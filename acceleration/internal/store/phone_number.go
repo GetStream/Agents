@@ -149,6 +149,11 @@ type PhoneNumbers struct {
 
 // Insert stores a number a customer now holds.
 func (r *PhoneNumbers) Insert(ctx context.Context, number *PhoneNumber) error {
+	return insertNumber(ctx, r.store.global, number)
+}
+
+// insertNumber stores a number a customer now holds, in db.
+func insertNumber(ctx context.Context, db bun.IDB, number *PhoneNumber) error {
 	if err := number.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
@@ -161,7 +166,7 @@ func (r *PhoneNumbers) Insert(ctx context.Context, number *PhoneNumber) error {
 		number.Capabilities = []string{}
 	}
 
-	if _, err := r.store.global.NewInsert().Model(number).Exec(ctx); err != nil {
+	if _, err := db.NewInsert().Model(number).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: record number: %w", err))
 	}
 	return nil
@@ -204,7 +209,9 @@ func (r *PhoneNumbers) Release(ctx context.Context, customerID, e164 string, at 
 	if customerID == "" || e164 == "" {
 		return stack.Wrap(errors.New("store: a customer and a number are required"))
 	}
-	return releaseNumber(ctx, r.store.global, customerID, e164, at)
+	return r.store.numberWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return releaseNumber(ctx, tx, customerID, e164, at)
+	})
 }
 
 // Attach records which SIP trunk calls to a number arrive on and which Stream call they
@@ -216,7 +223,22 @@ func (r *PhoneNumbers) Attach(ctx context.Context, customerID, e164 string, atta
 	if customerID == "" || e164 == "" {
 		return stack.Wrap(errors.New("store: a customer and a number are required"))
 	}
-	return attachNumber(ctx, r.store.global, customerID, e164, attached)
+	return r.store.numberWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return attachNumber(ctx, tx, customerID, e164, attached)
+	})
+}
+
+// numberWrite runs write, a write to a number's row from outside its trunk group, in a
+// transaction that waits on the row as long as a trunk group waits on the group: the group
+// holds the row (TrunkGroupTx.Number) across its calls to Stream, which outlast the serving
+// lock limit. The statement limit still ends the wait.
+func (s *Store) numberWrite(ctx context.Context, write func(context.Context, bun.Tx) error) error {
+	return s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := boundTransaction(ctx, tx, statementTimeout, trunkGroupIdle, idleInTransactionTimeout); err != nil {
+			return stack.Wrap(fmt.Errorf("store: number write: %w", err))
+		}
+		return write(ctx, tx)
+	})
 }
 
 // attachNumber records in db that a number is attached.
@@ -327,39 +349,41 @@ func (r *PhoneNumbers) SetAgent(ctx context.Context, customerID, e164, configID 
 	if customerID == "" || e164 == "" || configID == "" {
 		return stack.Wrap(errors.New("store: a customer, a number and a config are required"))
 	}
-	// Only an attached number has an agent, and only a live config is one, and a detach or
-	// the config's delete can land between the caller's read and this write.
-	result, err := r.store.global.NewUpdate().Model((*PhoneNumber)(nil)).
-		Set("config_id = ?", configID).
-		Where("customer_id = ?", customerID).
-		Where("e164 = ?", e164).
-		Where("released_at IS NULL").
-		Where("attached_at IS NOT NULL").
-		Where("EXISTS (?)", liveConfig(r.store.global, customerID, configID)).
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: set number agent: %w", err))
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: set number agent: %w", err))
-	}
-	if affected > 0 {
-		return nil
-	}
-	// The number or the config is not there: the caller is told which.
-	live, err := r.store.global.NewSelect().Model((*AgentConfig)(nil)).
-		Where("id = ?", configID).
-		Where("customer_id = ?", customerID).
-		Where("deleted_at IS NULL").
-		Exists(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: set number agent: %w", err))
-	}
-	if !live {
-		return unknownAgentConfig(configID)
-	}
-	return stack.Wrap(numberNotHeld{fmt.Sprintf("store: %s is not a number %s holds attached", e164, customerID)})
+	return r.store.numberWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		// Only an attached number has an agent, and only a live config is one, and a detach or
+		// the config's delete can land between the caller's read and this write.
+		result, err := tx.NewUpdate().Model((*PhoneNumber)(nil)).
+			Set("config_id = ?", configID).
+			Where("customer_id = ?", customerID).
+			Where("e164 = ?", e164).
+			Where("released_at IS NULL").
+			Where("attached_at IS NOT NULL").
+			Where("EXISTS (?)", liveConfig(tx, customerID, configID)).
+			Exec(ctx)
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: set number agent: %w", err))
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: set number agent: %w", err))
+		}
+		if affected > 0 {
+			return nil
+		}
+		// The number or the config is not there: the caller is told which.
+		live, err := tx.NewSelect().Model((*AgentConfig)(nil)).
+			Where("id = ?", configID).
+			Where("customer_id = ?", customerID).
+			Where("deleted_at IS NULL").
+			Exists(ctx)
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: set number agent: %w", err))
+		}
+		if !live {
+			return unknownAgentConfig(configID)
+		}
+		return stack.Wrap(numberNotHeld{fmt.Sprintf("store: %s is not a number %s holds attached", e164, customerID)})
+	})
 }
 
 // liveConfig selects the id of a customer's config while it is live, share-locking its row
@@ -380,23 +404,25 @@ func (r *PhoneNumbers) ClearAgent(ctx context.Context, customerID, e164 string) 
 	if customerID == "" || e164 == "" {
 		return stack.Wrap(errors.New("store: a customer and a number are required"))
 	}
-	result, err := r.store.global.NewUpdate().Model((*PhoneNumber)(nil)).
-		Set("config_id = NULL").
-		Where("customer_id = ?", customerID).
-		Where("e164 = ?", e164).
-		Where("released_at IS NULL").
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: clear number agent: %w", err))
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: clear number agent: %w", err))
-	}
-	if affected == 0 {
-		return stack.Wrap(numberNotHeld{fmt.Sprintf("store: %s is not a number %s holds", e164, customerID)})
-	}
-	return nil
+	return r.store.numberWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		result, err := tx.NewUpdate().Model((*PhoneNumber)(nil)).
+			Set("config_id = NULL").
+			Where("customer_id = ?", customerID).
+			Where("e164 = ?", e164).
+			Where("released_at IS NULL").
+			Exec(ctx)
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: clear number agent: %w", err))
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: clear number agent: %w", err))
+		}
+		if affected == 0 {
+			return stack.Wrap(numberNotHeld{fmt.Sprintf("store: %s is not a number %s holds", e164, customerID)})
+		}
+		return nil
+	})
 }
 
 // AnsweredBy returns the numbers a config answers, sorted.

@@ -62,7 +62,7 @@ func (s *PolicySuite) warnable(micros int64, enforcers ...*reading) {
 	s.usage().SetLimits(s.T(), s.org, usage.Limits{LowBalanceMicros: pointer(int64(5_000_000))})
 	s.usage().Credit(s.T(), s.org, micros)
 	for _, enforcer := range enforcers {
-		enforcer.Join(s.app, s.org, usage.DefaultTier)
+		enforcer.Join(s.T().Context(), s.app, s.org, usage.DefaultTier)
 		s.read(enforcer.Enforcer, s.org)
 	}
 }
@@ -201,7 +201,7 @@ func (s *PolicySuite) balance(enforcer *Enforcer) Balance {
 func (s *PolicySuite) TestAnOrganizationNeverGrantedCreditIsNotWarned() {
 	enforcer := s.billed()
 	s.streamDestination(s.app)
-	enforcer.Join(s.app, s.org, usage.DefaultTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, usage.DefaultTier)
 	s.read(enforcer.Enforcer, s.org)
 
 	s.never(func() bool { return len(s.notices(s.org)) > 0 }, 10*quick.Fresh, 10*time.Millisecond, "nothing ran out")
@@ -211,7 +211,7 @@ func (s *PolicySuite) TestOffSendsNothing() {
 	enforcer := s.billed(func(settings *Settings) { settings.Mode = config.LimitsOff })
 	s.streamDestination(s.app)
 	s.usage().Credit(s.T(), s.org, 1_000_000)
-	enforcer.Join(s.app, s.org, usage.DefaultTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, usage.DefaultTier)
 
 	s.never(func() bool { return len(s.notices(s.org)) > 0 }, 10*quick.Fresh, 10*time.Millisecond, "off reads no money")
 }

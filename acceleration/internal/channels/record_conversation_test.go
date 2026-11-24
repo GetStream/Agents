@@ -103,7 +103,7 @@ func (s *RecordConversationSuite) TestAFirstMessageGoesOnInTheConversationRecord
 	s.T().Cleanup(func() { _, _ = s.manager.Close(answering.ID(), session.OwnerOf(answering.Spec())) })
 	s.Equal(kept, answering.Spec().ConversationID, "the message goes on in the conversation recorded first")
 	s.Equal(kept, identity.ConversationID)
-	s.False(s.manager.Running(orphan.ID()), "the session the lost race opened is closed")
+	s.False(s.manager.Running(customerID, orphan.ID()), "the session the lost race opened is closed")
 }
 
 // Opening the kept conversation can fail; the message is then answered where it was opened
@@ -122,5 +122,5 @@ func (s *RecordConversationSuite) TestAFirstMessageIsAnsweredWhereItOpenedWhenTh
 	answering, err := s.service.recordConversation(s.ctx, orphan, spec(customerID), &identity, slog.New(slog.DiscardHandler))
 	s.Require().NoError(err)
 	s.Equal(orphan.ID(), answering.ID())
-	s.True(s.manager.Running(orphan.ID()))
+	s.True(s.manager.Running(customerID, orphan.ID()))
 }

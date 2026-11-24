@@ -3,6 +3,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -227,6 +228,28 @@ func (s *StoreSuite) TestABatchLogsEachRowInItsOwnCall() {
 		id(batch[3]): "first/cfg-1",
 	}, sessions("calls-a"), "the call a row names, else the agent's latest call started by it")
 	s.Equal(map[string]string{id(batch[1]): "other/cfg-3"}, sessions("calls-b"))
+}
+
+// A row's log names the agent config of the call it happened in, which was read off whichever
+// customer's session had the call's session id.
+func (s *StoreSuite) TestARowsLogTakesNoAgentConfigFromAnotherCustomersSession() {
+	s.opened("borrowed", "calls-b", s.base, func(session *AgentSession) { session.ConfigID = "cfg-b" })
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{ID: "call-borrowed", SessionID: "borrowed", CallID: "stream-1",
+		CustomerID: "calls-a", AgentID: "agent", StartedAt: s.base}))
+	row := s.usageRow("calls-a", func(request *Request) {
+		request.AgentID, request.CallID, request.StartedAt = "agent", "stream-1", s.base.Add(time.Minute)
+	})
+
+	_, err := s.store.Requests.InsertMany(s.ctx, []Request{row})
+	s.Require().NoError(err)
+
+	logs, err := s.store.AgentLogs.Select(s.ctx, "calls-a", AgentLogFilter{Limit: 10})
+	s.Require().NoError(err)
+	s.Require().Len(logs, 1)
+	logged, err := s.store.AgentLogs.Get(s.ctx, "calls-a", logs[0].ID)
+	s.Require().NoError(err)
+	s.Equal("borrowed", logged.SessionID)
+	s.Empty(logged.ConfigID, "calls-b's agent config is not calls-a's")
 }
 
 func (s *StoreSuite) TestBatchesNamingTheSameCustomersInAnotherOrderDoNotDeadlock() {
@@ -682,4 +705,49 @@ func (s *StoreSuite) TestRequestQueryBudgets() {
 		_, err := s.store.Requests.VendorCostGaps(s.ctx, s.base.Add(-time.Hour), 3, time.Minute)
 		s.Require().NoError(err)
 	}), "VendorCostGaps")
+}
+
+func (s *StoreSuite) TestRenamingAUserWithMoreRequestsThanOneStatementTakesRenamesThemAll() {
+	s.inSmallBatches()
+	for i := range 3 {
+		s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+			Modality: "stt", CustomerID: "acme", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en",
+			StartedAt: s.base.Add(time.Duration(i) * time.Minute), Success: true,
+		}))
+	}
+
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+		Modality: "stt", CustomerID: "other-app", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true,
+	}))
+
+	var renamed int64
+	var err error
+	updates := s.statementsLike(`WITH "changes" AS (UPDATE`, func() { renamed, err = s.store.Requests.RenameUser(s.ctx, "acme", "jlahey", "forgotten") })
+
+	s.Require().NoError(err)
+	s.EqualValues(3, renamed)
+	s.Equal(4+len(s.store.shards())-1, updates, "a row per statement, then the one that finds none, and one on each shard holding none")
+	theirs, err := s.store.Requests.CountByUser(s.ctx, "other-app", "jlahey")
+	s.Require().NoError(err)
+	s.EqualValues(1, theirs, "the same id under another app is another person")
+	left, err := s.store.Requests.CountByUser(s.ctx, "acme", "jlahey")
+	s.Require().NoError(err)
+	s.Zero(left)
+	moved, err := s.store.Requests.CountByUser(s.ctx, "acme", "forgotten")
+	s.Require().NoError(err)
+	s.EqualValues(3, moved)
+}
+
+func (s *StoreSuite) TestRenamingAUserToTheirOwnIdRewritesNothing() {
+	s.inSmallBatches()
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+		Modality: "stt", CustomerID: "acme", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true,
+	}))
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+
+	renamed, err := s.store.Requests.RenameUser(ctx, "acme", "jlahey", "jlahey")
+
+	s.Require().NoError(err)
+	s.Zero(renamed)
 }

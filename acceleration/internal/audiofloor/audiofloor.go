@@ -63,6 +63,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -428,7 +429,8 @@ func (c *Client) rereadLocked() {
 		return
 	}
 	c.reading = true
-	go func() {
+	// The client serves all calls, so a panic here stops only this read.
+	goroutine.Go(context.Background(), func() {
 		ctx, cancel := context.WithTimeout(context.Background(), policyReadTimeout)
 		defer cancel()
 		_, err := c.readPolicy(ctx)
@@ -438,7 +440,7 @@ func (c *Client) rereadLocked() {
 		if err != nil {
 			c.nextRead = c.now().Add(policyRetry)
 		}
-	}()
+	})
 }
 
 // readPolicy reads GET /v1/info within ctx, and keeps the policy it answers, and whether the
@@ -642,7 +644,7 @@ func (c *Client) decideWords(ctx context.Context, target string, body []byte, co
 		return Answer{}, nil, resp.StatusCode, given(ctx.Err())
 	}
 	said := make(chan Words, 1)
-	go func() {
+	goroutine.Go(ctx, func() {
 		defer cancel()
 		defer resp.Body.Close()
 		var line struct {
@@ -658,7 +660,7 @@ func (c *Client) decideWords(ctx context.Context, target string, body []byte, co
 		default:
 			said <- line.Transcript.words(line.Ms)
 		}
-	}()
+	})
 	return answer, said, resp.StatusCode, nil
 }
 

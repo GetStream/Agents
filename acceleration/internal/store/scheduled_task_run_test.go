@@ -41,6 +41,32 @@ func (s *StoreSuite) TestARunTakesOneCallUntilItIsGivenBack() {
 	s.False(take("acme", "call-4"), "a finished run places no call")
 }
 
+func (s *StoreSuite) TestARunTakesEachTextChannelOnceUntilItIsGivenBack() {
+	s.task("one", nil)
+	run := ScheduledTaskRun{
+		TaskID: "one", CustomerID: "acme", ScheduledFor: s.base, Trigger: ScheduledTaskTriggerManual,
+		Prompt: "Remind Sam to stretch.", State: ScheduledTaskRunRunning, Attempts: 1, StartedAt: &s.base,
+	}
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(s.ctx, &run))
+	take := func(customer, channel string) bool {
+		took, err := s.store.ScheduledTaskRuns.TakeText(s.ctx, customer, run.ID, channel)
+		s.Require().NoError(err)
+		return took
+	}
+
+	s.False(take("globex", "sms"), "another customer's run is not taken")
+	s.True(take("acme", "sms"))
+	s.False(take("acme", "sms"), "a run that texted on a channel texts there no second time")
+	s.True(take("acme", "whatsapp"), "each channel is taken on its own")
+
+	s.Require().NoError(s.store.ScheduledTaskRuns.ReleaseText(s.ctx, "globex", run.ID, "sms"))
+	s.False(take("acme", "sms"), "only the customer's own run is given back")
+
+	s.Require().NoError(s.store.ScheduledTaskRuns.ReleaseText(s.ctx, "acme", run.ID, "sms"))
+	s.True(take("acme", "sms"), "a text given back may be sent again")
+	s.False(take("acme", "whatsapp"), "giving one channel back leaves the other taken")
+}
+
 func (s *StoreSuite) TestAnotherCustomersFinishOfARunIdChangesNothing() {
 	s.task("one", nil)
 	run := ScheduledTaskRun{
@@ -152,6 +178,14 @@ func (s *StoreSuite) TestScheduledTaskRunQueryBudgets() {
 	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.ScheduledTaskRuns.ReleaseCall(s.ctx, "acme", run.ID, "call-1"))
 	}), "ReleaseCall")
+	s.Equal(1, s.countQueries(func() {
+		took, err := s.store.ScheduledTaskRuns.TakeText(s.ctx, "acme", run.ID, "sms")
+		s.Require().NoError(err)
+		s.True(took)
+	}), "TakeText")
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.ScheduledTaskRuns.ReleaseText(s.ctx, "acme", run.ID, "sms"))
+	}), "ReleaseText")
 	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.ScheduledTaskRuns.FinishManual(s.ctx, run.CustomerID, run.ID, ScheduledTaskRunDelivered, "conversation", "session-1", ""))
 	}), "FinishManual")

@@ -266,6 +266,12 @@ module GetStream
           body: nil, body_required: false,
           socket: false, client_accessible: false
         }.freeze,
+        "deleteCampaignContact" => {
+          method: :delete, path: "/v1/agents/campaigns/{id}/contacts/{contact_id}",
+          path_params: %w[id contact_id].freeze, query: [].freeze,
+          body: nil, body_required: false,
+          socket: false, client_accessible: false
+        }.freeze,
         "deleteCampaignContacts" => {
           method: :delete, path: "/v1/agents/campaigns/{id}/contacts",
           path_params: %w[id].freeze, query: [].freeze,
@@ -1712,6 +1718,12 @@ module GetStream
           body: "CampaignRequest", body_required: true,
           socket: false, client_accessible: false
         }.freeze,
+        "updateCampaignContact" => {
+          method: :patch, path: "/v1/agents/campaigns/{id}/contacts/{contact_id}",
+          path_params: %w[id contact_id].freeze, query: [].freeze,
+          body: "ContactUpdateRequest", body_required: true,
+          socket: false, client_accessible: false
+        }.freeze,
         "updateCustomModel" => {
           method: :put, path: "/v1/agents/models/{id}",
           path_params: %w[id].freeze, query: [].freeze,
@@ -1908,7 +1920,7 @@ module GetStream
           required: %w[created_at id mode name region updated_at].freeze, open: false
         }.freeze,
         "AgentConfigPatch" => {
-          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins region resume_history review role sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions video visible_tools voice].freeze,
+          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins region resume_history review role sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions updated_at video visible_tools voice].freeze,
           required: [].freeze, open: false
         }.freeze,
         "AgentConfigRequest" => {
@@ -2378,6 +2390,10 @@ module GetStream
         "ContactPage" => {
           properties: %w[has_more items next_cursor].freeze,
           required: %w[items has_more].freeze, open: false
+        }.freeze,
+        "ContactUpdateRequest" => {
+          properties: %w[instructions time_zone to_number variables].freeze,
+          required: [].freeze, open: false
         }.freeze,
         "CostSource" => {
           properties: %w[cost_micros source].freeze,
@@ -3152,7 +3168,7 @@ module GetStream
           required: %w[text].freeze, open: false
         }.freeze,
         "SpendBucket" => {
-          properties: %w[bucket cost_micros_total request_count value].freeze,
+          properties: %w[bucket cost_micros_total other request_count value].freeze,
           required: %w[bucket cost_micros_total request_count value].freeze, open: false
         }.freeze,
         "SpendHardLimit" => {

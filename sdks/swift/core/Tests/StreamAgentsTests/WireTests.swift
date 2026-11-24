@@ -212,6 +212,7 @@ import Testing
         let headers = try await backend.headers()
         #expect(headers["Stream-Auth-Type"] == "jwt")
         #expect(headers["X-Customer-Id"] == "acme")
+        #expect(headers["X-Stream-Client"] == "stream-agents-swift-v\(Backend.version)")
     }
 
     @Test func anAPIKeyReachesStreamsHostedRouter() {
@@ -241,6 +242,7 @@ import Testing
         let headers = try await backend.headers()
         #expect(headers["Authorization"] == "Bearer t1")
         #expect(headers["Stream-Auth-Type"] == "jwt")
+        #expect(headers["X-Stream-Client"] == "stream-agents-swift-v\(Backend.version)")
         #expect(headers["X-Customer-Id"] == nil)
     }
 

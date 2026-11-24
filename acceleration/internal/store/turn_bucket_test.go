@@ -67,6 +67,36 @@ func (s *StoreSuite) TestOneAgentsTurnsAreNotAnothers() {
 	s.InEpsilon(100, *buckets[0].RoundtripP99Ms, 0.05)
 }
 
+func (s *StoreSuite) TestATurnWindowInsideItsHoursReturnsEveryHourItTouches() {
+	s.Require().NoError(s.store.TurnBuckets.Add(s.ctx, s.turn(s.base.Add(45*time.Minute), 100)))
+	s.Require().NoError(s.store.TurnBuckets.Add(s.ctx, s.turn(s.base.Add(2*time.Hour+45*time.Minute), 100)))
+
+	buckets, err := s.store.TurnBuckets.Select(s.ctx, "acme", TurnBucketFilter{Granularity: Hourly,
+		From: s.base.Add(30 * time.Minute), To: s.base.Add(2*time.Hour + 30*time.Minute)})
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 2, "the hour the window starts in and the hour it ends in")
+	s.Equal(s.base, buckets[0].Bucket.UTC())
+	s.Equal(s.base.Add(2*time.Hour), buckets[1].Bucket.UTC())
+	s.Require().NotNil(buckets[0].RoundtripP50Ms, "the start hour's latency is read with it")
+}
+
+func (s *StoreSuite) TestADailyTurnWindowStartingMidDayCountsOnlyTheHoursInIt() {
+	day := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	s.Require().NoError(s.store.TurnBuckets.Add(s.ctx, s.turn(day.Add(5*time.Hour), 100)))
+	s.Require().NoError(s.store.TurnBuckets.Add(s.ctx, s.turn(day.Add(15*time.Hour), 100)))
+	s.Require().NoError(s.store.TurnBuckets.Add(s.ctx, s.turn(day.Add(32*time.Hour), 100)))
+	s.Require().NoError(s.store.TurnBuckets.Add(s.ctx, s.turn(day.Add(40*time.Hour), 100)))
+
+	days, err := s.store.TurnBuckets.Select(s.ctx, "acme", TurnBucketFilter{Granularity: Daily,
+		From: day.Add(10 * time.Hour), To: day.Add(34 * time.Hour)})
+	s.Require().NoError(err)
+	s.Require().Len(days, 2)
+	s.Equal(day, days[0].Bucket.UTC())
+	s.EqualValues(1, days[0].TurnCount, "the morning before the window is not in it")
+	s.Equal(day.Add(24*time.Hour), days[1].Bucket.UTC())
+	s.EqualValues(1, days[1].TurnCount, "nor the evening after it")
+}
+
 // turn builds one conversational turn with every leg measured.
 func (s *StoreSuite) turn(at time.Time, roundtripMs float64) TurnSample {
 	sttMs, ttftMs, ttfbMs := 30.0, 120.0, 90.0

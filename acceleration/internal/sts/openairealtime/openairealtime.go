@@ -33,6 +33,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -663,7 +664,7 @@ func (s *STS) Start(ctx context.Context) error {
 	}
 
 	s.emitter.Send(sts.Connected{Provider: s.options.Vendor.Provider, Model: s.options.Model, At: time.Now()})
-	go s.readLoop()
+	goroutine.Go(ctx, s.readLoop)
 	return nil
 }
 

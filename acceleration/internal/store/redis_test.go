@@ -19,6 +19,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/redis/rueidis"
+	"github.com/redis/rueidis/rueidishook"
 	"github.com/uptrace/bun"
 )
 
@@ -827,4 +829,343 @@ func (s *StoreSuite) TestEveryCachedWriteARequestGaveUpOnLeavesNoStaleCopy() {
 	} {
 		s.Run(name, site)
 	}
+}
+
+// redisLine is the suite's Redis reached through a proxy a test can break: cut closes every
+// connection and the port, as a Redis that went away does, and freeze stops answering on the
+// connections already open, as a Redis that hangs does.
+type redisLine struct {
+	cut, freeze func()
+	// slow holds back every answer from Redis by a while, as a Redis that is slow but up does.
+	slow func(time.Duration)
+}
+
+// storeOnRedisLine is another router's store on the suite's databases, whose Redis is reached
+// through a redisLine. Skipped without Redis.
+func (s *StoreSuite) storeOnRedisLine() (*Store, redisLine) {
+	return s.storeOnRedisLineHooked(nil)
+}
+
+// storeOnRedisLineHooked is storeOnRedisLine with hook seeing every command, given the line.
+func (s *StoreSuite) storeOnRedisLineHooked(hook func(redisLine) rueidishook.Hook) (*Store, redisLine) {
+	upstream := s.redis()
+	if upstream.Address == "" {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	var mu sync.Mutex
+	var clients, servers []net.Conn
+	closed := false
+	// delay holds back each answer from Redis by this many nanoseconds.
+	var delay atomic.Int64
+	go func() {
+		for {
+			client, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			server, err := net.Dial("tcp", upstream.Address)
+			mu.Lock()
+			if err != nil || closed {
+				mu.Unlock()
+				_ = client.Close()
+				if server != nil {
+					_ = server.Close()
+				}
+				continue
+			}
+			clients, servers = append(clients, client), append(servers, server)
+			mu.Unlock()
+			go func() { _, _ = io.Copy(server, client) }()
+			go func() {
+				buffer := make([]byte, 32<<10)
+				for {
+					n, err := server.Read(buffer)
+					if n > 0 {
+						time.Sleep(time.Duration(delay.Load()))
+						if _, err := client.Write(buffer[:n]); err != nil {
+							return
+						}
+					}
+					if err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	freeze := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		closed = true
+		for _, server := range servers {
+			_ = server.Close()
+		}
+	}
+	cut := sync.OnceFunc(func() {
+		freeze()
+		mu.Lock()
+		defer mu.Unlock()
+		_ = listener.Close()
+		for _, client := range clients {
+			_ = client.Close()
+		}
+	})
+
+	line := redisLine{cut: cut, freeze: freeze, slow: func(by time.Duration) { delay.Store(int64(by)) }}
+	options := Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: Redis{Address: listener.Addr().String()}}
+	if hook != nil {
+		options.redisHook = hook(line)
+	}
+	store, err := OpenShards(options)
+	s.Require().NoError(err)
+	// Cut first: closing a store on a frozen Redis waits for the client to give up on it.
+	s.T().Cleanup(func() {
+		cut()
+		s.NoError(store.Close())
+	})
+	return store, line
+}
+
+func (s *StoreSuite) TestAConfigIsReadFromPostgresWhileRedisCannotBeReached() {
+	created := s.boundConfig("app")
+	cutOff, line := s.storeOnRedisLine()
+	line.cut()
+
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	found, err := cutOff.AgentConfigs.Get(ctx, "app", created.ID)
+
+	s.Require().NoError(err)
+	s.Equal(created.Name, found.Name)
+	s.Less(time.Since(started), time.Second, "the read waited on Redis rather than going to Postgres")
+}
+
+func (s *StoreSuite) TestARowSlowerToLoadThanRedisIsWaitedOnIsStillCached() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	name := cacheKey("slow", newID())
+
+	loaded, err := cached(s.ctx, s.store, name, func(ctx context.Context) (string, error) {
+		_, err := s.store.GlobalDB().ExecContext(ctx, "SELECT pg_sleep(?)", (2 * cacheWait).Seconds())
+		return "loaded", err
+	})
+	s.Require().NoError(err, "a read of Postgres is not held to Redis's wait")
+	s.Equal("loaded", loaded)
+
+	again, err := cached(s.ctx, s.store, name, func(context.Context) (string, error) {
+		return "", errors.New("read from postgres again")
+	})
+	s.Require().NoError(err)
+	s.Equal("loaded", again, "the row was cached")
+}
+
+func (s *StoreSuite) TestARowLoadedAsRedisGoesIsTheAnswer() {
+	cutOff, line := s.storeOnRedisLine()
+	loads := 0
+
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+	found, err := cached(ctx, cutOff, cacheKey("lost", newID()), func(context.Context) (string, error) {
+		loads++
+		line.cut()
+		return fmt.Sprintf("load %d", loads), nil
+	})
+
+	s.Require().NoError(err)
+	s.Equal("load 1", found, "the row Postgres answered with, not a second read of it")
+}
+
+func (s *StoreSuite) TestAUserIsWrittenDownWhileRedisHangs() {
+	hung, line := s.storeOnRedisLine()
+	line.freeze()
+	app := s.freshApp()
+
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	s.Require().NoError(hung.Users.Seen(ctx, app, "jlahey", UserKindAuthenticated))
+
+	s.Less(time.Since(started), time.Second, "the sighting waited on Redis")
+	_, found := s.userRow(app, "jlahey")
+	s.True(found)
+}
+
+func (s *StoreSuite) TestReadersOfAColdRowShareOneReadOfPostgres() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	name := cacheKey("cold", newID())
+	var loads atomic.Int32
+	answers := make(chan string, 8)
+	var readers sync.WaitGroup
+	for range 8 {
+		readers.Go(func() {
+			found, err := cached(s.ctx, s.store, name, func(ctx context.Context) (string, error) {
+				loads.Add(1)
+				_, err := s.store.GlobalDB().ExecContext(ctx, "SELECT pg_sleep(0.6)")
+				return "loaded", err
+			})
+			s.NoError(err)
+			answers <- found
+		})
+	}
+	readers.Wait()
+	close(answers)
+
+	for found := range answers {
+		s.Equal("loaded", found)
+	}
+	s.EqualValues(1, loads.Load(), "one read of Postgres for every reader of the row")
+}
+
+func (s *StoreSuite) TestAReadAfterAWriteAndItsForgetGetsTheNewRow() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	name := cacheKey("rewritten", newID())
+	loading, release := make(chan struct{}), make(chan struct{})
+	older := make(chan string, 1)
+	go func() {
+		found, err := cached(s.ctx, s.store, name, func(context.Context) (string, error) {
+			close(loading)
+			<-release
+			return "old", nil
+		})
+		s.NoError(err)
+		older <- found
+	}()
+	<-loading
+	// The write lands and forgets the key while the older read is still loading the row.
+	s.store.forget(s.ctx, name)
+	newer := make(chan string, 1)
+	go func() {
+		found, err := cached(s.ctx, s.store, name, func(context.Context) (string, error) { return "new", nil })
+		s.NoError(err)
+		newer <- found
+	}()
+	// Long enough for the newer read to be waiting on the older one's load, which nothing
+	// outside the client can see.
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+
+	s.Equal("old", <-older, "the older read began before the write")
+	s.Equal("new", <-newer)
+	again, err := cached(s.ctx, s.store, name, func(context.Context) (string, error) {
+		return "", errors.New("read from postgres again")
+	})
+	s.Require().NoError(err)
+	s.Equal("new", again, "the older read's row was not cached over the newer")
+}
+
+func (s *StoreSuite) TestAReaderWhileRedisHangsAnswersFromPostgresWithinTheWait() {
+	hung, line := s.storeOnRedisLine()
+	line.freeze()
+
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	found, err := cached(ctx, hung, cacheKey("hung", newID()), func(context.Context) (string, error) { return "loaded", nil })
+
+	s.Require().NoError(err)
+	s.Equal("loaded", found)
+	s.Less(time.Since(started), 400*time.Millisecond)
+}
+
+func (s *StoreSuite) TestReadersWaitingOnALoadWhoseWriteBackHangsAnswerWithinTheWait() {
+	hung, line := s.storeOnRedisLine()
+	name := cacheKey("hung-write-back", newID())
+	var freeze sync.Once
+	answers := make(chan string, 4)
+	var readers sync.WaitGroup
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
+	started := time.Now()
+	for range 4 {
+		readers.Go(func() {
+			found, err := cached(ctx, hung, name, func(context.Context) (string, error) {
+				// Redis hangs while the row is loaded, before it is written back.
+				freeze.Do(line.freeze)
+				return "loaded", nil
+			})
+			s.NoError(err)
+			answers <- found
+		})
+	}
+	readers.Wait()
+	close(answers)
+
+	for found := range answers {
+		s.Equal("loaded", found)
+	}
+	s.Less(time.Since(started), 2*time.Second, "the readers waited on Redis rather than its wait")
+}
+
+// freezeOnMiss freezes the line once Redis has answered a cached read that it holds no row.
+type freezeOnMiss struct{ line redisLine }
+
+func (f freezeOnMiss) Do(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+	return client.Do(ctx, cmd)
+}
+
+func (f freezeOnMiss) DoMulti(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) []rueidis.RedisResult {
+	return client.DoMulti(ctx, multi...)
+}
+
+func (f freezeOnMiss) DoCache(client rueidis.Client, ctx context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	result := client.DoCache(ctx, cmd, ttl)
+	if rueidis.IsRedisNil(result.Error()) {
+		f.line.freeze()
+	}
+	return result
+}
+
+func (f freezeOnMiss) DoMultiCache(client rueidis.Client, ctx context.Context, multi ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	return client.DoMultiCache(ctx, multi...)
+}
+
+func (f freezeOnMiss) Receive(client rueidis.Client, ctx context.Context, subscribe rueidis.Completed, fn func(rueidis.PubSubMessage)) error {
+	return client.Receive(ctx, subscribe, fn)
+}
+
+func (f freezeOnMiss) DoStream(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResultStream {
+	return client.DoStream(ctx, cmd)
+}
+
+func (f freezeOnMiss) DoMultiStream(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) rueidis.MultiRedisResultStream {
+	return client.DoMultiStream(ctx, multi...)
+}
+
+// A fresh client's first load sets the marker that says it is alive before it takes the
+// row's lock, on a context of the client's own.
+func (s *StoreSuite) TestAFreshRoutersFirstReadAnswersWithinTheWaitWhenRedisHangsAfterAMiss() {
+	fresh, _ := s.storeOnRedisLineHooked(func(line redisLine) rueidishook.Hook { return freezeOnMiss{line: line} })
+
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
+	started := time.Now()
+	found, err := cached(ctx, fresh, cacheKey("fresh", newID()), func(context.Context) (string, error) { return "loaded", nil })
+
+	s.Require().NoError(err)
+	s.Equal("loaded", found)
+	s.Less(time.Since(started), 400*time.Millisecond)
+}
+
+func (s *StoreSuite) TestAForgetWaitsOnARedisSlowerThanACachedReadWould() {
+	slowed, line := s.storeOnRedisLine()
+	name := cacheKey("slow-forget", newID())
+	client := slowed.cache.Client()
+	s.Require().NoError(client.Do(s.ctx, client.B().Set().Key(name).Value("old").Build()).Error())
+	line.slow(2 * cacheWait)
+
+	told := slowed.forget(s.ctx, name)
+
+	s.True(told, "the deletion was answered late, not given up on")
+	line.slow(0)
+	held, err := client.Do(s.ctx, client.B().Exists().Key(name).Build()).AsInt64()
+	s.Require().NoError(err)
+	s.Zero(held)
 }
