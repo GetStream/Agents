@@ -75,7 +75,7 @@ func (d *phoneDialer) Dial(ctx context.Context, dial Dial) (Dialed, error) {
 	if err != nil {
 		dialed := resultOf(err)
 		// A failure, as opposed to a refusal, is returned to be logged.
-		if dialed.Result == "" || dialed.Result == DialFailed {
+		if dialed.Result == "" || dialed.Result == DialFailed || dialed.Reason == reasonPlacingFailed {
 			return dialed, err
 		}
 		return dialed, nil

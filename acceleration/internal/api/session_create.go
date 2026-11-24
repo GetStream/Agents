@@ -71,17 +71,8 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	if errors.Is(err, streamapp.ErrDeploymentAppUnknown) {
 		return nil, err
 	}
-	if answer, unkept := unkeptAnswer(err); unkept {
-		// Stream's own answer is the operator's to read, never the caller's.
-		var cause error
-		if found, ok := errors.AsType[*session.UnkeptError](err); ok {
-			cause = found.Cause
-		}
-		s.logger.Warn("a session that is not incognito has no Stream app to be kept in",
-			"customer", customerID, "error", err, "cause", cause)
-		return nil, answer
-	}
 	if err != nil {
+		s.logUnkept(customerID, err)
 		// Everything that can go wrong here is the caller's spec, a provider that would not
 		// start, or a refusal about money, and each is worth reading rather than a 500 with
 		// the detail in a log the caller cannot see.
@@ -89,6 +80,15 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	}
 	s.rememberTimezone(ctx, customerID, spec)
 	return &createSessionResponse{Body: sessionOf(ctx, created)}, nil
+}
+
+// logUnkept logs what Stream or the router said for a session refused because its Stream app is
+// missing or refuses its keys: Stream's own answer is the operator's to read, never the caller's.
+func (s *Server) logUnkept(customerID string, err error) {
+	if found, ok := errors.AsType[*session.UnkeptError](err); ok {
+		s.logger.Warn("a session that is not incognito has no Stream app to be kept in",
+			"customer", customerID, "error", err, "cause", found.Cause)
+	}
 }
 
 // unkeptAnswer is the answer for a session refused because the deployment's Stream app is

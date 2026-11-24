@@ -1330,6 +1330,10 @@ var errServerSideOnly = APIError{
 		auth.AuthTypeServer + " and a token carrying server: true",
 }
 
+// statusClientClosed is what a request whose caller hung up before it was answered is counted
+// as, nginx's 499: no caller reads it.
+const statusClientClosed = 499
+
 // withCustomer lifts the authenticated principal into the request context so handlers can
 // read it without each one reaching into the raw request.
 //
@@ -1351,10 +1355,6 @@ var errServerSideOnly = APIError{
 // is how a backend says which of its users it is opening a session for, so that the user's
 // own device can reach that session afterwards; what keeps the limit off it is that
 // withQuota looks at whether the caller is server-side rather than at whether there is one.
-// statusClientClosed is what a request whose caller hung up before it was answered is counted
-// as, nginx's 499: no caller reads it.
-const statusClientClosed = 499
-
 func (s *Server) withCustomer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Stream is not a customer, and a delivery is authenticated by its signature. Who a

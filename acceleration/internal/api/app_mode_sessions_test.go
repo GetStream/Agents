@@ -84,11 +84,16 @@ func (s *AppModeSessionsSuite) TestAPersistedTextSessionIntoAnAppRefusingItsKeys
 		own.RefuseWith(method, "", chattest.Refusal{Status: http.StatusUnauthorized, Code: 2, Message: "api_key not valid"})
 	}
 
-	status, failure := s.errorOf(http.MethodPost, "/v1/agents/sessions", textSession(nil))
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/sessions", textSession(nil))
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &answered), string(payload))
 
-	s.Equal(http.StatusBadRequest, status)
-	s.NotEqual(codeNotConfigured, failure.Code)
-	s.NotContains(failure.Message, "STREAM_API_KEY")
+	s.Equal(http.StatusBadRequest, status, string(payload))
+	s.Equal("invalid_request", answered.Error.Code)
+	s.Contains(answered.Error.Message, "Stream refused this app's Stream app keys")
+	s.Contains(answered.Error.Message, "incognito: true")
+	s.NotContains(answered.Error.Message, "STREAM_API_KEY")
+	s.NotContains(string(payload), "api_key not valid", "Stream's own words stay in the log")
 }
 
 func (s *AppModeSessionsSuite) TestAnIncognitoSessionNeedsNoStreamApp() {

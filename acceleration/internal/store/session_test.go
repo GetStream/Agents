@@ -1673,3 +1673,14 @@ func (s *StoreSuite) TestATurnPastTheCeilingIsCutWithTheMarker() {
 		s.True(utf8.ValidString(text), "%s is cut between runes", name)
 	}
 }
+
+func (s *StoreSuite) TestATurnOfExactlyTheCeilingIsKeptWhole() {
+	s.opened("one", "app", s.base, nil)
+	exact := strings.Repeat("a", 256<<10)
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{
+		ID: "first", SessionID: "one", CustomerID: "app", Said: exact, CreatedAt: s.base,
+	}))
+	response, err := s.store.Responses.Get(s.ctx, "app", "one", "first")
+	s.Require().NoError(err)
+	s.Equal(len(exact), len(response.Said), "a turn of exactly 256 KiB is not cut")
+}
