@@ -219,6 +219,46 @@ func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhere() {
 	s.Zero(exists, "a router of the release before would still forward to it")
 }
 
+// A session's call is found by its id and Stream app until the session is released, and a
+// renewal says it again.
+func (s *DirectorySuite) TestASessionsCallIsFoundByItsAppUntilItIsReleased() {
+	directory := s.directoryAt("node-a:1")
+	directory.Hold(s.ctx, "acme", "order-42", "", "")
+	directory.HoldCall(s.ctx, "acme", "order-42", 7)
+	peer := s.directoryAt("node-b:1")
+	holder := func(app int64, id string) string {
+		customer, err := peer.CallHolder(s.ctx, app, id)
+		s.Require().NoError(err)
+		return customer
+	}
+
+	s.Equal("acme", holder(7, "order-42"))
+	s.Empty(holder(0, "order-42"), "another app's call of the name")
+	s.Empty(holder(7, "order-43"))
+
+	key := s.prefix + ":call:7:order-42"
+	ttl, err := s.client.Do(s.ctx, s.client.B().Pttl().Key(key).Build()).AsInt64()
+	s.Require().NoError(err)
+	s.InDelta(30000, ttl, 5000, "it lapses with the node")
+	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Del().Key(key).Build()).Error())
+	directory.renewAll(s.ctx)
+	s.Equal("acme", holder(7, "order-42"))
+
+	directory.Release(s.ctx, "acme", "order-42")
+	s.Empty(holder(7, "order-42"))
+}
+
+func (s *DirectorySuite) TestACallOfASessionNotHeldHereIsNotHeld() {
+	directory := s.directoryAt("node-a:1")
+
+	directory.HoldCall(s.ctx, "acme", "order-42", 7)
+	directory.renewAll(s.ctx)
+
+	holder, err := directory.CallHolder(s.ctx, 7, "order-42")
+	s.Require().NoError(err)
+	s.Empty(holder)
+}
+
 // directoryAt is a node's directory at address, renewing nothing for the test's length.
 func (s *DirectorySuite) directoryAt(address string) *Directory {
 	directory, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: address, Prefix: s.prefix})

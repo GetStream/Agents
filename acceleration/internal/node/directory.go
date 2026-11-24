@@ -61,6 +61,7 @@ type Directory struct {
 	address  string
 	shard    string
 	sessions string
+	calls    string
 	// agents and channels are a session's agent and conversation by their ids alone, which a
 	// router of the release before reads. Here only channels is read, when a customer's own key
 	// is not there.
@@ -91,8 +92,9 @@ type offerKey struct{ customerID, agentID string }
 // one id.
 type heldSession struct{ customerID, sessionID string }
 
-// claim is what a session this node holds is found by besides its own id.
-type claim struct{ agentID, conversationID string }
+// claim is what a session this node holds is found by besides its own id. call is the key its
+// call, agent:<id>, is held under, empty until it is (HoldCall).
+type claim struct{ agentID, conversationID, call string }
 
 // offerEntry is one node's offer as Redis holds it. A hash cannot expire its fields one at
 // a time, so each says when it lapses.
@@ -124,6 +126,7 @@ func NewDirectory(options DirectoryOptions) (*Directory, error) {
 		address:     options.Address,
 		shard:       options.Shard,
 		sessions:    prefix + ":session:",
+		calls:       prefix + ":call:",
 		agents:      prefix + ":agent:",
 		channels:    prefix + ":channel:",
 		writingAs:   prefix + ":writing-as:",
@@ -188,10 +191,37 @@ func (d *Directory) shardCommands() []rueidis.Completed {
 func (d *Directory) Hold(ctx context.Context, customerID, sessionID, agentID, conversationID string) {
 	key := heldSession{customerID, sessionID}
 	d.mu.Lock()
-	d.held[key] = claim{agentID, conversationID}
+	d.held[key] = claim{agentID: agentID, conversationID: conversationID}
 	d.mu.Unlock()
 
-	d.write(ctx, key, claim{agentID, conversationID})
+	d.write(ctx, key, claim{agentID: agentID, conversationID: conversationID})
+}
+
+// HoldCall says whose the call of a session this node holds is: agent:<session id>, in a Stream
+// app, 0 for the deployment's own. It goes on saying so until Release.
+func (d *Directory) HoldCall(ctx context.Context, customerID, sessionID string, app int64) {
+	key := heldSession{customerID, sessionID}
+	d.mu.Lock()
+	held, holding := d.held[key]
+	held.call = d.callKey(app, sessionID)
+	if holding {
+		d.held[key] = held
+	}
+	d.mu.Unlock()
+	if holding {
+		d.write(ctx, key, held)
+	}
+}
+
+// CallHolder is the customer whose session some node runs on the call agent:<id> in the Stream
+// app, 0 for the deployment's own, and empty when no node says it does.
+func (d *Directory) CallHolder(ctx context.Context, app int64, id string) (string, error) {
+	return d.lookup(ctx, d.callKey(app, id))
+}
+
+// callKey is where a call is held: node:call:<app>:<id>.
+func (d *Directory) callKey(app int64, id string) string {
+	return d.calls + strconv.FormatInt(app, 10) + ":" + id
 }
 
 // Release says this node is not running a customer's session any more.
@@ -203,14 +233,18 @@ func (d *Directory) Hold(ctx context.Context, customerID, sessionID, agentID, co
 func (d *Directory) Release(ctx context.Context, customerID, sessionID string) {
 	key := heldSession{customerID, sessionID}
 	d.mu.Lock()
-	_, held := d.held[key]
+	released, held := d.held[key]
 	delete(d.held, key)
 	d.mu.Unlock()
 	if !held {
 		return
 	}
 
-	if err := d.redis.Do(ctx, d.redis.B().Del().Key(d.sessionKey(key), d.sessions+sessionID).Build()).Error(); err != nil {
+	gone := []string{d.sessionKey(key), d.sessions + sessionID}
+	if released.call != "" {
+		gone = append(gone, released.call)
+	}
+	if err := d.redis.Do(ctx, d.redis.B().Del().Key(gone...).Build()).Error(); err != nil {
 		d.logger.Warn("could not take back this node's claim on a session",
 			"customer", customerID, "session", sessionID, "error", err)
 	}
@@ -450,6 +484,9 @@ func (d *Directory) writeCommands(key heldSession, held claim) []rueidis.Complet
 	commands := []rueidis.Completed{
 		d.redis.B().Set().Key(d.sessionKey(key)).Value(d.address).Ex(holdFor).Build(),
 		d.redis.B().Set().Key(d.sessions + key.sessionID).Value(d.address).Ex(holdFor).Build(),
+	}
+	if held.call != "" {
+		commands = append(commands, d.redis.B().Set().Key(held.call).Value(key.customerID).Ex(holdFor).Build())
 	}
 	if held.agentID != "" {
 		writers := d.writingAs + held.agentID

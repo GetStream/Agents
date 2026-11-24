@@ -26,6 +26,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
 // PhoneSuite covers the telephony surface of a deployment that declares every vendor and
@@ -373,6 +374,7 @@ func (s *CallStatusSuite) SetupSuite() {
 	s.phoneVendors = registry
 	s.phoneOnChat = true
 	s.sessionTelephony = true
+	s.deploymentKnown = true
 	s.logged = &lockedLog{}
 	s.logs = s.logged
 	s.RouterSuite.SetupSuite()
@@ -1347,4 +1349,179 @@ func (s *PhoneSuite) TestClearingANumbersLineRemovesItsAgent() {
 	s.Require().NoError(err)
 	s.Empty(answering)
 	s.Nil(s.listedNumber().AgentConfigId)
+}
+
+// arrivedFor opens the leg of a caller whose call was dispatched to a customer's worker.
+func (s *CallStatusSuite) arrivedFor(customer string) string {
+	call := s.utils.uuid()
+	s.router.phone.OpenLeg(context.Background(), routing.Owner{CustomerID: customer}, store.CallLeg{
+		CallType: "agent", CallID: call, StreamSessionID: "stream-" + call, Vendor: "twilio", Direction: store.Inbound,
+		LocalNumber: s.utils.number(), RemoteNumber: s.utils.number(), DialedAt: time.Now().Add(-time.Minute),
+	}, true)
+	return call
+}
+
+// callInto places a call into a session from a number the suite's app holds.
+func (s *CallStatusSuite) callInto(session string) (int, string) {
+	e164 := s.utils.number()
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &store.PhoneNumber{
+		E164: e164, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
+	}))
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/phone/calls", PlaceCallRequest{
+		From: e164, To: "+15550001111", SessionId: &session,
+	})
+	return status, string(payload)
+}
+
+func (s *CallStatusSuite) TestACallCannotBeRoutedIntoACallDispatchedToAnotherCustomer() {
+	s.useApp(s.data.createApp())
+	theirs := s.arrivedFor("customer-" + s.utils.uuid())
+
+	status, payload := s.callInto(theirs)
+
+	s.Equal(http.StatusConflict, status, payload)
+	s.Contains(payload, "session_id is taken")
+}
+
+// A call to a vendor nothing answers is phone_vendor_failed: one let past the router's own checks.
+func (s *CallStatusSuite) TestACallMayBeRoutedIntoACallDispatchedToTheCaller() {
+	s.useApp(s.data.createApp())
+
+	status, payload := s.callInto(s.arrivedFor(s.customerID()))
+
+	s.Equal(http.StatusServiceUnavailable, status, payload)
+	s.Contains(payload, "phone_vendor_failed")
+}
+
+// An incognito session has no row, so only the node running it says whose its call is.
+func (s *CallStatusSuite) TestACallCannotBeRoutedIntoAnotherCustomersSessionOnAnotherNode() {
+	s.useApp(s.data.createApp())
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	opened, err := sessions.Create(context.Background(), session.Spec{CustomerID: "customer-" + s.utils.uuid(), Text: true,
+		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+	s.Require().NoError(err)
+
+	status, payload := s.callInto(opened.ID())
+
+	s.Equal(http.StatusConflict, status, payload)
+}
+
+func (s *CallStatusSuite) TestACallMayBeRoutedIntoTheCallersSessionOnAnotherNode() {
+	s.useApp(s.data.createApp())
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	opened, err := sessions.Create(context.Background(), session.Spec{CustomerID: s.customerID(), Text: true,
+		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+	s.Require().NoError(err)
+
+	status, payload := s.callInto(opened.ID())
+
+	s.Equal(http.StatusServiceUnavailable, status, payload)
+	s.Contains(payload, "phone_vendor_failed")
+}
+
+func (s *CallStatusSuite) TestASessionCannotBeCreatedOnACallDispatchedToAnotherCustomer() {
+	s.useApp(s.data.createApp())
+	theirs := s.arrivedFor("customer-" + s.utils.uuid())
+
+	s.Equal(http.StatusConflict, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", textSession(&theirs), nil))
+}
+
+func (s *CallStatusSuite) TestASessionMayBeCreatedOnACallDispatchedToItsCustomer() {
+	s.useApp(s.data.createApp())
+	mine := s.arrivedFor(s.customerID())
+
+	s.Equal(mine, s.serverClient.createSession(textSession(&mine)).Id)
+}
+
+func (s *CallStatusSuite) TestASessionCannotBeCreatedUnderTheIdOfAnotherCustomersOnAnotherNode() {
+	s.useApp(s.data.createApp())
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	opened, err := sessions.Create(context.Background(), session.Spec{CustomerID: "customer-" + s.utils.uuid(), Text: true,
+		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+	s.Require().NoError(err)
+	id := opened.ID()
+
+	s.Equal(http.StatusConflict, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", textSession(&id), nil))
+}
+
+func (s *CallStatusSuite) TestACallIntoASessionOfACustomerWhoseAppIsDisconnectedIsAnInvalidRequest() {
+	s.useApp(s.data.createApp())
+	s.setApps(s.customerID(), func(apps *suiteApps) {
+		apps.refused = map[string]error{s.customerID(): streamapp.ErrStreamAppDisconnected}
+	})
+
+	status, payload := s.callInto(s.utils.uuid())
+
+	s.Equal(http.StatusBadRequest, status, payload)
+}
+
+// A customer in a Stream app of its own names its sessions without regard to another app's.
+func (s *CallStatusSuite) TestASessionMayBeCreatedUnderTheNameOfAnotherAppsCall() {
+	s.useApp(s.data.createApp())
+	theirs := s.arrivedFor("customer-" + s.utils.uuid())
+	s.giveApp(s.customerID(), streamAppID(), "key-"+s.customerID())
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	opened, err := sessions.Create(context.Background(), session.Spec{CustomerID: "customer-" + s.utils.uuid(), Text: true,
+		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+	s.Require().NoError(err)
+
+	s.serverClient.createSession(textSession(&theirs))
+	s.Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", textSession(pointerTo(opened.ID())), nil))
+}
+
+func (s *CallStatusSuite) TestACallMayBeRoutedUnderTheNameOfAnotherAppsSessionOnAnotherNode() {
+	s.useApp(s.data.createApp())
+	s.giveApp(s.customerID(), streamAppID(), "key-"+s.customerID())
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	opened, err := sessions.Create(context.Background(), session.Spec{CustomerID: "customer-" + s.utils.uuid(), Text: true,
+		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+	s.Require().NoError(err)
+
+	status, payload := s.callInto(opened.ID())
+
+	s.Equal(http.StatusServiceUnavailable, status, payload)
+}
+
+// A customer whose work is pinned to the deployment's app's id and one pinned to none act in one
+// app.
+func (s *CallStatusSuite) TestACallCannotBeRoutedIntoASessionOfTheDeploymentsAppWhicheverWayEitherIsPinned() {
+	s.useApp(s.data.createApp())
+	theirs := "customer-" + s.utils.uuid()
+	s.giveApp(theirs, suiteStreamApp, "key-"+theirs)
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	hold := func(customer string) string {
+		opened, err := sessions.Create(context.Background(), session.Spec{CustomerID: customer, Text: true,
+			Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+		s.Require().NoError(err)
+		return opened.ID()
+	}
+
+	status, payload := s.callInto(hold(theirs))
+	s.Equal(http.StatusConflict, status, payload)
+
+	unpinned := hold("customer-" + s.utils.uuid())
+	s.giveApp(s.customerID(), suiteStreamApp, "key-"+s.customerID())
+	status, payload = s.callInto(unpinned)
+	s.Equal(http.StatusConflict, status, payload)
+	s.Equal(http.StatusConflict, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", textSession(&unpinned), nil))
+}
+
+// Customers of a deployment in app mode with no app to act in share no call.
+func (s *CallStatusSuite) TestASessionOfNoStreamAppIsOnNoCallOfAnothers() {
+	s.useApp(s.data.createApp())
+	theirs := "customer-" + s.utils.uuid()
+	s.setApps(theirs, func(apps *suiteApps) {
+		apps.perApp = true
+		apps.nowhere = map[string]bool{theirs: true, s.customerID(): true}
+	})
+	s.stream.Invalidate(s.customerID())
+	s.T().Cleanup(func() { s.setApps(theirs, func(apps *suiteApps) { apps.perApp = false; apps.nowhere = nil }) })
+	_, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	opened, err := sessions.Create(context.Background(), session.Spec{CustomerID: theirs, Text: true,
+		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
+	s.Require().NoError(err)
+	request := textSession(pointerTo(opened.ID()))
+	request.Incognito = pointerTo(true)
+
+	s.Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", request, nil))
 }

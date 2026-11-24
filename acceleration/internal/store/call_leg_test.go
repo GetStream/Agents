@@ -396,6 +396,11 @@ func (s *StoreSuite) TestCallLegQueryBudgets() {
 		s.Require().NoError(err)
 		s.True(ringing)
 	}), "Ringing")
+	s.Equal(shards, s.countQueries(func() {
+		owner, err := s.store.CallLegs.Owner(s.ctx, scope, "default", "call-1")
+		s.Require().NoError(err)
+		s.NotEmpty(owner)
+	}), "Owner")
 	s.Equal(shards+1, s.countQueries(func() {
 		_, connection, err := s.store.CallLegs.Connect(s.ctx, scope, "default", "call-1", "session", "phone-1", "+15125550101", s.base, nil)
 		s.Require().NoError(err)
@@ -688,4 +693,123 @@ func (s *StoreSuite) TestADialNamingNoOrganizationKeepsTheOneTheCallWasPlacedUnd
 	s.Require().True(opened)
 
 	s.Equal("org", dialed.OrganizationID, "still counted among the organization's calls")
+}
+
+// onCall opens a leg of customer's on the call in app, dialled at.
+func (s *StoreSuite) onCall(customer, callID string, app int64, at time.Time) CallLeg {
+	leg := CallLeg{CustomerID: customer, StreamAppPK: app, CallType: "agent", CallID: callID, Vendor: "telnyx",
+		VendorCallID: customer + at.String(), Direction: Outbound, LocalNumber: "+15125550150", RemoteNumber: "+15125550151", DialedAt: at}
+	opened, err := s.store.CallLegs.Open(s.ctx, &leg)
+	s.Require().NoError(err)
+	s.Require().True(opened)
+	return leg
+}
+
+func (s *StoreSuite) ownerOf(scope AppScope, callID string) string {
+	owner, err := s.store.CallLegs.Owner(s.ctx, scope, "agent", callID)
+	s.Require().NoError(err)
+	return owner
+}
+
+func (s *StoreSuite) TestACallIsTheCustomersWhoseLegWasOnItFirst() {
+	s.onCall("later", "call", 0, s.base.Add(time.Second))
+	s.onCall("first", "call", 0, s.base)
+
+	s.Equal("first", s.ownerOf(AppScope{Unpinned: true}, "call"))
+	s.Empty(s.ownerOf(AppScope{Unpinned: true}, "another call"))
+	other, err := s.store.CallLegs.Owner(s.ctx, AppScope{Unpinned: true}, "default", "call")
+	s.Require().NoError(err)
+	s.Empty(other, "a call of another type")
+}
+
+func (s *StoreSuite) TestACallIsTheCustomersWhoPlacedItBeforeItIsDialled() {
+	s.placedLeg("placing", func(leg *CallLeg) { leg.CallType = "agent" })
+	s.onCall("later", "call", 0, s.base.Add(time.Second))
+
+	s.Equal("app", s.ownerOf(AppScope{Unpinned: true}, "call"))
+}
+
+func (s *StoreSuite) TestACallIsOwnedInItsOwnStreamApp() {
+	s.onCall("theirs", "call", 7, s.base)
+	s.onCall("mine", "call", 8, s.base.Add(time.Second))
+	s.onCall("pinned", "shared", 1, s.base)
+
+	s.Equal("mine", s.ownerOf(AppOf(8, 1), "call"))
+	s.Empty(s.ownerOf(AppOf(0, 1), "call"))
+	s.Equal("pinned", s.ownerOf(AppOf(0, 1), "shared"), "the deployment's app, pinned to its id")
+	s.Equal("pinned", s.ownerOf(AppOf(1, 1), "shared"))
+	s.onCall("unpinned", "older", 0, s.base)
+	s.Equal("unpinned", s.ownerOf(AppOf(1, 1), "older"))
+}
+
+func (s *StoreSuite) TestACallSomebodyWasOnStaysTheirsAndOneNobodyAnsweredDoesNot() {
+	s.onCall("answered", "held", 0, s.base)
+	s.onCall("unanswered", "rang", 0, s.base)
+	scope := AppScope{Unpinned: true}
+	_, connection, err := s.store.CallLegs.Connect(s.ctx, scope, "agent", "held", "session", "phone", "+15125550151", s.base, nil)
+	s.Require().NoError(err)
+	s.Require().Equal(LegConnected, connection)
+	for _, call := range []string{"held", "rang"} {
+		_, err := s.store.CallLegs.EndCall(s.ctx, scope, "agent", call, s.base.Add(time.Minute))
+		s.Require().NoError(err)
+	}
+
+	s.Equal("answered", s.ownerOf(scope, "held"))
+	s.Empty(s.ownerOf(scope, "rang"))
+}
+
+func (s *StoreSuite) TestAPhoneIsNotGivenALegThatCameToAnotherCustomersCall() {
+	scope := AppScope{Unpinned: true}
+	mine := s.onCall("first", "call", 0, s.base)
+	s.onCall("later", "call", 0, s.base.Add(time.Second))
+
+	given, connection, err := s.store.CallLegs.Connect(s.ctx, scope, "agent", "call", "session", "phone-1", "", s.base.Add(time.Minute), nil)
+	s.Require().NoError(err)
+	s.Require().Equal(LegConnected, connection)
+	s.Equal(mine.ID, given.ID)
+
+	_, connection, err = s.store.CallLegs.Connect(s.ctx, scope, "agent", "call", "session", "phone-2", "+15125550151", s.base.Add(time.Minute), nil)
+	s.Require().NoError(err)
+	s.Equal(NothingWaiting, connection, "the second phone is given the other customer's leg")
+	_, err = s.store.CallLegs.EndCall(s.ctx, scope, "agent", "call", s.base.Add(2*time.Minute))
+	s.Require().NoError(err)
+	_, connection, err = s.store.CallLegs.Connect(s.ctx, scope, "agent", "call", "session", "phone-2", "+15125550151", s.base.Add(time.Minute), nil)
+	s.Require().NoError(err)
+	s.Equal(NothingWaiting, connection, "nor is it revived")
+}
+
+// Another app's call of the same name, another type's call and a call nobody answered keep no
+// phone from its leg, nor does a second leg of the customer's own.
+func (s *StoreSuite) TestAPhoneIsGivenItsLegWhateverElseIsOfTheCallsName() {
+	scope := AppScope{Unpinned: true}
+	s.onCall("theirs", "call", 7, s.base)
+	s.placedLeg("another type", nil)
+	s.onCall("gone", "call", 0, s.base)
+	_, err := s.store.CallLegs.EndCall(s.ctx, scope, "agent", "call", s.base.Add(time.Second))
+	s.Require().NoError(err)
+	first := s.onCall("mine", "call", 0, s.base.Add(time.Minute))
+	second := s.onCall("mine", "call", 0, s.base.Add(2*time.Minute))
+
+	for i, want := range []CallLeg{first, second} {
+		given, connection, err := s.store.CallLegs.Connect(s.ctx, scope, "agent", "call", "session", fmt.Sprintf("phone-%d", i), "+15125550151", s.base.Add(time.Hour), nil)
+		s.Require().NoError(err)
+		s.Require().Equal(LegConnected, connection)
+		s.Equal(want.ID, given.ID)
+	}
+}
+
+// A placed leg is on its call from when it was placed, however long its dial took.
+func (s *StoreSuite) TestAPhoneIsGivenTheLegPlacedBeforeAnotherCustomersWasDialled() {
+	placed := s.base
+	mine := CallLeg{CustomerID: "mine", CallType: "agent", CallID: "call", Vendor: "telnyx", Direction: Outbound,
+		LocalNumber: "+15125550150", RemoteNumber: "+15125550152", PlacedAt: &placed, DialedAt: s.base.Add(time.Minute)}
+	opened, err := s.store.CallLegs.Open(s.ctx, &mine)
+	s.Require().NoError(err)
+	s.Require().True(opened)
+	s.onCall("theirs", "call", 0, s.base.Add(time.Second))
+
+	given, connection, err := s.store.CallLegs.Connect(s.ctx, AppScope{Unpinned: true}, "agent", "call", "session", "phone", "", s.base.Add(time.Hour), nil)
+	s.Require().NoError(err)
+	s.Require().Equal(LegConnected, connection)
+	s.Equal(mine.ID, given.ID)
 }

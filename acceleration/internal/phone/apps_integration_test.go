@@ -1000,6 +1000,8 @@ func (a *testApps) ForAppRemoving(_ context.Context, customer string, app int64)
 	return NewStreamFromClient(a.deployment.Client), nil
 }
 
+func (a *testApps) DeploymentApp() int64 { return 1 }
+
 func (s *AppsSuite) purchase() Purchase {
 	return Purchase{Vendor: s.vendor.vendor, E164: aNumber(), Country: "US", Owner: routing.Owner{CustomerID: s.customer}}
 }
@@ -2885,4 +2887,111 @@ func (s *AppsSuite) TestNoNumberIsGivenOutTwice() {
 		s.Require().False(given[number], "%s was given out twice", number)
 		given[number] = true
 	}
+}
+
+// another is a second customer acting in the deployment's app, and a number it holds.
+func (s *AppsSuite) another() (string, string) {
+	customer, e164 := "customer-"+uuid.NewString(), aNumber()
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
+		E164: e164, Vendor: s.vendor.vendor, Country: "US", CustomerID: customer, PurchasedAt: time.Now().UTC(),
+	}))
+	return customer, e164
+}
+
+// arrived opens the leg of a caller who rang one of customer's numbers.
+func (s *AppsSuite) arrived(customer, callID string, app int64) {
+	s.service.OpenLeg(s.ctx, routing.Owner{CustomerID: customer}, store.CallLeg{
+		StreamAppPK: app, CallType: defaultCallType, CallID: callID, StreamSessionID: "session-" + callID, Vendor: "twilio",
+		Direction: store.Inbound, LocalNumber: s.e164, RemoteNumber: "+15125550160", DialedAt: time.Now().Add(-time.Minute),
+	}, true)
+}
+
+// refusedTaken checks a call into the session is refused with nothing dialled, made at Stream or kept.
+func (s *AppsSuite) refusedTaken(sessionID string) {
+	trunks := len(s.deployment.Trunks())
+	s.vendor.dialed = Outbound{}
+
+	s.ErrorIs(s.dialInto(sessionID, "+15550001111", map[string]string{"k": "v"}), ErrSessionTaken)
+
+	s.Empty(s.vendor.dialed.To)
+	s.Len(s.deployment.Trunks(), trunks)
+	kept, err := s.store.CallLegs.SelectPlaced(s.ctx, s.customer, []string{sessionID})
+	s.Require().NoError(err)
+	s.Empty(kept, "the refused call's leg is kept")
+}
+
+func (s *AppsSuite) TestACallIsNotPlacedIntoACallThatArrivedForAnotherCustomer() {
+	s.sealed()
+	theirs, _ := s.another()
+	for name, app := range map[string]int64{"unpinned": 0, "pinned to the deployment's app": 1} {
+		s.Run(name, func() {
+			call := uuid.NewString()
+			s.arrived(theirs, call, app)
+
+			s.refusedTaken(call)
+			s.Nil(s.deployment.Call(defaultCallType, call), "the other customer's call is untouched")
+		})
+	}
+}
+
+func (s *AppsSuite) TestACallIsNotPlacedIntoACallAnotherCustomerPlaced() {
+	s.sealed()
+	theirs, e164 := s.another()
+	for name, session := range map[string]string{"a session chosen": "", "a session named": uuid.NewString()} {
+		s.Run(name, func() {
+			placed, err := s.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: theirs}, From: e164, To: "+15550002222", SessionID: session})
+			s.Require().NoError(err)
+
+			s.refusedTaken(placed.SessionID)
+		})
+	}
+}
+
+func (s *AppsSuite) TestACallIsPlacedIntoACallThatArrivedForTheSameCustomer() {
+	s.sealed()
+	call := uuid.NewString()
+	s.arrived(s.customer, call, 0)
+
+	s.Require().NoError(s.dialInto(call, "+15550001111", nil))
+	s.NoError(s.dialInto(call, "+15550001112", nil), "and again")
+}
+
+func (s *AppsSuite) TestACallIsPlacedIntoASessionOfTheNameAnotherAppsCallHas() {
+	s.ownApp()
+	s.sealed()
+	theirs, _ := s.another()
+	call := uuid.NewString()
+	s.arrived(theirs, call, 0)
+
+	s.NoError(s.dialInto(call, "+15550001111", nil))
+}
+
+// Of two customers placing into one id at once, one at most is put on the call.
+func (s *AppsSuite) TestTwoCustomersPlacingIntoOneSessionAtOnceAreNotBothOnItsCall() {
+	s.sealed()
+	theirs, e164 := s.another()
+	for range 10 {
+		session := uuid.NewString()
+		errs := make([]error, 2)
+		var wg sync.WaitGroup
+		for i, request := range []CallRequest{
+			{Owner: routing.Owner{CustomerID: s.customer}, From: s.e164},
+			{Owner: routing.Owner{CustomerID: theirs}, From: e164},
+		} {
+			request.To, request.SessionID = "+15550001111", session
+			wg.Go(func() { _, errs[i] = s.service.Call(s.ctx, request) })
+		}
+		wg.Wait()
+
+		s.True(errors.Is(errs[0], ErrSessionTaken) != errors.Is(errs[1], ErrSessionTaken), "%v", errs)
+	}
+}
+
+func (s *AppsSuite) TestACampaignDoesNotTryACallIntoATakenSessionAgain() {
+	s.sealed()
+	theirs, _ := s.another()
+	call := uuid.NewString()
+	s.arrived(theirs, call, 0)
+
+	s.NotErrorIs(s.dialInto(call, "+15550001111", nil), ErrNotDialed)
 }

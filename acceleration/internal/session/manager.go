@@ -511,6 +511,17 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	if stream.Client == nil && m.options.Stream != nil && m.options.Stream.PerApp() {
 		spec.StreamApp = store.ForeignStreamApp
 	}
+	// The agent joins agent:<id>, and calls are placed and people brought into it. An id
+	// generated just now names no call yet, and a reopened session's is its own.
+	if spec.Reopened.IsZero() && !generated {
+		taken, err := m.callTaken(ctx, spec)
+		if err != nil {
+			return nil, stack.Wrap(err)
+		}
+		if taken {
+			return nil, stack.Wrap(ErrSessionExists)
+		}
+	}
 
 	var remembering *metered.Memory
 	if spec.Memory.UserID != "" {
@@ -1118,6 +1129,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	// the strength of it has somewhere to forward it to.
 	if m.options.Directory != nil {
 		m.options.Directory.Hold(ctx, spec.CustomerID, created.id, spec.AgentID, spec.ConversationID)
+		if spec.StreamApp != store.ForeignStreamApp {
+			m.options.Directory.HoldCall(ctx, spec.CustomerID, created.id, m.callApp(spec.StreamApp))
+		}
 	}
 	// Asked again now the session is held: a status that came while the call was being
 	// joined found no session to end, and one that comes after this finds it. The session
@@ -2239,6 +2253,39 @@ func (m *Manager) stream(ctx context.Context, spec Spec, newCall bool) (streamap
 		return streamapp.Bound{}, fmt.Errorf("session: which Stream app to act in: %w", err)
 	}
 	return bound, nil
+}
+
+// callApp is the Stream app pinned app as the directory holds a call in it: zero for the
+// deployment's own, whether the session is pinned to its id or to none.
+func (m *Manager) callApp(app int64) int64 {
+	if m.options.Stream != nil && app == m.options.Stream.DeploymentApp() {
+		return 0
+	}
+	return app
+}
+
+// callTaken reports whether the call a session is named after, agent:<id> in the Stream app it
+// acts in, is another customer's: by its phone legs, or by the session some node runs on it. A
+// session that acts in no Stream app has no call.
+func (m *Manager) callTaken(ctx context.Context, spec Spec) (bool, error) {
+	if spec.StreamApp == store.ForeignStreamApp {
+		return false, nil
+	}
+	if m.options.Store != nil {
+		var deployment int64
+		if m.options.Stream != nil {
+			deployment = m.options.Stream.DeploymentApp()
+		}
+		owner, err := m.options.Store.CallLegs.Owner(ctx, store.AppOf(spec.StreamApp, deployment), streamapp.AgentCallType, spec.ID)
+		if err != nil || owner != "" && owner != spec.CustomerID {
+			return err == nil, err
+		}
+	}
+	if m.options.Directory == nil {
+		return false, nil
+	}
+	holder, err := m.options.Directory.CallHolder(ctx, m.callApp(spec.StreamApp), spec.ID)
+	return holder != "" && holder != spec.CustomerID, err
 }
 
 // hookPinFor is how long a hook's app is remembered for the session it starts.

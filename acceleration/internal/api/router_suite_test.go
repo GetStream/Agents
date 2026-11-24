@@ -2688,6 +2688,8 @@ type suiteApps struct {
 	// keyless are customers of a deployment with no Stream keys, which the deployment's own app
 	// answers ErrNoIdentity for whatever it is asked, as an unconfigured Deployment does.
 	keyless map[string]bool
+	// refused are customers the app to act in is refused for, and how.
+	refused map[string]error
 	// perApp answers as app mode does, where customers act in apps of their own.
 	perApp bool
 }
@@ -2702,8 +2704,11 @@ func (a *suiteApps) For(ctx context.Context, customer string) (streamapp.Identit
 	a.mu.Lock()
 	identity, ok := a.own[customer]
 	waiting, nowhere := a.waiting[customer], a.nowhere[customer] || a.keyless[customer]
+	refused := a.refused[customer]
 	a.mu.Unlock()
 	switch {
+	case refused != nil:
+		return streamapp.Identity{}, refused
 	case waiting:
 		return streamapp.Identity{}, streamapp.ErrDeploymentAppUnknown
 	case nowhere:

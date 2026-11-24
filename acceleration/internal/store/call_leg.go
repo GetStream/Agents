@@ -380,8 +380,40 @@ type legMatch struct {
 	revive         bool
 }
 
+// onCall keeps the legs that make a call their customer's: those open, and those a phone was on.
+func onCall(q bun.QueryBuilder) bun.QueryBuilder {
+	return q.WhereGroup(" AND ", func(q bun.QueryBuilder) bun.QueryBuilder {
+		return q.Where("ended_at IS NULL").WhereOr("participant_session <> ''")
+	})
+}
+
+// Owner is the customer a call is, in one app: the one whose leg was on it first, in any shard.
+// It is empty for a call no leg is on.
+func (r *CallLegs) Owner(ctx context.Context, scope AppScope, callType, callID string) (string, error) {
+	type first struct {
+		CustomerID string
+		At         time.Time
+	}
+	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]first, error) {
+		var found []first
+		err := db.NewSelect().Model((*CallLeg)(nil)).Column("customer_id").ColumnExpr("COALESCE(placed_at, dialed_at) AS at").
+			Where("call_type = ?", callType).Where("call_id = ?", callID).
+			ApplyQueryBuilder(scope.where).ApplyQueryBuilder(onCall).
+			OrderExpr("at, id").Limit(1).Scan(ctx, &found)
+		return found, err
+	})
+	if err != nil {
+		return "", stack.Wrap(fmt.Errorf("store: call owner: %w", err))
+	}
+	if owner := merged(lists, func(a, b first) int { return a.At.Compare(b.At) }, 1); len(owner) > 0 {
+		return owner[0].CustomerID, nil
+	}
+	return "", nil
+}
+
 // connectWaitingLeg gives the phone the first leg of the call, across the shards, that match
-// keeps.
+// keeps. A leg that came to a call after another customer's is given no phone: the call is the
+// other's (Owner).
 func (r *CallLegs) connectWaitingLeg(ctx context.Context, scope AppScope, callType, callID, sessionID, participant string,
 	match legMatch, at time.Time, left *time.Time) (CallLeg, Connection, error) {
 	var leftAt any
@@ -392,7 +424,12 @@ func (r *CallLegs) connectWaitingLeg(ctx context.Context, scope AppScope, callTy
 		waiting := db.NewSelect().Model((*CallLeg)(nil)).Column("id").
 			Where("call_type = ?", callType).Where("call_id = ?", callID).
 			Where("participant_session = ''").
-			ApplyQueryBuilder(scope.where)
+			ApplyQueryBuilder(scope.where).
+			Where("NOT EXISTS (?)", db.NewSelect().TableExpr("call_legs AS o").ColumnExpr("1").
+				Where("call_type = ?", callType).Where("call_id = ?", callID).
+				ApplyQueryBuilder(scope.where).ApplyQueryBuilder(onCall).
+				Where("o.customer_id <> cl.customer_id").
+				Where("COALESCE(o.placed_at, o.dialed_at) < COALESCE(cl.placed_at, cl.dialed_at)"))
 		if match.revive {
 			waiting = waiting.Where("direction = ?", Outbound).Where("end_reason = ?", LegUnanswered).
 				Where("ended_at > GREATEST(?::timestamptz, dialed_at)", at)

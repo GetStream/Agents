@@ -176,6 +176,8 @@ type Apps interface {
 	// wherever reading that app does: a line in the deployment's app that the customer may
 	// no longer add to is still the router's own to take down, and one left there is billed.
 	ForAppRemoving(ctx context.Context, customer string, app int64) (*Stream, error)
+	// DeploymentApp is the deployment's own app's id, zero while it is not known.
+	DeploymentApp() int64
 }
 
 // ErrNoStream is a service with no Stream app to make lines in: a deployment without Stream
@@ -224,6 +226,15 @@ func (s *Service) streamFor(ctx context.Context, customer string) (*Stream, int6
 		return nil, 0, ErrNoStream
 	}
 	return s.stream, 0, nil
+}
+
+// scopeOf is the rows of the Stream app a pin names.
+func (s *Service) scopeOf(pin int64) store.AppScope {
+	var deployment int64
+	if s.apps != nil {
+		deployment = s.apps.DeploymentApp()
+	}
+	return store.AppOf(pin, deployment)
 }
 
 // streamForApp is the app a line already made is in.
@@ -1194,6 +1205,9 @@ type Placed struct {
 	StreamApp int64
 }
 
+// ErrSessionTaken is a call into a session whose call is another customer's.
+var ErrSessionTaken = errors.New("phone: the session id is taken")
+
 // Call places an outbound call and bridges it into a Stream call.
 //
 // Stream's SIP is inbound only, so the vendor originates the call and connects it to a
@@ -1222,7 +1236,7 @@ func lasting(err error) bool {
 	return errors.Is(err, ErrInvalid) || errors.Is(err, store.ErrNoNumber) || errors.Is(err, store.ErrNoSIPTrunk) ||
 		errors.Is(err, ErrNoStream) || errors.Is(err, ErrNoSealerToCall) ||
 		errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrSIPTrunksDisabled) ||
-		errors.Is(err, errLasting) || (err != nil && streamapp.Settled(err))
+		errors.Is(err, errLasting) || errors.Is(err, ErrSessionTaken) || (err != nil && streamapp.Settled(err))
 }
 
 // errLasting marks a failure that has no kind of its own and that a second try meets again: a
@@ -1340,6 +1354,18 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 			s.forgetOutcome(ctx, token, callID)
 		}
 	}()
+	// A leg is routed into agent:<session id>, so a session id somebody named has to be a call of
+	// the customer's. Asked once its own leg is kept, so of two customers placing into one id at
+	// once each sees the other's.
+	if request.SessionID != "" {
+		owner, err := s.store.CallLegs.Owner(ctx, s.scopeOf(pin), callType, callID)
+		if err != nil {
+			return Placed{}, err
+		}
+		if owner != "" && owner != request.Owner.CustomerID {
+			return Placed{}, stack.Wrap(ErrSessionTaken)
+		}
+	}
 	// Its leg counts against the organization it was placed under once it is dialled too.
 	if room.OrganizationID != "" {
 		request.Owner.OrganizationID = room.OrganizationID

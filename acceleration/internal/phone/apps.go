@@ -39,3 +39,5 @@ func (a clientApps) ForAppRemoving(ctx context.Context, customer string, app int
 	}
 	return NewStreamFromClient(bound.Client), nil
 }
+
+func (a clientApps) DeploymentApp() int64 { return a.clients.DeploymentApp() }
