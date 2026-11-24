@@ -152,7 +152,7 @@ func (s *SessionOwnershipSuite) TestASignedInUserDoesNotCarryOnTheConversationOf
 	s.refusesToCarryOn(s.data.signedInAs(guest.userID), s.ended(guest))
 }
 
-func (s *SessionOwnershipSuite) TestAGuestCarriesOnItsConversationWithTheTokenItWasMinted() {
+func (s *SessionOwnershipSuite) TestAGuestCarriesOnItsConversationWithATokenOfNoRole() {
 	var minted GuestUser
 	s.Require().Equal(http.StatusCreated,
 		s.data.createAnonymous().do(http.MethodPost, "/v1/agents/guests", GuestUserRequest{}, &minted))

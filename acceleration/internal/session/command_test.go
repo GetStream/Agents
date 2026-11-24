@@ -1314,7 +1314,7 @@ func (s *SessionSuite) TestAVoiceSessionOfAnotherKindOfCallerRestoresNoHistory()
 	s.persists()
 	spec := s.writtenBy(auth.KindAuthenticated)
 	spec.Text, spec.PersistConversation, spec.CallID = false, false, "athv-nimbus"
-	spec.STTTarget, spec.TTSTarget = "en-low-latency", "low-latency"
+	spec.STTTarget, spec.TTSTarget = "en-low-latency", "en-low-latency"
 	spec.CallerKind = auth.KindGuest
 
 	_, err := s.manager.Create(s.ctx, spec)
