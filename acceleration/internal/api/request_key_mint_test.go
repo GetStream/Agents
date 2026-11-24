@@ -85,7 +85,7 @@ func (s *RequestKeyMintSuite) guestToken(client *testClient) string {
 func (s *RequestKeyMintSuite) callToken(client *testClient) CallToken {
 	call := store.Call{ID: s.utils.uuid(), CustomerID: s.customerID(), CallID: s.utils.callID(),
 		AgentID: "agent-" + s.utils.uuid(), StreamAppPK: s.id, StartedAt: time.Now()}
-	s.Require().NoError(s.store.StartCall(context.Background(), &call))
+	s.Require().NoError(s.store.Calls.Start(context.Background(), &call))
 	var minted CallToken
 	s.Require().Equal(http.StatusOK, client.do(http.MethodPost, "/v1/agents/calls/"+call.ID+"/token",
 		map[string]any{}, &minted))

@@ -13,7 +13,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/blob"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -33,6 +32,10 @@ const VoiceClone = "voice_clone"
 // line or two: the line is sent to the provider and billed.
 const MaxLine = 500
 
+// prepareFailed is the reason a failed binding records. The provider's own answer can carry
+// its hosts, request ids and bodies, so it goes to the log only.
+const prepareFailed = "the provider could not make a voice from these recordings"
+
 // ErrLineTooLong is a line to hear a voice say that is over MaxLine characters.
 var ErrLineTooLong = errors.New("voices: the line is too long to hear a voice say")
 
@@ -40,7 +43,7 @@ var ErrLineTooLong = errors.New("voices: the line is too long to hear a voice sa
 // recordings behind them and the ids each provider gave them back. It is the only caller of
 // a Cloner, so it records every clone it asks for.
 type Service struct {
-	store    *appconfig.Store
+	store    *store.Store
 	bucket   *blob.Bucket
 	cloners  *Registry
 	recorder *routing.Recorder
@@ -50,7 +53,7 @@ type Service struct {
 // Options configures a Service. The first three dependencies are required, since a voice
 // with nowhere to keep its recordings and nobody to teach them to is not a voice.
 type Options struct {
-	Store   *appconfig.Store
+	Store   *store.Store
 	Bucket  *blob.Bucket
 	Cloners *Registry
 	// Recorder records each clone as a tts row. Nil records nothing.
@@ -89,7 +92,7 @@ func NewService(options Options) (*Service, error) {
 // Create records a new, empty voice.
 func (s *Service) Create(ctx context.Context, customerID, name, description string) (store.Voice, error) {
 	voice := store.Voice{CustomerID: customerID, Name: name, Description: description}
-	if err := s.store.CreateVoice(ctx, &voice); err != nil {
+	if err := s.store.Voices.Insert(ctx, &voice); err != nil {
 		return store.Voice{}, err
 	}
 	return voice, nil
@@ -97,7 +100,7 @@ func (s *Service) Create(ctx context.Context, customerID, name, description stri
 
 // AddSample stores a recording and attaches it to the voice.
 func (s *Service) AddSample(ctx context.Context, customerID, voiceID string, sample Sample) error {
-	voice, err := s.store.Voice(ctx, customerID, voiceID)
+	voice, err := s.store.Voices.Get(ctx, customerID, voiceID)
 	if err != nil {
 		return err
 	}
@@ -118,7 +121,7 @@ func (s *Service) AddSample(ctx context.Context, customerID, voiceID string, sam
 		Bytes:       written,
 		Transcript:  sample.Transcript,
 	}
-	if err := s.store.DB().AddVoiceSample(ctx, &stored); err != nil {
+	if err := s.store.VoiceSamples.Insert(ctx, &stored); err != nil {
 		// The row is what makes the object findable, so an orphan is swept up here rather
 		// than left in the bucket costing money nobody can account for.
 		if err := s.bucket.Delete(ctx, key); err != nil {
@@ -135,7 +138,7 @@ func (s *Service) AddSample(ctx context.Context, customerID, voiceID string, sam
 // why, and the router simply will not choose it for this voice. Each clone is recorded for
 // the customer, under the key that asked.
 func (s *Service) Prepare(ctx context.Context, customerID, voiceID string, providers []string) error {
-	voice, err := s.store.Voice(ctx, customerID, voiceID)
+	voice, err := s.store.Voices.Get(ctx, customerID, voiceID)
 	if err != nil {
 		return err
 	}
@@ -166,12 +169,12 @@ func (s *Service) Prepare(ctx context.Context, customerID, voiceID string, provi
 // row. Providers first, because a voice we have forgotten about but are still billed for
 // is the failure worth avoiding.
 func (s *Service) Delete(ctx context.Context, customerID, voiceID string) error {
-	voice, err := s.store.Voice(ctx, customerID, voiceID)
+	voice, err := s.store.Voices.Get(ctx, customerID, voiceID)
 	if err != nil {
 		return err
 	}
 
-	bindings, err := s.store.DB().VoiceBindings(ctx, voice.ID)
+	bindings, err := s.store.VoiceBindings.Select(ctx, voice.ID)
 	if err != nil {
 		return err
 	}
@@ -190,7 +193,7 @@ func (s *Service) Delete(ctx context.Context, customerID, voiceID string) error 
 		}
 	}
 
-	samples, err := s.store.DB().VoiceSamples(ctx, voice.ID)
+	samples, err := s.store.VoiceSamples.Select(ctx, voice.ID)
 	if err != nil {
 		return err
 	}
@@ -201,7 +204,7 @@ func (s *Service) Delete(ctx context.Context, customerID, voiceID string) error 
 		}
 	}
 
-	return s.store.DeleteVoice(ctx, customerID, voice.ID)
+	return s.store.Voices.Delete(ctx, customerID, voice.ID)
 }
 
 // Providers reports which providers a voice can be prepared with, sorted by name.
@@ -227,7 +230,7 @@ func (s *Service) Speak(ctx context.Context, customerID, voiceID, provider, text
 	if err != nil {
 		return Speech{}, err
 	}
-	externalID, err := s.store.ReadyVoiceBinding(ctx, customerID, voiceID, provider)
+	externalID, err := s.store.VoiceBindings.GetReady(ctx, customerID, voiceID, provider)
 	if err != nil {
 		return Speech{}, err
 	}
@@ -254,12 +257,12 @@ func (c clone) UsageID() uuid.UUID { return c.id }
 
 // Samples returns a voice's recordings, oldest first.
 func (s *Service) Samples(ctx context.Context, voiceID string) ([]store.VoiceSample, error) {
-	return s.store.DB().VoiceSamples(ctx, voiceID)
+	return s.store.VoiceSamples.Select(ctx, voiceID)
 }
 
 // Bindings returns what each provider made of a voice.
 func (s *Service) Bindings(ctx context.Context, voiceID string) ([]store.VoiceBinding, error) {
-	return s.store.DB().VoiceBindings(ctx, voiceID)
+	return s.store.VoiceBindings.Select(ctx, voiceID)
 }
 
 // prepareOne sends the recordings to one provider and writes down what came back. It marks
@@ -282,7 +285,7 @@ func (s *Service) prepareOne(
 	pending := store.VoiceBinding{
 		VoiceID: voice.ID, Provider: provider, State: store.VoicePending, ExternalID: previous,
 	}
-	if err := s.store.SaveVoiceBinding(ctx, &pending, voice.CustomerID); err != nil {
+	if err := s.store.VoiceBindings.Upsert(ctx, &pending); err != nil {
 		s.logger.Warn("could not record that a voice is being prepared",
 			"voice", voice.ID, "provider", provider, "error", err)
 		return
@@ -301,7 +304,7 @@ func (s *Service) prepareOne(
 	externalID := made.ExternalID
 	if err != nil {
 		binding.State = store.VoiceFailed
-		binding.Error = err.Error()
+		binding.Error = prepareFailed
 		s.logger.Warn("a provider would not take this voice",
 			"voice", voice.ID, "provider", provider, "error", err)
 	} else {
@@ -309,7 +312,7 @@ func (s *Service) prepareOne(
 		binding.ExternalID = externalID
 	}
 
-	if err := s.store.SaveVoiceBinding(ctx, &binding, voice.CustomerID); err != nil {
+	if err := s.store.VoiceBindings.Upsert(ctx, &binding); err != nil {
 		s.logger.Warn("could not record what a provider made of a voice",
 			"voice", voice.ID, "provider", provider, "error", err)
 		return
@@ -324,7 +327,7 @@ func (s *Service) prepareOne(
 
 // externalID is the id a provider last gave the voice, or empty when it never had it.
 func (s *Service) externalID(ctx context.Context, voiceID, provider string) (string, error) {
-	bindings, err := s.store.DB().VoiceBindings(ctx, voiceID)
+	bindings, err := s.store.VoiceBindings.Select(ctx, voiceID)
 	if err != nil {
 		return "", err
 	}
@@ -338,7 +341,7 @@ func (s *Service) externalID(ctx context.Context, voiceID, provider string) (str
 
 // request reads the recordings back out of the bucket, which is what every cloner is given.
 func (s *Service) request(ctx context.Context, voice store.Voice) (Request, error) {
-	stored, err := s.store.DB().VoiceSamples(ctx, voice.ID)
+	stored, err := s.store.VoiceSamples.Select(ctx, voice.ID)
 	if err != nil {
 		return Request{}, err
 	}

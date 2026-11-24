@@ -1,14 +1,17 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -74,6 +77,11 @@ type StreamOptions struct {
 	ResponseID string
 	Provider   string
 	Model      string
+	// StartedAt is when the request was sent, which time to first token and the duration are
+	// measured from. It defaults to when the stream was made, for a provider whose stream
+	// exists before anything is waited on; one that returns its stream only once the response
+	// headers are in sets it, since a server can hold those back until its first token.
+	StartedAt time.Time
 }
 
 // NewStream returns the stream a provider produces by advancing the given puller.
@@ -82,11 +90,15 @@ func NewStream(options StreamOptions, puller Puller) *Stream {
 		options.ResponseID = fmt.Sprintf("resp-%d", time.Now().UnixNano())
 	}
 
+	if options.StartedAt.IsZero() {
+		options.StartedAt = time.Now()
+	}
+
 	stream := &Stream{puller: puller}
 	stream.writer = &ResponseWriter{
 		stream:    stream,
 		options:   options,
-		startedAt: time.Now(),
+		startedAt: options.StartedAt,
 		status:    StatusCompleted,
 		calls:     map[int64]*partialCall{},
 	}
@@ -98,6 +110,10 @@ func NewStream(options StreamOptions, puller Puller) *Stream {
 	})
 	return stream
 }
+
+// StartedAt is when the response's clock started (StreamOptions.StartedAt), zero for a
+// replayed one.
+func (s *Stream) StartedAt() time.Time { return s.writer.startedAt }
 
 // Replay returns a Stream over events that have already happened, for a caller standing in
 // for a provider.
@@ -306,22 +322,23 @@ func (s *Stream) Close() error {
 }
 
 // Screen has a judgement of what the response was asked run beside it. The verdict channel
-// yields exactly once: nil to let the response stand, or the reason to refuse it.
+// yields exactly once: nil to let the response stand, or the reason to refuse it. ctx is the
+// context of the call that the response is for.
 //
 // The deltas are not held, so the screen costs a caller no time to first token. What is held
 // is the ResponseCompleted, until the verdict arrives, because that is where the tool calls a
 // caller acts on are settled. A refusal that arrives while the model is still answering
 // closes the upstream at once, and either way the response settles as failed with the
 // refusal as its error. It is for a stream a provider produced, not one from Replay.
-func (s *Stream) Screen(verdict <-chan error) *Stream {
+func (s *Stream) Screen(ctx context.Context, verdict <-chan error) *Stream {
 	s.screened = make(chan struct{})
-	go func() {
+	goroutine.Go(ctx, func() {
 		defer close(s.screened)
 		if err := <-verdict; err != nil {
 			s.Close()
 			s.refused.Store(&err)
 		}
-	}()
+	})
 	return s
 }
 
@@ -378,6 +395,7 @@ type ResponseWriter struct {
 	firstTokenAt       time.Time
 	text               strings.Builder
 	reasoning          strings.Builder
+	reasoningBlocks    []ReasoningBlock
 	deltas             int
 	usage              Usage
 	usageReported      bool
@@ -436,6 +454,14 @@ func (w *ResponseWriter) ReasoningText(delta string) {
 	w.markFirstToken()
 	w.reasoning.WriteString(delta)
 	w.emit(ReasoningTextDelta{ResponseID: w.options.ResponseID, Index: w.next(), Delta: delta})
+}
+
+// ReasoningBlock records a finished block of thinking with what a replay needs, as soon as
+// it is finished, so a caller can put it in place among the text that follows. Its text was
+// already streamed through ReasoningText.
+func (w *ResponseWriter) ReasoningBlock(block ReasoningBlock) {
+	w.reasoningBlocks = append(w.reasoningBlocks, block)
+	w.emit(ReasoningBlockDone{ResponseID: w.options.ResponseID, Block: block})
 }
 
 // FunctionCall records a fragment of a call the model is asking for.
@@ -554,8 +580,17 @@ func (w *ResponseWriter) settle(failure error) {
 	// A failed response asks for nothing: refused by a screen or broken off by its provider,
 	// it is not an answer that stands, and a caller running its calls would act on it anyway.
 	calls, dropped := w.assembled(), []ToolCall(nil)
+	reasoning := w.reasoningBlocks
+	// A call dropped for arguments that do not parse is missing from the turn a caller sends
+	// back, so a block after it would stand after a different call or none: from the first
+	// one dropped, no block after a call is kept.
+	if kept := w.callsBeforeADrop(); kept < len(w.order) {
+		reasoning = slices.DeleteFunc(slices.Clone(reasoning), func(block ReasoningBlock) bool { return block.AfterToolCalls > kept })
+	}
 	if w.status == StatusFailed {
-		calls, dropped = nil, calls
+		// Its thinking goes with its calls: a block placed after a dropped call has nowhere
+		// to go back to.
+		calls, dropped, reasoning = nil, calls, nil
 	}
 
 	w.emit(ResponseCompleted{Response: Response{
@@ -565,6 +600,7 @@ func (w *ResponseWriter) settle(failure error) {
 		Model:              w.options.Model,
 		OutputText:         w.text.String(),
 		ReasoningText:      w.reasoning.String(),
+		ReasoningBlocks:    reasoning,
 		ToolCalls:          calls,
 		DroppedToolCalls:   dropped,
 		Usage:              w.usage,
@@ -577,6 +613,17 @@ func (w *ResponseWriter) settle(failure error) {
 		TimeToFirstTokenMs: timeToFirstToken,
 		DurationMs:         float64(time.Since(w.startedAt).Microseconds()) / 1000,
 	}})
+}
+
+// callsBeforeADrop is how many calls the response asked for before the first assembled
+// drops, or all of them.
+func (w *ResponseWriter) callsBeforeADrop() int {
+	for i, index := range w.order {
+		if arguments := w.calls[index].arguments.String(); arguments != "" && !json.Valid([]byte(arguments)) {
+			return i
+		}
+	}
+	return len(w.order)
 }
 
 // assembled returns the tool calls in the order the model asked for them.

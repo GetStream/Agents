@@ -2,7 +2,7 @@
 
 When running an agent using @acceleration/ or an example using @acceleration/ refer to the skill acceleration/development_skills/dashboard_skill.md to setup the dashboard and launch the example. Make sure you restart any routers or binaries to avoid running old builds.
 
-Work happens on the `accelerate` branch here, and the agents docs live in getstream.io's `content/docs` (see the `docs` skill).
+Work happens on the `main` branch here, and the agents docs live in getstream.io's `content/docs` (see the `docs` skill).
 
 ## What is here
 
@@ -25,12 +25,13 @@ Work happens on the `accelerate` branch here, and the agents docs live in getstr
 ## SDK changes
 
 When you need to make an SDK change start by only changing Go
-Leave a note in the sdk skill at the bottom that other SDKs also need to udpate.
+Leave a note that the other SDKs also need to update, as a new file in `.claude/skills/sdk/notes/`
+(see «SDK updates» in the sdk skill). Never add it to the end of the skill itself.
 We run this periodically, you don't need to change all SDKs at once.
 Go goes first, and later on we update the others.
 
-To release every SDK at once, or one of them, read the `release-sdks` skill
-(`.claude/skills/release-sdks/SKILL.md`). Publishing a GitHub Release releases them all.
+To publish every SDK at once, or one of them, read the `release-sdks` skill
+(`.claude/skills/release-sdks/SKILL.md`). A release of the whole repo publishes them all.
 
 ## Local dev
 
@@ -42,14 +43,25 @@ Run the router in Docker, with the Volt dashboard's override (see the `dashboard
 docker compose -f compose.yaml -f ../volt-dashboard/docs/local-agents/compose.volt.yaml up -d --build router
 ```
 
-That serves the router on `:8080`, with Postgres on `:55432` and Redis on `:56379`, its data
-in the `vision-agents_pgdata` volume. Rerun it after router changes so you never test an old
+That serves the router on `:8080`, with Postgres 19 on `:55432` and Redis on `:56379`, its data
+in the `vision-agents_pgdata19` volume. Rerun it after router changes so you never test an old
 build. Those two ports are also what the standalone `va-pg` and `va-redis` containers use, so
 stop those first if they are running.
 
-`.env` must set `ROUTER_AUTH_KEK` (single-quoted: compose expands a `$` in it) and
+Postgres 16 data in the old `vision-agents_pgdata` volume is not read by the 19 image. To keep
+it, dump it with a 16 server and restore it into the new one before starting the router:
+
+```bash
+docker run -d --name va-pg16 -e POSTGRES_PASSWORD=postgres -v vision-agents_pgdata:/var/lib/postgresql/data postgres:16-alpine
+docker exec va-pg16 pg_dumpall -U postgres > /tmp/pg16.sql && docker rm -f va-pg16
+docker compose up -d postgres
+docker compose exec -T postgres psql -U postgres -f - < /tmp/pg16.sql
+```
+
+`.env` must set `ROUTER_DEV_KEK` (single-quoted: compose expands a `$` in it) and
 `ROUTER_PUBLIC_URL=http://localhost:8080`. Without the KEK no connector client secret can be
-saved, and changing it leaves the stored ones unreadable.
+saved, and changing it leaves the stored ones unreadable. The router refuses the old
+`ROUTER_AUTH_KEK`: rename it to `ROUTER_DEV_KEK` and keep its value.
 
 Logs: `docker compose logs -f router`.
 
@@ -57,10 +69,10 @@ An agent, once the router is up:
 
 ```bash
 cd examples/voice_agents/simple_voice_ai
-uv sync && uv run simple_voice_ai.py run
+uv sync && uv run simple_voice_ai.py
 ```
 
-It prints a call URL on the dashboard; open it and talk.
+It stores the agent's directory on the router, then opens a demo call in the browser; talk into it.
 
 The client generators (`plugins/stream/generate.py`, `sdks/swift/generate.py`) are standalone uv scripts with inline metadata: `uv run <script>` does not resolve the workspace.
 
@@ -167,6 +179,12 @@ skill (`.claude/skills/connectors/SKILL.md`). To add a provider to the catalog, 
 
 To set up, test or debug an SMS line on a Telnyx number, staging's permanent line included,
 read the `telnyx` skill (`.claude/skills/telnyx/SKILL.md`).
+
+## Generative UI
+
+To change how an agent answers with a card (the `ui:` key in `agent.yaml`, the router's UI
+splitter, the `ui_delta`/`ui_completed` frames, `custom.ai_ui`, `LiveUI`), or to find why a card
+is missing or jumps, read the `generative-ui` skill (`.claude/skills/generative-ui/SKILL.md`).
 
 ## Scheduled tasks
 
@@ -283,8 +301,18 @@ module-level `logger = logging.getLogger(__name__)`. Use `debug` for lifecycle, 
 
 ## Changelog
 
-- Lives in `CHANGELOG.md` at the repo root.
-- Organised by version heading (`# v0.4.0`), then sections: **Breaking Changes**, **New Features**, **Bug Fixes**.
+- Lives in the root `CHANGELOG.md`, not the Dart package's own `CHANGELOG.md`. A pull request does not edit it: when every PR added
+  lines at the same place, any two open PRs conflicted there. One exception: a PR that breaks a
+  published SDK's API (Go: a renamed or removed field or signature) adds one line under
+  `# Unreleased` → **Breaking Changes**.
+- It is written once per release, with the `release` skill (`.claude/skills/release/SKILL.md`).
+  A release is one version of the whole repo (router, SDKs, Python packages, apps): a `vX.Y.Z`
+  tag on `main`, whose GitHub release also publishes the Python packages. Router deploy tags
+  (`accelerate-v*`) and SDK tags get no section.
+- The release PR turns `# Unreleased` and every user-facing PR merged since the previous release
+  into one version heading (`# v0.4.0`), with sections **Breaking Changes**, **New Features**,
+  **Bug Fixes**.
 - Only include user-facing changes (public API breaks, features, fixes). Skip docs-only and CI-only commits.
 - Reference PR numbers inline, e.g. `(#374)`.
-- To generate: `git log <last-tag>..HEAD --oneline --no-merges`, then classify each commit.
+- To generate: follow step 2 of the `release` skill, which lists the PRs merged since the previous
+  release tag; then classify each one.

@@ -27,7 +27,7 @@ import (
 //	  sandbox gate                                              channel_unreachable
 //	  the organization may not pay (dlc.ErrUnpaid)              its code, such as insufficient_credits, final
 //	  past WhatsApp's 24 h, no template                         outside_window, final
-//	lease the thread's turn (store.TakeChannelThreadTurn)       another turn: wait
+//	lease the thread's turn (store.ChannelTurns.Take)           another turn: wait
 //	the session on the channel, else threadSpec on the task's config
 //	  the organization may not pay                              its code, final
 //	Session.FollowUp("st_<run>"), wait for its reply            no_reply, reply_failed
@@ -47,7 +47,7 @@ func (s *Server) deliverOnThread(ctx context.Context, delivery scheduledDelivery
 	if s.store == nil {
 		return "", "", errors.New("this router has no store to find a task's thread in")
 	}
-	thread, err := s.store.ChannelThread(ctx, channelID)
+	thread, err := s.store.ChannelThreads.Get(ctx, channelID)
 	if errors.Is(err, store.ErrNoChannelThread) {
 		return "", "", undeliveredFinally(scheduling.ReasonThreadGone, err)
 	}
@@ -65,13 +65,13 @@ func (s *Server) deliverOnThread(ctx context.Context, delivery scheduledDelivery
 		return "", "", threadUnreachable(err)
 	}
 	holder := uuid.NewString()
-	if err := s.takeThreadTurn(ctx, thread.ChannelID, holder); err != nil {
+	if err := s.takeThreadTurn(ctx, thread, holder); err != nil {
 		return "", "", err
 	}
 	defer func() {
 		releasing, done := context.WithTimeout(context.WithoutCancel(ctx), threadTurnPoll*20)
 		defer done()
-		if err := s.store.ReleaseChannelThreadTurn(releasing, thread.ChannelID, holder); err != nil {
+		if err := s.store.ChannelTurns.Release(releasing, thread.StreamAppPK, chatlog.ChannelType+":"+thread.ChannelID, holder); err != nil {
 			s.logger.Error("could not let go of a thread's turn; it runs out instead", "channel", thread.ChannelID, "error", err)
 		}
 	}()
@@ -89,7 +89,10 @@ func (s *Server) deliverOnThread(ctx context.Context, delivery scheduledDelivery
 			}
 		}()
 	}
-	delivery.CommandID = replyCommand(found, delivery.CommandID)
+	delivery.CommandID = replyCommand(found, delivery.CommandID, delivery.Earlier)
+	if err := refusedAgain(found, delivery); err != nil {
+		return "", "", err
+	}
 	// The delivery sends the reply itself, to settle the run on whether it went out.
 	replies, release := s.channelBridge.Hold(delivery.CommandID)
 	defer release()
@@ -149,7 +152,7 @@ func (s *Server) taskThreadSession(ctx context.Context, delivery scheduledDelive
 	if running {
 		return found, false, nil
 	}
-	config, err := s.store.AgentConfig(ctx, delivery.CustomerID, delivery.ConfigID)
+	config, err := s.store.AgentConfigs.Get(ctx, delivery.CustomerID, delivery.ConfigID)
 	if err != nil {
 		return nil, false, err
 	}

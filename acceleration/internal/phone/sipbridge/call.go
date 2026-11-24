@@ -11,6 +11,9 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
+// ErrReleased is what Err returns for a call let go without BYE, so another node can continue it.
+var ErrReleased = errors.New("sipbridge: call released to another node")
+
 var errCallEnded = errors.New("call ended")
 
 // errNotEstablished refuses a request that arrives while Dial is still setting the call up:
@@ -20,10 +23,15 @@ var errNotEstablished = errors.New("call not set up yet")
 // Call is an established outbound call: two dialogs, and whatever one side sends in its
 // dialog is passed on to the other.
 type Call struct {
+	// ctx is the context the call was dialled or resumed in, without its cancellation: what
+	// the other side asks of the call later (a BYE, a re-INVITE, a keepalive) is traced under it.
+	ctx  context.Context
 	legs [2]leg
 	log  *slog.Logger
 	// media is where each side sent its audio from at setup, fixed before Dial returns.
 	media MediaAddrs
+	// onChange is told when a passed-on re-INVITE changed what either leg last sent.
+	onChange func()
 
 	established atomic.Bool
 	ending      atomic.Bool
@@ -32,8 +40,8 @@ type Call struct {
 	err         error
 }
 
-func newCall(customer, stream leg, log *slog.Logger) *Call {
-	return &Call{legs: [2]leg{customer, stream}, log: log, done: make(chan struct{})}
+func newCall(ctx context.Context, customer, stream leg, log *slog.Logger) *Call {
+	return &Call{ctx: context.WithoutCancel(ctx), legs: [2]leg{customer, stream}, log: log, done: make(chan struct{})}
 }
 
 // Done is closed when the call has ended.
@@ -63,6 +71,20 @@ func (c *Call) Hangup(ctx context.Context) error {
 	wg.Wait()
 	c.end(nil)
 	return errors.Join(errs[:]...)
+}
+
+// Release ends the call without a BYE on either leg. The dialogs stay up for the node that
+// takes the call over.
+func (c *Call) Release() {
+	if !c.claim() {
+		return
+	}
+	c.end(ErrReleased)
+}
+
+// State is both legs' dialogs and where the audio flows.
+func (c *Call) State() CallState {
+	return CallState{Customer: c.legs[customerSide].State(), Stream: c.legs[streamSide].State(), Media: c.media}
 }
 
 // establish lets requests from one side through to the other. Dial calls it once both
@@ -115,6 +137,7 @@ func (c *Call) onReinvite(ctx context.Context, from side, offer []byte) ([]byte,
 		return nil, err
 	}
 	c.log.Info("re-INVITE answered", media(1-from, answer)...)
+	c.changed()
 	return answer, nil
 }
 
@@ -139,4 +162,10 @@ func (c *Call) lost(ctx context.Context, s side, err error) {
 		c.log.Warn("BYE to the other leg failed", "leg", 1-s, "error", byeErr)
 	}
 	c.end(stack.Wrap(fmt.Errorf("%s leg lost: %w", s, err)))
+}
+
+func (c *Call) changed() {
+	if c.onChange != nil {
+		c.onChange()
+	}
 }

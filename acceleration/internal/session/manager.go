@@ -17,13 +17,13 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	persistent "github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/guardrail"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/imagejobs"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
@@ -96,6 +96,9 @@ type ManagerOptions struct {
 	Knowledge *metered.Knowledge
 	// Search is optional, and is what every session finds out what is true now with.
 	Search *searchrouter.Router
+	// Drawings is optional, and is where a session whose config names an image target queues
+	// the pictures it is asked for, to be drawn after the turn and posted into its conversation.
+	Drawings *imagejobs.Service
 	// Classifier is optional, and is what a session with a guardrail asks whether a turn
 	// may be answered. Without it a session declaring a guardrail that needs one is
 	// refused rather than held unguarded.
@@ -132,11 +135,7 @@ type ManagerOptions struct {
 	// organization's, which its agent config can shorten and not lengthen. Nil holds it to
 	// the agent config alone.
 	Policies *policy.Enforcer
-	// Configs reads what a session is opened from -- the skills it names -- through
-	// whatever cache is in front of Postgres. Built over Store when it is not given, in
-	// which case every read is a query, which is what a deployment without Redis does.
-	Configs *appconfig.Store
-	Live    *live.Client
+	Live     *live.Client
 	// Pricer and Writer are the process's price list and usage writer, for what a session
 	// records of its own rather than through a router or internal/metered, such as the time
 	// it runs; memory and knowledge record through the recorders they are built with. Nothing
@@ -226,7 +225,7 @@ type Manager struct {
 	sliceEvery time.Duration
 
 	mu       sync.Mutex
-	sessions map[string]*Session
+	sessions map[Key]*Session
 	// kickScheduler wakes the scheduled-task worker after a scheduling tool
 	// makes or changes a task (SetSchedulerKick); nil where no worker runs.
 	kickScheduler func()
@@ -272,8 +271,11 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 		hookPins:      map[string]hookPinned{},
 		options:       options,
 		logger:        options.Logger,
-		sessions:      map[string]*Session{},
+		sessions:      map[Key]*Session{},
 		conversations: options.Conversations,
+	}
+	if options.Conversations != nil && options.Store != nil {
+		keepBranches(options.Conversations, options.Store)
 	}
 	// Once, here, rather than for each session it would have ruled: the router runs, and the
 	// flow controller rules every floor that chose nothing, as it would with no default.
@@ -284,20 +286,13 @@ func NewManager(options ManagerOptions) (*Manager, error) {
 	// written is the recorder behind records, which titles are written through too.
 	var written *sessionRecorder
 	if options.Store != nil {
-		if options.Configs == nil {
-			configs, err := appconfig.New(appconfig.Options{Store: options.Store, Logger: options.Logger})
-			if err != nil {
-				return nil, err
-			}
-			manager.options.Configs = configs
-		}
 		manager.logs = newLogRecorder(options.Store, options.Logger)
-		manager.calls = newCallRecorder(options.Store, options.Logger)
 		// Read only: the phone service's keeper is what counts calls, so this one names no vendors.
 		manager.outcomes = outcome.NewKeeper(options.Store, time.Now, nil, options.Logger)
 		written = newSessionRecorder(options.Store, options.Logger)
 		manager.records = written
-		manager.reviews = newReviewer(options.LLM, options.Store, options.Logger)
+		manager.calls = &callRecorder{records: written}
+		manager.reviews = newReviewer(options.LLM, options.Store, written, options.Logger)
 		if options.Connectors.Transports != nil {
 			manager.invocations = newInvocationRecorder(options.Store, options.Logger)
 		}
@@ -358,12 +353,13 @@ func (m *Manager) startRuntime(spec Spec) *routing.Slices {
 
 // newSession is the session spec opens, timed from now by runtime, which every session is
 // given so that none is open unbilled.
-func (m *Manager) newSession(spec Spec, conv *persistent.Conversation, skills harness.Skills, opening time.Time, runtime *routing.Slices) *Session {
+func (m *Manager) newSession(ctx context.Context, spec Spec, conv *persistent.Conversation, skills harness.Skills, opening time.Time, runtime *routing.Slices) *Session {
 	// The files a fork carried are pinned and kept below, and are not the session's to hand
 	// on: a spec read off it (a fork, a reopen) reads its own files by their owner.
 	held := spec
 	held.Documents = nil
 	created := &Session{
+		ctx:       context.WithoutCancel(ctx),
 		logs:      m.logs,
 		persisted: conv,
 		id:        spec.ID,
@@ -393,10 +389,10 @@ func (m *Manager) newSession(spec Spec, conv *persistent.Conversation, skills ha
 // team's agent configs to its own users keeps their channels in the config's team too, so
 // that Chat shows them to that team's users alone. A config of no team asks nothing.
 func (m *Manager) channelTeam(ctx context.Context, spec Spec) (string, error) {
-	if spec.ConfigTeam == "" || m.options.Configs == nil {
+	if spec.ConfigTeam == "" || m.options.Store == nil {
 		return "", nil
 	}
-	settings, err := m.options.Configs.AppSettings(ctx, spec.CustomerID)
+	settings, err := m.options.Store.Apps.GetSettings(ctx, spec.CustomerID)
 	if err != nil {
 		return "", stack.Wrap(fmt.Errorf("%w: %w", ErrAppSettingsUnreadable, err))
 	}
@@ -413,6 +409,7 @@ func (m *Manager) channelTeam(ctx context.Context, spec Spec) (string, error) {
 // session would hold a model session and a place in a call that nobody holds a handle to.
 func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure error) {
 	began := time.Now()
+	generated := spec.ID == ""
 	if err := spec.Normalize(); err != nil {
 		return nil, stack.Wrap(err)
 	}
@@ -427,14 +424,14 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	spec.Attribution.SessionID = spec.ID
 	// Refuse unsupported voice modes before opening a call or persistent resource.
 	if spec.Native() && m.options.STS == nil {
-		return nil, stack.Wrap(errors.New("session: this deployment routes no speech-to-speech model"))
+		return nil, stack.Wrap(notConfigured(errors.New("session: this deployment routes no speech-to-speech model")))
 	}
 	if !spec.Text && !spec.Native() {
 		if m.options.STT == nil {
-			return nil, stack.Wrap(errors.New("session: an stt router is required for voice sessions"))
+			return nil, stack.Wrap(notConfigured(errors.New("session: an stt router is required for voice sessions")))
 		}
 		if m.options.TTS == nil {
-			return nil, stack.Wrap(errors.New("session: a tts router is required for voice sessions"))
+			return nil, stack.Wrap(notConfigured(errors.New("session: a tts router is required for voice sessions")))
 		}
 	}
 
@@ -443,23 +440,25 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		m.mu.Unlock()
 		return nil, stack.Wrap(errors.New("session: the manager is shut down"))
 	}
-	held, live := m.sessions[spec.ID]
+	held, live := m.sessions[Key{spec.CustomerID, spec.ID}]
+	another := m.heldByAnother(spec.CustomerID, spec.ID)
 	m.mu.Unlock()
-	if live && !replaces(spec, held) {
+	if another || live && !replaces(spec, held) {
 		return nil, stack.Wrap(ErrSessionExists)
 	}
 	// The id is the row's primary key whoever owns it, so one somebody already used would
 	// write this session over theirs. A reopened one is the same session, its owner checked
-	// by whoever reopened it.
-	if m.options.Store != nil && spec.Reopened.IsZero() {
-		taken, err := m.options.Store.SessionExists(ctx, spec.ID)
+	// by whoever reopened it. One generated just now is a UUIDv7 nobody has, and asking every
+	// shard about it would refuse the session whenever any one of them is down.
+	if m.options.Store != nil && spec.Reopened.IsZero() && !generated {
+		taken, err := m.options.Store.Sessions.Exists(ctx, spec.ID)
 		if err != nil {
 			return nil, stack.Wrap(err)
 		}
 		// A session's channel is named after it, and a thread channel's id is taken by the
 		// external thread it holds. Compared case-folded, as threadConversation does.
 		if folded := strings.ToLower(spec.ID); !taken && strings.HasPrefix(folded, persistent.ThreadChannelPrefix) {
-			_, err := m.options.Store.ChannelThread(ctx, folded)
+			_, err := m.options.Store.ChannelThreads.Get(ctx, folded)
 			if err != nil && !errors.Is(err, store.ErrNoChannelThread) {
 				return nil, stack.Wrap(err)
 			}
@@ -483,10 +482,19 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		}
 		spec.ToolOutputRetention = floor.Shorter(spec.ToolOutputRetention)
 	}
+	loading := newToolLoading(spec)
+	if ungrouped := loading.ungrouped(spec.Tools); len(ungrouped) > 0 {
+		// A conversation carried on from its row was opened with the tools its config named
+		// then. One the config no longer names is left out rather than ending the conversation.
+		if spec.Reopened.IsZero() {
+			return nil, stack.Wrap(fmt.Errorf("%w: %s", ErrToolNotConfigured, strings.Join(ungrouped, ", ")))
+		}
+		spec.Tools = slices.DeleteFunc(slices.Clone(spec.Tools), func(tool harness.Tool) bool { return !loading.grouped(tool.Name) })
+	}
 
 	// The Stream app the session acts in is settled once, before anything is done there,
 	// and the whole session keeps it: its call, its transcript and the rows it writes.
-	stream, err := m.stream(ctx, spec)
+	stream, err := m.stream(ctx, spec, generated && spec.ownCall)
 	if err != nil {
 		return nil, err
 	}
@@ -560,7 +568,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		if cid == "" {
 			open, cid = service.CreateInApp, streamapp.AgentChannelType+":"+spec.ID
 		}
-		conv, previous, truncated, err = open(reading, spec.StreamApp, spec.CustomerID, spec.AgentID, cid, spec.Caller.UserID, spec.UserID, spec.Custom, spec.ChannelTeam, memory.Scope{AppID: spec.Memory.AppID, UserID: spec.Memory.UserID, Extra: spec.Memory.Filter})
+		// The session's branch switches are kept under its id, and one a router left unfinished
+		// is finished as the conversation opens.
+		conv, previous, truncated, err = open(persistent.WithSession(reading, spec.ID), spec.StreamApp, spec.CustomerID, spec.AgentID, cid, spec.Caller.UserID, spec.UserID, spec.Custom, spec.ChannelTeam, memory.Scope{AppID: spec.Memory.AppID, UserID: spec.Memory.UserID, Extra: spec.Memory.Filter})
 		if errors.Is(err, streamapp.ErrReadOnly) {
 			return nil, ErrConversationReadOnly
 		}
@@ -585,18 +595,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		// knows the one its transcript was written under.
 		spec.AgentID = conv.Agent()
 		spec.ContextTruncated = truncated
-		displays := map[string]persistent.ToolDisplay{}
-		for _, tool := range spec.Tools {
-			display := persistent.ToolDisplay{Title: tool.DisplayTitle, Client: tool.Client}
-			if approval := tool.Approval; approval != nil {
-				display.Approval = &persistent.ToolApproval{
-					Title: approval.Title, Message: approval.Message, ReasonArgument: approval.ReasonArgument,
-					AllowTitle: approval.AllowTitle, DeclineTitle: approval.DeclineTitle,
-				}
-			}
-			displays[tool.Name] = display
-		}
-		conv.DescribeTools(displays)
+		conv.DescribeTools(toolDisplays(spec.Tools))
 		// A fork opens an empty channel of its own and then reads the parent's, so the model
 		// carries on from what was said while the transcripts stay separate. The parent's
 		// half goes first because it happened first.
@@ -683,7 +682,8 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			runtime.Cancel()
 		}
 	}()
-	created := m.newSession(spec, conv, skills, opening, runtime)
+	created := m.newSession(ctx, spec, conv, skills, opening, runtime)
+	created.loading = loading
 	// A session held ends where it closes (Session.counted); one never held ends here,
 	// unless it was turned away for a router shutting down or for a session already held
 	// under its id (a redelivered hook): neither is a session that failed.
@@ -699,6 +699,8 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		runtime.Cancel()
 		created.Close()
 	}
+	created.toolCalls.approves = created.approves
+	created.toolCalls.titles = created.toolTitle
 	created.tools = newBridge(
 		time.Duration(spec.ToolTimeoutMs)*time.Millisecond,
 		spec.Tools,
@@ -712,7 +714,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	sources := map[string]ToolSource{}
 	markTools(sources, tools, ToolFromSession)
 	var callers agent.ToolRunner = created.tools
-	tools, callers = m.hostedTools(spec, created.id, hostedProgress{created}, tools, callers)
+	tools, callers = m.hostedTools(spec, loading, created.id, hostedProgress{created}, tools, callers)
 	markTools(sources, tools[len(spec.Tools):], ToolFromWorker)
 	tools, callers = moderationTools(spec, stream, tools, callers)
 	if line != nil || m.reading(spec) || m.searching(spec) || spec.endsCalls() {
@@ -721,6 +723,12 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			return nil, stack.Wrap(err)
 		}
 		tools = append(tools, spec.callTools(builtin.Tools)...)
+	}
+	// A worker that is not connected, or an SDK that no longer defines a function, leaves
+	// the agent without it. The session still opens and does what it can.
+	if missing := loading.missing(tools); len(missing) > 0 {
+		m.logger.Warn("the agent's tool groups name tools nothing on this session runs; it carries on without them",
+			"session", created.id, "config", spec.ConfigID, "tools", missing)
 	}
 
 	// A config's plugins and MCP servers are no longer opened, whatever its row still names:
@@ -758,6 +766,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		connectors.next = runner
 		runner = connectors
 		connectors.askIn(conv, created.chose)
+		connectors.approvals.changed = created.trackToolCall
 		connectors.stepUps = newStepUps(m.options.Connectors.Consents, created.broadcast, m.logger)
 		created.connectors = connectors
 		created.closers = append(created.closers, connectors.Close, connectors.closeLogins)
@@ -766,9 +775,10 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	created.toolSources = sources
 	// Last, so every other tool's name is taken first and a child cannot shadow one.
 	tools, runner = m.childAgents(spec, created, tools, runner)
-	if spec.ProgressiveTools {
-		tools, runner = progressively(tools, connectorTools, runner)
+	if loading.summarises() {
+		runner = newProgressiveRunner(runner, created.summarised)
 	}
+	created.otherTools = slices.Clone(tools[len(spec.Tools):])
 
 	var toolStarted func(agent.ToolStarted)
 	if conv != nil {
@@ -781,9 +791,10 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	if connectors != nil {
 		toolPolicy = connectors.toolPolicy
 	}
-	if policy := interruptible(tools, toolPolicy); policy != nil {
+	if policy := interruptible(created.otherTools, toolPolicy); policy != nil {
 		toolPolicy = policy
 	}
+	toolPolicy = created.toolPolicy(toolPolicy)
 	screening, err := m.guardrail(ctx, spec, stream.Identity)
 	if err != nil {
 		return nil, stack.Wrap(err)
@@ -863,7 +874,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			Ender:              m.ender(created, spec, stream),
 			EndCallWhen:        spec.endCallWhen(),
 			ToolRunner:         runner,
-			Tools:              harness.Tools{Tools: tools},
+			Tools:              created.offering(spec.Tools),
 			Sandbox:            box,
 			Publish:            publisher(conv),
 			Tasks:              spec.Tasks,
@@ -881,6 +892,8 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			KnowledgeNamespace: spec.KnowledgeNamespace,
 			Search:             m.options.Search,
 			SearchTarget:       spec.SearchTarget,
+			Draws:              m.drawer(spec, conv),
+			ImageTarget:        spec.ImageTarget,
 			Guardrail:          screening,
 			SpeculativeReplies: m.options.SpeculativeReplies,
 			UnifiedReplies:     m.options.UnifiedReplies,
@@ -890,7 +903,6 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			MemoryUserID:       spec.Memory.UserID,
 			MemoryFilter:       spec.Memory.Filter,
 			Store:              m.options.Store,
-			Live:               m.options.Live,
 			Logger:             m.logger,
 		})
 	}
@@ -953,6 +965,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	if created.carded {
 		created.cardsFor = person
 	}
+	created.cards = cards
 	built.RestoreHistory(append(cards, previous...))
 	if !spec.Native() {
 		built.PinDocuments(m.documents(ctx, spec)...)
@@ -979,6 +992,27 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	// fan-out records is held until the row is queued below (startRecording).
 	if m.records != nil && !spec.Incognito {
 		created.records = m.records
+		if m.options.Store != nil {
+			created.tree = m.options.Store
+			created.restoring = func(ctx context.Context) (context.Context, error) { return m.restoring(ctx, spec) }
+		}
+		// A reopened session carries on from the newest response on its conversation, which a
+		// branch switch may have made an older one. Its last turns may still be on their way to
+		// the store.
+		if m.options.Store != nil && !spec.Reopened.IsZero() {
+			// Carrying on from the wrong one would answer the next question after a response the
+			// conversation does not show, so a store that cannot say refuses the reopen.
+			if err := m.records.Flush(ctx); err != nil {
+				fail()
+				return nil, stack.Wrap(err)
+			}
+			leaf, err := m.options.Store.Responses.ActiveLeaf(ctx, spec.CustomerID, spec.ID)
+			if err != nil {
+				fail()
+				return nil, err
+			}
+			created.leaf = leaf
+		}
 	}
 
 	run := created.track(built)
@@ -1011,13 +1045,37 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		created.closers = append(created.closers, func() { m.hangUpRinging(created, spec) })
 	}
 
-	// The row is queued before the session is reachable, so the call cannot be recorded
-	// as ending before it is recorded as starting. An incognito session has none: the row
-	// names the session, its caller and the instructions it ran with.
+	// The row is queued once the session has joined, so a call that refused it leaves no
+	// session behind, and once search has started, so its tool is among the ones stored.
+	// The turns held until now, the greeting's among them, are written after it.
+	if created.records != nil {
+		row := sessionRow(created)
+		created.closers = append(created.closers, func() {
+			m.records.Closed(spec.CustomerID, created.id, row.OpenedAt, time.Now().UTC(), created.kept())
+		})
+		if spec.Reopened.IsZero() {
+			m.records.Opened(row, toolRows(created))
+		} else {
+			m.records.CarriedOn(row, toolRows(created))
+		}
+		created.startRecording()
+	}
+
+	// The call is queued behind the session row it names, and before the session is
+	// reachable, so it cannot be recorded as ending before it is recorded as starting. An
+	// incognito session has none: the row names the session, its caller and the
+	// instructions it ran with.
 	if m.calls != nil && !spec.Incognito {
 		created.calls = m.calls
+		// A reopened session's created is when it first opened; its new call starts now.
+		started := created.created
+		if !spec.Reopened.IsZero() {
+			started = created.began.UTC().Truncate(time.Microsecond)
+		}
+		created.nextCall(started)
 		created.closers = append(created.closers, func() {
-			m.calls.Ended(created.id, time.Now().UTC())
+			id, _ := created.callRow()
+			m.calls.Ended(spec.CustomerID, id, time.Now().UTC())
 			// The review runs on a model rather than in this closer, so it is started
 			// here and lands on the row whenever it comes back.
 			if !spec.NoReview {
@@ -1025,17 +1083,6 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			}
 		})
 		m.calls.Started(row(created))
-	}
-
-	// The row is queued once the session has joined, so a call that refused it leaves no
-	// session behind, and once search has started, so its tool is among the ones stored.
-	// The turns held until now, the greeting's among them, are written after it.
-	if created.records != nil {
-		created.closers = append(created.closers, func() {
-			m.records.Closed(created.id, time.Now().UTC(), created.kept())
-		})
-		m.records.Opened(sessionRow(created), toolRows(created))
-		created.startRecording()
 	}
 
 	m.mu.Lock()
@@ -1048,14 +1095,14 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		fail()
 		return nil, stack.Wrap(errors.New("session: the manager is shut down"))
 	}
-	if held, raced := m.sessions[created.id]; raced && !replaces(spec, held) {
+	if held, raced := m.sessions[created.Key()]; raced && !replaces(spec, held) || m.heldByAnother(spec.CustomerID, created.id) {
 		m.mu.Unlock()
 		turnedAway = true
 		created.handedOver.Store(true)
 		fail()
 		return nil, stack.Wrap(ErrSessionExists)
 	}
-	m.sessions[created.id] = created
+	m.sessions[created.Key()] = created
 	sessionsActive.Inc()
 	created.active.Store(true)
 	m.mu.Unlock()
@@ -1063,7 +1110,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	// Said after the session is here to be found, so a peer that forwards a request on
 	// the strength of it has somewhere to forward it to.
 	if m.options.Directory != nil {
-		m.options.Directory.Hold(ctx, created.id, spec.AgentID)
+		m.options.Directory.Hold(ctx, spec.CustomerID, created.id, spec.AgentID, spec.ConversationID)
 	}
 	// Asked again now the session is held: a status that came while the call was being
 	// joined found no session to end, and one that comes after this finds it. The session
@@ -1074,7 +1121,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		m.end(created, TimeoutUnanswered)
 	}
 	m.mu.Lock()
-	held, present := m.sessions[created.id]
+	held, present := m.sessions[created.Key()]
 	m.mu.Unlock()
 	if err == nil && held != created {
 		// Ended between going into the map and here, by a status, a takeover or shutdown:
@@ -1087,7 +1134,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		// otherwise be renewed for a session nobody holds. One reopened under the id since
 		// holds its own.
 		if !present {
-			m.release(created.id)
+			m.release(created)
 		}
 		return nil, err
 	}
@@ -1147,16 +1194,16 @@ func replaces(spec Spec, held *Session) bool {
 func (m *Manager) supersede(spec Spec) {
 	m.mu.Lock()
 	var left []*Session
-	for id, found := range m.sessions {
+	for key, found := range m.sessions {
 		if sameSeat(found.Spec(), spec) {
 			left = append(left, found)
-			delete(m.sessions, id)
+			delete(m.sessions, key)
 		}
 	}
 	m.mu.Unlock()
 
 	for _, found := range left {
-		m.release(found.id)
+		m.release(found)
 	}
 
 	for _, found := range left {
@@ -1246,16 +1293,16 @@ func (m *Manager) awaitRetiring(ctx context.Context, customer, cid string) {
 func (m *Manager) takeOver(customer, cid string, thread bool) {
 	m.mu.Lock()
 	var left []*Session
-	for id, found := range m.sessions {
+	for key, found := range m.sessions {
 		if found.spec.CustomerID == customer && found.spec.Thread == thread && found.unwatchedFor(cid) {
 			left = append(left, found)
-			delete(m.sessions, id)
+			delete(m.sessions, key)
 		}
 	}
 	m.mu.Unlock()
 
 	for _, found := range left {
-		m.release(found.id)
+		m.release(found)
 		m.logger.Info("reopening a conversation nobody was watching",
 			"session", found.id, "conversation", cid)
 		found.abandon()
@@ -1340,7 +1387,7 @@ func (m *Manager) Get(id string, owner Owner) (*Session, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	found, ok := m.sessions[id]
+	found, ok := m.sessions[Key{owner.CustomerID, id}]
 	if !ok || !owner.Reaches(OwnerOf(found.Spec())) {
 		return nil, false
 	}
@@ -1528,9 +1575,9 @@ func (m *Manager) find(ctx context.Context, owner Owner, text string, filter sto
 		var rows []store.AgentSession
 		var err error
 		if text != "" {
-			rows, err = m.options.Store.SearchSessions(ctx, owner.CustomerID, text, filter)
+			rows, err = m.options.Store.Sessions.Search(ctx, owner.CustomerID, text, filter)
 		} else {
-			rows, err = m.options.Store.QuerySessions(ctx, owner.CustomerID, filter)
+			rows, err = m.options.Store.Sessions.Select(ctx, owner.CustomerID, filter)
 		}
 		if err != nil {
 			return nil, err
@@ -1592,50 +1639,28 @@ func livePosition(live *Session) store.SessionPosition {
 // among the caller's sessions and never reaches another's.
 func matchesLive(live *Session, filter store.SessionFilter) bool {
 	spec := live.Spec()
+	var state string
+	switch live.State() {
+	case Live:
+		state = store.SessionRunning
+	case Ended:
+		state = store.SessionClosed
+	}
 	switch {
 	case filter.UserID != "" && spec.Caller.UserID != filter.UserID:
 		return false
 	case len(filter.CallerKinds) > 0 && !slices.Contains(filter.CallerKinds, string(spec.CallerKind)):
 		return false
-	case filter.ConfigID != "" && spec.ConfigID != filter.ConfigID:
-		return false
-	case filter.AgentName != "" && spec.AgentName != filter.AgentName:
-		return false
-	case filter.Project != "" && spec.Project != filter.Project:
-		return false
-	case filter.Modality != "" && live.Modality() != filter.Modality:
-		return false
 	case filter.AgentID != "" && spec.AgentID != filter.AgentID:
-		return false
-	case filter.Team != "" && usage.Team(spec.Attribution.UsageCategories) != filter.Team:
-		return false
-	case filter.State == store.SessionRunning && live.State() != Live,
-		filter.State == store.SessionClosed && live.State() != Ended:
-		return false
-	case !filter.After.IsZero() && live.CreatedAt().Before(filter.After):
-		return false
-	case !filter.Before.IsZero() && !live.CreatedAt().Before(filter.Before):
-		return false
-	case !contains(spec.Custom, filter.Custom):
 		return false
 	// Nobody has reviewed a session that is still running, so it has no score.
 	case !filter.Where.Matches(store.SessionValues{
-		Project: spec.Project, Agent: spec.AgentName, UserID: spec.Caller.UserID,
+		Project: spec.Project, Agent: spec.AgentName, UserID: spec.Caller.UserID, ConfigID: spec.ConfigID,
+		State: state, CreatedAt: live.CreatedAt().Truncate(time.Microsecond), Custom: spec.Custom,
 	}):
 		return false
 	case filter.Cursor != nil && filter.Order.Compare(livePosition(live), *filter.Cursor) <= 0:
 		return false
-	}
-	return true
-}
-
-// contains is the store's custom @> ?::jsonb, for a session that has no row to ask.
-func contains(custom map[string]any, wanted map[string]string) bool {
-	for key, value := range wanted {
-		held, ok := custom[key]
-		if !ok || fmt.Sprint(held) != value {
-			return false
-		}
 	}
 	return true
 }
@@ -1653,7 +1678,7 @@ func (m *Manager) Pin(ctx context.Context, live *Session, pinned bool) (*time.Ti
 	if err := live.records.Flush(ctx); err != nil {
 		return nil, stack.Wrap(err)
 	}
-	return m.options.Store.PinSession(ctx, live.spec.CustomerID, live.id, pinned, time.Now().UTC())
+	return m.options.Store.Sessions.Pin(ctx, live.spec.CustomerID, live.id, pinned, time.Now().UTC())
 }
 
 // Recorded reports whether the session has a row: false for an incognito one and for a
@@ -1667,9 +1692,10 @@ func (m *Manager) Close(id string, owner Owner) (bool, error) {
 		return false, nil
 	}
 
+	key := found.Key()
 	m.mu.Lock()
-	_, held := m.sessions[id]
-	delete(m.sessions, id)
+	_, held := m.sessions[key]
+	delete(m.sessions, key)
 	if held {
 		m.closing++
 		m.ended.Add(1)
@@ -1681,7 +1707,7 @@ func (m *Manager) Close(id string, owner Owner) (bool, error) {
 		}()
 	}
 	m.mu.Unlock()
-	m.release(id)
+	m.release(found)
 
 	return true, found.Close()
 }
@@ -1696,7 +1722,7 @@ func (m *Manager) end(found *Session, reason EndReason) {
 		return
 	}
 	defer done()
-	m.release(found.id)
+	m.release(found)
 
 	found.noteEnd(reason)
 	m.logger.Info("ending the session", "session", found.id, "reason", reason)
@@ -1714,7 +1740,7 @@ func (m *Manager) hangUp(found *Session, reason EndReason) {
 	found.noteEnd(reason)
 	go func() {
 		defer done()
-		m.release(found.id)
+		m.release(found)
 		m.logger.Info("ending the session", "session", found.id, "reason", reason)
 		if err := found.Close(); err != nil {
 			m.logger.Warn("could not close the session its agent hung up", "session", found.id, "error", err)
@@ -1727,10 +1753,10 @@ func (m *Manager) hangUp(found *Session, reason EndReason) {
 func (m *Manager) take(found *Session) (done func(), held bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if current, ok := m.sessions[found.id]; !ok || current != found {
+	if current, ok := m.sessions[found.Key()]; !ok || current != found {
 		return nil, false
 	}
-	delete(m.sessions, found.id)
+	delete(m.sessions, found.Key())
 	m.closing++
 	m.ended.Add(1)
 	return func() {
@@ -1745,13 +1771,12 @@ func (m *Manager) take(found *Session) (done func(), held bool) {
 // has joined it, reporting whether this node holds it.
 func (m *Manager) EndUnanswered(customerID, id string) bool {
 	m.mu.Lock()
-	found, held := m.sessions[id]
+	found, held := m.sessions[Key{customerID, id}]
 	m.mu.Unlock()
 	if !held {
 		return false
 	}
-	spec := found.Spec()
-	if OwnerOf(spec).CustomerID == customerID && spec.Phone != nil && !found.CallerJoined() {
+	if found.Spec().Phone != nil && !found.CallerJoined() {
 		m.end(found, TimeoutUnanswered)
 	}
 	return true
@@ -1769,13 +1794,13 @@ const voicemailWithin = 2 * time.Minute
 // The message is left in the background, as it takes a while to say.
 func (m *Manager) Machine(customerID, id string, machine phone.Machine) bool {
 	m.mu.Lock()
-	found, held := m.sessions[id]
+	found, held := m.sessions[Key{customerID, id}]
 	m.mu.Unlock()
 	if !held {
 		return false
 	}
 	spec := found.Spec()
-	if OwnerOf(spec).CustomerID != customerID || spec.Phone == nil || spec.Voicemail == nil {
+	if spec.Phone == nil || spec.Voicemail == nil {
 		return true
 	}
 	if machine == phone.MachineHuman {
@@ -1802,7 +1827,7 @@ func (m *Manager) Machine(customerID, id string, machine phone.Machine) bool {
 // hangs up. A session that began closing meanwhile, its call hung up, is left to close.
 func (m *Manager) leaveVoicemail(found *Session, spec Spec, message string) {
 	if message != "" && !found.closingNow() {
-		ctx, cancel := context.WithTimeout(context.Background(), voicemailWithin)
+		ctx, cancel := context.WithTimeout(found.ctx, voicemailWithin)
 		// Whatever the agent was saying to the greeting is not for the recording.
 		found.Interrupt()
 		if err := found.Say(ctx, message); err != nil && !found.closingNow() {
@@ -1815,7 +1840,7 @@ func (m *Manager) leaveVoicemail(found *Session, spec Spec, message string) {
 	}
 	// Leaving the call alone would leave the machine recording until it gives up.
 	if spec.Phone.Number != "" && !found.closingNow() {
-		ctx, cancel := context.WithTimeout(context.Background(), hangUpTimeout)
+		ctx, cancel := context.WithTimeout(found.ctx, hangUpTimeout)
 		if err := m.options.Phone.EndCall(ctx, spec.CustomerID, spec.StreamApp, spec.CallType, spec.CallID); err != nil {
 			m.logger.Warn("could not end the call of a voicemail left", "session", found.id, "error", err)
 		}
@@ -1834,7 +1859,7 @@ func (m *Manager) hangUpRinging(created *Session, spec Spec) {
 	m.ended.Add(1)
 	go func() {
 		defer m.ended.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), hangUpTimeout)
+		ctx, cancel := context.WithTimeout(created.ctx, hangUpTimeout)
 		defer cancel()
 		if err := m.options.Phone.HangUpUnanswered(ctx, spec.CustomerID, spec.CallID); err != nil {
 			m.logger.Warn("could not hang up the call its session left ringing", "session", created.id, "call", spec.CallID, "customer", spec.CustomerID, "error", err)
@@ -1851,33 +1876,58 @@ const hangUpTimeout = 5 * time.Second
 const releaseTimeout = 2 * time.Second
 
 // release stops telling this deployment's other nodes that a session is here.
-func (m *Manager) release(id string) {
+func (m *Manager) release(found *Session) {
 	if m.options.Directory == nil {
 		return
 	}
 	// Not the caller's context: a session is let go of on paths that have none, and one
 	// cancelled the moment the answer is written would leave the claim behind.
-	ctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
+	ctx, cancel := context.WithTimeout(found.ctx, releaseTimeout)
 	defer cancel()
-	m.options.Directory.Release(ctx, id)
+	m.options.Directory.Release(ctx, found.spec.CustomerID, found.id)
 }
 
-// Running reports whether this process is running a session, whoever it belongs to.
+// Running reports whether this process is running a customer's session, whoever of the
+// customer's it belongs to.
 //
 // No owner is asked for, unlike Get, because which node holds a session is not a question
 // about who may see it: the node that answers checks that for itself.
-func (m *Manager) Running(id string) bool {
+func (m *Manager) Running(customerID, id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	_, running := m.sessions[id]
+	_, running := m.sessions[Key{customerID, id}]
 	return running
+}
+
+// HeldByAnother reports whether this process is running a session of the id for a customer
+// other than customerID. A session's row is keyed by its id alone, whoever's it is, so a second
+// customer's session under one is refused.
+func (m *Manager) HeldByAnother(customerID, id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.heldByAnother(customerID, id)
+}
+
+// heldByAnother is HeldByAnother with m.mu held.
+func (m *Manager) heldByAnother(customerID, id string) bool {
+	for key := range m.sessions {
+		if key.ID == id && key.CustomerID != customerID {
+			return true
+		}
+	}
+	return false
 }
 
 // SandboxesIn reports whether a session's sandbox can be made in region: a config naming a
 // sandbox in a region with no Daytona target here is refused as it is written.
 func (m *Manager) SandboxesIn(region string) bool {
 	return m.options.Sandboxes.Serves(region)
+}
+
+// SpeaksNative reports whether this deployment's sessions can run a speech-to-speech model.
+func (m *Manager) SpeaksNative() bool {
+	return m.options.STS != nil
 }
 
 // Len is how many sessions this process is running, which is what a draining router waits
@@ -1921,7 +1971,7 @@ func (m *Manager) Delete(ctx context.Context, id string, owner Owner) error {
 	if m.options.Store == nil {
 		return nil
 	}
-	return m.options.Store.DeleteSession(ctx, owner.CustomerID, id)
+	return m.options.Store.Sessions.Delete(ctx, owner.CustomerID, id)
 }
 
 // mayRemember is whether a session could have taught the memory store anything. Only a row
@@ -1933,7 +1983,7 @@ func (m *Manager) mayRemember(ctx context.Context, customerID, id string) bool {
 	if m.options.Store == nil {
 		return true
 	}
-	row, err := m.options.Store.StoredSession(ctx, customerID, id)
+	row, err := m.options.Store.Sessions.Get(ctx, customerID, id)
 	if err != nil {
 		return true
 	}
@@ -1942,9 +1992,17 @@ func (m *Manager) mayRemember(ctx context.Context, customerID, id string) bool {
 
 // TruncateMemories deletes everything remembered about one of the customer's users, from
 // every session and every agent.
+//
+// The copies of the user's hidden branches go with them: they are what the user said as much
+// as what was learned from it.
 func (m *Manager) TruncateMemories(ctx context.Context, customerID, userID string) error {
 	if m.options.Memory == nil {
 		return stack.Wrap(ErrNoMemory)
+	}
+	if m.options.Store != nil {
+		if _, err := m.options.Store.BranchMessages.DeleteUser(ctx, customerID, userID); err != nil {
+			return err
+		}
 	}
 	return memoryFailed(ctx, m.options.Memory.For(forgetting(ctx, customerID)).Truncate(ctx, customerID, userID))
 }
@@ -1973,7 +2031,7 @@ func (m *Manager) Shutdown() error {
 	for _, found := range m.sessions {
 		running = append(running, found)
 	}
-	m.sessions = map[string]*Session{}
+	m.sessions = map[Key]*Session{}
 	m.mu.Unlock()
 
 	// Each close may wait for the agent to finish speaking, so every session stops being
@@ -2000,7 +2058,6 @@ func (m *Manager) Shutdown() error {
 	}
 	if m.calls != nil {
 		m.reviews.Close()
-		m.calls.Close()
 		m.records.Close()
 		m.logs.close()
 	}
@@ -2026,7 +2083,7 @@ func (m *Manager) box(ctx context.Context, spec Spec, connectors *dispatcher) (s
 		return nil, nil
 	}
 	if spec.Sandbox != daytonaProvider {
-		return nil, stack.Wrap(fmt.Errorf("session: there is no sandbox provider called %q", spec.Sandbox))
+		return nil, stack.Wrap(invalid(fmt.Errorf("session: there is no sandbox provider called %q", spec.Sandbox)))
 	}
 	granted := connectors != nil && len(connectors.grants) > 0
 	slots, err := m.options.SandboxLimits.Sandbox(ctx, owner(spec), policy.SandboxAsk{Config: spec.SandboxOptions, Granted: granted})
@@ -2081,8 +2138,8 @@ func (m *Manager) guardrail(ctx context.Context, spec Spec, stream streamapp.Ide
 	// arrives. Refusing is the honest answer - the alternative is a guardrail that is
 	// configured, reported, and enforcing nothing.
 	if spec.Native() {
-		return nil, stack.Wrap(errors.New(
-			"session: a speech-to-speech agent answers the caller directly, so a guardrail cannot screen its turns"))
+		return nil, stack.Wrap(invalid(errors.New(
+			"session: a speech-to-speech agent answers the caller directly, so a guardrail cannot screen its turns")))
 	}
 
 	policy, err := guardrail.Parse(spec.Guardrail)
@@ -2111,7 +2168,10 @@ func (m *Manager) guardrail(ctx context.Context, spec Spec, stream streamapp.Ide
 // stream is the Stream app a new session acts in. A deployment with no Stream app still
 // holds a text conversation, so having none is not an error here: what needs one fails
 // where it needs it.
-func (m *Manager) stream(ctx context.Context, spec Spec) (streamapp.Bound, error) {
+//
+// newCall is a call named after an id generated for this session, which no line can have been
+// made for yet, so no shard is asked about its lines.
+func (m *Manager) stream(ctx context.Context, spec Spec, newCall bool) (streamapp.Bound, error) {
 	nowhere := streamapp.Bound{Identity: streamapp.Identity{CustomerID: spec.CustomerID}}
 	if m.options.Stream == nil {
 		return nowhere, nil
@@ -2126,8 +2186,8 @@ func (m *Manager) stream(ctx context.Context, spec Spec) (streamapp.Bound, error
 	}
 	// A call that already has lines, a number's or a placed call's, is in the app they were
 	// made in, and the agent has to join it there.
-	if m.options.Store != nil && spec.CallID != "" && !spec.Text {
-		pin, found, err := m.options.Store.CallPin(ctx, spec.CustomerID, spec.CallType, spec.CallID)
+	if m.options.Store != nil && spec.CallID != "" && !spec.Text && !newCall {
+		pin, found, err := m.options.Store.CallResources.Pin(ctx, spec.CustomerID, spec.CallType, spec.CallID)
 		if err != nil {
 			return streamapp.Bound{}, err
 		}
@@ -2407,7 +2467,7 @@ func (m *Manager) line(spec Spec) (agent.Telephony, error) {
 		return nil, nil
 	}
 	if m.options.Phone == nil {
-		return nil, stack.Wrap(errors.New("session: this deployment has no telephony, so a number cannot be used"))
+		return nil, stack.Wrap(notConfigured(errors.New("session: this deployment has no telephony, so a number cannot be used")))
 	}
 
 	return m.options.Phone.Line(phone.LineOptions{
@@ -2423,6 +2483,27 @@ func (m *Manager) line(spec Spec) (agent.Telephony, error) {
 
 // ErrSessionExists is a session asked for by an id some session already has.
 var ErrSessionExists = errors.New("session: a session with that id already exists")
+
+// ErrInvalid is a session or a turn asked for in a way it cannot be carried out: the
+// request's own mistake, or its agent config's. Its message says what to change. A failure of
+// the router's own, such as a database that failed, is never one.
+var ErrInvalid = errors.New("session: invalid request")
+
+// invalid marks err as ErrInvalid without changing its message.
+func invalid(err error) error { return marked{err, ErrInvalid} }
+
+// ErrNotConfigured is a session that needs something this deployment does not have, such as
+// a speech-to-text router or telephony: the operator's to fix, not the request's.
+var ErrNotConfigured = errors.New("session: not configured")
+
+// notConfigured marks err as ErrNotConfigured without changing its message.
+func notConfigured(err error) error { return marked{err, ErrNotConfigured} }
+
+// marked is err that is also kind, with err's own message.
+type marked struct{ err, kind error }
+
+func (e marked) Error() string   { return e.err.Error() }
+func (e marked) Unwrap() []error { return []error{e.err, e.kind} }
 
 // ErrAppSettingsUnreadable is an app's settings that could not be read. It is the router's
 // failure, not the caller's request.
@@ -2461,6 +2542,20 @@ func newID() string {
 	return hex.EncodeToString(raw)
 }
 
+// branchJournal is the store's copies of the messages branch switches hide and its journal of
+// the switches, as conversations keep them.
+type branchJournal struct {
+	*store.BranchMessages
+	*store.BranchSwitches
+}
+
+// keepBranches has service keep its conversations' branch switches in tree, and finish the
+// ones a router left unfinished with the sessions' responses there.
+func keepBranches(service *persistent.Service, tree *store.Store) {
+	service.SetBranches(branchJournal{tree.BranchMessages, tree.BranchSwitches})
+	service.SetSwitchHooks(switchHooks(tree))
+}
+
 func (m *Manager) Conversations() (*persistent.Service, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2468,15 +2563,33 @@ func (m *Manager) Conversations() (*persistent.Service, error) {
 		// A conversation is kept in the Stream app its session acts in, so without a way
 		// to say which app that is there is nowhere to keep one.
 		if m.options.Stream == nil {
-			return nil, stack.Wrap(errors.New("Stream Chat credentials are required for persistent conversations"))
+			return nil, stack.Wrap(notConfigured(errors.New("Stream Chat credentials are required for persistent conversations")))
 		}
 		service := persistent.NewForChats(persistent.StreamApps(m.options.Stream))
 		if m.options.Store != nil {
-			service.SetPins(m.options.Store.ConversationPin)
+			service.SetPins(m.options.Store.Sessions.ConversationPin)
+			keepBranches(service, m.options.Store)
 		}
 		m.conversations = service
 	}
 	return m.conversations, nil
+}
+
+// drawer queues the pictures a session is asked for into its conversation, as the agent's
+// messages. Nil, which offers no generate_image, without a deployment that draws, a
+// conversation kept in a channel to post into, or an image target.
+func (m *Manager) drawer(spec Spec, conv *persistent.Conversation) agent.Drawer {
+	if m.options.Drawings == nil || conv == nil || spec.ImageTarget == "" {
+		return nil
+	}
+	return func(ctx context.Context, request agent.DrawRequest) (bool, error) {
+		return m.options.Drawings.Queue(ctx, imagejobs.Request{
+			CustomerID: spec.CustomerID, StreamApp: conv.StreamApp(), CID: conv.CID(), AgentUser: conv.Agent(),
+			SessionID: request.SessionID, TurnID: request.TurnID, ToolCallID: request.ToolCallID, AgentID: request.AgentID, CallID: request.CallID, Region: request.Region,
+			Target: request.Target, Tags: request.Tags, Attribution: request.Attribution,
+			Prompt: request.Prompt, AspectRatio: request.AspectRatio,
+		})
+	}
 }
 
 // publisher is where files the subagent's code hands back are shown: the conversation's

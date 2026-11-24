@@ -11,7 +11,6 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -63,6 +62,7 @@ func (s *Server) listCalls(ctx context.Context, request *listCallsRequest) (*lis
 
 	filter := store.CallFilter{
 		AgentID:        value(request.AgentId.ptr()),
+		SessionID:      value(request.SessionId.ptr()),
 		CampaignID:     value(request.CampaignId.ptr()),
 		Running:        value(request.Running.ptr()),
 		MaxReviewScore: value(request.MaxReviewScore.ptr()),
@@ -75,7 +75,7 @@ func (s *Server) listCalls(ctx context.Context, request *listCallsRequest) (*lis
 		filter.To = *request.To.ptr()
 	}
 
-	stored, err := s.store.CustomerCalls(ctx, customerID, filter)
+	stored, err := s.store.Calls.Select(ctx, customerID, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -97,9 +97,9 @@ func (s *Server) getCall(ctx context.Context, request *getCallRequest) (*getCall
 		return nil, errNoCalls
 	}
 
-	call, err := s.store.Call(ctx, customerID, request.Id)
+	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 	rendered := callOf(call)
 	s.attachUsed(ctx, customerID, call, &rendered)
@@ -115,7 +115,7 @@ func (s *Server) attachUsage(ctx context.Context, customerID string, call store.
 		return
 	}
 
-	spent, err := s.store.CallUsage(ctx, customerID, call.AgentID, call.ID, call.StartedAt, call.EndedAt)
+	spent, err := s.store.Calls.Usage(ctx, customerID, call.AgentID, call.SessionID, call.StartedAt, call.EndedAt)
 	if err != nil {
 		s.logger.Error("could not read what a call spent", "call", call.ID, "error", err)
 		return
@@ -129,7 +129,8 @@ func (s *Server) attachUsage(ctx context.Context, customerID string, call store.
 	}
 }
 
-// getCallTokens says what the call's models read and wrote, and what their prompts were made of.
+// getCallTokens is getSessionTokens under the path it had before tokens moved to the
+// session, answering an unknown id as an unknown call as it did.
 func (s *Server) getCallTokens(ctx context.Context, request *getCallTokensRequest) (*getCallTokensResponse, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
@@ -138,12 +139,28 @@ func (s *Server) getCallTokens(ctx context.Context, request *getCallTokensReques
 	if s.store == nil {
 		return nil, errNoCalls
 	}
-
-	call, err := s.store.Call(ctx, customerID, request.Id)
+	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
-	used, err := s.store.CallTokens(ctx, customerID, call.AgentID, call.ID, call.StartedAt, call.EndedAt)
+	spent, err := s.tokensOf(ctx, customerID, call)
+	if err != nil {
+		return nil, err
+	}
+	return &getCallTokensResponse{Body: *spent}, nil
+}
+
+// sessionSpan is a stored session as one call that ran all of it, which is what its usage and
+// tokens are totalled over.
+func sessionSpan(row store.AgentSession) store.Call {
+	return store.Call{CustomerID: row.CustomerID, SessionID: row.ID, AgentID: row.AgentID,
+		StartedAt: row.CreatedAt, EndedAt: row.ClosedAt}
+}
+
+// tokensOf says what the models of a call, or of a session as its sessionSpan, read and wrote,
+// and what their prompts were made of.
+func (s *Server) tokensOf(ctx context.Context, customerID string, call store.Call) (*CallTokens, error) {
+	used, err := s.store.Calls.Tokens(ctx, customerID, call.AgentID, call.SessionID, call.StartedAt, call.EndedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +187,7 @@ func (s *Server) getCallTokens(ctx context.Context, request *getCallTokensReques
 		spent.InputParts.Video += parts.Video
 	}
 	spent.CostSources = costSources(used)
-	return &getCallTokensResponse{Body: spent}, nil
+	return &spent, nil
 }
 
 // costSources splits what the models cost by where it came from. A model's prompt cost is
@@ -252,9 +269,9 @@ func (s *Server) createCallToken(ctx context.Context, request *createCallTokenRe
 		return nil, errNoStreamKeys
 	}
 
-	call, err := s.store.Call(ctx, customerID, request.Id)
+	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 
 	var wanted CallTokenRequest
@@ -272,7 +289,7 @@ func (s *Server) createCallToken(ctx context.Context, request *createCallTokenRe
 	// knows best and the call row remembers after it.
 	callType, pin := defaultCallType, call.StreamAppPK
 	if s.sessions != nil {
-		if found, running := s.sessions.Get(call.ID, OwnerFrom(ctx)); running {
+		if found, running := s.sessions.Get(call.SessionID, OwnerFrom(ctx)); running {
 			callType, pin = found.Spec().CallType, found.Spec().StreamApp
 		}
 	}
@@ -453,9 +470,9 @@ func (s *Server) getCallTranscript(ctx context.Context, request *getCallTranscri
 		return nil, errNoTranscripts
 	}
 
-	call, err := s.store.Call(ctx, customerID, request.Id)
+	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 
 	said, err := s.transcriptOf(ctx, customerID, call)
@@ -551,13 +568,17 @@ const callElsewhere = "that call was made in a Stream app this customer no longe
 // may no longer act there: what was said can be read, and nothing more is minted.
 const callReadOnly = "that call was made in the router's shared Stream app, where this app no longer mints tokens"
 
-// CallTranscript is what was said on one of a customer's calls, as GET
-// /v1/agents/calls/{id}/transcript reads it. The campaign dialer reads an answered call's
-// outcome from it.
-func (s *Server) CallTranscript(ctx context.Context, customerID, callID string) ([]chatlog.Spoken, error) {
-	call, err := s.store.Call(ctx, customerID, callID)
+// CallTranscript is what was said on the latest call of one of a customer's sessions, as GET
+// /v1/agents/calls/{id}/transcript reads it. The campaign dialer, which knows the session a
+// call opened, reads an answered call's outcome from it.
+func (s *Server) CallTranscript(ctx context.Context, customerID, sessionID string) ([]chatlog.Spoken, error) {
+	latest, err := s.store.Calls.Latest(ctx, customerID, []string{sessionID})
 	if err != nil {
 		return nil, err
+	}
+	call, ok := latest[sessionID]
+	if !ok {
+		return nil, stack.Wrap(store.ErrNoCall)
 	}
 	return s.transcriptOf(ctx, customerID, call)
 }
@@ -586,7 +607,7 @@ func (s *Server) transcriptOf(ctx context.Context, customerID string, call store
 // made in, or for an agent nobody has spoken to yet, the customer's own.
 func (s *Server) agentStream(ctx context.Context, customerID, agentID string) (streamapp.Bound, error) {
 	if s.store != nil {
-		latest, err := s.store.QuerySessions(ctx, customerID, store.SessionFilter{AgentID: agentID, Limit: 1})
+		latest, err := s.store.Sessions.Select(ctx, customerID, store.SessionFilter{AgentID: agentID, Limit: 1})
 		if err != nil {
 			return streamapp.Bound{}, err
 		}
@@ -609,29 +630,28 @@ const transcriptSlack = 2 * time.Second
 // call bound to a conversation wrote into that conversation's channel, beside what was
 // typed before and after it, so only the call's own window is read. A call whose session
 // row is gone, as a deleted session's is while its conversation stays in Stream Chat, wrote
-// into the conversation its call row names (a call from before that column names none),
-// else into the channel a new conversation is named after its session
-// (session.Manager.Create); failing that it read its agent's channel, as a call from before
-// there were session rows still does. The session's row is written behind the call's, so a
-// call that just ended is read once its writer has caught up.
+// into the channel a new conversation is named after its session (session.Manager.Create),
+// which a call from before calls had ids of their own is named after too; failing that it
+// read its agent's channel, as a call from before there were session rows still does. A
+// call that just ended is read once the session's writer has caught up.
 func (s *Server) transcriptReads(ctx context.Context, customerID string, call store.Call) []chatlog.Read {
 	window := chatlog.Read{
 		Customer: customerID,
 		Agent:    call.AgentID,
+		Writer:   call.AgentUserID,
 		From:     call.StartedAt.Add(-transcriptSlack),
 	}
 	if call.EndedAt != nil {
 		window.To = call.EndedAt.Add(transcriptSlack)
 	}
-	channels := []string{call.ID, call.AgentID}
-	if call.ConversationID != "" {
-		channels = slices.Compact([]string{conversationChannel(call.ConversationID), call.ID, call.AgentID})
-	}
-	if stored, err := s.storedSession(ctx, customerID, call.ID); err == nil {
-		channels = []string{transcriptChannel(stored)}
+	channels := []string{conversationChannel(call.ConversationID), call.SessionID, call.ID, call.AgentID}
+	if call.SessionID != "" {
+		if stored, err := s.storedSession(ctx, customerID, call.SessionID); err == nil {
+			channels = []string{transcriptChannel(stored)}
+		}
 	}
 	// A conversation on a channel that is not an agent channel names none to read.
-	channels = slices.DeleteFunc(channels, func(channel string) bool { return channel == "" })
+	channels = slices.Compact(slices.DeleteFunc(channels, func(channel string) bool { return channel == "" }))
 	reads := make([]chatlog.Read, 0, len(channels))
 	for _, channel := range channels {
 		read := window
@@ -651,14 +671,15 @@ func (s *Server) getCallEvents(ctx context.Context, request *getCallEventsReques
 		return nil, errNoCalls
 	}
 
-	call, err := s.store.Call(ctx, customerID, request.Id)
+	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 
-	var stored []live.CallEvent
-	if s.live != nil {
-		stored, err = s.live.CallEvents(
+	// A session held in writing has no Stream call, so it has no decisions kept under one.
+	var stored []store.CallEvent
+	if call.CallID != "" {
+		stored, err = s.store.CallEvents.Select(
 			ctx, customerID, call.CallID, call.StartedAt, call.EndedAt, value(request.Limit.ptr()))
 		if err != nil {
 			return nil, err
@@ -691,21 +712,27 @@ func (s *Server) getCallTimeline(ctx context.Context, request *getCallTimelineRe
 		return nil, errNoCalls
 	}
 
-	call, err := s.store.Call(ctx, customerID, request.Id)
+	call, err := s.store.Calls.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownCall
+		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 
-	var turns []live.Turn
-	if s.live != nil {
-		turns, err = s.live.CallTurns(ctx, customerID, call.AgentID, call.StartedAt, call.EndedAt)
-		if err != nil {
-			return nil, err
-		}
-	}
-	models, err := s.store.CallModelCalls(ctx, customerID, call.AgentID, call.CallID, call.StartedAt, call.EndedAt)
+	turns, err := s.store.Turns.Select(ctx, customerID, call.AgentID, call.StartedAt, call.EndedAt)
 	if err != nil {
 		return nil, err
+	}
+	models, err := s.store.Calls.ModelCalls(ctx, customerID, call.AgentID, call.CallID, call.StartedAt, call.EndedAt)
+	if err != nil {
+		return nil, err
+	}
+	// The checks, like the transcript, are worth having but not worth failing over. A session
+	// held in writing has no Stream call, so it keeps none.
+	var checks []store.CallEvent
+	if call.CallID != "" {
+		checks, err = s.store.CallEvents.SelectFloorChecks(ctx, customerID, call.CallID, call.StartedAt, call.EndedAt)
+		if err != nil {
+			s.logger.Error("could not read the floor checks for a timeline", "call", call.ID, "error", err)
+		}
 	}
 
 	// The transcript is worth having but not worth failing over: the timings are the
@@ -715,7 +742,7 @@ func (s *Server) getCallTimeline(ctx context.Context, request *getCallTimelineRe
 		s.logger.Error("could not read the transcript for a timeline", "call", call.ID, "error", err)
 	}
 
-	return &getCallTimelineResponse{Body: timelineOf(turns, said, models)}, nil
+	return &getCallTimelineResponse{Body: timelineOf(turns, said, models, checks)}, nil
 }
 
 // timelineOf pairs each exchange with what the caller said and what the agent answered.
@@ -727,7 +754,7 @@ func (s *Server) getCallTimeline(ctx context.Context, request *getCallTimelineRe
 // agent's lines from its start to the next turn's, and heard the caller's lines since the
 // previous turn's reply began, up to its own reply, or its start when it has none.
 // Everything heard before one answer is joined, since that answer is to all of it.
-func timelineOf(turns []live.Turn, said []chatlog.Spoken, models []store.Request) []TimelineEntry {
+func timelineOf(turns []store.Turn, said []chatlog.Spoken, models []store.Request, checks []store.CallEvent) []TimelineEntry {
 	modelCalls := make(map[string][]ModelCallTiming)
 	for _, request := range models {
 		if request.TurnID == "" {
@@ -748,6 +775,7 @@ func timelineOf(turns []live.Turn, said []chatlog.Spoken, models []store.Request
 			ErrorMessage: optional(request.ErrorMessage),
 		})
 	}
+	floorChecks := floorChecksByTurn(turns, checks)
 	// A reply talked over is in the transcript as what it was going to say, which is not
 	// what the turn said.
 	said = slices.DeleteFunc(slices.Clone(said), func(line chatlog.Spoken) bool { return line.Interrupted })
@@ -776,6 +804,12 @@ func timelineOf(turns []live.Turn, said []chatlog.Spoken, models []store.Request
 		if calls := modelCalls[turn.TurnID]; len(calls) > 0 {
 			entry.ModelCalls = &calls
 		}
+		if checks := floorChecks[turn.TurnID]; len(checks) > 0 {
+			entry.FloorChecks = &checks
+		}
+		if turn.Guardrail != nil {
+			entry.Guardrail = guardrailCheckOf(*turn.Guardrail)
+		}
 
 		var until time.Time
 		if index+1 < len(turns) {
@@ -792,6 +826,111 @@ func timelineOf(turns []live.Turn, said []chatlog.Spoken, models []store.Request
 		timeline = append(timeline, entry)
 	}
 	return timeline
+}
+
+// floorChecksPerTurn is the most floor-control checks a timeline entry carries, the latest.
+const floorChecksPerTurn = 40
+
+// floorChecksByTurn joins a call's floor-control checks to the turns of the same call they are
+// about: the turn a check names, when it is one of them, and otherwise, for a check at a pause
+// with the floor free, the first that began after it, as one about words the flow controller
+// let go of leads to it. A check while the agent talked joins only the reply it names. A turn
+// keeps its latest floorChecksPerTurn, oldest first. turns are oldest first, and an agent's
+// turns may be of calls that overlap this one.
+func floorChecksByTurn(turns []store.Turn, checks []store.CallEvent) map[string][]FloorCheck {
+	byID := make(map[string][]store.Turn, len(turns))
+	for _, turn := range turns {
+		byID[turn.TurnID] = append(byID[turn.TurnID], turn)
+	}
+	byTurn := map[string][]FloorCheck{}
+	for _, check := range checks {
+		if check.FloorCheck == nil {
+			continue
+		}
+		ofCall := func(turn store.Turn) bool { return turn.CallID == "" || turn.CallID == check.CallID }
+		turn := ""
+		for _, named := range byID[check.TurnID] {
+			if check.TurnID != "" && ofCall(named) {
+				turn = named.TurnID
+				break
+			}
+		}
+		if turn == "" && check.FloorCheck.Kind == store.FloorCheckPause {
+			for _, next := range turns {
+				if ofCall(next) && !next.StartedAt.Before(check.At) {
+					turn = next.TurnID
+					break
+				}
+			}
+		}
+		if turn != "" {
+			byTurn[turn] = append(byTurn[turn], floorCheckOf(*check.FloorCheck))
+		}
+	}
+	for turn, joined := range byTurn {
+		slices.SortStableFunc(joined, func(a, b FloorCheck) int { return a.At.Compare(b.At) })
+		byTurn[turn] = joined[max(0, len(joined)-floorChecksPerTurn):]
+	}
+	return byTurn
+}
+
+// guardrailCheckOf renders a guardrail's check of a turn for the wire, as a timeline entry
+// and a turn frame say it.
+func guardrailCheckOf(check store.GuardrailCheck) *GuardrailCheck {
+	rendered := &GuardrailCheck{
+		Kind:        check.Kind,
+		Model:       optional(check.Model),
+		Probability: check.Probability,
+		Threshold:   check.Threshold,
+		Allowed:     check.Allowed,
+		LatencyMs:   check.LatencyMs,
+		Mode:        check.Mode,
+	}
+	if check.HeldMs > 0 {
+		rendered.HeldMs = &check.HeldMs
+	}
+	if check.Failed {
+		rendered.Failed = &check.Failed
+	}
+	return rendered
+}
+
+// floorChecksOf renders floor-control checks for the wire.
+func floorChecksOf(checks []store.FloorCheck) []FloorCheck {
+	out := make([]FloorCheck, 0, len(checks))
+	for _, check := range checks {
+		out = append(out, floorCheckOf(check))
+	}
+	return out
+}
+
+// floorCheckOf renders one floor-control check for the wire, as a timeline entry and a turn
+// frame say it.
+func floorCheckOf(check store.FloorCheck) FloorCheck {
+	rendered := FloorCheck{
+		At:       check.At,
+		Kind:     FloorCheckKind(check.Kind),
+		PausedMs: check.PausedMs,
+		Ruling: FloorRuling{
+			Disposition: check.Ruling.Disposition,
+			Floor:       check.Ruling.Floor,
+			Tool:        optional(check.Ruling.Tool),
+		},
+		Acted:     check.Acted,
+		LatencyMs: check.LatencyMs,
+		Point:     optional(check.Point),
+	}
+	if check.Ruling.Cannot {
+		rendered.Ruling.Cannot = &check.Ruling.Cannot
+	}
+	if len(check.Options) > 0 {
+		options := make([]FloorOption, 0, len(check.Options))
+		for _, option := range check.Options {
+			options = append(options, FloorOption{Option: option.Option, Probability: option.Probability})
+		}
+		rendered.Options = &options
+	}
+	return rendered
 }
 
 // spokenBy keeps the agent's lines, or everybody else's.
@@ -839,10 +978,9 @@ func callOf(call store.Call) Call {
 		StartedAt: call.StartedAt,
 		EndedAt:   call.EndedAt,
 	}
-	rendered.ConfigId = optional(call.ConfigID)
+	rendered.SessionId = optional(call.SessionID)
 	rendered.CampaignId = optional(call.CampaignID)
 	rendered.ContactId = optional(call.ContactID)
-	rendered.UserId = optional(call.UserID)
 	rendered.FromNumber = optional(call.FromNumber)
 	rendered.ToNumber = optional(call.ToNumber)
 	rendered.Stt = optional(call.STT)
@@ -878,8 +1016,8 @@ func callOf(call store.Call) Call {
 // first turn. Failover can leave more than one model per modality; the one that still
 // satisfies the target is the one shown.
 func (s *Server) attachUsed(ctx context.Context, customerID string, call store.Call, rendered *Call) {
-	if s.sessions != nil {
-		if found, ok := s.sessions.Get(call.ID, OwnerFrom(ctx)); ok {
+	if s.sessions != nil && call.EndedAt == nil {
+		if found, ok := s.sessions.Get(call.SessionID, OwnerFrom(ctx)); ok {
 			// The row is written off the request path, so what a running session is on
 			// now is read from it rather than from a row a swap may not have reached yet.
 			spec := found.Spec()
@@ -906,7 +1044,7 @@ func (s *Server) attachUsed(ctx context.Context, customerID string, call store.C
 		return
 	}
 
-	used, err := s.store.CallUsedModels(ctx, customerID, call.AgentID, call.StartedAt, call.EndedAt)
+	used, err := s.store.Calls.UsedModels(ctx, customerID, call.AgentID, call.StartedAt, call.EndedAt)
 	if err != nil {
 		s.logger.Error("could not read the models a call used", "call", call.ID, "error", err)
 		return
@@ -1032,10 +1170,10 @@ func (s *Server) registerCalls(api huma.API) {
 		Method:      http.MethodGet,
 		Path:        "/v1/agents/calls/{id}/tokens",
 		Summary:     "What a call's models read and wrote, and what their prompts were made of",
-		Description: "Read while the call is going as well as after it, unlike the usage on the call, " +
-			"which is counted once it is over. A prompt's parts are estimated: no provider says how " +
-			"much of a prompt was instructions, tools or images, so the router estimates it from each " +
-			"request and scales it to what the provider counted. The parts sum to the input tokens.",
+		Description: "Deprecated: read getSessionTokens, GET /v1/agents/sessions/{id}/tokens, which answers " +
+			"the same for a session held in writing or on a call. An unknown id is answered here as " +
+			"call_not_found rather than session_not_found.",
+		Deprecated: true,
 		Responses: map[string]*huma.Response{
 			"200": {Description: "The call's tokens"},
 		},
@@ -1120,6 +1258,7 @@ func (s *Server) registerCalls(api huma.API) {
 
 type listCallsRequest struct {
 	AgentId        optionalParam[string]    `query:"agent_id" doc:"Narrow to one agent."`
+	SessionId      optionalParam[string]    `query:"session_id" doc:"Narrow to the calls of one session, which starts a new one each time voice is started or stopped on it."`
 	CampaignId     optionalParam[string]    `query:"campaign_id" doc:"Narrow to the calls one campaign placed."`
 	Running        optionalParam[bool]      `query:"running" doc:"Only calls that have not ended."`
 	From           optionalParam[time.Time] `query:"from" doc:"Only calls that started at or after this, inclusive."`
@@ -1379,6 +1518,70 @@ func (DecisionKind) Schema(registry huma.Registry) *huma.Schema {
 	return namedEnum(registry, "DecisionKind", "What a conversation decided. Asking puts a settled turn to the flow controller; waiting leaves it because the caller has not finished; ignoring drops speech meant for somebody else; answering replies to it; queueing holds it until the agent has stopped talking; interrupting abandons the reply being spoken and shortening ends it early; a backchannel is a listening noise that never reaches the model; superseding drops a ruling about words that have since changed; compacting replaces old history with a summary; delegating hands work to the subagent and settling is that work coming back, answered or not.", "ask", "wait", "ignore", "answer", "queue", "interrupt", "shorten", "backchannel", "supersede", "compact", "delegate", "settle", "fail")
 }
 
+// FloorCheckKind What a chorus-asr floor-control check asked: pause, with the floor free, whether the caller has finished; over_agent, while the agent was talking, whether the caller stops or shortens it, at a pause or while they talked on.
+type FloorCheckKind string
+
+// Defines values for FloorCheckKind.
+const (
+	FloorCheckKindOverAgent FloorCheckKind = "over_agent"
+	FloorCheckKindPause     FloorCheckKind = "pause"
+)
+
+// Valid indicates whether the value is a known member of the FloorCheckKind enum.
+func (e FloorCheckKind) Valid() bool {
+	switch e {
+	case FloorCheckKindOverAgent:
+		return true
+	case FloorCheckKindPause:
+		return true
+	default:
+		return false
+	}
+}
+
+func (FloorCheckKind) Schema(registry huma.Registry) *huma.Schema {
+	return namedEnum(registry, "FloorCheckKind", "What a chorus-asr floor-control check asked: pause, with the floor free, whether the caller has finished; over_agent, while the agent was talking, whether the caller stops or shortens it, at a pause or while they talked on.", "pause", "over_agent")
+}
+
+// GuardrailCheck is the GuardrailCheck schema.
+type GuardrailCheck struct {
+	Allowed     bool     `json:"allowed" doc:"Whether the turn was answered. True for a check that failed, whose turn is answered anyway."`
+	Failed      *bool    `json:"failed,omitempty" doc:"True when the check could not be made (the model or the webhook failed or took too long) and the turn was answered anyway. Such a check has no probability. Absent for a check that answered."`
+	HeldMs      *float64 `json:"held_ms,omitempty" doc:"How long a reply the model had begun waited on the verdict, which is what a parallel check costs the caller. Absent when it did not wait, and in blocking mode, where the model is asked only after the verdict."`
+	Kind        string   `json:"kind" enum:"decision_model,llm,webhook" doc:"How the turn was checked: the guardrail.md's type."`
+	LatencyMs   float64  `json:"latency_ms" doc:"How long the check took, from asking to the verdict or the failure."`
+	Mode        string   `json:"mode" enum:"parallel,blocking" doc:"When the check ran: parallel, beside the model, or blocking, before the model was asked."`
+	Model       *string  `json:"model,omitempty" doc:"The provider and model that answered, as provider/model. Absent for a webhook, and for a check that failed."`
+	Probability *float64 `json:"probability,omitempty" minimum:"0" maximum:"1" doc:"The probability the model put on the turn going against the policy. Absent for a webhook, which answers yes or no, and for a check that failed."`
+	Threshold   *float64 `json:"threshold,omitempty" minimum:"0" maximum:"1" doc:"The guardrail.md's threshold: a probability at or above it refuses the turn. Absent for a webhook."`
+}
+
+// FloorCheck is the FloorCheck schema.
+type FloorCheck struct {
+	Acted     bool           `json:"acted" doc:"Whether the router acted on the ruling: with the floor free, the caller's turn ended on this check; while the agent talked, its stop or shorten was handed to the agent, which may still talk on over its own echo or a murmur, or the turn ended on it. False for a ruling to go on, and for one the router let go of, as for words since replaced."`
+	At        time.Time      `json:"at" doc:"When the check was asked."`
+	Kind      FloorCheckKind `json:"kind"`
+	LatencyMs float64        `json:"latency_ms" doc:"The round trip to the chorus-asr server."`
+	Options   *[]FloorOption `json:"options,omitempty" doc:"The probability of each answer, in the order the model was offered them: respond, wait, clarify and ignore at a pause; stop, shorten, continue and ignore over the agent; then cannot and each of the agent's tools, those of at least 0.01. Absent from a server that does not report them."`
+	PausedMs  *float64       `json:"paused_ms,omitempty" doc:"How far into the caller's pause the check was asked. Absent for a check asked while they talked on over the agent."`
+	Point     *string        `json:"point,omitempty" doc:"The end-of-turn point or preset the check was read by. Absent over the agent, where there is no bar."`
+	Ruling    FloorRuling    `json:"ruling"`
+}
+
+// FloorOption is the FloorOption schema.
+type FloorOption struct {
+	Option      string  `json:"option"`
+	Probability float64 `json:"probability"`
+}
+
+// FloorRuling What the model ruled the agent do once the turn has ended.
+type FloorRuling struct {
+	Cannot      *bool   `json:"cannot,omitempty" doc:"The caller wants something none of the agent's tools can do."`
+	Disposition string  `json:"disposition" doc:"respond, wait, clarify or ignore."`
+	Floor       string  `json:"floor" doc:"stop, shorten or continue over the agent; at a pause, who has the floor once the turn has ended."`
+	Tool        *string `json:"tool,omitempty" doc:"The tool the caller wants."`
+}
+
 // ModelCallTiming is the ModelCallTiming schema.
 type ModelCallTiming struct {
 	DurationMs   *float64  `json:"duration_ms,omitempty" doc:"Request to completed response or failed create."`
@@ -1402,6 +1605,8 @@ type TimelineEntry struct {
 	DecisionMs           *float64           `json:"decision_ms,omitempty" doc:"Stable turn to the main model request, including flow and queueing."`
 	FirstAudibleFrameMs  *float64           `json:"first_audible_frame_ms,omitempty" doc:"Last transcript revision to the outgoing track taking the first frame of the reply that was not silence, which is when it could first be heard. Unlike roundtrip_ms it does not include the wait for a long first chunk to be queued. Absent where the edge does not report it." nullable:"true"`
 	FirstFrameQueuedMs   *float64           `json:"first_frame_queued_ms,omitempty" doc:"Last transcript revision to the first frame of the reply being queued for the outgoing track. Absent where the edge does not report it." nullable:"true"`
+	FloorChecks          *[]FloorCheck      `json:"floor_checks,omitempty" doc:"The chorus-asr model's floor-control checks about this turn, the latest 40 by when they were asked, oldest first. A check names its turn: the reply the agent was saying when it was asked while the agent talked, whatever turn comes next, and otherwise the caller's turn its words were put as. A check with the floor free whose turn has no entry joins the first turn that began after it. Absent for an agent without chorus-asr floor control."`
+	Guardrail            *GuardrailCheck    `json:"guardrail,omitempty" doc:"The guardrail's check of this turn, allowed or refused. Absent when no check ran: an agent with no guardrail, or a reply that carries no new words of the caller's. A written aside is no turn, so its check is not recorded."`
 	Heard                *string            `json:"heard,omitempty" doc:"What the caller said, when it can be matched to this exchange."`
 	Interrupted          *bool              `json:"interrupted,omitempty" doc:"Whether the caller talked over the answer."`
 	LlmTtftMs            *float64           `json:"llm_ttft_ms,omitempty" doc:"The wait between asking the model and its first token." nullable:"true"`

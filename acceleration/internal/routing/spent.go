@@ -11,6 +11,8 @@ type Spent struct {
 	micros    atomic.Int64
 	rows      atomic.Int64
 	estimated atomic.Bool
+	// within is the Spent this one is a part of, which every row added here is added to too.
+	within *Spent
 }
 
 type spentKey struct{}
@@ -28,16 +30,22 @@ func SpentFrom(ctx context.Context) *Spent {
 	return spent
 }
 
-// add counts one row of the cost, estimated when its quantities were the router's own count.
+// Part is a Spent of its own for part of the work, such as one session of a socket, whose
+// rows add to s as well. A nil s gives a Spent that adds to nothing else.
+func (s *Spent) Part() *Spent {
+	return &Spent{within: s}
+}
+
+// add counts one row of the cost, estimated when its quantities were the router's own count,
+// here and in every Spent this one is a part of.
 func (s *Spent) add(micros int64, estimated bool) {
-	if s == nil {
-		return
+	for spent := s; spent != nil; spent = spent.within {
+		spent.micros.Add(micros)
+		if estimated {
+			spent.estimated.Store(true)
+		}
+		spent.rows.Add(1)
 	}
-	s.micros.Add(micros)
-	if estimated {
-		s.estimated.Store(true)
-	}
-	s.rows.Add(1)
 }
 
 // Total is what every row recorded so far cost, how many there were, and whether any was an

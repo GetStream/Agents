@@ -184,6 +184,9 @@ type Settings struct {
 	// llm alone, and the router refuses one that names it.
 	Subagent string `yaml:"subagent"`
 	Search   string `yaml:"search"`
+	// Image is what the agent draws pictures with, such as image-fast. Nil, a file that names
+	// none, leaves the stored one; an empty string, image: "", turns drawing off.
+	Image *string `yaml:"image"`
 	// Greeting is what the agent opens the call with. Nil leaves the stored one.
 	Greeting *GreetingSettings `yaml:"greeting"`
 	Sandbox  string            `yaml:"sandbox"`
@@ -194,9 +197,10 @@ type Settings struct {
 	// file lists none, which removes them. A null entry is refused: dropping it
 	// would sync an empty list and wipe the stored bindings.
 	Connectors connectorList `yaml:"connectors"`
-	// Tools is how MCP server and connector tools are offered. Nil when the
-	// declaration says nothing about it.
-	Tools *ToolSettings `yaml:"tools"`
+	// Tools are the groups naming the functions this process provides that the agent may
+	// offer: a function no group names is never offered. Nil when the declaration says
+	// nothing, which leaves the groups stored.
+	Tools *toolGroupList `yaml:"tools"`
 	// Channels are the lines the agent answers on besides its Stream Chat channel: a
 	// WhatsApp number, a number to text, an iMessage line. Each names a number the app
 	// connected on the router, which is where the provider's credentials live.
@@ -225,20 +229,72 @@ type Settings struct {
 	Tags     map[string]string `yaml:"tags"`
 	Video    *VideoSettings    `yaml:"video"`
 	Dispatch *DispatchSettings `yaml:"dispatch"`
+	UI       *UISettings       `yaml:"ui"`
 	// App is the application's own section of the declaration, which this SDK never reads
 	// and the backend is never sent. It is the one place an unknown key is not refused.
 	App map[string]any `yaml:"app"`
 }
 
-// ToolSettings is how MCP server and connector tools are offered, and how long what any tool
-// was given and gave back is kept.
-type ToolSettings struct {
-	// Progressive offers each tool by a summary, the first call to it returning its full
-	// description instead of running it. Nil when the declaration says nothing about it.
-	Progressive *bool `yaml:"progressive"`
-	// OutputRetention is how long the agent's sessions keep a tool's arguments and output:
-	// none, or a duration such as 12h or 30d. Nil when the declaration says nothing about it.
-	OutputRetention *string `yaml:"output_retention"`
+// ToolGroupSettings is one group of the agent's functions, and how they are offered.
+type ToolGroupSettings struct {
+	Name string `yaml:"name"`
+	// Loading is full, the whole description and schema; summary, the first line, with the
+	// first call returning the rest; or deferred, offered only once the model finds and loads
+	// it. Empty is full.
+	Loading string `yaml:"loading"`
+	// Tools are the names of the functions in the group.
+	Tools []string `yaml:"tools"`
+	// OutputRetention is how long the agent's sessions keep what the group's tools were
+	// given and gave back: none, or a duration such as 12h or 30d. Empty is as long as the
+	// session.
+	OutputRetention string `yaml:"output_retention"`
+}
+
+// toolLoadings are what a group's or a connector's loading may say.
+var toolLoadings = []string{"full", "summary", "deferred"}
+
+// toolGroupList is the tools list. The mapping tools was before groups is refused with where
+// each of its settings went.
+type toolGroupList []ToolGroupSettings
+
+func (t *toolGroupList) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.MappingNode {
+		return fmt.Errorf("line %d: tools is a list of groups, each with a name and its tools, such as "+
+			"- {name: booking, loading: full, tools: [lookup_booking]}; progressive: true is now "+
+			"loading: summary, and output_retention moves onto each group and connector", node.Line)
+	}
+	if node.Kind != yaml.SequenceNode {
+		return fmt.Errorf("line %d: tools must be a list of groups", node.Line)
+	}
+	keys := []string{"name", "loading", "tools", "output_retention"}
+	groups := make(toolGroupList, 0, len(node.Content))
+	for _, item := range node.Content {
+		if item.Kind != yaml.MappingNode {
+			return fmt.Errorf("line %d: a tool group is a mapping with a name and its tools", item.Line)
+		}
+		for index := 0; index < len(item.Content); index += 2 {
+			if key := item.Content[index]; !slices.Contains(keys, key.Value) {
+				return fmt.Errorf("line %d: %q is not something a tool group says; %s are", key.Line, key.Value,
+					strings.Join(keys, ", "))
+			}
+		}
+		var group ToolGroupSettings
+		if err := item.Decode(&group); err != nil {
+			return err
+		}
+		switch {
+		case group.Name == "":
+			return fmt.Errorf("line %d: a tool group needs a name", item.Line)
+		case len(group.Tools) == 0:
+			return fmt.Errorf("line %d: tool group %q names no tools", item.Line, group.Name)
+		case group.Loading != "" && !slices.Contains(toolLoadings, group.Loading):
+			return fmt.Errorf("line %d: tool group %q: loading is %s, not %q", keyLine(item, "loading"), group.Name,
+				strings.Join(toolLoadings, ", "), group.Loading)
+		}
+		groups = append(groups, group)
+	}
+	*t = groups
+	return nil
 }
 
 // ConnectorSettings is one connector the agent binds. agent.yaml gives it as the alias
@@ -263,6 +319,13 @@ type ConnectorSettings struct {
 	// RequireApproval are names or path.Match patterns of the tools whose every call waits for
 	// the session's user to allow it. Nil sends no require_approval key.
 	RequireApproval *[]string `yaml:"require_approval"`
+	// Loading is how the connector's tools are offered, as a tool group's: full, summary or
+	// deferred. Empty is full.
+	Loading string `yaml:"loading"`
+	// OutputRetention is how long the agent's sessions keep what the connector's tools were
+	// given and gave back: none, or a duration such as 12h or 30d. Empty is as long as the
+	// session.
+	OutputRetention string `yaml:"output_retention"`
 }
 
 // connectorKeys are the keys a connector entry may hold: the yaml tags of ConnectorSettings.
@@ -303,6 +366,10 @@ func (c *ConnectorSettings) UnmarshalYAML(node *yaml.Node) error {
 	}
 	if c.Connection != nil && *c.Connection == "" {
 		return fmt.Errorf("line %d: connector %q: connection must be a connection id or label", keyLine(node, "connection"), c.Name)
+	}
+	if c.Loading != "" && !slices.Contains(toolLoadings, c.Loading) {
+		return fmt.Errorf("line %d: connector %q: loading is %s, not %q", keyLine(node, "loading"), c.Name,
+			strings.Join(toolLoadings, ", "), c.Loading)
 	}
 	return nil
 }
@@ -355,6 +422,9 @@ type ChannelsSettings struct {
 type ChatChannelSettings struct {
 	// Type is the channel type's name, as it comes before the colon in a channel's cid.
 	Type string `yaml:"type"`
+	// Answer is which messages there the agent answers: always, the default, or mentioned,
+	// only a message that mentions the agent.
+	Answer string `yaml:"answer"`
 }
 
 // SchedulingSettings is an agent's scheduled tasks: whether its users may ask
@@ -474,8 +544,40 @@ type ChannelSettings struct {
 type GreetingSettings struct {
 	Text string `yaml:"text"`
 	// Mode is exact, said word for word, or variation, which the model rewords on every
-	// call. Empty is exact.
+	// call. agent.yaml leaving it out is variation; empty in a GreetingSettings built in
+	// code is exact.
 	Mode string `yaml:"mode"`
+}
+
+// UnmarshalYAML reads greeting as its text alone, such as `greeting: Hello`, or as a mapping
+// of text and mode. Either way a greeting that names no mode is a variation.
+func (g *GreetingSettings) UnmarshalYAML(node *yaml.Node) error {
+	read := GreetingSettings{Mode: "variation"}
+	switch node.Kind {
+	case yaml.ScalarNode:
+		read.Text = node.Value
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key, value := node.Content[i].Value, node.Content[i+1]
+			if value.Kind != yaml.ScalarNode {
+				return fmt.Errorf("greeting.%s must be a string", key)
+			}
+			switch key {
+			case "text":
+				read.Text = value.Value
+			case "mode":
+				if value.Value != "" {
+					read.Mode = value.Value
+				}
+			default:
+				return fmt.Errorf("%q is not a greeting setting; text and mode are", key)
+			}
+		}
+	default:
+		return errors.New("greeting is its text, or a mapping of text and mode")
+	}
+	*g = read
+	return nil
 }
 
 type VideoSettings struct {
@@ -545,6 +647,10 @@ type Folder struct {
 	Settings Settings
 	// Instructions is instructions.md, or empty if there is none.
 	Instructions string
+	// UIInstructions is agent.yaml's ui compiled into what teaches the model to answer with
+	// UI, or empty without one. It is synced apart from Instructions, so a session opened
+	// with ui false is not told it.
+	UIInstructions string
 	// Guardrail is guardrail.md, whole and unparsed, or empty if there is none. The
 	// backend parses it, so a policy this SDK has never heard of still reaches it.
 	Guardrail string
@@ -619,6 +725,11 @@ func Load(path string) (*Folder, error) {
 	if folder.Simulations, err = loadSimulations(filepath.Join(path, SimulationsDir)); err != nil {
 		return nil, err
 	}
+	if folder.Settings.UI != nil {
+		if folder.UIInstructions, err = loadUIPrompt(path, *folder.Settings.UI); err != nil {
+			return nil, err
+		}
+	}
 	return folder, nil
 }
 
@@ -663,7 +774,17 @@ func (f *Folder) KnowledgeNamespace() string {
 // Hash is a fingerprint of the directory. The same files produce the same hash, and the
 // Python SDK takes it the same way, so a stamp either one wrote is understood by both.
 func (f *Folder) Hash() string {
-	return fingerprint(f.Declaration, f.Instructions, f.Guardrail, f.Skills, f.Knowledge, f.KnowledgeURLs, f.Simulations)
+	return withUI(fingerprint(f.Declaration, f.Instructions, f.Guardrail, f.Skills, f.Knowledge, f.KnowledgeURLs, f.Simulations),
+		f.UIInstructions)
+}
+
+// withUI adds the compiled UI to a directory's hash. A directory without one keeps the hash
+// it had before UI was synced apart from the instructions, so it is not synced again.
+func withUI(hash, ui string) string {
+	if ui == "" {
+		return hash
+	}
+	return fingerprint(hash, ui, "", nil, nil, nil, nil)
 }
 
 func fingerprint(

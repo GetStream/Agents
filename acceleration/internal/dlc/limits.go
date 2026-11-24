@@ -95,7 +95,7 @@ func (g *Gate) overTier(ctx context.Context, organization, tier, channel, to str
 		}
 	}
 	if channel == Voice && limits.Concurrent != nil {
-		up, inCall, err := g.store.OpenCallLegs(ctx, organization, time.Now().Add(-RingWindow), into.Type, into.ID)
+		up, inCall, err := g.store.CallLegs.CountOpen(ctx, organization, time.Now().Add(-RingWindow), into.Type, into.ID)
 		if err != nil {
 			return err, "unread"
 		}

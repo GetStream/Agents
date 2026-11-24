@@ -4,17 +4,23 @@ from .account import Account
 from .account_balance_state import AccountBalanceState
 from .account_balance_warning_source import AccountBalanceWarningSource
 from .account_status import AccountStatus
+from .activated_branch import ActivatedBranch
 from .activity_area import ActivityArea
 from .activity_bucket import ActivityBucket
+from .activity_day import ActivityDay
 from .activity_ending import ActivityEnding
 from .activity_granularity import ActivityGranularity
 from .activity_latency import ActivityLatency
 from .activity_meter import ActivityMeter
+from .activity_page import ActivityPage
 from .activity_session import ActivitySession
 from .activity_sessions import ActivitySessions
 from .activity_step import ActivityStep
+from .activity_step_day import ActivityStepDay
+from .activity_step_day_step import ActivityStepDayStep
 from .add_contacts_request import AddContactsRequest
 from .add_contacts_response import AddContactsResponse
+from .add_session_tools_request import AddSessionToolsRequest
 from .add_trunk_number_request import AddTrunkNumberRequest
 from .add_trunk_number_request_tags import AddTrunkNumberRequestTags
 from .agent_calls import AgentCalls
@@ -54,7 +60,6 @@ from .agent_review import AgentReview
 from .agent_role import AgentRole
 from .agent_scheduling import AgentScheduling
 from .agent_stats import AgentStats
-from .agent_tools import AgentTools
 from .agent_user import AgentUser
 from .agent_user_request import AgentUserRequest
 from .analyze_reviews_request import AnalyzeReviewsRequest
@@ -76,6 +81,10 @@ from .authorization import Authorization
 from .authorization_kind import AuthorizationKind
 from .authorization_request import AuthorizationRequest
 from .available_number import AvailableNumber
+from .branch_message import BranchMessage
+from .branch_message_attachments_item import BranchMessageAttachmentsItem
+from .branch_message_custom import BranchMessageCustom
+from .branch_message_page import BranchMessagePage
 from .business_profile import BusinessProfile
 from .business_profile_legal_entity_type import BusinessProfileLegalEntityType
 from .business_profile_organization_type import BusinessProfileOrganizationType
@@ -130,6 +139,7 @@ from .channel_kind import ChannelKind
 from .channel_limits import ChannelLimits
 from .channel_line_request import ChannelLineRequest
 from .channel_link import ChannelLink
+from .chat_channel_answer import ChatChannelAnswer
 from .chat_token import ChatToken
 from .chat_token_request import ChatTokenRequest
 from .child_agent import ChildAgent
@@ -211,6 +221,8 @@ from .contact_input import ContactInput
 from .contact_input_variables import ContactInputVariables
 from .contact_page import ContactPage
 from .contact_stage import ContactStage
+from .contact_update_request import ContactUpdateRequest
+from .contact_update_request_variables import ContactUpdateRequestVariables
 from .contact_variables import ContactVariables
 from .cost_source import CostSource
 from .create_opt_out_request import CreateOptOutRequest
@@ -264,7 +276,11 @@ from .error_detail import ErrorDetail
 from .error_response import ErrorResponse
 from .error_type import ErrorType
 from .file_source import FileSource
+from .floor_check import FloorCheck
+from .floor_check_kind import FloorCheckKind
 from .floor_control import FloorControl
+from .floor_option import FloorOption
+from .floor_ruling import FloorRuling
 from .fork_session_request import ForkSessionRequest
 from .fork_session_request_custom import ForkSessionRequestCustom
 from .generated_image import GeneratedImage
@@ -276,6 +292,9 @@ from .get_conversation_messages_response_200 import GetConversationMessagesRespo
 from .granularity import Granularity
 from .greeting import Greeting
 from .greeting_mode import GreetingMode
+from .guardrail_check import GuardrailCheck
+from .guardrail_check_kind import GuardrailCheckKind
+from .guardrail_check_mode import GuardrailCheckMode
 from .guest_user import GuestUser
 from .guest_user_custom import GuestUserCustom
 from .guest_user_request import GuestUserRequest
@@ -336,6 +355,7 @@ from .limits import Limits
 from .limits_channels import LimitsChannels
 from .link_channel_request import LinkChannelRequest
 from .list_agent_logs_severity import ListAgentLogsSeverity
+from .list_response_siblings_of import ListResponseSiblingsOf
 from .list_scheduled_tasks_state import ListScheduledTasksState
 from .list_simulation_runs_state import ListSimulationRunsState
 from .llm_options import LlmOptions
@@ -353,6 +373,7 @@ from .model_overwrites import ModelOverwrites
 from .model_overwrites_thinking import ModelOverwritesThinking
 from .model_overwrites_verbosity import ModelOverwritesVerbosity
 from .model_tokens import ModelTokens
+from .model_voice import ModelVoice
 from .number_search_result import NumberSearchResult
 from .ocr_error_code import OcrErrorCode
 from .ocr_options import OcrOptions
@@ -368,6 +389,7 @@ from .opt_out import OptOut
 from .opt_out_channel import OptOutChannel
 from .opt_out_page import OptOutPage
 from .organization_activity import OrganizationActivity
+from .organization_progress import OrganizationProgress
 from .phone_capability import PhoneCapability
 from .phone_number import PhoneNumber
 from .phone_number_tags import PhoneNumberTags
@@ -437,7 +459,12 @@ from .recording_status import RecordingStatus
 from .refused_contact import RefusedContact
 from .refused_reason import RefusedReason
 from .respond_request import RespondRequest
+from .response_branch import ResponseBranch
+from .response_branch_of import ResponseBranchOf
+from .response_sibling import ResponseSibling
+from .response_sibling_page import ResponseSiblingPage
 from .resume_history import ResumeHistory
+from .resume_session_request import ResumeSessionRequest
 from .review_actor import ReviewActor
 from .review_analysis import ReviewAnalysis
 from .review_cause import ReviewCause
@@ -447,6 +474,7 @@ from .review_queue import ReviewQueue
 from .review_score_match_type_1 import ReviewScoreMatchType1
 from .review_use_case_request import ReviewUseCaseRequest
 from .rewind_session_request import RewindSessionRequest
+from .rewound_to import RewoundTo
 from .rollup_request import RollupRequest
 from .rollup_result import RollupResult
 from .route import Route
@@ -488,6 +516,7 @@ from .session_end_fault import SessionEndFault
 from .session_end_reason import SessionEndReason
 from .session_end_stage import SessionEndStage
 from .session_filter import SessionFilter
+from .session_filter_custom import SessionFilterCustom
 from .session_memory import SessionMemory
 from .session_memory_filter import SessionMemoryFilter
 from .session_modality import SessionModality
@@ -504,6 +533,7 @@ from .session_sort import SessionSort
 from .session_sort_direction import SessionSortDirection
 from .session_sort_field import SessionSortField
 from .session_state import SessionState
+from .session_state_equals_type_1 import SessionStateEqualsType1
 from .session_tool import SessionTool
 from .session_tool_approval import SessionToolApproval
 from .session_tool_executor import SessionToolExecutor
@@ -571,9 +601,17 @@ from .text_content_part import TextContentPart
 from .text_content_part_type import TextContentPartType
 from .text_match import TextMatch
 from .tier import Tier
+from .time_window import TimeWindow
 from .timeline_entry import TimelineEntry
+from .tool_approval_answer import ToolApprovalAnswer
 from .tool_approval_command import ToolApprovalCommand
 from .tool_approval_command_type import ToolApprovalCommandType
+from .tool_call_frame_type import ToolCallFrameType
+from .tool_call_state import ToolCallState
+from .tool_call_state_custom import ToolCallStateCustom
+from .tool_call_status import ToolCallStatus
+from .tool_group import ToolGroup
+from .tool_loading import ToolLoading
 from .tool_result_command import ToolResultCommand
 from .tool_result_command_type import ToolResultCommandType
 from .tool_stats import ToolStats
@@ -642,17 +680,23 @@ __all__ = (
     "AccountBalanceState",
     "AccountBalanceWarningSource",
     "AccountStatus",
+    "ActivatedBranch",
     "ActivityArea",
     "ActivityBucket",
+    "ActivityDay",
     "ActivityEnding",
     "ActivityGranularity",
     "ActivityLatency",
     "ActivityMeter",
+    "ActivityPage",
     "ActivitySession",
     "ActivitySessions",
     "ActivityStep",
+    "ActivityStepDay",
+    "ActivityStepDayStep",
     "AddContactsRequest",
     "AddContactsResponse",
+    "AddSessionToolsRequest",
     "AddTrunkNumberRequest",
     "AddTrunkNumberRequestTags",
     "AgentCalls",
@@ -692,7 +736,6 @@ __all__ = (
     "AgentRole",
     "AgentScheduling",
     "AgentStats",
-    "AgentTools",
     "AgentUser",
     "AgentUserRequest",
     "AnalyzeReviewsRequest",
@@ -714,6 +757,10 @@ __all__ = (
     "AuthorizationKind",
     "AuthorizationRequest",
     "AvailableNumber",
+    "BranchMessage",
+    "BranchMessageAttachmentsItem",
+    "BranchMessageCustom",
+    "BranchMessagePage",
     "BusinessProfile",
     "BusinessProfileLegalEntityType",
     "BusinessProfileOrganizationType",
@@ -764,6 +811,7 @@ __all__ = (
     "ChannelLimits",
     "ChannelLineRequest",
     "ChannelLink",
+    "ChatChannelAnswer",
     "ChatToken",
     "ChatTokenRequest",
     "ChildAgent",
@@ -845,6 +893,8 @@ __all__ = (
     "ContactInputVariables",
     "ContactPage",
     "ContactStage",
+    "ContactUpdateRequest",
+    "ContactUpdateRequestVariables",
     "ContactVariables",
     "CostSource",
     "CreateOptOutRequest",
@@ -898,7 +948,11 @@ __all__ = (
     "ErrorResponse",
     "ErrorType",
     "FileSource",
+    "FloorCheck",
+    "FloorCheckKind",
     "FloorControl",
+    "FloorOption",
+    "FloorRuling",
     "ForkSessionRequest",
     "ForkSessionRequestCustom",
     "GeneratedImage",
@@ -908,6 +962,9 @@ __all__ = (
     "Granularity",
     "Greeting",
     "GreetingMode",
+    "GuardrailCheck",
+    "GuardrailCheckKind",
+    "GuardrailCheckMode",
     "GuestUser",
     "GuestUserCustom",
     "GuestUserRequest",
@@ -968,6 +1025,7 @@ __all__ = (
     "LimitsChannels",
     "LinkChannelRequest",
     "ListAgentLogsSeverity",
+    "ListResponseSiblingsOf",
     "ListScheduledTasksState",
     "ListSimulationRunsState",
     "LlmOptions",
@@ -985,6 +1043,7 @@ __all__ = (
     "ModelOverwritesThinking",
     "ModelOverwritesVerbosity",
     "ModelTokens",
+    "ModelVoice",
     "NumberSearchResult",
     "OcrErrorCode",
     "OcrOptions",
@@ -1000,6 +1059,7 @@ __all__ = (
     "OptOutChannel",
     "OptOutPage",
     "OrganizationActivity",
+    "OrganizationProgress",
     "PhoneCapability",
     "PhoneNumber",
     "PhoneNumberTags",
@@ -1069,7 +1129,12 @@ __all__ = (
     "RefusedContact",
     "RefusedReason",
     "RespondRequest",
+    "ResponseBranch",
+    "ResponseBranchOf",
+    "ResponseSibling",
+    "ResponseSiblingPage",
     "ResumeHistory",
+    "ResumeSessionRequest",
     "ReviewActor",
     "ReviewAnalysis",
     "ReviewCause",
@@ -1079,6 +1144,7 @@ __all__ = (
     "ReviewScoreMatchType1",
     "ReviewUseCaseRequest",
     "RewindSessionRequest",
+    "RewoundTo",
     "RollupRequest",
     "RollupResult",
     "Route",
@@ -1120,6 +1186,7 @@ __all__ = (
     "SessionEndReason",
     "SessionEndStage",
     "SessionFilter",
+    "SessionFilterCustom",
     "SessionMemory",
     "SessionMemoryFilter",
     "SessionModality",
@@ -1136,6 +1203,7 @@ __all__ = (
     "SessionSortDirection",
     "SessionSortField",
     "SessionState",
+    "SessionStateEqualsType1",
     "SessionTool",
     "SessionToolApproval",
     "SessionToolExecutor",
@@ -1203,9 +1271,17 @@ __all__ = (
     "TextContentPartType",
     "TextMatch",
     "Tier",
+    "TimeWindow",
     "TimelineEntry",
+    "ToolApprovalAnswer",
     "ToolApprovalCommand",
     "ToolApprovalCommandType",
+    "ToolCallFrameType",
+    "ToolCallState",
+    "ToolCallStateCustom",
+    "ToolCallStatus",
+    "ToolGroup",
+    "ToolLoading",
     "ToolResultCommand",
     "ToolResultCommandType",
     "ToolStats",

@@ -14,10 +14,12 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/sdks/go/acceleration"
 	"github.com/GetStream/Vision-Agents/sdks/go/stream"
@@ -33,6 +35,8 @@ type router struct {
 	mu sync.Mutex
 	// asked is every request that arrived, as "METHOD /path?query", in order.
 	asked []string
+	// heard are the headers of each request in asked, at the same index.
+	heard []http.Header
 	// bodies are the decoded JSON bodies, keyed by "METHOD /path".
 	bodies map[string]map[string]any
 
@@ -44,6 +48,13 @@ type router struct {
 	items [][]acceleration.AgentResponseItem
 	// frames are what the session's socket was sent, close aside.
 	frames []map[string]any
+	// calls are the tool calls a session's socket sends once it opens, by session id.
+	calls map[string][]map[string]any
+	// connections are the stored connections, oldest first.
+	connections []acceleration.Connection
+	// unrecorded answers a question with no response id, as the router does for a session
+	// that records nothing.
+	unrecorded bool
 }
 
 func newRouter(t *testing.T) *router {
@@ -79,6 +90,18 @@ func newRouter(t *testing.T) *router {
 			return
 		}
 		answer(w, http.StatusNotFound, acceleration.ErrorResponse{Error: acceleration.ErrorDetail{Message: "no such agent config"}})
+	})
+
+	mux.HandleFunc("GET /v1/stats/agents", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		if r.URL.Query().Get("agent") != "config-1" {
+			answer(w, http.StatusNotFound, acceleration.ErrorResponse{Error: acceleration.ErrorDetail{Message: "no such agent config"}})
+			return
+		}
+		answer(w, http.StatusOK, acceleration.AgentStats{
+			Sessions: 40, AvgTurns: ptr(6.5),
+			Tools: []acceleration.ToolStats{{Tool: "weather_lookup", Calls: 12, Sessions: 10, SessionShare: ptr(0.25)}},
+		})
 	})
 
 	mux.HandleFunc("GET /v1/settings/app", func(w http.ResponseWriter, r *http.Request) {
@@ -134,6 +157,30 @@ func newRouter(t *testing.T) *router {
 		})
 	})
 
+	mux.HandleFunc("POST /v1/agents/sessions/{id}/tools", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("DELETE /v1/agents/sessions/{id}/tools/{name}", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("GET /v1/agents/sessions/{id}", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		answer(w, http.StatusOK, acceleration.Session{
+			Id: r.PathValue("id"), AgentId: "agent-1", UserId: "jean", State: "ended", CreatedAt: time.Now(),
+		})
+	})
+
+	mux.HandleFunc("POST /v1/agents/sessions/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		answer(w, http.StatusOK, acceleration.Session{
+			Id: r.PathValue("id"), AgentId: "agent-1", UserId: "jean", State: "running", CreatedAt: time.Now(),
+		})
+	})
+
 	mux.HandleFunc("PATCH /v1/agents/sessions/{id}", func(w http.ResponseWriter, r *http.Request) {
 		backend.record(r)
 		// A target that does not route is refused, and the session carries on as it was.
@@ -160,10 +207,65 @@ func newRouter(t *testing.T) *router {
 
 	mux.HandleFunc("POST /v1/agents/sessions/{id}/responses", func(w http.ResponseWriter, r *http.Request) {
 		backend.record(r)
+		backend.mu.Lock()
+		replaces, _ := backend.bodies[r.Method+" "+r.URL.Path]["replaces"].(string)
+		backend.mu.Unlock()
+		if replaces != "" {
+			// A regenerate or an edit, answered as the router answers one that hid the reply.
+			answer(w, http.StatusAccepted, acceleration.AgentResponse{
+				Id: "response-3", SessionId: r.PathValue("id"), Status: "running", CreatedAt: time.Now(),
+				ParentResponseId: ptr("response-1"),
+				Branch:           &acceleration.ResponseBranch{Of: "reply", Index: 2, Count: 2},
+				RewoundTo:        &acceleration.RewoundTo{MessageId: "question-2"},
+			})
+			return
+		}
+		backend.mu.Lock()
+		unrecorded := backend.unrecorded
+		backend.mu.Unlock()
+		if unrecorded {
+			answer(w, http.StatusAccepted, acceleration.AgentResponse{
+				SessionId: r.PathValue("id"), Status: "running", CreatedAt: time.Now(),
+			})
+			return
+		}
 		answer(w, http.StatusAccepted, acceleration.AgentResponse{
 			Id: "response-1", SessionId: r.PathValue("id"), Status: "running",
 			Said: ptr("Is Stream better?"), CreatedAt: time.Now(),
 		})
+	})
+
+	mux.HandleFunc("GET /v1/agents/sessions/{id}/responses/{response_id}/siblings", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		if r.URL.Query().Get("cursor") == "" {
+			answer(w, http.StatusOK, acceleration.ResponseSiblingPage{HasMore: true, NextCursor: ptr("sibling-2"),
+				Items: []acceleration.ResponseSibling{{Id: "response-2", Index: 1, CreatedAt: time.Now()}}})
+			return
+		}
+		answer(w, http.StatusOK, acceleration.ResponseSiblingPage{
+			Items: []acceleration.ResponseSibling{{Id: "response-3", Index: 2, Active: true, CreatedAt: time.Now()}}})
+	})
+
+	mux.HandleFunc("GET /v1/agents/sessions/{id}/responses/{response_id}/branch", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		switch r.PathValue("response_id") {
+		case "response-3":
+			answer(w, http.StatusOK, acceleration.BranchMessagePage{Active: true, Items: []acceleration.BranchMessage{}})
+		case "truncated":
+			answer(w, http.StatusGone, acceleration.ErrorResponse{Error: acceleration.ErrorDetail{
+				Code: "branch_unavailable", Message: "this branch is no longer kept"}})
+		default:
+			answer(w, http.StatusOK, acceleration.BranchMessagePage{Items: []acceleration.BranchMessage{{
+				Id: "reply-2", Text: "Yes.", UserId: "docs", Role: ptr("assistant"), CreatedAt: time.Now(),
+				Attachments: []map[string]interface{}{}, Custom: map[string]interface{}{},
+			}}})
+		}
+	})
+
+	mux.HandleFunc("POST /v1/agents/sessions/{id}/responses/{response_id}/activate", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		answer(w, http.StatusOK, acceleration.ActivatedBranch{LeafResponseId: r.PathValue("response_id"), Resent: 1,
+			RewoundTo: &acceleration.RewoundTo{MessageId: "question-2"}})
 	})
 
 	mux.HandleFunc("GET /v1/agents/sessions/{id}/responses", func(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +290,58 @@ func newRouter(t *testing.T) *router {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// A call's reads answer with what is told apart by the session asked about, so a read of
+	// the wrong session, or of the wrong one of the three, is seen. session-1's newest call has
+	// an id of its own, so a session id read as a call id is unknown.
+	unknownCall := func(w http.ResponseWriter) {
+		answer(w, http.StatusNotFound, acceleration.ErrorResponse{Error: acceleration.ErrorDetail{
+			Message: "unknown call", Type: acceleration.ErrorTypeNotFound, Code: "call_not_found",
+		}})
+	}
+	mux.HandleFunc("GET /v1/agents/sessions/{id}/tokens", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		if r.PathValue("id") != "session-1" {
+			answer(w, http.StatusNotFound, acceleration.ErrorResponse{Error: acceleration.ErrorDetail{
+				Message: "no such session", Type: acceleration.ErrorTypeNotFound, Code: "session_not_found",
+			}})
+			return
+		}
+		answer(w, http.StatusOK, acceleration.CallTokens{
+			InputTokens: 1200, CachedInputTokens: 800, OutputTokens: 90, CostMicros: 4100, Requests: 3,
+			InputParts: acceleration.InputParts{Instructions: 700, Messages: 300, ToolDefinitions: 200},
+			Models:     []acceleration.ModelTokens{{Modality: "llm", Provider: "openai", Model: "gpt-5-mini", InputTokens: 1200}},
+		})
+	})
+	mux.HandleFunc("GET /v1/agents/calls", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		calls := []acceleration.Call{}
+		if r.URL.Query().Get("session_id") == "session-1" {
+			calls = []acceleration.Call{{Id: "call-2", SessionId: ptr("session-1")}, {Id: "call-1", SessionId: ptr("session-1")}}
+		}
+		answer(w, http.StatusOK, calls)
+	})
+	mux.HandleFunc("GET /v1/agents/calls/{id}/timeline", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		if r.PathValue("id") != "call-2" {
+			unknownCall(w)
+			return
+		}
+		answer(w, http.StatusOK, []acceleration.TimelineEntry{
+			{Heard: ptr("what time do you open"), RoundtripMs: ptr(640.0)},
+			{Heard: ptr("and on sundays"), RoundtripMs: ptr(910.0)},
+		})
+	})
+	mux.HandleFunc("GET /v1/agents/calls/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		if r.PathValue("id") != "call-2" {
+			unknownCall(w)
+			return
+		}
+		answer(w, http.StatusOK, []acceleration.CallEvent{
+			{Kind: acceleration.DecisionKindIgnore, Reason: "not meant for the agent", At: time.Now()},
+		})
 	})
 
 	mux.HandleFunc("DELETE /v1/agents/sessions/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -258,6 +412,16 @@ func newRouter(t *testing.T) *router {
 		})
 	})
 
+	mux.HandleFunc("GET /v1/image/routes", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		// Listed as a deployment that offers the quality route first would, which is not the
+		// order a client sorting by name or by the default would give.
+		answer(w, http.StatusOK, []acceleration.Route{
+			{Id: "image-quality", Title: "Best images", Candidates: []acceleration.Candidate{{Provider: "google", Model: "gemini-3.1-flash-image"}}},
+			{Id: "image-fast", Title: "Fast images", Candidates: []acceleration.Candidate{{Provider: "fal", Model: "alibaba/qwen-image-3/text-to-image"}}},
+		})
+	})
+
 	mux.HandleFunc("POST /v1/agents/guests/claim", func(w http.ResponseWriter, r *http.Request) {
 		backend.record(r)
 		answer(w, http.StatusOK, acceleration.ClaimGuestResult{
@@ -271,6 +435,14 @@ func newRouter(t *testing.T) *router {
 			return
 		}
 		defer connection.Close()
+		backend.mu.Lock()
+		calls := backend.calls[r.PathValue("id")]
+		backend.mu.Unlock()
+		for _, call := range calls {
+			if err := connection.WriteJSON(call); err != nil {
+				return
+			}
+		}
 		for {
 			var frame map[string]any
 			if err := connection.ReadJSON(&frame); err != nil || frame["type"] == "close" {
@@ -281,6 +453,8 @@ func newRouter(t *testing.T) *router {
 			backend.mu.Unlock()
 		}
 	})
+
+	backend.serveConnections(mux)
 
 	backend.Server = httptest.NewServer(mux)
 	t.Cleanup(backend.Close)
@@ -307,6 +481,7 @@ func (r *router) record(request *http.Request) {
 	} else {
 		r.asked = append(r.asked, line)
 	}
+	r.heard = append(r.heard, request.Header.Clone())
 
 	if request.Body != nil {
 		var body map[string]any
@@ -1022,6 +1197,55 @@ func TestPinningAndUnpinningTheSessionHeld(t *testing.T) {
 	}
 }
 
+func TestASessionsMetricsAreReadBackByItsID(t *testing.T) {
+	backend := newRouter(t)
+	sessions := backend.client(t).Agent("docs").Sessions
+
+	tokens, err := sessions.Tokens(t.Context(), "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens.InputTokens != 1200 || tokens.CachedInputTokens != 800 || tokens.InputParts.ToolDefinitions != 200 ||
+		len(tokens.Models) != 1 || tokens.Models[0].Model != "gpt-5-mini" {
+		t.Errorf("the tokens were read as %+v", tokens)
+	}
+
+	timeline, err := sessions.Timeline(t.Context(), "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(timeline) != 2 || *timeline[1].Heard != "and on sundays" || *timeline[1].RoundtripMs != 910 {
+		t.Errorf("the timeline was read as %+v", timeline)
+	}
+
+	decisions, err := sessions.Decisions(t.Context(), "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) != 1 || decisions[0].Kind != acceleration.DecisionKindIgnore {
+		t.Errorf("the decisions were read as %+v", decisions)
+	}
+}
+
+func TestASessionsMetricsOfAnUnknownSessionAreRefused(t *testing.T) {
+	backend := newRouter(t)
+	sessions := backend.client(t).Agent("docs").Sessions
+
+	_, tokens := sessions.Tokens(t.Context(), "someone-elses")
+	_, timeline := sessions.Timeline(t.Context(), "someone-elses")
+	_, decisions := sessions.Decisions(t.Context(), "someone-elses")
+
+	var refused *stream.RouterError
+	if !errors.As(tokens, &refused) || refused.Code != "session_not_found" {
+		t.Errorf("the tokens of an unknown session came back as %v, want session_not_found", tokens)
+	}
+	for read, err := range map[string]error{"timeline": timeline, "decisions": decisions} {
+		if !errors.Is(err, ErrNoCall) {
+			t.Errorf("the %s of an unknown session came back as %v, want ErrNoCall", read, err)
+		}
+	}
+}
+
 func TestPinningThroughUpdateSendsItWithTheRest(t *testing.T) {
 	backend := newRouter(t)
 
@@ -1239,6 +1463,29 @@ func TestATurnsItemsAreNarrowedToThatTurn(t *testing.T) {
 	query := backend.query(t, "GET", "/v1/agents/sessions/session-1/responses/items")
 	if query.Get("response_id") != "response-1" {
 		t.Errorf("the items were asked for with response_id %q", query.Get("response_id"))
+	}
+}
+
+func TestATurnWithNoIDHasNoItemsRatherThanTheWholeSessions(t *testing.T) {
+	backend := newRouter(t)
+	backend.unrecorded = true
+	backend.items = [][]acceleration.AgentResponseItem{{{ResponseId: "response-0", Kind: "said"}}}
+	session := open(t, backend)
+
+	answer, err := session.Responses.Create(t.Context(), "Is Stream better?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := answer.Items.All(t.Context())
+	if !errors.Is(err, ErrUnnamedTurn) {
+		t.Fatalf("the items of a turn with no id came back as %v, %v", items, err)
+	}
+	page, err := answer.Items.List(t.Context(), 0, "")
+	if !errors.Is(err, ErrUnnamedTurn) {
+		t.Fatalf("a page of the items of a turn with no id came back as %v, %v", page, err)
+	}
+	if asked := backend.requests("GET", "/v1/agents/sessions/session-1/responses/items"); asked != 0 {
+		t.Errorf("the router was asked %d times for the items", asked)
 	}
 }
 
@@ -1698,6 +1945,75 @@ func TestForkingContinuesTheConversationAsANewOne(t *testing.T) {
 	}
 }
 
+func TestAForksToolTimeoutGoesOverInMilliseconds(t *testing.T) {
+	backend := newRouter(t)
+	session := open(t, backend)
+
+	forked, err := session.Fork(t.Context(), ForkOptions{ToolTimeout: 3 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer forked.Close(t.Context())
+
+	if body := backend.body(t, "POST", "/v1/agents/sessions/session-1/fork"); body["tool_timeout_ms"] != float64(180_000) {
+		t.Errorf("tool_timeout_ms went over as %v", body["tool_timeout_ms"])
+	}
+}
+
+func TestAForksToolTimeoutUnderAMillisecondIsNotSent(t *testing.T) {
+	// Sent, it would be zero: 30 seconds, not the parent's timeout the field promises.
+	backend := newRouter(t)
+	session := open(t, backend)
+
+	forked, err := session.Fork(t.Context(), ForkOptions{ToolTimeout: 500 * time.Microsecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer forked.Close(t.Context())
+
+	if body := backend.body(t, "POST", "/v1/agents/sessions/session-1/fork"); body["tool_timeout_ms"] != nil {
+		t.Errorf("tool_timeout_ms went over as %v", body["tool_timeout_ms"])
+	}
+}
+
+func TestAResumesToolTimeoutGoesOverInMilliseconds(t *testing.T) {
+	backend := newRouter(t)
+
+	resumed, err := backend.client(t).Agent("docs").Sessions.Resume(t.Context(), "session-7",
+		ResumeOptions{ToolTimeout: 3 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resumed.Close(t.Context())
+
+	body := backend.body(t, "POST", "/v1/agents/sessions/session-7/resume")
+	if body["tool_timeout_ms"] != float64(180_000) {
+		t.Errorf("tool_timeout_ms went over as %v", body["tool_timeout_ms"])
+	}
+	if _, sent := body["tools"]; sent {
+		t.Errorf("an agent with no functions declared tools: %v", body["tools"])
+	}
+}
+
+func TestAResumeWithNothingToSayReadsTheConversationAsItIs(t *testing.T) {
+	// A timeout under a millisecond would go over as zero, 30 seconds, not what it ran with.
+	backend := newRouter(t)
+
+	resumed, err := backend.client(t).Agent("docs").Sessions.Resume(t.Context(), "session-7",
+		ResumeOptions{ToolTimeout: 500 * time.Microsecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resumed.Close(t.Context())
+
+	backend.query(t, "GET", "/v1/agents/sessions/session-7")
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if _, posted := backend.bodies["POST /v1/agents/sessions/session-7/resume"]; posted {
+		t.Error("a resume with nothing to say asked the router to carry the conversation on")
+	}
+}
+
 func TestForkingWithoutMessagesSaysSo(t *testing.T) {
 	backend := newRouter(t)
 	session := open(t, backend)
@@ -1716,11 +2032,12 @@ func TestForkingWithoutMessagesSaysSo(t *testing.T) {
 func TestAForkInheritsTheParentsFunctions(t *testing.T) {
 	backend := newRouter(t)
 	agent := backend.client(t).Agent("docs")
-	if err := register(agent.Tools(), "get_weather"); err != nil {
+	own := tools.NewRegistry()
+	if err := register(own, "get_weather"); err != nil {
 		t.Fatal(err)
 	}
 
-	session, err := agent.Sessions.Create(t.Context(), SessionOptions{})
+	session, err := agent.Sessions.Create(t.Context(), SessionOptions{Tools: own})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1738,14 +2055,71 @@ func TestAForkInheritsTheParentsFunctions(t *testing.T) {
 	}
 }
 
-func TestTheModelIsOfferedTheAgentsFunctions(t *testing.T) {
+// SessionToolsSuite is what a conversation runs once its tools changed while it ran.
+type SessionToolsSuite struct {
+	suite.Suite
+	backend *router
+}
+
+func TestSessionToolsSuite(t *testing.T) {
+	suite.Run(t, new(SessionToolsSuite))
+}
+
+func (s *SessionToolsSuite) SetupTest() {
+	s.backend = newRouter(s.T())
+}
+
+// The router gives a fork of a running session the tools it has now, so the fork runs those:
+// the ones added since it opened, and not the ones taken back.
+func (s *SessionToolsSuite) TestAForkRunsTheToolsTheSessionHasNow() {
+	s.backend.calls = map[string][]map[string]any{"session-2": {
+		{"type": "tool_call", "id": "call-1", "name": "get_weather", "arguments": `{"location":"Oslo"}`},
+		{"type": "tool_call", "id": "call-2", "name": "reserve_table", "arguments": `{"location":"T4"}`},
+	}}
+	agent := s.backend.client(s.T()).Agent("docs")
+	var withdrawnRan atomic.Bool
+	own := tools.NewRegistry()
+	s.Require().NoError(tools.Register(own, "get_weather", "What the weather is",
+		func(context.Context, struct{}) (any, error) {
+			withdrawnRan.Store(true)
+			return "raining", nil
+		}))
+	session, err := agent.Sessions.Create(s.T().Context(), SessionOptions{Tools: own})
+	s.Require().NoError(err)
+	defer session.Close(s.T().Context())
+	added := tools.NewRegistry()
+	s.Require().NoError(register(added, "reserve_table"))
+	s.Require().NoError(session.AddTools(s.T().Context(), added))
+	s.Require().NoError(session.RemoveTool(s.T().Context(), "get_weather"))
+
+	forked, err := session.Fork(s.T().Context(), ForkOptions{})
+	s.Require().NoError(err)
+
+	want := map[string]any{"type": "tool_result", "tool_call_id": "call-2", "output": "raining in T4"}
+	s.Require().Eventually(func() bool {
+		s.backend.mu.Lock()
+		defer s.backend.mu.Unlock()
+		return slices.ContainsFunc(s.backend.frames, func(frame map[string]any) bool { return reflect.DeepEqual(frame, want) })
+	}, 5*time.Second, 10*time.Millisecond, "the fork's call of the added tool was not answered")
+	// Closing waits for every call the fork started, so one of the withdrawn tool has run by now.
+	s.Require().NoError(forked.Close(s.T().Context()))
+	s.False(withdrawnRan.Load(), "the fork ran a tool the session had withdrawn")
+}
+
+func TestAConversationDeclaresItsOwnToolsAndNotTheApps(t *testing.T) {
+	// The app's tools are for every agent: declared on a session, the ones its agent's
+	// tool groups do not name would have the router refuse it.
 	backend := newRouter(t)
-	agent := backend.client(t).Agent("docs")
-	if err := register(agent.Tools(), "get_weather"); err != nil {
+	api := backend.client(t)
+	if err := register(api.Tools(), "get_weather"); err != nil {
+		t.Fatal(err)
+	}
+	own := tools.NewRegistry()
+	if err := register(own, "book_table"); err != nil {
 		t.Fatal(err)
 	}
 
-	session, err := agent.Sessions.Create(t.Context(), SessionOptions{})
+	session, err := api.Agent("docs").Sessions.Create(t.Context(), SessionOptions{Tools: own})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1755,7 +2129,7 @@ func TestTheModelIsOfferedTheAgentsFunctions(t *testing.T) {
 	if len(declared) != 1 {
 		t.Fatalf("the session declared %v", declared)
 	}
-	if tool, _ := declared[0].(map[string]any); tool["name"] != "get_weather" {
+	if tool, _ := declared[0].(map[string]any); tool["name"] != "book_table" {
 		t.Errorf("the declared tool is %v", declared[0])
 	}
 }
@@ -1807,6 +2181,37 @@ func TestUpdatingAnAgentNothingIsStoredUnderFails(t *testing.T) {
 		acceleration.AgentConfigPatch{Guardrail: &policy})
 	if err == nil || !strings.Contains(err.Error(), "nowhere") {
 		t.Errorf("updating an agent nobody stored answered %v", err)
+	}
+}
+
+func TestAnAgentsStatsAreReadForItsConfigOverTheWindow(t *testing.T) {
+	backend := newRouter(t)
+	backend.configs = []acceleration.AgentConfig{{Id: "config-1", Name: "docs"}}
+	from := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	to := from.AddDate(0, 1, 0)
+
+	stats, err := backend.client(t).Agent("docs").Stats(t.Context(), from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Sessions != 40 || len(stats.Tools) != 1 || stats.Tools[0].Tool != "weather_lookup" {
+		t.Fatalf("the stats came back as %+v", stats)
+	}
+	asked := backend.query(t, "GET", "/v1/stats/agents")
+	if asked.Get("from") != "2026-11-01T00:00:00Z" || asked.Get("to") != "2026-12-01T00:00:00Z" {
+		t.Errorf("the window went over as %v", asked)
+	}
+}
+
+func TestTheStatsOfAnAgentNothingIsStoredUnderFail(t *testing.T) {
+	backend := newRouter(t)
+
+	_, err := backend.client(t).Agent("nowhere").Stats(t.Context(), time.Now().Add(-time.Hour), time.Now())
+	if err == nil || !strings.Contains(err.Error(), "nowhere") {
+		t.Errorf("reading the stats of an agent nobody stored answered %v", err)
+	}
+	if backend.requests("GET", "/v1/stats/agents") != 0 {
+		t.Error("an agent with no config had every agent's stats read for it")
 	}
 }
 
@@ -1885,6 +2290,26 @@ func TestClaimingNeedsBothTheGuestAndTheAccount(t *testing.T) {
 	}
 	if backend.requests("POST", "/v1/agents/guests/claim") != 0 {
 		t.Error("the router was asked to claim a guest for nobody")
+	}
+}
+
+// The router puts the default first; the client keeps its order, whatever it is, so the first
+// route a caller reads is the deployment's default.
+func TestTheImageRoutesAreListedInTheOrderTheRouterGave(t *testing.T) {
+	backend := newRouter(t)
+
+	routes, err := backend.client(t).Routes(t.Context(), acceleration.ModalityImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routes) != 2 || routes[0].Id != "image-quality" || routes[1].Id != "image-fast" {
+		t.Fatalf("listed %v", routes)
+	}
+	if routes[1].Candidates[0].Model != "alibaba/qwen-image-3/text-to-image" {
+		t.Errorf("image-fast resolves to %v", routes[1].Candidates)
+	}
+	if backend.requests("GET", "/v1/image/routes") != 1 {
+		t.Error("the image modality's routes were not asked for")
 	}
 }
 

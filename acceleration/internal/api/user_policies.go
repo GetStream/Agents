@@ -249,7 +249,7 @@ func (s *Server) listUserPolicies(ctx context.Context, request *ListUserPolicies
 	if after != nil {
 		position = after.UserID
 	}
-	rows, err := s.store.UserPolicies(ctx, appID, position, request.Limit)
+	rows, err := s.store.Policies.SelectUsers(ctx, appID, position, request.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +317,7 @@ func (s *Server) deleteUserPolicy(ctx context.Context, request *userIDRequest) (
 // audits the change under auditedAs.
 func (s *Server) saveUserPolicy(ctx context.Context, appID, userID string, sent *Quota, auditedAs string) error {
 	id := store.UserScopeID(appID, userID)
-	before, err := s.configs.Policy(ctx, store.ScopeUser, id)
+	before, err := s.configs.Policies.Get(ctx, store.ScopeUser, id)
 	if err != nil {
 		return err
 	}
@@ -340,7 +340,7 @@ func (s *Server) saveUserPolicy(ctx context.Context, appID, userID string, sent 
 
 // userPolicyOf is a user's own quota, what they are held to and what they spent today.
 func (s *Server) userPolicyOf(ctx context.Context, appID, userID string) (UserPolicy, error) {
-	own, err := s.configs.Policy(ctx, store.ScopeUser, store.UserScopeID(appID, userID))
+	own, err := s.configs.Policies.Get(ctx, store.ScopeUser, store.UserScopeID(appID, userID))
 	if err != nil {
 		return UserPolicy{}, err
 	}
@@ -398,7 +398,7 @@ func (s *Server) customerScope(ctx context.Context, organizationID string, scope
 
 // checkOrganizationApp answers unknown for an app that is not the organization's.
 func (s *Server) checkOrganizationApp(ctx context.Context, organizationID, appID string, unknown APIError) error {
-	in, err := s.store.AppInOrganization(ctx, appID, organizationID)
+	in, err := s.store.AppOrganizations.Holds(ctx, organizationID, appID)
 	if err != nil {
 		return err
 	}
@@ -454,7 +454,7 @@ func (s *Server) updateCustomerPolicy(ctx context.Context, request *updateCustom
 	}
 	policy, err := s.savePolicy(ctx, scope, id, sent, auditedAs)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return &policyResponse{Body: policy}, nil
 }

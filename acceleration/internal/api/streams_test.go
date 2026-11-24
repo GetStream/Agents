@@ -21,6 +21,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sts"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -128,7 +129,7 @@ func (s *StreamsSuite) TestAModelThatRefusedTheAccountIsListedUnavailable() {
 	var recorded []store.Request
 	s.Require().Eventually(func() bool {
 		recorded = nil
-		err := s.store.DB().NewSelect().Model(&recorded).
+		err := s.store.GlobalDB().NewSelect().Model(&recorded).
 			Where("model = ? AND NOT success", refusingModel).Limit(1).Scan(context.Background())
 		return err == nil && len(recorded) == 1
 	}, 5*time.Second, 20*time.Millisecond)
@@ -208,7 +209,7 @@ func (s *StreamsSuite) TestAStartPinnedToABatchModelIsRefusedAndLeavesItsHealthA
 	s.Equal("routing: "+pinned+" is a batch model for recordings, not live calls; for a live call name en-low-latency",
 		read[0]["error"])
 	s.Never(func() bool {
-		count, err := s.store.DB().NewSelect().Model((*store.Request)(nil)).
+		count, err := s.store.GlobalDB().NewSelect().Model((*store.Request)(nil)).
 			Where("model = ?", batchModel).Count(context.Background())
 		return err != nil || count > 0
 	}, time.Second, 50*time.Millisecond, "no start_failed row counts against the model")
@@ -228,10 +229,25 @@ func (s *StreamsSuite) TestAVendorThatFailsToStartEndsAsAnInternalError() {
 	read, ended := s.ending(s.start("/v1/stt/stream", frame{"target": "down/" + downModel}))
 
 	s.Require().NotEmpty(read)
-	s.Contains(read[0]["error"], "batch: connect failed")
+	s.Equal(somethingWentWrong, read[0]["error"], "the vendor's text names its host")
 	var closed *websocket.CloseError
 	s.Require().ErrorAs(ended, &closed)
 	s.Equal(websocket.CloseInternalServerErr, closed.Code)
+	s.NotContains(closed.Text, "batch: connect failed")
+}
+
+func (s *StreamsSuite) TestAConfigThatCannotBeReadEndsAsAnInternalError() {
+	id := s.utils.uuid()
+	s.failQueries(id)
+
+	read, ended := s.ending(s.start("/v1/stt/stream", frame{"config_id": id}))
+
+	s.Require().NotEmpty(read)
+	s.Equal(somethingWentWrong, read[0]["error"])
+	var closed *websocket.CloseError
+	s.Require().ErrorAs(ended, &closed)
+	s.Equal(websocket.CloseInternalServerErr, closed.Code)
+	s.Equal(somethingWentWrong, closed.Text)
 }
 
 func (s *StreamsSuite) TestATermTheNamedModelDoesNotTakeEndsAsAPolicyViolation() {
@@ -530,7 +546,7 @@ func (s *StreamsSuite) TestAModelOfTheCustomersOwnAnswersAtItsEndpointWithItsKey
 	name := "own-" + s.utils.uuid()
 	sealed, err := s.sealer.SealWithAAD("sk-own", []byte(s.customerID()))
 	s.Require().NoError(err)
-	s.Require().NoError(s.configs.CreateCustomModel(context.Background(), &store.CustomModel{
+	s.Require().NoError(s.store.CustomModels.Insert(context.Background(), &store.CustomModel{
 		CustomerID: s.customerID(), Name: name, BaseURL: "https://8.8.8.8/v1", Model: "acme/tuned-27b",
 		APIKeySealed: sealed, KEKVersion: s.sealer.CurrentVersion(),
 	}))
@@ -548,7 +564,7 @@ func (s *StreamsSuite) TestAModelOfTheCustomersOwnAnswersAtItsEndpointWithItsKey
 
 func (s *StreamsSuite) TestAnotherCustomersModelIsNotOneThisCustomerCanName() {
 	name := "theirs-" + s.utils.uuid()
-	s.Require().NoError(s.configs.CreateCustomModel(context.Background(), &store.CustomModel{
+	s.Require().NoError(s.store.CustomModels.Insert(context.Background(), &store.CustomModel{
 		CustomerID: s.utils.uuid(), Name: name, BaseURL: "https://8.8.8.8/v1", Model: "acme/tuned-27b",
 	}))
 
@@ -1073,4 +1089,55 @@ func (s *StreamsSuite) until(connection *websocket.Conn, kind string) frame {
 	}
 	s.FailNow("no " + kind + " frame arrived")
 	return nil
+}
+
+// TestThinkingComesBackToTheModelWhereItWasWritten is the round trip a caller of a model that
+// signs its thinking makes: each block as it finishes and again on complete, then all of them
+// sent back with the turn, which the model is handed in place.
+func (s *StreamsSuite) TestThinkingComesBackToTheModelWhereItWasWritten() {
+	answering := s.start("/v1/llm/stream", frame{"target": "thinking/thinking-model"})
+	started := s.nextFrame(answering)
+	s.Require().Equal("started", started["type"], started)
+
+	s.Require().NoError(answering.WriteJSON(frame{"type": "respond", "id": "r1",
+		"messages": []frame{{"role": "user", "content": "find roses"}}}))
+	var order []any
+	var complete frame
+	for complete == nil {
+		switch got := s.nextFrame(answering); got["type"] {
+		case "delta":
+			order = append(order, got["text"])
+		case "reasoning":
+			s.Equal("r1", got["id"])
+			order = append(order, got["block"])
+		case "complete":
+			complete = got
+		}
+	}
+	s.Equal([]any{
+		map[string]any{"text": "plan", "signature": "sig-1"},
+		"Looking.",
+		map[string]any{"signature": "sig-2", "after_text": float64(len("Looking."))},
+		map[string]any{"redacted": "enc-1", "after_tool_calls": float64(1)},
+	}, order, "each block arrives where it was written")
+	s.Equal([]any{
+		map[string]any{"text": "plan", "signature": "sig-1"},
+		map[string]any{"signature": "sig-2", "after_text": float64(len("Looking."))},
+		map[string]any{"redacted": "enc-1", "after_tool_calls": float64(1)},
+	}, complete["reasoning"])
+
+	s.Require().NoError(answering.WriteJSON(frame{"type": "respond", "id": "r2",
+		"messages": []frame{
+			{"role": "user", "content": "find roses"},
+			{"role": "assistant", "content": complete["text"], "tool_calls": complete["tool_calls"], "reasoning": complete["reasoning"]},
+			{"role": "tool", "tool_call_id": "call-1", "content": "roses"},
+		}}))
+	s.Equal("complete", s.until(answering, "complete")["type"])
+
+	asked := s.thinker.requests()
+	s.Equal([]llm.ReasoningBlock{
+		{Text: "plan", Signature: "sig-1"},
+		{Signature: "sig-2", AfterText: len("Looking.")},
+		{Redacted: "enc-1", AfterToolCalls: 1},
+	}, asked[len(asked)-1].Input[1].ReasoningBlocks)
 }

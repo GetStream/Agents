@@ -72,8 +72,9 @@ final readonly class AgentConfigRequest
         // Cost labels, carried onto every request a session using it makes. The team tag is also the team those sessi...
         /** @var array<string, string>|null */
         public ?array $tags = null,
-        // How the agent is offered its connector tools. Left out on an update, the stored settings stay.
-        public ?AgentTools $tools = null,
+        // The functions an SDK provides that the agent may offer, in named groups, each with how it is loaded. A func...
+        /** @var list<ToolGroup>|null */
+        public ?array $tools = null,
         public ?string $tts = null,
         public ?SessionVideo $video = null,
         // Tools whose steps end users see on a persistent conversation's replies, as tool names or path.Match pattern...
@@ -90,6 +91,10 @@ final readonly class AgentConfigRequest
         // The app's other text agents this one may hand work to, each offered to its model as a tool that takes one s...
         /** @var list<ChildAgent>|null */
         public ?array $agents = null,
+        // What the agent draws pictures with, as a provider/model or a capability shortcut such as image-fast. Naming...
+        public ?string $image = null,
+        // What teaches the agent's model to answer with UI, such as the section the SDK compiles from agent.yaml's ui...
+        public ?string $uiInstructions = null,
     ) {
     }
 
@@ -130,7 +135,7 @@ final readonly class AgentConfigRequest
             stt: array_key_exists('stt', $data) && $data['stt'] !== null ? Json::string($data, 'stt') : null,
             subagent: array_key_exists('subagent', $data) && $data['subagent'] !== null ? Json::string($data, 'subagent') : null,
             tags: array_key_exists('tags', $data) && $data['tags'] !== null ? Json::stringMap($data, 'tags') : null,
-            tools: array_key_exists('tools', $data) && $data['tools'] !== null ? AgentTools::fromArray(Json::object($data, 'tools')) : null,
+            tools: array_key_exists('tools', $data) && $data['tools'] !== null ? array_map(ToolGroup::fromArray(...), Json::objects($data, 'tools')) : null,
             tts: array_key_exists('tts', $data) && $data['tts'] !== null ? Json::string($data, 'tts') : null,
             video: array_key_exists('video', $data) && $data['video'] !== null ? SessionVideo::fromArray(Json::object($data, 'video')) : null,
             visibleTools: array_key_exists('visible_tools', $data) && $data['visible_tools'] !== null ? Json::strings($data, 'visible_tools') : null,
@@ -138,6 +143,8 @@ final readonly class AgentConfigRequest
             llmFallbacks: array_key_exists('llm_fallbacks', $data) && $data['llm_fallbacks'] !== null ? Json::strings($data, 'llm_fallbacks') : null,
             chatChannels: array_key_exists('chat_channels', $data) && $data['chat_channels'] !== null ? array_map(AgentChatChannel::fromArray(...), Json::objects($data, 'chat_channels')) : null,
             agents: array_key_exists('agents', $data) && $data['agents'] !== null ? array_map(ChildAgent::fromArray(...), Json::objects($data, 'agents')) : null,
+            image: array_key_exists('image', $data) && $data['image'] !== null ? Json::string($data, 'image') : null,
+            uiInstructions: array_key_exists('ui_instructions', $data) && $data['ui_instructions'] !== null ? Json::string($data, 'ui_instructions') : null,
         );
     }
 
@@ -241,7 +248,7 @@ final readonly class AgentConfigRequest
             $out['tags'] = $this->tags;
         }
         if ($this->tools !== null) {
-            $out['tools'] = $this->tools->toArray();
+            $out['tools'] = array_map(static fn (ToolGroup $each): array => $each->toArray(), $this->tools);
         }
         if ($this->tts !== null) {
             $out['tts'] = $this->tts;
@@ -263,6 +270,12 @@ final readonly class AgentConfigRequest
         }
         if ($this->agents !== null) {
             $out['agents'] = array_map(static fn (ChildAgent $each): array => $each->toArray(), $this->agents);
+        }
+        if ($this->image !== null) {
+            $out['image'] = $this->image;
+        }
+        if ($this->uiInstructions !== null) {
+            $out['ui_instructions'] = $this->uiInstructions;
         }
         return $out;
     }

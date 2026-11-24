@@ -1,6 +1,6 @@
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import {
   defineAIUIComponent,
   parseAIUIComponentDefinition,
@@ -11,19 +11,32 @@ import {
 
 // The components are described once, for the iOS and Android apps too, beside the iOS app.
 import described from "../../swift_assistant/app/SwiftAssistant/UIComponents.json";
+import { Assistant } from "./assistant";
+import type { ChatScreen, ChatScreenSnapshot } from "./chatScreen";
 import { calendarDays } from "./reminders";
+import { isReservationOf, offerOf, RESERVE_TABLE, reserveTable, type DiningTable, type Reservation } from "./reserveTable";
+import { useSelected } from "./store";
+
+/**
+ * The conversation the components are shown in, which holds the session a card's tool is given
+ * to. Undefined where they are shown outside one.
+ */
+export const ChatScreenContext = createContext<ChatScreen | undefined>(undefined);
 
 // Each component's view, by the name the agent places it by.
 const views: Record<string, (definition: AIUIComponentDefinition) => AIUIComponent> = {
   place_card: (definition) => defineAIUIComponent(definition, PlaceCard),
   trip_map: (definition) => defineAIUIComponent(definition, TripMap),
   calendar_check: (definition) => defineAIUIComponent(definition, CalendarCheck),
+  restaurant_card: (definition) => defineAIUIComponent(definition, RestaurantCard),
+  availability_gauge: (definition) => defineAIUIComponent(definition, AvailabilityGauge),
+  seat_selector: (definition) => defineAIUIComponent(definition, SeatSelector),
 };
 
 /**
  * The views the agent can place in a reply's UI, besides the ones its format has: a card for a
- * place with its Wikipedia photo, a map of a plan, and the person's own calendar for its days.
- * The same components, by the same names, as the iOS app's.
+ * place with its Wikipedia photo, a map of a plan, the person's own calendar, and hospitality
+ * booking elements (restaurant summary, live occupancy gauge, and table zone selector).
  */
 export const tripComponents: AIUIComponent[] = (described as unknown[]).flatMap((json) => {
   const definition = parseAIUIComponentDefinition(json);
@@ -180,5 +193,171 @@ function CalendarCheck({ args }: AIUIComponentProps<CalendarArguments>) {
       </ul>
       <p className="calendar-check-private">Only you see this. Juno doesn't.</p>
     </section>
+  );
+}
+
+type RestaurantCardArguments = {
+  name: string;
+  cuisine: string;
+  rating: number;
+  priceTier?: string;
+};
+
+function RestaurantCard({ args, context }: AIUIComponentProps<RestaurantCardArguments>) {
+  return (
+    <button
+      className="restaurant-card"
+      onClick={() =>
+        context.emit("inspect_venue", `Show me the menu and highlights for ${args.name}`, {
+          name: args.name,
+        })
+      }
+      type="button"
+    >
+      <div className="restaurant-card-head">
+        <strong>{args.name}</strong>
+        <span className="restaurant-card-rating">
+          ★ {args.rating.toFixed(1)}
+          {args.priceTier ? ` · ${args.priceTier}` : ""}
+        </span>
+      </div>
+      <span className="restaurant-card-cuisine">{args.cuisine}</span>
+    </button>
+  );
+}
+
+type AvailabilityGaugeArguments = {
+  occupancyPct: number;
+  waitLabel: string;
+};
+
+function AvailabilityGauge({ args }: AIUIComponentProps<AvailabilityGaugeArguments>) {
+  const clamped = Math.max(0, Math.min(100, args.occupancyPct));
+  const arcLength = 176;
+  const filled = (clamped / 100) * arcLength;
+  return (
+    <div aria-label={`Occupancy ${Math.round(clamped)} percent, ${args.waitLabel}`} className="availability-gauge">
+      <svg viewBox="0 0 140 84" className="availability-gauge-svg" role="img">
+        <path
+          d="M 14 72 A 56 56 0 0 1 126 72"
+          fill="none"
+          stroke="var(--border)"
+          strokeLinecap="round"
+          strokeWidth="10"
+        />
+        <path
+          d="M 14 72 A 56 56 0 0 1 126 72"
+          fill="none"
+          stroke="var(--accent)"
+          strokeDasharray={`${filled} ${arcLength}`}
+          strokeLinecap="round"
+          strokeWidth="10"
+        />
+        <text x="70" y="58" textAnchor="middle" className="availability-gauge-value">
+          {Math.round(clamped)}%
+        </text>
+      </svg>
+      <span className="availability-gauge-label">{args.waitLabel}</span>
+    </div>
+  );
+}
+
+type SeatSelectorArguments = { tables: DiningTable[] };
+
+/**
+ * A venue's tables, by zone and seats. Tapping a free one chooses it and asks to reserve it; a
+ * taken one can't be tapped.
+ *
+ * The card brings its own tool, `reserve_table`: the agent has no way to book a table until a
+ * card offering tables is on the screen, so the card gives the conversation's session the tool
+ * the first time it shows (`Session.addTools`), and takes it back once a table is reserved
+ * (`Session.removeTool`). Its tables then show the booking, even if the agent shows them again.
+ * A second card, or the same tables with others free, takes the tool over for its own tables.
+ */
+function SeatSelector({ args, context }: AIUIComponentProps<SeatSelectorArguments>) {
+  const screen = useContext(ChatScreenContext);
+  const shown: CardState = screen ?? noScreen;
+  // Each card shows the booking made from its own tables, however many were made since.
+  const reservation = useSelected(shown, (state) =>
+    state.reservations.find((each) => isReservationOf(each, args.tables)),
+  );
+  const [selected, setSelected] = useState<string | undefined>(
+    () => args.tables.find((t) => t.available)?.id,
+  );
+  const tables = useRef(args.tables);
+  tables.current = args.tables;
+  // A conversation carried on shows its messages before its session is back, so a card in them
+  // brings its tool once the session is open.
+  const isOpen = useSelected(shown, (state) => state.session !== undefined);
+  const isBooked = reservation !== undefined;
+  const offer = offerOf(args.tables);
+
+  // Brought once the tables are all in, which is when the tool can tell a free one, and again
+  // when they change. The latest card shown owns the tool, so its tables are the ones booked.
+  useEffect(() => {
+    if (!screen || !isOpen || isBooked || context.isStreaming) return;
+    void screen.bring(
+      RESERVE_TABLE,
+      offer,
+      reserveTable(tables.current, Assistant.user.name, (made) => screen.reserved(made)),
+    );
+  }, [screen, isOpen, isBooked, context.isStreaming, offer]);
+
+  if (reservation) return <ReservationConfirmation reservation={reservation} />;
+  return (
+    <div className="seat-selector">
+      <span className="seat-selector-title">Select a table zone</span>
+      <div className="seat-selector-grid">
+        {args.tables.map((table) => (
+          <button
+            className={`seat-pill${selected === table.id ? " active" : ""}`}
+            disabled={!table.available}
+            key={table.id}
+            onClick={() => {
+              setSelected(table.id);
+              context.emit(
+                "select_table",
+                `Reserve table ${table.id} (${table.zone} for ${table.seats})`,
+                { id: table.id, zone: table.zone, seats: table.seats },
+              );
+            }}
+            type="button"
+          >
+            <strong>{table.id}</strong> · {table.zone} ({table.seats}p)
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** What of the conversation a seat selector follows: its session and the booking made in it. */
+type CardState = {
+  get: () => Pick<ChatScreenSnapshot, "session" | "reservations">;
+  subscribe: (listener: () => void) => () => void;
+};
+
+/** No session or reservations, for a seat selector shown outside a conversation. */
+const noScreen: CardState = {
+  get: () => ({ session: undefined, reservations: [] }),
+  subscribe: () => () => undefined,
+};
+
+/** What a seat selector shows once one of its tables is booked. */
+function ReservationConfirmation({ reservation }: { reservation: Reservation }) {
+  const { table, when, code } = reservation;
+  return (
+    <div className="seat-selector reservation-confirmation" role="status">
+      <span aria-hidden className="reservation-confirmation-mark">
+        ✓
+      </span>
+      <span className="reservation-confirmation-text">
+        <strong>Table {table.id} reserved</strong>
+        <span className="reservation-confirmation-detail">
+          {table.zone} · {table.seats} people · {when}
+        </span>
+        <span className="reservation-confirmation-code">Confirmation {code}</span>
+      </span>
+    </div>
   );
 }

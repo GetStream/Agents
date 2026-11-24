@@ -113,18 +113,18 @@ type Call struct {
 	AgentId      string             `json:"agent_id" doc:"Which agent ran it, and where its transcript is kept."`
 	CallId       string             `json:"call_id"`
 	CampaignId   *string            `json:"campaign_id,omitempty"`
-	ConfigId     *string            `json:"config_id,omitempty"`
 	ContactId    *string            `json:"contact_id,omitempty"`
 	Direction    CallDirection      `json:"direction" enum:"inbound,outbound"`
 	EndedAt      *time.Time         `json:"ended_at,omitempty" doc:"Absent while the call is still running."`
 	FromNumber   *string            `json:"from_number,omitempty"`
-	Id           string             `json:"id" doc:"The session that ran the call, which is what it is held by."`
+	Id           string             `json:"id"`
 	Instructions *string            `json:"instructions,omitempty" doc:"What the agent was told to be on this call."`
 	Llm          *string            `json:"llm,omitempty" doc:"The target that held the conversation."`
 	LlmUsed      *string            `json:"llm_used,omitempty" doc:"The provider/model that held the conversation."`
 	Mode         *SessionMode       `json:"mode,omitempty"`
 	ReviewNotes  *string            `json:"review_notes,omitempty"`
 	ReviewScore  *int               `json:"review_score,omitempty" doc:"How well the agent handled it, from 1 to 5."`
+	SessionId    *string            `json:"session_id,omitempty" doc:"The session the call was part of. A session starts a new call each time voice is started or stopped on it. Absent once the session is deleted."`
 	Skills       *[]string          `json:"skills,omitempty" doc:"What the fast model could hand to the subagent. The instructions behind each name are in the skill registry."`
 	StartedAt    time.Time          `json:"started_at"`
 	Sts          *string            `json:"sts,omitempty" doc:"The speech-to-speech target, for a native call, on the same terms as stt."`
@@ -139,7 +139,6 @@ type Call struct {
 	Tts          *string            `json:"tts,omitempty" doc:"The voice target, on the same terms as stt."`
 	TtsUsed      *string            `json:"tts_used,omitempty" doc:"The provider/model that spoke, on the same terms as stt_used."`
 	Usage        *CallUsage         `json:"usage,omitempty"`
-	UserId       *string            `json:"user_id,omitempty" doc:"Who the agent spoke to, as the client's own token named them. Empty for a call the customer's backend opened, and for telephony, where the number is the name."`
 	Voice        *string            `json:"voice,omitempty" doc:"The voice the call asked for, in the provider's own terms. Empty means the provider's default."`
 	VoiceUsed    *string            `json:"voice_used,omitempty" doc:"The voice that spoke, which is the provider's default when none was asked for. Known only while the call is running."`
 }
@@ -292,9 +291,10 @@ type CreateSessionRequest struct {
 	Team                 *string            `json:"team,omitempty" minLength:"1" maxLength:"59" doc:"The team the session's work is counted under, its team spend limits included, as team:<name> is among a token's usage categories: 1 to 59 letters, digits, _ . and -. Left out, the session is counted under the team the caller's token names, else the agent config's team tag. A token naming another team is refused with a 400: the team a token was signed for is not moved. Server-side only: a device sending it is refused with a 403, since its team is the one its token was signed for."`
 	Timezone             *string            `json:"timezone,omitempty" doc:"The end user's IANA timezone, such as Europe/Amsterdam, which a device knows and the router does not. It sets the zone the agent reads dates in for this session and, for a user the caller may name, is remembered as theirs for the scheduled tasks and sessions that follow. An unknown zone is refused with a 400 invalid_timezone."`
 	Title                *string            `json:"title,omitempty" doc:"What to call the conversation, for a list a person reads, until the router names a persistent one for what was said. Never shown to the model: what a conversation is called is a label on it rather than part of it."`
-	ToolTimeoutMs        *int               `json:"tool_timeout_ms,omitempty" doc:"How long the model waits for a tool result. Zero is the default."`
+	ToolTimeoutMs        *int               `json:"tool_timeout_ms,omitempty" doc:"How long the model waits for the result of a tool the caller or a worker runs, in milliseconds. Zero or omitted is 30 seconds. A tool's own timeout_ms replaces it for that tool, which is how one slow tool, such as one that draws a picture, gets longer without every tool waiting as long."`
 	Tools                *[]SessionTool     `json:"tools,omitempty"`
 	Tts                  *string            `json:"tts,omitempty" doc:"Omit it and the config decides, or en-low-latency when there is no config."`
+	Ui                   *bool              `json:"ui,omitempty" doc:"Whether the model is told its config's ui_instructions in this session. Left out or true, it is told them after the instructions; false leaves them out, for a client that shows no UI. It is no filter: instructions that teach UI themselves still do, and a UI block the model writes is still split off the reply. Reopening or forking the session keeps it. A device may send it, since it only chooses whether to use what the agent's owner wrote."`
 	UserId               *string            `json:"user_id,omitempty" doc:"The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id." default:"vision-agent"`
 	UserName             *string            `json:"user_name,omitempty" default:"Vision Agent"`
 	Video                *SessionVideo      `json:"video,omitempty"`
@@ -724,6 +724,20 @@ func (Modality) Schema(registry huma.Registry) *huma.Schema {
 	return namedEnum(registry, "Modality", "What kind of work was done. The first nine are routed across providers; sts is speech to speech, one native audio model in place of a transcriber, a text model and a voice. decision_model is a decision model: it answers named questions about a piece of text with a typed value and the probability behind it rather than with prose, which is what a guardrail asks before a reply is spoken. image is pictures drawn from a prompt, detection is boxes found in one, and ocr is the text of a page read from a picture of it. Memory, knowledge and phone are recorded but not routed, since there is one memory store, one knowledge base and one vendor per number, so the provider paths do not serve them while the statistics paths do.", "stt", "tts", "llm", "sts", "search", "decision_model", "image", "detection", "ocr", "memory", "knowledge", "phone")
 }
 
+// ModelVoice is a built-in voice a native speech model accepts by ID.
+type ModelVoice struct {
+	Default     *bool   `json:"default,omitempty" doc:"True when this is the model's default voice."`
+	Description *string `json:"description,omitempty" doc:"Short description of the voice's tone, style or accent."`
+	Gender      *string `json:"gender,omitempty" doc:"Voice presentation, such as female, male or neutral."`
+	Id          string  `json:"id" example:"marin" doc:"The voice identifier the provider accepts in its voice field."`
+	Name        string  `json:"name" example:"Marin" doc:"Display name for the voice."`
+}
+
+func (*ModelVoice) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
+	schema.Description = "A built-in voice a native speech model accepts by id."
+	return schema
+}
+
 // Provider is the Provider schema.
 type Provider struct {
 	Benchmark   *ProviderBenchmark `json:"benchmark,omitempty"`
@@ -738,6 +752,7 @@ type Provider struct {
 	Supports    []string           `json:"supports,omitempty" nullable:"false" example:"[\"keyterms\",\"diarize\"]" doc:"The options this model can be asked for, as the terms a request's options turn on: keyterms, diarize, similarity, semantic_turns and the like. A request whose options ask for one the model does not list is never routed to it, and is refused when nothing else could serve it. Left out when the model takes none."`
 	Tier        Tier               `json:"tier"`
 	UsageShare  *float64           `json:"usage_share,omitempty" doc:"This model's share of the modality's requests over the last seven days, across every customer, from 0 to 1. It is how popular the model is, and is 0 when nothing was served or the deployment keeps no statistics."`
+	Voices      []ModelVoice       `json:"voices,omitempty" nullable:"false" doc:"The built-in voices this native speech model accepts by id. Left out for models whose voices come from a voice library or that do not speak."`
 }
 
 // RecordingSource Where the audio to work on comes from. A URL is what every vendor's batch API takes and what anything longer than a clip should use; inline bytes save a caller with a short local file from having to host it somewhere first.

@@ -6,10 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/vendorevent"
 )
 
 // telnyxURL is Telnyx's API.
@@ -21,6 +24,11 @@ const (
 	telnyxSignatureHeader = "Telnyx-Signature-Ed25519"
 	telnyxTimestampHeader = "Telnyx-Timestamp"
 )
+
+// telnyxSpendLimitReached is the event Telnyx sends down a messaging profile's webhook, which is
+// the line's hook, once the profile's spend limit is reached and it refuses every message after.
+// https://developers.telnyx.com/docs/messaging/messages/configurable-spend-limits.md
+const telnyxSpendLimitReached = "messaging-profile.spend-limit-reached"
 
 // telnyxMaxMedia is how many media URLs Telnyx takes on one message.
 const telnyxMaxMedia = 10
@@ -63,6 +71,8 @@ func (p *telnyxProvider) Verify(account Account, header http.Header, body []byte
 // telnyxDelivery is the part of a Telnyx webhook a message is read out of.
 type telnyxDelivery struct {
 	Data struct {
+		// ID is the event's own id, which an account event's log line carries.
+		ID        string `json:"id"`
 		EventType string `json:"event_type"`
 		Payload   struct {
 			ID   string `json:"id"`
@@ -82,13 +92,22 @@ type telnyxDelivery struct {
 }
 
 // Parse reads the message out of a delivery. Telnyx reports on messages this router sent
-// down the same webhook, and those are not messages to answer.
+// down the same webhook, and those are not messages to answer. A reached spend limit is no
+// message either, but it stops every text of the line, so it is counted for a monitor; Receive
+// parses only a delivery whose signature it checked, so only Telnyx's own are counted.
 func (p *telnyxProvider) Parse(body []byte) ([]Message, error) {
 	var delivered telnyxDelivery
 	if err := json.Unmarshal(body, &delivered); err != nil {
 		return nil, fmt.Errorf("channels: that is not a Telnyx delivery: %w", err)
 	}
 	if delivered.Data.EventType != "message.received" {
+		if delivered.Data.EventType == telnyxSpendLimitReached {
+			event, level := vendorevent.Telnyx(delivered.Data.EventType, "")
+			vendorevent.Count(vendorevent.VendorTelnyx, event, level)
+			// The default logger is the router's own: cmd/router/main.go sets it.
+			slog.Default().Info("received a telnyx account event", "vendor", vendorevent.VendorTelnyx,
+				"event", event, "event_level", string(level), "id", delivered.Data.ID)
+		}
 		return nil, nil
 	}
 	message := delivered.Data.Payload
@@ -110,9 +129,10 @@ func (p *telnyxProvider) Parse(body []byte) ([]Message, error) {
 	}}, nil
 }
 
-// Send writes the reply back. Files go as media URLs, which makes it an MMS, batched because
-// Telnyx takes ten a message. The text is billed by its segments and each MMS by itself.
-func (p *telnyxProvider) Send(ctx context.Context, account Account, thread string, reply Reply) (Sent, error) {
+// telnyxParts splits a reply into what Telnyx is sent: the text, with the link after it, and
+// the media URLs in batches of the ten a message takes. Send posts them and Estimate counts
+// them, so what is held for a reply is what Send bills.
+func telnyxParts(reply Reply) (string, [][]string) {
 	text := reply.Text
 	if link := reply.Link; link != nil {
 		text = strings.TrimSpace(text + "\n\n" + link.Text + ": " + link.URL)
@@ -123,12 +143,33 @@ func (p *telnyxProvider) Send(ctx context.Context, account Account, thread strin
 			urls = append(urls, file.URL)
 		}
 	}
-
-	var bodies []map[string]any
+	var batches [][]string
 	for start := 0; start < len(urls); start += telnyxMaxMedia {
-		body := map[string]any{"to": thread, "from": account.E164}
-		body["media_urls"] = urls[start:min(start+telnyxMaxMedia, len(urls))]
-		bodies = append(bodies, body)
+		batches = append(batches, urls[start:min(start+telnyxMaxMedia, len(urls))])
+	}
+	return text, batches
+}
+
+// Estimate is what Send bills for the reply: the text, and one MMS for each batch of files.
+func (p *telnyxProvider) Estimate(reply Reply) Sent {
+	text, batches := telnyxParts(reply)
+	var sent Sent
+	if text != "" {
+		sent.Messages++
+		sent.Segments = Segments(text)
+	}
+	sent.Messages += int64(len(batches))
+	sent.Media = int64(len(batches))
+	return sent
+}
+
+// Send writes the reply back. Files go as media URLs, which makes it an MMS, batched because
+// Telnyx takes ten a message. The text is billed by its segments and each MMS by itself.
+func (p *telnyxProvider) Send(ctx context.Context, account Account, thread string, reply Reply) (Sent, error) {
+	text, batches := telnyxParts(reply)
+	var bodies []map[string]any
+	for _, urls := range batches {
+		bodies = append(bodies, map[string]any{"to": thread, "from": account.E164, "media_urls": urls})
 	}
 	if text != "" {
 		// The text goes first, so an answer reads before whatever it made arrives.

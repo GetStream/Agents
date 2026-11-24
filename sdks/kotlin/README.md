@@ -33,8 +33,9 @@ dependencies {
 val agents = StreamAgents(apiKey = "your_api_key")
 agents.setUser(User(id = "jlahey")) { yourBackend.agentToken() }
 
-// In writing. No call is joined, nothing is transcribed or spoken.
-val chat = agents.agent("docs").chat()
+// In writing. No call is joined, nothing is transcribed or spoken. It returns with the
+// socket open, so the conversation is already being watched.
+val chat = agents.agent("docs").sessions.create()
 chat.responses.create("What are your opening hours?")
 // chat.conversation is a StateFlow: the question shows at once, the turns grow as the reply
 // streams in, and its state says what the agent is doing.
@@ -92,8 +93,37 @@ included. The channel from `chat(context)` is what Stream Chat's AI components s
 streaming in, its reasoning and tool calls, and the approvals waiting on the person. On a call,
 `voice.call` is the Stream `Call` that Stream Video's Compose views render.
 
+An `incognito` session has no channel, so `chat(context)` throws. Show it from its socket
+instead: `chat.turnMessages` is a `Flow` of the conversation in the same shape, one
+`TurnMessage` per question and reply, each reply's rounds of thinking and tool calls as steps
+for `AIMessagePart.parts`, rounds numbered `r1`, `r2` across the reply, the whole of each round
+in `reasoning`, its UI under `customData["ai_ui"]`, and a call waiting in `approvals` shown
+`awaiting_approval` for the user `setUser` named:
+
+```kotlin
+val chat = agents.agent("docs").chat(SessionOptions(incognito = true))
+chat.turnMessages.collect { messages ->
+    for (message in messages) {
+        val parts = AIMessagePart.parts(message.steps.map { it.type to it.fields })
+        // reasoningText(step) is message.reasoning[step.id]
+    }
+}
+```
+
+`chat.conversation`'s turns hold the same as `Turn.steps` (`TurnStep.Reasoning`,
+`TurnStep.ToolCall`) and `Turn.isDone`, folded from the socket's `reasoning_delta`,
+`tool_started`, `tool_updated` and `tool_ran`. A round of thinking is timed from when the model
+was asked or went on after writing, not from its first words.
+
 `say(text)` has the agent speak words as written, without the model; `say(text, interrupt = true)`
 stops what it is saying first rather than waiting for it to finish.
+
+`sessions.create` opens a conversation and watches it. `SessionOptions(startVoice = true)` puts
+the agent on the session's call as well; `agents.agent("docs").chat(...)` and `.voice(...)` are
+the same call with `startVoice` false and true. `SessionOptions(watch = false)` opens one with no
+socket and declares no tools: its turns go through `responses.create` and come back from
+`responses.items()`, and `say`, `interrupt`, `decide` and `addTools` throw
+`AgentsException.Configuration`. The router's row is `.session` either way.
 
 ### Remembering the user
 
@@ -102,7 +132,7 @@ recalled in this session, and what it learns here is kept for their next one. It
 user's; a device recalls nobody else's, and an `incognito` session remembers nothing.
 
 ```kotlin
-val chat = agents.agent("docs").chat(
+val chat = agents.agent("docs").sessions.create(
     SessionOptions(memory = SessionOptions.Memory(filter = mapOf("topic" to "billing"))),
 )
 ```
@@ -134,13 +164,57 @@ val lookup = AgentTool(
     parameters = AgentTool.strings(mapOf("order_id" to "the order number"), required = listOf("order_id")),
 ) { arguments -> orders.find(arguments["order_id"]?.jsonPrimitive?.content.orEmpty()) }
 
-val chat = agents.agent("docs").chat(lookup)
+val chat = agents.agent("docs").sessions.create(SessionOptions(tools = listOf(lookup)))
+```
+
+Or let a `@Serializable` class be the arguments and their schema. A property with no default
+that is not nullable is required, `@SerialName` names it, and `@AgentTool.Describe` tells the
+model what it is. Arguments that do not decode tell the model why, as a tool that throws does:
+
+```kotlin
+@Serializable
+data class WeatherLookup(@AgentTool.Describe("a city or region") val location: String)
+
+val weatherLookup = AgentTool.typed<WeatherLookup>(
+    name = "weather_lookup",
+    description = "Look up the current weather for a location",
+) { args -> weather.today(args.location) }
 ```
 
 Tools are answered inside `AgentSession` whether or not anybody collects `events()`, and a
 `tool_cancel` cancels the coroutine running one. `displayTitle` is what the people in the
 conversation see while it runs, and `executor = AgentTool.Executor.Client` shows the call as
 waiting on the person's device.
+
+A tool that throws is reported to the model, because the model is mid-sentence waiting for it and
+can only say something useful if it is told. What it is told is the error's message, cut to 1,024
+characters, so a tool may throw words meant for it. The model may repeat them to the person and
+the conversation keeps them, and an error from a library a tool calls can name an internal host, a
+table or a value from a record. To pass on only the words you wrote, throw those as an error of
+your own and say something plain for anything else:
+
+```kotlin
+class ToolError(message: String) : Exception(message) // thrown with words meant for the model
+
+agents.onToolError = { call, error -> if (error is ToolError) error.message.orEmpty() else "${call.name} failed" }
+```
+
+It covers every session of that `StreamAgents`, and a hook that throws tells the model only that
+the tool failed.
+
+A running conversation can be given more tools and have them taken back, such as the ones a card
+shown in it brings:
+
+```kotlin
+chat.addTools(listOf(reserveTable))
+chat.removeTool("reserve_table")
+```
+
+The router waits for the reply in progress and every call it made to finish, and the model is
+offered the change from the next turn, so never call either from inside one of the session's own
+tools. A name the session already has is refused with a 409: to change a tool, remove it and add
+it again. The tools added are that session's alone, and only a session this device opened takes
+them.
 
 ### A tool that shows the model a picture
 
@@ -249,9 +323,9 @@ chat.responses.rewind(turns[0])
 val branch = agents.attach(chat.fork(ForkOptions(responseId = turns[0].id)).id)
 ```
 
-A text session is kept in Stream Chat unless it is `incognito`, and a conversation kept there
-cannot be rewound, since its transcript would bring the turns back: the router answers 400, so
-fork it at the response instead. An open `AgentSession` keeps the transcript it already showed, so reload it from
+A session, typed or spoken, is kept in Stream Chat unless it is `incognito`, and a conversation
+kept there is rewound there too: the later turns are hidden in the channel and kept as a branch that can be
+brought back. An open `AgentSession` keeps the transcript it already showed, so reload it from
 `responses` after a rewind.
 
 ### Reminders
@@ -290,7 +364,7 @@ when one is needed and again after a 401, never on every request.
 ## What is deliberately not here
 
 The router is server-side only by default: a handful of operations are marked
-`x-client-accessible` in the spec and everything else answers a device 403. This SDK uses twenty-two
+`x-client-accessible` in the spec and everything else answers a device 403. This SDK uses twenty-four
 of them plus the event socket, and `generate.py` fails if the list names anything the spec does
 not open.
 
@@ -358,16 +432,24 @@ The unit tests are plain JVM tests, run by the Android Gradle plugin with no emu
 ## Releasing
 
 `.github/workflows/publish-sdk-kotlin.yml` publishes `io.getstream:stream-agents-android-core`
-to `https://stream-io-repo.com` from `release-kotlin-*` branches only. `version` in
-`gradle.properties` must match the branch:
+to `https://stream-io-repo.com` with each release of the repository, and from `release-kotlin-*`
+branches, whose `version` in `gradle.properties` must match the branch:
 
+- **With the repository:** publishing a GitHub release tagged `vX.Y.Z` or `X.Y.Z` publishes
+  `X.Y.Z` from the tagged commit, whatever `gradle.properties` says, and tags the commit
+  `sdk-kotlin-vX.Y.Z`. The commit must be on `main`. Nothing is published for a pre-release, for
+  another tag (`sdk-js-v*`, `sdks/go/v*`, `X.Y.Z-rc.1`), or when `X.Y.Z` is not newer than the
+  last release or already published. A pre-release made a release later publishes nothing.
 - **A snapshot:** push a branch named `release-kotlin-X.Y.Z-SNAPSHOT` that sets
   `version=X.Y.Z-SNAPSHOT`. Each push publishes `X.Y.Z-<yyyyMMddHHmm>-SNAPSHOT`, which expires
   after 7 days. `X.Y.Z` must be newer than the last release.
-- **A release:** open a pull request to `accelerate` from `release-kotlin-X.Y.Z` that sets
-  `version=X.Y.Z`. It fails unless `X.Y.Z` is newer than the last release and not already
-  published. Merging it publishes the release and tags the commit `sdk-kotlin-vX.Y.Z`.
+- **A Kotlin-only release,** such as a patch between releases of the repository: open a pull
+  request to `main` from `release-kotlin-X.Y.Z` that sets `version=X.Y.Z`. It fails unless `X.Y.Z`
+  is newer than the last release and not already published. Merging it publishes the release and
+  tags the commit `sdk-kotlin-vX.Y.Z`. It makes no GitHub release.
 
-Other merges into `accelerate` publish nothing.
+Other merges into `main` publish nothing, even one that sets a new `version`: only the merge of a
+pull request from a `release-kotlin-X.Y.Z` branch publishes. If a release merge's run says nothing
+is published, re-run all its jobs: the lookup of its pull request can lag right after the merge.
 
-There is no GitHub release: publishing one starts the Python release, `release.yml`.
+The last release is the highest `sdk-kotlin-v*` tag.

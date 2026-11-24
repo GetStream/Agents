@@ -39,7 +39,7 @@ binding on agent config "support": name linear, connection.type session, tools [
 | Setting | Why |
 |---|---|
 | `ROUTER_CONNECTORS_ENABLED=true` | Off by default |
-| `ROUTER_AUTH_KEK` (or `ROUTER_AUTH_KEK_V<n>` + `ROUTER_AUTH_KEK_VERSION`) | Seals the credentials. The router refuses to start without it when connectors are on. Changing it makes stored credentials unreadable. A hosted deployment sets `ROUTER_AUTH_KMS_KEY` + `ROUTER_AUTH_KEK_V<n>_WRAPPED` in its place: README, «The key encryption key in Cloud KMS» |
+| `ROUTER_DEV_KEK` on a laptop or in CI; `ROUTER_AUTH_KMS_KEY` + `ROUTER_AUTH_KEK_V<n>_WRAPPED` (+ `ROUTER_AUTH_KEK_VERSION`) on a hosted router | Seals the credentials. The router refuses to start without it when connectors are on, and refuses `ROUTER_DEV_KEK` beside a KMS setting. Changing it makes stored credentials unreadable. README, «The key encryption key in Cloud KMS» |
 | `ROUTER_PUBLIC_URL` | The provider sends the browser back to `<ROUTER_PUBLIC_URL>/v1/agents/connectors/oauth/callback`. The dashboard shows this redirect URI on each OAuth connector |
 | `DASHBOARD_BASE_URL` | The consent popup reports back only to this origin, unless the consent was started with a `return_url` (`createAuthorization`'s, or for a login or step-up the chat asks for, the session's own from `createSession`), which then replaces it. Unset, a consent without one reports to the wrong place and the dashboard waits forever |
 | `ROUTER_CORS_ORIGINS` | The dashboard origin, when the browser calls the router directly |
@@ -167,7 +167,16 @@ until the session's user allows it. The call's step is `awaiting_approval`, addr
 nothing reaches the provider before they answer with `tool_approval` (`tool_call_id`, the reply's
 `request_id`, `allowed`), on their socket or their backend's. Declined, or not answered in ten
 minutes, the call is not sent and the model is told. A session with nobody to ask (incognito, a
-run, a shared chat, an MCP event's) refuses the call at once. An entry must match a tool the
+run, a shared chat, an MCP event's) refuses the call at once. In a channel of a type
+`chat_channels` names, the call asks the writer of the message the reply answers, who answers
+with their own user token through `POST /v1/agents/conversations/{cid}/tool_approvals` while a
+member of the channel; the backend may answer any (`api/conversations.go`, AI-3154). There the
+writer has two minutes, not ten, when the Router opened the session for the message, as it does
+unless a session opened through the API answers in the channel: it answers one message for at
+most two minutes (`askTimeout`, `api/messagehooks.go`) and then closes that session, which stops
+the call, and an answer after that is a 404 (`answerHosted`, `api/threadhooks.go`). The model gets
+no round to say why, so the reply ends with a line that the approval expired, that the step
+waiting did not run (an earlier call of the reply may have), and that the person can ask again, and the step says "Not allowed in time" (`ExpireApprovals`, `conversation/parts.go`, AI-3302). An entry must match a tool the
 binding grants, and `sandbox: true` is refused beside it (`session/connector_approval.go`).
 Beside a sensitive connector (Nessy), a binding's write tool needs `require_approval`: the
 config is refused unless each tool it grants only reads (`read_only_tools`) or is held, and a
@@ -328,11 +337,11 @@ over HTTPS to a host in `sandbox.hosts`. Daytona's egress swaps it for the token
   ends TLS itself and refuses the proxy's certificate for a granted host (staging E2E,
   2026-10-22: `tls: bad certificate`).
 - Behind the proxy, the sandbox gets a placeholder (`va_ph_…`) in the env var. Every command and
-  run of code gets the proxy and the CA in its env, since netleash replaces the env vars a
-  sandbox is created with, but not those of one command or run (live probes, 2026-10-21):
+  run of code gets the CA in its env, and each run of code the proxy, since netleash replaces the
+  env vars a sandbox is created with, but not those of one command or run (live probes, 2026-10-21):
   - `HTTPS_PROXY`, `HTTP_PROXY`, `https_proxy` and `http_proxy` are
-    `http://sbx:<credential>@<proxy address>:<port>`; `NO_PROXY` and `no_proxy` are
-    `localhost,127.0.0.1,::1`;
+    `http://sbx:<credential>@<proxy address>:<port>`, with a credential of the run's own;
+    `NO_PROXY` and `no_proxy` are `localhost,127.0.0.1,::1`;
   - `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` and `GIT_SSL_CAINFO` name
     `/tmp/va-egress-ca-bundle.pem`, and `NODE_EXTRA_CA_CERTS` names the proxy's CA certificate,
     `/tmp/va-egress-ca.pem`;
@@ -356,10 +365,11 @@ over HTTPS to a host in `sandbox.hosts`. Daytona's egress swaps it for the token
   A host both cover is a grant's. A config with `network: true` and no `allowed_domains`, or with
   a `network_allow_list`, is refused when a session with a sandbox grant starts: the proxy reaches
   hosts by name only.
-- Known limit (accepted, Kanat 2026-10-22): the sandbox's proxy credential is in the env of every
-  command and run, so sandbox code can read it and send it out to a granted host or an allowed
-  domain. It is a proxy credential, never a token. It is the sandbox's own, it expires with the
-  sandbox's record, and it reaches only the sandbox's grants and allowed domains.
+- Known limit: a run's proxy credential is in its code's env, so the code can read it and send it
+  out to a granted host or an allowed domain. It is a proxy credential, never a token. It reaches
+  only the sandbox's grants and allowed domains, and it ends when its run ends: the proxy port is
+  open to the internet, so a copy works only while its run is in flight. A process an earlier
+  run left running gets a 407 once that run ends.
 - Sandbox code has root (`sudo` with no password, live probe 2026-10-21). No control inside the
   sandbox protects anything: code can change its env, its CA files and its routes. The controls
   are the token, which stays in the router; Daytona's network allow list, which lets the sandbox

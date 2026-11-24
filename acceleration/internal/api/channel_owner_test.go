@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -256,7 +257,7 @@ func (s *SlackChannelSuite) sharedAsBefore() string {
 
 // tagged sets a config's tags in its row.
 func (s *SlackChannelSuite) tagged(configID, tags string) {
-	_, err := s.store.DB().ExecContext(context.Background(), "UPDATE agent_configs SET tags = ? WHERE id = ?", tags, configID)
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), "UPDATE agent_configs SET tags = ? WHERE id = ?", tags, configID)
 	s.Require().NoError(err)
 }
 
@@ -276,12 +277,76 @@ func (s *LinqChannelSuite) TestAnIMessageOnALineTwoAgentsSharedIsAnswered() {
 // sharedAsBefore is a second live config binding the line, as a save before AI-1049 could
 // store one: made while the suite's config is tagged a test copy, which the store now needs.
 func (s *LinqChannelSuite) sharedAsBefore() {
-	_, err := s.store.DB().ExecContext(context.Background(), "UPDATE agent_configs SET tags = ? WHERE id = ?",
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), "UPDATE agent_configs SET tags = ? WHERE id = ?",
 		`{"`+store.DraftOfTag+`":"`+s.config.ID+`"}`, s.config.ID)
 	s.Require().NoError(err)
 	newer := store.AgentConfig{CustomerID: s.customerID(), Name: "linq-newer-" + s.utils.uuid(), Mode: store.AgentModeText,
-		LLM: "noted/noted-model", Connectors: s.config.Connectors}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &newer))
-	_, err = s.store.DB().ExecContext(context.Background(), "UPDATE agent_configs SET tags = '{}' WHERE id = ?", s.config.ID)
+		Models: store.AgentModels{LLM: "noted/noted-model"}, Connectors: s.config.Connectors}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &newer))
+	_, err = s.store.GlobalDB().ExecContext(context.Background(), "UPDATE agent_configs SET tags = '{}' WHERE id = ?", s.config.ID)
 	s.Require().NoError(err)
+}
+
+// AI-3503: a customer can hold two connections of one Slack workspace. A message from the
+// workspace goes to the one an agent binds, whichever is newer.
+
+// TestASecondConnectionToTheWorkspaceThatNoAgentBindsLeavesTheBoundOneAnswering pins AI-3503:
+// on base the newer, unbound connection took the message and it was dropped.
+func (s *SlackChannelSuite) TestASecondConnectionToTheWorkspaceThatNoAgentBindsLeavesTheBoundOneAnswering() {
+	s.madeEarlier(s.bot, store.ConnectionConnected)
+	second := s.connectedBot(s.workspace, s.slack.InstallBot())
+
+	status, _ := s.deliver(s.message("U0000ALICE", "Can you check the build?", "1759740000.006000", ""), 0)
+
+	s.Equal(http.StatusOK, status)
+	channel := s.threadChannel("C0000CHAN:1759740000.006000")
+	s.written(channel, 1)
+	s.Equal(s.config.ID, s.answeredBy(channel), "the agent of the older, bound connection answers")
+	s.NotContains(s.logged.String(), "connection="+second.ConnectionID, "the unbound connection takes nothing")
+}
+
+// TestTheConnectedOfTwoBoundConnectionsToTheWorkspaceAnswers: the older connection needs
+// reauthorization, so the agent of the newer, connected one answers.
+func (s *SlackChannelSuite) TestTheConnectedOfTwoBoundConnectionsToTheWorkspaceAnswers() {
+	s.madeEarlier(s.bot, store.ConnectionNeedsReauthorization)
+	second := s.connectedBot(s.workspace, s.slack.InstallBot())
+	newer := s.answering(second.ConnectionID)
+
+	status, _ := s.deliver(s.message("U0000ALICE", "Can you check the build?", "1759740000.006100", ""), 0)
+
+	s.Equal(http.StatusOK, status)
+	channel := s.threadChannel("C0000CHAN:1759740000.006100")
+	s.written(channel, 1)
+	s.Equal(newer.ID, s.answeredBy(channel))
+}
+
+// TestAMessageToAWorkspaceWhoseConnectionsNoAgentBindsIsDropped is the control: with neither
+// connection bound the message is dropped with the warning, naming the newest, as on base.
+func (s *SlackChannelSuite) TestAMessageToAWorkspaceWhoseConnectionsNoAgentBindsIsDropped() {
+	s.tagged(s.config.ID, `{"`+store.DraftOfTag+`":"`+s.utils.uuid()+`"}`)
+	s.madeEarlier(s.bot, store.ConnectionConnected)
+	second := s.connectedBot(s.workspace, s.slack.InstallBot())
+
+	status, _ := s.deliver(s.message("U0000ALICE", "Can you check the build?", "1759740000.006200", ""), 0)
+
+	s.Equal(http.StatusOK, status)
+	s.nothingLinked()
+	s.Contains(s.logged.String(), `msg="dropped an inbound message: one agent config must bind the connection it came in on"`+
+		` connector=slack_bot customer=`+s.customerID()+` connection=`+second.ConnectionID)
+}
+
+// madeEarlier moves a connection's creation an hour back and sets its status, so it is the
+// older of two whatever the clock does.
+func (s *SlackChannelSuite) madeEarlier(ref core.ConnectionRef, status string) {
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
+		"UPDATE connector_connections SET created_at = created_at - interval '1 hour', status = ? WHERE id = ?", status, ref.ConnectionID)
+	s.Require().NoError(err)
+}
+
+// answeredBy is the agent config a thread channel names as the one that answers in it.
+func (s *SlackChannelSuite) answeredBy(channel string) any {
+	data, found := s.chat.Channel(channel)
+	s.Require().True(found)
+	custom, _ := data["custom"].(map[string]any)
+	return custom[ConfigField]
 }

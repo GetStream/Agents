@@ -60,12 +60,12 @@ func (s *ScheduleResumeSuite) TestAOneShotResumedInsideTheFallBackHourKeepsTheSe
 	s.Require().NoError(json.Unmarshal([]byte(parts[0].Text), &answer), parts[0].Text)
 	s.NotContains(answer, "state", "an active task's answer names no state: %s", parts[0].Text)
 	s.NotContains(answer, "missed", parts[0].Text)
-	stored, err := s.store.ScheduledTask(s.ctx, task.CustomerID, task.ID)
+	stored, err := s.store.ScheduledTasks.Get(s.ctx, task.CustomerID, task.ID)
 	s.Require().NoError(err)
 	s.Equal(store.ScheduledTaskActive, stored.State)
 	s.Require().NotNil(stored.NextRunAt)
 	s.True(task.NextRunAt.Equal(*stored.NextRunAt), "due at the second pass, %s, not %s", task.NextRunAt, stored.NextRunAt)
-	runs, err := s.store.ScheduledTaskRuns(s.ctx, task.CustomerID, task.ID, 25, nil)
+	runs, err := s.store.ScheduledTaskRuns.Select(s.ctx, task.CustomerID, store.ScheduledTaskRunFilter{TaskID: task.ID, Limit: 25})
 	s.Require().NoError(err)
 	s.Empty(runs, "nothing was slept through")
 }
@@ -73,7 +73,7 @@ func (s *ScheduleResumeSuite) TestAOneShotResumedInsideTheFallBackHourKeepsTheSe
 // movePaused marks a paused task as a data move imports one that was active where it came
 // from, for the cut-over to resume (store.ResumeMovedRows).
 func (s *ScheduleResumeSuite) movePaused(task store.ScheduledTask) {
-	_, err := s.store.DB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
 		Set("move_paused = true").
 		Where("customer_id = ?", task.CustomerID).Where("id = ?", task.ID).
 		Exec(s.ctx)
@@ -91,7 +91,7 @@ func (s *ScheduleResumeSuite) TestATaskAMovePausedThatTheAgentPausesIsLeftPaused
 	resumed, _, _, _, err := s.store.ResumeMovedRows(s.ctx, task.CustomerID)
 	s.Require().NoError(err)
 	s.Zero(resumed, "the user asked the agent to pause it")
-	stored, err := s.store.ScheduledTask(s.ctx, task.CustomerID, task.ID)
+	stored, err := s.store.ScheduledTasks.Get(s.ctx, task.CustomerID, task.ID)
 	s.Require().NoError(err)
 	s.Equal(store.ScheduledTaskPaused, stored.State)
 }
@@ -106,7 +106,7 @@ func (s *ScheduleResumeSuite) TestATaskAMovePausedThatTheAgentResumesLosesTheMov
 		Arguments: `{"id":"` + task.ID + `","action":"resume"}`})
 	s.Require().NoError(err)
 
-	stored, err := s.store.ScheduledTask(s.ctx, task.CustomerID, task.ID)
+	stored, err := s.store.ScheduledTasks.Get(s.ctx, task.CustomerID, task.ID)
 	s.Require().NoError(err)
 	s.Require().Equal(store.ScheduledTaskActive, stored.State)
 	s.False(stored.MovePaused, "the user decided what it does here")
@@ -123,7 +123,7 @@ func (s *ScheduleResumeSuite) TestATaskAMovePausedThatTheAgentMovesIsStillResume
 			parts, err := runner.Run(s.ctx, llm.ToolCall{ID: uuid.NewString(), Name: "update_scheduled_task",
 				Arguments: `{"id":"` + task.ID + `",` + args + `}`})
 			s.Require().NoError(err)
-			moved, err := s.store.ScheduledTask(s.ctx, task.CustomerID, task.ID)
+			moved, err := s.store.ScheduledTasks.Get(s.ctx, task.CustomerID, task.ID)
 			s.Require().NoError(err)
 			s.Require().NotNil(moved.NextRunAt)
 			s.Require().False(task.NextRunAt.Equal(*moved.NextRunAt), "the agent moved it: %s", parts[0].Text)
@@ -131,7 +131,7 @@ func (s *ScheduleResumeSuite) TestATaskAMovePausedThatTheAgentMovesIsStillResume
 			resumed, _, _, _, err := s.store.ResumeMovedRows(s.ctx, task.CustomerID)
 			s.Require().NoError(err)
 			s.Equal(int64(1), resumed, "the user only moved it")
-			stored, err := s.store.ScheduledTask(s.ctx, task.CustomerID, task.ID)
+			stored, err := s.store.ScheduledTasks.Get(s.ctx, task.CustomerID, task.ID)
 			s.Require().NoError(err)
 			s.Equal(store.ScheduledTaskActive, stored.State)
 			s.Require().NotNil(stored.NextRunAt)
@@ -147,7 +147,7 @@ func (s *ScheduleResumeSuite) TestATaskAMovePausedThatTheAgentMovesIsStillResume
 func (s *ScheduleResumeSuite) pausedInTheSecondPass() (*scheduleRunner, store.ScheduledTask) {
 	customer, user := "resume-"+uuid.NewString(), "user-"+uuid.NewString()
 	config := store.AgentConfig{CustomerID: customer, Name: "agent-" + uuid.NewString()}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 	due := time.Date(2026, 10, 25, 1, 20, 0, 0, time.UTC)
 	task := store.ScheduledTask{
 		CustomerID: customer, ConfigID: config.ID, UserID: user, CallerKind: string(auth.KindAuthenticated),
@@ -155,8 +155,8 @@ func (s *ScheduleResumeSuite) pausedInTheSecondPass() (*scheduleRunner, store.Sc
 		StartLocal: time.Date(2026, 10, 25, 2, 20, 0, 0, time.UTC), Timezone: "Europe/Berlin",
 		NextRunAt: &due, State: store.ScheduledTaskPaused, Channels: []string{"session"},
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(s.ctx, &task, 10))
-	stored, err := s.store.ScheduledTask(s.ctx, customer, task.ID)
+	s.Require().NoError(s.store.ScheduledTasks.Insert(s.ctx, &task, 10))
+	stored, err := s.store.ScheduledTasks.Get(s.ctx, customer, task.ID)
 	s.Require().NoError(err)
 	s.Require().Equal(store.ScheduledTaskPaused, stored.State)
 	s.Require().True(due.Equal(*stored.NextRunAt))

@@ -3,9 +3,15 @@
 package api
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime/pprof"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,6 +239,44 @@ func (s *RelayedSessionSuite) TestASocketOnTheOtherNodeResumesWhereItLeftOff() {
 
 	s.Equal(true, s.await(again, "resumed")["complete"])
 	s.NotEmpty(s.await(again, "responded")["cursor"], "what was said while it was gone crossed the relay again")
+}
+
+func (s *RelayedSessionSuite) TestClosingANodeEndsItsRelaySubscriptionsAndItsWatcherExpiry() {
+	// Labelled, so its goroutines are told from those of the nodes other suites run beside it.
+	label := s.utils.uuid()
+	var node *Server
+	pprof.Do(context.Background(), pprof.Labels("node", label), func(context.Context) {
+		// A shard of its own, so no other node's watcher is answered by this one.
+		node = s.newNode(s.utils.uuid(), slog.Default(), Options{Routers: s.modalities, Logger: slog.Default()})
+	})
+	// Two subscriptions and the watcher expiry, once their goroutines have started.
+	s.Require().Eventually(func() bool { return s.relayGoroutines(label) >= 3 }, 5*time.Second, 10*time.Millisecond,
+		"the node runs no subscription or watcher expiry")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(node.Close(ctx))
+
+	s.Zero(s.relayGoroutines(label), "the node's background work outlived Close")
+}
+
+// relayGoroutines counts the goroutines labelled node=label that run the api or relay
+// package's code.
+func (s *RelayedSessionSuite) relayGoroutines(label string) int {
+	var dump bytes.Buffer
+	s.Require().NoError(pprof.Lookup("goroutine").WriteTo(&dump, 1))
+	total := 0
+	for _, stack := range strings.Split(dump.String(), "\n\n") {
+		if !strings.Contains(stack, `"node":"`+label+`"`) ||
+			!strings.Contains(stack, "acceleration/internal/api.") && !strings.Contains(stack, "acceleration/internal/relay.") {
+			continue
+		}
+		var count int
+		_, err := fmt.Sscanf(stack, "%d @", &count)
+		s.Require().NoError(err)
+		total += count
+	}
+	return total
 }
 
 // inWriting opens a conversation on the suite's own node that keeps no transcript, which

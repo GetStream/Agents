@@ -2,7 +2,6 @@ package simulation
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -74,7 +73,7 @@ func (r *Runner) converse(
 	kase store.SimulationCase,
 ) (transport, error) {
 	if r.tts == nil || r.stt == nil {
-		return nil, errors.New("simulation: this deployment cannot give the caller a voice or ears")
+		return nil, &told{"simulation: this deployment cannot give the caller a voice or ears"}
 	}
 
 	held := &spoken{within: spokenWithin, lastAt: time.Now()}
@@ -168,16 +167,16 @@ func (s *spoken) Say(ctx context.Context, text string) (store.SimulationLine, er
 			answer, meant, quiet, failure, gone := s.state()
 			switch {
 			case gone:
-				return store.SimulationLine{}, errors.New("simulation: the call ended before the agent answered")
+				return store.SimulationLine{}, &told{"simulation: the call ended before the agent answered"}
 			// Out loud there is a third thing to wait for: the agent may have written the
 			// whole reply and still be several seconds from the end of saying it.
 			case answer != "" && quiet >= spokenSettle && !s.created.Busy() && !s.edge.Talking():
 				return store.SimulationLine{Text: answer, Intended: meant, Tools: s.acted()}, nil
 			case time.Since(started) >= s.within:
 				if failure != nil {
-					return store.SimulationLine{}, fmt.Errorf("simulation: the agent did not answer: %w", failure)
+					return store.SimulationLine{}, fmt.Errorf("%w: %w", errNoAnswer, failure)
 				}
-				return store.SimulationLine{}, errors.New("simulation: the agent did not answer")
+				return store.SimulationLine{}, errNoAnswer
 			}
 		}
 	}
@@ -219,7 +218,7 @@ func (s *spoken) speak(ctx context.Context, text string) (audio.PcmData, error) 
 			return audio.PcmData{}, ctx.Err()
 		case event, open := <-s.voice.Events():
 			if !open {
-				return audio.PcmData{}, errors.New("simulation: the caller's voice closed mid-sentence")
+				return audio.PcmData{}, &told{"simulation: the caller's voice closed mid-sentence"}
 			}
 			switch typed := event.(type) {
 			case tts.AudioChunk:
@@ -233,7 +232,7 @@ func (s *spoken) speak(ctx context.Context, text string) (audio.PcmData, error) 
 					continue
 				}
 				if len(samples) == 0 {
-					return audio.PcmData{}, errors.New("simulation: the caller's voice said nothing")
+					return audio.PcmData{}, &told{"simulation: the caller's voice said nothing"}
 				}
 				// A provider emits whatever its model produces, and the call carries
 				// 16 kHz mono, so this is where the two are reconciled.

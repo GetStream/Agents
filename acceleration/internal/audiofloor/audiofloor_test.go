@@ -113,6 +113,15 @@ type fakeServer struct {
 	// blanked is the reason a decision's words give for being none, as the server says why
 	// it wrote nothing of a murmur it ruled ignored.
 	blanked string
+	// unknown has every decision answer 404, as a replica behind the address that was never
+	// told the agent does, however often another is told; retryAfter is the Retry-After a
+	// transcription answered failWith carries; wordsBusy has a decision's words answer that
+	// every lane that writes them is busy; and deadlines are the TimeoutHeader of each
+	// decision and transcription asked for.
+	unknown    bool
+	retryAfter string
+	wordsBusy  bool
+	deadlines  []string
 }
 
 // requests is how many decisions the server was asked for.
@@ -152,8 +161,12 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		f.deadlines = append(f.deadlines, r.Header.Get(TimeoutHeader))
 		if f.failing > 0 {
 			f.failing--
+			if f.retryAfter != "" {
+				w.Header().Set("Retry-After", f.retryAfter)
+			}
 			w.WriteHeader(f.failWith)
 			_, _ = w.Write([]byte(`{"error":"every lane is busy"}`))
 			return
@@ -195,6 +208,7 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintf(w, `{"transcript":{"text":%q,"language":%q}}`+"\n", f.words, f.spoken())
 	case "/v1/decide":
 		f.decidesAt = append(f.decidesAt, time.Now())
+		f.deadlines = append(f.deadlines, r.Header.Get(TimeoutHeader))
 		if f.fail || f.failDecide || f.failingDecides > 0 {
 			if f.failingDecides > 0 {
 				f.failingDecides--
@@ -202,8 +216,9 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		if !f.known[r.URL.Query().Get("agent")] {
+		if f.unknown || !f.known[r.URL.Query().Get("agent")] {
 			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"this server doesn't know that agent: register it with POST /v1/agents"}`))
 			return
 		}
 		parts, types, ok := formParts(r, "turn", "audio")
@@ -243,6 +258,10 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				f.mu.Unlock()
 				<-gate
 				f.mu.Lock()
+			}
+			if f.wordsBusy {
+				_, _ = w.Write([]byte(`{"transcript_error":"busy"}` + "\n"))
+				return
 			}
 			_, _ = fmt.Fprintf(w, `{"transcript":{"text":%q,"language":%q,"noise":%q},"transcript_ms":3}`+"\n", words, f.spoken(), f.blanked)
 		}
@@ -871,6 +890,24 @@ func (s *transcribing) answered() {
 		defer s.transcriber.mu.Unlock()
 		return !s.transcriber.pause.inFlight
 	}, 5*time.Second, time.Millisecond)
+}
+
+// idle waits for the goroutines the transcriber has set going to be done: a pause's words, kept
+// off the check's own goroutine (await), are written by then, however long it takes to be run, so
+// the next frame is the one after them, as it is on a call where they are written within a frame
+// or so. The frames come from the test, so none starts a goroutine while it waits.
+func (s *transcribing) idle() {
+	s.T().Helper()
+	done := make(chan struct{})
+	go func() {
+		s.transcriber.running.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		s.FailNow("the transcriber's goroutines did not finish")
+	}
 }
 
 // next is the next event of type E.
@@ -1508,7 +1545,7 @@ func BenchmarkADecisionsBody(b *testing.B) {
 			var size int
 			b.ResetTimer()
 			for range b.N {
-				body, _, err := decisionBody(turn, stream.Last(Window))
+				body, _, err := decisionBody(turn, stream.Last(Window), nil)
 				require.NoError(b, err)
 				size = len(body)
 			}

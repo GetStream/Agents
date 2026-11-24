@@ -83,7 +83,7 @@ final readonly class CreateSessionRequest
         public ?string $timezone = null,
         // What to call the conversation, for a list a person reads, until the router names a persistent one for what...
         public ?string $title = null,
-        // How long the model waits for a tool result. Zero is the default.
+        // How long the model waits for the result of a tool the caller or a worker runs, in milliseconds. Zero or omi...
         public ?int $toolTimeoutMs = null,
         /** @var list<SessionTool>|null */
         public ?array $tools = null,
@@ -97,6 +97,8 @@ final readonly class CreateSessionRequest
         public ?string $voice = null,
         // The team the session's work is counted under, its team spend limits included, as team:<name> is among a tok...
         public ?string $team = null,
+        // Whether the model is told its config's ui_instructions in this session. Left out or true, it is told them a...
+        public ?bool $ui = null,
     ) {
     }
 
@@ -149,6 +151,7 @@ final readonly class CreateSessionRequest
             video: array_key_exists('video', $data) && $data['video'] !== null ? SessionVideo::fromArray(Json::object($data, 'video')) : null,
             voice: array_key_exists('voice', $data) && $data['voice'] !== null ? Json::string($data, 'voice') : null,
             team: array_key_exists('team', $data) && $data['team'] !== null ? Json::string($data, 'team') : null,
+            ui: array_key_exists('ui', $data) && $data['ui'] !== null ? Json::bool($data, 'ui') : null,
         );
     }
 
@@ -288,6 +291,9 @@ final readonly class CreateSessionRequest
         }
         if ($this->team !== null) {
             $out['team'] = $this->team;
+        }
+        if ($this->ui !== null) {
+            $out['ui'] = $this->ui;
         }
         return $out;
     }

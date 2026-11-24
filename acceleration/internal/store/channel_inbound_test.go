@@ -28,7 +28,7 @@ func (s *StoreSuite) inbound(channelID, providerMessageID string, change ...func
 // queue queues message in a transaction of its own, as AcceptChannelInbound does after its claim.
 func (s *StoreSuite) queue(message ChannelInbound) (bool, error) {
 	var queued bool
-	err := s.store.db.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err := s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		var err error
 		queued, err = queueChannelInbound(ctx, tx, message)
 		return err
@@ -38,7 +38,7 @@ func (s *StoreSuite) queue(message ChannelInbound) (bool, error) {
 
 // inboundMessage is the message inbound queues, its thread channel linked, not yet queued.
 func (s *StoreSuite) inboundMessage(channelID, providerMessageID string, change ...func(*ChannelInbound)) ChannelInbound {
-	_, err := s.store.LinkChannelThread(s.ctx, thread(channelID, "C0000CHAN:"+channelID))
+	_, err := s.store.ChannelThreads.Link(s.ctx, thread(channelID, "C0000CHAN:"+channelID))
 	s.Require().NoError(err)
 	message := ChannelInbound{
 		ChannelID: channelID, ProviderMessageID: providerMessageID, CustomerID: "acme-app", ConnectorID: "acme",
@@ -54,7 +54,7 @@ func (s *StoreSuite) inboundMessage(channelID, providerMessageID string, change 
 
 // claim claims every message due at at, under a lease of a minute.
 func (s *StoreSuite) claim(at time.Time) []ChannelInbound {
-	claimed, err := s.store.ClaimChannelInbound(s.ctx, at, 10, at.Add(time.Minute))
+	claimed, err := s.store.ChannelInbounds.Claim(s.ctx, at, 10, at.Add(time.Minute))
 	s.Require().NoError(err)
 	return claimed
 }
@@ -69,7 +69,7 @@ func (s *StoreSuite) claimedOne(at time.Time, providerMessageID string) ChannelI
 
 // inboundState is the state and attempts of a message's row.
 func (s *StoreSuite) inboundState(channelID, providerMessageID string) (state string, attempts int) {
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT state, attempts FROM channel_thread_inbound WHERE channel_id = ? AND provider_message_id = ?",
 		channelID, providerMessageID).Scan(&state, &attempts))
 	return state, attempts
@@ -94,7 +94,7 @@ func (s *StoreSuite) TestAClaimedInboundMessageHasEverythingItWasQueuedWith() {
 	s.Equal("config-one", claimed.ConfigID)
 	s.Equal("Ada", claimed.ConfigName)
 	s.Equal(ChannelInboundQueued, claimed.State)
-	s.Zero(claimed.Attempts)
+	s.Equal(1, claimed.Attempts, "a claim counts its attempt")
 	s.True(claimed.NextAttemptAt.Equal(s.base.Add(time.Minute)), "a claimed message is due at the end of its lease")
 	s.Require().NotNil(claimed.Forward)
 	s.Equal("Ev0001", claimed.Forward.ID)
@@ -114,7 +114,7 @@ func (s *StoreSuite) TestAnInboundMessagesMediaIsStoredUnderItsOwnKeys() {
 	})
 
 	var media string
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT media::text FROM channel_thread_inbound WHERE channel_id = 'thread-one'").Scan(&media))
 
 	s.JSONEq(`[{"url": "https://files.example.com/a.png", "mime_type": "image/png"},
@@ -135,22 +135,22 @@ func (s *StoreSuite) TestAnInboundMessagesUploadsAreSavedOnlyUnderTheRowsLease()
 	current := s.claimedOne(s.base.Add(time.Minute), "1759740000.000100")
 	uploaded := []core.Media{{ID: "1003383421387256", MIMEType: "image/png", Uploaded: "https://cdn.example.com/photo-1.png"}}
 
-	saved, err := s.store.SaveChannelInboundMedia(s.ctx, stale, uploaded)
+	saved, err := s.store.ChannelInbounds.SaveMedia(s.ctx, stale, uploaded)
 	s.Require().NoError(err)
 	s.False(saved, "the lease is another worker's")
-	saved, err = s.store.SaveChannelInboundMedia(s.ctx, current, uploaded)
+	saved, err = s.store.ChannelInbounds.SaveMedia(s.ctx, current, uploaded)
 	s.Require().NoError(err)
 	s.True(saved)
 
 	var media string
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT media::text FROM channel_thread_inbound WHERE channel_id = 'thread-one'").Scan(&media))
 	s.JSONEq(`[{"url": "", "mime_type": "", "id": "1003383421387256", "id_mime_type": "image/png",
 		"uploaded": "https://cdn.example.com/photo-1.png"}]`, media)
 	s.Equal(uploaded, s.claimedOne(s.base.Add(2*time.Minute), "1759740000.000100").Message().Media)
 	state, attempts := s.inboundState("thread-one", "1759740000.000100")
 	s.Equal(ChannelInboundQueued, state)
-	s.Zero(attempts, "saving the media records no attempt")
+	s.Equal(3, attempts, "the three claims; saving the media records no attempt")
 }
 
 func (s *StoreSuite) TestAnInboundMessageWithNoMediaAndNoForwardIsClaimedWithNeither() {
@@ -162,7 +162,7 @@ func (s *StoreSuite) TestAnInboundMessageWithNoMediaAndNoForwardIsClaimedWithNei
 	s.Nil(claimed.Forward)
 	var media int
 	var forwarded bool
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT jsonb_array_length(media), forward IS NOT NULL FROM channel_thread_inbound WHERE channel_id = 'thread-one'").Scan(&media, &forwarded))
 	s.Zero(media, "no media is an empty array, not JSON null")
 	s.False(forwarded, "no forward is NULL, not JSON null")
@@ -182,7 +182,7 @@ func (s *StoreSuite) TestAnInboundMessageQueuedTwiceInOneChannelIsOneRow() {
 
 func (s *StoreSuite) TestAWrittenInboundMessageIsNotQueuedAgain() {
 	first := s.inbound("thread-one", "1759740000.000100")
-	_, err := s.store.FinishChannelInbound(s.ctx, s.claimedOne(s.base, "1759740000.000100"), s.base)
+	_, err := s.store.ChannelInbounds.Finish(s.ctx, s.claimedOne(s.base, "1759740000.000100"), s.base)
 	s.Require().NoError(err)
 
 	again, err := s.queue(first)
@@ -222,7 +222,7 @@ func (s *StoreSuite) TestAThreadsSecondMessageWaitsUntilItsFirstIsWritten() {
 	}
 	s.Empty(s.claim(s.base.Add(time.Second)))
 
-	changed, err := s.store.FinishChannelInbound(s.ctx, first, s.base.Add(time.Second))
+	changed, err := s.store.ChannelInbounds.Finish(s.ctx, first, s.base.Add(time.Second))
 	s.Require().NoError(err)
 	s.True(changed)
 	s.claimedOne(s.base.Add(time.Second), "1759740000.000200")
@@ -235,7 +235,7 @@ func (s *StoreSuite) TestAThreadsSecondMessageWaitsUntilItsFirstIsWritten() {
 func (s *StoreSuite) TestAThreadsMessageQueuedWhileAnEarlierOneCommitsWaitsForIt() {
 	a := s.inboundMessage("thread-one", "1759740000.000100")
 	b := s.inboundMessage("thread-one", "1759740000.000200")
-	tx, err := s.store.DB().BeginTx(s.ctx, nil)
+	tx, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer tx.Rollback() //nolint:errcheck // a no-op once committed
 	queued, err := queueChannelInbound(s.ctx, tx, a)
@@ -248,7 +248,7 @@ func (s *StoreSuite) TestAThreadsMessageQueuedWhileAnEarlierOneCommitsWaitsForIt
 	}()
 	s.Require().Eventually(func() bool {
 		var waiting int
-		s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 			"SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database() AND query LIKE '%FROM channel_threads%FOR NO KEY UPDATE%'").Scan(&waiting))
 		return waiting == 1
 	}, 5*time.Second, 10*time.Millisecond, "queueing B waits for A's transaction")
@@ -259,7 +259,7 @@ func (s *StoreSuite) TestAThreadsMessageQueuedWhileAnEarlierOneCommitsWaitsForIt
 
 	first := s.claimedOne(s.base, "1759740000.000100")
 	s.Empty(s.claim(s.base), "B waits while A is written")
-	changed, err := s.store.FinishChannelInbound(s.ctx, first, s.base)
+	changed, err := s.store.ChannelInbounds.Finish(s.ctx, first, s.base)
 	s.Require().NoError(err)
 	s.True(changed)
 	s.claimedOne(s.base, "1759740000.000200")
@@ -277,13 +277,13 @@ func (s *StoreSuite) TestAClaimTakesAtMostLimitOldestDueFirst() {
 	s.inbound("thread-one", "1759740000.000100", func(message *ChannelInbound) { message.NextAttemptAt = s.base.Add(time.Second) })
 	s.inbound("thread-two", "1759740000.000200")
 
-	claimed, err := s.store.ClaimChannelInbound(s.ctx, s.base.Add(time.Second), 1, s.base.Add(time.Minute))
+	claimed, err := s.store.ChannelInbounds.Claim(s.ctx, s.base.Add(time.Second), 1, s.base.Add(time.Minute))
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	s.Equal("1759740000.000200", claimed[0].ProviderMessageID)
 
 	for _, limit := range []int{0, -1} {
-		none, err := s.store.ClaimChannelInbound(s.ctx, s.base.Add(time.Second), limit, s.base.Add(time.Minute))
+		none, err := s.store.ChannelInbounds.Claim(s.ctx, s.base.Add(time.Second), limit, s.base.Add(time.Minute))
 		s.Require().NoError(err, "limit %d", limit)
 		s.Empty(none, "limit %d", limit)
 	}
@@ -294,24 +294,24 @@ func (s *StoreSuite) TestARetriedInboundMessageHoldsItsThreadUntilItsNextAttempt
 	s.inbound("thread-one", "1759740000.000200")
 	first := s.claimedOne(s.base, "1759740000.000100")
 
-	changed, err := s.store.RetryChannelInbound(s.ctx, first, s.base.Add(5*time.Second))
+	changed, err := s.store.ChannelInbounds.Retry(s.ctx, first, s.base.Add(5*time.Second))
 	s.Require().NoError(err)
 	s.True(changed)
 
 	s.Empty(s.claim(s.base.Add(4*time.Second)), "the second waits for the first's retry")
 	again := s.claimedOne(s.base.Add(5*time.Second), "1759740000.000100")
-	s.Equal(1, again.Attempts)
+	s.Equal(2, again.Attempts, "the retried claim and this one")
 }
 
 func (s *StoreSuite) TestAFailedInboundMessageLetsItsThreadGoOn() {
 	s.inbound("thread-one", "1759740000.000100")
 	s.inbound("thread-one", "1759740000.000200")
 	first := s.claimedOne(s.base, "1759740000.000100")
-	_, err := s.store.RetryChannelInbound(s.ctx, first, s.base.Add(time.Second))
+	_, err := s.store.ChannelInbounds.Retry(s.ctx, first, s.base.Add(time.Second))
 	s.Require().NoError(err)
 	last := s.claimedOne(s.base.Add(time.Second), "1759740000.000100")
 
-	changed, err := s.store.FailChannelInbound(s.ctx, last, s.base.Add(2*time.Second), nil)
+	changed, err := s.store.ChannelInbounds.Fail(s.ctx, last, s.base.Add(2*time.Second), nil)
 	s.Require().NoError(err)
 	s.True(changed)
 
@@ -324,15 +324,15 @@ func (s *StoreSuite) TestAFailedInboundMessageLetsItsThreadGoOn() {
 func (s *StoreSuite) TestAWrittenInboundMessageKeepsItsAttempts() {
 	s.inbound("thread-one", "1759740000.000100")
 	first := s.claimedOne(s.base, "1759740000.000100")
-	_, err := s.store.RetryChannelInbound(s.ctx, first, s.base.Add(time.Second))
+	_, err := s.store.ChannelInbounds.Retry(s.ctx, first, s.base.Add(time.Second))
 	s.Require().NoError(err)
 
-	_, err = s.store.FinishChannelInbound(s.ctx, s.claimedOne(s.base.Add(time.Second), "1759740000.000100"), s.base.Add(2*time.Second))
+	_, err = s.store.ChannelInbounds.Finish(s.ctx, s.claimedOne(s.base.Add(time.Second), "1759740000.000100"), s.base.Add(2*time.Second))
 	s.Require().NoError(err)
 
 	state, attempts := s.inboundState("thread-one", "1759740000.000100")
 	s.Equal(ChannelInboundDone, state)
-	s.Equal(1, attempts)
+	s.Equal(2, attempts, "each claim counts, and finishing adds none")
 }
 
 // A worker whose lease ran out while it wrote, and whose message another worker took since,
@@ -342,11 +342,11 @@ func (s *StoreSuite) TestAWorkerWhoseLeaseWasTakenOverChangesNothing() {
 	stale := s.claimedOne(s.base, "1759740000.000100")
 	current := s.claimedOne(s.base.Add(time.Minute), "1759740000.000100")
 
-	retried, err := s.store.RetryChannelInbound(s.ctx, stale, s.base.Add(time.Minute))
+	retried, err := s.store.ChannelInbounds.Retry(s.ctx, stale, s.base.Add(time.Minute))
 	s.Require().NoError(err)
-	failed, err := s.store.FailChannelInbound(s.ctx, stale, s.base.Add(time.Minute), nil)
+	failed, err := s.store.ChannelInbounds.Fail(s.ctx, stale, s.base.Add(time.Minute), nil)
 	s.Require().NoError(err)
-	finished, err := s.store.FinishChannelInbound(s.ctx, stale, s.base.Add(time.Minute))
+	finished, err := s.store.ChannelInbounds.Finish(s.ctx, stale, s.base.Add(time.Minute))
 	s.Require().NoError(err)
 
 	s.False(retried)
@@ -354,9 +354,9 @@ func (s *StoreSuite) TestAWorkerWhoseLeaseWasTakenOverChangesNothing() {
 	s.False(finished)
 	state, attempts := s.inboundState("thread-one", "1759740000.000100")
 	s.Equal(ChannelInboundQueued, state)
-	s.Zero(attempts)
+	s.Equal(2, attempts, "the current claim's count, which the stale worker left alone")
 	s.Empty(s.claim(s.base.Add(90*time.Second)), "the current worker's lease still holds it")
-	changed, err := s.store.FinishChannelInbound(s.ctx, current, s.base.Add(90*time.Second))
+	changed, err := s.store.ChannelInbounds.Finish(s.ctx, current, s.base.Add(90*time.Second))
 	s.Require().NoError(err)
 	s.True(changed)
 }
@@ -364,10 +364,10 @@ func (s *StoreSuite) TestAWorkerWhoseLeaseWasTakenOverChangesNothing() {
 func (s *StoreSuite) TestAFinishedInboundMessageIsNotFinishedAgain() {
 	s.inbound("thread-one", "1759740000.000100")
 	claimed := s.claimedOne(s.base, "1759740000.000100")
-	_, err := s.store.FinishChannelInbound(s.ctx, claimed, s.base)
+	_, err := s.store.ChannelInbounds.Finish(s.ctx, claimed, s.base)
 	s.Require().NoError(err)
 
-	failed, err := s.store.FailChannelInbound(s.ctx, claimed, s.base, nil)
+	failed, err := s.store.ChannelInbounds.Fail(s.ctx, claimed, s.base, nil)
 
 	s.Require().NoError(err)
 	s.False(failed)
@@ -375,19 +375,10 @@ func (s *StoreSuite) TestAFinishedInboundMessageIsNotFinishedAgain() {
 	s.Equal(ChannelInboundDone, state)
 }
 
-// pausedInboundClaim is ClaimChannelInbound's statement with a pause after head read the rows,
-// so another router's claim commits inside it every run.
-func (s *StoreSuite) pausedInboundClaim() string {
-	head := "    WHERE cti.state = 'queued'\n    ORDER BY cti.channel_id, cti.seq\n), due AS ("
-	s.Require().Contains(claimChannelInboundQuery, head)
-	return strings.Replace(claimChannelInboundQuery, head,
-		"    WHERE cti.state = 'queued' AND (SELECT 1 FROM pg_sleep(0.5)) = 1\n    ORDER BY cti.channel_id, cti.seq\n), due AS (", 1)
-}
-
 // claimWhileAnotherRouterActs runs router A's paused claim at at and, while A is in its pause,
 // meanwhile on this suite's store, and returns what A took.
 func (s *StoreSuite) claimWhileAnotherRouterActs(at time.Time, meanwhile func()) []ChannelInbound {
-	routerA, err := Open(s.dsn)
+	routerA, err := s.openRouter()
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(routerA.Close()) })
 	type claim struct {
@@ -396,12 +387,15 @@ func (s *StoreSuite) claimWhileAnotherRouterActs(at time.Time, meanwhile func())
 	}
 	byA := make(chan claim, 1)
 	go func() {
-		claimed, err := routerA.claimChannelInbound(s.ctx, s.pausedInboundClaim(), at, 10, at.Add(time.Minute))
+		claimed, err := routerA.ChannelInbounds.claim(s.ctx, at, 10, at.Add(time.Minute), func(heads *bun.SelectQuery) *bun.SelectQuery {
+			// A pause after the heads are read, so another router's claim commits inside it.
+			return heads.Where("(SELECT 1 FROM pg_sleep(0.5)) = 1")
+		})
 		byA <- claim{claimed, err}
 	}()
 	s.Require().Eventually(func() bool {
 		var sleeping int
-		s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 			"SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND datname = current_database()").Scan(&sleeping))
 		return sleeping == 1
 	}, 5*time.Second, 10*time.Millisecond, "router A's claim is in its pause")
@@ -428,7 +422,7 @@ func (s *StoreSuite) TestARouterDoesNotClaimAnInboundMessageAnotherFinishedDurin
 	s.inbound("thread-one", "1759740000.000100")
 
 	byA := s.claimWhileAnotherRouterActs(s.base.Add(2*time.Minute), func() {
-		_, err := s.store.FinishChannelInbound(s.ctx, s.claimedOne(s.base, "1759740000.000100"), s.base)
+		_, err := s.store.ChannelInbounds.Finish(s.ctx, s.claimedOne(s.base, "1759740000.000100"), s.base)
 		s.Require().NoError(err)
 	})
 
@@ -440,7 +434,7 @@ func (s *StoreSuite) TestARouterDoesNotClaimAnInboundMessageAnotherFinishedDurin
 func (s *StoreSuite) TestAClaimSkipsAnInboundMessageAnotherRouterHoldsLocked() {
 	s.inbound("thread-one", "1759740000.000100")
 	s.inbound("thread-two", "1759740000.000200")
-	held, err := s.store.DB().BeginTx(s.ctx, nil)
+	held, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer held.Rollback() //nolint:errcheck // only releases the lock
 	_, err = held.ExecContext(s.ctx, "SELECT 1 FROM channel_thread_inbound WHERE channel_id = 'thread-one' FOR UPDATE")
@@ -448,7 +442,7 @@ func (s *StoreSuite) TestAClaimSkipsAnInboundMessageAnotherRouterHoldsLocked() {
 
 	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
 	defer cancel()
-	claimed, err := s.store.ClaimChannelInbound(ctx, s.base, 10, s.base.Add(time.Minute))
+	claimed, err := s.store.ChannelInbounds.Claim(ctx, s.base, 10, s.base.Add(time.Minute))
 
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
@@ -456,7 +450,7 @@ func (s *StoreSuite) TestAClaimSkipsAnInboundMessageAnotherRouterHoldsLocked() {
 }
 
 func (s *StoreSuite) TestTheNextInboundMessageIsTheOneAClaimMayTakeFirst() {
-	_, found, err := s.store.NextChannelInboundAt(s.ctx)
+	_, found, err := s.store.ChannelInbounds.NextDue(s.ctx)
 	s.Require().NoError(err)
 	s.False(found, "none when nothing is queued")
 
@@ -465,7 +459,7 @@ func (s *StoreSuite) TestTheNextInboundMessageIsTheOneAClaimMayTakeFirst() {
 	s.inbound("thread-two", "1759740000.000300", func(message *ChannelInbound) { message.NextAttemptAt = s.base.Add(time.Hour) })
 	s.claimedOne(s.base, "1759740000.000100")
 
-	next, found, err := s.store.NextChannelInboundAt(s.ctx)
+	next, found, err := s.store.ChannelInbounds.NextDue(s.ctx)
 	s.Require().NoError(err)
 	s.True(found)
 	s.True(next.Equal(s.base.Add(time.Minute)), "the second message of thread-one waits for the first's lease, not due at %s", next)
@@ -476,15 +470,15 @@ func (s *StoreSuite) TestNoInboundMessageIsNextOnceAllAreWrittenOrGivenUp() {
 	s.inbound("thread-two", "1759740000.000200")
 	for _, claimed := range s.claim(s.base) {
 		if claimed.ChannelID == "thread-one" {
-			_, err := s.store.FinishChannelInbound(s.ctx, claimed, s.base)
+			_, err := s.store.ChannelInbounds.Finish(s.ctx, claimed, s.base)
 			s.Require().NoError(err)
 			continue
 		}
-		_, err := s.store.FailChannelInbound(s.ctx, claimed, s.base, nil)
+		_, err := s.store.ChannelInbounds.Fail(s.ctx, claimed, s.base, nil)
 		s.Require().NoError(err)
 	}
 
-	_, found, err := s.store.NextChannelInboundAt(s.ctx)
+	_, found, err := s.store.ChannelInbounds.NextDue(s.ctx)
 
 	s.Require().NoError(err)
 	s.False(found)
@@ -510,19 +504,19 @@ func (s *StoreSuite) TestPruningKeepsAWrittenMessageADayAndAGivenUpOneThirtyDays
 		}
 		var err error
 		if strings.HasPrefix(claimed.ProviderMessageID, "done") {
-			_, err = s.store.FinishChannelInbound(s.ctx, claimed, at)
+			_, err = s.store.ChannelInbounds.Finish(s.ctx, claimed, at)
 		} else {
-			_, err = s.store.FailChannelInbound(s.ctx, claimed, at, nil)
+			_, err = s.store.ChannelInbounds.Fail(s.ctx, claimed, at, nil)
 		}
 		s.Require().NoError(err)
 	}
 
-	pruned, err := s.store.PruneChannelInbound(s.ctx, s.base)
+	pruned, err := s.store.ChannelInbounds.Prune(s.ctx, s.base)
 
 	s.Require().NoError(err)
 	s.Equal(2, pruned)
 	var kept []string
-	rows, err := s.store.DB().QueryContext(s.ctx, "SELECT provider_message_id FROM channel_thread_inbound ORDER BY provider_message_id")
+	rows, err := s.store.GlobalDB().QueryContext(s.ctx, "SELECT provider_message_id FROM channel_thread_inbound ORDER BY provider_message_id")
 	s.Require().NoError(err)
 	defer rows.Close() //nolint:errcheck // read to the end below
 	for rows.Next() {
@@ -537,7 +531,7 @@ func (s *StoreSuite) TestPruningKeepsAWrittenMessageADayAndAGivenUpOneThirtyDays
 func (s *StoreSuite) TestAThreadChannelsInboundMessagesGoWithIt() {
 	s.inbound("thread-one", "1759740000.000100")
 
-	_, err := s.store.DB().ExecContext(s.ctx, "DELETE FROM channel_threads WHERE channel_id = 'thread-one'")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM channel_threads WHERE channel_id = 'thread-one'")
 	s.Require().NoError(err)
 
 	s.Empty(s.claim(s.base))
@@ -553,7 +547,7 @@ func (s *StoreSuite) givenUp(channelID string, change ...func(*ChannelInbound)) 
 func (s *StoreSuite) givenUpForwarding(channelID string, failure error, change ...func(*ChannelInbound)) bool {
 	s.inbound(channelID, "1759740000.000100", change...)
 	var forwarded bool
-	changed, err := s.store.FailChannelInbound(s.ctx, s.claimedOne(s.base, "1759740000.000100"), s.base, func(context.Context) error {
+	changed, err := s.store.ChannelInbounds.Fail(s.ctx, s.claimedOne(s.base, "1759740000.000100"), s.base, func(context.Context) error {
 		forwarded = true
 		return failure
 	})
@@ -611,7 +605,7 @@ func (s *StoreSuite) TestAWorkerWhoseLeaseWasTakenOverForwardsNothing() {
 	s.claimedOne(s.base.Add(time.Minute), "1759740000.000100")
 
 	var forwarded bool
-	changed, err := s.store.FailChannelInbound(s.ctx, stale, s.base.Add(time.Minute), func(context.Context) error {
+	changed, err := s.store.ChannelInbounds.Fail(s.ctx, stale, s.base.Add(time.Minute), func(context.Context) error {
 		forwarded = true
 		return nil
 	})
@@ -635,7 +629,7 @@ func (s *StoreSuite) TestTwoMessagesOfADeliveryGivenUpAtOnceForwardItOnce() {
 		for _, message := range claimed {
 			wg.Go(func() {
 				forwarded := false
-				_, err := s.store.FailChannelInbound(s.ctx, message, s.base, func(context.Context) error {
+				_, err := s.store.ChannelInbounds.Fail(s.ctx, message, s.base, func(context.Context) error {
 					forwarded = true
 					return nil
 				})
@@ -658,7 +652,7 @@ func (s *StoreSuite) TestTwoMessagesOfADeliveryGivenUpAtOnceForwardItOnce() {
 // inboundClaims are the provider ids of the inbound messages claimed in channelID.
 func (s *StoreSuite) inboundClaims(channelID string) []string {
 	var ids []string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT message_id FROM channel_thread_messages WHERE channel_id = ? AND kind = ? ORDER BY message_id",
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT message_id FROM channel_thread_messages WHERE channel_id = ? AND kind = ? ORDER BY message_id",
 		channelID, ClaimInbound).Scan(s.ctx, &ids))
 	return ids
 }
@@ -676,10 +670,10 @@ func (s *StoreSuite) waitedRow(reply core.InboundMessage) (ChannelInbound, bool,
 func (s *StoreSuite) TestAnAcceptedInboundMessageIsClaimedAndQueuedOnce() {
 	message := s.inboundMessage("thread-one", "1759740000.000100")
 
-	fresh, err := s.store.AcceptChannelInbound(s.ctx, message, nil)
+	fresh, err := s.store.ChannelInbounds.Accept(s.ctx, message, nil)
 	s.Require().NoError(err)
 	s.True(fresh)
-	again, err := s.store.AcceptChannelInbound(s.ctx, message, nil)
+	again, err := s.store.ChannelInbounds.Accept(s.ctx, message, nil)
 
 	s.Require().NoError(err)
 	s.False(again, "a provider's retry of a message is dropped")
@@ -692,18 +686,18 @@ func (s *StoreSuite) TestAnAcceptedInboundMessageIsClaimedAndQueuedOnce() {
 func (s *StoreSuite) TestTheRepliesThatWaitedAreQueuedAfterTheMessageThatStartsTheirThread() {
 	message := s.inboundMessage("thread-one", "1759740000.000100")
 	for _, id := range []string{"1759740000.000300", "1759740000.000200"} {
-		_, err := s.store.WaitChannelThreadMessage(s.ctx, "acme-app", waiting(message.ThreadKey, id))
+		_, err := s.store.WaitingMessages.Wait(s.ctx, "acme-app", waiting(message.ThreadKey, id))
 		s.Require().NoError(err)
 	}
 
-	_, err := s.store.AcceptChannelInbound(s.ctx, message, s.waitedRow)
+	_, err := s.store.ChannelInbounds.Accept(s.ctx, message, s.waitedRow)
 
 	s.Require().NoError(err)
 	s.Equal([]string{"1759740000.000100", "1759740000.000200", "1759740000.000300"}, s.inboundClaims("thread-one"))
 	var queued []string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT provider_message_id FROM channel_thread_inbound WHERE channel_id = 'thread-one' ORDER BY seq").Scan(s.ctx, &queued))
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT provider_message_id FROM channel_thread_inbound WHERE channel_id = 'thread-one' ORDER BY seq").Scan(s.ctx, &queued))
 	s.Equal([]string{"1759740000.000100", "1759740000.000300", "1759740000.000200"}, queued)
-	left, err := takeWaitingChannelThreadMessages(s.ctx, s.store.db, "acme-app", "acme", "T0000TEAM", message.ThreadKey)
+	left, err := takeWaitingMessages(s.ctx, s.store.global, "acme-app", "acme", "T0000TEAM", message.ThreadKey)
 	s.Require().NoError(err)
 	s.Empty(left)
 }
@@ -713,11 +707,11 @@ func (s *StoreSuite) TestTheRepliesThatWaitedAreQueuedAfterTheMessageThatStartsT
 func (s *StoreSuite) TestAWaitingReplyWaitedDoesNotQueueIsDroppedAndTheOthersAreQueued() {
 	message := s.inboundMessage("thread-one", "1759740000.000100")
 	for _, id := range []string{"1759740000.000200", "1759740000.000300"} {
-		_, err := s.store.WaitChannelThreadMessage(s.ctx, "acme-app", waiting(message.ThreadKey, id))
+		_, err := s.store.WaitingMessages.Wait(s.ctx, "acme-app", waiting(message.ThreadKey, id))
 		s.Require().NoError(err)
 	}
 
-	fresh, err := s.store.AcceptChannelInbound(s.ctx, message, func(reply core.InboundMessage) (ChannelInbound, bool, error) {
+	fresh, err := s.store.ChannelInbounds.Accept(s.ctx, message, func(reply core.InboundMessage) (ChannelInbound, bool, error) {
 		row, _, err := s.waitedRow(reply)
 		return row, reply.ProviderMessageID != "1759740000.000200", err
 	})
@@ -726,9 +720,9 @@ func (s *StoreSuite) TestAWaitingReplyWaitedDoesNotQueueIsDroppedAndTheOthersAre
 	s.True(fresh)
 	s.Equal([]string{"1759740000.000100", "1759740000.000300"}, s.inboundClaims("thread-one"))
 	var queued []string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT provider_message_id FROM channel_thread_inbound WHERE channel_id = 'thread-one' ORDER BY seq").Scan(s.ctx, &queued))
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT provider_message_id FROM channel_thread_inbound WHERE channel_id = 'thread-one' ORDER BY seq").Scan(s.ctx, &queued))
 	s.Equal([]string{"1759740000.000100", "1759740000.000300"}, queued)
-	left, err := takeWaitingChannelThreadMessages(s.ctx, s.store.db, "acme-app", "acme", "T0000TEAM", message.ThreadKey)
+	left, err := takeWaitingMessages(s.ctx, s.store.global, "acme-app", "acme", "T0000TEAM", message.ThreadKey)
 	s.Require().NoError(err)
 	s.Empty(left, "the dropped reply waits no more")
 }
@@ -737,20 +731,20 @@ func (s *StoreSuite) TestAWaitingReplyWaitedDoesNotQueueIsDroppedAndTheOthersAre
 // and unqueued, and its replies waiting, for the provider's retry to take them all.
 func (s *StoreSuite) TestAFailedAcceptLeavesNoClaimNoRowAndTheRepliesWaiting() {
 	message := s.inboundMessage("thread-one", "1759740000.000100")
-	_, err := s.store.WaitChannelThreadMessage(s.ctx, "acme-app", waiting(message.ThreadKey, "1759740000.000200"))
+	_, err := s.store.WaitingMessages.Wait(s.ctx, "acme-app", waiting(message.ThreadKey, "1759740000.000200"))
 	s.Require().NoError(err)
 
-	_, err = s.store.AcceptChannelInbound(s.ctx, message, func(core.InboundMessage) (ChannelInbound, bool, error) {
+	_, err = s.store.ChannelInbounds.Accept(s.ctx, message, func(core.InboundMessage) (ChannelInbound, bool, error) {
 		return ChannelInbound{}, false, errors.New("synthetic read failure")
 	})
 
 	s.Require().ErrorContains(err, "synthetic read failure")
 	s.Empty(s.inboundClaims("thread-one"))
 	s.Empty(s.claim(s.base))
-	_, err = s.store.AcceptChannelInbound(s.ctx, s.inboundMessage("thread-one", "1759740000.000100", func(message *ChannelInbound) { message.ConfigID = "" }), nil)
+	_, err = s.store.ChannelInbounds.Accept(s.ctx, s.inboundMessage("thread-one", "1759740000.000100", func(message *ChannelInbound) { message.ConfigID = "" }), nil)
 	s.Require().Error(err, "a message with no agent config")
 	s.Empty(s.inboundClaims("thread-one"))
-	fresh, err := s.store.AcceptChannelInbound(s.ctx, message, s.waitedRow)
+	fresh, err := s.store.ChannelInbounds.Accept(s.ctx, message, s.waitedRow)
 	s.Require().NoError(err)
 	s.True(fresh)
 	s.Equal([]string{"1759740000.000100", "1759740000.000200"}, s.inboundClaims("thread-one"))
@@ -760,12 +754,12 @@ func (s *StoreSuite) TestAFailedAcceptLeavesNoClaimNoRowAndTheRepliesWaiting() {
 // the thread before any of them waited leaves them to the next.
 func (s *StoreSuite) TestAMessageClaimedBeforeStillTakesTheRepliesThatWaited() {
 	message := s.inboundMessage("thread-one", "1759740000.000100")
-	_, err := s.store.AcceptChannelInbound(s.ctx, message, s.waitedRow)
+	_, err := s.store.ChannelInbounds.Accept(s.ctx, message, s.waitedRow)
 	s.Require().NoError(err)
-	_, err = s.store.WaitChannelThreadMessage(s.ctx, "acme-app", waiting(message.ThreadKey, "1759740000.000200"))
+	_, err = s.store.WaitingMessages.Wait(s.ctx, "acme-app", waiting(message.ThreadKey, "1759740000.000200"))
 	s.Require().NoError(err)
 
-	fresh, err := s.store.AcceptChannelInbound(s.ctx, message, s.waitedRow)
+	fresh, err := s.store.ChannelInbounds.Accept(s.ctx, message, s.waitedRow)
 
 	s.Require().NoError(err)
 	s.False(fresh)
@@ -779,16 +773,70 @@ func (s *StoreSuite) TestAKeywordIsMarkedAnsweredOnlyUnderTheRowsLease() {
 	stale := s.claimedOne(s.base, "1759740000.000100")
 	current := s.claimedOne(s.base.Add(time.Minute), "1759740000.000100")
 
-	marked, err := s.store.MarkChannelInboundKeywordAnswered(s.ctx, stale)
+	marked, err := s.store.ChannelInbounds.MarkKeywordAnswered(s.ctx, stale)
 	s.Require().NoError(err)
 	s.False(marked, "the lease is another worker's")
-	marked, err = s.store.MarkChannelInboundKeywordAnswered(s.ctx, current)
+	marked, err = s.store.ChannelInbounds.MarkKeywordAnswered(s.ctx, current)
 	s.Require().NoError(err)
 	s.True(marked)
 
 	again := s.claimedOne(s.base.Add(2*time.Minute), "1759740000.000100")
 	s.True(again.KeywordAnswered)
-	marked, err = s.store.MarkChannelInboundKeywordAnswered(s.ctx, again)
+	marked, err = s.store.ChannelInbounds.MarkKeywordAnswered(s.ctx, again)
 	s.Require().NoError(err)
 	s.False(marked, "an earlier attempt answered it")
+}
+
+func (s *StoreSuite) TestChannelInboundQueryBudgets() {
+	_, err := s.store.ChannelThreads.Link(s.ctx, thread("thread-one", "C0000CHAN:thread-one"))
+	s.Require().NoError(err)
+	_, err = s.store.WaitingMessages.Wait(s.ctx, "acme-app", waiting("C0000CHAN:thread-one", "1759740000.000050"))
+	s.Require().NoError(err)
+	first, second := s.inboundMessage("thread-one", "1759740000.000100"), s.inboundMessage("thread-one", "1759740000.000200")
+	s.Equal(6, s.countQueries(func() {
+		fresh, err := s.store.ChannelInbounds.Accept(s.ctx, first, nil)
+		s.Require().NoError(err)
+		s.True(fresh)
+	}), "Accept: begin, drop old claims, claim the message, lock its thread, queue, commit")
+	s.Equal(11, s.countQueries(func() {
+		fresh, err := s.store.ChannelInbounds.Accept(s.ctx, second, s.waitedRow)
+		s.Require().NoError(err)
+		s.True(fresh)
+	}), "Accept starting its thread: and take the waiting replies, and drop, claim, lock and queue the one waiting")
+	s.Equal(1, s.countQueries(func() {
+		_, found, err := s.store.ChannelInbounds.NextDue(s.ctx)
+		s.Require().NoError(err)
+		s.True(found)
+	}), "NextDue")
+	var claimed ChannelInbound
+	s.Equal(1, s.countQueries(func() { claimed = s.claimedOne(s.base, "1759740000.000100") }), "Claim")
+	held := func(name string, write func() (bool, error)) {
+		s.Equal(1, s.countQueries(func() {
+			changed, err := write()
+			s.Require().NoError(err)
+			s.True(changed, name)
+		}), name)
+	}
+	held("MarkKeywordAnswered", func() (bool, error) { return s.store.ChannelInbounds.MarkKeywordAnswered(s.ctx, claimed) })
+	held("SaveMedia", func() (bool, error) { return s.store.ChannelInbounds.SaveMedia(s.ctx, claimed, nil) })
+	held("Retry", func() (bool, error) { return s.store.ChannelInbounds.Retry(s.ctx, claimed, s.base) })
+	held("Finish", func() (bool, error) { return s.store.ChannelInbounds.Finish(s.ctx, claimed, s.base) })
+	next := s.claimedOne(s.base, "1759740000.000200")
+	s.Equal(3, s.countQueries(func() {
+		changed, err := s.store.ChannelInbounds.Fail(s.ctx, next, s.base, nil)
+		s.Require().NoError(err)
+		s.True(changed)
+	}), "Fail of a message with no forward: begin, give up, commit")
+	s.Equal(1, s.countQueries(func() {
+		pruned, err := s.store.ChannelInbounds.Prune(s.ctx, time.Now().Add(31*24*time.Hour))
+		s.Require().NoError(err)
+		s.Equal(2, pruned)
+	}), "Prune")
+}
+
+// PruningKeepsAWrittenMessageADayAndAGivenUpOneThirtyDays, with a backlog of more than one statement's worth.
+func (s *StoreSuite) TestABacklogOfWrittenMessagesIsPrunedWhole() {
+	s.inSmallBatches()
+	deletes := s.statementsLike("DELETE FROM channel_thread_inbound", s.TestPruningKeepsAWrittenMessageADayAndAGivenUpOneThirtyDays)
+	s.Equal(3, deletes, "a row per statement, then the one that finds none")
 }

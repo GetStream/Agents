@@ -88,6 +88,32 @@ void main() {
       await chat.close();
     });
 
+    test('a refused question leaves the card being written intact', () async {
+      // The person asks while a card streams, and the router refuses the question.
+      router.answer(
+        'POST /v1/agents/sessions/s1/responses',
+        Answer(429, errorJson('rate_limited', 'rate_limited', 'slow down')),
+      );
+      final chat = await agents.chat();
+      final socket = await router.socket();
+      socket
+        ..send('{"type":"responding","turn_id":"t1"}')
+        ..send(
+          '{"type":"ui_delta","turn_id":"t1","format":"openui",'
+          r'"delta":"root = Card([hdr])\nhdr = CardHea"}',
+        );
+      await until(() => chat.turns.lastOrNull?.ui != null);
+
+      await expectLater(chat.responses.create('And tomorrow?'), throwsA(isA<RouterException>()));
+      socket.send(
+        r'{"type":"ui_delta","turn_id":"t1","format":"openui","delta":"der(\"Kaneo\")\n"}',
+      );
+
+      await until(() => chat.turns.last.ui?.content.contains('Kaneo') ?? false);
+      expect(chat.turns.last.ui?.content, 'root = Card([hdr])\nhdr = CardHeader("Kaneo")');
+      await chat.close();
+    });
+
     test('names each question with a fresh request id, one that shows an image too', () async {
       router.answer('POST /v1/agents/sessions/s1/responses', Answer(202, responseJson('r1')));
       final chat = await agents.chat();
@@ -212,6 +238,74 @@ void main() {
       await chat.close();
     });
 
+    test('a typed tool runs on the arguments its fromJson read', () async {
+      final chat = await agents.chat(
+        SessionOptions(
+          tools: [
+            AgentTool.typed<_OrderLookup>(
+              name: 'lookup_order',
+              description: 'Look up an order.',
+              fromJson: _OrderLookup.fromJson,
+              run: (lookup) async => 'Order ${lookup.orderId}: ${lookup.items} items.',
+            ),
+          ],
+        ),
+      );
+      final socket = await router.socket();
+
+      socket.send(
+        '{"type":"tool_call","id":"c1","name":"lookup_order",'
+        r'"arguments":"{\"order_id\":\"A-1042\",\"items\":2}"}',
+      );
+
+      final result = await socket.next();
+      expect(result['output'], 'Order A-1042: 2 items.');
+      expect(result['error'], '');
+      await chat.close();
+    });
+
+    test('tells the model a typed tool failed when its arguments do not read', () async {
+      final ran = <_OrderLookup>[];
+      final chat = await agents.chat(
+        SessionOptions(
+          tools: [
+            AgentTool.typed<_OrderLookup>(
+              name: 'lookup_order',
+              description: 'Look up an order.',
+              fromJson: _OrderLookup.fromJson,
+              run: (lookup) async {
+                ran.add(lookup);
+                return 'found';
+              },
+            ),
+          ],
+        ),
+      );
+      final socket = await router.socket();
+
+      socket
+        ..send(
+          '{"type":"tool_call","id":"missing","name":"lookup_order",'
+          r'"arguments":"{\"items\":2}"}',
+        )
+        ..send(
+          '{"type":"tool_call","id":"wrong_type","name":"lookup_order",'
+          r'"arguments":"{\"order_id\":\"A-1042\",\"items\":\"two\"}"}',
+        );
+
+      final results = {
+        for (final result in [await socket.next(), await socket.next()])
+          result['tool_call_id']: result,
+      };
+      for (final result in results.values) {
+        expect(result['output'], '');
+        expect(result['error'], isNotEmpty);
+      }
+      expect(results.keys, unorderedEquals(['missing', 'wrong_type']));
+      expect(ran, isEmpty);
+      await chat.close();
+    });
+
     test('answers with pictures as parts beside the words', () async {
       final chat = await agents.chat(
         SessionOptions(
@@ -289,6 +383,51 @@ void main() {
         await chat.close();
       },
     );
+
+    test('interrupts the current reply', () async {
+      final chat = await agents.chat();
+      final socket = await router.socket();
+
+      chat.interrupt();
+
+      expect(await socket.next(), {'type': 'interrupt'});
+      await chat.close();
+      expect(await socket.next(), {'type': 'close'});
+    });
+
+    test('interrupts only the reply answering a request', () async {
+      final chat = await agents.chat();
+      final socket = await router.socket();
+
+      chat.interrupt(requestId: 'm1');
+
+      expect(await socket.next(), {'type': 'interrupt', 'request_id': 'm1'});
+      await chat.close();
+      expect(await socket.next(), {'type': 'close'});
+    });
+
+    test('says something after what is in flight', () async {
+      final chat = await agents.chat();
+      final socket = await router.socket();
+
+      chat.say('One moment.');
+
+      expect(await socket.next(), {'type': 'say', 'text': 'One moment.'});
+      await chat.close();
+      expect(await socket.next(), {'type': 'close'});
+    });
+
+    test('stops what is in flight before saying something', () async {
+      final chat = await agents.chat();
+      final socket = await router.socket();
+
+      chat.say('Sorry, wrong order.', interrupt: true);
+
+      expect(await socket.next(), {'type': 'interrupt'});
+      expect(await socket.next(), {'type': 'say', 'text': 'Sorry, wrong order.'});
+      await chat.close();
+      expect(await socket.next(), {'type': 'close'});
+    });
 
     test('a picture tool that asks first sends its pictures once allowed', () async {
       final chat = await agents.chat(
@@ -388,6 +527,117 @@ void main() {
         ..send('{"type":"tool_call","id":"c2","name":"mine","arguments":"{}"}');
 
       expect((await socket.next())['tool_call_id'], 'c2');
+      await chat.close();
+    });
+
+    test(
+      'a call meant for another watcher is not run, and one approved by voice is not asked again',
+      () async {
+        final ran = <String>[];
+        final chat = await agents.chat(
+          SessionOptions(
+            tools: [
+              AgentTool(
+                name: 'lookup_order',
+                description: 'Look up an order.',
+                run: (_) async => 'found',
+              ),
+              AgentTool(
+                name: 'issue_refund',
+                description: 'Refund an order.',
+                approval: const ToolApproval(title: 'Refund it?'),
+                run: (_) async {
+                  ran.add('refund');
+                  return 'refunded';
+                },
+              ),
+            ],
+          ),
+        );
+        final socket = await router.socket();
+
+        socket
+          ..send(
+            '{"type":"tool_call","id":"elsewhere","name":"lookup_order","arguments":"{}","run":false}',
+          )
+          ..send(
+            '{"type":"tool_call","id":"approved","name":"issue_refund","arguments":"{}","approved":true}',
+          )
+          ..send('{"type":"tool_call","id":"here","name":"lookup_order","arguments":"{}"}');
+
+        final answered = {
+          (await socket.next())['tool_call_id'],
+          (await socket.next())['tool_call_id'],
+        };
+        expect(answered, {'approved', 'here'});
+        expect(ran, ['refund']);
+        expect(chat.approvals.value, isEmpty);
+        await chat.close();
+      },
+    );
+
+    test('keeps each tool call\'s last state, and a handler hears its kind until cancelled', () async {
+      final chat = await agents.chat();
+      final socket = await router.socket();
+      final progress = <String>[];
+      final finished = <String>[];
+      late StreamSubscription<AgentEvent> first;
+      first = chat.on(AgentEventKind.toolCallProgress, (event) {
+        progress.add(event['progress'] as String);
+        first.cancel();
+      });
+      chat.on(
+        AgentEventKind.toolCallFinished,
+        (event) => finished.add(event['tool_call_id'] as String),
+      );
+      const call =
+          '"tool_call_id":"c1","tool":"search_flights","turn_id":"t1","display_title":"Searching flights",'
+          '"started_at":"2026-11-18T12:00:00Z"';
+
+      socket
+        ..send('{"type":"tool_call.started",$call,"status":"waiting","duration_ms":0}')
+        ..send(
+          '{"type":"tool_call.progress",$call,"status":"in_progress","duration_ms":100,'
+          '"progress":"Searching for flights","approved_at":"2026-11-18T12:00:00.1Z"}',
+        )
+        ..send(
+          '{"type":"tool_call.progress",$call,"status":"in_progress","duration_ms":200,'
+          '"progress":"Comparing prices","custom":{"cheapest":129},"approved_at":"2026-11-18T12:00:00.1Z"}',
+        )
+        ..send(
+          '{"type":"tool_call.finished",$call,"status":"success","duration_ms":300,'
+          '"custom":{"cheapest":129},"approved_at":"2026-11-18T12:00:00.1Z"}',
+        );
+      await until(() => chat.toolCalls.value['c1']?.status.isFinished ?? false);
+      await until(() => finished.isNotEmpty);
+
+      final last = chat.toolCalls.value['c1']!;
+      expect(last.status, ToolCallStatus.success);
+      expect(last.duration, const Duration(milliseconds: 300));
+      expect(last.progress, '', reason: 'the finished frame carries the whole state');
+      expect(last.approvedAt, DateTime.utc(2026, 11, 18, 12, 0, 0, 100));
+      expect(last.displayTitle, 'Searching flights');
+      expect(last.custom, {'cheapest': 129});
+      expect(progress, ['Searching for flights']);
+      expect(finished, ['c1']);
+
+      socket.send(
+        '{"type":"tool_call.started","tool_call_id":"c2","tool":"list_issues","turn_id":"t2",'
+        '"status":"in_progress","started_at":"2026-11-18T12:00:01Z","duration_ms":0}',
+      );
+      socket.send(
+        '{"type":"tool_call.progress","tool_call_id":"c3","tool":"read_issues","turn_id":"t2",'
+        '"display_title":"Reading issues","status":"in_progress","progress":"Reading 12 issues",'
+        '"started_at":"2026-11-18T12:00:02Z","duration_ms":0}',
+      );
+      await until(() => chat.toolCalls.value.containsKey('c3'));
+      expect(chat.toolCallsForTurn('t1').map((call) => call.title), ['Searching flights']);
+      expect(chat.toolCallsForTurn('t2').map((call) => call.title), [
+        'list_issues',
+        'Reading 12 issues',
+      ]);
+      expect(chat.toolCallsForTurn('t3'), isEmpty);
+      expect(chat.toolCalls.value['c3']!.custom, isEmpty);
       await chat.close();
     });
 
@@ -929,6 +1179,315 @@ void main() {
       });
     });
 
+    group('tools given while it runs', () {
+      const adding = 'POST /v1/agents/sessions/s1/tools';
+      const withdrawing = 'DELETE /v1/agents/sessions/s1/tools/reserve_table';
+      const forking = 'POST /v1/agents/sessions/s1/fork';
+      final taken = Answer(409, errorJson('conflict', 'tool_exists', 'reserve_table is taken'));
+      final noTool = Answer(404, errorJson('not_found', 'tool_not_found', 'no such tool'));
+      final now = AgentTool(name: 'now', description: 'The time.', run: (_) async => 'noon');
+
+      /// How many calls of `reserve_table` were run here, counted as each starts rather than
+      /// when it answers.
+      var reservations = 0;
+
+      AgentTool reserve(String where) => AgentTool(
+        name: 'reserve_table',
+        description: 'Reserve a table.',
+        run: (_) async {
+          reservations++;
+          return 'Reserved $where.';
+        },
+      );
+
+      /// What a call of `reserve_table` is answered with here, or null when nothing here runs
+      /// it. `now`, called straight after, always answers, and a call is run as it arrives, so
+      /// once `now` has answered a `reserve_table` run here is counted, however long it takes.
+      Future<String?> reserved(TestSocket socket) async {
+        final before = reservations;
+        socket
+          ..send('{"type":"tool_call","id":"c1","name":"reserve_table","arguments":"{}"}')
+          ..send('{"type":"tool_call","id":"c2","name":"now","arguments":"{}"}');
+        final answers = <Object?, Map<String, Object?>>{};
+        while (!answers.containsKey('c2')) {
+          final answer = await socket.next();
+          answers[answer['tool_call_id']] = answer;
+        }
+        if (reservations == before && !answers.containsKey('c1')) {
+          return null;
+        }
+        final reservation = answers['c1'] ?? await socket.next();
+        expect(reservation['tool_call_id'], 'c1');
+        return reservation['output'] as String;
+      }
+
+      test('are declared as when it opened, and answered before the router says so', () async {
+        final answered = Completer<void>();
+        router
+          ..answer(adding, const Answer(204))
+          ..hold(adding, answered.future);
+        final chat = await agents.chat(SessionOptions(tools: [now]));
+        final socket = await router.socket();
+
+        final added = chat.addTools([reserve('by the window')]);
+        await until(() => router.arrived.any((request) => request.path.endsWith('/tools')));
+
+        expect(router.last(adding).json, {
+          'tools': [
+            {'name': 'reserve_table', 'description': 'Reserve a table.'},
+          ],
+        });
+        expect(await reserved(socket), 'Reserved by the window.');
+        answered.complete();
+        await added;
+        expect(await reserved(socket), 'Reserved by the window.');
+        await chat.close();
+      });
+
+      test('one the router refused is not answered, since it offers none of them', () async {
+        router.answer(adding, taken);
+        final chat = await agents.chat(SessionOptions(tools: [now]));
+        final socket = await router.socket();
+
+        await expectLater(chat.addTools([reserve('here')]), throwsA(isA<RouterException>()));
+
+        expect(await reserved(socket), isNull);
+        await chat.close();
+      });
+
+      test('one whose adding got no answer is still answered, since it may be offered', () async {
+        router.answer(adding, const Answer.hangUp());
+        final chat = await agents.chat(SessionOptions(tools: [now]));
+        final socket = await router.socket();
+
+        await expectLater(chat.addTools([reserve('here')]), throwsA(isA<TransportException>()));
+
+        expect(await reserved(socket), 'Reserved here.');
+        await chat.close();
+      });
+
+      test('one named as a tool the session has leaves that tool answering', () async {
+        router.answer(adding, taken);
+        final chat = await agents.chat(SessionOptions(tools: [now, reserve('here')]));
+        final socket = await router.socket();
+
+        await expectLater(chat.addTools([reserve('elsewhere')]), throwsA(isA<RouterException>()));
+
+        expect(await reserved(socket), 'Reserved here.');
+        await chat.close();
+      });
+
+      test('a name whose adding got no answer is withdrawn before another takes it', () async {
+        router
+          ..answerInTurn(adding, [const Answer.hangUp(), const Answer(204)])
+          ..answer(withdrawing, noTool);
+        final chat = await agents.chat(SessionOptions(tools: [now]));
+        final socket = await router.socket();
+        await expectLater(chat.addTools([reserve('here')]), throwsA(isA<TransportException>()));
+
+        await chat.addTools([reserve('elsewhere')]);
+
+        expect(
+          [
+            for (final request in router.arrived)
+              if (request.path.contains('/tools')) '${request.method} ${request.path}',
+          ],
+          [adding, withdrawing, adding],
+        );
+        expect(await reserved(socket), 'Reserved elsewhere.');
+        await chat.close();
+      });
+
+      test('one whose adding failed in front of the router is withdrawn before another', () async {
+        // The router added it, and the gateway in front of it answered 502.
+        router
+          ..answerInTurn(adding, [const Answer(502, '<html>bad gateway</html>'), const Answer(204)])
+          ..answer(withdrawing, const Answer(204));
+        final chat = await agents.chat(SessionOptions(tools: [now]));
+        final socket = await router.socket();
+        await expectLater(chat.addTools([reserve('here')]), throwsA(isA<RouterException>()));
+        expect(await reserved(socket), 'Reserved here.');
+
+        await chat.addTools([reserve('elsewhere')]);
+
+        expect(
+          [
+            for (final request in router.arrived)
+              if (request.path.contains('/tools')) '${request.method} ${request.path}',
+          ],
+          [adding, withdrawing, adding],
+        );
+        expect(await reserved(socket), 'Reserved elsewhere.');
+        await chat.close();
+      });
+
+      test('one whose removing failed in front of the router is answered until settled', () async {
+        // The router withdrew it, and the gateway in front of it answered 504.
+        router.answerInTurn(withdrawing, [const Answer(504), noTool]);
+        final chat = await agents.chat(SessionOptions(tools: [now, reserve('here')]));
+        final socket = await router.socket();
+        await expectLater(chat.removeTool('reserve_table'), throwsA(isA<RouterException>()));
+        expect(await reserved(socket), 'Reserved here.');
+
+        await chat.removeTool('reserve_table');
+
+        expect(await reserved(socket), isNull);
+        await chat.close();
+      });
+
+      test('a name whose adding got no answer is removed when the router has none', () async {
+        router
+          ..answer(adding, const Answer.hangUp())
+          ..answer(withdrawing, noTool);
+        final chat = await agents.chat(SessionOptions(tools: [now]));
+        final socket = await router.socket();
+        await expectLater(chat.addTools([reserve('here')]), throwsA(isA<TransportException>()));
+
+        await chat.removeTool('reserve_table');
+
+        expect(await reserved(socket), isNull);
+        await chat.close();
+      });
+
+      test('one whose removing got no answer is answered until the router has none', () async {
+        router.answerInTurn(withdrawing, [const Answer.hangUp(), noTool]);
+        final chat = await agents.chat(SessionOptions(tools: [now, reserve('here')]));
+        final socket = await router.socket();
+        await expectLater(chat.removeTool('reserve_table'), throwsA(isA<TransportException>()));
+        expect(await reserved(socket), 'Reserved here.');
+
+        await chat.removeTool('reserve_table');
+
+        expect(await reserved(socket), isNull);
+        await chat.close();
+      });
+
+      test('a name whose removing got no answer is withdrawn before another takes it', () async {
+        router
+          ..answerInTurn(withdrawing, [const Answer.hangUp(), noTool])
+          ..answer(adding, const Answer(204));
+        final chat = await agents.chat(SessionOptions(tools: [now, reserve('here')]));
+        final socket = await router.socket();
+        await expectLater(chat.removeTool('reserve_table'), throwsA(isA<TransportException>()));
+
+        await chat.addTools([reserve('elsewhere')]);
+
+        expect(
+          [
+            for (final request in router.arrived)
+              if (request.path.contains('/tools')) '${request.method} ${request.path}',
+          ],
+          [withdrawing, withdrawing, adding],
+        );
+        expect(await reserved(socket), 'Reserved elsewhere.');
+        await chat.close();
+      });
+
+      test('removing one it opened with stops it answering and frees its name', () async {
+        router
+          ..answer(withdrawing, const Answer(204))
+          ..answer(adding, const Answer(204));
+        final chat = await agents.chat(SessionOptions(tools: [now, reserve('here')]));
+        final socket = await router.socket();
+
+        await chat.removeTool('reserve_table');
+        expect(await reserved(socket), isNull);
+        await chat.addTools([reserve('elsewhere')]);
+
+        expect(await reserved(socket), 'Reserved elsewhere.');
+        await chat.close();
+      });
+
+      test('change one at a time, so a refusal takes back only its own tool', () async {
+        router.answerInTurn(adding, [taken, const Answer(204)]);
+        final chat = await agents.chat(SessionOptions(tools: [now]));
+        final socket = await router.socket();
+
+        final first = chat.addTools([reserve('here')]);
+        final second = chat.addTools([reserve('elsewhere')]);
+
+        await expectLater(first, throwsA(isA<RouterException>()));
+        await second;
+        expect(await reserved(socket), 'Reserved elsewhere.');
+        await chat.close();
+      });
+
+      test('a fork is given them as they are now, as the router gives it them', () async {
+        router
+          ..answer(adding, const Answer(204))
+          ..answer(withdrawing, const Answer(204))
+          ..answer(forking, Answer(201, sessionJson(id: 's2')));
+        final chat = await agents.chat(SessionOptions(tools: [now, reserve('here')]));
+        await chat.addTools([
+          AgentTool(name: 'cancel_table', description: 'Cancel.', run: (_) async => 'Cancelled.'),
+        ]);
+        await chat.removeTool('reserve_table');
+
+        final fork = await chat.fork();
+        await fork.start();
+        final socket = await router.socket(1);
+
+        expect(await reserved(socket), isNull);
+        socket.send('{"type":"tool_call","id":"c3","name":"cancel_table","arguments":"{}"}');
+        expect((await socket.next())['output'], 'Cancelled.');
+        await fork.close();
+        await chat.close();
+      });
+
+      test('a fork withdraws a name the session never settled before another takes it', () async {
+        const forkAdding = 'POST /v1/agents/sessions/s2/tools';
+        const forkWithdrawing = 'DELETE /v1/agents/sessions/s2/tools/reserve_table';
+        // The router never added it, so the fork it copies has none either.
+        router
+          ..answer(adding, const Answer.hangUp())
+          ..answer(withdrawing, noTool)
+          ..answer(forking, Answer(201, sessionJson(id: 's2')))
+          ..answer(forkWithdrawing, noTool)
+          ..answer(forkAdding, const Answer(204));
+        final chat = await agents.chat(SessionOptions(tools: [now]));
+        await expectLater(chat.addTools([reserve('here')]), throwsA(isA<TransportException>()));
+        final fork = await chat.fork();
+        // Settled in the session, the name is still the fork's to settle.
+        await chat.removeTool('reserve_table');
+
+        await fork.start();
+        await fork.addTools([reserve('elsewhere')]);
+
+        expect(
+          [
+            for (final request in router.arrived)
+              if (request.path.startsWith('/v1/agents/sessions/s2/tools'))
+                '${request.method} ${request.path}',
+          ],
+          [forkWithdrawing, forkAdding],
+        );
+        expect(await reserved(await router.socket(1)), 'Reserved elsewhere.');
+        await fork.close();
+        await chat.close();
+      });
+
+      test('a fork waits for a change under way, so it has none the router refused', () async {
+        final answered = Completer<void>();
+        router
+          ..answer(adding, taken)
+          ..hold(adding, answered.future)
+          ..answer(forking, Answer(201, sessionJson(id: 's2')));
+        final chat = await agents.chat(SessionOptions(tools: [now]));
+
+        final added = chat.addTools([reserve('here')]);
+        final forked = chat.fork();
+        await until(() => router.arrived.any((request) => request.path.endsWith('/tools')));
+        answered.complete();
+
+        await expectLater(added, throwsA(isA<RouterException>()));
+        final fork = await forked;
+        await fork.start();
+        expect(await reserved(await router.socket(1)), isNull);
+        await fork.close();
+        await chat.close();
+      });
+    });
+
     test('two readers of events each get every event', () async {
       final chat = await agents.chat();
       final socket = await router.socket();
@@ -1221,4 +1780,13 @@ void main() {
       await chat.close();
     });
   });
+}
+
+class _OrderLookup {
+  _OrderLookup.fromJson(Map<String, Object?> json)
+    : orderId = json['order_id']! as String,
+      items = json['items']! as int;
+
+  final String orderId;
+  final int items;
 }

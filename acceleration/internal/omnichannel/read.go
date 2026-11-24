@@ -125,7 +125,7 @@ func (c *Cards) Context(ctx context.Context, reading Reading) ([]llm.Message, er
 	if err != nil {
 		return nil, err
 	}
-	cards, err := c.store.EpisodeCards(ctx, store.CardsQuery{
+	cards, err := c.store.Episodes.Cards(ctx, store.CardsQuery{
 		CustomerID: reading.CustomerID, AgentConfigID: reading.AgentConfigID, ConversationID: contact.ConversationID,
 		ExceptThread: cmp.Or(reading.Thread, reading.Chat, reading.Own), ExceptSession: reading.SessionID, Limit: maxCards,
 	})
@@ -154,9 +154,9 @@ func (c *Cards) whose(ctx context.Context, reading Reading) (store.ContactMapEnt
 		return c.deviceContact(ctx, reading)
 	}
 	if reading.Thread == "" {
-		return c.store.Contact(ctx, reading.CustomerID, reading.AgentConfigID, reading.Person.Kind, reading.Person.Address)
+		return c.store.ContactMapEntries.GetByAddress(ctx, reading.CustomerID, reading.AgentConfigID, reading.Person.Kind, reading.Person.Address)
 	}
-	contact, err := c.store.ThreadContact(ctx, reading.CustomerID, reading.AgentConfigID, reading.Thread)
+	contact, err := c.store.ContactMapEntries.GetByThread(ctx, reading.CustomerID, reading.AgentConfigID, reading.Thread)
 	if err != nil {
 		return store.ContactMapEntry{}, err
 	}
@@ -278,7 +278,7 @@ func (c *Cards) streamUser(reading Reading, user string) (Person, error) {
 // pinnedContact is the contact map row of a Stream user, unless it was made in another Stream
 // app of the customer than the session's, where the same user id is somebody else (samePin).
 func (c *Cards) pinnedContact(ctx context.Context, reading Reading, person Person) (store.ContactMapEntry, error) {
-	contact, err := c.store.Contact(ctx, reading.CustomerID, reading.AgentConfigID, person.Kind, person.Address)
+	contact, err := c.store.ContactMapEntries.GetByAddress(ctx, reading.CustomerID, reading.AgentConfigID, person.Kind, person.Address)
 	if err != nil {
 		return store.ContactMapEntry{}, err
 	}
@@ -454,6 +454,12 @@ func linesOf(ctx context.Context, bound streamapp.Bound, card store.EpisodeCard,
 		if !ok {
 			continue
 		}
+		// An app chat's agent writes there as the channel's id (api.unopenedSpec, the session a
+		// worker opens for the agent id handed out), and the person, who writes with a token of
+		// their own, may set the agent's source on a message: one by anybody else is theirs.
+		if card.Source == store.EpisodeChat && message.User.ID != channelID {
+			from = fromPerson
+		}
 		if call && from == fromPerson && !callerOf(card, message.User.ID) {
 			return nil, nil
 		}
@@ -489,7 +495,7 @@ func theirs(custom map[string]any, card store.EpisodeCard) bool {
 	if stamped, ok := custom[conversation.CustomerField]; ok {
 		return stamped == card.CustomerID
 	}
-	return card.Source == store.EpisodeChat && card.AgentConfigID != "" && custom[configField] == card.AgentConfigID
+	return card.Source == store.EpisodeChat && card.ConfigID != "" && custom[configField] == card.ConfigID
 }
 
 // lineOf is who a thread channel's message is from: the person for one a person wrote (no
@@ -576,7 +582,7 @@ func render(cards []told) []llm.Message {
 	}{kept})
 	return []llm.Message{
 		{Role: llm.System, Content: cardsAttribution},
-		{Role: llm.User, Content: string(envelope)},
+		{Role: llm.User, Content: string(envelope), Router: true},
 	}
 }
 

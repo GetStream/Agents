@@ -42,7 +42,9 @@ That is the price of one artifact; do not split it back up without being asked.
 repository's root, so the manifest is the root `Package.swift`, its targets reaching into
 `sdks/swift/core` with `path:`, and the examples reference the root by path. A release is a `v`
 tag, shared with the Python packages: there is nothing to upload, and SwiftPM has no tag prefix
-that would give Swift versions of its own. Never move or delete a released tag. An app clones
+that would give Swift versions of its own. Never move or delete a released tag. `Backend.version`
+is the tag's version, a literal the release PR sets (step 2 of the `release` skill), since a
+package cannot read its own tag; it is the release `X-Stream-Client` names. An app clones
 the whole repository once (`git clone --mirror`, about 300 MB); that is the price of one
 repository. Do not make `Package.swift` branch on an environment variable between `path:` and
 `url:` — resolution stops being reproducible and development paths leak into releases.
@@ -82,6 +84,13 @@ task owns the object that owns the task, and `deinit` never runs to cancel it.
   generated value into one of ours instead.
 - Answering a tool call must not depend on anybody consuming a public event stream. It happens
   inside `AgentSession`.
+- A tool added while the session runs (`add(tools:)`) answers calls before the router says it
+  is added: the next turn can call it while that answer is on its way. An add refused with a 4xx
+  takes the handler back; any other failure (a 5xx, no answer, cancellation) leaves it and marks
+  the name unsettled, since the router may have added it. Changes go one at a time.
+  `remove(toolNamed:)` drops the handler once the router answers, which waits until no call of
+  the tool can still arrive; a removal that gets no answer or a 5xx leaves it unsettled too, and
+  the name's next add or remove withdraws it first, a 404 counting as done.
 - A tool with an `approval` is not run when its call arrives. The call waits in
   `AgentSession.approvals` until `decide` sends `tool_approval`; then the tool runs (allowed) or
   the call is answered with an error (declined), since the router wants a `tool_result` either
@@ -240,6 +249,10 @@ let session = try await agents.agent("myagent").sessions.create()
 let turn = try await session.responses.create("Where is order 1042?")
 ```
 
+`sessions.create` returns once the session's socket is open, so the tools in its options are
+answered from the first turn, as in JS. `watch = false` opens it with no socket; `chat` and
+`voice` open one whose socket waits for `start()`.
+
 and the advanced form is a request value, not thirty initialiser parameters:
 
 ```swift
@@ -309,11 +322,27 @@ working. What the router writes is what it renders:
   token in its fragment, in a web authentication sheet. The router updates the step once the
   provider has answered, and the call runs in the same reply. A session made without a
   `returnURL` sends the sign-in back to the dashboard, and the sheet never comes back.
+- A reply's interactive UI (`ai_ui`) reaches the session's socket first, as `ui_delta` and
+  `ui_completed`, which `Conversation` folds onto the turn as `Turn.ui` (`TurnUI`), merging an
+  `openui` patch onto the turn before's card. While OpenUI streams, `TurnUI.content` holds only
+  its finished statements, so a card grows a part at a time. `LiveUI` shows it on the reply while
+  Chat is writing it and its own `ai_ui` isn't complete, by the rules in the `generative-ui`
+  skill: `observe` the conversation, and read each message's custom data through `overlay(_:)`
+  into `AIUIDocument(customData:)`. On a call there is no channel; show the newest `Turn.ui`
+  with an `AIUIHost` of its own.
 - `ai_indicator.update` and `.clear` say what the agent is doing before the answer starts:
   `AITypingIndicatorView`. Read them from `chatClient.eventsController()`; a channel's events
   controller never sees them.
 - `AIComposerView`'s stop button is `session.interrupt()`, which cancels the reply in flight.
   The router does not listen for `ai_indicator.stop`.
+- An incognito session has no channel, and `chat()` throws. `Conversation` folds the socket's
+  `reasoning_delta`, `tool_started`, `tool_updated` and `tool_ran` into `Turn.steps`, and
+  `session.turnMessages` (`TurnMessage`) is the conversation in the channel's shape: one reply
+  per question, its steps as attachment payloads for `AIMessagePart.parts(from:)`, rounds
+  numbered across the reply, the whole thinking in `reasoning`, and a call in `approvals` as
+  `awaiting_approval` for `Session.userID`. The app's message type wraps either source; see
+  `swift_assistant`'s `AgentChat`. Build from the value the `$conversation` sink hands over:
+  `@Published` sends it before the session holds it.
 
 A spoken session has no channel. The demo shows the agent as `AIVoiceGlowView`, whose
 `AIVoiceAgentState` comes from the call and the session together: connecting until

@@ -26,7 +26,6 @@ import (
 	"github.com/redis/rueidis"
 	"github.com/uptrace/bun"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -135,13 +134,12 @@ type reading struct {
 }
 
 func (s *PolicySuite) billed(change ...func(*Settings)) *reading {
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	return s.billedOn(configs, change...)
 }
 
 // billedOn is billed, reading its policies and the shard through configs.
-func (s *PolicySuite) billedOn(configs *appconfig.Store, change ...func(*Settings)) *reading {
+func (s *PolicySuite) billedOn(configs *store.Store, change ...func(*Settings)) *reading {
 	service := s.usage()
 	f := s.front(service)
 	client := f.client(s, service)
@@ -265,7 +263,7 @@ func (s *PolicySuite) TestAnOrganizationWithNoCreditMayNotSpend() {
 			// An account unread for MaxStale is refused as unreadable, which is an ErrNoCredits too,
 			// so a first read slow on a loaded machine would answer for the balance's own refusal.
 			enforcer := s.billed(func(settings *Settings) { settings.MaxStale = time.Minute })
-			enforcer.Join(s.app, s.org, tier)
+			enforcer.Join(s.T().Context(), s.app, s.org, tier)
 
 			spend := s.spendRefused(enforcer.Enforcer, s.app, ErrNoCredits)
 
@@ -276,7 +274,7 @@ func (s *PolicySuite) TestAnOrganizationWithNoCreditMayNotSpend() {
 
 func (s *PolicySuite) TestAGrantLetsItSpend() {
 	enforcer := s.billed()
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.spendRefused(enforcer.Enforcer, s.app, ErrNoCredits)
 
 	s.usage().Credit(s.T(), s.org, 1_000_000)
@@ -287,7 +285,7 @@ func (s *PolicySuite) TestAGrantLetsItSpend() {
 func (s *PolicySuite) TestASuspendedOrganizationIsRefusedOutright() {
 	enforcer := s.billed()
 	s.usage().Credit(s.T(), s.org, 1_000_000)
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 
 	s.usage().Suspend(s.T(), s.org, "chargeback on the card")
@@ -314,9 +312,8 @@ func (s *PolicySuite) TestAnAppLimitIsMeasuredInTheBackground() {
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = db.Close() })
 	reads := &requestReads{}
-	db.DB().AddQueryHook(reads)
-	configs, err := appconfig.New(appconfig.Options{Store: db})
-	s.Require().NoError(err)
+	db.GlobalDB().AddQueryHook(reads)
+	configs := db
 	enforcer := s.newEnforcer(configs, nil)
 	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
 	s.spend(s.app, 1_500_000)
@@ -352,7 +349,7 @@ func (s *PolicySuite) TestTheDailySpendHardLimitRefusesBillableWork() {
 	enforcer := s.billed()
 	s.usage().Credit(s.T(), s.org, 100_000_000)
 	s.usage().SetLimits(s.T(), s.org, spendHardLimit(new(int64(1_000_000)), nil))
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 
 	s.usage().Spend(s.T(), s.org, 1_000_000)
 
@@ -367,7 +364,7 @@ func (s *PolicySuite) TestTheMonthlySpendHardLimitNamesTheMonth() {
 	enforcer := s.billed()
 	s.usage().Credit(s.T(), s.org, 10_000_000_000)
 	s.usage().SetLimits(s.T(), s.org, spendHardLimit(nil, new(int64(2_500_000_000))))
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 
 	s.usage().Spend(s.T(), s.org, 2_500_000_000)
 
@@ -382,7 +379,7 @@ func (s *PolicySuite) TestAHoldCountsAgainstTheSpendHardLimit() {
 	enforcer := s.billed()
 	s.usage().Credit(s.T(), s.org, 100_000_000)
 	s.usage().SetLimits(s.T(), s.org, spendHardLimit(new(int64(1_000_000)), nil))
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 	s.Require().NoError(s.admit(enforcer.Enforcer, s.app).Spend)
 
@@ -403,7 +400,7 @@ func (s *PolicySuite) TestTheSpendHardLimitStartsAgainAtMidnightUTC() {
 	})
 	s.usage().Credit(s.T(), s.org, 100_000_000)
 	s.usage().SetLimits(s.T(), s.org, spendHardLimit(new(int64(1_000_000)), nil))
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.usage().Spend(s.T(), s.org, 1_000_000)
 	s.spendRefused(enforcer.Enforcer, s.app, ErrSystemLimit)
 
@@ -418,7 +415,7 @@ func (s *PolicySuite) TestAnOverrideRaisesTheSpendHardLimit() {
 	enforcer := s.billed()
 	s.usage().Credit(s.T(), s.org, 100_000_000)
 	s.usage().SetLimits(s.T(), s.org, spendHardLimit(new(int64(1_000_000)), nil))
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.usage().Spend(s.T(), s.org, 1_000_000)
 	s.spendRefused(enforcer.Enforcer, s.app, ErrSystemLimit)
 
@@ -449,7 +446,7 @@ func (s *PolicySuite) TestShadowModeAdmitsAndLogs() {
 			s.SetupTest()
 			enforcer := s.billed(func(settings *Settings) { settings.Mode = config.LimitsShadow })
 			arrange(s.org)
-			enforcer.Join(s.app, s.org, openTier)
+			enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 			s.read(enforcer.Enforcer, s.org)
 
 			s.eventually(func() bool {
@@ -466,7 +463,7 @@ func (s *PolicySuite) TestShadowModeAdmitsAndLogs() {
 func (s *PolicySuite) TestOffModeChecksNothing() {
 	enforcer := s.billed(func(settings *Settings) { settings.Mode = config.LimitsOff })
 	s.usage().Suspend(s.T(), s.org, "a test")
-	enforcer.Join(s.app, s.org, closedTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, closedTier)
 
 	s.never(func() bool {
 		admitted, err := enforcer.Admit(s.ctx, ownerOf(s.app))
@@ -480,7 +477,7 @@ func (s *PolicySuite) TestOneCallReadsEveryOrganization() {
 	organizations := make([]string, 150)
 	for i := range organizations {
 		organizations[i] = fmt.Sprintf("%s-%03d", s.org, i)
-		enforcer.Join(fmt.Sprintf("%s-%03d", s.app, i), organizations[i], openTier)
+		enforcer.Join(s.T().Context(), fmt.Sprintf("%s-%03d", s.app, i), organizations[i], openTier)
 	}
 	s.eventually(func() bool {
 		for _, organization := range organizations {
@@ -508,7 +505,7 @@ func (s *PolicySuite) TestOneCallReadsEveryOrganization() {
 func (s *PolicySuite) TestAnOldAccountAnswersAtOnce() {
 	enforcer := s.billed()
 	s.usage().Credit(s.T(), s.org, 1_000_000)
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 	// A service that never answers: an admission waiting on it would wait readTimeout.
 	enforcer.front.stalled.Store(true)
@@ -550,7 +547,7 @@ func (s *PolicySuite) TestJoinWarmsTheDecisionAndTheAccount() {
 	s.save(store.ScopeApp, s.app, store.PolicyDocument{DataPolicy: store.PolicyDataPolicy{AllowTraining: &no}})
 	enforcer := s.billed()
 
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.eventually(func() bool {
 		enforcer.money.mu.Lock()
 		defer enforcer.money.mu.Unlock()
@@ -559,7 +556,7 @@ func (s *PolicySuite) TestJoinWarmsTheDecisionAndTheAccount() {
 		return decided && acct != nil && !acct.read.IsZero()
 	}, 5*time.Second, 5*time.Millisecond, "both are read without a request asking")
 
-	locked, err := s.store.DB().BeginTx(s.ctx, nil)
+	locked, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer locked.Rollback() //nolint:errcheck // nothing was written
 	_, err = locked.ExecContext(s.ctx, "LOCK TABLE policies IN ACCESS EXCLUSIVE MODE")
@@ -578,7 +575,7 @@ func (s *PolicySuite) TestJoinWarmsTheDecisionAndTheAccount() {
 func (s *PolicySuite) TestSpendRecordedHereCountsAtOnce() {
 	enforcer := s.billed()
 	s.usage().Credit(s.T(), s.org, 1_000_000)
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 	s.Require().NoError(s.admit(enforcer.Enforcer, s.app).Spend)
 
@@ -592,7 +589,7 @@ func (s *PolicySuite) TestAHoldIsKeptUntilAReadAfterItsAck() {
 	// outlast on a loaded machine; it is let go here by the ack alone.
 	enforcer := s.billed(func(settings *Settings) { settings.PendingTTL = time.Hour })
 	s.usage().Credit(s.T(), s.org, 3_000_000)
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 	var over atomic.Int64
 	sampling, stop := make(chan struct{}), make(chan struct{})
@@ -636,7 +633,7 @@ func (s *PolicySuite) TestSpentTwiceUnderOneUsageIDHoldsOnce() {
 
 func (s *PolicySuite) TestAnUnackedHoldExpires() {
 	enforcer := s.billed()
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 
 	enforcer.Settle(s.owner(), uuid.Must(uuid.NewV7()), 1_250_000)
 
@@ -656,7 +653,7 @@ func (s *PolicySuite) TestAHoldOutlivesAnOutageOfTheUsageService() {
 			s.SetupTest()
 			enforcer := s.billed(func(settings *Settings) { settings.PendingTTL = ttl })
 			s.usage().Credit(s.T(), s.org, 1_000_000)
-			enforcer.Join(s.app, s.org, openTier)
+			enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 			s.read(enforcer.Enforcer, s.org)
 			usageID := uuid.Must(uuid.NewV7())
 			enforcer.Settle(s.owner(), usageID, 1_000_000)
@@ -703,18 +700,18 @@ func (s *PolicySuite) TestAHoldOutlivesAnOutageOfTheUsageService() {
 func (s *PolicySuite) TestAnUnackedHoldGoesOnceTheShardSaysItShipped() {
 	enforcer := s.billed(func(settings *Settings) { settings.PendingTTL = time.Hour })
 	s.usage().Credit(s.T(), s.org, 1_000_000)
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 	usageID := uuid.Must(uuid.NewV7())
 	enforcer.Settle(s.owner(), usageID, 1_000_000)
 	s.Require().ErrorIs(s.admit(enforcer.Enforcer, s.app).Spend, ErrNoCredits)
 
 	// Another router's sweeper ships the row, so no ack of it reaches this one.
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &store.Request{
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &store.Request{
 		UsageID: usageID, Modality: "llm", CustomerID: s.app, Provider: "openai", Model: "gpt-5.6-luna",
 		StartedAt: time.Now().UTC(), CostMicros: 1_000_000, Success: true, ToShip: true,
 	}))
-	s.Require().NoError(s.store.RecordShipment(s.ctx, []uuid.UUID{usageID}, nil))
+	s.Require().NoError(s.store.Requests.Ship(s.ctx, []uuid.UUID{usageID}, nil))
 
 	s.eventually(func() bool { return balanceHeld(enforcer.Enforcer, s.org) == 0 }, 5*time.Second, 10*time.Millisecond,
 		"let go once a standing asked for after the shard said so lands, long before its timer")
@@ -724,11 +721,10 @@ func (s *PolicySuite) TestAnUnackedHoldGoesOnceTheShardSaysItShipped() {
 func (s *PolicySuite) TestAShardThatDoesNotAnswerKeepsUnackedHolds() {
 	db, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
 	s.Require().NoError(err)
-	configs, err := appconfig.New(appconfig.Options{Store: db})
-	s.Require().NoError(err)
+	configs := db
 	enforcer := s.billedOn(configs)
 	s.usage().Credit(s.T(), s.org, 1_000_000)
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 	enforcer.Settle(s.owner(), uuid.Must(uuid.NewV7()), 400_000)
 
@@ -745,7 +741,7 @@ func (s *PolicySuite) TestBalanceHoldsGoOnTheStandingsWhileLimitsCannotBeRead() 
 	enforcer := s.billed()
 	s.usage().Credit(s.T(), s.org, 1_000_000)
 	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 10_000_000})
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 	s.admit(enforcer.Enforcer, s.app)
 	enforcer.front.windowsDown.Store(true)
@@ -773,8 +769,7 @@ func (s *PolicySuite) counted() (*Enforcer, *usagetest.Service, rueidis.Client) 
 		ManageKey: "manage-" + uuid.NewString(), Logger: slog.New(slog.DiscardHandler),
 	})
 	counters := usagetest.Redis(s.T())
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	enforcer := s.newEnforcer(configs, nil, func(settings *Settings) {
 		settings.Usage, settings.Counters, settings.Fresh = service.Client, counters, time.Hour
 		// The first admission waits for its read however slow the machine, so it is answered on
@@ -853,8 +848,7 @@ func (s *PolicySuite) TestCountersThatFailAreReadThroughTheService() {
 		ManageKey: "manage-" + uuid.NewString(), Logger: slog.New(slog.DiscardHandler),
 	})
 	redis, counters := s.cuttableRedis()
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	front := s.front(service)
 	windows := &front.windows
 	client := front.client(s, service)
@@ -864,7 +858,7 @@ func (s *PolicySuite) TestCountersThatFailAreReadThroughTheService() {
 	})
 	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
 	service.Credit(s.T(), s.org, 10_000_000)
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.Require().NoError(s.admit(enforcer, s.app).Spend, "read from the counters")
 	before := windows.Load()
 
@@ -884,7 +878,7 @@ func (s *PolicySuite) TestALimitIsReadFromTheCounters() {
 	s.limit(store.Limit{Subject: usage.SubjectAPIKey, Level: store.LevelAPIKey, OrganizationID: s.org, AppID: s.app,
 		APIKey: "key-a", LimitMicros: 1_000_000})
 	service.Credit(s.T(), s.org, 10_000_000)
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.NoError(s.admit(enforcer, s.app).Spend)
 
 	service.Spend(s.T(), s.org, 1_000_000, func(event *usage.Event) { event.AppID, event.APIKey = s.app, "key-a" })
@@ -905,7 +899,7 @@ func (s *PolicySuite) TestAMissingCounterIsReadThroughTheService() {
 	service.Spend(s.T(), s.org, 1_000_000, func(event *usage.Event) { event.AppID = s.app })
 	key := usage.SubjectRef{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app}.Key(usage.CounterPrefix)
 	s.Require().NoError(counters.Do(s.ctx, counters.B().Del().Key(key).Build()).Error(), "as a Redis that lost it")
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 
 	s.spendRefused(enforcer, s.app, ErrBudgetSpent)
 	exists, err := counters.Do(s.ctx, counters.B().Exists().Key(key).Build()).AsInt64()
@@ -917,7 +911,7 @@ func (s *PolicySuite) TestAMirroredAckLetsTheLimitsHoldGoOnTheNextCounterRead() 
 	enforcer, service, _ := s.counted()
 	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 5_000_000})
 	service.Credit(s.T(), s.org, 10_000_000)
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.admit(enforcer, s.app)
 	usageID := uuid.Must(uuid.NewV7())
 	enforcer.Settle(s.owner(), usageID, 400_000)
@@ -935,7 +929,7 @@ func (s *PolicySuite) TestWithNoCountersALimitReadsTheUsageService() {
 	enforcer := s.billed()
 	s.usage().Credit(s.T(), s.org, 10_000_000)
 	s.limit(store.Limit{Subject: usage.SubjectAPIKey, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.usage().Spend(s.T(), s.org, 1_000_000, func(event *usage.Event) { event.AppID, event.APIKey = s.app, "key-a" })
 
 	var spend error
@@ -962,7 +956,7 @@ func (s *PolicySuite) TestAHoldMadeBeforeMidnightCountsAgainstTheBalanceButNotTh
 	s.usage().Credit(s.T(), s.org, 10_000_000)
 	s.usage().SetLimits(s.T(), s.org, spendHardLimit(new(int64(1_000_000)), nil))
 	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 5_000_000})
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 	enforcer.front.down.Store(true)
 	enforcer.Settle(s.owner(), uuid.Must(uuid.NewV7()), 1_000_000)
@@ -986,7 +980,7 @@ func (s *PolicySuite) TestAHoldMadeBeforeMidnightCountsAgainstTheBalanceButNotTh
 
 func (s *PolicySuite) TestAnAccountKeepsAtMostSoManyHoldsApart() {
 	enforcer := s.billed()
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 	enforcer.front.down.Store(true)
 	ids := s.fold(enforcer)
@@ -1006,7 +1000,7 @@ func (s *PolicySuite) TestAFoldedHoldKeepsItsAck() {
 			s.SetupTest()
 			enforcer := s.billed(func(settings *Settings) { settings.PendingTTL = time.Hour })
 			s.usage().Credit(s.T(), s.org, 1_000_000_000)
-			enforcer.Join(s.app, s.org, openTier)
+			enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 			s.read(enforcer.Enforcer, s.org)
 			enforcer.front.down.Store(true)
 			var ids []uuid.UUID
@@ -1030,10 +1024,9 @@ func (s *PolicySuite) TestAFoldedHoldKeepsItsAck() {
 }
 
 func (s *PolicySuite) TestAPolicyReadThatFailsAdmitsOnceAndIsNotKept() {
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	enforcer := s.newEnforcer(configs, nil)
-	locked, err := s.store.DB().BeginTx(s.ctx, nil)
+	locked, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer locked.Rollback() //nolint:errcheck // nothing was written
 	_, err = locked.ExecContext(s.ctx, "LOCK TABLE policies IN ACCESS EXCLUSIVE MODE")
@@ -1090,7 +1083,7 @@ func (s *PolicySuite) ack(enforcer *reading, ids []uuid.UUID) {
 
 // lockLimits holds the limits table from another session until the test ends.
 func (s *PolicySuite) lockLimits() {
-	locked, err := s.store.DB().BeginTx(s.ctx, nil)
+	locked, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = locked.Rollback() })
 	_, err = locked.ExecContext(s.ctx, "LOCK TABLE limits IN ACCESS EXCLUSIVE MODE")
@@ -1104,7 +1097,7 @@ func (s *PolicySuite) TestPastMaxStaleLimitsThatCannotBeReadFollowTheTier() {
 			enforcer := s.billed()
 			s.usage().Credit(s.T(), s.org, 1_000_000)
 			s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
-			enforcer.Join(s.app, s.org, tier)
+			enforcer.Join(s.T().Context(), s.app, s.org, tier)
 			s.read(enforcer.Enforcer, s.org)
 			s.Require().NoError(s.admit(enforcer.Enforcer, s.app).Spend)
 			s.lockLimits()
@@ -1143,7 +1136,7 @@ func (s *PolicySuite) TestPastMaxStaleLimitsOfAnAccountWhoseWorkNeedsNoSubjectFo
 	enforcer := s.billed()
 	s.usage().Credit(s.T(), s.org, 1_000_000)
 	s.limit(store.Limit{Subject: usage.SubjectUser, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
-	enforcer.Join(s.app, s.org, closedTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, closedTier)
 	s.read(enforcer.Enforcer, s.org)
 	s.Require().NoError(s.admit(enforcer.Enforcer, s.app).Spend, "work with no user is under no user's limit")
 	s.lockLimits()
@@ -1157,8 +1150,7 @@ func (s *PolicySuite) TestPastMaxStaleLimitsOfAnAccountWhoseWorkNeedsNoSubjectFo
 func (s *PolicySuite) TestAFreshRoutersFirstAdmissionReadsTheLimitFirst() {
 	s.limit(store.Limit{Subject: usage.SubjectUser, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 500_000})
 	s.spendAs(store.Request{CustomerID: s.app, UserID: "u1", CostMicros: 600_000})
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	enforcer := s.newEnforcer(configs, nil, func(settings *Settings) { settings.Fresh, settings.SumEvery = time.Hour, time.Hour })
 
 	admitted, err := enforcer.Admit(s.ctx, routing.Owner{CustomerID: s.app, Attribution: routing.Attribution{UserID: "u1"}})
@@ -1170,8 +1162,7 @@ func (s *PolicySuite) TestAFreshRoutersFirstAdmissionReadsTheLimitFirst() {
 func (s *PolicySuite) TestASubjectSeenAgainAfterIdleIsReadBeforeItsAdmission() {
 	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
 	s.spend(s.app, 400_000)
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	enforcer := s.newEnforcer(configs, nil, idle, func(settings *Settings) { settings.SumEvery = time.Hour })
 	s.Require().NoError(s.admit(enforcer, s.app).Spend)
 	s.eventually(func() bool {
@@ -1190,7 +1181,7 @@ func (s *PolicySuite) TestLimitsNeverReadAdmitWhateverTheTier() {
 	s.usage().Credit(s.T(), s.org, 1_000_000)
 	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
 	s.lockLimits()
-	enforcer.Join(s.app, s.org, closedTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, closedTier)
 	s.eventually(func() bool {
 		enforcer.money.mu.Lock()
 		defer enforcer.money.mu.Unlock()
@@ -1218,7 +1209,7 @@ func (s *PolicySuite) TestASubjectsFirstReadThatDoesNotLandFollowsTheTier() {
 			s.usage().Credit(s.T(), s.org, 1_000_000)
 			s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
 			enforcer.front.windowsDown.Store(true)
-			enforcer.Join(s.app, s.org, tier)
+			enforcer.Join(s.T().Context(), s.app, s.org, tier)
 			s.eventually(func() bool {
 				enforcer.money.mu.Lock()
 				defer enforcer.money.mu.Unlock()
@@ -1260,18 +1251,16 @@ func (r *limitsReads) AfterQuery(_ context.Context, event *bun.QueryEvent) {
 }
 
 func (s *PolicySuite) TestAColdStartReadsItsFirstAccountsInBatches() {
-	db, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
+	// Policies cached in Redis, as a router has them, so the admissions reach their first read
+	// of money together rather than as each read of its policies lands.
+	db, err := redisready.Retry(os.Getenv("ROUTER_REDIS_ADDR"), func() (*store.Store, error) {
+		return store.OpenShards(store.Options{DSN: os.Getenv("ROUTER_POSTGRES_DSN"), Redis: store.Redis{Address: os.Getenv("ROUTER_REDIS_ADDR")}})
+	})
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = db.Close() })
 	reads := &limitsReads{}
-	db.DB().AddQueryHook(reads)
-	// Policies cached in Redis, as a router has them, so the admissions reach their first read
-	// of money together rather than as each read of its policies lands.
-	configs, err := redisready.Retry(os.Getenv("ROUTER_REDIS_ADDR"), func() (*appconfig.Store, error) {
-		return appconfig.New(appconfig.Options{Store: db, Address: os.Getenv("ROUTER_REDIS_ADDR")})
-	})
-	s.Require().NoError(err)
-	s.T().Cleanup(configs.Close)
+	db.GlobalDB().AddQueryHook(reads)
+	configs := db
 	// The loops read nothing on their own, and an admission waits for its read as long as the
 	// read may take, however slow a loaded machine makes the batch, with the balance not read
 	// yet refusing nothing. Spend is read from the usage service, whose windows a first read asks
@@ -1286,13 +1275,13 @@ func (s *PolicySuite) TestAColdStartReadsItsFirstAccountsInBatches() {
 	for i := range apps {
 		apps[i] = fmt.Sprintf("%s-%02d", s.app, i)
 		organization := fmt.Sprintf("%s-%02d", s.org, i)
-		s.Require().NoError(s.store.JoinOrganization(s.ctx, apps[i], organization))
+		s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: apps[i], OrganizationID: organization}))
 		s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: organization, AppID: apps[i], LimitMicros: 1})
 		s.usage().Credit(s.T(), organization, 1_000_000)
 		s.usage().Spend(s.T(), organization, 1, func(event *usage.Event) { event.AppID = apps[i] })
 		_, _, _, err := enforcer.policies(s.ctx, apps[i])
 		s.Require().NoError(err)
-		_, err = configs.HasUserPolicies(s.ctx, apps[i])
+		_, err = configs.Policies.HasUsers(s.ctx, apps[i])
 		s.Require().NoError(err)
 	}
 	before, windowsBefore := reads.reads.Load(), billed.front.windows.Load()
@@ -1315,8 +1304,7 @@ func (s *PolicySuite) TestAColdStartReadsItsFirstAccountsInBatches() {
 }
 
 func (s *PolicySuite) TestAChangedLimitIsHeldToTheLastSpendReadAtOnce() {
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	enforcer := s.newEnforcer(configs, nil, func(settings *Settings) { settings.SumEvery = time.Hour })
 	limit := s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 2_000_000})
 	s.spend(s.app, 1_500_000)
@@ -1331,7 +1319,7 @@ func (s *PolicySuite) TestAChangedLimitIsHeldToTheLastSpendReadAtOnce() {
 	}, 5*time.Second, 10*time.Millisecond, "summed once, when the subject was first seen")
 
 	lower := int64(1_000_000)
-	_, err = s.store.UpdateLimit(s.ctx, s.org, limit.ID, store.LimitChange{LimitMicros: &lower, UpdatedBy: "test"},
+	_, err := s.store.Limits.Update(s.ctx, s.org, limit.ID, store.LimitChange{LimitMicros: &lower, UpdatedBy: "test"},
 		store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI})
 	s.Require().NoError(err)
 
@@ -1353,7 +1341,7 @@ func (s *PolicySuite) TestAnAppInNoOrganizationLetsGoOfItsHoldOnceWritten() {
 
 func (s *PolicySuite) TestAnOrganizationsHoldWaitsForTheUsageServiceNotTheShard() {
 	enforcer := s.billed()
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	usageID := uuid.Must(uuid.NewV7())
 	enforcer.Settle(s.owner(), usageID, 1_000_000)
 
@@ -1366,7 +1354,7 @@ func (s *PolicySuite) TestAnOrganizationsHoldWaitsForTheUsageServiceNotTheShard(
 
 func (s *PolicySuite) TestShadowCountsEveryRefusalAndSaysWhatItRead() {
 	enforcer := s.billed(func(settings *Settings) { settings.Mode = config.LimitsShadow })
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 	before := testutil.ToFloat64(wouldRefuse.WithLabelValues(reasonNoCredit))
 
@@ -1386,7 +1374,7 @@ func (s *PolicySuite) TestShadowNeverSaysASuspendedOrganizationWasRefused() {
 	enforcer := s.billed(func(settings *Settings) { settings.Mode = config.LimitsShadow })
 	s.usage().Credit(s.T(), s.org, 1_000_000)
 	s.usage().Suspend(s.T(), s.org, "a test")
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 
 	s.NoError(s.admit(enforcer.Enforcer, s.app).Spend)
@@ -1421,7 +1409,7 @@ func (s *PolicySuite) TestPastMaxStaleAClosedTierIsRefusedBillableWork() {
 			s.SetupTest()
 			enforcer := s.billed()
 			s.usage().Credit(s.T(), s.org, 1_000_000)
-			enforcer.Join(s.app, s.org, tier)
+			enforcer.Join(s.T().Context(), s.app, s.org, tier)
 			s.read(enforcer.Enforcer, s.org)
 			s.Require().NoError(s.admit(enforcer.Enforcer, s.app).Spend)
 
@@ -1440,13 +1428,13 @@ func (s *PolicySuite) TestPastMaxStaleAClosedTierIsRefusedBillableWork() {
 
 func (s *PolicySuite) TestAnAccountNeverReadFollowsItsTiersFailMode() {
 	learned := s.billed()
-	learned.Join(s.app, s.org, openTier)
+	learned.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(learned.Enforcer, s.org)
 	other := s.app + "-other"
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, other, s.org+"-other"))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: other, OrganizationID: s.org + "-other"}))
 	learned.front.down.Store(true)
 
-	learned.Join(other, s.org+"-other", openTier)
+	learned.Join(s.T().Context(), other, s.org+"-other", openTier)
 	s.never(func() bool { return s.admit(learned.Enforcer, other).Spend != nil }, 500*time.Millisecond, 10*time.Millisecond,
 		"a tier whose row was read open admits an organization not read yet")
 
@@ -1454,7 +1442,7 @@ func (s *PolicySuite) TestAnAccountNeverReadFollowsItsTiersFailMode() {
 	// that however slow the machine.
 	unknown := s.billed(func(settings *Settings) { settings.MaxStale = time.Second })
 	unknown.front.down.Store(true)
-	unknown.Join(s.app, s.org, openTier)
+	unknown.Join(s.T().Context(), s.app, s.org, openTier)
 	s.NoError(s.admit(unknown.Enforcer, s.app).Spend, "admitted until the first read is due")
 	spend := s.spendRefused(unknown.Enforcer, s.app, ErrNoCredits)
 	s.ErrorContains(spend, "could not be read", "past MaxStale with no row ever read, the default fails closed")
@@ -1506,8 +1494,7 @@ func (s *PolicySuite) TestAnAppInNoOrganizationWithNoLimitIsNeverRefused() {
 }
 
 func (s *PolicySuite) TestAnIdleDecisionIsDropped() {
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	enforcer := s.newEnforcer(configs, nil, idle)
 	s.admit(enforcer, s.app)
 	_, kept := enforcer.decided(s.app)

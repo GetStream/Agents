@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -606,6 +607,23 @@ func TestAPIKey(t *testing.T) {
 		_, err := authenticator.Authenticate(context.Background(),
 			request("vak_live_ffffffffffffffff00000000", signed(t, secret, time.Hour)))
 		require.ErrorIs(t, err, ErrUnauthenticated)
+	})
+
+	t.Run("passes on a lookup that could not reach its database", func(t *testing.T) {
+		unreachable, err := New(APIKey, func(ctx context.Context, _ string) (App, error) {
+			conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", "127.0.0.1:1")
+			if err == nil {
+				_ = conn.Close()
+			}
+			return App{}, err
+		})
+		require.NoError(t, err)
+
+		_, err = unreachable.Authenticate(context.Background(), request(key, signed(t, secret, time.Hour)))
+
+		require.Error(t, err)
+		require.NotErrorIs(t, err, ErrUnauthenticated, "an outage is not a wrong key, and the caller is not told it is")
+		require.ErrorContains(t, err, "127.0.0.1:1")
 	})
 
 	t.Run("ignores the headers a proxy would set", func(t *testing.T) {

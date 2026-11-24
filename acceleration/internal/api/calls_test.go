@@ -3,8 +3,12 @@
 package api
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
 	"net/http"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,7 +17,6 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -23,10 +26,18 @@ type CallsSuite struct {
 	// base is when the calls in a test happened. It is a fixed hour, and the app is new in
 	// every test, so what is listed is only what the test itself started.
 	base time.Time
+	// logged is what the router logged, for the errors a read leaves.
+	logged *lockedLog
 }
 
 func TestCallsSuite(t *testing.T) {
 	runSuite(t, new(CallsSuite))
+}
+
+func (s *CallsSuite) SetupSuite() {
+	s.logged = &lockedLog{}
+	s.logs = s.logged
+	s.RouterSuite.SetupSuite()
 }
 
 // SetupTest gives every test an app of its own, because the running calls are everything
@@ -248,7 +259,7 @@ func (s *CallsSuite) TestACallAnotherAppHoldsCannotBeJoined() {
 func (s *CallsSuite) TestTheRunningCallsAreTheOnesThatHaveNotEnded() {
 	running := s.started(store.Call{StartedAt: s.base})
 	finished := s.started(store.Call{StartedAt: s.base.Add(-time.Hour)})
-	s.Require().NoError(s.store.FinishCall(context.Background(), finished.ID, s.base))
+	s.Require().NoError(s.store.Calls.Finish(context.Background(), finished.CustomerID, finished.ID, s.base))
 
 	var listed []Call
 	s.Require().Equal(http.StatusOK,
@@ -268,7 +279,7 @@ func (s *CallsSuite) TestWhatACallDecidedIsFoundByTheRowRecordingIt() {
 	// it joined. Reading one by the other is what puts the decision log on the page.
 	// Decisions are kept for an hour, so this call is a recent one.
 	call := s.started(store.Call{StartedAt: time.Now().Add(-time.Minute)})
-	s.Require().NoError(s.live.RecordCallEvents(context.Background(), []live.CallEvent{{
+	s.Require().NoError(s.store.CallEvents.InsertMany(context.Background(), []store.CallEvent{{
 		CustomerID: s.customerID(), CallID: call.CallID, AgentID: call.AgentID,
 		At: time.Now(), Kind: "answer", Reason: "a complete thought",
 		Said: "how is the weather",
@@ -282,16 +293,37 @@ func (s *CallsSuite) TestWhatACallDecidedIsFoundByTheRowRecordingIt() {
 	s.Equal("how is the weather", value(decided[0].Said))
 }
 
+func (s *CallsSuite) TestATextSessionsDecisionsAreAnEmptyListNotAnError() {
+	// A session held in writing has no Stream call, so no decisions are kept for it; the
+	// store refuses a read without a call id, which used to answer 500.
+	call := s.heldCall(store.Call{ID: s.utils.uuid(), CustomerID: s.customerID(),
+		AgentID: "agent-" + s.utils.uuid(), StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)}, "", "")
+	s.Require().Empty(call.CallID, "a text session's call names no Stream call")
+
+	response := s.serverClient.raw(http.MethodGet, "/v1/agents/calls/"+call.ID+"/events", nil)
+	s.Require().Equal(http.StatusOK, response.StatusCode)
+	// A 500 for this request would log its access line at ERROR; the line names the request id.
+	requestID := response.Header.Get(RequestIDHeader)
+	s.Require().NotEmpty(requestID)
+	served := func() string { return lineWith(s.logged, `msg="served a request"`, " request_id="+requestID) }
+	s.Require().Eventually(func() bool { return served() != "" }, 5*time.Second, 20*time.Millisecond, s.logged.String())
+	s.Contains(served(), "level=INFO", "the request was answered 200, so it is not an ERROR")
+
+	var decided []CallEvent
+	s.Require().NoError(json.NewDecoder(response.Body).Decode(&decided))
+	s.Empty(decided)
+}
+
 func (s *CallsSuite) TestAFinishedNativeCallNamesTheConversationAndSubagentModels() {
 	call := s.started(store.Call{STS: "stub/stub-sts", Subagent: "stub/stub-llm"})
 	for modality, model := range map[string]string{"sts": "stub-sts", "llm": "stub-llm"} {
-		s.Require().NoError(s.store.RecordRequest(context.Background(), &store.Request{
+		s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
 			CustomerID: s.customerID(), AgentID: call.AgentID,
 			Modality: modality, Provider: "stub", Model: model,
 			StartedAt: s.base.Add(time.Second), Success: true,
 		}))
 	}
-	s.Require().NoError(s.store.FinishCall(context.Background(), call.ID, s.base.Add(time.Minute)))
+	s.Require().NoError(s.store.Calls.Finish(context.Background(), call.CustomerID, call.ID, s.base.Add(time.Minute)))
 
 	var rendered Call
 	s.Require().Equal(http.StatusOK,
@@ -303,21 +335,22 @@ func (s *CallsSuite) TestAFinishedNativeCallNamesTheConversationAndSubagentModel
 	s.Nil(rendered.TtsUsed)
 }
 
-func (s *CallsSuite) TestAFinishedCallReportsWhatItSpentAndWhoItSpokeTo() {
-	call := s.started(store.Call{UserID: "ada"})
-	s.Require().NoError(s.store.RecordRequest(context.Background(), &store.Request{
+func (s *CallsSuite) TestAFinishedCallReportsWhatItSpentAndTheSessionItWasPartOf() {
+	call := s.heldCall(store.Call{ID: s.utils.uuid(), CustomerID: s.customerID(), CallID: s.utils.callID(),
+		AgentID: "agent-" + s.utils.uuid(), StartedAt: s.base}, "", "")
+	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
 		CustomerID: s.customerID(), AgentID: call.AgentID,
 		Modality: "llm", Provider: "stub", Model: "stub-llm",
 		StartedAt:   s.base.Add(time.Second),
 		InputTokens: 900, CachedInputTokens: 400, OutputTokens: 150,
 		CostMicros: 2500, Success: true,
 	}))
-	s.Require().NoError(s.store.FinishCall(context.Background(), call.ID, s.base.Add(time.Minute)))
+	s.Require().NoError(s.store.Calls.Finish(context.Background(), call.CustomerID, call.ID, s.base.Add(time.Minute)))
 
 	var rendered Call
 	s.Require().Equal(http.StatusOK,
 		s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+call.ID, nil, &rendered))
-	s.Equal("ada", value(rendered.UserId))
+	s.Equal(call.SessionID, value(rendered.SessionId))
 	s.Require().NotNil(rendered.Usage)
 	s.Equal(int64(900), rendered.Usage.InputTokens)
 	s.Equal(int64(400), rendered.Usage.CachedInputTokens)
@@ -328,7 +361,7 @@ func (s *CallsSuite) TestAFinishedCallReportsWhatItSpentAndWhoItSpokeTo() {
 
 func (s *CallsSuite) TestACallStillRunningIsNotToldWhatItHasSpentSoFar() {
 	call := s.started(store.Call{})
-	s.Require().NoError(s.store.RecordRequest(context.Background(), &store.Request{
+	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
 		CustomerID: s.customerID(), AgentID: call.AgentID,
 		Modality: "llm", Provider: "stub", Model: "stub-llm",
 		StartedAt: s.base.Add(time.Second), InputTokens: 900, Success: true,
@@ -341,7 +374,7 @@ func (s *CallsSuite) TestACallStillRunningIsNotToldWhatItHasSpentSoFar() {
 }
 
 func (s *CallsSuite) TestACallsTokensAreReadWhileItRunsByModelAndByWhatThePromptsCarried() {
-	call := s.started(store.Call{})
+	call := s.inSession("", store.Call{})
 	for _, request := range []store.Request{
 		{Modality: "llm", Provider: "stub", Model: "stub-llm", InputTokens: 900, CachedInputTokens: 400,
 			OutputTokens: 150, InputParts: store.InputParts{InstructionTokens: 300, MessageTokens: 100, ToolDefinitionTokens: 500}},
@@ -353,12 +386,12 @@ func (s *CallsSuite) TestACallsTokensAreReadWhileItRunsByModelAndByWhatThePrompt
 	} {
 		request.CustomerID, request.AgentID = s.customerID(), call.AgentID
 		request.StartedAt, request.Success = s.base.Add(time.Second), true
-		s.Require().NoError(s.store.RecordRequest(context.Background(), &request))
+		s.Require().NoError(s.store.Requests.Insert(context.Background(), &request))
 	}
 
 	var spent CallTokens
 	s.Require().Equal(http.StatusOK,
-		s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+call.ID+"/tokens", nil, &spent))
+		s.serverClient.do(http.MethodGet, "/v1/agents/sessions/"+call.SessionID+"/tokens", nil, &spent))
 	s.Equal(int64(1050), spent.InputTokens)
 	s.Equal(int64(400), spent.CachedInputTokens)
 	s.Equal(int64(165), spent.OutputTokens)
@@ -370,7 +403,7 @@ func (s *CallsSuite) TestACallsTokensAreReadWhileItRunsByModelAndByWhatThePrompt
 }
 
 func (s *CallsSuite) TestACallsCostIsSplitByWhereItCameFrom() {
-	call := s.started(store.Call{})
+	call := s.inSession("", store.Call{})
 	for _, request := range []store.Request{
 		{Modality: "llm", Provider: "stub", Model: "stub-llm", InputTokens: 1000, OutputTokens: 100,
 			CostMicros: 1500, OutputCostMicros: 500,
@@ -380,12 +413,12 @@ func (s *CallsSuite) TestACallsCostIsSplitByWhereItCameFrom() {
 	} {
 		request.CustomerID, request.AgentID = s.customerID(), call.AgentID
 		request.StartedAt, request.Success = s.base.Add(time.Second), true
-		s.Require().NoError(s.store.RecordRequest(context.Background(), &request))
+		s.Require().NoError(s.store.Requests.Insert(context.Background(), &request))
 	}
 
 	var spent CallTokens
 	s.Require().Equal(http.StatusOK,
-		s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+call.ID+"/tokens", nil, &spent))
+		s.serverClient.do(http.MethodGet, "/v1/agents/sessions/"+call.SessionID+"/tokens", nil, &spent))
 	s.Equal(int64(2800), spent.CostMicros)
 	s.Equal([]CostSource{
 		{Source: "input", CostMicros: 1000},
@@ -397,6 +430,28 @@ func (s *CallsSuite) TestACallsCostIsSplitByWhereItCameFrom() {
 	}, spent.CostSources, "the prompt recorded without a split is input")
 }
 
+func (s *CallsSuite) TestTokensAreStillReadUnderTheCallsPathTheyMovedFrom() {
+	call := s.inSession("", store.Call{})
+	request := store.Request{Modality: "llm", Provider: "stub", Model: "stub-llm", InputTokens: 700, OutputTokens: 30,
+		CustomerID: s.customerID(), AgentID: call.AgentID, StartedAt: s.base.Add(time.Second), Success: true}
+	s.Require().NoError(s.store.Requests.Insert(context.Background(), &request))
+
+	var moved, kept CallTokens
+	s.Require().Equal(http.StatusOK,
+		s.serverClient.do(http.MethodGet, "/v1/agents/sessions/"+call.SessionID+"/tokens", nil, &moved))
+	s.Require().Equal(http.StatusOK,
+		s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+call.ID+"/tokens", nil, &kept))
+	s.Equal(int64(700), moved.InputTokens)
+	s.Equal(moved, kept)
+
+	status, body := s.serverClient.call(http.MethodGet, "/v1/agents/sessions/nobody/tokens", nil)
+	s.Equal(http.StatusNotFound, status)
+	s.Contains(string(body), `"code":"`+codeSessionNotFound+`"`)
+	status, body = s.serverClient.call(http.MethodGet, "/v1/agents/calls/nobody/tokens", nil)
+	s.Equal(http.StatusNotFound, status)
+	s.Contains(string(body), `"code":"`+codeCallNotFound+`"`, "the old path answers as it did")
+}
+
 func (s *CallsSuite) TestAConversationRecordsWhatItsPromptsWereMadeOf() {
 	request := textSession(nil)
 	request.Llm, request.ConfigId = pointerTo("counted/counted-model"), s.data.instructedAgent("Answer about "+s.utils.uuid())
@@ -406,7 +461,7 @@ func (s *CallsSuite) TestAConversationRecordsWhatItsPromptsWereMadeOf() {
 
 	var spent CallTokens
 	s.Require().Eventually(func() bool {
-		return s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+opened.Id+"/tokens", nil, &spent) == http.StatusOK &&
+		return s.serverClient.do(http.MethodGet, "/v1/agents/sessions/"+opened.Id+"/tokens", nil, &spent) == http.StatusOK &&
 			spent.InputTokens >= 1000
 	}, settleFor, 20*time.Millisecond, "the turn's request is recorded")
 	parts := spent.InputParts
@@ -434,12 +489,8 @@ func (s *CallsSuite) TestNobodyIsListedACallWithoutCredentials() {
 func (s *CallsSuite) TestTheTranscriptOfAConversationBoundCallIsReadFromTheConversation() {
 	// A voice call bound to a conversation writes into the conversation's channel, not
 	// the agent's own, so reading the agent's channel would find nothing it said.
-	call := s.started(store.Call{})
 	conversation := "support-" + s.utils.uuid()
-	s.Require().NoError(s.store.SaveSession(context.Background(), &store.AgentSession{
-		ID: call.ID, CustomerID: s.customerID(), AgentID: call.AgentID,
-		ConversationID: "agent:" + conversation, CallID: call.CallID,
-	}))
+	call := s.inSession("agent:"+conversation, store.Call{})
 	s.inChannel(conversation, s.customerID(), call.StartedAt.Add(time.Minute), "said in the conversation")
 	s.inChannel(call.AgentID, s.customerID(), call.StartedAt.Add(time.Minute), "not where this call wrote")
 
@@ -466,7 +517,8 @@ func (s *CallsSuite) TestACallWithoutASessionRowReadsItsAgentChannel() {
 
 func (s *CallsSuite) TestACallWhoseSessionRowIsGoneReadsItsSessionsChannel() {
 	// A deleted session leaves its conversation in Chat and its call row behind. A new
-	// conversation is named after its session, so that is where the call wrote.
+	// conversation is named after its session, whose id a call from before calls had ids of
+	// their own still has, so that is where the call wrote.
 	call := s.started(store.Call{})
 	s.inChannel(call.ID, s.customerID(), call.StartedAt.Add(time.Minute), "said on the deleted session")
 	s.inChannel(call.AgentID, s.customerID(), call.StartedAt.Add(time.Minute), "said on another call of the agent")
@@ -514,8 +566,8 @@ func (s *CallsSuite) TestADeletedSessionsConversationIsReadOnlyInTheCallsWindow(
 }
 
 func (s *CallsSuite) TestADeletedSessionsConversationHoldingNothingReadsTheCallsOwnChannel() {
-	// A bound conversation with nothing from the call in it is no answer: the call may
-	// have written under its own id, as a call bound to nothing does.
+	// A bound conversation with nothing from the call in it is no answer: a call from before
+	// calls had ids of their own may have written under its id, its session's.
 	conversation := "support-" + s.utils.uuid()
 	call := s.started(store.Call{ConversationID: "agent:" + conversation})
 	s.inChannel(conversation, s.customerID(), call.StartedAt.Add(-time.Hour), "typed long before the call")
@@ -532,8 +584,9 @@ func (s *CallsSuite) TestADeletedSessionsConversationHoldingNothingReadsTheCalls
 func (s *CallsSuite) TestACallBoundToItsOwnChannelReadsEachChannelOnce() {
 	// The call row names agent:<call id>, which is the channel the call is named after:
 	// listing it twice would put the same question to Stream twice.
-	call := s.started(store.Call{ConversationID: "agent:" + s.utils.uuid()})
-	call.ConversationID = "agent:" + call.ID
+	id := s.utils.uuid()
+	call := store.Call{ID: id, CustomerID: s.customerID(), AgentID: "agent-" + s.utils.uuid(),
+		ConversationID: "agent:" + id, StartedAt: s.base}
 
 	var channels []string
 	for _, read := range s.router.transcriptReads(context.Background(), s.customerID(), call) {
@@ -559,11 +612,7 @@ func (s *CallsSuite) TestASessionRowNamesTheConversationBeforeTheCallRowDoes() {
 	// While the session's row is there it is the newer word on where the conversation is.
 	named := "support-" + s.utils.uuid()
 	callRows := "support-" + s.utils.uuid()
-	call := s.started(store.Call{ConversationID: "agent:" + callRows})
-	s.Require().NoError(s.store.SaveSession(context.Background(), &store.AgentSession{
-		ID: call.ID, CustomerID: s.customerID(), AgentID: call.AgentID,
-		ConversationID: "agent:" + named, CallID: call.CallID,
-	}))
+	call := s.inSession("agent:"+named, store.Call{ConversationID: "agent:" + callRows})
 	s.inChannel(named, s.customerID(), call.StartedAt.Add(time.Minute), "said where the session's row says")
 	s.inChannel(callRows, s.customerID(), call.StartedAt.Add(time.Minute), "said where the call row says")
 
@@ -573,6 +622,38 @@ func (s *CallsSuite) TestASessionRowNamesTheConversationBeforeTheCallRowDoes() {
 
 	s.Require().Len(read, 1)
 	s.Equal("said where the session's row says", read[0].Text)
+}
+
+func (s *CallsSuite) TestASessionsConversationIsReadOnlyInTheCallsWindow() {
+	// The conversation holds what was typed before and after the call too, and the
+	// session's other calls.
+	ended := s.base.Add(10 * time.Minute)
+	conversation := "support-" + s.utils.uuid()
+	call := s.inSession("agent:"+conversation, store.Call{EndedAt: &ended})
+	s.inChannel(conversation, s.customerID(), call.StartedAt.Add(-time.Hour), "typed before the call")
+	s.inChannel(conversation, s.customerID(), call.StartedAt.Add(time.Minute), "said on the call")
+	s.inChannel(conversation, s.customerID(), ended.Add(time.Hour), "typed after the call")
+
+	var read []TranscriptMessage
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/calls/"+call.ID+"/transcript", nil, &read))
+
+	s.Require().Len(read, 1)
+	s.Equal("said on the call", read[0].Text)
+}
+
+func (s *CallsSuite) TestACallUnderItsSessionsIdReadsEachChannelOnce() {
+	// A call from before calls had ids of their own has its session's: listing the channel
+	// named after both twice would put the same question to Stream twice.
+	id := s.utils.uuid()
+	call := store.Call{ID: id, SessionID: id, CustomerID: s.customerID(), AgentID: "agent-" + s.utils.uuid(), StartedAt: s.base}
+
+	var channels []string
+	for _, read := range s.router.transcriptReads(context.Background(), s.customerID(), call) {
+		channels = append(channels, read.Channel)
+	}
+
+	s.Equal([]string{call.ID, call.AgentID}, channels)
 }
 
 func (s *CallsSuite) TestACallWhoseSessionChannelHoldsNothingReadsItsAgentChannel() {
@@ -621,12 +702,8 @@ func (s *CallsSuite) TestAnEndedCallWithoutASessionRowReadsOnlyItsWindowOnEveryC
 func (s *CallsSuite) TestACallWithASessionRowReadsOnlyItsRowsChannel() {
 	// The row names the conversation; a channel named after the call or its agent is
 	// not read when the conversation holds nothing in the window.
-	call := s.started(store.Call{})
 	conversation := "support-" + s.utils.uuid()
-	s.Require().NoError(s.store.SaveSession(context.Background(), &store.AgentSession{
-		ID: call.ID, CustomerID: s.customerID(), AgentID: call.AgentID,
-		ConversationID: "agent:" + conversation, CallID: call.CallID,
-	}))
+	call := s.inSession("agent:"+conversation, store.Call{})
 	s.inChannel(conversation, s.customerID(), call.StartedAt.Add(-time.Hour), "the conversation, before the call")
 	s.inChannel(call.ID, s.customerID(), call.StartedAt.Add(time.Minute), "channel named after the call")
 	s.inChannel(call.AgentID, s.customerID(), call.StartedAt.Add(time.Minute), "the agent's channel")
@@ -651,15 +728,21 @@ func (s *CallsSuite) TestAFailedFirstReadOfATranscriptIsReturned() {
 }
 
 func (s *CallsSuite) TestTheCampaignDialerReadsOnlyItsOwnCustomersTranscript() {
-	call := s.started(store.Call{})
-	s.inChannel(call.AgentID, s.customerID(), call.StartedAt.Add(time.Minute), "said on the call")
+	// The dialer knows the session its call opened, and reads that session's latest call.
+	conversation := "support-" + s.utils.uuid()
+	earlier := s.inSession("agent:"+conversation, store.Call{StartedAt: s.base.Add(-time.Hour)})
+	ended := s.base.Add(-50 * time.Minute)
+	s.Require().NoError(s.store.Calls.Finish(context.Background(), earlier.CustomerID, earlier.ID, ended))
+	call := s.started(store.Call{SessionID: earlier.SessionID, AgentID: earlier.AgentID})
+	s.inChannel(conversation, s.customerID(), earlier.StartedAt.Add(time.Minute), "said on the earlier call")
+	s.inChannel(conversation, s.customerID(), call.StartedAt.Add(time.Minute), "said on the call")
 
-	said, err := s.router.CallTranscript(context.Background(), s.customerID(), call.ID)
+	said, err := s.router.CallTranscript(context.Background(), s.customerID(), call.SessionID)
 	s.Require().NoError(err)
 	s.Require().Len(said, 1)
 	s.Equal("said on the call", said[0].Text)
 
-	_, err = s.router.CallTranscript(context.Background(), "customer-"+s.utils.uuid(), call.ID)
+	_, err = s.router.CallTranscript(context.Background(), "customer-"+s.utils.uuid(), call.SessionID)
 	s.Error(err, "another customer's call is not read")
 }
 
@@ -686,9 +769,9 @@ func (s *CallsSuite) TestATimelinePairsWhatEachCallerSaidWithTheAgentsAnswer() {
 	s.inChannelAs(call.AgentID, s.customerID(), call.AgentID, at(13_100), "Got it, your favorite color is blue.")
 	s.inChannelAs(call.AgentID, s.customerID(), "bob", at(21_409), "My favorite color is green.")
 	s.inChannelAs(call.AgentID, s.customerID(), call.AgentID, at(23_500), "Noted, Bob, your favorite is green.")
-	for _, turn := range []live.Turn{{TurnID: "turn-1", StartedAt: at(11_940)}, {TurnID: "turn-2", StartedAt: at(22_468)}} {
+	for _, turn := range []store.Turn{{TurnID: "turn-1", StartedAt: at(11_940)}, {TurnID: "turn-2", StartedAt: at(22_468)}} {
 		turn.CustomerID, turn.AgentID, turn.CallID = s.customerID(), call.AgentID, call.CallID
-		s.Require().NoError(s.live.RecordTurn(ctx, turn))
+		s.Require().NoError(s.store.Turns.Insert(ctx, turn))
 	}
 
 	var timeline []TimelineEntry
@@ -705,7 +788,7 @@ func (s *CallsSuite) TestATimelinePairsWhatEachCallerSaidWithTheAgentsAnswer() {
 func (s *CallsSuite) TestATimelineOfACallNobodyWroteDownHasTurnsWithoutWords() {
 	ctx := context.Background()
 	call := s.started(store.Call{StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)})
-	s.Require().NoError(s.live.RecordTurn(ctx, live.Turn{CustomerID: s.customerID(), AgentID: call.AgentID,
+	s.Require().NoError(s.store.Turns.Insert(ctx, store.Turn{CustomerID: s.customerID(), AgentID: call.AgentID,
 		CallID: call.CallID, TurnID: "turn-1", StartedAt: call.StartedAt.Add(time.Second)}))
 
 	var timeline []TimelineEntry
@@ -716,6 +799,208 @@ func (s *CallsSuite) TestATimelineOfACallNobodyWroteDownHasTurnsWithoutWords() {
 	s.Equal("turn-1", timeline[0].TurnId)
 	s.Nil(timeline[0].Heard)
 	s.Nil(timeline[0].Said)
+}
+
+func (s *CallsSuite) TestATextSessionsTimelineReadsNoFloorChecksAndLogsNoError() {
+	// A session held in writing has no Stream call, so it has no call id to keep floor checks
+	// under; the read for them is refused by the store, and used to be logged as an error
+	// on every read of the timeline.
+	ctx := context.Background()
+	call := s.heldCall(store.Call{ID: s.utils.uuid(), CustomerID: s.customerID(),
+		AgentID: "agent-" + s.utils.uuid(), StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)}, "", "")
+	s.Require().Empty(call.CallID, "a text session's call names no Stream call")
+	s.Require().NoError(s.store.Turns.Insert(ctx, store.Turn{CustomerID: s.customerID(), AgentID: call.AgentID,
+		TurnID: "turn-1", StartedAt: call.StartedAt.Add(time.Second)}))
+
+	var timeline []TimelineEntry
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/calls/"+call.ID+"/timeline", nil, &timeline))
+
+	s.Require().Len(timeline, 1)
+	s.Equal("turn-1", timeline[0].TurnId)
+	s.Nil(timeline[0].FloorChecks)
+	s.Empty(s.errorsAbout(call.ID), "reading a text session's timeline is not an error")
+}
+
+func (s *CallsSuite) TestAVoiceCallsTimelineStillCarriesItsFloorChecks() {
+	ctx := context.Background()
+	call := s.started(store.Call{StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)})
+	at := call.StartedAt.Add(time.Second)
+	s.Require().NoError(s.store.Turns.Insert(ctx, store.Turn{CustomerID: s.customerID(), AgentID: call.AgentID,
+		CallID: call.CallID, TurnID: "turn-1", StartedAt: at}))
+	check := floorChecked("turn-1", pauseFloorCheck(at.Add(-500*time.Millisecond)))
+	check.CustomerID, check.CallID, check.AgentID = s.customerID(), call.CallID, call.AgentID
+	s.Require().NoError(s.store.CallEvents.InsertMany(ctx, []store.CallEvent{check}))
+
+	var timeline []TimelineEntry
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/calls/"+call.ID+"/timeline", nil, &timeline))
+
+	s.Require().Len(timeline, 1)
+	s.Require().NotNil(timeline[0].FloorChecks)
+	s.Require().Len(*timeline[0].FloorChecks, 1)
+	s.Equal(FloorCheckKindPause, (*timeline[0].FloorChecks)[0].Kind)
+	s.Empty(s.errorsAbout(call.ID))
+}
+
+func (s *CallsSuite) TestAVoiceCallsTimelineIsAnsweredWithoutFloorChecksWhenTheirReadFails() {
+	ctx := context.Background()
+	call := s.started(store.Call{StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)})
+	at := call.StartedAt.Add(time.Second)
+	s.Require().NoError(s.store.Turns.Insert(ctx, store.Turn{CustomerID: s.customerID(), AgentID: call.AgentID,
+		CallID: call.CallID, TurnID: "turn-1", StartedAt: at}))
+	check := floorChecked("turn-1", pauseFloorCheck(at.Add(-500*time.Millisecond)))
+	check.CustomerID, check.CallID, check.AgentID = s.customerID(), call.CallID, call.AgentID
+	s.Require().NoError(s.store.CallEvents.InsertMany(ctx, []store.CallEvent{check}))
+	s.callEventsOnClosedRedis()
+
+	var timeline []TimelineEntry
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/calls/"+call.ID+"/timeline", nil, &timeline), "the checks are not worth failing the timeline over")
+
+	s.Require().Len(timeline, 1, "the turns are still read")
+	s.Equal("turn-1", timeline[0].TurnId)
+	s.Nil(timeline[0].FloorChecks, "the checks the read could not return are not shown")
+	s.Require().Len(s.errorsAbout(call.ID), 1)
+	s.Contains(s.errorsAbout(call.ID)[0], `msg="could not read the floor checks for a timeline"`)
+	s.Contains(s.errorsAbout(call.ID)[0], "store: floor checks")
+}
+
+func (s *CallsSuite) TestAVoiceCallsDecisionsAreNotAnEmptyListWhenTheirReadFails() {
+	// The decisions are the whole of this answer, so a read that failed is no call that decided
+	// nothing: the caller is told something went wrong, and the access line is an ERROR.
+	call := s.started(store.Call{StartedAt: time.Now().Add(-time.Minute)})
+	s.Require().NoError(s.store.CallEvents.InsertMany(context.Background(), []store.CallEvent{{
+		CustomerID: s.customerID(), CallID: call.CallID, AgentID: call.AgentID,
+		At: time.Now(), Kind: "answer", Reason: "a complete thought",
+	}}))
+	s.callEventsOnClosedRedis()
+
+	response := s.serverClient.raw(http.MethodGet, "/v1/agents/calls/"+call.ID+"/events", nil)
+	s.Equal(http.StatusInternalServerError, response.StatusCode)
+	requestID := response.Header.Get(RequestIDHeader)
+	s.Require().NotEmpty(requestID)
+	served := func() string { return lineWith(s.logged, `msg="served a request"`, " request_id="+requestID) }
+	s.Require().Eventually(func() bool { return served() != "" }, 5*time.Second, 20*time.Millisecond, s.logged.String())
+	s.Contains(served(), "level=ERROR")
+	s.Contains(served(), "store: call events")
+}
+
+// callEventsOnClosedRedis has the decisions and floor checks every read of the suite's store
+// makes come from a Redis that is closed, as an unreachable one is. The test's end puts them back.
+func (s *CallsSuite) callEventsOnClosedRedis() {
+	closed, err := store.OpenShards(store.Options{DSN: testDatabase(s.T(), os.Getenv("ROUTER_POSTGRES_DSN")),
+		Redis: store.Redis{Address: s.redisAddr}})
+	s.Require().NoError(err)
+	s.Require().NoError(closed.Close())
+	original := s.store.CallEvents
+	s.store.CallEvents = closed.CallEvents
+	s.T().Cleanup(func() { s.store.CallEvents = original })
+}
+
+// errorsAbout is the ERROR lines the router logged about the call with this row id.
+func (s *CallsSuite) errorsAbout(id string) []string {
+	var errors []string
+	for _, line := range strings.Split(s.logged.String(), "\n") {
+		if strings.Contains(line, "level=ERROR") && strings.Contains(line, "call="+id) {
+			errors = append(errors, line)
+		}
+	}
+	return errors
+}
+
+func (s *CallsSuite) TestAMembersLineMarkedAsTheAgentsIsTheMembersOnEveryReader() {
+	// Ben is a member of the channel the call's transcript is in, and marks a message of his
+	// as the agent's. The call's row names the user the agent wrote as, so only its lines are.
+	ctx := context.Background()
+	call := s.inSession("", store.Call{AgentUserID: "vision-agent", StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)})
+	at := func(ms int) time.Time { return call.StartedAt.Add(time.Duration(ms) * time.Millisecond) }
+	s.inChannelAs(call.AgentID, s.customerID(), "alice", at(10_608), "Can I swap my shift?")
+	s.markedAsTheAgents(call.AgentID, "ben", at(12_500), "The agent approved Ben's shift swap.")
+	s.markedAsTheAgents(call.AgentID, "vision-agent", at(13_100), "Who would you like to swap with?")
+	s.Require().NoError(s.store.Turns.Insert(ctx, store.Turn{CustomerID: s.customerID(), AgentID: call.AgentID,
+		CallID: call.CallID, TurnID: "turn-1", StartedAt: at(11_940)}))
+
+	var read []TranscriptMessage
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/calls/"+call.ID+"/transcript", nil, &read))
+	s.Equal(map[string]bool{
+		"alice: Can I swap my shift?":                    false,
+		"ben: The agent approved Ben's shift swap.":      false,
+		"vision-agent: Who would you like to swap with?": true,
+	}, agentLines(read))
+
+	var timeline []TimelineEntry
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/calls/"+call.ID+"/timeline", nil, &timeline))
+	s.Require().Len(timeline, 1)
+	s.Equal("Can I swap my shift? The agent approved Ben's shift swap.", value(timeline[0].Heard))
+	s.Equal("Who would you like to swap with?", value(timeline[0].Said))
+
+	// What the campaign dialer classifies an answered call from (campaign.Transcripts).
+	said, err := s.router.CallTranscript(ctx, s.customerID(), call.SessionID)
+	s.Require().NoError(err)
+	dialed := map[string]bool{}
+	for _, line := range said {
+		dialed[line.Speaker] = line.Agent
+	}
+	s.Equal(map[string]bool{"alice": false, "ben": false, "vision-agent": true}, dialed)
+}
+
+func (s *CallsSuite) TestACallFromBeforeItsWriterWasKeptReadsAMarkedLineAsTheAgents() {
+	// A call row from before the column names no writer, and its transcript reads as it did:
+	// the expected values are what the base, 4b4bcbaf5, answers for the same lines.
+	ctx := context.Background()
+	call := s.inSession("", store.Call{StartedAt: time.Now().UTC().Truncate(time.Millisecond).Add(-time.Minute)})
+	at := func(ms int) time.Time { return call.StartedAt.Add(time.Duration(ms) * time.Millisecond) }
+	s.inChannelAs(call.AgentID, s.customerID(), "alice", at(10_608), "Can I swap my shift?")
+	s.markedAsTheAgents(call.AgentID, "ben", at(12_500), "The agent approved Ben's shift swap.")
+	s.markedAsTheAgents(call.AgentID, "vision-agent", at(13_100), "Who would you like to swap with?")
+	s.Require().NoError(s.store.Turns.Insert(ctx, store.Turn{CustomerID: s.customerID(), AgentID: call.AgentID,
+		CallID: call.CallID, TurnID: "turn-1", StartedAt: at(11_940)}))
+
+	var read []TranscriptMessage
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/calls/"+call.ID+"/transcript", nil, &read))
+	s.Equal(map[string]bool{
+		"alice: Can I swap my shift?":                    false,
+		"ben: The agent approved Ben's shift swap.":      true,
+		"vision-agent: Who would you like to swap with?": true,
+	}, agentLines(read))
+
+	var timeline []TimelineEntry
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+		"/v1/agents/calls/"+call.ID+"/timeline", nil, &timeline))
+	s.Require().Len(timeline, 1)
+	s.Equal("Can I swap my shift?", value(timeline[0].Heard))
+	s.Equal("The agent approved Ben's shift swap. Who would you like to swap with?", value(timeline[0].Said))
+
+	said, err := s.router.CallTranscript(ctx, s.customerID(), call.SessionID)
+	s.Require().NoError(err)
+	dialed := map[string]bool{}
+	for _, line := range said {
+		dialed[line.Speaker] = line.Agent
+	}
+	s.Equal(map[string]bool{"alice": false, "ben": true, "vision-agent": true}, dialed)
+}
+
+// agentLines is whether each line of a transcript read as the agent's, keyed by who said what.
+func agentLines(read []TranscriptMessage) map[string]bool {
+	lines := map[string]bool{}
+	for _, line := range read {
+		lines[line.Speaker+": "+line.Text] = value(line.Agent)
+	}
+	return lines
+}
+
+// markedAsTheAgents writes a line as speaker into a channel inChannelAs made, carrying the source
+// the agent's own lines carry (chatlog.SourceField).
+func (s *CallsSuite) markedAsTheAgents(channel, speaker string, at time.Time, text string) {
+	s.chat.At(at)
+	_, err := s.chat.Client.Chat().SendMessage(context.Background(), chatlog.ChannelType, channel,
+		&getstream.SendMessageRequest{Message: getstream.MessageRequest{Text: &text, UserID: &speaker,
+			Custom: map[string]any{chatlog.SourceField: chatlog.SourceAgent}}})
+	s.Require().NoError(err)
 }
 
 // inChannel writes one line into an agent channel, created and stamped for a customer the
@@ -755,8 +1040,8 @@ func (s *CallsSuite) TestCallsCanBeListedByHowBadlyTheyWentFor() {
 	ctx := context.Background()
 	bad, good, unreviewed := s.started(store.Call{}), s.started(store.Call{}), s.started(store.Call{})
 	two, five := 2, 5
-	s.Require().NoError(s.store.ReviewCall(ctx, s.customerID(), bad.ID, "Stalled.", &two, ""))
-	s.Require().NoError(s.store.ReviewCall(ctx, s.customerID(), good.ID, "Helped.", &five, ""))
+	s.Require().NoError(s.store.Calls.Review(ctx, s.customerID(), bad.ID, "Stalled.", &two, ""))
+	s.Require().NoError(s.store.Calls.Review(ctx, s.customerID(), good.ID, "Helped.", &five, ""))
 
 	var listed []Call
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
@@ -766,6 +1051,17 @@ func (s *CallsSuite) TestCallsCanBeListedByHowBadlyTheyWentFor() {
 
 	s.Equal(http.StatusBadRequest, s.serverClient.do(http.MethodGet,
 		"/v1/agents/calls?max_review_score=9", nil, nil))
+}
+
+// inSession is started for a call of a session in conversation.
+func (s *CallsSuite) inSession(conversation string, call store.Call) store.Call {
+	call.CustomerID = s.customerID()
+	call.ID, call.CallID = cmp.Or(call.ID, s.utils.uuid()), cmp.Or(call.CallID, s.utils.callID())
+	call.AgentID = cmp.Or(call.AgentID, "agent-"+s.utils.uuid())
+	if call.StartedAt.IsZero() {
+		call.StartedAt = s.base
+	}
+	return s.heldCall(call, "", conversation)
 }
 
 func (s *CallsSuite) started(call store.Call) store.Call {
@@ -782,6 +1078,6 @@ func (s *CallsSuite) started(call store.Call) store.Call {
 	if call.StartedAt.IsZero() {
 		call.StartedAt = s.base
 	}
-	s.Require().NoError(s.store.StartCall(context.Background(), &call))
+	s.Require().NoError(s.store.Calls.Start(context.Background(), &call))
 	return call
 }

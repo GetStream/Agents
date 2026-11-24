@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from ..models.agent_dispatch import AgentDispatch
     from ..models.agent_review import AgentReview
     from ..models.agent_scheduling import AgentScheduling
-    from ..models.agent_tools import AgentTools
     from ..models.child_agent import ChildAgent
     from ..models.floor_control import FloorControl
     from ..models.greeting import Greeting
@@ -32,6 +31,7 @@ if TYPE_CHECKING:
     from ..models.resume_history import ResumeHistory
     from ..models.sandbox_options import SandboxOptions
     from ..models.session_video import SessionVideo
+    from ..models.tool_group import ToolGroup
 
 
 T = TypeVar("T", bound="AgentConfig")
@@ -99,14 +99,15 @@ class AgentConfig:
         search (str | Unset):
         skills (list[str] | Unset):
         sts (str | Unset): A speech-to-speech target: one native audio model that hears the caller and speaks back.
-            Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+            Naming one makes the agent native, and stt, tts and llm are then not used. New voice configs default to sts-fast
+            unless created with sts set to an empty string or with cascade settings; absent means the cascade.
         stt (str | Unset):
         subagent (str | Unset):
         sync_hash (str | Unset): Fingerprint of the last directory synced onto this config. Empty if it was never synced
             from a directory.
         tags (AgentConfigTags | Unset):
-        tools (AgentTools | Unset): How an agent is offered its tools, and how long what they were given and gave back
-            is kept.
+        tools (list[ToolGroup] | Unset): The functions an SDK provides that the agent may offer, in named groups. Empty
+            when there are none, and then the agent offers no function.
         tts (str | Unset):
         video (SessionVideo | Unset):
         visible_tools (list[str] | Unset):
@@ -119,6 +120,8 @@ class AgentConfig:
             agent answers in besides agent channels. Absent when there are none.
         agents (list[ChildAgent] | Unset): The app's other text agents this one may hand work to, each as a tool. Absent
             when there are none.
+        image (str | Unset):
+        ui_instructions (str | Unset): Absent when the agent is taught no UI.
     """
 
     created_at: datetime.datetime
@@ -154,7 +157,7 @@ class AgentConfig:
     subagent: str | Unset = UNSET
     sync_hash: str | Unset = UNSET
     tags: AgentConfigTags | Unset = UNSET
-    tools: AgentTools | Unset = UNSET
+    tools: list[ToolGroup] | Unset = UNSET
     tts: str | Unset = UNSET
     video: SessionVideo | Unset = UNSET
     visible_tools: list[str] | Unset = UNSET
@@ -162,6 +165,8 @@ class AgentConfig:
     llm_fallbacks: list[str] | Unset = UNSET
     chat_channels: list[AgentChatChannel] | Unset = UNSET
     agents: list[ChildAgent] | Unset = UNSET
+    image: str | Unset = UNSET
+    ui_instructions: str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -273,9 +278,12 @@ class AgentConfig:
         if not isinstance(self.tags, Unset):
             tags = self.tags.to_dict()
 
-        tools: dict[str, Any] | Unset = UNSET
+        tools: list[dict[str, Any]] | Unset = UNSET
         if not isinstance(self.tools, Unset):
-            tools = self.tools.to_dict()
+            tools = []
+            for tools_item_data in self.tools:
+                tools_item = tools_item_data.to_dict()
+                tools.append(tools_item)
 
         tts = self.tts
 
@@ -306,6 +314,10 @@ class AgentConfig:
             for agents_item_data in self.agents:
                 agents_item = agents_item_data.to_dict()
                 agents.append(agents_item)
+
+        image = self.image
+
+        ui_instructions = self.ui_instructions
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -389,6 +401,10 @@ class AgentConfig:
             field_dict["chat_channels"] = chat_channels
         if agents is not UNSET:
             field_dict["agents"] = agents
+        if image is not UNSET:
+            field_dict["image"] = image
+        if ui_instructions is not UNSET:
+            field_dict["ui_instructions"] = ui_instructions
 
         return field_dict
 
@@ -402,7 +418,6 @@ class AgentConfig:
         from ..models.agent_dispatch import AgentDispatch
         from ..models.agent_review import AgentReview
         from ..models.agent_scheduling import AgentScheduling
-        from ..models.agent_tools import AgentTools
         from ..models.child_agent import ChildAgent
         from ..models.floor_control import FloorControl
         from ..models.greeting import Greeting
@@ -410,6 +425,7 @@ class AgentConfig:
         from ..models.resume_history import ResumeHistory
         from ..models.sandbox_options import SandboxOptions
         from ..models.session_video import SessionVideo
+        from ..models.tool_group import ToolGroup
 
         d = dict(src_dict)
         created_at = datetime.datetime.fromisoformat(d.pop("created_at"))
@@ -565,11 +581,13 @@ class AgentConfig:
             tags = AgentConfigTags.from_dict(_tags)
 
         _tools = d.pop("tools", UNSET)
-        tools: AgentTools | Unset
-        if isinstance(_tools, Unset):
-            tools = UNSET
-        else:
-            tools = AgentTools.from_dict(_tools)
+        tools: list[ToolGroup] | Unset = UNSET
+        if _tools is not UNSET:
+            tools = []
+            for tools_item_data in _tools:
+                tools_item = ToolGroup.from_dict(tools_item_data)
+
+                tools.append(tools_item)
 
         tts = d.pop("tts", UNSET)
 
@@ -603,6 +621,10 @@ class AgentConfig:
                 agents_item = ChildAgent.from_dict(agents_item_data)
 
                 agents.append(agents_item)
+
+        image = d.pop("image", UNSET)
+
+        ui_instructions = d.pop("ui_instructions", UNSET)
 
         agent_config = cls(
             created_at=created_at,
@@ -646,6 +668,8 @@ class AgentConfig:
             llm_fallbacks=llm_fallbacks,
             chat_channels=chat_channels,
             agents=agents,
+            image=image,
+            ui_instructions=ui_instructions,
         )
 
         agent_config.additional_properties = d

@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // defaultCapacity is how many calls a worker that did not say is assumed to take at once.
@@ -97,7 +98,7 @@ func (s *Server) dispatchCalls(w http.ResponseWriter, r *http.Request) {
 	stopTaking := sync.OnceFunc(func() { close(writerDone) })
 	defer stopTaking()
 	go func() {
-		gone <- s.readWorker(connection, worker, pongs, replies, writerDone)
+		gone <- s.readWorker(r.Context(), connection, worker, pongs, replies, writerDone)
 	}()
 	s.writeCalls(connection, worker, gone, pongs, replies, stopTaking)
 
@@ -236,7 +237,7 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 // A message of a type it does not know is reported and skipped rather than closing the
 // socket: dropping a worker over one bad message would take the calls it is already in with
 // it. A frame that is not JSON at all returns errUnreadableFrame.
-func (s *Server) readWorker(connection *websocket.Conn, worker *dispatch.Worker, pongs chan<- float64, replies chan<- frame, writerDone <-chan struct{}) error {
+func (s *Server) readWorker(ctx context.Context, connection *websocket.Conn, worker *dispatch.Worker, pongs chan<- float64, replies chan<- frame, writerDone <-chan struct{}) error {
 	connection.SetReadDeadline(time.Now().Add(pongWait))
 	connection.SetPongHandler(func(string) error {
 		return connection.SetReadDeadline(time.Now().Add(pongWait))
@@ -259,10 +260,12 @@ func (s *Server) readWorker(connection *websocket.Conn, worker *dispatch.Worker,
 			// At echoes back a ping, so the worker can measure the round trip itself.
 			At float64 `json:"at"`
 			// AgentID, Tools and TimeoutMs are what a worker offers to run for every
-			// session opened under one agent id.
-			AgentID   string       `json:"agent_id"`
-			Tools     []hostedTool `json:"tools"`
-			TimeoutMs int          `json:"timeout_ms"`
+			// session opened under one agent id, or with EveryAgent instead of an agent
+			// id, for every agent of the app whose tool groups name them.
+			AgentID    string       `json:"agent_id"`
+			EveryAgent bool         `json:"every_agent"`
+			Tools      []hostedTool `json:"tools"`
+			TimeoutMs  int          `json:"timeout_ms"`
 			// ToolCallID, Output and Error answer one hosted tool call, as a session's
 			// tool_result does: Output is a string or a parts array. ID is ToolCallID under
 			// the name workers sent it by before.
@@ -272,8 +275,9 @@ func (s *Server) readWorker(connection *websocket.Conn, worker *dispatch.Worker,
 			Error      string          `json:"error"`
 			// Text and Verbatim say how a running hosted call is going, as a session's
 			// tool_update does.
-			Text     string `json:"text"`
-			Verbatim bool   `json:"verbatim"`
+			Text     string         `json:"text"`
+			Verbatim bool           `json:"verbatim"`
+			Custom   map[string]any `json:"custom"`
 		}
 		_, payload, err := connection.ReadMessage()
 		if err != nil {
@@ -307,7 +311,7 @@ func (s *Server) readWorker(connection *websocket.Conn, worker *dispatch.Worker,
 			}
 
 		case "host_tools":
-			reply := s.hostTools(worker, report.AgentID, report.Tools, report.TimeoutMs)
+			reply := s.hostTools(ctx, worker, report.AgentID, report.EveryAgent, report.Tools, report.TimeoutMs)
 			select {
 			case replies <- reply:
 			case <-writerDone:
@@ -331,7 +335,7 @@ func (s *Server) readWorker(connection *websocket.Conn, worker *dispatch.Worker,
 			}
 
 		case "tool_update":
-			worker.Update(report.ToolCallID, report.Text, report.Verbatim)
+			worker.Update(report.ToolCallID, report.Text, report.Verbatim, report.Custom)
 
 		case "tool_hold":
 			// The conversation may be on another node, so the answer is a round trip that
@@ -378,9 +382,10 @@ type hostedTool struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	Parameters  map[string]any `json:"parameters"`
-	// Interruptible and TimeoutMs mean what they do on a session's own tool.
-	Interruptible bool `json:"interruptible"`
-	TimeoutMs     int  `json:"timeout_ms"`
+	// DisplayTitle, Interruptible and TimeoutMs mean what they do on a session's own tool.
+	DisplayTitle  string `json:"display_title"`
+	Interruptible bool   `json:"interruptible"`
+	TimeoutMs     int    `json:"timeout_ms"`
 	// Approval is the question a voice caller is asked before each call runs, as on a
 	// session's own tool. Only its title is asked.
 	Approval *hostedApproval `json:"approval"`
@@ -398,10 +403,17 @@ type hostedApproval struct {
 // is trusted with its customer's conversations already, and naming an agent is not a way
 // into anybody else's. The agent is named as its config is, since that is the name sessions
 // are opened by, and a name no config has is refused.
-func (s *Server) hostTools(worker *dispatch.Worker, agentID string, declared []hostedTool, timeoutMs int) frame {
+func (s *Server) hostTools(ctx context.Context, worker *dispatch.Worker, agentID string, everyAgent bool, declared []hostedTool, timeoutMs int) frame {
 	refuse := func(reason string) frame {
 		s.logger.Warn("refused a worker's hosted tools", "worker", worker.ID, "agent", agentID, "reason", reason)
-		return frame{"type": "hosting_refused", "agent_id": agentID, "reason": reason}
+		return frame{"type": "hosting_refused", "agent_id": agentID, "every_agent": everyAgent, "reason": reason}
+	}
+	// An agent id left out by mistake would otherwise offer the tools to every agent.
+	switch {
+	case everyAgent && agentID != "":
+		return refuse("host tools for one agent_id or for every_agent, not both")
+	case !everyAgent && agentID == "":
+		return refuse("hosted tools need the agent_id they are for, or every_agent")
 	}
 	tools := make([]dispatch.Tool, 0, len(declared))
 	names := make([]string, 0, len(declared))
@@ -414,6 +426,7 @@ func (s *Server) hostTools(worker *dispatch.Worker, agentID string, declared []h
 		}
 		hosted := dispatch.Tool{
 			Name: tool.Name, Description: tool.Description, Parameters: tool.Parameters,
+			DisplayTitle:  strings.TrimSpace(tool.DisplayTitle),
 			Interruptible: tool.Interruptible, Timeout: time.Duration(tool.TimeoutMs) * time.Millisecond,
 		}
 		if tool.Approval != nil {
@@ -424,35 +437,35 @@ func (s *Server) hostTools(worker *dispatch.Worker, agentID string, declared []h
 		tools = append(tools, hosted)
 		names = append(names, tool.Name)
 	}
-	if reason := s.unknownHostedAgent(worker.CustomerID, agentID); reason != "" {
+	if reason := s.unknownHostedAgent(ctx, worker.CustomerID, agentID); reason != "" {
 		return refuse(reason)
 	}
 	if err := s.dispatch.Host(worker, agentID, tools, time.Duration(timeoutMs)*time.Millisecond); err != nil {
 		return refuse(err.Error())
 	}
 	if s.workers != nil {
-		s.workers.Offer(context.Background(), worker.CustomerID, agentID)
+		s.workers.Offer(ctx, worker.CustomerID, agentID)
 	}
-	s.logger.Info("a worker hosts tools", "worker", worker.ID, "agent", agentID, "tools", names)
-	return frame{"type": "hosting", "agent_id": agentID, "tools": names}
+	s.logger.Info("a worker hosts tools", "worker", worker.ID, "agent", agentID, "every_agent", everyAgent, "tools", names)
+	return frame{"type": "hosting", "agent_id": agentID, "every_agent": everyAgent, "tools": names}
 }
 
 // unknownHostedAgent says why tools offered under a name the customer has no agent config
 // for are refused, or nothing when there is one. Sessions are only opened by an existing
 // config's name, so a misspelled name would host tools nothing ever calls while the worker
 // looks healthy. A router without configs, or one that cannot read them now, takes the offer.
-func (s *Server) unknownHostedAgent(customerID, agentID string) string {
+func (s *Server) unknownHostedAgent(ctx context.Context, customerID, agentID string) string {
 	if s.configs == nil || agentID == "" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hostedAgentLookup)
+	ctx, cancel := context.WithTimeout(ctx, hostedAgentLookup)
 	defer cancel()
-	_, exists, err := s.configs.AgentConfigByName(ctx, customerID, agentID)
-	if err != nil {
-		s.logger.Warn("could not check the agent a worker hosts tools for", "agent", agentID, "error", err)
+	_, err := s.store.AgentConfigs.GetByName(ctx, customerID, agentID)
+	if err == nil {
 		return ""
 	}
-	if exists {
+	if !errors.Is(err, store.ErrNoAgentConfig) {
+		s.logger.Warn("could not check the agent a worker hosts tools for", "agent", agentID, "error", err)
 		return ""
 	}
 	return "there is no agent called " + agentID + "; check the name, or sync the agent before starting the worker"

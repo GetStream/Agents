@@ -6,18 +6,8 @@ on:
         description: 'pytest -m expression (e.g., `not integration` or `integration`)'
         required: true
         type: string
-      pytest-params:
-        description: 'additional pytest params'
-        required: false
-        default: ""
-        type: string
-      notify-on-failure:
-        description: 'Post to Slack on test failure'
-        required: false
-        default: false
-        type: boolean
-      ref:
-        description: 'Branch to check out; empty checks out the commit that triggered the run'
+      environment:
+        description: 'Environment the test job runs in, for its provider keys; empty runs it in none'
         required: false
         default: ""
         type: string
@@ -39,12 +29,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          ref: ${{ inputs.ref }}
       - name: Install dependencies
         uses: ./.github/actions/python-uv-setup
         with:
           python-version: "3.12.13"
+          cpu-torch: "true"
       # Run ruff
       - name: Run Ruff linter
         run: uv run ruff check .
@@ -60,8 +49,8 @@ jobs:
           uv run plugins/stream/generate.py
           changed=$(git status --porcelain -- plugins/stream/vision_agents/plugins/stream/_generated)
           if [ -n "$changed" ]; then echo "$changed"; git diff; exit 1; fi
-      # Run mypy. A cache key is written once and never updated, so each push to main or
-      # accelerate saves its own, and every other run starts from the newest one.
+      # Run mypy. A cache key is written once and never updated, so each push to main
+      # saves its own, and every other run starts from the newest one.
       - name: Restore mypy cache
         uses: actions/cache/restore@v5
         with:
@@ -84,6 +73,8 @@ jobs:
   test:
     name: Test "${{ inputs.marker }}"
     runs-on: ubuntu-latest
+    # The provider keys live in this environment, which only the branches that need them may enter.
+    environment: ${{ inputs.environment }}
     env:
       ASSEMBLYAI_API_KEY: ${{ secrets.ASSEMBLYAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -115,8 +106,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          ref: ${{ inputs.ref }}
       # Ubuntu 26.04's PortAudio (19.7) has a PulseAudio backend, and `import sounddevice`
       # fails without a server to connect to, so the job runs one.
       - name: Install system dependencies
@@ -127,6 +116,7 @@ jobs:
         uses: ./.github/actions/python-uv-setup
         with:
           python-version: "3.12.13"
+          cpu-torch: "true"
       # The VAD and turn models land in the temp dir by default and are otherwise fetched
       # from GitHub and Hugging Face on every run.
       - name: Cache ONNX models
@@ -144,14 +134,6 @@ jobs:
       # Unit tests spread over every core; integration tests stay serial so the providers'
       # rate limits see one caller.
       - name: Run core tests
-        run: uv run --no-sync pytest -m "${{ inputs.marker }}" ${{ inputs.marker != 'integration' && '-n auto --dist worksteal' || '' }} tests/ ${{ inputs.pytest-params }}
+        run: uv run --no-sync pytest -m "${{ inputs.marker }}" ${{ inputs.marker != 'integration' && '-n auto --dist worksteal' || '' }} tests/
       - name: Run plugin tests
-        run: uv run --no-sync pytest -m "${{ inputs.marker }}" ${{ inputs.marker != 'integration' && '-n auto --dist worksteal' || '' }} plugins/*/tests/*.py ${{ inputs.pytest-params }}
-      - name: Notify Slack on failure
-        if: failure() && inputs.notify-on-failure
-        uses: ./.github/actions/notify-slack
-        with:
-          workflow-name: ${{ github.workflow }}
-          report-file: .report.json
-          summary: "${{ github.workflow }} failed"
-          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: uv run --no-sync pytest -m "${{ inputs.marker }}" ${{ inputs.marker != 'integration' && '-n auto --dist worksteal' || '' }} plugins/*/tests/*.py

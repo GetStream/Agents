@@ -46,6 +46,16 @@ type OpenAICompatSuite struct {
 	// with 429.
 	keys       []string
 	refusedKey string
+	// contentType and body replace the event stream with a 200 of that type and body.
+	contentType string
+	body        string
+	// silent answers with event stream headers and then ends without a single frame, not
+	// even [DONE].
+	silent bool
+	// holdHeaders blocks before any header is sent, as a hung server does, and headersAfter
+	// delays them, as a server that sends none before its first token does.
+	holdHeaders  chan struct{}
+	headersAfter time.Duration
 }
 
 func TestOpenAICompatSuite(t *testing.T) {
@@ -61,6 +71,11 @@ func (s *OpenAICompatSuite) SetupTest() {
 	s.errorBody = ""
 	s.keys = nil
 	s.refusedKey = ""
+	s.contentType = ""
+	s.body = ""
+	s.silent = false
+	s.holdHeaders = nil
+	s.headersAfter = 0
 
 	s.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, err := io.ReadAll(r.Body)
@@ -91,9 +106,32 @@ func (s *OpenAICompatSuite) SetupTest() {
 			return
 		}
 
+		if s.holdHeaders != nil {
+			select {
+			case <-s.holdHeaders:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		if s.body != "" {
+			// A nil value sends no Content-Type and stops Go from sniffing one.
+			w.Header()["Content-Type"] = nil
+			if s.contentType != "" {
+				w.Header().Set("Content-Type", s.contentType)
+			}
+			fmt.Fprint(w, s.body)
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
 		s.Require().True(ok)
+		if s.silent {
+			flusher.Flush()
+			return
+		}
+		if s.headersAfter > 0 {
+			time.Sleep(s.headersAfter)
+		}
 
 		for _, frame := range s.frames {
 			fmt.Fprintf(w, "data: %s\n\n", frame)

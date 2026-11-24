@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // TimelineSuite pairs turns with the lines of a transcript the way a call stores them: a
@@ -32,7 +32,7 @@ func (s *TimelineSuite) TestSeveralThingsTheCallerSaidBeforeOneAnswerAreHeardTog
 		s.caller(9_000, "I need a table."),
 		s.caller(10_608, "For two, at eight."),
 		s.agent(12_500, "Booked for two at eight."),
-	}, nil)
+	}, nil, nil)
 
 	s.Require().Len(timeline, 1)
 	s.Equal("I need a table. For two, at eight.", value(timeline[0].Heard))
@@ -45,7 +45,7 @@ func (s *TimelineSuite) TestATurnCutOffBeforeTheAgentSaidAnythingHasNoAnswer() {
 		s.caller(10_608, "What time is it?"),
 		s.caller(14_200, "Never mind, what day is it?"),
 		s.agent(15_800, "It is Monday."),
-	}, nil)
+	}, nil, nil)
 
 	s.Require().Len(timeline, 2)
 	s.Equal("What time is it?", value(timeline[0].Heard))
@@ -60,7 +60,7 @@ func (s *TimelineSuite) TestWhatTheCallerSaysOverAnAnswerIsHeardByTheNextTurn() 
 		s.agent(12_500, "Rome was founded"),
 		s.caller(13_900, "Actually, Paris."),
 		s.agent(15_600, "Paris is the capital of France."),
-	}, nil)
+	}, nil, nil)
 
 	s.Require().Len(timeline, 2)
 	s.Equal("Tell me about Rome.", value(timeline[0].Heard))
@@ -75,7 +75,7 @@ func (s *TimelineSuite) TestALineStoredOnlyOnceHeardStillBelongsToItsTurn() {
 	timeline := timelineOf(s.turns(11_940), []chatlog.Spoken{
 		s.caller(12_100, "Hi."),
 		s.agent(12_900, "Hello there."),
-	}, nil)
+	}, nil, nil)
 
 	s.Require().Len(timeline, 1)
 	s.Equal("Hi.", value(timeline[0].Heard))
@@ -88,7 +88,7 @@ func (s *TimelineSuite) TestALineStoredAfterItsTurnStartedIsNotHeardAgainByTheNe
 		s.agent(12_900, "Hello there."),
 		s.caller(19_000, "Bye."),
 		s.agent(20_500, "Goodbye."),
-	}, nil)
+	}, nil, nil)
 
 	s.Require().Len(timeline, 2)
 	s.Equal("Hi.", value(timeline[0].Heard))
@@ -102,7 +102,7 @@ func (s *TimelineSuite) TestSeveralAgentLinesInOneTurnAreSaidTogether() {
 		s.caller(13_000, "For two."),
 		s.agent(13_500, "Booked."),
 		s.agent(15_600, "Anything else?"),
-	}, nil)
+	}, nil, nil)
 
 	s.Require().Len(timeline, 2)
 	s.Equal("One moment. Booked.", value(timeline[0].Said))
@@ -115,7 +115,7 @@ func (s *TimelineSuite) TestATurnTheAgentStartedHeardNothing() {
 		s.agent(1_500, "Hi, how can I help?"),
 		s.caller(10_608, "What is the weather?"),
 		s.agent(12_500, "Sunny."),
-	}, nil)
+	}, nil, nil)
 
 	s.Require().Len(timeline, 2)
 	s.Nil(timeline[0].Heard)
@@ -125,10 +125,10 @@ func (s *TimelineSuite) TestATurnTheAgentStartedHeardNothing() {
 }
 
 // turns are turns starting at offsets from the start, in milliseconds.
-func (s *TimelineSuite) turns(offsets ...int) []live.Turn {
-	turns := make([]live.Turn, 0, len(offsets))
+func (s *TimelineSuite) turns(offsets ...int) []store.Turn {
+	turns := make([]store.Turn, 0, len(offsets))
 	for _, offset := range offsets {
-		turns = append(turns, live.Turn{TurnID: "turn-" + strconv.Itoa(offset), StartedAt: s.at(offset)})
+		turns = append(turns, store.Turn{TurnID: "turn-" + strconv.Itoa(offset), StartedAt: s.at(offset)})
 	}
 	return turns
 }

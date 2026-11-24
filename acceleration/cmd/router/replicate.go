@@ -266,7 +266,7 @@ func copyEverything(ctx context.Context, source *deployment, pgStore *store.Stor
 			return customerID, *saved, nil
 		}
 	}
-	if err := pgStore.SaveMoveCursor(ctx, customerID, source.url, cursor, asked); err != nil {
+	if err := pgStore.MoveCursors.Upsert(ctx, &store.MoveCursor{CustomerID: customerID, Source: source.url, Cursor: cursor, ReadAt: asked}); err != nil {
 		return "", 0, err
 	}
 
@@ -280,7 +280,7 @@ func copyEverything(ctx context.Context, source *deployment, pgStore *store.Stor
 // refused for an app this deployment already holds unless full asks for it.
 func carryOn(ctx context.Context, pgStore *store.Store, customerID, source string, full bool, retention time.Duration, asked time.Time) (*int64, error) {
 	if !full {
-		saved, err := pgStore.MoveCursor(ctx, customerID, source)
+		saved, err := pgStore.MoveCursors.Get(ctx, customerID, source)
 		if err != nil {
 			return nil, err
 		}
@@ -309,7 +309,7 @@ func carryOn(ctx context.Context, pgStore *store.Store, customerID, source strin
 	}
 	// The cursor is saved once the export has all been written; a run stopped before that leaves
 	// none, and the next run copies the export again.
-	return nil, pgStore.SaveMoveCursor(ctx, customerID, source, nil, asked)
+	return nil, pgStore.MoveCursors.Upsert(ctx, &store.MoveCursor{CustomerID: customerID, Source: source, ReadAt: asked})
 }
 
 // follow replays what happens at the source from the cursor onwards, until there is
@@ -345,12 +345,15 @@ func follow(ctx context.Context, source *deployment, pgStore *store.Store, reser
 			if err := pgStore.ApplyChanges(ctx, customerID, page.Changes); err != nil {
 				return err
 			}
+			logger.Info("caught up on changes", "changes", len(page.Changes), "cursor", page.Cursor)
+		}
+		// A page can move the cursor with no change on it: past changes the source leaves out.
+		if page.Cursor > cursor {
 			cursor = page.Cursor
-			logger.Info("caught up on changes", "changes", len(page.Changes), "cursor", cursor)
 		}
 		// Saved after every read rather than only one that brought changes: a read is what keeps
 		// the source recording the app's changes (carryOn).
-		if err := pgStore.SaveMoveCursor(ctx, customerID, source.url, &cursor, asked); err != nil {
+		if err := pgStore.MoveCursors.Upsert(ctx, &store.MoveCursor{CustomerID: customerID, Source: source.url, Cursor: &cursor, ReadAt: asked}); err != nil {
 			return err
 		}
 

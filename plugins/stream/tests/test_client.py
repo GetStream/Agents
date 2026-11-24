@@ -2,11 +2,13 @@ import asyncio
 import json
 import pickle
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
+import httpx
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+from vision_agents.core.llm import FunctionRegistry
 from vision_agents.plugins import stream
 
 WHEN = "2026-01-01T00:00:00Z"
@@ -27,6 +29,9 @@ class Router:
         self.asked: list[str] = []
         self.queries: dict[str, dict[str, str]] = {}
         self.bodies: dict[str, dict[str, Any]] = {}
+        # headers holds the router's own headers (X-...) each request carried, the latest
+        # against the same key.
+        self.headers: dict[str, dict[str, str]] = {}
 
         self.configs: list[dict[str, Any]] = []
         self.sessions: list[dict[str, Any]] = []
@@ -42,6 +47,19 @@ class Router:
         # are what the client sent back on it.
         self.frames: list[dict[str, Any]] = []
         self.commands: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        # tools_with answers each change of a session's tools in turn, adding or removing:
+        # a status, or -1 to drop the connection unanswered. Once it runs out, each is a 204.
+        # tools_take is how long each change waits before it is answered, as the router waits
+        # for the turn in progress, and changes says when each was asked and answered.
+        self.tools_with: list[int] = []
+        self.tools_take = 0.0
+        self.changes: list[str] = []
+        # started are the calls the functions a test gives a session were started for, which
+        # each says before it answers, so ran tells a call left alone from one still running.
+        self.started: list[str] = []
+        self._calls = 0
+        self._socket: Optional[web.WebSocketResponse] = None
+        self._watching = asyncio.Event()
 
     def app(self) -> web.Application:
         app = web.Application(middlewares=[self._refuse])
@@ -65,6 +83,10 @@ class Router:
         app.router.add_post("/v1/agents/guests", self._guest)
         app.router.add_post("/v1/agents/guests/claim", self._claim)
         app.router.add_get("/v1/agents/sessions/{id}/events", self._events)
+        app.router.add_get("/v1/agents/sessions/{id}/{read:tokens}", self._call)
+        app.router.add_get("/v1/agents/calls/{id}/{read:timeline|events}", self._call)
+        app.router.add_post("/v1/agents/sessions/{id}/tools", self._tools)
+        app.router.add_delete("/v1/agents/sessions/{id}/tools/{name}", self._tools)
         app.router.add_post("/v1/agents/simulations", self._simulation)
         app.router.add_get("/v1/agents/simulations", self._simulations)
         app.router.add_get("/v1/agents/simulations/{id}", self._simulation)
@@ -149,6 +171,76 @@ class Router:
         updated = self._session(request.match_info["id"])
         updated.update(self.bodies[f"PATCH {request.path}"])
         return web.json_response(updated)
+
+    async def _call(self, request: web.Request) -> web.Response:
+        # Each read answers with what tells it apart, and only for session-1, so a read of
+        # the wrong session, or of the wrong one of the three, is seen.
+        await self._record(request)
+        parts = {
+            "instructions": 700,
+            "messages": 300,
+            "tool_definitions": 200,
+            "tool_use": 0,
+            "images": 0,
+            "video": 0,
+        }
+        answers: dict[str, Any] = {
+            "tokens": {
+                "input_tokens": 1200,
+                "cached_input_tokens": 800,
+                "output_tokens": 90,
+                "cost_micros": 4100,
+                "cost_sources": [],
+                "requests": 3,
+                "input_parts": parts,
+                "models": [
+                    {
+                        "modality": "llm",
+                        "provider": "openai",
+                        "model": "gpt-5-mini",
+                        "input_tokens": 1200,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 0,
+                        "cost_micros": 0,
+                        "requests": 1,
+                        "input_parts": parts,
+                    }
+                ],
+            },
+            "timeline": [
+                {
+                    "turn_id": "turn-1",
+                    "started_at": WHEN,
+                    "heard": "what time do you open",
+                    "roundtrip_ms": 640.0,
+                },
+                {
+                    "turn_id": "turn-2",
+                    "started_at": WHEN,
+                    "heard": "and on sundays",
+                    "roundtrip_ms": 910.0,
+                },
+            ],
+            "events": [
+                {"kind": "ignore", "reason": "not meant for the agent", "at": WHEN}
+            ],
+        }
+        if request.match_info["id"] != "session-1":
+            unknown = (
+                "session" if request.path.startswith("/v1/agents/sessions/") else "call"
+            )
+            return web.json_response(
+                status=404,
+                data={
+                    "error": {
+                        "message": f"unknown {unknown}",
+                        "type": "not_found",
+                        "code": f"{unknown}_not_found",
+                        "doc_url": "https://getstream.io/agents/docs/api/errors/#not_found",
+                    }
+                },
+            )
+        return web.json_response(answers[request.match_info["read"]])
 
     async def _simulation(self, request: web.Request) -> web.Response:
         await self._record(request)
@@ -258,9 +350,68 @@ class Router:
             {"guest_id": "guest-1", "user_id": "jean", "sessions_moved": 3}
         )
 
+    async def send(self, frame: dict[str, Any]) -> None:
+        """Send one frame to whoever watches the session last opened."""
+        await asyncio.wait_for(self._watching.wait(), 2)
+        assert self._socket is not None
+        await self._socket.send_json(frame)
+
+    async def ran(self, name: str) -> Optional[str]:
+        """What a call of the tool ``name`` was answered with, or None when it was left alone.
+
+        A call of lookup_order, which every session here runs, follows it. A session starts
+        its calls in the order they arrive, so once lookup_order is answered a call no
+        function was started for was left alone, and one that was started is waited for,
+        however long it takes: its answer is neither missed nor left behind for the next.
+        """
+        self._calls += 1
+        call, probe = f"call-{self._calls}", f"probe-{self._calls}"
+        await self.send(
+            {
+                "type": "tool_call",
+                "id": call,
+                "name": name,
+                "arguments": json.dumps({"table": "T4"}),
+            }
+        )
+        await self.send({"type": "tool_call", "id": probe, "name": "lookup_order"})
+        answers: dict[str, dict[str, Any]] = {}
+        while probe not in answers or (call in self.started and call not in answers):
+            answer = await asyncio.wait_for(self.commands.get(), 2)
+            answers[answer["tool_call_id"]] = answer
+        if call not in answers:
+            return None
+        return answers[call].get("output", answers[call].get("error"))
+
+    async def _tools(self, request: web.Request) -> web.Response:
+        await self._record(request)
+        line = f"{request.method} {request.path}"
+        self.changes.append(f"asked {line}")
+        await asyncio.sleep(self.tools_take)
+        self.changes.append(f"answered {line}")
+        status = self.tools_with.pop(0) if self.tools_with else 204
+        if status < 0:
+            assert request.transport is not None
+            request.transport.close()
+        if status in (-1, 204):
+            return web.Response(status=204)
+        return web.json_response(
+            status=status,
+            data={
+                "error": {
+                    "message": f"the router said {status}",
+                    "type": "conflict",
+                    "code": "conflict",
+                    "doc_url": "https://getstream.io/agents/docs/api/errors/#conflict",
+                }
+            },
+        )
+
     async def _events(self, request: web.Request) -> web.WebSocketResponse:
         socket = web.WebSocketResponse()
         await socket.prepare(request)
+        self._socket = socket
+        self._watching.set()
         for frame in self.frames:
             await socket.send_json(frame)
         # Held open until the client goes away, which is what a conversation with nothing
@@ -274,6 +425,11 @@ class Router:
         line = f"{request.method} {request.path}"
         self.asked.append(line)
         self.queries[line] = dict(request.query)
+        self.headers[line] = {
+            name: value
+            for name, value in request.headers.items()
+            if name.lower().startswith("x-")
+        }
         if request.can_read_body:
             self.bodies[line] = await request.json()
 
@@ -316,6 +472,62 @@ def api(router: Router) -> stream.Client:
     return stream.Client(url=router.url, customer_id="acme")
 
 
+@pytest.fixture
+def docs(api: stream.Client) -> stream.Agent:
+    return api.agent("docs")
+
+
+@pytest.fixture
+def lookup() -> FunctionRegistry:
+    """The caller's own lookup_order, which the session below runs."""
+    functions = FunctionRegistry()
+
+    @functions.register(description="Look up an order")
+    async def lookup_order() -> str:
+        return "found"
+
+    return functions
+
+
+@pytest.fixture
+async def session(
+    docs: stream.Agent, lookup: FunctionRegistry
+) -> AsyncIterator[stream.Session]:
+    session = await docs.sessions.create(stream.SessionOptions(tools=lookup))
+    yield session
+    await session.close()
+
+
+@pytest.fixture
+def reserve_table(router: Router) -> FunctionRegistry:
+    """A tool given to a session while it runs."""
+    functions = FunctionRegistry()
+
+    @functions.register(description="Reserve a table")
+    async def reserve_table(
+        tool_call_context: stream.ToolCallContext, table: str
+    ) -> str:
+        router.started.append(tool_call_context.id)
+        return f"Reserved {table}."
+
+    return functions
+
+
+@pytest.fixture
+def window_table(router: Router) -> FunctionRegistry:
+    """Another function under reserve_table's name, which answers in its own words."""
+    functions = FunctionRegistry()
+
+    @functions.register(name="reserve_table", description="Reserve a window table")
+    async def reserve_window_table(
+        tool_call_context: stream.ToolCallContext, table: str
+    ) -> str:
+        router.started.append(tool_call_context.id)
+        return f"Reserved {table} by the window."
+
+    return functions
+
+
 class TestSessions:
     async def test_a_session_is_opened_against_the_agent_by_name(
         self, api: stream.Client, router: Router
@@ -351,19 +563,13 @@ class TestSessions:
             assert field not in body
 
     async def test_a_call_for_a_tool_held_elsewhere_is_left_for_whoever_holds_it(
-        self, api: stream.Client, router: Router
+        self, docs: stream.Agent, router: Router, lookup: FunctionRegistry
     ):
-        agent = api.agent("docs")
-
-        @agent.register(description="Look up an order")
-        async def lookup_order() -> str:
-            return "found"
-
         router.frames = [
             {"type": "tool_call", "id": "call-1", "name": "book_flight"},
             {"type": "tool_call", "id": "call-2", "name": "lookup_order"},
         ]
-        session = await agent.sessions.create(stream.SessionOptions())
+        session = await docs.sessions.create(stream.SessionOptions(tools=lookup))
         try:
             answer = await asyncio.wait_for(router.commands.get(), 2)
             assert answer["tool_call_id"] == "call-2"
@@ -377,11 +583,11 @@ class TestSessions:
     ):
         agent = api.agent("docs")
         seen: list[stream.ToolCallContext] = []
+        functions = FunctionRegistry()
 
-        @agent.register(description="Look up an order", timeout=2.5)
+        @functions.register(description="Look up an order", timeout=2.5)
         async def lookup_order(tool_call_context: stream.ToolCallContext) -> str:
             seen.append(tool_call_context)
-            await tool_call_context.update("searching the archive")
             return "found"
 
         router.frames = [
@@ -394,9 +600,8 @@ class TestSessions:
                 "run": True,
             },
         ]
-        session = await agent.sessions.create(stream.SessionOptions())
+        session = await agent.sessions.create(stream.SessionOptions(tools=functions))
         try:
-            update = await asyncio.wait_for(router.commands.get(), 2)
             answer = await asyncio.wait_for(router.commands.get(), 2)
             await asyncio.sleep(0.1)
             assert router.commands.empty(), "the call addressed elsewhere is left"
@@ -406,12 +611,6 @@ class TestSessions:
         assert (
             router.body("POST", "/v1/agents/sessions")["tools"][0]["timeout_ms"] == 2500
         )
-        assert update == {
-            "type": "tool_update",
-            "tool_call_id": "call-2",
-            "text": "searching the archive",
-            "verbatim": False,
-        }
         assert answer["tool_call_id"] == "call-2"
         assert (seen[0].id, seen[0].session_id, seen[0].turn_id) == (
             "call-2",
@@ -906,6 +1105,52 @@ class TestSessions:
 
         assert router.requests("DELETE", "/v1/agents/sessions/session-9/memories") == 1
 
+    async def test_a_sessions_metrics_are_read_back_by_its_id(self, api: stream.Client):
+        sessions = api.agent("docs").sessions
+
+        tokens = await sessions.tokens("session-1")
+        assert (
+            tokens.input_tokens,
+            tokens.cached_input_tokens,
+            tokens.input_parts.tool_definitions,
+        ) == (1200, 800, 200)
+        assert [model.model for model in tokens.models] == ["gpt-5-mini"]
+
+        timeline = await sessions.timeline("session-1")
+        assert [(entry.heard, entry.roundtrip_ms) for entry in timeline] == [
+            ("what time do you open", 640.0),
+            ("and on sundays", 910.0),
+        ]
+
+        decisions = await sessions.decisions("session-1")
+        assert [(d.kind.value, d.reason) for d in decisions] == [
+            ("ignore", "not meant for the agent")
+        ]
+
+    @pytest.mark.parametrize(
+        "read, code",
+        [
+            ("tokens", "session_not_found"),
+            ("timeline", "call_not_found"),
+            ("decisions", "call_not_found"),
+        ],
+    )
+    async def test_a_sessions_metrics_of_an_unknown_session_are_refused(
+        self, api: stream.Client, read: str, code: str
+    ):
+        sessions = api.agent("docs").sessions
+        reads = {
+            "tokens": sessions.tokens,
+            "timeline": sessions.timeline,
+            "decisions": sessions.decisions,
+        }
+
+        with pytest.raises(stream.RouterError) as refused:
+            await reads[read]("someone-elses")
+
+        assert refused.value.code == code
+        assert f"reading the {read} of someone-elses" in str(refused.value)
+
     async def test_a_delete_the_router_refuses_is_raised(self, api: stream.Client):
         with pytest.raises(stream.RouterError, match="no such thing"):
             await api.agent("docs").sessions.delete("missing")
@@ -1005,6 +1250,312 @@ class TestSessions:
 
         with pytest.raises(ValueError):
             await api.agent("docs").sessions.get("session-1")
+
+    async def test_a_tool_given_while_the_session_runs_is_declared_and_run_here(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+    ):
+        await session.add_tools(reserve_table)
+
+        [declared] = router.body("POST", "/v1/agents/sessions/session-1/tools")["tools"]
+        assert declared["name"] == "reserve_table"
+        assert declared["description"] == "Reserve a table"
+        assert declared["parameters"]["properties"] == {"table": {"type": "string"}}
+        assert await router.ran("reserve_table") == "Reserved T4."
+
+    async def test_a_tool_the_router_refused_is_not_run_here(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+    ):
+        router.tools_with = [409]
+
+        with pytest.raises(stream.RouterError) as refused:
+            await session.add_tools(reserve_table)
+
+        assert refused.value.status == 409
+        assert await router.ran("reserve_table") is None
+
+    async def test_a_tool_whose_adding_got_no_answer_is_still_run_here(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+    ):
+        # The router may have added it before the connection dropped, so a call of it can
+        # still arrive and is answered.
+        router.tools_with = [-1]
+
+        with pytest.raises(httpx.TransportError):
+            await session.add_tools(reserve_table)
+
+        assert await router.ran("reserve_table") == "Reserved T4."
+
+    async def test_a_name_whose_adding_got_no_answer_is_withdrawn_before_it_is_added_again(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+        window_table: FunctionRegistry,
+    ):
+        # The first add is lost, and the router had not added it: withdrawing it is a 404.
+        router.tools_with = [-1, 404]
+        with pytest.raises(httpx.TransportError):
+            await session.add_tools(reserve_table)
+
+        await session.add_tools(window_table)
+
+        tools = "/v1/agents/sessions/session-1/tools"
+        assert [line for line in router.asked if tools in line] == [
+            f"POST {tools}",
+            f"DELETE {tools}/reserve_table",
+            f"POST {tools}",
+        ]
+        assert await router.ran("reserve_table") == "Reserved T4 by the window."
+
+    async def test_removing_a_name_whose_adding_got_no_answer_takes_a_404_as_removed(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+    ):
+        router.tools_with = [-1, 404]
+        with pytest.raises(httpx.TransportError):
+            await session.add_tools(reserve_table)
+
+        await session.remove_tool("reserve_table")
+
+        assert await router.ran("reserve_table") is None
+
+    async def test_a_removed_tool_is_no_longer_run_here(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+    ):
+        await session.add_tools(reserve_table)
+
+        await session.remove_tool("reserve_table")
+
+        assert (
+            router.requests(
+                "DELETE", "/v1/agents/sessions/session-1/tools/reserve_table"
+            )
+            == 1
+        )
+        assert await router.ran("reserve_table") is None
+
+    async def test_a_tool_the_router_would_not_withdraw_is_still_run_here(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+    ):
+        await session.add_tools(reserve_table)
+        router.tools_with = [404]
+
+        with pytest.raises(stream.RouterError) as refused:
+            await session.remove_tool("reserve_table")
+
+        assert refused.value.status == 404
+        assert await router.ran("reserve_table") == "Reserved T4."
+
+    async def test_an_add_under_a_name_the_session_runs_keeps_its_function(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+        window_table: FunctionRegistry,
+    ):
+        await session.add_tools(reserve_table)
+        router.tools_with = [409]
+
+        with pytest.raises(stream.RouterError):
+            await session.add_tools(window_table)
+
+        assert await router.ran("reserve_table") == "Reserved T4."
+
+    async def test_a_tool_opened_with_withdrawn_runs_nothing_until_another_takes_its_name(
+        self,
+        docs: stream.Agent,
+        router: Router,
+        window_table: FunctionRegistry,
+        lookup: FunctionRegistry,
+    ):
+        @lookup.register(name="reserve_table", description="Reserve a table")
+        async def reserve(tool_call_context: stream.ToolCallContext, table: str) -> str:
+            router.started.append(tool_call_context.id)
+            return f"Reserved {table}."
+
+        session = await docs.sessions.create(stream.SessionOptions(tools=lookup))
+        try:
+            await session.remove_tool("reserve_table")
+            withdrawn = await router.ran("reserve_table")
+            await session.add_tools(window_table)
+            replaced = await router.ran("reserve_table")
+        finally:
+            await session.close()
+
+        assert withdrawn is None
+        assert replaced == "Reserved T4 by the window."
+
+    async def test_a_tool_given_to_one_session_is_not_its_agents(
+        self,
+        docs: stream.Agent,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+    ):
+        await session.add_tools(reserve_table)
+
+        another = await docs.sessions.create(stream.SessionOptions())
+        await another.close()
+
+        assert "tools" not in router.body("POST", "/v1/agents/sessions")
+
+    async def test_one_change_of_a_sessions_tools_is_made_at_a_time(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+    ):
+        router.tools_take = 0.2
+
+        await asyncio.gather(
+            session.add_tools(reserve_table), session.remove_tool("lookup_order")
+        )
+
+        tools = "/v1/agents/sessions/session-1/tools"
+        assert router.changes == [
+            f"asked POST {tools}",
+            f"answered POST {tools}",
+            f"asked DELETE {tools}/lookup_order",
+            f"answered DELETE {tools}/lookup_order",
+        ]
+
+    async def test_a_tool_whose_removal_got_no_answer_is_run_until_a_404_settles_it(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+    ):
+        await session.add_tools(reserve_table)
+        # The router withdrew it before the connection dropped, so asking again is a 404.
+        router.tools_with = [-1, 404]
+        with pytest.raises(httpx.TransportError):
+            await session.remove_tool("reserve_table")
+        kept = await router.ran("reserve_table")
+
+        await session.remove_tool("reserve_table")
+
+        assert kept == "Reserved T4."
+        assert await router.ran("reserve_table") is None
+
+    async def test_a_name_whose_removal_got_no_answer_is_withdrawn_before_it_is_added_again(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+        window_table: FunctionRegistry,
+    ):
+        await session.add_tools(reserve_table)
+        router.tools_with = [-1, 404]
+        with pytest.raises(httpx.TransportError):
+            await session.remove_tool("reserve_table")
+
+        await session.add_tools(window_table)
+
+        tools = "/v1/agents/sessions/session-1/tools"
+        assert [line for line in router.asked if tools in line] == [
+            f"POST {tools}",
+            f"DELETE {tools}/reserve_table",
+            f"DELETE {tools}/reserve_table",
+            f"POST {tools}",
+        ]
+        assert await router.ran("reserve_table") == "Reserved T4 by the window."
+
+    async def test_a_tool_whose_adding_was_answered_502_is_run_until_its_name_is_settled(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+        window_table: FunctionRegistry,
+    ):
+        # The router added it and a gateway in front of it answered 502, which says nothing
+        # of whether it did, so a call of it can still arrive and the name is withdrawn
+        # before it is added again.
+        router.tools_with = [502]
+        with pytest.raises(stream.RouterError) as lost:
+            await session.add_tools(reserve_table)
+        kept = await router.ran("reserve_table")
+
+        await session.add_tools(window_table)
+
+        tools = "/v1/agents/sessions/session-1/tools"
+        assert lost.value.status == 502
+        assert kept == "Reserved T4."
+        assert [line for line in router.asked if tools in line] == [
+            f"POST {tools}",
+            f"DELETE {tools}/reserve_table",
+            f"POST {tools}",
+        ]
+        assert await router.ran("reserve_table") == "Reserved T4 by the window."
+
+    async def test_a_tool_whose_removal_was_answered_502_is_run_until_a_404_settles_it(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+    ):
+        await session.add_tools(reserve_table)
+        # The router withdrew it and a gateway in front of it answered 502, so asking again
+        # is a 404.
+        router.tools_with = [502, 404]
+        with pytest.raises(stream.RouterError) as lost:
+            await session.remove_tool("reserve_table")
+        kept = await router.ran("reserve_table")
+
+        await session.remove_tool("reserve_table")
+
+        assert lost.value.status == 502
+        assert kept == "Reserved T4."
+        assert await router.ran("reserve_table") is None
+
+    async def test_a_removal_cancelled_while_the_router_has_it_is_settled_by_the_next(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+    ):
+        await session.add_tools(reserve_table)
+        # The caller gives up while the router waits for the turn in progress, and the router
+        # withdraws it all the same, so asking again is a 404.
+        router.tools_take = 0.5
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(session.remove_tool("reserve_table"), 0.1)
+        router.tools_take = 0
+        router.tools_with = [404]
+
+        await session.remove_tool("reserve_table")
+
+        assert await router.ran("reserve_table") is None
+
+    async def test_a_function_registered_under_an_added_name_afterwards_is_not_run(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+    ):
+        await session.add_tools(reserve_table)
+
+        @reserve_table.register(name="reserve_table", description="Reserve a table")
+        async def reserve_window_table(table: str) -> str:
+            return f"Reserved {table} by the window."
+
+        assert await router.ran("reserve_table") == "Reserved T4."
 
 
 class TestResponses:
@@ -1194,6 +1745,94 @@ class TestUpdate:
         assert body == {"title": "Pricing", "custom": {"ticket": "4721"}}
 
 
+class TestActingForAUser:
+    async def test_an_agent_for_a_user_names_them_on_every_request(
+        self, api: stream.Client, router: Router
+    ):
+        docs = api.agent("docs", user_id="alice")
+
+        session = await docs.sessions.create(stream.SessionOptions(title="Pricing"))
+        await docs.sessions.get(session.id)
+        await session.close()
+
+        assert router.headers["POST /v1/agents/sessions"]["X-Stream-User-Id"] == "alice"
+        get = f"GET /v1/agents/sessions/{session.id}"
+        assert router.headers[get]["X-Stream-User-Id"] == "alice"
+        # The client's own agent stays the client's.
+        assert api.backend.acting_for == ""
+
+    async def test_an_agent_without_a_user_sends_what_it_sent_before(
+        self, api: stream.Client, router: Router
+    ):
+        docs = api.agent("docs")
+
+        session = await docs.sessions.create(stream.SessionOptions(title="Pricing"))
+        await docs.sessions.get(session.id)
+        await session.close()
+
+        # Probed on fa2a6a66d, before agent() took a user.
+        assert router.asked == [
+            "POST /v1/agents/sessions",
+            "GET /v1/agents/sessions/session-1",
+        ]
+        assert router.bodies == {
+            "POST /v1/agents/sessions": {
+                "agent": "docs",
+                "backchannel": False,
+                "incognito": False,
+                "navigating": False,
+                "start_voice": False,
+                "title": "Pricing",
+                "user_id": "vision-agent",
+                "user_name": "Vision Agent",
+            }
+        }
+        assert router.headers == {
+            "POST /v1/agents/sessions": {
+                "X-Customer-Id": "acme",
+                "X-Stream-Client": "sdk",
+            },
+            "GET /v1/agents/sessions/session-1": {
+                "X-Customer-Id": "acme",
+                "X-Stream-Client": "sdk",
+            },
+        }
+
+    async def test_an_agent_without_a_user_keeps_the_user_the_client_was_built_for(
+        self, router: Router
+    ):
+        api = stream.Client(
+            url=router.url,
+            api_key="key",
+            api_secret="secret",
+            user_id="jean",
+            authenticate=False,
+        )
+        docs = api.agent("docs")
+
+        session = await docs.sessions.create(stream.SessionOptions(title="Pricing"))
+        await docs.sessions.get(session.id)
+        await session.close()
+
+        assert len(router.headers) == 2
+        for line, sent in router.headers.items():
+            assert sent["X-Stream-User-Id"] == "jean", line
+            assert sent["X-Api-Key"] == "key", line
+
+    def test_a_device_cannot_name_a_user(self, router: Router):
+        device = stream.Client(url=router.url, api_key="key", token="jean-token")
+
+        with pytest.raises(ValueError, match="only a backend"):
+            device.agent("docs", user_id="alice")
+        with pytest.raises(ValueError, match="only a backend"):
+            device.router("clinic", user_id="alice")
+        # Without a user a device's router is its own, as before.
+        assert device.router("clinic").backend is device.backend
+        # An empty user is no user: a device may pass one along unset.
+        assert device.router("clinic", user_id="").backend is device.backend
+        assert device.agent("docs", user_id="")._backend is device.backend
+
+
 class TestMemories:
     async def test_everything_remembered_about_a_user_is_truncated(
         self, api: stream.Client, router: Router
@@ -1317,14 +1956,16 @@ class TestFork:
     async def test_a_fork_inherits_the_parents_functions(
         self, api: stream.Client, router: Router
     ):
-        agent = api.agent("docs")
+        functions = FunctionRegistry()
 
-        @agent.register()
+        @functions.register()
         async def get_weather(location: str) -> str:
             """Get current weather for a location"""
             return "raining in " + location
 
-        session = await agent.sessions.create()
+        session = await api.agent("docs").sessions.create(
+            stream.SessionOptions(tools=functions)
+        )
         try:
             forked = await session.fork()
             await forked.close()
@@ -1333,17 +1974,106 @@ class TestFork:
 
         assert forked.functions.list_functions() == ["get_weather"]
 
-    async def test_the_model_is_offered_the_agents_functions(
+    async def test_a_fork_runs_the_tools_its_parent_has_now(
+        self,
+        docs: stream.Agent,
+        router: Router,
+        reserve_table: FunctionRegistry,
+        lookup: FunctionRegistry,
+    ):
+        @lookup.register(description="Release a table")
+        async def release_table(
+            tool_call_context: stream.ToolCallContext, table: str
+        ) -> str:
+            router.started.append(tool_call_context.id)
+            return f"Released {table}."
+
+        session = await docs.sessions.create(stream.SessionOptions(tools=lookup))
+        try:
+            await session.add_tools(reserve_table)
+            await session.remove_tool("release_table")
+            forked = await session.fork()
+            try:
+                added = await router.ran("reserve_table")
+                removed = await router.ran("release_table")
+            finally:
+                await forked.close()
+        finally:
+            await session.close()
+
+        assert added == "Reserved T4."
+        assert removed is None
+
+    async def test_a_fork_withdraws_a_name_whose_adding_got_no_answer_before_adding_it(
+        self,
+        session: stream.Session,
+        router: Router,
+        reserve_table: FunctionRegistry,
+        window_table: FunctionRegistry,
+    ):
+        # The parent's add is lost and the router never made it, so the fork the router
+        # copies has no tool by the name either, and withdrawing it there is a 404.
+        router.tools_with = [-1, 404]
+        with pytest.raises(httpx.TransportError):
+            await session.add_tools(reserve_table)
+        forked = await session.fork()
+        try:
+            await forked.add_tools(window_table)
+            ran = await router.ran("reserve_table")
+        finally:
+            await forked.close()
+
+        tools = "/v1/agents/sessions/session-2/tools"
+        assert [line for line in router.asked if tools in line] == [
+            f"DELETE {tools}/reserve_table",
+            f"POST {tools}",
+        ]
+        assert ran == "Reserved T4 by the window."
+
+    async def test_a_fork_waits_for_a_change_of_its_parents_tools(
+        self, docs: stream.Agent, router: Router, lookup: FunctionRegistry
+    ):
+        @lookup.register(description="Release a table")
+        async def release_table(
+            tool_call_context: stream.ToolCallContext, table: str
+        ) -> str:
+            router.started.append(tool_call_context.id)
+            return f"Released {table}."
+
+        session = await docs.sessions.create(stream.SessionOptions(tools=lookup))
+        try:
+            router.tools_take = 0.2
+            _, forked = await asyncio.gather(
+                session.remove_tool("release_table"), session.fork()
+            )
+            try:
+                released = await router.ran("release_table")
+            finally:
+                await forked.close()
+        finally:
+            await session.close()
+
+        assert released is None
+
+    async def test_a_session_declares_its_own_functions_and_not_the_apps(
         self, api: stream.Client, router: Router
     ):
-        agent = api.agent("docs")
+        # The app's tools are for every agent: declared on a session, the ones its agent's
+        # tool groups do not name would have the router refuse it.
+        @api.tools.register(description="Look up an order")
+        async def lookup_order() -> str:
+            return "found"
 
-        @agent.register()
+        functions = FunctionRegistry()
+
+        @functions.register()
         async def get_weather(location: str) -> str:
             """Get current weather for a location"""
             return "raining in " + location
 
-        session = await agent.sessions.create()
+        session = await api.agent("docs").sessions.create(
+            stream.SessionOptions(tools=functions)
+        )
         await session.close()
 
         [declared] = router.body("POST", "/v1/agents/sessions")["tools"]

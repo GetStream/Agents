@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"net/http"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	"github.com/GetStream/getstream-go/v5"
 	"github.com/gorilla/websocket"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/fakeprovider"
@@ -22,6 +24,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/bearer"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/mcp"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -60,7 +63,7 @@ func (s *SessionConnectorsSuite) SetupSuite() {
 	s.approvalWait = 5 * time.Second
 	s.RouterSuite.SetupSuite()
 	// Seeded as a router start does, for the nessy binding the approval tests set beside crm.
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 	s.token = issuedToken(&s.RouterSuite, s.provider)
 }
 
@@ -102,7 +105,7 @@ func (s *SessionConnectorsSuite) TestAToolCallAnswered400KeepsAStaticTokenConnec
 
 	s.Equal(connectorEcho, ran["tool"])
 	s.NotEmpty(ran["error"], "the provider's 400 is the call's answer")
-	connection, err := s.store.ConnectorConnection(context.Background(), s.customerID(), mine)
+	connection, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), mine)
 	s.Require().NoError(err)
 	s.Equal(store.ConnectionConnected, connection.Status)
 }
@@ -119,34 +122,10 @@ func (s *SessionConnectorsSuite) TestACustomConnectorsServerInstructionsFollowTh
 // config's instructions alone, as on base (probe on c4d53f3e9: "Be brief.").
 func (s *SessionConnectorsSuite) TestABuiltInConnectorsServerInstructionsAreLeftOut() {
 	builtin := "fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), fstest.MapFS{builtin + ".yaml": {
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), fstest.MapFS{builtin + ".yaml": {
 		Data: []byte(strings.Replace(s.manifest(), "custom_crm", builtin, 1))}}))
 
 	s.Equal("Be brief.", s.recordedInstructions(builtin, "Quote ticket ids whole."))
-}
-
-// TestARowStillNamingPluginsRunsItsBuiltInAndCustomBindingsAsOnBase is the control: a config
-// whose row still names a plugin, a plugin event and an MCP server, as one saved before they
-// were refused does, runs the tool of a custom and of a built-in connector's binding as the base
-// did (probe on c467ee4d6: crm__echo ran with the echo's text and no error, for each).
-func (s *SessionConnectorsSuite) TestARowStillNamingPluginsRunsItsBuiltInAndCustomBindingsAsOnBase() {
-	builtin := "fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), fstest.MapFS{builtin + ".yaml": {
-		Data: []byte(strings.Replace(s.manifest(), "custom_crm", builtin, 1))}}))
-	for kind, connector := range map[string]string{"custom": s.connector(), "built-in": builtin} {
-		s.Run(kind, func() {
-			mine, echo := s.connection(s.client, connector)
-			config := s.config(s.binding("crm", connector, "session", "", echo))
-			nameRetired(s.T(), s.store, config)
-
-			opened := s.client.createSession(s.session(config, map[string]string{"crm": mine}))
-			ran := s.toolRanOn(s.serverClient.actingFor(s.client), s.client.opens("/v1/agents/sessions/"+opened.Id+"/events"), opened.Id)
-
-			s.Equal(connectorEcho, ran["tool"])
-			s.Equal(connectorEchoText, ran["result"])
-			s.Empty(ran["error"])
-		})
-	}
 }
 
 // recordedInstructions is what the call of a session of a config told "Be brief." records the
@@ -164,7 +143,7 @@ func (s *SessionConnectorsSuite) recordedInstructions(connector, instructions st
 	opened := s.client.createSession(s.session(config.Id, map[string]string{"crm": mine}))
 	s.recorded(opened.Id)
 	var call Call
-	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+opened.Id, nil, &call))
+	s.Require().Equal(http.StatusOK, s.sessionCall(opened.Id, &call))
 	s.client.stopSession(opened.Id)
 	return value(call.Instructions)
 }
@@ -335,9 +314,10 @@ func (s *SessionConnectorsSuite) TestAForkWhoseConfigCannotBeReadFails() {
 	opened := s.client.createSession(s.session(config, nil))
 	s.storedSelections(opened.Id)
 	s.client.stopSession(opened.Id)
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE agent_configs SET connectors = '{"not": "a list"}'::jsonb WHERE id = ?`, config)
 	s.Require().NoError(err)
+	s.store.AgentConfigs.ForgetCached(context.Background(), s.customerID(), config)
 
 	status := s.client.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/fork", ForkSessionRequest{Messages: pointerTo(false)}, nil)
 
@@ -454,7 +434,7 @@ func (s *SessionConnectorsSuite) TestAForkOfAnEndedSessionIsWrittenWhateverItsCo
 func (s *SessionConnectorsSuite) TestAForkNamingAConfigDoesNotReadItsParentsConfig() {
 	config := s.modelledConfig("noted/noted-model", nil)
 	parent := s.endedSession(config)
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE agent_configs SET connectors = '{"not": "a list"}'::jsonb WHERE id = ?`, config)
 	s.Require().NoError(err)
 	named := s.modelledConfig("counted/counted-model", nil)
@@ -549,7 +529,7 @@ func (s *SessionConnectorsSuite) TestAnIncognitoForkIsRefusedWhateverItsConfig()
 	request := s.session(config, nil)
 	request.Incognito = pointerTo(true)
 	running := s.client.createSession(request)
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE agent_configs SET connectors = '{"not": "a list"}'::jsonb WHERE id = ?`, config)
 	s.Require().NoError(err)
 
@@ -572,7 +552,7 @@ func (s *SessionConnectorsSuite) TestAThreadsForkIsRefusedWhateverItsConfig() {
 	opened := s.serverClient.createSession(request)
 	s.serverClient.stopSession(opened.Id)
 	s.storedSelections(opened.Id)
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE agent_configs SET connectors = '{"not": "a list"}'::jsonb WHERE id = ?`, config)
 	s.Require().NoError(err)
 
@@ -596,6 +576,51 @@ func (s *SessionConnectorsSuite) TestAForkOfARunningSessionReachesTheConnectionI
 
 	s.Equal(connectorEchoText, ran["result"])
 	s.Empty(ran["error"])
+}
+
+// A slow tool, such as one that draws a picture, needs the longer timeout the caller gave the
+// conversation: a fork that dropped it would fail that tool at 30 seconds.
+func (s *SessionConnectorsSuite) TestAForkNamingAConfigKeepsItsRunningParentsToolTimeout() {
+	request := s.session(s.modelledConfig("counted/counted-model", nil), nil)
+	request.ToolTimeoutMs = pointerTo(180_000)
+	running := s.client.createSession(request)
+	named := s.modelledConfig("noted/noted-model", nil)
+
+	var forked Session
+	s.Require().Equal(http.StatusCreated, s.client.do(http.MethodPost, "/v1/agents/sessions/"+running.Id+"/fork",
+		ForkSessionRequest{Messages: pointerTo(false), ConfigId: &named}, &forked))
+
+	s.Equal(180_000, s.heldSpec(forked.Id).ToolTimeoutMs)
+}
+
+// The row of a conversation that ended keeps no tool timeout, so a fork of one is given it.
+func (s *SessionConnectorsSuite) TestAForkOfAnEndedSessionTakesTheToolTimeoutItIsGiven() {
+	parent := s.endedSession(s.modelledConfig("counted/counted-model", nil))
+
+	var forked Session
+	s.Require().Equal(http.StatusCreated, s.client.do(http.MethodPost, "/v1/agents/sessions/"+parent+"/fork",
+		ForkSessionRequest{Messages: pointerTo(false), ToolTimeoutMs: pointerTo(180_000)}, &forked))
+
+	s.Equal(180_000, s.heldSpec(forked.Id).ToolTimeoutMs)
+}
+
+func (s *SessionConnectorsSuite) TestAForksToolTimeoutWinsOverItsRunningParents() {
+	request := s.session(s.modelledConfig("counted/counted-model", nil), nil)
+	request.ToolTimeoutMs = pointerTo(60_000)
+	running := s.client.createSession(request)
+
+	var forked Session
+	s.Require().Equal(http.StatusCreated, s.client.do(http.MethodPost, "/v1/agents/sessions/"+running.Id+"/fork",
+		ForkSessionRequest{Messages: pointerTo(false), ToolTimeoutMs: pointerTo(180_000)}, &forked))
+
+	s.Equal(180_000, s.heldSpec(forked.Id).ToolTimeoutMs)
+}
+
+// heldSpec is the spec of the session id this node holds.
+func (s *SessionConnectorsSuite) heldSpec(id string) session.Spec {
+	held, ok := s.manager.Get(id, session.Owner{CustomerID: s.customerID(), Kind: auth.KindServer})
+	s.Require().True(ok, "session %s is held here", id)
+	return held.Spec()
 }
 
 // TestAForkOfARunningSessionKeepsTheModelItWasOpenedWith: a live parent's spec carries its
@@ -637,12 +662,46 @@ func (s *SessionConnectorsSuite) TestASlackThreadSessionUsesTheAppsConnectionsOn
 	s.Equal(connectorEchoText, ran["result"], "the app's binding answers")
 }
 
+// TestAThreadChannelsHeldCallAsksNobody: a thread channel (type agent) answered by the hook
+// keeps the rule it had before channels of a named type asked their writer. The Router's own
+// session there asks nobody, so a call held for approval is refused at once, never put to the
+// person whose message the reply answers (Session.followUp hands BeginFollowUp a writer only
+// for a turn agent.WithWriter marks, which a thread channel's turn is not).
+func (s *SessionConnectorsSuite) TestAThreadChannelsHeldCallAsksNobody() {
+	connector := s.connector()
+	app, echo := s.connection(nil, connector)
+	held := s.binding("crm", connector, "fixed", app, echo)
+	held["require_approval"] = []string{"echo"}
+	config := s.config(held)
+	channel := conversation.ThreadChannelPrefix + s.utils.uuid()
+	s.threadChannel(channel, connector, app, config)
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/chat/hooks/stream", fmt.Sprintf(`{
+  "type": "message.new", "cid": "agent:%s", "channel_id": %q, "channel_type": "agent", "channel_custom": {},
+  "message": {"id": "message-%s", "text": "check the crm", "user": {"id": "slack-U0000ALICE", "name": "Alice"}}
+}`, channel, channel, s.utils.uuid())))
+
+	s.Require().Eventually(func() bool {
+		for _, stored := range s.chat.Stored("agent:" + channel) {
+			custom, _ := stored["custom"].(map[string]any)
+			runtime, _ := custom["support_runtime"].(map[string]any)
+			if strings.HasPrefix(fmt.Sprint(runtime["command_id"]), "thread_") && runtime["state"] == "completed" {
+				return true
+			}
+		}
+		return false
+	}, settleFor, 20*time.Millisecond, "the thread's reply never finished")
+	for _, stored := range s.chat.Stored("agent:" + channel) {
+		s.Nil(echoStepOf(stored), "a thread channel's held call was put to a person")
+	}
+}
+
 // threadChannel is a Slack thread's thread channel, linked and created in Stream Chat as the
 // channel bridge does on the thread's first message (channelbridge.Bridge.openThread), with
 // two people of the thread writing in it.
 func (s *SessionConnectorsSuite) threadChannel(channel, connector, connection, config string) {
 	ctx := context.Background()
-	_, err := s.store.LinkChannelThread(ctx, &store.ChannelThread{ChannelID: channel, CustomerID: s.customerID(),
+	_, err := s.store.ChannelThreads.Link(ctx, &store.ChannelThread{ChannelID: channel, CustomerID: s.customerID(),
 		ConnectorID: connector, ProviderUnitID: "T0000TEAM", ThreadKey: s.utils.uuid(), ConnectionID: connection})
 	s.Require().NoError(err)
 	alice, bob := "slack-U0000ALICE", "slack-U0000BOB"
@@ -660,23 +719,34 @@ func (s *SessionConnectorsSuite) threadChannel(channel, connector, connection, c
 }
 
 // connector stores a connector of the suite's app at the fake, taking a bearer token.
-func (s *SessionConnectorsSuite) connector() string {
+func (s *SessionConnectorsSuite) connector() string { return s.customConnector(s.provider) }
+
+// manifest is the YAML of a connector custom_crm at the fake, taking a bearer token.
+func (s *SessionConnectorsSuite) manifest() string { return customManifest(s.provider) }
+
+// connection is bearerConnection with the fake's token.
+func (s *SessionConnectorsSuite) connection(user *testClient, connector string) (string, map[string]any) {
+	return s.bearerConnection(s.token, user, connector)
+}
+
+// customConnector stores a connector of the suite's app at provider, taking a bearer token.
+func (s *RouterSuite) customConnector(provider *fakeprovider.Server) string {
 	id := "custom_crm" + strings.ReplaceAll(s.utils.uuid(), "-", "")
-	manifest, err := core.ParseManifest([]byte(strings.Replace(s.manifest(), "custom_crm", id, 1)))
+	manifest, err := core.ParseManifest([]byte(strings.Replace(customManifest(provider), "custom_crm", id, 1)))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	return id
 }
 
-// manifest is the YAML of a connector custom_crm at the fake, taking a bearer token.
-func (s *SessionConnectorsSuite) manifest() string {
+// customManifest is the YAML of a connector custom_crm at provider, taking a bearer token.
+func customManifest(provider *fakeprovider.Server) string {
 	return `
 id: custom_crm
 revision: 1
 name: CRM
 endpoints:
-  mcp: ` + s.provider.URL + fakeprovider.PathMCP + `
+  mcp: ` + provider.URL + fakeprovider.PathMCP + `
 schemes: [bearer]
 sources:
   - kind: mcp
@@ -684,10 +754,10 @@ sources:
 `
 }
 
-// connection is a validated connection to connector holding the fake's token, the app's
+// bearerConnection is a validated connection to connector holding token, a fake's, the app's
 // when user is nil and otherwise user's, made by the backend acting for them, and the grant
 // of the fake's echo at the digest its validate listed.
-func (s *SessionConnectorsSuite) connection(user *testClient, connector string) (string, map[string]any) {
+func (s *RouterSuite) bearerConnection(token string, user *testClient, connector string) (string, map[string]any) {
 	as, body := s.serverClient, appOwned(connector)
 	if user != nil {
 		as, body = s.serverClient.actingFor(user), userOwned(connector, user)
@@ -695,7 +765,7 @@ func (s *SessionConnectorsSuite) connection(user *testClient, connector string) 
 	var created Connection
 	s.Require().Equal(http.StatusCreated, as.do(http.MethodPost, "/v1/agents/connections", withScheme(body, bearer.Name), &created))
 	s.Require().Equal(http.StatusOK, as.do(http.MethodPut, "/v1/agents/connections/"+created.ID+"/credentials",
-		map[string]any{"expected_revision": 1, "values": map[string]string{bearer.SuppliedToken: s.token}}, nil))
+		map[string]any{"expected_revision": 1, "values": map[string]string{bearer.SuppliedToken: token}}, nil))
 	var validation ConnectionValidation
 	s.Require().Equal(http.StatusOK, as.do(http.MethodPost, "/v1/agents/connections/"+created.ID+"/validate", nil, &validation))
 	s.Require().Equal(validationConnected, string(validation.Status), validation.Error)
@@ -857,7 +927,7 @@ func (s *SessionConnectorsSuite) forkPrompts(parent string) forkedPrompts {
 
 	var call Call
 	s.Require().Eventually(func() bool {
-		return s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+forked.Id, nil, &call) == http.StatusOK &&
+		return s.sessionCall(forked.Id, &call) == http.StatusOK &&
 			call.ReviewNotes != nil
 	}, 2*settleFor, 10*time.Millisecond, "the fork is reviewed when it ends")
 	review := strings.TrimSuffix(*call.ReviewNotes, "\n\n"+`Answer with JSON only: {"summary": "...", "score": 3, "notes": "..."}`)
@@ -868,7 +938,7 @@ func (s *SessionConnectorsSuite) forkPrompts(parent string) forkedPrompts {
 // and a session stopped before it is there loses the review that stopping starts.
 func (s *SessionConnectorsSuite) recorded(id string) {
 	s.Require().Eventually(func() bool {
-		return s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+id, nil, nil) == http.StatusOK
+		return s.sessionCall(id, nil) == http.StatusOK
 	}, settleFor, 10*time.Millisecond, "the call is recorded")
 }
 
@@ -896,7 +966,7 @@ func (s *SessionConnectorsSuite) forkSummary(parent string, config *string) stri
 	var summary string
 	s.Require().Eventually(func() bool {
 		var call Call
-		s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+forked.Id, nil, &call)
+		s.sessionCall(forked.Id, &call)
 		summary = value(call.Summary)
 		return strings.Contains(summary, "upgrade")
 	}, 2*settleFor, 10*time.Millisecond, "the fork is summarised when it ends")

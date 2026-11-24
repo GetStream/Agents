@@ -2,6 +2,10 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -15,96 +19,303 @@ import (
 )
 
 func (s *AgentSuite) TestACallThatNeedsApprovalAsksTheQuestionAsWrittenAndDoesNotRun() {
-	s.askedToApprove()
+	s.onFakeClock(func() {
+		s.askedToApprove()
 
-	s.never(func() bool { return len(s.runner.asked()) > 0 }, "the call ran before the caller said yes")
-	asked := s.historyWith(llm.ToolResult)
-	s.Contains(asked, "Book order 12?")
-	s.Contains(asked, confirmTool)
-	s.Len(s.model.requests(), 1, "the question is said as written, without a turn of the model's")
+		s.never(func() bool { return len(s.runner.asked()) > 0 }, "the call ran before the caller said yes")
+		asked := s.historyWith(llm.ToolResult)
+		s.Contains(asked, "Book order 12?")
+		s.Contains(asked, confirmTool)
+		s.Len(s.model.requests(), 1, "the question is said as written, without a turn of the model's")
+	})
 }
 
 func (s *AgentSuite) TestAYesRunsTheCallOnceWithItsOwnID() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		var approved atomic.Bool
+		s.runner.run = func(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart, error) {
+			approved.Store(Approved(ctx))
+			return llm.TextParts("order 12 booked"), nil
+		}
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+
+		s.eventually(func() bool { return len(s.runner.asked()) == 1 }, "the call never ran")
+		ran := s.runner.asked()[0]
+		s.Equal("call-1", ran.ID, "the call runs under the id the model gave it")
+		s.Equal("lookup_order", ran.Name)
+		s.Equal(`{"order":"12"}`, ran.Arguments)
+		// Read once the result is back: the stub records a call before it runs it.
+		s.eventually(func() bool { return strings.Contains(s.historyWith(llm.ToolResult), "order 12 booked") },
+			"the call's result never answered the confirmation")
+		s.True(approved.Load(), "the call is marked approved for whoever runs it")
+		s.eventually(func() bool { return countOf[ToolApprovalDecided](s.reported()) == 1 }, "the answer was never reported")
+		decided, _ := firstOf[ToolApprovalDecided](s.reported())
+		s.Equal(ToolApprovalDecided{ID: "call-1", TurnID: decided.TurnID, Allowed: true}, decided)
+	})
+}
+
+// Keys of a line for a call that was answered with its question, as main logs them: the asked
+// line has only approval added to them.
+var askedLineKeys = []string{"agent_id", "app_id", "call", "customer", "duration_ms", "error_code", "level", "msg",
+	"outcome", "session", "success", "time", "tool", "tool_call", "turn"}
+
+// confirmationLineKeys are the keys the confirmation's line has: the run it approved has its
+// own line, with the connector and the error.
+var confirmationLineKeys = []string{"agent_id", "app_id", "call", "customer", "duration_ms", "level", "msg",
+	"outcome", "session", "success", "time", "tool", "tool_call", "turn"}
+
+// connectorLineKeys are the keys main logs a connector's call with that asks nothing.
+var connectorLineKeys = []string{"agent_id", "app_id", "call", "connector", "customer", "duration_ms", "error_code",
+	"level", "msg", "outcome", "session", "success", "time", "tool", "tool_call", "turn"}
+
+// confirmedLines has the caller asked whether to book order 12 and answer with arguments, run
+// carrying out the call they allow, and returns the "a tool call came back" lines once the
+// confirmation's has been logged.
+func (s *AgentSuite) confirmedLines(arguments string, run func(context.Context, llm.ToolCall) ([]llm.ContentPart, error)) []map[string]any {
+	s.logs = &logLines{}
 	s.askedToApprove()
-	var approved atomic.Bool
-	s.runner.run = func(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart, error) {
-		approved.Store(Approved(ctx))
-		return llm.TextParts("order 12 booked"), nil
-	}
-	s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+	s.runner.run = run
+	s.confirms(arguments)
 
 	s.says(stt.Participant{ID: "alice"}, "yes please")
 
-	s.eventually(func() bool { return len(s.runner.asked()) == 1 }, "the call never ran")
-	ran := s.runner.asked()[0]
-	s.Equal("call-1", ran.ID, "the call runs under the id the model gave it")
-	s.Equal("lookup_order", ran.Name)
-	s.Equal(`{"order":"12"}`, ran.Arguments)
-	// Read once the result is back: the stub records a call before it runs it.
-	s.eventually(func() bool { return strings.Contains(s.historyWith(llm.ToolResult), "order 12 booked") },
-		"the call's result never answered the confirmation")
-	s.True(approved.Load(), "the call is marked approved for whoever runs it")
-	s.eventually(func() bool { return countOf[ToolApprovalDecided](s.reported()) == 1 }, "the answer was never reported")
-	decided, _ := firstOf[ToolApprovalDecided](s.reported())
-	s.Equal(ToolApprovalDecided{ID: "call-1", TurnID: decided.TurnID, Allowed: true}, decided)
+	s.eventually(func() bool {
+		return slices.ContainsFunc(s.logs.records(toolBack), func(line map[string]any) bool { return line["tool"] == confirmTool })
+	}, "the confirmation never came back")
+	return s.logs.records(toolBack)
+}
+
+// The call a caller said yes to is logged under its own name, connector and run, so an
+// operator sees the tool that ran and not only the confirmation it ran inside.
+func (s *AgentSuite) TestAnApprovedCallIsLoggedUnderItsOwnName() {
+	s.onFakeClock(func() {
+		okBefore, _ := histogramOf("router_agent_tool_call_seconds", "outcome", "ok")
+		refusedBefore, _ := histogramOf("router_agent_tool_call_seconds", "outcome", "refused")
+		lines := s.confirmedLines(`{"tool_call_id":"call-1","allowed":true}`,
+			func(ctx context.Context, _ llm.ToolCall) ([]llm.ContentPart, error) {
+				ReportTool(ctx, ToolReport{Connector: "github"})
+				time.Sleep(2 * time.Second)
+				return llm.TextParts("order 12 booked"), nil
+			})
+
+		s.Require().Len(lines, 3)
+		asked, ran, confirmed := lines[0], lines[1], lines[2]
+		s.Equal("lookup_order", asked["tool"])
+		s.Equal("call-1", asked["tool_call"])
+		s.Equal("refused", asked["outcome"], "the outcome the metric counts an asked call under is kept")
+		s.Equal("asked", asked["approval"], "the call was answered with its question")
+		s.Equal(askedLineKeys, slices.Sorted(maps.Keys(withoutKey(asked, "approval"))))
+
+		s.Equal("lookup_order", ran["tool"])
+		s.Equal("call-1", ran["tool_call"])
+		s.Equal(asked["turn"], ran["turn"], "the run is in the turn that asked for it")
+		s.Equal("allowed", ran["approval"])
+		s.Equal("call-2", ran["confirmation"])
+		s.Equal("github", ran["connector"])
+		s.Equal("ok", ran["outcome"])
+		s.Equal(true, ran["success"])
+		s.Equal("", ran["error_code"])
+		s.Equal(float64(2000), ran["duration_ms"], "the run took the two seconds the tool did")
+		s.Equal("acme", ran["app_id"])
+		s.Equal(s.agentID, ran["agent_id"])
+
+		s.Equal(confirmTool, confirmed["tool"])
+		s.Equal("call-2", confirmed["tool_call"])
+		s.Equal(true, confirmed["success"])
+		s.Equal("ok", confirmed["outcome"])
+		s.Equal(confirmationLineKeys, slices.Sorted(maps.Keys(confirmed)), "the connector is on the run's line only")
+
+		okAfter, _ := histogramOf("router_agent_tool_call_seconds", "outcome", "ok")
+		refusedAfter, _ := histogramOf("router_agent_tool_call_seconds", "outcome", "refused")
+		s.Equal(okBefore+1, okAfter, "the run is timed once, under its confirmation, as on main")
+		s.Equal(refusedBefore+1, refusedAfter)
+	})
+}
+
+// An approved run that failed says so on its own line, with what its runner reported in
+// place of the error it returned.
+func (s *AgentSuite) TestAnApprovedCallThatFailedIsLoggedAsFailed() {
+	s.onFakeClock(func() {
+		lines := s.confirmedLines(`{"tool_call_id":"call-1","allowed":true}`,
+			func(ctx context.Context, _ llm.ToolCall) ([]llm.ContentPart, error) {
+				ReportTool(ctx, ToolReport{Connector: "github", ErrorCode: "customer_auth", Error: "the token was refused"})
+				return nil, errors.New("stub: POST /orders/12/refund was refused")
+			})
+
+		s.Require().Len(lines, 3)
+		ran, confirmed := lines[1], lines[2]
+		s.Equal("lookup_order", ran["tool"])
+		s.Equal("error", ran["outcome"])
+		s.Equal(false, ran["success"])
+		s.Equal("customer_auth", ran["error_code"])
+		s.Equal("the token was refused", ran["error"])
+		s.NotContains(fmt.Sprint(ran), "/orders/12/refund", "the returned error is not logged")
+		s.Equal(false, confirmed["success"])
+		s.Equal("error", confirmed["outcome"])
+		s.Equal(confirmationLineKeys, slices.Sorted(maps.Keys(confirmed)), "the error is on the run's line only")
+		s.NotContains(fmt.Sprint(confirmed), "/orders/12/refund")
+		s.NotContains(fmt.Sprint(confirmed), "the token was refused")
+	})
+}
+
+// interruptedRun has the caller say yes to booking order 12, under a tool policy, and talk
+// over the run, and returns the line the run was logged with.
+func (s *AgentSuite) interruptedRun(policy ToolPolicy) map[string]any {
+	s.logs = &logLines{}
+	s.toolPolicy = func(string) ToolPolicy { return policy }
+	s.askedToApprove()
+	began, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	s.runner.run = func(ctx context.Context, _ llm.ToolCall) ([]llm.ContentPart, error) {
+		close(began)
+		select {
+		case <-release:
+			return llm.TextParts("order 12 booked"), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+	participant := stt.Participant{ID: "alice"}
+	s.says(participant, "yes please")
+	select {
+	case <-began:
+	case <-time.After(settleFor):
+		s.FailNow("the approved call never ran")
+	}
+	s.flow.then = []string{`{"disposition":"wait","floor":"stop"}`}
+	s.replyWentOut()
+
+	s.mutters(participant, "stop, hold on")
+
+	if !policy.Cancels {
+		s.eventually(func() bool { return strings.Contains(fmt.Sprint(s.history()), stillRunning) },
+			"the interrupted confirmation was not answered")
+		release <- struct{}{}
+	}
+	s.eventually(func() bool { return len(s.logs.records(toolBack)) == 3 }, "the run never came back")
+	return s.logs.records(toolBack)[1]
+}
+
+// A run the caller talked over is answered with stillRunning and let finish, as the
+// confirmation it ran inside is.
+func (s *AgentSuite) TestAnApprovedCallTheCallerTalkedOverIsLoggedAsStillRunning() {
+	s.onFakeClock(func() {
+		ran := s.interruptedRun(ToolPolicy{Waits: true})
+		s.Equal("lookup_order", ran["tool"])
+		s.Equal("still-running", ran["outcome"])
+	})
+}
+
+// A run of a tool that asks to be cancelled when talked over is logged as cancelled.
+func (s *AgentSuite) TestAnApprovedCallCancelledByTheCallerIsLoggedAsCancelled() {
+	s.onFakeClock(func() {
+		ran := s.interruptedRun(ToolPolicy{Cancels: true})
+		s.Equal("lookup_order", ran["tool"])
+		s.Equal("cancelled", ran["outcome"])
+		s.Equal("cancelled", ran["error_code"])
+	})
+}
+
+// A no runs nothing, so nothing is logged as run: only the question and the confirmation.
+func (s *AgentSuite) TestADeclinedCallLogsNoRun() {
+	s.onFakeClock(func() {
+		lines := s.confirmedLines(`{"tool_call_id":"call-1","allowed":false}`, nil)
+
+		s.Require().Len(lines, 2)
+		s.Equal("asked", lines[0]["approval"])
+		s.Equal(confirmTool, lines[1]["tool"])
+		s.NotContains(lines[1], "approval")
+	})
 }
 
 func (s *AgentSuite) TestANoNeverRunsTheCall() {
-	s.askedToApprove()
-	s.confirms(`{"tool_call_id":"call-1","allowed":false}`)
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.confirms(`{"tool_call_id":"call-1","allowed":false}`)
 
-	s.says(stt.Participant{ID: "alice"}, "no, leave it")
+		s.says(stt.Participant{ID: "alice"}, "no, leave it")
 
-	s.eventually(func() bool { return strings.Contains(s.historyWith(llm.ToolResult), "declined") },
-		"the model was never told the caller declined")
-	s.never(func() bool { return len(s.runner.asked()) > 0 }, "a declined call ran")
-	s.eventually(func() bool { return countOf[ToolApprovalDecided](s.reported()) == 1 }, "the answer was never reported")
-	decided, _ := firstOf[ToolApprovalDecided](s.reported())
-	s.False(decided.Allowed)
+		s.eventually(func() bool { return strings.Contains(s.historyWith(llm.ToolResult), "declined") },
+			"the model was never told the caller declined")
+		s.never(func() bool { return len(s.runner.asked()) > 0 }, "a declined call ran")
+		s.eventually(func() bool { return countOf[ToolApprovalDecided](s.reported()) == 1 }, "the answer was never reported")
+		decided, _ := firstOf[ToolApprovalDecided](s.reported())
+		s.False(decided.Allowed)
+	})
 }
 
 func (s *AgentSuite) TestSilenceDeclinesOnceTheWaitHasPassedSinceTheQuestionWasSaid() {
-	s.agentAsksAndWaits(300 * time.Millisecond)
-	s.voice.mu.Lock()
-	s.voice.silent = true
-	s.voice.mu.Unlock()
-	s.askFor()
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(300 * time.Millisecond)
+		s.voice.mu.Lock()
+		s.voice.silent = true
+		s.voice.mu.Unlock()
+		s.askFor()
 
-	s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
-	time.Sleep(600 * time.Millisecond)
-	s.False(s.declinedBySilence(), "the wait counted from when the question started, not when it finished")
-	finished := time.Now()
-	s.voiceFinishes()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		time.Sleep(600 * time.Millisecond)
+		s.False(s.declinedBySilence(), "the wait counted from when the question started, not when it finished")
+		finished := time.Now()
+		s.voiceFinishes()
 
-	s.eventually(s.declinedBySilence, "silence never declined the call")
-	s.GreaterOrEqual(time.Since(finished), 300*time.Millisecond, "declined before the wait had passed")
-	s.never(func() bool { return len(s.runner.asked()) > 0 }, "a call nobody allowed ran")
+		s.eventually(s.declinedBySilence, "silence never declined the call")
+		s.GreaterOrEqual(time.Since(finished), 300*time.Millisecond, "declined before the wait had passed")
+		s.never(func() bool { return len(s.runner.asked()) > 0 }, "a call nobody allowed ran")
+	})
 }
 
 // The note that silence declined a call is the router's, on the caller's side of the
 // conversation, and no caller's speech: a model of the call's speech is not told it was said.
 func (s *AgentSuite) TestTheNoteThatSilenceDeclinedIsNotSaid() {
-	s.agentAsksAndWaits(100 * time.Millisecond)
-	s.askFor()
-	s.eventually(s.declinedBySilence, "silence never declined the call")
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(100 * time.Millisecond)
+		s.askFor()
+		s.eventually(s.declinedBySilence, "silence never declined the call")
 
-	at := slices.IndexFunc(s.history(), func(m llm.Message) bool { return strings.Contains(m.Content, "did not say yes") })
-	s.Require().GreaterOrEqual(at, 0)
-	s.Equal(llm.User, s.history()[at].Role)
-	s.True(s.history()[at].Typed, "the router's note was kept as said on the call")
+		at := slices.IndexFunc(s.history(), func(m llm.Message) bool { return strings.Contains(m.Content, "did not say yes") })
+		s.Require().GreaterOrEqual(at, 0)
+		s.Equal(llm.User, s.history()[at].Role)
+		s.True(s.history()[at].Typed, "the router's note was kept as said on the call")
+	})
 }
 
 func (s *AgentSuite) TestAYesAfterTheWaitAsksTheModelToCallTheToolAgain() {
-	s.agentAsksAndWaits(100 * time.Millisecond)
-	s.askFor()
-	s.eventually(s.declinedBySilence, "silence never declined the call")
-	s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(100 * time.Millisecond)
+		s.askFor()
+		s.eventually(s.declinedBySilence, "silence never declined the call")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
 
-	s.says(stt.Participant{ID: "alice"}, "oh, yes")
+		s.says(stt.Participant{ID: "alice"}, "oh, yes")
 
-	s.eventually(func() bool { return strings.Contains(s.historyWith(llm.ToolResult), "call lookup_order again") },
-		"a late yes was not sent back to ask again")
-	s.never(func() bool { return len(s.runner.asked()) > 0 }, "a late yes ran the call")
+		s.eventually(func() bool { return strings.Contains(s.historyWith(llm.ToolResult), "call lookup_order again") },
+			"a late yes was not sent back to ask again")
+		s.never(func() bool { return len(s.runner.asked()) > 0 }, "a late yes ran the call")
+	})
+}
+
+func (s *AgentSuite) TestAYesToACallWhoseToolChangedSinceDoesNotRunIt() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		changed := s.agent.tools()
+		changed.Tools = slices.Clone(changed.Tools)
+		changed.Tools[0].Approval = &harness.ToolApproval{Title: "Book order {order} for tomorrow?"}
+		ctx, cancel := context.WithTimeout(s.ctx, settleFor)
+		defer cancel()
+		s.Require().NoError(s.agent.SetTools(ctx, changed, func() {}))
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+
+		s.eventually(func() bool { return strings.Contains(s.historyWith(llm.ToolResult), "call lookup_order again") },
+			"the yes was not sent back to ask again")
+		s.never(func() bool { return len(s.runner.asked()) > 0 },
+			"a yes to a call asked about as the tool was ran the tool as it is now")
+	})
 }
 
 func (s *AgentSuite) TestConfirmToolCallIsOfferedOnlyWhenAToolNeedsApproval() {
@@ -215,4 +426,75 @@ func (s *AgentSuite) historyWith(role llm.Role) string {
 		}
 	}
 	return strings.Join(text, "\n")
+}
+
+// withoutKey is line without key.
+func withoutKey(line map[string]any, key string) map[string]any {
+	kept := maps.Clone(line)
+	delete(kept, key)
+	return kept
+}
+
+// A confirmation that fails on its own runs nothing, so its line keeps its own error: no run
+// line carries it. Three ways to fail on its own: arguments that are not an answer, a native
+// model's call refused before it is run, and a caller's own tool that has the name.
+func (s *AgentSuite) TestAConfirmationThatFailedOnItsOwnKeepsItsError() {
+	s.onFakeClock(func() {
+		lines := s.confirmedLines(`{"tool_call_id":"call-1","allowed":{"yes":1}}`, nil)
+
+		s.Require().Len(lines, 2)
+		s.Equal(confirmTool, lines[1]["tool"])
+		s.Equal(false, lines[1]["success"])
+		s.Equal("error", lines[1]["error_code"])
+		s.Contains(lines[1]["error"], "confirm_tool_call's arguments")
+	})
+}
+
+func (s *AgentSuite) TestANativeConfirmationTheRouterRefusedKeepsItsError() {
+	s.logs = &logLines{}
+	s.ownsTools("")
+	peer := s.joinNativeWith(func(options *Options) {
+		options.Logger = slog.New(slog.NewJSONHandler(s.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		options.ToolRunner = s.runner
+		options.Tools = s.tools
+	})
+	s.nativeFrame(peer, "session.update")
+	s.nativeSend(peer, `{"type":"response.created","response":{"id":"r1"}}`)
+	s.nativeSend(peer, `{"type":"response.function_call_arguments.done","response_id":"r1","call_id":"call2","name":"confirm_tool_call","arguments":"{\"tool_call_id\":\"call1\",\"allowed\":true}"}`)
+	s.nativeSend(peer, `{"type":"response.done","response":{"id":"r1","status":"completed"}}`)
+
+	s.eventually(func() bool {
+		return slices.ContainsFunc(s.logs.records(toolBack), func(line map[string]any) bool { return line["tool"] == confirmTool })
+	}, "the refused confirmation never came back")
+	lines := s.logs.records(toolBack)
+	s.Require().Len(lines, 1)
+	s.Equal(false, lines[0]["success"])
+	s.Equal("error", lines[0]["error_code"])
+	s.Contains(lines[0]["error"], "is not one of the model's tools")
+}
+
+func (s *AgentSuite) TestACallersToolNamedConfirmToolCallKeepsItsError() {
+	s.onFakeClock(func() {
+		s.logs = &logLines{}
+		s.ownsTools("")
+		s.approves()
+		s.tools.Tools = append(s.tools.Tools, harness.Tool{Name: confirmTool, Description: "the caller's own", Parameters: map[string]any{"type": "object"}})
+		s.join(true)
+		s.agent.options.ToolRunner = s.runner
+		s.runner.run = func(context.Context, llm.ToolCall) ([]llm.ContentPart, error) {
+			return nil, errors.New("the caller's tool failed")
+		}
+		s.model.reply = []string{"Sure."}
+		s.asksFor(confirmTool, `{}`)
+		participant := stt.Participant{ID: "alice"}
+		s.speak(participant)
+		s.says(participant, "do it")
+
+		s.eventually(func() bool { return len(s.logs.records(toolBack)) > 0 }, "the call never came back")
+		line := s.logs.records(toolBack)[0]
+		s.Equal(confirmTool, line["tool"])
+		s.Equal(false, line["success"])
+		s.Equal("error", line["error_code"])
+		s.Contains(line["error"], "the caller's tool failed")
+	})
 }

@@ -173,7 +173,7 @@ func (v *vendorSocket) send(frame string) {
 // rows is what the customer's session stored, in the order it was written.
 func (s *MeteringSuite) rows(customer string) []store.Request {
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
 	return rows
 }
 
@@ -185,7 +185,7 @@ func (s *MeteringSuite) session(provider sts.STS, name string) (*Session, *routi
 	customer := uuid.NewString()
 	recorder := routing.NewRecorder(routing.STS, s.store, s.live, s.prices, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	owner := routing.Owner{CustomerID: customer, AgentID: agentID, Attribution: attributed}
-	return newSession(provider, s.builtIn(name), owner, recorder, recorder.For(routing.LLM)), recorder, customer
+	return newSession(context.Background(), provider, s.builtIn(name), owner, recorder, recorder.For(routing.LLM)), recorder, customer
 }
 
 // attributed is who every session here is billed to and asked for by, which every row it
@@ -358,10 +358,10 @@ func (s *MeteringSuite) TestGPTLiveBillsOnlyItsSecondsWhenTheCallerSpeaksAfterTh
 	s.Equal(strconv.FormatInt(s.priced(routing.STS, "openai/gpt-live-1", pricing.Quantities{pricing.AudioMs: 1_000}), 10),
 		reply.Attributes[routing.AttributeFreeCostMicros], "what the caller's second would have cost")
 
-	spent, err := s.store.SpendSince(s.ctx, customer, since)
+	spent, err := s.store.Spend.Since(s.ctx, customer, since)
 	s.Require().NoError(err)
 	s.Equal(tenSeconds, spent, "a budget sees only the seconds")
-	used, err := s.store.CallUsage(s.ctx, customer, agentID, "", since, nil)
+	used, err := s.store.Calls.Usage(s.ctx, customer, agentID, "", since, nil)
 	s.Require().NoError(err)
 	s.Equal(tenSeconds, used.CostMicros, "the call's cost is only the seconds")
 	s.Equal(tenSeconds, s.spent(routing.STS, customer))

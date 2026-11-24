@@ -150,7 +150,7 @@ headers or body.
 
 ```dart
 final agents = StreamAgents(url: url, customerId: 'acme');
-final chat = await agents.agent('support').chat();
+final session = await agents.agent('support').sessions.create();
 ```
 
 The constructor does no I/O. Advanced forms take an options value (`SessionOptions`,
@@ -271,9 +271,12 @@ docker run --rm -v "$PWD":/repo -v va-dart-pub:/pub-cache -e PUB_CACHE=/pub-cach
 
 ## Releasing
 
-The first version is `flutter pub publish` from `sdks/dart/stream_agents`, after the CI dry run
-passes. Later ones are `.github/workflows/release-sdk-dart.yml`, for the version `pubspec.yaml`
-names, by hand or with every other SDK (see the `release-sdks` skill). The first
+`.github/workflows/release-sdk-dart.yml` publishes the version `pubspec.yaml` names, by hand or
+with every other SDK (see the `release-sdks` skill); by hand it is `flutter pub publish` from
+`sdks/dart/stream_agents`, after the CI dry run passes. A release
+sets `sdkVersion` in `lib/src/core/backend.dart` with the `version` in `pubspec.yaml`, since a
+package cannot read its own pubspec when it runs: it is the release `X-Stream-Client` names, and
+a test fails until the two match. The first
 release of `stream_agents` also discontinues `stream_agents_core`, `stream_agents_chat` and
 `stream_agents_rtc` on pub.dev, each with `stream_agents` as its replacement (the package's
 admin page, "Mark as discontinued"), so an app on 0.1.0 is pointed at the one package.

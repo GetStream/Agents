@@ -6,7 +6,7 @@ Stream token are all swift_assistant's, as they are for the [Android app](../and
 Only the page is here.
 
 ```
-package.json     React and Vite over @stream-io/stream-agents (0.4.1 and up, for its
+package.json     React and Vite over @stream-io/stream-agents (0.5.0 and up, for its
                  AgentChat, with stream-chat 10) and stream-chat-react's AI components
                  (15.0.1 and up)
 connected.html   where a connector's sign-in comes back to
@@ -15,7 +15,7 @@ tests/           its pure parts (captions, the glow's phases, photos, days) and 
                  over a fake channel and session
 ```
 
-The conversation's state is stream-chat-react's `AIConversationController`: the question on its way, whether Juno thinks or writes, errors and Try again, Send turning into Stop. Its transport is the SDK's `AgentChat` (`agentChatTransport`), which reads the router's channel and session. The page keeps only what is its own, in `src/chatScreen.ts`: voice mode, and naming a new conversation to the list once it is used. Edit and regenerate are turned off (`actions`), since the router keeps the conversation in Stream Chat and can't rewind it.
+The conversation's state is stream-chat-react's `AIConversationController`: the question on its way, whether Juno thinks or writes, errors and Try again, Send turning into Stop. Its transport is the SDK's `AgentChat` (`agentChatTransport`), which reads the router's channel and session. The page keeps only what is its own, in `src/chatScreen.ts`: voice mode, and naming a new conversation to the list once it is used. Regenerating a reply or editing a question asks again beside the earlier version, which the router keeps; an incognito chat keeps nothing to branch from, so it turns both off (`actions`). Answering a tool's question goes through `chat.decide`, which reads the call from the loaded messages, so a question asked before a reload or on another device is answered too.
 It runs on `stream-chat` 10 and `stream-chat-react` 15, with React 19, Vite 8 and TypeScript 7.
 That takes Node 22.18 or newer: `stream-chat` 10's own floor, above Vite 8's.
 
@@ -90,6 +90,11 @@ npm run build     # types, then the bundle
   can copy, share and rate it; ratings stay in the page, as the router takes none yet. The
   composer floats over the bottom of the conversation, which fades away under it, and its
   options offer Think harder, which asks with a higher `reasoning_effort`.
+- **Incognito chat** is the dashed bubble at the top right of a new chat. Its session is created
+  with `incognito: true`, so it has no channel, isn't listed or put in the URL, and Juno learns
+  nothing from it; `AgentChat` shows it from the session's socket, reasoning and tool calls
+  included. Leaving it, or picking another conversation, ends it for good. It needs
+  `@stream-io/stream-agents` 0.5.0 or later.
 - **Interactive replies**: the gear in the top bar picks how Juno answers, as the iOS app's
   settings do: in text, or with interactive UI written in [A2UI](https://a2ui.org) or
   [OpenUI](https://openui.com). It is the
@@ -105,6 +110,20 @@ npm run build     # types, then the bundle
   packages. Tapping a place or sending the form is the person's next question, in their words,
   with what they did as its `uiAction`, so the agent answers with a new plan. One done while
   Juno is still answering isn't sent, and the line over the composer says so.
+- **A card brings its own tool.** Ask "Where should we eat in Ohrid tonight?" for restaurant
+  cards and a seat selector of a venue's tables (swift_assistant's `UIComponents.json`). The agent cannot book
+  a table until a seat selector is on the screen: the card defines `reserve_table`
+  (`reserveTable.ts`) and gives it to the conversation's session the first time it shows, with
+  `Session.addTools`. Tapping a free table then has the agent call it, which asks first
+  ("Reserve this table?") and takes only a free table from the card. Once you allow it the card
+  turns into the booking: the table, the time and a confirmation code, which it keeps if the
+  agent shows the same tables again. The card has done what it was for, so it takes the tool
+  back with `Session.removeTool`. A second seat selector in the conversation takes the tool over
+  for its own tables, swapping it with `removeTool` then `addTools`, and each card keeps its own
+  booking. To see the difference, ask Juno to reserve a table before any
+  seat selector is shown: it has no tool to do it with. The router's
+  `GET /v1/agents/sessions/{id}/tools`, with the backend's credentials, lists `reserve_table` as
+  `session` while the card's tool is given.
 - **Photos** from the composer's button go with the question, shrunk to 1280 pixels across and
   inline as JPEG data URIs (`photos.ts`), turned the way the camera held them. The question shows
   them at once; the router uploads them to the conversation's channel and writes them on the
@@ -130,7 +149,8 @@ npm run build     # types, then the bundle
   notification at its time, and `list_events` reads it. Notifications are asked for when the
   person allows the first reminder. A tool that asks first asks on its step in the reply.
   `send_email` has swift_assistant's backend send it through the router's proxy for the
-  person's Gmail (`POST /gmail/send`).
+  person's Gmail (`POST /gmail/send`). A seat selector card adds `reserve_table` while it
+  is shown (see "A card brings its own tool" above).
 - **Connect Gmail and Linear in the chat.** Every new conversation names
   `http://localhost:5173/connected.html` as its session's `return_url`. A call that waits for the
   person's account shows Stream's sign-in card on its step. Connect opens the router's sign-in

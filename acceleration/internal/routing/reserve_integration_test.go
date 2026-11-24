@@ -16,14 +16,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing/pricingtest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage/usagetest"
+	"github.com/GetStream/Vision-Agents/acceleration/prices"
 )
 
 // reservedModel is billed $2 per million input tokens.
@@ -75,9 +77,8 @@ func (s *ReserveSuite) SetupSuite() {
 func (s *ReserveSuite) SetupTest() {
 	stamp := time.Now().UnixNano()
 	s.app, s.org = fmt.Sprintf("app-%d", stamp), fmt.Sprintf("org-%d", stamp)
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, s.app, s.org))
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: s.app, OrganizationID: s.org}))
+	configs := s.store
 	client, err := usage.NewClient(usage.ClientOptions{URL: s.service.URL, Token: s.service.Token})
 	s.Require().NoError(err)
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -102,7 +103,7 @@ func (s *ReserveSuite) credit(micros int64) {
 	if micros > 0 {
 		s.service.Credit(s.T(), s.org, micros)
 	}
-	s.enforcer.Join(s.app, s.org, usage.DefaultTier)
+	s.enforcer.Join(s.T().Context(), s.app, s.org, usage.DefaultTier)
 	// An account never read admits; once read, holding all of its credit leaves none.
 	probe := uuid.Must(uuid.NewV7())
 	s.Eventually(func() bool {
@@ -131,7 +132,7 @@ func (s *ReserveSuite) rows(want int) []store.Request {
 	var rows []store.Request
 	s.Eventually(func() bool {
 		rows = nil
-		s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", s.app).Scan(s.ctx))
+		s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", s.app).Scan(s.ctx))
 		return len(rows) == want
 	}, 5*time.Second, 10*time.Millisecond)
 	return rows
@@ -157,6 +158,29 @@ func (s *ReserveSuite) TestCallReservesBeforeTheVendorAndSettlesAfter() {
 	s.NoError(s.spend(), "settled at the $0.50 it cost")
 	row := s.rows(1)[0]
 	s.EqualValues(500_000, row.CostMicros)
+}
+
+func (s *ReserveSuite) TestAHoldLastsAsLongAsItsMeterAsks() {
+	// Work that runs past the default two minutes, such as a picture, asks for its own time;
+	// held for less, it would let concurrent work spend past a limit while it still runs.
+	// A short one shows the time is the meter's: the default would still hold here. Two seconds
+	// leaves the first spend, right after the reservation, well inside the hold on a slow
+	// runner, and its lapse well inside the five seconds the test waits for it.
+	s.credit(2_000_000)
+	meter := s.meter()
+	meter.Estimate = pricing.Quantities{pricing.InputTokens: 1_000_000}
+	meter.ReserveFor = 2 * time.Second
+	var held, lapsed error
+
+	_, err := routing.Call(s.ctx, meter, func(context.Context) (worked, error) {
+		held = s.spend()
+		s.Eventually(func() bool { lapsed = s.spend(); return lapsed == nil }, 5*time.Second, 20*time.Millisecond)
+		return worked{pricing.InputTokens: 250_000}, nil
+	})
+
+	s.Require().NoError(err)
+	s.ErrorIs(held, policy.ErrNoCredits, "held while the work starts")
+	s.NoError(lapsed, "let go once the meter's time ran out, though the work had not ended")
 }
 
 func (s *ReserveSuite) TestARefusedReservationCallsNoVendor() {
@@ -189,6 +213,39 @@ func (s *ReserveSuite) TestAFailedCallReleasesItsReservation() {
 	s.Require().Error(err)
 	s.NoError(s.spend(), "a failure bills nothing, so nothing is held for it")
 	s.False(s.rows(1)[0].Success)
+}
+
+func (s *ReserveSuite) TestARecordedHookIsToldOnlyOnceTheReservationIsReleased() {
+	s.credit(2_000_000)
+	meter := s.meter()
+	meter.Estimate = pricing.Quantities{pricing.InputTokens: 1_000_000}
+	var held error
+	told := false
+	meter.Recorded = func(routing.Stat, int64) { held, told = s.spend(), true }
+
+	_, err := routing.Call(s.ctx, meter, func(context.Context) (worked, error) {
+		return nil, errors.New("vendor down")
+	})
+
+	s.Require().Error(err)
+	s.True(told)
+	s.NoError(held, "the hook runs after the reservation is let go, so work it does holds no money")
+}
+
+func (s *ReserveSuite) TestAPanickingRecordedHookStillReleasesTheReservation() {
+	s.credit(2_000_000)
+	meter := s.meter()
+	meter.Estimate = pricing.Quantities{pricing.InputTokens: 1_000_000}
+	meter.Recorded = func(routing.Stat, int64) { panic("hook fell over") }
+
+	s.PanicsWithValue("hook fell over", func() {
+		_, _ = routing.Call(s.ctx, meter, func(context.Context) (worked, error) {
+			return nil, errors.New("vendor down")
+		})
+	})
+
+	s.NoError(s.spend(), "a failed call holds nothing, though its hook panicked")
+	s.False(s.rows(1)[0].Success, "and the row was queued before the hook ran")
 }
 
 func (s *ReserveSuite) TestWorkThatNamesItsOwnIDReleasesTheReservation() {
@@ -257,6 +314,81 @@ func (s *ReserveSuite) TestASlicedRunLeasesAtItsRowsPrice() {
 	s.NotContains(logs.String(), "billable work has no price")
 	run.Cancel()
 	s.NoError(s.spend(), "and let go when the run ends")
+}
+
+// A text is priced by where it goes, which only its meter's attributes say, so its reservation
+// is priced with them, as its row is, rather than as work with no price that holds nothing.
+func (s *ReserveSuite) TestATextReservesWhatItsDestinationCosts() {
+	meter, price := s.text()
+	s.credit(price)
+	var during error
+
+	_, err := routing.Call(s.ctx, meter, func(context.Context) (worked, error) {
+		during = s.spend()
+		return worked(meter.Estimate), nil
+	})
+
+	s.Require().NoError(err)
+	s.ErrorIs(during, policy.ErrNoCredits, "the vendor sends with the text's price already held")
+	s.Equal(price, s.rows(1)[0].CostMicros, "and the row settles what was held")
+}
+
+func (s *ReserveSuite) TestATextTheOrganizationCannotAffordIsRefusedBeforeTheVendor() {
+	meter, _ := s.text()
+	s.credit(0)
+	asked := false
+
+	_, err := routing.Call(s.ctx, meter, func(context.Context) (worked, error) {
+		asked = true
+		return worked(meter.Estimate), nil
+	})
+
+	s.ErrorIs(err, policy.ErrNoCredits)
+	s.True(routing.ReservationRefused(err), "refused for its money, so no other vendor is to be asked")
+	s.False(asked, "no vendor was asked")
+	// A row recorded after the refusal: once it is written, a row of the refused text would be too.
+	after := meter
+	after.Free, after.UsageID = true, uuid.Must(uuid.NewV7())
+	s.Require().NoError(routing.Settle(after, worked(meter.Estimate)))
+	rows := s.rows(1)
+	s.Equal(after.UsageID, rows[0].UsageID, "the refused text recorded no row")
+}
+
+// Attributes no price is set by, such as the session a row belongs to, leave a reservation as
+// it is without them: the estimate's $2.
+func (s *ReserveSuite) TestAttributesNoPriceNamesReserveAsWithoutThem() {
+	s.credit(2_000_000)
+	meter := s.meter()
+	meter.Estimate = pricing.Quantities{pricing.InputTokens: 1_000_000}
+	meter.Attributes = map[string]string{"session_id": uuid.NewString()}
+	var during error
+
+	_, err := routing.Call(s.ctx, meter, func(context.Context) (worked, error) {
+		during = s.spend()
+		return worked{pricing.InputTokens: 250_000}, nil
+	})
+
+	s.Require().NoError(err)
+	s.ErrorIs(during, policy.ErrNoCredits, "the $2 estimate is held")
+	s.NoError(s.spend(), "settled at the $0.50 it cost")
+}
+
+// text is a one-segment SMS to the US metered as the channels service meters a reply, on a
+// recorder priced from the vendor list, and what it costs there.
+func (s *ReserveSuite) text() (routing.Meter, int64) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	list, err := pricing.NewList("vendor", pricing.AllAtCost(prices.Vendor().Entries), discard)
+	s.Require().NoError(err)
+	attributes := map[string]string{phone.AttributeDirection: store.Outbound, phone.AttributeCountry: "US"}
+	estimate := pricing.Quantities{pricing.Messages: 1, pricing.MessageSegments: 1}
+	price := pricingtest.Micros(s.T(), list, pricing.Item{Modality: string(routing.Phone), Provider: "telnyx", Model: "sms",
+		Region: pricing.DefaultRegion, Attributes: attributes}, estimate)
+	s.Require().Positive(price, "the vendor list prices a text to the US")
+	return routing.Meter{
+		Recorder: routing.NewRecorderOn(routing.Phone, s.writer, list, discard),
+		Config:   routing.ProviderConfig{Provider: "telnyx", Model: "sms"},
+		Owner:    s.owner(), Attributes: attributes, Estimate: estimate,
+	}, price
 }
 
 // identified is work that names its own usage id.

@@ -60,7 +60,7 @@ func (s *StoreSuite) seven() {
 		s.changed(id, "review_score = ?", score)
 	}
 	for _, id := range []string{"s2", "s6"} {
-		_, err := s.store.PinSession(s.ctx, "app", id, true, minutes(30))
+		_, err := s.store.Sessions.Pin(s.ctx, "app", id, true, minutes(30))
 		s.Require().NoError(err)
 	}
 	// Somebody else's, which no query of app's may turn up.
@@ -94,7 +94,7 @@ func (s *StoreSuite) walked(read func(SessionFilter) ([]AgentSession, error), fi
 
 func (s *StoreSuite) queried(filter SessionFilter) []string {
 	return s.walked(func(filter SessionFilter) ([]AgentSession, error) {
-		return s.store.QuerySessions(s.ctx, "app", filter)
+		return s.store.Sessions.Select(s.ctx, "app", filter)
 	}, filter)
 }
 
@@ -130,7 +130,7 @@ func (s *StoreSuite) TestEveryOrderPagesWithoutSkippingOrRepeating() {
 	for _, one := range orders {
 		s.Equal(one.want, s.queried(SessionFilter{Order: one.order}), one.name)
 
-		whole, err := s.store.QuerySessions(s.ctx, "app", SessionFilter{Order: one.order, Limit: 200})
+		whole, err := s.store.Sessions.Select(s.ctx, "app", SessionFilter{Order: one.order, Limit: 200})
 		s.Require().NoError(err)
 		s.Equal(one.want, sessionIDs(whole), "%s, in one page", one.name)
 	}
@@ -152,17 +152,17 @@ func (s *StoreSuite) TestACursorHoldsWhenSessionsArriveBetweenPages() {
 	s.seven()
 	order := SessionOrder{PinnedFirst: true}
 
-	first, err := s.store.QuerySessions(s.ctx, "app", SessionFilter{Order: order, Limit: 3})
+	first, err := s.store.Sessions.Select(s.ctx, "app", SessionFilter{Order: order, Limit: 3})
 	s.Require().NoError(err)
 	s.Equal([]string{"s6", "s2", "s7", "s5"}, sessionIDs(first))
 
 	// A newer session and a newly pinned one both sort before the cursor, so neither
 	// shifts where the next page starts.
 	s.opened("s8", "app", s.base.Add(time.Hour), nil)
-	_, err = s.store.PinSession(s.ctx, "app", "s8", true, time.Time{})
+	_, err = s.store.Sessions.Pin(s.ctx, "app", "s8", true, time.Time{})
 	s.Require().NoError(err)
 
-	second, err := s.store.QuerySessions(s.ctx, "app", SessionFilter{Order: order, Limit: 3, Cursor: after(first[2])})
+	second, err := s.store.Sessions.Select(s.ctx, "app", SessionFilter{Order: order, Limit: 3, Cursor: after(first[2])})
 	s.Require().NoError(err)
 	s.Equal([]string{"s5", "s4", "s3", "s1"}, sessionIDs(second))
 }
@@ -184,6 +184,33 @@ func (s *StoreSuite) TestFilterMatchesEachFieldAndOperator() {
 	s.Equal([]string{"s1", "s3", "s4"}, s.matching(ReviewScoreIs(SessionGte, 3)))
 	s.Equal([]string{"s5"}, s.matching(ReviewScoreIs(SessionLt, 3)))
 	s.Equal([]string{"s1", "s4", "s5"}, s.matching(ReviewScoreIs(SessionLte, 3)))
+}
+
+func (s *StoreSuite) TestFilterMatchesTheConfigStateStartAndLabels() {
+	minutes := func(n int) time.Time { return s.base.Add(time.Duration(n) * time.Minute) }
+	s.opened("c1", "app", minutes(0), func(session *AgentSession) {
+		session.Custom = map[string]any{"origin": "test", "attempt": 2}
+	})
+	s.opened("c2", "app", minutes(1), func(session *AgentSession) {
+		session.ConfigID, session.State = "cfg-sales", SessionClosed
+	})
+	s.opened("c3", "app", minutes(2), func(session *AgentSession) {
+		session.Custom = map[string]any{"origin": "production"}
+	})
+	test := CustomHolds(map[string]string{"origin": "test"})
+
+	s.Equal([]string{"c1", "c3"}, s.matching(SessionIs(SessionFieldConfig, "cfg-docs")))
+	s.Equal([]string{"c1", "c3"}, s.matching(SessionIs(SessionFieldState, SessionRunning)))
+	s.Equal([]string{"c2"}, s.matching(SessionIs(SessionFieldState, SessionClosed)))
+
+	s.Equal([]string{"c2", "c3"}, s.matching(CreatedAtIs(SessionGte, minutes(1))), "$gte holds at the instant itself")
+	s.Equal([]string{"c1"}, s.matching(CreatedAtIs(SessionLt, minutes(1))), "$lt does not")
+	s.Equal([]string{"c2"}, s.matching(AllOf(CreatedAtIs(SessionGte, minutes(1)), CreatedAtIs(SessionLt, minutes(2)))))
+
+	s.Equal([]string{"c1"}, s.matching(test))
+	s.Empty(s.matching(CustomHolds(map[string]string{"origin": "test", "case": "a"})), "every pair has to be held")
+	s.Empty(s.matching(CustomHolds(map[string]string{"attempt": "2"})), "a number is not the string it prints as")
+	s.Equal([]string{"c1", "c2"}, s.matching(AnyOf(test, SessionIs(SessionFieldState, SessionClosed))))
 }
 
 func (s *StoreSuite) TestASessionWithNoReviewMatchesNoScoreCondition() {
@@ -221,7 +248,7 @@ func (s *StoreSuite) TestFilterCombinesWithAndOrAndNesting() {
 	)))
 	s.Len(s.matching(AllOf()), 7, "nothing asked for is every session")
 	s.Empty(s.matching(AnyOf()), "one of nothing is none")
-	s.Empty(s.matching(SessionExpr{Field: "custom", Op: SessionEq, Strings: []string{"x"}}),
+	s.Empty(s.matching(SessionExpr{Field: "call_id", Op: SessionEq, Strings: []string{"x"}}),
 		"a field the store does not know matches nothing rather than everything")
 }
 
@@ -237,7 +264,7 @@ func (s *StoreSuite) TestAnOrNeverReachesPastWhoTheCallerMaySee() {
 	}
 	for _, where := range widened {
 		mine := SessionFilter{UserID: "jlahey", CallerKinds: []string{"user"}, Where: &where, Limit: 200}
-		found, err := s.store.QuerySessions(s.ctx, "app", mine)
+		found, err := s.store.Sessions.Select(s.ctx, "app", mine)
 		s.Require().NoError(err)
 		s.NotEmpty(found)
 		for _, session := range found {
@@ -247,7 +274,7 @@ func (s *StoreSuite) TestAnOrNeverReachesPastWhoTheCallerMaySee() {
 
 		// The kind of caller narrows around the expression too.
 		mine.CallerKinds = []string{"anonymous"}
-		found, err = s.store.QuerySessions(s.ctx, "app", mine)
+		found, err = s.store.Sessions.Select(s.ctx, "app", mine)
 		s.Require().NoError(err)
 		s.Empty(found)
 	}
@@ -256,7 +283,7 @@ func (s *StoreSuite) TestAnOrNeverReachesPastWhoTheCallerMaySee() {
 	s.changed("s5", "title = ?", "refund for randy")
 	s.changed("s1", "title = ?", "refund for jim")
 	where := AnyOf(SessionIs(SessionFieldProject, "b"), SessionIs(SessionFieldUser, "randy"), SessionIs(SessionFieldProject, "a"))
-	found, err := s.store.SearchSessions(s.ctx, "app", "refund", SessionFilter{UserID: "jlahey", Where: &where})
+	found, err := s.store.Sessions.Search(s.ctx, "app", "refund", SessionFilter{UserID: "jlahey", Where: &where})
 	s.Require().NoError(err)
 	s.Equal([]string{"s1"}, sessionIDs(found))
 }
@@ -277,7 +304,7 @@ func (s *StoreSuite) TestSearchNarrowsToAProjectAndPagesByRelevance() {
 	titled("r7", "nothing to see", "billing", minutes(4))
 
 	search := func(filter SessionFilter) ([]AgentSession, error) {
-		return s.store.SearchSessions(s.ctx, "app", "refund", filter)
+		return s.store.Sessions.Search(s.ctx, "app", "refund", filter)
 	}
 	billing := SessionIs(SessionFieldProject, "billing")
 	s.Equal([]string{"r4", "r3", "r2", "r1"}, s.walked(search, SessionFilter{Where: &billing}))
@@ -294,22 +321,22 @@ func (s *StoreSuite) TestSearchNarrowsToAProjectAndPagesByRelevance() {
 func (s *StoreSuite) TestPinningKeepsItsFirstTimeAndMovesNothingElse() {
 	s.opened("one", "app", s.base, nil)
 	s.lastAnswered("one", s.base.Add(time.Minute))
-	before, err := s.store.StoredSession(s.ctx, "app", "one")
+	before, err := s.store.Sessions.Get(s.ctx, "app", "one")
 	s.Require().NoError(err)
 	s.Nil(before.PinnedAt)
 
 	first := s.base.Add(time.Hour)
-	pinnedAt, err := s.store.PinSession(s.ctx, "app", "one", true, first)
+	pinnedAt, err := s.store.Sessions.Pin(s.ctx, "app", "one", true, first)
 	s.Require().NoError(err)
 	s.Require().NotNil(pinnedAt)
 	s.True(pinnedAt.Equal(first))
 
-	again, err := s.store.PinSession(s.ctx, "app", "one", true, first.Add(time.Hour))
+	again, err := s.store.Sessions.Pin(s.ctx, "app", "one", true, first.Add(time.Hour))
 	s.Require().NoError(err)
 	s.Require().NotNil(again)
 	s.True(again.Equal(first), "pinning again keeps the time it was first pinned")
 
-	pinned, err := s.store.StoredSession(s.ctx, "app", "one")
+	pinned, err := s.store.Sessions.Get(s.ctx, "app", "one")
 	s.Require().NoError(err)
 	s.Require().NotNil(pinned.PinnedAt)
 	s.True(pinned.PinnedAt.Equal(first))
@@ -318,34 +345,34 @@ func (s *StoreSuite) TestPinningKeepsItsFirstTimeAndMovesNothingElse() {
 
 	// Saving the row again, as a reopened conversation does, keeps the pin.
 	s.opened("one", "app", s.base, nil)
-	saved, err := s.store.StoredSession(s.ctx, "app", "one")
+	saved, err := s.store.Sessions.Get(s.ctx, "app", "one")
 	s.Require().NoError(err)
 	s.Require().NotNil(saved.PinnedAt)
 
-	unpinned, err := s.store.PinSession(s.ctx, "app", "one", false, time.Time{})
+	unpinned, err := s.store.Sessions.Pin(s.ctx, "app", "one", false, time.Time{})
 	s.Require().NoError(err)
 	s.Nil(unpinned)
-	cleared, err := s.store.StoredSession(s.ctx, "app", "one")
+	cleared, err := s.store.Sessions.Get(s.ctx, "app", "one")
 	s.Require().NoError(err)
 	s.Nil(cleared.PinnedAt)
 
-	_, err = s.store.PinSession(s.ctx, "somebody-else", "one", true, time.Time{})
+	_, err = s.store.Sessions.Pin(s.ctx, "somebody-else", "one", true, time.Time{})
 	s.Require().ErrorIs(err, ErrNoSession, "another customer's session is not there to pin")
-	_, err = s.store.PinSession(s.ctx, "app", "missing", true, time.Time{})
+	_, err = s.store.Sessions.Pin(s.ctx, "app", "missing", true, time.Time{})
 	s.Require().ErrorIs(err, ErrNoSession)
 }
 
 func (s *StoreSuite) TestReviewingACallScoresItsSession() {
 	s.opened("reviewed", "app", s.base, nil)
 	s.opened("unreviewed", "app", s.base.Add(time.Minute), nil)
-	s.Require().NoError(s.store.StartCall(s.ctx, &Call{ID: "reviewed", CustomerID: "app", StartedAt: s.base}))
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{ID: "reviewed-call", SessionID: "reviewed", CustomerID: "app", StartedAt: s.base}))
 	// A call with no session row, as an incognito one is, is still reviewed.
-	s.Require().NoError(s.store.StartCall(s.ctx, &Call{ID: "no-session", CustomerID: "app", StartedAt: s.base}))
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{ID: "no-session", CustomerID: "app", StartedAt: s.base}))
 
 	s.Empty(s.matching(ReviewScoreIs(SessionGte, 1)))
 
-	s.Require().NoError(s.store.ReviewCall(s.ctx, "app", "reviewed", "went fine", new(4), "polite"))
-	s.Require().NoError(s.store.ReviewCall(s.ctx, "app", "no-session", "went fine", new(2), ""))
+	s.Require().NoError(s.store.Calls.Review(s.ctx, "app", "reviewed-call", "went fine", new(4), "polite"))
+	s.Require().NoError(s.store.Calls.Review(s.ctx, "app", "no-session", "went fine", new(2), ""))
 
 	s.Equal([]string{"reviewed"}, s.matching(ReviewScoreIs(SessionEq, 4)))
 	s.Equal([]string{"reviewed"}, s.matching(ReviewScoreIs(SessionGt, 3)))
@@ -353,7 +380,7 @@ func (s *StoreSuite) TestReviewingACallScoresItsSession() {
 	s.Equal([]string{"reviewed", "unreviewed"}, s.queried(SessionFilter{Order: SessionOrder{By: SessionSortReviewScore}}))
 
 	// Reviewed again with no score, the session has none again.
-	s.Require().NoError(s.store.ReviewCall(s.ctx, "app", "reviewed", "nobody spoke", nil, ""))
+	s.Require().NoError(s.store.Calls.Review(s.ctx, "app", "reviewed-call", "nobody spoke", nil, ""))
 	s.Empty(s.matching(ReviewScoreIs(SessionGte, 1)))
 }
 
@@ -366,11 +393,11 @@ func (s *ShardedStoreSuite) TestEveryOrderPagesAcrossShards() {
 			ID: id, CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user",
 			State: SessionRunning, CreatedAt: at,
 		}
-		s.Require().NoError(shard.SaveSession(s.ctx, row))
-		s.Require().NoError(shard.StartCall(s.ctx, &Call{ID: id, CustomerID: "app", StartedAt: at}))
+		s.Require().NoError(shard.Sessions.Upsert(s.ctx, row))
+		s.Require().NoError(shard.Calls.Start(s.ctx, &Call{ID: id + "-call", SessionID: id, CustomerID: "app", StartedAt: at}))
 		if score > 0 {
 			// Reviewed from this shard's router, wherever the row is.
-			s.Require().NoError(s.store.ReviewCall(s.ctx, "app", id, "", new(score), ""))
+			s.Require().NoError(s.store.Calls.Review(s.ctx, "app", id+"-call", "", new(score), ""))
 		}
 	}
 	in(s.store, "s1", minutes(0), 3)
@@ -381,7 +408,7 @@ func (s *ShardedStoreSuite) TestEveryOrderPagesAcrossShards() {
 	in(s.other, "s6", minutes(3), 0)
 	in(s.other, "s7", minutes(4), 0)
 	for _, id := range []string{"s2", "s6"} {
-		pinnedAt, err := s.store.PinSession(s.ctx, "app", id, true, minutes(30))
+		pinnedAt, err := s.store.Sessions.Pin(s.ctx, "app", id, true, minutes(30))
 		s.Require().NoError(err)
 		s.Require().NotNil(pinnedAt, "a session in the other shard is pinned from this one")
 	}

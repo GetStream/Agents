@@ -1,6 +1,32 @@
-## 0.1.0
+## Upcoming
 
-First release of `stream_agents`, the Flutter client for Stream Agents. It holds what were
+🔄 Changed
+
+- `sessions.create` opens the session and follows it, as `chat` and `voice` do: it returns an
+  `AgentSession` once the socket is open, and answers the device's tools. It returned a `Session`
+  row before; read that as `session.session`. `chat` and `voice` are now `sessions.create` with
+  `startVoice` false and true.
+
+✅ Added
+
+- `SessionOptions.watch` - false opens a session with no socket and no tools declared; turns go
+  through `responses.create`, and `say`, `interrupt`, `events` and `addTools` throw a
+  `StateError` saying so.
+
+- `StreamAgents.scheduledTasks` - list, change, pause, resume and delete the user's scheduled tasks.
+- `session.interrupt(requestId:)` - stops only the reply answering that request.
+- `session.say(text, interrupt: true)` - stops what the agent is saying first.
+- `session.addTools` and `session.removeTool` - change a running session's tools.
+- `AgentTool.typed` - a tool whose arguments its `fromJson` reads into a class of yours.
+- `ToolCallState.displayTitle` and `title` - what a call is doing: its latest progress update
+  while it runs, such as "Comparing 40 flights", otherwise its display title, such as "Checking
+  the weather", falling back to the tool's name.
+- `session.toolCallsForTurn(turnId)` - the calls one agent turn made, to show under its message.
+
+## 0.7.0
+
+First release of `stream_agents`, the Flutter client for Stream Agents, versioned with the
+repository's 0.7.0 release. It holds what were
 `stream_agents_core`, `stream_agents_chat` and `stream_agents_rtc`, with the same API, behind one
 import: `package:stream_agents/stream_agents.dart`.
 

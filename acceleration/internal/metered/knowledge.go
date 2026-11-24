@@ -38,16 +38,16 @@ const knowledgeFailed = "knowledge_failed"
 var ErrNoAccountKey = errors.New("metered: the knowledge base is kept in your own account, and you keep no key for it any more")
 
 // NamespacePlaces is where the place each knowledge base is kept is recorded: its region, and
-// the account in it. *store.Store is one.
+// the account in it. *store.KnowledgeNamespaces is one.
 type NamespacePlaces interface {
-	// KnowledgePlace is where the base is kept, and false for one never written.
-	KnowledgePlace(ctx context.Context, customerID, namespace string) (store.KnowledgePlace, bool, error)
-	// ClaimKnowledgePlace keeps the base at place unless it is kept somewhere already, and
+	// GetPlace is where the base is kept, and false for one never written.
+	GetPlace(ctx context.Context, customerID, namespace string) (store.KnowledgePlace, bool, error)
+	// Claim keeps the base at place unless it is kept somewhere already, and
 	// answers where it is kept.
-	ClaimKnowledgePlace(ctx context.Context, customerID, namespace string, place store.KnowledgePlace) (store.KnowledgePlace, error)
-	// ForgetKnowledgePlace forgets where a dropped base was kept, so a base made again under its
+	Claim(ctx context.Context, customerID, namespace string, place store.KnowledgePlace) (store.KnowledgePlace, error)
+	// Delete forgets where a dropped base was kept, so a base made again under its
 	// name is kept where its first write goes.
-	ForgetKnowledgePlace(ctx context.Context, customerID, namespace string) error
+	Delete(ctx context.Context, customerID, namespace string) error
 }
 
 // AccountBackend is the backend of a customer's own account at the knowledge vendor in region,
@@ -241,7 +241,7 @@ func (k *Knowledge) keptAt(ctx context.Context, customerID, namespace string) (s
 	if k.places == nil || strings.TrimSpace(namespace) == "" {
 		return store.KnowledgePlace{}, false, nil
 	}
-	return k.places.KnowledgePlace(ctx, customerID, namespace)
+	return k.places.GetPlace(ctx, customerID, namespace)
 }
 
 // OwnedKnowledge is a knowledge.Store and a knowledge.Writer for one owner. Each call is a
@@ -371,7 +371,7 @@ func (o OwnedKnowledge) Drop(ctx context.Context, namespace string) (bool, error
 		return false, err
 	}
 	if o.knowledge.places != nil {
-		if err := o.knowledge.places.ForgetKnowledgePlace(ctx, o.owner.CustomerID, namespace); err != nil {
+		if err := o.knowledge.places.Delete(ctx, o.owner.CustomerID, namespace); err != nil {
 			return false, err
 		}
 	}
@@ -449,7 +449,7 @@ func (o OwnedKnowledge) writing(ctx context.Context, namespace string) (knowledg
 	if err != nil || o.knowledge.places == nil || strings.TrimSpace(namespace) == "" {
 		return backend, place, err
 	}
-	kept, err := o.knowledge.places.ClaimKnowledgePlace(ctx, o.owner.CustomerID, namespace, place)
+	kept, err := o.knowledge.places.Claim(ctx, o.owner.CustomerID, namespace, place)
 	if err != nil {
 		return nil, store.KnowledgePlace{}, err
 	}

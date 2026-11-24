@@ -269,7 +269,7 @@ func (s *Stored) fellBack(ctx context.Context, customer string) {
 			"customer_id", customer)
 	}
 	if uses > 0 {
-		if err := s.store.RecordStreamFallbackUses(ctx, customer, uses, now); err != nil {
+		if err := s.store.StreamFallbackUses.Add(ctx, &store.StreamFallbackUse{CustomerID: customer, Uses: uses, LastAt: now}); err != nil {
 			s.logger.Warn("stream: could not record a use of the fallback", "customer_id", customer, "error", err)
 		}
 	}

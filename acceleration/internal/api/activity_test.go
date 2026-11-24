@@ -48,12 +48,12 @@ type counted struct {
 	code, org         string
 }
 
-func (s *ActivitySuite) counted(area, client string) counted {
+func (s *RouterSuite) counted(area, client string) counted {
 	var (
 		row       counted
 		code, org sql.NullString
 	)
-	err := s.store.DB().QueryRowContext(context.Background(), `
+	err := s.store.GlobalDB().QueryRowContext(context.Background(), `
 SELECT COALESCE(sum(requests), 0), COALESCE(sum(refused), 0),
        (array_agg(last_refusal_code ORDER BY last_refusal_at DESC NULLS LAST))[1], max(organization_id)
 FROM customer_activity WHERE app_id = ? AND area = ? AND client = ?`,
@@ -64,7 +64,7 @@ FROM customer_activity WHERE app_id = ? AND area = ? AND client = ?`,
 }
 
 // countedOnce waits for one request under area and client to be written and returns its row.
-func (s *ActivitySuite) countedOnce(area, client string) counted {
+func (s *RouterSuite) countedOnce(area, client string) counted {
 	var row counted
 	s.Require().Eventually(func() bool {
 		row = s.counted(area, client)
@@ -108,6 +108,24 @@ func (s *ActivitySuite) TestAClientNobodyKnowsIsCountedAsTheAPI() {
 	s.countedOnce(activity.AreaAgentSetup, store.AuditSourceAPI)
 	s.countedOnce(activity.AreaAgentSetup, store.AuditSourceCLI)
 	s.Equal(int64(0), s.counted(activity.AreaAgentSetup, "anything-else").requests)
+}
+
+// Defect: an SDK that names its release (stream-agents-<language>-v<version>, in any case)
+// counted as the API, or plain sdk from an older release no longer counted as the SDK; or
+// another Stream product's client, or the product's name with no SDK after it, counted as ours.
+func (s *ActivitySuite) TestAnSDKNamingItsReleaseIsCountedAsTheSDK() {
+	for _, client := range []string{"stream-agents-go-v1.2.3", "Stream-Agents-JS-v0.8.0-browser", "sdk",
+		"stream-chat-js-v8.40.0-browser", "stream-agents"} {
+		s.Require().Equal(http.StatusOK, s.serverClient.with(clientHeader, client).
+			do(http.MethodGet, "/v1/agents/skills", nil, nil), client)
+	}
+
+	s.Require().Eventually(func() bool {
+		return s.counted(activity.AreaAgentSetup, store.AuditSourceSDK).requests+
+			s.counted(activity.AreaAgentSetup, store.AuditSourceAPI).requests == 5
+	}, settleFor, 10*time.Millisecond)
+	s.Equal(int64(3), s.counted(activity.AreaAgentSetup, store.AuditSourceSDK).requests)
+	s.Equal(int64(2), s.counted(activity.AreaAgentSetup, store.AuditSourceAPI).requests)
 }
 
 // Defect: a refusal answered before the request reached its route (withServerSide) counted as
@@ -159,6 +177,15 @@ func (s *ActivitySuite) TestARefusalAnOperationsMiddlewareWroteIsCountedWithItsC
 	s.Equal(s.errorCode(payload), row.code)
 }
 
+// Defect: a successful health probe an app made with its own credential left out of the activity
+// record, since its access line is skipped (answeredHealthy) and the record was written after it.
+func (s *ActivitySuite) TestASuccessfulHealthProbeIsStillCounted() {
+	s.Require().Equal(http.StatusOK, s.serverClient.with(clientHeader, store.AuditSourceCLI).
+		do(http.MethodGet, "/health", nil, nil))
+
+	s.countedOnce(activity.AreaOther, store.AuditSourceCLI)
+}
+
 // Defect: a request nobody authenticated counted under an empty app, which is everybody's.
 func (s *ActivitySuite) TestARequestNobodyAuthenticatedIsNotCounted() {
 	asked := time.Now()
@@ -171,7 +198,7 @@ func (s *ActivitySuite) TestARequestNobodyAuthenticatedIsNotCounted() {
 
 	// Since the test began: suites run beside each other and count their own requests.
 	var nobody int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM customer_activity WHERE app_id = '' AND last_at >= ?", asked).Scan(&nobody))
 	s.Equal(0, nobody)
 }
@@ -211,7 +238,57 @@ func (s *ActivitySuite) TestARequestIsCountedWhenItArrived() {
 	recorder.Close()
 
 	var first time.Time
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT first_at FROM customer_activity WHERE app_id = ?", s.customerID()).Scan(&first))
 	s.True(first.Before(began), "first_at %s, handler began %s", first, began)
+}
+
+// refusedSocket opens the session socket from the SDK, sends start and returns the error frame
+// it was refused with.
+func (s *ActivitySuite) refusedSocket(start map[string]any) map[string]any {
+	connection := s.serverClient.with(clientHeader, store.AuditSourceSDK).opens("/v1/agents/socket")
+	s.Require().NoError(connection.WriteJSON(start))
+	return s.await(connection, "error")
+}
+
+// Defect: a socket refused in a frame, after its 101, counted as answered.
+func (s *ActivitySuite) TestASocketWhoseFirstFrameIsNoStartIsCountedAsRefused() {
+	refusal := s.refusedSocket(map[string]any{"type": "hello"})
+	s.NotContains(refusal, "code", "the frame says what it always said")
+
+	row := s.countedOnce(activity.AreaConversations, store.AuditSourceSDK)
+	s.Equal(int64(1), row.refused)
+	s.Equal(invalidRequest("").Code, row.code)
+}
+
+// Defect: a socket refused for an agent config it named counted with no code, or the code of
+// some other failure than the one POST /v1/agents/sessions answers.
+func (s *ActivitySuite) TestASocketNamingAConfigNobodyHoldsIsCountedWithItsCode() {
+	s.refusedSocket(map[string]any{"type": "start", "session": map[string]any{"config_id": s.utils.uuid()}})
+
+	row := s.countedOnce(activity.AreaConversations, store.AuditSourceSDK)
+	s.Equal(int64(1), row.refused)
+	s.Equal(codeAgentConfigNotFound, row.code)
+}
+
+// Defect: a socket naming a session that is already open counted with the code of a request the
+// caller got wrong, not the conflict POST /v1/agents/sessions answers it with.
+func (s *ActivitySuite) TestASocketNamingAnOpenSessionIsCountedAsAConflict() {
+	opened := s.serverClient.with(clientHeader, store.AuditSourceCLI).
+		createSession(CreateSessionRequest{Incognito: pointerTo(true), Llm: pointerTo("llm-flow")})
+
+	s.refusedSocket(map[string]any{"type": "start", "session": map[string]any{"id": opened.Id}})
+
+	row := s.countedOnce(activity.AreaConversations, store.AuditSourceSDK)
+	s.Equal(int64(1), row.refused)
+	s.Equal(conflict("").Code, row.code)
+}
+
+// Defect: a socket whose session would not start counted with no code.
+func (s *ActivitySuite) TestASocketWhoseSessionWouldNotStartIsCountedAsAnInvalidRequest() {
+	s.refusedSocket(map[string]any{"type": "start", "session": map[string]any{"llm": "nobody/no-model"}})
+
+	row := s.countedOnce(activity.AreaConversations, store.AuditSourceSDK)
+	s.Equal(int64(1), row.refused)
+	s.Equal(invalidRequest("").Code, row.code)
 }

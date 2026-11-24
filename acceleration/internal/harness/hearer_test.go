@@ -92,7 +92,7 @@ func (s *HearerSuite) ruling(hearer Hearer, turn FlowTurn) Decided {
 	f := newFlow(nil, s.emitter, slog.New(slog.DiscardHandler))
 	f.judge, f.hearer = respondingJudge{}, hearer
 	defer func() { s.Require().NoError(f.Close()) }()
-	s.Require().NoError(f.Decide(turn))
+	s.Require().NoError(f.Decide(s.T().Context(), turn))
 	var got Decided
 	s.Require().Eventually(func() bool {
 		s.mu.Lock()
@@ -111,6 +111,34 @@ func (s *HearerSuite) TestTheHearersRulingIsTheFlowControllers() {
 		FlowTurn{ID: "t", Text: "book me on the eight o'clock", Ended: true})
 	s.Equal(Heard, got.Ruler)
 	s.Equal(Respond, got.Disposition)
+}
+
+// applyingHearer is told whether each ruling was acted on, and says whether the flow controller
+// had sent the ruling by then.
+type applyingHearer struct {
+	stubHearer
+	sent    func() bool
+	applied chan [2]bool
+}
+
+func (h applyingHearer) Applied(_ string, acted bool) {
+	time.Sleep(20 * time.Millisecond)
+	h.applied <- [2]bool{acted, h.sent()}
+}
+
+// A Hearer is told its ruling was taken before the agent can act on it, so that the turn the
+// ruling ends carries the check it was made at.
+func (s *HearerSuite) TestAHearerIsToldItsRulingWasTakenBeforeTheAgentIs() {
+	hearer := applyingHearer{stubHearer: stubHearer{ruling: Decided{Disposition: Respond, Floor: Continue}},
+		applied: make(chan [2]bool, 1), sent: func() bool {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			return len(s.decided) > 0
+		}}
+	s.ruling(hearer, FlowTurn{ID: "t", Text: "book me on the eight o'clock", Ended: true})
+	got := <-hearer.applied
+	s.True(got[0], "acted on")
+	s.False(got[1], "told before the ruling went out")
 }
 
 func (s *HearerSuite) TestAHearersWaitSaysWhenToAskAgain() {

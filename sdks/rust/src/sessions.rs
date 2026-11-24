@@ -3,7 +3,7 @@ use serde_json::{Map, Value, json};
 
 use crate::client::Client;
 use crate::error::{Error, Result};
-use crate::operations::ListAgentConfigsQuery;
+use crate::operations::{GetCallEventsQuery, ListAgentConfigsQuery};
 use crate::responses::Responses;
 use crate::session::{Session, WatchOptions};
 use crate::tools::Tools;
@@ -21,9 +21,6 @@ pub struct AgentRef {
     pub name: String,
     /// This agent's conversations: opening one, and reading the old ones back.
     pub sessions: Sessions,
-    /// Functions run for every session of this agent, whoever opened it, once a dispatch
-    /// worker hosts them with [`Dispatch::host`](crate::Dispatch::host).
-    pub tools: Tools,
     client: Client,
 }
 
@@ -35,7 +32,6 @@ impl AgentRef {
                 client: client.clone(),
                 agent: name.into(),
             },
-            tools: Tools::new(),
             client,
         }
     }
@@ -198,6 +194,29 @@ impl Sessions {
     /// the user's memories alone. Server side only.
     pub async fn delete_memories(&self, id: &str) -> Result<()> {
         self.client.delete_session_memories(id).await
+    }
+
+    /// What one conversation's models read and wrote, per model, with the prompt split into
+    /// instructions, messages, tool definitions, tool use, images and video. Unlike the
+    /// session's usage it is answered while the conversation runs. Server side only.
+    pub async fn tokens(&self, id: &str) -> Result<types::CallTokens> {
+        self.client.get_session_tokens(id).await
+    }
+
+    /// One conversation's exchanges, with what was said in each and how long the answer took
+    /// to start, its transcription, model and voice timings kept apart. The timings are kept
+    /// for an hour. Server side only.
+    pub async fn timeline(&self, id: &str) -> Result<Vec<types::TimelineEntry>> {
+        self.client.get_call_timeline(id).await
+    }
+
+    /// What one conversation decided, oldest first: why the agent waited rather than
+    /// answering, why it read something as not meant for it, why it stopped mid-sentence.
+    /// They are kept for an hour. Server side only.
+    pub async fn decisions(&self, id: &str) -> Result<Vec<types::CallEvent>> {
+        self.client
+            .get_call_events(id, &GetCallEventsQuery::default())
+            .await
     }
 
     /// The turns of a conversation this process is not holding.

@@ -131,12 +131,12 @@ func (s *Server) childConfig(ctx context.Context, customerID, named string) (sto
 	if err != nil {
 		return store.AgentConfig{}, false, err
 	}
-	found, exists, err := s.configs.AgentConfigByName(ctx, customerID, named)
-	if err != nil {
+	found, err := s.store.AgentConfigs.GetByName(ctx, customerID, named)
+	if err != nil && !errors.Is(err, store.ErrNoAgentConfig) {
 		return store.AgentConfig{}, false, err
 	}
-	if !exists {
-		found, err = s.configs.AgentConfig(ctx, customerID, named)
+	if err != nil {
+		found, err = s.store.AgentConfigs.Get(ctx, customerID, named)
 		if errors.Is(err, store.ErrNoAgentConfig) {
 			return store.AgentConfig{}, false, nil
 		}
@@ -150,7 +150,7 @@ func (s *Server) childConfig(ctx context.Context, customerID, named string) (sto
 // parentOf is the name of a config of the app, other than self, that hands work to the
 // config called name, and empty when none does.
 func (s *Server) parentOf(ctx context.Context, customerID, name, self string) (string, error) {
-	return s.store.AgentConfigCalling(ctx, customerID, name, self)
+	return s.store.AgentConfigs.NameCalling(ctx, customerID, name, self)
 }
 
 func (*ChildAgent) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -72,8 +73,10 @@ type FlowTurn struct {
 	Text         string
 	Speaking     bool
 	// Reply is what the agent is currently saying, so the controller can tell a cough
-	// overlapping a read-back from a caller who is correcting it.
-	Reply string
+	// overlapping a read-back from a caller who is correcting it, and ReplyID the turn it is
+	// saying it for, which a check over it is about.
+	Reply   string
+	ReplyID string
 	// Heard is how much of Reply the caller has heard by now, as the agent's voice has played
 	// it, when Measured says the agent could tell; otherwise Reply stands for it.
 	Heard    string
@@ -113,6 +116,8 @@ type FlowTurn struct {
 }
 
 type flow struct {
+	// call is the context of the call (Options.Call). The decisions start under it.
+	call  context.Context
 	model *llmrouter.Session
 	// judge, when set, is asked in place of model.
 	judge Judge
@@ -226,7 +231,7 @@ func newFlow(model *llmrouter.Session, emitter *Emitter, logger *slog.Logger) *f
 	}
 }
 
-func (f *flow) Decide(turn FlowTurn) error {
+func (f *flow) Decide(ctx context.Context, turn FlowTurn) error {
 	if strings.TrimSpace(turn.ID) == "" {
 		return stack.Wrap(errors.New("harness: a flow candidate id is required"))
 	}
@@ -238,7 +243,7 @@ func (f *flow) Decide(turn FlowTurn) error {
 	if turn.Unfinished && turn.Speaking {
 		deadline = overlapDeadline
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deadline)
 	asked := &candidate{turn: turn, askedAt: time.Now(), ctx: ctx, cancel: cancel}
 
 	f.mu.Lock()
@@ -260,7 +265,7 @@ func (f *flow) Decide(turn FlowTurn) error {
 	f.running.Add(1)
 	f.mu.Unlock()
 
-	go f.run(asked)
+	goroutine.Go(f.call, func() { f.run(asked) })
 	return nil
 }
 
@@ -346,7 +351,7 @@ func (f *flow) advance(turnID string) {
 	f.inFlight = next.turn.ID
 	f.running.Add(1)
 	f.mu.Unlock()
-	go f.run(next)
+	goroutine.Go(f.call, func() { f.run(next) })
 }
 
 // dropWaitingLocked forgets a turn that never reached Create, because newer words

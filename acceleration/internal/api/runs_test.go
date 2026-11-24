@@ -165,6 +165,31 @@ func (s *RunsSuite) TestAModelThatFailsIsAModelFailure() {
 	s.Equal(codeModelFailed, failure.Code)
 }
 
+func (s *RunsSuite) TestAModelThatFailsIsToldInNoneOfTheVendorsWords() {
+	_, failure := s.runFails(CreateRunRequest{ConfigId: s.config("failing/failing-model"), Input: "hello"})
+
+	s.Equal(codeModelFailed, failure.Code)
+	s.NotContains(failure.Message, "the provider is down")
+}
+
+func (s *RunsSuite) TestARunWhoseSessionTheConfigCannotOpenIsAnInvalidConfigSayingWhy() {
+	tags := map[string]string{}
+	for i := range 16 {
+		tags[fmt.Sprintf("tag_%d", i)] = "on"
+	}
+	var created AgentConfig
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", AgentConfigRequest{
+		Name: "agent-" + s.utils.uuid(), Llm: pointerTo("echo/echo-model"), Tags: &tags,
+	}, &created))
+
+	status, failure := s.runFails(CreateRunRequest{ConfigId: created.Id, Input: "hello",
+		Tags: &map[string]string{"one_more": "on"}})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal(codeInvalidConfig, failure.Code)
+	s.Contains(failure.Message, "at most 16 tags")
+}
+
 func (s *RunsSuite) TestARunOnACustomModelThatFailsIsAnsweredByItsFallback() {
 	config := s.configOnModelThatIsDown(pointerTo([]string{"echo/echo-model"}))
 
@@ -195,7 +220,7 @@ func (s *RunsSuite) TestARunWhoseInputTheScreenRefusedIsARefusalNotAModelFailure
 func (s *RunsSuite) TestASpentLimitIsAPaymentRequired() {
 	s.useApp(s.data.createApp())
 	s.limitApp(usage.Daily, 1_000)
-	s.Require().NoError(s.store.RecordRequest(s.T().Context(), &store.Request{
+	s.Require().NoError(s.store.Requests.Insert(s.T().Context(), &store.Request{
 		Modality: "llm", CustomerID: s.customerID(), Provider: "echo", Model: "echo-model",
 		StartedAt: time.Now().UTC(), CostMicros: 5_000, Billable: true, Success: true,
 	}))
@@ -221,8 +246,8 @@ func (s *RunsSuite) TestATeamLimitRefusesTheAgentTaggedWithTheTeam() {
 		Subject: usage.SubjectCategory, Level: store.LevelOrganization, OrganizationID: s.app.organization.ID,
 		Category: usage.TeamPrefix + "support", Interval: usage.Daily, LimitMicros: 1_000, UpdatedBy: "test",
 	}
-	s.Require().NoError(s.store.CreateLimit(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
-	s.Require().NoError(s.store.RecordRequest(s.T().Context(), &store.Request{
+	s.Require().NoError(s.store.Limits.Insert(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.Requests.Insert(s.T().Context(), &store.Request{
 		Modality: "llm", CustomerID: s.customerID(), Provider: "echo", Model: "echo-model", UsageCategories: []string{"team:support"},
 		StartedAt: time.Now().UTC(), CostMicros: 5_000, Billable: true, Success: true,
 	}))
@@ -340,6 +365,18 @@ func (s *RunsSuite) TestAnImageThatCannotBeFetchedIsUnavailable() {
 	s.Equal(http.StatusBadRequest, status, "the same image fails the same way, so it is no 503 to retry")
 	s.Equal(codeImageUnavailable, failure.Code)
 	s.Contains(failure.Message, "image 1", "the message names which image")
+}
+
+func (s *RunsSuite) TestAnImageOnAHostThatDoesNotResolveIsUnavailableNamingNeitherHostNorResolver() {
+	status, failure := s.runFails(CreateRunRequest{ConfigId: s.config("vision/vision-model"), Input: "hello",
+		Images: &[]ImageSource{{Url: "https://photos.invalid/a.png"}}})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal(codeImageUnavailable, failure.Code)
+	s.Contains(failure.Message, "could not be fetched")
+	s.NotContains(failure.Message, "photos.invalid")
+	s.NotContains(failure.Message, "lookup")
+	s.NotContains(failure.Message, "dial")
 }
 
 func (s *RunsSuite) TestAnImageURLThatIsNoImageIsUnavailable() {

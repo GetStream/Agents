@@ -51,7 +51,7 @@ func (s *StreamAppsCLISuite) SetupSuite() {
 }
 
 func (s *StreamAppsCLISuite) SetupTest() {
-	s.T().Setenv("ROUTER_AUTH_KEK_V1", "first-key")
+	setDevKEK(s.T(), "first-key")
 	s.stream = chattest.NewServer(s.T())
 	s.stream.SetAppFor("deploy-key", chattest.App{ID: 1})
 	s.customer = strconv.FormatInt(1_000_000_000+rand.Int64N(8_000_000_000), 10)
@@ -63,10 +63,10 @@ func (s *StreamAppsCLISuite) SetupTest() {
 
 func (s *StreamAppsCLISuite) TestLegacyCountsOtherCustomersWorkInTheDeploymentApp() {
 	other := "someone-" + s.customer
-	s.Require().NoError(s.store.SaveSession(s.ctx, &store.AgentSession{
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &store.AgentSession{
 		ID: uuid.NewString(), CustomerID: other, AgentID: "agent", UserID: "user",
 	}))
-	s.Require().NoError(s.store.SaveSession(s.ctx, &store.AgentSession{
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &store.AgentSession{
 		ID: uuid.NewString(), CustomerID: "1", AgentID: "agent", UserID: "user",
 	}))
 	var out bytes.Buffer

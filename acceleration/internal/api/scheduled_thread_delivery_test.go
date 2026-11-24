@@ -35,7 +35,7 @@ func (s *RouterSuite) manualRun(task store.ScheduledTask) store.ScheduledTaskRun
 		TaskID: task.ID, CustomerID: task.CustomerID, ScheduledFor: now, Trigger: store.ScheduledTaskTriggerManual,
 		Prompt: task.Instructions, State: store.ScheduledTaskRunRunning, Attempts: 1, StartedAt: &now,
 	}
-	s.Require().NoError(s.store.InsertScheduledTaskRun(context.Background(), &run))
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &run))
 	return run
 }
 
@@ -103,16 +103,16 @@ func (s *RouterSuite) scheduledTurnTools() []string {
 
 // deliveredByTheWorker makes task due, has a worker deliver it, and returns its settled run.
 func (s *RouterSuite) deliveredByTheWorker(task store.ScheduledTask) store.ScheduledTaskRun {
-	worker := scheduling.NewScheduler(s.store, s.router.DeliverScheduledTask, slog.New(slog.DiscardHandler))
+	worker := s.newScheduler(s.router.DeliverScheduledTask, slog.New(slog.DiscardHandler))
 	worker.Start(context.Background())
 	defer worker.Close()
 	past := time.Now().Add(-time.Minute)
 	task.NextRunAt = &past
-	s.Require().NoError(s.store.SaveScheduledTask(context.Background(), &task))
+	s.Require().NoError(s.store.ScheduledTasks.Update(context.Background(), &task))
 	worker.Kick()
 	var settled store.ScheduledTaskRun
 	s.Require().Eventually(func() bool {
-		runs, err := s.store.ScheduledTaskRuns(context.Background(), task.CustomerID, task.ID, 25, nil)
+		runs, err := s.store.ScheduledTaskRuns.Select(context.Background(), task.CustomerID, store.ScheduledTaskRunFilter{TaskID: task.ID, Limit: 25})
 		s.Require().NoError(err)
 		if len(runs) == 0 || runs[0].State == store.ScheduledTaskRunRunning {
 			return false
@@ -272,7 +272,7 @@ func reportRun() llm.ToolCall {
 // link.
 func (s *TelnyxChannelSuite) TestATaskWhoseReplyIsOnlyAFileTextsTheFile() {
 	person := "+13125550001"
-	s.config.Sandbox = string(Daytona)
+	s.config.Sandbox.Provider = string(Daytona)
 	task, _ := s.scheduledInThread(person)
 	report := s.codeHandsBackAReport()
 	s.schedulingScript.saySilently()
@@ -290,8 +290,7 @@ func (s *TelnyxChannelSuite) TestATaskWhoseReplyIsOnlyAFileTextsTheFile() {
 func (s *TelnyxChannelSuite) TestATaskWaitsForTheThreadsTurnAndLetsGoOfIt() {
 	task, channel := s.scheduledInThread("+13125550001")
 	sent := len(s.telnyx().sent())
-	ctx := context.Background()
-	taken, err := s.store.TakeChannelThreadTurn(ctx, channel, "another-router", time.Now().Add(time.Minute))
+	taken, err := s.takeThreadTurn(channel, "another-router")
 	s.Require().NoError(err)
 	s.Require().True(taken)
 	run := s.manualRun(task)
@@ -302,7 +301,7 @@ func (s *TelnyxChannelSuite) TestATaskWaitsForTheThreadsTurnAndLetsGoOfIt() {
 	}()
 
 	s.Never(func() bool { return s.scheduledTurns() > 0 }, dropped, 20*time.Millisecond, "the task ran in another router's turn")
-	s.Require().NoError(s.store.ReleaseChannelThreadTurn(ctx, channel, "another-router"))
+	s.releaseThreadTurn(channel, "another-router")
 
 	select {
 	case err := <-done:
@@ -311,7 +310,7 @@ func (s *TelnyxChannelSuite) TestATaskWaitsForTheThreadsTurnAndLetsGoOfIt() {
 		s.FailNow("the task was not delivered once the turn was free")
 	}
 	s.took(sent + 1)
-	taken, err = s.store.TakeChannelThreadTurn(ctx, channel, "the-next-router", time.Now().Add(time.Minute))
+	taken, err = s.takeThreadTurn(channel, "the-next-router")
 	s.Require().NoError(err)
 	s.True(taken, "the delivery let go of the thread's turn")
 }
@@ -382,7 +381,7 @@ func reportReply(link string) string {
 // The file the task's code made is texted with the reply's words, as its link after them.
 func (s *TelnyxChannelSuite) TestATaskTextsTheFileItsCodeMadeWithItsWords() {
 	person := "+13125550001"
-	s.config.Sandbox = string(Daytona)
+	s.config.Sandbox.Provider = string(Daytona)
 	task, _ := s.scheduledInThread(person)
 	report := s.codeHandsBackAReport()
 	sent := len(s.telnyx().sent())
@@ -397,7 +396,7 @@ func (s *TelnyxChannelSuite) TestATaskTextsTheFileItsCodeMadeWithItsWords() {
 // back from the thread's conversation, without running the task again.
 func (s *TelnyxChannelSuite) TestATaskWhoseReplyTheLineRefusesTextsItsFileOnTheRetry() {
 	person := "+13125550001"
-	s.config.Sandbox = string(Daytona)
+	s.config.Sandbox.Provider = string(Daytona)
 	task, _ := s.scheduledInThread(person)
 	report := s.codeHandsBackAReport()
 	sent := len(s.telnyx().sent())
@@ -420,7 +419,7 @@ func (s *TelnyxChannelSuite) TestAPersonWhoOptsOutBeforeTheReplyGoesOutIsNotText
 	task, _ := s.scheduledInThread(person)
 	sent := len(s.telnyx().sent())
 	s.telnyx().refuse(http.StatusServiceUnavailable, func() {
-		s.Require().NoError(s.store.OptOut(context.Background(), &store.OptOut{
+		s.Require().NoError(s.store.OptOuts.Insert(context.Background(), &store.OptOut{
 			CustomerID: task.CustomerID, Recipient: person, Channel: "sms", Source: "keyword",
 		}))
 	})
@@ -486,7 +485,7 @@ func (s *TelnyxChannelSuite) TestAFailedDeliveryNoLongerHoldsItsCommandsReply() 
 func (s *TelnyxChannelSuite) TestAPersonWhoOptedOutIsNotTextedAndTheTaskIsNotRetried() {
 	person := "+13125550001"
 	task, _ := s.scheduledInThread(person)
-	s.Require().NoError(s.store.OptOut(context.Background(), &store.OptOut{
+	s.Require().NoError(s.store.OptOuts.Insert(context.Background(), &store.OptOut{
 		CustomerID: s.customerID(), Recipient: person, Channel: "sms", Source: "keyword",
 	}))
 	sent := len(s.telnyx().sent())
@@ -501,7 +500,7 @@ func (s *TelnyxChannelSuite) TestAPersonWhoOptedOutIsNotTextedAndTheTaskIsNotRet
 // A line whose connection was removed fails the task for good.
 func (s *TelnyxChannelSuite) TestATaskOnARemovedLineFailsFinally() {
 	task, _ := s.scheduledInThread("+13125550001")
-	s.Require().NoError(s.store.DeleteConnectorConnection(context.Background(), s.customerID(), s.connection.ID))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(context.Background(), s.customerID(), s.connection.ID))
 
 	_, _, err := s.deliverTask(task)
 
@@ -523,10 +522,10 @@ func (s *TelnyxChannelSuite) TestATaskWhoseThreadIsGoneFailsFinally() {
 // removeThread takes the thread channel's link away, as if its thread were gone.
 func (s *RouterSuite) removeThread(channel string) error {
 	ctx := context.Background()
-	if _, err := s.store.DB().ExecContext(ctx, "DELETE FROM channel_thread_messages WHERE channel_id = ?", channel); err != nil {
+	if _, err := s.store.GlobalDB().ExecContext(ctx, "DELETE FROM channel_thread_messages WHERE channel_id = ?", channel); err != nil {
 		return err
 	}
-	_, err := s.store.DB().ExecContext(ctx, "DELETE FROM channel_threads WHERE channel_id = ?", channel)
+	_, err := s.store.GlobalDB().ExecContext(ctx, "DELETE FROM channel_threads WHERE channel_id = ?", channel)
 	return err
 }
 
@@ -683,7 +682,7 @@ func (s *TelnyxChannelSuite) TestAThreadTasksDeliverToCannotChange() {
 
 	s.Equal(http.StatusBadRequest, status, string(raw))
 	s.Contains(string(raw), "a task made in a thread is delivered on that thread")
-	stored, err := s.store.ScheduledTask(context.Background(), task.CustomerID, task.ID)
+	stored, err := s.store.ScheduledTasks.Get(context.Background(), task.CustomerID, task.ID)
 	s.Require().NoError(err)
 	s.Equal(task.Channels, stored.Channels)
 	var renamed ScheduledTask
@@ -701,7 +700,7 @@ func (s *TelnyxChannelSuite) TestATaskWithoutAThreadIsDeliveredAsBefore() {
 	task := store.ScheduledTask{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: "alice", CallerKind: "server", APIKey: s.RouterSuite.app.key,
 		Title: "Stretch", Instructions: "Remind them to stretch.", StartLocal: next, Timezone: "Europe/Amsterdam",
 		NextRunAt: &next, Channels: []string{"conversation"}}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 0))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 0))
 
 	run := s.deliveredByTheWorker(task)
 
@@ -723,7 +722,7 @@ func (s *TelnyxSandboxSuite) TestATaskPastTheSandboxsDailyLimitIsHeldBack() {
 	task := store.ScheduledTask{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: stored[0]["user_id"].(string),
 		CallerKind: "server", APIKey: s.RouterSuite.app.key, ChannelThread: channel, Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: next, Timezone: "Europe/Amsterdam", NextRunAt: &next, Channels: []string{"conversation"}}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 0))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 0))
 
 	_, _, err := s.deliverTask(task)
 
@@ -771,7 +770,7 @@ func (s *WhatsAppChannelSuite) TestAWhatsAppThreadTaskSaysItIsDeliveredOnWhatsAp
 // person writing opens the window again.
 func (s *WhatsAppChannelSuite) TestAWhatsAppThreadTaskPastTheWindowIsNotSent() {
 	task, channel := s.scheduledOnWhatsApp("16505551234")
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE channel_threads SET last_inbound_at = now() - interval '25 hours' WHERE channel_id = ?", channel)
 	s.Require().NoError(err)
 

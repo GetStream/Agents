@@ -12,8 +12,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"runtime/pprof"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,6 +24,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -30,6 +34,8 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/twiliosig"
 )
 
 // RouterStartSuite starts the router as its serve command does, on a database of the suite's
@@ -43,6 +49,10 @@ type RouterStartSuite struct {
 
 func TestRouterStartSuite(t *testing.T) {
 	suite.Run(t, new(RouterStartSuite))
+}
+
+func (s *RouterStartSuite) SetupTest() {
+	clearKeySources(s.T())
 }
 
 func (s *RouterStartSuite) SetupSuite() {
@@ -74,35 +84,35 @@ func (s *RouterStartSuite) TestAStartingRouterPrunesAndRedactsWhatIsPastItsReten
 		CallerKind: store.UserKindAuthenticated, Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: next, Timezone: "UTC", NextRunAt: &next, State: store.ScheduledTaskActive, CreatedBy: "agent",
 	}
-	s.Require().NoError(s.db.CreateScheduledTask(s.ctx, &task, 25))
+	s.Require().NoError(s.db.ScheduledTasks.Insert(s.ctx, &task, 25))
 	s.T().Cleanup(func() {
-		s.NoError(s.db.DeleteScheduledTask(context.Background(), customer, task.ID))
+		s.NoError(s.db.ScheduledTasks.Delete(context.Background(), customer, task.ID))
 	})
-	_, err := s.db.DB().ExecContext(s.ctx, `
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, `
 INSERT INTO scheduled_task_runs (id, task_id, customer_id, scheduled_for, trigger, state, finished_at)
 VALUES (?, ?, ?, now() - interval '91 days', 'schedule', 'delivered', now() - make_interval(secs => ?))`,
 		uuid.NewString(), task.ID, customer, (store.ScheduledTasksKept + 24*time.Hour).Seconds())
 	s.Require().NoError(err)
-	_, err = s.db.DB().ExecContext(s.ctx, `
+	_, err = s.db.GlobalDB().ExecContext(s.ctx, `
 INSERT INTO data_changes (customer_id, table_name, op, key, at)
 VALUES (?, 'agent_configs', 'insert', '{}', now() - make_interval(secs => ?))`,
 		customer, (s.settings.DataMove.Retention + 24*time.Hour).Seconds())
 	s.Require().NoError(err)
 	session := &store.AgentSession{ID: uuid.NewString(), CustomerID: customer, AgentName: "docs", ConfigID: "config-1",
 		UserID: "user-1", CallerKind: store.UserKindAuthenticated, State: store.SessionClosed, CreatedAt: time.Now().UTC()}
-	s.Require().NoError(s.db.SaveSession(s.ctx, session))
+	s.Require().NoError(s.db.Sessions.Upsert(s.ctx, session))
 	response := uuid.NewString()
-	s.Require().NoError(s.db.StartResponse(s.ctx, &store.AgentResponse{
+	s.Require().NoError(s.db.Responses.Insert(s.ctx, &store.AgentResponse{
 		ID: response, SessionID: session.ID, CustomerID: customer, Said: "where is my order?", CreatedAt: time.Now().UTC(),
 	}))
 	due := time.Now().UTC().Add(-time.Hour)
-	s.Require().NoError(s.db.AppendResponseItems(s.ctx, []store.AgentResponseItem{{
+	s.Require().NoError(s.db.ResponseItems.InsertMany(s.ctx, []store.AgentResponseItem{{
 		ResponseID: response, SessionID: session.ID, Kind: store.ItemToolResult, ToolName: "orders",
 		Text: `{"email":"someone@example.com"}`, At: time.Now().UTC(), RedactAt: &due,
 	}}))
 	left := func(query string) int {
 		var n int
-		s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, query, customer).Scan(&n))
+		s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, query, customer).Scan(&n))
 		return n
 	}
 	const (
@@ -191,21 +201,22 @@ func (s *RouterStartSuite) TestAStartingRouterRetiresTheStatusURLsOfOldCalls() {
 	// Well inside the wait below; the production ten minutes would outlast it.
 	phoneSweepEvery = 50 * time.Millisecond
 	s.T().Cleanup(func() { phoneSweepEvery = previous })
-	call := store.PhoneCall{
+	// Past a status url's lifetime, phone.MaxCallLength and an hour (statusTokenLifetime in
+	// internal/phone/service.go).
+	placed := time.Now().UTC().Add(-phone.MaxCallLength - 2*time.Hour)
+	call := store.CallLeg{
 		Token: uuid.NewString(), CustomerID: "customer-" + uuid.NewString(), CallType: "default", CallID: uuid.NewString(),
-		Vendor: "telnyx", LocalNumber: "+15125550100", RemoteNumber: "+15125550199", Reports: true,
-		// Past a status url's lifetime, phone.MaxCallLength and an hour (statusTokenLifetime in
-		// internal/phone/service.go).
-		PlacedAt: time.Now().UTC().Add(-phone.MaxCallLength - 2*time.Hour),
+		Vendor: "telnyx", Direction: store.Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199", Reports: true,
+		PlacedAt: &placed,
 	}
-	s.Require().NoError(s.db.InsertPhoneCall(s.ctx, &call))
+	s.Require().NoError(s.db.CallLegs.Place(s.ctx, &call))
 	s.T().Cleanup(func() {
-		_, err := s.db.DB().ExecContext(context.Background(), "DELETE FROM phone_calls WHERE id = ?", call.ID)
+		_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM call_legs WHERE id = ?", call.ID)
 		s.NoError(err)
 	})
 	retired := func() bool {
 		var gone bool
-		err := s.db.DB().QueryRowContext(s.ctx, "SELECT token IS NULL FROM phone_calls WHERE id = ?", call.ID).Scan(&gone)
+		err := s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT token_hash IS NULL FROM call_legs WHERE id = ?", call.ID).Scan(&gone)
 		return err == nil && gone
 	}
 
@@ -220,35 +231,68 @@ func (s *RouterStartSuite) TestAStartingRouterRetiresTheStatusURLsOfOldCalls() {
 		10*time.Second, 50*time.Millisecond, "the phone sweep went on after the router stopped")
 }
 
+// The router's phone sweep deletes the bridges of calls nobody answered, and only those.
+func (s *RouterStartSuite) TestAStartingRouterSweepsTheBridgesOfCallsNobodyAnswered() {
+	previous := phoneSweepEvery
+	// Well inside the wait below; the production ten minutes would outlast it.
+	phoneSweepEvery = 50 * time.Millisecond
+	s.T().Cleanup(func() { phoneSweepEvery = previous })
+	customer := "customer-" + uuid.NewString()
+	for _, expires := range []time.Time{time.Now().Add(-time.Minute), time.Now().Add(time.Hour)} {
+		s.Require().NoError(s.db.CallBridges.Insert(s.ctx, &store.CallBridge{
+			Token: uuid.NewString(), CustomerID: customer, Vendor: "plivo", TrunkURI: "sip:x@example.com",
+			CallID: uuid.NewString(), ExpiresAt: expires,
+		}))
+	}
+	s.T().Cleanup(func() {
+		_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM call_bridges WHERE customer_id = ?", customer)
+		s.NoError(err)
+	})
+	parked := func() int {
+		var count int
+		s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
+			"SELECT count(*) FROM call_bridges WHERE customer_id = ?", customer).Scan(&count))
+		return count
+	}
+
+	stop := s.start(s.settings)
+
+	s.Eventually(func() bool { return parked() == 1 }, 30*time.Second, 50*time.Millisecond, "the expired bridge is still parked")
+	s.Require().NoError(stop())
+	var waiting bool
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT expires_at > now() FROM call_bridges WHERE customer_id = ?", customer).Scan(&waiting))
+	s.True(waiting, "the bridge kept is the one still waiting for its fetch")
+}
+
 // The router starts the sweep that closes idle episodes where an agent config has the cards on.
 func (s *RouterStartSuite) TestAStartingRouterClosesAnIdleEpisode() {
 	customer := "customer-" + uuid.NewString()
-	carded := &store.AgentConfig{CustomerID: customer, Name: "carded", EpisodeCards: true}
-	s.Require().NoError(s.db.CreateAgentConfig(s.ctx, carded))
-	s.T().Cleanup(func() { s.NoError(s.db.DeleteAgentConfig(context.Background(), customer, carded.ID)) })
+	carded := &store.AgentConfig{CustomerID: customer, Name: "carded", EpisodeCards: store.AgentEpisodeCards{On: true}}
+	s.Require().NoError(s.db.AgentConfigs.Insert(s.ctx, carded))
+	s.T().Cleanup(func() { s.NoError(s.db.AgentConfigs.Delete(context.Background(), customer, carded.ID)) })
 	contact := store.ContactMapEntry{
-		CustomerID: customer, AgentConfigID: carded.ID, Kind: store.ContactSlack,
+		CustomerID: customer, ConfigID: carded.ID, Kind: store.ContactSlack,
 		Address: "T1:U1", ConversationID: "agent:omni-" + uuid.NewString(),
 	}
-	_, err := s.db.MapContact(s.ctx, &contact)
+	_, err := s.db.ContactMapEntries.Map(s.ctx, &contact)
 	s.Require().NoError(err)
 	episode := store.Episode{
 		CustomerID: customer, ContactID: contact.ID, Source: store.EpisodeSlack, ThreadChannel: "agent:thread-" + uuid.NewString(),
 		// Past episodes.idle_after, an hour by default (config.Defaults).
 		StartedAt: time.Now().Add(-2 * time.Hour),
 	}
-	_, err = s.db.OpenEpisode(s.ctx, &episode)
+	_, err = s.db.Episodes.Open(s.ctx, &episode)
 	s.Require().NoError(err)
-	// The episode's episode_activity row goes with it (ON DELETE CASCADE).
 	s.T().Cleanup(func() {
-		_, err := s.db.DB().ExecContext(context.Background(), "DELETE FROM episodes WHERE id = ?", episode.ID)
+		_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM episodes WHERE id = ?", episode.ID)
 		s.NoError(err)
-		_, err = s.db.DB().ExecContext(context.Background(), "DELETE FROM contact_map WHERE id = ?", contact.ID)
+		_, err = s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM contact_map WHERE id = ?", contact.ID)
 		s.NoError(err)
 	})
 	closed := func() bool {
 		var status string
-		err := s.db.DB().QueryRowContext(s.ctx, "SELECT status FROM episodes WHERE id = ?", episode.ID).Scan(&status)
+		err := s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT status FROM episodes WHERE id = ?", episode.ID).Scan(&status)
 		return err == nil && status != "in_progress"
 	}
 
@@ -272,11 +316,11 @@ func (s *RouterStartSuite) TestAStartingRouterEndsALegLeftRingingUntilItStops() 
 			Vendor: "telnyx", Direction: store.Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199",
 			DialedAt: time.Now().UTC().Add(-phone.MaxCallLength - time.Hour),
 		}
-		opened, err := s.db.OpenCallLeg(s.ctx, &leg)
+		opened, err := s.db.CallLegs.Open(s.ctx, &leg)
 		s.Require().NoError(err)
 		s.Require().True(opened)
 		s.T().Cleanup(func() {
-			_, err := s.db.DB().ExecContext(context.Background(), "DELETE FROM call_legs WHERE id = ?", leg.ID)
+			_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM call_legs WHERE id = ?", leg.ID)
 			s.NoError(err)
 		})
 		return leg.ID
@@ -284,7 +328,7 @@ func (s *RouterStartSuite) TestAStartingRouterEndsALegLeftRingingUntilItStops() 
 	ended := func(id int64) func() bool {
 		return func() bool {
 			var reason string
-			err := s.db.DB().QueryRowContext(s.ctx, "SELECT end_reason FROM call_legs WHERE id = ? AND ended_at IS NOT NULL", id).Scan(&reason)
+			err := s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT end_reason FROM call_legs WHERE id = ? AND ended_at IS NOT NULL", id).Scan(&reason)
 			return err == nil && reason == store.LegUnanswered
 		}
 	}
@@ -325,10 +369,10 @@ func (s *RouterStartSuite) TestAStartingRouterAsksTheVendorAfterItsCampaignsUnti
 			CustomerID: "customer-" + uuid.NewString(), Name: "Support", Status: dlc.VendorPending,
 			Vendor: "telnyx", VendorCampaignID: "campaign-" + uuid.NewString(),
 		}
-		s.Require().NoError(s.db.CreateUseCase(s.ctx, &useCase))
+		s.Require().NoError(s.db.UseCases.Insert(s.ctx, &useCase))
 		// Its review log goes with it (ON DELETE CASCADE).
 		s.T().Cleanup(func() {
-			_, err := s.db.DB().ExecContext(context.Background(), "DELETE FROM dlc_use_cases WHERE id = ?", useCase.ID)
+			_, err := s.db.GlobalDB().ExecContext(context.Background(), "DELETE FROM dlc_use_cases WHERE id = ?", useCase.ID)
 			s.NoError(err)
 		})
 		return useCase.ID
@@ -336,7 +380,7 @@ func (s *RouterStartSuite) TestAStartingRouterAsksTheVendorAfterItsCampaignsUnti
 	refused := func(id string) func() bool {
 		return func() bool {
 			var status string
-			err := s.db.DB().QueryRowContext(s.ctx, "SELECT status FROM dlc_use_cases WHERE id = ?", id).Scan(&status)
+			err := s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT status FROM dlc_use_cases WHERE id = ?", id).Scan(&status)
 			return err == nil && status == dlc.VendorRejected
 		}
 	}
@@ -404,6 +448,49 @@ func (s *RouterStartSuite) TestARouterHandedNoSocketFailsOnAProxyAddressAnotherP
 	}
 }
 
+// The router run builds from its settings hands TWILIO_WEBHOOK_AUTH_TOKEN and ROUTER_PUBLIC_URL to
+// the Twilio events route; an unwired token leaves the route answering 404 to every alert.
+func (s *RouterStartSuite) TestAStartingRouterAcceptsAnAlertSignedWithTheTwilioToken() {
+	settings := s.settings
+	settings.Addr = freeAddress(s.T())
+	settings.PublicURL = "https://router.example.test"
+	settings.Twilio.WebhookAuthToken = rand.Text()
+	s.start(settings)
+
+	form := url.Values{"Sid": {"NO" + rand.Text()}, "Payload": {`{"error_code":"10001"}`}}
+	signature := twiliosig.Sign(settings.Twilio.WebhookAuthToken, settings.PublicURL+"/v1/phone/hooks/twilio/events", form)
+
+	s.Equal(http.StatusNoContent, s.postTwilioAlert(settings.Addr, form, signature))
+	other := twiliosig.Sign(rand.Text(), settings.PublicURL+"/v1/phone/hooks/twilio/events", form)
+	s.Equal(http.StatusUnauthorized, s.postTwilioAlert(settings.Addr, form, other), "a signature of another token")
+}
+
+// A router given no token answers 404, so the test above fails on the wiring and not on a route that
+// always answers 204.
+func (s *RouterStartSuite) TestAStartingRouterWithNoTwilioTokenHasNoTwilioEventsRoute() {
+	settings := s.settings
+	settings.Addr = freeAddress(s.T())
+	settings.PublicURL = "https://router.example.test"
+	s.start(settings)
+
+	form := url.Values{"Sid": {"NO" + rand.Text()}, "Payload": {`{"error_code":"10001"}`}}
+	signature := twiliosig.Sign("any-token", settings.PublicURL+"/v1/phone/hooks/twilio/events", form)
+
+	s.Equal(http.StatusNotFound, s.postTwilioAlert(settings.Addr, form, signature))
+}
+
+func (s *RouterStartSuite) postTwilioAlert(address string, form url.Values, signature string) int {
+	request, err := http.NewRequest(http.MethodPost, "http://"+address+"/v1/phone/hooks/twilio/events",
+		strings.NewReader(form.Encode()))
+	s.Require().NoError(err)
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set(twiliosig.SignatureHeader, signature)
+	response, err := http.DefaultClient.Do(request)
+	s.Require().NoError(err)
+	s.Require().NoError(response.Body.Close())
+	return response.StatusCode
+}
+
 // proxySettings is a router that serves the sandbox egress proxy: it needs redis, connectors
 // and so a keyring.
 func (s *RouterStartSuite) proxySettings() config.Config {
@@ -413,7 +500,7 @@ func (s *RouterStartSuite) proxySettings() config.Config {
 	}
 	settings := s.settings
 	settings.Redis.Addr = address
-	settings.Auth.KEK = "listen-fd-key"
+	setDevKEK(s.T(), "listen-fd-key")
 	settings.Connectors.Enabled = true
 	settings.CodeSandbox.ProxyCACert, settings.CodeSandbox.ProxyCAKey = newCA(s.T())
 	return settings
@@ -468,8 +555,14 @@ func healthy(address string) bool {
 // still up; run has a handler for SIGTERM only while it runs, so the cleanup stops it here and
 // not by the signal killing the binary.
 func (s *RouterStartSuite) start(settings config.Config) (stop func() error) {
+	stop, _ = s.startLogged(settings)
+	return stop
+}
+
+// startLogged is start that also gives what the router logged.
+func (s *RouterStartSuite) startLogged(settings config.Config) (stop func() error, logs *listenLog) {
 	stopped := make(chan struct{})
-	logs := &listenLog{listening: make(chan struct{})}
+	logs = &listenLog{listening: make(chan struct{})}
 	var runErr error
 	go func() {
 		runErr = run(settings, slog.New(logs))
@@ -500,7 +593,7 @@ func (s *RouterStartSuite) start(settings config.Config) (stop func() error) {
 	case <-time.After(30 * time.Second):
 		s.Require().Fail("the router did not start listening")
 	}
-	return stop
+	return stop, logs
 }
 
 // Defect: the router built without its activity record (the server counts nothing), or without
@@ -523,10 +616,60 @@ func (s *RouterStartSuite) TestARunningRouterCountsAnAppsRequestAndWritesItWhenI
 	s.Require().NoError(stop())
 
 	var requests int64
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT COALESCE(sum(requests), 0) FROM customer_activity WHERE app_id = ? AND area = 'agent_setup' AND client = ?",
 		customer, store.AuditSourceCLI).Scan(&requests))
 	s.Equal(int64(1), requests)
+}
+
+// Defect: the router builds the trunk call provider but never starts it, so no node it stops
+// beside hands it calls, and a drain started with this one's claims unrenewed.
+func (s *RouterStartSuite) TestARunningRouterSaysItTakesTrunkCallsOverUntilItStops() {
+	address := os.Getenv("ROUTER_REDIS_ADDR")
+	if address == "" {
+		s.T().Skip("ROUTER_REDIS_ADDR not set")
+	}
+	client, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{address}, DisableCache: true})
+	s.Require().NoError(err)
+	s.T().Cleanup(client.Close)
+	// Another router on this Redis may be one already.
+	before := s.takingTrunkCalls(client)
+	settings := s.settings
+	settings.Addr = freeAddress(s.T())
+	settings.Redis.Addr = address
+	setDevKEK(s.T(), "trunk-key")
+
+	stop := s.start(settings)
+
+	var node string
+	s.Require().Eventually(func() bool {
+		node = joined(before, s.takingTrunkCalls(client))
+		return node != ""
+	}, 10*time.Second, 20*time.Millisecond, "the running router does not say it takes trunk calls over")
+	s.Require().NoError(stop())
+	s.NotContains(s.takingTrunkCalls(client), node, "the stopped router still says it takes trunk calls over")
+}
+
+// takingTrunkCalls is every node that says now that it takes trunk calls over.
+func (s *RouterStartSuite) takingTrunkCalls(client rueidis.Client) []string {
+	nodes, err := trunkCallTakers(s.ctx, client)
+	s.Require().NoError(err)
+	return nodes
+}
+
+func trunkCallTakers(ctx context.Context, client rueidis.Client) ([]string, error) {
+	return client.Do(ctx, client.B().Zrangebyscore().Key("{siptrunk}:nodes").
+		Min("("+strconv.FormatInt(time.Now().UnixMilli(), 10)).Max("+inf").Build()).AsStrSlice()
+}
+
+// joined is a node in now that is not in before, or "" when there is none.
+func joined(before, now []string) string {
+	for _, n := range now {
+		if !slices.Contains(before, n) {
+			return n
+		}
+	}
+	return ""
 }
 
 // goroutines is every goroutine's stack, as the pprof endpoint prints it.
@@ -540,11 +683,25 @@ func goroutines() string {
 type listenLog struct {
 	listening chan struct{}
 	once      sync.Once
+	mu        sync.Mutex
+	warnings  []string
+}
+
+// warned is every warning logged so far.
+func (l *listenLog) warned() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.warnings)
 }
 
 func (l *listenLog) Enabled(context.Context, slog.Level) bool { return true }
 
 func (l *listenLog) Handle(_ context.Context, record slog.Record) error {
+	if record.Level == slog.LevelWarn {
+		l.mu.Lock()
+		l.warnings = append(l.warnings, record.Message)
+		l.mu.Unlock()
+	}
 	if record.Message == "listening" {
 		l.once.Do(func() { close(l.listening) })
 	}
@@ -573,4 +730,26 @@ func (s *RouterStartSuite) TestARouterWithASlackChannelChecksCostAnomaliesUntilI
 	held, err := other.Hold(s.ctx)
 	s.Require().NoError(err)
 	s.True(held, "the router kept the lock after it stopped")
+}
+
+// Defect: the warning of a router with no keyring names a variable the router no longer
+// reads, and sends an operator to set it.
+func (s *RouterStartSuite) TestARouterWithNoKeyringWarnsWhichVariablesToSet() {
+	for _, name := range []string{"ROUTER_DEV_KEK", "ROUTER_AUTH_KEK", "ROUTER_AUTH_KEK_V1", "ROUTER_AUTH_KEK_V1_WRAPPED"} {
+		s.T().Setenv(name, "")
+	}
+	settings := s.settings
+	settings.Addr = freeAddress(s.T())
+
+	stop, logs := s.startLogged(settings)
+	s.Require().NoError(stop())
+
+	var found string
+	for _, warning := range logs.warned() {
+		if strings.HasPrefix(warning, "no key encryption keyring set") {
+			found = warning
+		}
+	}
+	s.Require().NotEmpty(found, "warnings: %q", logs.warned())
+	s.Contains(found, "(ROUTER_DEV_KEK (local), or ROUTER_AUTH_KEK_V1_WRAPPED with ROUTER_AUTH_KMS_KEY (hosted))")
 }

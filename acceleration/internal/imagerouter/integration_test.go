@@ -86,7 +86,7 @@ func (s *ImageRouterIntegrationSuite) TestAGenerationIsOneRowCountingItsPictures
 	router.Close()
 	to := from.Add(2 * time.Hour)
 
-	buckets, err := s.store.CustomerStats(s.ctx, string(routing.Image), s.customerID, store.Hourly, from, to, nil)
+	buckets, err := s.store.Buckets.Select(s.ctx, s.customerID, store.BucketFilter{Modality: string(routing.Image), Granularity: store.Hourly, From: from, To: to})
 	s.Require().NoError(err)
 	s.Require().Len(buckets, 2)
 	drawn, refused := buckets[0], buckets[1]
@@ -100,15 +100,47 @@ func (s *ImageRouterIntegrationSuite) TestAGenerationIsOneRowCountingItsPictures
 	s.Zero(refused.CostMicrosTotal, "a picture that was refused is not billed")
 	s.EqualValues(1, refused.ErrorCount)
 
-	_, err = s.store.Rollup(s.ctx, store.Hourly, from, to)
+	_, err = s.store.Buckets.Rollup(s.ctx, store.Hourly, from, to)
 	s.Require().NoError(err)
-	labelled, err := s.store.CustomerTagStats(s.ctx, string(routing.Image), s.customerID, "employee", store.Hourly, from, to)
+	labelled, err := s.store.TagBuckets.Select(s.ctx, s.customerID, store.TagBucketFilter{Modality: string(routing.Image), Key: "employee", Granularity: store.Hourly, From: from, To: to})
 	s.Require().NoError(err)
 	s.Require().Len(labelled, 1)
 	s.Equal("e1", labelled[0].TagValue)
 	s.EqualValues(2, labelled[0].ImagesTotal)
 	s.EqualValues(80_000, labelled[0].CostMicrosTotal)
 	s.EqualValues(2, labelled[0].RequestCount)
+}
+
+func (s *ImageRouterIntegrationSuite) TestAGenerationDrawnTwiceUnderOneUsageIDIsBilledOnce() {
+	// A picture an agent asked for, drawn by a router that stopped before keeping it, is drawn
+	// again by the next under the job's usage id: one row, one bill.
+	drawing := &stubImages{name: "quick", drawn: pictures(1, 1024, 1024)}
+	registry := NewRegistry()
+	registry.Register("quick", func(routing.Spec) (imagegen.Provider, error) { return drawing, nil })
+	router, err := New(Options{
+		Config: routing.ModalityConfig{Providers: []routing.ProviderConfig{
+			{Provider: "quick", Model: "fast", Languages: []string{"en"}, Price: routing.Price{PerImage: 0.04}},
+		}},
+		Registry: registry,
+		Store:    s.store,
+		Logger:   slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	usageID := routing.UsageID("image_job", s.customerID)
+
+	for range 2 {
+		_, err = router.Generate(s.ctx, Request{
+			CustomerID: s.customerID, Target: "quick/fast", UsageID: usageID, Image: imagegen.Request{Prompt: "a field"},
+		})
+		s.Require().NoError(err)
+	}
+	router.Close()
+
+	var rows []store.Request
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", s.customerID).Scan(s.ctx))
+	s.Require().Len(rows, 1, "drawn twice, recorded once")
+	s.Equal(usageID, rows[0].UsageID)
+	s.EqualValues(40_000, rows[0].CostMicros)
 }
 
 func (s *ImageRouterIntegrationSuite) TestAnImageRowSaysTheSizeItWasDrawnAtWhichCanChooseThePrice() {
@@ -142,7 +174,7 @@ func (s *ImageRouterIntegrationSuite) TestAnImageRowSaysTheSizeItWasDrawnAtWhich
 	router.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", s.customerID).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", s.customerID).Scan(s.ctx))
 	s.Require().Len(rows, 1)
 	s.Equal("1024", rows[0].Attributes[imagegen.AttributeWidth])
 	s.Equal("1792", rows[0].Attributes[imagegen.AttributeHeight])

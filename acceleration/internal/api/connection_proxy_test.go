@@ -152,7 +152,7 @@ func (s *ConnectionProxySuite) SetupSuite() {
 	// A Link's target under api_base is rewritten to the proxy under this URL.
 	s.publicURL = proxyPublicURL
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 // TestCallsUpToTheDefaultCapAllReachTheProvider: the default cap's worth of calls on one
@@ -628,13 +628,13 @@ func (s *ConnectionProxySuite) TestALinearAppConnectionsGraphQLCallGoesToLinears
 // api_base, so a direct call answers as base 3690152b answered it (probe in the PR).
 func (s *ConnectionProxySuite) TestALinearConnectionMadeByDCRStillTakesNoDirectCalls() {
 	ctx := context.Background()
-	definition, err := s.store.LatestConnectorDefinition(ctx, s.customerID(), "linear")
+	definition, err := s.store.ConnectorDefinitions.Latest(ctx, s.customerID(), "linear")
 	s.Require().NoError(err)
 	connection := store.ConnectorConnection{CustomerID: s.customerID(), ConnectorID: "linear",
 		DefinitionRevision: definition.Revision, OwnerType: store.OwnerApp, AuthScheme: oauth2code.Name}
-	s.Require().NoError(s.store.CreateConnectorConnection(ctx, s.connectors, &connection))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(ctx, s.connectors, &connection))
 	connection.Status, connection.Revision = store.ConnectionConnected, 2
-	s.Require().NoError(s.store.SaveConnectorConnectionAtRevision(ctx, &connection, 1))
+	s.Require().NoError(s.store.ConnectorConnections.SaveAtRevision(ctx, &connection, 1))
 	before := s.hits.Load()
 
 	status, message := s.serverClient.failure(http.MethodPost, proxy(connection.ID, "graphql"),
@@ -878,7 +878,7 @@ func (s *ConnectionProxySuite) storeConnector(body string) string {
 func (s *ConnectionProxySuite) storeConnectorAs(id, body string) {
 	manifest, err := core.ParseManifest([]byte("id: " + id + "\nrevision: 1\nname: Proxy\n" + body))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 }
 
@@ -1065,10 +1065,10 @@ func (s *ConnectionProxyOffSuite) TestTheConnectionEndpointsAnswerAsOnBase() {
 	manifest, err := core.ParseManifest([]byte("id: " + connectorID + "\nrevision: 1\nname: Listed\n" +
 		"endpoints:\n  api_base: https://api.example.com\nschemes: [bearer]\n"))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(ctx, s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(ctx, s.customerID(), manifest)
 	s.Require().NoError(err)
 	registry := core.Registry{Schemes: map[string]core.Scheme{bearer.Name: bearer.New()}}
-	s.Require().NoError(s.store.CreateConnectorConnection(ctx, registry, &store.ConnectorConnection{
+	s.Require().NoError(s.store.ConnectorConnections.Insert(ctx, registry, &store.ConnectorConnection{
 		CustomerID: s.customerID(), ConnectorID: connectorID, OwnerType: store.OwnerApp,
 		AuthScheme: bearer.Name, DefinitionRevision: 1}))
 
@@ -1093,12 +1093,12 @@ func (s *ConnectionProxyOffSuite) TestTheProxyIsNoRouteAsOnBase() {
 	manifest, err := core.ParseManifest([]byte("id: " + connectorID + "\nrevision: 1\nname: Proxy\n" +
 		"endpoints:\n  api_base: https://api.example.com\nschemes: [bearer]\n"))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(ctx, s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(ctx, s.customerID(), manifest)
 	s.Require().NoError(err)
 	connection := &store.ConnectorConnection{CustomerID: s.customerID(), ConnectorID: connectorID,
 		OwnerType: store.OwnerApp, AuthScheme: bearer.Name, DefinitionRevision: 1}
 	registry := core.Registry{Schemes: map[string]core.Scheme{bearer.Name: bearer.New()}}
-	s.Require().NoError(s.store.CreateConnectorConnection(ctx, registry, connection))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(ctx, registry, connection))
 	device := s.data.createUser()
 
 	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,

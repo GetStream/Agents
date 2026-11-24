@@ -38,7 +38,9 @@ const (
 
 // Ledger records usage events and keeps the windows.
 type Ledger struct {
-	db     *bun.DB
+	db *bun.DB
+	// dsn is what db was opened with, for the pool a migration runs on.
+	dsn    string
 	mirror *Mirror
 	now    func() time.Time
 }
@@ -62,7 +64,8 @@ func Open(options Options) (*Ledger, error) {
 		options.Now = time.Now
 	}
 	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(options.DSN)))
-	return &Ledger{db: bun.NewDB(sqldb, pgdialect.New()), mirror: options.Mirror, now: options.Now}, nil
+	// A release rolled back past a migration that added a column still reads the row.
+	return &Ledger{db: bun.NewDB(sqldb, pgdialect.New(), bun.WithDiscardUnknownColumns()), dsn: options.DSN, mirror: options.Mirror, now: options.Now}, nil
 }
 
 // DB is the database, for what the ledger does not wrap.
@@ -81,9 +84,14 @@ func (l *Ledger) Ping(ctx context.Context) error {
 
 // Migrate applies every pending migration.
 func (l *Ledger) Migrate(ctx context.Context) error {
+	// A pool of its own with no read timeout: the serving pool gives up on a statement after
+	// the driver's 10 s, and waiting for the lock or a migration on a large table takes longer.
+	// The server would go on running it, holding its locks, while the service restarted into it.
+	db := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(l.dsn), pgdriver.WithReadTimeout(0)))
+	defer db.Close() //nolint:errcheck // a pool the migration is done with
 	// Every replica starts at once in a rollout, and two goose runs on one database collide,
 	// so one migrates while the others wait.
-	conn, err := l.db.DB.Conn(ctx)
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("ledger: migrate: %w", err)
 	}
@@ -100,7 +108,7 @@ func (l *Ledger) Migrate(ctx context.Context) error {
 	}
 	// A provider of its own rather than goose's globals, which the router's store sets in
 	// the same process when both run in one test binary.
-	provider, err := goose.NewProvider(goose.DialectPostgres, l.db.DB, files)
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, files)
 	if err != nil {
 		return fmt.Errorf("ledger: migrate: %w", err)
 	}
@@ -383,8 +391,8 @@ func storedWindows(ctx context.Context, db bun.IDB, wanted []UsageWindow) ([]Usa
 func (l *Ledger) PruneWindows(ctx context.Context, cutoff time.Time) (int64, error) {
 	var deleted int64
 	for {
-		result, err := l.db.NewRaw(`DELETE FROM usage_windows WHERE ctid IN (
-			SELECT ctid FROM usage_windows WHERE window_end < ? LIMIT ?)`, cutoff, pruneBatch).Exec(ctx)
+		ended := l.db.NewSelect().Model((*UsageWindow)(nil)).Column("ctid").Where("window_end < ?", cutoff).Limit(pruneBatch)
+		result, err := l.db.NewDelete().Model((*UsageWindow)(nil)).Where("ctid IN (?)", ended).Exec(ctx)
 		if err != nil {
 			return deleted, fmt.Errorf("ledger: prune windows: %w", err)
 		}

@@ -52,7 +52,7 @@ func reservingSessionOver(t *testing.T, money *policytest.Money, owner routing.O
 	config := routing.ProviderConfig{Provider: provider.Provider(), Model: provider.Model(), Price: routing.Price{PerMillionChars: 1_000_000}}
 	prices, err := routing.Prices(routing.Config{routing.TTS: {Providers: []routing.ProviderConfig{config}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
-	session := newSession(provider, config, owner, money.Recorder(routing.TTS, prices), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	session := newSession(context.Background(), provider, config, owner, money.Recorder(routing.TTS, prices), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { _ = session.Close() })
 	return session
 }
@@ -133,7 +133,7 @@ func rowsOf(t *testing.T, money *policytest.Money, owner routing.Owner, want int
 	var rows []store.Request
 	require.Eventually(t, func() bool {
 		rows = nil
-		require.NoError(t, money.Store.DB().NewSelect().Model(&rows).Where("customer_id = ?", owner.CustomerID).Order("id").Scan(context.Background()))
+		require.NoError(t, money.Store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", owner.CustomerID).Order("id").Scan(context.Background()))
 		return len(rows) == want
 	}, 5*time.Second, 10*time.Millisecond, "%d rows", want)
 	return rows
@@ -426,7 +426,7 @@ func TestASentenceSpokenAgainAfterABargeInIsBilledOnItsOwn(t *testing.T) {
 	var rows []store.Request
 	require.Eventually(t, func() bool {
 		rows = nil
-		require.NoError(t, money.Store.DB().NewSelect().Model(&rows).Where("customer_id = ?", owner.CustomerID).Order("id").Scan(context.Background()))
+		require.NoError(t, money.Store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", owner.CustomerID).Order("id").Scan(context.Background()))
 		return len(rows) == 2
 	}, 5*time.Second, 10*time.Millisecond, "each sentence is a row")
 	require.EqualValues(t, 1, rows[0].Characters)
@@ -483,7 +483,7 @@ func TestAnIdReusedAfterItsSentenceFinishedIsBilledOnceForWhatWasSent(t *testing
 			var rows []store.Request
 			require.Eventually(t, func() bool {
 				rows = nil
-				require.NoError(t, money.Store.DB().NewSelect().Model(&rows).Where("customer_id = ?", owner.CustomerID).Order("id").Scan(context.Background()))
+				require.NoError(t, money.Store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", owner.CustomerID).Order("id").Scan(context.Background()))
 				return len(rows) == 2
 			}, 5*time.Second, 10*time.Millisecond)
 			require.EqualValues(t, 1, rows[0].Characters)

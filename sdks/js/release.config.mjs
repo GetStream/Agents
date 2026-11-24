@@ -10,7 +10,7 @@
 const scope = "sdk-js";
 
 export default {
-  branches: ["accelerate"],
+  branches: ["main"],
   tagFormat: "sdk-js-v${version}",
   plugins: [
     [
@@ -40,7 +40,7 @@ export default {
       "@semantic-release/github",
       {
         // A draft, published by the workflow with `--latest=false`, so the repository's
-        // latest release stays the Python one.
+        // latest release stays the repository's vX.Y.Z release.
         draftRelease: true,
         releaseNameTemplate: "@stream-io/stream-agents v<%= nextRelease.version %>",
         // Every commit since the last tag is in context, router ones included, so a comment

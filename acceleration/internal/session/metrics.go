@@ -103,6 +103,10 @@ func (s *Session) kept() EndReason {
 	return s.endLabel()
 }
 
+// EndedFor is why the session ended, as its row keeps it. It is read once the session has
+// ended: before, it is the reason a session closed now would be kept under.
+func (s *Session) EndedFor() EndReason { return s.kept() }
+
 // counted takes the session's end into the session metrics if the manager held it. Called
 // once, from close.
 func (s *Session) counted() {

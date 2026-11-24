@@ -1,6 +1,7 @@
 package conversation
 
 import (
+	"cmp"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -132,6 +133,16 @@ type ToolApproval struct {
 	DeclineTitle   string
 }
 
+// ToolTitle is what a call of the tool called name is shown doing: title, the one its tool
+// declared, or for the runtime's own search, which has no caller to title it, "Searching the
+// web". Other untitled calls are left to the clients, which name them from the tool.
+func ToolTitle(name, title string) string {
+	if title == "" && (name == "search" || name == "web_search") {
+		return "Searching the web"
+	}
+	return title
+}
+
 // DescribeTools records the caller's tools for this session.
 func (c *Conversation) DescribeTools(tools map[string]ToolDisplay) {
 	c.mu.Lock()
@@ -190,12 +201,7 @@ func (c *Conversation) called(m *Message, e toolCall) {
 	}
 	started := e.startedAt.UTC()
 	part := Part{Type: partToolCall, V: partVersion, ID: e.id, Status: "running", Name: e.name,
-		DisplayTitle: display.Title, Executor: "server", StartedAt: &started}
-	// The runtime's own search has no caller to title it. Other untitled calls are left to
-	// the clients, which name them from the tool.
-	if part.DisplayTitle == "" && (e.name == "search" || e.name == "web_search") {
-		part.DisplayTitle = "Searching the web"
-	}
+		DisplayTitle: ToolTitle(e.name, display.Title), Executor: "server", StartedAt: &started}
 	if display.Client {
 		part.Executor = "client"
 		record := c.data.Commands[m.CommandID]
@@ -212,9 +218,12 @@ func (c *Conversation) called(m *Message, e toolCall) {
 	// A call a person must allow first waits for the one whose command it answers, with
 	// the question their client asks. A client tool with no install to address runs
 	// nowhere, so nobody is asked.
+	// In a channel of a type an agent config answers in, that is the writer of the message the
+	// reply answers (askedFor).
 	if approval := display.Approval; approval != nil && (!display.Client || part.Status == "awaiting_client") {
-		if initiator := c.data.Commands[m.CommandID].Initiator; initiator != "" {
-			part.TargetUserID = initiator
+		record := c.data.Commands[m.CommandID]
+		if asked := cmp.Or(record.Writer, record.Initiator); asked != "" {
+			part.TargetUserID = asked
 			part.Status = "awaiting_approval"
 			part.Approval = &Approval{
 				Title:        capRunes(strings.TrimSpace(approval.Title), maxApprovalTitle),
@@ -239,6 +248,20 @@ func reasonOf(arguments, name string) string {
 	}
 	text, _ := values[name].(string)
 	return capRunes(strings.Join(strings.Fields(text), " "), maxApprovalReason)
+}
+
+// clonedParts copies parts with approvals of their own. DecideApproval answers an approval in
+// place on the reply being written, while a queued write or a published update of that reply
+// may still be encoding the copy elsewhere.
+func clonedParts(parts []Part) []Part {
+	cloned := append([]Part{}, parts...)
+	for i := range cloned {
+		if approval := cloned[i].Approval; approval != nil {
+			copied := *approval
+			cloned[i].Approval = &copied
+		}
+	}
+	return cloned
 }
 
 // decided records a person's answer to a call awaiting their approval. Allowed, the call
@@ -376,21 +399,24 @@ func shownStep(m *Message, id string) *Part {
 // approval's question and the call's arguments on its step, which DecideApproval settles. The
 // arguments are shown as a client tool's are: valid JSON up to maxClientArguments; any other
 // arguments show as a cut preview in the approval's message, so none is approved blind. The step is
-// shown whatever the agent config shows, since somebody is waiting on it. It returns the
-// command the reply answers, which the answer names, and false when owner cannot be asked here
-// (CanAskToConnect) or the reply made no such call.
-func (c *Conversation) AwaitApproval(owner, id, arguments string, approval ToolApproval) (string, bool) {
+// shown whatever the agent config shows, since somebody is waiting on it. The person asked is
+// the writer of the message the reply answers in a channel of a type an agent config answers
+// in, and otherwise owner (askedFor). It returns the command the reply answers, which the
+// answer names, and who was asked, and false when nobody can be asked here or the reply made
+// no such call.
+func (c *Conversation) AwaitApproval(owner, id, arguments string, approval ToolApproval) (string, string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.canAsk(owner) {
-		return "", false
+	asked := c.askedFor(owner)
+	if asked == "" {
+		return "", "", false
 	}
 	m := c.data.Current
 	part := shownStep(m, id)
 	if part == nil {
-		return "", false
+		return "", "", false
 	}
-	part.Status, part.TargetUserID = "awaiting_approval", owner
+	part.Status, part.TargetUserID = "awaiting_approval", asked
 	part.Approval = &Approval{Title: capRunes(strings.TrimSpace(approval.Title), maxApprovalTitle)}
 	if raw := json.RawMessage(arguments); len(raw) <= maxClientArguments && json.Valid(raw) {
 		part.Arguments = raw
@@ -400,7 +426,22 @@ func (c *Conversation) AwaitApproval(owner, id, arguments string, approval ToolA
 	m.Sequence++
 	c.save()
 	c.publish(*m)
-	return m.CommandID, true
+	return m.CommandID, asked, true
+}
+
+// askedFor is whom the reply being written asks to allow a call, with c.mu held: the writer of
+// the message it answers in a channel of a type an agent config answers in, where each turn is
+// a different person's, and otherwise owner, the session's user, when canAsk. Empty for nobody.
+func (c *Conversation) askedFor(owner string) string {
+	if m := c.data.Current; m != nil && m.FinishedAt == nil && m.Role == "assistant" {
+		if writer := c.data.Commands[m.CommandID].Writer; writer != "" {
+			return writer
+		}
+	}
+	if !c.canAsk(owner) {
+		return ""
+	}
+	return owner
 }
 
 // AwaitsApproval reports whether the step of the call id in the reply being written still
@@ -433,6 +474,39 @@ func (c *Conversation) DecideApproval(e agent.ToolApprovalDecided) bool {
 	m.Saved = false
 	c.publish(*m)
 	return true
+}
+
+// approvalExpired is the line a reply ends with when it ended while a call still waited for a
+// person to allow it (ExpireApprovals): why the call did not run, and what to do next.
+const approvalExpired = "The approval expired before anyone answered, so that step did not run. Ask again if you still need it."
+
+// ExpireApprovals has the reply being written, if it ends with a call still waiting for a person
+// to allow it, decline that call as one nobody allowed in time and say so (expire). It is for a
+// reply whose session closes with its turn: the call is stopped then, and the model gets no round
+// to say why it did not run. Until the reply ends, an answer still reaches the call.
+func (c *Conversation) ExpireApprovals() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if m := c.data.Current; m != nil {
+		c.expiring = m.ID
+	}
+}
+
+// expire declines each call of m still waiting for a person, with the summary a call nobody
+// allowed in time gets (session.holdForApproval), and ends m's text with approvalExpired when
+// one did.
+func expire(m *Message, now time.Time) {
+	expired := false
+	for _, part := range m.Parts {
+		expired = decided(m, part.ID, false, "Not allowed in time", now) || expired
+	}
+	if !expired {
+		return
+	}
+	if m.Text != "" && !strings.HasSuffix(m.Text, "\n\n") {
+		m.Text += "\n\n"
+	}
+	m.Text += approvalExpired
 }
 
 // toolStep is the step of the call id on m, or nil.

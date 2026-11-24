@@ -12,6 +12,7 @@ from PIL import Image
 from vision_agents.core import Agent, User
 from vision_agents.core.agents.agents import DEFAULT_INSTRUCTIONS
 from vision_agents.core.harness import Daytona, DefaultHarness
+from vision_agents.core.llm import FunctionRegistry
 from vision_agents.core.llm.llm import ImageContent
 from vision_agents.core.llm.tool_call import (
     ToolCallContext,
@@ -52,6 +53,8 @@ class Router:
         self.created_for = ""
         self.synced: Optional[dict[str, Any]] = None
         self.closed: list[str] = []
+        # added are the tools each session was given after it opened, by session.
+        self.added: list[tuple[str, dict[str, Any]]] = []
         self.commands: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.url = ""
         # refusing makes creating a session answer 429, as a customer over its limit is.
@@ -64,6 +67,7 @@ class Router:
         app.router.add_post("/v1/agents/sessions", self._create)
         app.router.add_get("/v1/agents/sessions/{id}/events", self._events)
         app.router.add_post("/v1/agents/sessions/{id}/stop", self._close)
+        app.router.add_post("/v1/agents/sessions/{id}/tools", self._add_tools)
         app.router.add_get("/v1/agents/configs", self._configs)
         app.router.add_post("/v1/agents/sync", self._sync)
         return app
@@ -120,6 +124,10 @@ class Router:
         self.closed.append(request.match_info["id"])
         return web.Response(status=204)
 
+    async def _add_tools(self, request: web.Request) -> web.Response:
+        self.added.append((request.match_info["id"], await request.json()))
+        return web.Response(status=204)
+
     async def _events(self, request: web.Request) -> web.WebSocketResponse:
         socket = web.WebSocketResponse()
         await socket.prepare(request)
@@ -159,6 +167,23 @@ class TestAccelerated:
             return f"it is raining in {city}"
 
         return pipeline
+
+    @pytest.fixture
+    def started(self) -> list[str]:
+        """The calls reserve_table was started for, which it says before it answers."""
+        return []
+
+    @pytest.fixture
+    def reserve_table(self, started: list[str]) -> FunctionRegistry:
+        """A tool given to the session while the call runs."""
+        functions = FunctionRegistry()
+
+        @functions.register(description="Reserve a table")
+        async def reserve_table(tool_call_context: ToolCallContext, table: str) -> str:
+            started.append(tool_call_context.id)
+            return f"Reserved {table}."
+
+        return functions
 
     @pytest.fixture
     def stream_credentials(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -895,33 +920,6 @@ class TestAccelerated:
         )
         assert seen[0].approved
 
-    async def test_a_function_tells_the_caller_how_it_is_going(
-        self, router: Router, joined: stream.Accelerated
-    ):
-        @joined.register_function(description="Search flights")
-        async def search(tool_call_context: ToolCallContext) -> str:
-            await tool_call_context.update("checking three airlines")
-            await tool_call_context.say("Still looking, one moment.")
-            return "found two"
-
-        await router.send(
-            {"type": "tool_call", "id": "call-4", "name": "search", "arguments": "{}"}
-        )
-
-        assert await router.answered() == {
-            "type": "tool_update",
-            "tool_call_id": "call-4",
-            "text": "checking three airlines",
-            "verbatim": False,
-        }
-        assert await router.answered() == {
-            "type": "tool_update",
-            "tool_call_id": "call-4",
-            "text": "Still looking, one moment.",
-            "verbatim": True,
-        }
-        assert (await router.answered())["output"] == "found two"
-
     async def test_a_held_call_is_not_cancelled_by_the_caller_talking_over(
         self, router: Router, joined: stream.Accelerated
     ):
@@ -954,6 +952,45 @@ class TestAccelerated:
             "tool_call_id": "call-5",
             "output": "charged",
         }
+
+    async def test_a_calls_updates_reach_the_router_before_its_result(
+        self, router: Router, joined: stream.Accelerated
+    ):
+        @joined.register_function(description="Search for flights")
+        async def search_flights(tool_call_context: ToolCallContext) -> str:
+            await tool_call_context.update("Comparing 40 flights")
+            await tool_call_context.update(
+                title="Booking the cheapest", custom={"cheapest": 129}
+            )
+            await tool_call_context.update(custom={"seat": "12A"})
+            return "found 3"
+
+        await router.send(
+            {
+                "type": "tool_call",
+                "id": "call-7",
+                "name": "search_flights",
+                "arguments": "{}",
+            }
+        )
+
+        assert await router.answered() == {
+            "type": "tool_update",
+            "tool_call_id": "call-7",
+            "text": "Comparing 40 flights",
+        }
+        assert await router.answered() == {
+            "type": "tool_update",
+            "tool_call_id": "call-7",
+            "text": "Booking the cheapest",
+            "custom": {"cheapest": 129},
+        }
+        assert await router.answered() == {
+            "type": "tool_update",
+            "tool_call_id": "call-7",
+            "custom": {"seat": "12A"},
+        }
+        assert (await router.answered())["output"] == "found 3"
 
     async def test_a_call_stopped_before_it_was_held_never_writes(
         self, router: Router, joined: stream.Accelerated
@@ -1005,6 +1042,75 @@ class TestAccelerated:
 
         assert await router.answered() == {"type": "close"}
 
+    async def test_a_tool_given_while_the_call_runs_is_run_here(
+        self,
+        router: Router,
+        joined: stream.Accelerated,
+        reserve_table: FunctionRegistry,
+    ):
+        await joined.add_tools(reserve_table)
+        await router.send(
+            {
+                "type": "tool_call",
+                "id": "call-7",
+                "name": "reserve_table",
+                "arguments": json.dumps({"table": "T4"}),
+            }
+        )
+
+        answer = await router.answered()
+
+        assert [
+            (session, [tool["name"] for tool in body["tools"]])
+            for session, body in router.added
+        ] == [("session-1", ["reserve_table"])]
+        assert answer == {
+            "type": "tool_result",
+            "tool_call_id": "call-7",
+            "output": "Reserved T4.",
+        }
+
+    async def test_leaving_forgets_the_tools_the_session_was_given(
+        self,
+        router: Router,
+        llm: stream.Accelerated,
+        call: RemoteCall,
+        reserve_table: FunctionRegistry,
+        started: list[str],
+    ):
+        await llm.join_remote(call)
+        await llm.add_tools(reserve_table)
+        await llm.leave_remote()
+        assert await router.answered() == {"type": "close"}
+
+        await llm.join_remote(call)
+        try:
+            # weather is the agent's own and always run, and calls are started in the
+            # order they arrive, so once weather is answered a call of reserve_table run
+            # here, however slow, has started.
+            await router.send(
+                {
+                    "type": "tool_call",
+                    "id": "call-1",
+                    "name": "reserve_table",
+                    "arguments": json.dumps({"table": "T4"}),
+                }
+            )
+            await router.send(
+                {
+                    "type": "tool_call",
+                    "id": "call-2",
+                    "name": "weather",
+                    "arguments": json.dumps({"city": "Amsterdam"}),
+                }
+            )
+            answer = await router.answered()
+        finally:
+            await llm.leave_remote()
+
+        assert answer["tool_call_id"] == "call-2"
+        assert started == []
+
     async def test_a_config_named_when_the_agent_was_built_is_looked_up_on_joining(
         self, router: Router, call: RemoteCall
     ):
@@ -1049,45 +1155,42 @@ class TestAccelerated:
         monkeypatch.chdir(tmp_path)
         return folder
 
-    async def test_joining_stores_the_directory_the_config_is_named_after(
+    async def test_joining_runs_on_the_stored_config_without_syncing_the_directory(
         self, router: Router, call: RemoteCall, john_dir
     ):
-        # Nobody called sync_agent: the directory is what the config is, so joining is
-        # what stores whatever it says now.
         pipeline = stream.Accelerated(config="john", url=router.url, customer_id="acme")
 
         await pipeline.join_remote(call)
         await pipeline.leave_remote()
 
-        assert router.synced is not None
-        assert router.synced["instructions"] == "Be brief."
+        assert router.synced is None
         assert router.created is not None
         assert router.created["config_id"] == "config-7"
 
-    async def test_joining_again_for_an_untouched_directory_stores_nothing(
-        self, router: Router, call: RemoteCall, john_dir
+    @pytest.mark.usefixtures("stream_credentials")
+    async def test_syncing_an_agent_stores_the_directory_its_config_is_named_after(
+        self, router: Router, john_dir
     ):
-        first = stream.Accelerated(config="john", url=router.url, customer_id="acme")
-        await first.join_remote(call)
-        await first.leave_remote()
-
-        router.synced = None
-        again = stream.Accelerated(config="john", url=router.url, customer_id="acme")
-        await again.join_remote(call)
-        await again.leave_remote()
-
-        assert router.synced is None, (
-            ".agent_sync should answer for a directory nothing has touched"
+        agent = Agent(
+            llm=stream.Accelerated(config="john", url=router.url, customer_id="acme"),
+            edge=getstream.Edge(),
+            agent_user=User(name="john"),
         )
 
-    async def test_a_config_name_nothing_is_stored_under_says_so(
+        await agent.sync()
+
+        assert router.synced is not None
+        assert router.synced["name"] == "john"
+        assert router.synced["instructions"] == "Be brief."
+
+    async def test_a_config_name_nothing_is_stored_under_says_to_sync_it(
         self, router: Router, call: RemoteCall
     ):
         pipeline = stream.Accelerated(
             config="nobody", url=router.url, customer_id="acme"
         )
 
-        with pytest.raises(RemotePipelineError, match="nobody"):
+        with pytest.raises(RemotePipelineError, match=r"'nobody'.*agent\.sync\(\)"):
             await pipeline.join_remote(call)
 
     async def test_a_session_the_router_refuses_is_raised_with_what_it_said(

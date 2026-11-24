@@ -35,6 +35,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/hibiken/asynq"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,7 +45,6 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -161,14 +161,14 @@ func (s *RouterSuite) BeforeTest(_, _ string) {
 		return
 	}
 	t := s.T()
-	count, err := s.store.DB().NewSelect().Model((*store.ScheduledTask)(nil)).Count(context.Background())
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.ScheduledTask)(nil)).Count(context.Background())
 	require.NoError(t, err)
 	require.Zero(t, count, "a task is left from an earlier test or run")
 	// A database that stalls past the driver's 10s read timeout fails the delete, and the next
 	// test would then fail on this one's tasks; the delete is tried again until it lands.
 	t.Cleanup(func() {
 		require.EventuallyWithT(t, func(c *assert.CollectT) {
-			_, err := s.store.DB().NewDelete().Model((*store.ScheduledTask)(nil)).Where("true").Exec(context.Background())
+			_, err := s.store.GlobalDB().NewDelete().Model((*store.ScheduledTask)(nil)).Where("true").Exec(context.Background())
 			assert.NoError(c, err)
 		}, time.Minute, 100*time.Millisecond, "the tasks were never deleted")
 	})
@@ -208,13 +208,17 @@ type RouterSuite struct {
 	suite.Suite
 
 	store   *store.Store
-	configs *appconfig.Store
+	configs *store.Store
 	live    *live.Client
 	sealer  *auth.Sealer
+	// storeOptions are what the suite's store was opened with, for a node on the same databases.
+	storeOptions store.Options
 	// activity is the activity record every node of the suite counts in.
 	activity *activity.Recorder
 	// manager runs the suite's sessions, for a test about what ends them from inside.
 	manager *session.Manager
+	// library is the voice libraries the suite's router reads, empty until a test registers one.
+	library *voices.Catalogue
 
 	// appMode runs the suite's Stream through app mode's own source, over the suite's
 	// database and keyring, with the deployment's app as the fallback: behind a gateway,
@@ -227,6 +231,9 @@ type RouterSuite struct {
 	// proxied authenticates as a router behind Stream's proxy does, believing the headers it
 	// writes, so a test names its caller with proxiedClient rather than a key.
 	proxied bool
+	// release is the version the router says it was built from (Options.Release). A suite
+	// sets it before SetupSuite runs; empty, as a local build is, names none.
+	release string
 	// byCustomer authenticates as a local router in proxy mode with nothing in front, as
 	// every example runs: a caller names its customer itself and is a backend unless it
 	// declares otherwise.
@@ -247,6 +254,9 @@ type RouterSuite struct {
 	// limitsMode is the suite's ROUTER_LIMITS_MODE, for a suite to set before it starts the
 	// harness. Empty is enforce.
 	limitsMode config.LimitsMode
+	// privateModels lets the suite's custom models sit on a private address, as a self-hosted
+	// router's models.private_endpoints does; a suite sets it before it starts the harness.
+	privateModels bool
 	// owned are the apps the suite made or used, whose rows must all name a key.
 	ownedMu sync.Mutex
 	owned   []string
@@ -301,10 +311,11 @@ type RouterSuite struct {
 	// The stubs standing in for providers, for a test to read back what the router asked
 	// them for. model answers questions, vision is the one that can see, knowledge keeps the
 	// passages written to it. holding answers once a test lets it, for a summary that has to
-	// still be in the writing.
+	// still be in the writing. thinker signs its thinking, as Claude does.
 	model     *scriptedLLM
 	vision    *scriptedLLM
 	holding   *scriptedLLM
+	thinker   *scriptedLLM
 	knowledge *knowledgeBase
 	// knowledgeBucket is where an uploaded knowledge file waits to be read.
 	knowledgeBucket *blob.Bucket
@@ -330,6 +341,11 @@ type RouterSuite struct {
 	scheduledMu      sync.Mutex
 	scheduled        []*schedulingModel
 	schedulingScript schedulingScript
+	// retries, when set, are the waits the test's scheduled-task workers retry a failed
+	// occurrence after (newScheduler), in place of the scheduler's own; finishRetries the
+	// waits before they write a failed outcome again.
+	retries       []time.Duration
+	finishRetries []time.Duration
 
 	// chat is the Stream Chat the conversations are written to and transcripts read from:
 	// the deployment's own app. apps gives a customer an app of its own instead, and
@@ -403,9 +419,14 @@ type RouterSuite struct {
 	// logs, set by a suite before it starts the harness, is where the router logs, as text at
 	// debug and up, for a suite about what it warns of. Nil discards them.
 	logs io.Writer
+	// failing makes the queries that a test names with failQueries fail.
+	failing *failingQueries
 	// telnyxPublicKey, set by a suite about Telnyx's call webhook before it starts the
 	// harness, is the key Telnyx's requests are checked against. Nil leaves it unconfigured.
 	telnyxPublicKey ed25519.PublicKey
+	// twilioAuthToken, set by a suite about Twilio's webhooks before it starts the harness, is
+	// the Auth Token Twilio's requests are checked against. Empty leaves it unconfigured.
+	twilioAuthToken string
 	// chatInboundKeys, set by a suite about Stream Chat's delivery endpoint before it starts
 	// the harness, are what its deliveries are checked against, on every node. Nil leaves it
 	// unconfigured.
@@ -554,18 +575,20 @@ func (s *RouterSuite) SetupSuite() {
 		s.T().Skip("ROUTER_POSTGRES_DSN and ROUTER_REDIS_ADDR must be set")
 	}
 	s.forgetPhoneVendors()
+	s.library = voices.NewCatalogue()
 	if s.knowledgeLimits == (ingest.Limits{}) {
 		s.knowledgeLimits = ingest.DefaultLimits
 	}
 	ctx := context.Background()
 	logger := slog.New(slog.DiscardHandler)
 	if s.logs != nil {
-		logger = slog.New(slog.NewTextHandler(s.logs, &slog.HandlerOptions{Level: slog.LevelDebug, ReplaceAttr: store.RedactLogAttr}))
+		logger = slog.New(NewLogHandler(slog.NewTextHandler(s.logs, &slog.HandlerOptions{Level: slog.LevelDebug, ReplaceAttr: store.RedactLogAttr})))
 	}
 
 	// A shard database and Redis run the suite as a hosted shard runs: the shared rows in one
 	// place and the calls, sessions and requests in another.
-	options := store.Options{DSN: testDatabase(s.T(), dsn)}
+	options := store.Options{DSN: testDatabase(s.T(), dsn), Redis: store.Redis{Address: redisAddr},
+		ShardRedis: store.Redis{Address: os.Getenv("ROUTER_REDIS_SHARD_ADDR")}}
 	if s.channelProvider != nil && s.database == "" {
 		s.T().Fatal("a suite with the real channel bridge needs a database of its own: its inbound worker takes every queued message there")
 	}
@@ -575,22 +598,33 @@ func (s *RouterSuite) SetupSuite() {
 	if shardDSN := os.Getenv("ROUTER_POSTGRES_SHARD_DSN"); shardDSN != "" {
 		options.ShardDSN = testDatabase(s.T(), shardDSN)
 	}
+	s.storeOptions = options
 	pgStore, err := store.OpenShards(options)
 	s.Require().NoError(err)
-	pgStore.DB().SetMaxOpenConns(suiteConnections)
+	pgStore.GlobalDB().SetMaxOpenConns(suiteConnections)
 	s.Require().NoError(migrate(ctx, pgStore, options.DSN))
 	s.store = pgStore
+	s.failing = &failingQueries{}
+	pgStore.GlobalDB().AddQueryHook(s.failing)
+	if pgStore.Sharded() {
+		pgStore.ShardDB().AddQueryHook(s.failing)
+	}
 	s.T().Cleanup(func() { s.Require().NoError(pgStore.Close()) })
 	// Registered before everything that records, so it runs once all of it has closed and
 	// written what it held.
 	s.T().Cleanup(s.assertEveryRowNamesAKey)
+	queueFull := usageLostQueueFull(s)
+	s.T().Cleanup(func() {
+		s.Zero(usageLostQueueFull(s)-queueFull, "usage rows were lost to a full writer queue "+
+			"(suiteQueueSize) while this suite ran, by it or by a suite beside it")
+	})
 	if s.database != "" {
 		// Only a suite's own database is emptied, never the shared one. A run killed by
 		// -timeout skips its cleanups, and the database outlives it. A queued inbound row it
 		// left is claimed once its lease lapses, before SetupTest has made the channel fakes.
-		_, err := pgStore.DB().NewDelete().Model((*store.ScheduledTask)(nil)).Where("true").Exec(ctx)
+		_, err := pgStore.GlobalDB().NewDelete().Model((*store.ScheduledTask)(nil)).Where("true").Exec(ctx)
 		s.Require().NoError(err)
-		_, err = pgStore.DB().NewDelete().Model((*store.ChannelInbound)(nil)).Where("true").Exec(ctx)
+		_, err = pgStore.GlobalDB().NewDelete().Model((*store.ChannelInbound)(nil)).Where("true").Exec(ctx)
 		s.Require().NoError(err)
 	}
 
@@ -628,11 +662,7 @@ func (s *RouterSuite) SetupSuite() {
 		s.stream = streamapp.NewClients(stored, streamapp.ClientsOptions{})
 	}
 	s.store.SetStreamPins(store.StreamPins{Deployment: s.apps.deployment.App, For: s.stream.Pin, Knowable: s.stream.DeploymentAppKnowable})
-	s.configs, err = redisready.Retry(redisAddr, func() (*appconfig.Store, error) {
-		return appconfig.New(appconfig.Options{Store: pgStore, Address: redisAddr, Logger: logger})
-	})
-	s.Require().NoError(err)
-	s.T().Cleanup(s.configs.Close)
+	s.configs = pgStore
 	s.relayPrefix = uuid.NewString()
 
 	if s.pricedFromDatabase {
@@ -742,7 +772,6 @@ func (s *RouterSuite) SetupSuite() {
 		Directory: directory,
 		Sessions:  sessions,
 		Store:     pgStore,
-		Configs:   s.configs,
 		Activity:  s.activity,
 		Live:      liveClient,
 		Auth:      s.authenticator(),
@@ -762,7 +791,7 @@ func (s *RouterSuite) SetupSuite() {
 		KnowledgeURLs:     s.pages(redisAddr),
 		KnowledgeFiles:    s.knowledgeFiles(redisAddr, knowledgeBase, streams.OCR),
 		Voices:            s.voiceService(),
-		VoiceLibrary:      voices.NewCatalogue(),
+		VoiceLibrary:      s.library,
 		Dispatch:          s.dispatch,
 		Policies:          policies,
 		Documents:         s.documentReader(),
@@ -776,9 +805,11 @@ func (s *RouterSuite) SetupSuite() {
 		Stream:             s.stream,
 		HookSecret:         suiteStreamSecret,
 		TelnyxPublicKey:    s.telnyxPublicKey,
+		TwilioAuthToken:    s.twilioAuthToken,
 		ChatInboundKeys:    s.chatInboundKeys,
 		TelnyxConnectionID: s.telnyxConnectionID,
 		AudioFloor:         s.audioFloor,
+		Release:            s.release,
 		Logger:             logger,
 		// The connector events endpoint revokes through the suite's resolver.
 		ConnectorResolver:     s.resolver,
@@ -795,6 +826,7 @@ func (s *RouterSuite) SetupSuite() {
 		Episodes:              episodes,
 		SlackApps:             s.slackApps,
 		OperatorProviderApps:  s.operatorApps,
+		PrivateModelEndpoints: s.privateModels,
 	})
 	listener.Config.Handler = server.Handler()
 	listener.Start()
@@ -904,7 +936,7 @@ func (s *RouterSuite) channelBridge(logger *slog.Logger) *channelbridge.Bridge {
 func (s *RouterSuite) writtenByTheInboundWorker(channel string) {
 	var providerID string
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT provider_message_id FROM channel_thread_inbound WHERE channel_id = ? AND state = 'done'", channel).Scan(&providerID) == nil
 	}, settleFor, 10*time.Millisecond, "no written row of %s", channel)
 	stored := s.bridged(channel)
@@ -937,7 +969,7 @@ func (s *RouterSuite) settled() {
 // inboundRows is how many of the test customer's queued inbound messages are in state.
 func (s *RouterSuite) inboundRows(state string) int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_thread_inbound WHERE customer_id = ? AND state = ?", s.customerID(), state).Scan(&count))
 	return count
 }
@@ -947,7 +979,7 @@ func (s *RouterSuite) inboundRows(state string) int {
 func (s *RouterSuite) failedOnce() {
 	s.Require().Eventually(func() bool {
 		var count int
-		s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT count(*) FROM channel_thread_inbound WHERE customer_id = ? AND state = 'queued' AND attempts > 0", s.customerID()).Scan(&count))
 		return count > 0
 	}, settleFor, 5*time.Millisecond, "no attempt failed")
@@ -957,7 +989,7 @@ func (s *RouterSuite) failedOnce() {
 // drop. The table is in the suite's own database (database), and when names the test's
 // customer, so no other test's rows meet it.
 func (s *RouterSuite) trigger(name, table, op, when, body string) (drop func()) {
-	db := s.store.DB()
+	db := s.store.GlobalDB()
 	_, err := db.ExecContext(context.Background(), "CREATE OR REPLACE FUNCTION "+name+"() RETURNS trigger AS $$ BEGIN IF "+when+" THEN "+body+
 		" END IF; RETURN COALESCE(NEW, OLD); END $$ LANGUAGE plpgsql")
 	s.Require().NoError(err)
@@ -977,6 +1009,28 @@ func (s *RouterSuite) trigger(name, table, op, when, body string) (drop func()) 
 	s.T().Cleanup(drop)
 	return drop
 }
+
+// failQueries makes each query that contains value fail, until the test ends.
+func (s *RouterSuite) failQueries(value string) {
+	s.failing.value.Store(&value)
+	s.T().Cleanup(func() { s.failing.value.Store(nil) })
+}
+
+// failingQueries makes each query that contains a value fail. The query stops before Postgres
+// gets it, with the same error as when the database does not answer in time.
+type failingQueries struct{ value atomic.Pointer[string] }
+
+func (f *failingQueries) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	value := f.value.Load()
+	if value == nil || !strings.Contains(event.Query, *value) {
+		return ctx
+	}
+	expired, cancel := context.WithDeadline(ctx, time.Time{})
+	cancel()
+	return expired
+}
+
+func (*failingQueries) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 // channelBridgeOptions are the options channelBridge builds the bridge with, for a test to
 // build another router's bridge.
@@ -1047,9 +1101,7 @@ func (s *RouterSuite) registrations(listener *httptest.Server, logger *slog.Logg
 func (s *RouterSuite) telephonyRecorder(logger *slog.Logger) *routing.Recorder {
 	list, err := pricing.NewList("vendor", pricing.AllAtCost(prices.Vendor().Entries), logger)
 	s.Require().NoError(err)
-	recorder := routing.NewRecorder(routing.Phone, s.store, s.live, list, logger)
-	s.T().Cleanup(recorder.Close)
-	return recorder
+	return routing.NewRecorderOn(routing.Phone, s.routerWriter(s.store, s.live, nil, logger), list, logger)
 }
 
 // vendorPriced is what used of a phone item costs at the vendor list's rates, as
@@ -1157,6 +1209,7 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 	hearing.Probe()
 	transcriber, err := sttrouter.New(sttrouter.Options{
 		Config: heard, Registry: hearing, Store: s.store, Live: s.live, Gate: gate, Logger: logger,
+		Writer: s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(transcriber.Close)
@@ -1179,6 +1232,12 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 	reasoning.Register("recites", func(routing.Spec) (llmrouter.Provider, error) { return &scriptedLLM{recites: true}, nil })
 	s.holding = &scriptedLLM{reply: "Held."}
 	reasoning.Register("holding", func(routing.Spec) (llmrouter.Provider, error) { return s.holding, nil })
+	s.thinker = &scriptedLLM{reply: "Looking.", calls: []llm.ToolCall{{ID: "call-1", Name: "lookup", Arguments: "{}"}}, thinks: []llm.ReasoningBlock{
+		{Text: "plan", Signature: "sig-1"},
+		{Signature: "sig-2", AfterText: len("Looking.")},
+		{Redacted: "enc-1", AfterToolCalls: 1},
+	}}
+	reasoning.Register("thinking", func(routing.Spec) (llmrouter.Provider, error) { return s.thinker, nil })
 	reasoning.Register("noted", func(routing.Spec) (llmrouter.Provider, error) {
 		opened := &scriptedLLM{reply: "Noted."}
 		s.notedMu.Lock()
@@ -1284,7 +1343,7 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 	reasoner, err := llmrouter.New(llmrouter.Options{
 		Config: reasoned, Registry: reasoning, Store: s.store, Live: s.live,
 		Quota: limiter, Gate: gate, Pricer: pricer, Logger: logger,
-		Models: llmrouter.NewCustomModels(s.configs, s.sealer, false),
+		Models: llmrouter.NewCustomModels(s.store, s.sealer, false),
 		Writer: s.shippingWriter(gate, logger),
 	})
 	s.Require().NoError(err)
@@ -1304,7 +1363,7 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 	}
 	speaker, err := ttsrouter.New(ttsrouter.Options{
 		Config: ttsConfig, Registry: speaking, Store: s.store, Live: s.live, Voices: s.ttsVoices, Gate: gate,
-		Logger: logger,
+		Logger: logger, Writer: s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(speaker.Close)
@@ -1318,6 +1377,7 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 		Live:         s.live,
 		Gate:         gate,
 		Logger:       logger,
+		Writer:       s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(transcriptions.Close)
@@ -1330,42 +1390,47 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 		Voices:    s.ttsVoices,
 		Gate:      gate,
 		Logger:    logger,
+		Writer:    s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(recordings.Close)
 
 	finding, err := searchrouter.New(searchrouter.Options{
 		Config: searchConfig(), Registry: searchRegistry(), Store: s.store, Live: s.live, Gate: gate,
-		Logger: logger,
+		Logger: logger, Writer: s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(finding.Close)
 
 	judging, err := decisionrouter.New(decisionrouter.Options{
 		Config: classifyConfig(), Registry: classifierRegistry(), Logger: logger,
+		Writer: s.routerWriter(nil, nil, nil, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(judging.Close)
 
 	imaging, err := imagerouter.New(imagerouter.Options{
 		Config: imageConfig(), Registry: painterRegistry(), Store: s.store, Live: s.live, Gate: gate, Logger: logger,
+		Writer: s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(imaging.Close)
 
 	detecting, err := detectionrouter.New(detectionrouter.Options{
 		Config: detectionConfig(), Registry: detectorRegistry(), Gate: gate, Logger: logger,
+		Writer: s.routerWriter(nil, nil, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(detecting.Close)
 
 	reading, err := ocrrouter.New(ocrrouter.Options{
 		Config: ocrConfig(), Registry: ocrRegistry(), Store: s.store, Live: s.live, Gate: gate, Logger: logger,
+		Writer: s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(reading.Close)
 
-	conversing, err := stsrouterStub()
+	conversing, err := stsrouterStub(s.routerWriter(nil, nil, nil, logger))
 	s.Require().NoError(err)
 	s.T().Cleanup(conversing.Close)
 
@@ -1425,7 +1490,7 @@ func (s *RouterSuite) serverPricer(logger *slog.Logger) pricing.Pricer {
 func (s *RouterSuite) databasePrices(logger *slog.Logger) *pricing.Active {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.T().Cleanup(cancel)
-	_, _, _, err := s.store.SyncPrices(ctx, store.PriceLoad{Entries: pricingtest.Entries(s.T()),
+	_, _, _, err := s.store.PriceChanges.Sync(ctx, store.PriceLoad{Entries: pricingtest.Entries(s.T()),
 		Source: pricingtest.FileName + ", " + prices.VendorFile, Release: "suite"})
 	s.Require().NoError(err)
 	reasoned := reasoningConfig()
@@ -1434,7 +1499,7 @@ func (s *RouterSuite) databasePrices(logger *slog.Logger) *pricing.Active {
 	fallback, err := prices.Embedded(local, "suite", logger)
 	s.Require().NoError(err)
 	return pricing.NewActive(ctx, pricing.ActiveOptions{
-		Source: s.store.PriceSource(), Fallback: fallback, Local: local, Interval: suitePriceReload, RequireEntries: true, Logger: logger,
+		Source: s.store.PriceEntries.Source(), Fallback: fallback, Local: local, Interval: suitePriceReload, RequireEntries: true, Logger: logger,
 	})
 }
 
@@ -1492,10 +1557,10 @@ func (s *RouterSuite) sessionManager(
 		Store:         s.store,
 		Policies:      policies,
 		Live:          s.live,
-		Configs:       s.configs,
 		Directory:     directory,
 		Connectors:    connectors,
 		Logger:        logger,
+		Writer:        s.routerWriter(s.store, s.live, nil, logger),
 		// The policies a session's resume_history falls back to, as cmd/router passes them.
 		ResumeHistories: policies,
 		Edge: func(context.Context, session.Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
@@ -1540,11 +1605,56 @@ func (s *RouterSuite) assertEveryRowNamesAKey() {
 	}
 }
 
+// usageLostQueueFull is router_usage_lost_total{reason="queue_full"}, the rows a writer
+// dropped because its queue was full (internal/routing/writer.go).
+func usageLostQueueFull(s *RouterSuite) float64 {
+	families, err := prometheus.DefaultGatherer.Gather()
+	s.Require().NoError(err)
+	for _, family := range families {
+		if family.GetName() != "router_usage_lost_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, pair := range metric.GetLabel() {
+				if pair.GetName() == "reason" && pair.GetValue() == "queue_full" {
+					return metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// suiteQueueSize is how many rows each writer of the suite holds, where a deployment's holds
+// 20,000 (internal/routing/writer.go). A finished suite's routers and writers stay in memory
+// to the end of the package: goroutines of its nodes that never end, such as
+// Server.expireProxies, hold its Server. At 20,000 rows a writer, the package needed more
+// memory than CI's runner has (AI-3471). A writer drains its queue in batches of 200 as rows
+// arrive, and 1,000 is five such batches.
+const suiteQueueSize = 1_000
+
+// routerWriter is the writer a router or recorder builds for itself when given none
+// (routing.newRecorder), over pgStore and liveClient, with room for suiteQueueSize rows. It
+// writes what it holds when the suite ends, as the router's Close would.
+func (s *RouterSuite) routerWriter(pgStore *store.Store, liveClient *live.Client, gate routing.Gate, logger *slog.Logger) *routing.Writer {
+	options := routing.WriterOptions{Store: pgStore, Live: liveClient, Logger: logger, QueueSize: suiteQueueSize}
+	if counter, ok := gate.(interface{ Counted([]routing.Acked) }); ok {
+		options.Counted = counter.Counted
+	}
+	writer := routing.NewWriter(options)
+	s.T().Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		writer.Close(ctx)
+	})
+	return writer
+}
+
 // shippingWriter is the writer the conversation model records through when the suite ships,
-// and nil, a writer of the router's own, when it does not.
+// and routerWriter's, the one the router would build for itself, when it does not.
 func (s *RouterSuite) shippingWriter(gate routing.Gate, logger *slog.Logger) *routing.Writer {
 	if !s.shipping {
-		return nil
+		return s.routerWriter(s.store, s.live, gate, logger)
 	}
 	if s.usage == nil {
 		s.usage = usagetest.Start(s.T(), usagetest.Options{Logger: logger})
@@ -1555,7 +1665,7 @@ func (s *RouterSuite) shippingWriter(gate routing.Gate, logger *slog.Logger) *ro
 	}
 	writer := routing.NewWriter(routing.WriterOptions{
 		Store: s.store, Live: s.live, Logger: logger, Gate: gate, Usage: s.usage.Client, Source: "router/suite/" + s.utils.uuid(),
-		Shipped: shipped,
+		Shipped: shipped, QueueSize: suiteQueueSize,
 	})
 	s.T().Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -1574,7 +1684,7 @@ func (s *RouterSuite) authenticator() auth.Authenticator {
 	if s.byCustomer {
 		return auth.NewProxy(auth.ProxyOptions{})
 	}
-	authenticator, err := auth.New(auth.APIKey, s.configs.Lookup(s.sealer))
+	authenticator, err := auth.New(auth.APIKey, s.configs.APIKeys.Lookup(s.sealer))
 	s.Require().NoError(err)
 	return authenticator
 }
@@ -1627,7 +1737,6 @@ func (s *RouterSuite) telephonySealedBy(sealer *auth.Sealer, apps phone.Apps, lo
 		Sealer:    sealer,
 		SIPTrunks: siptrunk.New(siptrunk.Options{Logger: logger}),
 		Apps:      apps,
-		Redis:     s.live.Redis(),
 		Logger:    logger,
 	})
 	s.Require().NoError(err)
@@ -1651,16 +1760,14 @@ func (s *RouterSuite) meteringRecorder(logger *slog.Logger) *routing.Recorder {
 	if s.prices != nil {
 		pricer = s.prices
 	}
-	recorder := routing.NewRecorder(routing.Knowledge, s.store, s.live, pricer, logger)
-	s.T().Cleanup(recorder.Close)
-	return recorder
+	return routing.NewRecorderOn(routing.Knowledge, s.routerWriter(s.store, s.live, nil, logger), pricer, logger)
 }
 
 func (s *RouterSuite) knowledgeWriter(gate routing.Gate) *metered.Knowledge {
 	s.knowledge = newKnowledgeBase()
 	backends := map[string]knowledge.Backend{pricing.DefaultRegion: s.knowledge}
 	maps.Copy(backends, s.knowledgeRegions)
-	return metered.NewRegionalKnowledge(backends, s.metering, gate, s.store)
+	return metered.NewRegionalKnowledge(backends, s.metering, gate, s.store.KnowledgeNamespaces)
 }
 
 // schedulingModel is a model that runs the tool calls its test queued in the suite's
@@ -1743,7 +1850,7 @@ func (s *RouterSuite) voiceService() *voices.Service {
 	cloners := voices.NewRegistry()
 	cloners.Register("elevenlabs", cloner)
 
-	service, err := voices.NewService(voices.Options{Store: s.configs, Bucket: bucket, Cloners: cloners, Recorder: s.metering})
+	service, err := voices.NewService(voices.Options{Store: s.store, Bucket: bucket, Cloners: cloners, Recorder: s.metering})
 	s.Require().NoError(err)
 	return service
 }
@@ -1793,9 +1900,9 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 		Stream:        s.stream,
 		Store:         s.store,
 		Live:          s.live,
-		Configs:       s.configs,
 		Directory:     directory,
 		Logger:        logger,
+		Writer:        s.routerWriter(s.store, s.live, nil, logger),
 		Edge: func(context.Context, session.Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
 			return &silentEdge{inbound: make(chan agent.InboundAudio, 4)}, nil
 		},
@@ -1815,7 +1922,6 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 		Dispatch:          workers,
 		Workers:           everyWorker,
 		Store:             s.store,
-		Configs:           s.configs,
 		Activity:          s.activity,
 		Live:              s.live,
 		Auth:              s.authenticator(),
@@ -1893,9 +1999,9 @@ func (s *RouterSuite) nodeDirectory(listener *httptest.Server, shard string, log
 // The node subscribes to its relay as it is made, each subscription on a Redis connection of
 // its own that rueidis gives 5 s to open, which a loaded machine can overrun. The node is then
 // made again until redisready's minute is up, each attempt with a Redis client of its own for
-// the relay, closed when the attempt fails: NewServer holds the subscriptions against the
-// process and goes on trying a failed one, so only closing the client ends what a node nobody
-// holds left subscribed, which would otherwise answer the relay beside the node that came up.
+// the relay, closed when the attempt fails. The node is closed when the test that made it ends,
+// as cmd/router closes it, which ends its subscriptions: they would otherwise hold the node,
+// and everything it was made with, to the end of the package.
 func (s *RouterSuite) newNode(shard string, logger *slog.Logger, options Options) *Server {
 	server, err := redisready.Retry(s.shardRedisAddr, func() (*Server, error) {
 		redis, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{s.shardRedisAddr}, DisableCache: true})
@@ -1915,6 +2021,12 @@ func (s *RouterSuite) newNode(shard string, logger *slog.Logger, options Options
 		return server, nil
 	})
 	s.Require().NoError(err)
+	// After redis.Close's cleanup, so it runs first: the subscriptions end on the cancel.
+	s.T().Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.NoError(server.Close(ctx), "the node's background work did not end")
+	})
 	return server
 }
 
@@ -1936,8 +2048,10 @@ func (s *RouterSuite) workBus(logger *slog.Logger) *relay.Bus {
 const suiteFresh = 100 * time.Millisecond
 
 // suiteFlushMaxLag is how long a suite sharing holds lets one wait unshared before billable
-// work is refused, rather than a router's ten seconds.
-const suiteFlushMaxLag = 300 * time.Millisecond
+// work is refused, rather than a router's ten seconds. It is longer than one flush pass may
+// take (the policy package's flushPassTimeout), so a pass a loaded machine holds up refuses
+// nothing.
+const suiteFlushMaxLag = 3 * time.Second
 
 // limitApp gives the suite's app a spend limit of its own, as the limits API writes one.
 func (s *RouterSuite) limitApp(interval usage.Interval, micros int64) store.Limit {
@@ -1945,7 +2059,7 @@ func (s *RouterSuite) limitApp(interval usage.Interval, micros int64) store.Limi
 		Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.app.organization.ID, AppID: s.customerID(),
 		Interval: interval, LimitMicros: micros, UpdatedBy: "test",
 	}
-	s.Require().NoError(s.store.CreateLimit(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.Limits.Insert(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
 	return limit
 }
 
@@ -2061,6 +2175,36 @@ func (s *RouterSuite) useApp(app testApp) {
 // to. It is what the rows a test writes straight into Postgres have to be filed under to
 // be the ones an endpoint reads back.
 func (s *RouterSuite) customerID() string { return s.app.app.ID }
+
+// heldCall records call as one of a session's, of its customer and agent, under the config
+// and in the conversation named: the session first, as its recorder writes them, since the
+// call names it.
+func (s *RouterSuite) heldCall(call store.Call, configID, conversationID string) store.Call {
+	call.SessionID = s.utils.uuid()
+	call.ConversationID = cmp.Or(call.ConversationID, conversationID)
+	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{ID: call.SessionID,
+		CustomerID: call.CustomerID, AgentID: call.AgentID, ConfigID: configID, ConversationID: conversationID,
+		CreatedAt: call.StartedAt}))
+	s.Require().NoError(s.store.Calls.Start(context.Background(), &call))
+	return call
+}
+
+// sessionCall reads the newest call of session id into into, which may be nil, and answers
+// as a read of the call would: 200, or 404 while none is written.
+func (s *RouterSuite) sessionCall(id string, into *Call) int {
+	var listed []Call
+	status := s.serverClient.do(http.MethodGet, "/v1/agents/calls?session_id="+url.QueryEscape(id), nil, &listed)
+	if status != http.StatusOK {
+		return status
+	}
+	if len(listed) == 0 {
+		return http.StatusNotFound
+	}
+	if into != nil {
+		*into = listed[0]
+	}
+	return http.StatusOK
+}
 
 // signedFor is a token for an end user signed with secret, for a test presenting one that
 // was signed with the wrong one.
@@ -2334,11 +2478,28 @@ func (u testUtils) callID() string {
 	return "call-" + u.uuid()
 }
 
-// number is an E.164 number nobody else holds. It is random rather than read off the clock,
-// which ticks in microseconds on some machines and so repeats every ten thousand numbers,
-// and nothing a suite holds is ever released.
+// number is an E.164 number nobody else holds in this run: the next one of a sequence that
+// starts at a random place, so that runs on a kept database start in different places. A number
+// drawn at random could be one another suite of the run holds, and a held number is unique
+// (phone_numbers_held_idx). It is not read off the clock, which ticks in microseconds on some
+// machines and so repeats every ten thousand numbers.
 func (testUtils) number() string {
-	return fmt.Sprintf("+1512%07d", rand.IntN(10_000_000))
+	return fmt.Sprintf("+1512%07d", nextNumber())
+}
+
+// numbersFrom and numbersGiven make nextNumber's numbers; numbersAvailable is how many there
+// are in the seven digits of a number's last part.
+const numbersAvailable = 10_000_000
+
+var (
+	numbersFrom  = rand.Int64N(numbersAvailable)
+	numbersGiven atomic.Int64
+)
+
+// nextNumber is a number no other call in this process gave out, as the seven digits that follow
+// a prefix.
+func nextNumber() int64 {
+	return (numbersFrom + numbersGiven.Add(1)) % numbersAvailable
 }
 
 // testData makes what a test runs against. Nothing it makes is cleaned up.
@@ -2350,9 +2511,9 @@ type testData struct {
 func (d testData) createApp() testApp {
 	s, ctx := d.suite, context.Background()
 	organization := store.Organization{Name: "organization-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateOrganization(ctx, &organization))
+	s.Require().NoError(s.store.Organizations.Insert(ctx, &organization))
 	app := store.App{OrganizationID: organization.ID, Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(ctx, &app))
+	s.Require().NoError(s.store.Apps.Insert(ctx, &app))
 	return d.keyed(organization, app)
 }
 
@@ -2361,9 +2522,9 @@ func (d testData) createApp() testApp {
 func (d testData) createAppAdmitting(settings store.AppSettings) testApp {
 	s, ctx := d.suite, context.Background()
 	organization := store.Organization{Name: "organization-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateOrganization(ctx, &organization))
+	s.Require().NoError(s.store.Organizations.Insert(ctx, &organization))
 	app := store.App{OrganizationID: organization.ID, Name: "app-" + s.utils.uuid(), Settings: settings}
-	s.Require().NoError(s.store.CreateApp(ctx, &app))
+	s.Require().NoError(s.store.Apps.Insert(ctx, &app))
 	return d.keyed(organization, app)
 }
 
@@ -2376,7 +2537,7 @@ func (d testData) keyed(organization store.Organization, app store.App) testApp 
 	s.Require().NoError(err)
 	sealed, err := s.sealer.Seal(secret)
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.CreateAPIKey(ctx, &store.APIKey{
+	s.Require().NoError(s.store.APIKeys.Insert(ctx, &store.APIKey{
 		ID: key, AppID: app.ID, Name: "router suite", Env: string(auth.Test),
 		Sealed: sealed, KEKVersion: auth.KEKVersion, Last4: auth.Last4(secret), CreatedBy: "router suite",
 	}))
@@ -2417,7 +2578,7 @@ func (d testData) briefed(request CreateSessionRequest) (CreateSessionRequest, s
 // straight into the store, for an endpoint that only asks whose a session is.
 func (d testData) storedSession() string {
 	id := "session-" + d.suite.utils.uuid()
-	d.suite.Require().NoError(d.suite.store.SaveSession(context.Background(),
+	d.suite.Require().NoError(d.suite.store.Sessions.Upsert(context.Background(),
 		&store.AgentSession{ID: id, CustomerID: d.suite.customerID()}))
 	return id
 }

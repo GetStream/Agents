@@ -149,7 +149,7 @@ func counted(name, provider, model string, labels map[string]string) float64 {
 // billed is the customer's successful rows, in the order they were written.
 func (s *MeteringSuite) billed(customer string) []store.Request {
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ? AND success", customer).Order("id").Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ? AND success", customer).Order("id").Scan(s.ctx))
 	return rows
 }
 
@@ -163,7 +163,7 @@ func (s *MeteringSuite) TestARouterMeasuredTranscriberIsBilledEveryMillisecondIt
 	health := s.health("cartesia", "ink-2")
 	provider := &measuredSTT{quietSTT{emitter: stt.NewEmitter(64)}}
 	owner := routing.Owner{CustomerID: customer, Attribution: routing.Attribution{APIKey: "key-1"}}
-	session := newSession(provider, s.builtIn("cartesia/ink-2"), owner, recorder, nil, nil)
+	session := newSession(context.Background(), provider, s.builtIn("cartesia/ink-2"), owner, recorder, nil, nil)
 	estimatedBefore := counted("router_usage_estimated_total", "cartesia", "ink-2", nil)
 	missingBefore := counted("router_usage_missing_total", "cartesia", "ink-2", nil)
 
@@ -210,7 +210,7 @@ func (s *MeteringSuite) TestAVendorThatMeasuresItsTurnsIsBilledOnlyThem() {
 	customer := uuid.NewString()
 	recorder := routing.NewRecorder(routing.STT, s.store, s.live, s.prices, slog.New(slog.NewTextHandler(s.logs, nil)))
 	provider := &quietSTT{emitter: stt.NewEmitter(64)}
-	session := newSession(provider, s.flux(), routing.Owner{CustomerID: customer}, recorder, nil, nil)
+	session := newSession(context.Background(), provider, s.flux(), routing.Owner{CustomerID: customer}, recorder, nil, nil)
 
 	s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
 	provider.emitter.Send(stt.Transcript{Text: "book a table", Mode: stt.ModeFinal, AudioDurationMs: 960})
@@ -236,7 +236,7 @@ func (s *MeteringSuite) TestAFailoverBillsEachVendorTheAudioItTook() {
 	next := &measuredSTT{quietSTT{emitter: stt.NewEmitter(64)}}
 	gemini := s.builtIn("gemini/gemini-3.5-transcribe-live")
 	reopen := func([]string) (stt.STT, routing.ProviderConfig, error) { return next, gemini, nil }
-	session := newSession(first, s.builtIn("cartesia/ink-2"), routing.Owner{CustomerID: customer}, recorder, reopen, nil)
+	session := newSession(context.Background(), first, s.builtIn("cartesia/ink-2"), routing.Owner{CustomerID: customer}, recorder, reopen, nil)
 
 	s.Require().NoError(session.ProcessAudio(speech(700), stt.Participant{}))
 	first.emitter.Send(stt.Error{Err: errors.New("account suspended"), Context: "session", Fatal: true})
@@ -267,7 +267,7 @@ func (s *MeteringSuite) TestATurnTheVendorDidNotMeasureIsBilledForWhatWasStreame
 	customer := uuid.NewString()
 	recorder := routing.NewRecorder(routing.STT, s.store, nil, s.prices, slog.New(slog.NewTextHandler(s.logs, nil)))
 	provider := &quietSTT{emitter: stt.NewEmitter(64)}
-	session := newSession(provider, s.flux(), routing.Owner{CustomerID: customer}, recorder, nil, nil)
+	session := newSession(context.Background(), provider, s.flux(), routing.Owner{CustomerID: customer}, recorder, nil, nil)
 	before := estimated()
 
 	s.Require().NoError(session.ProcessAudio(speech(1_000), stt.Participant{}))
@@ -281,7 +281,7 @@ func (s *MeteringSuite) TestATurnTheVendorDidNotMeasureIsBilledForWhatWasStreame
 	recorder.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
 	s.Require().Len(rows, 2)
 	s.EqualValues(1_500, rows[0].AudioMs, "the audio streamed since the session opened")
 	s.Equal(map[string]string{routing.AttributeUsageEstimated: "true"}, rows[0].Attributes)

@@ -48,7 +48,7 @@ Source = "https://github.com/GetStream/Vision-Agents"
 vision-agents = "vision_agents.cli.main:main"
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-json-report", "mypy", "ruff"]
+dev = ["pytest", "mypy", "ruff"]
 anthropic = ["vision-agents-plugins-anthropic"]
 cartesia = ["vision-agents-plugins-cartesia"]
 deepgram = ["vision-agents-plugins-deepgram"]

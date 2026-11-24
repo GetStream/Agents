@@ -104,7 +104,9 @@ path parameter with a `ConfigurationError`, so neither looks like something wort
 A request that is safe to send twice (GET, PUT, DELETE, and `responses.create`, which the router
 answers once per request id) is sent again after a network failure or a 429, 502, 503 or 504,
 up to `maxRetries` times (2 unless the client says), waiting longer each time and as long as
-`Retry-After` asks. To ask again yourself after a failure that may have reached the router,
+`Retry-After` asks. A router that has not started answering within `timeoutMs` (60 seconds unless
+the client says, 0 for no limit) is given up on the same way, as a request that never got an
+answer; once the answer has begun it is not timed, so an event stream runs on. To ask again yourself after a failure that may have reached the router,
 pass the same `requestId` to `responses.create`. When the router took the question and only its
 answer was lost, it answers the retry with no id, and `responses.create` looks up the turn by
 what was asked, so the response it returns still names that turn.
@@ -112,6 +114,20 @@ what was asked, so the response it returns still names that turn.
 A connection lost while reading a response body follows the same retry policy. Invalid JSON
 is reported with the operation and request id and is not retried. Text responses remain
 strings; event-stream responses return a `ReadableStream<Uint8Array>` for the caller to read.
+
+### What a modality routes to
+
+`api.router().routes(modality)` lists the capability shortcuts a modality offers as a choice,
+default first, each with the models it resolves to now, best first. For `"image"` they are
+`image-fast` and `image-quality`, either of which an agent config's `image` accepts in place of a
+`provider/model`. It is server side only.
+
+```ts
+const routes = await api.router().routes("image");
+for (const route of routes) {
+  console.log(route.id, route.candidates.map((c) => `${c.provider}/${c.model}`));
+}
+```
 
 ## Spend limits and teams
 
@@ -162,6 +178,36 @@ be passed beside a token; a session naming a team other than its token's is refu
 and a device naming one at all with a 403. What the router answers is in micros too:
 `USD.fromMicros(limit.limit_micros)` prints as `$20000.00`. Work a limit refuses is a
 `RouterError` of 402 `spend_limit_reached`, or 429 `user_limit_reached` for one end user's.
+
+## A user's own accounts
+
+A connection is one account at a connector, such as a user's Linear, that an agent's tools act
+through. A backend creates one for a user, sends the user's browser to the provider's consent,
+and reads whether it connected. Server side only:
+
+```ts
+const connection = await api.connections.create("linear", { userId: "alice" });
+const consent = await api.connections.authorize(connection.id, {
+  returnUrl: "https://app.example.com/settings",
+  userId: "alice",
+});
+// Open consent.launch_url in a popup from a page of the return URL's origin, and post it
+// consent.handoff_token. The attempt ends at consent.expires_at.
+
+await api.connections.get(connection.id, { userId: "alice" }); // status is pending until alice consents
+await api.connections.list({ userId: "alice" }); // or one connector's: { connectorId: "linear", userId }
+await api.connections.delete(connection.id, { userId: "alice" });
+```
+
+`userId` is named on each call, and the SDK sends it as the owner and as `X-Stream-User-Id`, so
+the two never differ. Without it a call is about the app's own connections, which any of its
+agents may be bound to. Another user's connection is not found, the same as one that does not
+exist; the app's are reached whatever `userId` a call names, but `list({ userId })` lists only
+that user's. Only a server holding the API secret may name a user: a device or page gets a
+`ConfigurationError` before anything is sent.
+
+`backend.actingFor(userId)` still works and is deprecated: name the user on the call instead. A
+client built on it sends no user on a call that names none.
 
 ## A conversation somebody comes back to
 
@@ -301,7 +347,18 @@ that call, over the agent's. Neither set sends none.
 
 The model asks for a tool over the session socket, this process runs it, and the answer
 goes back the same way. A tool that throws is reported to the model, because the model is
-mid-sentence waiting for it and can only say something useful if it is told.
+mid-sentence waiting for it and can only say something useful if it is told. What it is told is
+the error's message, cut to 1,024 characters, so a tool may throw words meant for it. The model
+may repeat them to the person and the conversation keeps them, and an error from a library a tool
+calls can name an internal host, a table or a value from a record. To pass on only the words you
+wrote, throw those as an error of your own and say something plain for anything else:
+
+```ts
+class ToolError extends Error {} // thrown with words meant for the model
+
+client.tools.setOnError((error, call) => (error instanceof ToolError ? error.message : `${call.name} failed`));
+// or, for a Tools of your own: new Tools({ onError: ... })
+```
 
 `parameters` can also be a Zod 4 schema, or any schema that implements
 [Standard JSON Schema](https://standardschema.dev), such as ArkType's or Valibot's:
@@ -339,7 +396,6 @@ agent.tools.register<{ flight_id: string }>({
   approval: { title: "Book flight {flight_id}?" },
   timeoutMs: 20_000,
   run: async ({ flight_id }, toolCallContext) => {
-    toolCallContext.update("checking seats");
     await toolCallContext.disallowInterruptions();
     return bookings.book(flight_id, { user: toolCallContext.user.id, key: toolCallContext.id });
   },
@@ -352,7 +408,7 @@ agent.tools.register<{ flight_id: string }>({
   longer fails.
 - `concurrency` caps how many calls to the tool run at once. A call over the cap waits its
   turn, and its timeout keeps counting while it waits. Every tool's calls together are capped
-  at 16 at once, which `agent.tools.setConcurrency(n)` changes. A `Dispatch` shares an agent's
+  at 16 at once, which `agent.tools.setConcurrency(n)` changes. A `Dispatch` shares the client's
   `tools` across every session it hosts, so the cap is the worker's.
 - `approval` is asked before each call runs. In writing the call waits in `session.approvals`
   until `session.decide(id, { allowed })` answers it; a page follows the list in
@@ -378,6 +434,46 @@ as URLs or data URIs, which the model sees with that call's result.
 ```ts
 run: async () => new ToolOutput({ text: "The desk, just now.", images: [{ url: dataUri }] }),
 ```
+
+A running session can be given more functions, such as the ones a card shown in it brings, and
+have them taken back:
+
+```ts
+await session.addTools(new Tools().register({ name: "reserve_table", description: "Reserve a table", run: reserve }));
+await session.removeTool("reserve_table");
+```
+
+They are that session's alone and run here, as the ones it opened with do. The router waits for
+the reply in progress and every call in flight before either answers, and the model is offered
+the change from its next turn, so neither is awaited from inside one of the session's functions.
+A name the session already has is refused with a 409: to change a function, remove it, then add
+it again. Only the kind of caller that opened the session may change its tools (403 otherwise),
+and an add or a removal whose answer was lost, or was a failure other than a 4xx refusal, keeps
+the function running until the name is added or removed again. `session.fork()` runs the
+functions the session runs when it forks, which are the tools the router copies to the fork.
+
+In React, `useTool` from `@stream-io/stream-agents/react` offers a component's own function
+while it is mounted, and withdraws it when it unmounts or the session or name changes:
+
+```tsx
+import { useTool } from "@stream-io/stream-agents/react";
+
+function CheckoutPage({ session }: { session: Session | undefined }) {
+  const [cart] = useCart();
+  const failure = useTool(session, {
+    name: "read_cart",
+    description: "What is in the person's cart right now",
+    parameters: z.object({}),
+    run: async () => JSON.stringify(cart),
+  });
+  // ...
+}
+```
+
+What the model is told of the tool is sent once per session and name; each call runs the latest
+`run`, so a re-render with new state sends nothing. A removal waits for the add before it, and
+an add that was refused, such as the 409 for a name the session already has, is not followed by
+one. The hook answers the last add or removal that failed, or undefined.
 
 ## Agent dispatch
 
@@ -432,23 +528,24 @@ written to and a `requestId`, unanswered, and `dispatch.answer(message)` has the
 it, with this worker's credential acting for the user who wrote it. The photos sent with a
 message come in `images`, by URL, and `dispatch.answer` shows them to the model.
 
-A worker can also host tools for every session opened under an agent id, including one a
-browser opened, where the session's own process cannot reach what the tool needs:
+A worker can also host the app's tools, registered once on the client for every agent, so they
+run for any session, including one a browser opened, where the session's own process cannot
+reach what the tool needs:
 
 ```ts
-const agent = client.agent("my-agent");
-agent.tools.register({ name: "lookup", description: "Look up an order", run: lookup });
-dispatch.host(agent, { toolTimeoutMs: 60_000 });
+const client = new Client();
+client.tools.register({ name: "lookup", description: "Look up an order", timeoutMs: 60_000, run: lookup });
+await client.runDispatch();
 ```
 
-The router offers them to each session naming the agent and sends every call here. A hosted
-tool takes the same `interruptible`, `timeoutMs` and `approval` (asked only on a voice
-call), is handed its `toolCallContext`, and fails when the router gives up on it. `run`
-works with only hosted tools and no handler, and throws `HostingRefusedError` if the router
-refuses them.
+The router offers a tool to a session only where a tool group of its agent's agent.yaml names
+it, and sends every call here. A hosted tool takes the same `interruptible`, `timeoutMs` and
+`approval` (asked only on a voice call), is handed its `toolCallContext`, and fails when the
+router gives up on it. `runDispatch` rejects with `HostingRefusedError` if the router refuses
+them. A worker that also answers calls or messages hosts them with `dispatch.host(client)`
+before `run`.
 
-Tool names must be unique across the agents hosted by one worker. Use separate workers when
-agents need different implementations of a tool with the same name. `stop` also cancels a
+Tool names must be unique across the clients hosted by one worker. `stop` also cancels a
 socket upgrade still in progress; work already running is drained.
 
 Server side only. A worker is offered other people's callers, so anything that can open
@@ -480,6 +577,11 @@ agents/jean/
   simulations/lunch.yaml
   .agent_sync           written by sync: the fingerprint last synced and when
 ```
+
+Hidden files and folders (`.env`, `.git`, `.github`), `node_modules` and `__pycache__` in
+`skills/` and `knowledge/` are left behind, since knowledge is what the agent quotes. A symbolic
+link there is followed only to a file inside the agent directory; one that leads out of it is
+refused, so a link left pointing at a credentials file is never synced.
 
 ```ts
 import { Agent } from "@stream-io/stream-agents";
@@ -574,7 +676,9 @@ the socket beside `events()`, so it takes nothing from a loop reading them, and 
 `get` and `subscribe`. It is not the session's lifecycle, which is `session.created.state`.
 
 `session.conversation` is the rest of what a page shows, fed the same way: `turns`, what this
-device typed, what was transcribed on the call and the agent's replies as they were written;
+device typed, what was transcribed on the call and the agent's replies as they were written,
+each agent turn with its `steps` (every round of the model's thinking on a written reply, and
+every tool it called, by name and how it went) and `done` once nothing more of it is to come;
 `failure`, what the agent last reported going wrong, such as speech recognition on a call,
 with `failureContext` naming the part (`stt`, `llm`, `sts`, `tts`) and `failureAt` when, until
 the agent next hears, answers or speaks;
@@ -616,7 +720,6 @@ const conversation = new AIConversationController({
   transport: agentChatTransport(chat, {
     adapt: (message, reasoningText) => fromStreamMessage(message, { reasoningText }),
   }),
-  actions: { edit: false, regenerate: false }, // the router can't rewind a conversation
 });
 ```
 
@@ -632,6 +735,47 @@ with no text of the router's, so the components show their own. `chat.state` has
 `StateStore` from `@stream-io/state-store`, so `useStateStore(chat.state, selector)` reads it.
 It reads the channel with stream-chat 9 or 10, whichever `session.chat()` opens it on.
 
+An incognito session (`sessions.create({ incognito: true, tools })`) keeps no channel, and
+`AgentChat` shows it all the same: its messages are made from `session.conversation`, in the
+shape of the channel's, so the same `adapt` and `fromStreamMessage` read them. The agent's turns
+between two of the person's messages are one reply, with each round of thinking and each tool
+call as its steps, its whole thinking through `reasoningText`, and a call waiting in `approvals`
+asking the session's user, whom the approver answers for. Nothing is kept, so it can't be carried
+on, loaded again or branched: offer neither regenerate nor edit.
+
+**Regenerate, edit and ‹ i/n ›.** The transport has `switchBranch`, so the controller offers
+regenerate on every reply and edit on every message of the person's, and shows ‹ i/n › from each
+message's `branch`, which `adapt` reads from the router's `support_branch` mark. A regenerate
+calls `responses.regenerate` and an edit `responses.edit` on the response the message belongs to
+(see "Regenerate and edit" below), and what they hid leaves the conversation as soon as the
+router answers, before the new reply arrives. `switchBranch` shows another version: it reads it
+with `responses.branch` and shows it in place of the channel's messages from where the two part,
+writing nothing to Chat and telling the model nothing. Going back to the version the
+conversation is on shows the channel's own messages again, and so does a `channel.rewound`, or
+the message the versions part at leaving the channel. New messages in the channel keep the
+version shown on screen. Asking anything while another version is shown, or regenerating or
+editing one of its messages, first brings it back with `responses.activate`, so the agent
+answers from what the person sees. Bringing it back sends its messages again as copies carrying
+`resent_from`, which the controller never takes for the new reply; the transport resolves only
+once they are in the conversation (or after a few seconds and a fresh read of the channel), so
+keep `resent_from` in what `adapt` makes of a message. `fromStreamMessage` maps it to
+`resentFrom`. A switch the controller aborts, because the person sent something first, shows
+nothing.
+
+A refusal is an `AgentBranchError` whose message is for the person and whose `code` says which:
+
+- `not_branchable`: a turn from before branches, or typed while the agent was on a call, carries
+  no mark, and neither regenerates, edits nor pages. Nothing is sent.
+- `branch_limit_reached`: the conversation used its 100 edit and regenerate points. Asking and
+  paging still work.
+- `branch_too_long`: the version shown has more than 100 messages to send again, so it can be
+  looked at but not continued; it stays on screen.
+- `branch_unavailable`: a memory truncate deleted the router's copy of that version.
+
+A version brought back is sent again as new messages, with new ids, and memories made on a
+version the person left are kept: the rest of what to tell the person is under "Regenerate and
+edit".
+
 Make one per conversation and close it when the person leaves it. In React, make the chat and
 the controller in an effect and let them go in its cleanup, so StrictMode's second mount makes
 fresh ones rather than reusing closed ones:
@@ -641,7 +785,6 @@ useEffect(() => {
   const chat = new AgentChat({ sessionId, open });
   const conversation = new AIConversationController({
     transport: agentChatTransport(chat, { adapt }),
-    actions: { edit: false, regenerate: false },
   });
   setScreen({ chat, conversation });
   return () => {
@@ -717,9 +860,93 @@ const branch = await session.fork({ response_id: items[2].response_id, title: "a
 `rewind` takes a response, a response's id, or any item of one. The model forgets the later
 turns, and they drop out of what `responses` reads back. A text conversation is kept in
 Stream Chat unless it is incognito, and so cannot be rewound, since the channel would still
-hold the later turns: fork it at the
-response instead, which starts a new session carrying the history only that far. Both work
-from a browser as well as a server.
+hold the later turns: regenerate or edit it instead (below), or fork it at the response, which
+starts a new session carrying the history only that far. All of these work from a browser as
+well as a server.
+
+## Regenerate and edit
+
+In a conversation kept in Stream Chat, a reply can be answered again and a question asked
+differently without leaving the conversation. The earlier versions are kept as branches the
+person can page through, ‹ 1/2 › the way ChatGPT does it, all in the same session and channel.
+
+```ts
+const again = await session.responses.regenerate(reply);           // the same question, answered again
+const edited = await session.responses.edit(reply, "Rome instead"); // a new question in its place
+again.created.branch; // { of: "reply", index: 2, count: 2 }
+```
+
+Both take a response, its id, or any item of one, and `maxOutputTokens`, `reasoningEffort` and
+`requestId`; images and a UI action cannot go with them. Like `create` they go under a request
+id, a fresh one unless you name it, and return once the agent has started answering: the answer
+arrives as any other does, in the channel and through `session.events()`.
+
+The router hides the conversation from that point on in Chat, with Chat's rewind, and keeps
+what it hid. A regenerate hides the reply and everything after it; an edit hides the question
+too. The channel only ever shows the branch the person is on:
+
+```ts
+const page = await session.responses.siblings(reply, { of: "reply" }); // or "question" for edits
+for await (const sibling of session.responses.unwindSiblings(reply)) {
+  sibling.index; sibling.active; // the i of ‹ i/n ›, and whether the channel shows it
+}
+const other = page.items.find((sibling) => !sibling.active);
+if (other) {
+  const hidden = await session.responses.branch(other.id); // its messages, shaped as Chat's
+  await session.responses.activate(other.id);              // before asking anything on it
+}
+```
+
+`branch` only reads: show its messages in place of the channel's from where the two part, and
+nothing is written to Chat or told to the model. A response the channel already shows answers
+`active: true` and no items. To carry on from a branch that is not shown, `activate` it first:
+the router hides the shown one and sends the chosen one's messages again, and the model answers
+from it from then on. Activating what is already shown changes nothing, so it is safe to retry.
+
+Each message the router writes carries its place, `support_branch`, which `supportBranchOf`
+reads from a stream-chat 9 or 10 message, or from one `branch` read back, for a page drawing
+‹ i/n › without the React components:
+
+```ts
+import { supportBranchOf } from "@stream-io/stream-agents";
+
+const place = supportBranchOf(message); // { of, index, count, responseId, ... } or undefined
+```
+
+**The channel follows along.** Once `session.chat()` has opened the channel, the session drops
+what a regenerate, an edit or an activation hid from it as soon as the call returns, from the
+answer's `rewound_to`, so the device that asked never shows the old and the new answer
+together. Another device hears Chat's `channel.rewound` (or `notification.channel_rewound`, when
+it is a member not watching), and the session drops the hidden messages from the channel's state
+at once and then reads the channel again. Dropping comes first because stream-chat does not
+handle the event, and its `channel.query` adds what it reads to what the channel holds rather
+than replacing it, so reading again alone would never take anything away. This stops when the
+session is closed. An app showing the channel without this package needs its own handler.
+
+**What to tell the person.**
+
+- **At most 100 edit and regenerate points per conversation.** Chat keeps 100 separate hidden
+  stretches per channel. Regenerating the same reply again reuses its stretch, and editing an
+  earlier turn swallows the ones after it, so a normal conversation stays in single digits.
+  Past it, a regenerate or an edit is a `RouterError` with code `branch_limit_reached` (409):
+  continue in a new chat. Asking and reading still work, and paging through ‹ i/n › never counts.
+- **A branch of more than 100 messages cannot be brought back.** `activate` sends them again,
+  and past 100 it is refused with `branch_too_long` (409): continue in a new chat.
+- **A deleted branch is gone.** A memory truncate deletes the router's copies of hidden
+  branches; reading or activating one is then `branch_unavailable` (410).
+- **Brought-back messages are new messages.** They have new ids and times, fire `message.new`
+  again, and reach webhooks, the firehose and moderation as new. They are sent with `skip_push`
+  and carry `custom.resent_from`, the id of the message each copies, for a backend to dedupe on.
+- **Memories from abandoned branches are kept.** What the agent remembered on a branch the
+  person left can still be recalled; `session.deleteMemories()` is the only way to take it back.
+- **Some turns cannot be branched.** A turn answered before branches existed, or typed while the
+  agent was on a call, carries no mark and is refused. So are shared conversations, threads,
+  conversations a dispatch worker answers, a session while it is on a call, a speech-to-speech
+  model, and incognito sessions (nothing is kept to branch).
+- **Chat still counts what is hidden.** Hidden messages stay in a channel export and in
+  `message_count`, and for a moment after a rewind a read can still return what it hid.
+
+`branchErrorOf(error)` answers which of the three codes a failure is, or undefined.
 
 ## Sockets
 
@@ -743,8 +970,10 @@ for await (const message of socket.messages()) {
 }
 ```
 
-Credentials go in the query string, because a browser WebSocket carries no headers of its
-own. A socket never says it is a backend: `Stream-Auth-Type: server` has no query
+A page's credentials go in the query string, because a browser WebSocket carries no headers of
+its own. A backend holding the secret sends its credential as headers instead, so its token, which
+speaks for the whole app, is never written into an access log with the URL; `Socket.open` adds
+them. A socket never says it is a backend: `Stream-Auth-Type: server` has no query
 counterpart on purpose, and the proxy is only ever told `stream-auth-type=jwt`, which is how
 it reads a user's token.
 
@@ -812,7 +1041,7 @@ still passes and only the one test that needed an answer steps aside.
 
 ### Releasing
 
-The **Release JS SDK** workflow publishes to npm, run by hand from the `accelerate` branch.
+The **Release JS SDK** workflow publishes to npm, run by hand from the `main` branch.
 semantic-release (`release.config.mjs`) reads the commits since the last `sdk-js-v*` tag and
 counts only those scoped `sdk-js`: `feat(sdk-js):` moves the minor, `fix(sdk-js):` and
 `perf(sdk-js):` the patch, and while the package is 0.x a breaking change moves the minor too.
@@ -828,6 +1057,13 @@ git tag sdk-js-v0.2.0 && git push origin sdk-js-v0.2.0
 ```
 
 then on npmjs.com, under the package's settings, add GitHub Actions as a trusted publisher:
-`GetStream/Vision-Agents`, workflow `release-sdk-js.yml`. From then on the version in
+`GetStream/Agents`, workflow `release-sdk-js.yml`. From then on the version in
 `package.json` is not maintained: semantic-release writes the next one into the package it
-publishes and nothing is committed back.
+publishes and nothing is committed back, so the committed one is the placeholder
+`0.0.0-development`. The release is the newest `sdk-js-v*` tag, and npm.
+
+`prepublishOnly` runs `npm run build`: Vite (`vite.config.ts`) builds `dist/`, one module per
+source file, and `tsc` writes the declarations beside them. The build writes the version in
+`package.json`, which semantic-release has just set, into `VERSION`, the release every request
+from Node names in its `User-Agent`. The source names it `__SDK_VERSION__`; run through `tsc`
+alone, as the tests and examples are, `VERSION` is `0.0.0-development`.

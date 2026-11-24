@@ -37,7 +37,7 @@ func (s *UsageIdentitySuite) SetupTest() {
 }
 
 func (s *UsageIdentitySuite) TestARequestRecordsAllSixFields() {
-	s.Require().NoError(s.store.SetOrganizationTier(context.Background(), s.app.organization.ID, "tier-a", time.Now()))
+	s.Require().NoError(s.store.OrganizationTiers.Upsert(context.Background(), &store.OrganizationTier{OrganizationID: s.app.organization.ID, Tier: "tier-a", SeenAt: time.Now()}))
 	asking := s.userWith([]string{"project:onboarding"}, "finance")
 
 	row := s.searched(asking)
@@ -346,7 +346,7 @@ func (s *UsageIdentitySuite) searched(client *testClient) store.Request {
 // hookRow records a row of work a chat hook started, which names the origin hook:chat in
 // place of a key.
 func (s *UsageIdentitySuite) hookRow() {
-	s.Require().NoError(s.store.RecordRequest(context.Background(), &store.Request{
+	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
 		Modality: "stt", CustomerID: s.customerID(), OrganizationID: s.app.organization.ID, APIKey: "hook:chat",
 		Provider: "stub", Model: "stub-stt", StartedAt: time.Now(), CostMicros: 1_000, Billable: true, Success: true,
 	}))

@@ -366,10 +366,13 @@ func (s *FloorSuite) TestANoisyTailWithARunOpenAsksForItsFinal() {
 	for sent := 0; s.askedForFinals() == 0; sent += 20 {
 		s.Require().Less(sent, 4000, "the held check ends the turn")
 		s.say(20, true)
+		// A check that ended the turn asks for the final off its own goroutine (settle), so the
+		// next frame waits for that too: the turn ended at this frame.
 		s.Eventually(func() bool {
 			s.transcriber.mu.Lock()
-			defer s.transcriber.mu.Unlock()
-			return !s.transcriber.still.inFlight
+			out, ended := s.transcriber.still.inFlight, s.transcriber.pause.ended != nil
+			s.transcriber.mu.Unlock()
+			return !out && (!ended || s.askedForFinals() > 0)
 		}, 5*time.Second, time.Millisecond)
 	}
 	s.noFinal()
@@ -561,7 +564,9 @@ func (s *FloorSuite) TestAFloorWhoseServerStaysDownIsAskedLessOftenAndNotAfterCl
 	s.Require().NoError(s.transcriber.Close())
 	closed := time.Now()
 	time.Sleep(250 * time.Millisecond)
-	s.Empty(s.decidedSince(closed), "nothing asked once the session closed")
+	// A probe sent just before Close can reach the server just after it; a probe asked after
+	// Close would come a wait of at least probeFirst later.
+	s.Empty(s.decidedSince(closed.Add(s.transcriber.probeFirst)), "nothing asked once the session closed")
 }
 
 // A check over the agent that runs out of its short deadline says the server took longer than

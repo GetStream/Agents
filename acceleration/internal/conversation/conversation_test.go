@@ -398,6 +398,17 @@ func TestActivityPersistsAndRestores(t *testing.T) {
 	require.Error(t, err)
 }
 
+// A kept line with a name reaches the model as an envelope of its author and time, not as the
+// bare text, the way a typed message does.
+func TestASuppliedNamedLineIsQuotedAsItsAuthorAndTime(t *testing.T) {
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+
+	got := Supplied([]HistoryLine{{Role: "user", Name: "Anya", At: at, Text: "I'm sick"}, {Role: "assistant", Text: "ok"}})
+
+	require.Len(t, got, 3)
+	require.Equal(t, `{"author":{"display_name":"Anya"},"sent_at":"2026-11-19T10:00:00Z","text":"I'm sick"}`, got[1].Content)
+}
+
 func TestContextForCallerSeedsCompletedTurnsWithoutOpeningTheConversation(t *testing.T) {
 	_, client := newChat(t)
 	service := NewForChat(client)
@@ -774,6 +785,33 @@ func TestSharedMembersResumeContextWithTheirOwnCommandsAndLoseAccessOnRemoval(t 
 	require.Error(t, err)
 }
 
+// Stream failing the read is no answer about whose the conversation is: told it is not found,
+// the caller would drop a command that was theirs, and nobody would see the outage.
+func TestASharedConversationStreamFailsToReadIsNoMissingCommand(t *testing.T) {
+	db, client := newChat(t)
+	s := NewForChat(client)
+	t.Cleanup(s.Close)
+	alice, _, _, err := s.OpenForCaller(t.Context(), "customer", "agent", "", "alice")
+	require.NoError(t, err)
+	cid := alice.CID()
+	alice.Release()
+	db.mu.Lock()
+	db.channels[strings.TrimPrefix(cid, "agent:")]["custom"].(map[string]any)["support_access"] = "members"
+	db.mu.Unlock()
+	alice, _, _, err = s.OpenForCaller(t.Context(), "customer", "agent", cid, "alice")
+	require.NoError(t, err)
+	t.Cleanup(alice.Release)
+	require.NoError(t, alice.CheckCaller(t.Context(), "alice"))
+
+	db.mu.Lock()
+	db.fail = true
+	db.mu.Unlock()
+	err = alice.CheckCaller(t.Context(), "alice")
+
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrCommandNotFound)
+}
+
 func TestMalformedSharedMetadataDoesNotRelaxOwnership(t *testing.T) {
 	for _, mode := range []any{true, "public", "", map[string]any{"members": true}} {
 		err := ownedBy(map[string]any{
@@ -904,7 +942,7 @@ func TestAFollowUpIsDuplicateSafeAcrossRestart(t *testing.T) {
 	service := NewForChat(client)
 	c, _, _, err := service.OpenForCaller(t.Context(), "customer", "agent", "", "employee")
 	require.NoError(t, err)
-	first, err := c.BeginFollowUp("st_0123456789abcdef0123456789abcdef", "the task is due")
+	first, err := c.BeginFollowUp("st_0123456789abcdef0123456789abcdef", "the task is due", "")
 	require.NoError(t, err)
 	require.False(t, first.Duplicate)
 	c.Observe(agent.ResponseDelta{Text: "done"})
@@ -919,7 +957,7 @@ func TestAFollowUpIsDuplicateSafeAcrossRestart(t *testing.T) {
 	t.Cleanup(recovered.Close)
 	c, _, _, err = recovered.OpenForCaller(t.Context(), "customer", "agent", c.CID(), "employee")
 	require.NoError(t, err)
-	replay, err := c.BeginFollowUp("st_0123456789abcdef0123456789abcdef", "the task is due")
+	replay, err := c.BeginFollowUp("st_0123456789abcdef0123456789abcdef", "the task is due", "")
 	require.NoError(t, err)
 	require.True(t, replay.Duplicate)
 	require.Equal(t, first.AssistantMessageID, replay.AssistantMessageID)
@@ -933,7 +971,7 @@ func TestAFollowUpsReplyIsReadBackLiveAndAcrossRestart(t *testing.T) {
 	service := NewForChat(client)
 	c, _, _, err := service.OpenForCaller(t.Context(), "customer", "agent", "", "employee")
 	require.NoError(t, err)
-	_, err = c.BeginFollowUp("st_run", "the task is due")
+	_, err = c.BeginFollowUp("st_run", "the task is due", "")
 	require.NoError(t, err)
 	state, text, known := c.FollowUpReply("st_run")
 	require.True(t, known)
@@ -992,10 +1030,10 @@ func TestARetriedFollowUpsReplyIsReadBackAcrossRestart(t *testing.T) {
 	service := NewForChat(client)
 	c, _, _, err := service.OpenForCaller(t.Context(), "customer", "agent", "", "employee")
 	require.NoError(t, err)
-	_, err = c.BeginFollowUp("st_run", "the task is due")
+	_, err = c.BeginFollowUp("st_run", "the task is due", "")
 	require.NoError(t, err)
 	c.AbandonFollowUp("st_run")
-	_, err = c.BeginFollowUp("st_run", "the task is due")
+	_, err = c.BeginFollowUp("st_run", "the task is due", "")
 	require.NoError(t, err)
 	c.Observe(agent.ResponseDelta{Text: "time for standup"})
 	c.Observe(agent.Responded{})
@@ -1019,12 +1057,12 @@ func TestAnAbandonedFollowUpStartsWhenDeliveredAgain(t *testing.T) {
 	t.Cleanup(service.Close)
 	c, _, _, err := service.OpenForCaller(t.Context(), "customer", "agent", "", "employee")
 	require.NoError(t, err)
-	first, err := c.BeginFollowUp("thread_message", "a message")
+	first, err := c.BeginFollowUp("thread_message", "a message", "")
 	require.NoError(t, err)
 	c.AbandonFollowUp("thread_message")
 	require.Equal(t, "cancelled", current(c).State)
 
-	again, err := c.BeginFollowUp("thread_message", "a message")
+	again, err := c.BeginFollowUp("thread_message", "a message", "")
 	require.NoError(t, err)
 	require.False(t, again.Duplicate, "the turn never started, so the retry starts it")
 	require.NotEqual(t, first.AssistantMessageID, again.AssistantMessageID)
@@ -1036,11 +1074,11 @@ func TestAFinishedFollowUpIsStillADuplicate(t *testing.T) {
 	t.Cleanup(service.Close)
 	c, _, _, err := service.OpenForCaller(t.Context(), "customer", "agent", "", "employee")
 	require.NoError(t, err)
-	_, err = c.BeginFollowUp("thread_message", "a message")
+	_, err = c.BeginFollowUp("thread_message", "a message", "")
 	require.NoError(t, err)
 	c.Observe(agent.Responded{})
 
-	again, err := c.BeginFollowUp("thread_message", "a message")
+	again, err := c.BeginFollowUp("thread_message", "a message", "")
 	require.NoError(t, err)
 	require.True(t, again.Duplicate)
 }

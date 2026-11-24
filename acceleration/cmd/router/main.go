@@ -31,7 +31,6 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/api"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/billable"
@@ -60,6 +59,7 @@ import (
 	dlctelnyx "github.com/GetStream/Vision-Agents/acceleration/internal/dlc/telnyx"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/eventforward"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/imagejobs"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/imagerouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/extract"
@@ -89,7 +89,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/simulation"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stsrouter"
@@ -102,7 +101,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/inworld"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/ttsrouter"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/users"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/twiliosig"
 	"github.com/GetStream/Vision-Agents/acceleration/prices"
 )
 
@@ -138,15 +137,22 @@ var idleTimeout = 10 * time.Minute
 
 const (
 	// authKEKEnvVar and authKEKVersionEnvVar name the connector credential keyring: the
-	// keys are authKEKEnvVar with a _V<n> suffix, and authKEKVersionEnvVar says which one
-	// seals new rows.
+	// keys are authKEKEnvVar with a _V<n>_WRAPPED suffix, and authKEKVersionEnvVar says
+	// which one seals new rows. authKEKEnvVar alone and with a plain _V<n> suffix once held
+	// a plain key, and a start that still sets one is refused.
 	authKEKEnvVar        = "ROUTER_AUTH_KEK"
 	authKEKVersionEnvVar = "ROUTER_AUTH_KEK_VERSION"
 	// authKEKWrappedSuffix marks a key a KMS wrapped, ROUTER_AUTH_KEK_V<n>_WRAPPED, which
 	// auth.kms_key unwraps at startup into the same version n.
 	authKEKWrappedSuffix = "_WRAPPED"
-	shutdownGrace        = 10 * time.Second
-	readHeaderTimeout    = 10 * time.Second
+	// devKEKEnvVar is the one plain key the router reads, as version 1, for a laptop or CI.
+	// A hosted router keeps its keys wrapped, so this is refused beside a KMS setting.
+	devKEKEnvVar = "ROUTER_DEV_KEK"
+	// setAKeyring is what a refusal for a missing keyring tells the operator to set.
+	setAKeyring = "set " + devKEKEnvVar + " on a laptop or in CI, or " + authKEKEnvVar + "_V1" +
+		authKEKWrappedSuffix + " with auth.kms_key (ROUTER_AUTH_KMS_KEY) on a hosted router"
+	shutdownGrace     = 10 * time.Second
+	readHeaderTimeout = 10 * time.Second
 	// crawlTimeout bounds reading one page into a knowledge base. It is generous compared
 	// to a search because nobody is on the phone waiting for it: a page that has to be
 	// crawled live rather than served from an index takes seconds, and giving up on it
@@ -158,17 +164,25 @@ const (
 	sentryFlushTimeout = 2 * time.Second
 	// traceFlushTimeout bounds the same thing for spans, on the same reasoning.
 	traceFlushTimeout = 2 * time.Second
-	// phoneHangupGrace bounds hanging up the calls this node holds through customers' own
-	// SIP trunks. A BYE is one round trip, so this is generous. On a signal the hangup runs
-	// first, and the HTTP drain gets the rest of shutdownGrace, so both fit inside the
+	// phoneHangupGrace bounds handing the calls this node holds through customers' own SIP
+	// trunks to another node, or hanging them up when there is no Redis to hand them through.
+	// A BYE is one round trip and a takeover a few, so this is generous. On a signal this
+	// runs first, and the HTTP drain gets the rest of shutdownGrace, so both fit inside the
 	// orchestrator's termination grace period.
 	phoneHangupGrace = 5 * time.Second
+	// legFlushTimeout bounds the last write of the call legs the leg sweep still holds, once
+	// the HTTP and session drains are over: one insert a leg, of at most a few, normally.
+	legFlushTimeout = 5 * time.Second
 	// usageDrainTimeout is how long the usage writer has to write what is queued once
 	// everything that records has stopped: it starts after the HTTP drain, any session drain
 	// and sessions.Shutdown, and counts none of them. What is still queued after it is lost,
 	// and logged in full; what a kill at the end of the pod's termination grace period finds
 	// queued first is lost without a log line.
 	usageDrainTimeout = 15 * time.Second
+	// serverCloseTimeout bounds waiting for the API server's background work once it is
+	// cancelled. Nothing in it waits on anything but the cancel, so this only bounds a Redis
+	// client that does not let go of a subscription; short, on sentryFlushTimeout's reasoning.
+	serverCloseTimeout = 2 * time.Second
 )
 
 // usage is what the binary does besides serving.
@@ -176,6 +190,7 @@ const usage = `usage: router [--config path] [command]
 
   serve                 serve the API (the default)
   keys create           mint a credential for an app, printing the secret once
+  keys revoke           stop one of an app's keys (--app, --key)
   replicate             copy another deployment's data here and follow its changes
   stream-apps           look after the Stream apps customers registered in app mode
   prices                read and check the price list (router prices for its commands)
@@ -295,9 +310,10 @@ func logLevel(settings config.Config) slog.Level {
 }
 
 // newLogger is the router's logger, which writes text to w and takes every credential out of
-// what it prints: a provider's error can echo the key the router sent it.
+// what it prints: a provider's error can echo the key the router sent it. A line logged with an
+// authenticated request's context carries its app_id and api_key.
 func newLogger(w io.Writer, level slog.Level) *slog.Logger {
-	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level, ReplaceAttr: store.RedactLogAttr}))
+	return slog.New(api.NewLogHandler(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level, ReplaceAttr: store.RedactLogAttr})))
 }
 
 // sentryOptions are the router's Sentry options. An event carries an error's text, which can
@@ -317,11 +333,11 @@ func sentryOptions() sentry.ClientOptions {
 // one; channels and SIP trunks use it when it is set and are off otherwise, so it is nil only when nothing requires it and no key is set. It does not
 // depend on auth.mode: a proxy deployment holds them as much as an api_key one does.
 //
-// The keyring is every ROUTER_AUTH_KEK_V1, _V2 and so on that is set, with
+// The keyring is every ROUTER_AUTH_KEK_V1_WRAPPED, _V2_WRAPPED and so on that is set, with
 // ROUTER_AUTH_KEK_VERSION naming the one that seals new rows. That variable picks the
 // writer and is never a ceiling: moving it back to an older key must leave the newer ones
-// loaded, or the rows sealed under them stop opening. auth.kek is version 1, so a
-// deployment that already has it needs nothing more.
+// loaded, or the rows sealed under them stop opening. ROUTER_DEV_KEK is version 1, so a
+// laptop needs nothing more.
 func newSecretSealer(ctx context.Context, settings config.Config) (*auth.Sealer, error) {
 	var holders []string
 	if settings.Connectors.Enabled {
@@ -345,28 +361,96 @@ func newSecretSealer(ctx context.Context, settings config.Config) (*auth.Sealer,
 	return loadKeyring(ctx, settings, needs)
 }
 
-// keyringSet reports whether any key of the keyring is set: auth.kek, a
-// ROUTER_AUTH_KEK_V<n> or its _WRAPPED form, or auth.kms_key to unwrap one with.
+// keyringSet reports whether any key of the keyring is set: ROUTER_DEV_KEK, a
+// ROUTER_AUTH_KEK_V<n>_WRAPPED, auth.kms_key to unwrap one with, or a retired plain
+// ROUTER_AUTH_KEK, which has to reach loadKeyring to be refused.
 func keyringSet(settings config.Config) bool {
-	if settings.Auth.KEK != "" || settings.Auth.KMSKey != "" {
+	if settings.Auth.KMSKey != "" || os.Getenv(devKEKEnvVar) != "" {
 		return true
 	}
 	for _, variable := range os.Environ() {
 		name, key, _ := strings.Cut(variable, "=")
-		if strings.HasPrefix(name, authKEKEnvVar+"_V") && key != "" {
+		if (name == authKEKEnvVar || strings.HasPrefix(name, authKEKEnvVar+"_V")) && key != "" {
 			return true
 		}
 	}
 	return false
 }
 
-// loadKeyring reads every ROUTER_AUTH_KEK_V<n>, ROUTER_AUTH_KEK_V<n>_WRAPPED and auth.kek
-// into a keyring, with ROUTER_AUTH_KEK_VERSION naming the writer, and unwraps the wrapped
-// ones with the KMS key auth.kms_key names. needs says which setting requires it, for each
-// refusal to name.
+// keyringVersion reads the keyring version a variable named name holds, and whether it is
+// the _WRAPPED form. Only the plain spelling counts, so _V01 cannot stand in for _V1 and
+// ROUTER_AUTH_KEK_VERSION is not read as a key.
+func keyringVersion(name string) (version int, wrapped bool, ok bool) {
+	suffix, ok := strings.CutPrefix(name, authKEKEnvVar+"_V")
+	suffix, wrapped = strings.CutSuffix(suffix, authKEKWrappedSuffix)
+	version, err := strconv.Atoi(suffix)
+	if !ok || err != nil || version < 1 || strconv.Itoa(version) != suffix {
+		return 0, false, false
+	}
+	return version, wrapped, true
+}
+
+// checkKeySources refuses a plain key anywhere but ROUTER_DEV_KEK, and ROUTER_DEV_KEK on a
+// router that also unwraps keys with a KMS: a hosted router holds no plain key, and one that
+// mixed the two would seal under whichever won. Each refusal names variables, never values.
+func checkKeySources(settings config.Config) error {
+	var retired, wrapped []string
+	if os.Getenv(authKEKEnvVar) != "" {
+		retired = append(retired, authKEKEnvVar)
+	}
+	for _, variable := range os.Environ() {
+		name, key, _ := strings.Cut(variable, "=")
+		_, isWrapped, ok := keyringVersion(name)
+		if !ok || key == "" {
+			continue
+		}
+		if isWrapped {
+			wrapped = append(wrapped, name)
+		} else {
+			retired = append(retired, name)
+		}
+	}
+	if len(retired) > 0 {
+		slices.Sort(retired)
+		// ROUTER_AUTH_KEK was version 1, and ROUTER_AUTH_KEK_V<n> is version n.
+		replacement := retired[0] + authKEKWrappedSuffix
+		if retired[0] == authKEKEnvVar {
+			replacement = authKEKEnvVar + "_V1" + authKEKWrappedSuffix
+		}
+		// ROUTER_DEV_KEK is version 1 only, so it is no way to keep the rows of a later version.
+		if retired[0] != authKEKEnvVar && retired[0] != authKEKEnvVar+"_V1" {
+			return fmt.Errorf("%s is no longer read: set %s with auth.kms_key (ROUTER_AUTH_KMS_KEY) "+
+				"on a hosted router", retired[0], replacement)
+		}
+		return fmt.Errorf("%s is no longer read: set %s on a laptop or in CI, or %s with "+
+			"auth.kms_key (ROUTER_AUTH_KMS_KEY) on a hosted router", retired[0], devKEKEnvVar, replacement)
+	}
+	if os.Getenv(devKEKEnvVar) == "" {
+		return nil
+	}
+	if settings.Auth.KMSKey != "" {
+		return fmt.Errorf("%s is for a laptop or CI and is never set with auth.kms_key (ROUTER_AUTH_KMS_KEY): "+
+			"unset %s", devKEKEnvVar, devKEKEnvVar)
+	}
+	if len(wrapped) > 0 {
+		slices.Sort(wrapped)
+		return fmt.Errorf("%s is for a laptop or CI and is never set with %s: unset %s",
+			devKEKEnvVar, wrapped[0], devKEKEnvVar)
+	}
+	return nil
+}
+
+// loadKeyring reads ROUTER_DEV_KEK and every ROUTER_AUTH_KEK_V<n>_WRAPPED into a keyring,
+// with ROUTER_AUTH_KEK_VERSION naming the writer, and unwraps the wrapped ones with the KMS
+// key auth.kms_key names. needs says which setting requires it, for each refusal to name.
 func loadKeyring(ctx context.Context, settings config.Config, needs string) (*auth.Sealer, error) {
+	// Checked before a KMS client opens, so a laptop that also names a KMS key hears why
+	// rather than that it has no cloud credentials.
+	if err := checkKeySources(settings); err != nil {
+		return nil, err
+	}
 	if settings.Auth.KMSKey == "" {
-		return readKeyring(ctx, settings, nil, needs)
+		return readKeyring(ctx, nil, needs)
 	}
 	unwrapper, err := newKEKUnwrapper(ctx, settings.Auth.KMSKey)
 	if err != nil {
@@ -374,11 +458,12 @@ func loadKeyring(ctx context.Context, settings config.Config, needs string) (*au
 	}
 	// The keys are unwrapped once, here, so nothing needs the client after.
 	defer unwrapper.Close()
-	return readKeyring(ctx, settings, unwrapper, needs)
+	return readKeyring(ctx, unwrapper, needs)
 }
 
-// readKeyring is loadKeyring with the unwrapper given, nil when auth.kms_key is unset.
-func readKeyring(ctx context.Context, settings config.Config, unwrapper kekUnwrapper, needs string) (*auth.Sealer, error) {
+// readKeyring is loadKeyring after its checks, with the unwrapper given, nil when
+// auth.kms_key is unset.
+func readKeyring(ctx context.Context, unwrapper kekUnwrapper, needs string) (*auth.Sealer, error) {
 	current := auth.KEKVersion
 	if configured := os.Getenv(authKEKVersionEnvVar); configured != "" {
 		version, err := strconv.Atoi(configured)
@@ -390,36 +475,19 @@ func readKeyring(ctx context.Context, settings config.Config, unwrapper kekUnwra
 		current = version
 	}
 	keys := make(map[int]string)
-	if settings.Auth.KEK != "" {
-		keys[1] = settings.Auth.KEK
+	if key := os.Getenv(devKEKEnvVar); key != "" {
+		keys[1] = key
 	}
 	wrapped := make(map[int]string)
 	for _, variable := range os.Environ() {
 		name, key, _ := strings.Cut(variable, "=")
-		suffix, ok := strings.CutPrefix(name, authKEKEnvVar+"_V")
-		suffix, isWrapped := strings.CutSuffix(suffix, authKEKWrappedSuffix)
-		version, err := strconv.Atoi(suffix)
-		// Only the plain spelling counts, so _V01 cannot stand in for _V1 and
-		// ROUTER_AUTH_KEK_VERSION is not read as a key.
-		if !ok || err != nil || version < 1 || strconv.Itoa(version) != suffix || key == "" {
-			continue
-		}
-		if isWrapped {
+		version, isWrapped, ok := keyringVersion(name)
+		if ok && isWrapped && key != "" {
 			wrapped[version] = key
-			continue
 		}
-		if version == 1 && keys[1] != "" && keys[1] != key {
-			return nil, stack.Wrap(fmt.Errorf("%s and %s_V1 are both version 1 and differ: set one of them",
-				authKEKEnvVar, authKEKEnvVar))
-		}
-		keys[version] = key
 	}
 	for _, version := range slices.Sorted(maps.Keys(wrapped)) {
 		name := fmt.Sprintf("%s_V%d%s", authKEKEnvVar, version, authKEKWrappedSuffix)
-		if keys[version] != "" {
-			return nil, fmt.Errorf("%s and a plain version %d key (%s_V%d, or %s for version 1) "+
-				"are both set: set one of them", name, version, authKEKEnvVar, version, authKEKEnvVar)
-		}
 		if unwrapper == nil {
 			return nil, fmt.Errorf("%s is set, but auth.kms_key names no KMS key to unwrap it with", name)
 		}
@@ -431,15 +499,20 @@ func readKeyring(ctx context.Context, settings config.Config, unwrapper kekUnwra
 	}
 	if keys[current] == "" {
 		if os.Getenv(authKEKVersionEnvVar) == "" {
-			return nil, fmt.Errorf("%s a key encryption keyring to seal the secrets it holds: "+
-				"set %s_V1 (%s is version 1)", needs, authKEKEnvVar, authKEKEnvVar)
+			return nil, fmt.Errorf("%s a key encryption keyring to seal the secrets it holds: %s", needs, setAKeyring)
+		}
+		// ROUTER_DEV_KEK is version 1, and a wrapped key beside it is refused: only the selector
+		// can change.
+		if os.Getenv(devKEKEnvVar) != "" {
+			return nil, fmt.Errorf("%s a key for the version %s names, and %s is version 1 only: "+
+				"unset %s or set it to 1", needs, authKEKVersionEnvVar, devKEKEnvVar, authKEKVersionEnvVar)
 		}
 		// The version is not named: an all-digit key pasted into ROUTER_AUTH_KEK_VERSION
 		// parses as one, and naming it would send the key to the logs and Sentry. The
 		// versions that are set come from variable names, never from values.
 		return nil, fmt.Errorf("%s a key for the version %s names: "+
-			"set the matching %s_V<n> (versions set: %v)",
-			needs, authKEKVersionEnvVar, authKEKEnvVar, slices.Sorted(maps.Keys(keys)))
+			"set the matching %s_V<n>%s (versions set: %v)",
+			needs, authKEKVersionEnvVar, authKEKEnvVar, authKEKWrappedSuffix, slices.Sorted(maps.Keys(keys)))
 	}
 	return auth.NewSealerWithKeyring(current, keys)
 }
@@ -503,7 +576,7 @@ func connectorSchemeConfig(settings config.Config, clients oauth2code.ClientLook
 // errAPIKeyNeedsKeyring is the refusal of an api_key start with no keyring: the one
 // loadKeyring gave before newAuthenticator took the keyring from newSecretSealer.
 var errAPIKeyNeedsKeyring = errors.New("auth.mode=" + string(auth.APIKey) + " needs a key encryption " +
-	"keyring to seal the secrets it holds: set " + authKEKEnvVar + "_V1 (" + authKEKEnvVar + " is version 1)")
+	"keyring to seal the secrets it holds: " + setAKeyring)
 
 // newAuthenticator builds the authenticator the deployment's mode asks for.
 //
@@ -513,7 +586,7 @@ var errAPIKeyNeedsKeyring = errors.New("auth.mode=" + string(auth.APIKey) + " ne
 //
 // secrets is the keyring newSecretSealer built, so a start unwraps its keys once; nil
 // refuses api_key, and the keyring is never read again here.
-func newAuthenticator(ctx context.Context, settings config.Config, configs *appconfig.Store, secrets *auth.Sealer, logger *slog.Logger) (auth.Authenticator, error) {
+func newAuthenticator(ctx context.Context, settings config.Config, configs *store.Store, secrets *auth.Sealer, logger *slog.Logger) (auth.Authenticator, error) {
 	mode, err := auth.ParseMode(settings.Auth.Mode)
 	if err != nil {
 		return nil, err
@@ -546,7 +619,7 @@ func newAuthenticator(ctx context.Context, settings config.Config, configs *appc
 		return nil, errAPIKeyNeedsKeyring
 	}
 
-	return auth.New(mode, configs.Lookup(secrets))
+	return auth.New(mode, configs.APIKeys.Lookup(secrets))
 }
 
 func run(settings config.Config, logger *slog.Logger) error {
@@ -688,48 +761,13 @@ func run(settings config.Config, logger *slog.Logger) error {
 		return err
 	}
 
-	// What every request is measured against -- the key it presented, the app behind it,
-	// their policies and what they have configured -- read through Redis and the cache
-	// rueidis keeps beside it. Without Redis it is Postgres on every read, which is what
-	// this deployment did before the cache existed.
-	var configs *appconfig.Store
-	if pgStore != nil {
-		configs, err = appconfig.New(appconfig.Options{
-			Store:    pgStore,
-			Address:  settings.Redis.Addr,
-			Username: settings.Redis.Username,
-			Password: settings.Redis.Password,
-			Logger:   logger,
-		})
-		if err != nil {
-			return err
-		}
-		defer configs.Close()
-	}
+	configs := pgStore
 	// The keys customers keep for their own accounts at the vendors, read through the same cache
 	// and opened with the keyring they were sealed under. Without either, work is routed on the
 	// deployment's own keys alone.
 	var customerKeys routing.CustomerKeys
 	if configs != nil && secrets != nil {
-		customerKeys = providerkeys.NewKeyring(configs, secrets)
-	}
-
-	// Who each app is acting for, written down once per user rather than once per
-	// request: an LRU of the last few thousand this process saw, a key the replicas share
-	// in Redis, and the row underneath.
-	var endUsers *users.Recorder
-	if pgStore != nil {
-		endUsers, err = users.New(users.Options{
-			Store:    pgStore,
-			Address:  settings.Redis.Addr,
-			Username: settings.Redis.Username,
-			Password: settings.Redis.Password,
-			Logger:   logger,
-		})
-		if err != nil {
-			return err
-		}
-		defer endUsers.Close()
+		customerKeys = providerkeys.NewKeyring(configs.ProviderKeys, secrets)
 	}
 
 	// The activity record counts every request an app makes, by area and client, and writes
@@ -769,7 +807,13 @@ func run(settings config.Config, logger *slog.Logger) error {
 			forwarder.Wake()
 		}
 	}
-	policies, closeCounters, err := newPolicies(settings, configs, usageClient, holds, notified, logger)
+	// The sender posts the notices of the limits and the cost anomaly check, so it closes after both.
+	sender := noticeSender(settings, pgStore, logger)
+	if sender != nil {
+		sender.Start()
+		defer sender.Close()
+	}
+	policies, closeCounters, err := newPolicies(settings, configs, usageClient, holds, notified, sender, logger)
 	if err != nil {
 		return err
 	}
@@ -800,8 +844,10 @@ func run(settings config.Config, logger *slog.Logger) error {
 		defer stopSweeper()
 	}
 
-	// One router of the deployment checks every organization's spend for a jump each hour.
-	if anomalies := costAnomalies(settings, pgStore, logger); anomalies != nil {
+	// One router of the deployment checks every organization's spend for a jump each hour, posts
+	// the day before's activity digest each day, and deletes the activity past its keep each day.
+	// It runs on every router with a database: without Slack settings it only deletes.
+	if anomalies := costAnomalies(pgStore, sender, logger); anomalies != nil {
 		anomalies.Start()
 		defer anomalies.Close()
 	}
@@ -972,7 +1018,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		}
 		var models routing.ModelResolver
 		if configs != nil {
-			models = llmrouter.NewCustomModels(configs, secrets, settings.Models.PrivateEndpoints)
+			models = llmrouter.NewCustomModels(pgStore, secrets, settings.Models.PrivateEndpoints)
 		}
 		thinkers := llmrouter.DefaultRegistry()
 		if settings.MockProviders {
@@ -1143,7 +1189,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if policies != nil {
 		dlcGate.Charging(policies).Limiting(settings.Limits.Mode)
 	}
-	telephony, err := buildPhone(settings, vendorConfig, pgStore, liveClient, phoneRecorder, streamClients, dlcGate, secrets, logger)
+	telephony, stopTakingTrunkCalls, err := buildPhone(settings, vendorConfig, pgStore, liveClient, phoneRecorder, streamClients, dlcGate, secrets, logger)
 	if err != nil {
 		return err
 	}
@@ -1153,6 +1199,13 @@ func run(settings config.Config, logger *slog.Logger) error {
 		// leg whose row was lost is recorded again. Months of numbers and of 10DLC campaigns are
 		// billed by jobs of their own (router usage numbers, router usage dlc).
 		go telephony.RunLegSweep(ctx, legSweepEvery)
+		// Deferred here, it runs after the drain and sessions.Shutdown, so the legs a webhook or
+		// a session still kept get their last write, and before the usage writer closes.
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), legFlushTimeout)
+			defer cancel()
+			telephony.StopLegSweep(ctx)
+		}()
 		go checkCallHook(ctx, settings, logger)
 		startPhoneSweeper(ctx, telephony, logger)
 	}
@@ -1197,13 +1250,30 @@ func run(settings config.Config, logger *slog.Logger) error {
 			dialer.Close()
 		}
 	}()
+	// The pictures agents are asked for are queued in Postgres and drawn after their turn by
+	// whichever router claims them, where there is an image router to draw with.
+	var drawings *imagejobs.Service
+	if pgStore != nil && streams.Image != nil {
+		if drawings, err = imagejobs.New(imagejobs.Options{Store: pgStore, Images: streams.Image, Logger: logger}); err != nil {
+			return err
+		}
+	}
 	sessions, err := buildSessions(settings, streams, pgStore, configs, liveClient, usageWriter, directory, telephony, base, finding, judging, floor, streamClients,
-		sessionConnectors, prices, policies, customerKeys, logger)
+		sessionConnectors, prices, policies, customerKeys, drawings, logger)
 	if err != nil {
 		return err
 	}
 	if sessions != nil {
 		defer sessions.Shutdown()
+	}
+	// A picture is posted into its conversation, which only sessions reach Stream Chat for.
+	if drawings != nil && sessions != nil {
+		if conversations, err := sessions.Conversations(); err == nil {
+			drawings.Start(ctx, conversations)
+			defer drawings.Close()
+		} else {
+			drawings = nil
+		}
 	}
 	// A simulation is a conversation, a model to judge it and a row, so it too runs only
 	// where all three are configured. Elsewhere a simulation can be written down but the
@@ -1216,9 +1286,10 @@ func run(settings config.Config, logger *slog.Logger) error {
 			LLM:      streams.LLM,
 			// Speech is what an audio simulation needs and a text one does not, so it is
 			// passed where it exists rather than required.
-			TTS:    streams.TTS,
-			STT:    streams.STT,
-			Logger: logger,
+			TTS:      streams.TTS,
+			STT:      streams.STT,
+			Activity: activityRecord,
+			Logger:   logger,
 		})
 		if err != nil {
 			return err
@@ -1340,10 +1411,11 @@ func run(settings config.Config, logger *slog.Logger) error {
 	}
 
 	// A worker waits on whichever node its socket landed on, and a session needing it may be
-	// running on any other.
+	// running on any other. They are held against the process, as the relay is, not against
+	// ctx: a draining router's sessions still wait on calls they carried to other nodes.
 	var everyWorker *node.Workers
 	if workBus != nil && directory != nil {
-		everyWorker, err = node.NewWorkers(ctx, workers, directory, workBus, logger)
+		everyWorker, err = node.NewWorkers(context.WithoutCancel(ctx), workers, directory, workBus, logger)
 		if err != nil {
 			return err
 		}
@@ -1383,6 +1455,10 @@ func run(settings config.Config, logger *slog.Logger) error {
 				"TELNYX_CONNECTION_ID is set", "setting", "TELNYX_CONNECTION_ID")
 		}
 	}
+	// A token that cannot be Twilio's is refused at start, as an unreadable chat inbound key is.
+	if err := twiliosig.CheckAuthToken(settings.Twilio.WebhookAuthToken); err != nil {
+		return err
+	}
 	logger.Info("management API, /v1/manage", "on", settings.Auth.ManageKey != "", "setting", "ROUTER_AUTH_MANAGE_KEY")
 
 	documents := api.NewDocumentReader(extract.Options{Logger: logger})
@@ -1398,8 +1474,6 @@ func run(settings config.Config, logger *slog.Logger) error {
 		KnowledgeURLs:         pages,
 		KnowledgeFiles:        uploads,
 		Store:                 pgStore,
-		Configs:               configs,
-		Users:                 endUsers,
 		Activity:              activityRecord,
 		Live:                  liveClient,
 		Phone:                 telephony,
@@ -1414,6 +1488,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		HookSecret:            settings.Stream.APISecret,
 		TelnyxPublicKey:       telnyxPublicKey,
 		ChatInboundKeys:       chatInboundKeys,
+		TwilioAuthToken:       settings.Twilio.WebhookAuthToken,
 		TelnyxConnectionID:    settings.Telnyx.ConnectionID,
 		Simulations:           simulations,
 		DLC:                   registrations,
@@ -1433,6 +1508,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		PublicURL:             settings.PublicURL,
 		DashboardURL:          settings.DashboardURL,
 		Auth:                  authenticator,
+		Release:               release,
 		Logger:                logger,
 	}
 	// A provider app's events go on to the customer's event destinations, whose secrets are
@@ -1442,7 +1518,10 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// up, and so closed after it.
 	var forwarder *eventforward.Forwarder
 	if connectorSecrets != nil && pgStore != nil {
-		forwarder, err = eventforward.New(eventforward.Options{Store: pgStore, Secrets: connectorSecrets, Logger: logger})
+		// The activity record closes after it, so a forward it ends while it drains is counted.
+		forwarder, err = eventforward.New(eventforward.Options{
+			Store: pgStore, Secrets: connectorSecrets, Activity: activityRecord, Logger: logger,
+		})
 		if err != nil {
 			return err
 		}
@@ -1570,7 +1649,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 			defer inbound.Close()
 		}
 	} else {
-		logger.Warn("no key encryption keyring set (ROUTER_AUTH_KEK_V1), so no channel can be "+
+		logger.Warn("no key encryption keyring set ("+devKEKEnvVar+" (local), or "+authKEKEnvVar+"_V1"+
+			authKEKWrappedSuffix+" with ROUTER_AUTH_KMS_KEY (hosted)), so no channel can be "+
 			"connected: there is nowhere safe to keep a provider's credentials",
 			"endpoint", "POST /v1/agents/channels")
 	}
@@ -1579,6 +1659,15 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// Deferred here, it runs once stopServing below has stopped the HTTP servers, and before
+	// Redis is closed.
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), serverCloseTimeout)
+		defer cancel()
+		if err := server.Close(ctx); err != nil {
+			logger.Warn("the API server's background work did not end in time", "error", err)
+		}
+	}()
 	// Every router runs the worker that writes the queued inbound messages and hands each to
 	// the agent; a message is taken by one router at a time. The hand-off is the server's
 	// (AnswerQueued), and the server is built with the bridge (options.ChannelBridge), so the
@@ -1593,6 +1682,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	var scheduler *scheduling.Scheduler
 	if pgStore != nil && sessions != nil {
 		scheduler = scheduling.NewScheduler(pgStore, server.DeliverScheduledTask, logger)
+		scheduler.SetActivity(activityRecord)
 		// Before Start: a session the first delivery opens takes the kick then.
 		server.SetSchedulerKick(scheduler.Kick)
 		scheduler.Start(ctx)
@@ -1607,6 +1697,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 			Dialer:      campaign.NewPhoneDialer(telephony, sessions, pgStore, logger),
 			Transcripts: server,
 			Classifier:  campaign.NewClassifier(streams.LLM),
+			Activity:    activityRecord,
 			Logger:      logger,
 		})
 		if err != nil {
@@ -1685,9 +1776,10 @@ func run(settings config.Config, logger *slog.Logger) error {
 			public:          httpServer,
 			peers:           peerServer,
 			drainWork:       server.Drain,
-			held:            func() int { return running(sessions, scheduler, bridge, deliveries, server, dialer) },
+			held:            func() int { return running(sessions, scheduler, bridge, deliveries, server, dialer, drawings) },
 			telephony:       telephony,
 			handOverMetrics: handOverMetrics,
+			stopTaking:      stopTakingTrunkCalls,
 			handOverProxy:   handOverSandboxProxy,
 			drain:           settings.Shutdown.Drain,
 			logger:          logger,
@@ -1725,6 +1817,9 @@ type stopping struct {
 	// over on the same address is the one scraped. Without a drain the caller stops it at
 	// exit.
 	handOverMetrics func()
+	// stopTaking stops this node taking calls through customers' own SIP trunks over from
+	// other nodes when a drain starts, while it keeps relaying its own.
+	stopTaking func()
 	// handOverProxy stops the sandbox egress proxy taking connections when a drain starts,
 	// so the router taking over on the same address serves the sandboxes; the tunnels already
 	// open stay until the process ends. Without a drain the caller stops it at exit. It does
@@ -1742,13 +1837,13 @@ const drainPoll = 250 * time.Millisecond
 
 // stopServing stops taking work, then lets what is running finish.
 //
-// Without a drain it hangs up the calls through customers' own SIP trunks, then drains HTTP,
-// both inside the grace: the drain gets whatever the hangup left of it, and metrics and the
-// sandbox egress proxy are served until the process exits. With one, the metrics, sandbox
-// egress proxy and public listeners close first and the sessions this process holds, phone
-// calls included, keep going until they end or the drain runs out, still answering their
-// peers' requests. A second signal stops
-// waiting. The sessions left are ended by the caller's sessions.Shutdown either way.
+// Without a drain it hands the calls through customers' own SIP trunks to another node (or
+// hangs them up without Redis), then drains HTTP, both inside the grace: the drain gets
+// whatever that left of it, and metrics and the sandbox egress proxy are served until the
+// process exits. With one, the metrics, sandbox egress proxy and public listeners close first
+// and the sessions this process holds, phone calls included, keep going until they end or the
+// drain runs out, still answering their peers' requests. A second signal stops waiting. The
+// sessions left are ended by the caller's sessions.Shutdown either way.
 func stopServing(s stopping) error {
 	s.drainWork()
 	grace := cmp.Or(s.grace, shutdownGrace)
@@ -1768,6 +1863,9 @@ func stopServing(s stopping) error {
 
 	if s.handOverMetrics != nil {
 		s.handOverMetrics()
+	}
+	if s.stopTaking != nil {
+		s.stopTaking()
 	}
 	if s.handOverProxy != nil {
 		s.handOverProxy()
@@ -1800,12 +1898,16 @@ func stopServing(s stopping) error {
 }
 
 // running is how many sessions, scheduled deliveries, inbound writes and the turns they handed
-// over, chat answers, the app chat's episode cards and campaign calls a router holds; one
+// over, chat answers, the app chat's episode cards, campaign calls and pictures being drawn a
+// router holds; one
 // without one of them holds none of its work. A turn counts until it ends, also before the
 // session it opens is counted, and so does a campaign call placed before its session exists.
 func running(sessions *session.Manager, scheduler *scheduling.Scheduler, bridge *channelbridge.Bridge,
-	deliveries *chatinbound.Worker, server *api.Server, dialer *campaign.Runner) int {
+	deliveries *chatinbound.Worker, server *api.Server, dialer *campaign.Runner, drawings *imagejobs.Service) int {
 	held := 0
+	if drawings != nil {
+		held += drawings.Running()
+	}
 	if dialer != nil {
 		held += dialer.Running()
 	}
@@ -1879,7 +1981,7 @@ func pruneDataChanges(ctx context.Context, pgStore *store.Store, retention time.
 		} else if removed > 0 {
 			logger.Debug("pruned recorded changes", "rows", removed)
 		}
-		if removed, err := pgStore.PruneGrantUses(ctx); err != nil {
+		if removed, err := pgStore.LimitGrantUses.Prune(ctx); err != nil {
 			logger.Error("could not prune the uses of ended grants", "error", err)
 		} else if removed > 0 {
 			logger.Debug("pruned the uses of ended grants", "rows", removed)
@@ -1898,7 +2000,7 @@ func pruneScheduledTasks(ctx context.Context, pgStore *store.Store, logger *slog
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 	for {
-		runs, tasks, err := pgStore.PruneScheduledTasks(ctx)
+		runs, tasks, err := pgStore.ScheduledTasks.Prune(ctx)
 		if err != nil {
 			logger.Error("could not prune scheduled tasks", "error", err)
 		} else if runs > 0 || tasks > 0 {
@@ -1930,7 +2032,7 @@ func redactToolOutput(ctx context.Context, pgStore *store.Store, logger *slog.Lo
 	for {
 		var redacted int64
 		for range redactBatches {
-			rows, err := pgStore.RedactToolOutput(ctx, time.Now().UTC(), redactBatch)
+			rows, err := pgStore.ResponseItems.Redact(ctx, time.Now().UTC(), redactBatch)
 			if err != nil {
 				logger.Error("could not redact tool output", "error", err)
 				break
@@ -1962,6 +2064,12 @@ func openStore(ctx context.Context, settings config.Config) (*store.Store, error
 		DSN:      settings.Postgres.DSN,
 		ShardDSN: settings.Postgres.ShardDSN,
 		Shards:   settings.Postgres.Shards,
+		Redis:    store.Redis{Address: settings.Redis.Addr, Username: settings.Redis.Username, Password: settings.Redis.Password},
+		ShardRedis: store.Redis{
+			Address:  settings.Redis.Shard.Addr,
+			Username: settings.Redis.Shard.Username,
+			Password: settings.Redis.Shard.Password,
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -1972,7 +2080,7 @@ func openStore(ctx context.Context, settings config.Config) (*store.Store, error
 	}
 	// Seeded whether connectors are on or not: the built-ins are data with no secret in
 	// them, and a deployment that turns connectors on later finds them already there.
-	if err := pgStore.SeedConnectorDefinitions(ctx, providers.FS); err != nil {
+	if err := pgStore.ConnectorDefinitions.Seed(ctx, providers.FS); err != nil {
 		pgStore.Close()
 		return nil, err
 	}
@@ -2035,7 +2143,7 @@ func buildSessions(
 	settings config.Config,
 	streams *api.Streams,
 	pgStore *store.Store,
-	configs *appconfig.Store,
+	configs *store.Store,
 	liveClient *live.Client,
 	usageWriter *routing.Writer,
 	directory *node.Directory,
@@ -2049,6 +2157,7 @@ func buildSessions(
 	prices pricing.Pricer,
 	policies *policy.Enforcer,
 	keys routing.CustomerKeys,
+	drawings *imagejobs.Service,
 	logger *slog.Logger,
 ) (*session.Manager, error) {
 	if streams.LLM == nil {
@@ -2074,6 +2183,7 @@ func buildSessions(
 		Knowledge:  base,
 		Pricer:     prices,
 		Search:     finding,
+		Drawings:   drawings,
 		Classifier: judging,
 		FlowJudge:  settings.Agent.FlowJudge,
 		Phone:      telephony,
@@ -2093,7 +2203,6 @@ func buildSessions(
 		Logger:             logger,
 		Edge:               edgeFor(stream),
 		Transcript:         transcriptFor(settings.Agent.ChatTimings),
-		Configs:            configs,
 		Directory:          directory,
 		// The session's dispatcher shares the validate endpoint's transports, so each
 		// connection has one outbound client in the router.
@@ -2214,10 +2323,10 @@ func newKnowledge(settings config.Config, recorder *routing.Recorder, gate routi
 		logger.Debug("nothing will be looked up or written down", "error", err)
 		return nil
 	}
-	// A nil *store.Store in the interface would not be a nil interface.
+	// A nil *store.KnowledgeNamespaces in the interface would not be a nil interface.
 	var places metered.NamespacePlaces
 	if pgStore != nil {
-		places = pgStore
+		places = pgStore.KnowledgeNamespaces
 	}
 	base := metered.NewRegionalKnowledge(backends, recorder, gate, places)
 	if keys != nil {
@@ -2354,7 +2463,7 @@ func buildLibrary(logger *slog.Logger) *voices.Catalogue {
 // teach them to. The voice paths report the absence rather than failing halfway through an
 // upload.
 func buildVoices(
-	configs *appconfig.Store,
+	configs *store.Store,
 	bucket *blob.Bucket,
 	recorder *routing.Recorder,
 	logger *slog.Logger,
@@ -2410,7 +2519,7 @@ func newPrices(capabilities routing.Config, files store.PriceLoad, version strin
 func newActivePrices(ctx context.Context, pgStore *store.Store, capabilities routing.Config, fallback *pricing.List,
 	requireEntries bool, interval time.Duration, logger *slog.Logger) *pricing.Active {
 	return pricing.NewActive(ctx, pricing.ActiveOptions{
-		Source:         pgStore.PriceSource(),
+		Source:         pgStore.PriceEntries.Source(),
 		Fallback:       fallback,
 		Local:          routing.LocalItems(capabilities),
 		Interval:       interval,
@@ -2421,7 +2530,8 @@ func newActivePrices(ctx context.Context, pgStore *store.Store, capabilities rou
 
 // buildPhone wires the telephony service. Stream credentials are only needed to attach a
 // number, so a deployment without them still lists vendors and searches for numbers, and
-// the operations that need them say so.
+// the operations that need them say so. The calls through customers' own SIP trunks are
+// taken over from other nodes until stopTaking, nil without them, or the provider closes.
 func buildPhone(
 	settings config.Config,
 	vendorConfig phone.Config,
@@ -2432,7 +2542,7 @@ func buildPhone(
 	gate *dlc.Gate,
 	secrets *auth.Sealer,
 	logger *slog.Logger,
-) (*phone.Service, error) {
+) (service *phone.Service, stopTaking func(), err error) {
 	if settings.Stream.APIKey == "" || settings.Stream.APISecret == "" {
 		logger.Warn("no stream credentials, numbers cannot be attached to a call in the deployment's app")
 	}
@@ -2440,21 +2550,22 @@ func buildPhone(
 	// Passwords of customers' own SIP trunks are sealed under the router's keyring. Without
 	// a key those trunks are off, rather than their passwords stored in the clear.
 	var trunks phone.Provider
+	var trunkCalls *siptrunk.Provider
+	// The Redis of every shard: the node that ends a refused call's leg need not be the one
+	// that refused it, and the node that stops need not be the one that continues a call.
+	var shared rueidis.Client
+	if liveClient != nil {
+		shared = liveClient.Redis()
+	}
 	if secrets != nil {
-		trunks = siptrunk.New(siptrunk.Options{Logger: logger})
+		trunkCalls = siptrunk.New(siptrunk.Options{Logger: logger, Redis: shared})
+		trunks = trunkCalls
 	} else {
 		logger.Info("no key encryption key, calls through customers' own sip trunks are off")
 	}
 
-	// The Redis of every shard: the node that ends a refused call's leg need not be the one
-	// that refused it.
-	var refusals rueidis.Client
-	if liveClient != nil {
-		refusals = liveClient.Redis()
-	}
-	return phone.NewService(phone.ServiceOptions{
+	service, err = phone.NewService(phone.ServiceOptions{
 		Registry:  vendors.Registry(vendorConfig),
-		Redis:     refusals,
 		Store:     pgStore,
 		Apps:      phone.AppsOf(stream),
 		Recorder:  recorder,
@@ -2463,7 +2574,17 @@ func buildPhone(
 		Logger:    logger,
 		Sealer:    secrets,
 		SIPTrunks: trunks,
+
+		AgentJoinTimeout: settings.Phone.AgentJoinTimeout,
 	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if trunkCalls != nil {
+		trunkCalls.Start(service)
+		stopTaking = trunkCalls.StopTaking
+	}
+	return service, stopTaking, nil
 }
 
 // callHookCheckTimeout bounds the one read of the deployment's app hooks at boot.
@@ -2498,9 +2619,10 @@ func checkCallHook(ctx context.Context, settings config.Config, logger *slog.Log
 	}
 }
 
-// closePhone hangs up the calls this node holds through customers' own SIP trunks. Their
-// signalling runs through this process, so stopping without a BYE would leave both ends of
-// each call connected to nothing.
+// closePhone hands the calls this node holds through customers' own SIP trunks to another
+// node, or hangs them up when no other node takes them or there is no Redis to hand them
+// through. Their signalling runs through this process, so stopping with neither would leave
+// both ends of each call connected to nothing.
 func closePhone(telephony *phone.Service, logger *slog.Logger) {
 	ctx, cancel := context.WithTimeout(context.Background(), phoneHangupGrace)
 	defer cancel()

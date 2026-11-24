@@ -55,7 +55,7 @@ var redisAwaited string
 
 // awaitConfiguredRedis waits once per test process for the Redis the suites dial, so that
 // every setup that opens a client on it, through rueidis or through a constructor such as
-// live.New or appconfig.New, finds it answering. A word on stderr says when it did not.
+// live.New or store.Open, finds it answering. A word on stderr says when it did not.
 func awaitConfiguredRedis() {
 	address := os.Getenv(redisAddressVar)
 	if address == "" {

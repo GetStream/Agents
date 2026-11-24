@@ -176,13 +176,13 @@ func (w *logins) waiting(alias string) (*login, bool) {
 // offerLogin makes binding a login of d when reason is one a login fixes, the binding is the
 // caller's to choose, it is optional, and the session has a conversation to ask in. It
 // reports whether it did. selection is the connection chosen, empty for none.
-func (m *Manager) offerLogin(spec Spec, binding store.ConnectorBinding, reason, selection string, d *dispatcher) bool {
+func (m *Manager) offerLogin(ctx context.Context, spec Spec, binding store.ConnectorBinding, reason, selection string, d *dispatcher) bool {
 	if m.options.Connectors.Consents == nil || m.options.Connectors.Transports == nil || !spec.PersistConversation ||
 		binding.Required || binding.Connection.Type != selectionSession || !slices.Contains(loginReasons, reason) {
 		return false
 	}
 	if d.logins == nil {
-		watching, stop := context.WithCancel(context.Background())
+		watching, stop := context.WithCancel(context.WithoutCancel(ctx))
 		d.logins = &logins{byAlias: map[string]*login{}, consents: m.options.Connectors.Consents,
 			open: m.openBinding, implied: m.impliedSelection, finished: m.ConnectorConsentFinished,
 			watching: watching, stopWatching: stop, logger: m.logger}
@@ -303,7 +303,7 @@ func (d *dispatcher) openOrAsk(ctx context.Context, l *login, callID string) (*d
 // (account_mismatch) leaves connected_at as it was.
 func (d *dispatcher) openConnected(ctx context.Context, l *login) bool {
 	if l.connectionID != "" && d.store != nil {
-		connection, err := d.store.ConnectorConnection(ctx, d.spec.CustomerID, l.connectionID)
+		connection, err := d.store.ConnectorConnections.Get(ctx, d.spec.CustomerID, l.connectionID)
 		if err == nil && connection.Status == store.ConnectionConnected &&
 			connection.ConnectorID == l.binding.ConnectorID && mayUse(d.spec, l.binding, connection) &&
 			(!l.asked || connectedSince(connection.ConnectedAt, l.connectedBefore)) &&
@@ -491,7 +491,7 @@ func (d *dispatcher) offerConsent(ctx context.Context, l *login) {
 		return
 	}
 	if consent, ok := d.beginConsent(ctx, l); ok {
-		go d.watchConsent(l, consent)
+		go d.watchConsent(context.WithoutCancel(ctx), l, consent)
 	}
 }
 
@@ -503,7 +503,7 @@ func (d *dispatcher) offerConsent(ctx context.Context, l *login) {
 // opens the binding and tells the session to carry on: a consent finished on another router is
 // never handed to this one, and no call waits for it to read the store (waitForLogin). Of the
 // two, only the one that opens the login carries on (loginFinished).
-func (d *dispatcher) watchConsent(l *login, consent Consent) {
+func (d *dispatcher) watchConsent(ctx context.Context, l *login, consent Consent) {
 	expiry := time.NewTimer(time.Until(consent.ExpiresAt))
 	defer expiry.Stop()
 	poll := time.NewTicker(loginPoll)
@@ -520,12 +520,12 @@ func (d *dispatcher) watchConsent(l *login, consent Consent) {
 			l.mu.Unlock()
 			// The attempt is read before the connection: a callback uses it up before it stores
 			// the connection, so one read after a connect finds it connected.
-			_, open := d.store.ConnectorAuthorizationAttemptByID(context.Background(), consent.AuthorizationID)
+			_, open := d.store.ConnectorAuthorizationAttempts.Get(ctx, consent.AuthorizationID)
 			// Connected anew since the consent began, as openConnected reads it; loginFinished
 			// checks the rest, and does nothing for a login already open.
-			connection, err := d.store.ConnectorConnection(context.Background(), d.spec.CustomerID, consent.ConnectionID)
+			connection, err := d.store.ConnectorConnections.Get(ctx, d.spec.CustomerID, consent.ConnectionID)
 			if err == nil && connectedSince(connection.ConnectedAt, before) {
-				d.logins.finished(context.Background(), d.spec.CustomerID, consent.ConnectionID, consent.AuthorizationID)
+				d.logins.finished(ctx, d.spec.CustomerID, consent.ConnectionID, consent.AuthorizationID)
 				return
 			}
 			if errors.Is(open, store.ErrNoAuthorizationAttempt) {
@@ -558,7 +558,7 @@ func (d *dispatcher) beginConsent(ctx context.Context, l *login) (Consent, bool)
 	}
 	if !l.asked {
 		l.asked = true
-		if connection, err := d.store.ConnectorConnection(ctx, d.spec.CustomerID, consent.ConnectionID); err == nil {
+		if connection, err := d.store.ConnectorConnections.Get(ctx, d.spec.CustomerID, consent.ConnectionID); err == nil {
 			l.connectedBefore = connection.ConnectedAt
 		}
 	}
@@ -576,7 +576,7 @@ func (d *dispatcher) stillWaits(ctx context.Context, binding store.ConnectorBind
 	if d.store == nil {
 		return false
 	}
-	config, err := d.store.AgentConfig(ctx, d.spec.CustomerID, d.spec.ConfigID)
+	config, err := d.store.AgentConfigs.Get(ctx, d.spec.CustomerID, d.spec.ConfigID)
 	if err != nil {
 		return false
 	}

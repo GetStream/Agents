@@ -9,6 +9,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // errShort is the refusal of a booking the credit does not cover.
@@ -86,7 +87,7 @@ func (s *MeteringSuite) TestANumberTheCreditDoesNotCoverIsNotBought() {
 
 	s.Zero(s.vendor.ordered, "the vendor is never asked")
 	s.Empty(money.booked)
-	numbers, err := s.store.CustomerNumbers(s.ctx, s.customer, false)
+	numbers, err := s.store.PhoneNumbers.Select(s.ctx, s.customer, store.PhoneNumberFilter{})
 	s.Require().NoError(err)
 	for _, number := range numbers {
 		s.NotEqual(e164, number.E164)
@@ -117,4 +118,36 @@ func (s *MeteringSuite) TestANumberWithNoQuoteStillNeedsSomeCredit() {
 	_, err = s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: s.owner()})
 	s.Require().NoError(err)
 	s.Equal([]int64{0}, money.booked, "no price to book, so only some credit is asked for")
+}
+
+func (s *MeteringSuite) TestAnUnverifiedOrganizationBuysNoNumber() {
+	money, e164 := s.booking(5_000_000)
+	owner := s.owner()
+	owner.OrganizationTier = "not-verified"
+
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: owner})
+
+	s.Require().ErrorIs(err, ErrVerificationRequired)
+	s.Zero(s.vendor.ordered, "the vendor is never asked")
+	s.Empty(money.booked, "no credit is set aside")
+}
+
+func (s *MeteringSuite) TestAVerifiedOrganizationBuysANumber() {
+	_, e164 := s.booking(5_000_000)
+	owner := s.owner()
+	owner.OrganizationTier = "verified"
+
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: owner})
+
+	s.Require().NoError(err)
+}
+
+func (s *MeteringSuite) TestAnOrganizationWithNoTierBuysANumber() {
+	_, e164 := s.booking(5_000_000)
+	owner := s.owner()
+	owner.OrganizationTier = ""
+
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: owner})
+
+	s.Require().NoError(err, "a router not behind stream-accelerate names no tier and is not gated")
 }

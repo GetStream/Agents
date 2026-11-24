@@ -1,6 +1,6 @@
 name: Release Rust SDK
 
-# Run by hand from accelerate, or started by release-sdks.yml with every other SDK. It raises the
+# Run by hand from main, or started by release-sdks.yml with every other SDK. It raises the
 # last sdk-rust-v* version by the chosen part, or takes the exact version typed in, tests and
 # packages that copy, publishes it to crates.io through trusted publishing, then tags the commit
 # sdk-rust-v<version>. The version in Cargo.toml is not maintained: the one released is written
@@ -32,8 +32,11 @@ concurrency:
 
 jobs:
   release:
-    if: github.ref == 'refs/heads/accelerate'
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # The registry's trusted publisher accepts only a token minted in this environment. The job
+    # `if` above lets only a run from `main` enter it; the environment has no reviewer gate.
+    environment: registry-publish
     permissions:
       contents: write   # push the release tag
       id-token: write   # crates.io trusted publishing (OIDC)

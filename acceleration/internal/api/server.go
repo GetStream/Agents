@@ -32,12 +32,12 @@ import (
 	sentryhttp "github.com/getsentry/sentry-go/http"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
+	"github.com/redis/rueidis"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
@@ -74,7 +74,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tracing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/users"
 )
 
 // tracer records the spans this package opens around work a route pattern does not say.
@@ -133,13 +132,6 @@ type Options struct {
 	// providers alone.
 	Billable []pricing.Item
 	Store    *store.Store
-	// Configs reads and writes the tenant's configuration -- keys, policies, agent and
-	// router configs, voices -- through whatever cache is in front of Postgres. Built
-	// over Store when it is not given, in which case every read is a query.
-	Configs *appconfig.Store
-	// Users writes down the end users each app is seen acting for. Built over Store when
-	// it is not given, in which case it caches in this process alone.
-	Users *users.Recorder
 	// Activity counts every request an app makes, by area and client. A deployment without
 	// one keeps no activity record.
 	Activity *activity.Recorder
@@ -236,6 +228,9 @@ type Options struct {
 	// ChatInboundKeys check that a message delivered to the Stream Chat delivery endpoint
 	// came from Stream (ROUTER_CHAT_INBOUND_KEYS). Without one that endpoint answers 404.
 	ChatInboundKeys []ed25519.PublicKey
+	// TwilioAuthToken checks that a webhook came from Twilio (TWILIO_WEBHOOK_AUTH_TOKEN).
+	// Without it no Twilio webhook is believed.
+	TwilioAuthToken string
 	// TelnyxConnectionID is the TeXML application this router's Telnyx numbers are on
 	// (TELNYX_CONNECTION_ID). A call webhook for any other is hung up.
 	TelnyxConnectionID string
@@ -337,7 +332,10 @@ type Options struct {
 	// how much of X-Forwarded-For is believed when working out who a request is from.
 	// Empty means none of it is, and the connection's own address is used.
 	TrustedProxies []netip.Prefix
-	Logger         *slog.Logger
+	// Release is the version this binary was built from, logged on every access line as
+	// build_version. Empty, which a local build is, logs none.
+	Release string
+	Logger  *slog.Logger
 }
 
 // Server serves the router's HTTP API.
@@ -349,8 +347,7 @@ type Server struct {
 	prices             *pricing.Active
 	billable           []pricing.Item
 	store              *store.Store
-	configs            *appconfig.Store
-	users              *users.Recorder
+	configs            *store.Store
 	activity           *activity.Recorder
 	live               *live.Client
 	phone              *phone.Service
@@ -367,6 +364,8 @@ type Server struct {
 	hookSecret         string
 	telnyxPublicKey    ed25519.PublicKey
 	chatInboundKeys    []ed25519.PublicKey
+	twilioAuthToken    string
+	twilioAlertSids    rueidis.Client // nil without Redis: every copy of an alert is counted
 	telnyxConnectionID string
 	simulations        *simulation.Runner
 	knowledge          *metered.Knowledge
@@ -390,9 +389,18 @@ type Server struct {
 	authMode           auth.Mode
 	dataRetention      time.Duration
 	exportWritesWait   time.Duration
+	exportLineWait     time.Duration
+	exportWait         time.Duration
 	quota              *quota.Limiter
 	policies           *policy.Enforcer
 	connectors         core.Registry
+	// exporting holds the customers with an export running on this router, one each, and
+	// exports a place for each export running on it, of maxExports.
+	exporting sync.Map
+	exports   chan struct{}
+	// healthLogs throttles the line a dependency that did not answer the health check logs:
+	// every probe asks.
+	healthLogs quota.Throttle
 	// connectorSecrets seals consent attempts; credentials stores what a consent got. Both
 	// are nil when connectors are off.
 	connectorSecrets *auth.Sealer
@@ -457,18 +465,37 @@ type Server struct {
 	// that finished just after a look waited up to 2 s to leave, and every thread task took 2 s
 	// at least. 100 ms is not a delay a person waiting for a text notices.
 	replyPoll time.Duration
+	// replyWindow bounds reading an answer for a channel (scheduledReplyWindow); phoneWindow is how
+	// long a ring is waited out (scheduledPhoneWindow), and callLimit how long a call a task placed
+	// may last (scheduledCallLimit). Each router holds its own, so a test that shortens them on its
+	// router changes no other suite's: the suites run in parallel in one process.
+	replyWindow time.Duration
+	phoneWindow time.Duration
+	callLimit   time.Duration
+	// resumedAt is the clock a resume counts a task's next run from. A test sets it to resume inside
+	// an hour the wall clock is not in.
+	resumedAt func() time.Time
 
-	// serverSide matches the requests the spec marks server-side only. It holds no
-	// handlers: what is registered on it is the patterns, and matching one is the answer.
+	// serverSide matches the requests the spec marks server-side only. What is registered on
+	// it is the patterns, and matching one is the answer; its handlers only name the operation
+	// (operationName).
 	serverSide *http.ServeMux
 	upgrader   websocket.Upgrader
 	popularity *popularity
 	logger     *slog.Logger
+	// release is Options.Release.
+	release string
 
 	// draining is closed when the process stops taking work, which sends its dispatch
 	// workers to another one.
 	draining  chan struct{}
 	drainOnce sync.Once
+
+	// stopBackground ends the work the server runs for as long as it lives, the relay's
+	// subscriptions and the expiry of its watchers, and background is that work, which Close
+	// waits for.
+	stopBackground context.CancelFunc
+	background     sync.WaitGroup
 }
 
 // Option adjusts the options a server is built from. It exists for the settings a
@@ -526,20 +553,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	configs := options.Configs
-	if configs == nil && options.Store != nil {
-		var err error
-		if configs, err = appconfig.New(appconfig.Options{Store: options.Store, Logger: logger}); err != nil {
-			return nil, err
-		}
-	}
-	recorder := options.Users
-	if recorder == nil && options.Store != nil {
-		var err error
-		if recorder, err = users.New(users.Options{Store: options.Store, Logger: logger}); err != nil {
-			return nil, err
-		}
-	}
+	configs := options.Store
 	pricer := options.Pricer
 	if pricer == nil && options.Prices != nil {
 		pricer = options.Prices
@@ -562,7 +576,6 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		billable:           options.Billable,
 		store:              options.Store,
 		configs:            configs,
-		users:              recorder,
 		activity:           options.Activity,
 		live:               options.Live,
 		phone:              options.Phone,
@@ -576,6 +589,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		hookSecret:         options.HookSecret,
 		telnyxPublicKey:    options.TelnyxPublicKey,
 		chatInboundKeys:    options.ChatInboundKeys,
+		twilioAuthToken:    options.TwilioAuthToken,
 		telnyxConnectionID: options.TelnyxConnectionID,
 		simulations:        options.Simulations,
 		knowledge:          options.Knowledge,
@@ -594,9 +608,16 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		authMode:           authMode,
 		dataRetention:      retention,
 		exportWritesWait:   exportWritesWait,
+		exportLineWait:     exportLineWait,
+		exportWait:         exportWait,
+		exports:            make(chan struct{}, maxExports),
 		scheduledPoll:      2 * time.Second,
 		scheduledPeerWait:  30 * time.Second,
 		replyPoll:          100 * time.Millisecond,
+		replyWindow:        scheduledReplyWindow,
+		phoneWindow:        scheduledPhoneWindow,
+		callLimit:          scheduledCallLimit,
+		resumedAt:          time.Now,
 		quota:              options.Quota,
 		policies:           options.Policies,
 		connectors:         options.Connectors,
@@ -619,6 +640,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		manageKey:          options.ManageKey,
 		popularity:         newPopularity(options.Store, logger),
 		logger:             logger,
+		release:            options.Release,
 		draining:           make(chan struct{}),
 	}
 	if options.Store != nil && options.ConnectorSecrets != nil {
@@ -633,6 +655,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	server.proxyCallsPerMinute = options.ProxyCallsPerMinute
 	if options.Live != nil {
 		server.runSlots, server.runsPerApp = concurrency.New(options.Live.Redis(), nil), options.RunsPerApp
+		server.twilioAlertSids = options.Live.Redis()
 	}
 	server.imageHTTP = options.ImageHTTP
 	server.documents = options.Documents
@@ -658,11 +681,13 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	}
 	server.serverSide = serverSide
 
-	// The subscriptions outlive every request, so they are held against the process
-	// rather than against a context a handler brought with it. Closing the Redis client
-	// is what ends them, which is what shutting the deployment down already does.
+	// The subscriptions outlive every request, so they are held against the server rather
+	// than against a context a handler brought with it. Close is what ends them.
+	background, stopBackground := context.WithCancel(context.Background())
+	server.stopBackground = stopBackground
 	if options.Relay != nil {
-		if server.relayed, err = server.newRelayed(context.Background(), options.Relay); err != nil {
+		if server.relayed, err = server.newRelayed(background, options.Relay); err != nil {
+			stopBackground()
 			return nil, fmt.Errorf("api: subscribe to the session relay: %w", err)
 		}
 	}
@@ -673,7 +698,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 			// derives, so without one no node can be let in and none of this node's
 			// requests is answered by another.
 			logger.Warn("peers cannot forward to or from this node without a key encryption key",
-				"setting", "ROUTER_AUTH_KEK")
+				"setting", "ROUTER_DEV_KEK (local), or ROUTER_AUTH_KEK_V1_WRAPPED with ROUTER_AUTH_KMS_KEY (hosted)")
 		} else {
 			credential, server.peerCredentials = options.Secrets.Derive(node.CredentialPurpose)
 		}
@@ -717,6 +742,25 @@ func (s *Server) Drain() {
 	s.drainOnce.Do(func() { close(s.draining) })
 }
 
+// Close ends the work the server runs in the background, the relay's subscriptions among it,
+// and waits for it until ctx is done, returning ctx's error if it had not ended by then. A
+// watcher on another node is not served once it is called, so it comes after the HTTP
+// servers have stopped.
+func (s *Server) Close(ctx context.Context) error {
+	s.stopBackground()
+	ended := make(chan struct{})
+	go func() {
+		s.background.Wait()
+		close(ended)
+	}()
+	select {
+	case <-ended:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // methodNotAllowed is the answer to a method a route does not serve.
 func methodNotAllowed(w http.ResponseWriter, r *http.Request) {
 	writeError(w, newAPIError(ErrorTypeMethodNotAllowed, r.Method+" is not served on this route"))
@@ -736,48 +780,50 @@ func (s *Server) Handler() http.Handler {
 		writeError(w, notFound("no such route"))
 	})
 	mux.MethodNotAllowed(methodNotAllowed)
-	mux.HandleFunc("GET /v1/agents/logs", s.listAgentLogs)
-	mux.HandleFunc("GET /v1/agents/logs/stream", s.streamAgentLogs)
-	mux.HandleFunc("GET /v1/agents/logs/{id}", s.getAgentLog)
-	mux.HandleFunc("GET /v1/data/export", s.exportData)
-	mux.HandleFunc("POST /v1/data/import", s.importData)
-	mux.HandleFunc("POST "+knowledgeFilesPath, s.uploadKnowledgeFile)
-	mux.HandleFunc("GET /v1/data/changes", s.listDataChanges)
-	mux.HandleFunc("POST "+scheduledPeerPath, s.deliverScheduledForPeer)
-	mux.HandleFunc("POST "+chatInboundPeerPath, s.answerChatInboundForPeer)
-	mux.HandleFunc("POST "+unansweredPeerPath, s.endUnansweredForPeer)
-	mux.HandleFunc("POST "+machinePeerPath, s.tellMachineForPeer)
-	mux.HandleFunc("GET /v1/agents/sessions/{id}/events", s.watchSession)
-	mux.HandleFunc("GET /v1/agents/socket", s.openSocketSession)
-	mux.HandleFunc("GET /v1/{modality}/stream", s.streamModality)
-	mux.HandleFunc("GET /v1/dispatch", s.dispatchCalls)
-	mux.HandleFunc("GET /v1/phone/answer/{token}", s.answerPhoneCall)
-	mux.HandleFunc("POST /v1/phone/answer/{token}", s.answerPhoneCall)
-	mux.HandleFunc("POST /v1/phone/status/{token}", s.receiveCallStatus)
-	mux.HandleFunc("POST /v1/phone/machine/{token}", s.receiveCallMachine)
-	mux.HandleFunc("POST "+phone.CallHookPath, s.receiveCallEvent)
-	mux.HandleFunc("POST "+phone.CallHookPath+"/{app}", s.receiveCallEvent)
-	mux.HandleFunc("POST "+telnyxCallHookPath, s.receiveTelnyxCall)
-	mux.HandleFunc("POST "+chat.MessageHookPath, s.receiveMessageEvent)
-	mux.HandleFunc("POST "+chat.MessageHookPath+"/{app}", s.receiveMessageEvent)
-	mux.HandleFunc("POST "+chatInboundPath, s.receiveChatInbound)
-	mux.HandleFunc("GET "+connectorLaunchPath+"{id}", s.serveConnectorLaunch)
-	mux.HandleFunc("POST "+connectorLaunchPath+"{id}", s.handOffConnectorLaunch)
-	mux.HandleFunc("GET "+ConnectorCallbackPath, s.finishConnectorConsent)
-	mux.HandleFunc("GET "+ConnectorClientMetadataPath, s.serveConnectorClientMetadata)
-	mux.HandleFunc("POST "+connectorEventsPath+"{connector_id}", s.receiveConnectorEvent)
-	mux.HandleFunc("POST "+providerAppEventsPath+"{connector_id}/{provider_app_id}", s.receiveProviderAppEvent)
-	mux.HandleFunc("GET "+providerAppEventsPath+"{connector_id}/{provider_app_id}", s.answerProviderAppHandshake)
+	handle(mux, "GET /v1/agents/logs", "ListAgentLogs", s.listAgentLogs)
+	handle(mux, "GET /v1/agents/logs/stream", "StreamAgentLogs", s.streamAgentLogs)
+	handle(mux, "GET /v1/agents/logs/{id}", "GetAgentLog", s.getAgentLog)
+	handle(mux, "GET /v1/data/export", "ExportData", s.exportData)
+	handle(mux, "POST /v1/data/import", "ImportData", s.importData)
+	handle(mux, "POST "+knowledgeFilesPath, "UploadKnowledgeFile", s.uploadKnowledgeFile)
+	handle(mux, "GET /v1/data/changes", "ListDataChanges", s.listDataChanges)
+	handle(mux, "POST "+scheduledPeerPath, "ScheduledTaskDeliver", s.deliverScheduledForPeer)
+	handle(mux, "POST "+chatInboundPeerPath, "ChatInboundAnswer", s.answerChatInboundForPeer)
+	handle(mux, "POST "+unansweredPeerPath, "PhoneEndUnanswered", s.endUnansweredForPeer)
+	handle(mux, "POST "+machinePeerPath, "PhoneMachine", s.tellMachineForPeer)
+	handle(mux, "GET /v1/agents/sessions/{id}/events", "WatchSession", s.watchSession)
+	handle(mux, "GET /v1/agents/socket", "OpenSocketSession", s.openSocketSession)
+	handle(mux, "GET /v1/{modality}/stream", "StreamModality", s.streamModality)
+	handle(mux, "GET /v1/dispatch", "DispatchCalls", s.dispatchCalls)
+	handle(mux, "GET /v1/phone/answer/{token}", "PhoneAnswer", s.answerPhoneCall)
+	handle(mux, "POST /v1/phone/answer/{token}", "PhoneAnswer", s.answerPhoneCall)
+	handle(mux, "POST /v1/phone/status/{token}", "ReceiveCallStatus", s.receiveCallStatus)
+	handle(mux, "POST /v1/phone/machine/{token}", "ReceiveCallMachine", s.receiveCallMachine)
+	handle(mux, "POST "+phone.CallHookPath, "PhoneHook", s.receiveCallEvent)
+	handle(mux, "POST "+phone.CallHookPath+"/{app}", "PhoneHook", s.receiveCallEvent)
+	handle(mux, "POST "+telnyxCallHookPath, "ReceiveTelnyxCall", s.receiveTelnyxCall)
+	handle(mux, "POST "+telnyxEventsHookPath, "ReceiveTelnyxEvent", s.receiveTelnyxEvent)
+	handle(mux, "POST "+twilioEventsHookPath, "ReceiveTwilioEvent", s.receiveTwilioEvent)
+	handle(mux, "POST "+chat.MessageHookPath, "ChatHook", s.receiveMessageEvent)
+	handle(mux, "POST "+chat.MessageHookPath+"/{app}", "ChatHook", s.receiveMessageEvent)
+	handle(mux, "POST "+chatInboundPath, "ReceiveChatDelivery", s.receiveChatInbound)
+	handle(mux, "GET "+connectorLaunchPath+"{id}", "GetConnectorLaunchPage", s.serveConnectorLaunch)
+	handle(mux, "POST "+connectorLaunchPath+"{id}", "HandOffConnectorLaunch", s.handOffConnectorLaunch)
+	handle(mux, "GET "+ConnectorCallbackPath, "FinishConnectorConsent", s.finishConnectorConsent)
+	handle(mux, "GET "+ConnectorClientMetadataPath, "GetConnectorClientMetadata", s.serveConnectorClientMetadata)
+	handle(mux, "POST "+connectorEventsPath+"{connector_id}", "ReceiveConnectorEvent", s.receiveConnectorEvent)
+	handle(mux, "POST "+providerAppEventsPath+"{connector_id}/{provider_app_id}", "ReceiveProviderAppEvent", s.receiveProviderAppEvent)
+	handle(mux, "GET "+providerAppEventsPath+"{connector_id}/{provider_app_id}", "AnswerProviderAppHandshake", s.answerProviderAppHandshake)
 	// With connectors off (no transports) the proxy is no route at all, as before it existed.
 	if s.connectorTransports != nil {
 		for _, method := range proxyMethods {
-			mux.HandleFunc(method+" "+connectionProxyPath+"*", s.proxyConnection)
+			handle(mux, method+" "+connectionProxyPath+"*", "ProxyConnection"+method[:1]+strings.ToLower(method[1:]), s.proxyConnection)
 		}
 	}
-	mux.HandleFunc("POST "+mcpevents.Path+"{token}", s.receiveConnectionEvent)
-	mux.HandleFunc("GET "+channels.HookPath+"{token}", s.receiveChannelMessage)
-	mux.HandleFunc("POST "+channels.HookPath+"{token}", s.receiveChannelMessage)
-	mux.HandleFunc("POST "+dlc.HookPath, s.receiveDLCReport)
+	handle(mux, "POST "+mcpevents.Path+"{token}", "ReceiveConnectionEvent", s.receiveConnectionEvent)
+	handle(mux, "GET "+channels.HookPath+"{token}", "VerifyChannelHook", s.receiveChannelMessage)
+	handle(mux, "POST "+channels.HookPath+"{token}", "ReceiveChannelMessage", s.receiveChannelMessage)
+	handle(mux, "POST "+dlc.HookPath, "ReceiveDLCReport", s.receiveDLCReport)
 	s.newAPI(mux)
 	s.mux = mux
 	var handler http.Handler = mux
@@ -797,7 +843,7 @@ func (s *Server) Handler() http.Handler {
 	// lived socket; blocking the handler's return on event delivery would hold
 	// the connection open past its use. The flush in cmd/router covers shutdown.
 	served := withSentry(mux, withRequestID(withTrace(mux, withMetrics(mux, withTiming(withCORS(s.authMode,
-		s.onOwningNode(s.withCustomer(s.withCost(s.withRequestLog(mux, s.withQuota(s.withServerSide(handler))))))))))))
+		s.withCustomer(s.onOwningNode(s.withCost(s.withRequestLog(mux, s.withQuota(s.withServerSide(handler))))))))))))
 	if s.directory == nil {
 		return served
 	}
@@ -973,10 +1019,13 @@ func withTrace(mux *chi.Mux, next http.Handler) http.Handler {
 // It sits inside withCustomer so it can name the caller, and outside withServerSide so a
 // refusal is a logged 403 rather than a request that appears not to have arrived. It is
 // inside withCORS, which means a preflight goes unlogged: it carries nothing worth routing
-// and doubling the volume to record that a browser asked permission is a poor trade.
+// and doubling the volume to record that a browser asked permission is a poor trade. What
+// withCustomer refuses itself is logged through it all the same (refuseLogged).
 //
 // The path is logged without the query, because a socket names its customer there and a
 // vendor names a token, and an access log is the last place either should end up.
+//
+// A successful health probe is not logged (answeredHealthy).
 //
 // A 5xx is logged at error level. An access log at a busy deployment is the one stream
 // nobody reads all of, and a server error that only appears in it is a server error nobody
@@ -997,7 +1046,8 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 		started := time.Now()
 		recorder := &loggedResponse{ResponseWriter: w}
 		failure := &requestFailure{}
-		r = r.WithContext(context.WithValue(r.Context(), requestFailureContextKey{}, failure))
+		ctx, note := activity.WithNote(context.WithValue(r.Context(), requestFailureContextKey{}, failure))
+		r = r.WithContext(ctx)
 		defer func() {
 			recovered := recover()
 			if recovered == nil {
@@ -1005,9 +1055,8 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 			}
 			// ErrAbortHandler is net/http's own way of dropping a connection, not a bug.
 			if recovered != http.ErrAbortHandler {
-				customer, _ := CustomerFrom(r.Context())
-				s.logger.Error("a request panicked",
-					"method", r.Method, "path", loggedPath(routes, r), "customer", customer,
+				s.logger.ErrorContext(failure.loggedContext(r.Context()), "a request panicked",
+					"method", r.Method, "path", loggedPath(routes, r), "customer", loggedCustomer(r, note),
 					"request_id", RequestIDFrom(r.Context()),
 					"panic", fmt.Sprint(recovered), "stack", string(debug.Stack()))
 				if recorder.code == 0 && recorder.written == 0 && !recorder.hijacked {
@@ -1017,34 +1066,116 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 			panic(recovered)
 		}()
 		next.ServeHTTP(recorder, r)
-		s.recordActivity(routes, r, recorder, started)
+		s.recordActivity(routes, r, recorder, note, started)
+		if answeredHealthy(routes, r, recorder.status(), failure) {
+			return
+		}
 
-		customer, _ := CustomerFrom(r.Context())
 		// A socket reports the life of the connection rather than a time to respond,
-		// since it is logged once it has closed.
+		// since it is logged once it has closed, and why it closed (socketEnd).
 		fields := []any{
 			"method", r.Method,
 			"path", loggedPath(routes, r),
 			"status", recorder.status(),
 			"duration", time.Since(started).Round(time.Millisecond),
-			"customer", customer,
+			"customer", loggedCustomer(r, note),
 			"request_id", RequestIDFrom(r.Context()),
 		}
 		if recorder.written > 0 {
 			fields = append(fields, "bytes", recorder.written)
 		}
+		fields = append(fields, failure.closed.fields()...)
 		if failure.err != nil {
 			fields = append(fields, "error", failure.err.Error())
 		}
 		if failure.trace != "" {
 			fields = append(fields, "stack", failure.trace)
 		}
+		fields = append(fields, s.accessFields(r, recorder, failure.operation)...)
+		logged := failure.loggedContext(r.Context())
 		if recorder.status() >= http.StatusInternalServerError {
-			s.logger.Error("served a request", fields...)
+			s.logger.ErrorContext(logged, "served a request", fields...)
 			return
 		}
-		s.logger.Info("served a request", fields...)
+		s.logger.InfoContext(logged, "served a request", fields...)
 	})
+}
+
+// loggedCustomer is the customer the request's access line names: the one its credential names,
+// or, for a hook, which no credential names, the app its handler noted once it checked the hook
+// (activity.NoteCustomer). A hook it did not check names none.
+func loggedCustomer(r *http.Request, note *activity.Note) string {
+	if customer, ok := CustomerFrom(r.Context()); ok {
+		return customer
+	}
+	return note.AppID
+}
+
+// refuseLogged answers r with failure through withRequestLog, for a refusal made before the
+// request reaches it, so the refusal has its access line and its code like any other.
+func (s *Server) refuseLogged(w http.ResponseWriter, r *http.Request, failure APIError) {
+	s.withRequestLog(s.mux, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, failure)
+	})).ServeHTTP(w, r)
+}
+
+// answeredHealthy is whether r is a health probe the router answered below 400 with no error
+// recorded. The load balancer and kubelet ask every few seconds, so the lines would crowd out
+// every request of a customer. A probe that fails keeps its line, so a failing check stays
+// visible. A panic is logged on its own line.
+func answeredHealthy(routes *chi.Mux, r *http.Request, status int, failure *requestFailure) bool {
+	return routeLabel(routes, r) == healthPath && status < http.StatusBadRequest && failure.err == nil
+}
+
+// maxLoggedValue caps a value the caller chose, a header or an anonymous caller's user id, on
+// the access line. net/http admits up to 1 MiB of headers (http.DefaultMaxHeaderBytes), which
+// would otherwise land on one line. The clients the router knows by X-Stream-Client are a word
+// or an SDK's name and release (store.AuditSource), well under it, and 256 bytes is enough to
+// tell user agents apart.
+const maxLoggedValue = 256
+
+// accessFields are the access line's fields named as the Stream platform's access logs name
+// them, each left out when the request has none.
+//
+// trace_id is logged for a sampled span only: the sampler's dropped span is never exported, so
+// its id would name a trace nobody can open.
+// operation_type is the name the operation's handler gave itself (nameOperation), so a request
+// no handler took has none: an unknown path, a method its route does not take, a caller withQuota
+// refused. withServerSide names what it refuses. user_id is the end user's: a backend's request
+// is its own, whichever user it says it acts for. request_size is the declared Content-Length, so
+// a chunked body names none.
+func (s *Server) accessFields(r *http.Request, answered *loggedResponse, operation string) []any {
+	var fields []any
+	if span := trace.SpanContextFromContext(r.Context()); span.IsValid() && span.IsSampled() {
+		fields = append(fields, "trace_id", span.TraceID().String())
+	}
+	if operation != "" {
+		fields = append(fields, "operation_type", operation)
+	}
+	if answered.refusal != "" {
+		fields = append(fields, "error_code", answered.refusal)
+	}
+	for _, header := range []struct{ field, name string }{
+		{"x_stream_client", clientHeader},
+		{"user_agent", "User-Agent"},
+	} {
+		if value := trimmedTo(r.Header.Get(header.name), maxLoggedValue); value != "" {
+			fields = append(fields, header.field, value)
+		}
+	}
+	if declared := trimmedTo(auth.DeclaredAuthType(r), maxLoggedValue); declared != "" {
+		fields = append(fields, "stream_auth_type", declared)
+	}
+	if r.ContentLength > 0 {
+		fields = append(fields, "request_size", r.ContentLength)
+	}
+	if caller, ok := routing.CallerFrom(r.Context()); ok && !caller.ServerSide && caller.UserID != "" {
+		fields = append(fields, "user_id", trimmedTo(caller.UserID, maxLoggedValue))
+	}
+	if s.release != "" {
+		fields = append(fields, "build_version", s.release)
+	}
+	return fields
 }
 
 // loggedResponse remembers what was answered so it can be logged once the handler is done.
@@ -1115,16 +1246,42 @@ func serverSideRoutes(document *huma.OpenAPI) (*http.ServeMux, error) {
 	operations := specifiedOperations(document)
 
 	routes := http.NewServeMux()
-	nothing := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 	for _, operation := range operations {
 		// The connection proxy refuses a client-side caller itself (proxyConnection), on every
 		// path; with connectors off it is no route, and a 403 here would answer for it.
 		if operation.public || operation.open || strings.HasPrefix(operation.path, connectionProxyPath) {
 			continue
 		}
-		routes.Handle(operation.method+" "+operation.path, nothing)
+		routes.Handle(operation.method+" "+operation.path, operationName(pascalCase(operation.id)))
 	}
 	return routes, nil
+}
+
+// handle registers handler for pattern on mux, naming its operation for the access line as a
+// huma operation is named (nameHumaOperation): with the id the spec declares for it, its first
+// letter upper-cased, or, for a route the spec leaves out, a name of its own.
+func handle(mux chi.Router, pattern, name string, handler http.HandlerFunc) {
+	mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		nameOperation(r.Context(), name)
+		handler(w, r)
+	})
+}
+
+// pascalCase is id with its first letter upper-cased, the way the Stream platform's access logs
+// name a handler: getSession is GetSession.
+func pascalCase(id string) string {
+	if id == "" {
+		return ""
+	}
+	return strings.ToUpper(id[:1]) + id[1:]
+}
+
+// operationName is an entry of serverSideRoutes: serving it names the operation for the access
+// line, as its handler would have.
+type operationName string
+
+func (n operationName) ServeHTTP(_ http.ResponseWriter, r *http.Request) {
+	nameOperation(r.Context(), string(n))
 }
 
 // withServerSide refuses the generated operations only a backend may reach.
@@ -1140,10 +1297,10 @@ func serverSideRoutes(document *huma.OpenAPI) (*http.ServeMux, error) {
 // not have. One that never authenticated is left to the handler's own 401.
 func (s *Server) withServerSide(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, matched := s.serverSide.Handler(r); matched != "" {
-			if s.refuseClientSide(w, r) {
-				return
-			}
+		if named, matched := s.serverSide.Handler(r); matched != "" && s.refuseClientSide(w, r) {
+			// The operation's handler, which names it, never runs: its entry here names it.
+			named.ServeHTTP(w, r)
+			return
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -1203,15 +1360,28 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 		if errors.Is(err, auth.ErrLevelRefused) {
 			s.logger.Debug("refused a level of user this app turns away",
 				"method", r.Method, "path", loggedPath(s.mux, r), "kind", principal.Kind)
-			writeError(w, forbidden("this app does not accept "+
+			// The caller proved which app it is of, so its lines name the app, though it is
+			// no customer here: nothing it asked for is counted under the app.
+			r = r.WithContext(WithLoggedApp(r.Context(), principal.AppID, principal.APIKey))
+			s.refuseLogged(w, r, forbidden("this app does not accept "+
 				"requests from this level of user"))
 			return
 		}
 		// The categories are what the request's usage is counted under, so a request naming
 		// ones that break the rule is refused rather than counted under fewer.
 		if errors.Is(err, auth.ErrInvalidUsageCategories) {
-			writeError(w, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidUsageCategories,
+			s.refuseLogged(w, r, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidUsageCategories,
 				Message: strings.TrimPrefix(err.Error(), "auth: ")})
+			return
+		}
+		// A credential that could not be checked (the key store down, a key that would not
+		// unseal) is the router's failure, not a wrong key. It is logged here: withRequestLog
+		// runs after this.
+		if err != nil && !errors.Is(err, auth.ErrUnauthenticated) {
+			s.logger.Error("could not check a credential", "method", r.Method,
+				"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()),
+				"error", err, "stack", stack.Trace(err))
+			writeError(w, internalError())
 			return
 		}
 		if err == nil && principal.AppID != "" {
@@ -1220,6 +1390,7 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 			ctx = context.WithValue(ctx, serverSideContextKey{}, principal.ServerSide)
 			ctx = context.WithValue(ctx, kindContextKey{}, principal.Kind)
 			ctx = context.WithValue(ctx, requestKeyContextKey{}, s.vouchedKey(r, principal))
+			ctx = WithLoggedApp(ctx, principal.AppID, principal.APIKey)
 			ctx = routing.WithCaller(ctx, routing.Caller{
 				UserID:     principal.UserID,
 				IP:         s.callerIP(r, principal.UserID),
@@ -1229,7 +1400,7 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 			ctx = context.WithValue(ctx, actorContextKey{}, actorOf(r, principal.ServerSide))
 			ctx = routing.WithAttribution(ctx, attributionOf(principal))
 			r = r.WithContext(ctx)
-			s.policies.Join(principal.AppID, principal.OrganizationID, principal.OrganizationTier)
+			s.policies.Join(ctx, principal.AppID, principal.OrganizationID, principal.OrganizationTier)
 			s.recordUser(ctx, principal)
 			s.recordEmail(ctx, principal)
 			s.keepServerToken(ctx, r, principal.AppID)
@@ -1305,7 +1476,7 @@ func (s *Server) vouchedKey(r *http.Request, principal auth.Principal) string {
 // caller asked for, and refusing the request they did ask for because of it would be the
 // wrong trade.
 func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
-	if s.users == nil || principal.UserID == "" {
+	if s.store == nil || principal.UserID == "" {
 		return
 	}
 	var err error
@@ -1313,11 +1484,11 @@ func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
 	case auth.KindAnonymous:
 		return
 	case auth.KindAuthenticated:
-		err = s.users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindAuthenticated)
+		err = s.store.Users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindAuthenticated)
 	case auth.KindGuest:
-		err = s.users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindGuest)
+		err = s.store.Users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindGuest)
 	default:
-		err = s.users.Named(ctx, principal.AppID, principal.UserID)
+		err = s.store.Users.Named(ctx, principal.AppID, principal.UserID)
 	}
 	if err != nil {
 		s.logger.Error("could not record an end user",
@@ -1327,14 +1498,14 @@ func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
 
 // recordEmail keeps the address a backend said its user signs in with (auth.EmailHeader),
 // which a consent for a connector whose manifest sets owner_email is checked against. Only a
-// server-side caller has one (auth.Principal.Email), and users.Recorder.Email does nothing
+// server-side caller has one (auth.Principal.Email), and store.Users.Email does nothing
 // without one or without a user, nor for the address it last wrote. A failure is logged, as
 // recordUser's is: the consent it would have served then finds no address and is refused.
 func (s *Server) recordEmail(ctx context.Context, principal auth.Principal) {
-	if s.users == nil {
+	if s.store == nil {
 		return
 	}
-	if err := s.users.Email(ctx, principal.AppID, principal.UserID, principal.Email); err != nil {
+	if err := s.store.Users.Email(ctx, principal.AppID, principal.UserID, principal.Email); err != nil {
 		s.logger.Error("could not record an end user's email", "customer", principal.AppID, "user", principal.UserID, "error", err)
 	}
 }
@@ -1470,6 +1641,9 @@ const (
 	Degraded HealthStatusStatus = "degraded"
 )
 
+// healthPath is the route the load balancer and kubelet probe.
+const healthPath = "/health"
+
 type healthResponse struct {
 	Status int
 	Body   HealthStatus
@@ -1479,7 +1653,7 @@ func (s *Server) registerHealth(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "getHealth",
 		Method:      http.MethodGet,
-		Path:        "/health",
+		Path:        healthPath,
 		Summary:     "Liveness and dependency check",
 		Security:    []map[string][]string{},
 		Responses: map[string]*huma.Response{
@@ -1502,7 +1676,11 @@ func (s *Server) getHealth(ctx context.Context, _ *struct{}) (*healthResponse, e
 	if s.store == nil {
 		dependencies["postgres"] = "not configured"
 	} else if err := s.store.Ping(ctx); err != nil {
-		dependencies["postgres"] = err.Error()
+		// Anyone may read the health check, and the error names where the database is.
+		if s.healthLogs.Due("postgres", time.Minute) {
+			s.logger.Error("the database did not answer the health check", "error", err)
+		}
+		dependencies["postgres"] = "unavailable"
 		healthy = false
 	} else {
 		dependencies["postgres"] = "ok"
@@ -1511,7 +1689,10 @@ func (s *Server) getHealth(ctx context.Context, _ *struct{}) (*healthResponse, e
 	if s.live == nil {
 		dependencies["redis"] = "not configured"
 	} else if err := s.live.Ping(ctx); err != nil {
-		dependencies["redis"] = err.Error()
+		if s.healthLogs.Due("redis", time.Minute) {
+			s.logger.Error("redis did not answer the health check", "error", err)
+		}
+		dependencies["redis"] = "unavailable"
 		healthy = false
 	} else {
 		dependencies["redis"] = "ok"
@@ -1572,9 +1753,31 @@ func (s *Server) listProviders(ctx context.Context, request *listProvidersReques
 			UsageShare:  &share,
 			Benchmark:   providerBenchmark(candidate.Config.Benchmark),
 			Price:       s.providerPrice(request.Modality, candidate.Config),
+			Voices:      voicesOf(candidate.Config.Voices),
 		})
 	}
 	return &listProvidersResponse{Body: providers}, nil
+}
+
+// voicesOf renders a model's built-in voices for the wire, nil when it declares none.
+func voicesOf(voices []routing.ModelVoice) []ModelVoice {
+	if len(voices) == 0 {
+		return nil
+	}
+	listed := make([]ModelVoice, 0, len(voices))
+	for _, voice := range voices {
+		item := ModelVoice{
+			Id:          voice.ID,
+			Name:        voice.Name,
+			Description: optional(voice.Description),
+			Gender:      optional(voice.Gender),
+		}
+		if voice.Default {
+			item.Default = new(true)
+		}
+		listed = append(listed, item)
+	}
+	return listed
 }
 
 // supportsOf is the terms a model declared, as the names a request's options use.
@@ -1678,8 +1881,8 @@ func (s *Server) getStats(ctx context.Context, request *getStatsRequest) (*getSt
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.CustomerStats(
-		ctx, string(request.Modality), customerID, granularity, request.From, request.To, tags)
+	buckets, err := s.store.Buckets.Select(ctx, customerID, store.BucketFilter{
+		Modality: string(request.Modality), Granularity: granularity, From: request.From, To: request.To, Tags: tags})
 	if err != nil {
 		return nil, err
 	}
@@ -1721,10 +1924,10 @@ func (s *Server) getTagStats(ctx context.Context, request *getTagStatsRequest) (
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.CustomerTagStats(ctx, string(request.Modality), customerID,
-		request.Key, granularity, request.From, request.To)
+	buckets, err := s.store.TagBuckets.Select(ctx, customerID, store.TagBucketFilter{
+		Modality: string(request.Modality), Key: request.Key, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 
 	stats := make([]TagStatsBucket, 0, len(buckets))
@@ -1769,8 +1972,8 @@ func (s *Server) getTurnStats(ctx context.Context, request *getTurnStatsRequest)
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.CustomerTurnStats(
-		ctx, customerID, agentID, granularity, request.From, request.To)
+	buckets, err := s.store.TurnBuckets.Select(ctx, customerID, store.TurnBucketFilter{
+		AgentID: agentID, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
 		return nil, err
 	}
@@ -1820,7 +2023,7 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 	if scope := request.Scope.ptr(); scope != nil && *scope == spendScopeOrganization {
 		// An app in no organization is its own.
 		if organization := OrganizationFrom(ctx); organization != "" {
-			apps, err := s.store.OrganizationApps(ctx, organization)
+			apps, err := s.store.AppOrganizations.Apps(ctx, organization)
 			if err != nil {
 				return nil, err
 			}
@@ -1840,10 +2043,10 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 		limit = *request.Limit.ptr()
 	}
 
-	buckets, err := s.store.CustomerSpend(ctx, customerID, groupBy,
+	buckets, err := s.store.Requests.Spend(ctx, customerID, groupBy,
 		granularityOf(request.Granularity.ptr()), request.From, request.To, limit, tags, who)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 
 	spend := make([]SpendBucket, 0, len(buckets))
@@ -1851,6 +2054,7 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 		spend = append(spend, SpendBucket{
 			Bucket:          bucket.Bucket,
 			Value:           bucket.Value,
+			Other:           bucket.Other,
 			CostMicrosTotal: bucket.CostMicrosTotal,
 			RequestCount:    bucket.RequestCount,
 		})
@@ -1901,7 +2105,7 @@ func (s *Server) getTagKeys(ctx context.Context, request *getTagKeysRequest) (*g
 		return nil, invalidRequest("statistics are not available: no database configured")
 	}
 
-	found, err := s.store.CustomerTagKeys(ctx, customerID, request.From, request.To, tags)
+	found, err := s.store.Requests.TagKeys(ctx, customerID, request.From, request.To, tags)
 	if err != nil {
 		return nil, err
 	}
@@ -1976,11 +2180,22 @@ func (s *Server) getAgentStats(ctx context.Context, request *getAgentStatsReques
 		return nil, invalidRequest("statistics are not available: no database configured")
 	}
 
+	configID := value(request.Agent.ptr())
+	if configID != "" {
+		if _, err := s.store.AgentConfigs.Get(ctx, customerID, configID); err != nil {
+			return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
+		}
+	}
+
 	peak, err := s.store.CustomerConcurrencyPeak(ctx, customerID, request.From, request.To)
 	if err != nil {
 		return nil, err
 	}
-	overall, tools, err := s.store.CustomerToolUsage(ctx, customerID, request.From, request.To)
+	turns, err := s.store.CustomerTurns(ctx, customerID, configID, request.From, request.To)
+	if err != nil {
+		return nil, err
+	}
+	overall, tools, err := s.store.CustomerToolUsage(ctx, customerID, configID, request.From, request.To)
 	if err != nil {
 		return nil, err
 	}
@@ -1988,24 +2203,41 @@ func (s *Server) getAgentStats(ctx context.Context, request *getAgentStatsReques
 	stats := AgentStats{
 		PeakConcurrentSessions: peak.Sessions,
 		PeakAt:                 peak.At,
-		ToolCalls:              toolStatsOf(overall),
+		Sessions:               turns.Sessions,
+		AvgTurns:               share(turns.Turns, turns.Sessions),
+		ToolCalls:              toolStatsOf(overall, turns.Sessions),
 		Tools:                  make([]ToolStats, 0, len(tools)),
 	}
 	for _, tool := range tools {
-		stats.Tools = append(stats.Tools, toolStatsOf(tool))
+		stats.Tools = append(stats.Tools, toolStatsOf(tool, turns.Sessions))
 	}
 	return &getAgentStatsResponse{Body: stats}, nil
 }
 
-func toolStatsOf(usage store.ToolUsage) ToolStats {
+func toolStatsOf(usage store.ToolUsage, sessions int64) ToolStats {
 	return ToolStats{
-		Tool:      usage.Tool,
-		Calls:     usage.Calls,
-		Failed:    usage.Failed,
-		AvgTokens: usage.AvgTokens,
-		AvgMs:     usage.AvgMs,
-		P99Ms:     usage.P99Ms,
+		Tool:              usage.Tool,
+		Calls:             usage.Calls,
+		Failed:            usage.Failed,
+		Sessions:          usage.Sessions,
+		SessionShare:      share(usage.Sessions, sessions),
+		AvgTurnsBeforeUse: usage.AvgTurnsBeforeUse,
+		AvgTokens:         usage.AvgTokens,
+		AvgMs:             usage.AvgMs,
+		P99Ms:             usage.P99Ms,
+		Loading:           usage.Loading,
+		DefinitionTokens:  usage.DefinitionTokens,
+		SummaryTokens:     usage.SummaryTokens,
 	}
+}
+
+// share is part over whole, nil when whole is none.
+func share(part, whole int64) *float64 {
+	if whole == 0 {
+		return nil
+	}
+	ratio := float64(part) / float64(whole)
+	return &ratio
 }
 
 // runRollup aggregates every customer's request rows into a rollup table. It is a
@@ -2022,7 +2254,7 @@ func (s *Server) runRollup(ctx context.Context, request *runRollupRequest) (*run
 	}
 
 	granularity := granularityOf(request.Body.Granularity)
-	written, err := s.store.Rollup(ctx, granularity, request.Body.From, request.Body.To)
+	written, err := s.store.Buckets.Rollup(ctx, granularity, request.Body.From, request.Body.To)
 	if err != nil {
 		return nil, err
 	}
@@ -2244,9 +2476,9 @@ func (s *Server) registerServer(api huma.API) {
 			"app alone; grouped by \"who:user\" the value is then <app_id>/<user_id>, since a user id is " +
 			"only unique within its app.\n" +
 			"Only the biggest values keep a series of their own, because a label such as customer_id " +
-			"has as many values as the customer has customers. The rest are summed into \"other\", and " +
-			"spend carrying no such label at all into the empty value, so the rows still add up to " +
-			"the total.\n" +
+			"has as many values as the customer has customers. The rest are summed into a row marked " +
+			"other, whose value is \"other\", and spend carrying no such label at all into the empty " +
+			"value, so the rows still add up to the total.\n" +
 			"Reads the request rows rather than the rollups, so today's spend is there without a " +
 			"rollup having run.",
 		// Declared rather than read off the input, so the default is documented without
@@ -2298,13 +2530,16 @@ func (s *Server) registerServer(api huma.API) {
 		Path:        "/v1/stats/agents",
 		Summary:     "How the calling customer's agents ran, across all of them",
 		Description: "The most agents that were running at once, and which tools they called: how often, " +
-			"how much each call put in front of the model and how long it took.\n" +
+			"in how many sessions and after how many turns, how much each call put in front of the model, " +
+			"what the tool's definition costs every turn that carries it and how long a call took.\n" +
+			"With agent, the sessions, turns and tools are that agent config's alone; the peak is still " +
+			"every agent's.\n" +
 			"One figure for the whole window rather than a row per bucket, because neither a peak nor " +
 			"a percentile can be summed out of smaller ones.",
 		Responses: map[string]*huma.Response{
 			"200": {Description: "The window's figures"},
 		},
-		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden},
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 	}, s.getAgentStats)
 	huma.Register(api, huma.Operation{
 		OperationID: "runRollup",
@@ -2440,8 +2675,9 @@ type getActivityResponse struct {
 }
 
 type getAgentStatsRequest struct {
-	From time.Time `query:"from" doc:"Start of the window, inclusive." required:"true"`
-	To   time.Time `query:"to" doc:"End of the window, exclusive." required:"true"`
+	From  time.Time             `query:"from" doc:"Start of the window, inclusive." required:"true"`
+	To    time.Time             `query:"to" doc:"End of the window, exclusive." required:"true"`
+	Agent optionalParam[string] `query:"agent" doc:"The id of an agent config: only its sessions are counted. Omitted is every agent."`
 }
 
 type getAgentStatsResponse struct {
@@ -2452,18 +2688,26 @@ type getAgentStatsResponse struct {
 type AgentStats struct {
 	PeakConcurrentSessions int64       `json:"peak_concurrent_sessions" doc:"The most sessions open at the same time, each one an agent running. A session still open counts up to now."`
 	PeakAt                 *time.Time  `json:"peak_at" nullable:"true" doc:"When that peak was first reached. Null when no session was open in the window."`
+	Sessions               int64       `json:"sessions" doc:"Sessions that took a turn in the window: what a tool's session_share is out of."`
+	AvgTurns               *float64    `json:"avg_turns" nullable:"true" doc:"Turns a session took in the window, on average. A turn is a reply that was not rewound, delegated work that came back after its turn ended included. Null when no session took one."`
 	ToolCalls              ToolStats   `json:"tool_calls" doc:"Every tool call in the window, as one. Its tool is empty."`
 	Tools                  []ToolStats `json:"tools" nullable:"false" doc:"One row per tool, most called first."`
 }
 
 // ToolStats is how often a tool ran and what it cost.
 type ToolStats struct {
-	Tool      string   `json:"tool"`
-	Calls     int64    `json:"calls"`
-	Failed    int64    `json:"failed" doc:"Calls that ended in an error."`
-	AvgTokens float64  `json:"avg_tokens" doc:"What a call put in front of the model, its arguments and its result, estimated at four characters a token."`
-	AvgMs     *float64 `json:"avg_ms" nullable:"true" doc:"From the call starting to its result. Null when none was timed."`
-	P99Ms     *float64 `json:"p99_ms" nullable:"true"`
+	Tool              string   `json:"tool"`
+	Calls             int64    `json:"calls"`
+	Failed            int64    `json:"failed" doc:"Calls that ended in an error."`
+	Sessions          int64    `json:"sessions" doc:"Sessions that called it at least once."`
+	SessionShare      *float64 `json:"session_share" nullable:"true" minimum:"0" doc:"Sessions that called it, out of the window's sessions, from 0 to 1. Null when no session took a turn."`
+	AvgTurnsBeforeUse *float64 `json:"avg_turns_before_use" nullable:"true" doc:"Turns a session took before its first call, on average: 0 is a call on the first turn. Null on the row over every tool."`
+	AvgTokens         float64  `json:"avg_tokens" doc:"What a call put in front of the model, its arguments and its result, estimated at four characters a token."`
+	AvgMs             *float64 `json:"avg_ms" nullable:"true" doc:"From the call starting to its result. Null when none was timed."`
+	P99Ms             *float64 `json:"p99_ms" nullable:"true"`
+	Loading           string   `json:"loading" doc:"How the latest call had the tool offered: full, summary or deferred. Empty when no call recorded it, as calls made before it was recorded and built-in tools."`
+	DefinitionTokens  *int64   `json:"definition_tokens" nullable:"true" doc:"What the tool's whole definition, its name, description and schema, costs every turn that carries it, estimated at four characters a token. Null when no call recorded it."`
+	SummaryTokens     *int64   `json:"summary_tokens" nullable:"true" doc:"What its definition costs offered as a summary. Null unless its loading is summary."`
 }
 
 type runRollupRequest struct {
@@ -2605,8 +2849,9 @@ type RollupResult struct {
 type SpendBucket struct {
 	Bucket          time.Time `json:"bucket"`
 	CostMicrosTotal int64     `json:"cost_micros_total" doc:"Millionths of a dollar, priced from the configured rates."`
+	Other           bool      `json:"other,omitempty" doc:"True on the row that is everything outside the biggest few, summed. Its value is \"other\", which a label can also have: a label of that value is a row of its own, without other."`
 	RequestCount    int64     `json:"request_count"`
-	Value           string    `json:"value" doc:"The modality or label value this row is for. \"other\" is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part." example:"support"`
+	Value           string    `json:"value" doc:"The modality or label value this row is for. \"other\" with other true is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part." example:"support"`
 }
 
 // StatsBucket is the StatsBucket schema.

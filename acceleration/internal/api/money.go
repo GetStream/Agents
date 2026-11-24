@@ -4,12 +4,18 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
 // moneyError is the answer for a refusal about money, and false for any other error. A
@@ -19,29 +25,42 @@ import (
 // refuse only work that costs money, and are a 402 the caller fixes by paying or waiting for a
 // reset.
 func moneyError(err error) (APIError, bool) {
-	for _, refusal := range []struct {
-		kind   error
-		answer func(message string) APIError
-	}{
-		{policy.ErrSuspended, func(message string) APIError {
-			return APIError{Type: ErrorTypePermission, Code: codeAccountSuspended, Message: message}
-		}},
-		{policy.ErrNoCredits, func(message string) APIError { return paymentRequired(codeInsufficientCredits, message) }},
-		{policy.ErrTopUpRequired, func(message string) APIError { return paymentRequired(codeTopUpRequired, message) }},
-		{policy.ErrSystemLimit, func(message string) APIError { return paymentRequired(codeSystemLimitReached, message) }},
-		{policy.ErrBudgetSpent, func(message string) APIError { return paymentRequired(codeSpendLimitReached, message) }},
-		{policy.ErrUserLimit, func(message string) APIError {
-			return APIError{Type: ErrorTypeRateLimited, Code: codeUserLimitReached, Message: message}
-		}},
-		{policy.ErrSpendCheckUnavailable, func(message string) APIError {
-			return APIError{Type: ErrorTypeUnavailable, Code: codeSpendCheckUnavailable, Message: message}
-		}},
-	} {
+	for _, refusal := range moneyRefusals {
 		if found := refusalOf(err, refusal.kind); found != nil {
 			return refusal.answer(strings.TrimPrefix(found.Error(), "policy: ")), true
 		}
 	}
 	return APIError{}, false
+}
+
+// moneyRefusals are the refusals about money moneyError answers, each with its answer.
+var moneyRefusals = []struct {
+	kind   error
+	answer func(message string) APIError
+}{
+	{policy.ErrSuspended, func(message string) APIError {
+		return APIError{Type: ErrorTypePermission, Code: codeAccountSuspended, Message: message}
+	}},
+	{policy.ErrNoCredits, func(message string) APIError { return paymentRequired(codeInsufficientCredits, message) }},
+	{policy.ErrTopUpRequired, func(message string) APIError { return paymentRequired(codeTopUpRequired, message) }},
+	{policy.ErrSystemLimit, func(message string) APIError { return paymentRequired(codeSystemLimitReached, message) }},
+	{policy.ErrBudgetSpent, func(message string) APIError { return paymentRequired(codeSpendLimitReached, message) }},
+	{policy.ErrUserLimit, func(message string) APIError {
+		return APIError{Type: ErrorTypeRateLimited, Code: codeUserLimitReached, Message: message}
+	}},
+	{policy.ErrSpendCheckUnavailable, func(message string) APIError {
+		return APIError{Type: ErrorTypeUnavailable, Code: codeSpendCheckUnavailable, Message: message}
+	}},
+}
+
+// moneyCode reports whether code is one moneyError answers a refusal about money with.
+func moneyCode(code string) bool {
+	for _, refusal := range moneyRefusals {
+		if refusal.answer("").Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 // spendCheckRetry is how soon a caller refused because spend could not be shared is told to
@@ -75,20 +94,48 @@ type moneyAnswer struct {
 func (m moneyAnswer) GetHeaders() http.Header { return m.headers }
 
 // refusedRequest is a request routing refused, as the caller is told it: a refusal about money
-// as moneyError says, and anything else as the caller's to change. An app's settings that could
-// not be read are ours to answer for: the error goes on as is, so Huma logs it with its stack
-// and tells the caller only that something went wrong.
+// as moneyError says, a mistake of the caller's own (callerMistakes) as theirs to change, and a
+// feature the deployment lacks as not configured. Anything else is ours to answer for, such as
+// a database that failed, whose text names where the database is: the error goes on as is, so
+// Huma logs it with its stack and tells the caller only that something went wrong.
 func refusedRequest(err error) error {
-	if errors.Is(err, session.ErrAppSettingsUnreadable) {
-		return err
-	}
 	if answer, ok := moneyError(err); ok {
 		if headers := moneyHeaders(err); headers != nil {
 			return moneyAnswer{APIError: answer, headers: headers}
 		}
 		return answer
 	}
-	return invalidRequest(err.Error())
+	switch {
+	case errors.Is(err, session.ErrToolNotConfigured):
+		return toolNotConfigured(err)
+	case errors.Is(err, session.ErrNoMemory):
+		return errNoMemory
+	case errors.Is(err, session.ErrNotConfigured):
+		return notConfigured(err.Error())
+	case callerMistake(err):
+		return invalidRequest(err.Error())
+	}
+	return err
+}
+
+// callerMistakes are the errors a session, a turn or routing refuses a request with that are
+// the caller's to correct. Their messages say what to change and name nothing of the router's.
+var callerMistakes = []error{
+	session.ErrInvalid, conversation.ErrInvalid, agent.ErrInvalid, harness.ErrInvalid,
+	routing.ErrRequest, routing.ErrModelNotAllowed,
+	session.ErrNoStreamApp, session.ErrNoAgentChannelType, session.ErrUnsafeAgentChannelType,
+	session.ErrConversationReadOnly, session.ErrConversationElsewhere, session.ErrMemoryRegion,
+	streamapp.ErrStreamAppMoved, streamapp.ErrReadOnly, agent.ErrNoVideo,
+	conversation.ErrResponseRunning, conversation.ErrCommandNotFound,
+}
+
+// callerMistake reports whether err is one of callerMistakes, or a conversation the caller may
+// not read.
+func callerMistake(err error) bool {
+	if _, refused := errors.AsType[conversation.RefusedRead](err); refused {
+		return true
+	}
+	return slices.ContainsFunc(callerMistakes, func(mistake error) bool { return errors.Is(err, mistake) })
 }
 
 // refusalOf is the error in err's tree that is kind or wraps it directly, which reads as the

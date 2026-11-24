@@ -1,3 +1,4 @@
+import { followRewinds, heldIds, pruneRewound } from "./branches.js";
 import type { Client, Schemas } from "./client.js";
 import { Conversation } from "./conversation.js";
 import { ConfigurationError, RouterError } from "./errors.js";
@@ -6,9 +7,10 @@ import { Responses } from "./responses.js";
 import { Socket, type Frame, flag, nested, text } from "./socket.js";
 import { Speech } from "./speech.js";
 import { ConversationState } from "./state.js";
+import { ToolCalls, type ToolCallState } from "./tool-calls.js";
 import type { ChatClient, VideoClient } from "./stream.js";
 import { Holds, socketLine, toolCallContextOf } from "./tool_line.js";
-import type { ToolApproval, Tools } from "./tools.js";
+import { type ToolApproval, Tools } from "./tools.js";
 
 /**
  * How many events are held for one reader of `events()` that has not taken them yet, and for
@@ -75,9 +77,11 @@ export interface Participant {
  *
  * `kind` is the backend's own name for it: joined, hearing, heard, decision, responding,
  * response_delta, responded, blocked, speaking, spoke, turn, delegated, task_settled,
- * task_cancelled, tool_started, tool_ran, transferred, pressed, looked_up, backchannel,
- * interrupted, overlap_decided, conversation_compacted, conversation_updated, error and left,
- * and tool_call for a call waiting in `session.approvals`. The fields
+ * task_cancelled, tool_started, tool_updated, tool_ran, tool_call.started, tool_call.progress
+ * and tool_call.finished (each call's state, also kept in `session.toolCalls`), transferred,
+ * pressed, looked_up, backchannel, interrupted, overlap_decided, conversation_compacted,
+ * conversation_updated, error and left, and tool_call for a call waiting in
+ * `session.approvals`. The fields
  * below are filled from whichever of those carry them, and `frame` is the whole thing for
  * anything they do not cover.
  *
@@ -115,6 +119,18 @@ export interface SessionOptions {
    * nothing to send to.
    */
   watch?: boolean;
+}
+
+/**
+ * How to carry a conversation on. The tools given are declared to the router in place of the
+ * ones it was opened with, as on a fork.
+ */
+export interface ResumeOptions extends SessionOptions {
+  /**
+   * How long the model waits for one of your tools, in milliseconds, in place of what the
+   * conversation ran with. Left out, it keeps that, also after it ended. Zero is 30 seconds.
+   */
+  tool_timeout_ms?: number;
 }
 
 /** What to change about a conversation while continuing it. */
@@ -185,6 +201,12 @@ export class Session {
    */
   readonly conversation: Conversation;
   /**
+   * Every tool call of the session by `tool_call_id`, as it was last reported: running,
+   * waiting for a person's approval, or how it ended, whichever process runs it. Fed from the
+   * socket beside `events()`, like `state`.
+   */
+  readonly toolCalls = new ToolCalls();
+  /**
    * @internal What this device's camera showed lately, set by a `VoiceSession` while its
    * camera is on. The router's `get_video_frames` is answered from it.
    */
@@ -198,12 +220,30 @@ export class Session {
   private readonly socket: Socket | undefined;
   /** The Stream Chat channel and the video call, each opened on first use. */
   private chatPeer: Promise<SessionChat> | undefined;
+  /** The channel once it has opened, which a regenerate, an edit or an activation prunes. */
+  private chatOpened: SessionChat | undefined;
+  /** Stops following the channel's rewinds. */
+  private unfollowRewinds: (() => void) | undefined;
   private videoPeer: Promise<SessionVideo> | undefined;
   private readonly client: Client;
   private readonly tools: Tools | undefined;
+  /**
+   * The functions `addTools` gave this session after it opened, by name, each in the `Tools` it
+   * was added in; they run here before the session's own of the same name. `withdrawn` are the
+   * names `removeTool` took from the session, which its own no longer run, and `unsettled` the
+   * ones whose adding or withdrawing got no answer, or one that was neither a yes nor a refusal,
+   * which the router may or may not offer.
+   */
+  private readonly added = new Map<string, Tools>();
+  private readonly withdrawn = new Set<string>();
+  private readonly unsettled = new Set<string>();
+  /** The change of the session's tools under way, which the next one waits for. */
+  private changing: Promise<void> = Promise.resolve();
   /** What arrived while nobody was reading, for the first reader to start with. */
   private readonly backlog: SessionEvent[] = [];
   private readonly readers = new Set<Reader>();
+  /** What `on` registered, by the kind of event each wants. */
+  private readonly handlers = new Map<string, Set<(event: SessionEvent) => void>>();
   private readonly running = new Map<string, AbortController>();
   private readonly holds = new Holds();
   /** Aborts when the socket ends, which stops even a call that asked to be held. */
@@ -211,6 +251,8 @@ export class Session {
   private readonly asking = new Map<string, { request: ToolApprovalRequest; frame: Frame }>();
   /** The calls answered here, so answering one shown from the conversation again sends nothing. */
   private readonly answered = new Set<string>();
+  /** Calls allowed from the conversation without their arguments, run once the router sends them. */
+  private readonly allowedShown = new Set<string>();
   private readonly finished: Promise<void>;
   private ended = false;
   private stopped = false;
@@ -226,7 +268,12 @@ export class Session {
     this.socket = socket;
     this.tools = tools;
     this.conversation = new Conversation(socket !== undefined);
-    this.responses = new Responses(client, created.id, (asked) => this.conversation.said(asked));
+    this.responses = new Responses(
+      client,
+      created.id,
+      (asked) => this.conversation.said(asked),
+      () => this.branching(),
+    );
     this.voice = new Voice(client, created.id, Boolean(created.call_id), (on) =>
       this.speech.voiceChanged(on),
     );
@@ -308,7 +355,7 @@ export class Session {
     return this.created.id;
   }
 
-  /** The conversation replies are written into, for a text session that is not incognito. */
+  /** The conversation replies are written into, typed or spoken. Empty for an incognito session. */
   get conversationId(): string {
     return this.created.conversation_id ?? "";
   }
@@ -386,8 +433,9 @@ export class Session {
   /**
    * Answers a call that never reached this socket, from what the conversation shows of it, once.
    * The router settles a client call only with its result, so a declined one is answered with
-   * the same error a waiting one gets, and an allowed one of this session's tools is run here,
-   * or failed when the conversation left out its arguments, so the model isn't left waiting.
+   * the same error a waiting one gets, and an allowed one of this session's tools is run here.
+   * One whose arguments the conversation left out runs when the router sends the call, which it
+   * does to a session that attaches while the call waits.
    */
   private decideShown(id: string, call: NonNullable<ToolDecision["call"]>, { allowed, summary }: ToolDecision): void {
     if (this.answered.has(id)) {
@@ -401,14 +449,9 @@ export class Session {
     this.answered.add(id);
     if (!allowed) {
       this.held().send({ type: "tool_result", tool_call_id: id, ...ids, error: "The person declined this call." });
-    } else if (this.tools?.has(call.name)) {
+    } else if (this.functionsFor(call.name)?.has(call.name)) {
       if (call.arguments === undefined) {
-        this.held().send({
-          type: "tool_result",
-          tool_call_id: id,
-          ...ids,
-          error: "The call's arguments were too long for the conversation to keep, so it could not run.",
-        });
+        this.allowedShown.add(id);
       } else {
         void this.runTool({ type: "tool_call", id, name: call.name, arguments: call.arguments, ...ids });
       }
@@ -459,6 +502,30 @@ export class Session {
     }
   }
 
+  /**
+   * Calls `handler` with every event of `kind` that `events()` yields, such as
+   * `tool_call.finished` or `responded`, from now until the returned function is called. It
+   * needs no loop over `events()` and takes nothing from one.
+   */
+  on(kind: string, handler: (event: SessionEvent) => void): () => void {
+    let handlers = this.handlers.get(kind);
+    if (handlers === undefined) {
+      handlers = new Set();
+      this.handlers.set(kind, handlers);
+    }
+    const added = handlers;
+    const handle = (event: SessionEvent): void => handler(event);
+    added.add(handle);
+    return () => {
+      added.delete(handle);
+    };
+  }
+
+  /** The tool call `id` as it was last reported, or undefined before the session said anything of it. */
+  toolCall(id: string): ToolCallState | undefined {
+    return this.toolCalls.get().get(id);
+  }
+
   /** Speaks text without going through the model, for when you know what should be said. */
   say(said: string, options: { interrupt?: boolean } = {}): void {
     if (options.interrupt) {
@@ -507,6 +574,76 @@ export class Session {
   }
 
   /**
+   * Gives the agent more of your functions while the conversation runs, such as the ones a card
+   * shown in it brings, for this session alone. Their calls are run here, as those of the tools
+   * it was opened with are.
+   *
+   * The router waits for the reply in progress, and every call in flight, to finish, and the
+   * model is offered them from the next turn: so do not wait for this from inside one of this
+   * session's functions, which it would be waiting for. A name the session already has is
+   * refused with a 409: to change a function, `removeTool` it first, so that no call runs half
+   * under each. Only the kind of caller that opened the session may (a device its own, a backend
+   * a backend's), and a name the session offers from elsewhere, such as a connector's, is a 409.
+   * Refused with a 4xx, the router offers none of them and none is run here. When the answer is
+   * lost, or is any other failure, such as a 502 from a gateway in front of a router that had
+   * added them, the functions go on being run here, and adding one of their names again
+   * withdraws it first.
+   */
+  async addTools(more: Tools): Promise<void> {
+    // A conversation nothing is watching has nowhere to be asked for a call.
+    this.held();
+    await this.oneAtATime(async () => {
+      const declared = more.declared();
+      // A name whose last change was never settled may or may not be the router's: it is
+      // withdrawn first, so the router and this session agree on which function it is.
+      for (const { name } of declared) {
+        if (this.unsettled.has(name)) {
+          await this.withdraw(name, true);
+        }
+      }
+      // Run from before the router answers: the next turn can call one before the answer is
+      // here. A name already run here keeps its function, since the router refuses to add it
+      // again.
+      const fresh = declared
+        .map(({ name }) => name)
+        .filter((name) => !this.added.has(name) && (this.withdrawn.has(name) || !this.tools?.has(name)));
+      for (const name of fresh) {
+        this.added.set(name, more);
+      }
+      try {
+        await this.client.post("/v1/agents/sessions/{id}/tools", {
+          path: { id: this.id },
+          body: { tools: declared },
+        });
+      } catch (cause) {
+        // Refused, the router offers none of them. Otherwise it may have added them, so their
+        // calls are still run here until a later change of the name settles it.
+        for (const name of fresh) {
+          if (refusal(cause)) {
+            this.added.delete(name);
+          } else {
+            this.unsettled.add(name);
+          }
+        }
+        throw cause;
+      }
+    });
+  }
+
+  /**
+   * Withdraws one of your functions, whether the session was opened with it or it was added
+   * since. The router waits as it does for `addTools`, so once this resolves no call of it is in
+   * flight and none can be made, and it is no longer run here; do not wait for this from inside
+   * one of this session's functions either. A name you have no tool by is a 404, and refused
+   * with a 4xx, nothing changes. When the answer is lost, or is any other failure, such as a 502
+   * from a gateway in front of a router that had withdrawn it, the function goes on being run
+   * here, and removing or adding the name again withdraws it first, a 404 then being as good.
+   */
+  removeTool(name: string): Promise<void> {
+    return this.oneAtATime(() => this.withdraw(name, this.unsettled.has(name)));
+  }
+
+  /**
    * The socket, or what to do instead of it.
    *
    * Everything reached through here is a message to a conversation being watched, and a
@@ -535,28 +672,46 @@ export class Session {
    * The history comes across by default. The fork writes into a channel of its own, so the
    * two do not end up interleaved in one transcript with no way to tell which turn belonged
    * to which. An incognito parent cannot be forked, because there is nothing to fork from.
+   *
+   * The router gives the fork the tools this session offers when it forks, those `addTools`
+   * added included and those `removeTool` withdrew left out, and the fork runs the functions
+   * this session runs for them as its own, unless given `tools`, and a name whose change was
+   * never settled here is unsettled in the fork too. A change of them under way is finished
+   * first, so do not wait for this from inside one of this session's functions, which it would
+   * be waiting for.
    */
   async fork(options: ForkOptions = {}): Promise<Session> {
     const { tools, interim, decisions, watch, modelOverwrites, ...rest } = options;
-    const forked = await this.client.post("/v1/agents/sessions/{id}/fork", {
-      path: { id: this.id },
-      body: {
-        ...rest,
-        ...(modelOverwrites ? { model_overwrites: modelOverwrites } : {}),
-      },
-    });
     // The fork inherits the parent's tools unless it was given its own: the functions are
     // here in this process, and a conversation continued without them would offer the model
-    // tools it cannot run.
-    const inherited = tools ?? this.tools;
-    return Session.startWatching(this.client, forked, {
-      ...(inherited ? { tools: inherited } : {}),
+    // tools it cannot run. They are read, and the fork asked for, between changes of them, so
+    // the fork runs the ones the router copied.
+    const [forked, inherited, unsettled] = await this.oneAtATime(async () => {
+      const inherited = tools ?? this.current();
+      const unsettled = new Set(this.unsettled);
+      const forked = await this.client.post("/v1/agents/sessions/{id}/fork", {
+        path: { id: this.id },
+        body: {
+          ...rest,
+          ...(modelOverwrites ? { model_overwrites: modelOverwrites } : {}),
+        },
+      });
+      return [forked, inherited, unsettled] as const;
+    });
+    const fork = await Session.startWatching(this.client, forked, {
+      tools: inherited,
       ...(interim === undefined ? {} : { interim }),
       ...(decisions === undefined ? {} : { decisions }),
       // A fork of a conversation nothing is watching is not watched either, unless the
       // caller says otherwise: whatever stopped the parent holding a socket still holds.
       watch: watch ?? Boolean(this.socket),
     });
+    // The router copied whatever it offers by those names, which this session never learned,
+    // so the fork's next change of one withdraws it first.
+    for (const name of unsettled) {
+      fork.unsettled.add(name);
+    }
+    return fork;
   }
 
   /**
@@ -659,6 +814,8 @@ export class Session {
       }
     }
     this.stopped = true;
+    this.unfollowRewinds?.();
+    this.unfollowRewinds = undefined;
     this.socket?.close();
     await this.finished;
     if (!this.socket) {
@@ -684,6 +841,7 @@ export class Session {
         this.speech.observe(message);
         this.state.observe(message);
         this.conversation.observe(message);
+        this.toolCalls.observe(message);
 
         if (message.type === "tool_call" && text(message, "name") === CameraFrames.toolName) {
           // Answered by the session rather than offered as a tool, and only by a device whose
@@ -697,11 +855,25 @@ export class Session {
           // Every watcher is sent every call, and the router says which are to run it. One
           // from before it said holds the same rule: answering a tool held elsewhere would
           // beat whoever runs it, with an error.
-          if (message["run"] === false || !this.tools?.has(text(message, "name"))) {
+          const functions = this.functionsFor(text(message, "name"));
+          if (message["run"] === false || !functions?.has(text(message, "name"))) {
             continue;
           }
-          // A caller who already said yes on a voice call is not asked again.
-          const approval = message.approved === true ? undefined : this.tools.approval(text(message, "name"));
+          const id = text(message, "id");
+          // Allowed from the conversation before its arguments were known: this is the call
+          // that answer was waiting for.
+          const allowedShown = this.allowedShown.delete(id);
+          // A call this session already answered, is running or is asking about, delivered
+          // again, as the router does to a socket that attaches while it waits. Asking again
+          // would put a settled question back in front of the person, and running it again
+          // would do what it does twice.
+          if (!allowedShown && (this.answered.has(id) || this.running.has(id) || this.asking.has(id))) {
+            continue;
+          }
+          // A caller who already said yes, on a voice call or to the call shown in the
+          // conversation before it reached here, is not asked again.
+          const allowed = message.approved === true || allowedShown;
+          const approval = allowed ? undefined : functions.approval(text(message, "name"));
           if (approval) {
             this.hold(message, approval);
             this.deliver(eventOf(message));
@@ -768,6 +940,70 @@ export class Session {
     this.approvalsChanged();
   }
 
+  /**
+   * Runs one change of the session's tools at a time, in the order they were asked for. A
+   * function is put in place before the router is asked and taken back when it refuses, so two
+   * changes interleaved across their requests could take back what the other put in place.
+   */
+  private oneAtATime<T>(change: () => Promise<T>): Promise<T> {
+    const changed = this.changing.then(change);
+    this.changing = changed.then(() => undefined, () => undefined);
+    return changed;
+  }
+
+  /**
+   * Takes the tool called `name` from the session and from what runs here. `absentIsFine`
+   * settles a name whose last change was never settled: the router having no tool by it is as
+   * good as withdrawing it.
+   */
+  private async withdraw(name: string, absentIsFine: boolean): Promise<void> {
+    try {
+      // Not retried: sent again after its answer was lost, the 404 would say the router had no
+      // tool by the name when it was this request that withdrew it.
+      await this.client.delete("/v1/agents/sessions/{id}/tools/{name}", {
+        path: { id: this.id, name },
+        idempotent: false,
+      });
+    } catch (cause) {
+      if (!(absentIsFine && cause instanceof RouterError && cause.status === 404)) {
+        // Not refused, the router may have withdrawn it, so it is still run here until a later
+        // change of the name settles it.
+        if (!refusal(cause)) {
+          this.unsettled.add(name);
+        }
+        throw cause;
+      }
+    }
+    this.added.delete(name);
+    this.unsettled.delete(name);
+    this.withdrawn.add(name);
+  }
+
+  /**
+   * The functions that run the tool called `name`: the ones `addTools` added it in, none once
+   * `removeTool` withdrew it, else the session's own.
+   */
+  private functionsFor(name: string): Tools | undefined {
+    return this.added.get(name) ?? (this.withdrawn.has(name) ? undefined : this.tools);
+  }
+
+  /**
+   * The functions that run the session's tools now, in a `Tools` of their own: those it was
+   * opened with less the ones withdrawn, and the ones added since, a name whose change was
+   * never settled included.
+   */
+  private current(): Tools {
+    const running = new Map<string, Tools>();
+    const names = [...(this.tools?.declared() ?? []).map(({ name }) => name), ...this.added.keys()];
+    for (const name of names) {
+      const functions = this.functionsFor(name);
+      if (functions) {
+        running.set(name, functions);
+      }
+    }
+    return Tools.of(running);
+  }
+
   /** Tells `conversation` which calls are waiting now. */
   private approvalsChanged(): void {
     this.conversation.approvalsChanged([...this.asking.values()].map(({ request }) => request));
@@ -793,15 +1029,20 @@ export class Session {
 
     const cancel = new AbortController();
     this.running.set(id, cancel);
+    // Answered by this session from here on, also once it has finished and left `running`: the
+    // same call delivered again afterwards is not run again.
+    this.answered.add(id);
+    const functions = this.functionsFor(name);
     try {
-      if (!this.tools) {
+      if (!functions) {
         throw new Error(`${name} was asked for, and no tools are registered`);
       }
       const line = socketLine((sent) => this.socket?.open && this.socket.send(sent), this.holds);
       const toolCallContext = toolCallContextOf(frame, this.id, line, this.ending.signal);
-      result["output"] = await this.tools.call(name, text(frame, "arguments"), cancel.signal, toolCallContext);
+      result["output"] = await functions.call(name, text(frame, "arguments"), cancel.signal, toolCallContext);
     } catch (cause) {
-      result["error"] = cause instanceof Error ? cause.message : String(cause);
+      // What the model is told is the tools' own choice (`onError`), since it may repeat it.
+      result["error"] = functions ? functions.failure(name, id, cause) : (cause as Error).message;
     } finally {
       this.running.delete(id);
       this.holds.forget(id);
@@ -860,8 +1101,8 @@ export class Session {
     const channel = this.created.conversation_id ?? "";
     if (!channel) {
       throw new ConfigurationError(
-        "this session keeps no transcript, so there is no channel to read: only a text " +
-          "session has one, and an incognito session never does",
+        "this session keeps no transcript, so there is no channel to read: an incognito " +
+          "session never has one",
       );
     }
     // The wire writes the channel as type:id, which is what the backend calls a
@@ -869,7 +1110,33 @@ export class Session {
     const [type, ...rest] = channel.split(":");
 
     const connected = await this.client.peers.chat();
-    return { client: connected, channel: connected.channel(type ?? "agent", rest.join(":")) };
+    const opened: SessionChat = { client: connected, channel: connected.channel(type ?? "agent", rest.join(":")) };
+    // A rewind another device made, or this one, hides messages this client already holds.
+    // Not followed for a session closed while the channel opened: nothing would stop it.
+    if (!this.stopped) {
+      this.unfollowRewinds?.();
+      this.unfollowRewinds = followRewinds(connected, opened.channel, channel);
+    }
+    this.chatOpened = opened;
+    return opened;
+  }
+
+  /**
+   * What a regenerate, an edit or an activation does to the open channel: notes what it holds
+   * before the request goes, and drops what the answer's `rewound_to` hid of that once it
+   * comes back. A channel not opened yet holds nothing, and is not opened for this.
+   */
+  private branching(): (rewoundTo: Schemas["RewoundTo"] | undefined) => void {
+    const chat = this.chatOpened;
+    if (!chat) {
+      return () => undefined;
+    }
+    const before = heldIds(chat.channel);
+    return (rewoundTo) => {
+      if (rewoundTo) {
+        pruneRewound(chat.channel, rewoundTo, before);
+      }
+    };
   }
 
   private async openVideo(): Promise<SessionVideo> {
@@ -884,6 +1151,16 @@ export class Session {
   }
 
   private deliver(event: SessionEvent): void {
+    for (const handler of [...(this.handlers.get(event.kind) ?? [])]) {
+      try {
+        handler(event);
+      } catch (cause) {
+        // A handler runs on the socket's read, which one mistake must not stop.
+        queueMicrotask(() => {
+          throw cause;
+        });
+      }
+    }
     if (this.readers.size === 0) {
       this.backlog.push(event);
       if (this.backlog.length > BUFFERED_EVENTS) {
@@ -946,6 +1223,15 @@ export class Voice {
     this.changed?.(false);
     return stopped;
   }
+}
+
+/**
+ * Whether a change of the session's tools failed with the router refusing it, which changed
+ * nothing. Only a 4xx says so: a 5xx can come from a gateway in front of a router that made the
+ * change, and an answer that was lost or could not be read says nothing.
+ */
+function refusal(cause: unknown): boolean {
+  return cause instanceof RouterError && cause.status >= 400 && cause.status < 500;
 }
 
 /** A tool call's arguments, which arrive as a JSON object encoded as a string. Garbled ones are none. */

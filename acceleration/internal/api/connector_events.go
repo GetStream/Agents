@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/eventforward"
@@ -140,7 +141,7 @@ func (s *Server) receiveConnectorEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	connectorID := r.PathValue("connector_id")
-	definition, err := s.store.LatestBuiltinConnectorDefinition(r.Context(), connectorID)
+	definition, err := s.store.ConnectorDefinitions.LatestBuiltin(r.Context(), connectorID)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		writeError(w, errNoConnectorEvents)
 		return
@@ -197,7 +198,7 @@ func (s *Server) receiveProviderAppEvent(w http.ResponseWriter, r *http.Request)
 		writeFailure(w, r, err)
 		return
 	}
-	definition, err := s.store.LatestConnectorDefinition(r.Context(), app.CustomerID, connectorID)
+	definition, err := s.store.ConnectorDefinitions.Latest(r.Context(), app.CustomerID, connectorID)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		writeError(w, errNoConnectorEvents)
 		return
@@ -250,7 +251,7 @@ func (s *Server) answerProviderAppHandshake(w http.ResponseWriter, r *http.Reque
 		writeFailure(w, r, err)
 		return
 	}
-	definition, err := s.store.LatestConnectorDefinition(r.Context(), app.CustomerID, connectorID)
+	definition, err := s.store.ConnectorDefinitions.Latest(r.Context(), app.CustomerID, connectorID)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		methodNotAllowed(w, r)
 		return
@@ -336,6 +337,8 @@ func (s *Server) receiveEvent(w http.ResponseWriter, r *http.Request, body []byt
 		writeError(w, errUnsigned)
 		return
 	}
+	// A connector's own route is the operator's app's, whose events are no one customer's.
+	activity.NoteCustomer(r.Context(), app.CustomerID, activity.AreaHooksIn)
 	if event.Challenge != "" {
 		outcome = eventChallenge
 		writeChallenge(w, event.Challenge)
@@ -411,7 +414,7 @@ func (s *Server) revokeAccount(ctx context.Context, m core.Manifest, signal core
 			metadata[name] = value
 		}
 	}
-	refs, err := s.store.ConnectionsByIdentity(ctx, m.ID, inputs, metadata)
+	refs, err := s.store.ConnectorConnections.SelectByIdentity(ctx, m.ID, inputs, metadata)
 	if err != nil {
 		return err
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -138,6 +139,122 @@ func TestSafeLogTextKeepsTheRestOfTheURL(t *testing.T) {
 	}
 }
 
+// A key in an encoded query that no ? or & stands before (a text cut at the parameter, a name
+// after an encoded quote), and a provider's refusal that names the key with no = or : before it.
+// Each row is the whole answer, so what stays around the key is checked too. The rows with no
+// credential are the answers base 31fd2dd96 gives, the same as the input.
+func TestSafeLogTextTakesAnEncodedKeyAndAVendorRefusalOut(t *testing.T) {
+	raw := make([]byte, 16)
+	_, err := rand.Read(raw)
+	require.NoError(t, err)
+	secret := hex.EncodeToString(raw)
+	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0." + secret
+	for name, tc := range map[string]struct{ in, want string }{
+		"jwt after the phrase":                   {"Invalid API token " + jwt, "Invalid API token [redacted]"},
+		"jwt after the phrase and a colon":       {"Invalid API key: " + jwt, "Invalid API key: [redacted]"},
+		"key":                                    {"key%3D" + secret, "key%3D[redacted]"},
+		"api_key":                                {"api_key%3D" + secret, "api_key%3D[redacted]"},
+		"token":                                  {"token%3D" + secret, "token%3D[redacted]"},
+		"mixed case equals sign":                 {"key%3d" + secret, "key%3d[redacted]"},
+		"upper case name":                        {"API_KEY%3d" + secret, "API_KEY%3d[redacted]"},
+		"name with a prefix":                     {"x_api_key%3D" + secret, "x_api_key%3D[redacted]"},
+		"apikey":                                 {"apikey%3D" + secret, "apikey%3D[redacted]"},
+		"access_token":                           {"access_token%3D" + secret, "access_token%3D[redacted]"},
+		"client_secret":                          {"client_secret%3D" + secret, "client_secret%3D[redacted]"},
+		"password":                               {"password%3D" + secret, "password%3D[redacted]"},
+		"camel case accessToken":                 {"accessToken%3D" + secret, "accessToken%3D[redacted]"},
+		"camel case clientSecret":                {"clientSecret%3D" + secret, "clientSecret%3D[redacted]"},
+		"camel case authToken":                   {"authToken%3D" + secret, "authToken%3D[redacted]"},
+		"camel case refreshToken":                {"refreshToken%3D" + secret, "refreshToken%3D[redacted]"},
+		"camel case idToken":                     {"idToken%3D" + secret, "idToken%3D[redacted]"},
+		"id_token after a prefix":                {"x_id_token%3D" + secret, "x_id_token%3D[redacted]"},
+		"camel case privateKey":                  {"privateKey%3D" + secret, "privateKey%3D[redacted]"},
+		"after a twice-encoded quote":            {"q%3D%2522key%253D" + secret, "q%3D%2522key%253D[redacted]"},
+		"after a twice-encoded space":            {"%2520key%253D" + secret, "%2520key%253D[redacted]"},
+		"camel case after a twice-encoded ?":     {"%253FaccessToken%253D" + secret, "%253FaccessToken%253D[redacted]"},
+		"camel case apiKey":                      {"apiKey%3D" + secret, "apiKey%3D[redacted]"},
+		"twice-encoded equals sign":              {"key%253D" + secret, "key%253D[redacted]"},
+		"in the middle of a sentence":            {"request failed: key%3D" + secret + " tail", "request failed: key%3D[redacted] tail"},
+		"after an encoded quote":                 {"q=%22key%3D" + secret + "%22", "q=%22key%3D[redacted]"},
+		"in the middle of a query":               {"wss://live.example/ws?a=1&key%3D" + secret + "&b=2", "wss://live.example/ws?a=1&key%3D[redacted]&b=2"},
+		"in an encoded url":                      {"https%3A%2F%2Flive.example%2Fws%3Fa%3D1%26key%3D" + secret, "https%3A%2F%2Flive.example%2Fws%3Fa%3D1%26key%3D[redacted]"},
+		"after a json-escaped newline":           {`{"m":"x\nkey%3D` + secret + `"}`, `{"m":"x\nkey%3D[redacted]"}`},
+		"after a json-escaped quote":             {`{"m":"\u0022key%3D` + secret + `"}`, `{"m":"\u0022key%3D[redacted]"}`},
+		"ends at a quote":                        {`"key%3D` + secret + `" failed`, `"key%3D[redacted]" failed`},
+		"ends at a single quote":                 {`'key%3D` + secret + `' failed`, `'key%3D[redacted]' failed`},
+		"ends at a fragment":                     {"key%3D" + secret + "#top", "key%3D[redacted]#top"},
+		"ends at a json escape":                  {"key%3D" + secret + `\u0026model=m`, "key%3D[redacted]" + `\u0026model=m`},
+		"invalid api key":                        {"Invalid API key " + secret, "Invalid API key [redacted]"},
+		"invalid api key with a colon":           {"invalid api key: " + secret, "invalid api key: [redacted]"},
+		"incorrect api key provided":             {"Incorrect API key provided: " + secret, "Incorrect API key provided: [redacted]"},
+		"incorrect key from a vendor":            {"Incorrect API key provided: sk-" + secret, "Incorrect API key provided: [redacted]"},
+		"invalid_api_key code":                   {"invalid_api_key " + secret, "invalid_api_key [redacted]"},
+		"invalid x-api-key":                      {"Invalid x-api-key " + secret, "Invalid x-api-key [redacted]"},
+		"invalid api token":                      {"Invalid API token " + secret, "Invalid API token [redacted]"},
+		"key of 16 characters":                   {"Invalid API key " + secret[:16], "Invalid API key [redacted]"},
+		"after a prefix and a colon":             {`provider: 401: {"message":"Invalid API key ` + secret + `"}`, `provider: 401: {"message":"Invalid API key [redacted]"}`},
+		"text after the key":                     {"Invalid API key " + secret + " for model m", "Invalid API key [redacted] for model m"},
+		"word then key":                          {"Invalid API key authentication_failed_error; Invalid API key " + secret, "Invalid API key authentication_failed_error; Invalid API key [redacted]"},
+		"key then word":                          {"Invalid API key " + secret + "; Invalid API key authentication_failed_error", "Invalid API key [redacted]; Invalid API key authentication_failed_error"},
+		"before the verdict, word then key":      {"API key authentication_failed_error is invalid; API key " + secret + " is invalid", "API key authentication_failed_error is invalid; API key [redacted] is invalid"},
+		"key before the verdict, single quotes":  {"The API key '" + secret + "' is invalid", "The API key '[redacted]' is invalid"},
+		"key before the verdict, double quotes":  {`The API key "` + secret + `" is invalid`, `The API key "[redacted]" is invalid`},
+		"key before the verdict, no quotes":      {"The API key " + secret + " is invalid", "The API key [redacted] is invalid"},
+		"api token before the verdict":           {"api token '" + secret + "' was incorrect", "api token '[redacted]' was incorrect"},
+		"single-quoted key after a colon":        {"Invalid API key: '" + secret + "'", "Invalid API key: '[redacted]'"},
+		"double-quoted key after the phrase":     {`Invalid API key "` + secret + `"`, `Invalid API key "[redacted]"`},
+		"json-escaped quote after the phrase":    {`{"message":"Invalid API key: \"` + secret + `\""}`, `{"message":"Invalid API key: \"[redacted]\""}`},
+		"json-escaped quotes before the verdict": {`{"detail":"The API key \"` + secret + `\" is invalid"}`, `{"detail":"The API key \"[redacted]\" is invalid"}`},
+		"base64 key":                             {"Invalid API key Ab" + secret[:10] + "+/" + secret[10:] + "==", "Invalid API key [redacted]"},
+		"base64 key before the verdict":          {"The API key '" + secret[:16] + "+/" + secret[16:] + "=' is invalid", "The API key '[redacted]' is invalid"},
+		"key of 16 before the verdict":           {"API key '" + secret[:16] + "' is invalid for model m", "API key '[redacted]' is invalid for model m"},
+		"key then an encoded key, in this order": {"Invalid API key " + secret[:16] + "-key%3D" + secret, "Invalid API key [redacted]%3D[redacted]"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.want, SafeLogText(tc.in))
+			require.Equal(t, tc.want, SafeLogText(tc.want), "a second pass changes the text")
+		})
+	}
+	for name, text := range map[string]string{
+		"no key named":                       "Invalid API key provided",
+		"no key named, other wording":        "Incorrect API key provided",
+		"request id of 8 hex digits":         "Invalid API key " + secret[:8],
+		"key of 15 characters":               "Invalid API key " + secret[:15],
+		"request id after the sentence":      "Invalid API key. Request id " + secret[:8],
+		"request id in parentheses":          "Invalid API key (request " + secret[:8] + ")",
+		"a word after the phrase":            "invalid_api_key authentication_failed_error",
+		"an id with no phrase":               "request id " + secret,
+		"id of 15 before the verdict":        "API key '" + secret[:15] + "' is invalid",
+		"id of 8 before the verdict":         "API key " + secret[:8] + " is invalid",
+		"a word before the verdict":          "API key authentication_failed_error is invalid",
+		"key before another verdict":         "API key " + secret + " is set",
+		"phrase with no key":                 "API key not valid. Please pass a valid API key.",
+		"already redacted vendor text":       "Invalid API key [redacted]",
+		"already redacted query":             "key%3D[redacted]",
+		"name with no value":                 "key%3D",
+		"name inside a word":                 "monkey%3D" + secret,
+		"key word glued to the phrase":       "Invalid API keystore" + secret,
+		"plural name":                        "keys%3D" + secret,
+		"tokens":                             "max_tokens%3D256 tokens%3D12",
+		"a name ending in _token":            "max_token%3D256",
+		"a name ending in _key":              "sort_key%3Ddate",
+		"a name ending in id_token":          "valid_token%3D" + secret,
+		"phrase glued to the word before it": "noninvalid api key " + secret,
+		"phrase glued together":              "invalidapi key " + secret,
+		"name glued to the word before it":   "rapi key " + secret + " is invalid",
+		"name glued to the key":              "API key" + secret + " is invalid",
+		"key glued to the verdict":           "API key " + secret + "is invalid",
+		"name with a plain equals":           "the key=value pair",
+		"a name=value after the phrase":      "Invalid API key provided: model=gpt-4o-mini-transcribe",
+		"a request id after the colon":       "Invalid API key: request_id=req_0123456789abcdef",
+		"a name=value before the verdict":    "API key model=gpt-4o-mini-transcribe is invalid",
+	} {
+		t.Run("keeps "+name, func(t *testing.T) {
+			require.Equal(t, text, SafeLogText(text))
+		})
+	}
+}
+
 // Our own errors name a bearer token, a secret or a password in prose, and a WWW-Authenticate
 // challenge starts with Bearer and an auth-param (RFC 6750 section 3): with no credential in
 // them, they are kept byte for byte.
@@ -187,6 +304,296 @@ func TestRedactLogTextTakesAValueThatIsNotAWord(t *testing.T) {
 	}
 }
 
+// A connector's error can echo a token in a shape no keyword names: each row is a text with one,
+// and the text redacted, so a rule that is removed, or a part of it that is cut, fails its row.
+func TestRedactLogTextTakesAConnectorTokenShape(t *testing.T) {
+	secret := rand.Text()
+	jwt := "eyJhbGciOi-_JIUzI1NiJ9.eyJ" + secret[:12] + "-_." + secret[12:] + "_-"
+	pem := pemLine("BEGIN", "RSA ") + "\nMIIEowIBAAKCAQEA+/" + secret + "\n" + secret + "==\n" + pemLine("END", "RSA ")
+	rows := map[string]string{
+		"slack bot token":                          "slack: invalid_auth for xoxb-123456789012-" + secret,
+		"slack user token":                         "slack: invalid_auth for xoxp-123456789012-" + secret,
+		"slack app token":                          "slack: invalid_auth for xoxa-123456789012-" + secret,
+		"slack legacy token":                       "slack: invalid_auth for xoxo-123456789012-" + secret,
+		"slack session token":                      "slack: invalid_auth for xoxs-123456789012-" + secret,
+		"slack refresh token":                      "slack: invalid_auth for xoxr-123456789012-" + secret,
+		"slack rotating refresh token":             "slack: invalid_auth for xoxe-1-" + secret,
+		"slack app-level token":                    "slack: invalid_auth for xapp-1-A0123456789-123456789012-" + secret,
+		"aws temporary access key id":              "aws: InvalidClientTokenId for ASIA" + secret[:16],
+		"github personal access token":             "github: 401 for ghp_" + secret,
+		"github oauth token":                       "github: 401 for gho_" + secret,
+		"github user-to-server token":              "github: 401 for ghu_" + secret,
+		"github server-to-server token":            "github: 401 for ghs_" + secret,
+		"github refresh token":                     "github: 401 for ghr_" + secret,
+		"github fine-grained token":                "github: 401 for github_pat_11A" + secret + "_" + secret,
+		"token in a nested encoded query":          "https://a.example/?next=%3Faccess_token%3Dghp_" + secret,
+		"google api key":                           "google: 403 for AIza" + secret + "-_abcdefghij",
+		"google api key of 35 characters":          "google: 403 for AIza" + secret + secret[:9],
+		"aws access key id":                        "aws: InvalidClientTokenId for AKIA" + secret[:16],
+		"bare jwt":                                 "provider said " + jwt + " is expired",
+		"bare jwt in quotes":                       `body="` + jwt + `"`,
+		"jwt with an empty signature":              "provider said eyJhbGciOiJub25lIn0.eyJ" + secret[:12] + ". failed",
+		"jwt after a colon":                        "got:" + jwt,
+		"pem block":                                "parse: " + pem + ": no key found",
+		"pem block with real newlines":             "parse: " + pemLine("BEGIN", "") + "\nMIIE" + secret + "\n" + pemLine("END", "") + "\nfailed",
+		"encrypted pem block":                      "parse: " + pemLine("BEGIN", "ENCRYPTED ") + "\nMIIE" + secret + "\n" + pemLine("END", "ENCRYPTED ") + ": bad",
+		"legacy encrypted pem block":               "parse: " + pemLine("BEGIN", "RSA ") + "\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0A1B2C3D4E5F60718293A4B5C6D7E8F9\n\nMIIE" + secret + "\n" + pemLine("END", "RSA ") + ": bad",
+		"legacy encrypted pem block escaped":       `parse: "` + pemLine("BEGIN", "RSA ") + `\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0A1B2C3D4E5F60718293A4B5C6D7E8F9\n\nMIIE` + secret + `" failed`,
+		"pem block cut before its end":             `parse: "` + pemLine("BEGIN", "") + `\nMIIE+/` + secret + `==" failed`,
+		"id_token":                                 "oauth: bad id_token=" + secret + " from the provider",
+		"id_token as json":                         `{"id_token":"` + secret + `"}`,
+		"id-token header":                          "x-id-token: " + secret,
+		"prefixed id_token":                        "oauth: client_id_token=" + secret + " refused",
+		"auth_token":                               "request failed auth_token=" + secret + " refused",
+		"auth_token as json":                       `{"auth_token":"` + secret + `"}`,
+		"x-auth-token":                             "x-auth-token: " + secret,
+		"oauth_token":                              "oauth_token=" + secret,
+		"private_key as json":                      `{"type":"service_account","private_key":"` + pem + `","client_email":"a@b.example"}`,
+		"private_key with a dash":                  "private-key=" + secret,
+		"token as json":                            `{"ok":true,"token":"` + secret + `","scope":"read"}`,
+		"token as json with spaces":                `{"ok":true,"token" : "` + secret + `"}`,
+		"token as json in upper case":              `{"Token":"` + secret + `"}`,
+		"token as json with an escaped quote":      `{"token":"` + secret + `\"` + secret + `","scope":"read"}`,
+		"token as json with a word for its value":  `{"token":"expired"}`,
+		"token as a dict with single quotes":       `{'token': '` + secret + `', 'scope': 'read'}`,
+		"token as json after a bearer type":        `{"token_type":"bearer","token":"` + secret + `"}`,
+		"token as json in a connector error":       "connector github: exchange failed: 200 OK " + `{"token":"` + secret + `"}`,
+		"token as json after a nested object":      `{"data":{"token":"` + secret + `"}}`,
+		"token as json after a number key":         `{"expires_in":3600,"token":"` + secret + `"}`,
+		"token as json with a json null before it": `{"error":null,"token":"` + secret + `"}`,
+	}
+	want := map[string]string{
+		"slack bot token":                          "slack: invalid_auth for [redacted]",
+		"slack user token":                         "slack: invalid_auth for [redacted]",
+		"slack app token":                          "slack: invalid_auth for [redacted]",
+		"slack legacy token":                       "slack: invalid_auth for [redacted]",
+		"slack session token":                      "slack: invalid_auth for [redacted]",
+		"slack refresh token":                      "slack: invalid_auth for [redacted]",
+		"slack rotating refresh token":             "slack: invalid_auth for [redacted]",
+		"slack app-level token":                    "slack: invalid_auth for [redacted]",
+		"aws temporary access key id":              "aws: InvalidClientTokenId for [redacted]",
+		"github personal access token":             "github: 401 for [redacted]",
+		"github oauth token":                       "github: 401 for [redacted]",
+		"github user-to-server token":              "github: 401 for [redacted]",
+		"github server-to-server token":            "github: 401 for [redacted]",
+		"github refresh token":                     "github: 401 for [redacted]",
+		"github fine-grained token":                "github: 401 for [redacted]",
+		"token in a nested encoded query":          "https://a.example/?next=%3Faccess_token%3D[redacted]",
+		"google api key":                           "google: 403 for [redacted]",
+		"google api key of 35 characters":          "google: 403 for [redacted]",
+		"aws access key id":                        "aws: InvalidClientTokenId for [redacted]",
+		"bare jwt":                                 "provider said [redacted] is expired",
+		"bare jwt in quotes":                       `body="[redacted]"`,
+		"jwt with an empty signature":              "provider said [redacted] failed",
+		"jwt after a colon":                        "got:[redacted]",
+		"pem block":                                "parse: [redacted]: no key found",
+		"pem block with real newlines":             "parse: [redacted]\nfailed",
+		"encrypted pem block":                      "parse: [redacted]: bad",
+		"legacy encrypted pem block":               "parse: [redacted]: bad",
+		"legacy encrypted pem block escaped":       `parse: "[redacted]" failed`,
+		"pem block cut before its end":             `parse: "[redacted]" failed`,
+		"id_token":                                 "oauth: bad [redacted] from the provider",
+		"id_token as json":                         `{"[redacted]}`,
+		"id-token header":                          "x-[redacted]",
+		"prefixed id_token":                        "oauth: client[redacted] refused",
+		"auth_token":                               "request failed [redacted] refused",
+		"auth_token as json":                       `{"[redacted]}`,
+		"x-auth-token":                             "x-[redacted]",
+		"oauth_token":                              "o[redacted]",
+		"private_key as json":                      `{"type":"service_account","[redacted],"client_email":"a@b.example"}`,
+		"private_key with a dash":                  "[redacted]",
+		"token as json":                            `{"ok":true,"token":"[redacted]","scope":"read"}`,
+		"token as json with spaces":                `{"ok":true,"token" : "[redacted]"}`,
+		"token as json in upper case":              `{"Token":"[redacted]"}`,
+		"token as json with an escaped quote":      `{"token":"[redacted]","scope":"read"}`,
+		"token as json with a word for its value":  `{"token":"[redacted]"}`,
+		"token as a dict with single quotes":       `{'token': "[redacted]", 'scope': 'read'}`,
+		"token as json after a bearer type":        `{"token_type":"bearer","token":"[redacted]"}`,
+		"token as json in a connector error":       "connector github: exchange failed: 200 OK " + `{"token":"[redacted]"}`,
+		"token as json after a nested object":      `{"data":{"token":"[redacted]"}}`,
+		"token as json after a number key":         `{"expires_in":3600,"token":"[redacted]"}`,
+		"token as json with a json null before it": `{"error":null,"token":"[redacted]"}`,
+	}
+	require.Len(t, want, len(rows))
+	for name, text := range rows {
+		t.Run(name, func(t *testing.T) {
+			got := RedactLogText(text)
+			require.NotContains(t, got, secret)
+			require.Equal(t, want[name], got)
+		})
+	}
+}
+
+// A provider's JSON answer keeps its shape when its token is taken out: the stored text is read
+// back as JSON, so the key stays and its value is "[redacted]".
+func TestRedactLogTextKeepsAJSONAnswerValidWhenItsTokenIsTakenOut(t *testing.T) {
+	secret := rand.Text()
+	for _, text := range []string{
+		`{"ok":true,"token":"` + secret + `","scope":"read"}`,
+		`{"token":"` + secret + `"}`,
+		`{"data":{"token" : "` + secret + `\"` + secret + `"},"n":1}`,
+		`{"error":null,"token":"expired","token_count":5}`,
+	} {
+		require.True(t, json.Valid([]byte(text)), text)
+		got := RedactLogText(text)
+		require.NotContains(t, got, secret)
+		require.True(t, json.Valid([]byte(got)), got)
+		require.Contains(t, got, `"[redacted]"`)
+	}
+}
+
+// A token is taken out after whatever may stand before it in a logged line: the start of the text,
+// a space, a quote, an ampersand, a JSON escape (\n, \t, \u0026) or a percent escape (%3D,
+// %20, %22), which a word boundary would not see when a letter follows. One row per shape and
+// boundary, so each rule's boundary is tested apart.
+func TestRedactLogTextTakesAConnectorTokenShapeAfterAnyBoundary(t *testing.T) {
+	secret := rand.Text()
+	shapes := map[string]string{
+		"slack":             "xoxb-123456789012-" + secret,
+		"slack rotating":    "xoxe-1-" + secret,
+		"slack app":         "xapp-1-A0123456789-" + secret,
+		"github":            "ghp_" + secret,
+		"github fine-grain": "github_pat_11A" + secret + "_" + secret,
+		"google":            "AIza" + secret + "-_abcdefghij",
+		"aws":               "AKIA" + secret[:16],
+		"aws temporary":     "ASIA" + secret[:16],
+	}
+	boundaries := map[string]string{
+		"start":                   "",
+		"space":                   " ",
+		"quote":                   `"`,
+		"ampersand":               "&",
+		"json newline":            `\n`,
+		"json tab":                `\t`,
+		"json unicode ampersand":  `\u0026`,
+		"percent encoded equals":  "%3D",
+		"percent encoded space":   "%20",
+		"percent encoded quote":   "%22",
+		"percent after a letter":  "a%3D",
+		"json newline after word": "word\\n",
+	}
+	for shape, token := range shapes {
+		for boundary, before := range boundaries {
+			t.Run(shape+" after "+boundary, func(t *testing.T) {
+				text := before + token + " end"
+				got := RedactLogText(text)
+				require.NotContains(t, got, secret)
+				require.Equal(t, before+"[redacted] end", got)
+			})
+		}
+	}
+}
+
+// What looks like a token shape and is not one stays byte for byte, in the rules' own words: a
+// prefix with a short tail, prose that starts with gh or xox, a counter of tokens, a key name,
+// base64 with no dots and a dotted text that does not start as a JWT does.
+func TestRedactLogTextKeepsWhatOnlyLooksLikeATokenShape(t *testing.T) {
+	for _, text := range []string{
+		"max_tokens: 256 and tokens: 12",
+		`{"max_tokens":256,"tokens":["a","b"],"token_count":5,"keyterm":"Stream"}`,
+		`{"usage":{"input_tokens":123,"output_tokens":45},"token_type":"Bearer"}`,
+		"input_tokens: 123 output_tokens=45 keyterm=Stream",
+		`{"token":null}`,
+		`{"token":12}`,
+		`{"token":["a"]}`,
+		`{"token":true}`,
+		`{"x_token":"abc","tokens":"abc","my-token":"abc"}`,
+		`{"note":"token: 'a1b2'"}`,
+		"the token is missing",
+		"token: expired",
+		"token_type_hint=id_token&client=a",
+		`{"token_type_hint":"id_token"}`,
+		"valid_token=a1b2 and solid_token: 12",
+		"id_token_hint=abc and idle_token=abc",
+		"the ghost wrote gh pull and ghp and gho_ and ghp_short in ghrelin",
+		"ghp_" + strings.Repeat("a", 19),
+		"github_pat_short and github_pat_",
+		"xoxo, xox, xoxb and xoxb-short and xoxz-1234567890123456 and box-xoxb",
+		"xoxb-" + strings.Repeat("a", 9),
+		"AIza and AIzaShort and AKIA and AKIA_REGION_NAME and AKIAshort and AKIA" + strings.Repeat("A", 15),
+		"Asia and ASIA and ASIAshort and ASIA_PACIFIC and xapp and xapp- and xapp-short and ASIA" + strings.Repeat("A", 15),
+		"inside identifiers: abcxapp-1-aaaaaaaaaaaaaaaa abcASIAAAAAAAAAAAAAAAAAAAA",
+		"aiza akia are not shapes in lower case: aizaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa akiaaaaaaaaaaaaaaaaaaaaa",
+		"inside identifiers: abcxoxb-12345678901234 abcghp_aaaaaaaaaaaaaaaaaaaaaaaaa abcgithub_pat_aaaaaaaaaaaaaaaaaaaaaa abcAIzaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa abcAKIAAAAAAAAAAAAAAAAAAAA",
+		"eyJhbGciOiJIUzI1NiJ9",
+		"eyJ.abc.def and eyJabc..def and eyJ.eyJabc.def",
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0",
+		"eyJ.",
+		"dGhpcyBpcyBub3QgYSBqd3QgYXQgYWxsLCBqdXN0IHNvbWUgYmFzZTY0IHRleHQ=",
+		"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+		"v1.2.3 and example.com.au and a.b.c and header.payload.signature",
+		"open keyJar.example.com.au failed",
+		"pkg.loadKeyJSON.func1.1(0x1)",
+		"surveyJS.min.js.map",
+		"MoneyJar.co.uk",
+		"heyJude.mp3.bak",
+		"-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----",
+		"-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----",
+		"the private key is missing and private_key: the key is required",
+		"private_key_id: abc and private_keys: 3",
+	} {
+		if result := RedactLogText(text); result != text {
+			t.Errorf("RedactLogText(%q) = %q, want it unchanged", text, result)
+		}
+	}
+}
+
+// The rules run on every log line, so a long line with a prefix or a dot in it over and over is
+// read in linear time: a quadratic rule would take minutes here. The race detector slows a scan
+// past the bound, so the bound is checked in a build without it, which is what CI runs.
+func TestRedactLogTextReadsALongLineInTime(t *testing.T) {
+	if raceDetector {
+		t.Skip("a wall-clock bound does not hold under the race detector")
+	}
+	for name, text := range map[string]string{
+		"jwt starts":     strings.Repeat("eyJ.", 100000),
+		"jwt parts":      "eyJ" + strings.Repeat("a.", 100000),
+		"pem begins":     strings.Repeat(pemLine("BEGIN", ""), 20000),
+		"slack prefixes": strings.Repeat("xoxb-", 100000),
+		"json tokens":    strings.Repeat(`"token"  :  `, 50000),
+	} {
+		t.Run(name, func(t *testing.T) {
+			started := time.Now()
+			RedactLogText(text)
+			require.Less(t, time.Since(started), 5*time.Second)
+		})
+	}
+}
+
+// A text with a shape's start and no keyword (a base64 body with eyJ in it) runs only the shaped
+// rules, so it is read much faster than the same text with a keyword, which runs all of them. The
+// bound is a ratio of the two, so it holds on a slow machine. The gate-off mutant runs at 0.8x, so
+// a 2x bound still fails it; the best of 7 runs keeps a loaded runner's one slow sample from failing it.
+func TestRedactLogTextSkipsTheKeywordRulesForATextWithOnlyAShapeStart(t *testing.T) {
+	if raceDetector {
+		t.Skip("a wall-clock bound does not hold under the race detector")
+	}
+	body := strings.Repeat("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo", 30000)
+	shapeOnly := "eyJ" + body
+	withKeyword := "key " + body
+	fastest := func(text string) time.Duration {
+		best := time.Hour
+		for range 7 {
+			started := time.Now()
+			RedactLogText(text)
+			best = min(best, time.Since(started))
+		}
+		return best
+	}
+	require.Less(t, fastest(shapeOnly)*2, fastest(withKeyword))
+}
+
+// A connector's error is logged as the router logs it, whole, with the token it echoed taken out
+// and the rest of the line, and the counters beside it, as it was.
+func TestRedactLogAttrTakesAConnectorTokenOutOfAnError(t *testing.T) {
+	secret := rand.Text()
+	err := fmt.Errorf("connector slack: call chat.postMessage: 401: %w", errors.New(`{"ok":false,"error":"invalid_auth","token":"`+secret+`"} sent xoxb-1234567890-`+secret))
+	line := logged(t, true, "connector call failed", "error", err, "input_tokens", 123, "max_tokens", 256)
+	require.NotContains(t, line, secret)
+	require.Contains(t, line, "invalid_auth")
+	require.Contains(t, line, "input_tokens=123 max_tokens=256")
+}
+
 // mayHoldCredential lets through every text a rule redacts: one row per rule and per word it
 // needs, in any case, with the Kelvin sign and the long s the rules fold to k and s.
 func TestEveryTextARuleRedactsPassesTheCheck(t *testing.T) {
@@ -205,9 +612,25 @@ func TestEveryTextARuleRedactsPassesTheCheck(t *testing.T) {
 		"client_SECRET=" + secret,
 		`{"Password":"` + secret + `"}`,
 		"wss://live.example/ws?KEY=" + secret,
+		"key%3d" + secret,
+		"Invalid API key " + secret,
 		"https://ipinfo.io/json?Token=" + secret,
 		"https://user:" + secret + "@example.com",
 		"used sk-" + secret,
+		"used xoxb-1234567890-" + secret,
+		"used ghp_" + secret,
+		"used gho_" + secret,
+		"used ghu_" + secret,
+		"used ghs_" + secret,
+		"used ghr_" + secret,
+		"used github_pat_" + secret,
+		"used AIza" + secret + "abcdefghij",
+		"used AKIA" + secret[:16],
+		"used ASIA" + secret[:16],
+		"used xoxe-1-" + secret,
+		"used xapp-1-A0123456789-" + secret,
+		"used eyJhbGciOiJIUzI1NiJ9.eyJ" + secret + "." + secret,
+		"used " + pemLine("BEGIN", "") + secret + pemLine("END", ""),
 		"https://ipinfo.io/json?to\u212aen=" + secret,
 		"pa\u017f\u017fword=" + secret,
 	} {
@@ -327,6 +750,20 @@ func TestRedactLogAttrTakesTheKeyOutOfAStringAndTheMessage(t *testing.T) {
 	}
 	if strings.Count(line, `failed to connect to local service\nrequest headers: [redacted]`) != 2 {
 		t.Fatalf("the line lost the rest of the error: %s", line)
+	}
+}
+
+// A line names the app's public key as api_key (api.NewLogHandler), which must stay readable
+// while the same key's secret, echoed in a text, does not.
+func TestRedactLogAttrKeepsAPublicKeyAndMasksItsSecret(t *testing.T) {
+	key := "vak_test_" + rand.Text()[:24]
+	secret := "vas_test_" + rand.Text()
+	line := logged(t, true, "served a request", "api_key", key, "reason", "api_key="+secret)
+	if !strings.Contains(line, "api_key="+key+" ") {
+		t.Fatalf("the public key was masked: %s", line)
+	}
+	if strings.Contains(line, secret) {
+		t.Fatalf("the secret survived: %s", line)
 	}
 }
 
@@ -611,7 +1048,8 @@ func TestRedactSentryEventReturnsFromAContextThatHoldsItselfTwice(t *testing.T) 
 		if got := event.Contexts["usage_alert"]["loop"].(map[string]any)["error"]; got != reason {
 			t.Fatalf("a context that holds itself twice kept the key or lost the reason: %v", got)
 		}
-	case <-time.After(time.Second):
+	// The race detector makes the walk about 20 times slower.
+	case <-time.After(10 * time.Second):
 		t.Fatal("a context that holds itself twice did not return")
 	}
 }
@@ -778,4 +1216,10 @@ func BenchmarkLogLine(b *testing.B) {
 			}
 		})
 	}
+}
+
+// pemLine is a PEM boundary line, built in parts: a secret scanner reads a whole one in a source file
+// as a private key. kind is "BEGIN" or "END" and label the words before PRIVATE KEY, as "RSA ".
+func pemLine(kind, label string) string {
+	return "-----" + kind + " " + label + "PRIVATE KEY-----"
 }

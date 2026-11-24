@@ -94,7 +94,7 @@ class PostureTest {
         }
         val sessions = agents.sessions
 
-        sessions.create()
+        sessions.create(SessionOptions(watch = false))
         sessions.query()
         sessions.search("billing")
         sessions.get("s1")
@@ -106,6 +106,9 @@ class PostureTest {
         sessions.responses("s1").list()
         sessions.responses("s1").items()
         sessions.responses("s1").rewind("r1")
+        val held = AgentSession(agents.backend, sessions.get("s1"), emptyList())
+        held.addTools(listOf(AgentTool("lookup_order", "Look up an order.") { "" }))
+        held.removeTool("lookup_order")
         sessions.close("s1")
         sessions.delete("s1")
         agents.scheduledTasks.list()

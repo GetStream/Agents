@@ -88,7 +88,7 @@ func (s *PerformanceSuite) TestTheOverheadOfAskingAnAgentSomething() {
 	// A stored agent, which is what a deployment with configs opens its sessions from and
 	// the read the configuration cache is there for.
 	agent := store.AgentConfig{CustomerID: s.customerID(), Name: "performance", Mode: "text"}
-	s.Require().NoError(s.configs.CreateAgentConfig(context.Background(), &agent))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &agent))
 	configured := textSession(nil)
 	configured.ConfigId = &agent.ID
 

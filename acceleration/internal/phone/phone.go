@@ -63,6 +63,9 @@ var ErrDestinationRefused = errors.New("phone: calls to this number are refused"
 // ErrSuspended is an app Stream staff stopped from using the phone. Why stays with Stream.
 var ErrSuspended = errors.New("phone: this app's telephony is suspended; contact Stream support")
 
+// ErrVerificationRequired is a number asked for by an organization Stream has not verified (KYC).
+var ErrVerificationRequired = errors.New("phone: the organization must be verified to buy a number")
+
 // ErrNotDialable is a number no call may be placed to: not a full E.164 number, or one refused
 // as a destination. A caller that holds a list of numbers can tell it from a failed call.
 var ErrNotDialable = errors.New("phone: not dialable")
@@ -438,6 +441,22 @@ type Outbound struct {
 	// Ended is told how a call through a customer's own SIP trunk ended, which only the
 	// router's own bridge sees. Nil tells nobody.
 	Ended func(CallStatus)
+	// Resume is what another node needs to continue a call through a customer's own SIP
+	// trunk if this one stops. Set only for a call on a shared line; nil, the call cannot move.
+	Resume *TrunkCallRef
+}
+
+// TrunkCallRef names what a node taking over a call through a customer's own SIP trunk
+// reads fresh from the service. It holds no secret.
+type TrunkCallRef struct {
+	CustomerID string
+	SIPTrunkID string
+	// StreamTrunkID is the shared line's Stream trunk. Only a call on a shared line moves.
+	StreamTrunkID string
+	From          string
+	CallID        string
+	// Token is the call's outcome token, which Ended reports with.
+	Token string
 }
 
 // Features are the terms this call is placed on, which is what a vendor has to be able to
@@ -465,6 +484,14 @@ type DigitsPlayer interface {
 // otherwise. A vendor that asks the router on every call needs no such step.
 type InboundStopper interface {
 	StopInbound(ctx context.Context, e164 string) error
+}
+
+// NumberFinder is a vendor that can say whether its account holds a number, which settles a
+// purchase or a release whose outcome was not recorded (Service.SweepOrders).
+type NumberFinder interface {
+	// HoldsNumber reports whether the account holds e164, and the id its purchase is recorded
+	// by (Number.VendorID), empty when the vendor's listing cannot name it.
+	HoldsNumber(ctx context.Context, e164 string) (string, bool, error)
 }
 
 // Hanger is a vendor that can hang up a call it placed, ringing or answered.

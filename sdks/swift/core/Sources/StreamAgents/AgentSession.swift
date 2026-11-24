@@ -28,11 +28,23 @@ public final class AgentSession: ObservableObject {
     /// first. A conversation kept in Stream Chat also shows each on its reply's step.
     @Published public private(set) var approvals: [ToolApprovalRequest] = []
 
+    /// Every tool call of the session by its id, as it was last reported: running, waiting for
+    /// a person's approval, or how it ended, whichever process runs it. Finished calls stay.
+    @Published public private(set) var toolCalls: [String: ToolCallState] = [:]
+
     /// What the router holds this session by, which is what addresses it and its socket.
     public var id: String { session.id }
 
     public var turns: [Turn] { conversation.turns }
     public var state: Conversation.State { conversation.state }
+
+    /// The calls one agent turn made, in the order they started: the ones to show under that
+    /// turn's message. A view reading it redraws as they change, as with `toolCalls`.
+    public func toolCalls(forTurn turnID: String) -> [ToolCallState] {
+        toolCalls.values
+            .filter { $0.turnID == turnID }
+            .sorted { ($0.startedAt ?? .distantPast, $0.id) < ($1.startedAt ?? .distantPast, $1.id) }
+    }
 
     /// This session's turns as the router wrote them down: asking, reading back, rewinding.
     ///
@@ -47,18 +59,35 @@ public final class AgentSession: ObservableObject {
     /// Where the session lives and who is asking, for the chat channel to connect as.
     let backend: Backend
     private let socket: SessionSocket
-    private let tools: [String: AgentTool]
+    /// The tools whose calls are answered here, by name.
+    private(set) var tools: [String: AgentTool]
+    /// The tools whose adding or removal was never answered, so the router may or may not offer
+    /// them.
+    private var unsettledTools: Set<String> = []
+    /// Whether a change of tools is under way, and the ones waiting for it (`oneAtATime`).
+    private var changingTools = false
+    private var waitingToChangeTools: [CheckedContinuation<Void, Never>] = []
     private var pump: Task<Void, Never>?
+    /// The one `start()` under way or done, which a second `start()` waits for.
+    private var starting: Task<Void, Never>?
     /// Whoever is reading `events()`, each with a stream of their own, or nil once the session
     /// has stopped and there is nothing more to read.
     private var subscribers: [UUID: AsyncStream<AgentEvent>.Continuation]? = [:]
+    /// What `on(_:perform:)` registered, locked rather than main-actor isolated so a
+    /// cancellable released anywhere takes its handler away at once.
+    private let handlers = AllocatedUnfairLock<[UUID: (kind: AgentEvent.Kind, handle: @MainActor (AgentEvent) -> Void)]>([:])
     /// The frames this device's camera showed lately, while it is on a call with it on, which
     /// answer the router's `get_video_frames`.
     var cameraFrames: CameraFrames?
 
-    init(backend: Backend, session: Session, tools: [AgentTool]) {
+    /// Whether anything here watches the conversation. One opened with `watch: false` has no
+    /// socket: its turns go in through `responses.create` and are read back from `responses`.
+    private let watched: Bool
+
+    init(backend: Backend, session: Session, tools: [AgentTool], watched: Bool = true) {
         self.session = session
         self.backend = backend
+        self.watched = watched
         self.tools = Dictionary(tools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
         socket = SessionSocket(
             url: backend.socketURL(
@@ -70,18 +99,31 @@ public final class AgentSession: ObservableObject {
             urlSession: backend.urlSession)
     }
 
-    /// Opens the socket and starts following the conversation. Doing this twice does nothing.
+    /// Opens the socket and starts following the conversation, returning once the router is
+    /// sending it here, or once it failed, which `failure` says. A session from
+    /// `sessions.create` has started already. Doing this twice does nothing, and so does doing
+    /// it on a session opened with `watch: false`.
     public func start() async {
-        guard pump == nil else { return }
+        guard watched else { return }
+        if let starting { return await starting.value }
+        let starting = Task { await connect() }
+        self.starting = starting
+        await starting.value
+        // One that never got as far as the socket can be started again.
+        if pump == nil { self.starting = nil }
+    }
+
+    private func connect() async {
         let headers: [String: String]
         do {
             headers = try await backend.headers()
+        } catch is CancellationError {
+            return
         } catch let error as AgentsError {
             return stopped(error)
         } catch {
             return stopped(.transport(error))
         }
-        guard pump == nil else { return }
         let stream = await socket.open(headers: headers)
         isConnected = true
         pump = Task { [weak self] in
@@ -98,6 +140,10 @@ public final class AgentSession: ObservableObject {
             } catch {
                 self?.stopped(.transport(error))
             }
+        }
+        // A refused upgrade ends the stream at once, with what the router answered.
+        if await !socket.isOpen {
+            await pump?.value
         }
     }
 
@@ -118,9 +164,18 @@ public final class AgentSession: ObservableObject {
         return stream
     }
 
+    /// Calls `handler` with every event of `kind`, such as `.toolCallFinished`, until the
+    /// returned value is cancelled or released. It needs no loop over `events()`.
+    public func on(_ kind: AgentEvent.Kind, perform handler: @escaping @MainActor (AgentEvent) -> Void) -> AnyCancellable {
+        let id = UUID()
+        handlers.withLock { $0[id] = (kind, handler) }
+        return AnyCancellable { [handlers] in handlers.withLock { $0[id] = nil } }
+    }
+
     /// Speaks this without going through the model. `interrupt` stops what the agent is saying
     /// first, rather than waiting for it to finish.
     public func say(_ text: String, interrupt: Bool = false) async throws {
+        let socket = try held()
         if interrupt {
             try await socket.send(.interrupt())
         }
@@ -130,7 +185,7 @@ public final class AgentSession: ObservableObject {
     /// Abandons the reply in flight, or with `requestID` only the one answering that request,
     /// wherever it got to. An event's `request_id` names it.
     public func interrupt(requestID: String = "") async throws {
-        try await socket.send(.interrupt(requestID: requestID))
+        try await held().send(.interrupt(requestID: requestID))
     }
 
     /// Has the agent join the session's call, `agent:<session id>`, and carry the conversation
@@ -180,6 +235,85 @@ public final class AgentSession: ObservableObject {
         try await StreamAgents(backend: backend).fork(sessionID: session.id, options)
     }
 
+    /// Gives the agent more of your tools while the conversation runs, such as the ones a card
+    /// shown in it brings. Their calls are answered here, as those of the tools the session was
+    /// opened with are.
+    ///
+    /// The router waits for the reply in progress, and every call it made, to finish, and the
+    /// model is offered the tools from the next turn. So do not wait for this from inside one of
+    /// this session's tools: it waits for that call. A tool named as one this session already
+    /// has is refused: to change one, `remove(toolNamed:)` it first, so that no call of it runs
+    /// half under each. Only a session this device opened takes tools from it, and a name the
+    /// agent has of its own, such as a connector's tool, is refused. A refusal is a 4xx, and takes
+    /// the tools back; after any other failure they stay answered, since the router may have
+    /// added them, until the next add or remove of the name settles it.
+    public func add(tools: [AgentTool]) async throws {
+        // A conversation nothing is watching has nowhere to be asked for a call.
+        _ = try held()
+        guard !tools.isEmpty else { return }
+        try await oneAtATime {
+            // A name whose adding or removal was never answered may or may not be the router's:
+            // it is withdrawn first, so the router and this session agree on which tool it is.
+            for tool in tools where unsettledTools.contains(tool.name) {
+                try await withdraw(tool.name)
+            }
+            // Answered from before the router says they are added: the next turn can call one
+            // while that answer is still on its way here. A name already answered here keeps
+            // its handler, since the router refuses to add it again.
+            let added = tools.filter { self.tools[$0.name] == nil }
+            for tool in added {
+                self.tools[tool.name] = tool
+            }
+            let id = session.id
+            let body = AddSessionToolsRequest(tools: tools.map(\.schema))
+            do {
+                try await backend.call { @Sendable in try await $0.addSessionTools(id: id, addSessionToolsRequest: body) }
+            } catch AgentsError.http(let failure) where (400..<500).contains(failure.status) {
+                // Refused, so the router offers none of them.
+                for tool in added {
+                    self.tools[tool.name] = nil
+                }
+                throw AgentsError.http(failure)
+            } catch {
+                // Whether the router offers them is unknown, since a gateway in front of it can
+                // answer a 5xx after it added them, so they stay answered until a later add or
+                // remove of the name settles it.
+                unsettledTools.formUnion(added.map(\.name))
+                throw error
+            }
+        }
+    }
+
+    /// Withdraws one of your tools. The router waits for the reply in progress, and every call it
+    /// made, to finish, as `add(tools:)` does, so once this returns no call of the tool can still
+    /// arrive, and its handler goes. If neither a success nor a 4xx comes back, the handler stays,
+    /// since the router may still offer the tool, until the next remove or add of the name
+    /// settles it.
+    public func remove(toolNamed name: String) async throws {
+        try await oneAtATime { try await withdraw(name) }
+    }
+
+    /// Withdraws a tool and drops its handler once the router has. A name whose adding or removal
+    /// was never answered is settled by the router having none by it as well as by withdrawing it.
+    private func withdraw(_ name: String) async throws {
+        let id = session.id
+        do {
+            try await backend.call { @Sendable in try await $0.removeSessionTool(id: id, name: name) }
+        } catch AgentsError.http(let failure) where failure.status == 404 && unsettledTools.contains(name) {
+        } catch AgentsError.http(let failure) where (400..<500).contains(failure.status) {
+            // Refused, so the router offers the tool as it did.
+            throw AgentsError.http(failure)
+        } catch {
+            // Whether the router still offers it is unknown, since a gateway in front of it can
+            // answer a 5xx after it withdrew it, so it stays answered until a later add or remove
+            // of the name settles it.
+            unsettledTools.insert(name)
+            throw error
+        }
+        tools[name] = nil
+        unsettledTools.remove(name)
+    }
+
     /// Answers a call waiting in `approvals`.
     ///
     /// Allowed, the tool runs and its result goes back as it would have. Declined, it never
@@ -187,6 +321,7 @@ public final class AgentSession: ObservableObject {
     /// call that is not waiting is left alone, so answering twice does nothing. If the answer
     /// cannot be sent, the call waits again.
     public func decide(_ toolCallID: String, allowed: Bool, summary: String = "") async throws {
+        let socket = try held()
         guard let index = approvals.firstIndex(where: { $0.id == toolCallID }) else { return }
         let request = approvals.remove(at: index)
         let call = request.call
@@ -214,15 +349,20 @@ public final class AgentSession: ObservableObject {
     /// runs nothing and the agent is told the person did not connect. A call that is not waiting
     /// is left alone.
     public func declineLogin(_ toolCallID: String) async throws {
-        try await socket.send(.toolApproval(id: toolCallID, allowed: false))
+        try await held().send(.toolApproval(id: toolCallID, allowed: false))
     }
 
     /// Ends the session and closes the socket. What it recorded and remembered is kept.
     public func close() async {
-        try? await socket.send(.close)
+        if watched {
+            try? await socket.send(.close)
+        } else {
+            try? await StreamAgents(backend: backend).close(sessionID: session.id)
+        }
         await socket.close()
         pump?.cancel()
         pump = nil
+        starting = nil
         isConnected = false
         approvals = []
         conversation.state = .ended
@@ -234,6 +374,37 @@ public final class AgentSession: ObservableObject {
     public func delete() async throws {
         try await StreamAgents(backend: backend).sessions.delete(session.id)
         await close()
+    }
+
+    /// The socket, or what to do instead of it. Everything sent through it is a message to a
+    /// conversation being watched, and one opened with `watch: false` is watched by nothing.
+    private func held() throws -> SessionSocket {
+        guard watched else {
+            throw AgentsError.configuration(
+                "this conversation is not being watched, so there is nothing to send to: open it "
+                    + "without watch: false, or use responses.create and read the turn back through "
+                    + "responses.items")
+        }
+        return socket
+    }
+
+    /// Runs one change of tools at a time, in the order they were asked for. A handler is
+    /// put in place before the router is asked and taken back when it refuses, so two changes
+    /// interleaved across their requests could take back what the other put in place.
+    private func oneAtATime(_ change: () async throws -> Void) async throws {
+        if changingTools {
+            await withCheckedContinuation { waitingToChangeTools.append($0) }
+        } else {
+            changingTools = true
+        }
+        defer {
+            if waitingToChangeTools.isEmpty {
+                changingTools = false
+            } else {
+                waitingToChangeTools.removeFirst().resume()
+            }
+        }
+        try await change()
     }
 
     private func stopped(_ error: AgentsError?) {
@@ -251,6 +422,14 @@ public final class AgentSession: ObservableObject {
 
     private func apply(_ event: AgentEvent) {
         conversation.apply(event)
+        if let state = event.toolCallState {
+            toolCalls[state.id] = state
+        }
+        if let kind = event.kind {
+            for handler in handlers.withLock({ $0.values.filter { $0.kind == kind }.map(\.handle) }) {
+                handler(event)
+            }
+        }
         for (id, continuation) in subscribers ?? [:] {
             switch continuation.yield(event) {
             case .enqueued:
@@ -276,11 +455,12 @@ public final class AgentSession: ObservableObject {
     private func answer(_ call: AgentEvent.ToolCall) {
         // Session events are broadcast to observers as well as tool owners. A Python
         // video worker may own this request; an observer must not resolve it first.
+        guard call.run else { return }
         if call.name == CameraFrames.toolName, let cameraFrames {
             return show(cameraFrames, for: call)
         }
         guard let tool = tools[call.name] else { return }
-        if let approval = tool.approval {
+        if let approval = tool.approval, !call.approved {
             approvals.append(ToolApprovalRequest(call: call, approval: approval, tool: tool))
         } else {
             run(call, with: tool)
@@ -320,11 +500,18 @@ public final class AgentSession: ObservableObject {
     ///
     /// A task of its own, so a slow tool does not hold up the transcript. The handler is a
     /// nonisolated async closure, so its body does not run on the main actor even though this
-    /// call site is on it.
+    /// call site is on it. A typed tool decodes its type from the arguments as written: turning
+    /// the dictionary back into JSON there recurses as deep as the model nested it, on a
+    /// smaller stack than the main thread's.
     private func run(_ call: AgentEvent.ToolCall, with tool: AgentTool) {
         Task { [socket] in
             do {
-                let output = try await tool.run(call.argumentValues)
+                let output: ToolOutput
+                if let runWritten = tool.runWritten {
+                    output = try await runWritten(call.arguments)
+                } else {
+                    output = try await tool.run(call.argumentValues)
+                }
                 try await socket.send(
                     .toolResult(
                         id: call.id, output: output.text, error: nil, images: output.images,

@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/thesyncim/gopus"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -83,7 +84,7 @@ const (
 var transcribeFailures = promauto.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "router",
 	Name:      "chorus_asr_transcribe_failures_total",
-	Help:      "Requests for an utterance's words the chorus-asr server did not answer, by why: its status, timeout or connection. Each is asked again at the utterance's next pause or its end.",
+	Help:      "Requests for an utterance's words the chorus-asr server did not answer, by why: its status, busy or no_words (it answered without the words: busy, every lane that writes them busy), timeout, or connection (nothing answered). Each is asked again at the utterance's next pause or its end.",
 }, []string{"reason"})
 
 // Transcriber writes what a participant says with the chorus-asr server's model, so a call
@@ -119,6 +120,9 @@ var transcribeFailures = promauto.NewCounterVec(prometheus.CounterOpts{
 // a fatal error then: either hands the call to the next transcriber the routing target
 // names, rather than leave it without words.
 type Transcriber struct {
+	// id tells this transcriber's checks from another's (Checked.Source), whose utterances are
+	// numbered alike.
+	id        uint64
 	client    *Client
 	model     string
 	languages []string
@@ -131,6 +135,9 @@ type Transcriber struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
+	// call is the context of the call that Start got. The goroutines of the session start
+	// under it, so a panic in one of them stops that call.
+	call context.Context
 
 	// What ProcessAudio keeps, on the session's own goroutine: the frame being filled, the
 	// detector that scores each, and the stream of them.
@@ -189,6 +196,11 @@ type Transcriber struct {
 	// before the words come ends the pause, and not what was ruled on it. The utterance ending
 	// forgets them.
 	stopping map[int64]Ruled
+	// stoppingChecked is the check each of those stops was ruled at, reported once it is known
+	// whether the stop was handed over, and droppedStops those of stops the utterance ending
+	// forgot, to be reported not acted on (reportDroppedStops).
+	stoppingChecked map[int64]Checked
+	droppedStops    []Checked
 	// still is the utterance's words as the requests that wrote them with the floor free last
 	// read them, which end a turn the speech gate held voiced (still.go), and stillBound how long
 	// they must hold still, under the agent's point as its last check resolved it.
@@ -232,14 +244,15 @@ func NewTranscriber(client *Client, model string, languages []string, logger *sl
 	if model == "" {
 		model = DefaultModel
 	}
-	return &Transcriber{client: client, model: model, languages: languages, logger: logger, now: time.Now, stillBound: stillFor,
+	return &Transcriber{id: transcribers.Add(1), client: client, model: model, languages: languages, logger: logger, now: time.Now, stillBound: stillFor,
 		probeFirst: probeFirst, probeCap: probeCap,
 		asker: neutralAgent{hearer: NewHearer(client, EndOfTurn{}, logger)}, interims: client.interims,
 		emitter: stt.NewEmitter(eventBuffer), requests: make(chan request, queued), done: make(chan struct{})}
 }
 
 // Start opens the session. It asks the server nothing.
-func (t *Transcriber) Start(context.Context) error {
+func (t *Transcriber) Start(ctx context.Context) error {
+	t.call = ctx
 	var err error
 	if t.heard, err = t.client.NewStream(maxUtterance); err != nil {
 		return err
@@ -247,8 +260,8 @@ func (t *Transcriber) Start(context.Context) error {
 	if t.detector, err = gopus.NewSpeechDetector(SampleRate); err != nil {
 		return stack.Wrap(err)
 	}
-	t.ctx, t.cancel = context.WithCancel(context.Background())
-	go t.transcribe()
+	t.ctx, t.cancel = context.WithCancel(context.WithoutCancel(ctx))
+	goroutine.Go(t.call, t.transcribe)
 	t.emitter.Send(stt.Connected{Provider: ProviderName, Model: t.model, At: time.Now()})
 	return nil
 }
@@ -365,6 +378,7 @@ func (t *Transcriber) nextUtterance(heard int64) {
 	t.mu.Lock()
 	t.newUtteranceLocked()
 	t.mu.Unlock()
+	t.reportDroppedStops()
 }
 
 // hearing tells the asker the caller is in an utterance, every interval of the policy while
@@ -528,12 +542,22 @@ func (t *Transcriber) Provider() string { return ProviderName }
 // Model is the model identifier used in stats.
 func (t *Transcriber) Model() string { return t.model }
 
-// failure is why a request failed, as transcribeFailures counts it.
+// failure is why a request failed, as transcribeFailures and requestErrors count it: the
+// status the server answered; busy when it answered without the words because every lane that
+// writes them was busy, as a decision's words come back from a server shedding load, and
+// no_words when it answered without them for another reason; timeout; and connection when
+// nothing answered. An answer without the words is the server's, and not a connection that
+// failed.
 func failure(err error) string {
 	var status *StatusError
+	var transcript *TranscriptError
 	switch {
 	case errors.As(err, &status):
 		return strconv.Itoa(status.Code)
+	case errors.As(err, &transcript) && transcript.Message == "busy":
+		return "busy"
+	case errors.As(err, &transcript):
+		return "no_words"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
 	}
@@ -548,3 +572,6 @@ func level(samples []int16) float64 {
 	}
 	return math.Sqrt(sum/float64(len(samples))) / math.MaxInt16
 }
+
+// transcribers numbers transcribers (Transcriber.id).
+var transcribers atomic.Uint64

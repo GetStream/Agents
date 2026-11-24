@@ -142,9 +142,9 @@ type spendRow struct {
 	RequestCount    int64     `bun:"request_count"`
 }
 
-// foldSpend keeps the limit biggest groups over the whole window and sums the rest into
-// spendOther, the way CustomerSpend's query does for one shard: rows with no value stay
-// their own group. It reads every shard's unfolded rows, so the folding is exact.
+// foldSpend keeps the limit biggest groups over the whole window and sums the rest into the
+// row marked Other: rows with no value stay their own group. It reads every shard's unfolded
+// rows, so the folding is exact.
 func foldSpend(lists [][]spendRow, limit int) []SpendBucket {
 	type total struct {
 		cost, requests int64
@@ -179,19 +179,20 @@ func foldSpend(lists [][]spendRow, limit int) []SpendBucket {
 	type key struct {
 		bucket time.Time
 		value  string
+		other  bool
 	}
 	var order []key
 	sums := map[key]*SpendBucket{}
 	for _, list := range lists {
 		for _, row := range list {
-			value := row.Value
-			if value != "" && !kept[value] {
+			value, other := row.Value, row.Value != "" && !kept[row.Value]
+			if other {
 				value = spendOther
 			}
-			k := key{row.Bucket.UTC(), value}
+			k := key{row.Bucket.UTC(), value, other}
 			sum, seen := sums[k]
 			if !seen {
-				sum = &SpendBucket{Bucket: row.Bucket, Value: value}
+				sum = &SpendBucket{Bucket: row.Bucket, Value: value, Other: other}
 				sums[k] = sum
 				order = append(order, k)
 			}
@@ -204,7 +205,19 @@ func foldSpend(lists [][]spendRow, limit int) []SpendBucket {
 		out = append(out, *sums[k])
 	}
 	slices.SortStableFunc(out, func(a, b SpendBucket) int {
-		return cmp.Or(a.Bucket.Compare(b.Bucket), cmp.Compare(b.CostMicrosTotal, a.CostMicrosTotal), strings.Compare(a.Value, b.Value))
+		return cmp.Or(a.Bucket.Compare(b.Bucket), cmp.Compare(b.CostMicrosTotal, a.CostMicrosTotal), strings.Compare(a.Value, b.Value),
+			compareBool(a.Other, b.Other))
 	})
 	return out
+}
+
+// compareBool orders false before true.
+func compareBool(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case a:
+		return 1
+	}
+	return -1
 }

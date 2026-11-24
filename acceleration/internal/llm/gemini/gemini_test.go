@@ -139,6 +139,40 @@ func (s *GeminiSuite) TestMinimalIsRefusedOnArgonBeforeItIsSent() {
 	s.ErrorContains(err, `reasoning effort "minimal" is not one of low, medium, high`)
 }
 
+func (s *GeminiSuite) TestHydrogenCanBeAskedForXhigh() {
+	s.ask(Options{Model: "gemini-4-hydrogen", ReasoningEffort: "xhigh"})
+
+	s.Equal("xhigh", s.request["reasoning_effort"])
+}
+
+func (s *GeminiSuite) TestNeonCanBeAskedForXhigh() {
+	// Neon is a Gemini 4 model, and the family stops at high.
+	s.ask(Options{Model: "gemini-4-neon", ReasoningEffort: "xhigh"})
+
+	s.Equal("xhigh", s.request["reasoning_effort"])
+}
+
+func (s *GeminiSuite) TestXhighIsRefusedOnArgonBeforeItIsSent() {
+	// xhigh came with Hydrogen; Argon still stops at high.
+	_, err := New(Options{APIKey: "k", Model: "gemini-4-argon", ReasoningEffort: "xhigh"})
+
+	s.ErrorContains(err, `reasoning effort "xhigh" is not one of low, medium, high`)
+}
+
+func (s *GeminiSuite) TestXhighIsRefusedOnCarbonBeforeItIsSent() {
+	// Carbon came after Hydrogen and Neon but takes only Argon's three levels.
+	_, err := New(Options{APIKey: "k", Model: "gemini-4-carbon", ReasoningEffort: "xhigh"})
+
+	s.ErrorContains(err, `reasoning effort "xhigh" is not one of low, medium, high`)
+}
+
+func (s *GeminiSuite) TestHydrogenAcceptsImages() {
+	provider, err := New(Options{APIKey: "k", Model: "gemini-4-hydrogen"})
+	s.Require().NoError(err)
+
+	s.Contains(provider.Capabilities().InputModalities, "image")
+}
+
 func (s *GeminiSuite) TestArgonAcceptsImages() {
 	provider, err := New(Options{APIKey: "k", Model: "gemini-4-argon"})
 	s.Require().NoError(err)

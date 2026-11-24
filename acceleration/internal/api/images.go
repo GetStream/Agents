@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/google/uuid"
@@ -16,11 +15,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/imagerouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
-
-// imageDeadline bounds one generation. A queued provider can hold a job for minutes, and
-// a caller waiting on one response is owed an answer rather than a connection held open
-// until something upstream gives up.
-const imageDeadline = 240 * time.Second
 
 // errNoImages is what the image path says on a deployment that does not generate images.
 var errNoImages = notConfigured("this deployment does not generate images")
@@ -61,8 +55,6 @@ func (s *Server) generateImage(ctx context.Context, request *generateImageReques
 	}
 
 	sent := value(request.Body.Options)
-	ctx, cancel := context.WithTimeout(ctx, imageDeadline)
-	defer cancel()
 	generation, err := s.streams.Image.Generate(ctx, imagerouter.Request{
 		CustomerID: customerID,
 		Tags:       tags,
@@ -77,6 +69,9 @@ func (s *Server) generateImage(ctx context.Context, request *generateImageReques
 	var failure *imagegen.Error
 	if err != nil && !errors.As(err, &failure) {
 		return nil, invalidRequest(err.Error())
+	}
+	if err != nil {
+		recordFailure(ctx, err, stack.Trace(err))
 	}
 	return &generateImageResponse{Body: imageGenerationOf(generation, err)}, nil
 }
@@ -107,6 +102,16 @@ func imageRequestOf(body *ImageGenerationRequest) (imagegen.Request, error) {
 	return drawing, nil
 }
 
+// imageFailures is what a failed generation says, by its code. What the provider said names
+// its URL and its body, so it is left for the request log.
+var imageFailures = map[imagegen.Code]string{
+	imagegen.ContentFiltered:   "the provider's safety filter refused the prompt or the picture",
+	imagegen.UnsupportedOption: "no model asked can draw the size, shape or settings asked for",
+	imagegen.ProviderFailed:    "the provider failed to draw the pictures",
+	imagegen.Timeout:           "the pictures were not drawn in time",
+	imagegen.Cancelled:         "the caller stopped waiting for the pictures",
+}
+
 // imageGenerationOf renders a generation for the wire, and why it failed when it did.
 func imageGenerationOf(generation imagerouter.Generation, failure error) ImageGeneration {
 	rendered := ImageGeneration{
@@ -130,7 +135,7 @@ func imageGenerationOf(generation imagerouter.Generation, failure error) ImageGe
 		code := ImageErrorCode(imagegen.CodeOf(failure))
 		rendered.Status = ImageGenerationStatusFailed
 		rendered.ErrorCode = &code
-		rendered.Error = optional(failure.Error())
+		rendered.Error = optional(imageFailures[imagegen.Code(code)])
 	}
 	return rendered
 }

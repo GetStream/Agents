@@ -67,6 +67,10 @@ type messageEvent struct {
 		// wrote and hands to the agent itself (bridged). Raw, so a value of another type,
 		// which anyone writing in the app can set, costs only itself.
 		Bridged json.RawMessage `json:"stream_agents_bridged"`
+		// MentionedUsers are the users the writer mentioned, as Stream sends them with the
+		// message: objects with an id (Stream Chat docs, «Webhook Events», message.new). Raw, as
+		// Bridged is, so a list of another shape costs only the mention (mentions).
+		MentionedUsers json.RawMessage `json:"mentioned_users"`
 	} `json:"message"`
 }
 
@@ -202,6 +206,8 @@ func (s *Server) receiveMessageEvent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	s.noteHook(r.Context(), origin)
+	r = loggedHook(r, origin)
 
 	eventType := getstream.GetEventType(payload)
 	if eventType == "" {
@@ -228,7 +234,7 @@ func (s *Server) receiveMessageEvent(w http.ResponseWriter, r *http.Request) {
 			s.routeArrivingMessage(r.Context(), origin, event)
 		}
 	} else {
-		s.logger.Debug("ignoring a message event", "type", eventType)
+		s.logger.DebugContext(r.Context(), "ignoring a message event", "type", eventType)
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -304,7 +310,7 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 		if strings.TrimSpace(event.Message.Text) == "" && len(event.photos()) == 0 {
 			return true
 		}
-		origin.answer(func() { s.answerThread(origin, thread, event) })
+		origin.answer(func() { s.answerThread(context.WithoutCancel(ctx), origin, thread, event) })
 		return true
 	}
 	// Only a linked thread answers a photo sent without text on a thread channel (addressed).
@@ -342,10 +348,10 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 				if answer, settled := s.answerOnce(ctx, origin, event); !answer {
 					return settled
 				}
-				owed := s.owing.owe(found.ID())
+				owed := s.owing.owe(found.Key())
 				origin.answer(func() {
 					defer owed()
-					s.followUpMessage(origin, found, event)
+					s.followUpMessage(context.WithoutCancel(ctx), origin, found, event)
 				})
 				return true
 			}
@@ -369,7 +375,8 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 					}, "")
 					if err != nil {
 						s.logger.Error("nobody could answer an arriving message",
-							"channel", event.ChannelID, "session", found.ID(), "error", err)
+							"channel", event.ChannelID, "session", found.ID(), "customer", found.Spec().CustomerID,
+							"error", err)
 						if errors.Is(err, node.ErrNoReply) {
 							// The other node may have placed it before its reply was lost: queued
 							// again, it would be placed twice.
@@ -384,7 +391,7 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 			}
 			// The answer goes back to the channel rather than in a response, so there is
 			// nothing here to wait for.
-			origin.answer(func() { s.answerMessage(origin, found, event) })
+			origin.answer(func() { s.answerMessage(context.WithoutCancel(ctx), origin, found, event) })
 			return true
 		}
 	}
@@ -497,7 +504,7 @@ func (s *Server) handOn(ctx context.Context, origin hookOrigin, recorded bool, h
 func (s *Server) unopenedSpec(ctx context.Context, customerID, configID string, event messageEvent) (session.Spec, error) {
 	spec := session.Spec{CustomerID: customerID}
 	if configID != "" {
-		config, err := s.store.AgentConfig(ctx, customerID, configID)
+		config, err := s.store.AgentConfigs.Get(ctx, customerID, configID)
 		switch {
 		case err == nil:
 			spec = session.FromConfig(config)
@@ -541,7 +548,7 @@ func (s *Server) heardText(ctx context.Context, spec session.Spec, origin hookOr
 		return withPhotoNote(event.Message.Text, event.photos(), unheardRecording, unheardRecordingWithMore)
 	}
 	if origin.queuedMessage != "" {
-		if err := s.store.KeepChatInboundHeard(ctx, origin.app, origin.queuedMessage, note.Heard); err != nil {
+		if err := s.store.ChatInbounds.KeepHeard(ctx, origin.app, origin.queuedMessage, note.Heard); err != nil {
 			s.logger.Warn("could not keep what the voice recording of a queued chat inbound message said",
 				"message", origin.queuedMessage, "stream_app", origin.app, "error", err)
 		}
@@ -658,7 +665,7 @@ func (s *Server) ownerOf(ctx context.Context, origin hookOrigin, event messageEv
 // not known without it. A channel naming no config, or another one than the row's, is not
 // read, nor one with a voice recording, which unopenedSpec reads. A read that fails costs the
 // card, not the answer: nil.
-func (s *Server) heldConfigOf(ctx context.Context, origin hookOrigin, event messageEvent, previous store.Call) *store.AgentConfig {
+func (s *Server) heldConfigOf(ctx context.Context, origin hookOrigin, event messageEvent, previous store.HeldCall) *store.AgentConfig {
 	if _, recorded := event.recording(); recorded {
 		return nil
 	}
@@ -683,9 +690,9 @@ func (s *Server) declaredConfigOf(ctx context.Context, origin hookOrigin, event 
 	}
 
 	if owner, scoped := s.configOwnerOf(origin); scoped {
-		config, err = s.store.AgentConfig(ctx, owner, declared)
+		config, err = s.store.AgentConfigs.Get(ctx, owner, declared)
 	} else {
-		config, err = s.store.AgentConfigOwner(ctx, declared)
+		config, err = s.store.AgentConfigs.GetUnscoped(ctx, declared)
 	}
 	// A config nobody in the app holds is no failure here: an app whose message hooks deliver
 	// to two routers, such as a local one and staging, sends each the other's channels too.
@@ -707,7 +714,7 @@ func (s *Server) declaredConfigOf(ctx context.Context, origin hookOrigin, event 
 // that failed. A hook goes on as for a channel that held none when the read fails, as it always
 // has; a queued delivery is tried again instead, so it is answered by the agent that actually
 // ran there.
-func (s *Server) lastCallOn(ctx context.Context, origin hookOrigin, channelID string) (store.Call, bool, error) {
+func (s *Server) lastCallOn(ctx context.Context, origin hookOrigin, channelID string) (store.HeldCall, bool, error) {
 	previous, err := s.store.CallByAgentInApp(ctx, origin.scope(), channelID)
 	switch {
 	case err == nil:
@@ -797,8 +804,8 @@ func (s *Server) assignMessage(ctx context.Context, customerID string, message d
 // (session.Spec.Dispatched), once the reply it may still be writing is done, as a thread's
 // session answers one (answerClaimed): with what its voice recording says and its photos, read
 // once for every try.
-func (s *Server) followUpMessage(origin hookOrigin, found *session.Session, event messageEvent) {
-	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
+func (s *Server) followUpMessage(ctx context.Context, origin hookOrigin, found *session.Session, event messageEvent) {
+	ctx, cancel := context.WithTimeout(ctx, askTimeout)
 	defer cancel()
 	followUpID := "message_" + store.NewID()
 	text, images := s.messagePhotos(ctx, found.SeesImages(), s.heardText(ctx, found.Spec(), origin, event), event)
@@ -809,7 +816,8 @@ func (s *Server) followUpMessage(origin hookOrigin, found *session.Session, even
 			continue
 		}
 		if err != nil {
-			s.logger.Error("could not answer a message", "channel", event.ChannelID, "session", found.ID(), "error", err)
+			s.logger.Error("could not answer a message", "channel", event.ChannelID, "session", found.ID(),
+				"customer", found.Spec().CustomerID, "error", err)
 		}
 		return
 	}
@@ -820,8 +828,8 @@ func (s *Server) followUpMessage(origin hookOrigin, found *session.Session, even
 // The answer is written rather than spoken. A session on a call has somebody listening to
 // it, and saying a reply to something they never said would interrupt them with an answer
 // to somebody else's question.
-func (s *Server) answerMessage(origin hookOrigin, found *session.Session, event messageEvent) {
-	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
+func (s *Server) answerMessage(ctx context.Context, origin hookOrigin, found *session.Session, event messageEvent) {
+	ctx, cancel := context.WithTimeout(ctx, askTimeout)
 	defer cancel()
 
 	// Ask refuses a speech-to-speech agent, which answers only on the call (Mode), so a
@@ -833,7 +841,7 @@ func (s *Server) answerMessage(origin hookOrigin, found *session.Session, event 
 	text, images := s.messagePhotos(ctx, found.SeesImagesInWriting(), heard, event)
 	if _, err := found.Ask(ctx, text, images...); err != nil {
 		s.logger.Error("could not answer a message",
-			"channel", event.ChannelID, "session", found.ID(), "error", err)
+			"channel", event.ChannelID, "session", found.ID(), "customer", found.Spec().CustomerID, "error", err)
 		return
 	}
 	s.logger.Debug("answered a message in writing",

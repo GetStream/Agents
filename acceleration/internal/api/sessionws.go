@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
@@ -46,11 +48,19 @@ const pongWait = 90 * time.Second
 // for another site to ride on and nothing for this check to protect. One that does carry
 // an origin is held to the same rule as an ordinary cross-origin request: a socket with a
 // looser one would be the way around the check the rest of the API makes.
+//
+// A handshake it refuses is answered as gorilla answers one by default, with its code noted
+// for the access line.
 func newUpgrader(mode auth.Mode) websocket.Upgrader {
 	return websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			origin := r.Header.Get("Origin")
 			return origin == "" || originAllowed(mode, origin)
+		},
+		Error: func(w http.ResponseWriter, _ *http.Request, status int, _ error) {
+			noteAnswered(w, status)
+			w.Header().Set("Sec-Websocket-Version", "13")
+			http.Error(w, http.StatusText(status), status)
 		},
 	}
 }
@@ -167,10 +177,20 @@ func (s *Server) watchSession(w http.ResponseWriter, r *http.Request) {
 	// Reading and writing each own the connection in one direction, which is what gorilla
 	// requires: two goroutines writing to one socket interleave frames.
 	gone := make(chan error, 1)
+	var closing atomic.Bool
 	go func() {
-		gone <- s.readCommands(connection, found, seat, CallerFrom(r.Context()))
+		gone <- s.readCommands(r.Context(), connection, found, seat, CallerFrom(r.Context()), &closing)
 	}()
-	s.writeEvents(connection, events, watching(r), gone, endingOf(resuming, found.Halted))
+	ended := s.writeEvents(connection, events, watching(r), gone, endingOf(resuming, found.Halted))
+	// A close command ends the session before the reader stops, so the writer sees the end first.
+	// One that came once the session had ended set no closing, and the end stays the session's.
+	if closing.Load() && ended.cause == sessionEnded {
+		ended.cause = closedByClient
+	}
+	if ended.cause == sessionEnded {
+		ended.endReason = found.EndedFor()
+	}
+	recordClose(r.Context(), ended)
 }
 
 // resuming is what a resumable watcher asked for: cursor is the last frame it was sent,
@@ -275,9 +295,9 @@ func (w wanted) takesFrame(kind string) bool {
 }
 
 // writeEvents pushes the conversation to the caller until the session ends or the socket
-// breaks. gone carries why the reader stopped, which is answered here because this is the
-// goroutine that writes.
-func (s *Server) writeEvents(connection *websocket.Conn, events <-chan session.Event, asked wanted, gone <-chan error, ended ending) {
+// breaks, and says why the socket closed. gone carries why the reader stopped, which is
+// answered here because this is the goroutine that writes.
+func (s *Server) writeEvents(connection *websocket.Conn, events <-chan session.Event, asked wanted, gone <-chan error, ended ending) socketEnd {
 	ping := time.NewTicker(pingEvery)
 	defer ping.Stop()
 
@@ -286,16 +306,20 @@ func (s *Server) writeEvents(connection *websocket.Conn, events <-chan session.E
 		case stopped := <-gone:
 			switch {
 			case stopped == nil:
+				// The reader stops on a close command, whoever ended the session; watchSession
+				// tells the two apart.
 				closeSocket(connection, websocket.CloseNormalClosure, "the session ended")
+				return socketEnd{cause: sessionEnded, code: websocket.CloseNormalClosure}
 			case errors.Is(stopped, errUnreadableFrame):
 				refuseUnreadable(connection)
+				return socketEnd{cause: refusedByRouter, code: websocket.ClosePolicyViolation}
 			}
-			return
+			return readEnd(stopped)
 		case event, open := <-events:
 			if !open {
 				code, reason := ended()
 				closeBeforeReader(connection, code, reason, gone)
-				return
+				return sessionEnd(code)
 			}
 			if !asked.takes(event) {
 				continue
@@ -307,13 +331,13 @@ func (s *Server) writeEvents(connection *websocket.Conn, events <-chan session.E
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteJSON(encoded); err != nil {
 				s.logger.Debug("session socket write failed", "error", err)
-				return
+				return socketEnd{cause: clientGone}
 			}
 
 		case <-ping.C:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
+				return socketEnd{cause: clientGone}
 			}
 		}
 	}
@@ -326,7 +350,12 @@ type watcherCommand struct {
 	Type string `json:"type"`
 	// ToolCallID names the call a tool_result answers.
 	ToolCallID string `json:"tool_call_id"`
-	CommandID  string `json:"request_id"`
+	// ID is tool_call_id under the name the tool_call frame gives it, which a client
+	// echoing that frame's fields sends. tool_call_id wins when both are sent. It is read raw
+	// and used only when it is a string: a command that never named a call by id may carry an
+	// id of any shape, and must not close the socket over a field it never read.
+	ID        json.RawMessage `json:"id"`
+	CommandID string          `json:"request_id"`
 	// LegacyCommandID is request_id under its name before v0.6.35, which clients built
 	// against an older SDK (the getstream.io Ask panel among them) still send.
 	LegacyCommandID string `json:"command_id"`
@@ -344,6 +373,8 @@ type watcherCommand struct {
 	Text string `json:"text"`
 	// Verbatim says a tool_update's text is to be said as written.
 	Verbatim bool `json:"verbatim"`
+	// Custom is a tool_update's data for the call, replacing what it had.
+	Custom map[string]any `json:"custom"`
 	// Images attach to a respond command, and become image parts on that turn.
 	Images []wireImage `json:"images"`
 }
@@ -356,8 +387,12 @@ type watcherCommand struct {
 // with it. A frame that is not JSON it can read ends the socket.
 //
 // It returns nil once a command closed the session, errUnreadableFrame for a frame that is not
-// a command, and the read's own error when the connection ended.
-func (s *Server) readCommands(connection *websocket.Conn, found *session.Session, seat session.Seat, sender routing.Caller) error {
+// a command, and the read's own error when the connection ended. closing is set before a close
+// command that ends the session is applied (closesSession).
+func (s *Server) readCommands(
+	ctx context.Context, connection *websocket.Conn, found *session.Session, seat session.Seat, sender routing.Caller,
+	closing *atomic.Bool,
+) error {
 	connection.SetReadDeadline(time.Now().Add(pongWait))
 	connection.SetPongHandler(func(string) error {
 		return connection.SetReadDeadline(time.Now().Add(pongWait))
@@ -376,11 +411,22 @@ func (s *Server) readCommands(connection *websocket.Conn, found *session.Session
 		if json.Unmarshal(payload, &command) != nil {
 			return errUnreadableFrame
 		}
+		if command.Type == "close" {
+			closing.Store(s.closesSession(found, seat.Owner))
+		}
 
-		if !s.applyCommand(found, seat, sender, command) {
+		if !s.applyCommand(ctx, found, seat, sender, command) {
 			return nil
 		}
 	}
+}
+
+// closesSession is whether a close command from owner ends found: the manager still holds it.
+// A session that already left the manager was ended by something else, which a close command
+// sent as its end crossed it only follows.
+func (s *Server) closesSession(found *session.Session, owner session.Owner) bool {
+	_, held := s.sessions.Get(found.ID(), owner)
+	return held
 }
 
 // errNoApprovalWaits answers a tool_approval no call waits for.
@@ -391,6 +437,28 @@ var errNoApprovalWaits = errors.New("tool_approval reached no call waiting for i
 // durable command, whose answer must repeat both.
 var errApprovalNeedsTurn = errors.New("tool_approval reached no call: the call of a durable command " +
 	"needs the turn_id of its tool_call with the request_id")
+
+// errToolResultNeedsCall answers a tool_result that names no call.
+var errToolResultNeedsCall = errors.New("tool_result needs tool_call_id: the id of the tool_call it answers")
+
+// errNoResultWaits answers a tool_result no call waits for.
+var errNoResultWaits = errors.New("tool_result reached no call waiting for it: the call was already " +
+	"answered, cancelled or timed out, or its tool_call_id names none, or a call of a durable command " +
+	"was answered without the request_id and turn_id of its tool_call")
+
+// maxEchoedID is the most of an id tool_result_ignored repeats, the length a request_id may
+// have on the HTTP API.
+const maxEchoedID = 128
+
+// echoedID is id as tool_result_ignored repeats it. Every watcher is sent that frame and it is
+// kept for replay, so a watcher sending ids of a megabyte must not be able to fill the buffer
+// with them; no id the router hands out is longer than this.
+func echoedID(id string) string {
+	if len(id) <= maxEchoedID {
+		return id
+	}
+	return strings.ToValidUTF8(id[:maxEchoedID], "")
+}
 
 // errUnreadableFrame ends a socket on a frame that is not JSON of the shape it reads.
 var errUnreadableFrame = invalidRequest("a frame on this socket is not JSON it can read")
@@ -418,14 +486,22 @@ func refuseUnreadable(connection *websocket.Conn) {
 // here on the bus, and a watcher on either node must be able to do the same things.
 //
 // seat is who the socket's caller is and what it runs; sender is the same caller, whose day
-// a turn it sends is counted on.
-func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender routing.Caller, command watcherCommand) bool {
+// a turn it sends is counted on. What a command starts outlives the socket that sent it.
+func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat session.Seat, sender routing.Caller, command watcherCommand) bool {
+	ctx = context.WithoutCancel(ctx)
 	owner := seat.Owner
 	if command.CommandID == "" {
 		command.CommandID = command.LegacyCommandID
 	}
+	if command.ToolCallID == "" {
+		command.ToolCallID = stringID(command.ID)
+	}
 	switch command.Type {
 	case "tool_result":
+		if command.ToolCallID == "" {
+			found.Report(errToolResultNeedsCall, "tool")
+			return true
+		}
 		// A watcher that was not asked to run the call does not answer it, so a browser
 		// without the tool cannot fail a call the backend that holds it is running.
 		if !found.Answers(seat, command.ToolCallID) {
@@ -434,17 +510,16 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 			return true
 		}
 		parts, err := parseToolOutput(command.Output)
+		failure := command.Error
 		if err != nil {
 			found.Report(err, "tool")
-			if !resolveTool(found, command.ToolCallID, command.CommandID, command.TurnID, nil, err.Error()) {
-				s.logger.Debug("a tool result answered nothing",
-					"session", found.ID(), "call", command.ToolCallID)
-			}
-			return true
+			parts, failure = nil, err.Error()
 		}
-		if !resolveTool(found, command.ToolCallID, command.CommandID, command.TurnID, parts, command.Error) {
-			s.logger.Debug("a tool result answered nothing",
-				"session", found.ID(), "call", command.ToolCallID)
+		// Without a word back, a result naming no call it can settle looks to its sender as
+		// though it was taken, while the model waits out the call's timeout.
+		if !resolveTool(found, command.ToolCallID, command.CommandID, command.TurnID, parts, failure) {
+			found.IgnoreToolResult(echoedID(command.ToolCallID), echoedID(command.CommandID), echoedID(command.TurnID),
+				errNoResultWaits)
 		}
 
 	case "tool_hold":
@@ -461,7 +536,7 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 				"session", found.ID(), "call", command.ToolCallID)
 			return true
 		}
-		found.ToolUpdate(command.ToolCallID, command.Text, command.Verbatim)
+		found.ToolUpdate(command.ToolCallID, command.Text, command.Verbatim, command.Custom)
 
 	case "tool_approval":
 		if command.Allowed == nil {
@@ -470,7 +545,7 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 		}
 		// A connector call the router holds for the person's approval is sent only once they
 		// allow it, and only they or their backend may answer it.
-		if found.AnswerConnectorApproval(command.ToolCallID, command.CommandID, *command.Allowed, command.Summary, owner) {
+		if found.AnswerConnectorApproval(command.ToolCallID, command.CommandID, *command.Allowed, command.Summary, owner) == nil {
 			return true
 		}
 		// A connector call waiting for the person to sign in is declined the same way.
@@ -493,7 +568,7 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 		found.IgnoreApproval(command.ToolCallID, command.CommandID, command.TurnID, errNoApprovalWaits)
 
 	case "say":
-		if err := found.Say(context.Background(), command.Text); err != nil {
+		if err := found.Say(ctx, command.Text); err != nil {
 			s.logger.Debug("could not say it", "session", found.ID(), "error", err)
 		}
 
@@ -503,7 +578,7 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 				found.Report(errors.New("this agent hands what is written to its server, which takes text only"), "dispatch")
 				return true
 			}
-			if _, err := s.dispatchText(context.Background(), found, dispatch.Message{
+			if _, err := s.dispatchText(ctx, found, dispatch.Message{
 				Text: command.Text, CommandID: command.CommandID, UserID: owner.UserID,
 			}, ""); err != nil {
 				found.Report(err, "dispatch")
@@ -516,12 +591,12 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 			return true
 		}
 		if command.CommandID != "" && found.Durable() {
-			if _, _, err := found.RespondCommand(routing.WithCaller(context.Background(), sender), command.CommandID, command.Text, "", images, options.LLM{}); err != nil {
+			if _, _, err := found.RespondCommand(routing.WithCaller(ctx, sender), command.CommandID, command.Text, "", images, options.LLM{}); err != nil {
 				found.Report(err, "llm")
 			}
 			return true
 		}
-		if _, err := found.Respond(routing.WithCaller(context.Background(), sender), command.Text, images, options.LLM{}, images...); err != nil {
+		if _, err := found.Respond(routing.WithCaller(ctx, sender), command.Text, images, options.LLM{}, images...); err != nil {
 			found.Report(err, "llm")
 		}
 
@@ -551,10 +626,17 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 
 	default:
 		found.Report(fmt.Errorf("unknown command %q", command.Type), "command")
-		s.logger.Debug("ignoring an unknown command",
-			"session", found.ID(), "type", command.Type)
 	}
 	return true
+}
+
+// stringID is raw as a string, or empty when it is not one.
+func stringID(raw json.RawMessage) string {
+	var id string
+	if json.Unmarshal(raw, &id) != nil {
+		return ""
+	}
+	return id
 }
 
 func resolveTool(found *session.Session, callID, commandID, turnID string, parts []llm.ContentPart, failure string) bool {
@@ -625,11 +707,31 @@ func frameOf(event session.Event) (frame, bool) {
 		}
 		return ignored, true
 
+	case session.ToolResultIgnored:
+		ignored := frame{"type": "tool_result_ignored", "reason": typed.Reason}
+		for key, id := range map[string]string{"tool_call_id": typed.ID, "request_id": typed.CommandID, "turn_id": typed.TurnID} {
+			if id != "" {
+				ignored[key] = id
+			}
+		}
+		return ignored, true
+
+	case session.ToolCallChanged:
+		return toolStateFrame(typed), true
+
 	case agent.ToolUpdated:
-		return frame{
+		// An update with only custom data is in the call's state, and says nothing.
+		if typed.Text == "" {
+			return nil, false
+		}
+		updated := frame{
 			"type": "tool_updated", "id": typed.ID, "turn_id": typed.TurnID, "tool": typed.Tool,
 			"text": typed.Text, "verbatim": typed.Verbatim,
-		}, true
+		}
+		if typed.Custom != nil {
+			updated["custom"] = typed.Custom
+		}
+		return updated, true
 
 	case agent.Joined:
 		return frame{"type": "joined", "at": typed.At}, true
@@ -696,6 +798,41 @@ func frameOf(event session.Event) (frame, bool) {
 	case agent.ResponseDelta:
 		return frame{"type": "response_delta", "turn_id": typed.TurnID, "text": typed.Text}, true
 
+	case agent.ReasoningDelta:
+		// The only way a written session with no conversation, an incognito one, shows its
+		// reply's thinking: a kept one also streams it into the reply's Chat message.
+		return frame{"type": "reasoning_delta", "turn_id": typed.TurnID, "text": typed.Text}, true
+
+	case agent.UIDelta:
+		out := frame{
+			"type":    "ui_delta",
+			"turn_id": typed.TurnID,
+			"format":  typed.Format,
+			"delta":   typed.Delta,
+		}
+		if typed.Version != "" {
+			out["version"] = typed.Version
+		}
+		if typed.Mode != "" && typed.Mode != "replace" {
+			out["mode"] = typed.Mode
+		}
+		return out, true
+
+	case agent.UICompleted:
+		out := frame{
+			"type":    "ui_completed",
+			"turn_id": typed.TurnID,
+			"format":  typed.Format,
+			"content": typed.Content,
+		}
+		if typed.Version != "" {
+			out["version"] = typed.Version
+		}
+		if typed.Mode != "" && typed.Mode != "replace" {
+			out["mode"] = typed.Mode
+		}
+		return out, true
+
 	case agent.Responded:
 		return withPurpose(frame{
 			"pending_work":           typed.PendingWork,
@@ -735,7 +872,7 @@ func frameOf(event session.Event) (frame, bool) {
 		}, typed.Message), true
 
 	case agent.Turn:
-		return frame{
+		measured := frame{
 			"type":                     "turn",
 			"turn_id":                  typed.TurnID,
 			"participant":              participantOf(typed.Participant),
@@ -755,7 +892,16 @@ func frameOf(event session.Event) (frame, bool) {
 			"speech_end_to_audible_ms": typed.SpeechEndToAudibleMs,
 			"audio_out_ms":             typed.AudioOutMs,
 			"interrupted":              typed.Interrupted,
-		}, true
+		}
+		// Only an agent with chorus-asr floor control adds them, as a timeline entry does.
+		if len(typed.FloorChecks) > 0 {
+			measured["floor_checks"] = floorChecksOf(typed.FloorChecks)
+		}
+		// Only a turn a guardrail checked adds it, as a timeline entry does.
+		if typed.Guardrail != nil {
+			measured["guardrail"] = guardrailCheckOf(*typed.Guardrail)
+		}
+		return measured, true
 
 	case agent.ModelCall:
 		called := frame{
@@ -959,6 +1105,80 @@ func withLine(rendered frame, line string) frame {
 	return rendered
 }
 
+// toolStateFrame renders one change to a tool call's state, as ToolCallState describes it.
+func toolStateFrame(changed session.ToolCallChanged) frame {
+	state := changed.State
+	rendered := frame{
+		"type":         "tool_call." + string(changed.Phase),
+		"tool_call_id": state.ID,
+		"tool":         state.Tool,
+		"turn_id":      state.TurnID,
+		"status":       string(state.Status),
+		"started_at":   state.StartedAt,
+		"duration_ms":  state.Duration.Milliseconds(),
+	}
+	for key, value := range map[string]string{"display_title": state.DisplayTitle, "progress": state.Progress, "error": state.Error} {
+		if value != "" {
+			rendered[key] = value
+		}
+	}
+	for key, at := range map[string]time.Time{"approved_at": state.ApprovedAt, "rejected_at": state.RejectedAt} {
+		if !at.IsZero() {
+			rendered[key] = at
+		}
+	}
+	if state.Custom != nil {
+		rendered["custom"] = state.Custom
+	}
+	return rendered
+}
+
+// ToolCallState is one change to a tool call's state, sent to every watcher of the session.
+type ToolCallState struct {
+	Type         ToolCallFrameType `json:"type"`
+	ToolCallID   string            `json:"tool_call_id" doc:"The call, as tool_call, tool_started and tool_ran name it."`
+	Tool         string            `json:"tool"`
+	TurnID       string            `json:"turn_id"`
+	Status       ToolCallStatus    `json:"status"`
+	DisplayTitle string            `json:"display_title,omitempty" doc:"What the call is doing, in words for the people in the conversation, such as \"Checking the weather\": the display_title its tool was declared with, or \"Searching the web\" for the router's own search. Absent when the tool declared none."`
+	Progress     string            `json:"progress,omitempty" doc:"The last thing said about the call while it runs, such as \"Searching for flights\": a tool_update, the connector binding's pre_speech, or the question it waits on."`
+	StartedAt    time.Time         `json:"started_at"`
+	DurationMS   int64             `json:"duration_ms" doc:"From started_at to this change; on tool_call.finished, how long the call took."`
+	ApprovedAt   *time.Time        `json:"approved_at,omitempty" doc:"When a person allowed the call."`
+	RejectedAt   *time.Time        `json:"rejected_at,omitempty" doc:"When a person declined the call, or its wait for them passed."`
+	Error        string            `json:"error,omitempty" doc:"Why a failed call failed, or what a declined one shows, such as \"Not allowed in time\"."`
+	Custom       map[string]any    `json:"custom,omitempty" doc:"The data whoever runs the call last sent with a tool_update, such as what a card under the message shows. Each update with custom replaces it whole, and it is kept once the call finishes."`
+}
+
+func (*ToolCallState) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
+	schema.Description = "One change to a tool call's state. Every watcher is sent tool_call.started once, " +
+		"tool_call.progress for each change while it runs or waits, and tool_call.finished once, carrying " +
+		"the call's whole state each time, so a client keeps the last one it got per tool_call_id."
+	return schema
+}
+
+// ToolCallFrameType is which of a call's changes a ToolCallState is.
+type ToolCallFrameType string
+
+func (ToolCallFrameType) Schema(registry huma.Registry) *huma.Schema {
+	return namedEnum(registry, "ToolCallFrameType",
+		"tool_call.started is the call's first frame, tool_call.progress one while it runs or waits, "+
+			"and tool_call.finished its last.",
+		"tool_call.started", "tool_call.progress", "tool_call.finished")
+}
+
+// ToolCallStatus is where a tool call stands.
+type ToolCallStatus string
+
+func (ToolCallStatus) Schema(registry huma.Registry) *huma.Schema {
+	return namedEnum(registry, "ToolCallStatus",
+		"in_progress while it runs, waiting while it is held for a person's approval, and success, "+
+			"failed or cancelled once it finished. A call declined, or whose approval nobody gave in "+
+			"time, is cancelled with rejected_at.",
+		string(session.ToolCallInProgress), string(session.ToolCallWaiting), string(session.ToolCallSuccess),
+		string(session.ToolCallFailed), string(session.ToolCallCancelled))
+}
+
 func participantOf(participant stt.Participant) frame {
 	return frame{
 		"id":      participant.ID,
@@ -970,12 +1190,24 @@ func participantOf(participant stt.Participant) frame {
 // errorText renders a failure as the empty string when there was none, so a client can
 // read one field rather than checking whether it is there. A provider's error can echo the
 // credential it was sent, so the text goes through the redactor the requests table keeps
-// failures by.
+// failures by. A failure of what the router depends on says only that something went wrong.
 func errorText(err error) string {
 	if err == nil {
 		return ""
 	}
+	if dependencyFailed(err) {
+		return somethingWentWrong
+	}
 	return store.SafeLogText(err.Error())
+}
+
+// dependencyFailed reports whether err is a failure of what the router depends on rather than
+// a refusal of what the caller asked: a deadline that passed, the network, or a vendor. Its
+// text names hosts, addresses, URLs and bodies, so a caller is never sent it.
+func dependencyFailed(err error) bool {
+	_, network := errors.AsType[net.Error](err)
+	_, vendor := errors.AsType[*llm.ProviderFailure](err)
+	return network || vendor || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, routing.ErrVendorsFailed)
 }
 
 // withRefusal adds the code naming a refusal to an error frame for one, so a client can tell

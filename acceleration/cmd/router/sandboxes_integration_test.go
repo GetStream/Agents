@@ -95,9 +95,9 @@ func (s *UsageCommandsSuite) meteredBy(deployment, id, app, session string, at t
 
 // session keeps a session of app's, closed at closed unless that is zero.
 func (s *UsageCommandsSuite) session(id, app string, closed time.Time) {
-	s.Require().NoError(s.store.SaveSession(s.ctx, &store.AgentSession{ID: id, CustomerID: app}))
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &store.AgentSession{ID: id, CustomerID: app}))
 	if !closed.IsZero() {
-		s.Require().NoError(s.store.CloseSession(s.ctx, id, closed, ""))
+		s.Require().NoError(s.store.Sessions.Close(s.ctx, app, id, closed, closed, ""))
 	}
 }
 
@@ -365,12 +365,12 @@ func (s *UsageCommandsSuite) TestTheSandboxJobLooksAfterEachCustomersOrganizatio
 	s.T().Setenv("DAYTONA_API_KEY", "key-1")
 	s.T().Setenv("DAYTONA_API_URL", server.APIURL())
 	s.settings.CodeSandbox.Deployment = ourDeployment
-	s.settings.Auth.KEK = "usage commands suite"
+	setDevKEK(s.T(), "usage commands suite")
 	secrets, err := newSecretSealer(s.ctx, s.settings)
 	s.Require().NoError(err)
 	sealed, err := providerkeys.Seal(secrets, "app-1", providerkeys.Daytona, pricing.RegionUS, customerDaytonaKey)
 	s.Require().NoError(err)
-	_, _, err = s.store.PutProviderKey(s.ctx, &sealed)
+	_, _, err = s.store.ProviderKeys.Upsert(s.ctx, &sealed)
 	s.Require().NoError(err)
 	now := time.Now().UTC()
 	s.session("session-ours", "app-1", now.Add(-15*time.Minute))

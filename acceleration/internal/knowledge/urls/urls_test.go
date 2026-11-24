@@ -234,7 +234,7 @@ func (s *URLsSuite) TearDownSuite() {
 }
 
 func (s *URLsSuite) SetupTest() {
-	_, err := s.store.DB().ExecContext(s.ctx, "TRUNCATE knowledge_urls CASCADE")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE knowledge_urls CASCADE")
 	s.Require().NoError(err)
 	_, err = s.store.ShardDB().ExecContext(s.ctx, "DELETE FROM requests WHERE modality = 'knowledge'")
 	s.Require().NoError(err)
@@ -412,7 +412,7 @@ func (s *URLsSuite) TestAPageWithARefreshIntervalIsReadAgainOnceItHasPassed() {
 
 	// Both were last read two days ago, which is past the one's interval and means nothing
 	// to the other, which only says when it is read again by being asked.
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE knowledge_urls SET updated_at = now() - interval '48 hours'")
 	s.Require().NoError(err)
 	s.reader.serve("# Pricing\n\nA call costs a penny.\n\n# Support\n\nWe answer within a day.\n\n# Refunds\n\nWithin a month.\n", nil)
@@ -430,11 +430,11 @@ func (s *URLsSuite) TestAPageWithARefreshIntervalIsReadAgainOnceItHasPassed() {
 func (s *URLsSuite) TestAPageIsNotReadAgainBeforeItsIntervalHasPassed() {
 	page := s.added(Subscription{Namespace: "docs", URL: "https://example.com/pricing", RefreshHours: 24})
 
-	due, err := s.store.DueKnowledgeURLs(s.ctx, time.Now().UTC().Add(23*time.Hour), 10)
+	due, err := s.store.KnowledgeURLs.SelectDue(s.ctx, time.Now().UTC().Add(23*time.Hour), 10)
 	s.Require().NoError(err)
 	s.Empty(due, "read an hour short of its interval")
 
-	due, err = s.store.DueKnowledgeURLs(s.ctx, time.Now().UTC().Add(25*time.Hour), 10)
+	due, err = s.store.KnowledgeURLs.SelectDue(s.ctx, time.Now().UTC().Add(25*time.Hour), 10)
 	s.Require().NoError(err)
 	s.Require().Len(due, 1)
 	s.Equal(page.ID, due[0].ID)
@@ -442,7 +442,22 @@ func (s *URLsSuite) TestAPageIsNotReadAgainBeforeItsIntervalHasPassed() {
 
 func (s *URLsSuite) TestANegativeRefreshIntervalIsRefused() {
 	_, err := s.service.Add(s.ctx, "acme", Subscription{Namespace: "docs", URL: "https://example.com/pricing", RefreshHours: -1})
-	s.Error(err)
+	s.ErrorIs(err, ErrRefused)
+	s.ErrorContains(err, "refresh_hours cannot be negative")
+}
+
+// A refusal is the caller's to read, so it says what to correct and is marked as such.
+func (s *URLsSuite) TestASubscriptionTheCallerHasToCorrectIsRefusedInItsWords() {
+	for refused, wanted := range map[string]Subscription{
+		"a namespace is required":           {URL: "https://example.com/pricing"},
+		"a url is required":                 {Namespace: "docs"},
+		"is not a page that can be fetched": {Namespace: "docs", URL: "mailto:sales@example.com"},
+		"names no host":                     {Namespace: "docs", URL: "https:///pricing"},
+	} {
+		_, err := s.service.Add(s.ctx, "acme", wanted)
+		s.ErrorIs(err, ErrRefused, refused)
+		s.ErrorContains(err, refused)
+	}
 }
 
 func (s *URLsSuite) TestAReadThatFailedOnceIsTriedAgain() {
@@ -458,12 +473,13 @@ func (s *URLsSuite) TestAReadThatFailedOnceIsTriedAgain() {
 func (s *URLsSuite) TestAPageThatCouldNotBeReadIsKeptWithTheReason() {
 	// The caller asked for this url to be part of the knowledge base. Telling them why it
 	// is not, on a row they can retry, is more use than refusing and forgetting.
-	s.reader.serve("", errors.New("CRAWL_NOT_FOUND"))
+	s.reader.serve("", errors.New("exa: 500 from https://api.exa.ai/contents: CRAWL_NOT_FOUND"))
 
 	page := s.added(Subscription{Namespace: "docs", URL: "https://example.com/gone"})
 
 	s.Equal(store.KnowledgeURLFailed, page.State, "every retry failed")
-	s.Contains(page.Error, "CRAWL_NOT_FOUND")
+	s.Equal("urls: the page could not be read", page.Error,
+		"the crawler's answer names its host and body, so the caller reads a reason of ours")
 	s.Nil(page.LastIndexedAt, "nothing was ever read, which is not the same as broken since")
 	s.Zero(page.Passages)
 	s.Empty(s.base.ids(), "a page that could not be read writes nothing")
@@ -483,6 +499,15 @@ func (s *URLsSuite) TestAPageOfACustomerWhoMayNotPayIsNeverRead() {
 	s.Contains(page.Error, policy.ErrNoCredits.Error())
 	s.Zero(s.readsMade(), "a read nobody can be billed for is never made")
 	s.Empty(s.base.ids())
+}
+
+func (s *URLsSuite) TestAPageWithNoTextIsKeptWithThatReason() {
+	s.reader.serve("", nil)
+
+	page := s.added(Subscription{Namespace: "docs", URL: "https://example.com/blank"})
+
+	s.Equal(store.KnowledgeURLFailed, page.State)
+	s.Equal(errEmpty.Error(), page.Error, "a reason the caller can act on is still theirs to read")
 }
 
 func (s *URLsSuite) TestAPageThatFailedCanBeReadAgainOnceItIsBack() {
@@ -723,7 +748,7 @@ func (s *URLsSuite) TestAReadAKeyAskedForIsRecordedUnderThatKey() {
 
 func (s *URLsSuite) TestARefreshIsTheCrawlersOwnWork() {
 	page := s.added(Subscription{Namespace: "docs", URL: "https://example.com/pricing", RefreshHours: 24})
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE knowledge_urls SET updated_at = now() - interval '48 hours'")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE knowledge_urls SET updated_at = now() - interval '48 hours'")
 	s.Require().NoError(err)
 	s.reader.serve("# Pricing\n\nA call costs a penny.\n\n# Support\n\nWe answer within a day.\n\n# Refunds\n\nWithin a month.\n", nil)
 	s.Eventually(func() bool {

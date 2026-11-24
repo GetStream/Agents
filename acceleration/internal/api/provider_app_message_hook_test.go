@@ -3,13 +3,11 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -77,7 +75,7 @@ func (s *messageHookHarness) start(connectorsOn bool, publicURL string) {
 	s.logged = &lockedLog{}
 	s.logs = s.logged
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 	s.staff = &testClient{suite: &s.RouterSuite, header: http.Header{opsKeyHeader: {suiteOpsKey}}, kind: noCredential}
 }
 
@@ -179,7 +177,7 @@ func (s *ProviderAppMessageHookSuite) TestCreatingTheAppLeavesThePinnedAppsHooks
 		ConnectorProviderAppRequest{Name: "Acme", ConfigRefreshToken: s.slack.NewConfigToken()})
 
 	s.Require().Equal(http.StatusCreated, status, string(payload))
-	record, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	record, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.Require().NoError(err)
 	s.Equal(s.appID(), record.StreamAppPK, "pinned to the customer's own app")
 	s.leftAlone(hooks)
@@ -222,7 +220,7 @@ func (s *ProviderAppMessageHookSuite) TestAProviderAppPinnedToTheDeploymentsAppP
 
 	s.Require().Equal(http.StatusCreated, s.operatorApp())
 
-	record, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	record, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.Require().NoError(err)
 	s.Equal(int64(suiteStreamApp), record.StreamAppPK)
 	s.Equal(before, s.asked(suiteStreamKey, http.MethodPatch, "/api/v2/app"))
@@ -238,14 +236,14 @@ func (s *ProviderAppMessageHookSuite) TestACardWrittenAfterTheIdlePeriodLandsInT
 	workspace := s.slack.TeamID
 	bot := s.connectedBot(workspace, s.slack.InstallBot())
 	config := store.AgentConfig{
-		CustomerID: s.customerID(), Name: "slack-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "recites/recites-model",
-		EpisodeCards: true,
+		CustomerID: s.customerID(), Name: "slack-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "recites/recites-model"},
+		EpisodeCards: store.AgentEpisodeCards{On: true},
 		Connectors: []store.ConnectorBinding{{
 			Name: "slack", ConnectorID: "slack_bot",
 			Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: bot.ConnectionID},
 		}},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &config))
 
 	status, _ := s.slack.Deliver(s.server.URL+providerAppEventsPath+"slack_bot/"+s.environment["SLACK_BOT_MCP_APP_ID"],
 		s.environment["SLACK_BOT_MCP_SIGNING_SECRET"], s.slackMessage(workspace, "U0000ALICE", "Can you check the build?"), 0)
@@ -253,12 +251,12 @@ func (s *ProviderAppMessageHookSuite) TestACardWrittenAfterTheIdlePeriodLandsInT
 	var episode string
 	var pin int64
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(ctx, "SELECT id, stream_app_pk FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&episode, &pin) == nil
+		return s.store.GlobalDB().QueryRowContext(ctx, "SELECT id, stream_app_pk FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&episode, &pin) == nil
 	}, settleFor, 10*time.Millisecond)
 	s.Equal(s.appID(), pin, "the episode is pinned to the provider app's app")
 	var cid string
-	s.Require().NoError(s.store.DB().QueryRowContext(ctx,
-		"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND agent_config_id = ? AND kind = 'slack' AND address = ?",
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(ctx,
+		"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND config_id = ? AND kind = 'slack' AND address = ?",
 		s.customerID(), config.ID, workspace+":U0000ALICE").Scan(&cid))
 	omni := strings.TrimPrefix(cid, "agent:")
 	s.Require().Eventually(func() bool { return len(s.chat.Stored(omni)) == 1 }, settleFor, 10*time.Millisecond)
@@ -266,11 +264,11 @@ func (s *ProviderAppMessageHookSuite) TestACardWrittenAfterTheIdlePeriodLandsInT
 	// Idle for two hours, past the closer's hour. Episodes left in progress from earlier runs
 	// are older still and would fill the sweep's batch, so they are put out of its way; the
 	// other suites' episodes are newer than an hour and stay.
-	_, err := s.store.DB().ExecContext(ctx, "UPDATE episodes SET started_at = now() - interval '2 hours' WHERE id = ?", episode)
+	_, err := s.store.GlobalDB().ExecContext(ctx, "UPDATE episodes SET started_at = now() - interval '2 hours' WHERE id = ?", episode)
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(ctx, "UPDATE episode_activity SET last_message_at = now() - interval '2 hours' WHERE episode_id = ?", episode)
+	_, err = s.store.GlobalDB().ExecContext(ctx, "UPDATE episodes SET last_message_at = now() - interval '2 hours' WHERE id = ?", episode)
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(ctx,
+	_, err = s.store.GlobalDB().ExecContext(ctx,
 		"UPDATE episodes SET status = 'summary_failed' WHERE status IN ('in_progress', 'ended') AND started_at < now() - interval '1 hour' AND id <> ?", episode)
 	s.Require().NoError(err)
 
@@ -297,13 +295,13 @@ func (s *ProviderAppMessageHookSuite) TestAThreadOfThePinnedAppIsAnsweredByTheSe
 	token := s.slack.InstallBot()
 	bot := s.connectedBot(workspace, token)
 	config := store.AgentConfig{
-		CustomerID: s.customerID(), Name: "slack-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
+		CustomerID: s.customerID(), Name: "slack-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"},
 		Connectors: []store.ConnectorBinding{{
 			Name: "slack", ConnectorID: "slack_bot",
 			Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: bot.ConnectionID},
 		}},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &config))
 	handOver := s.holdHandOffs()
 	status, _ := s.slack.Deliver(s.server.URL+providerAppEventsPath+"slack_bot/"+s.environment["SLACK_BOT_MCP_APP_ID"],
 		s.environment["SLACK_BOT_MCP_SIGNING_SECRET"], s.slackMessage(workspace, "U0000ALICE", "Can you check the build?"), 0)
@@ -311,7 +309,7 @@ func (s *ProviderAppMessageHookSuite) TestAThreadOfThePinnedAppIsAnsweredByTheSe
 	var channel string
 	var pin int64
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(ctx, "SELECT channel_id, stream_app_pk FROM channel_threads WHERE customer_id = ?", s.customerID()).Scan(&channel, &pin) == nil
+		return s.store.GlobalDB().QueryRowContext(ctx, "SELECT channel_id, stream_app_pk FROM channel_threads WHERE customer_id = ?", s.customerID()).Scan(&channel, &pin) == nil
 	}, settleFor, 10*time.Millisecond)
 	s.Require().Equal(s.appID(), pin, "the thread is pinned to the provider app's app")
 	// The backend opens its session on the channel the worker made, which the row is linked
@@ -320,7 +318,7 @@ func (s *ProviderAppMessageHookSuite) TestAThreadOfThePinnedAppIsAnsweredByTheSe
 		"the worker never wrote the message")
 	opened := s.serverClient.createSession(CreateSessionRequest{Agent: &config.Name, AgentId: &channel})
 	s.Require().Eventually(func() bool {
-		_, err := s.store.StoredSession(ctx, s.customerID(), opened.Id)
+		_, err := s.store.Sessions.Get(ctx, s.customerID(), opened.Id)
 		return err == nil
 	}, settleFor, 20*time.Millisecond, "the session's row was never stored")
 
@@ -337,7 +335,7 @@ func (s *ProviderAppMessageHookSuite) TestAThreadOfThePinnedAppIsAnsweredByTheSe
 		return false
 	}, settleFor, 10*time.Millisecond, "the person got no reply")
 	var sessions int
-	s.Require().NoError(s.store.DB().QueryRowContext(ctx, "SELECT count(*) FROM agent_sessions WHERE customer_id = ?", s.customerID()).Scan(&sessions))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(ctx, "SELECT count(*) FROM agent_sessions WHERE customer_id = ?", s.customerID()).Scan(&sessions))
 	s.Equal(1, sessions, "the backend's session answered; the router opened none")
 }
 
@@ -408,7 +406,7 @@ func (s *ProviderAppMessageHookNoAppSuite) TestAProviderAppPinnedToZeroPointsNoH
 
 	s.Require().Equal(http.StatusCreated, s.operatorApp())
 
-	record, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	record, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.Require().NoError(err)
 	s.Zero(record.StreamAppPK)
 	s.NotZero(s.stream.DeploymentApp())
@@ -447,24 +445,6 @@ func (s *ProviderAppMessageHookOffSuite) TestTheProviderAppPutsAnswerAsBeforeAnd
 	s.Contains(string(operatorBody), "operator apps cannot be set: connectors are not enabled on this deployment")
 	s.Len(s.chat.Requests(s.apiKey), asked, "nothing is asked of the customer's Stream app")
 	s.Empty(s.chat.EventHooks(s.apiKey))
-	_, err := s.store.ConnectorOAuthClient(context.Background(), s.customerID(), "slack_bot")
+	_, err := s.store.ConnectorOAuthClients.Get(context.Background(), s.customerID(), "slack_bot")
 	s.ErrorIs(err, store.ErrNoConnectorOAuthClient)
-}
-
-// lockedLog is what the router logs, written from any goroutine and read by the test.
-type lockedLog struct {
-	mu      sync.Mutex
-	written bytes.Buffer
-}
-
-func (l *lockedLog) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.written.Write(p)
-}
-
-func (l *lockedLog) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.written.String()
 }

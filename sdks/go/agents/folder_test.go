@@ -401,6 +401,39 @@ func TestTheOldPluginKeysAreRefused(t *testing.T) {
 	}
 }
 
+func TestTheToolSettingsOfBeforeGroupsAreRefusedSayingWhereTheyWent(t *testing.T) {
+	for _, declared := range []string{"tools:\n  progressive: true\n", "tools:\n  output_retention: 30d\n"} {
+		root := filepath.Join(t.TempDir(), "concierge")
+		write(t, root, "agent.yaml", declared)
+
+		_, err := Load(root)
+
+		if err == nil || !strings.Contains(err.Error(), "loading: summary") || !strings.Contains(err.Error(), "output_retention moves") {
+			t.Errorf("%q: %v", declared, err)
+		}
+	}
+}
+
+func TestAToolGroupThatSaysTooLittleOrTooMuchIsRefused(t *testing.T) {
+	for declared, says := range map[string]string{
+		"tools:\n  - tools: [lookup_booking]\n":                              "needs a name",
+		"tools:\n  - name: booking\n":                                        "names no tools",
+		"tools:\n  - name: booking\n    loading: lazy\n    tools: [a]\n":     `not "lazy"`,
+		"tools:\n  - name: booking\n    progressive: true\n    tools: [a]\n": `"progressive" is not something a tool group says`,
+		"tools:\n  - lookup_booking\n":                                       "a tool group is a mapping",
+		"connectors:\n  - name: linear\n    loading: eager\n":                `connector "linear": loading`,
+	} {
+		root := filepath.Join(t.TempDir(), "concierge")
+		write(t, root, "agent.yaml", declared)
+
+		_, err := Load(root)
+
+		if err == nil || !strings.Contains(err.Error(), says) {
+			t.Errorf("%q: %v", declared, err)
+		}
+	}
+}
+
 func TestADeclarationKeyNobodyKnowsIsRefused(t *testing.T) {
 	for _, declaration := range []string{
 		"name: jean\nlmm: openai/gpt-5.6\n",
@@ -417,6 +450,45 @@ func TestADeclarationKeyNobodyKnowsIsRefused(t *testing.T) {
 
 		if _, err := Load(root); err == nil {
 			t.Errorf("accepted %q", declaration)
+		}
+	}
+}
+
+// A greeting is its text alone, said as a variation, or a mapping that names its mode.
+func TestAGreetingIsItsTextOrAMappingThatNamesItsMode(t *testing.T) {
+	for _, c := range []struct {
+		declared string
+		want     *GreetingSettings
+	}{
+		{"greeting: Thanks for calling Acme. How can I help?\n", &GreetingSettings{Text: "Thanks for calling Acme. How can I help?", Mode: "variation"}},
+		{"greeting:\n  text: Hey, it's Juno.\n  mode: exact\n", &GreetingSettings{Text: "Hey, it's Juno.", Mode: "exact"}},
+		{"greeting:\n  text: Hello.\n", &GreetingSettings{Text: "Hello.", Mode: "variation"}},
+		{"greeting: \"\"\n", &GreetingSettings{Mode: "variation"}},
+		{"greeting:\n", nil},
+	} {
+		root := filepath.Join(t.TempDir(), "jean")
+		write(t, root, "agent.yaml", c.declared)
+
+		folder, err := Load(root)
+		if err != nil {
+			t.Errorf("%q: %v", c.declared, err)
+			continue
+		}
+		if !reflect.DeepEqual(folder.Settings.Greeting, c.want) {
+			t.Errorf("%q: greeting read as %+v, not %+v", c.declared, folder.Settings.Greeting, c.want)
+		}
+	}
+
+	for _, c := range []struct{ declared, says string }{
+		{"greeting: {text: Hello., voice: warm}\n", `"voice" is not a greeting setting`},
+		{"greeting: [Hello.]\n", "greeting is its text, or a mapping of text and mode"},
+		{"greeting: {text: [Hello.]}\n", "greeting.text must be a string"},
+	} {
+		root := filepath.Join(t.TempDir(), "jean")
+		write(t, root, "agent.yaml", c.declared)
+
+		if _, err := Load(root); err == nil || !strings.Contains(err.Error(), c.says) {
+			t.Errorf("%q: refused with %v", c.declared, err)
 		}
 	}
 }

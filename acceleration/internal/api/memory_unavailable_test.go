@@ -192,7 +192,7 @@ func (s *MemoryUnavailableSuite) TestASessionFromBeforeRowsSaidIsStillForgotten(
 	// A row written before rows said whether the session remembered. The row is written
 	// behind the request, so it is made old once it is there.
 	s.Require().Eventually(func() bool {
-		made, err := s.store.DB().ExecContext(s.T().Context(),
+		made, err := s.store.GlobalDB().ExecContext(s.T().Context(),
 			"UPDATE agent_sessions SET remembers = NULL WHERE id = ?", opened.Id)
 		if err != nil {
 			return false

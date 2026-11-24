@@ -2,6 +2,8 @@ package conversation_test
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"slices"
 	"sync"
 	"testing"
@@ -204,7 +206,7 @@ func (s *ThreadChannelSuite) TestAFinishedReplyIsHandedOverWithoutItsUI() {
 	s.person("U1", "plan a weekend in Ohrid")
 	c, _, _, err := s.service.Open(s.routerOpens(), "customer", "", s.cid)
 	s.Require().NoError(err)
-	_, err = c.BeginFollowUp("follow-up-"+uuid.NewString(), "plan a weekend in Ohrid")
+	_, err = c.BeginFollowUp("follow-up-"+uuid.NewString(), "plan a weekend in Ohrid", "")
 	s.Require().NoError(err)
 
 	c.Observe(agent.ResponseDelta{Text: "A weekend in Ohrid.\n```openui-lang\nroot = Card([])\n```"})
@@ -221,7 +223,7 @@ func (s *ThreadChannelSuite) TestAFinishedReplyIsHandedOverWithItsFiles() {
 	c, _, _, err := s.service.Open(s.routerOpens(), "customer", "", s.cid)
 	s.Require().NoError(err)
 	graph := sandbox.Attachment{Name: "graph.png", MIME: "image/png", URL: "https://cdn.fake/image/graph.png", Size: 3}
-	_, err = c.BeginFollowUp("follow-up-"+uuid.NewString(), "draw the build graph")
+	_, err = c.BeginFollowUp("follow-up-"+uuid.NewString(), "draw the build graph", "")
 	s.Require().NoError(err)
 
 	c.Observe(agent.Delegated{TaskID: "task-1", Skill: "render"})
@@ -241,7 +243,7 @@ func (s *ThreadChannelSuite) TestAReplyThatIsOnlyFilesIsHandedOver() {
 	c, _, _, err := s.service.Open(s.routerOpens(), "customer", "", s.cid)
 	s.Require().NoError(err)
 	graph := sandbox.Attachment{Name: "graph.png", MIME: "image/png", URL: "https://cdn.fake/image/graph.png", Size: 3}
-	_, err = c.BeginFollowUp("follow-up-"+uuid.NewString(), "draw the build graph")
+	_, err = c.BeginFollowUp("follow-up-"+uuid.NewString(), "draw the build graph", "")
 	s.Require().NoError(err)
 
 	c.Observe(agent.Delegated{TaskID: "task-1", Skill: "render"})
@@ -337,6 +339,38 @@ func (s *ThreadChannelSuite) TestAThreadChannelARequestNamesHasNoHistoryToRead()
 	s.Contains(historyErr.Error(), "invalid conversation channel")
 	s.Require().Error(contextErr)
 	s.Contains(contextErr.Error(), "invalid conversation channel")
+}
+
+// A channel Chat does not have is refused as a thread channel is, so a request learns
+// nothing from telling the two apart, and nothing of Chat's words reaches it.
+func (s *ThreadChannelSuite) TestAChannelChatDoesNotHaveIsRefusedAsAThreadChannelIs() {
+	unknown := "agent:" + conversation.ThreadChannelPrefix + uuid.NewString()
+
+	_, threadErr := s.service.HistoryForCaller(context.Background(), "customer", "", s.cid, "", "")
+	_, unknownErr := s.service.HistoryForCaller(context.Background(), "customer", "", unknown, "", "")
+	_, commandErr := s.service.CommandForCaller(context.Background(), "customer", "", unknown, "", "command-1")
+
+	thread, ok := errors.AsType[conversation.RefusedRead](threadErr)
+	s.Require().True(ok, threadErr)
+	refused, ok := errors.AsType[conversation.RefusedRead](unknownErr)
+	s.Require().True(ok, unknownErr)
+	s.Equal(thread, refused)
+	s.ErrorIs(commandErr, conversation.ErrCommandNotFound)
+}
+
+// Chat failing the read is no refusal: the caller is not told the conversation is not theirs,
+// nor that a command of theirs does not exist.
+func (s *ThreadChannelSuite) TestChatFailingAReadIsNoRefusal() {
+	s.chat.Fail(http.MethodPost, "/query")
+
+	_, historyErr := s.service.HistoryForCaller(context.Background(), "customer", "", s.cid, "", "")
+	_, commandErr := s.service.CommandForCaller(context.Background(), "customer", "", s.cid, "", "command-1")
+
+	s.Require().Error(historyErr)
+	_, refused := errors.AsType[conversation.RefusedRead](historyErr)
+	s.False(refused, historyErr)
+	s.Require().Error(commandErr)
+	s.NotErrorIs(commandErr, conversation.ErrCommandNotFound)
 }
 
 // A command in a thread channel is no command a request can look up, as at baseline.
@@ -469,7 +503,7 @@ func ptr[T any](value T) *T { return &value }
 // returns the follow-up's id.
 func (s *ThreadChannelSuite) answer(c *conversation.Conversation, told, reply string) string {
 	id := "follow-up-" + uuid.NewString()
-	_, err := c.BeginFollowUp(id, told)
+	_, err := c.BeginFollowUp(id, told, "")
 	s.Require().NoError(err)
 	c.Observe(agent.ResponseDelta{Text: reply})
 	c.Observe(agent.Responded{})

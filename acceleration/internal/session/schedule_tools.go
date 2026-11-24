@@ -26,6 +26,7 @@ const (
 	scheduledTaskNotFound = "scheduled_task_not_found"
 	tooManyTasks          = "too_many_tasks"
 	conflictCode          = "conflict"
+	taskChanged           = "task_changed"
 	serverSideOnly        = "server_side_only"
 	unknownConfig         = "unknown_config"
 )
@@ -260,7 +261,7 @@ func (r *scheduleRunner) schedule(ctx context.Context, call llm.ToolCall) ([]llm
 		task.UntilDate = &until
 	}
 	maxActive := r.maxActive()
-	if err := r.db.CreateScheduledTask(ctx, &task, maxActive); err != nil {
+	if err := r.db.ScheduledTasks.Insert(ctx, &task, maxActive); err != nil {
 		if errors.Is(err, store.ErrTooManyScheduledTasks) {
 			return refusal(tooManyTasks, fmt.Sprintf("the user already has %d tasks running, the most this agent allows; cancel one first, or pause one until it is wanted", maxActive)), nil
 		}
@@ -332,12 +333,13 @@ func (r *scheduleRunner) listed(ctx context.Context) ([]store.ScheduledTask, boo
 		Scope: store.ScheduledTaskScope{UserID: r.user,
 			Kinds: []string{string(r.kind), string(auth.KindServer)}},
 		ConfigID: r.spec.ConfigID,
+		Limit:    limit,
 	}
 	var tasks []store.ScheduledTask
 	for _, state := range listedStates {
 		filter.State = state
 		// The store answers one more than the limit, so a state that overflows it says so.
-		page, err := r.db.ScheduledTasks(ctx, r.spec.CustomerID, filter, limit, nil)
+		page, err := r.db.ScheduledTasks.Select(ctx, r.spec.CustomerID, filter)
 		if err != nil {
 			return nil, false, err
 		}
@@ -407,18 +409,12 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 		next, ok := schedule.Next(now)
 		missed := scheduling.SleptThrough(task)
 		if !ok && missed != nil {
-			if err := r.db.InsertScheduledTaskRun(ctx, missed); err != nil {
-				return nil, err
-			}
 			task.State, task.NextRunAt = store.ScheduledTaskCompleted, nil
 			slept = missed
 			break
 		}
 		if !ok {
 			return refusal(scheduling.CodeScheduleInPast, "that task has no occurrence left; reschedule it to a new time instead"), nil
-		}
-		if parts, err := r.room(ctx, &task); parts != nil || err != nil {
-			return parts, err
 		}
 		task.State = store.ScheduledTaskActive
 		task.NextRunAt = &next
@@ -431,9 +427,6 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 		}
 		schedule = parsed
 		if task.State != store.ScheduledTaskPaused {
-			if parts, err := r.room(ctx, &task); parts != nil || err != nil {
-				return parts, err
-			}
 			task.State = store.ScheduledTaskActive
 		}
 	case "snooze":
@@ -462,9 +455,19 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 	default:
 		return refusal(scheduling.CodeInvalidSchedule, "action must be reschedule, snooze, skip_next, pause or resume"), nil
 	}
-	if err := r.db.SaveScheduledTask(ctx, &task); err != nil {
-		if errors.Is(err, store.ErrNoAgentConfig) {
+	if slept != nil {
+		err = r.db.ScheduledTasks.Close(ctx, &task, slept)
+	} else {
+		err = r.db.ScheduledTasks.Update(ctx, &task)
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNoAgentConfig):
 			return refusal(unknownConfig, "this agent has been deleted, so the task cannot run again"), nil
+		case errors.Is(err, store.ErrTooManyScheduledTasks):
+			return refusal(tooManyTasks, "the user already has the most tasks running that this agent allows; cancel one first, or pause one until it is wanted"), nil
+		case errors.Is(err, store.ErrScheduledTaskChanged):
+			return refusal(taskChanged, "that task changed while you were changing it; read it again with list_scheduled_tasks and retry"), nil
 		}
 		return nil, err
 	}
@@ -499,7 +502,7 @@ func (r *scheduleRunner) cancel(ctx context.Context, call llm.ToolCall) ([]llm.C
 	if parts != nil || err != nil {
 		return parts, err
 	}
-	if err := r.db.DeleteScheduledTask(ctx, r.spec.CustomerID, task.ID); err != nil {
+	if err := r.db.ScheduledTasks.Delete(ctx, r.spec.CustomerID, task.ID); err != nil {
 		return nil, err
 	}
 	return result(map[string]any{"cancelled": task.Title}), nil
@@ -509,7 +512,7 @@ func (r *scheduleRunner) cancel(ctx context.Context, call llm.ToolCall) ([]llm.C
 // user's, or another agent's, is reported as not there: the tools reach only
 // what list_scheduled_tasks would have shown.
 func (r *scheduleRunner) ownTask(ctx context.Context, id string) (store.ScheduledTask, []llm.ContentPart, error) {
-	task, err := r.db.ScheduledTask(ctx, r.spec.CustomerID, id)
+	task, err := r.db.ScheduledTasks.Get(ctx, r.spec.CustomerID, id)
 	if errors.Is(err, store.ErrNoScheduledTask) {
 		return task, refusal(scheduledTaskNotFound, "there is no task with that id among this user's tasks on this agent; list_scheduled_tasks shows them"), nil
 	}
@@ -611,26 +614,6 @@ func (r *scheduleRunner) snoozeTarget(task store.ScheduledTask, args updateArgs,
 		return time.Time{}, parts
 	}
 	return target, nil
-}
-
-// room refuses the change when putting the task back among the active ones
-// would take its user over this agent's limit, or when its agent config is deleted: a
-// session opened before the delete still runs, but the task has nothing to run on.
-func (r *scheduleRunner) room(ctx context.Context, task *store.ScheduledTask) ([]llm.ContentPart, error) {
-	if task.State == store.ScheduledTaskActive {
-		return nil, nil
-	}
-	if _, err := r.db.AgentConfig(ctx, r.spec.CustomerID, task.ConfigID); errors.Is(err, store.ErrNoAgentConfig) {
-		return refusal(unknownConfig, "this agent has been deleted, so the task cannot run again"), nil
-	}
-	count, err := r.db.ActiveScheduledTaskCount(ctx, r.spec.CustomerID, r.user, task.ConfigID)
-	if err != nil {
-		return nil, err
-	}
-	if count >= r.maxActive() {
-		return refusal(tooManyTasks, fmt.Sprintf("the user already has %d tasks running, the most this agent allows; cancel one first, or pause one until it is wanted", r.maxActive())), nil
-	}
-	return nil, nil
 }
 
 // zone picks the zone for a new task: what was named for it, the session's,

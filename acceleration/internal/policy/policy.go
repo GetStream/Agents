@@ -18,7 +18,7 @@
 //
 // Admit is asked before every routed session and every LLM response, an in-process agent's
 // speech included, so it answers from memory. What an app's policies say is its decision,
-// read through appconfig and refreshed in the background once older than Settings.Fresh.
+// read through the store's cache and refreshed in the background once older than Settings.Fresh.
 // What its organization may do with money is its account, read by two loops per Enforcer, for
 // every organization in use at once: its standing from the usage service every Fresh, and its
 // limits every Fresh with what their subjects spent, from the usage service's counters every
@@ -38,7 +38,6 @@ import (
 
 	"github.com/redis/rueidis"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/quota"
@@ -191,7 +190,7 @@ func (s Settings) withDefaults() Settings {
 // become an outage of everything the policies were protecting. Money fails as the
 // organization's tier says, once its account has gone unread for MaxStale.
 type Enforcer struct {
-	config   *appconfig.Store
+	config   *store.Store
 	logger   *slog.Logger
 	settings Settings
 
@@ -230,7 +229,7 @@ type tierSeen struct {
 	writtenAt time.Time
 }
 
-// decision is what an app's policies say. Read through appconfig, so from process memory once
+// decision is what an app's policies say. Read through the store's cache, so from process memory once
 // read, and refreshed in the background once older than Fresh.
 type decision struct {
 	floor  options.DataPolicy
@@ -264,7 +263,7 @@ type decision struct {
 
 // New returns an Enforcer reading policies from the configuration store and money as the
 // settings say, and starts its money loop, which Close stops. With Mode off no money is read.
-func New(config *appconfig.Store, settings Settings, logger *slog.Logger) (*Enforcer, error) {
+func New(config *store.Store, settings Settings, logger *slog.Logger) (*Enforcer, error) {
 	if config == nil {
 		return nil, errors.New("policy: a configuration store is required")
 	}
@@ -291,7 +290,7 @@ func (e *Enforcer) Close() {
 // owner's work may spend no money when it may not, and says what every one of the customer's
 // requests is held to. The owner's key, user and categories are the subjects the customer's
 // limits are checked for, beside its organization and app. It answers from memory: a customer
-// it has no decision for has its policies read now, through appconfig, and its money left to
+// it has no decision for has its policies read now, through the store's cache, and its money left to
 // the loops, which admit until they land.
 func (e *Enforcer) Admit(ctx context.Context, owner routing.Owner) (routing.Admission, error) {
 	customerID := owner.CustomerID
@@ -336,7 +335,7 @@ func (e *Enforcer) Attribute(ctx context.Context, customerID string) (routing.Ad
 // is then marked Unread, so a debit still counts what they spend.
 //
 // The app's and the organization's numbers come from the app's decision in memory. Whether
-// any of the app's users has a policy of their own is read through appconfig, not the
+// any of the app's users has a policy of their own is read through the store's cache, not the
 // decision, which another router's write does not drop: the next request after one is saved
 // is held to it. Only a user of such an app is looked up.
 func (e *Enforcer) Quota(ctx context.Context, customerID, userID string, defaults quota.Limits) quota.Quota {
@@ -354,10 +353,10 @@ func (e *Enforcer) Quota(ctx context.Context, customerID, userID string, default
 	defer cancel()
 	// An app whose users cannot be told apart is taken to have some with a policy, so each is
 	// looked up, and one that fails holds them to the app's quota.
-	if some, err := e.config.HasUserPolicies(reading, customerID); err == nil && !some {
+	if some, err := e.config.Policies.HasUsers(reading, customerID); err == nil && !some {
 		return held
 	}
-	own, err := e.config.Policy(reading, store.ScopeUser, store.UserScopeID(customerID, userID))
+	own, err := e.config.Policies.Get(reading, store.ScopeUser, store.UserScopeID(customerID, userID))
 	if err != nil {
 		if e.userQuotaLogs.Due(customerID, time.Minute) {
 			e.logger.Error("could not read a user's own quota, holding them to their app's",
@@ -389,35 +388,35 @@ func layered(held quota.Quota, set *store.Quota, by quota.Setter) quota.Quota {
 // and its organization's account if this process has neither, so by the time the caller's
 // work is admitted both are in memory. It returns at once and does all of it in the
 // background.
-func (e *Enforcer) Join(appID, organizationID, tier string) {
+func (e *Enforcer) Join(ctx context.Context, appID, organizationID, tier string) {
 	if e == nil || appID == "" {
 		return
 	}
-	e.warm(appID)
+	e.warm(ctx, appID)
 	if organizationID == "" {
 		return
 	}
 	e.money.want(organizationID)
-	e.seeTier(organizationID, tier)
+	e.seeTier(ctx, organizationID, tier)
 	if known, ok := e.members.Load(appID); ok && known == organizationID {
 		return
 	}
 	e.members.Store(appID, organizationID)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), joinTimeout)
 		defer cancel()
-		if err := e.config.JoinOrganization(ctx, appID, organizationID); err != nil {
+		if err := e.config.AppOrganizations.Upsert(ctx, &store.AppOrganization{AppID: appID, OrganizationID: organizationID}); err != nil {
 			e.members.Delete(appID)
 			e.logger.Error("could not record which organization an app belongs to",
 				"app", appID, "organization", organizationID, "error", err)
 			return
 		}
-		e.refresh(appID)
+		e.refresh(ctx, appID)
 	}()
 }
 
 // warm starts reading an app's decision in the background when this process has none.
-func (e *Enforcer) warm(appID string) {
+func (e *Enforcer) warm(ctx context.Context, appID string) {
 	e.mu.Lock()
 	_, known := e.decisions[appID]
 	e.mu.Unlock()
@@ -432,7 +431,7 @@ func (e *Enforcer) warm(appID string) {
 		e.mu.Lock()
 		forgotten := e.forgotten
 		e.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), joinTimeout)
 		defer cancel()
 		decided, err := e.configuration(ctx, appID)
 		if err != nil {
@@ -457,7 +456,7 @@ func (e *Enforcer) warm(appID string) {
 // tierTTL, so requests from proxies that disagree for a moment, as one whose cache has not
 // caught up does, are no stream of writes; a tier left unwritten is written by the first
 // request naming it after that, or by tier once tierTTL has passed. Empty names none.
-func (e *Enforcer) seeTier(organizationID, tier string) {
+func (e *Enforcer) seeTier(ctx context.Context, organizationID, tier string) {
 	if tier == "" {
 		return
 	}
@@ -472,17 +471,17 @@ func (e *Enforcer) seeTier(organizationID, tier string) {
 	e.tiers[organizationID] = seen
 	e.tiersMu.Unlock()
 	if due {
-		e.writeTier(organizationID, tier, now, now)
+		e.writeTier(ctx, organizationID, tier, now, now)
 	}
 }
 
 // writeTier records in the background that a request named the tier at seenAt, the write
 // marked as made at writtenAt. A write that fails is forgotten, so it is made again.
-func (e *Enforcer) writeTier(organizationID, tier string, seenAt, writtenAt time.Time) {
+func (e *Enforcer) writeTier(ctx context.Context, organizationID, tier string, seenAt, writtenAt time.Time) {
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), joinTimeout)
 		defer cancel()
-		if err := e.config.DB().SetOrganizationTier(ctx, organizationID, tier, seenAt); err != nil {
+		if err := e.config.OrganizationTiers.Upsert(ctx, &store.OrganizationTier{OrganizationID: organizationID, Tier: tier, SeenAt: seenAt}); err != nil {
 			e.tiersMu.Lock()
 			if current := e.tiers[organizationID]; current.written == tier && current.writtenAt.Equal(writtenAt) {
 				current.written, current.writtenAt = "", time.Time{}
@@ -521,10 +520,11 @@ func (e *Enforcer) tier(ctx context.Context, organizationID string) string {
 	}
 	if unwritten {
 		// Named at seen.at, so a newer tier another router wrote meanwhile is kept.
-		e.writeTier(organizationID, seen.tier, seen.at, now)
+		e.writeTier(ctx, organizationID, seen.tier, seen.at, now)
 		return seen.tier
 	}
-	recorded, err := e.config.DB().TierOf(ctx, organizationID)
+	row, err := e.config.OrganizationTiers.Get(ctx, organizationID)
+	recorded := row.Tier
 	e.tiersMu.Lock()
 	defer e.tiersMu.Unlock()
 	current := e.tiers[organizationID]
@@ -593,7 +593,7 @@ func resumeHistoryOf(document store.PolicyDocument) store.ResumeHistory {
 // Save replaces a scope's policy and drops the decisions it may have changed, so the next
 // request of this process reads them again.
 func (e *Enforcer) Save(ctx context.Context, scope store.PolicyScope, id string, document store.PolicyDocument) error {
-	if err := e.config.SavePolicy(ctx, scope, id, document); err != nil {
+	if err := e.config.Policies.Upsert(ctx, &store.Policy{Scope: scope, ScopeID: id, Document: document}); err != nil {
 		return err
 	}
 	e.changed(scope, id)
@@ -603,12 +603,12 @@ func (e *Enforcer) Save(ctx context.Context, scope store.PolicyScope, id string,
 // Delete removes a scope's policy, drops the decisions it may have changed, and reports
 // whether there was one.
 func (e *Enforcer) Delete(ctx context.Context, scope store.PolicyScope, id string) (bool, error) {
-	deleted, err := e.config.DeletePolicy(ctx, scope, id)
-	if err != nil {
+	err := e.config.Policies.Delete(ctx, scope, id)
+	if err != nil && !errors.Is(err, store.ErrNoPolicy) {
 		return false, err
 	}
 	e.changed(scope, id)
-	return deleted, nil
+	return err == nil, nil
 }
 
 // changed drops the decisions a write of one scope's policy may have changed: the app's, for
@@ -632,7 +632,7 @@ func (e *Enforcer) changed(scope store.PolicyScope, id string) {
 
 // decide answers from the customer's decision whatever its age and starts a background
 // refresh when it is older than Fresh. With no decision at all, the policies are read now,
-// through appconfig, so a data policy or a model allow-list is never skipped; the money is
+// through the store's cache, so a data policy or a model allow-list is never skipped; the money is
 // left to the loop, which admits until it lands.
 func (e *Enforcer) decide(ctx context.Context, customerID string) decision {
 	now := time.Now()
@@ -647,7 +647,7 @@ func (e *Enforcer) decide(ctx context.Context, customerID string) decision {
 		e.decisions[customerID] = cached
 		e.mu.Unlock()
 		if due {
-			go e.refresh(customerID)
+			go e.refresh(context.WithoutCancel(ctx), customerID)
 		}
 		return cached
 	}
@@ -665,7 +665,7 @@ func (e *Enforcer) decide(ctx context.Context, customerID string) decision {
 		e.logger.Error("could not read a customer's policies, allowing the request",
 			"customer", customerID, "error", err)
 		decided.unread = err
-		e.warm(customerID)
+		e.warm(ctx, customerID)
 		return decided
 	}
 	decided.read, decided.used = now, now
@@ -683,11 +683,11 @@ func (e *Enforcer) decide(ctx context.Context, customerID string) decision {
 
 // refresh reads a customer's decision again in the background and replaces the one in memory
 // with it. A read that fails keeps the decision there, and tries again after Fresh.
-func (e *Enforcer) refresh(customerID string) {
+func (e *Enforcer) refresh(ctx context.Context, customerID string) {
 	e.mu.Lock()
 	generation := e.decisions[customerID].generation
 	e.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), joinTimeout)
 	defer cancel()
 	decided, err := e.configuration(ctx, customerID)
 	now := time.Now()
@@ -715,21 +715,20 @@ func (e *Enforcer) refresh(customerID string) {
 
 // policies reads the app's policy, the organization it is in and the organization's policy.
 func (e *Enforcer) policies(ctx context.Context, appID string) (app, organization store.PolicyDocument, organizationID string, err error) {
-	if app, err = e.config.Policy(ctx, store.ScopeApp, appID); err != nil {
+	read, err := e.config.Policies.OfApp(ctx, appID)
+	if err != nil {
 		return app, organization, "", err
 	}
-	if organizationID, err = e.config.OrganizationOf(ctx, appID); err != nil {
-		return app, organization, "", err
-	}
+	app, organization, organizationID = read.App, read.Organization, read.OrganizationID
 	// An app seen for the first time is recorded under its organization in the background.
 	// Until that lands, the organization it came in under is the one whose floor applies:
 	// an app's first requests are not the ones to escape it.
 	if pending, ok := e.members.Load(appID); ok && organizationID == "" {
 		organizationID, _ = pending.(string)
-	}
-	if organizationID != "" {
-		if organization, err = e.config.Policy(ctx, store.ScopeOrganization, organizationID); err != nil {
-			return app, organization, "", err
+		if organizationID != "" {
+			if organization, err = e.config.Policies.Get(ctx, store.ScopeOrganization, organizationID); err != nil {
+				return app, organization, "", err
+			}
 		}
 	}
 	return app, organization, organizationID, nil

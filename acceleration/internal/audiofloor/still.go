@@ -8,6 +8,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -210,7 +211,7 @@ func (t *Transcriber) checksHeld(participant stt.Participant, heard int64) {
 		voiced: time.Duration(t.talked) * frame, length: time.Duration(length) * frame, audio: t.heard.Last(time.Duration(length) * frame),
 		asked: time.Now()}
 	t.running.Add(1)
-	go t.checkHeld(asker, c)
+	goroutine.Go(t.call, func() { t.checkHeld(asker, c) })
 }
 
 // newStill begins the clock of the utterance being heard. It runs on the session's goroutine, on
@@ -247,6 +248,7 @@ func (t *Transcriber) checkHeld(asker Asker, c heldCheck) {
 	ctx, cancel := context.WithTimeout(t.ctx, deadline)
 	defer cancel()
 	var said <-chan Words
+	var latency time.Duration
 	checked, err := func() (Check, error) {
 		policy, err := t.client.Policy(ctx)
 		if err != nil {
@@ -254,7 +256,10 @@ func (t *Transcriber) checkHeld(asker Asker, c heldCheck) {
 		}
 		agent := Agent{Instructions: turn.Instructions, Tools: turn.Tools, Languages: t.languages}
 		var answer Answer
-		if answer, said, err = t.decideWords(ctx, agent, turnOf(turn), turn.Audio); err != nil {
+		sent := time.Now()
+		answer, said, err = t.decideWords(ctx, agent, turnOf(turn), turn.Audio)
+		latency = time.Since(sent)
+		if err != nil {
 			return Check{}, err
 		}
 		return asker.Hearer().ruleStill(policy, answer)
@@ -266,6 +271,17 @@ func (t *Transcriber) checkHeld(asker Asker, c heldCheck) {
 		return
 	}
 	checkSeconds.Observe(time.Since(c.asked).Seconds())
+	// The check is reported once its words say whether the turn ended on it, and before they
+	// go out as the utterance's final (finish), which the turn it leads to is put to the flow
+	// controller with; with nothing ended, as it returns.
+	reported := Checked{Participant: c.participant.ID, Source: t.id, Utterance: c.utterance, At: c.asked, Latency: latency, Paused: c.paused,
+		Answer: checked.Answer, Point: checked.Ending.Name}
+	pending := true
+	defer func() {
+		if pending {
+			asker.Hearer().report(reported)
+		}
+	}()
 	var words Words
 	select {
 	case words = <-said:
@@ -316,6 +332,8 @@ func (t *Transcriber) checkHeld(asker Asker, c heldCheck) {
 	}
 	t.mu.Unlock()
 	t.logHeld(c, checked, held, why, nil)
+	reported.Acted, pending = ends, false
+	asker.Hearer().report(reported)
 	if ends {
 		stillEnds.Inc()
 		t.finish(epoch)

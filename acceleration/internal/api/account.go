@@ -277,7 +277,7 @@ func (s *Server) getAccount(ctx context.Context, _ *struct{}) (*accountResponse,
 		source = warningFromTier
 	}
 	if s.configs != nil {
-		own, err := s.configs.Policy(ctx, store.ScopeOrganization, organization)
+		own, err := s.configs.Policies.Get(ctx, store.ScopeOrganization, organization)
 		if err != nil {
 			return nil, err
 		}
@@ -440,7 +440,7 @@ func (s *Server) listTeams(ctx context.Context, organization string, billed bool
 		return nil, errNoLimits
 	}
 	now := time.Now()
-	limits, err := s.store.LimitsFor(ctx, []string{organization})
+	limits, err := s.store.Limits.SelectOf(ctx, []string{organization})
 	if err != nil {
 		return nil, err
 	}
@@ -547,7 +547,7 @@ func (s *Server) teamSpend(ctx context.Context, organization string, billed bool
 		since[i], _ = usage.Window(interval, now)
 	}
 	month, _ := usage.Window(usage.Monthly, now)
-	rows, err := s.store.TeamSpendSince(ctx, organization, since, month)
+	rows, err := s.store.Spend.Teams(ctx, organization, since, month)
 	if err != nil {
 		return nil, err
 	}

@@ -15,16 +15,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/telnyxsig"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/vendorevent"
 )
 
 const (
@@ -94,7 +98,7 @@ func New(options Options) (*Registrar, error) {
 }
 
 // Name is the vendor numbers bought here are recorded under.
-func (r *Registrar) Name() string { return "telnyx" }
+func (r *Registrar) Name() string { return vendorevent.VendorTelnyx }
 
 // brand is the part of a Telnyx brand this reads.
 type brand struct {
@@ -187,6 +191,8 @@ func (r *Registrar) RegisterCampaign(ctx context.Context, brandID string, useCas
 		"helpKeywords":     "HELP",
 		"optinKeywords":    "START",
 		"autoRenewal":      true,
+		// Telnyx refuses a second campaign with the same reference, and FindCampaign finds it.
+		"referenceId": useCase.ID,
 	}
 	if hookURL != "" {
 		request["webhookURL"] = hookURL
@@ -210,6 +216,39 @@ func (r *Registrar) Campaign(ctx context.Context, campaignID string) (dlc.Campai
 		return dlc.Campaign{}, err
 	}
 	return campaignOf(answered, raw), nil
+}
+
+// campaignsPerPage is the most campaigns Telnyx lists on a page.
+const campaignsPerPage = 500
+
+// FindCampaign finds the campaign registered under a brand with reference as its referenceId,
+// which RegisterCampaign sets to the use case's id.
+func (r *Registrar) FindCampaign(ctx context.Context, brandID, reference string) (dlc.Campaign, bool, error) {
+	for page := 1; ; page++ {
+		var listed struct {
+			Records      []json.RawMessage `json:"records"`
+			TotalRecords int               `json:"totalRecords"`
+		}
+		query := url.Values{"brandId": {brandID}, "page": {strconv.Itoa(page)}, "recordsPerPage": {strconv.Itoa(campaignsPerPage)}}
+		if _, err := r.do(ctx, http.MethodGet, "/v2/10dlc/campaign?"+query.Encode(), nil, &listed); err != nil {
+			return dlc.Campaign{}, false, err
+		}
+		for _, raw := range listed.Records {
+			var record struct {
+				campaign
+				ReferenceID string `json:"referenceId"`
+			}
+			if err := json.Unmarshal(raw, &record); err != nil {
+				return dlc.Campaign{}, false, stack.Wrap(fmt.Errorf("telnyx: decode a campaign of brand %s: %w", brandID, err))
+			}
+			if record.ReferenceID == reference {
+				return campaignOf(record.campaign, raw), true, nil
+			}
+		}
+		if len(listed.Records) == 0 || page*campaignsPerPage >= listed.TotalRecords {
+			return dlc.Campaign{}, false, nil
+		}
+	}
 }
 
 // campaignOf reads a campaign's outcome: usable once carriers provisioned it, failed when
@@ -286,14 +325,32 @@ func (r *Registrar) do(ctx context.Context, method, path string, body, into any)
 		request.Header.Set("Content-Type", "application/json")
 	}
 
+	var written atomic.Bool
+	request = request.WithContext(httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		WroteRequest: func(wrote httptrace.WroteRequestInfo) {
+			if wrote.Err == nil {
+				written.Store(true)
+			}
+		},
+	}))
 	response, err := r.client.Do(request)
 	if err != nil {
+		// A request never written whole, its dial, lookup or handshake failed or its context
+		// ended first, never reached Telnyx, which did nothing.
+		if !written.Load() {
+			err = fmt.Errorf("%w: %w", dlc.ErrNotCarriedOut, err)
+		}
 		return nil, stack.Wrap(fmt.Errorf("telnyx: %s: %w", path, err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		detail, _ := io.ReadAll(io.LimitReader(response.Body, errorBodyLimit))
-		return nil, stack.Wrap(fmt.Errorf("telnyx: %s: %s: %s", path, response.Status, strings.TrimSpace(string(detail))))
+		err := fmt.Errorf("telnyx: %s: %s: %s", path, response.Status, strings.TrimSpace(string(detail)))
+		// A 4xx is Telnyx refusing the request; a 5xx may follow work it did.
+		if response.StatusCode < http.StatusInternalServerError {
+			err = fmt.Errorf("%w: %w", dlc.ErrNotCarriedOut, err)
+		}
+		return nil, stack.Wrap(err)
 	}
 	raw, err := io.ReadAll(response.Body)
 	if err != nil {

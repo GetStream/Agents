@@ -102,6 +102,7 @@ plugins/*/example/uv.lock
 /acceleration/say
 /acceleration/transcribe
 /examples/voice_agents/swift_demo/backend/backend
+/examples/voice_agents/swift_assistant/backend/backend
 /examples/voice_agents/swift_demo/configure/configure
 
 /performance_benchmark/out/
@@ -122,8 +123,6 @@ profile.html
 
 .uv-cache/
 
-# pytest json report
-.report.json
 .cursor/
 
 # Code generators fetched on demand, not vendored. See sdks/swift/README.md.

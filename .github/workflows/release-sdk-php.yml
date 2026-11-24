@@ -1,6 +1,6 @@
 name: Release PHP SDK
 
-# Run by hand from accelerate, or started by release-sdks.yml with every other SDK. Packagist
+# Run by hand from main, or started by release-sdks.yml with every other SDK. Packagist
 # reads composer.json at a repository's root and a version from its tags, so a release is
 # sdks/php split out with its history, pushed to the SDK's own read-only repository and tagged
 # v<version> there, where Packagist picks it up. The commit here is then tagged
@@ -8,7 +8,8 @@ name: Release PHP SDK
 # one typed in.
 #
 # The split repository is the variable SDK_PHP_SPLIT_REPOSITORY (owner/name), and the token that
-# may push to it the secret SDK_PHP_SPLIT_TOKEN. A dry run needs neither.
+# may push to it the secret SDK_PHP_SPLIT_TOKEN of the registry-publish environment. A dry run
+# needs neither.
 # No GitHub Release: publishing one runs release.yml, which uploads the Python packages to PyPI.
 on:
   workflow_dispatch:
@@ -36,8 +37,11 @@ concurrency:
 
 jobs:
   release:
-    if: github.ref == 'refs/heads/accelerate'
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # SDK_PHP_SPLIT_TOKEN is this environment's secret, so no other workflow can read it. The job
+    # `if` above lets only a run from `main` enter it; the environment has no reviewer gate.
+    environment: registry-publish
     permissions:
       contents: write   # push the release tag
     defaults:

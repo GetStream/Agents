@@ -54,12 +54,12 @@ func (n VoiceNote) Sent() Photo {
 // bytes, a data URI, rather than as a link to somewhere else.
 func (c *Conversation) PublishPhotos(ctx context.Context, images []llm.ImagePart) ([]Photo, error) {
 	if len(images) > maxFiles {
-		return nil, fmt.Errorf("conversation: a question carries at most %d photos", maxFiles)
+		return nil, invalid(fmt.Errorf("conversation: a question carries at most %d photos", maxFiles))
 	}
 	photos := make([]Photo, 0, len(images))
 	for index, image := range images {
 		if len(image.Data) == 0 {
-			return nil, errors.New("conversation: a saved conversation takes photos as data URIs")
+			return nil, invalid(errors.New("conversation: a saved conversation takes photos as data URIs"))
 		}
 		file := sandbox.File{Name: fmt.Sprintf("photo-%d.%s", index+1, strings.TrimPrefix(image.MIME, "image/")), MIME: image.MIME, Data: image.Data}
 		uploaded, err := c.upload(ctx, file, c.userAuthor())
@@ -217,6 +217,22 @@ const voiceRecordingType = "voiceRecording"
 // carries what they sent. Audio the agent made is a file like any other.
 func voiceRecording(file sandbox.Attachment, person bool) bool {
 	return person && strings.HasPrefix(file.MIME, "audio/")
+}
+
+// Images are the photos a person sent with m as a model is handed them: each by the URL Chat
+// serves it from, which a read of the message gives afresh.
+func Images(m Message) []llm.ImagePart {
+	return imagesIn(m.Files)
+}
+
+func imagesIn(files []sandbox.Attachment) []llm.ImagePart {
+	var images []llm.ImagePart
+	for _, file := range files {
+		if strings.HasPrefix(file.MIME, "image/") && file.URL != "" {
+			images = append(images, llm.ImagePart{URL: file.URL, MIME: file.MIME})
+		}
+	}
+	return images
 }
 
 // filesFromAttachments reads back the files fileAttachments wrote.

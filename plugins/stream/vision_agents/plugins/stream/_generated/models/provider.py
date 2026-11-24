@@ -11,6 +11,7 @@ from ..models.tier import Tier
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.model_voice import ModelVoice
     from ..models.provider_benchmark import ProviderBenchmark
     from ..models.provider_health import ProviderHealth
     from ..models.provider_price import ProviderPrice
@@ -45,6 +46,8 @@ class Provider:
         usage_share (float | Unset): This model's share of the modality's requests over the last seven days, across
             every customer, from 0 to 1. It is how popular the model is, and is 0 when nothing was served or the deployment
             keeps no statistics.
+        voices (list[ModelVoice] | Unset): The built-in voices this native speech model accepts by id. Left out for
+            models whose voices come from a voice library or that do not speak.
     """
 
     health: ProviderHealth
@@ -59,6 +62,7 @@ class Provider:
     price: ProviderPrice | Unset = UNSET
     supports: list[str] | Unset = UNSET
     usage_share: float | Unset = UNSET
+    voices: list[ModelVoice] | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -92,6 +96,13 @@ class Provider:
 
         usage_share = self.usage_share
 
+        voices: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.voices, Unset):
+            voices = []
+            for voices_item_data in self.voices:
+                voices_item = voices_item_data.to_dict()
+                voices.append(voices_item)
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -115,11 +126,14 @@ class Provider:
             field_dict["supports"] = supports
         if usage_share is not UNSET:
             field_dict["usage_share"] = usage_share
+        if voices is not UNSET:
+            field_dict["voices"] = voices
 
         return field_dict
 
     @classmethod
     def from_dict(cls, src_dict: Mapping[str, Any]) -> Self:
+        from ..models.model_voice import ModelVoice
         from ..models.provider_benchmark import ProviderBenchmark
         from ..models.provider_health import ProviderHealth
         from ..models.provider_price import ProviderPrice
@@ -159,6 +173,15 @@ class Provider:
 
         usage_share = d.pop("usage_share", UNSET)
 
+        _voices = d.pop("voices", UNSET)
+        voices: list[ModelVoice] | Unset = UNSET
+        if _voices is not UNSET:
+            voices = []
+            for voices_item_data in _voices:
+                voices_item = ModelVoice.from_dict(voices_item_data)
+
+                voices.append(voices_item)
+
         provider = cls(
             health=health,
             languages=languages,
@@ -172,6 +195,7 @@ class Provider:
             price=price,
             supports=supports,
             usage_share=usage_share,
+            voices=voices,
         )
 
         provider.additional_properties = d

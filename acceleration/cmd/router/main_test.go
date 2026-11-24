@@ -2,18 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/getsentry/sentry-go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/api"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/ingest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
@@ -35,11 +36,11 @@ func TestBuildSessionsSupportsAnLLMOnlyDeployment(t *testing.T) {
 	}, Registry: llmrouter.DefaultRegistry(), Logger: logger})
 	require.NoError(t, err)
 	t.Cleanup(model.Close)
-	manager, err := buildSessions(config.Defaults(), &api.Streams{LLM: model}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, session.Connectors{}, nil, nil, nil, logger)
+	manager, err := buildSessions(config.Defaults(), &api.Streams{LLM: model}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, session.Connectors{}, nil, nil, nil, nil, logger)
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 	t.Cleanup(func() { require.NoError(t, manager.Shutdown()) })
-	missing, err := buildSessions(config.Defaults(), &api.Streams{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, session.Connectors{}, nil, nil, nil, logger)
+	missing, err := buildSessions(config.Defaults(), &api.Streams{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, session.Connectors{}, nil, nil, nil, nil, logger)
 	require.NoError(t, err)
 	require.Nil(t, missing)
 }
@@ -57,7 +58,7 @@ func TestBuildSessionsGivesTheProxyBrokerItsProxy(t *testing.T) {
 	settings.CodeSandbox.Broker, settings.CodeSandbox.ProxyPublicURL = config.CodeSandboxBrokerProxy, "http://203.0.113.7:8091"
 	settings.CodeSandbox.ProxyCACert = "cert"
 
-	_, err = buildSessions(settings, &api.Streams{LLM: model}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, session.Connectors{}, nil, nil, nil, logger)
+	_, err = buildSessions(settings, &api.Streams{LLM: model}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, session.Connectors{}, nil, nil, nil, nil, logger)
 	require.ErrorContains(t, err, "redis.addr")
 
 	address := os.Getenv("ROUTER_REDIS_ADDR")
@@ -68,7 +69,7 @@ func TestBuildSessionsGivesTheProxyBrokerItsProxy(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(liveClient.Close)
 	manager, err := buildSessions(settings, &api.Streams{LLM: model}, nil, nil, liveClient, nil, nil, nil, nil, nil, nil, nil, nil,
-		session.Connectors{}, nil, nil, nil, logger)
+		session.Connectors{}, nil, nil, nil, nil, logger)
 	require.NoError(t, err)
 	require.NotNil(t, manager)
 	t.Cleanup(func() { require.NoError(t, manager.Shutdown()) })
@@ -83,7 +84,7 @@ func TestADeploymentWithNoDefaultDailyLimitStillCapsAnAppThatSetsOne(t *testing.
 	liveClient, err := redisready.Retry(address, func() (*live.Client, error) { return live.New(live.Options{Address: address}) })
 	require.NoError(t, err)
 	t.Cleanup(liveClient.Close)
-	policies, err := policy.New(&appconfig.Store{}, policy.Settings{}, logger)
+	policies, err := policy.New(&store.Store{}, policy.Settings{}, logger)
 	require.NoError(t, err)
 	t.Cleanup(policies.Close)
 
@@ -104,8 +105,8 @@ func TestADeploymentWithNoDefaultDailyLimitStillCapsAnAppThatSetsOne(t *testing.
 // with no sessions holds nothing, with or without an idle scheduled-task
 // worker, as before the worker counted.
 func TestAnIdleRouterHoldsTheDrainForNothing(t *testing.T) {
-	require.Zero(t, running(nil, nil, nil, nil, nil, nil))
-	require.Zero(t, running(nil, scheduling.NewScheduler(nil, nil, nil), nil, nil, nil, nil))
+	require.Zero(t, running(nil, nil, nil, nil, nil, nil, nil))
+	require.Zero(t, running(nil, scheduling.NewScheduler(nil, nil, nil), nil, nil, nil, nil, nil))
 }
 
 // TestKnowledgeURLsAreNotServedWithoutRedis: with a database, a knowledge base and a crawler
@@ -132,6 +133,24 @@ func TestTheRoutersLogKeepsAProvidersReasonAndNotTheKeyItEchoed(t *testing.T) {
 	require.NotContains(t, out.String(), key)
 	require.NotContains(t, out.String(), "below the level")
 	require.Contains(t, out.String(), `msg="agent failure" error="502 Bad Gateway: upstream error: failed to connect to local service\nrequest headers: [redacted]"`)
+}
+
+// A line the router logs with an authenticated request's context names its app and public key,
+// and the router's logger still takes a credential out of what else the line holds.
+func TestTheRoutersLogNamesTheAppAndPublicKeyOfTheRequestAndStillRedacts(t *testing.T) {
+	key := rand.Text()
+	var out bytes.Buffer
+	logger := newLogger(&out, slog.LevelInfo)
+	ctx := api.WithLoggedApp(context.Background(), "1732479", "pubkey123")
+
+	logger.InfoContext(ctx, "probe", "reason", "Authorization: Bearer sk-test-"+key)
+	logger.Info("without the request")
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	require.Len(t, lines, 2)
+	require.Contains(t, lines[0], " app_id=1732479 api_key=pubkey123")
+	require.NotContains(t, lines[0], key)
+	require.NotContains(t, lines[1], "app_id")
 }
 
 // The router's Sentry events carry a failure's text: the key a provider echoed in it is taken

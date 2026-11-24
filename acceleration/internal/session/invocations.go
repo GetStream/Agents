@@ -76,7 +76,7 @@ func (r *invocationRecorder) run() {
 	defer close(r.done)
 	for row := range r.queue {
 		ctx, cancel := context.WithTimeout(context.Background(), recordWriteTimeout)
-		if err := r.store.RecordConnectorInvocation(ctx, &row); err != nil {
+		if err := r.store.ConnectorInvocations.Insert(ctx, &row); err != nil {
 			r.logger.Error("could not record a connector invocation", "connection", row.ConnectionID, "error", err)
 		}
 		cancel()

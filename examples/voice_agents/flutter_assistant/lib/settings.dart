@@ -6,14 +6,16 @@ import 'package:http/http.dart' as http;
 import 'package:stream_core_flutter/core.dart';
 
 import 'assistant.dart';
+import 'brand_theme.dart';
 
-/// How the agent answers: in Markdown, or with interactive UI in A2UI.
+/// How the agent answers: in Markdown, or with interactive UI in A2UI or OpenUI.
 ///
 /// The backend keeps it, as what the agent is told, so the app has nothing to switch: its
 /// conversations show any UI it can draw, and a reply without UI as its text.
 enum ReplyFormat {
   markdown('Markdown'),
-  a2ui('A2UI');
+  a2ui('A2UI'),
+  openui('OpenUI');
 
   const ReplyFormat(this.title);
 
@@ -22,7 +24,7 @@ enum ReplyFormat {
   static Uri _url(Uri? backend) => (backend ?? Assistant.backendUrl).resolve('/reply-format');
 
   /// The format the agent answers in, asked of [backend], or null for one the app does not
-  /// offer, such as OpenUI, which another app chose.
+  /// offer, which another app chose.
   static Future<ReplyFormat?> current({Uri? backend}) async =>
       _read(await http.get(_url(backend)).timeout(_answering));
 
@@ -49,13 +51,17 @@ enum ReplyFormat {
   }
 }
 
-/// The app's settings: how the agent answers.
+/// The app's settings: how the agent answers, and the brand its UI wears.
 class SettingsSheet extends StatefulWidget {
   const SettingsSheet({super.key});
 
   static Future<void> show(BuildContext context) => showModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
+    // As tall as the replies and the brands need, which is more than half the screen.
+    isScrollControlled: true,
+    // Clear of the status bar once it is that tall.
+    useSafeArea: true,
     builder: (context) => const SettingsSheet(),
   );
 
@@ -116,32 +122,72 @@ class _SettingsSheetState extends State<SettingsSheet> {
     final colors = context.streamColorScheme;
     final text = context.streamTextTheme;
     return SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-            child: Text('Replies', style: text.headingSm.copyWith(color: colors.textPrimary)),
-          ),
-          for (final format in ReplyFormat.values)
-            StreamListTile(
-              title: Text(format.title),
-              trailing: format == _format ? Icon(Icons.check, color: colors.accentPrimary) : null,
-              onTap: _loaded && !_choosing ? () => _choose(format) : null,
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text('Replies', style: text.headingSm.copyWith(color: colors.textPrimary)),
             ),
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Text(
-              _failure ??
-                  'New conversations answer in this format. A2UI replies can show maps, places '
-                      'and forms.',
-              style: text.captionDefault.copyWith(
-                color: _failure == null ? colors.textSecondary : colors.accentError,
+            for (final format in ReplyFormat.values)
+              StreamListTile(
+                title: Text(format.title),
+                trailing: format == _format ? Icon(Icons.check, color: colors.accentPrimary) : null,
+                onTap: _loaded && !_choosing ? () => _choose(format) : null,
+              ),
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                _failure ??
+                    'Markdown answers in text. A2UI and OpenUI answer plans and bookings with '
+                        "interactive UI, made of the app's own views: maps, restaurant cards, "
+                        'gauges and forms. New conversations answer this way, and earlier replies '
+                        'keep theirs.',
+                style: text.captionDefault.copyWith(
+                  color: _failure == null ? colors.textSecondary : colors.accentError,
+                ),
               ),
             ),
-          ),
-        ],
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+              child: Text('Brand', style: text.headingSm.copyWith(color: colors.textPrimary)),
+            ),
+            ValueListenableBuilder<BrandProfile>(
+              valueListenable: BrandProfile.active,
+              builder: (context, active, _) => Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final profile in BrandProfile.values)
+                    StreamListTile(
+                      leading: SizedBox.square(
+                        dimension: 28,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: profile.accent,
+                            borderRadius: BorderRadius.circular(profile.cornerRadius / 2),
+                          ),
+                        ),
+                      ),
+                      title: Text(profile.title),
+                      subtitle: Text(profile.subtitle),
+                      trailing: profile == active ? Icon(Icons.check, color: profile.accent) : null,
+                      onTap: () => BrandProfile.active.value = profile,
+                    ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                "The accent and corners the agent's UI wears, in every conversation, straight away.",
+                style: text.captionDefault.copyWith(color: colors.textSecondary),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

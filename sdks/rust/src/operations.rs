@@ -319,6 +319,45 @@ impl Client {
         )
         .await
     }
+    /// Change one contact of a draft
+    ///
+    /// `PATCH /v1/agents/campaigns/{id}/contacts/{contact_id}` (`updateCampaignContact`).
+    pub async fn update_campaign_contact(
+        &self,
+        id: &str,
+        contact_id: &str,
+        body: &types::ContactUpdateRequest,
+    ) -> Result<types::Contact> {
+        self.send(
+            Method::PATCH,
+            &format!(
+                "/v1/agents/campaigns/{id}/contacts/{contact_id}",
+                id = segment(id),
+                contact_id = segment(contact_id)
+            ),
+            None::<&()>,
+            Some(body),
+            "updateCampaignContact",
+        )
+        .await
+    }
+    /// Remove one contact of a draft
+    ///
+    /// `DELETE /v1/agents/campaigns/{id}/contacts/{contact_id}` (`deleteCampaignContact`).
+    pub async fn delete_campaign_contact(&self, id: &str, contact_id: &str) -> Result<()> {
+        self.send(
+            Method::DELETE,
+            &format!(
+                "/v1/agents/campaigns/{id}/contacts/{contact_id}",
+                id = segment(id),
+                contact_id = segment(contact_id)
+            ),
+            None::<&()>,
+            None::<&()>,
+            "deleteCampaignContact",
+        )
+        .await
+    }
     /// Ring a contact no more
     ///
     /// `POST /v1/agents/campaigns/{id}/contacts/{contact_id}/stop` (`stopCampaignContact`).
@@ -1183,6 +1222,26 @@ impl Client {
         )
         .await
     }
+    /// Answer a call waiting for a person's approval
+    ///
+    /// `POST /v1/agents/conversations/{cid}/tool_approvals` (`answerConversationToolApproval`).
+    pub async fn answer_conversation_tool_approval(
+        &self,
+        cid: &str,
+        body: &types::ToolApprovalAnswer,
+    ) -> Result<()> {
+        self.send(
+            Method::POST,
+            &format!(
+                "/v1/agents/conversations/{cid}/tool_approvals",
+                cid = segment(cid)
+            ),
+            None::<&()>,
+            Some(body),
+            "answerConversationToolApproval",
+        )
+        .await
+    }
     /// Mint a guest so somebody can talk to an agent before signing up
     ///
     /// `POST /v1/agents/guests` (`createGuestUser`).
@@ -1937,6 +1996,88 @@ impl Client {
         )
         .await
     }
+    /// Make a hidden branch the conversation again
+    ///
+    /// `POST /v1/agents/sessions/{id}/responses/{response_id}/activate` (`activateResponse`).
+    pub async fn activate_response(
+        &self,
+        id: &str,
+        response_id: &str,
+    ) -> Result<types::ActivatedBranch> {
+        self.send(
+            Method::POST,
+            &format!(
+                "/v1/agents/sessions/{id}/responses/{response_id}/activate",
+                id = segment(id),
+                response_id = segment(response_id)
+            ),
+            None::<&()>,
+            None::<&()>,
+            "activateResponse",
+        )
+        .await
+    }
+    /// The messages of a hidden branch, to show in place of the conversation's
+    ///
+    /// `GET /v1/agents/sessions/{id}/responses/{response_id}/branch` (`getResponseBranch`).
+    pub async fn get_response_branch(
+        &self,
+        id: &str,
+        response_id: &str,
+        query: &GetResponseBranchQuery,
+    ) -> Result<types::BranchMessagePage> {
+        self.send(
+            Method::GET,
+            &format!(
+                "/v1/agents/sessions/{id}/responses/{response_id}/branch",
+                id = segment(id),
+                response_id = segment(response_id)
+            ),
+            Some(query),
+            None::<&()>,
+            "getResponseBranch",
+        )
+        .await
+    }
+    /// The alternatives to one response: its regenerations, or the edits of its question
+    ///
+    /// `GET /v1/agents/sessions/{id}/responses/{response_id}/siblings` (`listResponseSiblings`).
+    pub async fn list_response_siblings(
+        &self,
+        id: &str,
+        response_id: &str,
+        query: &ListResponseSiblingsQuery,
+    ) -> Result<types::ResponseSiblingPage> {
+        self.send(
+            Method::GET,
+            &format!(
+                "/v1/agents/sessions/{id}/responses/{response_id}/siblings",
+                id = segment(id),
+                response_id = segment(response_id)
+            ),
+            Some(query),
+            None::<&()>,
+            "listResponseSiblings",
+        )
+        .await
+    }
+    /// Carry a conversation on, with the caller's tool settings
+    ///
+    /// `POST /v1/agents/sessions/{id}/resume` (`resumeSession`).
+    pub async fn resume_session(
+        &self,
+        id: &str,
+        body: Option<&types::ResumeSessionRequest>,
+    ) -> Result<types::Session> {
+        self.send(
+            Method::POST,
+            &format!("/v1/agents/sessions/{id}/resume", id = segment(id)),
+            None::<&()>,
+            body,
+            "resumeSession",
+        )
+        .await
+    }
     /// Go back to a response and carry on from there
     ///
     /// `POST /v1/agents/sessions/{id}/rewind` (`rewindSession`).
@@ -1993,6 +2134,19 @@ impl Client {
         )
         .await
     }
+    /// What a session's models read and wrote, and what their prompts were made of
+    ///
+    /// `GET /v1/agents/sessions/{id}/tokens` (`getSessionTokens`).
+    pub async fn get_session_tokens(&self, id: &str) -> Result<types::CallTokens> {
+        self.send(
+            Method::GET,
+            &format!("/v1/agents/sessions/{id}/tokens", id = segment(id)),
+            None::<&()>,
+            None::<&()>,
+            "getSessionTokens",
+        )
+        .await
+    }
     /// List the tools a session's model is offered
     ///
     /// `GET /v1/agents/sessions/{id}/tools` (`listSessionTools`).
@@ -2003,6 +2157,40 @@ impl Client {
             None::<&()>,
             None::<&()>,
             "listSessionTools",
+        )
+        .await
+    }
+    /// Give a running session more of the caller's tools
+    ///
+    /// `POST /v1/agents/sessions/{id}/tools` (`addSessionTools`).
+    pub async fn add_session_tools(
+        &self,
+        id: &str,
+        body: &types::AddSessionToolsRequest,
+    ) -> Result<()> {
+        self.send(
+            Method::POST,
+            &format!("/v1/agents/sessions/{id}/tools", id = segment(id)),
+            None::<&()>,
+            Some(body),
+            "addSessionTools",
+        )
+        .await
+    }
+    /// Withdraw one of the caller's tools from a running session
+    ///
+    /// `DELETE /v1/agents/sessions/{id}/tools/{name}` (`removeSessionTool`).
+    pub async fn remove_session_tool(&self, id: &str, name: &str) -> Result<()> {
+        self.send(
+            Method::DELETE,
+            &format!(
+                "/v1/agents/sessions/{id}/tools/{name}",
+                id = segment(id),
+                name = segment(name)
+            ),
+            None::<&()>,
+            None::<&()>,
+            "removeSessionTool",
         )
         .await
     }
@@ -2957,6 +3145,19 @@ impl Client {
         self.send(Method::POST, "/v1/ocr", None::<&()>, Some(body), "readPage")
             .await
     }
+    /// List every organization's Agents activity by day
+    ///
+    /// `GET /v1/ops/activity` (`listActivity`).
+    pub async fn list_activity(&self, query: &ListActivityQuery) -> Result<types::ActivityPage> {
+        self.send(
+            Method::GET,
+            "/v1/ops/activity",
+            Some(query),
+            None::<&()>,
+            "listActivity",
+        )
+        .await
+    }
     /// Make Stream's own app a customer's provider app
     ///
     /// `PUT /v1/ops/customers/{customer_id}/connectors/{id}/provider-app` (`setOperatorProviderApp`).
@@ -3217,6 +3418,32 @@ impl Client {
             None::<&()>,
             None::<&()>,
             "receiveDLCReport",
+        )
+        .await
+    }
+    /// Receive a Telnyx account event
+    ///
+    /// `POST /v1/phone/hooks/telnyx/events` (`receiveTelnyxEvent`).
+    pub async fn receive_telnyx_event(&self) -> Result<()> {
+        self.send(
+            Method::POST,
+            "/v1/phone/hooks/telnyx/events",
+            None::<&()>,
+            None::<&()>,
+            "receiveTelnyxEvent",
+        )
+        .await
+    }
+    /// Receive a Twilio account event
+    ///
+    /// `POST /v1/phone/hooks/twilio/events` (`receiveTwilioEvent`).
+    pub async fn receive_twilio_event(&self) -> Result<()> {
+        self.send(
+            Method::POST,
+            "/v1/phone/hooks/twilio/events",
+            None::<&()>,
+            None::<&()>,
+            "receiveTwilioEvent",
         )
         .await
     }
@@ -4296,6 +4523,9 @@ pub struct ListCallsQuery {
     /// Narrow to one agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// Narrow to the calls of one session, which starts a new one each time voice is started or stopped on it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// Narrow to the calls one campaign placed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub campaign_id: Option<String>,
@@ -4593,6 +4823,29 @@ pub struct ListResponseItemsQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
 }
+/// The query string `getResponseBranch` takes. A field left `None` is left out.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct GetResponseBranchQuery {
+    /// Up to 200. Omitted is 100.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// The `next_cursor` of the previous page. Omitted is the first page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+/// The query string `listResponseSiblings` takes. A field left `None` is left out.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ListResponseSiblingsQuery {
+    /// reply lists the answers to the response's question; question lists the questions asked in its place. Omitted is reply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub of: Option<String>,
+    /// Up to 100. Omitted is 25.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// The `next_cursor` of the previous page, sent with the same filters. Omitted is the first page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
 /// The query string `listSimulationRuns` takes. A field left `None` is left out.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct ListSimulationRunsQuery {
@@ -4742,6 +4995,28 @@ pub struct ManageListTeamsQuery {
     pub app_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub organization_id: Option<String>,
+}
+/// The query string `listActivity` takes. A field left `None` is left out.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ListActivityQuery {
+    /// The first UTC day read, YYYY-MM-DD.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The last UTC day read, YYYY-MM-DD, included. At most 400 days from from on, both included, and not before it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// Narrow to the rows that name this organization. Empty is no filter. One with no row is an empty page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    /// Narrow to this app's rows. Empty is no filter. One with no row is an empty page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    /// Up to 1000. Omitted is 500.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// The next_cursor of the previous page, sent with the same from, to, org_id and app_id. A cursor sent with others is refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 /// The query string `getOrganizationActivity` takes. A field left `None` is left out.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -4947,6 +5222,9 @@ pub struct GetAgentStatsQuery {
     /// End of the window, exclusive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
+    /// The id of an agent config: only its sessions are counted. Omitted is every agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 /// The query string `getSpend` takes. A field left `None` is left out.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]

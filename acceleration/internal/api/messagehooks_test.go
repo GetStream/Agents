@@ -246,7 +246,7 @@ func (s *MessageHooksSuite) TestAChannelWithNoHistoryAndNoConfigIsAcceptedAndDro
 
 func (s *MessageHooksSuite) TestAConfigThatWasDeletedNoLongerClaimsAChannel() {
 	configID := s.holds()
-	s.Require().NoError(s.store.DeleteAgentConfig(context.Background(), s.customerID(), configID))
+	s.Require().NoError(s.store.AgentConfigs.Delete(context.Background(), s.customerID(), configID))
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	defer release()
 
@@ -497,8 +497,8 @@ func (s *MessageHooksSuite) TestAChannelsMessageReachesTheNewestOfItsCustomersSe
 // off the record, so nothing but the session itself ties it to the channel.
 func (s *MessageHooksSuite) dispatching() string {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
-		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	return s.serverClient.createSession(CreateSessionRequest{
 		AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true),
 	}).Id
@@ -532,21 +532,20 @@ func (s *MessageHooksSuite) holds() string {
 	config := store.AgentConfig{
 		CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(), Mode: "text",
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	return config.ID
 }
 
 // ran records a conversation having been held on the channel, which is what a call leaves
 // behind.
 func (s *MessageHooksSuite) ran(configID string) {
-	s.Require().NoError(s.store.StartCall(context.Background(), &store.Call{
+	s.heldCall(store.Call{
 		ID:         s.utils.uuid(),
 		CustomerID: s.customerID(),
 		CallID:     s.utils.callID(),
 		AgentID:    s.channelID,
-		ConfigID:   configID,
 		StartedAt:  time.Now().UTC(),
-	}))
+	}, configID, "")
 }
 
 // wrote delivers a signed message.new for the channel, as Stream would. The custom data is

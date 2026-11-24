@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sts"
 )
 
@@ -28,8 +29,10 @@ type toolUpdate struct {
 // either way. On a call it is said once nobody is talking and nothing is being written, a
 // newer update for the same call replacing it and the call's result dropping it, since the
 // result says more. In writing a status is only reported, and words are posted as Say posts
-// them. An update for a call that is not running is dropped.
-func (a *Agent) ToolUpdate(id, text string, verbatim bool) {
+// them. custom, the call's data for the people in the conversation, is only reported, and an
+// update with custom and no text says nothing. An update for a call that is not running is
+// dropped.
+func (a *Agent) ToolUpdate(id, text string, verbatim bool, custom map[string]any) {
 	text = strings.TrimSpace(text)
 	native := a.native()
 	updatesCalls := false
@@ -43,11 +46,11 @@ func (a *Agent) ToolUpdate(id, text string, verbatim bool) {
 		name = run.tool
 	}
 	turnID := a.toolTurns[held]
-	if !running || text == "" {
+	if !running || (text == "" && custom == nil) {
 		a.mu.Unlock()
 		return
 	}
-	spoken := !a.options.Text && (!native || updatesCalls)
+	spoken := text != "" && !a.options.Text && (!native || updatesCalls)
 	if spoken {
 		if a.toolUpdates == nil {
 			a.toolUpdates = map[string]toolUpdate{}
@@ -56,8 +59,8 @@ func (a *Agent) ToolUpdate(id, text string, verbatim bool) {
 	}
 	a.mu.Unlock()
 
-	a.emitter.Send(ToolUpdated{ID: id, TurnID: turnID, Tool: name, Text: text, Verbatim: verbatim})
-	if a.options.Text && verbatim {
+	a.emitter.Send(ToolUpdated{ID: id, TurnID: turnID, Tool: name, Text: text, Verbatim: verbatim, Custom: custom})
+	if a.options.Text && verbatim && text != "" {
 		if err := a.sayFor(text, PurposeUpdate); err != nil {
 			a.logger.Warn("could not post what a tool asked to say", "tool", name, "error", err)
 		}
@@ -94,7 +97,7 @@ func (a *Agent) sayToolUpdate() {
 	a.composing = true
 	a.mu.Unlock()
 
-	go func() {
+	goroutine.Go(a.ctx, func() {
 		defer func() {
 			a.mu.Lock()
 			a.composing = false
@@ -112,7 +115,7 @@ func (a *Agent) sayToolUpdate() {
 			return
 		}
 		a.sayComposed(participant, line, statusPurpose, asked)
-	}()
+	})
 }
 
 // sayNativeToolUpdate asks a speech-to-speech model to say one update waiting for the line,

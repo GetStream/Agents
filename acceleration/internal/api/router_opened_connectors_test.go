@@ -160,7 +160,7 @@ sources:
     endpoint: mcp
 `))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	return id
 }
@@ -182,7 +182,7 @@ func (s *RouterOpenedConnectorsSuite) withToken(as *testClient, sent map[string]
 	s.Require().Equal(http.StatusCreated, as.do(http.MethodPost, "/v1/agents/connections", sent, &created))
 	s.Require().Equal(http.StatusOK, as.do(http.MethodPut, "/v1/agents/connections/"+created.ID+"/credentials",
 		map[string]any{"expected_revision": created.Revision, "values": map[string]string{bearer.SuppliedToken: s.token}}, nil))
-	stored, err := s.store.ConnectorConnection(context.Background(), s.customerID(), created.ID)
+	stored, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), created.ID)
 	s.Require().NoError(err)
 	s.Require().Equal(store.ConnectionConnected, stored.Status)
 	return created.ID
@@ -191,7 +191,7 @@ func (s *RouterOpenedConnectorsSuite) withToken(as *testClient, sent map[string]
 // grant is echo at the schema digest the fake lists, read through connection once a validate
 // listed its tools.
 func (s *RouterOpenedConnectorsSuite) grant(connection string) map[string]any {
-	connected, err := s.store.ConnectorConnection(context.Background(), s.customerID(), connection)
+	connected, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), connection)
 	s.Require().NoError(err)
 	as := s.serverClient
 	if connected.OwnerType == store.OwnerUser {
@@ -273,8 +273,8 @@ func (s *RouterOpenedConnectorsSuite) writer() string { return "1347" + digits(s
 
 // sessionsOf are the conversations of agent held as userID, empty for one held as nobody.
 func (s *RouterOpenedConnectorsSuite) sessionsOf(agent, userID string) []store.AgentSession {
-	found, err := s.store.QuerySessions(context.Background(), s.customerID(),
-		store.SessionFilter{AgentName: agent, UserID: userID})
+	found, err := s.store.Sessions.Select(context.Background(), s.customerID(),
+		store.SessionFilter{Where: new(store.SessionIs(store.SessionFieldAgent, agent)), UserID: userID})
 	s.Require().NoError(err)
 	return found
 }

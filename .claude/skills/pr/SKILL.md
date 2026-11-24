@@ -10,16 +10,17 @@ description: Create a draft pull request for the Vision-Agents repo using gh CLI
 - Run `git log main..HEAD --oneline`. If the branch contains more than one independent logical change, STOP and ask the user whether to split it before proceeding.
 - Run `uv run --no-sync dev.py check`. Skip if the diff does not touch Python code (`*.py`) or `pyproject.toml` — e.g. docs-only, `.gitignore`, `.github/`, or `.claude/` changes.
 - Do not run integration tests locally, CI handles them.
-- If the change is user-facing (public API break, new feature, bug fix), update `CHANGELOG.md` per the rules in `CLAUDE.md`.
+- Do not edit the root `CHANGELOG.md`: it is written once per release (Changelog in `AGENTS.md`). The one exception is a line under `# Unreleased` → **Breaking Changes** for a PR that breaks a published SDK's API. Put what users need to know in the PR body.
 
 ## Creating
 
 - Always `gh pr create --draft`. Push the branch first.
+- A draft runs no CI workflow; CodeQL, the labeler and CodeRabbit still run. `gh pr ready` starts the workflows whose paths the PR touches, and every push after it runs them again, so mark it ready once the branch is done, not before.
 - Follow `.github/pull_request_template.md`. Read every commit on the branch, do not summarise from the latest commit alone.
 
 ## Title
 
-- Aim for 50 characters, never more than 65. The repo only squash-merges and uses the PR title as the commit subject on `accelerate`/`main` once a PR has two or more commits, and GitHub appends ` (#NNN)`. 65 plus that suffix stays within the 72 GitHub's docs give as the commit title maximum; 50 is what `git help commit` and Pro Git recommend.
+- Aim for 50 characters, never more than 65. The repo only squash-merges and uses the PR title as the commit subject on `main` once a PR has two or more commits, and GitHub appends ` (#NNN)`. 65 plus that suffix stays within the 72 GitHub's docs give as the commit title maximum; 50 is what `git help commit` and Pro Git recommend.
 - Say what changes, not how. The ticket id (`AI-833`) counts toward the limit; details go in the body.
 - Bad, 85 characters: `feat(connectors): connector definitions table seeded from built-in manifests (AI-833)`. Good, 44: `AI-833: connector definitions with revisions`.
 

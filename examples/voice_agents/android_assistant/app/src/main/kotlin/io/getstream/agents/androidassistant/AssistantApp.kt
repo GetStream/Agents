@@ -14,14 +14,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material.icons.outlined.WifiOff
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconToggleButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -29,6 +32,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -43,11 +47,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import io.getstream.agents.androidassistant.components.LocalMapTouch
 import kotlinx.coroutines.launch
 
 /**
@@ -87,7 +94,8 @@ fun AssistantApp(chat: ChatViewModel = viewModel(), conversations: Conversations
     val selected by chat.selected.collectAsStateWithLifecycle()
     val screen by chat.screen.collectAsStateWithLifecycle()
     val items by conversations.items.collectAsStateWithLifecycle()
-    val title = items.firstOrNull { it.id == selected }?.displayTitle ?: "Juno"
+    val isIncognito by chat.isIncognito.collectAsStateWithLifecycle()
+    val title = if (isIncognito) "Incognito chat" else items.firstOrNull { it.id == selected }?.displayTitle ?: "Juno"
 
     LaunchedEffect(drawer) {
         // The router titles a conversation as it goes, so the list is read again each time it is
@@ -109,12 +117,18 @@ fun AssistantApp(chat: ChatViewModel = viewModel(), conversations: Conversations
     val voiceShown by chat.isVoiceShown.collectAsStateWithLifecycle()
     val open by chat.session.collectAsStateWithLifecycle()
     val replyFormat by chat.replyFormat.collectAsStateWithLifecycle()
+    val brand by chat.brand.collectAsStateWithLifecycle()
     var isSettingsShown by rememberSaveable { mutableStateOf(false) }
+    // While a finger is on a reply's map, a sideways drag pans the map rather than opening the drawer.
+    var isMapTouched by remember { mutableStateOf(false) }
+    val mapTouch = remember { { touched: Boolean -> isMapTouched = touched } }
 
     if (isSettingsShown) {
         SettingsScreen(
             replyFormat = replyFormat,
             onReplyFormat = chat::chooseReplyFormat,
+            brand = brand,
+            onBrand = chat::chooseBrand,
             onBack = { isSettingsShown = false },
         )
         return
@@ -123,7 +137,7 @@ fun AssistantApp(chat: ChatViewModel = viewModel(), conversations: Conversations
     ModalNavigationDrawer(
         drawerState = drawer,
         // Voice mode is over everything, the drawer's edge included.
-        gesturesEnabled = !voiceShown,
+        gesturesEnabled = !voiceShown && !isMapTouched,
         drawerContent = {
             ModalDrawerSheet {
                 ConversationList(
@@ -152,6 +166,21 @@ fun AssistantApp(chat: ChatViewModel = viewModel(), conversations: Conversations
                             Icon(Icons.Outlined.Menu, contentDescription = "Conversations")
                         }
                     },
+                    actions = {
+                        // Only a new chat can be incognito: one in the list is kept already.
+                        if (selected == null) {
+                            IconToggleButton(
+                                checked = isIncognito,
+                                onCheckedChange = { chat.toggleIncognito() },
+                                modifier = Modifier.semantics { contentDescription = "Incognito chat" },
+                            ) {
+                                Icon(
+                                    if (isIncognito) Icons.Filled.VisibilityOff else Icons.Outlined.VisibilityOff,
+                                    contentDescription = null,
+                                )
+                            }
+                        }
+                    },
                 )
             },
             // The conversation runs on under the navigation bar and the keyboard, which the
@@ -159,7 +188,9 @@ fun AssistantApp(chat: ChatViewModel = viewModel(), conversations: Conversations
             contentWindowInsets = WindowInsets(0),
         ) { padding ->
             key(screen) {
-                ChatScreen(chat, Modifier.padding(padding).consumeWindowInsets(padding))
+                CompositionLocalProvider(LocalMapTouch provides mapTouch) {
+                    ChatScreen(chat, Modifier.padding(padding).consumeWindowInsets(padding))
+                }
             }
         }
     }

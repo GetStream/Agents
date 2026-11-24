@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	llmoptions "github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -102,6 +103,9 @@ type Options struct {
 	CacheKey    string
 	OnModelCall func(llm.CallTiming)
 	Logger      *slog.Logger
+	// Call is the context of the call that the harness serves. The goroutines of the
+	// harness start under it, so a panic in one of them stops that call.
+	Call context.Context
 }
 
 // noted is something for the fast model to be told, and the skill it came from. The skill
@@ -285,6 +289,19 @@ type Harness struct {
 	closeOnce sync.Once
 }
 
+// ErrInvalid is skills or tools a harness cannot be built with: the agent config's or the
+// request's own mistake. Its message says what to change.
+var ErrInvalid = errors.New("harness: invalid skills or tools")
+
+// invalid marks err as ErrInvalid without changing its message.
+func invalid(err error) error { return marked{err, ErrInvalid} }
+
+// marked is err that is also kind, with err's own message.
+type marked struct{ err, kind error }
+
+func (e marked) Error() string   { return e.err.Error() }
+func (e marked) Unwrap() []error { return []error{e.err, e.kind} }
+
 // New validates the options and returns a Harness. It opens nothing: the sessions it is
 // given are already started.
 func New(options Options) (*Harness, error) {
@@ -298,10 +315,10 @@ func New(options Options) (*Harness, error) {
 		options.Logger = slog.Default()
 	}
 	if err := options.Skills.Validate(); err != nil {
-		return nil, err
+		return nil, invalid(err)
 	}
 	if err := options.Tools.Validate(); err != nil {
-		return nil, err
+		return nil, invalid(err)
 	}
 
 	h := &Harness{
@@ -322,14 +339,16 @@ func New(options Options) (*Harness, error) {
 		h.tasks.publish = options.Publish
 		h.tasks.lookup = options.Lookup
 		h.tasks.search = options.Search
+		h.tasks.call = options.Call
 		if options.Subagent == nil {
 			h.tasks.open(options.OpenSubagent)
 		}
 		h.running.Add(1)
-		go h.consumeTasks()
+		goroutine.Go(options.Call, h.consumeTasks)
 	}
 	if options.Controller != nil || options.Judge != nil {
 		h.flow = newFlow(options.Controller, h.emitter, h.logger)
+		h.flow.call = options.Call
 		h.flow.judge = options.Judge
 		h.flow.hearer = options.Hearer
 		h.flow.onModelCall = options.OnModelCall
@@ -469,7 +488,7 @@ func (h *Harness) Respond(ctx context.Context, turn Turn) (*llm.Stream, error) {
 		return nil, errors.New("harness: no text conversation model")
 	}
 	h.history = WithoutNotes(turn.History)
-	h.charged = chargedAs(context.Background(), ctx)
+	h.charged = context.WithoutCancel(ctx)
 	model := session.Capabilities()
 	instructions, carried, transient := h.prompt(turn, working)
 	// A colleague asks only for what the caller alone can say, so a reply carrying its
@@ -636,9 +655,16 @@ func (h *Harness) SetModel(model, controller *llmrouter.Session) {
 	h.stored = stored{}
 	h.mu.Unlock()
 
-	if controller != nil && h.flow != nil {
-		h.flow.setModel(controller)
+	if controller == nil {
+		return
 	}
+	if h.flow == nil {
+		// Why: a harness built without a flow (a text session) never closes a controller it
+		// did not adopt, so one handed to it would stay open for the rest of the call.
+		_ = controller.Close()
+		return
+	}
+	h.flow.setModel(controller)
 }
 
 // SetSubagent opens delegated work on another model in the background. Tasks already
@@ -647,6 +673,26 @@ func (h *Harness) SetSubagent(open func(context.Context) (*llmrouter.Session, er
 	if h.tasks != nil {
 		h.tasks.open(open)
 	}
+}
+
+// SetTools replaces what the model is offered from its next request. A call the model asked
+// for before the change is still run; one it asks for afterwards of a tool no longer offered
+// is dropped, as one it invented would be.
+func (h *Harness) SetTools(tools Tools) error {
+	if err := tools.Validate(); err != nil {
+		return err
+	}
+	h.mu.Lock()
+	h.options.Tools = tools
+	h.mu.Unlock()
+	return nil
+}
+
+// offered is what the model is offered now, for a reader outside h.mu.
+func (h *Harness) offered() Tools {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.options.Tools
 }
 
 // SetOverwrites changes how the model answers from the next turn and the next task.
@@ -696,20 +742,21 @@ func WithImages(history []llm.Message, images []llm.ImagePart) []llm.Message {
 	return out
 }
 
-// Requested reports the tools the model asked to have run in one reply.
+// Requested reports the tools the model asked to have run in one reply, checked against
+// offered, the tools the reply was offered.
 //
 // A call for a tool that was never offered is dropped rather than passed on: models invent
 // them, and the agent should not have to know which names are real. Running the rest is the
 // agent's job, because a tool acts on the call and the harness does not know there is one.
-func (h *Harness) Requested(turnID string, calls []llm.ToolCall) {
+func (h *Harness) Requested(turnID string, calls []llm.ToolCall, offered Tools) {
 	for _, call := range calls {
-		tool, known := h.options.Tools.Lookup(call.Name)
+		tool, known := offered.Lookup(call.Name)
 		if !known {
 			h.logger.Debug("the model asked for a tool that does not exist", "tool", call.Name)
 			continue
 		}
 		call.Arguments = Coerce(tool.Parameters, call.Arguments)
-		h.emitter.Send(ToolRequested{TurnID: turnID, Call: call})
+		h.emitter.Send(ToolRequested{TurnID: turnID, Call: call, Tool: tool})
 	}
 }
 
@@ -729,11 +776,11 @@ func (h *Harness) DropUnoffered(turnID string, calls []llm.ToolCall) []llm.ToolC
 }
 
 // Decide asks the fast flow controller what to do with an evolving transcript.
-func (h *Harness) Decide(turn FlowTurn) error {
+func (h *Harness) Decide(ctx context.Context, turn FlowTurn) error {
 	if h.flow == nil {
 		return stack.Wrap(errors.New("harness: a flow controller is required"))
 	}
-	return h.flow.Decide(turn)
+	return h.flow.Decide(ctx, turn)
 }
 
 // CancelDecision abandons a flow decision whose transcript changed.
@@ -887,7 +934,7 @@ func (h *Harness) act(turnID string, found directive) {
 		if cancelled {
 			return
 		}
-		if _, offered := h.options.Tools.Lookup(found.skill); offered {
+		if _, offered := h.offered().Lookup(found.skill); offered {
 			h.emitter.Send(ToolDropped{Name: found.skill})
 			return
 		}
@@ -977,7 +1024,7 @@ func (h *Harness) act(turnID string, found directive) {
 // then go quiet waiting for a colleague who is not coming. A name that is a tool is run
 // as one. Anything else is a note, so the next turn can tell the caller rather than hang.
 func (h *Harness) actUnknown(turnID string, found directive) {
-	if tool, offered := h.options.Tools.Lookup(found.skill); offered {
+	if tool, offered := h.offered().Lookup(found.skill); offered {
 		if strings.TrimSpace(found.body) == "" {
 			return
 		}
@@ -1006,7 +1053,7 @@ func (h *Harness) actUnknown(turnID string, found directive) {
 // actCall runs a tool the model called in a tag rather than as a tool call, with the tag's
 // attributes as its arguments, or its body when it has none.
 func (h *Harness) actCall(turnID string, found directive) {
-	tool, offered := h.options.Tools.Lookup(found.skill)
+	tool, offered := h.offered().Lookup(found.skill)
 	if !offered {
 		h.logger.Debug("the model called a tool that does not exist", "tool", found.skill)
 		h.mu.Lock()

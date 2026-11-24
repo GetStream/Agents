@@ -38,7 +38,7 @@ Stream's .NET packages are `getstream-net` (the current generated server SDK, na
 namespace stays **`GetStream.VisionAgents`**, with the generated DTOs under
 `GetStream.VisionAgents.Models`.
 
-Releases run by hand: Actions, "Release .NET SDK", "Use workflow from" `accelerate`, pick the
+Releases run by hand: Actions, "Release .NET SDK", "Use workflow from" `main`, pick the
 part to bump or type an exact version, and untick the dry run to publish. The workflow is
 `.github/workflows/release-sdk-dotnet.yml`; it pushes to NuGet through trusted publishing and
 tags `sdk-dotnet-v<version>`. Keep the file name: the nuget.org policy is bound to it. Do not rename to `StreamIO.*`; nothing
@@ -164,7 +164,7 @@ Hand-written in `Socket.cs`, because OpenAPI stops at the upgrade. One `Socket` 
   and closes the agents it made. Dropping work would hang up on whoever is talking.
 - `GetOrCreateAgentAsync` keeps one agent per channel while its session is live, and opens
   chats with the message's `AgentId`, as Go and Python do.
-- `Host(agent, toolTimeout)` sends `host_tools` for `agent.Tools` under `agent.Name` after every `ready`. Hosted calls are
+- `Host(client, toolTimeout)` sends `host_tools` for `client.Tools` with `every_agent: true` after every `ready`; `client.RunDispatchAsync()` hosts them alone. Hosted calls are
   tracked work like calls, and `hosting_refused` throws out of `RunAsync`. A connection
   that ends without a normal close is redialled with backoff (1s doubling to 30s), as in
   Go. This is the one socket that reconnects: dispatch frames belong to one connection.

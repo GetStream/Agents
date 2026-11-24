@@ -86,6 +86,26 @@ final class Tools
     }
 
     /**
+     * A JSON Schema for arguments that are all strings, to pass as `register`'s `$parameters`.
+     *
+     *     $tools->register('weather_lookup', 'The weather somewhere', Tools::strings(['location' => 'a city or region']), $run);
+     *
+     * @param array<string, string> $properties each argument's description, by its name
+     * @param ?list<string> $required the arguments the model must send; every one when null,
+     *     unlike the mobile SDKs' `AgentTool.strings`, which require none
+     * @return array<string, mixed>
+     */
+    public static function strings(array $properties, ?array $required = null): array
+    {
+        $schema = [];
+        foreach ($properties as $name => $description) {
+            $schema[$name] = ['type' => 'string', 'description' => $description];
+        }
+        // Some models refuse a tool whose parameters have no `properties` object.
+        return ['type' => 'object', 'properties' => Json::objectValue($schema), 'required' => $required ?? array_keys($properties)];
+    }
+
+    /**
      * What the session is opened with.
      *
      * @return list<SessionTool>
@@ -115,6 +135,24 @@ final class Tools
     public function has(string $name): bool
     {
         return isset($this->tools[$name]);
+    }
+
+    /**
+     * A registry of its own, holding each tool as the registry named for it holds it now, so
+     * registering on that one later changes nothing here.
+     *
+     * @param array<string, Tools> $from the registry to copy each tool from, by the tool's name
+     * @internal for a session, which keeps the functions it was given
+     */
+    public static function copied(array $from): self
+    {
+        $copy = new self();
+        foreach ($from as $name => $tools) {
+            if (isset($tools->tools[$name])) {
+                $copy->tools[$name] = $tools->tools[$name];
+            }
+        }
+        return $copy;
     }
 
     /**

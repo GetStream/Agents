@@ -52,6 +52,11 @@ session and its request builders are coroutine-native; bare OkHttp is callbacks.
   the protocol has no cursor to resume from. The socket reports `SocketClosed` and the caller
   decides. Adding reconnection means adding resume semantics to the router first.
 - Credentials go in handshake headers, never the query string, where they end up in logs.
+- A tool that throws is answered with `error`, never dropped. What it says is `toolFailure`:
+  `StreamAgents.onToolError` (held on `Backend`, so every session of the client reads it when
+  the call fails), else the error's message, cut to 1,024 characters with an ellipsis either way,
+  as JavaScript's `Tools.failure`. A hook that throws is answered with only "`<name>` failed".
+  The camera's "nothing recent" is the SDK's own words and goes out as the output, not as a failure.
 - `interrupt` is a socket command. The REST `interruptSession` is not client-accessible.
 
 ## State
@@ -66,6 +71,29 @@ frames with no network; most new event handling belongs there.
 - The session owns a `CoroutineScope(SupervisorJob())` and `close()` cancels it. It is not tied
   to a screen; a `ViewModel` holding it is the usual home.
 - `CancellationException` is never caught and mapped. A screen going away is not a failure.
+- A reply's interactive UI (`ai_ui`) reaches the session's socket first, as `ui_delta` and
+  `ui_completed`, which `Conversation` folds onto the turn as `Turn.ui` (`TurnUI`), merging an
+  `openui` patch onto the turn before's card. While OpenUI streams, `TurnUI.content` holds only
+  its finished statements, so a card grows a part at a time, and a turn has no `Turn.ui` until
+  one is finished. A turn that ends with no `ui_completed` (an interrupted reply) settles on
+  `responded` or `interrupted`: its UI is complete, with the last statement shown when it closed.
+  `LiveUI` shows it on the reply while Chat is writing it and its own `ai_ui` isn't complete, by
+  the rules in the `generative-ui` skill: `observe` each conversation (it says whether what shows
+  changed), and read each message's custom data from `overlay(messages)`, by message id, into
+  `AIUIDocument.from`. A call screen shows no channel; show the newest `Turn.ui` there through
+  its `customData`, with an `AIUIHost` of its own.
+- A written reply's thinking and tool calls reach the socket as `reasoning_delta`,
+  `tool_started`, `tool_updated` (not `verbatim`) and `tool_ran`, which `Conversation` folds into
+  `Turn.steps` in order: a round of thinking `r1`, `r2`... opens on a delta after anything else
+  and completes when the turn writes text or UI, calls a tool, answers or is cut off, and is timed
+  from when the turn was asked or went on (a private `resumedAt`, counted in equality as
+  `uiWritten` is); a call runs until `tool_ran`, failed when it carries an `error`. A turn is
+  `isDone` on `responded` with no `pending_work`, or `interrupted`. An incognito session has no
+  channel, so `chat()` throws: `AgentSession.turnMessages` (`TurnMessage.messages`) is the
+  conversation in the channel's shape, one reply per question, steps as `type to fields` for
+  `AIMessagePart.parts`, rounds numbered across the reply, a call in `approvals` as
+  `awaiting_approval` for the user `setUser` named. `android_assistant`'s `AgentTransport` shows
+  one from it.
 
 ## The generated models
 
@@ -117,6 +145,9 @@ for the router, Stream Chat and Stream Video. There is no call token and no cred
   One the app built without handing it over is adopted if it is connected as the same user and
   refused with `Configuration` otherwise. `Chat.kt` and `VoiceSession.kt` each remember the
   last client they built, so they can tell their own instance from the app's.
+- A hand-written type that holds a token (`StreamCredentials`, `Guest`) overrides `toString()` to
+  show it as `[redacted]` (`REDACTED`), since a data class prints every field. The generated
+  models are internal and cannot be masked by the generator: never log one.
 - A token provider that asks `backend.streamCredentials(refresh = true)` again, never one fixed
   token: a token expires an hour in, and two clients refreshing at once fetch one.
 - Camera direction and state are set before joining, so no front-facing frame is published.

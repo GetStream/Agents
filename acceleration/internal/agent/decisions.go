@@ -7,15 +7,19 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // How the decision writer behaves under load. A call makes several judgements a second,
 // which is too many to write one at a time, and none of them is worth making a caller
 // wait for.
 const (
-	decisionQueueSize   = 1024
+	decisionQueueSize = 1024
+	// floorCheckRoom is how much of the queue floor checks may take, which leaves the rest to
+	// the judgements: a writer that has fallen behind drops checks first.
+	floorCheckRoom      = decisionQueueSize * 3 / 4
 	decisionBatchSize   = 64
 	decisionFlushEvery  = time.Second
 	decisionWriteTimout = 5 * time.Second
@@ -33,47 +37,53 @@ const (
 // is worth less than the call: Redis having a bad minute must cost somebody some detail in
 // a dashboard and nobody a conversation.
 type decisionRecorder struct {
-	live   *live.Client
 	owner  routing.Owner
 	logger *slog.Logger
 
-	queue chan live.CallEvent
+	queue chan store.CallEvent
 	done  chan struct{}
 
 	// send stores one batch; it is Redis unless a test says otherwise.
-	send func(ctx context.Context, batch []live.CallEvent) error
+	send func(ctx context.Context, batch []store.CallEvent) error
 
 	// ctx is the writer's, cancelled when Close gives up on what is still queued.
 	ctx          context.Context
 	cancel       context.CancelFunc
 	drainTimeout time.Duration
 
+	// closing guards the queue against a send after Close: a floor check is reported from
+	// the transcriber's and the flow controller's goroutines, which may outlast the call, and
+	// a send on a closed channel panics even from a select with a default.
+	closing sync.RWMutex
+	closed  bool
+	// admitting makes a floor check's look at the queue and its send one step, so that two
+	// can never both take the last of floorCheckRoom.
+	admitting sync.Mutex
 	closeOnce sync.Once
 	dropped   atomic.Int64
 }
 
-func newDecisionRecorder(liveClient *live.Client, owner routing.Owner, logger *slog.Logger) *decisionRecorder {
-	return buildDecisionRecorder(liveClient, owner, logger).start()
+func newDecisionRecorder(events *store.CallEvents, owner routing.Owner, logger *slog.Logger) *decisionRecorder {
+	return buildDecisionRecorder(events, owner, logger).start()
 }
 
 // buildDecisionRecorder is a recorder that has not started writing, so a test can swap how.
-func buildDecisionRecorder(liveClient *live.Client, owner routing.Owner, logger *slog.Logger) *decisionRecorder {
+func buildDecisionRecorder(events *store.CallEvents, owner routing.Owner, logger *slog.Logger) *decisionRecorder {
 	r := &decisionRecorder{
-		live:   liveClient,
 		owner:  owner,
 		logger: logger,
-		queue:  make(chan live.CallEvent, decisionQueueSize),
+		queue:  make(chan store.CallEvent, decisionQueueSize),
 		done:   make(chan struct{}),
 
 		drainTimeout: decisionDrainTimeout,
 	}
-	r.send = liveClient.RecordCallEvents
+	r.send = events.InsertMany
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	return r
 }
 
 func (r *decisionRecorder) start() *decisionRecorder {
-	go r.run()
+	goroutine.Go(r.ctx, r.run)
 	return r
 }
 
@@ -84,7 +94,7 @@ func (r *decisionRecorder) Record(decided Decided) {
 		at = time.Now()
 	}
 
-	row := live.CallEvent{
+	row := store.CallEvent{
 		CustomerID:  r.owner.CustomerID,
 		CallID:      r.owner.CallID,
 		AgentID:     r.owner.AgentID,
@@ -96,7 +106,17 @@ func (r *decisionRecorder) Record(decided Decided) {
 		Said:        decided.Text,
 		LatencyMs:   measured(decided.LatencyMs),
 	}
+	r.enqueue(row)
+}
 
+// enqueue queues a row, dropping it if the writer is too far behind, and letting it go if the
+// recorder has been closed.
+func (r *decisionRecorder) enqueue(row store.CallEvent) {
+	r.closing.RLock()
+	defer r.closing.RUnlock()
+	if r.closed {
+		return
+	}
 	select {
 	case r.queue <- row:
 	default:
@@ -104,11 +124,36 @@ func (r *decisionRecorder) Record(decided Decided) {
 	}
 }
 
+// RecordFloorCheck queues one of the chorus-asr model's checks on the floor, about turn when
+// that was known as it was asked, dropping it if the writer is too far behind. It never
+// waits: a check may be reported on the flow controller's goroutine.
+func (r *decisionRecorder) RecordFloorCheck(turn string, check store.FloorCheck) {
+	row := store.CallEvent{
+		CustomerID: r.owner.CustomerID,
+		CallID:     r.owner.CallID,
+		AgentID:    r.owner.AgentID,
+		At:         check.At,
+		Kind:       "floor_check",
+		TurnID:     turn,
+		FloorCheck: &check,
+	}
+	r.admitting.Lock()
+	defer r.admitting.Unlock()
+	if len(r.queue) >= floorCheckRoom {
+		r.dropped.Add(1)
+		return
+	}
+	r.enqueue(row)
+}
+
 // Close drains the queue and stops the writer, giving the writes drainTimeout between
 // them. Judgements still unwritten then are dropped and counted with the rest.
 func (r *decisionRecorder) Close() {
 	r.closeOnce.Do(func() {
+		r.closing.Lock()
+		r.closed = true
 		close(r.queue)
+		r.closing.Unlock()
 		drainWithin(r.done, r.drainTimeout, r.cancel)
 		if dropped := r.dropped.Load(); dropped > 0 {
 			r.logger.Warn("dropped decisions because the writer fell behind", "count", dropped)
@@ -124,7 +169,7 @@ func (r *decisionRecorder) run() {
 	ticker := time.NewTicker(decisionFlushEvery)
 	defer ticker.Stop()
 
-	batch := make([]live.CallEvent, 0, decisionBatchSize)
+	batch := make([]store.CallEvent, 0, decisionBatchSize)
 	for {
 		select {
 		case row, open := <-r.queue:
@@ -147,7 +192,7 @@ func (r *decisionRecorder) run() {
 	}
 }
 
-func (r *decisionRecorder) write(batch []live.CallEvent) {
+func (r *decisionRecorder) write(batch []store.CallEvent) {
 	if len(batch) == 0 {
 		return
 	}

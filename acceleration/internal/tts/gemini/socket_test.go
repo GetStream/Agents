@@ -324,6 +324,24 @@ func (s *GeminiSocketSuite) TestInterruptStopsTheAudioMidResponse() {
 	}
 }
 
+func (s *GeminiSocketSuite) TestAResponseThatOutlivesTheTimeoutIsAFailureNotABargeIn() {
+	fake := newFakeGemini()
+	defer fake.server.Close()
+	fake.events, fake.pause = 100, 20*time.Millisecond
+	provider := s.start(fake, Options{Timeout: 150 * time.Millisecond})
+
+	s.Require().NoError(provider.Synthesize(tts.Request{Text: "a very long sentence", Final: true}))
+
+	var failures []tts.Error
+	for _, event := range s.settled(provider) {
+		if failure, ok := event.(tts.Error); ok {
+			failures = append(failures, failure)
+		}
+	}
+	s.Require().Len(failures, 1, "nobody cut in: the provider ran out of time")
+	s.ErrorIs(failures[0].Err, context.DeadlineExceeded)
+}
+
 func (s *GeminiSocketSuite) TestCloseSettlesWhatWasInFlight() {
 	fake := newFakeGemini()
 	defer fake.server.Close()

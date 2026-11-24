@@ -1,9 +1,9 @@
 # Vision Agents Go SDK
 
-The Go SDK for agents that run in Stream's [acceleration backend](https://github.com/GetStream/Vision-Agents/tree/accelerate/acceleration).
+The Go SDK for agents that run in Stream's [acceleration backend](https://github.com/GetStream/Vision-Agents/tree/main/acceleration).
 
-It is the Go counterpart of [plugins/stream](https://github.com/GetStream/Vision-Agents/tree/accelerate/plugins/stream), not of
-[sdks/python](https://github.com/GetStream/Vision-Agents/tree/accelerate/sdks/python). The backend already runs the whole pipeline: it joins the
+It is the Go counterpart of [plugins/stream](https://github.com/GetStream/Vision-Agents/tree/main/plugins/stream), not of
+[sdks/python](https://github.com/GetStream/Vision-Agents/tree/main/sdks/python). The backend already runs the whole pipeline: it joins the
 call, transcribes, answers and speaks. What this does is create the session, hold the events
 socket, run your functions and configure everything.
 
@@ -183,13 +183,11 @@ run, whose `ID` is the same when the router sends a call again, so a function th
 something can key on it. A call sent again while it is still running joins it, and one that
 finished is answered with what it returned, without running twice.
 
-A call that takes a while can say how it is going, and protect a write from the caller
-talking over the agent:
+A call can protect a write from the caller talking over the agent:
 
 ```go
 func(ctx context.Context, args RebookFlight) (any, error) {
     toolCallContext := tools.ToolCallContextFrom(ctx)
-    toolCallContext.Update(ctx, "Checking seats on the new flight")
 
     // Read only: the caller interrupting cancels ctx, and nothing has changed.
     seat, err := airline.HoldSeat(ctx, args.NewFlightID)
@@ -199,17 +197,13 @@ func(ctx context.Context, args RebookFlight) (any, error) {
 
     // From here on, the caller interrupting no longer cancels the toolCallContext.
     ctx = toolCallContext.DisallowInterruptions(ctx)
-    toolCallContext.Say(ctx, "Got a seat, moving your booking now.")
     return airline.Rebook(ctx, args.BookingID, seat, toolCallContext.ID)
 }
 ```
 
-`toolCallContext.Update` hands the agent a status, which it tells a voice caller in its own
-words once nobody is talking, and which a conversation shows on the call's step.
-`toolCallContext.Say` has it say the words as written, or post them in text; a speech-to-speech
-model may paraphrase them. `DisallowInterruptions` returns a context only the call's timeout and
-the socket ending cancel. When the call was already stopped, that context comes back cancelled,
-so the write never starts. Outside a call, all three do nothing.
+`DisallowInterruptions` returns a context only the call's timeout and the socket ending cancel.
+When the call was already stopped, that context comes back cancelled, so the write never
+starts. Outside a call, it does nothing.
 
 Struct tags describe arguments beyond `schema`:
 
@@ -342,8 +336,10 @@ if recent.HasMore {
 ```
 
 The fields are `project_id` (a string, `{"$eq": s}` or `{"$in": [...]}`), `review_score` (a
-number 1 to 5, or `$eq`, `$gt`, `$gte`, `$lt`, `$lte`), `user_id` and `text`, combined with
-`$and` and `$or`; the router refuses any other with a 400 that names it. `Search` writes
+number 1 to 5, or `$eq`, `$gt`, `$gte`, `$lt`, `$lte`), `user_id`, `text`, `config_id`,
+`state` (`live` or `ended`), `created_at` (`{"$gte": t, "$lt": t}`, RFC 3339) and `custom` (a map
+of string labels the session holds), combined with `$and` and `$or`; the router refuses any other
+with a 400 that names it. `Search` writes
 `text` itself and takes no `Sort`. A sort is `client.SortLastMessageAt` either way,
 `client.SortPinned` alone or followed by `client.SortLastMessageAt`, or
 `client.SortReviewScore` either way; a cursor only continues the sort it came from.
@@ -476,17 +472,18 @@ agents.NewDispatch(agents.DispatchOptions{
 })
 ```
 
-A worker can also host an agent's tools for every session opened under it, including one a
+Tools are registered once for the app, on the client, and each agent is offered the ones a
+tool group of its `agent.yaml` names. A worker runs them for every session, including one a
 browser opened, where the session's own process cannot reach what the tool needs:
 
 ```go
-agent := api.Agent("my-agent")
-agent.Tools().Add(LookupOrder{})
-dispatch.Host(agent, time.Minute)
+api.Tools().Add(LookupOrder{})
+err := api.RunDispatch(ctx)
 ```
 
-The router offers them to each session naming the agent and sends every call here. `Run`
-works with only hosted tools and no handler, and stops if the router refuses them.
+The router sends every call of them here. A worker that also answers calls or messages hosts
+them with `dispatch.Host(api, time.Minute)` before `Run`. Either stops if the router refuses
+the tools.
 
 `sdks/go/examples/dispatch` is the whole of it, and
 `examples/voice_agents/chat_support` is the Python one.
@@ -723,12 +720,38 @@ What the router answers is in micros too: `client.USD(limit.LimitMicros)` prints
 Work a limit refuses is a `*stream.RouterError` of 402 `spend_limit_reached`, or 429
 `user_limit_reached` for one end user's.
 
+## A user's own accounts
+
+A connection is one account at a connector, such as a user's Linear, that an agent's tools act
+through. A backend creates one for a user, sends the user's browser to the provider's consent,
+and reads whether it connected:
+
+```go
+connections := api.Connections()
+connection, err := connections.Create(ctx, client.ConnectionRequest{Connector: "linear", UserID: "alice"})
+consent, err := connections.Authorize(ctx, *connection.Id, client.AuthorizeOptions{
+    ReturnURL: "https://app.example.com/settings", UserID: "alice",
+})
+// Open consent.LaunchUrl in a popup from a page of the return URL's origin, and post it
+// consent.HandoffToken. The attempt ends at consent.ExpiresAt.
+
+connection, err = connections.Get(ctx, *connection.Id, client.ConnectionOptions{UserID: "alice"}) // Status is pending until alice consents
+mine, err := connections.List(ctx, client.ConnectionFilter{UserID: "alice"})
+err = connections.Delete(ctx, *connection.Id, client.ConnectionOptions{UserID: "alice"})
+```
+
+Each call takes the user, and the SDK sends it as the owner and as `X-Stream-User-Id`, so the
+two never differ. Another user's connection is not found, the same as one that does not exist.
+An app's connection is reached by every call of a backend, one naming a user included, but
+`List` with a `UserID` lists only that user's. Leave the user empty for the app's own
+connection, which any of its agents may be bound to.
+
 ## Layout
 
 | Path            | What is in it                                                     |
 | --------------- | ----------------------------------------------------------------- |
 | `agents/`       | `Agent`, its lifecycle, the harness, the directory loader and function registration |
-| `client/`       | Agents by name, their sessions, responses and items, forking and guest users, spend limits and teams |
+| `client/`       | Agents by name, their sessions, responses and items, forking and guest users, spend limits and teams, connections |
 | `stream/`       | The remote pipeline, the backend it talks to, the socket and the phone endpoints |
 | `edge/`         | Creating the Stream call and minting a link to listen in on it     |
 | `tools/`        | The function registry and the JSON Schema derived from an argument struct |
@@ -739,9 +762,8 @@ Work a limit refuses is a `*stream.RouterError` of 402 `spend_limit_reached`, or
 ## Versioning
 
 Versions are tags of the form `sdks/go/vX.Y.Z`, which `go get` reads as `vX.Y.Z`. The SDK is
-developed on the repository's `accelerate` branch and released from `main`, which holds a copy
-of this directory taken from one `accelerate` commit. While the version is `0.x`, a minor
-version may change a signature; a patch only fixes. A version found broken after release is
+developed on the repository's `main` branch, and a version is a tag on a `main` commit. While
+the version is `0.x`, a minor version may change a signature; a patch only fixes. A version found broken after release is
 retracted in `go.mod` and followed by the next patch, never replaced.
 
 ## Generated types
@@ -759,10 +781,10 @@ wherever one exists.
 ## Regenerating the client
 
 `acceleration/generated.go` comes from
-[acceleration/api/openapi.yaml](https://github.com/GetStream/Vision-Agents/blob/accelerate/acceleration/api/openapi.yaml), which is the same file
+[acceleration/api/openapi.yaml](https://github.com/GetStream/Vision-Agents/blob/main/acceleration/api/openapi.yaml), which is the same file
 the Go server and the Python client come from. It is committed, so installing this module
 needs no code generation. Generating it needs the spec beside it, so it runs in a checkout of
-`accelerate`:
+this repository:
 
 ```bash
 go generate ./...
@@ -785,7 +807,7 @@ what they are given.
 
 `e2e_test.go` drives a running router instead of a stand-in for one, so it is behind a tag.
 Start Postgres, Redis and the router as
-[acceleration/README.md](https://github.com/GetStream/Vision-Agents/blob/accelerate/acceleration/README.md) describes, then:
+[acceleration/README.md](https://github.com/GetStream/Vision-Agents/blob/main/acceleration/README.md) describes, then:
 
 ```bash
 STREAM_ACCELERATION_URL=http://localhost:8080 \

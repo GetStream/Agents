@@ -10,6 +10,7 @@ import { Plus, useStableCallback } from 'stream-chat-expo';
 
 import { agentSessions } from '../agent/agents';
 import { useAppContext } from '../contexts/AppContext';
+import { Settings } from './Settings';
 
 type SessionRow = Schemas['Session'];
 
@@ -25,8 +26,8 @@ const byLastUsed = (sessions: readonly SessionRow[]) =>
   [...sessions].sort((a, b) => lastUsed(b) - lastUsed(a));
 
 /**
- * The agent's conversations, most recently used first. Only those kept in writing: a session that
- * was only ever a call has no channel to read back.
+ * The agent's conversations, most recently used first. Only those kept in Stream Chat: a session
+ * with no conversation id has no channel to read back.
  */
 export const MenuDrawer = ({ navigation }: DrawerContentComponentProps) => {
   const { conversationsVersion, openConversation, sessionId, startConversation } = useAppContext();
@@ -74,7 +75,13 @@ export const MenuDrawer = ({ navigation }: DrawerContentComponentProps) => {
           <Plus size={24} stroke='#000000' />
         </Pressable>
       </View>
-      <FlatList data={sessions} keyExtractor={keyExtractor} renderItem={renderItem} />
+      {/* Under the conversations, so a short screen scrolls to it. */}
+      <FlatList
+        data={sessions}
+        keyExtractor={keyExtractor}
+        ListFooterComponent={Settings}
+        renderItem={renderItem}
+      />
     </SafeAreaView>
   );
 };

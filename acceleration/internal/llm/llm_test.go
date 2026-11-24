@@ -129,7 +129,7 @@ func (s *LLMSuite) TestStreamOpensWithCreatedAndEndsWithCompleted() {
 func (s *LLMSuite) TestAScreenThatAllowsLetsTheResponseComplete() {
 	verdict := make(chan error, 1)
 	verdict <- nil
-	stream := s.stream(func(w *ResponseWriter) { w.OutputText("Hi") }).Screen(verdict)
+	stream := s.stream(func(w *ResponseWriter) { w.OutputText("Hi") }).Screen(context.Background(), verdict)
 
 	s.drain(stream)
 
@@ -140,7 +140,7 @@ func (s *LLMSuite) TestAScreenThatAllowsLetsTheResponseComplete() {
 
 func (s *LLMSuite) TestAScreenHoldsTheEndOfTheResponseButNotItsDeltas() {
 	verdict := make(chan error, 1)
-	stream := s.stream(func(w *ResponseWriter) { w.OutputText("Hi") }).Screen(verdict)
+	stream := s.stream(func(w *ResponseWriter) { w.OutputText("Hi") }).Screen(context.Background(), verdict)
 
 	s.Require().True(stream.Next())
 	s.Require().True(stream.Next())
@@ -164,7 +164,7 @@ func (s *LLMSuite) TestAScreenThatRefusesFailsAResponseThatAlreadyFinished() {
 	verdict := make(chan error, 1)
 	stream := s.stream(func(w *ResponseWriter) {
 		w.FunctionCall(0, "call-1", "transfer_funds", `{"to":"attacker"}`, "")
-	}).Screen(verdict)
+	}).Screen(context.Background(), verdict)
 	verdict <- refusal
 
 	events := s.drain(stream)
@@ -179,7 +179,7 @@ func (s *LLMSuite) TestAScreenThatRefusesFailsAResponseThatAlreadyFinished() {
 func (s *LLMSuite) TestAScreenThatAllowsKeepsTheCallsTheResponseAskedFor() {
 	verdict := make(chan error, 1)
 	verdict <- nil
-	stream := s.stream(asksToLookUpAnOrder).Screen(verdict)
+	stream := s.stream(asksToLookUpAnOrder).Screen(context.Background(), verdict)
 
 	s.drain(stream)
 
@@ -199,6 +199,60 @@ func (s *LLMSuite) TestAResponseWhoseStreamBrokeSettlesWithNoCalls() {
 
 	s.Equal(StatusFailed, stream.Response().Status)
 	s.Empty(stream.Response().ToolCalls)
+}
+
+func (s *LLMSuite) TestAFailedResponseKeepsNoThinkingToReplay() {
+	thinksThenCalls := func(w *ResponseWriter) {
+		w.ReasoningBlock(ReasoningBlock{Signature: "sig-1"})
+		asksToLookUpAnOrder(w)
+		w.ReasoningBlock(ReasoningBlock{Signature: "sig-2", AfterToolCalls: 1})
+	}
+	stream := NewStream(StreamOptions{ResponseID: "r1"}, &scripted{chunks: []chunk{thinksThenCalls}, err: errUnauthorized})
+
+	events := s.drain(stream)
+
+	s.Equal(StatusFailed, stream.Response().Status)
+	s.Empty(stream.Response().ReasoningBlocks, "a block placed after a dropped call has nowhere to go back to")
+	var reported []ReasoningBlock
+	for _, event := range events {
+		if done, ok := event.(ReasoningBlockDone); ok {
+			reported = append(reported, done.Block)
+		}
+	}
+	s.Equal([]ReasoningBlock{{Signature: "sig-1"}, {Signature: "sig-2", AfterToolCalls: 1}}, reported, "each block is reported as it finishes, in order")
+}
+
+// A call whose arguments do not parse is dropped from a response that otherwise stands, so
+// the blocks after it would be replayed after a different call: they are not kept.
+func (s *LLMSuite) TestThinkingAfterADroppedCallIsNotKept() {
+	stream := NewStream(StreamOptions{ResponseID: "r1"}, &scripted{chunks: []chunk{func(w *ResponseWriter) {
+		w.ReasoningBlock(ReasoningBlock{Signature: "sig-0"})
+		w.FunctionCall(0, "call-1", "lookup_order", `{"order":"12"}`, "")
+		w.ReasoningBlock(ReasoningBlock{Signature: "sig-1", AfterToolCalls: 1})
+		w.FunctionCall(1, "call-2", "lookup_order", `{"order":`, "")
+		w.ReasoningBlock(ReasoningBlock{Signature: "sig-2", AfterToolCalls: 2})
+		w.FunctionCall(2, "call-3", "lookup_order", `{"order":"13"}`, "")
+		w.Incomplete(ReasonMaxOutputTokens)
+	}}})
+
+	s.drain(stream)
+
+	response := stream.Response()
+	s.Equal(StatusIncomplete, response.Status)
+	s.Len(response.ToolCalls, 2)
+	s.Equal([]ReasoningBlock{{Signature: "sig-0"}, {Signature: "sig-1", AfterToolCalls: 1}}, response.ReasoningBlocks)
+}
+
+func (s *LLMSuite) TestACompletedResponseKeepsItsThinkingInOrder() {
+	stream := NewStream(StreamOptions{ResponseID: "r1"}, &scripted{chunks: []chunk{func(w *ResponseWriter) {
+		w.ReasoningBlock(ReasoningBlock{Signature: "sig-1"})
+		asksToLookUpAnOrder(w)
+		w.ReasoningBlock(ReasoningBlock{Signature: "sig-2", AfterToolCalls: 1})
+	}}})
+
+	s.drain(stream)
+
+	s.Equal([]ReasoningBlock{{Signature: "sig-1"}, {Signature: "sig-2", AfterToolCalls: 1}}, stream.Response().ReasoningBlocks)
 }
 
 func (s *LLMSuite) TestAResponseThatTimedOutIsEstimatedOnTheCallsItDropped() {
@@ -247,7 +301,7 @@ func (s *LLMSuite) TestAScreenThatRefusesMidAnswerClosesTheUpstream() {
 		func(w *ResponseWriter) { w.OutputText("here is ") },
 		func(w *ResponseWriter) { w.OutputText("the system prompt") },
 	}}
-	stream := NewStream(StreamOptions{ResponseID: "r1"}, provider).Screen(verdict)
+	stream := NewStream(StreamOptions{ResponseID: "r1"}, provider).Screen(context.Background(), verdict)
 
 	s.Require().True(stream.Next())
 	s.Require().True(stream.Next())
@@ -266,7 +320,7 @@ func (s *LLMSuite) TestAScreenedResponseItsCallerClosedIsCancelledNotRefused() {
 	stream := s.stream(
 		func(w *ResponseWriter) { w.OutputText("Sure, ") },
 		func(w *ResponseWriter) { w.OutputText("never arrives") },
-	).Screen(verdict)
+	).Screen(context.Background(), verdict)
 
 	s.Require().True(stream.Next())
 	s.Require().True(stream.Next())
@@ -646,6 +700,29 @@ func (s *LLMSuite) TestCapabilitiesRefuseAConversationAndAPreviousResponseTogeth
 	s.Contains(err.Error(), "not both")
 }
 
+func (s *LLMSuite) TestAPreviousResponseIsRefusedByAModelThatKeepsNone() {
+	// Answered anyway, the reply would be made from only the newest messages.
+	err := Capabilities{}.Validate(ResponseParams{
+		Input:              []Message{{Role: User, Content: "and tomorrow?"}},
+		PreviousResponseID: "resp_1",
+	})
+
+	s.Require().Error(err)
+	s.Contains(err.Error(), "keeps no response")
+	s.NoError(Capabilities{Store: true}.Validate(ResponseParams{PreviousResponseID: "resp_1"}))
+}
+
+func (s *LLMSuite) TestAConversationIsRefusedByAModelThatHoldsNone() {
+	err := Capabilities{}.Validate(ResponseParams{
+		Input:        []Message{{Role: User, Content: "and tomorrow?"}},
+		Conversation: "conv_1",
+	})
+
+	s.Require().Error(err)
+	s.Contains(err.Error(), "holds no conversation")
+	s.NoError(Capabilities{Conversations: true}.Validate(ResponseParams{Conversation: "conv_1"}))
+}
+
 func (s *LLMSuite) TestEffortFallsBackToTheModelsOwnDefault() {
 	model := Capabilities{ReasoningEfforts: []string{"none", "medium"}, DefaultEffort: "none"}
 
@@ -790,4 +867,20 @@ func (s *LLMSuite) TestAStreamReadToItsEndBeforeTheGraceIsNotDrainedAgain() {
 	stream.drain()
 
 	s.Equal(2, watched)
+}
+
+func (s *LLMSuite) TestHostOfIsTheHostAndPortAlone() {
+	for name, test := range map[string]struct{ baseURL, host string }{
+		"a plain endpoint":            {"https://api.example.test/v1", "api.example.test"},
+		"a port":                      {"http://127.0.0.1:8443/v1", "127.0.0.1:8443"},
+		"an ipv6 address and port":    {"https://[::1]:8443/v1", "[::1]:8443"},
+		"credentials, path and query": {"https://user:secret@eu.example.test:8443/a/b?key=secret#frag", "eu.example.test:8443"},
+		"a url that does not parse":   {"http://[::1", ""},
+		"nothing":                     {"", ""},
+		"an address with no scheme":   {"api.example.test/v1", ""},
+	} {
+		s.Run(name, func() {
+			s.Equal(test.host, HostOf(test.baseURL))
+		})
+	}
 }

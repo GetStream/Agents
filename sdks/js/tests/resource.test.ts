@@ -14,6 +14,7 @@ import {
   type SessionSearch,
   type SessionSort,
   type Sessions,
+  Tools,
 } from "../src/index.js";
 import { inPage, offPage } from "./device.js";
 import { TestRouter, type Connection } from "./router.js";
@@ -165,7 +166,55 @@ describe("sessions", () => {
       false,
       "carrying a conversation on creates no session",
     );
+    assert.equal(
+      router.requestsTo("POST", "/v1/agents/sessions/session-4/resume").length,
+      0,
+      "with nothing to say over what it ran with, it is read as it is",
+    );
     await held.close();
+  });
+
+  it("resumes with a tool timeout and its tools by asking the router to carry it on", async () => {
+    router.serve("POST", "/v1/agents/sessions/session-4/resume", {
+      body: session({ id: "session-4", conversation_id: "agent:support-4", state: "live" }),
+    });
+    const tools = new Tools().register({ name: "lookup_order", description: "Finds an order", run: () => "found" });
+    const resuming = api.agent("docs").sessions.resume("session-4", { tools, tool_timeout_ms: 180_000 });
+    const connection = await router.socket();
+    const held = await resuming;
+
+    assert.deepEqual(router.requestsTo("POST", "/v1/agents/sessions/session-4/resume")[0]?.body, {
+      tool_timeout_ms: 180_000,
+      tools: [{ name: "lookup_order", description: "Finds an order" }],
+    });
+    assert.equal(router.requestsTo("GET", "/v1/agents/sessions/session-4").length, 0);
+    assert.equal(connection.path, "/v1/agents/sessions/session-4/events");
+    await held.close();
+  });
+
+  it("resumes with only a tool timeout, leaving the tools the conversation has", async () => {
+    router.serve("POST", "/v1/agents/sessions/session-4/resume", {
+      body: session({ id: "session-4", conversation_id: "agent:support-4", state: "live" }),
+    });
+    const resuming = api.agent("docs").sessions.resume("session-4", { tool_timeout_ms: 0 });
+    await router.socket();
+    const held = await resuming;
+
+    assert.deepEqual(router.requestsTo("POST", "/v1/agents/sessions/session-4/resume")[0]?.body, {
+      tool_timeout_ms: 0,
+    });
+    await held.close();
+  });
+
+  it("reads a conversation it will not watch as it is, though it has tools", async () => {
+    router.serve("GET", "/v1/agents/sessions/session-4", {
+      body: session({ id: "session-4", conversation_id: "agent:support-4", state: "ended" }),
+    });
+    const tools = new Tools().register({ name: "lookup_order", description: "Finds an order", run: () => "found" });
+    const held = await api.agent("docs").sessions.resume("session-4", { tools, watch: false });
+
+    assert.equal(held.id, "session-4");
+    assert.equal(router.requestsTo("POST", "/v1/agents/sessions/session-4/resume").length, 0);
   });
 
   it("spells the model overwrites the way the wire does", async () => {
@@ -561,6 +610,75 @@ describe("sessions", () => {
     );
   });
 
+  it("reads a session's tokens, timeline and decisions back by its id", async () => {
+    const parts = { instructions: 600, messages: 400, tool_definitions: 200, tool_use: 0, images: 0, video: 0 };
+    router.serve("GET", "/v1/agents/sessions/session-1/tokens", {
+      body: {
+        input_tokens: 1200,
+        cached_input_tokens: 800,
+        output_tokens: 90,
+        requests: 3,
+        cost_micros: 410,
+        cost_sources: [],
+        input_parts: parts,
+        models: [
+          {
+            provider: "openai",
+            model: "gpt-5-mini",
+            modality: "llm",
+            input_tokens: 1200,
+            cached_input_tokens: 800,
+            output_tokens: 90,
+            requests: 3,
+            cost_micros: 410,
+            input_parts: parts,
+          },
+        ],
+      },
+    });
+    router.serve("GET", "/v1/agents/calls/session-1/timeline", {
+      body: [
+        { turn_id: "turn-1", started_at: "2026-11-10T09:00:00Z", heard: "are you open late", roundtrip_ms: 840 },
+        { turn_id: "turn-2", started_at: "2026-11-10T09:00:04Z", heard: "and on sundays", roundtrip_ms: 910 },
+      ],
+    });
+    router.serve("GET", "/v1/agents/calls/session-1/events", {
+      body: [{ at: "2026-11-10T09:00:00Z", kind: "ignore", reason: "spoken to someone else" }],
+    });
+    const sessions = api.agent("docs").sessions;
+
+    const tokens = await sessions.tokens("session-1");
+    const timeline = await sessions.timeline("session-1");
+    const decisions = await sessions.decisions("session-1");
+
+    assert.equal(tokens.input_tokens, 1200);
+    assert.equal(tokens.cached_input_tokens, 800);
+    assert.equal(tokens.input_parts.tool_definitions, 200);
+    assert.deepEqual(tokens.models.map((model) => model.model), ["gpt-5-mini"]);
+    assert.equal(timeline.length, 2);
+    assert.equal(timeline[1]?.heard, "and on sundays");
+    assert.equal(timeline[1]?.roundtrip_ms, 910);
+    assert.deepEqual(decisions.map((decision) => decision.kind), ["ignore"]);
+  });
+
+  it("says the router does not know a session whose tokens, timeline or decisions were asked for", async () => {
+    const noCall = { error: { message: "no such call", type: "not_found", code: "call_not_found" } };
+    const noSession = { error: { message: "no such session", type: "not_found", code: "session_not_found" } };
+    router.serve("GET", "/v1/agents/sessions/someone-elses/tokens", { status: 404, body: noSession });
+    for (const read of ["timeline", "events"]) {
+      router.serve("GET", `/v1/agents/calls/someone-elses/${read}`, { status: 404, body: noCall });
+    }
+    const sessions = api.agent("docs").sessions;
+
+    for (const [reading, code] of [
+      [() => sessions.tokens("someone-elses"), "session_not_found"],
+      [() => sessions.timeline("someone-elses"), "call_not_found"],
+      [() => sessions.decisions("someone-elses"), "call_not_found"],
+    ] as const) {
+      await assert.rejects(reading(), (error: unknown) => error instanceof RouterError && error.code === code);
+    }
+  });
+
   it("renames, voices, stops and forks a session it is not holding, by its id", async () => {
     router.serve("PATCH", "/v1/agents/sessions/session-9", { body: session({ id: "session-9", title: "Trip" }) });
     router.serve("POST", "/v1/agents/sessions/session-9/voice", { body: session({ id: "session-9", call_id: "c" }) });
@@ -576,7 +694,11 @@ describe("sessions", () => {
     await sessions.startVoice("session-9");
     await sessions.stopVoice("session-9");
     await sessions.close("session-9");
-    const forking = sessions.fork("session-9", { title: "Trip, again", modelOverwrites: { llm: "openai/gpt-5" } });
+    const forking = sessions.fork("session-9", {
+      title: "Trip, again",
+      modelOverwrites: { llm: "openai/gpt-5" },
+      tool_timeout_ms: 180_000,
+    });
     const connection = await router.socket();
     const forked = await forking;
 
@@ -588,6 +710,7 @@ describe("sessions", () => {
     assert.deepEqual(router.requestsTo("POST", "/v1/agents/sessions/session-9/fork")[0]?.body, {
       title: "Trip, again",
       model_overwrites: { llm: "openai/gpt-5" },
+      tool_timeout_ms: 180_000,
     });
     assert.equal(forked.id, "session-10");
     assert.equal(connection.path, "/v1/agents/sessions/session-10/events");
@@ -1296,6 +1419,160 @@ describe("guest users", () => {
   it("keeps the guest under one key, so two tabs are one visitor", () => {
     assert.equal(GUEST_STORAGE_KEY, "stream-vision-agents-guest");
   });
+
+  describe("in a browser", () => {
+    const global = globalThis as Record<string, unknown>;
+    const names = ["document", "localStorage", "location"] as const;
+    let saved: Map<string, PropertyDescriptor | undefined>;
+
+    beforeEach(() => {
+      saved = new Map(names.map((name) => [name, Object.getOwnPropertyDescriptor(global, name)]));
+    });
+
+    afterEach(() => {
+      for (const [name, descriptor] of saved) {
+        if (descriptor) {
+          Object.defineProperty(global, name, descriptor);
+        } else {
+          delete global[name];
+        }
+      }
+    });
+
+    /** A page's globals: a cookie jar, and localStorage unless `storage` is false or throws. */
+    function page(options: { storage?: boolean | "blocked" | "full"; https?: boolean; cookie?: string } = {}) {
+      const written: string[] = [];
+      let jar = options.cookie ?? "";
+      const document = {
+        get cookie() {
+          return jar;
+        },
+        set cookie(line: string) {
+          written.push(line);
+          const [pair] = line.split(";");
+          const [name] = (pair ?? "").split("=");
+          const others = jar.split(";").map((one) => one.trim()).filter((one) => one && !one.startsWith(`${name}=`));
+          jar = [...others, ...(line.includes("max-age=0") ? [] : [pair ?? ""])].join("; ");
+        },
+      };
+      const items = new Map<string, string>();
+      const storage = {
+        getItem: (key: string) => items.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          if (options.storage === "full") {
+            throw new Error("QuotaExceededError");
+          }
+          items.set(key, value);
+        },
+        removeItem: (key: string) => void items.delete(key),
+      };
+      Object.defineProperty(global, "document", { value: document, configurable: true, writable: true });
+      Object.defineProperty(global, "location", {
+        value: { protocol: options.https ? "https:" : "http:" },
+        configurable: true,
+        writable: true,
+      });
+      if (options.storage === "blocked") {
+        Object.defineProperty(global, "localStorage", {
+          get() {
+            throw new Error("SecurityError");
+          },
+          configurable: true,
+        });
+      } else if (options.storage === false) {
+        Object.defineProperty(global, "localStorage", { value: undefined, configurable: true, writable: true });
+      } else {
+        Object.defineProperty(global, "localStorage", { value: storage, configurable: true, writable: true });
+      }
+      return { items, written, jar: () => jar };
+    }
+
+    const minted = { id: "guest-1", token: "guest-token", refresh_secret: "renew-once" };
+
+    it("remembers the guest in localStorage, never in a cookie sent with every request", async () => {
+      const { items, written } = page({ https: true });
+      router.serve("POST", "/v1/agents/guests", { status: 201, body: minted });
+
+      await api.guestUser();
+
+      assert.deepEqual(JSON.parse(items.get(GUEST_STORAGE_KEY) ?? "{}"), minted);
+      assert.deepEqual(written, []);
+    });
+
+    it("moves a guest an earlier version kept in a cookie into localStorage, and clears the cookie", async () => {
+      const cookie = `${GUEST_STORAGE_KEY}=${encodeURIComponent(JSON.stringify(minted))}`;
+      const { items, jar } = page({ https: true, cookie });
+
+      const guest = await api.guestUser();
+
+      assert.equal(guest.id, "guest-1", "the same guest, with the same history");
+      assert.equal(router.received.length, 0);
+      assert.ok(items.get(GUEST_STORAGE_KEY));
+      assert.equal(jar(), "");
+    });
+
+    it("clears another visitor's guest from an old cookie when minting a fresh one", async () => {
+      const previous = { id: "guest-0", token: "their-token", refresh_secret: "their-secret" };
+      const { items, jar } = page({ https: true, cookie: `${GUEST_STORAGE_KEY}=${encodeURIComponent(JSON.stringify(previous))}` });
+      router.serve("POST", "/v1/agents/guests", { status: 201, body: minted });
+
+      const guest = await api.guestUser({ fresh: true });
+
+      assert.equal(guest.id, "guest-1");
+      assert.equal(jar(), "", "the previous visitor's token no longer goes out with requests");
+      items.clear();
+      router.serve("POST", "/v1/agents/guests", { status: 201, body: { id: "guest-2", token: "t2" } });
+      assert.notEqual((await api.guestUser()).id, "guest-0", "and cannot come back once localStorage is cleared");
+    });
+
+    it("keeps a refreshed guest in a cookie when a full localStorage refuses it", async () => {
+      const expired = { ...minted, expires_at: "2000-01-01T00:00:00Z" };
+      const { items, jar } = page({ https: true, storage: "full" });
+      items.set(GUEST_STORAGE_KEY, JSON.stringify(expired));
+      const renewed = { id: "guest-1", token: "fresh-token", refresh_secret: "renew-twice" };
+      router.serve("POST", "/v1/agents/guests", { status: 201, body: renewed });
+
+      const guest = await api.guestUser();
+
+      assert.deepEqual(guest, renewed, "handed back although localStorage would not keep it");
+      assert.equal(items.get(GUEST_STORAGE_KEY), undefined, "the spent secret is not read again");
+      assert.match(jar(), /fresh-token/);
+      assert.deepEqual(await api.guestUser(), renewed, "read back from the cookie, not minted again");
+      assert.equal(router.received.length, 1);
+    });
+
+    it("falls back to a Secure cookie on an https page whose localStorage is blocked", async () => {
+      const { written } = page({ https: true, storage: "blocked" });
+      router.serve("POST", "/v1/agents/guests", { status: 201, body: minted });
+
+      await api.guestUser();
+
+      assert.equal(written.length, 1);
+      assert.match(written[0] ?? "", /; Secure$/);
+    });
+
+    it("leaves Secure off a cookie on an http page, which could not set one", async () => {
+      const { written } = page({ storage: false });
+      router.serve("POST", "/v1/agents/guests", { status: 201, body: minted });
+
+      await api.guestUser();
+
+      assert.equal(written.length, 1, "the guest was remembered in the cookie");
+      assert.match(written[0] ?? "", new RegExp(`^${GUEST_STORAGE_KEY}=[^;]*guest-token`));
+      assert.doesNotMatch(written[0] ?? "", /Secure/);
+    });
+
+    it("clears a malformed guest cookie on sign-out, and takes it for no guest", async () => {
+      const { jar } = page({ https: true, cookie: `${GUEST_STORAGE_KEY}=%E0%A4%A` });
+
+      api.forgetGuest();
+      assert.equal(jar(), "", "forgetGuest finished, and the cookie is gone");
+
+      page({ https: true, cookie: `${GUEST_STORAGE_KEY}=%` });
+      router.serve("POST", "/v1/agents/guests", { status: 201, body: minted });
+      assert.equal((await api.guestUser()).id, "guest-1", "a fresh guest rather than a thrown URIError");
+    });
+  });
 });
 
 describe("scheduled tasks", () => {
@@ -1387,5 +1664,19 @@ describe("search", () => {
 
     await api.router().search("weather in Lisbon");
     assert.deepEqual(router.last.body, { query: "weather in Lisbon" });
+  });
+  it("lists a modality's routes in the order the router gave, which puts the default first", async () => {
+    // Not the order sorting by name or by the default would give, so a client that reordered
+    // would fail here.
+    router.serve("GET", "/v1/image/routes", {
+      body: [
+        { id: "image-quality", title: "Best images", description: "", candidates: [{ provider: "google", model: "gemini-3.1-flash-image" }] },
+        { id: "image-fast", title: "Fast images", description: "", candidates: [{ provider: "fal", model: "alibaba/qwen-image-3/text-to-image" }] },
+      ],
+    });
+
+    const routes = await api.router().routes("image");
+    assert.deepEqual(routes.map((route) => route.id), ["image-quality", "image-fast"]);
+    assert.equal(router.requestsTo("GET", "/v1/image/routes").length, 1);
   });
 });

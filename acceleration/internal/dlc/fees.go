@@ -157,7 +157,7 @@ func (s *Service) BillCampaigns(ctx context.Context, from time.Time) (int, error
 	if s.recorder == nil {
 		return 0, nil
 	}
-	campaigns, err := s.store.UseCasesWithCampaigns(ctx, registeredNote, VendorPending, Approved)
+	campaigns, err := s.store.UseCases.SelectWithCampaigns(ctx, registeredNote, VendorPending, Approved)
 	if err != nil {
 		return 0, err
 	}

@@ -77,7 +77,7 @@ func (s *ConnectorEventsSuite) TestACustomConnectorsEventIsCountedAsCustom() {
 	manifest, err := core.ParseManifest([]byte("id: " + connector + "\nrevision: 1\nname: Metrics probe\n" +
 		"endpoints:\n  mcp: https://crm.example/mcp\nschemes: [oauth2_code]\nclient:\n  registration: [customer]\n"))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	appID, secret := "synthetic-custom-"+s.utils.uuid(), "synthetic-custom-signing-"+s.utils.uuid()
 	record := &store.ConnectorOAuthClient{CustomerID: s.customerID(), ConnectorID: connector,
@@ -85,7 +85,7 @@ func (s *ConnectorEventsSuite) TestACustomConnectorsEventIsCountedAsCustom() {
 	record.SigningSecretSealed, err = s.sealer.SealWithAAD(secret, providerAppAAD(record.CustomerID, connector, appID))
 	s.Require().NoError(err)
 	record.SigningKEKVersion = s.sealer.CurrentVersion()
-	_, err = s.store.PutConnectorOAuthClient(context.Background(), record)
+	_, err = s.store.ConnectorOAuthClients.Upsert(context.Background(), record)
 	s.Require().NoError(err)
 	before := eventsOf("custom", eventRefused)
 
@@ -127,12 +127,12 @@ func (s *SlackChannelSuite) TestAnEventOnTheProviderAppRouteOfAnIdNobodyDefinedI
 	s.Require().NoError(err)
 	// Put refuses a client whose connector has no definition, so the row is written as it was
 	// before the definition went: the race the store's cascade makes rare.
-	_, err = s.store.DB().NewRaw(`INSERT INTO connector_oauth_clients (customer_id, connector_id, registration, client_id,
+	_, err = s.store.GlobalDB().NewRaw(`INSERT INTO connector_oauth_clients (customer_id, connector_id, registration, client_id,
 provider_app_id, signing_secret_sealed, signing_kek_version) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		s.customerID(), connector, core.ClientCustomer, "synthetic-client", appID, sealed, s.sealer.CurrentVersion()).Exec(context.Background())
 	s.Require().NoError(err)
 	s.T().Cleanup(func() {
-		_, err := s.store.DB().NewRaw(`DELETE FROM connector_oauth_clients WHERE customer_id = ? AND connector_id = ?`,
+		_, err := s.store.GlobalDB().NewRaw(`DELETE FROM connector_oauth_clients WHERE customer_id = ? AND connector_id = ?`,
 			s.customerID(), connector).Exec(context.Background())
 		s.Require().NoError(err)
 	})

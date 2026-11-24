@@ -46,7 +46,7 @@ func (s *Server) deleteSession(ctx context.Context, request *deleteSessionReques
 	// for a follow-up to land. Their runs go with them (the store cascades).
 	if s.store != nil {
 		customerID, _ := CustomerFrom(ctx)
-		if err := s.store.DeleteScheduledTasksForSession(ctx, customerID, request.ID); err != nil {
+		if err := s.store.ScheduledTasks.DeleteForSession(ctx, customerID, request.ID); err != nil {
 			s.logger.Error("could not delete a deleted session's scheduled tasks",
 				"session", request.ID, "error", err)
 		}

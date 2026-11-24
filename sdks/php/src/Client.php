@@ -33,24 +33,33 @@ use Psr\Http\Message\StreamFactoryInterface;
 final readonly class Client
 {
     public Backend $backend;
+    public Connections $connections;
     public Memories $memories;
     public Simulations $simulations;
     public SpendLimits $spendLimits;
     public Teams $teams;
+    /** The app's tools, registered once for every agent and run by `runDispatch()`. An agent is offered one only where a tool group of its agent.yaml names it. */
+    public Tools $tools;
     private ClientInterface $http;
     private RequestFactoryInterface $requests;
     private StreamFactoryInterface $streams;
 
+    /**
+     * @param ?Tools $tools the app's tools, shared with a client this one is derived from
+     */
     public function __construct(
         ?Backend $backend = null,
         ?ClientInterface $http = null,
         ?RequestFactoryInterface $requests = null,
         ?StreamFactoryInterface $streams = null,
+        ?Tools $tools = null,
     ) {
         $this->backend = $backend ?? new Backend();
+        $this->tools = $tools ?? new Tools();
         $this->requests = $requests ?? Http::requests();
         $this->streams = $streams ?? Http::streams();
         $this->http = $http ?? Http::client();
+        $this->connections = new Connections($this);
         $this->memories = new Memories($this);
         $this->simulations = new Simulations($this);
         $this->spendLimits = new SpendLimits($this);
@@ -76,7 +85,7 @@ final readonly class Client
 
     public function withBackend(Backend $backend): self
     {
-        return new self($backend, $this->http, $this->requests, $this->streams);
+        return new self($backend, $this->http, $this->requests, $this->streams, $this->tools);
     }
 
     /**
@@ -87,6 +96,23 @@ final readonly class Client
     public function agent(string $name): AgentHandle
     {
         return new AgentHandle($this, $name);
+    }
+
+    /**
+     * Runs the app's tools for every session they are offered to, whoever opened it, until the
+     * socket closes or the process is signalled. A tool's own timeout is how long the router
+     * waits for one of its calls; without one it waits 30 seconds. A worker that also answers
+     * calls or messages hosts the tools with `Dispatch::host()` instead.
+     *
+     *     $client = new Client();
+     *     $client->tools->register('lookup', 'Look up an order', $schema, $run);
+     *     $client->runDispatch();
+     *
+     * @throws Exception\HostingRefusedException when the router refuses the tools
+     */
+    public function runDispatch(): void
+    {
+        (new Worker\Dispatch(client: $this))->host($this)->run();
     }
 
     /**
@@ -188,9 +214,11 @@ final readonly class Client
      * @param array<string, string> $params
      * @param array<string, scalar|null> $query
      * @param array<mixed>|\stdClass|null $body
+     * @param bool $resend false for a request whose lost answer must reach the caller as lost
+     *     (`status` 0), rather than the transport sending it again and handing back that answer
      * @throws RouterException when the router answers a failure or cannot be reached
      */
-    public function request(string $method, string $path, array $params = [], array $query = [], array|\stdClass|null $body = null): mixed
+    public function request(string $method, string $path, array $params = [], array $query = [], array|\stdClass|null $body = null, bool $resend = true): mixed
     {
         $operation = "{$method} {$path}";
         $url = $this->backend->url . self::expand($path, $params) . self::queryOf($query);
@@ -206,7 +234,7 @@ final readonly class Client
         }
 
         try {
-            $response = $this->http->sendRequest($request);
+            $response = ($resend ? $this->http : Http::sentOnce($this->http))->sendRequest($request);
         } catch (ClientExceptionInterface $failed) {
             throw new RouterException(0, $operation, $failed->getMessage(), '', 0, $failed);
         }

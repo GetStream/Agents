@@ -71,7 +71,7 @@ sandbox:
   hosts: [api.crm.example, "*.crm.example"]
 `))
 	s.Require().NoError(err)
-	definition, err := s.store.CreateConnectorDefinition(s.ctx, s.customerID, manifest)
+	definition, err := s.store.ConnectorDefinitions.Revise(s.ctx, s.customerID, manifest)
 	s.Require().NoError(err)
 	s.revision = definition.Revision
 }
@@ -87,7 +87,7 @@ sandbox:
     - {host: api.crm.example, method: POST, path: /search}
 `))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(s.ctx, s.customerID, manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(s.ctx, s.customerID, manifest)
 	s.Require().NoError(err)
 	return manifest.Sandbox.Reads
 }
@@ -413,9 +413,9 @@ func (s *SandboxGrantsSuite) TestARequiredBindingOnTheSandboxRevisionIsGranted()
 // openBinding reads them before sandboxGrant reads the latest revision.
 func (s *SandboxGrantsSuite) pinnedRead() (store.ConnectorConnection, core.ResolvedManifest) {
 	s.sandboxRevision()
-	connection, err := s.store.ConnectorConnection(s.ctx, s.customerID, s.connection("", "primary"))
+	connection, err := s.store.ConnectorConnections.Get(s.ctx, s.customerID, s.connection("", "primary"))
 	s.Require().NoError(err)
-	definition, err := s.store.ConnectorDefinition(s.ctx, s.customerID, s.connectorID, connection.DefinitionRevision)
+	definition, err := s.store.ConnectorDefinitions.Get(s.ctx, s.customerID, s.connectorID, connection.DefinitionRevision)
 	s.Require().NoError(err)
 	manifest, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	s.Require().NoError(err)
@@ -429,7 +429,7 @@ func (s *SandboxGrantsSuite) pinnedRead() (store.ConnectorConnection, core.Resol
 // open with a 500.
 func (s *SandboxGrantsSuite) TestAConnectorDeletedAfterThePinnedReadGivesTheSandboxNothing() {
 	connection, manifest := s.pinnedRead()
-	_, err := s.store.DeleteConnectorDefinition(s.ctx, s.customerID, s.connectorID, true)
+	_, err := s.store.ConnectorDefinitions.Delete(s.ctx, s.customerID, s.connectorID, true)
 	s.Require().NoError(err)
 	optional, needed := &dispatcher{}, &dispatcher{}
 
@@ -557,6 +557,7 @@ func (s *SandboxGrantsSuite) TestTheProxyBrokerSendsTheSandboxThroughTheProxy() 
 	s.Require().NoError(err)
 	s.T().Cleanup(redis.Close)
 	api := s.daytonaAPI()
+	api.redis = redis
 	s.manager.options.SandboxBroker, s.manager.options.SandboxSecretPrefix = egress.BrokerName, ""
 	s.manager.options.SandboxProxy = egress.BrokerOptions{Store: egress.NewStore(redis), URL: "http://203.0.113.7:8091",
 		CACert: []byte(proxyCA)}
@@ -581,10 +582,11 @@ func (s *SandboxGrantsSuite) TestTheProxyBrokerSendsTheSandboxThroughTheProxy() 
 	proxy, err := url.Parse(api.ran["envs"].(map[string]any)["HTTPS_PROXY"].(string))
 	s.Require().NoError(err)
 	s.Equal("203.0.113.7:8091", proxy.Host)
-	credential, _ := proxy.User.Password()
-	sum := sha256.Sum256([]byte(credential))
-	raw, err := redis.Do(s.ctx, redis.B().Get().Key("sandbox:egress:"+hex.EncodeToString(sum[:])).Build()).AsBytes()
-	s.Require().NoError(err)
+	raw := api.record
+	s.Require().NotNil(raw, "during the run")
+	api.mu.Lock()
+	s.Nil(api.reached(s.ctx), "once the run has ended")
+	api.mu.Unlock()
 	var record egress.Record
 	s.Require().NoError(json.Unmarshal(raw, &record))
 	s.Equal(spec.ID, record.Session)
@@ -605,7 +607,7 @@ func (s *SandboxGrantsSuite) TestTheProxyBrokerSendsTheSandboxThroughTheProxy() 
 	s.Require().NoError(err)
 	s.Equal(tokenOf("primary"), token)
 
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, s.customerID, id))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, s.customerID, id))
 	_, err = box.Run(s.ctx, "print(1)", nil)
 	s.Require().NoError(err)
 	s.Contains(s.logs.String(), "credential is withdrawn from the sandbox")
@@ -651,6 +653,10 @@ type daytonaAPI struct {
 	secrets map[string]string
 	// created is the last request for a sandbox, and ran for a run of code.
 	created, ran map[string]any
+	// redis, when set, is the proxy's store, and record the egress record the last run's proxy
+	// credential reached while the run was in flight, as code in it reads through the proxy.
+	redis  rueidis.Client
+	record []byte
 }
 
 func (s *SandboxGrantsSuite) daytonaAPI() *daytonaAPI {
@@ -696,10 +702,31 @@ func (a *daytonaAPI) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	case strings.HasSuffix(r.URL.Path, "/process/code-run"):
 		_ = json.NewDecoder(r.Body).Decode(&a.ran)
+		if a.redis != nil {
+			a.record = a.reached(r.Context())
+		}
 		_, _ = w.Write([]byte(`{"result":"","exitCode":0}`))
 	default:
 		_, _ = w.Write([]byte(`{"result":"","exitCode":0}`))
 	}
+}
+
+// reached is the egress record the proxy credential of the last run's env reaches now, nil when
+// there is none. The caller holds mu.
+func (a *daytonaAPI) reached(ctx context.Context) []byte {
+	envs, _ := a.ran["envs"].(map[string]any)
+	value, _ := envs["HTTPS_PROXY"].(string)
+	proxy, err := url.Parse(value)
+	if err != nil || proxy.User == nil {
+		return nil
+	}
+	credential, _ := proxy.User.Password()
+	sum := sha256.Sum256([]byte(credential))
+	raw, err := a.redis.Do(ctx, a.redis.B().Get().Key("sandbox:egress:"+hex.EncodeToString(sum[:])).Build()).AsBytes()
+	if err != nil {
+		return nil
+	}
+	return raw
 }
 
 // offered says whether Daytona still holds a secret for the env var the sandbox reads.
@@ -732,7 +759,7 @@ func (s *SandboxGrantsSuite) TestADeletedConnectionIsWithdrawnBeforeTheNextRun()
 	s.Require().NoError(err)
 	s.Require().True(api.offered("CRM_TOKEN"))
 
-	s.Require().NoError(s.store.DeleteConnectorConnection(s.ctx, s.customerID, id))
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, s.customerID, id))
 	_, err = box.Run(s.ctx, "print(1)", nil)
 
 	s.Require().NoError(err)
@@ -789,7 +816,7 @@ func (s *SandboxGrantsSuite) TestABindingTheConfigNoLongerHoldsAsOpenedGivesNoCr
 
 	s.rebind(config, s.fixed("crm", id, "whoami"))
 	s.ErrorIs(SandboxBound(s.ctx, s.store, grant), sandbox.ErrNoCredential, "sandbox unset")
-	s.Require().NoError(s.store.DeleteAgentConfig(s.ctx, s.customerID, config.ID))
+	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, s.customerID, config.ID))
 	s.ErrorIs(SandboxBound(s.ctx, s.store, grant), sandbox.ErrNoCredential, "config deleted")
 	closed, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
 	s.Require().NoError(err)
@@ -1164,7 +1191,7 @@ func (s *SandboxGrantsSuite) TestALoginOnARevisionWithOtherHostsLeavesTheGrantUn
 			mine := s.pending("alice", "primary")
 			manifest, err := core.ParseManifest([]byte(s.crmManifest(s.connectorID, 3) + "\nsandbox:\n" + block))
 			s.Require().NoError(err)
-			_, err = s.store.CreateConnectorDefinition(s.ctx, s.customerID, manifest)
+			_, err = s.store.ConnectorDefinitions.Revise(s.ctx, s.customerID, manifest)
 			s.Require().NoError(err)
 			box, d := s.chatSandbox(s.config(sandboxed(s.chosen("crm", "whoami"))), consent(mine))
 			_, err = s.call(d, "crm__list_tools", `{}`)
@@ -1269,7 +1296,7 @@ func (s *SandboxGrantsSuite) TestALoginWithoutSandboxOrABlockGivesTheSandboxNoth
 	s.sandboxRevision()
 	unset, _ := s.chatSandbox(s.config(s.chosen("crm", "whoami")), Consent{})
 	gone := s.config(sandboxed(s.chosen("crm", "whoami")))
-	_, err := s.store.DeleteConnectorDefinition(s.ctx, s.customerID, s.connectorID, true)
+	_, err := s.store.ConnectorDefinitions.Delete(s.ctx, s.customerID, s.connectorID, true)
 	s.Require().NoError(err)
 	deleted, d := s.chatSandbox(gone, Consent{})
 
@@ -1420,6 +1447,7 @@ func (s *SandboxGrantsSuite) TestTheProxyBrokerBindsALateGrantOnceTheLoginFinish
 	s.Require().NoError(err)
 	s.T().Cleanup(redis.Close)
 	api := s.daytonaAPI()
+	api.redis = redis
 	s.manager.options.SandboxBroker, s.manager.options.SandboxSecretPrefix = egress.BrokerName, ""
 	s.manager.options.SandboxProxy = egress.BrokerOptions{Store: egress.NewStore(redis), URL: "http://203.0.113.7:8091",
 		CACert: []byte(proxyCA)}
@@ -1432,14 +1460,8 @@ func (s *SandboxGrantsSuite) TestTheProxyBrokerBindsALateGrantOnceTheLoginFinish
 	record := func() egress.Record {
 		result, err = box.Run(s.ctx, "print(1)", nil)
 		s.Require().NoError(err)
-		proxy, err := url.Parse(api.ran["envs"].(map[string]any)["HTTPS_PROXY"].(string))
-		s.Require().NoError(err)
-		credential, _ := proxy.User.Password()
-		sum := sha256.Sum256([]byte(credential))
-		raw, err := redis.Do(s.ctx, redis.B().Get().Key("sandbox:egress:"+hex.EncodeToString(sum[:])).Build()).AsBytes()
-		s.Require().NoError(err)
 		var record egress.Record
-		s.Require().NoError(json.Unmarshal(raw, &record))
+		s.Require().NoError(json.Unmarshal(api.record, &record), "the record during the run")
 		s.Require().Len(record.Grants, 1)
 		return record
 	}

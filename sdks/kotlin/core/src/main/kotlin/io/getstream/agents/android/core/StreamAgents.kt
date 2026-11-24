@@ -8,7 +8,7 @@ import okhttp3.OkHttpClient
  * Two lines get a conversation going:
  *
  *     val agents = StreamAgents(url = "https://your-router", customerId = "acme")
- *     val chat = agents.agent("docs").chat()
+ *     val chat = agents.agent("docs").sessions.create()
  *
  * Opening a conversation, reading back its turns, going back to one of them, branching off and
  * ending it is the whole of what is here, because it is the whole of what the router lets a
@@ -33,6 +33,29 @@ public class StreamAgents(public val backend: Backend) : AutoCloseable {
     /** The reminders and later work agents hold for this user. */
     public val scheduledTasks: ScheduledTasks = ScheduledTasks(backend)
 
+    /**
+     * What the model is told when one of the app's tools throws, in place of the error's message.
+     *
+     * Left null, the message goes to the model as it is, which is how it can say something useful
+     * about a tool that did not work, and is why a tool may throw words meant for it. The model
+     * may repeat it to the person, and the conversation keeps it, and an error from a library a
+     * tool calls can name an internal host, a table or a value from a record. The safe hook passes
+     * on only an error of the app's own, thrown with words meant for the model, and says something
+     * plain for anything else. Either way it is cut to 1,024 characters, and a hook that throws
+     * tells the model only that the tool failed.
+     *
+     *     class ToolError(message: String) : Exception(message)
+     *
+     *     agents.onToolError = { call, error -> if (error is ToolError) error.message.orEmpty() else "${call.name} failed" }
+     *
+     * It covers every session of this client, those already open included.
+     */
+    public var onToolError: ((call: AgentEvent.ToolCall, error: Throwable) -> String)?
+        get() = backend.onToolError
+        set(value) {
+            backend.onToolError = value
+        }
+
     /** Says who this device is acting for, and how to prove it. See [Backend.setUser]. */
     public fun setUser(user: User, token: TokenProvider): Unit = backend.setUser(user, token)
 
@@ -50,22 +73,23 @@ public class StreamAgents(public val backend: Backend) : AutoCloseable {
 
     /**
      * Holds a conversation in writing: no call is joined, nothing is transcribed or spoken.
+     * [Sessions.create] without [SessionOptions.startVoice].
      *
      * The replies still come through the model with the same instructions, skills and knowledge
-     * a call would have had, and stream into [AgentSession.conversation]. It returns with the
-     * socket open, so the tools are already being answered.
+     * a call would have had, and stream into [AgentSession.conversation].
      */
     public suspend fun chat(options: SessionOptions = SessionOptions()): AgentSession =
-        follow(sessions.create(checked(options.copy(startVoice = false))), options.tools)
+        sessions.create(options.copy(startVoice = false))
 
     /**
      * Puts an agent on the session's own call, `agent:<session id>`, and follows it.
+     * [Sessions.create] with [SessionOptions.startVoice].
      *
      * The agent joins as soon as this returns. Joining the same call from this device is what
      * [VoiceSession] is for; this only starts the agent and gives you the state.
      */
     public suspend fun voice(options: SessionOptions = SessionOptions()): AgentSession =
-        follow(sessions.create(checked(options.copy(startVoice = true))), options.tools)
+        sessions.create(options.copy(startVoice = true))
 
     /**
      * Follows a session this caller already has open, without creating one.
@@ -75,7 +99,7 @@ public class StreamAgents(public val backend: Backend) : AutoCloseable {
      * reading a conversation.
      */
     public suspend fun attach(sessionId: String, tools: List<AgentTool> = emptyList()): AgentSession =
-        follow(sessions.get(sessionId), tools)
+        AgentSession(backend, sessions.get(sessionId), tools).also { it.start() }
 
     /**
      * Gets or creates a guest, so somebody can talk to an agent before they sign up.
@@ -110,17 +134,6 @@ public class StreamAgents(public val backend: Backend) : AutoCloseable {
     override fun close() {
         backend.close()
     }
-
-    private suspend fun follow(session: Session, tools: List<AgentTool>): AgentSession =
-        AgentSession(backend, session, tools).also { it.start() }
-
-    private fun checked(options: SessionOptions): SessionOptions {
-        val duplicate = options.tools.groupBy { it.name }.entries.firstOrNull { it.value.size > 1 }
-        if (duplicate != null) {
-            throw AgentsException.Configuration("${duplicate.key} is declared twice")
-        }
-        return options
-    }
 }
 
 /**
@@ -133,15 +146,15 @@ public class Agent internal constructor(private val agents: StreamAgents, public
     /** This agent's conversations: opening one names it, and listing is narrowed to it. */
     public val sessions: Sessions = Sessions(agents.backend, name)
 
-    /** Holds a conversation with this agent in writing. See [StreamAgents.chat]. */
+    /** Holds a conversation with this agent in writing. [Sessions.create] without voice. */
     public suspend fun chat(options: SessionOptions = SessionOptions()): AgentSession =
-        agents.chat(options.copy(agent = options.agent ?: name))
+        sessions.create(options.copy(startVoice = false))
 
     /** Holds a conversation with this agent in writing, answering these tools here. */
     public suspend fun chat(vararg tools: AgentTool): AgentSession =
         chat(SessionOptions(tools = tools.toList()))
 
-    /** Puts this agent on the session's own call and follows it. See [StreamAgents.voice]. */
+    /** Puts this agent on the session's own call and follows it. [Sessions.create] with voice. */
     public suspend fun voice(options: SessionOptions = SessionOptions()): AgentSession =
-        agents.voice(options.copy(agent = options.agent ?: name))
+        sessions.create(options.copy(startVoice = true))
 }

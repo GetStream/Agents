@@ -38,7 +38,7 @@ func (s *ConnectorsSuite) SetupSuite() {
 		"api_key":                   namedScheme("api_key"),
 	}}
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 // SetupTest gives every test an app of its own, so a list holds the built-ins and only what
@@ -315,6 +315,16 @@ func (s *ConnectorsSuite) TestASchemeThisDeploymentDoesNotHaveIsRefused() {
 func (s *ConnectorsSuite) TestAnOperatorClientIsRefusedForACustomConnector() {
 	sent := s.customConnector(s.customID())
 	sent["client"] = map[string]any{"registration": []string{"operator"}}
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/connectors", sent)
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "operator")
+}
+
+func (s *ConnectorsSuite) TestAnOperatorClientListedAfterAnotherIsRefusedForACustomConnector() {
+	sent := s.customConnector(s.customID())
+	sent["client"] = map[string]any{"registration": []string{"customer", "operator"}}
 
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/connectors", sent)
 
@@ -709,7 +719,7 @@ func (s *ConnectorsSuite) TestABindingToAConnectorDeletedMeanwhileIsRefused() {
 // waits for the definition, and it answers after the delete committed. Suites beside this one
 // may wait on the table meanwhile; the waits counted are the delete's and the call's alone.
 func (s *ConnectorsSuite) duringADeleteOf(id string, call func() (int, string)) (int, string) {
-	held, err := s.store.DB().BeginTx(context.Background(), nil)
+	held, err := s.store.GlobalDB().BeginTx(context.Background(), nil)
 	s.Require().NoError(err)
 	defer held.Rollback() //nolint:errcheck // after the commit below there is nothing to roll back
 	_, err = held.ExecContext(context.Background(), "LOCK TABLE connector_oauth_clients IN SHARE MODE")
@@ -717,7 +727,7 @@ func (s *ConnectorsSuite) duringADeleteOf(id string, call func() (int, string)) 
 	deleted := make(chan int, 1)
 	go func() { deleted <- s.serverClient.do(http.MethodDelete, "/v1/agents/connectors/"+id, nil, nil) }()
 	// The two seconds and the ten milliseconds are assertTheWaitEnded's (internal/store/credentials_test.go).
-	s.Require().Eventually(func() bool { return s.waitingFor("DELETE FROM connector_oauth_clients", id) == 1 },
+	s.Require().Eventually(func() bool { return s.waitingFor(`DELETE FROM "connector_oauth_clients"`, id) == 1 },
 		2*time.Second, 10*time.Millisecond, "the delete waits at its DELETE")
 	type answer struct {
 		status  int
@@ -740,7 +750,7 @@ func (s *ConnectorsSuite) duringADeleteOf(id string, call func() (int, string)) 
 // statement and the connector id (https://www.postgresql.org/docs/current/monitoring-stats.html#WAIT-EVENT-TABLE).
 func (s *ConnectorsSuite) waitingFor(statement, id string) int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(), `
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(), `
 SELECT count(*) FROM pg_stat_activity
 WHERE datname = current_database() AND wait_event_type = 'Lock'
   AND strpos(query, ?) > 0 AND strpos(query, ?) > 0`, statement, id).Scan(&count))

@@ -11,6 +11,10 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/fakeprovider"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/bearer"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/mcp"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -23,6 +27,10 @@ type AppHooksSuite struct {
 
 	channelID string
 	apiKey    string
+	// provider is the MCP server of a connector a config answering in a channel type binds,
+	// and token an access token it issued (chat_channels_approval_test.go).
+	provider *fakeprovider.Server
+	token    string
 }
 
 func TestAppHooksSuite(t *testing.T) {
@@ -31,7 +39,22 @@ func TestAppHooksSuite(t *testing.T) {
 
 func (s *AppHooksSuite) SetupSuite() {
 	s.appMode = true
+	s.provider = fakeprovider.New(s.T(), fakeprovider.ClientCredentials)
+	s.connectors = core.Registry{
+		Schemes:     map[string]core.Scheme{bearer.Name: bearer.New()},
+		ToolSources: map[string]core.ToolSource{mcp.Kind: mcp.New()},
+	}
+	s.connectorHTTP = s.provider.Client()
+	// A call held for approval that a test leaves unanswered ends its turn this soon, not in
+	// ten minutes, so the turn is over by the time the test's cleanup waits for it. A suite
+	// built on this one may keep a wait of its own (ChannelTypeTurnSuite).
+	if s.approvalWait == 0 {
+		s.approvalWait = 10 * time.Second
+	}
 	s.RouterSuite.SetupSuite()
+	// Sessions offer what the app's workers host, as cmd/router has them (chat_channels_hosted_test.go).
+	s.manager.HostTools(s.dispatch)
+	s.token = issuedToken(&s.RouterSuite, s.provider)
 }
 
 func (s *AppHooksSuite) SetupTest() {
@@ -71,7 +94,7 @@ func (s *AppHooksSuite) fromApp(path, body string) int {
 
 func (s *AppHooksSuite) config(customer string) string {
 	config := store.AgentConfig{CustomerID: customer, Name: "config-" + s.utils.uuid(), Mode: "text"}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	return config.ID
 }
 
@@ -97,8 +120,8 @@ func (s *AppHooksSuite) messageIn(custom string) string {
 // handed.
 func (s *AppHooksSuite) dispatchingSession() (string, <-chan dispatch.Message) {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
-		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	opened := s.serverClient.createSession(CreateSessionRequest{AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true)})
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	s.T().Cleanup(release)
@@ -272,10 +295,10 @@ func (s *AppHooksSuite) TestAnArrivingCallIsDispatchedToTheNumbersOwnerInThatApp
 // attach is a number the customer holds, attached in the app given.
 func (s *AppHooksSuite) attach(e164, call string, app int64) {
 	ctx := context.Background()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: e164, Vendor: "telnyx", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
-	s.Require().NoError(s.store.AttachNumber(ctx, s.customerID(), e164, store.NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), e164, store.NumberAttachment{
 		TrunkID: "trunk-" + s.utils.uuid(), StreamAppPK: app, CallType: "default", CallID: call,
 	}))
 }
@@ -294,10 +317,10 @@ func (s *AppHooksSuite) TestACallOfTheSameNameInAnotherAppDoesNotHideThisOne() {
 	other := s.numberedApp(streamAppID())
 	ctx := context.Background()
 	otherNumber := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: otherNumber, Vendor: "telnyx", Country: "US", CustomerID: other.app.ID, PurchasedAt: time.Now().UTC(),
 	}))
-	s.Require().NoError(s.store.AttachNumber(ctx, other.app.ID, otherNumber, store.NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, other.app.ID, otherNumber, store.NumberAttachment{
 		TrunkID: "trunk-" + s.utils.uuid(), StreamAppPK: 7, CallType: "default", CallID: line,
 	}))
 	s.attach(s.utils.number(), line, s.appID())

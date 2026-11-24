@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/redis/rueidis"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
@@ -48,8 +48,6 @@ type Service struct {
 	publicURL string
 	// outcomes keeps how each placed call ended. Nil without a store.
 	outcomes *outcome.Keeper
-	// redis keeps the arriving calls the router refused (Refused). Nil marks none.
-	redis rueidis.Client
 	// unanswered ends the session of a placed call nobody will answer. Nil leaves it to the
 	// session's start timeout.
 	unanswered func(ctx context.Context, customerID, sessionID string)
@@ -60,9 +58,18 @@ type Service struct {
 	// heard is the calls whose participant events this process recorded lately (Heard), and
 	// unhooked the apps it lately logged as not delivering them.
 	heard, unhooked recently
+	// unopened are the legs OpenLeg could not write, for the leg sweep (RunLegSweep) to.
+	unopened unopenedLegs
 	// connecting, when set, runs in Connect between reading the phone's kept leave and
 	// connecting its leg, where a leave delivered at the same moment lands.
 	connecting func()
+	// agentJoinTimeout is how long an answered outbound leg waits before the agent check
+	// (awaitAgent). Zero turns the check off. agentWait is the timer of that wait.
+	agentJoinTimeout time.Duration
+	agentWait        func(time.Duration) <-chan time.Time
+	// closing is closed by Close, which stops the agent checks still waiting.
+	closing   chan struct{}
+	closeOnce sync.Once
 }
 
 // ServiceOptions configures a Service. Only the registry is required: without a store
@@ -92,11 +99,11 @@ type ServiceOptions struct {
 	PublicURL string
 	// Now is the clock call legs are timed by. Nil is the wall clock.
 	Now func() time.Time
-	// Redis is where an arriving call the router refused is marked (Refused), for the node
-	// that ends its leg, whichever it is, to count it failed. Without it such a call is
-	// counted completed.
-	Redis  rueidis.Client
-	Logger *slog.Logger
+	// AgentJoinTimeout is how long the person who answered a placed call waits for someone
+	// else to be in the call. After it, a call with only the person in it is ended. Zero turns
+	// the check off, as phone.agent_join_timeout 0 does.
+	AgentJoinTimeout time.Duration
+	Logger           *slog.Logger
 }
 
 // NewService returns a Service.
@@ -119,8 +126,11 @@ func NewService(options ServiceOptions) (*Service, error) {
 		gate:      options.Gate,
 		publicURL: strings.TrimSuffix(options.PublicURL, "/"),
 		clock:     options.Now,
-		redis:     options.Redis,
 		logger:    options.Logger,
+
+		agentJoinTimeout: options.AgentJoinTimeout,
+		agentWait:        time.After,
+		closing:          make(chan struct{}),
 	}
 	if options.Store != nil {
 		vendors := []string{SIPTrunkVendor}
@@ -178,7 +188,7 @@ func (s *Service) Suspended(ctx context.Context, customerID string) error {
 	if s.store == nil {
 		return nil
 	}
-	_, err := s.store.TelephonySuspension(ctx, customerID)
+	_, err := s.store.TelephonySuspensions.Get(ctx, customerID)
 	if errors.Is(err, store.ErrNotSuspended) {
 		return nil
 	}
@@ -418,10 +428,16 @@ func (s *Service) pointCallHook(ctx context.Context, stream *Stream, app int64) 
 	return nil
 }
 
+// unverifiedTier is the tier stream-accelerate names an organization whose
+// core_organization.agents_verified is not true (appstore.go). Tiers are otherwise opaque here;
+// an empty one, as a router not behind that proxy sees, is not refused.
+const unverifiedTier = "not-verified"
+
 // Buy buys a number and records that the customer now holds it.
 //
-// The vendor is the side that costs money, so it goes first: a row without a number is a
-// lie, while a number without a row is a reconcilable mistake that is also logged.
+// The vendor is the side that costs money, so it goes before the number's row: a row without a
+// number would be a lie. An order kept before the vendor is asked makes a number whose row is
+// not written one the sweep records (SweepOrders), rather than one paid for and held by nobody.
 func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber, error) {
 	if purchase.Owner.CustomerID == "" {
 		return store.PhoneNumber{}, stack.Wrap(errors.New("phone: a number must belong to a customer"))
@@ -443,6 +459,9 @@ func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber
 	}
 	if err := s.Suspended(ctx, purchase.Owner.CustomerID); err != nil {
 		return store.PhoneNumber{}, err
+	}
+	if purchase.Owner.OrganizationTier == unverifiedTier {
+		return store.PhoneNumber{}, stack.Wrap(ErrVerificationRequired)
 	}
 	// A number is charged every month from the day it is bought, so an organization that may
 	// not spend money does not buy one.
@@ -474,6 +493,20 @@ func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber
 	if err != nil {
 		return store.PhoneNumber{}, err
 	}
+	// To the microsecond Postgres keeps, so a month billed now and one billed from the stored
+	// row name the same purchase.
+	purchasedAt := s.now().UTC().Truncate(time.Microsecond)
+	order := store.PhoneNumberOrder{
+		CustomerID: purchase.Owner.CustomerID, Vendor: purchase.Vendor, E164: purchase.E164, Action: store.OrderBuy,
+		Country: cmp.Or(purchase.Country, Country(purchase.E164)), MonthlyCostMicros: quoted, Tags: purchase.Owner.Tags,
+		CreatedAt: purchasedAt, NextAttemptAt: purchasedAt.Add(orderSettles),
+	}
+	if s.store != nil {
+		if err := s.store.PhoneNumberOrders.Insert(ctx, &order); err != nil {
+			booked.Release()
+			return store.PhoneNumber{}, err
+		}
+	}
 	// A failed purchase is a row of its own; a bought number is billed by its months, the
 	// first of them below.
 	buying := routing.Meter{
@@ -488,6 +521,7 @@ func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber
 	})
 	if err != nil {
 		booked.Release()
+		s.forgetRefusedOrder(ctx, order, err)
 		return store.PhoneNumber{}, err
 	}
 	if bought.MonthlyCostMicros == 0 {
@@ -503,9 +537,7 @@ func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber
 		CustomerID:        purchase.Owner.CustomerID,
 		Tags:              purchase.Owner.Tags,
 		VendorID:          bought.VendorID,
-		// To the microsecond Postgres keeps, so a month billed now and one billed from the
-		// stored row name the same purchase.
-		PurchasedAt: s.now().UTC().Truncate(time.Microsecond),
+		PurchasedAt:       purchasedAt,
 	}
 	// The month it was bought in is charged at once, whether or not the row below is kept.
 	s.billMonth(held, purchase.Owner, held.PurchasedAt)
@@ -513,9 +545,14 @@ func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber
 	if s.store == nil {
 		return held, nil
 	}
-	if err := s.store.RecordNumber(ctx, &held); err != nil {
+	recorded, err := s.store.PhoneNumberOrders.Bought(ctx, order.ID, &held)
+	if err == nil && !recorded {
+		// A sweep took the order first, and recorded the number or found the vendor without it.
+		err = errors.New("its order was settled by the sweep")
+	}
+	if err != nil {
 		// The number is bought either way, so saying so is more useful than failing and
-		// leaving the caller thinking it was not.
+		// leaving the caller thinking it was not. Its order is kept for the sweep.
 		// Support finds the number at the vendor by its order, and the log holds no number.
 		return held, stack.Wrap(fmt.Errorf("phone: a number bought from %s as %q was not recorded: %w",
 			held.Vendor, held.VendorID, err))
@@ -536,17 +573,27 @@ func (s *Service) Release(ctx context.Context, customerID, e164 string) error {
 	}
 	// Off its trunk first: a trunk Stream would not delete fails the release before the
 	// number is given back, so the release can be tried again.
-	if err := s.unline(ctx, held, "released a number", false); err != nil {
+	if err := s.unline(ctx, held, "released a number", time.Time{}); err != nil {
 		return err
 	}
 	seller, err := s.seller(held.Vendor)
 	if err != nil {
 		return err
 	}
+	releasedAt := time.Now().UTC()
+	var order store.PhoneNumberOrder
 	// A number on the customer's own trunk was never bought here, so there is nobody to
 	// give it back to.
 	if seller != nil {
+		// Kept before the vendor is asked, so a number given back whose row is not released
+		// below is released by the sweep (SweepOrders), rather than billed every month.
+		order = store.PhoneNumberOrder{CustomerID: held.CustomerID, Vendor: held.Vendor, E164: e164, Action: store.OrderRelease,
+			CreatedAt: releasedAt, NextAttemptAt: s.now().Add(orderSettles)}
+		if err := s.store.PhoneNumberOrders.Insert(ctx, &order); err != nil {
+			return err
+		}
 		if err := seller.ReleaseNumber(ctx, e164); err != nil {
+			s.forgetRefusedOrder(ctx, order, err)
 			if age := s.now().Sub(held.PurchasedAt); age < NumberSettles && errors.As(err, new(*VendorError)) {
 				return stack.Wrap(fmt.Errorf("%w: %s was bought %s ago: %w", ErrNumberSettling, e164, age.Round(time.Second), err))
 			}
@@ -555,7 +602,138 @@ func (s *Service) Release(ctx context.Context, customerID, e164 string) error {
 	}
 	// The trunk and rule the number was attached with would otherwise outlive it, billed
 	// and pointing a number nobody holds at a call.
-	return s.unline(ctx, held, "released a number", true)
+	if err := s.unline(ctx, held, "released a number", releasedAt); err != nil {
+		return err
+	}
+	s.forgetOrder(ctx, order)
+	return nil
+}
+
+// forgetRefusedOrder forgets an order the vendor answered err to, when err shows the vendor did
+// nothing: a 4xx, which it did not carry out, or a refusal before it was asked, by a vendor not
+// implemented or missing a setting, or of an order it cannot take as asked. Any other failure,
+// a timeout, a dropped connection or a 5xx, may come after the vendor bought or released the
+// number, so the order is left to the sweep, which asks the vendor what it holds.
+func (s *Service) forgetRefusedOrder(ctx context.Context, order store.PhoneNumberOrder, err error) {
+	refused, ok := errors.AsType[*VendorError](err)
+	if ok && refused.Status >= 400 && refused.Status < 500 ||
+		errors.Is(err, ErrNotImplemented) || errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrInvalid) {
+		s.forgetOrder(ctx, order)
+	}
+}
+
+// forgetOrder forgets an order whose outcome is recorded, or that the vendor refused. One that
+// cannot be forgotten is left to the sweep, which asks the vendor again.
+func (s *Service) forgetOrder(ctx context.Context, order store.PhoneNumberOrder) {
+	if s.store == nil || order.ID == 0 {
+		return
+	}
+	if err := s.store.PhoneNumberOrders.Delete(context.WithoutCancel(ctx), order.ID); err != nil {
+		s.logger.Warn("could not forget a number's order; the sweep settles it", "order", order.ID, "error", err)
+	}
+}
+
+// orderSettles is how old an order is before the sweep settles it: far longer than a purchase
+// or a release takes, so one still running is never settled under it. orderRetry is how long a
+// sweep holds the orders it claimed, and so when one it could not settle is tried again, by any
+// router. orderSweepBatch bounds how many one sweep claims.
+const (
+	orderSettles    = 10 * time.Minute
+	orderRetry      = time.Hour
+	orderSweepBatch = 100
+)
+
+// SweepOrders settles the purchases and releases of numbers whose outcome was not recorded,
+// by asking each vendor whether it holds the number: one bought and held gets its row, and its
+// first month if the purchase did not bill it; one given back and no longer held is released,
+// as of when it was. Any other order changed nothing and is forgotten. An order whose vendor
+// cannot say is logged for an operator and kept, to be tried again after orderRetry behind the
+// orders due before then. Every router sweeps, and each order is claimed by one of them at a
+// time. It reports how many it settled.
+func (s *Service) SweepOrders(ctx context.Context) (int, error) {
+	if s.store == nil {
+		return 0, nil
+	}
+	now := s.now()
+	orders, err := s.store.PhoneNumberOrders.Claim(ctx, now, now.Add(orderRetry), orderSweepBatch)
+	if err != nil {
+		return 0, err
+	}
+	settled := 0
+	for _, order := range orders {
+		if err := s.settleOrder(ctx, order); err != nil {
+			s.logger.Error("could not settle a number's purchase or release", "order", order.ID, "action", order.Action,
+				"vendor", order.Vendor, "customer", order.CustomerID, "error", err)
+			continue
+		}
+		settled++
+	}
+	return settled, nil
+}
+
+// settleOrder settles one order by what its vendor holds, and forgets it.
+func (s *Service) settleOrder(ctx context.Context, order store.PhoneNumberOrder) error {
+	provider, err := s.registry.Open(order.Vendor)
+	if err != nil {
+		return err
+	}
+	finder, ok := provider.(NumberFinder)
+	if !ok {
+		return stack.Wrap(fmt.Errorf("phone: %s cannot say whether it holds a number, so the order is settled by hand", order.Vendor))
+	}
+	vendorID, held, err := finder.HoldsNumber(ctx, order.E164)
+	if err != nil {
+		return err
+	}
+	switch {
+	case order.Action == store.OrderBuy && held:
+		return s.recordBought(ctx, order, vendorID)
+	case order.Action == store.OrderRelease && !held:
+		number, err := s.store.PhoneNumbers.GetByE164(ctx, order.CustomerID, order.E164)
+		if err != nil && !errors.Is(err, store.ErrNoNumber) {
+			return err
+		}
+		// Only the row the order gave back: the number may have been bought again since, or put
+		// on the customer's own trunk.
+		if err == nil && number.Vendor == order.Vendor && !number.PurchasedAt.After(order.CreatedAt) {
+			if err := s.unline(ctx, number, "released a number", order.CreatedAt); err != nil {
+				return err
+			}
+			s.logger.Warn("released a number given back whose release was not recorded", "order", order.ID,
+				"vendor", order.Vendor, "customer", order.CustomerID)
+		}
+	}
+	return s.store.PhoneNumberOrders.Delete(ctx, order.ID)
+}
+
+// recordBought writes the row of a number an order bought, from the order, and bills its first
+// month unless the purchase did. A row that already holds the number, another purchase's, leaves
+// nothing to record.
+func (s *Service) recordBought(ctx context.Context, order store.PhoneNumberOrder, vendorID string) error {
+	number := store.PhoneNumber{
+		E164: order.E164, Vendor: order.Vendor, Country: order.Country, MonthlyCostMicros: order.MonthlyCostMicros,
+		CustomerID: order.CustomerID, Tags: order.Tags, VendorID: vendorID, PurchasedAt: order.CreatedAt,
+	}
+	month := numberMonth(number, number.PurchasedAt).UsageID
+	billed, err := s.store.RecordedUsage(ctx, []uuid.UUID{month})
+	if err != nil {
+		return err
+	}
+	bought, err := s.store.PhoneNumberOrders.Bought(ctx, order.ID, &number)
+	if errors.Is(err, store.ErrNumberRecorded) {
+		return s.store.PhoneNumberOrders.Delete(ctx, order.ID)
+	}
+	if err != nil || !bought {
+		return err
+	}
+	s.logger.Warn("recorded a number bought whose row was not written", "order", order.ID, "vendor", order.Vendor,
+		"vendor_id", vendorID, "customer", order.CustomerID)
+	if !billed[month] {
+		s.billMonth(number, routing.Owner{
+			CustomerID: number.CustomerID, Attribution: routing.Attribution{APIKey: OriginNumberRental}, Tags: number.Tags,
+		}, number.PurchasedAt)
+	}
+	return nil
 }
 
 // Detach stops a number's callers reaching the agent. The number keeps its trunk and rule,
@@ -573,7 +751,7 @@ func (s *Service) number(ctx context.Context, customerID, e164, doing string) (s
 	if s.store == nil {
 		return store.PhoneNumber{}, stack.Wrap(fmt.Errorf("phone: %s a number needs a database to know who holds it", doing))
 	}
-	return s.store.Number(ctx, customerID, e164)
+	return s.store.PhoneNumbers.GetByE164(ctx, customerID, e164)
 }
 
 // detach stops the vendor sending a held number's callers, then forgets it was attached.
@@ -613,11 +791,11 @@ func (s *Service) seller(vendor string) (Provider, error) {
 }
 
 // unline takes a number off its trunk and deletes its rule, in the app they are in, and
-// forgets them on the number. With release it also gives the number back under the same
-// lock, so a line made for it meanwhile cannot put it back on a trunk. A Stream failure is
-// logged, not returned, so the number is still taken off, save a trunk Stream would not
-// delete (see offTrunk).
-func (s *Service) unline(ctx context.Context, held store.PhoneNumber, why string, release bool) error {
+// forgets them on the number. With a releasedAt it also gives the number back, as of then,
+// under the same lock, so a line made for it meanwhile cannot put it back on a trunk. A Stream
+// failure is logged, not returned, so the number is still taken off, save a trunk Stream would
+// not delete (see offTrunk).
+func (s *Service) unline(ctx context.Context, held store.PhoneNumber, why string, releasedAt time.Time) error {
 	app := held.StreamAppPK
 	// A call or attach lining the number in another app while this waited for its lock
 	// moves it there, and a release follows it.
@@ -641,12 +819,12 @@ func (s *Service) unline(ctx context.Context, held store.PhoneNumber, why string
 					return err
 				}
 			}
-			if release {
-				return tx.ReleaseNumber(number.E164, time.Now().UTC())
+			if !releasedAt.IsZero() {
+				return tx.ReleaseNumber(number.E164, releasedAt)
 			}
 			return nil
 		})
-		if err != nil || !moved || !release {
+		if err != nil || !moved || releasedAt.IsZero() {
 			return err
 		}
 	}
@@ -654,9 +832,9 @@ func (s *Service) unline(ctx context.Context, held store.PhoneNumber, why string
 }
 
 // offTrunk takes a number off its trunk and deletes its rule. The trunk is deleted with its
-// last number; one the number had to itself, made before trunks were shared, is not a row
-// and is deleted with it. A trunk Stream would not delete keeps its row, which holds its
-// password and is what a retry deletes it by.
+// last number; one the number had to itself (StreamTrunk.Own), or one without a row, is
+// deleted with it as best it can be. A shared trunk Stream would not delete keeps its row,
+// which holds its password and is what a retry deletes it by.
 func (s *Service) offTrunk(ctx context.Context, tx *store.TrunkGroupTx, stream *Stream, reached error, number store.PhoneNumber, why string) error {
 	if reached != nil {
 		stream = nil
@@ -668,9 +846,14 @@ func (s *Service) offTrunk(ctx context.Context, tx *store.TrunkGroupTx, stream *
 		return err
 	}
 	i := slices.IndexFunc(trunks, func(t store.StreamTrunk) bool { return t.ID == number.StreamTrunkID })
-	if i < 0 {
+	if i < 0 || trunks[i].Own {
 		if stream != nil {
 			s.deleteLines(ctx, stream, number.StreamRouteID, number.StreamTrunkID, why)
+		}
+		if i >= 0 {
+			if err := tx.DeleteTrunk(number.StreamTrunkID); err != nil {
+				return err
+			}
 		}
 		return tx.ClearLine(number.E164)
 	}
@@ -734,7 +917,11 @@ type Attached struct {
 const NumberKey = "phone_number"
 
 // ErrNoSealer says this deployment has no keyring to seal or open a number's trunk password.
-var ErrNoSealer = errors.New("phone: no key to seal a number's trunk password: set ROUTER_AUTH_KEK")
+var ErrNoSealer = errors.New("phone: no key to seal a number's trunk password: set ROUTER_DEV_KEK (local), or ROUTER_AUTH_KEK_V1_WRAPPED with ROUTER_AUTH_KMS_KEY (hosted)")
+
+// ErrNoSealerToCall says this deployment has no keyring to seal the trunk password a vendor
+// fetches on answer, so a call on that vendor cannot be placed.
+var ErrNoSealerToCall = errors.New("phone: no key to seal the trunk password the vendor fetches on answer, so the call cannot be placed: set ROUTER_DEV_KEK (local), or ROUTER_AUTH_KEK_V1_WRAPPED with ROUTER_AUTH_KMS_KEY (hosted)")
 
 // Attach puts a number on the trunk it shares with the customer's other numbers of its
 // vendor, with a rule of its own, and tells the vendor to send calls there. This is what
@@ -746,7 +933,7 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		return Attached{}, stack.Wrap(errors.New("phone: attaching a number needs a database to know who holds it"))
 	}
 
-	held, err := s.store.Number(ctx, attachment.CustomerID, attachment.E164)
+	held, err := s.store.PhoneNumbers.GetByE164(ctx, attachment.CustomerID, attachment.E164)
 	if err != nil {
 		return Attached{}, stack.Wrap(err)
 	}
@@ -783,13 +970,24 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 	// The same request is sent on every run of a program waiting for calls, so a number
 	// already attached in this app is answered with what it has.
 	if attachedHere {
-		return Attached{TrunkID: held.StreamTrunkID, RouteID: held.StreamRouteID,
-			Bridge: Bridge{URI: held.BridgeURI}}, nil
+		attached := Attached{TrunkID: held.StreamTrunkID, RouteID: held.StreamRouteID}
+		trunk, err := s.store.StreamTrunks.Get(ctx, held.CustomerID, held.StreamTrunkID)
+		if errors.Is(err, store.ErrNoStreamTrunk) {
+			return attached, nil
+		}
+		if err != nil {
+			return Attached{}, err
+		}
+		attached.Bridge, err = Bridge{URI: trunk.BridgeURI}.WithNumber(held.E164)
+		if err != nil {
+			return Attached{}, err
+		}
+		return attached, nil
 	}
 	// A number lined in another app is taken off there first: the customer's app is where
 	// its calls go now.
 	if held.StreamTrunkID != "" && held.StreamAppPK != pin {
-		if err := s.unline(ctx, held, "re-attached a number in another app", false); err != nil {
+		if err := s.unline(ctx, held, "re-attached a number in another app", time.Time{}); err != nil {
 			return Attached{}, err
 		}
 		held.StreamTrunkID, held.StreamRouteID = "", ""
@@ -800,7 +998,7 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		if err == nil {
 			attached := Attached{TrunkID: line.TrunkID, RouteID: line.RouteID, Bridge: line.Bridge}
 			// The line stays when this fails: the number's calls go out on it.
-			if err := s.finishAttach(ctx, provider, attachment, pin, attached, held.ConfigID); err != nil {
+			if err := s.finishAttach(ctx, provider, attachment, pin, held, attached, nil); err != nil {
 				return Attached{}, err
 			}
 			return attached, nil
@@ -810,13 +1008,13 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		}
 		// Attached before its trunk's password was kept, so its trunk cannot be shared: it is
 		// replaced by one of its own, which keeps it.
-		if err := s.unline(ctx, held, "re-attached a number", false); err != nil {
+		if err := s.unline(ctx, held, "re-attached a number", time.Time{}); err != nil {
 			return Attached{}, err
 		}
 	} else if held.StreamTrunkID != "" {
 		// Still on a trunk of its own (detached, or lined for calls out), and Stream refuses a
 		// second trunk naming it.
-		if err := s.unline(ctx, held, "re-attached a number", false); err != nil {
+		if err := s.unline(ctx, held, "re-attached a number", time.Time{}); err != nil {
 			return Attached{}, err
 		}
 	}
@@ -867,7 +1065,17 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		return Attached{}, stack.Wrap(err)
 	}
 	attached := Attached{TrunkID: trunkID, RouteID: routeID, Bridge: bridge}
-	if err := s.finishAttach(ctx, provider, attachment, pin, attached, held.ConfigID); err != nil {
+	// A vendor that asks per call where to send a caller needs the password then. Without a
+	// key it is not kept, rather than kept in the clear.
+	own := store.StreamTrunk{ID: trunkID, BridgeURI: bridge.URI, BridgeUsername: bridge.Username, Own: true}
+	if s.sealer != nil {
+		own.BridgePasswordSealed, err = s.sealer.SealWithAAD(bridge.Password, bridgeAAD(attachment.CustomerID, attachment.E164))
+		if err != nil {
+			return Attached{}, stack.Wrap(err)
+		}
+		own.BridgePasswordKEKVersion = s.sealer.CurrentVersion()
+	}
+	if err := s.finishAttach(ctx, provider, attachment, pin, held, attached, &own); err != nil {
 		return Attached{}, err
 	}
 	committed = true
@@ -875,23 +1083,13 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 }
 
 // finishAttach tells the vendor to send the number's calls to its trunk, and records that
-// they go there. configID is the agent the number had: taking it off its old trunk cleared
-// it, and attaching again never takes away an agent someone set.
-func (s *Service) finishAttach(ctx context.Context, provider Provider, attachment Attachment, pin int64, attached Attached, configID string) error {
+// they go there, saving own, the trunk made for the number alone, with it. The agent the
+// number had stays: taking it off its old trunk cleared it, and attaching again never takes
+// away an agent someone set.
+func (s *Service) finishAttach(ctx context.Context, provider Provider, attachment Attachment, pin int64, held store.PhoneNumber, attached Attached, own *store.StreamTrunk) error {
 	record := store.NumberAttachment{
 		TrunkID: attached.TrunkID, RouteID: attached.RouteID, StreamAppPK: pin, CallType: defaultCallType,
-		ConfigID: configID,
-	}
-	// The address is not secret and a repeat attach answers it. A vendor that asks per call
-	// where to send a caller needs the password then. Without a key it is not kept, rather
-	// than kept in the clear.
-	record.BridgeURI, record.BridgeUsername = attached.Bridge.URI, attached.Bridge.Username
-	if s.sealer != nil {
-		sealed, err := s.sealer.SealWithAAD(attached.Bridge.Password, bridgeAAD(attachment.CustomerID, attachment.E164))
-		if err != nil {
-			return stack.Wrap(err)
-		}
-		record.BridgePasswordSealed, record.BridgePasswordKEKVersion = sealed, s.sealer.CurrentVersion()
+		ConfigID: held.ConfigID,
 	}
 
 	err := provider.ConfigureInbound(ctx, Inbound{E164: attachment.E164, Bridge: attached.Bridge})
@@ -901,10 +1099,16 @@ func (s *Service) finishAttach(ctx context.Context, provider Provider, attachmen
 	// The vendor has already been told to send calls to the trunk. There is no primitive to
 	// un-configure a provider's inbound routing, so a failure here leaves the vendor
 	// pointing at a trunk that, when it is the number's own, is about to be rolled back.
-	if err := s.store.AttachNumber(ctx, attachment.CustomerID, attachment.E164, record); err != nil {
-		return stack.Wrap(err)
+	if own == nil {
+		return s.store.PhoneNumbers.Attach(ctx, attachment.CustomerID, attachment.E164, record)
 	}
-	return nil
+	group := store.TrunkGroup{CustomerID: attachment.CustomerID, StreamAppPK: pin, Vendor: held.Vendor}
+	return s.inTrunkGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		if err := tx.SaveTrunk(*own); err != nil {
+			return err
+		}
+		return tx.Attach(attachment.E164, record)
+	})
 }
 
 // InboundBridge is the Stream trunk calls to an attached number of the vendor go to, with
@@ -916,10 +1120,12 @@ func (s *Service) InboundBridge(ctx context.Context, vendor, e164 string) (Bridg
 	if s.sealer == nil {
 		return Bridge{}, stack.Wrap(ErrNoSealer)
 	}
-	stored, err := s.store.AttachedBridge(ctx, vendor, e164)
+	stored, err := s.store.PhoneNumbers.AttachedBridge(ctx, vendor, e164)
 	if err != nil {
 		return Bridge{}, err
 	}
+	// The vendor's hook asking is the number's app's, however it is answered below.
+	activity.NoteCustomer(ctx, stored.CustomerID, activity.AreaPhoneSMS)
 	if err := s.Suspended(ctx, stored.CustomerID); err != nil {
 		return Bridge{}, err
 	}
@@ -928,11 +1134,15 @@ func (s *Service) InboundBridge(ctx context.Context, vendor, e164 string) (Bridg
 	if err := s.gate.Admit(ctx, stored.CustomerID); err != nil {
 		return Bridge{}, err
 	}
-	password, err := s.sealer.OpenWithAADVersion(stored.PasswordSealed, bridgeAAD(stored.CustomerID, e164), stored.KEKVersion)
+	aad := trunkAAD(stored.CustomerID, stored.TrunkID)
+	if stored.Own {
+		aad = bridgeAAD(stored.CustomerID, e164)
+	}
+	password, err := s.sealer.OpenWithAADVersion(stored.PasswordSealed, aad, stored.KEKVersion)
 	if err != nil {
 		return Bridge{}, stack.Wrap(fmt.Errorf("phone: open the trunk password of %s: %w", e164, err))
 	}
-	return Bridge{URI: stored.URI, Username: stored.Username, Password: password}, nil
+	return Bridge{URI: stored.URI, Username: stored.Username, Password: password}.WithNumber(e164)
 }
 
 // CallRequest is a call to place from one of the customer's numbers.
@@ -999,8 +1209,33 @@ func (s *Service) Call(ctx context.Context, request CallRequest) (Placed, error)
 	if err != nil && !sent && ctx.Err() != nil {
 		return Placed{}, fmt.Errorf("%w: %w", ErrNotPlaced, err)
 	}
+	if err != nil && !sent && !lasting(err) {
+		return Placed{}, notDialed{err}
+	}
 	return placed, err
 }
+
+// lasting reports whether a call failed before it was sent for a reason that placing it again
+// would meet again: the request itself, a number or SIP trunk the app does not hold, its Stream
+// app, or the deployment's own setup (credentials, keys, a public URL, SIP trunks). Such a
+// failure is not marked ErrNotDialed, so a campaign does not try it for ever.
+func lasting(err error) bool {
+	return errors.Is(err, ErrInvalid) || errors.Is(err, store.ErrNoNumber) || errors.Is(err, store.ErrNoSIPTrunk) ||
+		errors.Is(err, ErrNoStream) || errors.Is(err, ErrNoSealerToCall) ||
+		errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrSIPTrunksDisabled) ||
+		errors.Is(err, errLasting) || (err != nil && streamapp.Settled(err))
+}
+
+// errLasting marks a failure that has no kind of its own and that a second try meets again: a
+// vendor that cannot be built from its configuration, or a password the router's keys cannot
+// open or seal.
+var errLasting = errors.New("phone: a lasting failure")
+
+type lastingError struct{ err error }
+
+func (e lastingError) Error() string        { return e.err.Error() }
+func (e lastingError) Unwrap() error        { return e.err }
+func (e lastingError) Is(target error) bool { return target == errLasting }
 
 // call is Call. It sets sent once the vendor is asked to dial: from then on the phone may ring
 // whatever the call returns.
@@ -1033,7 +1268,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 		return Placed{}, stack.Wrap(Invalid(errors.New("phone: a call needs one of your numbers to call from")))
 	}
 
-	held, err := s.store.Number(ctx, request.Owner.CustomerID, request.From)
+	held, err := s.store.PhoneNumbers.GetByE164(ctx, request.Owner.CustomerID, request.From)
 	if err != nil {
 		return Placed{}, stack.Wrap(err)
 	}
@@ -1060,6 +1295,11 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	allowedIPs, err := s.allowlistFor(held.Vendor)
 	if err != nil {
 		return Placed{}, stack.Wrap(err)
+	}
+	// A vendor that fetches its plan on answer and sends the trunk's password gets it from a
+	// parked bridge, which keeps it sealed: refused before anything is made at Stream.
+	if _, hosted := provider.(AnswerRenderer); hosted && s.sealer == nil && sendsPassword(s.registry, held.Vendor) {
+		return Placed{}, stack.Wrap(fmt.Errorf("phone: %s: %w", held.Vendor, ErrNoSealerToCall))
 	}
 
 	sessionID := request.SessionID
@@ -1183,12 +1423,13 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 			s.recordBridgeMedia(context.WithoutCancel(ctx), customerID, sessionID, media)
 		}
 		// Call refuses to run without a store, so report always has its keeper.
-		outbound.Ended = func(status CallStatus) {
-			ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), trunkReportTimeout)
-			defer cancel()
-			if _, err := s.report(ctx, token, status); err != nil {
-				s.logger.Error("could not keep how a call through a customer's sip trunk ended",
-					"call", callID, "result", status.Result, "error", err)
+		outbound.Ended = s.trunkCallEnded(ctx, token, callID)
+		// A per-call Stream trunk's password is never stored, and Stream challenges the
+		// re-INVITE a takeover sends, so only a call on a shared line can move.
+		if shared {
+			outbound.Resume = &TrunkCallRef{
+				CustomerID: customerID, SIPTrunkID: held.SIPTrunkID, StreamTrunkID: line.TrunkID,
+				From: request.From, CallID: callID, Token: token,
 			}
 		}
 	}
@@ -1205,7 +1446,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	// A shared line outlives the call, so its row costs nothing to undo when the dial fails,
 	// and the call's app (CallPin) is known before its leg arrives.
 	if shared {
-		if err := s.store.RecordCallResource(ctx, resource); err != nil {
+		if err := s.store.CallResources.Insert(ctx, resource); err != nil {
 			s.forgetOutcome(ctx, token, callID)
 			return Placed{}, stack.Wrap(err)
 		}
@@ -1238,7 +1479,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	// the Stream call: the leg rings until then, and one never answered is not billed.
 	s.OpenLeg(ctx, request.Owner, store.CallLeg{
 		StreamAppPK: pin, CallType: callType, CallID: callID, Vendor: held.Vendor, VendorCallID: dialed.VendorCallID,
-		Direction: store.Outbound, LocalNumber: request.From, RemoteNumber: request.To,
+		Direction: store.Outbound, LocalNumber: request.From, RemoteNumber: request.To, Token: token,
 	}, false)
 	sites := placedSites{streamSIPHost: BridgeHost(outbound.Bridge.URI)}
 	if trunk != nil {
@@ -1247,7 +1488,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	s.logger.Info("placed a phone call", append([]any{"session_id", sessionID,
 		"vendor_call_id", dialed.VendorCallID, "vendor", held.Vendor}, sites.logged()...)...)
 	if !shared {
-		if err := s.store.RecordCallResource(ctx, resource); err != nil {
+		if err := s.store.CallResources.Insert(ctx, resource); err != nil {
 			// The call is placed and connecting; deleting its trunk now would drop a live
 			// call. A logged, rare leak beats that. session_ended cannot clean a trunk it
 			// has no row for, which is the cost of this failing.
@@ -1321,7 +1562,7 @@ func (s *Service) recordPlaced(
 	details["vendor_call_id"] = placed.VendorCallID
 	ctx, cancel := context.WithTimeout(ctx, agentLogTimeout)
 	defer cancel()
-	err := s.store.RecordAgentLog(ctx, &store.AgentLog{
+	err := s.store.AgentLogs.Insert(ctx, &store.AgentLog{
 		CustomerID: customerID,
 		SessionID:  sessionID,
 		Source:     "system",
@@ -1332,6 +1573,19 @@ func (s *Service) recordPlaced(
 	})
 	if err != nil {
 		s.logger.Warn("could not record a placed call", "session_id", sessionID, "error", err)
+	}
+}
+
+// trunkCallEnded is what a call through a customer's own trunk tells when it ends. It never
+// fails the caller: the call is over either way.
+func (s *Service) trunkCallEnded(ctx context.Context, token, callID string) func(CallStatus) {
+	return func(status CallStatus) {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), trunkReportTimeout)
+		defer cancel()
+		if _, err := s.report(ctx, token, status); err != nil {
+			s.logger.Error("could not keep how a call through a customer's sip trunk ended",
+				"call", callID, "result", status.Result, "error", err)
+		}
 	}
 }
 
@@ -1359,7 +1613,7 @@ func (s *Service) recordBridgeMedia(ctx context.Context, customerID, sessionID s
 	if media.Customer != "" {
 		details["customer_media_addr"] = media.Customer
 	}
-	err := s.store.RecordAgentLog(ctx, &store.AgentLog{
+	err := s.store.AgentLogs.Insert(ctx, &store.AgentLog{
 		CustomerID: customerID,
 		SessionID:  sessionID,
 		Source:     "system",
@@ -1391,18 +1645,28 @@ func (s *Service) park(
 	}
 
 	token := uuid.NewString()
-	err := s.store.ParkBridge(ctx, &store.CallBridge{
+	bridge := &store.CallBridge{
 		Token:         token,
 		CustomerID:    customerID,
 		Vendor:        vendor,
 		TrunkURI:      outbound.Bridge.URI,
 		TrunkUsername: outbound.Bridge.Username,
-		TrunkPassword: outbound.Bridge.Password,
 		InitialDigits: outbound.InitialDigits,
 		CallID:        callID,
 		ExpiresAt:     time.Now().UTC().Add(bridgeLifetime),
-	})
-	if err != nil {
+	}
+	// Only a vendor that sends the password is given one, so only its bridge keeps one.
+	if outbound.Bridge.Password != "" {
+		if s.sealer == nil {
+			return "", stack.Wrap(ErrNoSealerToCall)
+		}
+		sealed, err := s.sealer.SealWithAAD(outbound.Bridge.Password, callBridgeAAD(customerID, token))
+		if err != nil {
+			return "", stack.Wrap(lastingError{fmt.Errorf("phone: seal a parked bridge's trunk password: %w", err)})
+		}
+		bridge.TrunkPasswordSealed, bridge.TrunkKEKVersion = sealed, s.sealer.CurrentVersion()
+	}
+	if err := s.store.CallBridges.Insert(ctx, bridge); err != nil {
 		return "", err
 	}
 	return s.publicURL + "/v1/phone/answer/" + token, nil
@@ -1418,10 +1682,11 @@ func (s *Service) Answer(ctx context.Context, token string) (Plan, error) {
 		return Plan{}, errors.New("phone: answering a call needs a database to know what to answer")
 	}
 
-	bridge, err := s.store.ClaimBridge(ctx, token)
+	bridge, err := s.store.CallBridges.Claim(ctx, token)
 	if err != nil {
 		return Plan{}, err
 	}
+	activity.NoteCustomer(ctx, bridge.CustomerID, activity.AreaPhoneSMS)
 	provider, err := s.registry.Open(bridge.Vendor)
 	if err != nil {
 		return Plan{}, err
@@ -1432,16 +1697,50 @@ func (s *Service) Answer(ctx context.Context, token string) (Plan, error) {
 			bridge.Vendor)
 	}
 
+	var password string
+	if len(bridge.TrunkPasswordSealed) > 0 {
+		if s.sealer == nil {
+			return Plan{}, stack.Wrap(ErrNoSealer)
+		}
+		password, err = s.sealer.OpenWithAADVersion(bridge.TrunkPasswordSealed, callBridgeAAD(bridge.CustomerID, token), bridge.TrunkKEKVersion)
+		if err != nil {
+			return Plan{}, stack.Wrap(fmt.Errorf("phone: open a parked bridge's trunk password: %w", err))
+		}
+	}
+
 	return renderer.Answer(Bridge{
 		URI:      bridge.TrunkURI,
 		Username: bridge.TrunkUsername,
-		Password: bridge.TrunkPassword,
+		Password: password,
 	}, bridge.InitialDigits)
+}
+
+// sendsPassword reports whether a vendor presents the trunk's password when it bridges.
+func sendsPassword(registry *Registry, vendor string) bool {
+	declared, _ := registry.Lookup(vendor)
+	return declared.Authenticates() == TrunkPassword
+}
+
+// callBridgeAAD binds a parked bridge's sealed trunk password to its customer and its token,
+// which only the fetch presents.
+func callBridgeAAD(customerID, token string) []byte {
+	return []byte("call_bridges/" + customerID + "/" + token)
 }
 
 // ErrNotPlaced is a call whose context ended before the vendor was asked to dial it: nobody
 // was rung.
 var ErrNotPlaced = errors.New("phone: the call was cancelled before it was placed")
+
+// ErrNotDialed is a call that failed before the vendor was asked to dial it, for a reason that
+// may not be met again, such as a database blip: nobody was rung. It marks the failure, whose
+// own text and kind are kept.
+var ErrNotDialed = errors.New("phone: the call failed before it was dialed")
+
+type notDialed struct{ err error }
+
+func (e notDialed) Error() string        { return e.err.Error() }
+func (e notDialed) Unwrap() error        { return e.err }
+func (e notDialed) Is(target error) bool { return target == ErrNotDialed }
 
 // ErrUnknownStatus is a status post for no call waiting for one: its token is unknown or swept,
 // or its vendor reports no status.
@@ -1485,6 +1784,9 @@ func (s *Service) callOfToken(ctx context.Context, token string) (outcome.Call, 
 	call, err := s.outcomes.ByToken(ctx, token)
 	if errors.Is(err, outcome.ErrUnknownCall) {
 		return outcome.Call{}, stack.Wrap(ErrUnknownStatus)
+	}
+	if err == nil {
+		activity.NoteCustomer(ctx, call.CustomerID, activity.AreaPhoneSMS)
 	}
 	return call, err
 }
@@ -1559,7 +1861,7 @@ func (s *Service) SweepBridges(ctx context.Context) (int64, error) {
 	if s.store == nil {
 		return 0, nil
 	}
-	return s.store.SweepBridges(ctx)
+	return s.store.CallBridges.Sweep(ctx)
 }
 
 // statusTokenLifetime is how long a placed call's status URL takes posts: past the longest a
@@ -1585,7 +1887,7 @@ func (s *Service) ReleaseCall(ctx context.Context, scope store.AppScope, callTyp
 	if s.store == nil || (s.stream == nil && s.apps == nil) {
 		return nil
 	}
-	resources, err := s.store.ReleaseCallResourcesInApp(ctx, scope, callType, callID)
+	resources, err := s.store.CallResources.Release(ctx, scope, callType, callID)
 	if err != nil {
 		return fmt.Errorf("phone: release call resources: %w", err)
 	}
@@ -1609,7 +1911,7 @@ func (s *Service) SweepCallResources(ctx context.Context, before time.Time) (int
 	if s.store == nil || (s.stream == nil && s.apps == nil) {
 		return 0, nil
 	}
-	stale, err := s.store.StaleCallResources(ctx, before)
+	stale, err := s.store.CallResources.SelectStale(ctx, before)
 	if err != nil {
 		return 0, fmt.Errorf("phone: sweep call resources: %w", err)
 	}
@@ -1629,7 +1931,7 @@ func (s *Service) SweepCallResources(ctx context.Context, before time.Time) (int
 				continue
 			}
 		}
-		if err := s.store.ForgetCallResource(ctx, resource); err != nil {
+		if err := s.store.CallResources.Forget(ctx, resource); err != nil {
 			return forgot, fmt.Errorf("phone: sweep call resources: %w", err)
 		}
 		forgot++
@@ -1696,7 +1998,7 @@ func (s *Service) sharedLine(ctx context.Context, stream *Stream, pin int64, pro
 	// An attached number stays where its callers are sent. Stream lets a number be on one
 	// trunk per app, so the call can still have one of its own here.
 	if held.StreamTrunkID != "" && held.StreamAppPK != pin && held.AttachedAt == nil {
-		if err := s.unline(ctx, held, "lined a number in another app", false); err != nil {
+		if err := s.unline(ctx, held, "lined a number in another app", time.Time{}); err != nil {
 			return TrunkLine{}, false, err
 		}
 	}
@@ -1714,7 +2016,7 @@ func (s *Service) sharedLine(ctx context.Context, stream *Stream, pin int64, pro
 // forgetCallResource deletes the row of a leg on a shared line that was never placed.
 // Best-effort: a failure is logged, never returned, so it cannot mask the dial's own.
 func (s *Service) forgetCallResource(ctx context.Context, resource *store.CallResource) {
-	if err := s.store.DeleteCallResource(ctx, resource.ID); err != nil {
+	if err := s.store.CallResources.Delete(ctx, resource.ID); err != nil {
 		s.logger.Error("could not delete the row of a leg that did not place",
 			"trunk", resource.TrunkID, "call", resource.CallID, "error", err)
 	}
@@ -1806,7 +2108,7 @@ func (s *Service) Transfer(ctx context.Context, request TransferRequest) (Dialed
 		return Dialed{}, stack.Wrap(Invalid(errors.New("phone: a transfer needs one of your numbers to dial from")))
 	}
 
-	held, err := s.store.Number(ctx, request.Owner.CustomerID, request.From)
+	held, err := s.store.PhoneNumbers.GetByE164(ctx, request.Owner.CustomerID, request.From)
 	if err != nil {
 		return Dialed{}, stack.Wrap(err)
 	}
@@ -1891,7 +2193,7 @@ func (s *Service) Transfer(ctx context.Context, request TransferRequest) (Dialed
 		Shared:      shared,
 	}
 	if shared {
-		if err := s.store.RecordCallResource(ctx, resource); err != nil {
+		if err := s.store.CallResources.Insert(ctx, resource); err != nil {
 			return Dialed{}, stack.Wrap(err)
 		}
 	}
@@ -1919,7 +2221,7 @@ func (s *Service) Transfer(ctx context.Context, request TransferRequest) (Dialed
 		Direction:    store.Outbound, LocalNumber: request.From, RemoteNumber: request.To,
 	}, false)
 	if !shared {
-		if err := s.store.RecordCallResource(ctx, resource); err != nil {
+		if err := s.store.CallResources.Insert(ctx, resource); err != nil {
 			// The transfer leg is placed and connecting; deleting its trunk now would drop
 			// a live call. A logged, rare leak beats that. session_ended cannot clean a
 			// trunk it has no row for, which is the cost of this failing.
@@ -1947,7 +2249,7 @@ func (s *Service) SendDigits(ctx context.Context, customerID, vendor, vendorCall
 	if s.store == nil {
 		return stack.Wrap(errors.New("phone: pressing digits needs a database"))
 	}
-	placed, err := s.store.PlacedCallLeg(ctx, customerID, vendor, vendorCallID)
+	placed, err := s.store.CallLegs.Placed(ctx, customerID, vendor, vendorCallID)
 	if err != nil {
 		return err
 	}
@@ -1966,7 +2268,7 @@ func (s *Service) Numbers(ctx context.Context, customerID string, includeRelease
 	if s.store == nil {
 		return nil, stack.Wrap(errors.New("phone: listing numbers needs a database"))
 	}
-	return s.store.CustomerNumbers(ctx, customerID, includeReleased)
+	return s.store.PhoneNumbers.Select(ctx, customerID, store.PhoneNumberFilter{IncludeReleased: includeReleased})
 }
 
 // names renders capabilities for storage, since Postgres holds them as plain text.

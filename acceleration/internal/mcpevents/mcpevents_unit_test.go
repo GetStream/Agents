@@ -1,10 +1,16 @@
 package mcpevents
 
 import (
+	"context"
+	"log/slog"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/suite"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // UnitSuite is what is decided before any row or request: keys, refresh times, sealing
@@ -135,4 +141,18 @@ func (s *UnitSuite) TestNewRefusesMissingOptions() {
 	_, err := New(Options{})
 
 	s.ErrorContains(err, "a store, sessions, transports and a sealer are required")
+}
+
+func (s *UnitSuite) TestADeliveryTheDatabaseCouldNotPlaceIsLoggedAndAnsweredWithNothingOfIt() {
+	broken, err := store.Open("postgres://router_app:hunter2@127.0.0.1:1/agents_prod?sslmode=disable")
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = broken.Close() })
+	logged := &strings.Builder{}
+	service := &Service{store: broken, logger: slog.New(slog.NewTextHandler(logged, nil))}
+
+	reply := service.Receive(context.Background(), "subscription-token", http.Header{}, []byte(`{}`))
+
+	s.Equal(http.StatusInternalServerError, reply.Status)
+	s.Equal(failure("something went wrong"), reply.Body)
+	s.Contains(logged.String(), "127.0.0.1:1", "a failure the server only hears as a 500 is in the log or nowhere")
 }

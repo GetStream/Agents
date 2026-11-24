@@ -15,6 +15,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
 
@@ -104,7 +105,7 @@ func New(options Options) (*Edge, error) {
 
 // Join starts sending the agent's speech. An edge is one call: joining it again changes
 // nothing, and once left, it is not joined again.
-func (e *Edge) Join(context.Context) error {
+func (e *Edge) Join(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.left {
@@ -114,7 +115,7 @@ func (e *Edge) Join(context.Context) error {
 		return nil
 	}
 	e.joined = true
-	go e.playout()
+	goroutine.Go(ctx, e.playout)
 	return nil
 }
 

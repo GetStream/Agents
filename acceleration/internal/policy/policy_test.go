@@ -16,7 +16,6 @@ import (
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/suite"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionmodel"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
@@ -107,13 +106,13 @@ func (s *PolicySuite) limit(limit store.Limit) store.Limit {
 		limit.Interval = usage.Daily
 	}
 	limit.UpdatedBy = "test"
-	s.Require().NoError(s.store.CreateLimit(s.ctx, &limit, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.Limits.Insert(s.ctx, &limit, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	return limit
 }
 
 // newEnforcer is an Enforcer over configs at quick's pace with the settings changed, closed
 // when the test ends.
-func (s *PolicySuite) newEnforcer(configs *appconfig.Store, logger *slog.Logger, change ...func(*Settings)) *Enforcer {
+func (s *PolicySuite) newEnforcer(configs *store.Store, logger *slog.Logger, change ...func(*Settings)) *Enforcer {
 	settings := quick
 	for _, apply := range change {
 		apply(&settings)
@@ -125,13 +124,12 @@ func (s *PolicySuite) newEnforcer(configs *appconfig.Store, logger *slog.Logger,
 }
 
 func (s *PolicySuite) SetupTest() {
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	s.enforcer = s.newEnforcer(configs, nil)
 	stamp := time.Now().UnixNano()
 	s.app = fmt.Sprintf("app-%d", stamp)
 	s.org = fmt.Sprintf("org-%d", stamp)
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, s.app, s.org))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: s.app, OrganizationID: s.org}))
 }
 
 // spend records a billable request the app made just now.
@@ -143,7 +141,7 @@ func (s *PolicySuite) spend(appID string, costMicros int64) {
 func (s *PolicySuite) spendAs(request store.Request) {
 	request.Modality, request.Provider, request.Model = "llm", "openai", "gpt-5.6-luna"
 	request.StartedAt, request.Success, request.Billable = time.Now().UTC(), true, true
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &request))
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &request))
 }
 
 func (s *PolicySuite) save(scope store.PolicyScope, id string, document store.PolicyDocument) {
@@ -245,7 +243,7 @@ func (s *PolicySuite) TestAnAppThatSpentItsLimitIsRefused() {
 
 func (s *PolicySuite) TestAnOrganizationLimitIsSpentByAllOfItsApps() {
 	sibling := s.app + "-sibling"
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, sibling, s.org))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: sibling, OrganizationID: s.org}))
 	s.limit(store.Limit{Subject: usage.SubjectOrganization, Level: store.LevelOrganization, OrganizationID: s.org,
 		Interval: usage.Weekly, LimitMicros: 1_000_000})
 	s.spend(sibling, 1_000_000)
@@ -314,7 +312,7 @@ func (s *PolicySuite) TestAGrantAdmitsPastASpentLimitUntilItIsUsed() {
 	s.spend(s.app, 1_000_000)
 	s.spendRefused(s.enforcer, s.app, ErrBudgetSpent)
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 2_000_000, Reason: "launch", Actor: "test"}
-	s.Require().NoError(s.store.AddGrant(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 
 	var admitted routing.Admission
 	s.eventually(func() bool {
@@ -331,7 +329,7 @@ func (s *PolicySuite) TestAGrantAdmitsPastASpentLimitUntilItIsUsed() {
 	s.NoError(refused)
 	s.ErrorIs(s.admitted().Spend, ErrBudgetSpent, "the hold uses the grant up at once")
 
-	s.spendAs(store.Request{UsageID: usageID, CustomerID: s.app, CostMicros: 2_000_000, LimitGrants: drawn})
+	s.spendAs(store.Request{UsageID: usageID, CustomerID: s.app, OrganizationID: s.org, CostMicros: 2_000_000, LimitGrants: drawn})
 	s.enforcer.Written([]routing.Acked{{UsageID: usageID, OrganizationID: s.org, CostMicros: 2_000_000}})
 	s.never(func() bool {
 		s.enforcer.money.mu.Lock()
@@ -345,7 +343,7 @@ func (s *PolicySuite) TestAGrantAdmitsPastASpentLimitUntilItIsUsed() {
 
 // sharded is a store over a shared database and one shard, with the test's app in its
 // organization and a limit on the app, and configs over it.
-func (s *PolicySuite) sharded() (*store.Store, *appconfig.Store) {
+func (s *PolicySuite) sharded() (*store.Store, *store.Store) {
 	dsn := os.Getenv("ROUTER_POSTGRES_DSN")
 	shared, shard := testenv.Database(dsn, "policy_grants_shared"), testenv.Database(dsn, "policy_grants_shard")
 	for _, each := range []string{shared, shard} {
@@ -357,10 +355,9 @@ func (s *PolicySuite) sharded() (*store.Store, *appconfig.Store) {
 	db, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shards: map[string]string{"here": shard}})
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = db.Close() })
-	s.Require().NoError(db.JoinOrganization(s.ctx, s.app, s.org))
-	configs, err := appconfig.New(appconfig.Options{Store: db})
-	s.Require().NoError(err)
-	s.Require().NoError(db.CreateLimit(s.ctx, &store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app,
+	s.Require().NoError(db.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: s.app, OrganizationID: s.org}))
+	configs := db
+	s.Require().NoError(db.Limits.Insert(s.ctx, &store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app,
 		Interval: usage.Daily, LimitMicros: 1, UpdatedBy: "test"}, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	return db, configs
 }
@@ -374,14 +371,14 @@ func (s *PolicySuite) shardRow(cost int64, grants []int64) store.Request {
 func (s *PolicySuite) TestWithShardsTheReconcileRunsAsTheLoopsStart() {
 	db, configs := s.sharded()
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 2_000_000, Reason: "launch", Actor: "test"}
-	s.Require().NoError(db.AddGrant(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(db.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	// The shard has a row naming the grant and nothing counted it: its count was dropped.
-	_, err := db.RecordRequests(s.ctx, []store.Request{s.shardRow(500_000, []int64{grant.ID})})
+	_, err := db.Requests.InsertMany(s.ctx, []store.Request{s.shardRow(500_000, []int64{grant.ID})})
 	s.Require().NoError(err)
 
 	s.newEnforcer(configs, nil)
 	s.eventually(func() bool {
-		read, err := db.Grant(s.ctx, "", grant.ID)
+		read, err := db.LimitGrants.Get(s.ctx, "", grant.ID)
 		return err == nil && read.UsedMicros == 500_000
 	}, 5*time.Second, 20*time.Millisecond, "counted by the reconcile the loops start with, not one reconcileEvery on")
 }
@@ -391,10 +388,10 @@ func (s *PolicySuite) TestWithShardsAGrantHoldStaysUntilItsRowCountsTowardTheGra
 	enforcer := s.newEnforcer(configs, nil)
 	audit := store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}
 	row := s.shardRow
-	_, err := db.RecordRequests(s.ctx, []store.Request{row(1, nil)})
+	_, err := db.Requests.InsertMany(s.ctx, []store.Request{row(1, nil)})
 	s.Require().NoError(err)
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 2_000_000, Reason: "launch", Actor: "test"}
-	s.Require().NoError(db.AddGrant(s.ctx, &grant, audit))
+	s.Require().NoError(db.LimitGrants.Insert(s.ctx, &grant, audit))
 	s.eventually(func() bool {
 		admitted, err := enforcer.Admit(s.ctx, ownerOf(s.app))
 		return err == nil && admitted.Spend == nil && len(admitted.Grants) == 1
@@ -405,7 +402,7 @@ func (s *PolicySuite) TestWithShardsAGrantHoldStaysUntilItsRowCountsTowardTheGra
 	used.LimitGrants = enforcer.Settle(owner, used.UsageID, used.CostMicros)
 	s.Equal([]int64{grant.ID}, used.LimitGrants)
 	// The shard has the row and nothing counted it: its count was dropped.
-	_, err = db.RecordRequests(s.ctx, []store.Request{used})
+	_, err = db.Requests.InsertMany(s.ctx, []store.Request{used})
 	s.Require().NoError(err)
 	usageID := used.UsageID
 	enforcer.Written([]routing.Acked{{UsageID: usageID, OrganizationID: s.org, CostMicros: 2_000_000}})
@@ -420,10 +417,10 @@ func (s *PolicySuite) TestWithShardsAGrantHoldStaysUntilItsRowCountsTowardTheGra
 	s.Require().NoError(err)
 	s.ErrorIs(admitted.Spend, ErrBudgetSpent, "the grant is not drawn twice meanwhile")
 
-	_, err = db.ReconcileGrantUses(s.ctx)
+	_, err = db.LimitGrantUses.Reconcile(s.ctx)
 	s.Require().NoError(err)
 	s.eventually(func() bool { return !held() }, 5*time.Second, 10*time.Millisecond, "let go once the reconcile counted it")
-	read, err := db.Grant(s.ctx, "", grant.ID)
+	read, err := db.LimitGrants.Get(s.ctx, "", grant.ID)
 	s.Require().NoError(err)
 	s.EqualValues(2_000_000, read.UsedMicros)
 	admitted, err = enforcer.Admit(s.ctx, ownerOf(s.app))
@@ -433,8 +430,7 @@ func (s *PolicySuite) TestWithShardsAGrantHoldStaysUntilItsRowCountsTowardTheGra
 
 func (s *PolicySuite) TestAGrantUntilMidnightIsExpiredAfterIt() {
 	var clock atomic.Pointer[time.Time]
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	enforcer := s.newEnforcer(configs, nil, func(settings *Settings) {
 		settings.Now = func() time.Time {
 			if moved := clock.Load(); moved != nil {
@@ -466,7 +462,7 @@ func (s *PolicySuite) TestAGrantUntilMidnightIsExpiredAfterIt() {
 	s.eventually(func() bool { return errors.Is(admit().Spend, ErrUserLimit) }, 5*time.Second, 10*time.Millisecond, "u1 is spent")
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectUser, AppID: s.app, UserID: "u1",
 		AmountMicros: 1_000_000, ExpiresAt: &midnight, Reason: "a support case", Actor: "test"}
-	s.Require().NoError(s.store.AddGrant(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	s.eventually(func() bool { return len(admit().Grants) > 0 }, 5*time.Second, 10*time.Millisecond, "admitted on the grant today")
 
 	after := midnight.Add(time.Second)
@@ -484,7 +480,7 @@ func (s *PolicySuite) TestAGrantUntilMidnightIsExpiredAfterIt() {
 // lockGrants holds limit_grants from another session until the test ends, as a long migration
 // or a stuck transaction would.
 func (s *PolicySuite) lockGrants() {
-	locked, err := s.store.DB().BeginTx(s.ctx, nil)
+	locked, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = locked.Rollback() })
 	_, err = locked.ExecContext(s.ctx, "LOCK TABLE limit_grants IN ACCESS EXCLUSIVE MODE")
@@ -496,7 +492,7 @@ func (s *PolicySuite) TestALockedGrantsTableKeepsTheLastGrantsAndTheLimitsRead()
 	s.spend(s.app, 1_000_000)
 	s.spendRefused(s.enforcer, s.app, ErrBudgetSpent)
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 2_000_000, Reason: "launch", Actor: "test"}
-	s.Require().NoError(s.store.AddGrant(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	s.eventually(func() bool { return len(s.admitted().Grants) > 0 }, 5*time.Second, 10*time.Millisecond, "admitted on the grant")
 
 	s.lockGrants()
@@ -504,7 +500,7 @@ func (s *PolicySuite) TestALockedGrantsTableKeepsTheLastGrantsAndTheLimitsRead()
 	s.never(func() bool { admitted := s.admitted(); return admitted.Spend != nil || len(admitted.Grants) == 0 },
 		2*grantsTimeout, 20*time.Millisecond, "the last grants read keeps answering while the next cannot land")
 	start, _ := usage.Window(usage.Daily, time.Now())
-	s.Require().NoError(s.store.AddResets(s.ctx, []store.UsageReset{{
+	s.Require().NoError(s.store.UsageResets.InsertMany(s.ctx, []store.UsageReset{{
 		OrganizationID: s.org, Subject: limit.Subject, AppID: s.app, Interval: usage.Daily, WindowStart: start,
 		BaselineMicros: 1_000_000, Reason: "test", Actor: "test",
 	}}, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
@@ -516,9 +512,8 @@ func (s *PolicySuite) TestAGrantNeverReadIsNeverDrawnAndTheLimitStillRefuses() {
 	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
 	s.spend(s.app, 1_000_000)
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 2_000_000, Reason: "launch", Actor: "test"}
-	s.Require().NoError(s.store.AddGrant(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	configs := s.store
 	enforcer := s.newEnforcer(configs, nil)
 	s.lockGrants()
 
@@ -542,7 +537,7 @@ func (s *PolicySuite) TestAResetCountsFromItsBaseline() {
 	s.spendRefused(s.enforcer, s.app, ErrBudgetSpent)
 
 	start, _ := usage.Window(usage.Daily, time.Now())
-	s.Require().NoError(s.store.AddResets(s.ctx, []store.UsageReset{{
+	s.Require().NoError(s.store.UsageResets.InsertMany(s.ctx, []store.UsageReset{{
 		OrganizationID: s.org, Subject: limit.Subject, AppID: s.app, Interval: usage.Daily, WindowStart: start,
 		BaselineMicros: 1_000_000, Reason: "test", Actor: "test",
 	}}, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
@@ -749,8 +744,7 @@ func (s *PolicySuite) TestAPolicyReadErrorRequiresItsOwnApp() {
 	closed, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
 	s.Require().NoError(err)
 	s.Require().NoError(closed.Close())
-	configs, err := appconfig.New(appconfig.Options{Store: closed})
-	s.Require().NoError(err)
+	configs := closed
 	enforcer := s.newEnforcer(configs, slog.New(slog.DiscardHandler))
 
 	requires, err := enforcer.RequiresOwnStreamApp(s.ctx, s.app)
@@ -867,7 +861,7 @@ func (s *PolicySuite) TestAUsersOwnQuotaWinsOverTheirAppsAndOrganizations() {
 
 func (s *PolicySuite) TestTheSameUserIDInTwoAppsIsTwoUsers() {
 	sibling := fmt.Sprintf("app-sibling-%d", time.Now().UnixNano())
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, sibling, s.org))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: sibling, OrganizationID: s.org}))
 	s.save(store.ScopeUser, store.UserScopeID(s.app, "same"), store.PolicyDocument{Quota: quotaOf(new(int64(1)), nil)})
 
 	s.EqualValues(1, s.limits("same").MessagesPerDay)
@@ -892,8 +886,7 @@ func (s *PolicySuite) TestDeletingAUsersQuotaFallsBackToTheirApps() {
 func (s *PolicySuite) TestAUserQuotaSavedOnAnotherRouterHoldsTheNextRequest() {
 	s.save(store.ScopeApp, s.app, store.PolicyDocument{Quota: quotaOf(new(int64(20)), nil)})
 	s.Require().EqualValues(20, s.limits("vip").MessagesPerDay)
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	other := s.newEnforcer(configs, nil)
 
 	s.Require().NoError(other.Save(s.ctx, store.ScopeUser, store.UserScopeID(s.app, "vip"),
@@ -909,8 +902,7 @@ func (s *PolicySuite) TestADailyLimitThatCannotBeReadIsTheDeployments() {
 	closed, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
 	s.Require().NoError(err)
 	s.Require().NoError(closed.Close())
-	configs, err := appconfig.New(appconfig.Options{Store: closed})
-	s.Require().NoError(err)
+	configs := closed
 	enforcer := s.newEnforcer(configs, slog.New(slog.DiscardHandler))
 
 	s.Equal(deployment, limitsOf(enforcer.Quota(s.ctx, s.app, "someone", deployment)))
@@ -920,8 +912,7 @@ func (s *PolicySuite) TestAUsersOwnQuotaThatCannotBeReadIsMarkedUnread() {
 	closed, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
 	s.Require().NoError(err)
 	s.Require().NoError(closed.Close())
-	configs, err := appconfig.New(appconfig.Options{Store: closed})
-	s.Require().NoError(err)
+	configs := closed
 	enforcer := s.newEnforcer(configs, slog.New(slog.DiscardHandler))
 
 	s.True(enforcer.Quota(s.ctx, s.app, "someone", deployment).Unread, "a user whose policy failed to read")
@@ -944,8 +935,7 @@ func (s *PolicySuite) TestADebitIsCountedForAUserWhoseOwnQuotaCannotBeRead() {
 	closed, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
 	s.Require().NoError(err)
 	s.Require().NoError(closed.Close())
-	configs, err := appconfig.New(appconfig.Options{Store: closed})
-	s.Require().NoError(err)
+	configs := closed
 	enforcer := s.newEnforcer(configs, slog.New(slog.DiscardHandler))
 	limiter, err := quota.New(client, quota.Limits{}, enforcer, slog.New(slog.DiscardHandler))
 	s.Require().NoError(err)
@@ -974,20 +964,19 @@ func (s *PolicySuite) TestADailyLimitHoldsWhenOnlyTheSpendCannotBeRead() {
 	if address == "" {
 		s.T().Skip("ROUTER_REDIS_ADDR is not set")
 	}
-	db, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
-	s.Require().NoError(err)
-	configs, err := redisready.Retry(address, func() (*appconfig.Store, error) {
-		return appconfig.New(appconfig.Options{Store: db, Address: address, Logger: slog.New(slog.DiscardHandler)})
+	db, err := redisready.Retry(address, func() (*store.Store, error) {
+		return store.OpenShards(store.Options{DSN: os.Getenv("ROUTER_POSTGRES_DSN"), Redis: store.Redis{Address: address}})
 	})
 	s.Require().NoError(err)
-	s.T().Cleanup(configs.Close)
+	configs := db
 	enforcer := s.newEnforcer(configs, slog.New(slog.DiscardHandler))
 	s.Require().NoError(enforcer.Save(s.ctx, store.ScopeApp, s.app, store.PolicyDocument{
 		Quota: quotaOf(new(int64(20_000)), nil),
 	}))
 	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
 	s.Require().EqualValues(20_000, enforcer.Quota(s.ctx, s.app, "someone", deployment).Messages.PerDay)
-	s.Require().NoError(db.Close())
+	s.T().Cleanup(func() { _ = db.Close() })
+	s.Require().NoError(db.GlobalDB().Close())
 	enforcer.forget(s.app)
 
 	limits := limitsOf(enforcer.Quota(s.ctx, s.app, "someone", deployment))
@@ -1035,8 +1024,7 @@ func (s *PolicySuite) TestAPolicyReadErrorKeepsNoToolOutput() {
 	closed, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
 	s.Require().NoError(err)
 	s.Require().NoError(closed.Close())
-	configs, err := appconfig.New(appconfig.Options{Store: closed})
-	s.Require().NoError(err)
+	configs := closed
 	enforcer := s.newEnforcer(configs, slog.New(slog.DiscardHandler))
 
 	kept, err := enforcer.ToolOutputRetention(s.ctx, s.app)

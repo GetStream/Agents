@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
@@ -254,11 +255,11 @@ func (t *TTS) Synthesize(request tts.Request) error {
 	t.mu.Unlock()
 
 	t.running.Add(1)
-	go func() {
+	goroutine.Go(ctx, func() {
 		defer t.running.Done()
 		defer cancel()
 		t.synthesize(ctx, synthesis, text, request)
-	}()
+	})
 	return nil
 }
 
@@ -435,8 +436,9 @@ func (t *TTS) stream(synthesis *tts.Synthesis, body io.Reader) bool {
 			if errors.Is(err, io.EOF) {
 				return false
 			}
-			// A cancelled context is barge-in or teardown, not a provider failure.
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// A cancelled context is barge-in or teardown, not a provider failure. A deadline
+			// is the synthesis's Timeout running out on a provider that stopped sending.
+			if errors.Is(err, context.Canceled) {
 				return true
 			}
 			t.emitter.Send(tts.Error{

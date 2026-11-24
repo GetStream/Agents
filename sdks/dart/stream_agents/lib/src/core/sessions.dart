@@ -1,34 +1,41 @@
 import 'dart:math';
 
+import 'agent_session.dart';
+import 'backend.dart';
 import 'convert.dart';
+import 'errors.dart';
 import 'generated/api.dart' as api;
 import 'models.dart';
+import 'tools.dart';
 
 /// How many items are read per request while unwinding.
 const _itemPage = 200;
 
 /// Conversations: the ones being held and the ones that were.
 ///
-/// What comes back are rows rather than live handles, because reading a conversation back is
-/// not holding one and most of these are over. `StreamAgents.attach` follows one that is
-/// still running.
+/// [create] opens one and follows it. What is read back are rows rather than live handles,
+/// because reading a conversation back is not holding one and most of these are over.
+/// `StreamAgents.attach` follows one that is still running.
 final class Sessions {
-  Sessions(this._operations, {this.agent, this._userId = ''});
+  Sessions(this._operations, this._backend, {this.agent});
 
   final api.Operations _operations;
 
-  /// Who is asking, which is whose memories a session reads.
-  final String _userId;
+  /// Where sessions opened here are followed, and who is asking, which is whose memories a
+  /// session reads.
+  final Backend _backend;
 
   /// The agent name every call here is about, or null for all of this caller's.
   final String? agent;
 
-  /// Opens a conversation without following it, for a caller building its own state layer.
+  /// Opens a conversation and follows it, answering [SessionOptions.tools] on this device.
   ///
   /// Held in writing unless [SessionOptions.startVoice] is set. It returns once the backend is
-  /// holding the conversation, so a session that comes back is one already listening.
-  Future<Session> create([SessionOptions options = const SessionOptions()]) =>
-      _create(options, options.startVoice);
+  /// holding the conversation and the socket is open, so a session that comes back is one
+  /// already listening. With [SessionOptions.watch] false no socket is opened and no tool
+  /// declared; its turns go through [AgentSession.responses].
+  Future<AgentSession> create([SessionOptions options = const SessionOptions()]) =>
+      _open(options, voice: options.startVoice);
 
   /// A page of this caller's conversations, the ones that ended included.
   ///
@@ -154,9 +161,38 @@ final class Sessions {
   /// A conversation's turns, whether or not this process is holding it.
   Responses responses(String id) => Responses._(_operations, id);
 
-  Future<Session> _create(SessionOptions options, bool startVoice) async {
-    final request = createRequestOf(options, startVoice: startVoice, agent: agent, userId: _userId);
-    return sessionOf(await _operations.createSession(body: request));
+  Future<AgentSession> _open(SessionOptions options, {required bool voice}) async {
+    // Taken before the request, so what is declared is what is answered here.
+    final tools = options.watch ? List.of(options.tools) : const <AgentTool>[];
+    final request = createRequestOf(
+      options,
+      startVoice: voice,
+      agent: agent,
+      userId: _backend.userId,
+    );
+    final session = AgentSession(
+      sessionOf(await _operations.createSession(body: request)),
+      backend: _backend,
+      sessions: this,
+      tools: tools,
+      watch: options.watch,
+    );
+    if (!options.watch) {
+      return session;
+    }
+    try {
+      await session.start();
+    } on AgentsException {
+      // The agent is in the conversation whether or not anybody here can follow it, so it is
+      // stopped rather than left holding a call nobody is listening to.
+      try {
+        await stop(session.id);
+      } on AgentsException {
+        // Reporting why the socket did not open matters more than this.
+      }
+      rethrow;
+    }
+    return session;
   }
 
   Future<ListPage<Session>> _query(
@@ -354,8 +390,8 @@ final class Responses {
   /// Goes back to a response and carries on from there, as though nothing after it was said.
   ///
   /// The model forgets the later turns and they drop out of [list] and [items]. A
-  /// conversation kept in Stream Chat is refused with a 400, because the channel would still
-  /// hold the later turns: fork it at the response instead.
+  /// conversation kept in Stream Chat is rewound there too: the later turns are hidden in
+  /// the channel and kept as a branch that can be brought back.
   Future<void> rewind(String responseId) {
     if (responseId.isEmpty) {
       throw ArgumentError.value(responseId, 'responseId', 'a response that was never recorded');
@@ -367,9 +403,24 @@ final class Responses {
   }
 }
 
-/// Opens a conversation on its call or in writing, whatever [options] say.
-Future<Session> openSession(Sessions sessions, SessionOptions options, {required bool voice}) =>
-    sessions._create(options, voice);
+/// Opens a conversation on its call or in writing, whatever [options] say, as
+/// [Sessions.create] does.
+Future<AgentSession> openSession(
+  Sessions sessions,
+  SessionOptions options, {
+  required bool voice,
+}) => sessions._open(options, voice: voice);
+
+/// Gives a running session more of its caller's tools, declared as when it opened.
+Future<void> addSessionTools(Sessions sessions, String id, List<AgentTool> tools) =>
+    sessions._operations.addSessionTools(
+      id: id,
+      body: api.AddSessionToolsRequest(tools: [for (final tool in tools) sessionToolOf(tool)]),
+    );
+
+/// Withdraws one of its caller's tools from a running session.
+Future<void> removeSessionTool(Sessions sessions, String id, String name) =>
+    sessions._operations.removeSessionTool(id: id, name: name);
 
 /// A name left empty, which means the same as leaving it out.
 String? _named(String? name) => name == null || name.isEmpty ? null : name;

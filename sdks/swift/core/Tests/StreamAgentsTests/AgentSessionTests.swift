@@ -1,11 +1,197 @@
 import Foundation
 import Network
 import Testing
+import os
 
 @testable import StreamAgents
 
 @MainActor
 @Suite struct AgentSessionTests {
+  /// The router refused the tools, so it offers none of them and nothing here answers them.
+  @Test func aToolTheRouterRefusedIsNotAnswered() async throws {
+    let server = try SessionServer(
+      answer: .init(
+        status: 409, headers: ["Content-Type": "application/json"],
+        body: #"{"error":{"message":"taken","type":"conflict","code":"conflict","doc_url":""}}"#))
+    defer { server.listener.cancel() }
+    let session = AgentSession(
+      backend: Backend(url: try await server.url(), customerID: "test"), session: Self.session, tools: [])
+
+    await #expect(throws: AgentsError.self) { try await session.add(tools: [Self.reserveTable]) }
+
+    #expect(session.tools["reserve_table"] == nil)
+  }
+
+  /// Whether a request that never came back added the tools is unknown, and a call of one that
+  /// the router did add has to be answered.
+  @Test func aToolWhoseAddingWasNeverAnsweredIsStillAnswered() async throws {
+    let server = try SessionServer()
+    let url = try await server.url()
+    server.listener.cancel()
+    let session = AgentSession(
+      backend: Backend(url: url, customerID: "test"), session: Self.session, tools: [])
+
+    await #expect(throws: AgentsError.self) { try await session.add(tools: [Self.reserveTable]) }
+
+    #expect(session.tools["reserve_table"] != nil)
+  }
+
+  /// The router never replaces a tool the session has, so the handler answering that tool's
+  /// calls stays the one it was added with, even when the request's answer is lost.
+  @Test func aToolAddedUnderANameTheSessionHasKeepsItsHandler() async throws {
+    let server = try SessionServer()
+    let url = try await server.url()
+    server.listener.cancel()
+    let session = AgentSession(
+      backend: Backend(url: url, customerID: "test"), session: Self.session,
+      tools: [Self.reserveTable])
+    let other = AgentTool(name: "reserve_table", description: "Reserve a table elsewhere") { _ in
+      "Reserved elsewhere."
+    }
+
+    await #expect(throws: AgentsError.self) { try await session.add(tools: [other]) }
+
+    #expect(session.tools["reserve_table"]?.description == "Reserve a table")
+  }
+
+  /// An add whose answer was lost may or may not have reached the router, so another tool
+  /// under its name settles it first rather than leaving the first one answering calls the
+  /// router now makes of the second.
+  @Test func aToolWhoseAddingWasNeverAnsweredIsSettledBeforeAnotherTakesItsName() async throws {
+    let server = try SessionServer { method, _, body in
+      let described = body["tools"]?.arrayValue?.first?["description"]?.stringValue
+      switch (method, described) {
+      case ("POST", "Reserve a table"):
+        return .init(status: 200, headers: ["Content-Type": "application/json"], body: "not json")
+      case ("DELETE", _):
+        return .init(
+          status: 404, headers: ["Content-Type": "application/json"],
+          body: #"{"error":{"message":"no tool","type":"not_found","code":"not_found","doc_url":""}}"#)
+      default:
+        return .init(status: 204, headers: [:], body: "")
+      }
+    }
+    defer { server.listener.cancel() }
+    let session = AgentSession(
+      backend: Backend(url: try await server.url(), customerID: "test"), session: Self.session, tools: [])
+    await #expect(throws: AgentsError.self) { try await session.add(tools: [Self.reserveTable]) }
+    let other = AgentTool(name: "reserve_table", description: "Reserve a table elsewhere") { _ in
+      "Reserved elsewhere."
+    }
+
+    try await session.add(tools: [other])
+
+    #expect(session.tools["reserve_table"]?.description == "Reserve a table elsewhere")
+  }
+
+  /// A gateway in front of the router can answer a 5xx after the router added the tools, so
+  /// they stay answered, and another tool under the name withdraws the first before it is added
+  /// rather than being refused as one the session already has.
+  @Test func aToolWhoseAddingAGatewayFailedIsStillAnsweredAndSettledBeforeAnotherTakesItsName()
+    async throws
+  {
+    let router = OSAllocatedUnfairLock(initialState: (offered: Set<String>(), adds: 0))
+    let server = try SessionServer { method, path, body in
+      router.withLock { router in
+        if method == "DELETE" {
+          return router.offered.remove(String(path.split(separator: "/").last ?? "")) == nil
+            ? .init(
+              status: 404, headers: ["Content-Type": "application/json"],
+              body: #"{"error":{"message":"no tool","type":"not_found","code":"not_found","doc_url":""}}"#)
+            : .init(status: 204, headers: [:], body: "")
+        }
+        let names = Set(body["tools"]?.arrayValue?.compactMap { $0["name"]?.stringValue } ?? [])
+        guard router.offered.isDisjoint(with: names) else {
+          return .init(
+            status: 409, headers: ["Content-Type": "application/json"],
+            body: #"{"error":{"message":"taken","type":"conflict","code":"conflict","doc_url":""}}"#)
+        }
+        router.offered.formUnion(names)
+        router.adds += 1
+        return router.adds == 1 ? .badGateway : .init(status: 204, headers: [:], body: "")
+      }
+    }
+    defer { server.listener.cancel() }
+    let session = AgentSession(
+      backend: Backend(url: try await server.url(), customerID: "test"), session: Self.session, tools: [])
+    await #expect(throws: AgentsError.self) { try await session.add(tools: [Self.reserveTable]) }
+    #expect(session.tools["reserve_table"]?.description == "Reserve a table", "the router offers it")
+    let other = AgentTool(name: "reserve_table", description: "Reserve a table elsewhere") { _ in
+      "Reserved elsewhere."
+    }
+
+    try await session.add(tools: [other])
+
+    #expect(session.tools["reserve_table"]?.description == "Reserve a table elsewhere")
+  }
+
+  /// The router may have withdrawn a tool whose removal was never answered, or answered by a
+  /// gateway's error, so asking again settles it when the router has none by that name, rather
+  /// than failing.
+  @Test(arguments: [SessionServer.Answer.dropped, .badGateway])
+  func aToolWhoseRemovalWasNeverAnsweredIsRemovedByAskingAgain(lost: SessionServer.Answer) async throws {
+    let server = try Self.losingTheFirstRemoval(lost)
+    defer { server.listener.cancel() }
+    let session = AgentSession(
+      backend: Backend(url: try await server.url(), customerID: "test"), session: Self.session,
+      tools: [Self.reserveTable])
+    await #expect(throws: AgentsError.self) { try await session.remove(toolNamed: "reserve_table") }
+    #expect(session.tools["reserve_table"] != nil, "the router may still offer it")
+
+    try await session.remove(toolNamed: "reserve_table")
+
+    #expect(session.tools["reserve_table"] == nil)
+  }
+
+  /// A removal whose answer was lost, or was a gateway's error, may or may not have reached the
+  /// router, so another tool under its name settles it first rather than leaving the first one
+  /// answering calls the router now makes of the second.
+  @Test(arguments: [SessionServer.Answer.dropped, .badGateway])
+  func aToolWhoseRemovalWasNeverAnsweredIsSettledBeforeAnotherTakesItsName(lost: SessionServer.Answer)
+    async throws
+  {
+    let server = try Self.losingTheFirstRemoval(lost)
+    defer { server.listener.cancel() }
+    let session = AgentSession(
+      backend: Backend(url: try await server.url(), customerID: "test"), session: Self.session,
+      tools: [Self.reserveTable])
+    await #expect(throws: AgentsError.self) { try await session.remove(toolNamed: "reserve_table") }
+    let other = AgentTool(name: "reserve_table", description: "Reserve a table elsewhere") { _ in
+      "Reserved elsewhere."
+    }
+
+    try await session.add(tools: [other])
+
+    #expect(session.tools["reserve_table"]?.description == "Reserve a table elsewhere")
+  }
+
+  /// A router that withdraws the tool on the first removal but whose answer comes back as
+  /// `lost`, so every removal after it finds no tool by that name.
+  private static func losingTheFirstRemoval(_ lost: SessionServer.Answer) throws -> SessionServer {
+    let removals = OSAllocatedUnfairLock(initialState: 0)
+    return try SessionServer { method, _, _ in
+      guard method == "DELETE" else { return .init(status: 204, headers: [:], body: "") }
+      let first = removals.withLock {
+        $0 += 1
+        return $0 == 1
+      }
+      return first
+        ? lost
+        : .init(
+          status: 404, headers: ["Content-Type": "application/json"],
+          body: #"{"error":{"message":"no tool","type":"not_found","code":"not_found","doc_url":""}}"#)
+    }
+  }
+
+  private static let session = Session(
+    .init(
+      agentId: "test", callId: "", callType: "agent", createdAt: Date(), id: "test",
+      modality: .text, state: .live, text: true, userId: "test"))
+
+  private static let reserveTable = AgentTool(name: "reserve_table", description: "Reserve a table") { _ in
+    "Reserved."
+  }
+
   @Test(arguments: ["get_video_frames", "server_lookup"], [false, true])
   func onlyLocallyOwnedToolsAreAnswered(remoteTool: String, localFailure: Bool) async throws {
     let server = try ToolEventServer(remoteTool: remoteTool)
@@ -71,6 +257,53 @@ import Testing
               "image_url": .dictionary(["url": .string("data:image/png;base64,iVBORw0KGgo=")]),
             ]),
           ]))
+      await session.close()
+    } catch {
+      await session.close()
+      throw error
+    }
+  }
+
+  private struct Booking: Decodable {
+    let location: String
+    let guests: Int
+    let notes: RawJSON?
+  }
+
+  /// A typed tool runs with the model's arguments decoded, and arguments missing a field reach
+  /// the model as the tool failing, naming the field, rather than running it with a blank.
+  /// Arguments nested deeper than a tool needs fail the same way, in a field the type reads or
+  /// not, rather than overflowing the stack of the thread the tool runs on.
+  @Test(arguments: [
+    (#"{"location":"Boulder","guests":4}"#, "Booked Boulder for 4", ""),
+    (#"{"guests":4}"#, nil, #""location""#),
+    (#"{"location":"Boulder","guests":"four"}"#, nil, #""guests""#),
+    (#"{"location":"Boulder","guests":4,"notes":\#(nested(20, open: "[", close: "]"))}"#, "Booked Boulder for 4", ""),
+    (#"{"location":"Boulder","guests":4,"notes":"\"\#(String(repeating: "{[", count: 100))"}"#, "Booked Boulder for 4", ""),
+    (#"{"location":"Boulder","guests":4,"extra":\#(nested(300, open: "{\"a\":", close: "}"))}"#, nil, "levels deep"),
+    (#"{"location":"Boulder","guests":4,"notes":\#(nested(500, open: "[", close: "]"))}"#, nil, "levels deep"),
+  ])
+  func aTypedToolGetsItsArgumentsDecoded(arguments: String, output: String?, error: String) async throws {
+    let server = try ToolEventServer(remoteTool: "server_lookup", arguments: arguments)
+    defer { server.listener.cancel() }
+    let url = try #require(try await server.addresses.first(where: { @Sendable _ in true }))
+    let tool = AgentTool(name: "local_lookup", description: "Book a table") { (booking: Booking) in
+      "Booked \(booking.location) for \(booking.guests)"
+    }
+    let session = AgentSession(
+      backend: Backend(url: url, customerID: "test"), session: Self.session, tools: [tool])
+    await session.start()
+    do {
+      let data = try #require(try await server.commands.first(where: { @Sendable _ in true }))
+      let command = try JSONDecoder().decode([String: RawJSON].self, from: data)
+      #expect(command["type"]?.stringValue == "tool_result")
+      if let output {
+        #expect(command["output"]?.stringValue == output)
+        #expect(command["error"]?.stringValue == "")
+      } else {
+        #expect(command["output"]?.stringValue == "")
+        #expect(command["error"]?.stringValue?.contains(error) == true, "\(command["error"] ?? .nil)")
+      }
       await session.close()
     } catch {
       await session.close()
@@ -282,13 +515,19 @@ import Testing
   }
 }
 
+/// A JSON value nested `depth` times, such as `{"a":{"a":1}}`.
+private func nested(_ depth: Int, open: String, close: String) -> String {
+  String(repeating: open, count: depth) + "1" + String(repeating: close, count: depth)
+}
+
 /// A real WebSocket peer broadcasting one remote tool and one locally owned tool.
 private struct ToolEventServer {
   let listener: NWListener
   let addresses: AsyncThrowingStream<URL, any Error>
   let commands: AsyncThrowingStream<Data, any Error>
 
-  init(remoteTool: String) throws {
+  init(remoteTool: String, arguments: String = "{}") throws {
+    let quoted = String(decoding: try JSONEncoder().encode(arguments), as: UTF8.self)
     let queue = DispatchQueue(label: "tool-event-server")
     let webSocket = NWProtocolWebSocket.Options()
     webSocket.autoReplyPing = true
@@ -321,7 +560,7 @@ private struct ToolEventServer {
       connection.stateUpdateHandler = { state in
         guard case .ready = state else { return }
         for (id, name) in [("remote", remoteTool), ("local", "local_lookup")] {
-          let frame = #"{"type":"tool_call","id":"\#(id)","name":"\#(name)","arguments":"{}"}"#
+          let frame = #"{"type":"tool_call","id":"\#(id)","name":"\#(name)","arguments":\#(quoted)}"#
           let context = NWConnection.ContentContext(
             identifier: id,
             metadata: [NWProtocolWebSocket.Metadata(opcode: .text)])

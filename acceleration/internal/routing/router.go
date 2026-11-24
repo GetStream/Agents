@@ -22,7 +22,6 @@ import (
 	"maps"
 	"math"
 	"net/http"
-	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -32,6 +31,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -123,6 +123,9 @@ type Endpoint struct {
 	Model string
 	// APIKey is empty for an endpoint that takes none.
 	APIKey string
+	// ContextWindow is how many tokens the endpoint serves the model with, zero when not
+	// known.
+	ContextWindow int64
 	// Client is how requests reach it. On a router tenants share it dials public addresses
 	// only, because the endpoint is whatever a tenant wrote.
 	Client *http.Client
@@ -535,7 +538,9 @@ func instanceKeys[P Provider](modality Modality, config ModalityConfig, registry
 		if !registry.Honors(provider.Provider, OverrideAPIKey) {
 			return nil, fmt.Errorf("routing: %s: %s sets api_key_env, which the %s factory does not take", modality, named, provider.Provider)
 		}
-		key := os.Getenv(provider.APIKeyEnv)
+		// Read as every key variable is, so the keys are known as the router's own: their
+		// refusals raise key_refused and their rate limits are kept (keypool.Env).
+		key := keypool.Getenv(provider.APIKeyEnv)
 		if key == "" {
 			return nil, fmt.Errorf("routing: %s: %s names its key in %s, which is not set", modality, named, provider.APIKeyEnv)
 		}
@@ -621,7 +626,7 @@ func (r *Router[P]) Resolve(ctx context.Context, target string, languageHints []
 	}
 
 	if len(matching) == 0 {
-		return nil, stack.Wrap(fmt.Errorf("routing: no provider satisfies %q for languages %s", target, strings.Join(languageHints, ",")))
+		return nil, stack.Wrap(Refused(fmt.Errorf("routing: no provider satisfies %q for languages %s", target, strings.Join(languageHints, ","))))
 	}
 
 	candidates := r.candidates(ctx, matching)
@@ -1045,6 +1050,13 @@ func (r *Router[P]) startCandidate(ctx context.Context, request Request, candida
 	voice, err := r.voice(voiceCtx, request, candidate.Config.Provider)
 	if err != nil {
 		return zero, err
+	}
+	// The voice overwrites name is handed to the provider as written, and is no more any
+	// customer's to speak in than the request's voice is.
+	if overwritten != "" && r.voices != nil {
+		if _, err := r.voices.ResolveVoice(voiceCtx, request.CustomerID, candidate.Config.Provider, overwritten); err != nil {
+			return zero, err
+		}
 	}
 	// With no top-level voice, a TTS overwrite is the voice spoken: a factory that reads no
 	// overwrites, as Cartesia's does not, would otherwise speak its own default. A top-level

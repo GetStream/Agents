@@ -1,4 +1,4 @@
-import { ConfigurationError } from "./errors.js";
+import { ConfigurationError, clipped } from "./errors.js";
 import type { Schemas } from "./client.js";
 
 /** A JSON Schema object describing what a tool takes. */
@@ -128,10 +128,24 @@ export interface ToolCallFields {
  * provides one; a test of a function's progress can too.
  */
 export interface ToolLine {
-  /** Says how the call is going, or with `verbatim`, words to say as written. */
-  update(id: string, text: string, verbatim: boolean): void;
   /** Asks for the call to keep going when the caller talks over the agent; resolves with whether it was still running to be held. */
   hold(id: string, signal?: AbortSignal): Promise<boolean>;
+  /** Tells the session how the call is going. */
+  update(id: string, update: ToolCallUpdate): void;
+}
+
+/** What a running call tells the people in the conversation. */
+export interface ToolCallUpdate {
+  /**
+   * Replaces the call's display title while it runs, such as "Comparing 40 flights", and on a
+   * voice call the agent tells the caller about it in its own words. Left out, the title stays.
+   */
+  title?: string;
+  /**
+   * Replaces the call's data whole, for their app to show, such as a card under the message.
+   * It is kept once the call finishes. Left out, the data stays.
+   */
+  custom?: Record<string, unknown>;
 }
 
 /** What `disallowInterruptions` rejects with when the call had already been stopped. */
@@ -173,27 +187,6 @@ export class ToolCallContext implements ToolCallFields {
   }
 
   /**
-   * Says how the call is going. A voice agent tells the caller in its own words once nobody
-   * is talking, and a conversation shows it on the call's step until the call ends. A newer
-   * update replaces one not yet said, and the result replaces both.
-   */
-  update(text: string): void {
-    if (this.line && this.id) {
-      this.line.update(this.id, text, false);
-    }
-  }
-
-  /**
-   * Has the agent say `text` as written while the call runs, or post it in a text
-   * conversation. A speech-to-speech model is asked for these words and may paraphrase them.
-   */
-  say(text: string): void {
-    if (this.line && this.id) {
-      this.line.update(this.id, text, true);
-    }
-  }
-
-  /**
    * Keeps the call going from now on when the caller talks over the agent, which is what a
    * write that must not be left halfway wants: from then on only the call's timeout and its
    * socket ending stop it. Rejects with a `CallNotHeldError` when the call was stopped before
@@ -206,6 +199,16 @@ export class ToolCallContext implements ToolCallFields {
     const held = await this.line.hold(this.id, this.lasting);
     if (!held || this.lasting.aborted) {
       throw new CallNotHeldError(this.id);
+    }
+  }
+
+  /**
+   * Tells the people in the conversation how the call is going. A string is a new title, such
+   * as "Comparing 40 flights"; an object can also carry `custom` data for their app to show.
+   */
+  update(update: string | ToolCallUpdate): void {
+    if (this.line && this.id) {
+      this.line.update(this.id, typeof update === "string" ? { title: update } : update);
     }
   }
 
@@ -242,6 +245,26 @@ export interface ToolApproval {
   declineTitle?: string;
 }
 
+/** How a `Tools` treats its functions' calls. */
+export interface ToolsOptions {
+  /**
+   * What the model is told when one of these functions throws, in place of the error's message.
+   *
+   * Left out, the message goes to the model as it is, which is how it can say something useful
+   * about a tool that did not work, and is why a function may throw words meant for it. The model
+   * may repeat it to the person, and the conversation keeps it, and an error from a library a
+   * function calls can name an internal host, a table or a value from a record. The safe hook
+   * passes on only an error of the app's own, thrown with words meant for the model, and says
+   * something plain for anything else. Either way it is cut to 1,024 characters.
+   *
+   * ```ts
+   * class ToolError extends Error {}
+   * new Tools({ onError: (error, call) => (error instanceof ToolError ? error.message : `${call.name} failed`) });
+   * ```
+   */
+  onError?: (error: unknown, call: { readonly name: string; readonly id: string }) => string;
+}
+
 /**
  * The functions a session offers, in the order they were registered.
  *
@@ -252,6 +275,11 @@ export interface ToolApproval {
 export class Tools {
   private readonly registered = new Map<string, Registered>();
   private readonly slots = new Slots(DEFAULT_CONCURRENCY);
+  private onError: ToolsOptions["onError"];
+
+  constructor(options: ToolsOptions = {}) {
+    this.onError = options.onError;
+  }
 
   /** Adds a function. Registering one name twice is refused rather than silently winning. */
   register<In>(tool: Tool<In>): this {
@@ -290,7 +318,35 @@ export class Tools {
       parameters,
       parse: isStandard(tool.parameters) ? tool.parameters["~standard"].validate : undefined,
       slots: tool.concurrency ? new Slots(tool.concurrency) : undefined,
+      shared: this.slots,
+      owner: this,
     });
+    return this;
+  }
+
+  /**
+   * @internal The functions named, each as the `Tools` beside it registered it, in a `Tools` of
+   * their own that holds nothing else. Their calls still count against the cap of the one they
+   * were registered in.
+   */
+  static of(functions: Iterable<readonly [string, Tools]>): Tools {
+    const own = new Tools();
+    for (const [name, from] of functions) {
+      const registered = from.registered.get(name);
+      if (!registered) {
+        throw new ConfigurationError(`nothing is registered as ${name}`);
+      }
+      own.registered.set(name, registered);
+    }
+    return own;
+  }
+
+  /**
+   * Says what the model is told when one of its functions throws: see `ToolsOptions.onError`. For
+   * a `Tools` built for you, such as `client.tools`, which the app's tools are registered on.
+   */
+  setOnError(onError: NonNullable<ToolsOptions["onError"]>): this {
+    this.onError = onError;
     return this;
   }
 
@@ -337,6 +393,24 @@ export class Tools {
   }
 
   /**
+   * @internal What the model is told of a call of `name` that failed with `cause`: what the
+   * `onError` of the `Tools` it was registered in says, else the error's message, cut to 1,024 characters
+   * either way. A hook that throws is answered with no more than that the function failed, since
+   * the message it was there to keep back is all there would be to say otherwise.
+   */
+  failure(name: string, id: string, cause: unknown): string {
+    const hook = this.registered.get(name)?.owner.onError;
+    if (!hook) {
+      return clipped(errorText(cause));
+    }
+    try {
+      return clipped(hook(cause, { name, id }));
+    } catch {
+      return `${name} failed`;
+    }
+  }
+
+  /**
    * Runs one function and renders what it returned in words the model can use.
    *
    * Arguments are the JSON object the model wrote. Empty is treated as no arguments, since
@@ -353,7 +427,7 @@ export class Tools {
     if (!registered) {
       throw new ConfigurationError(`nothing is registered as ${name}`);
     }
-    const { tool, parse, slots } = registered;
+    const { tool, parse, slots, shared } = registered;
 
     let input: unknown = {};
     if (args.trim()) {
@@ -401,7 +475,7 @@ export class Tools {
     try {
       // The function's own place first, so its calls waiting their turn hold none of the
       // places every other function needs.
-      for (const places of [slots, this.slots]) {
+      for (const places of [slots, shared]) {
         if (places) {
           await places.take(stopped);
           held.unshift(places);
@@ -490,6 +564,10 @@ interface Registered {
   parse: StandardToolSchema["~standard"]["validate"] | undefined;
   /** The places its calls run in, for a tool that caps them. */
   slots: Slots | undefined;
+  /** The places every call of the `Tools` it was registered in runs in. */
+  shared: Slots;
+  /** The `Tools` it was registered in, whose `onError` says what the model is told of a failure. */
+  owner: Tools;
 }
 
 function isStandard(parameters: unknown): parameters is StandardToolSchema {
@@ -592,4 +670,9 @@ export function render(output: unknown): string | ToolOutputPart[] {
   } catch {
     return String(output);
   }
+}
+
+/** What an error says of itself: its message, or the thing thrown as text. */
+function errorText(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
 }

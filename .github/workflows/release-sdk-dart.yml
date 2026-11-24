@@ -5,14 +5,14 @@ name: Release Dart SDK
 # the package's CHANGELOG.md names it, so a release starts with a pull request that raises it.
 #
 # pub.dev only takes a package from a run on a tag, so this runs twice:
-# - From accelerate, by hand or started by release-sdks.yml: checks the package and, if its
+# - From main, by hand or started by release-sdks.yml: checks the package and, if its
 #   version has no sdk-dart-v* tag yet and this is no dry run, tags the commit and starts
 #   itself again on that tag. A version already tagged is nothing to release.
 # - On the sdk-dart-v<version> tag: publishes the package. A failed run is run again from the
 #   tag.
 #
 # The first version is published by hand; after that the package's admin page on pub.dev
-# enables publishing from GitHub Actions for GetStream/Vision-Agents with the tag pattern
+# enables publishing from GitHub Actions for GetStream/Agents with the tag pattern
 # sdk-dart-v{{version}} and workflow_dispatch events allowed.
 on:
   workflow_dispatch:
@@ -32,7 +32,7 @@ concurrency:
 jobs:
   check:
     name: Check and tag
-    if: github.ref == 'refs/heads/accelerate'
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write   # push the release tag
@@ -109,16 +109,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # The whole history, to see that the tag is on accelerate.
+          # The whole history, to see that the tag is on main.
           fetch-depth: 0
           persist-credentials: false
 
-      - name: The tag is on accelerate and names the committed version
+      - name: The tag is on main and names the committed version
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#sdk-dart-v}"
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          git merge-base --is-ancestor HEAD origin/accelerate || { echo "::error::$GITHUB_REF_NAME is not on accelerate"; exit 1; }
+          git merge-base --is-ancestor HEAD origin/main || { echo "::error::$GITHUB_REF_NAME is not on main"; exit 1; }
           committed=$(sed -n 's/^version: //p' sdks/dart/stream_agents/pubspec.yaml)
           if [ "$committed" != "$version" ]; then
             echo "::error file=sdks/dart/stream_agents/pubspec.yaml::version $committed is not the tag's $version"; exit 1

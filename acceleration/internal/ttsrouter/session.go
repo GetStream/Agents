@@ -1,14 +1,17 @@
 package ttsrouter
 
 import (
+	"context"
 	"log/slog"
 	"slices"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 	"github.com/google/uuid"
 )
@@ -16,6 +19,8 @@ import (
 // Session is a live voice attached to one customer. It forwards the provider's events
 // untouched and records a stat row per completed synthesis on the way past.
 type Session struct {
+	// call is the context of the call. The goroutines of the session start under it.
+	call     context.Context
 	provider tts.TTS
 	// config is the routing identity of the provider. Stats and health are keyed by it,
 	// so a provider registered under a different name still aggregates coherently.
@@ -66,6 +71,9 @@ type pending struct {
 	// so its final text ends it. A streaming voice completes once for the utterance and speaks
 	// text sent after the final text in it, so only a barge-in ends it before it settles.
 	ended bool
+	// abandoned is set once it has the timing line of a sentence that ended with no
+	// completion, so it never has a second.
+	abandoned bool
 }
 
 // utterance is what the session remembers about one synthesis until it completes.
@@ -76,9 +84,15 @@ type utterance struct {
 	// errorCode is set when the provider reported a failure for this synthesis. It turns
 	// the completion into a failed row rather than adding a second one.
 	errorCode string
+	// errorMessage is what that failure said, for the synthesis's timing line.
+	errorMessage string
+	// firstByteAt is when its first audio reached the session, for the timing line of a
+	// synthesis that never completes. Zero until then.
+	firstByteAt time.Time
 }
 
 func newSession(
+	ctx context.Context,
 	provider tts.TTS,
 	config routing.ProviderConfig,
 	owner routing.Owner,
@@ -88,9 +102,10 @@ func newSession(
 	// A voice that takes each sentence as its own request works on them side by side, and
 	// heard as it arrives their audio is spliced together.
 	if !provider.Streaming() {
-		provider = tts.InOrder(provider)
+		provider = tts.InOrder(ctx, provider)
 	}
 	session := &Session{
+		call:      ctx,
 		provider:  provider,
 		config:    config,
 		owner:     owner,
@@ -103,7 +118,7 @@ func newSession(
 		sentences: map[string][]*pending{},
 		finished:  map[string]struct{}{},
 	}
-	go session.forward()
+	goroutine.Go(ctx, session.forward)
 	return session
 }
 
@@ -186,12 +201,16 @@ func (s *Session) forget(id string, refused *pending) {
 func (s *Session) Interrupt() error {
 	streaming := s.provider.Streaming()
 	var dropped []uuid.UUID
+	var cut []abandonment
 	s.mu.Lock()
 	for id, queue := range s.sentences {
 		var kept []*pending
-		for _, sentence := range queue {
+		for i, sentence := range queue {
 			if !streaming && !sentence.ended {
 				dropped = append(dropped, sentence.reserved)
+				if abandoned, ok := s.abandon(id, sentence, i == 0); ok {
+					cut = append(cut, abandoned)
+				}
 				continue
 			}
 			sentence.ended = true
@@ -206,6 +225,9 @@ func (s *Session) Interrupt() error {
 	s.mu.Unlock()
 	for _, reserved := range dropped {
 		s.recorder.Release(reserved)
+	}
+	for _, abandoned := range cut {
+		s.logAbandoned(abandoned, "interrupted")
 	}
 	return s.provider.Interrupt()
 }
@@ -251,7 +273,7 @@ func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.stopped)
 		err = s.provider.Close()
-		go func() {
+		goroutine.Go(s.call, func() {
 			<-s.forwarded
 			s.mu.Lock()
 			sentences := s.sentences
@@ -262,7 +284,7 @@ func (s *Session) Close() error {
 					s.recorder.Release(unsettled.reserved)
 				}
 			}
-		}()
+		})
 	})
 	return err
 }
@@ -271,6 +293,9 @@ func (s *Session) Close() error {
 func (s *Session) forward() {
 	defer close(s.forwarded)
 	defer close(s.events)
+	// Once the voice's events end, because the session was closed or the voice ended them on
+	// its own, a sentence it has not completed never will be.
+	defer s.abandonUnsettled()
 
 	for event := range s.provider.Events() {
 		s.observe(event)
@@ -296,6 +321,13 @@ func (s *Session) observe(event tts.Event) {
 		s.inFlight[typed.SynthesisID] = &utterance{startedAt: typed.At}
 		s.mu.Unlock()
 
+	case tts.AudioChunk:
+		s.mu.Lock()
+		if current := s.inFlight[typed.SynthesisID]; current != nil && current.firstByteAt.IsZero() {
+			current.firstByteAt = time.Now()
+		}
+		s.mu.Unlock()
+
 	case tts.SynthesisComplete:
 		// One utterance is one unit of billable work, the way one turn is for
 		// speech-to-text. An interrupted one still produced audio and still cost money.
@@ -310,7 +342,7 @@ func (s *Session) observe(event tts.Event) {
 				s.warnMiscounted(typed.Characters, characters)
 			}
 		}
-		s.recorder.Record(s.config, routing.Stat{
+		stat := routing.Stat{
 			Owner:       s.owner,
 			UsageID:     settled.reserved,
 			StartedAt:   settled.startedAt,
@@ -326,25 +358,132 @@ func (s *Session) observe(event tts.Event) {
 			LatencyMs: typed.TimeToFirstByteMs,
 			Success:   settled.errorCode == "",
 			ErrorCode: settled.errorCode,
-		})
+		}
+		s.recorder.Record(s.config, stat)
+		s.logTiming(stat, settled.errorMessage)
 
 	case tts.Error:
 		// A failure that names an utterance is settled by that utterance's completion, so
 		// one synthesis is still one row. Anything else is a session-level failure.
-		if typed.SynthesisID != "" && s.fail(typed.SynthesisID, errorCode(typed)) {
+		message := errorMessage(typed)
+		if typed.SynthesisID != "" && s.fail(typed.SynthesisID, errorCode(typed), message) {
 			return
 		}
-		s.recorder.Record(s.config, routing.Stat{
+		stat := routing.Stat{
 			Owner:     s.owner,
 			StartedAt: time.Now().UTC(),
 			Success:   false,
 			ErrorCode: errorCode(typed),
-		})
+		}
+		s.recorder.Record(s.config, stat)
+		s.logTiming(stat, message)
 	}
 }
 
+// logTiming writes the "speech synthesis timing" line for a row just recorded: a synthesis,
+// or a failure of the session that no synthesis settles. A failover is a session of its own,
+// so each voice asked has its own line. A failure of the session has no synthesis, so no
+// operation and nothing timed: those fields are left out rather than logged as zero.
+func (s *Session) logTiming(stat routing.Stat, message string) {
+	logged := routing.LoggedCall(s.owner.CallID, s.owner, s.config)
+	synthesis := stat.OperationID != ""
+	if synthesis {
+		logged = append(logged, "operation", stat.OperationID)
+	}
+	logged = append(logged, "characters", stat.Characters, "audio_ms", stat.AudioMs)
+	if synthesis {
+		logged = append(logged, "ttfb_ms", stat.LatencyMs, "duration_ms", stat.DurationMs)
+	}
+	logged = append(logged, "cost_micros", s.recorder.QuoteStat(s.config, stat).CostMicros,
+		"success", stat.Success, "error_code", stat.ErrorCode)
+	if message != "" {
+		logged = append(logged, "error", store.SafeLogText(message))
+	}
+	s.logger.Info("speech synthesis timing", logged...)
+}
+
+// abandonment is a sentence sent that ended with no completion, so with no row, as its
+// timing line tells it.
+type abandonment struct {
+	id         string
+	characters int64
+	// utterance is what the voice reported of it; started is false when it never started.
+	utterance utterance
+	started   bool
+}
+
+// abandon is the timing line of a sentence of id that ends with no completion, once: ok is
+// false when it already has one. first is whether it is id's oldest sentence, which a start
+// and a failure of id belong to, as they do when one settles. The caller holds mu.
+func (s *Session) abandon(id string, sentence *pending, first bool) (abandonment, bool) {
+	if sentence.abandoned {
+		return abandonment{}, false
+	}
+	sentence.abandoned = true
+	abandoned := abandonment{id: id, characters: sentence.characters}
+	if current, ok := s.inFlight[id]; ok && first {
+		abandoned.utterance, abandoned.started = *current, true
+	}
+	return abandoned, true
+}
+
+// abandonUnsettled logs every sentence the voice had not completed when its events ended,
+// with the code the voice reported for it, or "closed" when it reported none.
+// Their reservations are let go at Close, as before.
+func (s *Session) abandonUnsettled() {
+	var left []abandonment
+	s.mu.Lock()
+	for id, queue := range s.sentences {
+		for i, sentence := range queue {
+			if abandoned, ok := s.abandon(id, sentence, i == 0); ok {
+				left = append(left, abandoned)
+			}
+		}
+	}
+	s.mu.Unlock()
+	for _, abandoned := range left {
+		// The code the voice reported for it, when it did, is what its row would say.
+		code := "closed"
+		if reported := abandoned.utterance.errorCode; reported != "" {
+			code = reported
+		}
+		s.logAbandoned(abandoned, code)
+	}
+}
+
+// logAbandoned writes the timing line of a sentence that ended with no completion, failed
+// with code. What was not measured is left out: the audio, a time to first byte when none
+// arrived, a duration when it never started. No row is written for it, so it has no
+// cost_micros either; what was reserved for it is let go.
+func (s *Session) logAbandoned(abandoned abandonment, code string) {
+	logged := append(routing.LoggedCall(s.owner.CallID, s.owner, s.config),
+		"operation", abandoned.id, "characters", abandoned.characters)
+	if started := abandoned.utterance.startedAt; abandoned.started {
+		if first := abandoned.utterance.firstByteAt; !first.IsZero() {
+			logged = append(logged, "ttfb_ms", milliseconds(first.Sub(started)))
+		}
+		logged = append(logged, "duration_ms", milliseconds(time.Since(started)))
+	}
+	logged = append(logged, "success", false, "error_code", code)
+	if message := abandoned.utterance.errorMessage; message != "" {
+		logged = append(logged, "error", store.SafeLogText(message))
+	}
+	s.logger.Info("speech synthesis timing", logged...)
+}
+
+func milliseconds(elapsed time.Duration) float64 { return float64(elapsed.Microseconds()) / 1000 }
+
+// errorMessage is what a provider's failure said. An adapter may report one with no error
+// under it, which says nothing.
+func errorMessage(failure tts.Error) string {
+	if failure.Err == nil {
+		return ""
+	}
+	return failure.Err.Error()
+}
+
 // fail marks an utterance as failed, reporting whether it was still in flight.
-func (s *Session) fail(synthesisID, code string) bool {
+func (s *Session) fail(synthesisID, code, message string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -354,7 +493,7 @@ func (s *Session) fail(synthesisID, code string) bool {
 	}
 	// The first failure is the one that explains the utterance.
 	if current.errorCode == "" {
-		current.errorCode = code
+		current.errorCode, current.errorMessage = code, message
 	}
 	return true
 }
@@ -407,7 +546,7 @@ func (s *Session) settle(synthesisID string) (settled, bool) {
 	}
 	delete(s.inFlight, synthesisID)
 	return settled{
-		utterance:  utterance{startedAt: current.startedAt.UTC(), errorCode: current.errorCode},
+		utterance:  utterance{startedAt: current.startedAt.UTC(), errorCode: current.errorCode, errorMessage: current.errorMessage},
 		characters: characters,
 		sent:       sent,
 		reserved:   reserved,

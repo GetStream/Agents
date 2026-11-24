@@ -287,7 +287,6 @@ func run(options options, logger *slog.Logger) error {
 		AppID:          options.appID,
 		SessionID:      options.callID,
 		Store:          routers.store,
-		Live:           routers.live,
 		Logger:         logger,
 		AudioFloor:     floor,
 		AudioFloorMode: floorMode,
@@ -561,7 +560,7 @@ func buildRouters(ctx context.Context, replyHedge, flowHedge time.Duration, floo
 
 	var pgStore *store.Store
 	if dsn := os.Getenv(postgresEnvVar); dsn != "" {
-		pgStore, err = store.Open(dsn)
+		pgStore, err = store.OpenShards(store.Options{DSN: dsn, Redis: store.Redis{Address: os.Getenv(redisEnvVar)}})
 		if err != nil {
 			cleanup()
 			return routers{}, nil, err

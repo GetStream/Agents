@@ -30,6 +30,8 @@ type Tool struct {
 	Description string
 	// Parameters is a JSON Schema object describing the arguments.
 	Parameters map[string]any
+	// DisplayTitle is what a call is doing, in words for the people in the conversation.
+	DisplayTitle string `json:",omitempty"`
 	// Interruptible says the caller interrupting cancels a call in flight.
 	Interruptible bool `json:",omitempty"`
 	// Timeout is how long one call may take, in place of what the worker gave all its
@@ -72,8 +74,9 @@ type Progress interface {
 	// HoldTool keeps the call running when the caller talks over the agent, reporting
 	// whether it still was.
 	HoldTool(id string) bool
-	// ToolUpdate says how the call is going, or with verbatim, words to say as written.
-	ToolUpdate(id, text string, verbatim bool)
+	// ToolUpdate says how the call is going, or with verbatim, words to say as written, and
+	// with custom, replaces the call's data.
+	ToolUpdate(id, text string, verbatim bool, custom map[string]any)
 }
 
 // User is who a hosted call was made for.
@@ -154,9 +157,9 @@ func (w *Worker) Hold(id string) (string, bool) {
 
 // Update tells the conversation a hosted call was made in how it is going. An update for
 // a call nobody is waiting on is dropped.
-func (w *Worker) Update(id, text string, verbatim bool) {
+func (w *Worker) Update(id, text string, verbatim bool, custom map[string]any) {
 	if call := w.progressOf(id); call.progress != nil {
-		call.progress.ToolUpdate(id, text, verbatim)
+		call.progress.ToolUpdate(id, text, verbatim, custom)
 	}
 }
 
@@ -172,13 +175,14 @@ func (w *Worker) progressOf(id string) listening {
 	return w.progress[id]
 }
 
-// Host records that a worker runs these tools for sessions under an agent id, replacing
-// whatever it offered for that agent before. The offer is scoped to the worker's own
-// customer: this is the pool, not the gate.
+// EveryAgent is the agent id of tools a worker hosts for every agent of its customer. A
+// session is offered one of them only when its config's tool groups name it.
+const EveryAgent = ""
+
+// Host records that a worker runs these tools for sessions under an agent id, or EveryAgent,
+// replacing whatever it offered for that agent before. The offer is scoped to the worker's
+// own customer: this is the pool, not the gate.
 func (p *Pool) Host(worker *Worker, agentID string, tools []Tool, timeout time.Duration) error {
-	if agentID == "" {
-		return errors.New("dispatch: hosted tools need the agent they are for")
-	}
 	if len(tools) == 0 {
 		return errors.New("dispatch: hosting no tools is not hosting")
 	}
@@ -252,6 +256,16 @@ func (p *Pool) AgentsHostedBy(worker *Worker) []string {
 	return agents
 }
 
+// NoWorkerError is a hosted call no connected worker runs the tool for: the worker that
+// hosted it when the session opened has gone, or every one running it is full.
+type NoWorkerError struct {
+	Tool string
+}
+
+func (e NoWorkerError) Error() string {
+	return fmt.Sprintf("dispatch: no worker is running %s now", e.Tool)
+}
+
 // RunHosted sends one call to a worker hosting that tool for the agent and waits for its
 // answer, the worker's own timeout, or the caller giving up.
 //
@@ -284,7 +298,7 @@ func (p *Pool) RunHosted(ctx context.Context, customerID, agentID string, call T
 	}
 	if chosen == nil {
 		p.mu.Unlock()
-		return nil, fmt.Errorf("dispatch: no worker is running %s now", call.Name)
+		return nil, NoWorkerError{Tool: call.Name}
 	}
 	chosen.worker.mu.Lock()
 	if _, duplicate := chosen.worker.results[call.ID]; duplicate {

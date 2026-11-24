@@ -36,7 +36,7 @@ func (s *EpisodeReadingSuite) cardOfCall(number string, created, began time.Time
 func (s *EpisodeReadingSuite) callEpisode(session string) (time.Time, string) {
 	var started time.Time
 	var omni string
-	err := s.store.DB().QueryRowContext(s.ctx, `SELECT ep.started_at, cm.conversation_id FROM episodes AS ep
+	err := s.store.GlobalDB().QueryRowContext(s.ctx, `SELECT ep.started_at, cm.conversation_id FROM episodes AS ep
 JOIN contact_map AS cm ON cm.id = ep.contact_id WHERE ep.customer_id = ? AND ep.session_id = ?`,
 		s.customerID, session).Scan(&started, &omni)
 	s.Require().NoError(err)
@@ -46,7 +46,7 @@ JOIN contact_map AS cm ON cm.id = ep.contact_id WHERE ep.customer_id = ? AND ep.
 // postgresNow is Postgres's clock.
 func (s *EpisodeReadingSuite) postgresNow() time.Time {
 	var now time.Time
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT statement_timestamp()").Scan(&now))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT statement_timestamp()").Scan(&now))
 	return now
 }
 
@@ -59,13 +59,13 @@ func (s *EpisodeReadingSuite) TestACallThatBeganBeforeItsNumbersLinkIsLeftOutWit
 	number, user := "+15550100191", "anya-"+uuid.NewString()
 	ahead := time.Now().Add(time.Hour)
 	began := time.Now().Add(-time.Minute)
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &store.UserPhone{CustomerID: s.customerID,
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &store.UserPhone{CustomerID: s.customerID,
 		StreamAppPK: suiteDeploymentApp, UserID: user, Phone: number}))
 	before := s.cardOfCall(number, ahead, began)
 	after := s.cardOfCall(number, ahead, time.Now())
 
 	_, omni := s.callEpisode(before)
-	cards, err := s.store.EpisodeCards(s.ctx, store.CardsQuery{CustomerID: s.customerID, AgentConfigID: s.configID,
+	cards, err := s.store.Episodes.Cards(s.ctx, store.CardsQuery{CustomerID: s.customerID, AgentConfigID: s.configID,
 		ConversationID: omni, Limit: 10})
 	s.Require().NoError(err)
 	var read []string

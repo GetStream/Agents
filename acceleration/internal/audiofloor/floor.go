@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -134,7 +135,7 @@ func (t *Transcriber) force() {
 func (t *Transcriber) cutLocked(c pauseCheck, stopped time.Time) {
 	said, force := t.words.end(c.utterance, stopped)
 	t.running.Add(1)
-	go t.settle(c, said, force)
+	goroutine.Go(t.call, func() { t.settle(c, said, force) })
 }
 
 // settle keeps the words of the utterance check c ended, once the transcriber writing them
@@ -173,7 +174,7 @@ func (t *Transcriber) endOnWords(participant stt.Participant, heard int64) {
 	utterance, length, asked := t.utterance+1, time.Duration(heard-t.start)*frame, time.Now()
 	said, force := t.words.end(utterance, asked.Add(-t.quiet))
 	t.running.Add(1)
-	go func() {
+	goroutine.Go(t.call, func() {
 		defer t.running.Done()
 		if force {
 			t.force()
@@ -185,7 +186,7 @@ func (t *Transcriber) endOnWords(participant stt.Participant, heard int64) {
 			return
 		}
 		t.sendWords(participant, utterance, words, length, asked)
-	}()
+	})
 }
 
 // sendWords sends words as the final of utterance, with no check's ruling, the other
@@ -262,9 +263,12 @@ func (t *Transcriber) decideWords(ctx context.Context, agent Agent, turn Turn, a
 // row, the last at least failoverWindow after the first. A check answered starts the count
 // again. One that ran out of a deadline shorter than a check at a pause has, a check over the
 // agent's (harness.HearDeadline), counts neither way: it says the server took longer than that
-// to answer, not that it is down.
+// to answer, not that it is down. Nor does one held back while the server asked for time
+// (ErrBackingOff), which was never asked, or one a replica answered without knowing the agent
+// though it was told again (ErrAgentUnknown): the server is up, but did not rule, so the
+// checks it did not answer before it are still in a row with those after it.
 func (t *Transcriber) checked(err error, deadline time.Duration, participant stt.Participant) {
-	if t.words == nil || errors.Is(err, context.Canceled) {
+	if t.words == nil || errors.Is(err, context.Canceled) || errors.Is(err, ErrBackingOff) || errors.Is(err, ErrAgentUnknown) {
 		return
 	}
 	if errors.Is(err, context.DeadlineExceeded) && deadline < pauseDeadline() {
@@ -301,7 +305,7 @@ func (t *Transcriber) checked(err error, deadline time.Duration, participant stt
 	t.emitter.Send(stt.Disconnected{Provider: ProviderName, Model: t.model, Reason: stack.Wrap(err).Error(), At: time.Now()})
 	// Asked from a check, itself one of t.running: Close has not begun to wait on it.
 	t.running.Add(1)
-	go t.probe(participant)
+	goroutine.Go(t.call, func() { t.probe(participant) })
 }
 
 // pauseDeadline is how long a check at a pause has for its ruling (harness.HearDeadline): a
@@ -424,6 +428,7 @@ func (t *Transcriber) retake(participant stt.Participant) {
 	t.unruled = 0
 	out := time.Since(t.asideSince)
 	t.mu.Unlock()
+	t.reportDroppedStops()
 	t.words.restart(t.utterance + 1)
 	t.answered.Store(false)
 	t.stepped.Store(false)

@@ -3,7 +3,7 @@ import PackageDescription
 
 // The Swift SDK, whose sources are in sdks/swift/core. The manifest is at the root of the
 // repository because that is the only place SwiftPM looks for it: an app adds this
-// repository's URL, and each `v` tag, the Python packages' too, is a release of it.
+// repository's URL, and each `vX.Y.Z` tag of the repo is a release of it.
 let package = Package(
     name: "stream-agents",
     // iOS 15 is the floor. The session state is an ObservableObject rather than @Observable,

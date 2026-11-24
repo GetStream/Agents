@@ -74,7 +74,7 @@ func (s *TransferSuite) SetupSuite() {
 func (s *TransferSuite) SetupTest() {
 	s.customer = "transfer-" + uuid.NewString()
 	s.number = fmt.Sprintf("+1512%07d", rand.IntN(10_000_000))
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: s.number, Vendor: "telnyx", Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
 	}))
 	s.manager = s.manages()
@@ -186,7 +186,7 @@ func (s *TransferSuite) TestACallTransferredColdEndsItsSessionAsTransferred() {
 
 	s.transferred(events)
 	s.Require().Eventually(func() bool {
-		return created.State() == Ended && !s.manager.Running(created.ID())
+		return created.State() == Ended && !s.manager.Running(created.Spec().CustomerID, created.ID())
 	}, settleFor, 20*time.Millisecond, "the session outlived the agent that left on the transfer")
 	s.Equal(EndTransferred, created.EndReason())
 	// The agent leaves the call by itself on a transfer, which is no agent dropping out.

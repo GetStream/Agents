@@ -502,8 +502,8 @@ stt:
     # reason Nemotron's third tier is: a language the vendor's own figures say it
     # transcribes badly is not one to route a call to.
     #
-    # $0.39 an audio hour at the standard rate, before the $0.05 an hour keyterm prompting
-    # adds; an annual Business plan brings the base to $0.28.
+    # $0.22 an audio hour on every plan (repriced 2026-11-17, the same as Scribe v3 Live),
+    # before the $0.08 an hour keyterm prompting adds.
     - provider: elevenlabs
       model: scribe_v2_realtime
       description: "ElevenLabs' live Scribe, built for the 150 ms a live call needs."
@@ -585,6 +585,95 @@ stt:
         trains_on_data: "yes"
         retention: unspecified
 
+    # Scribe v3 Live, launched 2026-11-10 as the successor to Scribe v2 Realtime above: the
+    # same socket and frames, opened with model_id=scribe_v3_live, and ElevenLabs' migration
+    # note says an integration behaves the same until it asks for turn_prediction. They
+    # report a 44% lower WER than v2 across 73 FLEURS languages; Artificial Analysis'
+    # streaming board, read 2026-11-19, has it at 2.9% and 81 ms to the final transcript
+    # against v2's 3.6% and 141 ms.
+    #
+    # The languages are v2's list. ElevenLabs have not yet published per-language error
+    # rates for v3, only the average across 73, so nothing yet says which further languages
+    # it can be trusted with.
+    #
+    # $0.22 an audio hour, the rate ElevenLabs now publish for every plan
+    # (https://elevenlabs.io/pricing/api, read 2026-11-19), before the $0.08 an hour
+    # keyterm prompting adds, which nothing here meters yet.
+    - provider: elevenlabs
+      model: scribe_v3_live
+      description: "ElevenLabs' Scribe v3 Live: v2 Realtime's successor, more accurate and faster to the final word."
+      benchmark: { word_error_rate: 0.029, latency_ms: 81 }
+      languages:
+        [
+          az,
+          be,
+          bg,
+          bn,
+          bs,
+          ca,
+          cs,
+          da,
+          de,
+          el,
+          en,
+          es,
+          et,
+          fa,
+          fi,
+          fil,
+          fr,
+          gl,
+          gu,
+          hi,
+          hr,
+          hu,
+          hy,
+          id,
+          is,
+          it,
+          ja,
+          ka,
+          kk,
+          kn,
+          lt,
+          lv,
+          mk,
+          ml,
+          mr,
+          ms,
+          mt,
+          ne,
+          nl,
+          no,
+          or,
+          pl,
+          pt,
+          ro,
+          ru,
+          sk,
+          sl,
+          sr,
+          sv,
+          sw,
+          ta,
+          te,
+          tr,
+          uk,
+          vi,
+          yue,
+          zh,
+        ]
+      realtime: true
+      tier: low-latency
+      # The same two as v2, because they are what this package sends. v3 also offers a
+      # turn_prediction commit strategy, multilang_mode, a 10,000-term keyterm library and
+      # realtime diarize, and declares none of them: nothing here sends them yet.
+      supports: [keyterms, endpointing]
+      # ElevenLabs' account, the same answer as v2 above.
+      data_policy:
+        trains_on_data: "yes"
+        retention: unspecified
+
     # AssemblyAI's Universal-3.6 Pro Realtime, launched 2026-09-29 for voice agents. It
     # switches between its 32 languages mid-sentence and decides where a turn ended from
     # the words rather than from a silence alone. No benchmark line: Artificial Analysis
@@ -648,6 +737,65 @@ stt:
       # Self-serve accounts are in the model improvement program until an admin on a paid
       # plan opts out in Data Controls, and only an opted-out account gets zero retention
       # for streaming. Opting out makes this "no" and none.
+      data_policy:
+        trains_on_data: "yes"
+        retention: unspecified
+
+    # AssemblyAI-STT-3.7-Realtime-Agent, launched 2026-11-17 to replace Universal-3.6 Pro
+    # for voice agents, which stays above because AssemblyAI still fully support it. The
+    # same socket, protocol and parameters, so only speech_model differs; the same 32
+    # languages (assemblyai.com/llms/models.md, read 2026-11-19). Artificial Analysis
+    # measured 3.2% WER and 101 ms to the final transcript (read 2026-11-19), against
+    # 3.6% and 192 ms for Universal-3.6 Pro on its min_latency preset.
+    #
+    # $0.45 an hour, the same as Universal-3.6 Pro, billed by how long the socket is open,
+    # with keyterms included (assemblyai.com/pricing, read 2026-11-19). Speaker labels,
+    # Voice Focus, prompting and Medical Mode are add-ons this package never sends.
+    - provider: assemblyai
+      model: assemblyai-stt-3-7-realtime-agent
+      description: "AssemblyAI's STT 3.7 for voice agents: switches between 32 languages mid-sentence and finds the turn's end from the words."
+      benchmark: { word_error_rate: 0.032, latency_ms: 101 }
+      languages:
+        [
+          af,
+          ar,
+          ca,
+          da,
+          de,
+          en,
+          es,
+          et,
+          fa,
+          fi,
+          fr,
+          gl,
+          he,
+          hi,
+          it,
+          ja,
+          ko,
+          mr,
+          nl,
+          nn,
+          no,
+          pt,
+          ro,
+          ru,
+          sv,
+          tr,
+          ur,
+          vi,
+          xh,
+          yue,
+          zh,
+          zu,
+        ]
+      realtime: true
+      tier: low-latency
+      # What universal-3-6-pro declares, for the same reason: keyterms_prompt and
+      # max_turn_silence are all this package sends of what the model can do.
+      supports: [keyterms, endpointing]
+      # The same account and the same model improvement program as universal-3-6-pro.
       data_policy:
         trains_on_data: "yes"
         retention: unspecified
@@ -879,44 +1027,51 @@ stt:
     # documentation warns about: a name here is a judgement about which models are wanted
     # rather than a fact about what they can do, so it goes stale in the way a requirement
     # does not. That is what these are for, and the cost of it is that the lists have to be
-    # re-read rather than trusted. Last reviewed 2026-09.
+    # re-read rather than trusted. Last reviewed 2026-11.
 
     # Fast: answering before the caller wonders whether the line dropped. Flux is pinned
-    # because Deepgram's turn detector is the one the other three are measured against,
-    # with the multilingual Flux beside it so a caller who is not speaking English still
-    # lands on Deepgram; then Ink 2, whose migration guide is written from that exact
-    # model, then Inworld, then Nemotron on Together, the cheapest of them by a factor of
-    # six. Health orders the four behind the pin, which is what naming a group means.
+    # because Deepgram's turn detector is the one the others are measured against, with the
+    # multilingual Flux beside it so a caller who is not speaking English still lands on
+    # Deepgram; then AssemblyAI's 3.7 Realtime-Agent, built for voice agents and more
+    # accurate than Flux on the Artificial Analysis streaming board (3.2% against 5.9% word
+    # error rate, 101 ms to a final transcript); then Ink 2, whose migration guide is written
+    # from that exact model, then Inworld, then Nemotron on Together, the cheapest of them by
+    # a factor of six. Health orders the members behind the pin, which is what naming a
+    # group means.
     stt-fast:
       title: Speed
-      description: "Stream's pick for a live call: Deepgram Flux first, then Ink 2, Inworld and Nemotron as failover."
+      description: "Stream's pick for a live call: Deepgram Flux first, then AssemblyAI 3.7, Ink 2, Inworld and Nemotron as failover."
       require_realtime: true
       tier: low-latency
       prefer: deepgram/flux-general-en
       only:
         - deepgram/flux-general-en
         - deepgram/flux-general-multi
+        - assemblyai/assemblyai-stt-3-7-realtime-agent
         - cartesia/ink-2
         - inworld/inworld-stt-1
         - together-nemotron/nvidia/nemotron-3-asr-streaming-0.6b
 
     # Accurate: the same live path, ordered by how well it hears rather than how quickly.
-    # Muse is pinned because it is the one of the four that names the voice as well, so a
-    # config that goes on to ask for diarize: true narrows to the model this group already
-    # starts with rather than to a different one.
+    # Scribe v3 Live is pinned because it is the most accurate of these on the Artificial
+    # Analysis streaming board that is also quick (2.9% word error rate, 81 ms to a final
+    # transcript). MAI-Transcribe-2 hears better still (2.5%, 128 ms) and stands right
+    # behind it. Muse is the one that names the voice as well, so a config that goes on to
+    # ask for diarize: true narrows to Muse, since neither Scribe nor MAI declares it here.
     #
     # No tier requirement, for the reason en-high-accuracy gives: accuracy is worth waiting
-    # for, so a slower live model belongs here. All four happen to be low-latency today, and
-    # declaring that would turn replacing one of them with a better, slower model into a
+    # for, so a slower live model belongs here. All of them happen to be low-latency today,
+    # and declaring that would turn replacing one of them with a better, slower model into a
     # config that refuses to load.
     stt-accurate:
       title: Accuracy
-      description: "Stream's pick for hearing every word: Muse first, which also labels speakers, then Scribe, Ink 2 and Nemotron."
+      description: "Stream's pick for hearing every word: Scribe v3 Live first, then MAI-Transcribe-2, Muse (which also labels speakers), Ink 2 and Nemotron."
       require_realtime: true
-      prefer: muse/muse-voice-transcribe-1.0
+      prefer: elevenlabs/scribe_v3_live
       only:
+        - elevenlabs/scribe_v3_live
+        - microsoft/MAI-Transcribe-2-Streaming
         - muse/muse-voice-transcribe-1.0
-        - elevenlabs/scribe_v2_realtime
         - cartesia/ink-2
         - together-nemotron/nvidia/nemotron-3-asr-streaming-0.6b
 
@@ -924,7 +1079,7 @@ stt:
     # and low-latency and speaks English, so nothing any of them declares tells these
     # apart from the rest and the names have to be given outright. Gemini, the two
     # Parakeets, Ink 2, Inworld and Scribe stay reachable through the shortcuts below and
-    # by naming a provider and model. Grok is the one of these four that names the voice
+    # by naming a provider and model. Grok is the one of these five that names the voice
     # without being asked, and so the one that can tell a bystander at the caller's
     # microphone from the caller.
     en-low-latency:
@@ -934,6 +1089,7 @@ stt:
       only:
         - deepgram/flux-general-en
         - deepgram/flux-general-multi
+        - assemblyai/assemblyai-stt-3-7-realtime-agent
         - grok/grok-stt
         - muse/muse-voice-transcribe-1.0
 
@@ -2165,6 +2321,37 @@ sts:
       model: gemini-3.8-live
       description: "Google's default live voice, and what Fast conversational prefers. About a second to first audio, sees images, and a slow tool no longer holds the conversation."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: Zephyr, name: Zephyr, description: "Bright", gender: female }
+        - { id: Puck, name: Puck, description: "Upbeat", gender: male }
+        - { id: Charon, name: Charon, description: "Informative", gender: male }
+        - { id: Kore, name: Kore, description: "Firm", gender: female }
+        - { id: Fenrir, name: Fenrir, description: "Excitable", gender: male }
+        - { id: Leda, name: Leda, description: "Youthful", gender: female }
+        - { id: Orus, name: Orus, description: "Firm", gender: male }
+        - { id: Aoede, name: Aoede, description: "Breezy", gender: female }
+        - { id: Callirrhoe, name: Callirrhoe, description: "Easy-going", gender: female }
+        - { id: Autonoe, name: Autonoe, description: "Bright", gender: female }
+        - { id: Enceladus, name: Enceladus, description: "Breathy", gender: male }
+        - { id: Iapetus, name: Iapetus, description: "Clear", gender: male }
+        - { id: Umbriel, name: Umbriel, description: "Easy-going", gender: male }
+        - { id: Algieba, name: Algieba, description: "Smooth", gender: male }
+        - { id: Despina, name: Despina, description: "Smooth", gender: female }
+        - { id: Erinome, name: Erinome, description: "Clear", gender: female }
+        - { id: Algenib, name: Algenib, description: "Gravelly", gender: male }
+        - { id: Rasalgethi, name: Rasalgethi, description: "Informative", gender: male }
+        - { id: Laomedeia, name: Laomedeia, description: "Upbeat", gender: female }
+        - { id: Achernar, name: Achernar, description: "Soft", gender: female }
+        - { id: Alnilam, name: Alnilam, description: "Firm", gender: male }
+        - { id: Schedar, name: Schedar, description: "Even", gender: male }
+        - { id: Gacrux, name: Gacrux, description: "Mature", gender: female }
+        - { id: Pulcherrima, name: Pulcherrima, description: "Forward", gender: female }
+        - { id: Achird, name: Achird, description: "Friendly", gender: male }
+        - { id: Zubenelgenubi, name: Zubenelgenubi, description: "Casual", gender: male }
+        - { id: Vindemiatrix, name: Vindemiatrix, description: "Gentle", gender: female }
+        - { id: Sadachbia, name: Sadachbia, description: "Lively", gender: male }
+        - { id: Sadaltager, name: Sadaltager, description: "Knowledgeable", gender: male }
+        - { id: Sulafat, name: Sulafat, description: "Warm", gender: female }
       realtime: true
       tier: low-latency
       supports: [endpointing, tools, text, input_transcript, output_transcript]
@@ -2185,6 +2372,37 @@ sts:
       model: gemini-3.8-live-extended-thinking
       description: "Near the top of the Artificial Analysis speech-to-speech board. Thinks in the background and talks while a tool runs. Sees images."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: Zephyr, name: Zephyr, description: "Bright", gender: female }
+        - { id: Puck, name: Puck, description: "Upbeat", gender: male }
+        - { id: Charon, name: Charon, description: "Informative", gender: male }
+        - { id: Kore, name: Kore, description: "Firm", gender: female }
+        - { id: Fenrir, name: Fenrir, description: "Excitable", gender: male }
+        - { id: Leda, name: Leda, description: "Youthful", gender: female }
+        - { id: Orus, name: Orus, description: "Firm", gender: male }
+        - { id: Aoede, name: Aoede, description: "Breezy", gender: female }
+        - { id: Callirrhoe, name: Callirrhoe, description: "Easy-going", gender: female }
+        - { id: Autonoe, name: Autonoe, description: "Bright", gender: female }
+        - { id: Enceladus, name: Enceladus, description: "Breathy", gender: male }
+        - { id: Iapetus, name: Iapetus, description: "Clear", gender: male }
+        - { id: Umbriel, name: Umbriel, description: "Easy-going", gender: male }
+        - { id: Algieba, name: Algieba, description: "Smooth", gender: male }
+        - { id: Despina, name: Despina, description: "Smooth", gender: female }
+        - { id: Erinome, name: Erinome, description: "Clear", gender: female }
+        - { id: Algenib, name: Algenib, description: "Gravelly", gender: male }
+        - { id: Rasalgethi, name: Rasalgethi, description: "Informative", gender: male }
+        - { id: Laomedeia, name: Laomedeia, description: "Upbeat", gender: female }
+        - { id: Achernar, name: Achernar, description: "Soft", gender: female }
+        - { id: Alnilam, name: Alnilam, description: "Firm", gender: male }
+        - { id: Schedar, name: Schedar, description: "Even", gender: male }
+        - { id: Gacrux, name: Gacrux, description: "Mature", gender: female }
+        - { id: Pulcherrima, name: Pulcherrima, description: "Forward", gender: female }
+        - { id: Achird, name: Achird, description: "Friendly", gender: male }
+        - { id: Zubenelgenubi, name: Zubenelgenubi, description: "Casual", gender: male }
+        - { id: Vindemiatrix, name: Vindemiatrix, description: "Gentle", gender: female }
+        - { id: Sadachbia, name: Sadachbia, description: "Lively", gender: male }
+        - { id: Sadaltager, name: Sadaltager, description: "Knowledgeable", gender: male }
+        - { id: Sulafat, name: Sulafat, description: "Warm", gender: female }
       realtime: true
       tier: high-quality
       supports: [endpointing, tools, text, input_transcript, output_transcript]
@@ -2204,6 +2422,37 @@ sts:
       model: gemini-3.1-flash-live-preview
       description: "The previous Gemini live voice, now a legacy preview. Under a second to first audio. Tools run synchronously, so a slow tool holds the conversation."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: Zephyr, name: Zephyr, description: "Bright", gender: female }
+        - { id: Puck, name: Puck, description: "Upbeat", gender: male }
+        - { id: Charon, name: Charon, description: "Informative", gender: male }
+        - { id: Kore, name: Kore, description: "Firm", gender: female }
+        - { id: Fenrir, name: Fenrir, description: "Excitable", gender: male }
+        - { id: Leda, name: Leda, description: "Youthful", gender: female }
+        - { id: Orus, name: Orus, description: "Firm", gender: male }
+        - { id: Aoede, name: Aoede, description: "Breezy", gender: female }
+        - { id: Callirrhoe, name: Callirrhoe, description: "Easy-going", gender: female }
+        - { id: Autonoe, name: Autonoe, description: "Bright", gender: female }
+        - { id: Enceladus, name: Enceladus, description: "Breathy", gender: male }
+        - { id: Iapetus, name: Iapetus, description: "Clear", gender: male }
+        - { id: Umbriel, name: Umbriel, description: "Easy-going", gender: male }
+        - { id: Algieba, name: Algieba, description: "Smooth", gender: male }
+        - { id: Despina, name: Despina, description: "Smooth", gender: female }
+        - { id: Erinome, name: Erinome, description: "Clear", gender: female }
+        - { id: Algenib, name: Algenib, description: "Gravelly", gender: male }
+        - { id: Rasalgethi, name: Rasalgethi, description: "Informative", gender: male }
+        - { id: Laomedeia, name: Laomedeia, description: "Upbeat", gender: female }
+        - { id: Achernar, name: Achernar, description: "Soft", gender: female }
+        - { id: Alnilam, name: Alnilam, description: "Firm", gender: male }
+        - { id: Schedar, name: Schedar, description: "Even", gender: male }
+        - { id: Gacrux, name: Gacrux, description: "Mature", gender: female }
+        - { id: Pulcherrima, name: Pulcherrima, description: "Forward", gender: female }
+        - { id: Achird, name: Achird, description: "Friendly", gender: male }
+        - { id: Zubenelgenubi, name: Zubenelgenubi, description: "Casual", gender: male }
+        - { id: Vindemiatrix, name: Vindemiatrix, description: "Gentle", gender: female }
+        - { id: Sadachbia, name: Sadachbia, description: "Lively", gender: male }
+        - { id: Sadaltager, name: Sadaltager, description: "Knowledgeable", gender: male }
+        - { id: Sulafat, name: Sulafat, description: "Warm", gender: female }
       realtime: true
       tier: low-latency
       supports: [endpointing, tools, text, input_transcript, output_transcript]
@@ -2226,6 +2475,17 @@ sts:
       model: gpt-realtime-2.1
       description: "OpenAI's realtime voice, and what Vision prefers. Semantic turn detection, sees images. Among the dearest."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: marin, name: Marin, description: "Warm, natural" }
+        - { id: cedar, name: Cedar, description: "Clear, steady" }
+        - { id: alloy, name: Alloy, description: "Neutral, balanced", default: true }
+        - { id: ash, name: Ash, description: "Clear, precise" }
+        - { id: ballad, name: Ballad, description: "Melodic, smooth" }
+        - { id: coral, name: Coral, description: "Warm, friendly" }
+        - { id: echo, name: Echo, description: "Resonant, deep" }
+        - { id: sage, name: Sage, description: "Calm, thoughtful" }
+        - { id: shimmer, name: Shimmer, description: "Bright, energetic" }
+        - { id: verse, name: Verse, description: "Versatile, expressive" }
       realtime: true
       tier: high-quality
       supports: [semantic_turns, endpointing, tools, text, input_transcript, output_transcript]
@@ -2241,6 +2501,17 @@ sts:
       model: gpt-realtime-2
       description: "OpenAI's previous realtime voice. Semantic turn detection, sees images. GPT-Realtime-2.1 is better at the same price."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: marin, name: Marin, description: "Warm, natural" }
+        - { id: cedar, name: Cedar, description: "Clear, steady" }
+        - { id: alloy, name: Alloy, description: "Neutral, balanced", default: true }
+        - { id: ash, name: Ash, description: "Clear, precise" }
+        - { id: ballad, name: Ballad, description: "Melodic, smooth" }
+        - { id: coral, name: Coral, description: "Warm, friendly" }
+        - { id: echo, name: Echo, description: "Resonant, deep" }
+        - { id: sage, name: Sage, description: "Calm, thoughtful" }
+        - { id: shimmer, name: Shimmer, description: "Bright, energetic" }
+        - { id: verse, name: Verse, description: "Versatile, expressive" }
       realtime: true
       tier: high-quality
       supports: [semantic_turns, endpointing, tools, text, input_transcript, output_transcript]
@@ -2265,6 +2536,38 @@ sts:
       model: gpt-live-1
       description: "Second on the Artificial Analysis board and keeps talking while a tool runs, but is slower to first audio and cannot see. Backend tokens are billed on top."
       languages: [de, en, fr, hi, ja, ko, pt]
+      voices:
+        - { id: marin, name: Marin, description: "Warm, natural", default: true }
+        - { id: gleam, name: Gleam, description: "North American English", gender: female }
+        - { id: meridian, name: Meridian, description: "North American English", gender: male }
+        - { id: vesper, name: Vesper, description: "British English", gender: male }
+        - { id: quartz, name: Quartz, description: "Australian English", gender: female }
+        - { id: ripple, name: Ripple, description: "Australian English", gender: male }
+        - { id: willow, name: Willow, description: "Irish English", gender: female }
+        - { id: stone, name: Stone, description: "Irish English", gender: male }
+        - { id: delta, name: Delta, description: "Southern U.S. English", gender: female }
+        - { id: cinder, name: Cinder, description: "Southern U.S. English", gender: male }
+        - { id: beacon, name: Beacon, description: "Filipino English", gender: male }
+        - { id: bossa, name: Bossa, description: "Brazilian Portuguese", gender: female }
+        - { id: tempo, name: Tempo, description: "Brazilian Portuguese", gender: male }
+        - { id: nuri, name: Nuri, description: "German", gender: female }
+        - { id: juni, name: Juni, description: "German", gender: female }
+        - { id: flitz, name: Flitz, description: "German", gender: male }
+        - { id: brise, name: Brise, description: "French", gender: female }
+        - { id: sillage, name: Sillage, description: "French", gender: male }
+        - { id: nira, name: Nira, description: "Hindi", gender: female }
+        - { id: harema, name: Harema, description: "Japanese", gender: female }
+        - { id: shida, name: Shida, description: "Japanese", gender: male }
+        - { id: noeul, name: Noeul, description: "Korean", gender: female }
+        - { id: cedar, name: Cedar, description: "Clear, steady" }
+        - { id: alloy, name: Alloy, description: "Neutral, balanced" }
+        - { id: ash, name: Ash, description: "Clear, precise" }
+        - { id: ballad, name: Ballad, description: "Melodic, smooth" }
+        - { id: coral, name: Coral, description: "Warm, friendly" }
+        - { id: echo, name: Echo, description: "Resonant, deep" }
+        - { id: sage, name: Sage, description: "Calm, thoughtful" }
+        - { id: shimmer, name: Shimmer, description: "Bright, energetic" }
+        - { id: verse, name: Verse, description: "Versatile, expressive" }
       realtime: true
       tier: high-quality
       supports: [full_duplex, tools, text, input_transcript, output_transcript]
@@ -2282,6 +2585,12 @@ sts:
       model: grok-voice-3.0
       description: "xAI's Grok Voice 3.0, top of the Artificial Analysis speech-to-speech board and under a second to first audio. Cannot see."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: eve, name: Eve, description: "Energetic, upbeat", gender: female, default: true }
+        - { id: ara, name: Ara, description: "Warm, friendly", gender: female }
+        - { id: rex, name: Rex, description: "Confident, clear", gender: male }
+        - { id: sal, name: Sal, description: "Smooth, balanced", gender: neutral }
+        - { id: leo, name: Leo, description: "Authoritative, strong", gender: male }
       realtime: true
       tier: low-latency
       supports: [endpointing, tools, text, input_transcript, output_transcript]
@@ -2297,6 +2606,12 @@ sts:
       model: grok-voice-think-fast-2.0
       description: "xAI's previous Grok Voice, now deprecated. Fast, cannot see, and priced by the minute of audio xAI bills."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: eve, name: Eve, description: "Energetic, upbeat", gender: female, default: true }
+        - { id: ara, name: Ara, description: "Warm, friendly", gender: female }
+        - { id: rex, name: Rex, description: "Confident, clear", gender: male }
+        - { id: sal, name: Sal, description: "Smooth, balanced", gender: neutral }
+        - { id: leo, name: Leo, description: "Authoritative, strong", gender: male }
       realtime: true
       tier: low-latency
       supports: [endpointing, tools, text, input_transcript, output_transcript]
@@ -2312,6 +2627,39 @@ sts:
       model: qwen3.5-omni-plus-realtime
       description: "Top of the Artificial Analysis quality board and the cheapest, but it takes no tools and has published no data policy."
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      voices:
+        - { id: Tina, name: Tina, description: "Warm, conversational", gender: female, default: true }
+        - { id: Ethan, name: Ethan, description: "Bright, upbeat", gender: male }
+        - { id: Harvey, name: Harvey, description: "Calm, composed", gender: male }
+        - { id: Serena, name: Serena, description: "Gentle, soothing", gender: female }
+        - { id: Maia, name: Maia, description: "Clear, approachable", gender: female }
+        - { id: Ryan, name: Ryan, description: "Expressive, rhythmic", gender: male }
+        - { id: Katerina, name: Katerina, description: "Rich, poised", gender: female }
+        - { id: Jennifer, name: Jennifer, description: "Smooth, natural", gender: female }
+        - { id: Aiden, name: Aiden, description: "Warm, relaxed", gender: male }
+        - { id: Mione, name: Mione, description: "Soft, natural", gender: female }
+        - { id: Mia, name: Mia, description: "Gentle, attentive", gender: female }
+        - { id: Evan, name: Evan, description: "Clear, neutral", gender: male }
+        - { id: Raymond, name: Raymond, description: "Steady, measured", gender: male }
+        - { id: "Theo Calm", name: "Theo Calm", description: "Calm, even", gender: male }
+        - { id: "Liora Mira", name: "Liora Mira", description: "Expressive, bright", gender: female }
+        - { id: Andre, name: Andre, description: "Deep, steady", gender: male }
+        - { id: Emilien, name: Emilien, description: "French, warm", gender: male }
+        - { id: Sonrisa, name: Sonrisa, description: "Spanish, upbeat", gender: female }
+        - { id: Bodega, name: Bodega, description: "Spanish, warm", gender: male }
+        - { id: Dolce, name: Dolce, description: "Italian, smooth", gender: male }
+        - { id: Lenn, name: Lenn, description: "German, clear", gender: male }
+        - { id: Sohee, name: Sohee, description: "Korean, warm", gender: female }
+        - { id: "Ono Anna", name: "Ono Anna", description: "Japanese, lively", gender: female }
+        - { id: Alek, name: Alek, description: "Russian, steady", gender: male }
+        - { id: Griet, name: Griet, description: "Dutch, clear", gender: female }
+        - { id: Siiri, name: Siiri, description: "Finnish, calm", gender: female }
+        - { id: Ingrid, name: Ingrid, description: "Norwegian, clear", gender: female }
+        - { id: Cindy, name: Cindy, description: "Friendly, clear", gender: female }
+        - { id: Sunny, name: Sunny, description: "Bright, cheerful", gender: female }
+        - { id: Dylan, name: Dylan, description: "Casual, natural", gender: male }
+        - { id: Kiki, name: Kiki, description: "Cantonese, upbeat", gender: female }
+        - { id: Rocky, name: Rocky, description: "Cantonese, lively", gender: male }
       realtime: true
       tier: low-latency
       supports: [endpointing, input_transcript, output_transcript]
@@ -2332,6 +2680,20 @@ sts:
       model: qwen-audio-3.1-realtime-plus
       description: "Alibaba's Qwen-Audio. Calls tools, takes typed turns and has a semantic turn detector, but cannot see."
       languages: [de, en, es, fr, id, it, ja, ko, pt, ru, zh]
+      voices:
+        - { id: longanqian_v3.1, name: "Longanqian v3.1", description: "Warm, natural", gender: female, default: true }
+        - { id: longanhuan_v3.1, name: "Longanhuan v3.1", description: "Bright, lively", gender: female }
+        - { id: longanlingxin_v3.1, name: "Longanlingxin v3.1", description: "Clear, gentle", gender: female }
+        - { id: longanfengyue_v3.1, name: "Longanfengyue v3.1", description: "Warm, calm", gender: male }
+        - { id: xunanchuan_v3.1, name: "Xunanchuan v3.1", description: "Steady, expressive", gender: male }
+        - { id: beth_v3.1, name: "Beth v3.1", description: "English, friendly", gender: female }
+        - { id: betty_v3.1, name: "Betty v3.1", description: "English, warm", gender: female }
+        - { id: cally_v3.1, name: "Cally v3.1", description: "English, clear", gender: female }
+        - { id: longanqian, name: Longanqian, description: "Warm, conversational", gender: female }
+        - { id: longanlingxin, name: Longanlingxin, description: "Gentle, steady", gender: female }
+        - { id: longanlingxi, name: Longanlingxi, description: "Soft, natural", gender: female }
+        - { id: longanxiaoxin, name: Longanxiaoxin, description: "Youthful, bright", gender: female }
+        - { id: longanlufeng, name: Longanlufeng, description: "Clear, resonant", gender: male }
       realtime: true
       tier: high-quality
       supports: [semantic_turns, endpointing, tools, text, input_transcript, output_transcript]
@@ -2407,10 +2769,11 @@ llm:
     # times input; a prompt over 272k tokens costs twice the input, cached and write rates
     # and 1.5 times the output for the whole request; and the tier OpenAI answer that they
     # served a request at multiplies every rate: flex and batch half, fast twice, and
-    # ultrafast, which only GPT-6 Astra and GPT-6.1 Sol offer, six times. Fast was called
-    # priority until July 2026, and GPT-5.6 and earlier still answer priority for a fast
-    # request, so priority is priced as fast. A tier not named here is priced at the
-    # default rates and logged.
+    # ultrafast, which only GPT-6 Astra, GPT-6.1 Sol and GPT-6.2 Sol and Astra offer, six
+    # times. GPT-6.2's ultrafast is three times until 2027-03-01, when it goes to six, and
+    # GPT-6.2 offers no flex. Fast was called priority until July 2026, and GPT-5.6 and
+    # earlier still answer priority for a fast request, so priority is priced as fast. A
+    # tier not named here is priced at the default rates and logged.
     - provider: openai
       model: gpt-5.6-luna
       description: "OpenAI's small, fast model. Reads images, and costs little."
@@ -2428,11 +2791,11 @@ llm:
     # the first thing that arrives.
     #
     # OpenAI do not train on API traffic unless the organisation opts in, so that half is a
-    # no. Retention is the gap. Abuse-monitoring logs are kept for up to 30 days, but a
-    # response sent without store: false - which is how this provider sends one unless asked
-    # to store it - is kept as application state for "at least 30 days", a floor with no
-    # ceiling, so it is unspecified. Zero Data Retention would bring it to none, and it is an
-    # approval OpenAI grant per organisation rather than a flag sent with a request.
+    # no. The provider sends every response with store: false, so none is kept as application
+    # state, which OpenAI would otherwise do for "at least 30 days", a floor with no ceiling.
+    # What is left is abuse-monitoring logs, kept for up to 30 days. Zero Data Retention would
+    # bring it to none, and it is an approval OpenAI grant per organisation rather than a flag
+    # sent with a request.
     - provider: openai
       model: gpt-6-luna
       description: "OpenAI's most efficient model, and what Vision prefers. Reads images, and the cheapest OpenAI model here."
@@ -2444,7 +2807,7 @@ llm:
       input_modalities: [image]
       data_policy:
         trains_on_data: "no"
-        retention: unspecified
+        retention: 30d
 
     # What llm-fast prefers, so this is the model a conversation gets unless it is down. It
     # is the dearest of this tier by some way and its thinking is billed as output, which is
@@ -2534,7 +2897,7 @@ llm:
       input_modalities: [image]
       data_policy:
         trains_on_data: "no"
-        retention: unspecified
+        retention: 30d
 
     # GPT-5.6 Sol, which GPT-6 Sol below replaces as what llm-thinking prefers. It stays
     # declared because callers name it outright as their subagent, and a name that is no
@@ -2555,7 +2918,7 @@ llm:
     # Index at 58 - at max effort. The provider sends no effort, so it thinks at the medium
     # effort it defaults to, where that index puts it at 51. Thinking is adaptive and cannot
     # be switched off, and it counts against max_output_tokens. Forced tool use is a 400 on
-    # this model, so a request with tool_choice required fails if it is routed here.
+    # this model, so the provider refuses tool_choice required before it goes out.
     #
     # Cache reads are 5% of input rather than the usual 10%, and five-minute cache writes
     # 125% (https://platform.claude.com/docs/en/about-claude/pricing).
@@ -2576,11 +2939,41 @@ llm:
         trains_on_data: "no"
         retention: 30d
 
+    # Claude Fable 5.2, released 9 November 2026: Anthropic's tier above Opus, for long
+    # agentic work and the hardest reasoning, and first on the Artificial Analysis
+    # Intelligence Index at 65 - at max effort, where its first answer token takes over three
+    # and a half minutes. The provider sends no effort, so it thinks at the high effort it
+    # defaults to, where that index puts it at 62 and the first answer token at 23 s; low is
+    # 54 and 7 s. Too slow for a live turn and twice Opus 5.5's price, so no shortcut prefers
+    # it: it is reached by name or as failover in the quality tier. Thinking is adaptive and
+    # cannot be switched off, and it counts against max_output_tokens. Forced tool use is a
+    # 400 on this model, so the provider refuses tool_choice required before it goes out.
+    #
+    # Cache reads are 2.5% of input, and five-minute cache writes 125%, flat across the 1M
+    # context (https://platform.claude.com/docs/en/about-claude/pricing, read 2026-11-19).
+    # Fast mode ($16/$80) and US-only inference (1.1x) are never asked for from here.
+    - provider: anthropic
+      model: claude-fable-5-2
+      description: "Anthropic's Fable 5.2, top of the Artificial Analysis Intelligence Index. Reads images. Twice Opus 5.5's price, and slow to start."
+      benchmark: { intelligence_index: 62, output_tokens_per_second: 108 }
+      context_window: 1000000
+      languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      realtime: true
+      tier: high-quality
+      input_modalities: [image]
+      # Anthropic's Commercial Terms say they "may not train models on Customer Content",
+      # and API inputs and outputs are deleted "within 30 days of receipt or generation".
+      # Fable 5.2 requires 30-day retention and is not offered under zero data retention
+      # unless Anthropic expressly authorises it, so this is 30d whatever agreement we hold.
+      data_policy:
+        trains_on_data: "no"
+        retention: 30d
+
     # Anthropic's middle model, second on the Artificial Analysis Intelligence Index at 56 -
     # at max effort. The provider sends no effort, so it thinks at the high effort it
     # defaults to, where that index puts it at 47. Thinking is adaptive and counts against max_output_tokens.
-    # Forced tool use is a 400 on this model, so a request with tool_choice required fails
-    # if it is routed here.
+    # Forced tool use is a 400 on this model, so the provider refuses tool_choice required
+    # before it goes out.
     #
     # Cache reads are 5% of input since Anthropic halved them on 7 October 2026, and
     # five-minute cache writes 125%.
@@ -2664,12 +3057,12 @@ llm:
         trains_on_data: "no"
         retention: 30d
 
-    # GPT-6 Sol, which GPT-6.1 Sol below replaces as what llm-thinking prefers. It stays
-    # declared because callers name it outright, and because it is the Sol that can still be
-    # told not to think. Artificial Analysis score it 48 at roughly half the cost per task of
-    # GPT-5.6 Sol. OpenAI default it to medium reasoning effort; the provider asks for none
-    # unless a request names one. OpenAI's account, so the same data policy as GPT-6 Luna
-    # above.
+    # GPT-6 Sol, which GPT-6.1 Sol and then GPT-6.2 Sol below replaced as what llm-thinking
+    # prefers. It stays declared because callers name it outright, and because it is the Sol
+    # that can still be told not to think. Artificial Analysis score it 48 at roughly half
+    # the cost per task of GPT-5.6 Sol. OpenAI default it to medium reasoning effort; the
+    # provider asks for none unless a request names one. OpenAI's account, so the same data
+    # policy as GPT-6 Luna above.
     - provider: openai
       model: gpt-6-sol
       description: "OpenAI's previous model for coding and agentic work. Reads images, and can answer without thinking first."
@@ -2681,10 +3074,11 @@ llm:
       input_modalities: [image]
       data_policy:
         trains_on_data: "no"
-        retention: unspecified
+        retention: 30d
 
-    # GPT-6.1 Sol is GPT-6 Sol's direct upgrade at the same input and output price, and what
-    # llm-thinking prefers, so this is the model the skills run on unless it is down.
+    # GPT-6.1 Sol is GPT-6 Sol's direct upgrade at the same input and output price. GPT-6.2
+    # Sol below replaces it as what llm-thinking prefers; it stays declared because callers
+    # name it outright.
     # Artificial Analysis score it 51 at xhigh, 1 below GPT-6 Astra at xhigh, at a fifth of
     # the price. Its efforts run from low to xhigh: none and max are a 400, so the provider
     # asks for low when a request names no effort. Cache writes are $2.50 per million, and a prompt over 272k
@@ -2692,7 +3086,7 @@ llm:
     # the whole request. The same data policy as GPT-6 Luna above.
     - provider: openai
       model: gpt-6.1-sol
-      description: "OpenAI's model for coding and agentic work, and what llm-thinking prefers. Reads images, and always thinks first."
+      description: "OpenAI's previous model for coding and agentic work. Reads images, and always thinks first."
       benchmark: { intelligence_index: 42, output_tokens_per_second: 60 }
       context_window: 1050000
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
@@ -2701,7 +3095,29 @@ llm:
       input_modalities: [image]
       data_policy:
         trains_on_data: "no"
-        retention: unspecified
+        retention: 30d
+
+    # GPT-6.2 Sol (2026-11-17) is GPT-6.1 Sol's direct upgrade at the same price, and what
+    # llm-thinking prefers, so this is the model the skills run on unless it is down. Artificial
+    # Analysis score it 57 at max effort, at 75 output tokens a second; they have no row at
+    # low, the effort the provider sends, so there is no index here. Its
+    # efforts run from low to max: none and minimal are a 400, so the provider asks for low when
+    # a request names no effort. $2 in, $0.10 cached, $2.50 a 30-minute cache write and $10 out
+    # per million; over 272k input tokens the input and cache rates double and output is 1.5
+    # times, for the whole request (developers.openai.com/api/docs/pricing, read 2026-11-19).
+    # The same data policy as GPT-6 Luna above.
+    - provider: openai
+      model: gpt-6.2-sol
+      description: "OpenAI's model for coding and agentic work, and what llm-thinking prefers. Reads images, and always thinks first."
+      benchmark: { output_tokens_per_second: 75 }
+      context_window: 1050000
+      languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      realtime: true
+      tier: high-quality
+      input_modalities: [image]
+      data_policy:
+        trains_on_data: "no"
+        retention: 30d
 
     # GPT-6 Astra is OpenAI's most capable model, for the hardest end-to-end work, and 53 on
     # the Artificial Analysis Intelligence Index, the top of the non-Anthropic field. It
@@ -2710,7 +3126,7 @@ llm:
     # as failover in the quality tier. The same data policy as GPT-6 Luna above.
     - provider: openai
       model: gpt-6-astra
-      description: "OpenAI's most capable model, for the hardest reasoning. Always thinks first. The dearest here."
+      description: "OpenAI's previous most capable model, for the hardest reasoning. Always thinks first. The dearest here."
       benchmark: { intelligence_index: 46, output_tokens_per_second: 53 }
       context_window: 1000000
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
@@ -2719,7 +3135,29 @@ llm:
       input_modalities: [image]
       data_policy:
         trains_on_data: "no"
-        retention: unspecified
+        retention: 30d
+
+    # GPT-6.2 Astra (2026-11-17) is GPT-6 Astra's direct upgrade, and cheaper: $8 in, $0.40
+    # cached, $10 a 30-minute cache write and $40 out per million, against $10, $1, $12.50 and
+    # $50; over 272k input tokens the input and cache rates double and output is 1.5 times, for
+    # the whole request (developers.openai.com/api/docs/pricing, read 2026-11-19). Artificial
+    # Analysis score it 62 at max effort, third of the field, at 50 output tokens a second; they
+    # have no row at low, the effort the provider sends, so there is no index here. Its efforts
+    # run from low to max: none and minimal are a 400. Still four times Sol's price, so nothing
+    # prefers it; it is reached by name or as failover in the quality tier. The same data
+    # policy as GPT-6 Luna above.
+    - provider: openai
+      model: gpt-6.2-astra
+      description: "OpenAI's most capable model, for the hardest reasoning. Always thinks first."
+      benchmark: { output_tokens_per_second: 50 }
+      context_window: 1050000
+      languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      realtime: true
+      tier: high-quality
+      input_modalities: [image]
+      data_policy:
+        trains_on_data: "no"
+        retention: 30d
 
     # Meta's Muse Spark 1.3 on their hosted Model API, 48 on the Artificial Analysis
     # Intelligence Index at max effort and 45 at xhigh, and at around 230-250 output tokens
@@ -2759,6 +3197,27 @@ llm:
       languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
       realtime: true
       tier: high-quality
+      input_modalities: [image]
+      data_policy:
+        trains_on_data: "no"
+        retention: unspecified
+
+    # Meta's Muse Ember, the smallest Muse: $0.10/1M in and $0.50/1M out up to 200k tokens
+    # of prompt, three times that above (dev.meta.ai/models/muse-ember, read 2026-11-19).
+    # Artificial Analysis put it at about 470 output tokens a second. It takes Spark's
+    # requests unchanged: none is a 400, so the provider asks for low, and tool_choice takes
+    # auto and nothing else. Unlike Spark it is quick enough for the fast tier: streamed, the
+    # first answer token came 1.0-2.3 s after the request at minimal and low effort, against
+    # 1.5-4.7 s for Spark. Nothing prefers it; it is reached by name or as failover in the
+    # fast tier. The Standard terms are Spark's: no training, no retention window named.
+    - provider: meta
+      model: muse-ember-1.0
+      description: "Meta's smallest Muse, fast and cheap. Reads images and always thinks first."
+      benchmark: { output_tokens_per_second: 468 }
+      context_window: 1000000
+      languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      realtime: true
+      tier: low-latency
       input_modalities: [image]
       data_policy:
         trains_on_data: "no"
@@ -2885,6 +3344,26 @@ llm:
         trains_on_data: "no"
         retention: unspecified
 
+    # Qwen4-Max, Alibaba's closed 2.4T mixture-of-experts with 71B active, on QwenCloud's
+    # Singapore endpoint, where the key lives: a QwenCloud key works only in its own region.
+    # It thinks by default, at high effort; thinking is off here so the answer comes first.
+    # Singapore prices it at $1.50 per million input, $4.50 output (thinking included) and
+    # $0.075 for a cache hit, with no input-length tiers; an explicit five-minute cache
+    # write is $1.875 (docs.qwencloud.com/developer-guides/getting-started/pricing, read
+    # 2026-11-22). Only implicit caching is used here, so nothing is billed as a write.
+    # QwenCloud keep chat completions in memory only and never train on them.
+    - provider: qwen
+      model: qwen4-max
+      description: "Alibaba's Qwen4-Max, a 2.4T mixture-of-experts with 71B active. Reads images; thinking is off."
+      benchmark: { intelligence_index: 43 }
+      context_window: 1000000
+      languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      realtime: true
+      tier: high-quality
+      data_policy:
+        trains_on_data: "no"
+        retention: none
+
     # NVIDIA's Nemotron 3.5 Super VL, 120B with 12B active and the strongest US open-weight
     # model, 26 on the Artificial Analysis Intelligence Index. It reads images, so it is
     # also somewhere for vlm to fall over to. Together serve NVFP4 weights, which Artificial
@@ -2979,6 +3458,30 @@ llm:
         trains_on_data: "no"
         retention: unspecified
 
+    # Kimi K3.1 Pro, post-trained from K3, at $2 in, $0.20 cached and $10 out on both hosts
+    # (baseten.co/library/kimi-k31-pro and together.ai/pricing, read 2026-11-22), with no
+    # cache-write rate. Moonshot's API always reasons, but the open weights take the Kimi
+    # template's thinking switch, so these answer without it. No intelligence index: AA's 46
+    # is at effort max on Moonshot's API, not what these entries send.
+    - provider: baseten
+      model: moonshotai/Kimi-K3.1-Pro
+      description: "Moonshot's Kimi K3.1 Pro, K3 post-trained further with a 1M context, for less than K3."
+      context_window: 1048576
+      languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      realtime: true
+      tier: high-quality
+
+    - provider: together
+      model: moonshotai/Kimi-K3.1-Pro
+      description: "Kimi K3.1 Pro on Together, at the same price as the same weights on Baseten."
+      context_window: 1048576
+      languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      realtime: true
+      tier: high-quality
+      data_policy:
+        trains_on_data: "no"
+        retention: unspecified
+
     - provider: together
       model: Qwen/Qwen3.8-2.4T-A95B
       description: "Alibaba's largest open Qwen, 2.4T parameters with 95B active."
@@ -3025,6 +3528,74 @@ llm:
         trains_on_data: "no"
         retention: unspecified
 
+    # Gemini 4 Hydrogen, Google's cheaper Gemini 4 for coding and agent work. It takes low,
+    # medium, high and xhigh, where Argon stops at high, and defaults to high as Google do.
+    # Artificial Analysis score it 27, 41, 51 and 54 across those, so high is one above
+    # Argon, and on our own runs it started answering in a sixth of Argon's time. xhigh
+    # spent two and a half times the output of high for 3 points. The same unified
+    # 1M-token context as Argon. $1.50 in, $0.075 cached and $7.50 out per
+    # 1M tokens, flat across the context, thinking billed as output, implicit caching only
+    # (ai.google.dev/gemini-api/docs/pricing, read 2026-11-13). The data terms are the paid
+    # Developer API's, as for Argon above.
+    - provider: gemini
+      model: gemini-4-hydrogen
+      description: "Google's cheaper Gemini 4, quick at agent and tool work. Reads images, and can be asked to think from low to xhigh."
+      benchmark: { intelligence_index: 51 }
+      context_window: 1048576
+      languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      realtime: true
+      tier: high-quality
+      input_modalities: [image]
+      data_policy:
+        trains_on_data: "no"
+        retention: unspecified
+
+    # Gemini 4 Neon, between Hydrogen and Carbon, generally available on the paid tier only.
+    # It takes low, medium, high and xhigh, as Hydrogen does, and the provider asks for high.
+    # Artificial Analysis score it 44, 55, 60 and 61 across those. At low it took a median
+    # 3.9 s to its first answer token on our runs, against 2.2 s for Hydrogen and 1.6 s for
+    # 3.8 Flash, so it is no live-path model. The same unified 1M-token context as Argon.
+    # $3 in, $0.15 cached and $15 out per 1M tokens, flat across the context, thinking
+    # billed as output, implicit caching only (aistudio.google.com/docs/pricing, read
+    # 2026-11-19). The data terms are the paid Developer API's, as for Argon above.
+    - provider: gemini
+      model: gemini-4-neon
+      description: "Google's stronger Gemini 4 for hard work, above Hydrogen and dearer. Reads images, and can be asked to think from low to xhigh."
+      benchmark: { intelligence_index: 60 }
+      context_window: 1048576
+      languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      realtime: true
+      tier: high-quality
+      input_modalities: [image]
+      data_policy:
+        trains_on_data: "no"
+        retention: unspecified
+
+    # Gemini 4 Carbon, Google's strongest reasoning model, paid tier only. It takes Argon's
+    # low, medium and high (minimal and xhigh are a 400), and the provider asks for high as
+    # it does for Argon, though Google default to medium. Artificial Analysis score it 54,
+    # 58 and 60 across those, with a time to first answer token of 7 s, 33 s and 69 s, so it
+    # is for work nobody waits on. The same unified 1M-token context as Argon, and the API
+    # reports 32,768 output tokens a response.
+    #
+    # Caching is implicit only. $2 in, $0.10 cached and $10 out per 1M tokens, flat across
+    # the context, thinking billed as output, are Google's introductory rates through 30
+    # November 2026; from 1 December they double to $4, $0.20 and $20
+    # (aistudio.google.com/docs/pricing, read 2026-11-22). The data terms are the paid
+    # Developer API's, as for Argon above.
+    - provider: gemini
+      model: gemini-4-carbon
+      description: "Google's strongest Gemini 4, for the hardest reasoning. Reads images, thinks longest and is slow to answer."
+      benchmark: { intelligence_index: 60 }
+      context_window: 1048576
+      languages: [ar, de, en, es, fr, hi, id, it, ja, ko, nl, pl, pt, ru, th, tr, vi, zh]
+      realtime: true
+      tier: high-quality
+      input_modalities: [image]
+      data_policy:
+        trains_on_data: "no"
+        retention: unspecified
+
     # The load benchmark's stand-in, built only where mock_providers is on. Everything
     # about this entry is chosen to keep it out of the way of real traffic: zxx is the ISO
     # code for "no linguistic content", so no shortcut asking for a language reaches it,
@@ -3048,16 +3619,19 @@ llm:
   aliases:
     # Small talk, as cheaply and quickly as it can be had: the smallest models here, for
     # an agent whose turns are short and whose instructions are simple. Gemma 4 26B, with
-    # 4B active per token, is preferred; GPT-5.6 Luna catches it being down. Like the STT
-    # groups this names its members, since being small is not something a model declares.
+    # 4B active per token, is preferred; Muse Ember and GPT-5.6 Luna catch it being down.
+    # Ember thinks before it answers, about a second at low effort against Gemma's 130 ms,
+    # but costs half of Luna ($0.10 and $0.50 per million tokens) and calls tools. Like the
+    # STT groups this names its members, since being small is not something a model declares.
     llm-conversational:
       title: Conversational
-      description: "Super lightweight models for simple, short turns. Prefers Gemma 4 26B-A4B, then GPT-5.6 Luna."
+      description: "Super lightweight models for simple, short turns. Prefers Gemma 4 26B-A4B, then Muse Ember and GPT-5.6 Luna."
       require_realtime: true
       tier: low-latency
       prefer: gemma/gemma-4-26B-A4B-it
       only:
         - gemma/gemma-4-26B-A4B-it
+        - meta/muse-ember-1.0
         - openai/gpt-5.6-luna
 
     # A fast answer, in whatever language. The shorthand a caller reaches for when the only
@@ -3074,13 +3648,17 @@ llm:
       tier: low-latency
       prefer: gemini/gemini-3.8-flash
 
-    # The best answers a conversation can have, at the cost of waiting for them. GPT-5.6
-    # Sol is preferred, with the rest of the quality tier as failover.
+    # The best answers a conversation can have, at the cost of waiting for them. GPT-6.2
+    # Astra, OpenAI's newest and strongest (62 on the Artificial Analysis Intelligence Index
+    # at max effort, against GPT-5.6 Sol's 28 here), is preferred, with the rest of the
+    # quality tier as failover. It costs twice what Sol did, $8 and $40 per million tokens,
+    # and writes at about 50 tokens a second. Claude Fable 5.2 scores as high but takes about
+    # 23 s to its first answer token at its default effort, too long for a conversation.
     llm-smart:
       title: Smart
-      description: "The strongest models, for agents that must get hard questions right. Slower to answer. Prefers GPT-5.6 Sol."
+      description: "The strongest models, for agents that must get hard questions right. Slower to answer. Prefers GPT-6.2 Astra."
       tier: high-quality
-      prefer: openai/gpt-5.6-sol
+      prefer: openai/gpt-6.2-astra
 
     en-low-latency:
       languages: [en]
@@ -3126,17 +3704,17 @@ llm:
     # answer itself. The conversation carries on while it thinks, so this is the shorthand
     # for quality over speed, and nothing here is chosen for how soon it starts.
     #
-    # GPT-6.1 Sol is preferred outright rather than left to the ranking, for the same reason
+    # GPT-6.2 Sol is preferred outright rather than left to the ranking, for the same reason
     # llm-fast pins its own: the model that does the thinking is the one this deployment
     # chose. The rest of the tier is still here to catch it being down.
     llm-thinking:
       tier: high-quality
-      prefer: openai/gpt-6.1-sol
+      prefer: openai/gpt-6.2-sol
 
     # What the agent moderator (Nora) reviews flagged content on. GPT-5.6 Luna is preferred
     # for now. Gemma on our own GPUs, which was preferred before, stands behind it: a review
     # is a short ruling against labels, and the app's moderation volume is billed by the GPU
-    # minute there rather than by the token. GPT-6.1 Sol, what llm-thinking prefers, catches
+    # minute there rather than by the token. GPT-6.2 Sol, what llm-thinking prefers, catches
     # both being down, or OpenAI failing Luna while GEMMA_BASE_URL is unset. Named outright
     # with only because the three share no tier. It has no title: the moderator page offers
     # no model picker, so it is the template's default rather than a choice.
@@ -3145,7 +3723,7 @@ llm:
       only:
         - openai/gpt-5.6-luna
         - gemma/gemma-4-26B-A4B-it
-        - openai/gpt-6.1-sol
+        - openai/gpt-6.2-sol
 
     # What product data is analysed on: the model that reads a week of calls, tickets and
     # threads and writes what customers are asking for. That is a different intent from
@@ -3648,7 +4226,7 @@ ocr:
       input_modalities: [image]
       data_policy:
         trains_on_data: "no"
-        retention: unspecified
+        retention: 30d
 
     # Claude Haiku 5.5 at Luna's rates, a fallback that sees for the pages and pictures read
     # with their figures summarised. It thinks before it answers, so a page takes more

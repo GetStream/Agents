@@ -31,6 +31,10 @@ public struct AgentTool: Sendable {
     /// model the tool failed and why.
     public let run: @Sendable ([String: RawJSON]) async throws -> ToolOutput
 
+    /// Runs a typed tool on its arguments as the model wrote them, decoding its type straight
+    /// from that JSON, or nil for a tool that takes them as a dictionary.
+    private(set) var runWritten: (@Sendable (String) async throws -> ToolOutput)?
+
     public enum Executor: String, Sendable {
         case server
         /// A person's device: the call is shown as awaiting it until it answers.
@@ -104,6 +108,134 @@ public struct AgentTool: Sendable {
             name: name, description: description, parameters: parameters, executor: executor,
             displayTitle: displayTitle, approval: approval
         ) { ToolOutput(text: try await run($0)) }
+    }
+
+    /// A tool whose arguments are decoded into a type of yours, answering with pictures as well
+    /// as words. Arguments that do not decode fail the call, and the model is told why.
+    public init<Arguments: Decodable>(
+        name: String,
+        description: String,
+        parameters: RawJSON? = nil,
+        executor: Executor? = nil,
+        displayTitle: String? = nil,
+        approval: Approval? = nil,
+        run: @escaping @Sendable (Arguments) async throws -> ToolOutput
+    ) {
+        self.init(
+            name: name, description: description, parameters: parameters, executor: executor,
+            displayTitle: displayTitle, approval: approval,
+            run: { (arguments: [String: RawJSON]) in try await run(Self.decode(JSONEncoder().encode(arguments))) })
+        runWritten = { try await run(Self.decode(Data($0.utf8))) }
+    }
+
+    /// A tool whose arguments are decoded into a type of yours, answering in words. Arguments
+    /// that do not decode fail the call, and the model is told why.
+    ///
+    ///     struct WeatherLookup: Decodable { let location: String }
+    ///
+    ///     AgentTool(name: "weather_lookup", description: "Look up the weather",
+    ///               parameters: .strings(["location": "a city"], required: ["location"])) {
+    ///         (args: WeatherLookup) in try await weather.today(args.location)
+    ///     }
+    public init<Arguments: Decodable>(
+        name: String,
+        description: String,
+        parameters: RawJSON? = nil,
+        executor: Executor? = nil,
+        displayTitle: String? = nil,
+        approval: Approval? = nil,
+        run: @escaping @Sendable (Arguments) async throws -> String
+    ) {
+        self.init(
+            name: name, description: description, parameters: parameters, executor: executor,
+            displayTitle: displayTitle, approval: approval,
+            run: { (arguments: Arguments) in ToolOutput(text: try await run(arguments)) })
+    }
+
+    /// How deep a typed tool's arguments may nest. Decoding a type that holds itself, such as
+    /// `RawJSON`, recurses once a level, on a thread whose stack holds a few hundred.
+    private static let deepestNesting = 64
+
+    private static func decode<Arguments: Decodable>(_ arguments: Data) throws -> Arguments {
+        do {
+            guard nesting(of: arguments) <= deepestNesting else {
+                throw DecodingError.dataCorrupted(
+                    .init(codingPath: [], debugDescription: "they nest more than \(deepestNesting) levels deep"))
+            }
+            return try JSONDecoder().decode(Arguments.self, from: arguments)
+        } catch let error as DecodingError {
+            throw ToolArgumentsError(failure: error)
+        }
+    }
+
+    /// How many objects and arrays deep `json` goes, counted in one pass with no recursion.
+    private static func nesting(of json: Data) -> Int {
+        var depth = 0
+        var deepest = 0
+        var inString = false
+        var escaped = false
+        for byte in json {
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if byte == UInt8(ascii: "\\") {
+                    escaped = true
+                } else if byte == UInt8(ascii: "\"") {
+                    inString = false
+                }
+                continue
+            }
+            switch byte {
+            case UInt8(ascii: "\""): inString = true
+            case UInt8(ascii: "{"), UInt8(ascii: "["):
+                depth += 1
+                deepest = max(deepest, depth)
+            case UInt8(ascii: "}"), UInt8(ascii: "]"): depth -= 1
+            default: break
+            }
+        }
+        return deepest
+    }
+}
+
+/// Arguments the model sent that do not decode into a tool's type, said in words the model can
+/// correct them from: `DecodingError`'s own description names no field.
+struct ToolArgumentsError: LocalizedError {
+    let failure: DecodingError
+
+    var errorDescription: String? {
+        switch failure {
+        case .keyNotFound(let key, let context):
+            return "the arguments have no \"\(Self.path(context.codingPath + [key]))\""
+        case .typeMismatch(_, let context), .valueNotFound(_, let context), .dataCorrupted(let context):
+            let path = Self.path(context.codingPath)
+            return path.isEmpty
+                ? "the arguments do not fit the tool: \(context.debugDescription)"
+                : "the arguments do not fit the tool at \"\(path)\": \(context.debugDescription)"
+        @unknown default:
+            return failure.localizedDescription
+        }
+    }
+
+    private static func path(_ keys: [any CodingKey]) -> String {
+        keys.map { $0.intValue.map(String.init) ?? $0.stringValue }.joined(separator: ".")
+    }
+}
+
+extension AgentTool {
+    var schema: SessionTool {
+        SessionTool(
+            approval: approval.map {
+                .init(
+                    allowTitle: $0.allowTitle, declineTitle: $0.declineTitle,
+                    message: $0.message, reasonArgument: $0.reasonArgument, title: $0.title)
+            },
+            description: description,
+            displayTitle: displayTitle,
+            executor: executor.map { .init(rawValue: $0.rawValue) },
+            name: name,
+            // A schema that is not an object describes no arguments the router can read.
+            parameters: parameters.map { $0.dictionaryValue ?? [:] })
     }
 }
 

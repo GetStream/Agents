@@ -175,7 +175,7 @@ func (s *ConnectionEventsSuite) TestARenewalInFlightKeepsTheSubscription() {
 // flight while the stored row is connected again. Reconcile with that copy changes nothing.
 func (s *ConnectionEventsSuite) TestAStaleCopyOfARenewalKeepsTheSubscriptions() {
 	connection := s.subscribed(s.binding(s.connection(), issueCreated))
-	stale, err := s.store.ConnectorConnection(context.Background(), s.customerID(), connection)
+	stale, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), connection)
 	s.Require().NoError(err)
 	stale.Status = store.ConnectionNeedsReauthorization
 
@@ -197,7 +197,7 @@ func (s *ConnectionEventsSuite) TestAWorkerThatMeetsARenewalLooksAgainALeaseBefo
 	s.setStatus(connection, store.ConnectionNeedsReauthorization)
 	looked := time.Now().UTC()
 	refreshBefore := looked.Add(30 * time.Second)
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE connection_event_subscriptions SET refresh_before = ?, next_attempt_at = ? WHERE connection_id = ?",
 		refreshBefore, looked, connection)
 	s.Require().NoError(err)
@@ -220,16 +220,16 @@ func (s *ConnectionEventsSuite) TestAWorkerThatMeetsARenewalLooksAgainALeaseBefo
 // queries in a second, not thousands. Its lease is 10 s, so the lease does not hide the floor.
 func (s *ConnectionEventsSuite) TestARowLockedByAnotherRoutersClaimIsNotLookedForInABusyLoop() {
 	ctx := context.Background()
-	_, err := s.store.DB().ExecContext(ctx, "DELETE FROM connection_event_subscriptions")
+	_, err := s.store.GlobalDB().ExecContext(ctx, "DELETE FROM connection_event_subscriptions")
 	s.Require().NoError(err)
 	due := time.Now().UTC().Add(-time.Second)
 	locked := store.ConnectionEventSubscription{CustomerID: s.customerID(), ConnectionID: "gone-" + s.utils.uuid(),
 		ConfigID: s.utils.uuid(), Binding: "crm", Event: issueCreated, Key: "key", Token: s.utils.uuid(),
 		SecretSealed: []byte("sealed"), KEKVersion: 1, Status: store.ConnectionEventPending, NextAttemptAt: &due}
-	added, err := s.store.AddConnectionEventSubscription(ctx, &locked)
+	added, err := s.store.ConnectionEventSubscriptions.Insert(ctx, &locked)
 	s.Require().NoError(err)
 	s.Require().True(added)
-	claim, err := s.store.DB().BeginTx(ctx, nil)
+	claim, err := s.store.GlobalDB().BeginTx(ctx, nil)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = claim.Rollback() })
 	_, err = claim.ExecContext(ctx, "SELECT id FROM connection_event_subscriptions WHERE id = ? FOR UPDATE", locked.ID)
@@ -330,7 +330,7 @@ func (s *ConnectionEventsSuite) TestAStoredEventWithNoNameDoesNotFailTheValidate
 	connection := s.connection()
 	s.config(s.binding(connection, issueCreated))
 	broken := s.config(s.binding(connection, "issue.closed"))
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE agent_configs SET connectors = jsonb_set(connectors, '{0,events,0,event}', '""') WHERE id = ?`, broken)
 	s.Require().NoError(err)
 
@@ -371,22 +371,22 @@ func (s *ConnectionEventsSuite) TestABindingsEventsAreReadBackAsWritten() {
 	s.Equal("Say what broke.", value(events[0].Instructions))
 }
 
-// TestWithNoSubscriptionsAnIdleWorkerLooksTwiceALease: a router with connectors on and no
-// subscription looks at start and then once a lease, a claim and when the next one is due
-// each time: about 2 queries a lease, as eventforward's idle worker (#778), and never a busy
-// loop. Its own service over its own pool, so the suite's router's queries are not counted;
+// TestWithNoSubscriptionsAnIdleWorkerLooksNoMoreThanTwiceALease: a router with connectors on
+// and no subscription looks at start and then once a lease, a claim and when the next one is
+// due each time: about 2 queries a lease, as eventforward's idle worker (#778), and never a busy
+// loop. A slow machine makes the count lower, never higher, so the test checks only the upper
+// limit. TestAnIdleRouterTakesARowAnotherRouterAddsWithinALease checks that the worker looks
+// again. Its own service over its own pool, so the suite's router's queries are not counted;
 // every subscription row is dropped first, as a deployment with no connections has none.
-func (s *ConnectionEventsSuite) TestWithNoSubscriptionsAnIdleWorkerLooksTwiceALease() {
-	_, err := s.store.DB().ExecContext(context.Background(), "DELETE FROM connection_event_subscriptions")
+func (s *ConnectionEventsSuite) TestWithNoSubscriptionsAnIdleWorkerLooksNoMoreThanTwiceALease() {
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), "DELETE FROM connection_event_subscriptions")
 	s.Require().NoError(err)
+	started := time.Now()
 	queries := s.idleWorker(idleLease)
 
 	s.Require().Eventually(func() bool { return queries.Load() >= 2 }, settleFor, 10*time.Millisecond)
-	time.Sleep(idleWindow)
-
-	looks := idleWindow / idleLease
-	s.GreaterOrEqual(queries.Load(), int64(2*looks-2), "it looked again once a lease")
-	s.LessOrEqual(queries.Load(), int64(2*looks+4), "and no more often")
+	s.Never(func() bool { return queries.Load() > int64(2*(time.Since(started)/idleLease)+4) },
+		idleWindow, 10*time.Millisecond, "it looks no more than twice a lease")
 }
 
 // TestAnIdleRouterTakesARowAnotherRouterAddsWithinALease: router A adds a subscription due now
@@ -399,7 +399,7 @@ func (s *ConnectionEventsSuite) TestAnIdleRouterTakesARowAnotherRouterAddsWithin
 	left := store.ConnectionEventSubscription{CustomerID: s.customerID(), ConnectionID: "gone-" + s.utils.uuid(),
 		ConfigID: s.utils.uuid(), Binding: "crm", Event: issueCreated, Key: "key", Token: s.utils.uuid(),
 		SecretSealed: []byte("sealed"), KEKVersion: 1, Status: store.ConnectionEventPending, NextAttemptAt: &due}
-	added, err := s.store.AddConnectionEventSubscription(context.Background(), &left)
+	added, err := s.store.ConnectionEventSubscriptions.Insert(context.Background(), &left)
 	s.Require().NoError(err)
 	s.Require().True(added)
 
@@ -420,7 +420,7 @@ func (s *ConnectionEventsSuite) idleWorker(lease time.Duration) *countedQueries 
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(own.Close()) })
 	queries := &countedQueries{}
-	own.DB().AddQueryHook(queries)
+	own.GlobalDB().AddQueryHook(queries)
 	events, err := mcpevents.New(mcpevents.Options{Store: own, Sessions: s.manager, Registry: s.connectors,
 		Transports: s.transports, Secrets: s.sealer, PublicURL: s.server.URL, Lease: lease})
 	s.Require().NoError(err)
@@ -431,7 +431,7 @@ func (s *ConnectionEventsSuite) idleWorker(lease time.Duration) *countedQueries 
 
 // setStatus writes a connection's status as the resolver and the delete write it.
 func (s *ConnectionEventsSuite) setStatus(connection, status string) {
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE connector_connections SET status = ? WHERE id = ?", status, connection)
 	s.Require().NoError(err)
 }
@@ -470,7 +470,7 @@ sources:
     endpoint: mcp
 `))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	return id
 }
@@ -518,7 +518,7 @@ func (s *ConnectionEventsSuite) config(binding map[string]any) string {
 // held are the router's subscriptions of a connection.
 func (s *ConnectionEventsSuite) held(connection string) []store.ConnectionEventSubscription {
 	held := []store.ConnectionEventSubscription{}
-	s.Require().NoError(s.store.DB().NewSelect().Model(&held).Where("customer_id = ?", s.customerID()).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&held).Where("customer_id = ?", s.customerID()).
 		Where("connection_id = ?", connection).Order("created_at", "id").Scan(context.Background()))
 	return held
 }

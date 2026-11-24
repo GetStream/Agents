@@ -124,7 +124,7 @@ func (s *Store) importPin(ctx context.Context, customerID, table string, row jso
 func readPin(row json.RawMessage) (map[string]json.RawMessage, *int64, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
-		return nil, nil, fmt.Errorf("store: read a row's pin: %w", err)
+		return nil, nil, invalidImport(fmt.Errorf("store: read a row's pin: %w", err))
 	}
 	raw, ok := fields[pinColumn]
 	if !ok || string(raw) == "null" {
@@ -132,7 +132,7 @@ func readPin(row json.RawMessage) (map[string]json.RawMessage, *int64, error) {
 	}
 	var pin int64
 	if err := json.Unmarshal(raw, &pin); err != nil {
-		return nil, nil, fmt.Errorf("store: read a row's pin: %w", err)
+		return nil, nil, invalidImport(fmt.Errorf("store: read a row's pin: %w", err))
 	}
 	return fields, &pin, nil
 }
@@ -166,7 +166,7 @@ func (s *Store) BackfillStreamPins(ctx context.Context, deployment int64) (map[s
 	for _, table := range []string{"agent_sessions", "calls", "phone_numbers", "stream_trunks", "call_resources"} {
 		db := s.shard
 		if table == "phone_numbers" || table == "stream_trunks" {
-			db = s.db
+			db = s.global
 		}
 		for {
 			result, err := db.ExecContext(ctx, fmt.Sprintf(
@@ -214,7 +214,7 @@ func (s *Store) LegacyStreamPins(ctx context.Context, deployment int64) ([]Legac
 		var err error
 		if table == "phone_numbers" {
 			var rows []LegacyCount
-			rows, err = count(ctx, s.db)
+			rows, err = count(ctx, s.global)
 			lists = [][]LegacyCount{rows}
 		} else {
 			lists, err = everyShard(ctx, s, count)

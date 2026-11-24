@@ -1,0 +1,586 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, it } from "node:test";
+
+import { AgentChat, agentChatTransport, LiveUI, type AgentTransportFeed } from "../src/chat.js";
+import {
+  Client,
+  ConfigurationError,
+  Conversation,
+  Session,
+  mergeOpenUIStatements,
+} from "../src/index.js";
+import { loadFolder } from "../src/node.js";
+import { TestRouter } from "./router.js";
+
+describe("Conversation dynamic UI streaming", () => {
+  it("folds ui_delta and ui_completed frames onto the agent turn and merges openui patches", () => {
+    const conversation = new Conversation(true);
+
+    conversation.observe({ type: "responding", turn_id: "t1" }, 100);
+    conversation.observe({ type: "response_delta", turn_id: "t1", text: "Table at 19:15." }, 110);
+    conversation.observe(
+      { type: "ui_delta", turn_id: "t1", format: "openui", delta: '$party = 2\nroot = Card([hdr])\n' },
+      120,
+    );
+    assert.deepEqual(conversation.get().turns[0]?.ui, {
+      format: "openui",
+      status: "streaming",
+      content: "$party = 2\nroot = Card([hdr])",
+    });
+
+    conversation.observe(
+      {
+        type: "ui_completed",
+        turn_id: "t1",
+        format: "openui",
+        content: '$party = 2\nroot = Card([hdr])\nhdr = CardHeader("Kaneo")',
+      },
+      150,
+    );
+    conversation.observe({ type: "responded", turn_id: "t1", text: "Table at 19:15." }, 160);
+    assert.deepEqual(conversation.get().turns[0]?.ui, {
+      format: "openui",
+      status: "complete",
+      content: '$party = 2\nroot = Card([hdr])\nhdr = CardHeader("Kaneo")',
+    });
+
+    conversation.observe({ type: "responding", turn_id: "t2" }, 200);
+    conversation.observe(
+      { type: "ui_delta", turn_id: "t2", format: "openui", mode: "patch", delta: "$party = 4\n" },
+      210,
+    );
+    assert.deepEqual(conversation.get().turns[1]?.ui, {
+      format: "openui",
+      status: "streaming",
+      content: '$party = 4\nroot = Card([hdr])\nhdr = CardHeader("Kaneo")',
+    });
+
+    conversation.observe(
+      { type: "ui_completed", turn_id: "t2", format: "openui", mode: "patch", content: "$party = 4" },
+      220,
+    );
+    assert.equal(conversation.get().turns[1]?.ui?.status, "complete");
+  });
+
+  it("leaves a patch with no UI before it in this transcript to Chat's merged copy", () => {
+    // After a reload the socket's transcript starts empty, while the router merged the patch
+    // onto the card it remembers: the bare patch has no root and would blank the card.
+    const conversation = new Conversation(true);
+    conversation.observe({ type: "responding", turn_id: "t9" }, 100);
+    conversation.observe({ type: "ui_delta", turn_id: "t9", format: "openui", mode: "patch", delta: "$party = 4" }, 110);
+    assert.equal(conversation.get().turns[0]?.ui, undefined);
+    conversation.observe({ type: "ui_completed", turn_id: "t9", format: "openui", mode: "patch", content: "$party = 4" }, 120);
+    assert.equal(conversation.get().turns[0]?.ui, undefined);
+  });
+
+  it("shows an OpenUI value only once its line ends", () => {
+    // Otherwise a gauge reads 8 before 86, and a card reflows with every delta.
+    const conversation = new Conversation(true);
+    conversation.observe(
+      { type: "ui_delta", turn_id: "t1", format: "openui", delta: "root = Card([gauge])\ngauge = AvailabilityGauge(8" },
+      1,
+    );
+    conversation.observe(
+      { type: "ui_delta", turn_id: "t1", format: "openui", delta: '6, "12 min wait")\n$party = 4' },
+      2,
+    );
+    assert.equal(
+      conversation.get().turns[0]?.ui?.content,
+      'root = Card([gauge])\ngauge = AvailabilityGauge(86, "12 min wait")',
+    );
+
+    conversation.observe({ type: "ui_delta", turn_id: "t1", format: "openui", delta: "2\n" }, 3);
+    assert.match(conversation.get().turns[0]?.ui?.content ?? "", /\n\$party = 42$/);
+  });
+
+  it("shows an OpenUI statement over several lines only once it closes", () => {
+    const conversation = new Conversation(true);
+    conversation.observe(
+      { type: "ui_delta", turn_id: "t1", format: "openui", delta: 'root = Card([map])\nmap = TripMap([\n  {name: "Kaneo"},\n' },
+      1,
+    );
+    assert.equal(conversation.get().turns[0]?.ui?.content, "root = Card([map])");
+
+    conversation.observe({ type: "ui_delta", turn_id: "t1", format: "openui", delta: "])\n" }, 2);
+    assert.equal(conversation.get().turns[0]?.ui?.content, 'root = Card([map])\nmap = TripMap([\n  {name: "Kaneo"},\n])');
+  });
+
+  it("shows the whole program once the UI completes, its last line included", () => {
+    const conversation = new Conversation(true);
+    conversation.observe({ type: "ui_delta", turn_id: "t1", format: "openui", delta: "root = Card([hdr])\nhdr = CardHeader(" }, 1);
+    conversation.observe(
+      { type: "ui_completed", turn_id: "t1", format: "openui", content: 'root = Card([hdr])\nhdr = CardHeader("Kaneo")' },
+      2,
+    );
+    assert.deepEqual(conversation.get().turns[0]?.ui, {
+      format: "openui",
+      status: "complete",
+      content: 'root = Card([hdr])\nhdr = CardHeader("Kaneo")',
+    });
+  });
+
+  it("holds back nothing of a format other than OpenUI", () => {
+    const conversation = new Conversation(true);
+    conversation.observe({ type: "ui_delta", turn_id: "t1", format: "a2ui", version: "1.0", delta: '[{"version":"v1' }, 1);
+    assert.equal(conversation.get().turns[0]?.ui?.content, '[{"version":"v1');
+  });
+
+  it("sets no UI on a turn until one of its OpenUI statements is finished", () => {
+    const conversation = new Conversation(true);
+    const live = new LiveUI();
+    conversation.observe({ type: "responding", turn_id: "t1" }, 1);
+    conversation.observe({ type: "ui_delta", turn_id: "t1", format: "openui", delta: "root = Card([" }, 2);
+    assert.equal(conversation.get().turns[0]?.ui, undefined);
+    assert.equal(live.observeTurns(conversation.get().turns), false);
+    assert.equal(live.latest(), undefined);
+
+    conversation.observe({ type: "ui_delta", turn_id: "t1", format: "openui", delta: "hdr])\n" }, 3);
+    assert.equal(conversation.get().turns[0]?.ui?.content, "root = Card([hdr])");
+  });
+
+  it("merges only a streaming patch's finished statements onto the card before it", () => {
+    const conversation = new Conversation(true);
+    const base = '$party = 2\nroot = Card([hdr])\nhdr = CardHeader("Kaneo")';
+    conversation.observe({ type: "ui_completed", turn_id: "t1", format: "openui", content: base }, 1);
+    conversation.observe({ type: "responding", turn_id: "t2" }, 2);
+
+    // Nothing of the patch is finished: the new turn shows no UI, not the card before it.
+    conversation.observe({ type: "ui_delta", turn_id: "t2", format: "openui", mode: "patch", delta: "$party = 4" }, 3);
+    assert.equal(conversation.get().turns[1]?.ui, undefined);
+
+    conversation.observe(
+      { type: "ui_delta", turn_id: "t2", format: "openui", mode: "patch", delta: '\nhdr = CardHeader("Ka' },
+      4,
+    );
+    assert.equal(conversation.get().turns[1]?.ui?.content, '$party = 4\nroot = Card([hdr])\nhdr = CardHeader("Kaneo")');
+  });
+
+  it("merges a patch onto the card the router completed last, never one cut off", () => {
+    // The router never takes an interrupted reply's card as the base: the patch is merged onto
+    // the one before it, and Stream Chat's copy says so.
+    const conversation = new Conversation(true);
+    conversation.observe({ type: "responding", turn_id: "t1" }, 1);
+    conversation.observe(
+      { type: "ui_completed", turn_id: "t1", format: "openui", content: 'root = Card([hdr])\nhdr = CardHeader("Kaneo")' },
+      2,
+    );
+    conversation.observe({ type: "responded", turn_id: "t1", text: "" }, 3);
+    conversation.observe({ type: "responding", turn_id: "t2" }, 4);
+    conversation.observe(
+      { type: "ui_delta", turn_id: "t2", format: "openui", delta: 'root = Card([hdr])\nhdr = CardHeader("Nopa")\n' },
+      5,
+    );
+    conversation.observe({ type: "interrupted", turn_id: "t2" }, 6);
+    conversation.observe({ type: "responding", turn_id: "t3" }, 7);
+
+    conversation.observe({ type: "ui_delta", turn_id: "t3", format: "openui", mode: "patch", delta: "$party = 4\n" }, 8);
+
+    assert.equal(conversation.get().turns[2]?.ui?.content, 'root = Card([hdr])\nhdr = CardHeader("Kaneo")\n$party = 4');
+    assert.equal(conversation.get().turns[1]?.ui?.content, 'root = Card([hdr])\nhdr = CardHeader("Nopa")');
+  });
+
+  it("merges no patch past a card of another format, even one that completes late", () => {
+    // The router's base is the card it last completed whatever its format, and only OpenUI
+    // takes a patch: an A2UI card between leaves the patch to Stream Chat's copy, and drops a
+    // preview already merged onto the older OpenUI card.
+    const conversation = new Conversation(true);
+    conversation.observe({ type: "responding", turn_id: "t1" }, 1);
+    conversation.observe(
+      { type: "ui_completed", turn_id: "t1", format: "openui", content: 'root = Card([hdr])\nhdr = CardHeader("Kaneo")' },
+      2,
+    );
+    conversation.observe({ type: "responding", turn_id: "t2" }, 3);
+    conversation.observe({ type: "responding", turn_id: "t3" }, 4);
+    conversation.observe({ type: "ui_delta", turn_id: "t3", format: "openui", mode: "patch", delta: "$party = 4\n" }, 5);
+    assert.equal(conversation.get().turns[2]?.ui?.status, "streaming");
+
+    conversation.observe({ type: "ui_completed", turn_id: "t2", format: "a2ui", version: "1.0", content: "[]" }, 6);
+    conversation.observe({ type: "ui_completed", turn_id: "t3", format: "openui", mode: "patch", content: "$party = 4" }, 7);
+
+    assert.equal(conversation.get().turns[2]?.ui, undefined);
+  });
+
+  it("shows an interrupted turn's last statement when it closed, and settles its UI", () => {
+    // An interrupted reply never gets ui_completed: the router drops the block with the turn.
+    const conversation = new Conversation(true);
+    conversation.observe({ type: "responding", turn_id: "t1" }, 1);
+    conversation.observe(
+      { type: "ui_delta", turn_id: "t1", format: "openui", delta: 'root = Card([hdr])\nhdr = CardHeader("Kaneo")' },
+      2,
+    );
+    assert.equal(conversation.get().turns[0]?.ui?.content, "root = Card([hdr])");
+
+    conversation.observe({ type: "interrupted", turn_id: "t1" }, 3);
+    assert.deepEqual(conversation.get().turns[0]?.ui, {
+      format: "openui",
+      status: "complete",
+      content: 'root = Card([hdr])\nhdr = CardHeader("Kaneo")',
+    });
+  });
+
+  it("leaves out a statement a turn ended in the middle of", () => {
+    const conversation = new Conversation(true);
+    conversation.observe({ type: "responding", turn_id: "t1" }, 1);
+    conversation.observe(
+      { type: "ui_delta", turn_id: "t1", format: "openui", delta: 'root = Card([hdr])\nhdr = CardHeader("Ka' },
+      2,
+    );
+    conversation.observe({ type: "responded", turn_id: "t1", text: "" }, 3);
+    assert.deepEqual(conversation.get().turns[0]?.ui, {
+      format: "openui",
+      status: "complete",
+      content: "root = Card([hdr])",
+    });
+  });
+
+  it("keeps the card ui_completed sent when the turn ends after it", () => {
+    const conversation = new Conversation(true);
+    conversation.observe({ type: "responding", turn_id: "t1" }, 1);
+    conversation.observe({ type: "ui_delta", turn_id: "t1", format: "openui", delta: "root = Card([hdr])\n" }, 2);
+    conversation.observe(
+      { type: "ui_completed", turn_id: "t1", format: "openui", content: 'root = Card([hdr])\nhdr = CardHeader("Kaneo")' },
+      3,
+    );
+    const completed = conversation.get().turns[0]?.ui;
+    conversation.observe({ type: "responded", turn_id: "t1", text: "Here." }, 4);
+    assert.equal(conversation.get().turns[0]?.ui, completed);
+  });
+
+  it("removes component statements assigned null while keeping reactive $variables", () => {
+    const merged = mergeOpenUIStatements(
+      '$note = "Window"\nroot = Card([hdr, banner])\nhdr = CardHeader("Kaneo")\nbanner = Callout("info", "Busy", "12m")',
+      "$note = null\nbanner = null\nroot = Card([hdr])",
+    );
+    assert.equal(merged, '$note = null\nroot = Card([hdr])\nhdr = CardHeader("Kaneo")');
+  });
+});
+
+describe("LiveUI", () => {
+  type Reply = { id: string; text: string; custom: Record<string, unknown> };
+  const card = 'root = Card([hdr])\nhdr = CardHeader("Kaneo")';
+  const reply = (id: string, custom: Record<string, unknown>): Reply => ({
+    id,
+    text: "",
+    custom: { ai_generated: true, ...custom },
+  });
+  const uiOf = (message: Reply | undefined) => message?.custom["ai_ui"] as { status?: string; content?: string } | undefined;
+
+  it("never shows the card of the reply before on the reply to a follow-up or a tap", () => {
+    const conversation = new Conversation(true);
+    const live = new LiveUI();
+    conversation.said("Find me dinner near the lake", 1);
+    conversation.observe({ type: "responding", turn_id: "t1" }, 2);
+    conversation.observe({ type: "ui_completed", turn_id: "t1", format: "openui", content: card }, 3);
+    live.observeTurns(conversation.get().turns);
+    const first = reply("r1", {
+      generating: false,
+      ai_ui: { v: 1, format: "openui", status: "complete", content: card },
+      support_runtime: { role: "assistant", turn_id: "t1" },
+    });
+
+    // Asked again: the new reply is in Chat before the agent starts, with no turn id yet.
+    conversation.said("Reserve table T2 (Window for 2)", 4);
+    live.observeTurns(conversation.get().turns);
+    const waiting = reply("r2", { generating: true });
+    assert.equal(live.overlay([first, waiting])[1], waiting);
+
+    // The agent starts, and its reply names its turn, which has no UI yet.
+    conversation.observe({ type: "responding", turn_id: "t2" }, 5);
+    live.observeTurns(conversation.get().turns);
+    assert.equal(live.overlay([first, waiting])[1], waiting);
+    const writing = reply("r2", { generating: true, support_runtime: { role: "assistant", turn_id: "t2" } });
+    assert.equal(live.overlay([first, writing])[1], writing);
+
+    // Its own UI streams in, with or without its turn id in Chat yet.
+    conversation.observe(
+      { type: "ui_delta", turn_id: "t2", format: "openui", delta: 'root = Card([hdr])\nhdr = CardHeader("Booked")\n' },
+      6,
+    );
+    live.observeTurns(conversation.get().turns);
+    assert.match(uiOf(live.overlay([first, waiting])[1])?.content ?? "", /Booked/);
+    assert.match(uiOf(live.overlay([first, writing])[1])?.content ?? "", /Booked/);
+  });
+
+  it("shows what Chat stored once Chat says the reply is written", () => {
+    const conversation = new Conversation(true);
+    const live = new LiveUI();
+    conversation.said("Book Kaneo for two", 1);
+    conversation.observe({ type: "responding", turn_id: "t1" }, 2);
+    conversation.observe({ type: "ui_delta", turn_id: "t1", format: "openui", delta: card }, 3);
+    live.observeTurns(conversation.get().turns);
+    const turn = { role: "assistant", turn_id: "t1" };
+    assert.equal(uiOf(live.overlay([reply("r1", { generating: true, support_runtime: turn })])[0])?.status, "streaming");
+
+    // Refused, or interrupted: the socket never completes the UI, and Chat keeps the reply without it.
+    const refused = reply("r1", { generating: false, support_runtime: turn });
+    assert.equal(live.overlay([refused])[0], refused);
+  });
+
+  it("leaves a reply its text while none of its UI's statements is finished", () => {
+    const conversation = new Conversation(true);
+    const live = new LiveUI();
+    conversation.observe({ type: "responding", turn_id: "t1" }, 1);
+    conversation.observe({ type: "ui_delta", turn_id: "t1", format: "openui", delta: "root = Card([" }, 2);
+    live.observeTurns(conversation.get().turns);
+
+    const named = reply("r1", { generating: true, support_runtime: { role: "assistant", turn_id: "t1" } });
+    const unnamed = reply("r1", { generating: true });
+    assert.equal(live.overlay([named])[0], named);
+    assert.equal(live.overlay([unnamed])[0], unnamed);
+  });
+
+  it("reports no change for a delta that finishes no statement", () => {
+    const conversation = new Conversation(true);
+    const live = new LiveUI();
+    conversation.observe({ type: "responding", turn_id: "t1" }, 1);
+    conversation.observe({ type: "ui_delta", turn_id: "t1", format: "openui", delta: `${card}\n` }, 2);
+    live.observeTurns(conversation.get().turns);
+
+    conversation.observe({ type: "ui_delta", turn_id: "t1", format: "openui", delta: 'tip = Callout("info"' }, 3);
+    const unfinished = live.observeTurns(conversation.get().turns);
+    conversation.observe({ type: "ui_delta", turn_id: "t1", format: "openui", delta: ', "Book", "Terrace")\n' }, 4);
+    const finished = live.observeTurns(conversation.get().turns);
+
+    assert.equal(unfinished, false);
+    assert.equal(finished, true);
+  });
+});
+
+describe("AgentChat fast-lane LiveUI overlay over real WebSocket", () => {
+  let router: TestRouter;
+  let api: Client;
+
+  beforeEach(async () => {
+    router = await TestRouter.start();
+    api = new Client({ url: router.url, customerId: "local" });
+    router.serve("POST", "/v1/agents/sessions", {
+      status: 201,
+      body: {
+        id: "sess_ui",
+        call_id: "sess_ui",
+        call_type: "agent",
+        conversation_id: "agent:sess_ui",
+        user_id: "alex",
+        agent_id: "juno",
+        modality: "text",
+        state: "live",
+        created_at: "2026-11-12T00:00:00Z",
+      },
+    });
+    router.serve("POST", "/v1/agents/sessions/sess_ui/responses", {
+      status: 201,
+      body: { id: "resp_1", session_id: "sess_ui", status: "in_progress", created_at: "2026-11-12T00:00:00Z" },
+    });
+  });
+
+  afterEach(async () => {
+    await router.stop();
+  });
+
+  it("streams 0ms WebSocket ui_delta into adapted Chat messages and hands off cleanly when Chat settles", async () => {
+    type WireMessage = { id: string; text?: string; custom?: Record<string, unknown> };
+    const handlers = new Set<(event: { type: string; message?: WireMessage }) => void>();
+    const channel = {
+      state: { messages: [] as WireMessage[] },
+      on(handler: (event: { type: string; message?: WireMessage }) => void) {
+        handlers.add(handler);
+        return { unsubscribe: () => void handlers.delete(handler) };
+      },
+      async watch() {
+        return { messages: this.state.messages };
+      },
+      async query() {
+        return { messages: [] };
+      },
+      getClient() {
+        return { on: () => ({ unsubscribe() {} }) };
+      },
+      push(type: string, message: WireMessage) {
+        if (type === "message.new") {
+          this.state.messages = [...this.state.messages, message];
+        } else if (type === "message.updated") {
+          this.state.messages = this.state.messages.map((m) => (m.id === message.id ? message : m));
+        }
+        for (const h of handlers) h({ type, message });
+      },
+    };
+
+    const opening = Session.open(api, { start_voice: false });
+    const connection = await router.socket();
+    const opened = await opening;
+
+    const chat = new AgentChat<WireMessage>({
+      sessionId: "sess_ui",
+      open: async () => {
+        const proxy = Object.create(opened) as Session;
+        proxy.chat = async () => ({ client: {} as never, channel: channel as never });
+        proxy.close = async () => {};
+        return proxy;
+      },
+    });
+    await chat.prepare();
+
+    const rendered: WireMessage[][] = [];
+    const feed: AgentTransportFeed<WireMessage> = {
+      isConnected: true,
+      updateMessages: (msgs) => rendered.push([...msgs]),
+      updateHasOlderMessages: () => {},
+      updateActivity: () => {},
+    };
+    const transport = agentChatTransport(chat, { adapt: (msg) => msg });
+    const disconnect = transport.connect(feed);
+
+    channel.push("message.new", {
+      id: "reply_1",
+      text: "",
+      custom: { ai_generated: true, generating: true },
+    });
+
+    connection.send({ type: "responding", turn_id: "turn_fast" });
+    connection.send({
+      type: "ui_delta",
+      turn_id: "turn_fast",
+      format: "openui",
+      delta: 'root = Card([hdr])\nhdr = CardHeader("Kaneo")\n',
+    });
+
+    await waitUntil(() => {
+      const last = rendered.at(-1)?.[0];
+      const ui = last?.custom?.["ai_ui"] as { status?: string; content?: string } | undefined;
+      return ui?.status === "streaming" && ui.content?.includes("Kaneo") === true;
+    });
+
+    const settledReply: WireMessage = {
+      id: "reply_1",
+      text: "Here is Kaneo.",
+      custom: {
+        ai_generated: true,
+        generating: false,
+        ai_ui: {
+          v: 1,
+          format: "openui",
+          status: "complete",
+          content: 'root = Card([hdr])\nhdr = CardHeader("Kaneo")',
+        },
+      },
+    };
+    channel.push("message.updated", settledReply);
+
+    assert.equal(
+      rendered.at(-1)?.[0],
+      settledReply,
+      "once Stream Chat's durable ai_ui is complete, the exact settled message is handed over untouched",
+    );
+
+    disconnect();
+    await chat.close();
+    await opened.close();
+  });
+});
+
+describe("loadFolder declarative ui catalog and blueprints", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "va-js-ui-"));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("compiles deterministic instructions from ui allowlist, portable components, and blueprints", async () => {
+    const dir = join(root, "concierge");
+    await mkdir(join(dir, "ui"), { recursive: true });
+    await writeFile(
+      join(dir, "agent.yaml"),
+      [
+        "name: concierge",
+        "llm: llm-fast",
+        "ui:",
+        "  format: openui",
+        "  keep: [CardHeader, Form, Chips, FollowUpBlock]",
+        "  patch_mode: true",
+        "  voice_ui: true",
+        "  rules:",
+        "    - Always pair RestaurantCard with AvailabilityGauge.",
+      ].join("\n"),
+    );
+    await writeFile(join(dir, "instructions.md"), "You are Juno.");
+    await writeFile(
+      join(dir, "ui", "components.json"),
+      JSON.stringify([
+        {
+          name: "restaurant_card",
+          description: "Venue summary card.",
+          parameters: {
+            type: "object",
+            properties: { name: { type: "string" }, rating: { type: "number" } },
+            required: ["name", "rating"],
+            "x-order": ["name", "rating"],
+          },
+          events: [{ name: "inspect", description: "Tapping inspects the menu." }],
+        },
+      ]),
+    );
+    await writeFile(
+      join(dir, "ui", "blueprints.yaml"),
+      [
+        "- name: venue_booking",
+        "  when: booking a table",
+        "  order: [RestaurantCard, Form, FollowUpBlock]",
+        "  example: |",
+        '    $slot = "19:15"',
+        "    root = Card([venue, reserve, next])",
+        '    venue = RestaurantCard("Kaneo", 4.9)',
+        '    reserve = Form("book", btns, [slotField])',
+        '    slotField = FormControl("Slot", Chips("slot", "single", [ChipItem("19:15", "19:15")]))',
+        '    btns = Buttons([Button("Book", @ToAssistant("Book", {slot: $slot}), "primary")])',
+        '    next = FollowUpBlock([FollowUpItem("Menu")])',
+      ].join("\n"),
+    );
+
+    const first = await loadFolder(dir);
+    const second = await loadFolder(dir);
+    assert.equal(first.uiInstructions!, second.uiInstructions!);
+    assert.match(first.uiInstructions!, /RestaurantCard\(name: string, rating: number\)/);
+    assert.match(first.uiInstructions!, /\*\*venue_booking\*\*/);
+    assert.match(first.uiInstructions!, /openui-patch/);
+    assert.doesNotMatch(first.uiInstructions!, /BarChart\(/);
+  });
+
+  it("places a component that takes no parameters, as the Go SDK does", async () => {
+    const dir = join(root, "badge");
+    await mkdir(join(dir, "ui"), { recursive: true });
+    await writeFile(join(dir, "agent.yaml"), "name: badge\nui:\n  format: openui\n");
+    await writeFile(
+      join(dir, "ui", "components.json"),
+      JSON.stringify([{ name: "brand_badge", description: "Northwind's logo, for the top of a card." }]),
+    );
+
+    const loaded = await loadFolder(dir);
+    assert.match(loaded.uiInstructions!, /BrandBadge\(\) — Northwind's logo, for the top of a card\./);
+  });
+
+  it("refuses a ui components path that leaves the agent directory", async () => {
+    const dir = join(root, "escaped");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(root, "outside.json"), "[]");
+    await writeFile(join(dir, "agent.yaml"), "name: escaped\nui:\n  components: ../outside.json\n");
+
+    await assert.rejects(() => loadFolder(dir), ConfigurationError);
+  });
+});
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) {
+      throw new Error("Timed out waiting for condition");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}

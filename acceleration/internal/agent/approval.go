@@ -16,6 +16,10 @@ import (
 // question. It is offered only on a voice call with a tool that asks one.
 const confirmTool = "confirm_tool_call"
 
+// ConfirmTool is the tool the model answers a call's approval question with. The call it
+// confirms runs inside it, so its ToolRan is that call's outcome too.
+const ConfirmTool = confirmTool
+
 // approvalWait is how long a voice caller has to answer an approval question, from when it
 // finished playing.
 const approvalWait = 15 * time.Second
@@ -112,7 +116,7 @@ func (a *Agent) approvalQuestion(tool harness.Tool) string {
 
 // asksApproval reports whether any tool on offer asks before it runs.
 func (a *Agent) asksApproval() bool {
-	for _, tool := range a.options.Tools.Tools {
+	for _, tool := range a.tools().Tools {
 		if a.approvalQuestion(tool) != "" {
 			return true
 		}
@@ -126,7 +130,7 @@ func (a *Agent) offersConfirm() bool {
 	if a.options.ToolRunner == nil || !a.asksApproval() {
 		return false
 	}
-	_, taken := a.options.Tools.Lookup(confirmTool)
+	_, taken := a.tools().Lookup(confirmTool)
 	return !taken
 }
 
@@ -167,6 +171,7 @@ func (a *Agent) askApproval(call llm.ToolCall, question string) []llm.ContentPar
 	}
 	a.mu.Unlock()
 	a.logger.Info("a call waits for the caller's yes", "tool", call.Name, "tool_call", call.ID)
+	a.emitter.Send(ToolAwaitingApproval{ID: call.ID, TurnID: call.TurnID, Tool: call.Name, Question: question})
 	return llm.TextParts(fmt.Sprintf(answer, call.Name, question, call.ID, call.Name))
 }
 
@@ -222,13 +227,14 @@ func (a *Agent) askLocked(turnID, question string) error {
 
 // confirm runs the call the caller answered, when they said yes in time, and returns what
 // the model is told. The confirmation's own context is the call's: its timeout starts now.
-func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.ContentPart, error) {
+// The run gets its own "a tool call came back" line, under the call's name and id.
+func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.ContentPart, bool, error) {
 	var answer struct {
 		ToolCallID string `json:"tool_call_id"`
 		Allowed    bool   `json:"allowed"`
 	}
 	if err := json.Unmarshal([]byte(confirmation.Arguments), &answer); err != nil {
-		return nil, fmt.Errorf("agent: %s's arguments: %w", confirmTool, err)
+		return nil, false, fmt.Errorf("agent: %s's arguments: %w", confirmTool, err)
 	}
 	a.mu.Lock()
 	waiting, lapsed := a.approvalLocked(answer.ToolCallID)
@@ -238,18 +244,18 @@ func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.C
 	a.mu.Unlock()
 	switch {
 	case lapsed != "":
-		return llm.TextParts(fmt.Sprintf(approvalLapsed, lapsed, lapsed)), nil
+		return llm.TextParts(fmt.Sprintf(approvalLapsed, lapsed, lapsed)), false, nil
 	case waiting == nil:
-		return llm.TextParts(approvalUnknown), nil
+		return llm.TextParts(approvalUnknown), false, nil
 	}
 	call := waiting.call
 	a.emitter.Send(ToolApprovalDecided{ID: call.ID, TurnID: call.TurnID, Allowed: answer.Allowed})
 	a.logger.Info("the caller answered a call's question", "tool", call.Name, "tool_call", call.ID, "allowed", answer.Allowed)
 	if !answer.Allowed {
-		return llm.TextParts(fmt.Sprintf(approvalDeclined, call.Name)), nil
+		return llm.TextParts(fmt.Sprintf(approvalDeclined, call.Name)), false, nil
 	}
 	if a.options.ToolRunner == nil {
-		return nil, fmt.Errorf("agent: %s is not a tool this agent can run", call.Name)
+		return nil, false, fmt.Errorf("agent: %s is not a tool this agent can run", call.Name)
 	}
 	a.mu.Lock()
 	if a.approvedRuns == nil {
@@ -262,7 +268,16 @@ func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.C
 		delete(a.approvedRuns, call.ID)
 		a.mu.Unlock()
 	}()
-	return a.options.ToolRunner.Run(WithApproval(ctx), call)
+	began := time.Now()
+	runCtx, report := WithToolReport(ctx)
+	parts, err := a.options.ToolRunner.Run(WithApproval(runCtx), call)
+	a.mu.Lock()
+	hold := a.toolHolds[confirmation.ID]
+	answered := hold != nil && hold.answered
+	a.mu.Unlock()
+	a.logToolBack(call, a.loggedTool(*report, err), time.Since(began), toolOutcome(ctx.Err() != nil, err != nil, false, answered),
+		"approval", "allowed", "confirmation", confirmation.ID)
+	return parts, true, err
 }
 
 // approvalLocked finds the call a confirmation answers: the one it names, or the only one
@@ -342,7 +357,8 @@ func (a *Agent) tickApprovals() {
 				continue
 			}
 			note := llm.Message{Role: llm.User, Content: fmt.Sprintf(approvalSilence,
-				waiting.question, int(wait.Round(time.Second)/time.Second), waiting.call.Name, waiting.call.Name), Typed: true}
+				waiting.question, int(wait.Round(time.Second)/time.Second), waiting.call.Name, waiting.call.Name),
+				Typed: true, Router: true}
 			if callsOpen(a.history) {
 				a.lateResults = append(a.lateResults, note)
 			} else {

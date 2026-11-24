@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
@@ -37,9 +38,9 @@ func (s *SIPTrunkSuite) SetupSuite() {
 	s.store = opened
 
 	var database string
-	s.Require().NoError(opened.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(opened.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s", database)
-	_, err = opened.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = opened.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	s.Require().NoError(opened.Migrate(s.ctx))
 }
@@ -51,7 +52,7 @@ func (s *SIPTrunkSuite) TearDownSuite() {
 }
 
 func (s *SIPTrunkSuite) SetupTest() {
-	_, err := s.store.DB().ExecContext(s.ctx, "TRUNCATE phone_numbers, sip_trunks CASCADE")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE phone_numbers, sip_trunks CASCADE")
 	s.Require().NoError(err)
 	sealer, err := auth.NewSealer("sip trunk suite")
 	s.Require().NoError(err)
@@ -66,7 +67,7 @@ func (s *SIPTrunkSuite) SetupTest() {
 
 // placed opens the outbound leg customerID placed through its own trunk, as vendorCallID.
 func (s *SIPTrunkSuite) placed(customerID, vendorCallID string) {
-	_, err := s.store.OpenCallLeg(s.ctx, &store.CallLeg{
+	_, err := s.store.CallLegs.Open(s.ctx, &store.CallLeg{
 		CustomerID: customerID, CallType: "default", CallID: "session-" + vendorCallID,
 		Vendor: SIPTrunkVendor, VendorCallID: vendorCallID, Direction: store.Outbound,
 		LocalNumber: "+15125550100", RemoteNumber: "+15125550101",
@@ -109,8 +110,8 @@ func (s *SIPTrunkSuite) number(customerID, trunkID, e164 string) store.PhoneNumb
 }
 
 func (s *SIPTrunkSuite) TestAPasswordIsStoredSealedAndOpensForADial() {
-	trunk := s.create("acme", "s3cret")
-	s.NotContains(string(trunk.PasswordSealed), "s3cret")
+	trunk := s.create("acme", customerTrunkPassword)
+	s.NotContains(string(trunk.PasswordSealed), customerTrunkPassword)
 	s.Equal(1, trunk.PasswordKEKVersion)
 
 	held := s.number("acme", trunk.ID, "+15550000201")
@@ -119,12 +120,12 @@ func (s *SIPTrunkSuite) TestAPasswordIsStoredSealedAndOpensForADial() {
 	s.Same(s.trunks, provider)
 	s.Equal(&SIPTrunk{
 		Host: "trunk.example.com", Port: 5060, Transport: "tcp", Username: "agent",
-		Password: "s3cret", LateOffer: true, Codecs: []string{"PCMU", "PCMA"},
+		Password: customerTrunkPassword, LateOffer: true, Codecs: []string{"PCMU", "PCMA"},
 	}, opened)
 }
 
 func (s *SIPTrunkSuite) TestUpdatingWithoutAPasswordKeepsTheStoredOne() {
-	trunk := s.create("acme", "s3cret")
+	trunk := s.create("acme", customerTrunkPassword)
 	settings := SettingsOf(trunk)
 	settings.Name = "renamed"
 
@@ -136,7 +137,7 @@ func (s *SIPTrunkSuite) TestUpdatingWithoutAPasswordKeepsTheStoredOne() {
 	held := s.number("acme", trunk.ID, "+15550000202")
 	_, opened, err := s.service.dialVendor(s.ctx, held)
 	s.Require().NoError(err)
-	s.Equal("s3cret", opened.Password)
+	s.Equal(customerTrunkPassword, opened.Password)
 }
 
 func (s *SIPTrunkSuite) TestANewPasswordReplacesTheOldOne() {
@@ -155,10 +156,10 @@ func (s *SIPTrunkSuite) TestANewPasswordReplacesTheOldOne() {
 }
 
 func (s *SIPTrunkSuite) TestADialRefusesATrunkWithoutAPassword() {
-	trunk := s.create("acme", "s3cret")
+	trunk := s.create("acme", customerTrunkPassword)
 	held := s.number("acme", trunk.ID, "+15550000204")
 	// What a data move leaves behind.
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE sip_trunks SET password_sealed = ''::bytea, password_kek_version = 0 WHERE id = ?", trunk.ID)
 	s.Require().NoError(err)
 
@@ -168,11 +169,11 @@ func (s *SIPTrunkSuite) TestADialRefusesATrunkWithoutAPassword() {
 }
 
 func (s *SIPTrunkSuite) TestADialRefusesAPasswordSealedAtNoKey() {
-	trunk := s.create("acme", "s3cret")
+	trunk := s.create("acme", customerTrunkPassword)
 	held := s.number("acme", trunk.ID, "+15550000211")
 	// A password set again and then overwritten by a later data move keeps its sealed
 	// bytes, but at version 0 no key opens them.
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE sip_trunks SET password_kek_version = 0 WHERE id = ?", trunk.ID)
 	s.Require().NoError(err)
 
@@ -181,7 +182,7 @@ func (s *SIPTrunkSuite) TestADialRefusesAPasswordSealedAtNoKey() {
 }
 
 func (s *SIPTrunkSuite) TestAnotherCustomersTrunkCannotTakeANumber() {
-	trunk := s.create("acme", "s3cret")
+	trunk := s.create("acme", customerTrunkPassword)
 
 	_, err := s.service.AddTrunkNumber(s.ctx, TrunkNumber{
 		Owner: routing.Owner{CustomerID: "other"}, TrunkID: trunk.ID, E164: "+15550000205", Country: "US",
@@ -190,7 +191,7 @@ func (s *SIPTrunkSuite) TestAnotherCustomersTrunkCannotTakeANumber() {
 }
 
 func (s *SIPTrunkSuite) TestANumberIsCheckedBeforeItIsAdded() {
-	trunk := s.create("acme", "s3cret")
+	trunk := s.create("acme", customerTrunkPassword)
 
 	_, err := s.service.AddTrunkNumber(s.ctx, TrunkNumber{
 		Owner: routing.Owner{CustomerID: "acme"}, TrunkID: trunk.ID, E164: "5550000206", Country: "USA",
@@ -201,7 +202,7 @@ func (s *SIPTrunkSuite) TestANumberIsCheckedBeforeItIsAdded() {
 }
 
 func (s *SIPTrunkSuite) TestABadTagIsRefusedWithTheNumber() {
-	trunk := s.create("acme", "s3cret")
+	trunk := s.create("acme", customerTrunkPassword)
 
 	_, err := s.service.AddTrunkNumber(s.ctx, TrunkNumber{
 		Owner:   routing.Owner{CustomerID: "acme", Tags: routing.Tags{"bad key": "x"}},
@@ -211,7 +212,7 @@ func (s *SIPTrunkSuite) TestABadTagIsRefusedWithTheNumber() {
 }
 
 func (s *SIPTrunkSuite) TestReleasingATrunkNumberAsksNoVendor() {
-	trunk := s.create("acme", "s3cret")
+	trunk := s.create("acme", customerTrunkPassword)
 	s.number("acme", trunk.ID, "+15550000207")
 
 	// trunkProvider does not override ReleaseNumber, so reaching it would panic.
@@ -222,7 +223,7 @@ func (s *SIPTrunkSuite) TestReleasingATrunkNumberAsksNoVendor() {
 // A deployment without Stream is ErrNoStream, which the router answers 400, not 500.
 func (s *SIPTrunkSuite) TestAttachingWithoutStreamSaysSo() {
 	number := store.PhoneNumber{E164: "+15550000212", Vendor: "telnyx", CustomerID: "acme"}
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &number))
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &number))
 
 	_, err := s.service.Attach(s.ctx, Attachment{CustomerID: "acme", E164: number.E164})
 
@@ -231,7 +232,7 @@ func (s *SIPTrunkSuite) TestAttachingWithoutStreamSaysSo() {
 }
 
 func (s *SIPTrunkSuite) TestAttachingATrunkNumberIsRefused() {
-	trunk := s.create("acme", "s3cret")
+	trunk := s.create("acme", customerTrunkPassword)
 	s.number("acme", trunk.ID, "+15550000208")
 
 	_, err := s.service.Attach(s.ctx, Attachment{CustomerID: "acme", E164: "+15550000208"})
@@ -240,10 +241,10 @@ func (s *SIPTrunkSuite) TestAttachingATrunkNumberIsRefused() {
 
 func (s *SIPTrunkSuite) TestABoughtNumberStillGoesThroughTheRegistry() {
 	// bics is declared and not implemented, so it opens without credentials as the stub.
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: "+15550000209", Vendor: "bics", Country: "US", CustomerID: "acme",
 	}))
-	held, err := s.store.Number(s.ctx, "acme", "+15550000209")
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000209")
 	s.Require().NoError(err)
 
 	provider, trunk, err := s.service.dialVendor(s.ctx, held)
@@ -254,4 +255,92 @@ func (s *SIPTrunkSuite) TestABoughtNumberStillGoesThroughTheRegistry() {
 	allowed, err := s.service.allowlistFor(SIPTrunkVendor)
 	s.Require().NoError(err)
 	s.Empty(allowed, "the bridge presents the Stream trunk's password")
+}
+
+func (s *SIPTrunkSuite) TestResumingATrunkCallOpensItsTrunkPassword() {
+	trunk := s.create("acme", customerTrunkPassword)
+
+	s.shareLine("stream-trunk-1", "+15125550100")
+
+	resumed, err := s.service.ResumeTrunkCall(s.ctx, TrunkCallRef{
+		CustomerID: "acme", SIPTrunkID: trunk.ID, StreamTrunkID: "stream-trunk-1", From: "+15125550100",
+	})
+
+	s.Require().NoError(err)
+	s.Equal(customerTrunkPassword, resumed.Trunk.Password)
+}
+
+func (s *SIPTrunkSuite) TestResumingAnotherCustomersTrunkIsRefused() {
+	trunk := s.create("acme", customerTrunkPassword)
+
+	_, err := s.service.ResumeTrunkCall(s.ctx, TrunkCallRef{CustomerID: "globex", SIPTrunkID: trunk.ID})
+
+	s.ErrorIs(err, store.ErrNoSIPTrunk)
+}
+
+func (s *SIPTrunkSuite) TestACallOnItsOwnStreamTrunkCannotBeResumed() {
+	trunk := s.create("acme", customerTrunkPassword)
+
+	_, err := s.service.ResumeTrunkCall(s.ctx, TrunkCallRef{
+		CustomerID: "acme", SIPTrunkID: trunk.ID,
+	})
+
+	s.ErrorIs(err, store.ErrNoStreamTrunk)
+}
+
+// Built at runtime so no literal reads as a credential.
+var (
+	customerTrunkPassword = strings.Repeat("t", 12)
+	sharedBridgePassword  = strings.Repeat("e", 12)
+)
+
+// shareLine saves acme a shared Stream trunk for number, whose bridge password is
+// sharedBridgePassword.
+func (s *SIPTrunkSuite) shareLine(id, number string) {
+	sealed, err := s.service.sealer.SealWithAAD(sharedBridgePassword, trunkAAD("acme", id))
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, store.TrunkGroup{CustomerID: "acme", Vendor: SIPTrunkVendor},
+		func(_ context.Context, tx *store.TrunkGroupTx) error {
+			return tx.SaveTrunk(store.StreamTrunk{
+				ID: id, BridgeURI: "sip:old@shared.example.test",
+				BridgeUsername: "bridge-user", BridgePasswordSealed: sealed,
+				BridgePasswordKEKVersion: s.service.sealer.CurrentVersion(),
+			})
+		}))
+}
+
+func (s *SIPTrunkSuite) TestResumingACallOnASharedLineOpensItsBridgePassword() {
+	trunk := s.create("acme", customerTrunkPassword)
+	s.shareLine("stream-trunk-1", "+15125550100")
+
+	resumed, err := s.service.ResumeTrunkCall(s.ctx, TrunkCallRef{
+		CustomerID: "acme", SIPTrunkID: trunk.ID, StreamTrunkID: "stream-trunk-1", From: "+15125550100",
+	})
+
+	s.Require().NoError(err)
+	s.Equal(Bridge{URI: "sip:+15125550100@shared.example.test", Username: "bridge-user", Password: sharedBridgePassword}, resumed.Bridge)
+}
+
+func (s *SIPTrunkSuite) TestAResumedCallReportsHowItEndedWithItsToken() {
+	trunk := s.create("acme", customerTrunkPassword)
+	token, err := s.service.outcomes.Placed(s.ctx, outcome.Call{
+		Key: outcome.Key{
+			CustomerID: "acme", CallType: "default", CallID: "session-resumed",
+			Local: "+15125550100", Remote: "+15125550101",
+		},
+		Vendor: SIPTrunkVendor, Reports: true,
+	})
+	s.Require().NoError(err)
+	s.shareLine("stream-trunk-1", "+15125550100")
+	resumed, err := s.service.ResumeTrunkCall(s.ctx, TrunkCallRef{
+		CustomerID: "acme", SIPTrunkID: trunk.ID, StreamTrunkID: "stream-trunk-1", From: "+15125550100",
+		CallID: "session-resumed", Token: token,
+	})
+	s.Require().NoError(err)
+
+	resumed.Ended(CallStatus{Result: CallCompleted, Word: "bye", SIPCode: 200})
+
+	call, err := s.service.outcomes.ByToken(s.ctx, token)
+	s.Require().NoError(err)
+	s.Equal(outcome.Completed, call.Outcome)
 }

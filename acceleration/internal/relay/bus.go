@@ -109,6 +109,8 @@ type Response struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 	// Halted is a Closed for a session the holder's router stopped on its way down.
 	Halted bool `json:"halted,omitempty"`
+	// ByCommand is a Closed for a session that a close command from the watcher ended.
+	ByCommand bool `json:"by_command,omitempty"`
 }
 
 // Options configures a Bus.
@@ -182,17 +184,22 @@ func (b *Bus) Publish(ctx context.Context, channel string, message any) error {
 // subscription is live so that whatever the caller publishes next is heard by its peers.
 //
 // It goes on delivering until the context is done, resubscribing if the connection
-// breaks. Messages arrive on a goroutine of the client's, one at a time, so deliver has
-// to hand anything slow to somebody else.
-func (b *Bus) Subscribe(ctx context.Context, channel string, deliver func([]byte)) error {
+// breaks, and closes the channel it returns once it has stopped. Messages arrive on a
+// goroutine of the client's, one at a time, so deliver has to hand anything slow to
+// somebody else.
+func (b *Bus) Subscribe(ctx context.Context, channel string, deliver func([]byte)) (<-chan struct{}, error) {
 	live := make(chan error, 1)
-	go b.subscribe(ctx, channel, deliver, live)
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		b.subscribe(ctx, channel, deliver, live)
+	}()
 
 	select {
 	case err := <-live:
-		return err
+		return stopped, err
 	case <-ctx.Done():
-		return ctx.Err()
+		return stopped, ctx.Err()
 	}
 }
 

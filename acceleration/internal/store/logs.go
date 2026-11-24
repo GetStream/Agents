@@ -2,77 +2,21 @@ package store
 
 import (
 	"bytes"
-	"context"
-	"database/sql"
-	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"github.com/getsentry/sentry-go"
-	"github.com/uptrace/bun"
 	"log/slog"
 	"regexp"
-	"strconv"
 	"strings"
-	"time"
+
+	"github.com/getsentry/sentry-go"
 )
-
-type AgentLog struct {
-	Cursor        string `bun:"-" json:"cursor"`
-	bun.BaseModel `bun:"table:agent_logs,alias:l" json:"-"`
-	ID            int64          `bun:"id,pk,autoincrement" json:"id,string"`
-	CustomerID    string         `json:"-"`
-	ConfigID      string         `json:"config_id"`
-	AgentID       string         `json:"agent_id"`
-	SessionID     string         `json:"session_id"`
-	UserID        string         `json:"user_id,omitempty"`
-	Source        string         `json:"source"`
-	Severity      string         `json:"severity"`
-	EventType     string         `json:"event_type"`
-	Message       string         `json:"message"`
-	OccurredAt    time.Time      `json:"occurred_at"`
-	IngestedAt    time.Time      `json:"ingested_at"`
-	Details       map[string]any `bun:"details,type:jsonb" json:"details,omitempty"`
-}
-
-// severityOrder is the levels a log is written at, least serious first. A
-// filter names the least serious level it wants and gets that one and everything
-// above it, so asking for warnings is asking to be shown the problems without
-// the running commentary.
-var severityOrder = []string{"info", "warn", "error"}
-
-// severitiesFrom is the levels a filter admits. An empty filter admits all of
-// them, and so does one naming a level nothing is written at, which is the
-// reading that shows too much rather than too little.
-func severitiesFrom(least string) []string {
-	if least == "" {
-		return nil
-	}
-	for i, level := range severityOrder {
-		if level == least {
-			return severityOrder[i:]
-		}
-	}
-	return nil
-}
-
-type LogFilter struct {
-	// Severity is the least serious level to show, not the only one: see
-	// severitiesFrom.
-	CustomerID, ConfigID, SessionID, UserID, Severity, Search string
-	Sources                                                   []string
-	From, To                                                  time.Time
-	Before, After                                             int64
-	Limit                                                     int
-	Forward                                                   bool
-}
 
 // bearerCredential and credentialText take their unquoted value only when it is not a word
 // (see redactUnlessWord): the prose of our own errors and a WWW-Authenticate challenge put a
 // word or an auth-param name there, as in "a bearer token", "open secret: cipher: ..." or
 // `Bearer error="insufficient_scope"` (RFC 6750 section 3).
 var bearerCredential = regexp.MustCompile(`(?i)\bbearer\s+([^\s"\x27,;}]+)`)
-var credentialText = regexp.MustCompile(`(?i)(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|authorization|cookie)["\x27]?\s*[=:]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|([^\s,;}]+))`)
+var credentialText = regexp.MustCompile(`(?i)(?:api[_-]?key|access[_-]?token|refresh[_-]?token|(?:\b|_)id[_-]?token|auth[_-]?token|private[_-]?key|password|secret|authorization|cookie)["\x27]?\s*[=:]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|([^\s,;}]+))`)
 
 // word is a value that reads as prose rather than a credential: letters, lower case after the
 // first, with underscores, as an auth-param name has, or up to 8 capitals, as an error code
@@ -82,6 +26,67 @@ var word = regexp.MustCompile(`^(?:[A-Za-z][a-z_]*|[A-Z]{1,8})[=.:!?)]*$`)
 var authorizationHeader = regexp.MustCompile(`(?im)\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*[^\r\n]+`)
 var urlCredential = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^\s/@]+:[^\s/@]+@`)
 var providerCredential = regexp.MustCompile(`\bsk-[a-zA-Z0-9_-]{8,}`)
+
+// jsonToken is a "token" key of a JSON object (or a quoted key of a Python-style dict) with a
+// quoted value, as a provider's answer echoed in an error has it: {"token":"..."}. The key is
+// matched whole, so max_tokens, tokens, "token_count" and a number or null value stay; the
+// _token names credentialText takes (access_token, id_token...) are not matched here. The key
+// stays and the value becomes "[redacted]", so the JSON a log or a stored text holds stays valid.
+var jsonToken = regexp.MustCompile(`(?i)(["\x27]token["\x27]\s*:\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')`)
+
+// shapedCredential is a rule and the literals one of which a text holds if the rule can match
+// it. The rule is run only then, so a line that passes mayHoldCredential for its "key" or "token" is
+// not scanned once for every shape it does not hold.
+type shapedCredential struct {
+	rule     *regexp.Regexp
+	literals []string
+}
+
+func newShaped(pattern string, literals ...string) shapedCredential {
+	return shapedCredential{rule: regexp.MustCompile(pattern), literals: literals}
+}
+
+// shapeStart is the first group of a prefixed rule, see shapedCredentials.
+const shapeStart = `(^|[^A-Za-z0-9_]|%[0-9A-Fa-f]{2}|\\[a-z]|\\u[0-9A-Fa-f]{4})`
+
+// shapedCredentials are credentials with a fixed shape, which are taken out wherever they stand,
+// with no keyword before them. A rule names one shape and is case sensitive, as the prefix
+// of each is. A prefix starts after the start of the text, a character that is not a letter,
+// digit or underscore, or an escape (%3D, \n, \u0026), which a \b would not see as a boundary
+// when a letter follows it; the boundary is the rule's first group and is kept. The JWT and PEM
+// rules have no boundary and no group. The lengths are floors below the documented ones, so a
+// prefix with a short tail (a prose word, a test value) stays.
+var shapedCredentials = []shapedCredential{
+	// Slack tokens: xox, a letter for the type (b bot, p user, r refresh, e rotating refresh, and others)
+	// and a dash (https://api.slack.com/authentication/token-types).
+	newShaped(shapeStart+`xox[abposre]-[A-Za-z0-9-]{10,}`, "xox"),
+	// Slack app-level token: xapp, a version digit and the rest.
+	newShaped(shapeStart+`xapp-[A-Za-z0-9-]{10,}`, "xapp-"),
+	// GitHub personal, OAuth, user-to-server, server-to-server and refresh tokens: gh plus a type
+	// letter and an underscore, 36 characters after it
+	// (https://github.blog/engineering/platform-security/behind-githubs-new-authentication-token-formats/).
+	newShaped(shapeStart+`gh[pousr]_[A-Za-z0-9]{20,}`, "ghp_", "gho_", "ghu_", "ghs_", "ghr_"),
+	// GitHub fine-grained personal access token.
+	newShaped(shapeStart+`github_pat_[A-Za-z0-9_]{20,}`, "github_pat_"),
+	// Google API key: AIza and 35 characters.
+	newShaped(shapeStart+`AIza[0-9A-Za-z_-]{30,}`, "AIza"),
+	// AWS access key id: AKIA and 16 characters
+	// (https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_identifiers.html).
+	newShaped(shapeStart+`AKIA[0-9A-Z]{16}`, "AKIA"),
+	// AWS temporary access key id from STS: ASIA and 16 characters, as AKIA has.
+	newShaped(shapeStart+`ASIA[0-9A-Z]{16}`, "ASIA"),
+	// A JSON Web Token with no keyword before it: three base64url parts joined by dots, the first
+	// the encoded header, which starts with eyJ as {" does (RFC 7515 section 7.1, RFC 7519), and
+	// the payload, a JSON object, which starts with eyJ too, so a dotted name such as keyJar.example.com
+	// stays. The signature of an unsecured token is empty.
+	newShaped(`eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*`, "eyJ"),
+	// A PEM private key block (RFC 7468 section 13): the BEGIN line, the Proc-Type and DEK-Info
+	// headers of a legacy encrypted one (RFC 1421 section 4.6), the base64 body and escaped
+	// newlines after it, and the END line when there is one. The body is read as the characters
+	// it holds, not up to the END line, which a line cut short does not have and a lazy search for
+	// it would read to the end of the text for.
+	newShaped(`-----BEGIN [A-Z ]*PRIVATE KEY-----(?:(?:\s|\\[nr])*(?:Proc-Type|DEK-Info):[ \t]*[A-Za-z0-9,._-]+)*[A-Za-z0-9+/=\s\\]*(?:-----END [A-Z ]*PRIVATE KEY-----)?`, "-----BEGIN"),
+}
 
 // queryCredential is a key sent as a URL query parameter, which a Go http or websocket error
 // prints with the URL. The names are the ones we send a key in: key for Gemini's Live API
@@ -93,6 +98,35 @@ var providerCredential = regexp.MustCompile(`\bsk-[a-zA-Z0-9_-]{8,}`)
 // tokens, max_tokens or "the key=value pair" stay. The value runs to the next raw &, a backslash (the start of a JSON
 // escape) or a quote, so an encoded one also takes the encoded parameters after it.
 var queryCredential = regexp.MustCompile(`(?i)((?:[?&"]|&amp;|\\u0026|%(?:25)*3F|%(?:25)*26)(?:key|token)(?:=|\\u003d|%(?:25)*3D))[^&\s"\x27#\\]+`)
+
+// encodedCredential is a credential name and an encoded equals sign (%3D, or %253D twice
+// encoded) with the value after it, where no ? or & stands before the name: the text of an
+// encoded query cut at the parameter ("key%3D<hex>"), or a parameter after another separator
+// such as %22. The names are the ones credentialText takes, and as it takes them: api_key,
+// access_token, password, secret and the others wherever they stand, in any case and with or
+// without their separator (x_api_key, accessToken, clientSecret), and id_token after an
+// underscore or a boundary. Key and token, which end other names, take a boundary before them:
+// the start of the text, a character that is not a letter, digit or underscore, or an encoded
+// character, once or twice encoded (%22, %2522), so monkey%3D1, max_token%3D256 and
+// sort_key%3Ddate stay. The name and the boundary are kept. The value is read as
+// queryCredential reads it, whatever its length: a parameter named key is a key. A name with a
+// plain = is the rule of credentialText and queryCredential.
+var encodedCredential = regexp.MustCompile(`(?i)((?:^|[^A-Za-z0-9_]|%(?:25)*[0-9A-Fa-f]{2}|\\[a-z]|\\u[0-9A-Fa-f]{4})(?:key|token|id[_-]?token)|_id[_-]?token|api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?key|password|secret)(%(?:25)*3D)[^&\s"\x27#\\]+`)
+
+// vendorKeyMessage is a provider's refusal that names the key it was sent, with no = or : to
+// say so: "Invalid API key <32 hex>", "Incorrect API key provided: <key>", invalid_api_key, or
+// the same for an API token. The key is the 16 characters or more of the key alphabet, base64
+// (+ /, and = only as the padding at its end) and base64url (- _) included, after the phrase,
+// so a request id of 8 hex digits after "Invalid API key." stays, and so does a glued
+// name=value after it (model=..., request_id=...). A quote before the key, or a quote escaped as a JSON body has it
+// (\"), stays with the phrase. The phrase stays and the key is taken out, unless it is a word
+// (see redactVendorKeyMessage).
+var vendorKeyMessage = regexp.MustCompile(`(?i)\b((?:invalid|incorrect)[\s_-]+(?:x-)?api[\s_-]?(?:key|token)\b(?:\s+provided)?\s*[:=]?\s*(?:\\?["\x27])?)([A-Za-z0-9_+/-]{16,}={0,2})()`)
+
+// vendorKeyBefore is the same refusal with the key before the verdict: "The API key '<key>' is
+// invalid", with single quotes, double quotes (raw or JSON-escaped) or none. The key has the
+// same 16 character floor, and the phrase around it stays.
+var vendorKeyBefore = regexp.MustCompile(`(?i)\b(api[\s_-]?(?:key|token)\s+(?:\\?["\x27])?)([A-Za-z0-9_+/-]{16,}={0,2})((?:\\?["\x27])?\s+(?:is|was)\s+(?:invalid|incorrect)\b)`)
 
 // encodedAuthorization is an authorization or cookie header (proxy-authorization and
 // set-cookie end in those names) written into a URL: the name, an optional encoded quote
@@ -125,26 +159,40 @@ func RedactLogText(text string) string {
 	return redactCredentials(text)
 }
 
-// credentialWords are the words every rule in redactCredentials needs, in any case: bearer
-// (bearerCredential, encodedBearer), authorization and cookie (authorizationHeader,
-// encodedAuthorization), key and token (queryCredential, and api_key, access_token or
-// refresh_token in credentialText), password and secret (credentialText), the @ of
-// urlCredential and the sk- of providerCredential.
-var credentialWords = []string{"bearer", "authorization", "cookie", "key", "token", "password", "secret", "@", "sk-"}
+// legacyWords are the words every rule in redactCredentials but the shaped ones needs, in any
+// case: bearer (bearerCredential, encodedBearer), authorization and cookie
+// (authorizationHeader, encodedAuthorization), key and token (queryCredential, jsonToken, and
+// api_key, access_token or refresh_token in credentialText), password and secret
+// (credentialText), the @ of urlCredential and the sk- of providerCredential. A PEM block has
+// "key" in its BEGIN line. The rules for those are case sensitive; the check is not, which only
+// lets more text through to them.
+var legacyWords = []string{"bearer", "authorization", "cookie", "key", "token", "password", "secret", "@", "sk-"}
+
+// shapeWords are the start of each shape in shapedCredentials. A text with only one of these
+// (a base64 body with eyJ in it) runs the shaped rules and not the ones above, which scan the
+// whole text.
+var shapeWords = []string{"xox", "xapp-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "aiza", "akia", "asia", "eyj"}
 
 // mayHoldCredential is false for a text no rule can match, which is most of what is logged,
-// so it skips the regular expressions. The rules fold case as Unicode does, where K is also
-// the Kelvin sign and s the long s, so a text with either is checked in full.
+// so it skips the regular expressions.
 func mayHoldCredential(text string) bool {
-	if strings.ContainsRune(text, '\u212a') || strings.ContainsRune(text, '\u017f') {
-		return true
-	}
+	return holdsLegacyWord(text) || holdsWord(text, shapeWords)
+}
+
+// holdsLegacyWord is true for a text one of the rules other than the shaped ones can match. The
+// rules fold case as Unicode does, where K is also the Kelvin sign and s the long s, so a text
+// with either is checked in full.
+func holdsLegacyWord(text string) bool {
+	return strings.ContainsRune(text, '\u212a') || strings.ContainsRune(text, '\u017f') || holdsWord(text, legacyWords)
+}
+
+func holdsWord(text string, words []string) bool {
 	for i := 0; i < len(text); i++ {
 		c := text[i]
 		if 'A' <= c && c <= 'Z' {
 			c += 'a' - 'A'
 		}
-		for _, w := range credentialWords {
+		for _, w := range words {
 			if c == w[0] && len(text)-i >= len(w) && strings.EqualFold(text[i:i+len(w)], w) {
 				return true
 			}
@@ -153,17 +201,59 @@ func mayHoldCredential(text string) bool {
 	return false
 }
 
-// redactCredentials is RedactLogText with no check first.
+// redactCredentials is RedactLogText with no check first. The shaped rules run first, so a
+// rule after them that takes only a part of a shaped token, as vendorKeyMessage takes a JWT
+// up to its first dot, does not leave the rest of it in a shape no rule matches.
 func redactCredentials(text string) string {
+	for _, shaped := range shapedCredentials {
+		if shaped.mayMatch(text) {
+			text = shaped.rule.ReplaceAllString(text, "${1}[redacted]")
+		}
+	}
+	if holdsLegacyWord(text) {
+		text = redactLegacyCredentials(text)
+	}
+	return text
+}
+
+func redactLegacyCredentials(text string) string {
 	text = redactUnlessWord(bearerCredential, text)
 	text = authorizationHeader.ReplaceAllString(text, "[redacted]")
 	text = redactUnlessWord(credentialText, text)
 	text = urlCredential.ReplaceAllString(text, "${1}[redacted]@")
 	text = queryCredential.ReplaceAllString(text, "${1}[redacted]")
+	// The encoded key goes before the vendor phrase: the key class of the phrase stops at the %
+	// of %3D and would leave the value of an encoded key that follows it.
+	text = encodedCredential.ReplaceAllString(text, "${1}${2}[redacted]")
+	text = redactVendorKeyMessage(vendorKeyMessage, text)
+	text = redactVendorKeyMessage(vendorKeyBefore, text)
 	text = encodedAuthorization.ReplaceAllString(text, "[redacted]")
 	text = encodedBearer.ReplaceAllString(text, "[redacted]")
 	text = providerCredential.ReplaceAllString(text, "[redacted]")
+	text = jsonToken.ReplaceAllString(text, `${1}"[redacted]"`)
 	return text
+}
+
+// redactVendorKeyMessage takes the key out of each match of rule (vendorKeyMessage or
+// vendorKeyBefore: the phrase before it, the key, the phrase after it), but for a value that
+// is a word, as redactUnlessWord does, such as authentication_failed after "invalid_api_key".
+func redactVendorKeyMessage(rule *regexp.Regexp, text string) string {
+	return rule.ReplaceAllStringFunc(text, func(match string) string {
+		parts := rule.FindStringSubmatch(match)
+		if word.MatchString(parts[2]) {
+			return match
+		}
+		return parts[1] + "[redacted]" + parts[3]
+	})
+}
+
+func (s shapedCredential) mayMatch(text string) bool {
+	for _, literal := range s.literals {
+		if strings.Contains(text, literal) {
+			return true
+		}
+	}
+	return false
 }
 
 // redactUnlessWord replaces each match of rule with [redacted], but for one whose unquoted
@@ -374,112 +464,4 @@ func safeLogDetails(details map[string]any) map[string]any {
 		}
 	}
 	return out
-}
-func (s *Store) RecordAgentLog(ctx context.Context, entry *AgentLog) error {
-	if entry.CustomerID == "" {
-		return errors.New("log customer required")
-	}
-	entry.Message = SafeLogText(entry.Message)
-	entry.Details = safeLogDetails(entry.Details)
-	if entry.OccurredAt.IsZero() {
-		entry.OccurredAt = time.Now().UTC()
-	}
-	entry.IngestedAt = time.Now().UTC()
-	return s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended(?, 731))", entry.CustomerID); err != nil {
-			return err
-		}
-		_, err := tx.NewInsert().Model(entry).Exec(ctx)
-		return err
-	})
-}
-func (s *Store) LogHighWater(ctx context.Context, customer string) (int64, error) {
-	var id int64
-	err := s.db.NewSelect().Table("agent_logs").ColumnExpr("COALESCE(MAX(id),0)").Where("customer_id = ?", customer).Scan(ctx, &id)
-	return id, err
-}
-func (s *Store) AgentLogs(ctx context.Context, f LogFilter) ([]AgentLog, error) {
-	if f.CustomerID == "" {
-		return nil, errors.New("log customer required")
-	}
-	rows := []AgentLog{}
-	q := s.db.NewSelect().Model(&rows).ExcludeColumn("details").Where("customer_id = ?", f.CustomerID)
-	if f.ConfigID != "" {
-		q = q.Where("config_id = ?", f.ConfigID)
-	}
-	if f.SessionID != "" {
-		q = q.Where("session_id = ?", f.SessionID)
-	}
-	if f.UserID != "" {
-		q = q.Where("user_id = ?", f.UserID)
-	}
-	if levels := severitiesFrom(f.Severity); len(levels) > 0 {
-		q = q.Where("severity IN (?)", bun.In(levels))
-	}
-	if len(f.Sources) > 0 {
-		q = q.Where("source IN (?)", bun.In(f.Sources))
-	}
-	if f.Search != "" {
-		q = q.Where("message ILIKE ?", "%"+strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(f.Search, `\`, `\\`), "%", `\%`), "_", `\_`)+"%")
-	}
-	if !f.From.IsZero() {
-		q = q.Where("occurred_at >= ?", f.From)
-	}
-	if !f.To.IsZero() {
-		q = q.Where("occurred_at < ?", f.To)
-	}
-	if f.Before > 0 {
-		q = q.Where("id < ?", f.Before)
-	}
-	if f.After > 0 {
-		q = q.Where("id > ?", f.After)
-	}
-	order := "id DESC"
-	if f.Forward {
-		order = "id ASC"
-	}
-	err := q.Order(order).Limit(min(max(f.Limit, 1), 251)).Scan(ctx)
-	for i := range rows {
-		rows[i].Cursor = base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(rows[i].ID, 10)))
-	}
-	return rows, err
-}
-func (s *Store) AgentLog(ctx context.Context, customer string, id int64) (*AgentLog, error) {
-	if customer == "" {
-		return nil, sql.ErrNoRows
-	}
-	var row AgentLog
-	err := s.db.NewSelect().Model(&row).Where("customer_id = ? AND id = ?", customer, id).Scan(ctx)
-	if err != nil {
-		return &row, err
-	}
-	// The log row's own details carry the error since 20260914175000_agent_log_failures.sql,
-	// and are the answer. A request's id is only unique in the database that numbered it, with
-	// shards or after a data move, which gives a moved request an id of its new deployment's, so
-	// an older row's request is found by that number only when it also started when the row
-	// says it happened, for the same agent: both writers log a request at its started_at.
-	_, carried := row.Details["error_code"]
-	if row.EventType == "provider_request" && !s.Sharded() && !carried {
-		rawID, _ := row.Details["request_id"].(string)
-		requestID, parseErr := strconv.ParseInt(rawID, 10, 64)
-		if parseErr == nil && requestID > 0 {
-			var request Request
-			lookup := s.db.NewSelect().Model(&request).Column("error_code", "error_message").
-				Where("customer_id = ? AND id = ?", customer, requestID).
-				Where("started_at = ? AND agent_id = ?", row.OccurredAt, row.AgentID).
-				Scan(ctx)
-			if lookup != nil && !errors.Is(lookup, sql.ErrNoRows) {
-				return nil, lookup
-			}
-			if lookup == nil {
-				if request.ErrorCode != "" {
-					row.Details["error_code"] = SafeLogText(request.ErrorCode)
-				}
-				if request.ErrorMessage != "" {
-					row.Details["error_message"] = SafeLogText(request.ErrorMessage)
-				}
-			}
-		}
-	}
-	return &row, nil
 }

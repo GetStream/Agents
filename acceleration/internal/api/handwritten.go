@@ -30,6 +30,10 @@ func documentHandWritten(api huma.API) {
 				registry.Schema(reflect.TypeFor[ToolResultCommand](), true, ""),
 				registry.Schema(reflect.TypeFor[ToolApprovalCommand](), true, ""),
 			},
+			// The frames the server sends that a client keeps state from.
+			"x-server-frames": []*huma.Schema{
+				registry.Schema(reflect.TypeFor[ToolCallState](), true, ""),
+			},
 		},
 		Method:  http.MethodGet,
 		Path:    "/v1/agents/sessions/{id}/events",
@@ -37,7 +41,8 @@ func documentHandWritten(api huma.API) {
 		Description: "A WebSocket, which OpenAPI cannot describe past the upgrade. Frames are JSON objects " +
 			"carrying a `type` and the fields of that event.\n" +
 			"The server sends what the conversation did: `joined`, `heard`, `responding`, " +
-			"`response_delta`, `responded` (pending_work remains true while tools or delegated work " +
+			"`response_delta`, `reasoning_delta` (turn_id and text: the next piece of the model's thinking " +
+			"on a written reply, never spoken), `responded` (pending_work remains true while tools or delegated work " +
 			"are outstanding), `said` (a line the agent says as written rather than asking the model, " +
 			"such as its greeting, with the purpose it has), `speaking` (an utterance started being heard: " +
 			"turn_id, synthesis_id, the text the voice had been sent for it by then, at, when the call's " +
@@ -53,7 +58,8 @@ func documentHandWritten(api huma.API) {
 			"`decision`, `delegated`, `task_settled` (files " +
 			"lists what the work's code handed back, each a name, mime_type, url and size, uploaded " +
 			"to a persistent conversation's channel and attached to the reply), " +
-			"`task_cancelled`, `tool_call`, `tool_held`, `tool_approval_ignored`, `tool_updated`, `tool_ran`, `transferred`, `pressed`, `looked_up`, " +
+			"`task_cancelled`, `tool_call`, `tool_held`, `tool_approval_ignored`, `tool_result_ignored`, `tool_started`, `tool_updated`, `tool_ran`, " +
+			"`tool_call.started`, `tool_call.progress`, `tool_call.finished`, `transferred`, `pressed`, `looked_up`, " +
 			"`backchannel`, `interrupted` (turn_id; with synthesis_id, heard_ms, message_start and " +
 			"message_end, the utterance being heard when it was cut, how many milliseconds of it had been, " +
 			"and where all it had been sent is in the reply's message, when any of it had), " +
@@ -118,6 +124,13 @@ func documentHandWritten(api huma.API) {
 			"failed and cancelled. tool_started includes tool_call_id, tool, turn_id and started_at, and " +
 			"pre_speech when the tool's connector binding sets one in its policy; " +
 			"tool_ran also includes tool_call_id, and files when the tool was run_code, as on task_settled.\n" +
+			"`tool_call.started`, `tool_call.progress` and `tool_call.finished` (`ToolCallState`) are a " +
+			"call's state as a client shows it, whoever runs the call: tool_call_id, tool, turn_id, status " +
+			"(in_progress, waiting for a person's approval, success, failed or cancelled), display_title (what " +
+			"the call is doing, as its tool was declared with), progress (the last " +
+			"`tool_update`, the binding's pre_speech or the approval question), started_at, duration_ms, " +
+			"approved_at, rejected_at, error and custom (the data of the last `tool_update` that " +
+			"carried any, kept once the call finishes). Each carries the whole state: keep the last per tool_call_id.\n" +
 			"A respond command carrying request_id emits command_accepted with a nested command " +
 			"receipt (request_id, user_message_id, assistant_message_id, state, duplicate). Personal " +
 			"persistent text sessions require this ID. A retry with the same text and images returns " +
@@ -153,7 +166,7 @@ func documentHandWritten(api huma.API) {
 			"and `name` of the person whose turn asked for it, when the router knows) and " +
 			"`conversation` (`cid` when the conversation is kept, and the session's `custom`). " +
 			"Every watcher sees every `tool_call`, and `run` says whether this one is to run it: " +
-			"only a watcher that runs the tool answers, and a result from any other is dropped. A " +
+			"only a watcher that runs the tool answers, and a result from any other is dropped while the call waits. A " +
 			"watcher says which tools it runs with `tools` when it attaches. Without it, it runs " +
 			"the session's tools when it is on the side that created the session: a backend for a " +
 			"session a backend created, the same person for one a device created. A tool a backend " +
@@ -162,20 +175,34 @@ func documentHandWritten(api huma.API) {
 			"`tool_cancel` (`id`, `turn_id`) says a call is no longer wanted: its timeout passed, or " +
 			"the caller interrupted a call to an `interruptible` tool. Tool calls made by durable personal commands carry `request_id` and `turn_id`; " +
 			"their result must repeat both values so a result cannot be adopted by another command " +
-			"or turn.\n" +
+			"or turn. A `tool_result`, `tool_hold`, `tool_update` or `tool_approval` names its call " +
+			"with `tool_call_id`, or with `id` as the `tool_call` did; `tool_call_id` wins when both " +
+			"are sent. A `tool_result` naming no call is answered with an `error` (`context` `tool`). " +
+			"One no call waits for (answered already, cancelled, timed out, naming another call, or a " +
+			"call of a durable command without its `request_id` and `turn_id`) is answered with " +
+			"`tool_result_ignored`: the `tool_call_id`, `request_id` and `turn_id` it was sent with, " +
+			"each left out when it was and each cut to its first 128 bytes, and `reason`, a sentence " +
+			"saying why; the socket stays open. Every watcher is sent both. A result sent in the " +
+			"moment its call times out may be taken and lost without either. A result from a watcher " +
+			"that does not run a call still waiting for it is dropped without a word, since the " +
+			"watcher that runs it answers. Once the call waits no longer, a result from any watcher, " +
+			"running it or not, is answered with `tool_result_ignored` like any other. An `id` that " +
+			"is not a string names no call.\n" +
 			"While it runs a call, the watcher running it may send `tool_hold` (`tool_call_id`) " +
 			"to keep the call going when the caller talks over the agent, which would otherwise " +
 			"cancel a call to an `interruptible` tool. Every watcher is sent `tool_held` (`id`) when it " +
 			"was held, or `tool_cancel` when the call had already stopped. " +
 			"An explicit `interrupt` still cancels a held call. It may also send `tool_update` " +
-			"(`tool_call_id`, `text`, `verbatim`) to say how the call is going: the agent tells a " +
+			"(`tool_call_id`, `text`, `verbatim`, `custom`) to say how the call is going: the agent tells a " +
 			"voice caller in its own words once nobody is talking, and a persistent conversation " +
 			"shows `text` as the summary of the call's step until it ends. On speech-to-speech, " +
 			"OpenAI Realtime, Gemini 3.1 Flash Live and Gemini 3.8 Live are told while the call is open; " +
 			"other models only report it. With `verbatim` true, " +
 			"the agent says or posts `text` as written instead. A newer update replaces one not yet " +
-			"said, and a call's result replaces both. Every watcher is sent `tool_updated` (`id`, " +
-			"`turn_id`, `tool`, `text`, `verbatim`) for each update. An update or hold from a watcher " +
+			"said, and a call's result replaces both. `custom`, an object, replaces the call's `custom` " +
+			"in its `ToolCallState`; an update with `custom` and no `text` changes nothing else and " +
+			"is not said. Every watcher is sent `tool_updated` (`id`, " +
+			"`turn_id`, `tool`, `text`, `verbatim`, `custom`) for each update with text. An update or hold from a watcher " +
 			"that does not run the call is dropped.\n" +
 			"On a voice call, a call to a tool declared with an `approval` is asked about out loud " +
 			"instead, and sent only once the caller said yes, with `approved` true; a watcher does " +
@@ -305,9 +332,24 @@ func documentHandWritten(api huma.API) {
 			"long the caller waited for the first of them. `messages[].content` is a string, or an " +
 			"array of parts `[{type: text|image_url, ...}]`. Assistant messages replay `tool_calls: " +
 			"[{id, name, arguments, signature}]`, with arguments encoded as a JSON string and " +
-			"optional opaque signature. Tool-result messages use `role: tool` and `tool_call_id` to " +
-			"correlate their content. Completed tool calls include the same replay fields; " +
-			"incomplete responses additionally report `incomplete_reason` (such as " +
+			"optional opaque signature, and may replay their thinking as `reasoning: [{text, " +
+			"signature, redacted, after_tool_calls, after_text}]`, the list a `complete` that did " +
+			"not fail reported, unchanged: a provider that signs its thinking (Anthropic) is sent " +
+			"each block again where it stood, after `after_tool_calls` of the turn's tool calls " +
+			"and, before the first of them, after `after_text` bytes (UTF-8) of its text; every " +
+			"other provider ignores it. A position the turn does not have, or out of order, is " +
+			"refused. Send the blocks with what came before them unchanged too (the same " +
+			"instructions, tools and earlier messages, new turns only appended): when that " +
+			"changed, Claude may refuse the request or answer with the block's stale reasoning. " +
+			"Tool-result messages use `role: tool` and `tool_call_id` to correlate their content. " +
+			"Completed tool calls include the same replay fields. A provider that signs its " +
+			"thinking also sends a `reasoning` frame `{id, block}` as each block finishes, " +
+			"between the `delta`s of the text around it, for display: replay only what " +
+			"`complete` reports, which leaves out a failed response's blocks and any block a " +
+			"replay could not put back exactly (one after a tool call when text follows a call, " +
+			"one after a call dropped for arguments that do not parse, one after two texts with " +
+			"no thinking between them, and every block after those). A `complete`'s " +
+			"incomplete status additionally reports `incomplete_reason` (such as " +
 			"`max_output_tokens`). The LLM `started` frame advertises `tool_history: true` when tool " +
 			"replay is supported. Content parts use `[{type: text|image_url, ...}]` with images on " +
 			"`image_url: {url, detail}`. Use `vlm` to select image-capable models. A model that does " +
@@ -719,6 +761,47 @@ func documentHandWritten(api huma.API) {
 		},
 	})
 	document.AddOperation(&huma.Operation{
+		OperationID: "receiveTelnyxEvent",
+		Method:      http.MethodPost,
+		Path:        telnyxEventsHookPath,
+		Summary:     "Receive a Telnyx account event",
+		Description: "Where the Telnyx account's notification channel sends account events, such as a " +
+			"port-out or a number order. Unauthenticated because Telnyx is not a customer: each " +
+			"event is checked against the account's Ed25519 signature, then logged and counted in " +
+			"vendor_account_events_total by its type and level. A deployment with no Telnyx key " +
+			"answers 404, so nobody else can raise the count.",
+		Security: []map[string][]string{},
+		Responses: map[string]*huma.Response{
+			"204": {Description: "The event is counted"},
+			"400": {Description: "The signed body is not a Telnyx event"},
+			"401": {Description: "The event is not signed by Telnyx"},
+			"404": {Description: "Telnyx events are not configured"},
+			"413": {Description: "The event is over 64 KiB"},
+		},
+	})
+	document.AddOperation(&huma.Operation{
+		OperationID: "receiveTwilioEvent",
+		Method:      http.MethodPost,
+		Path:        twilioEventsHookPath,
+		Summary:     "Receive a Twilio account event",
+		Description: "Where the Twilio account sends its Monitor alerts (the Debugger webhook) and its " +
+			"usage triggers' callbacks, as form posts. Unauthenticated because Twilio is not a " +
+			"customer: each event is checked against X-Twilio-Signature, made with the account's " +
+			"Auth Token over ROUTER_PUBLIC_URL and this path, then logged and counted in " +
+			"vendor_account_events_total by its error code or usage category and its level. An " +
+			"alert whose Sid was counted in the last hour is answered 204 and not counted again. A " +
+			"deployment with no Twilio webhook token or no public URL answers 404, so nobody else " +
+			"can raise the count.",
+		Security: []map[string][]string{},
+		Responses: map[string]*huma.Response{
+			"204": {Description: "The event is counted, or is an alert already counted in the last hour"},
+			"400": {Description: "The signed form is not a Monitor alert or a usage trigger"},
+			"401": {Description: "The event is not signed by Twilio"},
+			"404": {Description: "Twilio events are not configured"},
+			"413": {Description: "The event is over 1 MiB"},
+		},
+	})
+	document.AddOperation(&huma.Operation{
 		OperationID: "receiveChatDelivery",
 		Method:      http.MethodPost,
 		Path:        chatInboundPath,
@@ -866,6 +949,8 @@ func documentHandWritten(api huma.API) {
 			"sample and a call recording lives in an object bucket rather than in this database; the " +
 			"rows naming those objects are here, and copying the bucket is yours to do.\n" +
 			"A router with shards cannot be the source of a move and answers 400 `not_configured`.\n" +
+			"An app runs one export at a time on a router, and an export ends after an hour, or when one line " +
+			"has taken a minute to write: an export with no cursor line is one to run again.\n" +
 			"Server-side only, and refused entirely when the router runs with " +
 			"ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.",
 		Responses: map[string]*huma.Response{
@@ -873,7 +958,8 @@ func documentHandWritten(api huma.API) {
 			"400": {Ref: "#/components/responses/BadRequest"},
 			"401": {Ref: "#/components/responses/Unauthorized"},
 			"403": {Ref: "#/components/responses/Forbidden"},
-			"503": {Description: "This deployment has no database to export from, or cannot record changes; or a write that was open when the export started is still open after 30 seconds: try again.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"409": {Description: "An export of this app is already running on this router: one runs at a time.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"503": {Description: "This deployment has no database to export from, or cannot record changes; or this router is running as many exports as it takes at once; or the export ran out of time before its first row; or a write that was open when the export started is still open after 30 seconds: try again.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 		},
 	})
 	document.AddOperation(&huma.Operation{
@@ -881,8 +967,8 @@ func documentHandWritten(api huma.API) {
 		Method:      http.MethodPost,
 		Path:        "/v1/data/import",
 		Summary:     "Write an export, or a batch of changes, into this deployment",
-		Description: "Takes what `exportData` produced, and the same lines with a `change` in place of a " +
-			"`row` for what `listDataChanges` returned. Every row is written under the calling app " +
+		Description: "Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the " +
+			"same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app " +
 			"whatever the file says, so an export from one app cannot be imported into another's " +
 			"rows, and rows belonging to a customer through a parent are only written where that " +
 			"parent is the caller's.\n" +
@@ -908,6 +994,7 @@ func documentHandWritten(api huma.API) {
 			"401": {Ref: "#/components/responses/Unauthorized"},
 			"403": {Ref: "#/components/responses/Forbidden"},
 			"409": {Description: "The file carries an export's rows, the app already has data here and `full` is not true.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"413": {Description: "A line of the file is over 64 MiB.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 			"503": {Description: "This deployment has no database to import into.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 		},
 	})

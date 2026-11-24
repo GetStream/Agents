@@ -63,6 +63,8 @@ type stubLLM struct {
 	// holdCreate, if set, is waited on after the request is recorded and before a stream
 	// is returned, so a test can Cancel while Create has not come back.
 	holdCreate <-chan struct{}
+	// closes counts the times the session over it was closed.
+	closes int
 
 	// scripts are the responses handed out, so a test can settle one and see which were
 	// abandoned. order remembers which came first.
@@ -149,6 +151,7 @@ func (s *stubLLM) settle(responseID, text string) {
 
 func (s *stubLLM) Close() error {
 	s.mu.Lock()
+	s.closes++
 	scripts := make([]*llmtest.Script, 0, len(s.scripts))
 	for _, script := range s.scripts {
 		scripts = append(scripts, script)
@@ -457,6 +460,21 @@ func (s *HarnessSuite) TestAModelIsRequired() {
 	s.ErrorContains(err, "model session")
 }
 
+// A harness with no flow controller has nowhere to put one it is handed, so it closes it
+// rather than leaving it open for the rest of the call.
+func (s *HarnessSuite) TestAControllerHandedToAHarnessWithoutAFlowIsClosed() {
+	h, err := New(Options{Text: true, Model: s.session(newStubLLM())})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = h.Close() })
+	controller := newStubLLM()
+
+	h.SetModel(s.session(newStubLLM()), s.session(controller))
+
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	s.Equal(1, controller.closes, "the controller was left open")
+}
+
 func (s *HarnessSuite) TestASkillWithoutADescriptionIsRefused() {
 	// A skill the fast model is told nothing about is one it can never know to ask for.
 	_, err := New(Options{
@@ -613,7 +631,7 @@ func (s *HarnessSuite) TestAToolCallIsReportedForSomebodyElseToRun() {
 
 	s.harness.Requested("turn-1", []llm.ToolCall{
 		{ID: "call-1", Name: "transfer", Arguments: `{"to":"+15550001111"}`},
-	})
+	}, s.tools)
 
 	requested := s.awaitToolRequests(1)
 	s.Equal("turn-1", requested[0].TurnID)
@@ -630,7 +648,7 @@ func (s *HarnessSuite) TestAToolThatWasNeverOfferedIsDropped() {
 	s.harness.Requested("turn-1", []llm.ToolCall{
 		{ID: "call-1", Name: "hang_up", Arguments: "{}"},
 		{ID: "call-2", Name: "press", Arguments: `{"digits":"1"}`},
-	})
+	}, s.tools)
 
 	requested := s.awaitToolRequests(1)
 	s.Equal("press", requested[0].Call.Name, "only the real one survives")
@@ -1707,7 +1725,7 @@ func (s *HarnessSuite) TestACompletedResultQueuedBeforeCancellationIsDiscarded()
 	// A slow event reader holds the first result's delivery, so the second finishes in
 	// the manager but cannot be consumed by the harness until after cancellation.
 	for range eventBuffer {
-		h.Requested("event-backlog", []llm.ToolCall{{Name: tools.Tools[0].Name}})
+		h.Requested("event-backlog", []llm.ToolCall{{Name: tools.Tools[0].Name}}, tools)
 	}
 	s.slow.settle(first, "The delivery address is Harbor Road.")
 	s.eventually(h.Pending, "the first result never reached the harness")
@@ -1871,7 +1889,7 @@ func (s *HarnessSuite) TestASkillThatNamesAToolIsAskedAsOne() {
 	s.JSONEq(`{"digits":"1"}`, asked[0].Arguments)
 	s.NotEmpty(asked[0].ID)
 
-	s.harness.Requested("turn-1", asked)
+	s.harness.Requested("turn-1", asked, s.tools)
 	requested := s.awaitToolRequests(1)
 	s.Equal("press", requested[0].Call.Name)
 	s.JSONEq(`{"digits":"1"}`, requested[0].Call.Arguments)

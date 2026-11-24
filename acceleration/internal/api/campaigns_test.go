@@ -46,12 +46,44 @@ func (s *CampaignsSuite) TestANewCampaignGetsTheDefaultSequenceAndHours() {
 	s.Zero(created.Contacts.Total)
 }
 
-func (s *CampaignsSuite) TestAnAutoEnrollCampaignIsRefusedForNow() {
-	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/campaigns",
-		map[string]any{"name": "may", "type": "auto_enroll"})
+func (s *CampaignsSuite) TestAnAutoEnrollCampaignKeepsItsType() {
+	created := s.create(map[string]any{"name": "may", "type": "auto_enroll"})
+
+	s.Equal(CampaignTypeAutoEnroll, created.Type)
+	s.Equal(CampaignTypeAutoEnroll, s.get(created.Id).Type)
+}
+
+func (s *CampaignsSuite) TestAnAutoEnrollCampaignLaunchesBeforeAnybodyIsAdded() {
+	created := s.create(map[string]any{
+		"name": "campaign-" + s.utils.uuid(), "type": "auto_enroll",
+		"config_id": s.data.createAgentConfig().Id, "from_number": s.heldNumber(),
+	})
+	s.setGoal(created, "Confirm the visit")
+
+	s.Equal(CampaignStateRunning, s.launch(created).State)
+}
+
+func (s *CampaignsSuite) TestAStandardCampaignStillNeedsContactsToLaunch() {
+	created := s.create(map[string]any{
+		"name": "campaign-" + s.utils.uuid(), "config_id": s.data.createAgentConfig().Id, "from_number": s.heldNumber(),
+	})
+	s.setGoal(created, "Confirm the visit")
+
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/campaigns/"+created.Id+"/launch",
+		map[string]any{"consent": true})
 
 	s.Equal(http.StatusBadRequest, status)
-	s.Contains(failure, "auto-enroll campaigns are not available yet")
+	s.Contains(string(payload), "a campaign needs contacts to ring before it can launch")
+}
+
+func (s *CampaignsSuite) TestADuplicateOfAnAutoEnrollCampaignIsAutoEnroll() {
+	created := s.create(map[string]any{"name": "may", "type": "auto_enroll"})
+
+	var copied Campaign
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/campaigns/"+created.Id+"/duplicate",
+		map[string]any{"contacts": "none"}, &copied))
+
+	s.Equal(CampaignTypeAutoEnroll, copied.Type)
 }
 
 func (s *CampaignsSuite) TestACampaignsTypeNeverChanges() {
@@ -202,7 +234,7 @@ func (s *CampaignsSuite) TestLaunchingFromANumberTheAppDoesNotHaveIsRefused() {
 	created := s.ready()
 	// The number was the app's when it was set, and is not now.
 	notOurs := s.utils.number()
-	_, err := s.store.UpdateCampaign(context.Background(), s.customerID(), created.Id, store.CampaignChanges{FromNumber: &notOurs})
+	_, err := s.store.Campaigns.Update(context.Background(), s.customerID(), created.Id, store.CampaignChanges{FromNumber: &notOurs})
 	s.Require().NoError(err)
 
 	status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/campaigns/"+created.Id+"/launch",
@@ -336,7 +368,7 @@ func (s *CampaignsSuite) TestResumingBeforeTheStartTimeReturnsToScheduled() {
 	at := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/campaigns/"+created.Id+"/launch",
 		map[string]any{"consent": true, "start_at": at}, nil))
-	_, err := s.store.DB().ExecContext(context.Background(), "UPDATE campaigns SET state = 'paused' WHERE id = ?", created.Id)
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), "UPDATE campaigns SET state = 'paused' WHERE id = ?", created.Id)
 	s.Require().NoError(err)
 
 	resumed := s.move(created.Id, "resume")
@@ -386,7 +418,7 @@ func (s *CampaignsSuite) TestLaunchCapturesWhoLaunched() {
 	s.Require().Equal(http.StatusOK, launcher.do(http.MethodPost, "/v1/agents/campaigns/"+created.Id+"/launch",
 		map[string]any{"consent": true}, nil))
 
-	stored, err := s.store.Campaign(context.Background(), s.customerID(), created.Id)
+	stored, err := s.store.Campaigns.Get(context.Background(), s.customerID(), created.Id)
 	s.Require().NoError(err)
 	s.Equal(key, stored.APIKey, "the key that launched it, not the one that made it")
 	s.NotEqual(s.app.key, stored.APIKey)
@@ -466,7 +498,7 @@ func (s *CampaignsSuite) TestAnalyticsOfANewCampaignAreZero() {
 func (s *CampaignsSuite) TestASuspendedAppCannotLaunch() {
 	s.useApp(s.data.createApp())
 	created := s.ready()
-	s.Require().NoError(s.store.SuspendTelephony(context.Background(), &store.TelephonySuspension{
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(context.Background(), &store.TelephonySuspension{
 		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@getstream.io",
 	}))
 
@@ -559,7 +591,7 @@ func (s *CampaignsSuite) TestResumingACampaignWhoseConfigWasDeletedIsRefused() {
 func (s *CampaignsSuite) TestResumingARunningCampaignOfAnAppThatMayNotCallIsAConflict() {
 	s.useApp(s.data.createApp())
 	created := s.launch(s.ready())
-	s.Require().NoError(s.store.SuspendTelephony(context.Background(), &store.TelephonySuspension{
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(context.Background(), &store.TelephonySuspension{
 		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@getstream.io",
 	}))
 
@@ -617,7 +649,7 @@ func (s *CampaignsSuite) get(id string) Campaign {
 // heldNumber is a number the app holds, which a campaign may call from.
 func (s *CampaignsSuite) heldNumber() string {
 	e164 := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(context.Background(), &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &store.PhoneNumber{
 		E164: e164, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	return e164
@@ -731,4 +763,19 @@ func (s *CampaignsSuite) TestLeavingAMessageWithASpeechToSpeechAgentIsRefusedAtL
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/campaigns/"+created.Id,
 		map[string]any{"sequence": sequence}, nil))
 	s.launch(created)
+}
+
+// A delay is made a duration in nanoseconds, which a delay of 200 million minutes overflows:
+// the next attempt would land decades in the past and the rest would ring back to back.
+func (s *CampaignsSuite) TestADelayOverThirtyDaysIsRefused() {
+	created := s.create(map[string]any{"name": "may"})
+	sequence := created.Sequence
+	sequence.Steps[0].Attempts = []CampaignAttempt{{0}, {200000000}}
+
+	status, failure := s.serverClient.failure(http.MethodPatch, "/v1/agents/campaigns/"+created.Id,
+		map[string]any{"sequence": sequence})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "43200 minutes")
+	s.Len(s.get(created.Id).Sequence.Steps[0].Attempts, 4, "the sequence stored is unchanged")
 }

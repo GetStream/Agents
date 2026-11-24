@@ -130,9 +130,9 @@ func (s *ForgetUserSuite) emptyDatabase(name string) string {
 	s.Require().NoError(err)
 	defer empty.Close()
 	var database string
-	s.Require().NoError(empty.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(empty.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = empty.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = empty.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	return own
 }
@@ -148,7 +148,7 @@ func (s *ForgetUserSuite) recorded(shard int, app, user string, cost int64) uuid
 // written writes one billable row of app's user on a shard, not shipped yet.
 func (s *ForgetUserSuite) written(shard int, app, user string, cost int64) uuid.UUID {
 	id := uuid.Must(uuid.NewV7())
-	_, err := s.shards[shard].RecordRequests(s.ctx, []store.Request{{
+	_, err := s.shards[shard].Requests.InsertMany(s.ctx, []store.Request{{
 		UsageID: id, Modality: "llm", CustomerID: app, OrganizationID: s.organization, OrganizationTier: usageservice.DefaultTier,
 		APIKey: "key", UserID: user, Provider: "openai", Model: "gpt", StartedAt: time.Now().UTC(),
 		CostMicros: cost, BaseCostMicros: cost, Billable: true, Success: true,
@@ -165,7 +165,7 @@ func (s *ForgetUserSuite) shipped(id uuid.UUID, app, user string, cost int64) {
 // stopped is what a run that stopped after its first call to the usage service left: every
 // shard and the service rewritten to replacement, and nothing after.
 func (s *ForgetUserSuite) stopped(replacement string) {
-	_, err := s.shards[0].RenameUserRequests(s.ctx, s.app, person, replacement)
+	_, err := s.shards[0].Requests.RenameUser(s.ctx, s.app, person, replacement)
 	s.Require().NoError(err)
 	manage, err := usageservice.NewClient(usageservice.ClientOptions{URL: s.service.URL, ManageKey: s.service.ManageKey})
 	s.Require().NoError(err)
@@ -278,25 +278,29 @@ func (s *ForgetUserSuite) settingsOf(app, user string) {
 	shared := s.shards[0]
 	audit := store.LimitAudit{CustomerID: app, Source: store.AuditSourceAPI, ActorID: "staff"}
 	ten := int64(10)
-	s.Require().NoError(shared.SavePolicy(s.ctx, store.ScopeUser, store.UserScopeID(app, user),
-		store.PolicyDocument{Quota: &store.Quota{MessagesPerUserPerDay: &ten}}))
+	s.Require().NoError(shared.Policies.Upsert(s.ctx, &store.Policy{Scope: store.ScopeUser, ScopeID: store.UserScopeID(app, user),
+		Document: store.PolicyDocument{Quota: &store.Quota{MessagesPerUserPerDay: &ten}}}))
 	for _, limit := range []store.Limit{
 		{Subject: usageservice.SubjectUser, Level: store.LevelUser, UserID: user},
 		{Subject: usageservice.SubjectUser, Level: store.LevelApp},
 	} {
 		limit.OrganizationID, limit.AppID, limit.Interval, limit.LimitMicros, limit.UpdatedBy = s.organization, app, usageservice.Daily, 1_000, "staff"
-		s.Require().NoError(shared.CreateLimit(s.ctx, &limit, audit))
+		s.Require().NoError(shared.Limits.Insert(s.ctx, &limit, audit))
 	}
 	start, _ := usageservice.Window(usageservice.Daily, time.Now())
-	s.Require().NoError(shared.AddResets(s.ctx, []store.UsageReset{{
+	s.Require().NoError(shared.UsageResets.InsertMany(s.ctx, []store.UsageReset{{
 		OrganizationID: s.organization, Subject: usageservice.SubjectUser, AppID: app, UserID: user,
 		Interval: usageservice.Daily, WindowStart: start, BaselineMicros: 5, Reason: "support", Actor: "staff",
 	}}, audit))
-	s.Require().NoError(shared.AddGrant(s.ctx, &store.LimitGrant{
+	s.Require().NoError(shared.LimitGrants.Insert(s.ctx, &store.LimitGrant{
 		OrganizationID: s.organization, Subject: usageservice.SubjectUser, AppID: app, UserID: user,
 		AmountMicros: 500, Reason: "support", Actor: "staff",
 	}, audit))
-	s.Require().NoError(shared.CreateCampaign(s.ctx, &store.Campaign{CustomerID: app, Name: "renewals", APIKey: "key", UserID: user}))
+	s.Require().NoError(shared.Campaigns.Insert(s.ctx, &store.Campaign{CustomerID: app, Name: "renewals", APIKey: "key", UserID: user}))
+	s.Require().NoError(shared.ScheduledTasks.Insert(s.ctx, &store.ScheduledTask{
+		ID: "reminder", CustomerID: app, UserID: user, Title: "Stretch", Instructions: "Remind them to stretch.",
+		StartLocal: time.Now(), Timezone: "UTC", State: store.ScheduledTaskActive,
+	}, 0))
 }
 
 // userRows is what the shared database holds of app's user: their own policy, the limits naming
@@ -311,9 +315,9 @@ type userRows struct {
 }
 
 func (s *ForgetUserSuite) userRows(app, user string) userRows {
-	shared := s.shards[0].DB()
+	shared := s.shards[0].GlobalDB()
 	var rows userRows
-	policy, err := s.shards[0].Policy(s.ctx, store.ScopeUser, store.UserScopeID(app, user))
+	policy, err := s.shards[0].Policies.Get(s.ctx, store.ScopeUser, store.UserScopeID(app, user))
 	s.Require().NoError(err)
 	rows.policy = policy.Quota != nil
 	rows.ownLimits, err = shared.NewSelect().Model((*store.Limit)(nil)).Where("app_id = ?", app).Where("level = ?", store.LevelUser).Count(s.ctx)
@@ -324,6 +328,37 @@ func (s *ForgetUserSuite) userRows(app, user string) userRows {
 	s.Require().NoError(shared.NewSelect().Model((*store.LimitGrant)(nil)).Column("user_id").Where("app_id = ?", app).Scan(s.ctx, &rows.grantUsers))
 	s.Require().NoError(shared.NewSelect().Model((*store.Campaign)(nil)).Column("user_id").Where("customer_id = ?", app).Scan(s.ctx, &rows.campaignUser))
 	return rows
+}
+
+// snapshotted writes, on a shard, a session of app's user and a hidden message copied from it,
+// and answers the session id.
+func (s *ForgetUserSuite) snapshotted(shard int, app, user string) string {
+	id := "session-" + uuid.NewString()
+	now := time.Now().UTC()
+	s.Require().NoError(s.shards[shard].Sessions.Upsert(s.ctx, &store.AgentSession{
+		ID: id, CustomerID: app, AgentName: "docs", UserID: user, CallerKind: "user", CreatedAt: now,
+	}))
+	s.Require().NoError(s.shards[shard].BranchMessages.UpsertMany(s.ctx, []store.AgentBranchMessage{{
+		SessionID: id, OriginalMessageID: "m-" + uuid.NewString(), CustomerID: app, ResponseID: "second",
+		SwitchID: "switch", ChatCreatedAt: now, AuthorID: user, Message: map[string]any{"text": "hello from " + user},
+	}}))
+	return id
+}
+
+// snapshots is how many hidden messages app's sessions hold on every shard, by the user of the
+// session they were copied from.
+func (s *ForgetUserSuite) snapshots(app string) map[string]int {
+	found := map[string]int{}
+	for _, shard := range s.shards {
+		var users []string
+		s.Require().NoError(shard.ShardDB().NewRaw(
+			`SELECT s.user_id FROM agent_branch_messages AS m JOIN agent_sessions AS s ON s.id = m.session_id WHERE m.customer_id = ? AND s.customer_id = ?`,
+			app, app).Scan(s.ctx, &users))
+		for _, user := range users {
+			found[user]++
+		}
+	}
+	return found
 }
 
 // forgottenAs is the one replacement every row of the user now carries.
@@ -356,6 +391,30 @@ func (s *ForgetUserSuite) TestForgettingAUserRewritesEveryShardAndTheUsageServic
 	s.Equal(len(usageservice.Intervals), s.windows(s.app, replacement))
 	s.Equal(before, s.spendOf(s.app), "count and cost per app are unchanged")
 	s.Equal([4]int64{4, 1070, 4, 1070}, before)
+}
+
+func (s *ForgetUserSuite) TestForgettingAUserDeletesTheirBranchSnapshotsOnEveryShardAlone() {
+	other := "other-" + s.app
+	s.snapshotted(0, s.app, person)
+	s.snapshotted(1, s.app, person)
+	s.snapshotted(1, s.app, "grace")
+	s.snapshotted(0, other, person)
+
+	out := s.forget(s.app, person)
+
+	s.Contains(out, "branch snapshots: 2 messages deleted")
+	s.Equal(map[string]int{"grace": 1}, s.snapshots(s.app))
+	s.Equal(map[string]int{person: 1}, s.snapshots(other), "another app's user of the same id keeps theirs")
+}
+
+func (s *ForgetUserSuite) TestADryRunCountsBranchSnapshotsAndKeepsThem() {
+	s.snapshotted(0, s.app, person)
+	s.snapshotted(1, s.app, person)
+
+	out := s.forget(s.app, person, "--dry-run")
+
+	s.Contains(out, "branch snapshots: 2 messages to delete\n")
+	s.Equal(map[string]int{person: 2}, s.snapshots(s.app))
 }
 
 func (s *ForgetUserSuite) TestForgettingAUserLeavesOtherAppsAlone() {
@@ -395,15 +454,37 @@ func (s *ForgetUserSuite) TestForgettingAUserClearsTheirCountersPolicyAndLimits(
 	s.Contains(out, "shared database: 1 policies and 1 limits deleted; 1 resets, 1 grants and 1 campaigns rewritten")
 }
 
+func (s *ForgetUserSuite) TestForgettingAUserDropsTheirPolicyARouterCached() {
+	router, err := store.OpenShards(store.Options{
+		DSN: s.settings.Postgres.DSN, ShardDSN: s.settings.Postgres.ShardDSN, Shards: s.settings.Postgres.Shards,
+		Redis: store.Redis{Address: s.settings.Redis.Addr},
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(router.Close()) })
+	s.settingsOf(s.app, person)
+	cached, err := router.Policies.Get(s.ctx, store.ScopeUser, store.UserScopeID(s.app, person))
+	s.Require().NoError(err)
+	s.Require().NotNil(cached.Quota)
+
+	s.forget(s.app, person)
+
+	s.Eventually(func() bool {
+		read, err := router.Policies.Get(s.ctx, store.ScopeUser, store.UserScopeID(s.app, person))
+		s.Require().NoError(err)
+		return read.Quota == nil
+	}, 5*time.Second, 10*time.Millisecond, "the router still answers the policy the user had")
+}
+
 func (s *ForgetUserSuite) TestTheAuditRowNeverNamesTheUser() {
 	s.recorded(0, s.app, person, 100)
 	s.settingsOf(s.app, person)
+	s.snapshotted(0, s.app, person)
 
 	out := s.forget(s.app, person)
 
 	replacement := s.forgottenAs(out)
 	s.NotContains(out, person)
-	entries, err := s.shards[0].AuditEntries(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
+	entries, err := s.shards[0].AuditEntries.Select(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 1)
 	entry := entries[0]
@@ -417,8 +498,8 @@ func (s *ForgetUserSuite) TestTheAuditRowNeverNamesTheUser() {
 		counts[change.Field] = change.After.(float64)
 	}
 	s.Equal(map[string]float64{
-		"requests": 1, "events": 1, "windows": 4, "redis_keys": 1,
-		"policies_deleted": 1, "limits_deleted": 1, "resets": 1, "grants": 1, "campaigns": 1,
+		"requests": 1, "branch_messages": 1, "events": 1, "windows": 4, "redis_keys": 1,
+		"policies_deleted": 1, "limits_deleted": 1, "resets": 1, "grants": 1, "campaigns": 1, "tasks_deleted": 1, "task_changes_redacted": 0,
 	}, counts)
 	var audits []ledger.ManageAudit
 	s.Require().NoError(s.service.Ledger.DB().NewSelect().Model(&audits).Where("action = ?", ledger.ActionForgetUser).Scan(s.ctx))
@@ -435,7 +516,7 @@ func (s *ForgetUserSuite) TestADryRunChangesNothing() {
 
 	out := s.forget(s.app, person, "--dry-run")
 
-	s.Equal("dry run, nothing is changed\nrequests: 2 rows\nusage service: 2 events, 4 windows\nredis: 8 keys\n"+
+	s.Equal("dry run, nothing is changed\nscheduled tasks: 1 to delete, 0 recorded changes to redact\nrequests: 2 rows\nbranch snapshots: 0 messages to delete\nusage service: 2 events, 4 windows\nredis: 8 keys\n"+
 		"shared database: 1 policies and 1 limits to delete; 1 resets, 1 grants and 1 campaigns to rewrite\n", out)
 	s.Equal(person, s.requests()[id].UserID)
 	s.Equal(person, s.events()[id].UserID)
@@ -443,7 +524,7 @@ func (s *ForgetUserSuite) TestADryRunChangesNothing() {
 	s.Equal(int64(len(routers)), s.present(s.routers, routers))
 	s.Equal(int64(1), s.present(s.counters, counters))
 	s.Equal(before, s.userRows(s.app, person))
-	entries, err := s.shards[0].AuditEntries(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
+	entries, err := s.shards[0].AuditEntries.Select(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
 	s.Require().NoError(err)
 	s.Empty(entries)
 }
@@ -549,7 +630,7 @@ func (s *ForgetUserSuite) TestARunThatStoppedIsFinishedWithItsReplacement() {
 	s.Zero(s.present(s.counters, counters))
 	s.Equal(userRows{appLimits: 1, resetUsers: []string{replacement}, grantUsers: []string{replacement},
 		campaignUser: []string{replacement}}, s.userRows(s.app, person))
-	entries, err := s.shards[0].AuditEntries(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
+	entries, err := s.shards[0].AuditEntries.Select(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 1, "one audit row, for the run that completed")
 	s.Equal(replacement, entries[0].ResourceID)
@@ -586,4 +667,20 @@ func (s *ForgetUserSuite) TestForgettingAUserNeedsTheManageKey() {
 	err := s.runForget([]string{"forget-user", "--app", s.app, "--user", person, "--actor", "staff@example.com"}, &bytes.Buffer{})
 
 	s.ErrorContains(err, "ROUTER_USAGE_MANAGE_KEY")
+}
+
+func (s *ForgetUserSuite) TestForgettingAUserDeletesTheirScheduledTasks() {
+	s.recorded(0, s.app, person, 100)
+	s.Require().NoError(s.shards[0].StartDataCapture(s.ctx, s.app, time.Hour, time.Second))
+	s.settingsOf(s.app, person)
+	s.settingsOf("other-"+s.app, person)
+	s.Contains(s.forget(s.app, person, "--dry-run"), "\nscheduled tasks: 1 to delete, 1 recorded changes to redact\n")
+
+	out := s.forget(s.app, person)
+
+	s.Contains(out, "\nscheduled tasks: 1 deleted, 1 recorded changes redacted\nrequests: ", "the tasks go first, so none runs during the forget")
+	_, err := s.shards[0].ScheduledTasks.Get(s.ctx, s.app, "reminder")
+	s.ErrorIs(err, store.ErrNoScheduledTask)
+	_, err = s.shards[0].ScheduledTasks.Get(s.ctx, "other-"+s.app, "reminder")
+	s.Require().NoError(err, "the same user id in another app keeps theirs")
 }

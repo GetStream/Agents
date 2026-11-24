@@ -54,13 +54,14 @@ const defaultToolTimeout = 30 * time.Second
 // model rather than an error nobody hears: a tool nobody answered is a tool that did not
 // work, and the agent apologises for it the same way it would for a failed transfer.
 type bridge struct {
+	// timeout is guarded by mu: a resume may change it while a call is starting.
 	timeout time.Duration
-	// timeouts is the tools that name their own, in place of timeout.
-	timeouts map[string]time.Duration
 	// ask publishes the request and reports whether anyone was there to receive it.
 	ask func(ToolCall) error
 
 	mu sync.Mutex
+	// timeouts is the tools that name their own, in place of timeout.
+	timeouts map[string]time.Duration
 	// pending is one channel per call in flight, keyed by the id the model gave it.
 	pending map[string]pendingTool
 	closed  bool
@@ -74,38 +75,63 @@ type pendingTool struct {
 	ctx      context.Context
 	answer   chan toolResult
 	resolved bool
+	// decided is set once the person answered the call's question (decide).
+	decided bool
 }
 
 // toolResult is what the caller said happened.
 type toolResult struct {
 	parts   []llm.ContentPart
 	failure string
+	// ended marks the router's own answer to a call that ended, not the caller's.
+	ended bool
 }
 
 func newBridge(timeout time.Duration, tools []harness.Tool, ask func(ToolCall) error) *bridge {
 	if timeout <= 0 {
 		timeout = defaultToolTimeout
 	}
+	b := &bridge{
+		timeout: timeout,
+		ask:     ask,
+		pending: map[string]pendingTool{},
+	}
+	b.setTimeouts(tools)
+	return b
+}
+
+// setTimeouts takes the timeouts tools name for themselves, in place of the ones before.
+func (b *bridge) setTimeouts(tools []harness.Tool) {
 	timeouts := map[string]time.Duration{}
 	for _, tool := range tools {
 		if tool.Timeout > 0 {
 			timeouts[tool.Name] = tool.Timeout
 		}
 	}
-	return &bridge{
-		timeout:  timeout,
-		timeouts: timeouts,
-		ask:      ask,
-		pending:  map[string]pendingTool{},
+	b.mu.Lock()
+	b.timeouts = timeouts
+	b.mu.Unlock()
+}
+
+// setTimeout replaces the session's tool timeout for the calls that start after it. Zero is
+// the default.
+func (b *bridge) setTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = defaultToolTimeout
 	}
+	b.mu.Lock()
+	b.timeout = timeout
+	b.mu.Unlock()
 }
 
 // Run carries one tool call out to the caller and waits for the answer.
 func (b *bridge) Run(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart, error) {
+	b.mu.Lock()
 	timeout := b.timeout
 	if own, named := b.timeouts[call.Name]; named {
 		timeout = own
 	}
+	b.mu.Unlock()
 	deadline, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	answer := make(chan toolResult, 1)
@@ -140,6 +166,9 @@ func (b *bridge) Run(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart,
 	select {
 	case result := <-answer:
 		if result.failure != "" {
+			if !result.ended {
+				agent.ReportTool(ctx, agent.ToolReport{Client: true})
+			}
 			return nil, errors.New(result.failure)
 		}
 		return result.parts, nil
@@ -195,6 +224,24 @@ func (b *bridge) turnOf(id string) (string, bool) {
 	return pending.turnID, waiting
 }
 
+// decide records that the person answered the question of the call id, waiting on the turn.
+func (b *bridge) decide(id, turnID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if pending, waiting := b.pending[id]; waiting && pending.turnID == turnID {
+		pending.decided = true
+		b.pending[id] = pending
+	}
+}
+
+// asking reports whether the call id still waits for the person's answer to its question.
+func (b *bridge) asking(id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	pending, waiting := b.pending[id]
+	return waiting && !b.closed && !pending.resolved && !pending.decided && pending.ctx.Err() == nil
+}
+
 // Waiting reports whether the call is still waiting for its result.
 func (b *bridge) Waiting(id string) bool {
 	b.mu.Lock()
@@ -235,7 +282,7 @@ func (b *bridge) Close() {
 	b.closed = true
 	for _, pending := range b.pending {
 		select {
-		case pending.answer <- toolResult{failure: "the call ended before it finished"}:
+		case pending.answer <- toolResult{failure: "the call ended before it finished", ended: true}:
 		default:
 		}
 	}

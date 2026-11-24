@@ -84,7 +84,7 @@ func (s *MeteringSuite) TestCharactersAreWhatWasSent() {
 	customer := uuid.NewString()
 	recorder := routing.NewRecorder(routing.TTS, s.store, nil, s.prices, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	provider := newStubTTS()
-	session := newSession(provider, s.inworld(), routing.Owner{CustomerID: customer}, recorder, slog.New(slog.NewTextHandler(&logs, nil)))
+	session := newSession(context.Background(), provider, s.inworld(), routing.Owner{CustomerID: customer}, recorder, slog.New(slog.NewTextHandler(&logs, nil)))
 
 	s.Require().NoError(session.Synthesize(tts.Request{ID: "u1", Text: "Grüß dich, "}))
 	s.Require().NoError(session.Synthesize(tts.Request{ID: "u1", Text: "Zoë.", Final: true}))
@@ -100,7 +100,7 @@ func (s *MeteringSuite) TestCharactersAreWhatWasSent() {
 	recorder.Close()
 
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
 	s.Require().Len(rows, 2)
 	s.EqualValues(15, rows[0].Characters, "the runes handed to the voice, not the 17 the adapter counted")
 	s.Equal("u1", rows[0].OperationID)
@@ -118,7 +118,7 @@ func (s *MeteringSuite) TestCharactersAreWhatWasSent() {
 // closed.
 func (s *MeteringSuite) rows(customer string) []store.Request {
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", customer).Order("id").Scan(s.ctx))
 	return rows
 }
 
@@ -126,7 +126,7 @@ func (s *MeteringSuite) TestAnUtteranceAVoiceReportsFinishedTwiceIsBilledOnce() 
 	customer := uuid.NewString()
 	recorder := routing.NewRecorder(routing.TTS, s.store, nil, s.prices, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	provider := newStubTTS()
-	session := newSession(provider, s.inworld(), routing.Owner{CustomerID: customer}, recorder, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	session := newSession(context.Background(), provider, s.inworld(), routing.Owner{CustomerID: customer}, recorder, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	s.Require().NoError(session.Synthesize(tts.Request{ID: "u1", Text: "Hello there.", Final: true}))
 	provider.emitter.Send(tts.SynthesisStarted{SynthesisID: "u1", At: time.Now()})
@@ -148,7 +148,7 @@ func (s *MeteringSuite) TestAnUtteranceAVoiceStartsAgainAfterItSettledIsBilledAg
 	customer := uuid.NewString()
 	recorder := routing.NewRecorder(routing.TTS, s.store, nil, s.prices, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	provider := newStubTTS()
-	session := newSession(provider, s.inworld(), routing.Owner{CustomerID: customer}, recorder, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	session := newSession(context.Background(), provider, s.inworld(), routing.Owner{CustomerID: customer}, recorder, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	s.Require().NoError(session.Synthesize(tts.Request{ID: "u1", Text: "Hello there.", Final: true}))
 	provider.emitter.Send(tts.SynthesisStarted{SynthesisID: "u1", At: time.Now()})

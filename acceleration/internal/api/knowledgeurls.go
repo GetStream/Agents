@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -78,8 +79,11 @@ func (s *Server) addKnowledgeUrl(ctx context.Context, request *addKnowledgeUrlRe
 	}
 
 	page, err := s.pages.Add(ctx, customerID, wanted)
-	if err != nil {
+	if errors.Is(err, urls.ErrRefused) {
 		return nil, invalidRequest(err.Error())
+	}
+	if err != nil {
+		return nil, err
 	}
 	subscribed := knowledgeURLOf(page)
 	s.audit(ctx, auditRecord{
@@ -102,7 +106,7 @@ func (s *Server) getKnowledgeUrl(ctx context.Context, request *getKnowledgeUrlRe
 
 	page, err := s.pages.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownKnowledgeURL
+		return nil, unknownOr(err, store.ErrNoKnowledgeURL, errUnknownKnowledgeURL)
 	}
 	return &getKnowledgeUrlResponse{Body: knowledgeURLOf(page)}, nil
 }
@@ -119,7 +123,7 @@ func (s *Server) listKnowledgeUrlPassages(ctx context.Context, request *listKnow
 
 	page, err := s.pages.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownKnowledgeURL
+		return nil, unknownOr(err, store.ErrNoKnowledgeURL, errUnknownKnowledgeURL)
 	}
 	passages, err := s.knowledgePassages(ctx, customerID, page.Namespace, page.URL, page.Passages)
 	if err != nil {
@@ -142,10 +146,10 @@ func (s *Server) deleteKnowledgeUrl(ctx context.Context, request *deleteKnowledg
 	// Read before it goes, so the entry recording the deletion can say which page it was.
 	existing, err := s.pages.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownKnowledgeURL
+		return nil, unknownOr(err, store.ErrNoKnowledgeURL, errUnknownKnowledgeURL)
 	}
 	if err := s.pages.Remove(ctx, customerID, request.Id); err != nil {
-		return nil, errUnknownKnowledgeURL
+		return nil, unknownOr(err, store.ErrNoKnowledgeURL, errUnknownKnowledgeURL)
 	}
 	s.audit(ctx, auditRecord{
 		ResourceType: store.AuditKnowledgeURL, ResourceID: existing.ID, ResourceName: existing.URL,
@@ -167,7 +171,7 @@ func (s *Server) indexKnowledgeUrl(ctx context.Context, request *indexKnowledgeU
 
 	page, err := s.pages.Reindex(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownKnowledgeURL
+		return nil, unknownOr(err, store.ErrNoKnowledgeURL, errUnknownKnowledgeURL)
 	}
 	return &indexKnowledgeUrlResponse{Body: knowledgeURLOf(page)}, nil
 }

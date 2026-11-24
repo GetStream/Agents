@@ -1,8 +1,45 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
+import { inspect } from "node:util";
 
-import { Backend, Client, ConfigurationError, DEFAULT_URL, regionUrl, signToken } from "../src/index.js";
+import * as chat from "../src/chat.js";
+import * as node from "../src/node.js";
+import * as react from "../src/react.js";
+import * as video from "../src/video.js";
+
+import {
+  Backend,
+  Client,
+  ConfigurationError,
+  DEFAULT_URL,
+  Socket,
+  VERSION,
+  regionUrl,
+  signToken,
+  type BackendOptions,
+  type WebSocketInit,
+} from "../src/index.js";
+import * as root from "../src/index.js";
 import { TestRouter, claimsOf } from "./router.js";
+
+/** The client a request from Node and one from a page name themselves as. */
+const NODE_CLIENT = `stream-agents-js-v${VERSION}-node`;
+const PAGE_CLIENT = `stream-agents-js-v${VERSION}-browser`;
+
+/** What every request from Node says the SDK is, beside who is calling. */
+const FROM_NODE = { "X-Stream-Client": NODE_CLIENT, "User-Agent": `stream-agents-js/${VERSION}` };
+
+/** Runs `body` where there is no `process`, as in a page. */
+async function inABrowser<T>(body: () => Promise<T>): Promise<T> {
+  const process = Object.getOwnPropertyDescriptor(globalThis, "process");
+  assert.ok(process);
+  Object.defineProperty(globalThis, "process", { value: undefined, configurable: true });
+  try {
+    return await body();
+  } finally {
+    Object.defineProperty(globalThis, "process", process);
+  }
+}
 
 describe("Backend", () => {
   let router: TestRouter;
@@ -20,10 +57,145 @@ describe("Backend", () => {
   // its own backend has said who is looking. Throwing on the constructor line would make that
   // shape impossible to write.
 
+  it("names the SDK and its release on every request from Node", async () => {
+    // The router counts a call that names no client as the API's, and logs Node's own
+    // User-Agent with no release. Which release is the build's to write in, and the client
+    // says it runs on Node, as stream-chat-js's does.
+    const named = /^stream-agents-js\/\S+$/;
+    router.serve("GET", "/v1/teams", { body: [] });
+    const api = new Client({ url: router.url, apiKey: "vak_live_x", apiSecret: "shh" });
+
+    await api.teams.list();
+
+    assert.match(router.last.headers["user-agent"] ?? "", named);
+    assert.equal(router.last.headers["x-stream-client"], NODE_CLIENT);
+    const anonymous = await new Backend({ url: router.url, apiKey: "vak_live_x" }).headers(true);
+    assert.match(anonymous["User-Agent"] ?? "", named, "a guest asked for anonymously");
+    assert.equal(anonymous["X-Stream-Client"], NODE_CLIENT, "a guest asked for anonymously");
+  });
+
+  it("names the SDK alone from a page, whose User-Agent the CORS lists do not allow", async () => {
+    const page = new Backend({ url: router.url, apiKey: "vak_live_x" });
+    await page.setUser({ id: "jlahey" }, "token-for-jim");
+
+    assert.deepEqual(await inABrowser(() => page.headers()), {
+      "X-Stream-Client": PAGE_CLIENT,
+      "X-Api-Key": "vak_live_x",
+      Authorization: "Bearer token-for-jim",
+      "Stream-Auth-Type": "jwt",
+    });
+    assert.deepEqual(await inABrowser(() => page.headers(true)), {
+      "X-Stream-Client": PAGE_CLIENT,
+      "X-Api-Key": "vak_live_x",
+      "Stream-Auth-Type": "anonymous",
+    });
+  });
+
+  it("keeps User-Agent off a page even where a polyfilled process object exists", async () => {
+    // Bundlers such as webpack 4 leave a `process` with empty `versions` in a page; testing
+    // for the object alone would send the User-Agent the CORS lists refuse.
+    const page = new Backend({ url: router.url, apiKey: "vak_live_x" });
+    const original = Object.getOwnPropertyDescriptor(globalThis, "process");
+    assert.ok(original);
+    Object.defineProperty(globalThis, "process", { value: { env: {}, versions: {} }, configurable: true });
+    try {
+      const headers = await page.headers(true);
+      assert.equal(headers["User-Agent"], undefined);
+      assert.equal(headers["X-Stream-Client"], PAGE_CLIENT);
+    } finally {
+      Object.defineProperty(globalThis, "process", original);
+    }
+  });
+
+  it("names the SDK on the upgrade request of a socket opened from Node", async () => {
+    // Without it the router counts every socket open as the API's.
+    const backend = new Backend({ url: router.url, apiKey: "vak_live_x", apiSecret: "shh" });
+    const opening = router.socket();
+
+    const socket = backend.openSocket(router.url.replace("http", "ws") + "/v1/anything");
+    const connection = await opening;
+    socket.close();
+
+    assert.equal(connection.headers["x-stream-client"], NODE_CLIENT);
+    assert.equal(connection.headers["user-agent"], `stream-agents-js/${VERSION}`);
+  });
+
+  it("names the SDK beside the credential a backend's socket carries in its headers", async () => {
+    // A backend holding the secret sends its credential as the upgrade's headers; the SDK's own
+    // go with it, or the router counts the socket as the API's.
+    const backend = new Backend({ url: router.url, apiKey: "vak_live_x", apiSecret: "shh" });
+    const opening = router.socket();
+
+    const socket = await Socket.dial(backend, "/v1/dispatch");
+    const connection = await opening;
+    socket.close();
+
+    assert.ok(connection.headers["authorization"]?.startsWith("Bearer "));
+    assert.equal(connection.headers["x-stream-client"], NODE_CLIENT);
+    assert.equal(connection.headers["user-agent"], `stream-agents-js/${VERSION}`);
+  });
+
+  it("opens a page's socket with the URL alone, as a browser takes protocols there", async () => {
+    // A browser's WebSocket reads a second argument as protocols and throws on an object, so
+    // every page socket would fail if it were given the headers.
+    const seen: unknown[][] = [];
+    class Recording {
+      constructor(...args: unknown[]) {
+        seen.push(args);
+      }
+    }
+    const original = Object.getOwnPropertyDescriptor(globalThis, "WebSocket");
+    Object.defineProperty(globalThis, "WebSocket", { value: Recording, configurable: true, writable: true });
+    try {
+      await inABrowser(async () => {
+        new Backend({ url: router.url, apiKey: "vak_live_x" }).openSocket("ws://x/y");
+      });
+    } finally {
+      if (original) Object.defineProperty(globalThis, "WebSocket", original);
+    }
+
+    assert.deepEqual(seen, [["ws://x/y"]]);
+  });
+
+  it("opens a socket the app passed in with the URL alone, as it is the app's to configure", () => {
+    const seen: unknown[][] = [];
+    class Recording {
+      constructor(...args: unknown[]) {
+        seen.push(args);
+      }
+    }
+
+    new Backend({
+      url: router.url,
+      apiKey: "vak_live_x",
+      apiSecret: "shh",
+      webSocket: Recording as never,
+    }).openSocket("ws://x/y");
+
+    assert.deepEqual(seen, [["ws://x/y"]]);
+  });
+
   it("refuses a request from a backend nobody is billed for", async () => {
     const backend = new Backend({ url: "http://localhost:8080" });
 
     await assert.rejects(() => backend.headers(), ConfigurationError);
+  });
+
+  it("offers acting for a user only through the deprecated actingFor, not a second method", () => {
+    const backend = new Backend({ url: router.url, apiKey: "vak_live_x" });
+    // @ts-expect-error speakingFor is not on Backend's published type
+    assert.equal(backend.speakingFor, undefined);
+    assert.equal(typeof backend.actingFor, "function");
+    assert.equal(backend.actingFor("ana").actsFor, "ana");
+  });
+
+  it("exports speakingFor from no entry point and as no static of Backend", () => {
+    assert.equal("speakingFor" in root, false);
+    assert.equal("speakingFor" in node, false);
+    assert.equal("speakingFor" in chat, false);
+    assert.equal("speakingFor" in video, false);
+    assert.equal("speakingFor" in react, false);
+    assert.equal(Object.getOwnPropertyNames(Backend).includes("speakingFor"), false);
   });
 
   it("goes to the hosted router, through the proxy, when nothing names another", () => {
@@ -116,6 +288,7 @@ describe("Backend", () => {
     assert.equal(backend.userId, "jlahey");
     assert.equal(backend.identity?.name, "Jim Lahey");
     assert.deepEqual(await backend.headers(), {
+      ...FROM_NODE,
       "X-Api-Key": "vak_live_x",
       Authorization: "Bearer token-for-jim",
       "Stream-Auth-Type": "jwt",
@@ -196,7 +369,7 @@ describe("Backend", () => {
       return `token-${minted}`;
     });
 
-    assert.deepEqual(await backend.headers(), { "X-Customer-Id": "local" });
+    assert.deepEqual(await backend.headers(), { ...FROM_NODE, "X-Customer-Id": "local" });
     assert.deepEqual(backend.query(), { user_id: "jlahey", "stream-auth-type": "jwt" });
     const url = new URL(await backend.socketURL("/v1/agents/sessions/x/events"));
     assert.equal(url.searchParams.get("customer_id"), "local");
@@ -254,7 +427,7 @@ describe("Backend", () => {
   it("names the customer when that is all there is to go on", async () => {
     const backend = new Backend({ url: router.url, customerId: "local" });
 
-    assert.deepEqual(await backend.headers(), { "X-Customer-Id": "local" });
+    assert.deepEqual(await backend.headers(), { ...FROM_NODE, "X-Customer-Id": "local" });
     assert.equal(backend.serverSide, true);
   });
 
@@ -346,7 +519,7 @@ describe("Backend", () => {
     try {
       const backend = new Backend({ url: router.url, customerId: "local" });
 
-      assert.deepEqual(await backend.headers(), { "X-Customer-Id": "local" });
+      assert.deepEqual(await backend.headers(), { ...FROM_NODE, "X-Customer-Id": "local" });
     } finally {
       delete process.env["STREAM_API_KEY"];
     }
@@ -450,6 +623,118 @@ describe("Backend", () => {
     assert.equal(url.searchParams.get("stream-auth-type"), null);
   });
 
+  it("keeps a backend's own token out of a socket's URL, where access logs would keep it", async () => {
+    const backend = new Backend({ url: router.url, apiKey: "key", apiSecret: "shh", userId: "ana" });
+
+    const url = new URL(await backend.socketURL("/v1/dispatch", { capacity: "2" }));
+    for (const name of ["token", "authorization", "api_key", "stream-auth-type"]) {
+      assert.equal(url.searchParams.get(name), null, `${name} is not in the URL`);
+    }
+    assert.equal(url.searchParams.get("user_id"), "ana");
+    assert.equal(url.searchParams.get("capacity"), "2");
+
+    const headers = await backend.socketHeaders();
+    assert.equal(headers?.["X-Api-Key"], "key");
+    assert.equal(claimsOf((headers?.["Authorization"] ?? "").replace("Bearer ", ""))["server"], true);
+    assert.equal(headers?.["Stream-Auth-Type"], undefined, "a socket never says it is a backend");
+  });
+
+  it("sends a proxied backend's socket credential as the headers the proxy reads", async () => {
+    const backend = new Backend({ url: router.url, apiKey: "key", apiSecret: "shh", authenticate: true });
+
+    const url = new URL(await backend.socketURL("/v1/dispatch"));
+    assert.equal(url.searchParams.get("token"), null);
+    assert.equal(url.searchParams.get("authorization"), null);
+
+    const headers = await backend.socketHeaders();
+    assert.equal(headers?.["api_key"], "key");
+    assert.equal(headers?.["stream-auth-type"], "jwt");
+    assert.ok(headers?.["Authorization"]?.startsWith("Bearer "));
+  });
+
+  it("opens a backend's socket with its credential in the upgrade's headers", async () => {
+    const backend = new Backend({ url: router.url, apiKey: "key", apiSecret: "shh" });
+    const arriving = router.socket();
+
+    const socket = await Socket.dial(backend, "/v1/dispatch");
+    const connection = await arriving;
+    assert.equal(connection.query.get("token"), null);
+    assert.equal(connection.headers["x-api-key"], "key");
+    assert.equal(claimsOf((connection.headers["authorization"] ?? "").replace("Bearer ", ""))["server"], true);
+    socket.close();
+  });
+
+  it("authenticates a socket opened from socketURL alone, as the README writes it", async () => {
+    const backend = new Backend({ url: router.url, apiKey: "key", apiSecret: "shh" });
+    const arriving = router.socket();
+
+    const socket = await Socket.open(backend, await backend.socketURL("/v1/stt/stream"));
+    const connection = await arriving;
+    assert.equal(connection.query.get("token"), null);
+    assert.equal(claimsOf((connection.headers["authorization"] ?? "").replace("Bearer ", ""))["server"], true);
+    socket.close();
+  });
+
+  it("still takes the browser's own WebSocket class as the webSocket option", () => {
+    // A compile-time check as much as a runtime one: the DOM constructor takes subprotocols as
+    // its second argument, and a page passes it as it is.
+    const options: BackendOptions = { url: router.url, apiKey: "key", token: "t", webSocket: WebSocket };
+    assert.equal(new Backend(options).url, router.url);
+  });
+
+  it("takes a WebSocket class whose headers argument is required, and hands it the credential", async () => {
+    // Compile-time too: a class that requires `{ headers }` is accepted as the option.
+    const given: WebSocketInit[] = [];
+    const options: BackendOptions = {
+      url: router.url,
+      apiKey: "key",
+      apiSecret: "shh",
+      // Node's own WebSocket takes `{ headers }` at runtime, though its type says subprotocols.
+      webSocket: class extends WebSocket {
+        constructor(url: string, init: WebSocketInit) {
+          given.push(init);
+          super(url, init as unknown as string[]);
+        }
+      },
+    };
+    const arriving = router.socket();
+
+    const socket = await Socket.dial(new Backend(options), "/v1/dispatch");
+    await arriving;
+    assert.ok(given[0]?.headers?.["Authorization"]?.startsWith("Bearer "));
+    socket.close();
+  });
+
+  it("never prints the secret or a token minted from it, logged or serialised", async () => {
+    const backend = new Backend({ url: router.url, apiKey: "key", apiSecret: "shh-very-secret", userId: "ana" });
+    const minted = ((await backend.headers())["Authorization"] ?? "").replace("Bearer ", "");
+    const client = new Client(backend);
+
+    for (const shown of [inspect(client, { depth: Infinity }), JSON.stringify(backend)]) {
+      assert.ok(!shown.includes("shh-very-secret"), shown);
+      assert.ok(minted && !shown.includes(minted), "the minted token is not printed");
+      assert.ok(shown.includes(router.url) && shown.includes("ana"), "where it goes and for whom still are");
+    }
+  });
+
+  it("never prints a page's token, handed in or answered by a function", async () => {
+    const handed = new Client({ url: router.url, apiKey: "key" });
+    await handed.setUser({ id: "ana" }, "tok-handed-in-123");
+    const fetched = new Backend({ url: router.url, apiKey: "key", token: async () => "tok-from-function-456" });
+    await fetched.headers();
+
+    for (const shown of [inspect(handed, { depth: Infinity }), JSON.stringify(handed.backend), inspect(fetched), JSON.stringify(fetched)]) {
+      assert.ok(!shown.includes("tok-handed-in-123") && !shown.includes("tok-from-function-456"), shown);
+    }
+  });
+
+  it("leaves a page's socket credential in the URL, the only place a browser can put it", async () => {
+    const backend = new Backend({ url: router.url, apiKey: "key", token: "t" });
+
+    assert.equal(await backend.socketHeaders(), undefined);
+    assert.equal(new URL(await backend.socketURL("/v1/agents/sessions/x/events")).searchParams.get("token"), "t");
+  });
+
   it("names the end user to a router reached by customer id", async () => {
     const backend = new Backend({ url: router.url, customerId: "local", userId: "ana" });
 
@@ -457,7 +742,11 @@ describe("Backend", () => {
     assert.equal(url.searchParams.get("customer_id"), "local");
     assert.equal(url.searchParams.get("user_id"), "ana");
     assert.deepEqual(backend.query(), { user_id: "ana" });
-    assert.deepEqual(await backend.headers(), { "X-Customer-Id": "local" }, "no header a page's CORS would refuse");
+    assert.deepEqual(
+      await inABrowser(() => backend.headers()),
+      { "X-Customer-Id": "local", "X-Stream-Client": PAGE_CLIENT },
+      "no header a page's CORS would refuse",
+    );
     assert.deepEqual(new Backend({ url: router.url, customerId: "local" }).query(), {});
   });
 

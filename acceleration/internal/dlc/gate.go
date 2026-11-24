@@ -173,7 +173,7 @@ func (g *Gate) allow(ctx context.Context, customerID, channel, to string, into C
 	if g == nil || g.store == nil {
 		return nil
 	}
-	optedOut, err := g.store.OptedOut(ctx, customerID, to, channel)
+	optedOut, err := g.store.OptOuts.OptedOut(ctx, customerID, to, channel)
 	if err != nil {
 		return err
 	}
@@ -192,7 +192,7 @@ func (g *Gate) inSandbox(ctx context.Context, customerID, channel, to string) er
 	if err != nil || !sandboxed {
 		return err
 	}
-	recipients, err := g.store.SandboxRecipients(ctx, customerID)
+	recipients, err := g.store.SandboxRecipients.Select(ctx, customerID)
 	if err != nil {
 		return err
 	}
@@ -248,7 +248,7 @@ func (g *Gate) Usage(ctx context.Context, customerID string) (Usage, error) {
 	if err != nil {
 		return Usage{}, err
 	}
-	recipients, err := g.store.SandboxRecipients(ctx, customerID)
+	recipients, err := g.store.SandboxRecipients.Select(ctx, customerID)
 	if err != nil {
 		return Usage{}, err
 	}
@@ -265,7 +265,7 @@ func (g *Gate) SetRecipients(ctx context.Context, customerID string, recipients 
 	if g.sandbox.Recipients > 0 && len(recipients) > g.sandbox.Recipients {
 		return stack.Wrap(fmt.Errorf("%w: the sandbox allows %d recipients", ErrInvalid, g.sandbox.Recipients))
 	}
-	return g.store.SetSandboxRecipients(ctx, customerID, recipients)
+	return g.store.SandboxRecipients.Replace(ctx, customerID, recipients)
 }
 
 // Sandboxed reports whether the sandbox holds an app now, which is what gives its texts and
@@ -283,7 +283,7 @@ func (g *Gate) sandboxed(ctx context.Context, customerID string) (bool, error) {
 	if !g.sandbox.Enabled {
 		return false, nil
 	}
-	approved, err := g.store.HasUseCaseIn(ctx, customerID, Approved)
+	approved, err := g.store.UseCases.HasIn(ctx, customerID, Approved)
 	if err != nil {
 		return false, err
 	}

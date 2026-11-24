@@ -37,7 +37,7 @@ Leave out:
 ## Only what works
 
 - A page says only what a user can install and run today, and you saw work end to end: run every snippet, curl and command, against staging if needed. Reading the code confirms a name, not a behaviour
-- "Which SDKs support X" means released packages (npm, PyPI, Maven Central, pub.dev, the released CLI), not source on `accelerate`
+- "Which SDKs support X" means released packages (npm, PyPI, Maven Central, pub.dev, the released CLI), not source on `main`
 - Not proven yet? Leave it out and ticket it. Don't caveat it ("not tested yet")
 
 ## Where things live
@@ -57,7 +57,7 @@ Leave out:
 
 ## Gotchas
 
-- Every server SDK reads `agent.yaml` and syncs the directory in one request, skipping it when `.agent_sync` matches. They differ in when: Python syncs automatically on starting, the others when you call `sync`. Say which SDK a behaviour applies to
+- Every server SDK reads `agent.yaml` and syncs the directory in one request, skipping it when `.agent_sync` matches. They sync only when you call `sync` (Python `agent.sync()`, .NET `SyncAsync`); a session never syncs. Say which SDK a behaviour applies to
 - Client SDKs (JavaScript in the browser, Swift, Android, Flutter) never sync or configure agents. Swift and browser JavaScript are handed a config id by the backend; Android and Flutter open an agent by its stored name
 - `SyncRouters` rejects unknown keys in `routers/*.yaml` (including `description`)
 

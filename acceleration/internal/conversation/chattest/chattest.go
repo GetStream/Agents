@@ -29,8 +29,8 @@ type store struct {
 	messages map[string]map[string]any
 	users    map[string]map[string]any
 	trunks   map[string]map[string]any
-	// calls are the participant ids in each call's session, by "<type>:<id>".
-	calls map[string][]string
+	// calls are the participants in each call's session, by "<type>:<id>".
+	calls map[string][]Participant
 	// callMembers are the member ids of each call, by "<type>:<id>".
 	callMembers map[string][]string
 	// made are the bodies calls were created with, by "<type>:<id>", with the custom an
@@ -73,6 +73,8 @@ type store struct {
 	uploads []Upload
 	// events are the events sent to each channel, by channel id, in the order they came.
 	events map[string][]map[string]any
+	// rewind is what the channel rewind endpoint holds and is steered by; see rewind.go.
+	rewind rewindState
 }
 
 // Upload is one file stored on a channel: the channel's type and id, which endpoint took it
@@ -142,7 +144,7 @@ func NewServer(t *testing.T) *Server {
 	db := &store{
 		channels: map[string]map[string]any{}, messages: map[string]map[string]any{},
 		users: map[string]map[string]any{}, trunks: map[string]map[string]any{},
-		rules: map[string]map[string]any{}, calls: map[string][]string{}, callMembers: map[string][]string{}, made: map[string]map[string]any{}, hooks: map[string][]json.RawMessage{},
+		rules: map[string]map[string]any{}, calls: map[string][]Participant{}, callMembers: map[string][]string{}, made: map[string]map[string]any{}, hooks: map[string][]json.RawMessage{},
 		updates: map[string][]json.RawMessage{}, events: map[string][]map[string]any{}, now: time.Now,
 		app: App{ID: 1, ChannelTypes: map[string]map[string][]string{"agent": safeGrants}, CallTypes: []string{"agent"}},
 	}
@@ -318,6 +320,21 @@ func (s *Server) Members(id string) []string {
 // PutCall puts a call in session with the participants named, for a reader of the call's
 // session to find: a SIP caller is sip-<number>.
 func (s *Server) PutCall(callType, id string, participants ...string) {
+	sessions := make([]Participant, 0, len(participants))
+	for _, participant := range participants {
+		sessions = append(sessions, Participant{UserID: participant})
+	}
+	s.PutCallParticipants(callType, id, sessions...)
+}
+
+// Participant is a user in a call's session, and the user session they joined it with.
+type Participant struct {
+	UserID, UserSessionID string
+}
+
+// PutCallParticipants puts a call in session with the participants given. No participants is
+// a call in session with nobody in it.
+func (s *Server) PutCallParticipants(callType, id string, participants ...Participant) {
 	s.db.mu.Lock()
 	defer s.db.mu.Unlock()
 	s.db.calls[callType+":"+id] = participants
@@ -733,6 +750,14 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(r.URL.Path, "/")
 	result := map[string]any{}
 	switch {
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/rewind"):
+		// The path is .../channels/<type>/<id>/rewind.
+		status, answer := db.rewindChannel(parts[len(parts)-3], parts[len(parts)-2], body)
+		if status != http.StatusCreated {
+			w.WriteHeader(status)
+		}
+		_ = json.NewEncoder(w).Encode(answer)
+		return
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/event"):
 		// The path is .../channels/<type>/<id>/event.
 		cid := parts[len(parts)-3] + ":" + parts[len(parts)-2]
@@ -811,10 +836,11 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 		// whose session has not started reads as.
 		cid := parts[len(parts)-2] + ":" + parts[len(parts)-1]
 		call := map[string]any{"cid": cid, "type": parts[len(parts)-2], "id": parts[len(parts)-1]}
-		if ids, ok := db.calls[cid]; ok {
+		if inSession, ok := db.calls[cid]; ok {
 			participants := []map[string]any{}
-			for _, id := range ids {
-				participants = append(participants, map[string]any{"user": map[string]any{"id": id}, "role": "user"})
+			for _, participant := range inSession {
+				participants = append(participants, map[string]any{"user": map[string]any{"id": participant.UserID}, "role": "user",
+					"user_session_id": participant.UserSessionID})
 			}
 			call["session"] = map[string]any{"id": "session-" + cid, "participants": participants}
 		}
@@ -947,6 +973,24 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		result["users"] = users
+	case strings.HasSuffix(r.URL.Path, "/chat/members") && r.Method == http.MethodGet:
+		// A query of a channel's members, by the user id its filter names ($eq), as
+		// conversation.Service.Member asks.
+		var payload struct {
+			Type             string         `json:"type"`
+			ID               string         `json:"id"`
+			FilterConditions map[string]any `json:"filter_conditions"`
+		}
+		_ = json.Unmarshal([]byte(r.URL.Query().Get("payload")), &payload)
+		wanted, _ := payload.FilterConditions["id"].(map[string]any)
+		listed, _ := db.channels[payload.Type+":"+payload.ID]["members"].([]any)
+		members := []any{}
+		for _, member := range listed {
+			if named, _ := member.(map[string]any); wanted["$eq"] != nil && named["user_id"] == wanted["$eq"] {
+				members = append(members, member)
+			}
+		}
+		result["members"] = members
 	case strings.HasSuffix(r.URL.Path, "/users") && r.Method == http.MethodPost:
 		// An upsert replaces the user whole, which is what Chat does.
 		written, _ := body["users"].(map[string]any)
@@ -993,7 +1037,7 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 		if cid, ok := filter["cid"].(string); ok {
 			if data, exists := db.channels[cid]; exists {
 				channels = append(channels, map[string]any{
-					"channel": data, "members": data["members"], "messages": db.messagesIn(cid),
+					"channel": data, "members": data["members"], "messages": db.visibleIn(cid),
 				})
 			}
 		}
@@ -1024,7 +1068,13 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 			result["channel"] = channel
 		}
 		result["members"] = db.channels[id]["members"]
-		result["messages"] = db.messagesIn(id)
+		messages, refused := db.pageAfter(id, body)
+		if refused != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(refused)
+			return
+		}
+		result["messages"] = messages
 	case strings.HasSuffix(r.URL.Path, "/message"):
 		message := body["message"].(map[string]any)
 		id, _ := message["id"].(string)
@@ -1042,16 +1092,39 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 		db.order = append(db.order, id)
 		// The path is .../channels/<type>/<id>/message.
 		message["cid"] = parts[len(parts)-3] + ":" + parts[len(parts)-2]
-		message["created_at"] = db.now().UnixNano()
+		message["created_at"] = db.afterHiddenRanges(message["cid"].(string), db.now()).UnixNano()
 		// Chat answers with the author it resolved the id to, which is how a reader
 		// learns who spoke: a stored message carries a user, not a user id. A user
 		// nobody named comes back named after their own id.
-		message["user"] = map[string]any{"id": message["user_id"], "name": message["user_id"]}
+		name := message["user_id"]
+		if user, ok := db.users[fmt.Sprint(message["user_id"])]; ok && user["name"] != nil {
+			name = user["name"]
+		}
+		message["user"] = map[string]any{"id": message["user_id"], "name": name}
+		// Chat answers with the users a message mentions as it does its author: a message
+		// is sent with their ids.
+		if ids, ok := message["mentioned_users"].([]any); ok {
+			users := make([]any, 0, len(ids))
+			for _, id := range ids {
+				users = append(users, map[string]any{"id": id, "name": id})
+			}
+			message["mentioned_users"] = users
+		}
 		if _, ok := message["custom"].(map[string]any); !ok {
 			message["custom"] = map[string]any{}
 		}
+		// skip_push is a field of the send, not of the message; it is kept on the message so a
+		// test can read what it was sent with.
+		if skip, _ := body["skip_push"].(bool); skip {
+			message["skip_push"] = true
+		}
 		db.messages[id] = message
 		result["message"] = db.messages[id]
+	case strings.Contains(r.URL.Path, "/messages/") && r.Method == http.MethodGet && db.hidden(db.messages[parts[len(parts)-1]]):
+		// Chat answers a read by id of a rewound message as one of a message it does not have.
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 16, "message": "message " + parts[len(parts)-1] + " does not exist", "StatusCode": http.StatusNotFound})
+		return
 	case strings.Contains(r.URL.Path, "/messages/") && r.Method == http.MethodDelete:
 		id := parts[len(parts)-1]
 		result["message"] = db.messages[id]
@@ -1072,7 +1145,15 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 		// is deliberately not stored: only the durable update is history.
 		if id == "ephemeral" {
 			id = parts[len(parts)-2]
-		} else if r.Method == http.MethodPut {
+		}
+		// Chat answers an update of a rewound message as one of a message it does not have.
+		// The status and wording are unverified.
+		if db.hidden(db.messages[id]) {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 16, "message": "message " + id + " does not exist", "StatusCode": http.StatusNotFound})
+			return
+		}
+		if r.Method == http.MethodPut && parts[len(parts)-1] != "ephemeral" {
 			if author, _ := body["user_id"].(string); db.knownAuthors && db.users[author] == nil {
 				refuse(w, "UpdateMessagePartial failed with error: \"the user "+author+" does not exist\"")
 				return

@@ -99,7 +99,7 @@ func (s *SIPTrunksSuite) TestUpdatingWithoutAPasswordKeepsIt() {
 func (s *SIPTrunksSuite) TestAPasswordSealedAtNoKeyIsNotAPassword() {
 	created := s.createTrunk()
 	// What a data move leaves on a trunk whose password was set again before it.
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE sip_trunks SET password_kek_version = 0 WHERE id = ?", created.Id)
 	s.Require().NoError(err)
 

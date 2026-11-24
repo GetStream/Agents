@@ -30,7 +30,7 @@ func TestConnectorEventDestinationsSuite(t *testing.T) {
 func (s *ConnectorEventDestinationsSuite) SetupSuite() {
 	s.forwardHTTP = destinationClient()
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *ConnectorEventDestinationsSuite) SetupTest() {
@@ -71,6 +71,20 @@ func (s *ConnectorEventDestinationsSuite) TestADestinationOnAPrivateAddressIsRef
 		s.Contains(string(answer), "public https URL", url)
 	}
 	s.Empty(s.listDestinations("slack_bot", "").Items)
+}
+
+// TestAHostThatDoesNotResolveIsRefusedAsAPrivateOneIs (AI-3575): telling the two apart would let
+// a caller probe the names the router's resolver knows.
+func (s *ConnectorEventDestinationsSuite) TestAHostThatDoesNotResolveIsRefusedAsAPrivateOneIs() {
+	answers := map[string]string{}
+	for _, url := range []string{"https://nowhere.invalid/hooks/slack", "https://10.0.0.7/hooks/slack"} {
+		status, failure := s.serverClient.failure(http.MethodPost, destinationsPath("slack_bot"),
+			ConnectorEventDestinationRequest{URL: url, Forward: store.ForwardAll})
+		s.Equal(http.StatusBadRequest, status, url)
+		answers[url] = failure
+	}
+
+	s.Equal(answers["https://10.0.0.7/hooks/slack"], answers["https://nowhere.invalid/hooks/slack"])
 }
 
 func (s *ConnectorEventDestinationsSuite) TestAPlainHTTPDestinationIsRefused() {

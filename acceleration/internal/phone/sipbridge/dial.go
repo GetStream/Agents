@@ -34,32 +34,9 @@ func Dial(ctx context.Context, cfg Config) (*Call, error) {
 		return nil, stack.Wrap(fmt.Errorf("sipbridge: customer trunk: %w", err))
 	}
 
-	ua, err := sipgo.NewUA(
-		sipgo.WithUserAgent("sipbridge"),
-		sipgo.WithUserAgenTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12}),
-	)
+	ua, customerClient, client, srv, err := newUA(guard)
 	if err != nil {
-		return nil, stack.Wrap(err)
-	}
-	// rport: our Via address is private, so responses must go back to where the request
-	// came from.
-	client, err := sipgo.NewClient(ua, sipgo.WithClientNAT())
-	if err != nil {
-		ua.Close()
-		return nil, stack.Wrap(err)
-	}
-	customerClient, err := sipgo.NewClient(ua, sipgo.WithClientNAT())
-	if err != nil {
-		ua.Close()
-		return nil, stack.Wrap(err)
-	}
-	customerClient.TxRequester = guardedRequester{guard: guard, tx: ua.TransactionLayer()}
-	// The server is never started with ListenAndServe. It only handles requests the other
-	// side sends back over the connections we opened.
-	srv, err := sipgo.NewServer(ua)
-	if err != nil {
-		ua.Close()
-		return nil, stack.Wrap(err)
+		return nil, err
 	}
 
 	reg := newRegistry()
@@ -67,7 +44,8 @@ func Dial(ctx context.Context, cfg Config) (*Call, error) {
 	customer.onDialog = func(id string) { reg.add(id, customer) }
 	stream.onDialog = func(id string) { reg.add(id, stream) }
 
-	call := newCall(customer, stream, log)
+	call := newCall(ctx, customer, stream, log)
+	call.onChange = cfg.OnChange
 	handle(srv, reg, call)
 
 	flow := flowB
@@ -95,16 +73,54 @@ func Dial(ctx context.Context, cfg Config) (*Call, error) {
 		ua.Close()
 		return nil, err
 	}
-	call.establish()
+	run(call, ua, customer, stream, cfg.KeepaliveInterval)
+	return call, nil
+}
 
+// newUA builds what both legs send and receive on. Requests on the customer client pass
+// guard first.
+func newUA(guard guard) (ua *sipgo.UserAgent, customerClient, streamClient *sipgo.Client, srv *sipgo.Server, err error) {
+	ua, err = sipgo.NewUA(
+		sipgo.WithUserAgent("sipbridge"),
+		sipgo.WithUserAgenTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12}),
+	)
+	if err != nil {
+		return nil, nil, nil, nil, stack.Wrap(err)
+	}
+	// rport: our Via address is private, so responses must go back to where the request
+	// came from.
+	streamClient, err = sipgo.NewClient(ua, sipgo.WithClientNAT())
+	if err != nil {
+		ua.Close()
+		return nil, nil, nil, nil, stack.Wrap(err)
+	}
+	customerClient, err = sipgo.NewClient(ua, sipgo.WithClientNAT())
+	if err != nil {
+		ua.Close()
+		return nil, nil, nil, nil, stack.Wrap(err)
+	}
+	customerClient.TxRequester = guardedRequester{guard: guard, tx: ua.TransactionLayer()}
+	// The server is never started with ListenAndServe. It only handles requests the other
+	// side sends back over the connections we opened.
+	srv, err = sipgo.NewServer(ua)
+	if err != nil {
+		ua.Close()
+		return nil, nil, nil, nil, stack.Wrap(err)
+	}
+	return ua, customerClient, streamClient, srv, nil
+}
+
+// run lets requests from one side through to the other and keeps both legs alive until the
+// call ends, then closes ua.
+func run(call *Call, ua *sipgo.UserAgent, customer, stream *sipLeg, keepaliveInterval time.Duration) {
+	call.establish()
 	for _, l := range []*sipLeg{customer, stream} {
-		go keepalive(call, l, cfg.KeepaliveInterval)
+		go keepalive(call, l, keepaliveInterval)
 	}
 	go func() {
 		<-call.Done()
 		ua.Close()
 	}()
-	return call, nil
 }
 
 // newLegs builds the customer leg and the Stream leg of a call. The call id goes on the
@@ -161,7 +177,7 @@ func handle(srv *sipgo.Server, reg *registry, call *Call) {
 		if err := l.readBye(req, tx); err != nil {
 			l.log.Warn("answering BYE failed", "error", err)
 		}
-		ctx, cancel := cleanupContext(context.Background())
+		ctx, cancel := cleanupContext(call.ctx)
 		defer cancel()
 		call.onBye(ctx, l.side)
 	})
@@ -172,12 +188,17 @@ func handle(srv *sipgo.Server, reg *registry, call *Call) {
 			unknown(req, tx)
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(call.ctx, 30*time.Second)
 		defer cancel()
 		forward := func(ctx context.Context, offer []byte) ([]byte, error) {
 			return call.onReinvite(ctx, l.side, offer)
 		}
-		_ = tx.Respond(answerReinvite(ctx, l, req, forward))
+		res := answerReinvite(ctx, l, req, forward)
+		_ = tx.Respond(res)
+		// onReinvite told it before this leg's own SDP was stored, so tell it again.
+		if res.StatusCode == sip.StatusOK && len(req.Body()) > 0 {
+			call.changed()
+		}
 	})
 
 	// The ACK for our 2xx to a re-INVITE needs no action.
@@ -189,7 +210,7 @@ func handle(srv *sipgo.Server, reg *registry, call *Call) {
 			unknown(req, tx)
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), keepaliveTimeout)
+		ctx, cancel := context.WithTimeout(call.ctx, keepaliveTimeout)
 		defer cancel()
 		contentType := ""
 		if h := req.GetHeader("Content-Type"); h != nil {
@@ -262,11 +283,11 @@ func keepalive(call *Call, l *sipLeg, interval time.Duration) {
 		case <-call.Done():
 			return
 		case <-ticker.C:
-			ctx, cancel := context.WithTimeout(context.Background(), keepaliveTimeout)
+			ctx, cancel := context.WithTimeout(call.ctx, keepaliveTimeout)
 			err := l.keepalive(ctx)
 			cancel()
 			if err != nil {
-				cctx, ccancel := cleanupContext(context.Background())
+				cctx, ccancel := cleanupContext(call.ctx)
 				call.lost(cctx, l.side, err)
 				ccancel()
 				return

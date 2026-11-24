@@ -9,6 +9,7 @@ import aiortc
 from getstream.video.rtc.track_util import PcmData
 from vision_agents.core.agents.agents import DEFAULT_INSTRUCTIONS
 from vision_agents.core.edge.types import Participant
+from vision_agents.core.llm.function_registry import FunctionRegistry
 from vision_agents.core.llm.llm import (
     LLMResponseDelta,
     LLMResponseFinal,
@@ -51,9 +52,9 @@ from ._tool_line import (
     cancel,
     run_with_tool_call_context,
 )
-from .config import ensure_agent
+from .config import sync_agent
 from .knowledge import Knowledge
-from .sessions import _with_policy
+from .sessions import _SessionTools, _with_policy
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,7 @@ class Accelerated(OmniLLM):
         self.session: Optional[Session] = None
 
         self._socket: Optional[Socket] = None
+        self._session_tools = _SessionTools(self.backend, self.function_registry)
         self._reader: Optional[asyncio.Task] = None
         self._running: set[asyncio.Task] = set()
         self._tool_tasks: dict[str, asyncio.Task] = {}
@@ -190,6 +192,16 @@ class Accelerated(OmniLLM):
         """The session the router is running this call in, once it has joined."""
         return self.session.id if self.session else None
 
+    async def sync(self) -> None:
+        """Store the agent directory named after the config, which sessions then run from."""
+        if not self.config:
+            return await super().sync()
+        await sync_agent(
+            self.config,
+            url=self.backend.url,
+            customer_id=self.backend.customer_id,
+        )
+
     async def join_remote(self, call: RemoteCall) -> None:
         """Create the session and start watching it.
 
@@ -198,14 +210,6 @@ class Accelerated(OmniLLM):
         """
         request = self._request(call)
         if self.config:
-            # The directory is the config, so it is stored before the config is looked
-            # up: an agent whose instructions changed since the last run joins with the
-            # ones on disk rather than the ones the server happens to remember.
-            await ensure_agent(
-                self.config,
-                url=self.backend.url,
-                customer_id=self.backend.customer_id,
-            )
             request.config_id = await self._config_id(self.config)
 
         try:
@@ -285,6 +289,8 @@ class Accelerated(OmniLLM):
         """End the call. Safe to call after it has already ended."""
         session = self.session
         self.session = None
+        # What add_tools and remove_tool changed was this session's alone, not the next one's.
+        self._session_tools = _SessionTools(self.backend, self.function_registry)
         if session is None:
             return
 
@@ -300,6 +306,29 @@ class Accelerated(OmniLLM):
     async def interrupt(self) -> None:
         """Abandon the reply being spoken."""
         await self._command({"type": "interrupt"})
+
+    async def add_tools(self, more: FunctionRegistry) -> None:
+        """Give the session the functions in `more` while the call runs, for it alone, and
+        run their calls here. See `Session.add_tools`: never call this from inside one of the
+        session's functions, since the router waits for the calls in flight.
+
+        Raises:
+            RemotePipelineError: The agent is not on a call.
+        """
+        if self.session is None:
+            raise RemotePipelineError("the agent is not on a call")
+        await self._session_tools.add(self.session.id, more)
+
+    async def remove_tool(self, name: str) -> None:
+        """Withdraw one of the session's tools, registered here or added since. See
+        `Session.remove_tool`: never call this from inside one of the session's functions.
+
+        Raises:
+            RemotePipelineError: The agent is not on a call.
+        """
+        if self.session is None:
+            raise RemotePipelineError("the agent is not on a call")
+        await self._session_tools.remove(self.session.id, name)
 
     async def close(self) -> None:
         await self.leave_remote()
@@ -336,7 +365,9 @@ class Accelerated(OmniLLM):
         for stored in listed:
             if stored.name == name:
                 return stored.id
-        raise RemotePipelineError(f"there is no agent config called {name!r}")
+        raise RemotePipelineError(
+            f"there is no agent config called {name!r}; store it with agent.sync() first"
+        )
 
     def _request(self, call: RemoteCall) -> CreateSessionRequest:
         """Render the agent's configuration as a session to create."""
@@ -518,7 +549,7 @@ class Accelerated(OmniLLM):
             # beat whoever runs it, with an error.
             if frame.get("run") is False or (
                 name != "get_video_frames"
-                and name not in self.function_registry.functions
+                and name not in self._session_tools.functions_for(name).functions
             ):
                 return
             if len(self._tool_tasks) >= 16:
@@ -574,7 +605,7 @@ class Accelerated(OmniLLM):
                     SocketLine(self._command, self._holds),
                 )
                 output = await run_with_tool_call_context(
-                    self.function_registry,
+                    self._session_tools.functions_for(name),
                     name,
                     arguments,
                     tool_call_context,

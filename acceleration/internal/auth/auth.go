@@ -253,7 +253,8 @@ func (l Levels) Admits(kind Kind) bool {
 // ErrUnauthenticated when there is no such key, or it has been revoked or has expired.
 type Lookup func(ctx context.Context, key string) (App, error)
 
-// Authenticator resolves the principal a request carries.
+// Authenticator resolves the principal a request carries. A credential it refuses is
+// ErrUnauthenticated; any other error is answered as the router's own failure.
 type Authenticator interface {
 	Authenticate(ctx context.Context, r *http.Request) (Principal, error)
 }
@@ -413,7 +414,7 @@ func (k keyed) Authenticate(ctx context.Context, r *http.Request) (Principal, er
 
 	app, err := k.lookup(ctx, key)
 	if err != nil {
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, err
 	}
 
 	// The method is pinned rather than taken from the token, because a token is allowed to
@@ -490,6 +491,15 @@ func (k keyed) Authenticate(ctx context.Context, r *http.Request) (Principal, er
 // before there was anything to declare.
 func authTypeOf(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get(AuthTypeHeader))
+}
+
+// DeclaredAuthType is what the caller declared as its kind of credential: the header, else a
+// socket's query parameter when it names an end user. It is read for logging, not trusted.
+func DeclaredAuthType(r *http.Request) string {
+	if declared := authTypeOf(r); declared != "" {
+		return declared
+	}
+	return endUserParam(r)
 }
 
 // endUserParam reads AuthTypeParam, and only when it names an end user.

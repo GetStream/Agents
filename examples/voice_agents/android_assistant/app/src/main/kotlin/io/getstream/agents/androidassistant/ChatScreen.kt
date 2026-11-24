@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -46,6 +47,7 @@ import io.getstream.chat.android.ai.compose.ui.component.ChatComposer
 import io.getstream.chat.android.ai.compose.ui.component.ComposerTrailingContentParams
 import io.getstream.chat.android.ai.compose.ui.component.LocalChatAiComponentFactory
 import io.getstream.chat.android.ai.compose.ui.component.MessageData
+import io.getstream.chat.android.ai.openui.rendering.ProvideOpenUITheme
 import java.util.Calendar
 
 private val starters = listOf(
@@ -72,6 +74,8 @@ fun ChatScreen(viewModel: ChatViewModel, modifier: Modifier = Modifier) {
     val status by conversation.status.collectAsStateWithLifecycle()
     val error by conversation.error.collectAsStateWithLifecycle()
     val opening by viewModel.failure.collectAsStateWithLifecycle()
+    val brand by viewModel.brand.collectAsStateWithLifecycle()
+    val isIncognito by viewModel.isIncognito.collectAsStateWithLifecycle()
     val signIn = LocalSignIn.current
     DisposableEffect(viewModel, signIn) {
         viewModel.signIn = signIn
@@ -91,14 +95,16 @@ fun ChatScreen(viewModel: ChatViewModel, modifier: Modifier = Modifier) {
 
     CompositionLocalProvider(LocalChatAiComponentFactory provides views) {
         Box(modifier.fillMaxSize()) {
-            AIConversation(
-                state = conversation,
-                modifier = Modifier.fillMaxSize(),
-                footer = { unanswered?.let { Unanswered(UNANSWERED, onRetry = viewModel::retry) } },
-                emptyContent = { Welcome() },
-                contentPadding = PaddingValues(bottom = barHeight),
-                ui = viewModel.uiHost,
-            )
+            ProvideOpenUITheme(brand.openUITheme()) {
+                AIConversation(
+                    state = conversation,
+                    modifier = Modifier.fillMaxSize(),
+                    footer = { unanswered?.let { Unanswered(UNANSWERED, onRetry = viewModel::retry) } },
+                    emptyContent = { Welcome(isIncognito) },
+                    contentPadding = PaddingValues(bottom = barHeight),
+                    ui = viewModel.uiHost,
+                )
+            }
 
             // The conversation fades away under the composer rather than stopping at a hairline,
             // so the composer does not read as a bar of its own.
@@ -169,21 +175,25 @@ private fun Unanswered(reason: String, onRetry: () -> Unit, modifier: Modifier =
 
 /** What a new conversation shows before anything is said. */
 @Composable
-private fun Welcome(modifier: Modifier = Modifier) {
+private fun Welcome(isIncognito: Boolean, modifier: Modifier = Modifier) {
     Column(
         modifier = modifier.padding(32.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Icon(
-            Icons.Outlined.AutoAwesome,
+            if (isIncognito) Icons.Outlined.VisibilityOff else Icons.Outlined.AutoAwesome,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.primary,
             modifier = Modifier.size(44.dp),
         )
-        Text(greeting(), style = MaterialTheme.typography.titleLarge)
+        Text(if (isIncognito) "Incognito chat" else greeting(), style = MaterialTheme.typography.titleLarge)
         Text(
-            "Ask me anything, show me a photo, or tap the waveform to talk.",
+            if (isIncognito) {
+                "This chat won't be saved or listed, and Juno won't remember anything from it."
+            } else {
+                "Ask me anything, show me a photo, or tap the waveform to talk."
+            },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,

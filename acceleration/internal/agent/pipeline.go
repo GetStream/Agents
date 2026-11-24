@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
@@ -35,7 +37,14 @@ type pipeline struct {
 	cancel      context.CancelFunc
 	running     sync.WaitGroup
 	writeFailed atomic.Bool
+	// speechEnded is set once a native pipeline's speech-to-speech session has stopped
+	// sending, before the agent recovers it (recoverNative).
+	speechEnded atomic.Bool
 }
+
+// ErrSpeechEnded refuses a change of tools whose speech-to-speech session ended while the
+// change waited for it: the agent is replacing the session, which the change would hold up.
+var ErrSpeechEnded = errors.New("agent: the speech-to-speech session ended while the tools were changing; try again")
 
 func newPipeline(parent context.Context, native bool) *pipeline {
 	ctx, cancel := context.WithCancel(parent)
@@ -128,7 +137,7 @@ func (a *Agent) SetSettings(ctx context.Context, next Settings) error {
 	if err != nil {
 		return stack.Wrap(err)
 	}
-	if err := a.quiesce(ctx); err != nil {
+	if err := a.quiesce(ctx, false); err != nil {
 		prep.close()
 		return stack.Wrap(err)
 	}
@@ -174,6 +183,92 @@ func (a *Agent) SetSettings(ctx context.Context, next Settings) error {
 		"stt", changed.STT, "tts", changed.TTS, "sts", changed.STS, "voice", changed.Voice)
 	a.emitter.Send(changed)
 	return nil
+}
+
+// SetTools replaces what the model may call. It waits for a turn boundary with no call of
+// any tool in flight, one answered as still running included, and holds the floor while it
+// changes them and runs changed: a call is only ever checked against the tools it was made
+// with, approval included, and changed puts whatever routes calls in step before the next
+// turn can make one. A speech-to-speech model that takes its tools only when it opens refuses
+// (sts.ErrToolsFixed), and then nothing changes and changed does not run.
+func (a *Agent) SetTools(ctx context.Context, tools harness.Tools, changed func()) error {
+	a.swapping.Lock()
+	defer a.swapping.Unlock()
+
+	a.mu.Lock()
+	closed, joined := a.closed, a.joined
+	a.mu.Unlock()
+	if closed {
+		return stack.Wrap(errors.New("agent: closed"))
+	}
+	if joined {
+		if err := a.quiesce(ctx, true); err != nil {
+			return err
+		}
+		defer func() {
+			a.mu.Lock()
+			a.toolsChanging = false
+			a.mu.Unlock()
+			a.switching.Store(false)
+		}()
+	}
+
+	before := a.availableTools()
+	a.toolsMu.Lock()
+	previous := a.options.Tools
+	a.options.Tools = tools
+	a.toolsMu.Unlock()
+
+	a.mu.Lock()
+	conversation, speech := a.harness, a.sts
+	a.mu.Unlock()
+	var err error
+	switch {
+	case a.native() && speech != nil:
+		// A native model has a harness only for the work it delegates.
+		var offered []llm.Tool
+		if offered, err = a.nativeTools(conversation != nil); err == nil {
+			err = speech.SetTools(offered)
+		}
+	case conversation != nil:
+		err = conversation.SetTools(a.availableTools())
+	}
+	if err != nil {
+		a.toolsMu.Lock()
+		a.options.Tools = previous
+		a.toolsMu.Unlock()
+		return stack.Wrap(err)
+	}
+	a.lapseChangedApprovals(before, a.availableTools())
+	changed()
+	return nil
+}
+
+// lapseChangedApprovals lets go of the calls waiting for a caller's yes whose tool is no
+// longer offered as it was when they were asked, as silence does: a yes to one would run the
+// tool as it is now, for a call the caller was asked about as it was.
+func (a *Agent) lapseChangedApprovals(before, after harness.Tools) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for id, waiting := range a.approvals {
+		was, _ := before.Lookup(waiting.call.Name)
+		if now, offered := after.Lookup(waiting.call.Name); offered && reflect.DeepEqual(was, now) {
+			continue
+		}
+		delete(a.approvals, id)
+		if a.lapsedApprovals == nil {
+			a.lapsedApprovals = map[string]string{}
+		}
+		a.lapsedApprovals[id] = waiting.call.Name
+	}
+}
+
+// tools is what the agent was given to offer, before availableTools drops what this call
+// cannot carry out.
+func (a *Agent) tools() harness.Tools {
+	a.toolsMu.RLock()
+	defer a.toolsMu.RUnlock()
+	return a.options.Tools
 }
 
 // Native reports whether the session is held by one speech-to-speech model.
@@ -242,7 +337,8 @@ func (a *Agent) prepare(current, next Settings, native, restart bool) (*prepared
 				return fail(fmt.Errorf("agent: %s cannot answer: %w", next.LLMTarget, err))
 			}
 		}
-		if next.controller() != current.controller() {
+		// A text session has no floor to control, so it never opens a flow controller.
+		if !a.options.Text && next.controller() != current.controller() {
 			if prep.controller, err = a.startLLM(next.controller(), nil); err != nil {
 				return fail(fmt.Errorf("agent: start flow controller: %w", err))
 			}
@@ -272,8 +368,11 @@ func (a *Agent) prepare(current, next Settings, native, restart bool) (*prepared
 
 // quiesce waits for a turn boundary: nothing being written, said or run on the caller's
 // behalf. It then holds the floor, so no turn starts and no audio is taken in while the
-// pipeline changes underneath.
-func (a *Agent) quiesce(ctx context.Context) error {
+// pipeline changes underneath. toolsDone also waits out a call answered as still running,
+// which no longer holds up a turn but is still being run, and a native reply whose opening
+// receiveSTS has seen and the consumer has not, and marks the tools changing under the same
+// lock, so native calls are refused until SetTools is done.
+func (a *Agent) quiesce(ctx context.Context, toolsDone bool) error {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -282,8 +381,16 @@ func (a *Agent) quiesce(ctx context.Context) error {
 			a.mu.Unlock()
 			return stack.Wrap(errors.New("agent: closed"))
 		}
+		// A session that ended mid-reply leaves the reply generating until recoverNative,
+		// which waits for the swap this holds, replaces the session.
+		if toolsDone && a.pipe != nil && a.pipe.speechEnded.Load() {
+			a.mu.Unlock()
+			return stack.Wrap(ErrSpeechEnded)
+		}
 		if !a.interrupting && a.recoveringVoice == nil && !a.generating && a.utterances == 0 && a.pendingTools == 0 && !a.toolReply &&
-			!a.nativeAwaiting && len(a.streams) == 0 && len(a.generatingCancel) == 0 {
+			!a.nativeAwaiting && len(a.streams) == 0 && len(a.generatingCancel) == 0 &&
+			(!toolsDone || len(a.toolsRunning) == 0 && len(a.nativeResponses) == 0) {
+			a.toolsChanging = toolsDone
 			a.switching.Store(true)
 			a.mu.Unlock()
 			return nil
@@ -327,7 +434,7 @@ func (a *Agent) swapCascade(current, next Settings, prep *prepared) []error {
 	var failures []error
 	if prep.tts != nil {
 		p.running.Add(1)
-		go a.consumeTTS(p, prep.tts)
+		goroutine.Go(a.ctx, func() { a.consumeTTS(p, prep.tts) })
 		if err := replacedTTS.Close(); err != nil {
 			failures = append(failures, fmt.Errorf("close tts: %w", err))
 		}
@@ -382,16 +489,16 @@ func (a *Agent) startCascade(prep *prepared) {
 	a.nativeMode.Store(false)
 
 	a.running.Add(1)
-	go a.consumeHarness(prep.harness, drained)
+	goroutine.Go(a.ctx, func() { a.consumeHarness(prep.harness, drained) })
 	p.running.Add(1)
-	go a.consumeLLM(p, replies)
+	goroutine.Go(a.ctx, func() { a.consumeLLM(p, replies) })
 	// The other three all begin at a microphone or end at a speaker, so a conversation
 	// held in writing runs none of them.
 	if !a.options.Text {
 		p.running.Add(3)
-		go a.consumeTTS(p, prep.tts)
-		go a.consumeCadence(p)
-		go a.consumePresence(p)
+		goroutine.Go(a.ctx, func() { a.consumeTTS(p, prep.tts) })
+		goroutine.Go(a.ctx, func() { a.consumeCadence(p) })
+		goroutine.Go(a.ctx, func() { a.consumePresence(p) })
 	}
 }
 
@@ -413,20 +520,23 @@ func (a *Agent) startNative(prep *prepared) {
 	}
 	a.voicePrompt, a.performs = "", false
 	a.nativeListening, a.nativeAwaiting = false, false
-	// The new session heard none of the old one's stops, so it owes no answer to one.
+	// The new session heard none of the old one's stops, so it owes no answer to one, and
+	// has opened no reply.
 	a.nativeAnswerDue = false
+	a.nativeResponses = nil
 	a.mu.Unlock()
 	a.nativeMode.Store(true)
 
 	if drained != nil {
 		a.running.Add(1)
-		go a.consumeHarness(prep.harness, drained)
+		goroutine.Go(a.ctx, func() { a.consumeHarness(prep.harness, drained) })
 	}
 	events := make(chan sts.Event, sts.EmitterBuffer)
+	source := prep.sts.Events()
 	p.running.Add(3)
-	go a.receiveSTS(p, prep.sts.Events(), events)
-	go a.consumeSTS(p, prep.sts, events)
-	go a.consumeNativePresence(p)
+	goroutine.Go(a.ctx, func() { a.receiveSTS(p, source, events) })
+	goroutine.Go(a.ctx, func() { a.consumeSTS(p, prep.sts, events) })
+	goroutine.Go(a.ctx, func() { a.consumeNativePresence(p) })
 }
 
 // stopPipeline closes the running pipeline's sessions and waits for its goroutines. The
@@ -510,7 +620,7 @@ func (a *Agent) releasePipeline(keepHarness bool) (*pipeline, []error) {
 }
 
 // openCascade opens the conversation model, the flow controller, the harness and the
-// voice a cascade runs on.
+// voice a cascade runs on. A text cascade opens only the model and the harness.
 func (a *Agent) openCascade(s Settings) (*prepared, error) {
 	// A transcriber opens per participant on each frame until one starts, so a target it
 	// could never start on is refused here, once, rather than on every frame of the call.
@@ -528,22 +638,29 @@ func (a *Agent) openCascade(s Settings) (*prepared, error) {
 	// complete never competes with the reply being streamed to the voice. It routes to a
 	// non-thinking model of its own, since a decision this small has nothing to think about
 	// and thinking would only add latency to every turn the caller waits through.
+	//
+	// A conversation held in writing has no floor: nothing is transcribed, so nothing is
+	// ever put to the flow controller or the judge. Neither is opened for one, or a
+	// deployment whose only model is the caller's own would refuse every text session for
+	// want of a hosted vendor's key it would never use.
 	var judge harness.Judge
-	if a.options.Judge != nil && a.options.JudgeTarget != "" {
-		if judge, err = a.options.Judge.Start(a.ctx, decisionrouter.Request{
-			CustomerID: a.options.CustomerID,
-			AgentID:    a.options.AgentID,
-			CallID:     a.options.CallID,
-			Region:     a.options.Region,
-			Tags:       a.options.Tags,
-			Target:     a.options.JudgeTarget,
-		}); err != nil {
+	if !a.options.Text {
+		if a.options.Judge != nil && a.options.JudgeTarget != "" {
+			if judge, err = a.options.Judge.Start(a.ctx, decisionrouter.Request{
+				CustomerID: a.options.CustomerID,
+				AgentID:    a.options.AgentID,
+				CallID:     a.options.CallID,
+				Region:     a.options.Region,
+				Tags:       a.options.Tags,
+				Target:     a.options.JudgeTarget,
+			}); err != nil {
+				prep.close()
+				return nil, stack.Wrap(fmt.Errorf("agent: start flow judge: %w", err))
+			}
+		} else if prep.controller, err = a.startLLM(s.controller(), nil); err != nil {
 			prep.close()
-			return nil, stack.Wrap(fmt.Errorf("agent: start flow judge: %w", err))
+			return nil, stack.Wrap(fmt.Errorf("agent: start flow controller: %w", err))
 		}
-	} else if prep.controller, err = a.startLLM(s.controller(), nil); err != nil {
-		prep.close()
-		return nil, stack.Wrap(fmt.Errorf("agent: start flow controller: %w", err))
 	}
 	prep.harness, err = harness.New(harness.Options{
 		Text:         a.options.Text,
@@ -565,6 +682,7 @@ func (a *Agent) openCascade(s Settings) (*prepared, error) {
 		CacheKey:     a.options.ConfigID,
 		OnModelCall:  func(timing llm.CallTiming) { a.emitter.Send(ModelCall{CallTiming: timing}) },
 		Logger:       a.logger,
+		Call:         a.ctx,
 	})
 	if err != nil {
 		prep.harness = nil
@@ -588,7 +706,7 @@ func (a *Agent) openNative(s Settings) (*prepared, error) {
 		var err error
 		prep.harness, err = harness.New(harness.Options{
 			OpenSubagent: subagent, Capture: a.captureVideo, Skills: a.options.Skills,
-			Sandbox: a.options.Sandbox, Publish: a.options.Publish, Tasks: a.options.Tasks, Logger: a.logger,
+			Sandbox: a.options.Sandbox, Publish: a.options.Publish, Tasks: a.options.Tasks, Logger: a.logger, Call: a.ctx,
 			Lookup: a.subagentLookup(), Search: a.subagentSearch(),
 			OnModelCall: func(timing llm.CallTiming) { a.emitter.Send(ModelCall{CallTiming: timing}) },
 		})
@@ -795,7 +913,7 @@ func (a *Agent) loseVoice(p *pipeline, lost *ttsrouter.Session) string {
 	// The new voice is consumed under this pipeline like the one it replaces, so it is
 	// counted before this one's consumer can return.
 	p.running.Add(1)
-	go func() {
+	goroutine.Go(a.ctx, func() {
 		next, err := a.startVoice(settings, failed)
 		if err != nil {
 			a.mu.Lock()
@@ -834,15 +952,15 @@ func (a *Agent) loseVoice(p *pipeline, lost *ttsrouter.Session) string {
 		// server to close the socket), and the reply held for the caller does not wait on it.
 		// The pipeline counts the close, so stopping it or closing the agent waits for it.
 		p.running.Add(1)
-		go func() {
+		goroutine.Go(a.ctx, func() {
 			defer p.running.Done()
 			if err := lost.Close(); err != nil {
 				a.logger.Debug("closing the lost voice", "error", err)
 			}
-		}()
+		})
 		// Start draining before releasing the recovery barrier. The queued answer may
 		// synthesize as soon as it is admitted, and a new voice can fail immediately.
-		go a.consumeTTS(p, next)
+		goroutine.Go(a.ctx, func() { a.consumeTTS(p, next) })
 		a.mu.Lock()
 		recovered := a.recoveringVoice == lost && a.pipe == p && a.tts == next
 		if recovered {
@@ -869,7 +987,7 @@ func (a *Agent) loseVoice(p *pipeline, lost *ttsrouter.Session) string {
 		if recovered {
 			a.respondQueued()
 		}
-	}()
+	})
 	return again
 }
 

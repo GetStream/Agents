@@ -772,15 +772,15 @@ func (s *Server) listLimits(ctx context.Context, organization string, request *L
 	if request.Team != "" {
 		filter.Category, filter.CategoryPrefix = usage.TeamPrefix+request.Team, ""
 	}
-	var position int64
 	if after != nil {
-		position = after.ID
+		filter.After = after.ID
 	}
-	rows, err := s.store.ListLimits(ctx, filter, position, request.Limit)
+	filter.Limit = request.Limit
+	rows, err := s.store.Limits.Select(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
-	all, err := s.store.LimitsFor(ctx, []string{organization})
+	all, err := s.store.Limits.SelectOf(ctx, []string{organization})
 	if err != nil {
 		return nil, err
 	}
@@ -809,14 +809,14 @@ func (s *Server) createLimit(ctx context.Context, organization string, sent Limi
 		UserID: ref.UserID, Category: ref.Category, Interval: interval, LimitMicros: sent.LimitMicros, Note: sent.Note,
 		UpdatedBy: actorName(audit),
 	}
-	all, err := s.store.LimitsFor(ctx, []string{organization})
+	all, err := s.store.Limits.SelectOf(ctx, []string{organization})
 	if err != nil {
 		return nil, err
 	}
 	if err := aboveParent(all, row); err != nil {
 		return nil, err
 	}
-	err = s.store.CreateLimit(ctx, &row, audit)
+	err = s.store.Limits.Insert(ctx, &row, audit)
 	var exists *store.ErrLimitExists
 	if errors.As(err, &exists) {
 		return nil, APIError{Type: ErrorTypeConflict, Code: codeLimitExists, Message: fmt.Sprintf(
@@ -830,14 +830,14 @@ func (s *Server) createLimit(ctx context.Context, organization string, sent Limi
 }
 
 func (s *Server) getLimit(ctx context.Context, organization string, id int64) (*limitResponse, error) {
-	row, err := s.store.Limit(ctx, organization, id)
+	row, err := s.store.Limits.Get(ctx, organization, id)
 	if errors.Is(err, store.ErrNoLimit) {
 		return nil, errNoSuchLimit
 	}
 	if err != nil {
 		return nil, err
 	}
-	all, err := s.store.LimitsFor(ctx, []string{row.OrganizationID})
+	all, err := s.store.Limits.SelectOf(ctx, []string{row.OrganizationID})
 	if err != nil {
 		return nil, err
 	}
@@ -845,7 +845,7 @@ func (s *Server) getLimit(ctx context.Context, organization string, id int64) (*
 }
 
 func (s *Server) updateLimit(ctx context.Context, organization string, id int64, change LimitChange, audit store.LimitAudit) (*limitResponse, error) {
-	existing, err := s.store.Limit(ctx, organization, id)
+	existing, err := s.store.Limits.Get(ctx, organization, id)
 	if errors.Is(err, store.ErrNoLimit) {
 		return nil, errNoSuchLimit
 	}
@@ -855,7 +855,7 @@ func (s *Server) updateLimit(ctx context.Context, organization string, id int64,
 	if audit.CustomerID == "" {
 		audit.CustomerID = existing.OrganizationID
 	}
-	all, err := s.store.LimitsFor(ctx, []string{existing.OrganizationID})
+	all, err := s.store.Limits.SelectOf(ctx, []string{existing.OrganizationID})
 	if err != nil {
 		return nil, err
 	}
@@ -866,7 +866,7 @@ func (s *Server) updateLimit(ctx context.Context, organization string, id int64,
 			return nil, err
 		}
 	}
-	updated, err := s.store.UpdateLimit(ctx, existing.OrganizationID, id,
+	updated, err := s.store.Limits.Update(ctx, existing.OrganizationID, id,
 		store.LimitChange{LimitMicros: change.LimitMicros, Note: change.Note, UpdatedBy: actorName(audit)}, audit)
 	if errors.Is(err, store.ErrNoLimit) {
 		return nil, errNoSuchLimit
@@ -884,7 +884,7 @@ func (s *Server) updateLimit(ctx context.Context, organization string, id int64,
 }
 
 func (s *Server) deleteLimit(ctx context.Context, organization string, id int64, audit store.LimitAudit) error {
-	existing, err := s.store.Limit(ctx, organization, id)
+	existing, err := s.store.Limits.Get(ctx, organization, id)
 	if errors.Is(err, store.ErrNoLimit) {
 		return errNoSuchLimit
 	}
@@ -894,7 +894,7 @@ func (s *Server) deleteLimit(ctx context.Context, organization string, id int64,
 	if audit.CustomerID == "" {
 		audit.CustomerID = existing.OrganizationID
 	}
-	_, err = s.store.DeleteLimit(ctx, existing.OrganizationID, id, audit)
+	_, err = s.store.Limits.Delete(ctx, existing.OrganizationID, id, audit)
 	if errors.Is(err, store.ErrNoLimit) {
 		return errNoSuchLimit
 	}
@@ -955,7 +955,7 @@ func (s *Server) subjectsUsage(ctx context.Context, organization string, refs []
 	if s.policies == nil {
 		return nil, errNoLimits
 	}
-	limits, err := s.store.LimitsFor(ctx, []string{organization})
+	limits, err := s.store.Limits.SelectOf(ctx, []string{organization})
 	if err != nil {
 		return nil, err
 	}
@@ -966,7 +966,7 @@ func (s *Server) subjectsUsage(ctx context.Context, organization string, refs []
 			earliest = start
 		}
 	}
-	resets, err := s.store.Resets(ctx, []string{organization}, earliest)
+	resets, err := s.store.UsageResets.Select(ctx, []string{organization}, earliest)
 	if err != nil {
 		return nil, err
 	}
@@ -974,7 +974,7 @@ func (s *Server) subjectsUsage(ctx context.Context, organization string, refs []
 	if err != nil {
 		return nil, stack.Wrap(err)
 	}
-	live, err := s.store.LiveGrants(ctx, []string{organization}, now)
+	live, err := s.store.LimitGrants.SelectLive(ctx, []string{organization}, now)
 	if err != nil {
 		return nil, err
 	}
@@ -1063,7 +1063,7 @@ func (s *Server) resetLimitUsage(ctx context.Context, organization string, bille
 			}
 		}
 	}
-	limits, err := s.store.LimitsFor(ctx, []string{organization})
+	limits, err := s.store.Limits.SelectOf(ctx, []string{organization})
 	if err != nil {
 		return nil, err
 	}
@@ -1092,7 +1092,7 @@ func (s *Server) resetLimitUsage(ctx context.Context, organization string, bille
 			Reason: sent.Reason, Actor: actorName(audit),
 		})
 	}
-	if err := s.store.AddResets(ctx, resets, audit); err != nil {
+	if err := s.store.UsageResets.InsertMany(ctx, resets, audit); err != nil {
 		return nil, err
 	}
 	s.policies.LimitsChanged(ctx, organization)

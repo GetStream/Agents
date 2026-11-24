@@ -158,7 +158,7 @@ func (s *ChatLogSuite) TestAReplyIsWrittenAsItStreams() {
 }
 
 func (s *ChatLogSuite) TestThePiecesOfAReplyAreOneMessage() {
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	writer.handle(message{author: s.log.agent, text: "hi ", turnID: "turn-1", kind: piece})
 	writer.handle(message{author: s.log.agent, text: "there", turnID: "turn-1", kind: piece})
@@ -168,7 +168,7 @@ func (s *ChatLogSuite) TestThePiecesOfAReplyAreOneMessage() {
 }
 
 func (s *ChatLogSuite) TestARepliesPiecesAreKeptApartFromAnothers() {
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	writer.handle(message{author: s.log.agent, text: "hi", turnID: "turn-1", kind: piece})
 	writer.handle(message{author: s.log.agent, text: "bye", turnID: "turn-2", kind: piece})
@@ -188,7 +188,7 @@ func (s *ChatLogSuite) TestAnInterruptedReplyIsClosedOut() {
 
 func (s *ChatLogSuite) TestAFinishedModelReplyStaysUnspokenUntilTheVoiceFinishes() {
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: s.log.agent, text: "1, 2, 3, 4, 5", turnID: "turn-1", kind: piece})
 	writer.handle(message{author: s.log.agent, text: "1, 2, 3, 4, 5", turnID: "turn-1", kind: prepared})
 	s.Require().Len(writer.writing, 1)
@@ -199,7 +199,7 @@ func (s *ChatLogSuite) TestAFinishedModelReplyStaysUnspokenUntilTheVoiceFinishes
 
 func (s *ChatLogSuite) TestALimitedAppIsNotAskedAgainOnEveryTick() {
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	chat.RateLimit("/message")
 
 	writer.handle(message{author: s.log.agent, text: "hi", turnID: "turn-1", kind: piece})
@@ -229,7 +229,7 @@ func (s *ChatLogSuite) TestASavedArtifactIsStoredEvenWithoutASpokenReply() {
 	queued := s.queued()
 	s.Require().NotEmpty(queued)
 	s.Require().Equal(artifact, queued[0].kind, "the card goes before the tool is done")
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	writer.handle(queued[0])
 	// Repeated delivery has the same stored identity rather than a second card.
@@ -268,7 +268,7 @@ func (s *ChatLogSuite) TestOnlyAShownToolsSuccessfulStoredReceiptMakesACard() {
 
 func (s *ChatLogSuite) TestAnInterruptedReplyIsNotStoredAsFullySpoken() {
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: s.log.agent, text: "1, 2, 3, 4, 5, 6, 7, 8, 9, 10", turnID: "turn-1", kind: piece})
 	writer.show()
 	writing := writer.writing["turn-1"]
@@ -290,7 +290,7 @@ func (s *ChatLogSuite) TestAnInterruptedReplyIsReadBackAsTalkedOver() {
 	// The caller heard the start of it, and a watcher was shown it as it was written: a
 	// transcript that leaves it out reads as the agent having said nothing at all.
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: s.log.agent, text: "Tomorrow will be", turnID: "turn-1", kind: piece, source: SourceAgent})
 	writer.show()
 	writer.handle(message{author: s.log.agent, text: "Tomorrow will be sunny.", turnID: "turn-1", kind: prepared, source: SourceAgent})
@@ -311,7 +311,7 @@ func (s *ChatLogSuite) TestAScriptedLineIsStoredOnceItIsSaid() {
 	s.useChat()
 	s.log.Record(agent.Said{TurnID: "say-1", Text: "Hi, thanks for getting in touch."})
 	s.log.Record(agent.Spoke{TurnID: "say-1"})
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	for _, queued := range s.queued() {
 		writer.handle(queued)
 	}
@@ -324,7 +324,7 @@ func (s *ChatLogSuite) TestAScriptedLineIsStoredOnceItIsSaid() {
 
 func (s *ChatLogSuite) TestANativePartialAfterInterruptIsKeptAsInterrupted() {
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: s.log.agent, turnID: "turn-1", kind: interrupt})
 	writer.handle(message{author: s.log.agent, text: "One,", turnID: "turn-1", kind: prepared})
 	s.Empty(writer.writing)
@@ -341,7 +341,7 @@ func (s *ChatLogSuite) TestANativePartialAfterInterruptIsKeptAsInterrupted() {
 
 func (s *ChatLogSuite) TestSilenceIsNotStored() {
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	s.play(writer, agent.Responded{TurnID: "turn-1", Text: ""})
 
@@ -387,7 +387,7 @@ func (s *ChatLogSuite) TestTheTranscriptSaysWhichLinesTheAgentSaid() {
 	// Speakers are user ids, and an agent can be named anything, so whoever reads the
 	// transcript back cannot work out which side of the conversation a line is from.
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: User{ID: "alice"}, text: "hello", kind: whole, source: SourceSpeech})
 	writer.handle(message{author: s.log.agent, text: "hi there", kind: whole, source: SourceAgent})
 	reader := &Reader{client: s.log.client}
@@ -416,7 +416,7 @@ func (s *ChatLogSuite) TestASpokenReplyIsMarkedAsTheAssistants() {
 	// Stream's AI components render a message as the assistant's only when it says so, as a
 	// reply in a conversation held in writing does.
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: s.log.agent, text: "Where does it", turnID: "turn-1", kind: piece, source: SourceAgent})
 	writer.show()
 	writer.handle(message{author: s.log.agent, text: "Where does it hurt?", turnID: "turn-1", kind: prepared, source: SourceAgent})
@@ -430,7 +430,7 @@ func (s *ChatLogSuite) TestASpokenReplyIsMarkedAsTheAssistants() {
 
 func (s *ChatLogSuite) TestWhatAParticipantSaidIsNotMarkedAsTheAssistants() {
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: User{ID: "alice"}, text: "my lower back", kind: heard, source: SourceSpeech})
 
 	stored := s.channel()
@@ -440,7 +440,7 @@ func (s *ChatLogSuite) TestWhatAParticipantSaidIsNotMarkedAsTheAssistants() {
 
 func (s *ChatLogSuite) TestWhatAParticipantIsSayingIsOneMessageThatSettles() {
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	alice := User{ID: "alice"}
 
 	writer.handle(message{author: alice, text: "where is", kind: hearing, source: SourceSpeech})
@@ -464,7 +464,7 @@ func (s *ChatLogSuite) TestALineIsStoredUnderTheIdItWasHeardAs() {
 	// The session's live frames name a line by its id, so the stored copy carries the same
 	// one and a watcher never has to match the two by their words.
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	alice := User{ID: "alice"}
 	writer.handle(message{author: alice, text: "where is", lineID: "line-1", kind: hearing, source: SourceSpeech})
 	writer.show()
@@ -479,7 +479,7 @@ func (s *ChatLogSuite) TestALineIsStoredUnderTheIdItWasHeardAs() {
 
 func (s *ChatLogSuite) TestALineHeardAgainGrownIsWrittenOverRatherThanStoredTwice() {
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	alice := User{ID: "alice"}
 	writer.handle(message{author: alice, text: "Woah.", lineID: "line-1", kind: heard, source: SourceSpeech})
 	writer.handle(message{author: alice, text: "Woah. This is", lineID: "line-1", kind: hearing, source: SourceSpeech})
@@ -496,7 +496,7 @@ func (s *ChatLogSuite) TestTwoLinesUnderOneUserAreKeptApart() {
 	// The same person on two devices is two participants with one user id: each line is
 	// its own message, and settling one leaves the other being said.
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	alice := User{ID: "alice"}
 	writer.handle(message{author: alice, text: "is it", lineID: "line-1", kind: hearing, source: SourceSpeech})
 	writer.handle(message{author: alice, text: "hello", lineID: "line-2", kind: hearing, source: SourceSpeech})
@@ -518,7 +518,7 @@ func (s *ChatLogSuite) TestALineHeardAgainAndLetGoOfKeepsWhatWasHeard() {
 	// "Woah." was heard; what the caller went on to say in the same line was not taken as
 	// meant for the agent. That much was said, and the transcript keeps it.
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	alice := User{ID: "alice"}
 	writer.handle(message{author: alice, text: "Woah.", lineID: "line-1", kind: heard, source: SourceSpeech})
 	writer.handle(message{author: alice, text: "Woah. Hang on, the door", lineID: "line-1", kind: hearing, source: SourceSpeech})
@@ -535,7 +535,7 @@ func (s *ChatLogSuite) TestALineStoredAgainUnderItsIdIsWrittenOver() {
 	// Chat refuses an id it has: a line remembered no longer, said again, is still the
 	// line, not lost.
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	alice := User{ID: "alice"}
 	writer.handle(message{author: alice, text: "Woah.", lineID: "line-1", kind: heard, source: SourceSpeech})
 	clear(writer.heardLines)
@@ -549,7 +549,7 @@ func (s *ChatLogSuite) TestALineStoredAgainUnderItsIdIsWrittenOver() {
 
 func (s *ChatLogSuite) TestTheTranscriptSaysWhatEachLineIsAndWhetherItIsFinished() {
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	alice := User{ID: "alice"}
 	writer.handle(message{author: s.log.agent, text: "Your order ships", turnID: "turn-9", kind: piece, source: SourceAgent})
 	writer.handle(message{author: alice, text: "and when", lineID: "line-3", kind: hearing, source: SourceSpeech})
@@ -570,7 +570,7 @@ func (s *ChatLogSuite) TestTheTranscriptSaysWhatEachLineIsAndWhetherItIsFinished
 // is being written after each, and returns what the channel then holds.
 func (s *ChatLogSuite) written(events ...agent.Event) []getstream.MessageResponse {
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	for _, event := range events {
 		s.log.Record(event)
 		for _, queued := range s.queued() {
@@ -585,7 +585,7 @@ func (s *ChatLogSuite) TestAStreamedReplyNamesTheTurnItIsSpokenAs() {
 	// The session socket's speaking and spoke name the same turn, which is how a page pairs
 	// the reply it was shown with how much of it has been heard.
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: s.log.agent, text: "Your order", turnID: "turn-1", kind: piece, source: SourceAgent})
 	writer.show()
 
@@ -699,7 +699,7 @@ func (s *ChatLogSuite) TestAReplySpokenInPartAndCutOffBeforeTheModelFinishedIsOn
 func (s *ChatLogSuite) TestAWrittenReplyNamesNoTurn() {
 	// Nothing was spoken, so no speaking or spoke will ever name it.
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	s.log.Reply("reissuing to another company is not possible")
 	for _, queued := range s.queued() {
 		writer.handle(queued)
@@ -716,7 +716,7 @@ func (s *ChatLogSuite) TestALineSaidUnaskedIsReadBackWithWhatItWasFor() {
 	s.log.Record(agent.Spoke{TurnID: "say-1"})
 	s.log.Record(agent.Responded{TurnID: "back-1", Text: "Are you still there?", Purpose: agent.PurposeCheckIn})
 	s.log.Record(agent.Spoke{TurnID: "back-1"})
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	for _, queued := range s.queued() {
 		writer.handle(queued)
 	}
@@ -732,7 +732,7 @@ func (s *ChatLogSuite) TestALineSaidUnaskedIsReadBackWithWhatItWasFor() {
 
 func (s *ChatLogSuite) TestALineSaidUnaskedKeepsWhatItWasForWhenCutOff() {
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: s.log.agent, text: "Are you", turnID: "back-1", kind: piece, source: SourceAgent})
 	writer.show()
 	writer.handle(message{author: s.log.agent, turnID: "back-1", purpose: agent.PurposeCheckIn, kind: prepared, source: SourceAgent})
@@ -751,7 +751,7 @@ func (s *ChatLogSuite) TestALineSaidUnaskedKeepsWhatItWasForWhenCutOff() {
 
 func (s *ChatLogSuite) TestSpeechTheAgentIgnoredIsNotLeftInTheChannel() {
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: User{ID: "alice"}, text: "hang on, the door", kind: hearing, source: SourceSpeech})
 	writer.show()
 
@@ -765,7 +765,7 @@ func (s *ChatLogSuite) TestSpeechTheAgentIgnoredIsNotLeftInTheChannel() {
 
 func (s *ChatLogSuite) TestSpeechThatNeverSettledIsRemovedWhenTheCallEnds() {
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: User{ID: "alice"}, text: "and one more", kind: hearing, source: SourceSpeech})
 	writer.show()
 
@@ -776,7 +776,7 @@ func (s *ChatLogSuite) TestSpeechThatNeverSettledIsRemovedWhenTheCallEnds() {
 
 func (s *ChatLogSuite) TestRetractingLeavesWhatWasSaidBefore() {
 	s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	alice := User{ID: "alice"}
 	writer.handle(message{author: alice, text: "What time is it?", kind: heard, source: SourceSpeech})
 	writer.handle(message{author: alice, text: "hang on", kind: hearing, source: SourceSpeech})
@@ -935,7 +935,7 @@ func (s *ChatLogSuite) TestATranscriptIsReadOnlyFromAChannelTheCustomerHolds() {
 			CreatedByID: &s.log.agent.ID, Custom: map[string]any{conversation.CustomerField: "customer-2"},
 		}})
 	s.Require().NoError(err)
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: User{ID: "alice"}, text: "hello", kind: whole, source: SourceSpeech})
 	reader := NewReaderFromClient(chat.Client)
 
@@ -952,7 +952,7 @@ func (s *ChatLogSuite) TestAConversationBoundCallsTranscriptHoldsOnlyItsCall() {
 	// A call bound to a conversation writes into that conversation's channel, beside what
 	// was typed before and after it.
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	before := time.Date(2026, 4, 1, 9, 0, 0, 0, time.UTC)
 	during := before.Add(10 * time.Minute)
 	after := during.Add(10 * time.Minute)
@@ -978,6 +978,56 @@ func (s *ChatLogSuite) TestAConversationBoundCallsTranscriptHoldsOnlyItsCall() {
 	s.True(said[1].Agent, "the conversation service writes no source; its author is the agent")
 }
 
+func (s *ChatLogSuite) TestAMembersLineMarkedAsTheAgentsIsTheMembersOnceTheWriterIsKnown() {
+	// Anybody who writes in the channel can mark a message as the agent's. Only the user the
+	// agent spoke as, or its id, makes one the agent's; a call that kept no writer reads as before.
+	chat := s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+	writer.handle(message{author: s.log.agent, text: "Your shift is at six.", kind: whole, source: SourceAgent})
+	// The conversation service marks every line it writes: its reply, as the agent's id, and a
+	// person's typed turn, as that person.
+	for _, marked := range []struct{ user, text string }{
+		{"ben", "The agent approved Ben's shift swap."},
+		{"agent-1", "the conversation's marked reply"},
+		{"alice", "typed by Alice"},
+	} {
+		_, err := chat.Client.Chat().SendMessage(context.Background(), ChannelType, s.log.channel,
+			&getstream.SendMessageRequest{Message: getstream.MessageRequest{Text: &marked.text, UserID: &marked.user,
+				Custom: map[string]any{SourceField: SourceAgent}}})
+		s.Require().NoError(err)
+	}
+	s.typed(chat, "agent-1", "the conversation's own reply")
+	reader := NewReaderFromClient(chat.Client)
+	agentOf := func(said []Spoken) map[string]bool {
+		read := map[string]bool{}
+		for _, line := range said {
+			read[line.Speaker+": "+line.Text] = line.Agent
+		}
+		return read
+	}
+
+	known, err := reader.Transcript(context.Background(), Read{Channel: s.log.channel, Agent: "agent-1", Writer: s.log.agent.ID})
+	s.Require().NoError(err)
+	unknown, err := reader.Transcript(context.Background(), Read{Channel: s.log.channel, Agent: "agent-1"})
+	s.Require().NoError(err)
+
+	s.Equal(map[string]bool{
+		"vision-agent: Your shift is at six.":       true,
+		"ben: The agent approved Ben's shift swap.": false,
+		"agent-1: the conversation's marked reply":  true,
+		"alice: typed by Alice":                     false,
+		"agent-1: the conversation's own reply":     true,
+	}, agentOf(known))
+	// What the base, 4b4bcbaf5, reads for every row: a marked line is the agent's.
+	s.Equal(map[string]bool{
+		"vision-agent: Your shift is at six.":       true,
+		"ben: The agent approved Ben's shift swap.": true,
+		"agent-1: the conversation's marked reply":  true,
+		"alice: typed by Alice":                     true,
+		"agent-1: the conversation's own reply":     true,
+	}, agentOf(unknown))
+}
+
 // typed writes a message the way the conversation service does, with no source.
 func (s *ChatLogSuite) typed(chat *chattest.Server, user, text string) {
 	_, err := chat.Client.Chat().SendMessage(context.Background(), ChannelType, s.log.channel,
@@ -990,7 +1040,7 @@ func (s *ChatLogSuite) TestATranscriptLeavesAnExistingParticipantAlone() {
 	// their profile with the name the call knew them by.
 	chat := s.useChat()
 	chat.PutUser(map[string]any{"id": "alice", "name": "Alice Example", "image": "https://example.com/alice.png"})
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	writer.handle(message{author: User{ID: "alice", Name: "alice"}, text: "hello", kind: whole, source: SourceSpeech})
 	writer.handle(message{author: User{ID: "bob", Name: "Bob"}, text: "hi", kind: whole, source: SourceSpeech})
@@ -1022,7 +1072,7 @@ func (s *ChatLogSuite) TestTimingsAreOffUnlessAsked() {
 	s.log.Record(agent.Turn{TurnID: "turn-1", RoundtripMs: 500, STTLatencyMs: 6})
 	s.Empty(s.queued(), "a developer's option is not something every transcript carries")
 
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: s.log.agent, text: "hi", turnID: "turn-1", kind: piece})
 	writer.handle(message{author: s.log.agent, text: "hi", turnID: "turn-1", kind: prepared})
 	writer.handle(message{author: s.log.agent, turnID: "turn-1", kind: spoken})
@@ -1136,7 +1186,7 @@ func (s *ChatLogSuite) TestATurnWithNothingToSayHasNoTimings() {
 
 func (s *ChatLogSuite) TestTimingsThatArriveBeforeTheReplyIsStoredWaitForIt() {
 	s.useTimings()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: s.log.agent, text: "Hello there.", turnID: "turn-1", kind: piece})
 	writer.show()
 	s.Require().NotEmpty(writer.writing["turn-1"].messageID)
@@ -1158,7 +1208,7 @@ func (s *ChatLogSuite) TestTimingsThatArriveBeforeTheReplyIsStoredWaitForIt() {
 
 func (s *ChatLogSuite) TestTimingsThatArriveAfterTheReplyIsStoredAreWrittenOntoIt() {
 	s.useTimings()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: s.log.agent, text: "Hello there.", turnID: "turn-1", kind: piece})
 	writer.show()
 	writer.handle(message{author: s.log.agent, text: "Hello there.", turnID: "turn-1", kind: prepared})
@@ -1180,7 +1230,7 @@ func (s *ChatLogSuite) TestTimingsThatArriveAfterTheReplyIsStoredAreWrittenOntoI
 
 func (s *ChatLogSuite) TestTimingsAreWrittenOntoAReplyThatWasNeverShownWhileItStreamed() {
 	s.useTimings()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: s.log.agent, text: "Hi.", turnID: "turn-1", kind: prepared})
 	writer.handle(message{author: s.log.agent, turnID: "turn-1", kind: spoken})
 
@@ -1193,7 +1243,7 @@ func (s *ChatLogSuite) TestTimingsAreWrittenOntoAReplyThatWasNeverShownWhileItSt
 
 func (s *ChatLogSuite) TestAnInterruptedRepliesTimingsAreAllThatIsLeftOfIt() {
 	s.useTimings()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: s.log.agent, text: "One, two, three", turnID: "turn-1", kind: piece})
 	writer.show()
 	writer.handle(s.timing(agent.Turn{TurnID: "turn-1", Interrupted: true, STTLatencyMs: 6}))
@@ -1208,7 +1258,7 @@ func (s *ChatLogSuite) TestAnInterruptedRepliesTimingsAreAllThatIsLeftOfIt() {
 
 func (s *ChatLogSuite) TestAReplyThatLeftNoMessageGetsNoTimings() {
 	s.useTimings()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: s.log.agent, turnID: "turn-1", kind: interrupt})
 
 	writer.handle(s.timing(agent.Turn{TurnID: "turn-1", Interrupted: true, STTLatencyMs: 6}))
@@ -1220,7 +1270,7 @@ func (s *ChatLogSuite) TestTheTranscriptHoldsWhatTheAgentSaidWithoutItsTimings()
 	// Whoever reads the conversation back is reading what was said, and the line of timings
 	// was never said.
 	s.useTimings()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	writer.handle(message{author: User{ID: "alice"}, text: "hello", kind: whole, source: SourceSpeech})
 	writer.handle(message{author: s.log.agent, text: "hi there", turnID: "turn-1", kind: prepared})
 	writer.handle(message{author: s.log.agent, turnID: "turn-1", kind: spoken})
@@ -1239,7 +1289,7 @@ func (s *ChatLogSuite) TestTheTranscriptHoldsWhatTheAgentSaidWithoutItsTimings()
 
 func (s *ChatLogSuite) TestWhatIsHeldForTimingsIsBounded() {
 	s.useTimings()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	// Timings whose reply never arrives, as for a turn that was silent.
 	for i := range 2 * recentTurns {
@@ -1319,7 +1369,7 @@ func (s *ChatLogSuite) TestAStreamedReplyIsShownThinkingThenGeneratingUntilItIsH
 	// Stream's AI components show what a reply is doing from the indicator, as they do for a
 	// conversation in writing. It clears only once the reply is stored as heard.
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.ResponseDelta{TurnID: "turn-1", Text: "Tomorrow "})
 	writer.show()
@@ -1337,7 +1387,7 @@ func (s *ChatLogSuite) TestAStreamedReplyIsShownThinkingThenGeneratingUntilItIsH
 
 func (s *ChatLogSuite) TestAnInterruptedReplyClearsItsIndicator() {
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.ResponseDelta{TurnID: "turn-1", Text: "Tomorrow "})
 	writer.show()
@@ -1348,7 +1398,7 @@ func (s *ChatLogSuite) TestAnInterruptedReplyClearsItsIndicator() {
 
 func (s *ChatLogSuite) TestAReplyInterruptedBeforeAWordClearsItsIndicator() {
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.Interrupted{TurnID: "turn-1"})
 
@@ -1357,7 +1407,7 @@ func (s *ChatLogSuite) TestAReplyInterruptedBeforeAWordClearsItsIndicator() {
 
 func (s *ChatLogSuite) TestAReplyThatNeverStreamedClearsItsIndicatorOnceItIsStored() {
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	s.play(writer,
 		agent.Responding{TurnID: "turn-1"},
@@ -1371,7 +1421,7 @@ func (s *ChatLogSuite) TestAReplyThatNeverStreamedClearsItsIndicatorOnceItIsStor
 func (s *ChatLogSuite) TestAReplyWithNothingToSayClearsItsIndicator() {
 	// Nothing is spoken, so no Spoke would ever clear it.
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.Responded{TurnID: "turn-1"})
 
@@ -1380,7 +1430,7 @@ func (s *ChatLogSuite) TestAReplyWithNothingToSayClearsItsIndicator() {
 
 func (s *ChatLogSuite) TestSpeechTheAgentIgnoresShowsNoIndicator() {
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	alice := stt.Participant{ID: "session-9", UserID: "alice"}
 
 	s.play(writer, agent.Hearing{Participant: alice, Text: "not you, sorry", LineID: "line-1"})
@@ -1392,7 +1442,7 @@ func (s *ChatLogSuite) TestSpeechTheAgentIgnoresShowsNoIndicator() {
 
 func (s *ChatLogSuite) TestASearchIsShownAsCheckingExternalSources() {
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	s.play(writer,
 		agent.Responding{TurnID: "turn-1"},
@@ -1413,7 +1463,7 @@ func (s *ChatLogSuite) TestASearchIsShownAsCheckingExternalSources() {
 func (s *ChatLogSuite) TestTheAgentIsShownThinkingWhileAToolRunsAfterItsWordsAreHeard() {
 	// "One moment" is heard in full while the booking is still being made.
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.ResponseDelta{TurnID: "turn-1", Text: "One moment."})
 	writer.show()
@@ -1432,7 +1482,7 @@ func (s *ChatLogSuite) TestTheAgentIsShownThinkingWhileAToolRunsAfterItsWordsAre
 func (s *ChatLogSuite) TestAReplyOfToolsAloneClearsOnceTheLastComesBack() {
 	// Pressing digits at a menu has nothing to say and no reply after it.
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	s.play(writer,
 		agent.Responding{TurnID: "turn-1"},
@@ -1450,7 +1500,7 @@ func (s *ChatLogSuite) TestAReplyOfToolsAloneClearsOnceTheLastComesBack() {
 func (s *ChatLogSuite) TestAnIndicatorNothingEndsIsClearedOnceStale() {
 	// Work the model was told is running can come to nothing without a word.
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	now := s.clock(writer)
 	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.Responded{TurnID: "turn-1", PendingWork: true})
 
@@ -1465,7 +1515,7 @@ func (s *ChatLogSuite) TestAnIndicatorNothingEndsIsClearedOnceStale() {
 
 func (s *ChatLogSuite) TestARunningToolKeepsTheIndicatorFromGoingStale() {
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	now := s.clock(writer)
 	s.play(writer,
 		agent.Responding{TurnID: "turn-1"},
@@ -1480,7 +1530,7 @@ func (s *ChatLogSuite) TestARunningToolKeepsTheIndicatorFromGoingStale() {
 
 func (s *ChatLogSuite) TestAnEarlierReplyEndingDoesNotClearTheTurnAfterIt() {
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.ResponseDelta{TurnID: "turn-1", Text: "Tomorrow "})
 	writer.show()
@@ -1496,7 +1546,7 @@ func (s *ChatLogSuite) TestAnEarlierReplyEndingDoesNotClearTheTurnAfterIt() {
 func (s *ChatLogSuite) TestASearchWhoseEndWasLostIsNotShownForTheNextTurn() {
 	// The queue drops rather than blocks, so a tool's end can be lost.
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	s.play(writer,
 		agent.Responding{TurnID: "turn-1"},
@@ -1522,7 +1572,7 @@ func (s *ChatLogSuite) TestClosingClearsAnIndicatorLeftUp() {
 
 func (s *ChatLogSuite) TestClosingWhileAReplyIsWrittenClearsIt() {
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.ResponseDelta{TurnID: "turn-1", Text: "Tomorrow "})
 	writer.show()
 
@@ -1535,7 +1585,7 @@ func (s *ChatLogSuite) TestNoIndicatorIsSentWhileStreamHoldsOff() {
 	// Stream answers a 429 by closing the connection, so a limited app is not asked again
 	// until it says to.
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	now := s.clock(writer)
 	writer.quietUntil = now.Add(time.Minute)
 
@@ -1556,7 +1606,7 @@ func (s *ChatLogSuite) TestNoIndicatorIsSentWhileStreamHoldsOff() {
 func (s *ChatLogSuite) TestAReplyStoredByAStoreThatTimedOutIsWrittenOver() {
 	// The first store timed out here but landed in Chat, so the reply's id is already taken.
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 	s.play(writer, agent.Responding{TurnID: "turn-1"})
 	id, text := replyID(s.log.channel, "turn-1"), "Tomorrow"
 	_, err := chat.Client.Chat().SendMessage(context.Background(), ChannelType, s.log.channel,
@@ -1575,7 +1625,7 @@ func (s *ChatLogSuite) TestAReplySpokenInPiecesKeepsEveryPiece() {
 	// A voice that speaks a sentence at a time reports each as spoken, the first before the
 	// model has finished. Every piece is kept, in the one message the reply is.
 	chat := s.useChat()
-	writer := newWriter(s.log)
+	writer := newWriter(s.T().Context(), s.log)
 
 	s.play(writer, agent.Responding{TurnID: "turn-1"}, agent.ResponseDelta{TurnID: "turn-1", Text: "One."})
 	writer.show()
@@ -1584,4 +1634,45 @@ func (s *ChatLogSuite) TestAReplySpokenInPiecesKeepsEveryPiece() {
 	s.play(writer, agent.Responded{TurnID: "turn-1", Text: "One. Two."}, agent.Spoke{TurnID: "turn-1"})
 
 	s.Equal([]string{"One. Two."}, chat.Messages(s.log.channel))
+}
+
+func (s *ChatLogSuite) TestAVoiceReplyWithUIDeltasStoresAndPatchesGeneratedUIInChat() {
+	s.useChat()
+	writer := newWriter(s.T().Context(), s.log)
+
+	s.play(
+		writer,
+		agent.Responding{TurnID: "turn-1"},
+		agent.ResponseDelta{TurnID: "turn-1", Text: "Kaneo has a table at seven fifteen."},
+		agent.UIDelta{TurnID: "turn-1", Format: "openui", Mode: "replace", Delta: "$party = 2\nroot = Card([hdr])\nhdr = CardHeader(\"Kaneo\")"},
+		agent.UICompleted{TurnID: "turn-1", Format: "openui", Mode: "replace", Content: "$party = 2\nroot = Card([hdr])\nhdr = CardHeader(\"Kaneo\")"},
+	)
+	writer.show()
+	s.play(
+		writer,
+		agent.Responded{TurnID: "turn-1", Text: "Kaneo has a table at seven fifteen."},
+		agent.Spoke{TurnID: "turn-1"},
+	)
+
+	s.play(
+		writer,
+		agent.Responding{TurnID: "turn-2"},
+		agent.ResponseDelta{TurnID: "turn-2", Text: "Changed to four guests."},
+		agent.UIDelta{TurnID: "turn-2", Format: "openui", Mode: "patch", Delta: "$party = 4"},
+		agent.UICompleted{TurnID: "turn-2", Format: "openui", Mode: "patch", Content: "$party = 4"},
+		agent.Responded{TurnID: "turn-2", Text: "Changed to four guests."},
+		agent.Spoke{TurnID: "turn-2"},
+	)
+
+	stored := s.channel()
+	s.Require().Len(stored, 2)
+	ui1, ok := stored[0].Custom["ai_ui"].(map[string]any)
+	s.Require().True(ok)
+	s.Equal("complete", ui1["status"])
+	s.Equal("$party = 2\nroot = Card([hdr])\nhdr = CardHeader(\"Kaneo\")", ui1["content"])
+
+	ui2, ok := stored[1].Custom["ai_ui"].(map[string]any)
+	s.Require().True(ok)
+	s.Equal("complete", ui2["status"])
+	s.Equal("$party = 4\nroot = Card([hdr])\nhdr = CardHeader(\"Kaneo\")", ui2["content"])
 }

@@ -40,7 +40,7 @@ Add this to your `pubspec.yaml`, using the latest version
 
 ```yaml
 dependencies:
-  stream_agents: ^0.1.0
+  stream_agents: ^0.7.0
   stream_chat: ^10.4.0 # for the Channel, Message and client types
   stream_chat_flutter_ai: ^0.2.0 # the conversation's UI
 ```
@@ -83,9 +83,18 @@ final agents = StreamAgents(
 ### Start a conversation
 
 ```dart
-final session = await agents.agent('support').chat();
+final session = await agents.agent('support').sessions.create();
 await session.responses.create('What are your opening hours?');
 ```
+
+`sessions.create` opens the session and follows it: it returns once the socket is open, so the
+device's tools are answered from the first turn. `SessionOptions(startVoice: true)` puts the agent
+on the session's call instead of holding it in writing. `chat()` and `voice()` are the same call
+with `startVoice` false and true.
+
+`SessionOptions(watch: false)` opens it without a socket, for a caller reading and writing turns
+over HTTP alone: no tool is declared, turns go in through `responses.create` and are read back
+from `responses.items`, and `say`, `interrupt`, `events` and `addTools` throw a `StateError`.
 
 `session.conversation` is a `LiveValue<Conversation>`: the current transcript and what the
 agent is doing, plus a stream of every change. A widget renders it with a `StreamBuilder`:
@@ -111,10 +120,40 @@ final lookup = AgentTool(
   run: (arguments) async => orders.find('${arguments['order_id']}'),
 );
 
-final session = await agents.agent('support').chat(SessionOptions(tools: [lookup]));
+final session = await agents.agent('support').sessions.create(SessionOptions(tools: [lookup]));
 ```
 
 The agent only sees what the tool returns.
+
+Dart has no reflection, so to read the arguments into a class of your own, give the tool its
+`fromJson`. The model is still shown `parameters`; arguments that do not read, such as a missing
+one, tell the model the tool failed, as a `run` that throws does:
+
+```dart
+class WeatherLookup {
+  WeatherLookup.fromJson(Map<String, Object?> json) : location = json['location']! as String;
+  final String location;
+}
+
+final weatherLookup = AgentTool.typed<WeatherLookup>(
+  name: 'weather_lookup',
+  description: 'Look up the current weather for a location',
+  parameters: AgentTool.strings({'location': 'a city or region'}, required: ['location']),
+  fromJson: WeatherLookup.fromJson,
+  run: (lookup) => weather.today(lookup.location),
+);
+```
+
+A running session takes more tools, such as the ones a card shown in it brings, and gives them
+back. The model is offered the change from the next turn, once the reply in progress and its tool
+calls have finished, so never wait for either from inside one of the session's own tools:
+
+```dart
+await session.addTools([reserveTable]);
+await session.removeTool('reserve_table');
+```
+
+A name the session already has is refused: remove it first, then add the new tool.
 
 ## Keeping the conversation in Stream Chat
 
@@ -210,8 +249,8 @@ time a session joins, and reuses it for that user's calls on the same `StreamAge
 
 - `StreamAgents` - the client: `agent(name)`, `sessions`, `guestUser`, `withUser`, `useChat`,
   `useVideo`, `disconnect`
-- `AgentSession` - one conversation: `responses`, `conversation`, `events()`, `decide`, `rewind`,
-  `fork`, `update`, `chat`, `close`, `delete`
+- `AgentSession` - one conversation: `responses`, `conversation`, `events()`, `decide`,
+  `addTools`, `removeTool`, `rewind`, `fork`, `update`, `chat`, `close`, `delete`
 - `Conversation`, `Turn`, `ConversationState` - the transcript and what the agent is doing
 - `LiveValue<T>` - a current value and a stream of its changes, with no state-management package
 - `AgentTool`, `ToolOutput` - tools the agent can call on the device

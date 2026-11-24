@@ -38,6 +38,7 @@ void main() {
 
   test('everything the SDK can ask for is something the spec lets a device ask for', () async {
     const s = '/v1/agents/sessions/s1';
+    const t = '/v1/agents/scheduled-tasks';
     router
       ..answer('POST /v1/agents/sessions', Answer(201, sessionJson()))
       ..answer('POST /v1/agents/sessions/query', Answer(200, pageJson([])))
@@ -52,6 +53,8 @@ void main() {
       ..answer('POST $s/rewind', const Answer(204))
       ..answer('POST $s/stop', const Answer(204))
       ..answer('DELETE $s', const Answer(204))
+      ..answer('POST $s/tools', const Answer(204))
+      ..answer('DELETE $s/tools/now', const Answer(204))
       ..answer(
         'POST /v1/search',
         const Answer(200, {
@@ -61,10 +64,17 @@ void main() {
           'results': [],
         }),
       )
-      ..answer('POST /v1/agents/guests', const Answer(201, {'id': 'guest-1', 'token': 't'}));
+      ..answer('POST /v1/agents/guests', const Answer(201, {'id': 'guest-1', 'token': 't'}))
+      ..answer('GET $t', Answer(200, pageJson([])))
+      ..answer('GET $t/t1', Answer(200, scheduledTaskJson()))
+      ..answer('PATCH $t/t1', Answer(200, scheduledTaskJson()))
+      ..answer('POST $t/t1/pause', Answer(200, scheduledTaskJson()))
+      ..answer('POST $t/t1/resume', Answer(200, scheduledTaskJson()))
+      ..answer('DELETE $t/t1', const Answer(204))
+      ..answer('GET $t/t1/runs', Answer(200, pageJson([])));
     final sessions = agents.sessions;
 
-    await sessions.create();
+    await (await sessions.create()).close();
     await sessions.query();
     await sessions.search('billing');
     await sessions.get('s1');
@@ -78,15 +88,27 @@ void main() {
     await sessions.responses('s1').rewind('r1');
     await sessions.stop('s1');
     await sessions.delete('s1');
+    final chat = await agents.chat();
+    await chat.addTools([AgentTool(name: 'now', description: 'The time.', run: (_) async => '')]);
+    await chat.removeTool('now');
+    await chat.close();
     await agents.router().search('pricing');
     await agents.guestUser();
+    final scheduled = agents.scheduledTasks;
+    await scheduled.list();
+    await scheduled.get('t1');
+    await scheduled.update('t1', title: 'Water the ferns');
+    await scheduled.pause('t1');
+    await scheduled.resume('t1');
+    await scheduled.delete('t1');
+    await scheduled.runs('t1');
 
     final accessible = _clientAccessible();
     bool allowed(String method, String path) =>
         accessible.any((operation) => operation.$1 == method && operation.$2.hasMatch(path));
     expect(allowed('POST', '/v1/agents/sessions'), isTrue);
     expect(allowed('POST', '/v1/agents/calls/x/token'), isFalse);
-    expect(router.arrived, hasLength(16));
+    expect(router.arrived, hasLength(26));
     expect(
       [
         for (final request in router.arrived)

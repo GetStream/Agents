@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
@@ -132,6 +133,67 @@ func (s *TelephonyBillingSuite) TestATextDeliveredTwiceIsBilledOnce() {
 	s.phoneRows("sms", 2)
 	time.Sleep(time.Second)
 	s.Len(s.rows("sms"), 2, "one received, one reply")
+}
+
+// spendLimitReached is the event Telnyx sends down the messaging profile's webhook, the
+// line's hook, once the profile reached its spend limit, as in
+// https://developers.telnyx.com/docs/messaging/messages/configurable-spend-limits.md with the
+// amounts left out.
+func (s *TelephonyBillingSuite) spendLimitReached() []byte {
+	return []byte(`{"data":{"event_type":"messaging-profile.spend-limit-reached","id":"` + s.utils.uuid() +
+		`","record_type":"event","payload":{"profile_id":"` + s.utils.uuid() + `"}}}`)
+}
+
+// deliveries is how many messages a line claimed.
+func (s *TelephonyBillingSuite) deliveries(line string) int {
+	account, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "sms", line)
+	s.Require().NoError(err)
+	var count int
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
+		"SELECT count(*) FROM channel_deliveries WHERE account_id = ?", account.ID).Scan(&count))
+	return count
+}
+
+// The spend limit stops every text of the line, so the hook counts it for a monitor, and it
+// is no text: nothing is claimed, billed or answered. Only this suite sends the event, and its
+// tests run one at a time, so the series moves only here. Catches the hook dropping the event
+// uncounted, or taking it for a message.
+func (s *TelephonyBillingSuite) TestASpendLimitOnALinesHookIsCountedAndStartsNoTurn() {
+	line := s.smsLine()
+	s.agentOnSMS(line)
+	before := accountEvents("telnyx", "messaging-profile.spend-limit-reached", "page")
+
+	s.Equal(http.StatusAccepted, s.telnyxIn(line, s.spendLimitReached(), time.Now()))
+
+	s.Equal(1.0, accountEvents("telnyx", "messaging-profile.spend-limit-reached", "page")-before)
+	s.Zero(s.deliveries(line))
+	s.Never(func() bool { return len(s.rows("sms")) > 0 }, time.Second, 50*time.Millisecond,
+		"a spend limit is no text to bill or answer")
+}
+
+// Only a delivery the line's key signed counts: an old one is refused before it is read.
+// Catches the count moved ahead of the signature check.
+func (s *TelephonyBillingSuite) TestASpendLimitSignedTooLongAgoIsRefusedUncounted() {
+	line := s.smsLine()
+	before := accountEvents("telnyx", "messaging-profile.spend-limit-reached", "page")
+
+	s.Equal(http.StatusUnauthorized, s.telnyxIn(line, s.spendLimitReached(), time.Now().Add(-6*time.Minute)))
+
+	s.Equal(0.0, accountEvents("telnyx", "messaging-profile.spend-limit-reached", "page")-before)
+}
+
+// Control: a text on the same hook is still claimed and answered, and counts as no account
+// event.
+func (s *TelephonyBillingSuite) TestATextOnALinesHookIsAnsweredAndNotCountedAsAnAccountEvent() {
+	line, person := s.smsLine(), "+1555"+digits(s.utils.uuid())
+	s.agentOnSMS(line)
+	before := accountEvents("telnyx", "messaging-profile.spend-limit-reached", "page")
+
+	s.Equal(http.StatusAccepted, s.textIn(line, person, "sms-"+s.utils.uuid(), "Is my order ready?"))
+
+	s.Require().Eventually(func() bool { return len(s.carriers.to(person)) > 0 }, settleFor, 50*time.Millisecond)
+	s.Equal(1, s.deliveries(line))
+	s.Equal(0.0, accountEvents("telnyx", "messaging-profile.spend-limit-reached", "page")-before)
 }
 
 func (s *TelephonyBillingSuite) TestAWhatsAppReplyIsRecordedAsAServiceMessage() {
@@ -427,6 +489,33 @@ func (s *TelephonySandboxBillingSuite) SetupSuite() {
 	s.telephonyBilling.SetupSuite()
 }
 
+// A STOP whose provider hung up while it was being recorded is billed as the sandbox bills a
+// text: the hang-up cuts neither the opt-out nor telling whether the sandbox holds the app.
+func (s *TelephonySandboxBillingSuite) TestAStopTheProviderHungUpOnIsBilledAsASandboxedText() {
+	line, person := s.smsLine(), "+13125550004"
+	s.agentOnSMS(line)
+	hold, holder := s.holdOptOuts("telephony_suite_held_opt_out", false)
+	ctx, hangUp := context.WithCancel(context.Background())
+	defer hangUp()
+	request := s.telnyxRequest(line, s.telnyxText(line, person, "sms-"+s.utils.uuid(), "STOP"), time.Now()).WithContext(ctx)
+	answered := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if err == nil {
+			response.Body.Close()
+		}
+		answered <- err
+	}()
+	s.waitingOn(holder)
+	hangUp()
+	s.Require().Error(<-answered, "the provider hung up before the opt-out was stored")
+	s.Require().NoError(hold.Rollback())
+
+	stop := s.phoneRows("sms", 2)[store.Inbound]
+	s.False(stop.Billable, "a sandboxed app's text is given away")
+	s.Equal("true", stop.Attributes[phone.AttributeDLCSandbox])
+}
+
 func (s *TelephonySandboxBillingSuite) TestASandboxedAppsTextsAndMinutesAreNotBillable() {
 	line, person := s.smsLine(), "+13125550003"
 	s.agentOnSMS(line)
@@ -451,7 +540,7 @@ func (s *TelephonySandboxBillingSuite) TestASandboxedAppsTextsAndMinutesAreNotBi
 		pricing.Quantities{pricing.CallSeconds: 60})
 	s.Equal(strconv.FormatInt(minute, 10), leg.Attributes[routing.AttributeFreeCostMicros])
 
-	s.Require().NoError(s.store.CreateUseCase(context.Background(), &store.UseCase{
+	s.Require().NoError(s.store.UseCases.Insert(context.Background(), &store.UseCase{
 		CustomerID: s.customerID(), Name: "approved", Status: dlc.Approved, UseCaseType: "CUSTOMER_CARE",
 	}))
 	_, again := s.attached()
@@ -474,12 +563,12 @@ func (s *TelephonySandboxBillingSuite) TestASandboxedAppsTextsAndMinutesAreNotBi
 func (s *telephonyBilling) smsLine() string {
 	ctx := context.Background()
 	number := "+1555" + digits(s.utils.uuid())
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		CustomerID: s.customerID(), E164: number, Vendor: "telnyx", Country: "US", Capabilities: []string{"sms"},
 	}))
 	sealed, err := s.router.sealChannelSecrets(s.customerID(), channels.Secrets{Token: "telnyx-key", Signing: s.public})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.SaveChannelAccount(ctx, &store.ChannelAccount{
+	s.Require().NoError(s.store.ChannelAccounts.Upsert(ctx, &store.ChannelAccount{
 		CustomerID: s.customerID(), Kind: "sms", E164: number, Token: "line-" + s.utils.uuid(),
 		SecretsSealed: sealed, SecretsKEKVersion: s.sealer.CurrentVersion(),
 	}))
@@ -496,20 +585,40 @@ func (s *telephonyBilling) agentOnSMS(number string) {
 
 // textIn delivers one text to a line, signed as Telnyx signs it.
 func (s *telephonyBilling) textIn(line, from, id, text string) int {
-	account, err := s.store.ChannelAccount(context.Background(), s.customerID(), "sms", line)
-	s.Require().NoError(err)
+	return s.telnyxIn(line, s.telnyxText(line, from, id, text), time.Now())
+}
+
+// telnyxText is the body Telnyx delivers one text to a line in.
+func (s *telephonyBilling) telnyxText(line, from, id, text string) []byte {
 	body, err := json.Marshal(map[string]any{"data": map[string]any{
 		"event_type": "message.received",
 		"payload": map[string]any{"id": id, "text": text, "from": map[string]any{"phone_number": from},
 			"to": []any{map[string]any{"phone_number": line}}},
 	}})
 	s.Require().NoError(err)
-	seconds := strconv.FormatInt(time.Now().Unix(), 10)
-	header := http.Header{}
-	header.Set("Telnyx-Timestamp", seconds)
-	header.Set("Telnyx-Signature-Ed25519", base64.StdEncoding.EncodeToString(
+	return body
+}
+
+// telnyxIn delivers body to a line as Telnyx signs it at at.
+func (s *telephonyBilling) telnyxIn(line string, body []byte, at time.Time) int {
+	response, err := http.DefaultClient.Do(s.telnyxRequest(line, body, at))
+	s.Require().NoError(err)
+	defer response.Body.Close()
+	return response.StatusCode
+}
+
+// telnyxRequest is the delivery of body to a line, as Telnyx signs it at at.
+func (s *telephonyBilling) telnyxRequest(line string, body []byte, at time.Time) *http.Request {
+	account, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "sms", line)
+	s.Require().NoError(err)
+	request, err := http.NewRequest(http.MethodPost, s.server.URL+channels.HookPath+account.Token, bytes.NewReader(body))
+	s.Require().NoError(err)
+	seconds := strconv.FormatInt(at.Unix(), 10)
+	request.Header.Set("Telnyx-Timestamp", seconds)
+	request.Header.Set("Telnyx-Signature-Ed25519", base64.StdEncoding.EncodeToString(
 		ed25519.Sign(s.signing, append([]byte(seconds+"|"), body...))))
-	return s.hook(channels.HookPath+account.Token, header, body)
+	request.Header.Set("Content-Type", "application/json")
+	return request
 }
 
 // whatsApp connects a WhatsApp line and puts a text agent on it.
@@ -567,8 +676,8 @@ func (s *telephonyBilling) attachedOn(vendor, country, e164 string) (store.Phone
 		E164: e164, Vendor: vendor, Country: country, CustomerID: s.customerID(),
 		Tags: map[string]string{"line": "support"}, PurchasedAt: time.Now().UTC(),
 	}
-	s.Require().NoError(s.store.RecordNumber(ctx, &number))
-	s.Require().NoError(s.store.AttachNumber(ctx, s.customerID(), number.E164, store.NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &number))
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), number.E164, store.NumberAttachment{
 		TrunkID: "trunk-" + s.utils.uuid(), CallType: "default", CallID: callID,
 	}))
 	return number, callID

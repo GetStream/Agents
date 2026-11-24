@@ -3,6 +3,7 @@ package api
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -55,16 +56,17 @@ func (s *Server) regionComplaint(ctx context.Context, config store.AgentConfig, 
 		target, stood string
 	}
 	models := []setting{
-		{"llm", routing.LLM, config.LLM, was.LLM},
-		{"stt", routing.STT, config.STT, was.STT},
-		{"tts", routing.TTS, config.TTS, was.TTS},
-		{"sts", routing.STS, config.STS, was.STS},
-		{"subagent", routing.LLM, config.Subagent, was.Subagent},
-		{"search", routing.Search, config.Search, was.Search},
+		{"llm", routing.LLM, config.Models.LLM, was.Models.LLM},
+		{"stt", routing.STT, config.Models.STT, was.Models.STT},
+		{"tts", routing.TTS, config.Models.TTS, was.Models.TTS},
+		{"sts", routing.STS, config.Models.STS, was.Models.STS},
+		{"subagent", routing.LLM, config.Models.Subagent, was.Models.Subagent},
+		{"search", routing.Search, config.Models.Search, was.Models.Search},
+		{"image", routing.Image, config.Models.Image, was.Models.Image},
 	}
-	for _, target := range config.LLMFallbacks {
+	for _, target := range config.Models.LLMFallbacks {
 		var stood string
-		if slices.Contains(was.LLMFallbacks, target) {
+		if slices.Contains(was.Models.LLMFallbacks, target) {
 			stood = target
 		}
 		models = append(models, setting{"llm_fallbacks", routing.LLM, target, stood})
@@ -78,8 +80,17 @@ func (s *Server) regionComplaint(ctx context.Context, config store.AgentConfig, 
 			continue
 		}
 		served, err := router.InRegion(ctx, model.target, region, nil)
-		if err != nil {
+		switch {
+		case err != nil && model.modality != routing.Image:
 			continue
+		case errors.Is(err, routing.ErrRequest):
+			// A session refuses a model it cannot route when it opens; nothing refuses a picture
+			// target until a draw after the turn fails, so one nothing answers to is refused here.
+			unmet = append(unmet, fmt.Sprintf("image: %s is not something this deployment draws with", model.target))
+			continue
+		case err != nil:
+			// Whether the target routes could not be told, which is no fault of the save's.
+			return "", false, err
 		}
 		if !served {
 			unmet = append(unmet, fmt.Sprintf("%s: no instance of %s in region %s", model.setting, model.target, region))
@@ -106,7 +117,7 @@ func (s *Server) regionComplaint(ctx context.Context, config store.AgentConfig, 
 		}
 	}
 
-	if s.sessions != nil && config.Sandbox != "" && (moved || was.Sandbox == "") {
+	if s.sessions != nil && config.Sandbox.Provider != "" && (moved || was.Sandbox.Provider == "") {
 		if s.sessions.SandboxesIn(region) {
 			billed = append(billed, vendorWorkIn("sandbox", routing.Sandbox, providerkeys.Daytona, region, keyed,
 				metered.SandboxRunning, metered.SandboxStopped)...)
@@ -181,14 +192,14 @@ func vendorWorkIn(setting string, modality routing.Modality, vendor, region stri
 	return billed
 }
 
-// keyedIn is the vendors the customer keeps a key for in region, read through appconfig. A key
+// keyedIn is the vendors the customer keeps a key for in region, read through the store's cache. A key
 // is not opened: that one is kept is what bills its work under the BYOK twin.
 func (s *Server) keyedIn(ctx context.Context, customerID, region string) (map[string]bool, error) {
 	keyed := map[string]bool{}
 	if s.configs == nil || customerID == "" {
 		return keyed, nil
 	}
-	keys, err := s.configs.ProviderKeys(ctx, customerID)
+	keys, err := s.configs.ProviderKeys.SelectAll(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}

@@ -53,7 +53,7 @@ go run ./backend
 It listens on `:8098`, beside the Swift demo's on `:8099`.
 
 Put the `STREAM_API_KEY` the router runs with in `Assistant.streamAPIKey`, in
-`app/SwiftAssistant/Assistant.swift`, then open `app/SwiftAssistant.xcodeproj` in Xcode 27 and
+`app/SwiftAssistant/Assistant.swift`, then open `app/SwiftAssistant.xcodeproj` in Xcode 26 or newer and
 run it on a simulator. The app
 takes `stream-chat-swift` from its `develop` branch, because what it shows is not released
 yet: `StreamChatAI`'s `AIConversation` and generative UI, and its renderers of A2UI and OpenUI,
@@ -98,7 +98,7 @@ tells the agent to call a Gmail tool first, which asks for the sign-in.
 To try the sign-in again, delete the person's connection in the Volt dashboard, under Library ›
 Connectors › Connections, or with `DELETE /v1/agents/connections/{id}`.
 
-What it takes, once, besides the router's `ROUTER_CONNECTORS_ENABLED=true`, `ROUTER_AUTH_KEK`
+What it takes, once, besides the router's `ROUTER_CONNECTORS_ENABLED=true`, `ROUTER_DEV_KEK`
 and `ROUTER_PUBLIC_URL=http://localhost:8080` in the repo-root `.env` (restart the router after
 a change), and `go run ./configure` again, which binds both:
 
@@ -128,6 +128,11 @@ a change), and `go run ./configure` again, which binds both:
   is not written again and a message is not edited: the router cannot rewind a conversation kept
   in Chat. The composer's options sheet has Think harder, which asks with a higher
   `reasoning_effort`.
+- **Incognito chat** is the dashed circle at the top right of a new chat. Its session is created
+  with `incognito: true`, so it has no channel, isn't listed, and Juno learns nothing from it;
+  `AgentChat` shows it from the session's `turnMessages`, reasoning, tool calls and approvals
+  included. Leaving it, or picking another conversation, ends it for good. The photos sent with a
+  question go to the agent but don't show on the question once it is sent.
 - **Photos** from the composer go with the question, shrunk and inline as data URIs. The
   router uploads them to the conversation's channel and writes them on the person's message,
   where the chat shows them; the model sees them with that question's reply.
@@ -141,16 +146,22 @@ a change), and `go run ./configure` again, which binds both:
 - **Tools on the phone**: `get_local_context` (date, time, timezone), `get_location` (asks
   first), `list_events` (EventKit), `add_reminder` (asks first), `send_email` (asks first,
   showing who it goes to). Calendar, reminders and location each need the phone's permission
-  too.
+  too. A seat selector card adds `reserve_table` while it is shown (see
+  [Interactive UI](#interactive-ui)).
 
 ## Interactive UI
 
 The gear in the conversations list opens the settings, where Replies chooses how the agent
 answers: in Markdown, or with interactive UI in A2UI or OpenUI. The backend keeps the choice as
-what the agent is told (`GET` and `PUT /reply-format`), so the app has nothing to switch: its
-`AIUIHost` has a renderer for each format, and a reply shows whichever UI it carries. A
-conversation keeps the instructions it started with, so the next new one is the first to answer
-the new way, and earlier replies keep theirs.
+the agent's UI instructions (`GET` and `PUT /reply-format`), apart from `instructions.md`, so the
+app has nothing to switch: its `AIUIHost` has a renderer for each format, and a reply shows
+whichever UI it carries. A conversation keeps the instructions it started with, so the next new
+one is the first to answer the new way, and earlier replies keep theirs.
+
+Settings' Interactive UI switch is the phone's own: off, the app opens its new conversations with
+`SessionOptions.ui` false, so the model isn't sent the UI instructions the backend chose. Markdown
+is the expected answer, since `instructions.md` teaches no UI, but it isn't guaranteed: a card the
+model writes anyway still shows.
 
 With A2UI or OpenUI chosen, ask "Plan a weekend in Ohrid" and the reply is UI rather than text: a
 map of the places, the person's own calendar for those days, a tab per day with each place's photo
@@ -166,7 +177,7 @@ The map, the place cards and the calendar are the app's own views (`TripComponen
 described once in `app/SwiftAssistant/UIComponents.json`, and both formats place them. They
 load what they show on the phone: the photos from Wikipedia and the calendar from EventKit, which
 the agent never sees. The agent learns them with the format, from `a2ui/instructions.md` or
-`openui/instructions.md`, which the backend adds to what it is told, and which are generated
+`openui/instructions.md`, which the backend stores as the agent's UI instructions, and which are generated
 from the same file with the renderers' own code, from a clone of `stream-chat-swift` beside this
 repository on the branch the app takes:
 
@@ -184,6 +195,38 @@ Tapping a place, a pin, a follow-up or the form's button asks the agent again: t
 message says what they did in words, such as "Update the plan", and carries the action, with
 the form's values, as `custom.ai_ui_action` (`session.responses.create(_:uiAction:)`). The
 model is told it after their words.
+
+Ask "Where should we eat in Ohrid tonight?" for the other kind of card: a `RestaurantCard` per
+venue, an `AvailabilityGauge` of how full the first one is and a `SeatSelector` of its tables,
+also the app's own views (`TripComponents.swift`). Tapping a free table asks to reserve it.
+
+- **A card brings its own tool.** The agent cannot book a table until a seat selector is on the
+  screen: the card defines `reserve_table` (`SeatSelector.reserveTable` in `TripComponents.swift`)
+  and gives it to the conversation's session the first time it shows, with
+  `AgentSession.add(tools:)`. Tapping a free table then has the agent call it, which asks first
+  ("Reserve this table?") and takes only a free table from the card. Once you allow it the card
+  turns into the booking: the table, the time and a confirmation code, which it keeps if the
+  agent shows the same tables again. The card has done what it was for, so it takes the tool
+  back with `AgentSession.remove(toolNamed:)`. To see the difference, ask Juno to reserve a table before any
+  seat selector is shown: it has no tool to do it with. The router's
+  `GET /v1/agents/sessions/{id}/tools`, with the backend's credentials, lists `reserve_table` as
+  `session` while the card's tool is given.
+- **The UI streams in over the socket.** The router sends a reply's UI on the session's socket
+  as the model writes it (`ui_delta`, then `ui_completed`), apart from the words people read or
+  hear, and writes it on the reply's message in Chat later, on a slower tick. `AgentChat` reads
+  each turn's UI from the session (`Turn.ui`) into the SDK's `LiveUI`, which shows it on the
+  reply until the message's own `ai_ui` is complete.
+- **A change to the last card is a patch.** Asked to change the card it just wrote, such as the
+  party size, the agent writes only the statements that change, in an ```` ```openui-patch ````
+  block. The router merges them into that card before it writes the message, and the SDK does
+  the same with what streams in, so the reply shows the whole card, changed.
+- **The UI shows on a call too.** In voice mode the agent says a sentence or two and writes the
+  same UI, which the router keeps out of what is spoken. Voice mode shows the newest of it under
+  the glow, from the call's session, and tapping it asks the agent as in the chat.
+- **Settings › Brand** chooses the accent and corners the UI wears: Stream Default, Ember
+  Hospitality or Nordic Mobility (`Brand.swift`). The open conversation shows it at once: its
+  renderers are made again with the brand's OpenUI and A2UI themes, and the app's components
+  read it from the environment. The agent writes the same UI whichever is chosen.
 
 ## What does not work yet
 

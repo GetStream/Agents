@@ -1,7 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Assistant } from "./assistant";
+import { BRAND_PROFILES, useBrandProfile } from "./brandTheme";
 import { messageOf } from "./errors";
+import { storedFlag, useStoredFlag } from "./layout";
+
+/** Where whether this page's new conversations may have UI is kept, as the iOS app keeps it. */
+const CARDS_KEY = "cardsInNewConversations";
+
+/**
+ * Whether a new conversation is told the UI instructions the reply format chose. Off, it opens
+ * with `ui: false`: the agent is not taught UI, so it is expected to answer in text, though UI it
+ * writes anyway is still shown. On unless the person turned it off.
+ */
+export function cardsInNewConversations(): boolean {
+  return storedFlag(CARDS_KEY, true);
+}
 
 /** How the agent answers: in Markdown, or with interactive UI in a format. */
 export type ReplyFormat = "markdown" | "a2ui" | "openui";
@@ -39,6 +53,8 @@ export function ReplyFormatMenu() {
   const [isOpen, setOpen] = useState(false);
   const [format, setFormat] = useState<ReplyFormat | undefined>(undefined);
   const [failure, setFailure] = useState<string | undefined>(undefined);
+  const [brand, setBrand] = useBrandProfile();
+  const [cards, setCards] = useStoredFlag(CARDS_KEY, true);
   const menu = useRef<HTMLDivElement>(null);
 
   // A tap anywhere else, or Escape, closes it, as a menu does.
@@ -114,6 +130,34 @@ export function ReplyFormatMenu() {
             ))}
           </div>
           <p className="reply-format-note">New conversations answer this way.</p>
+          <label className="reply-format-option">
+            <input checked={cards} onChange={(event) => setCards(event.target.checked)} type="checkbox" />
+            <span>
+              <strong>Interactive UI</strong>
+              <span>
+                Off opens this page's new conversations without the UI instructions chosen above, so
+                the agent is expected to answer in text. It can still write UI unprompted.
+              </span>
+            </span>
+          </label>
+          <hr className="reply-format-divider" />
+          <h3>Brand Design Tokens</h3>
+          <div role="radiogroup" aria-label="Brand Design Tokens">
+            {BRAND_PROFILES.map((profile) => (
+              <label className="reply-format-option" key={profile.id}>
+                <input
+                  checked={brand === profile.id}
+                  name="brand-profile"
+                  onChange={() => setBrand(profile.id)}
+                  type="radio"
+                />
+                <span>
+                  <strong>{profile.title}</strong>
+                  <span>{profile.description}</span>
+                </span>
+              </label>
+            ))}
+          </div>
           {failure && <p className="failure-pill">{failure}</p>}
         </div>
       )}

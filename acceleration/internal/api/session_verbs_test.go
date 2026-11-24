@@ -53,6 +53,35 @@ func (s *SessionVerbsSuite) TestSayingNothingIsRefused() {
 	s.Contains(failure, "nothing to say")
 }
 
+func (s *SessionVerbsSuite) TestAModelOfTheCustomersOwnThatCannotBeReadIsAnInternalError() {
+	opened := s.serverClient.createSession(textSession(nil))
+	name := "own-" + s.utils.uuid()
+	s.failQueries(name)
+
+	for _, path := range []string{"/settings", ""} {
+		status, body := s.serverClient.call(http.MethodPatch, "/v1/agents/sessions/"+opened.Id+path,
+			SessionSettingsRequest{Llm: pointerTo("custom/" + name)})
+
+		s.Equal(http.StatusInternalServerError, status, path)
+		s.Contains(string(body), `"code":"internal_error"`, path)
+		s.NotContains(string(body), "store:", path)
+		s.NotContains(string(body), "deadline", path)
+	}
+}
+
+func (s *SessionVerbsSuite) TestAModelTheCustomerDoesNotHaveIsRefusedByName() {
+	opened := s.serverClient.createSession(textSession(nil))
+	name := "own-" + s.utils.uuid()
+
+	for _, path := range []string{"/settings", ""} {
+		status, failure := s.serverClient.failure(http.MethodPatch, "/v1/agents/sessions/"+opened.Id+path,
+			SessionSettingsRequest{Llm: pointerTo("custom/" + name)})
+
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Contains(failure, "not one of this customer's models", path)
+	}
+}
+
 func (s *SessionVerbsSuite) TestChangingASessionsModelsLeavesEveryOtherSessionOnItsOwn() {
 	opened, untouched := s.onACall(), s.onACall()
 
@@ -251,8 +280,8 @@ func (s *SessionVerbsSuite) TestAnOlderSDKCarriesAChatOnByItsChannel() {
 
 func (s *SessionVerbsSuite) TestAReopenedChatIsSummarisedWhole() {
 	// A stopped session is reopened from its row, so the model has to come from a config.
-	config := store.AgentConfig{CustomerID: s.customerID(), Name: "summarising", Mode: "text", LLM: "summarising/summarising-model"}
-	s.Require().NoError(s.configs.CreateAgentConfig(context.Background(), &config))
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "summarising", Mode: "text", Models: store.AgentModels{LLM: "summarising/summarising-model"}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	request := textSession(nil)
 	request.Llm = nil
 	request.ConfigId = &config.ID
@@ -278,8 +307,8 @@ func (s *SessionVerbsSuite) TestAReopenedChatIsSummarisedWhole() {
 
 func (s *SessionVerbsSuite) TestAChatIsReviewedByItsAgentsReviewInstructions() {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "reviewed-" + s.utils.uuid(), Mode: "text",
-		LLM: "summarising/summarising-model", ReviewInstructions: "Score how well the agent sold the upgrade."}
-	s.Require().NoError(s.configs.CreateAgentConfig(context.Background(), &config))
+		Models: store.AgentModels{LLM: "summarising/summarising-model"}, ReviewInstructions: "Score how well the agent sold the upgrade."}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	request := textSession(nil)
 	request.Llm = nil
 	request.ConfigId = &config.ID
@@ -288,13 +317,13 @@ func (s *SessionVerbsSuite) TestAChatIsReviewedByItsAgentsReviewInstructions() {
 		"/v1/agents/sessions/"+opened.Id+"/respond", SayRequest{Text: "Is the upgrade worth it?"}, nil))
 	// The call is queued behind the session; stopping before it is written loses the review.
 	s.Require().Eventually(func() bool {
-		return s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+opened.Id, nil, nil) == http.StatusOK
+		return s.sessionCall(opened.Id, nil) == http.StatusOK
 	}, settleFor, 10*time.Millisecond, "the chat's call is recorded")
 	s.serverClient.stopSession(opened.Id)
 
 	var call Call
 	s.Require().Eventually(func() bool {
-		return s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+opened.Id, nil, &call) == http.StatusOK &&
+		return s.sessionCall(opened.Id, &call) == http.StatusOK &&
 			call.ReviewNotes != nil
 	}, 2*settleFor, 10*time.Millisecond, "the chat is reviewed when it ends")
 	s.Equal("Score how well the agent sold the upgrade.\n\n"+
@@ -304,7 +333,7 @@ func (s *SessionVerbsSuite) TestAChatIsReviewedByItsAgentsReviewInstructions() {
 // summary is what the reviewer made of a call so far.
 func (s *SessionVerbsSuite) summary(id string) string {
 	var call Call
-	if s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+id, nil, &call) != http.StatusOK {
+	if s.sessionCall(id, &call) != http.StatusOK {
 		return ""
 	}
 	return value(call.Summary)
@@ -390,10 +419,11 @@ func (s *SessionVerbsSuite) TestRewindingNeedsAResponseToCarryOnFrom() {
 func (s *SessionVerbsSuite) TestRewindingToATurnNobodyTookIsRefused() {
 	opened := s.serverClient.createSession(textSession(nil))
 
-	status, _ := s.serverClient.call(http.MethodPost,
+	status, body := s.serverClient.call(http.MethodPost,
 		"/v1/agents/sessions/"+opened.Id+"/rewind", RewindSessionRequest{ResponseId: s.utils.uuid()})
 
-	s.Equal(http.StatusBadRequest, status)
+	// Not found rather than the 400 every persistent session got before it could be rewound.
+	s.Equal(http.StatusNotFound, status, string(body))
 }
 
 func (s *SessionVerbsSuite) TestAnotherAppCannotRewindASession() {
@@ -408,7 +438,7 @@ func (s *SessionVerbsSuite) TestAnotherAppCannotRewindASession() {
 // onACall is a session with an agent in a call, which is the one that can speak.
 // closed reports whether a session's row says it ended.
 func (s *SessionVerbsSuite) closed(id string) bool {
-	stored, err := s.store.StoredSession(context.Background(), s.customerID(), id)
+	stored, err := s.store.Sessions.Get(context.Background(), s.customerID(), id)
 	return err == nil && stored.State == store.SessionClosed
 }
 

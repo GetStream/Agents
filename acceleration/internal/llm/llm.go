@@ -13,6 +13,7 @@ package llm
 
 import (
 	"context"
+	"net/url"
 	"strings"
 )
 
@@ -70,6 +71,9 @@ type Message struct {
 	// Reasoning is what an assistant turn thought before it answered, for a provider that
 	// is sent it again with the turn.
 	Reasoning string
+	// ReasoningBlocks is the same thinking as signed blocks, for a provider that only takes
+	// it back exactly as it gave it (Anthropic). Other providers leave it alone.
+	ReasoningBlocks []ReasoningBlock
 	// ToolCallID names the call a ToolResult message answers.
 	ToolCallID string
 	// Speaker names who said a User turn once more than one person has spoken. No provider
@@ -84,6 +88,11 @@ type Message struct {
 	// tool's late result, a call silence declined or a summary of the call so far. No provider
 	// reads it: a model of the call's speech is told only what was said.
 	Typed bool
+	// Router says a User turn was written by the router on the caller's side and said by
+	// nobody: a tool's late result, the note that silence declined a call, a summary of the
+	// call so far, the cards of earlier episodes. No provider reads it: a guardrail is shown
+	// only what was said.
+	Router bool
 	// Document marks a file the caller attached, which goes ahead of the conversation on
 	// every reply. No provider reads it: the file was screened once, when it arrived, so a
 	// reply's own screen leaves it out.
@@ -123,6 +132,22 @@ type ToolCall struct {
 	Signature string
 }
 
+// ReasoningBlock is one block of a response's thinking as its provider has to be handed it
+// back: its text, and the signature that vouches for it, or the encrypted Redacted form in
+// place of both. A block with neither signature nor Redacted cannot be replayed.
+//
+// A provider that signs thinking signs what came before it too, so a block also says where it
+// stood: after AfterToolCalls of the turn's tool calls and, before the first of them, after
+// AfterText bytes of the turn's text. A block after a call stands after all of the text, and
+// its AfterText is 0.
+type ReasoningBlock struct {
+	Text           string
+	Signature      string
+	Redacted       string
+	AfterToolCalls int
+	AfterText      int
+}
+
 // LLM is a streaming large-language-model provider.
 //
 // Create asks for one response and returns the stream it arrives on. There is no shared
@@ -152,4 +177,15 @@ func Unfence(answer string) string {
 	trimmed = strings.TrimPrefix(trimmed, "```")
 	trimmed = strings.TrimSuffix(trimmed, "```")
 	return strings.TrimSpace(trimmed)
+}
+
+// HostOf is the host of a base URL, without its scheme, path, query or any credentials, so a
+// log line can name where a model is served. Empty when the URL does not parse. Every provider
+// that reports its host goes through it.
+func HostOf(baseURL string) string {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
 }
