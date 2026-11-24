@@ -7,7 +7,7 @@ import (
 )
 
 func (s *StoreSuite) TestAnotherCustomersFinishOfASimulationRunIdChangesNothing() {
-	run := s.startedRun("app", time.Now().Add(time.Minute))
+	run := s.startedRun("app", time.Minute)
 	before, err := s.store.SimulationRuns.Get(s.ctx, "app", run.ID)
 	s.Require().NoError(err)
 
@@ -21,7 +21,10 @@ func (s *StoreSuite) TestAnotherCustomersFinishOfASimulationRunIdChangesNothing(
 func (s *StoreSuite) TestARunItsRouterStillRenewsIsNotWrittenOff() {
 	// However long ago it started: a second router booting must not abandon what the first
 	// is still having.
-	run := s.startedRun("app", time.Now().Add(time.Minute))
+	run := s.startedRun("app", time.Minute)
+	s.Require().NotNil(run.LeaseUntil)
+	s.InDelta(time.Minute, s.leftOnTheDatabasesClock(*run.LeaseUntil), float64(time.Second), "a minute on Postgres's clock")
+	s.leasesPass("simulation_runs", 55*time.Second)
 
 	s.Require().NoError(s.store.SimulationRuns.Abandon(s.ctx, time.Now()))
 
@@ -31,7 +34,8 @@ func (s *StoreSuite) TestARunItsRouterStillRenewsIsNotWrittenOff() {
 }
 
 func (s *StoreSuite) TestARunWhoseRouterStoppedRenewingIsWrittenOff() {
-	run := s.startedRun("app", time.Now().Add(-time.Second))
+	run := s.startedRun("app", time.Minute)
+	s.leasesPass("simulation_runs", time.Minute+5*time.Second)
 
 	s.Require().NoError(s.store.SimulationRuns.Abandon(s.ctx, time.Now()))
 
@@ -44,61 +48,64 @@ func (s *StoreSuite) TestARunWhoseRouterStoppedRenewingIsWrittenOff() {
 }
 
 func (s *StoreSuite) TestRenewingARunKeepsItFromBeingWrittenOff() {
-	run := s.startedRun("app", time.Now().Add(time.Second))
+	run := s.startedRun("app", time.Second)
 
-	stop, err := s.store.SimulationRuns.Renew(s.ctx, []string{run.ID}, time.Now().Add(time.Hour))
+	stop, err := s.store.SimulationRuns.Renew(s.ctx, []string{run.ID}, time.Hour)
 	s.Require().NoError(err)
 	s.Empty(stop)
-	s.Require().NoError(s.store.SimulationRuns.Abandon(s.ctx, time.Now().Add(time.Minute)))
+	s.leasesPass("simulation_runs", time.Minute)
+	s.Require().NoError(s.store.SimulationRuns.Abandon(s.ctx, time.Now()))
 
 	found, err := s.store.SimulationRuns.Get(s.ctx, "app", run.ID)
 	s.Require().NoError(err)
 	s.Equal(SimulationRunning, found.State)
+	s.Require().NotNil(found.LeaseUntil)
+	s.InDelta(59*time.Minute, s.leftOnTheDatabasesClock(*found.LeaseUntil), float64(time.Second), "renewed for an hour on Postgres's clock")
 }
 
 func (s *StoreSuite) TestARunAskedToStopIsNotRenewedAndIsToldToStop() {
-	run := s.startedRun("app", time.Now().Add(time.Minute))
+	run := s.startedRun("app", time.Minute)
 	s.Require().NoError(s.store.SimulationRuns.Stop(s.ctx, "app", run.ID))
 
-	stop, err := s.store.SimulationRuns.Renew(s.ctx, []string{run.ID}, time.Now().Add(time.Hour))
+	stop, err := s.store.SimulationRuns.Renew(s.ctx, []string{run.ID}, time.Hour)
 	s.Require().NoError(err)
 
 	s.Equal([]string{run.ID}, stop)
 }
 
 func (s *StoreSuite) TestAFinishedRunIsToldToStop() {
-	run := s.startedRun("app", time.Now().Add(time.Minute))
+	run := s.startedRun("app", time.Minute)
 	run.State = SimulationPassed
 	s.Require().NoError(s.store.SimulationRuns.Finish(s.ctx, run))
 
-	stop, err := s.store.SimulationRuns.Renew(s.ctx, []string{run.ID}, time.Now().Add(time.Hour))
+	stop, err := s.store.SimulationRuns.Renew(s.ctx, []string{run.ID}, time.Hour)
 	s.Require().NoError(err)
 
 	s.Equal([]string{run.ID}, stop)
 }
 
 func (s *StoreSuite) TestAnotherCustomerCannotStopARun() {
-	run := s.startedRun("app", time.Now().Add(time.Minute))
+	run := s.startedRun("app", time.Minute)
 	s.Require().NoError(s.store.SimulationRuns.Stop(s.ctx, "somebody-else", run.ID))
 
-	stop, err := s.store.SimulationRuns.Renew(s.ctx, []string{run.ID}, time.Now().Add(time.Hour))
+	stop, err := s.store.SimulationRuns.Renew(s.ctx, []string{run.ID}, time.Hour)
 	s.Require().NoError(err)
 
 	s.Empty(stop)
 }
 
-// startedRun starts a run of one conversation for a customer, leased until a given time.
-func (s *StoreSuite) startedRun(customerID string, leaseUntil time.Time) SimulationRun {
+// startedRun starts a run of one conversation for a customer, leased for a given time.
+func (s *StoreSuite) startedRun(customerID string, lease time.Duration) SimulationRun {
 	simulation := s.simulation(customerID)
 	run := SimulationRun{CustomerID: customerID, SimulationID: simulation.ID, Mode: SimulationText}
 	s.Require().NoError(s.store.SimulationRuns.Start(s.ctx, &run,
-		[]SimulationCase{{Scenario: simulation.Scenario}}, leaseUntil))
+		[]SimulationCase{{Scenario: simulation.Scenario}}, lease))
 	return run
 }
 
 func (s *StoreSuite) TestARunIsOnlyItsOwnCustomers() {
-	run := s.startedRun("app", time.Now().Add(time.Minute))
-	s.startedRun("other", time.Now().Add(time.Minute))
+	run := s.startedRun("app", time.Minute)
+	s.startedRun("other", time.Minute)
 
 	_, err := s.store.SimulationRuns.Get(s.ctx, "other", run.ID)
 	s.ErrorIs(err, ErrNoSimulationRun)
@@ -109,8 +116,8 @@ func (s *StoreSuite) TestARunIsOnlyItsOwnCustomers() {
 }
 
 func (s *StoreSuite) TestRunsAreSelectedBySimulationAndState() {
-	first := s.startedRun("app", time.Now().Add(time.Minute))
-	second := s.startedRun("app", time.Now().Add(time.Minute))
+	first := s.startedRun("app", time.Minute)
+	second := s.startedRun("app", time.Minute)
 	second.State = SimulationPassed
 	s.Require().NoError(s.store.SimulationRuns.Finish(s.ctx, second))
 
@@ -133,10 +140,10 @@ func (s *StoreSuite) TestARunWithoutConversationsIsNotStarted() {
 	run := SimulationRun{CustomerID: "app", SimulationID: simulation.ID, Mode: SimulationText}
 
 	var invalid *ValidationError
-	s.Require().ErrorAs(s.store.SimulationRuns.Start(s.ctx, &run, nil, time.Now().Add(time.Minute)), &invalid)
+	s.Require().ErrorAs(s.store.SimulationRuns.Start(s.ctx, &run, nil, time.Minute), &invalid)
 	s.Equal("cases", invalid.Field)
 	runless := SimulationRun{CustomerID: "app", Mode: SimulationText}
-	s.Require().ErrorAs(s.store.SimulationRuns.Start(s.ctx, &runless, []SimulationCase{{}}, time.Now()), &invalid)
+	s.Require().ErrorAs(s.store.SimulationRuns.Start(s.ctx, &runless, []SimulationCase{{}}, time.Minute), &invalid)
 	s.Equal("simulation_id", invalid.Field)
 
 	runs, err := s.store.SimulationRuns.Select(s.ctx, "app", SimulationRunFilter{})
@@ -147,7 +154,7 @@ func (s *StoreSuite) TestARunWithoutConversationsIsNotStarted() {
 func (s *StoreSuite) TestSimulationRunQueryBudgets() {
 	simulation := s.simulation("app")
 	for range 20 {
-		s.startedRun("app", time.Now().Add(time.Minute))
+		s.startedRun("app", time.Minute)
 	}
 	run := SimulationRun{CustomerID: "app", SimulationID: simulation.ID, Mode: SimulationText}
 	cases := make([]SimulationCase, maxVariations)
@@ -156,7 +163,7 @@ func (s *StoreSuite) TestSimulationRunQueryBudgets() {
 	}
 
 	s.Equal(4, s.countQueries(func() {
-		s.Require().NoError(s.store.SimulationRuns.Start(s.ctx, &run, cases, time.Now().Add(time.Minute)))
+		s.Require().NoError(s.store.SimulationRuns.Start(s.ctx, &run, cases, time.Minute))
 	}), "begin, the run, every case at once and commit")
 	s.Equal(1, s.countQueries(func() {
 		runs, err := s.store.SimulationRuns.Select(s.ctx, "app", SimulationRunFilter{})
@@ -168,7 +175,7 @@ func (s *StoreSuite) TestSimulationRunQueryBudgets() {
 		s.Require().NoError(err)
 	}))
 	s.Equal(1, s.countQueries(func() {
-		_, err := s.store.SimulationRuns.Renew(s.ctx, []string{run.ID}, time.Now().Add(time.Hour))
+		_, err := s.store.SimulationRuns.Renew(s.ctx, []string{run.ID}, time.Hour)
 		s.Require().NoError(err)
 	}))
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.SimulationRuns.Stop(s.ctx, "app", run.ID)) }))

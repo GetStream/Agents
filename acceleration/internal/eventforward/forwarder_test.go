@@ -107,11 +107,15 @@ func (s *ForwarderSuite) TestAForwardWhoseSenderDiesEveryTimeIsGivenUpAfterItsAt
 	s.Require().NoError(err)
 	customer := s.destinationOf(stopped, target.URL)
 	s.Require().NoError(stopped.Forward(s.ctx, Event{CustomerID: customer, ConnectorID: "slack_bot", Body: []byte(`{"dies":1}`)}))
+	// Due a minute ago: Forward dated it by this process's clock, and the claims judge it by
+	// Postgres's, which may run a little behind.
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, `UPDATE connector_event_deliveries SET next_attempt_at = now() - interval '1 minute'
+		WHERE destination_id IN (SELECT id FROM connector_event_destinations WHERE customer_id = ?)`, customer)
+	s.Require().NoError(err)
 	// The first attempt and the two waits of s.forwarder's, each claimed by a router that
 	// stopped before it sent, its lease over at once.
 	for range 3 {
-		now := time.Now()
-		claimed, err := s.store.EventDeliveries.Claim(s.ctx, now, 10, 10, nil, now)
+		claimed, err := s.store.EventDeliveries.Claim(s.ctx, 10, 10, nil, 0)
 		s.Require().NoError(err)
 		s.Require().NotEmpty(claimed)
 	}
