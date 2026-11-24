@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -336,6 +337,11 @@ func writeImportFailure(w http.ResponseWriter, r *http.Request, err error) {
 	var refusal APIError
 	if errors.As(err, &refusal) {
 		writeError(w, refusal)
+		return
+	}
+	if errors.Is(err, store.ErrAnotherCustomersRow) {
+		// Who holds the key is the operator's to know, so a caller is told only which row it is.
+		writeError(w, invalidRequest(strings.Replace(err.Error(), store.ErrAnotherCustomersRow.Error(), "this row cannot be written here", 1)))
 		return
 	}
 	var invalid *store.ValidationError
