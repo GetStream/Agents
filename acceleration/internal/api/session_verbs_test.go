@@ -403,7 +403,9 @@ func (s *SessionVerbsSuite) TestADeviceMayNotNameModelsOnAFork() {
 
 func (s *SessionVerbsSuite) TestADevicesForkOfARunningSessionKeepsItsOverwrites() {
 	request := textSession(nil)
-	request.ModelOverwrites = &ModelOverwrites{Llm: pointerTo("counted/counted-model")}
+	request.ModelOverwrites = &ModelOverwrites{
+		Llm: pointerTo("counted/counted-model"), Thinking: pointerTo(ModelOverwritesThinkingHigh),
+	}
 	parent := s.serverClient.actingFor(s.client).createSession(request)
 
 	var forked Session
@@ -411,6 +413,8 @@ func (s *SessionVerbsSuite) TestADevicesForkOfARunningSessionKeepsItsOverwrites(
 		"/v1/agents/sessions/"+parent.Id+"/fork", ForkSessionRequest{}, &forked))
 
 	s.Equal("counted/counted-model", value(forked.Llm))
+	s.Require().NotNil(forked.ModelOverwrites)
+	s.Equal(ModelOverwritesThinking("high"), value(forked.ModelOverwrites.Thinking))
 }
 
 func (s *SessionVerbsSuite) TestABackendsForkForAUserRunsOnTheModelsItNames() {
