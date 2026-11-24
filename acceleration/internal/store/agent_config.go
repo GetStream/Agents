@@ -683,7 +683,7 @@ func (r *AgentConfigs) NameCalling(ctx context.Context, customerID, child, excep
 // customer holds few, and the API lists them all.
 func (r *AgentConfigs) Select(ctx context.Context, customerID string) ([]AgentConfig, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var configs []AgentConfig
@@ -806,27 +806,13 @@ func normalizeConfig(config *AgentConfig) {
 	if config.GreetingMode == "" {
 		config.GreetingMode = GreetingExact
 	}
-	if config.Skills == nil {
-		config.Skills = []string{}
-	}
-	if config.Connectors == nil {
-		config.Connectors = []ConnectorBinding{}
-	}
-	if config.LeftOutConnectors == nil {
-		config.LeftOutConnectors = []LeftOutConnector{}
-	}
-	if config.Keyterms == nil {
-		config.Keyterms = []string{}
-	}
-	if config.VisibleTools == nil {
-		config.VisibleTools = []string{}
-	}
-	if config.Channels.Chat == nil {
-		config.Channels.Chat = []ChatChannel{}
-	}
-	if config.Tags == nil {
-		config.Tags = map[string]string{}
-	}
+	config.Skills = orEmpty(config.Skills)
+	config.Connectors = orEmpty(config.Connectors)
+	config.LeftOutConnectors = orEmpty(config.LeftOutConnectors)
+	config.Keyterms = orEmpty(config.Keyterms)
+	config.VisibleTools = orEmpty(config.VisibleTools)
+	config.Channels.Chat = orEmpty(config.Channels.Chat)
+	config.Tags = orEmptyMap(config.Tags)
 }
 
 func unknownAgentConfig(id string) error {

@@ -92,12 +92,8 @@ type ConnectorOAuthClients struct {
 // customer's record names ErrProviderAppTaken. client.StreamAppPK is the pin of a new record;
 // on return it is the pin the record has.
 func (r *ConnectorOAuthClients) Upsert(ctx context.Context, client *ConnectorOAuthClient) (created bool, err error) {
-	if client.SecretSealed == nil {
-		client.SecretSealed = []byte{}
-	}
-	if client.SigningSecretSealed == nil {
-		client.SigningSecretSealed = []byte{}
-	}
+	client.SecretSealed = orEmpty(client.SecretSealed)
+	client.SigningSecretSealed = orEmpty(client.SigningSecretSealed)
 	if err := client.Validate(); err != nil {
 		return false, stack.Wrap(err)
 	}

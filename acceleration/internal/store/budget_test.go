@@ -17,6 +17,9 @@ import (
 // redisAddressVar is where the tests look for a Redis to run against.
 const redisAddressVar = "ROUTER_REDIS_ADDR"
 
+// redisFamilies are the prefixes of every key the store keeps in Redis.
+var redisFamilies = []string{"appcfg:", "turns:", "call_events:", "floor_checks:", refusedPrefix, usersPrefix}
+
 // redis is the Redis the suite's store caches in, or none when the tests have none.
 func (s *StoreSuite) redis() Redis {
 	return Redis{Address: os.Getenv(redisAddressVar)}

@@ -80,7 +80,7 @@ func (s *StoreSuite) TestATagWindowInsideItsHoursKeepsOnlyTheRequestsInIt() {
 // tagged stores a labelled request, which is what the tag rollups are built from.
 func (s *StoreSuite) tagged(customerID string, at time.Time, audioMs int64, tags map[string]string) {
 	latencyMs := 100.0
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality:   "stt",
 		CustomerID: customerID,
 		Provider:   "deepgram",

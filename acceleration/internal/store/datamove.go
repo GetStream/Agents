@@ -287,16 +287,6 @@ type tableShapes struct {
 	byName map[string]shape
 }
 
-// DataTables names the tables an export carries, parents first. It is public so a test
-// and the docs have one answer rather than two.
-func DataTables() []string {
-	names := make([]string, 0, len(dataTables))
-	for _, table := range dataTables {
-		names = append(names, table.name)
-	}
-	return names
-}
-
 // StartDataCapture records that a customer is moving, so their changes are written down
 // for the deployment they are moving to.
 //
@@ -1831,9 +1821,8 @@ func (t dataTable) identity() string {
 	// expiry are what a connection without credentials holds,
 	// so the source credentials' key version and expiry do not come along either, on an import or
 	// on every change applied after it. Nor does its provider unit: a row in an import is
-	// whatever the importer wrote, and a unit stored from it would route another customer's
-	// events to this one. The reconnect it needs proves the unit again
-	// (ConnectorConnections.SetProviderUnit).
+	// whatever the importer wrote, and the column still holds one unit per connector
+	// (connector_connections_provider_unit_idx), so it is emptied here.
 	if t.name == "connector_connections" {
 		return "jsonb_build_object('customer_id', ?::text, 'status', '" + ConnectionNeedsReauthorization + "'," +
 			" 'credentials_kek_version', 0, 'expires_at', NULL, 'provider_unit_id', NULL)"

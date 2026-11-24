@@ -853,7 +853,7 @@ func (s *Server) completeConsent(ctx context.Context, row store.ConnectorAuthori
 	// the consent link works in any browser, so another person could finish it (AI-1543).
 	var refusal string
 	if manifest.OwnerEmail && connection.OwnerType == store.OwnerUser {
-		asserted, err := s.store.UserEmail(ctx, connection.CustomerID, connection.OwnerID)
+		asserted, err := s.store.Users.GetEmail(ctx, connection.CustomerID, connection.OwnerID)
 		if err != nil {
 			s.logger.Error("could not read the email a consent is checked against", "connection", row.ConnectionID, "error", err)
 			return consentFailed

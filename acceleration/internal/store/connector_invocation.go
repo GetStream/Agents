@@ -109,7 +109,7 @@ type InvocationPosition struct {
 // Select returns one row more than this, so a caller can tell the page is not
 // the last without counting.
 func InvocationLimit(asked int) int {
-	return clampLimit(asked, defaultInvocationLimit, maxInvocationLimit)
+	return ClampLimit(asked, defaultInvocationLimit, maxInvocationLimit)
 }
 
 // ConnectorInvocations are the connector tool calls sessions ran.

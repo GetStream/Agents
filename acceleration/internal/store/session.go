@@ -260,9 +260,10 @@ const (
 //
 // The queries return one row more than this, so a caller can tell the page is not the last
 // without counting.
-func SessionLimit(asked int) int { return clampLimit(asked, defaultSessionLimit, maxSessionLimit) }
+func SessionLimit(asked int) int { return ClampLimit(asked, defaultSessionLimit, maxSessionLimit) }
 
-func clampLimit(asked, fallback, most int) int {
+// ClampLimit is the page size for the limit asked for: fallback when none was, at most most.
+func ClampLimit(asked, fallback, most int) int {
 	if asked <= 0 {
 		return fallback
 	}
@@ -299,13 +300,9 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 	if session.Modality == "" {
 		session.Modality = ModalityText
 	}
-	if session.Custom == nil {
-		session.Custom = map[string]any{}
-	}
+	session.Custom = orEmptyMap(session.Custom)
 	// The column's own default, which a nil slice would write as JSON null.
-	if session.ConnectorSelections == nil {
-		session.ConnectorSelections = []SessionConnectorSelection{}
-	}
+	session.ConnectorSelections = orEmpty(session.ConnectorSelections)
 
 	// No conflict target is named: every unique index arbitrates the insert, so it neither fails
 	// on one it did not name nor depends on which of them the table has. A row there already is
@@ -727,7 +724,7 @@ func (r *Sessions) Delete(ctx context.Context, customerID, id string) error {
 // the other half, for when what the caller has is words rather than a filter.
 func (r *Sessions) Select(ctx context.Context, customerID string, filter SessionFilter) ([]AgentSession, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	// Relevance is a search's: without words there is no rank to sort on.
 	if filter.Order.By == SessionSortRelevance {
@@ -764,7 +761,7 @@ func (r *Sessions) Select(ctx context.Context, customerID string, filter Session
 // conversations.
 func (r *Sessions) Search(ctx context.Context, customerID, text string, filter SessionFilter) ([]AgentSession, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	if text == "" {
 		return r.Select(ctx, customerID, filter)

@@ -233,8 +233,8 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 	score := 2
 	app := AppScope{App: 2}
 	reads := []explainedRead{
-		{name: "Requests.Insert", index: "calls_customer_agent_idx", run: func(ctx context.Context, store *Store) error {
-			return store.Requests.Insert(ctx, &Request{Modality: "llm", CustomerID: "customer-7", AgentID: "agent-7",
+		{name: "Requests.InsertMany", index: "calls_customer_agent_idx", run: func(ctx context.Context, store *Store) error {
+			return insertRequest(ctx, store, &Request{Modality: "llm", CustomerID: "customer-7", AgentID: "agent-7",
 				CallID: "stream-7", Provider: "provider-1", Model: "model-1", StartedAt: s.base, Success: true})
 		}},
 		{name: "Requests.advanceIDs", index: "stt_requests_pkey", run: func(ctx context.Context, store *Store) error {
@@ -575,11 +575,11 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.Sessions.Ends(ctx, []SessionKey{{"customer-7", "seeded-session-7"}, {"customer-7", "seeded-session-207"}}, since)
 			return err
 		}},
-		{name: "Store.ClaimGuest", index: "agent_sessions_user_last_message_idx", run: func(ctx context.Context, store *Store) error {
-			if err := store.RecordGuest(ctx, &User{ID: "guest-7", CustomerID: "customer-7", CreatedAt: s.base}); err != nil {
+		{name: "Users.ClaimGuest", index: "agent_sessions_user_last_message_idx", run: func(ctx context.Context, store *Store) error {
+			if err := store.Users.InsertGuest(ctx, &User{ID: "guest-7", CustomerID: "customer-7", CreatedAt: s.base}); err != nil {
 				return err
 			}
-			_, err := store.ClaimGuest(ctx, "customer-7", "guest-7", "user-7")
+			_, err := store.Users.ClaimGuest(ctx, "customer-7", "guest-7", "user-7")
 			return err
 		}},
 		{name: "CallLegs.RenameUser", index: "call_legs_user_idx", run: func(ctx context.Context, store *Store) error {

@@ -555,7 +555,7 @@ func (s *SelfHostedAccountSuite) TestTeamsLeaveOutAnAppWhoseIdIsTheOrganizations
 
 func (s *SelfHostedAccountSuite) TestTeamsSumTheRequestsThisMonth() {
 	record := func(at time.Time, micros int64, team string) {
-		s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+		s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 			Modality: "llm", CustomerID: s.customerID(), OrganizationID: s.app.organization.ID, Provider: "stub", Model: "stub-llm",
 			StartedAt: at, CostMicros: micros, Billable: true, Success: true, UsageCategories: []string{"support", "team:" + team},
 		}))

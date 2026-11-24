@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:stream_chat_flutter_ai_a2ui/stream_chat_flutter_ai_a2ui.dart';
+import 'package:stream_chat_flutter_ai_openui/stream_chat_flutter_ai_openui.dart';
 
 /// Brand design-system presets applied to both OpenUI and A2UI generated surfaces as well as
 /// custom portable components.
@@ -44,6 +45,13 @@ enum BrandProfile {
     controlCornerRadius: cornerRadius / 2,
   );
 
+  OpenUIThemeData get openUITheme => OpenUIThemeData(
+    accent: accent,
+    cornerRadius: cornerRadius,
+    mediumCornerRadius: cornerRadius * 0.75,
+    smallCornerRadius: cornerRadius / 2,
+  );
+
   /// The brand chosen in Settings, kept between launches once [load] has run.
   static final ValueNotifier<BrandProfile> active = ValueNotifier(BrandProfile.stream);
 
@@ -78,7 +86,7 @@ enum BrandProfile {
   }
 }
 
-/// Inherited brand tokens read by OpenUI components and custom portable widgets.
+/// Inherited brand tokens read by the app's own components.
 class BrandThemeData extends InheritedWidget {
   const BrandThemeData({super.key, required this.profile, required super.child});
 
@@ -104,7 +112,10 @@ class BrandThemeScope extends StatelessWidget {
       valueListenable: BrandProfile.active,
       builder: (context, profile, _) => BrandThemeData(
         profile: profile,
-        child: A2UITheme(data: profile.a2uiTheme, child: child),
+        child: A2UITheme(
+          data: profile.a2uiTheme,
+          child: OpenUITheme(data: profile.openUITheme, child: child),
+        ),
       ),
     );
   }

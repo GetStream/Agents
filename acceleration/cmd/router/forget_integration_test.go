@@ -704,7 +704,7 @@ func (s *ForgetUserSuite) reachedOf(app, user, phone string) {
 		ExpiresAt: time.Now().Add(time.Hour)}, func() (string, error) { return phone[len(phone)-6:], nil }))
 	s.Require().NoError(shared.ContactMapEntries.Upsert(s.ctx, &store.ContactMapEntry{CustomerID: app, ConfigID: "agent", Kind: "sms",
 		Address: phone, ConversationID: "conversation", UserID: user}))
-	s.Require().NoError(shared.RecordUser(s.ctx, &store.User{CustomerID: app, ID: user, Kind: store.UserKindAuthenticated, Email: user}))
+	s.Require().NoError(shared.Users.Insert(s.ctx, &store.User{CustomerID: app, ID: user, Kind: store.UserKindAuthenticated, Email: user}))
 }
 
 // namingRows counts, for each table that reachedOf writes, the rows of app naming user.

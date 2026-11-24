@@ -21,7 +21,7 @@ func (s *StoreSuite) spend(customerID string, costMicros int64, minutesAgo int) 
 		CostMicros: costMicros,
 		Success:    true,
 	}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
 }
 
 func (s *StoreSuite) TestSpendSinceCountsOnlyTheCustomerAndTheWindow() {
@@ -39,7 +39,7 @@ func (s *StoreSuite) TestASubjectsSpendIsItsBillableRowsAlone() {
 	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: "app-1", OrganizationID: "org-1"}))
 	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: "app-2", OrganizationID: "org-1"}))
 	row := func(customer, key, user string, categories []string, cost int64, billable bool) {
-		s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+		s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 			UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: customer, Provider: "openai", Model: "m",
 			StartedAt: s.base.Add(-time.Minute), APIKey: key, UserID: user, UsageCategories: categories,
 			CostMicros: cost, Billable: billable, Success: true,
@@ -74,7 +74,7 @@ func (s *StoreSuite) orgSpend(store *Store, organization string, at time.Time, c
 	for _, apply := range change {
 		apply(request)
 	}
-	s.Require().NoError(store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, store, request))
 }
 
 func (s *StoreSuite) TestDailySpendIsEachOrganizationsBillableSpendPerUTCDay() {
@@ -132,7 +132,7 @@ func (s *ShardedStoreSuite) TestDailySpendSumsEveryShard() {
 func (s *StoreSuite) usedBy(appID, modality string, at time.Time, change func(*Request)) {
 	request := &Request{Modality: modality, CustomerID: appID, Provider: "stub", Model: "stub", StartedAt: at, Success: true}
 	change(request)
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
 }
 
 // Defect: a meter summed for one app of the organization or for every app, a quantity left
@@ -169,7 +169,7 @@ func (s *ShardedStoreSuite) TestMeterUsesSumEveryShard() {
 	s.usedBy("one", "tts", s.base, func(r *Request) { r.Characters, r.CostMicros = 9, 1 })
 	request := &Request{Modality: "llm", CustomerID: "two", Provider: "stub", Model: "stub", StartedAt: s.base,
 		InputTokens: 1, OutputTokens: 2, AudioMs: 3, Characters: 4, DurationMs: &took, CostMicros: 1, Success: true}
-	s.Require().NoError(s.other.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.other, request))
 
 	uses, err := s.store.Spend.Meters(s.ctx, []string{"one", "two"}, s.base)
 	s.Require().NoError(err)

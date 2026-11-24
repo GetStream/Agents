@@ -119,7 +119,7 @@ const (
 
 // ItemLimit is the page size an item list uses for the limit asked for. ResponseItems.Select
 // returns one row more than this, the same as the session queries.
-func ItemLimit(asked int) int { return clampLimit(asked, defaultItemLimit, maxItemLimit) }
+func ItemLimit(asked int) int { return ClampLimit(asked, defaultItemLimit, maxItemLimit) }
 
 // ResponseItems are what happened in each turn, in the shard that ran it.
 type ResponseItems struct {

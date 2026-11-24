@@ -609,7 +609,7 @@ func (b *Bridge) reply(reply conversation.FinishedReply) error {
 	// Not sent, so not claimed: whoever hands it over next sends it.
 	releasing, done := context.WithTimeout(context.Background(), sendTimeout)
 	defer done()
-	if released := b.store.ChannelThreadMessages.Release(releasing, thread.ChannelID, store.ClaimReply, reply.MessageID); released != nil {
+	if released := b.store.ChannelThreadMessages.ReleaseReply(releasing, thread.ChannelID, reply.MessageID); released != nil {
 		return errors.Join(err, released)
 	}
 	return err
