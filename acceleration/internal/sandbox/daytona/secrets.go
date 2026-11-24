@@ -237,9 +237,9 @@ func (s *Secrets) release(ctx context.Context) error {
 	return errors.Join(failed...)
 }
 
-// name is va_<prefix>_<session>_<binding>_<random>. The random part keeps two sandboxes of
-// one session id apart: a reopened session, or one taking over from a session of its id that
-// is still closing.
+// name is va_<prefix>_<session>_<customer>_<binding>_<random>. The random part keeps two
+// sandboxes of one session id apart: a reopened session, or one taking over from a session of
+// its id that is still closing.
 func (s *Secrets) name(grant sandbox.Grant) (string, error) {
 	random := make([]byte, 4)
 	if _, err := rand.Read(random); err != nil {
