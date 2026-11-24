@@ -86,7 +86,7 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 func (s *Server) logUnkept(customerID string, err error) {
 	if found, ok := errors.AsType[*session.UnkeptError](err); ok {
 		s.logger.Warn("a session that is not incognito has no Stream app to be kept in",
-			"customer", customerID, "error", err, "cause", found.Cause)
+			"customer", customerID, "error", found.Refusal, "cause", found.Cause)
 	}
 }
 
