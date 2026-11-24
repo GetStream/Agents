@@ -90,6 +90,18 @@ func (s *AcceptanceSuite) TestA403EchoingTheKeyIsRedacted() {
 	s.NotContains(reported.Message, s.provider.APIKey)
 }
 
+// An API answering 200 with the api_key it got does not put the key in the conversation either;
+// the rest of the answer stays as it came.
+func (s *AcceptanceSuite) TestA200EchoingTheKeyIsRedacted() {
+	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/echo-credential", ReadOnly: true,
+		Parameters: map[string]core.HTTPParameter{"status": {Type: "string"}}}
+
+	result, err := s.call(tool, `{"status":"200"}`)
+
+	s.Require().NoError(err)
+	s.Equal(`{"error":"key [redacted] and  may not read this"}`, llm.TextOf(result.Parts))
+}
+
 // The log line of a call (core.LoggedMessage, with the call's Exchange.Redact, as the session's
 // dispatcher writes it) holds no argument value and no credential: the URL the client's error
 // names is cut to its scheme and host, and the tool error is redacted.

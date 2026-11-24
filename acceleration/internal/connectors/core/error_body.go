@@ -131,11 +131,17 @@ type redaction []string
 // "Cannot POST /primary/mcp", and a provider may answer "invalid token <the token>".
 func redactionOf(request *http.Request, credential AccessCredential) redaction {
 	found := []string{request.URL.RequestURI(), request.URL.EscapedPath(), request.URL.Path, request.URL.RawQuery}
+	return redactionFrom(append(found, secretStrings(credential)...))
+}
+
+// secretStrings is each string in the credential's secret (AccessCredential.Secret): bearer's
+// token, api_key's header and key.
+func secretStrings(credential AccessCredential) []string {
 	var secret any
-	if json.Unmarshal(credential.Secret(), &secret) == nil {
-		found = appendStrings(found, secret)
+	if json.Unmarshal(credential.Secret(), &secret) != nil {
+		return nil
 	}
-	return redactionFrom(found)
+	return appendStrings(nil, secret)
 }
 
 // redactionFrom is the redaction of each of found longer than a byte, in order, each as it is,

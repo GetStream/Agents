@@ -1172,7 +1172,7 @@ func (s *FakeProviderSuite) slack(srv *fakeprovider.Server, method, token string
 }
 
 // The HTTP API answers only APIKey, records every request as it arrived, sizes /bytes/<n> to n,
-// and echoes the credential in /echo-credential's 403.
+// and echoes the credential in /echo-credential's 403, or in its 200 with ?status=200.
 func (s *FakeProviderSuite) TestTheHTTPAPITakesItsKeyRecordsEachRequestAndAnswersByPath() {
 	srv := fakeprovider.New(s.T())
 	send := func(method, path, key string) (int, string) {
@@ -1205,9 +1205,12 @@ func (s *FakeProviderSuite) TestTheHTTPAPITakesItsKeyRecordsEachRequestAndAnswer
 	status, body = send(http.MethodPost, "/echo-credential", srv.APIKey)
 	s.Equal(http.StatusForbidden, status)
 	s.Contains(body, srv.APIKey)
+	status, body = send(http.MethodGet, "/echo-credential?status=200", srv.APIKey)
+	s.Equal(http.StatusOK, status)
+	s.Contains(body, srv.APIKey)
 
 	requests := srv.APIRequests()
-	s.Require().Len(requests, 9, "the refused ones too")
+	s.Require().Len(requests, 10, "the refused ones too")
 	s.Equal(http.MethodDelete, requests[1].Method)
 	s.Equal("/rest/items/..%2Fadmin?q=1", requests[1].URI)
 	s.Equal("sent", requests[1].Body)

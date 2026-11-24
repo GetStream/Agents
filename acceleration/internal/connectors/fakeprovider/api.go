@@ -41,7 +41,9 @@ func (s *Server) APIRequests() []APIRequest {
 //	                        query's then names (none when it names none) that are not UTF-8
 //	                        (0xff each), so a reader that reads past n reads no text
 //	/rest/echo-credential   403 whose body says the APIKeyHeader and Authorization it got, as an
-//	                        API that echoes the request's credential in its error does
+//	                        API that echoes the request's credential in its error does; with
+//	                        ?status=200, the same body as a 200, as one that echoes it in an
+//	                        answer does
 //	anything else           200 "ok"
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
@@ -65,7 +67,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "/echo-credential" {
-		w.WriteHeader(http.StatusForbidden)
+		status := http.StatusForbidden
+		if r.URL.Query().Get("status") == "200" {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
 		_, _ = io.WriteString(w, `{"error":"key `+r.Header.Get(APIKeyHeader)+` and `+r.Header.Get("Authorization")+` may not read this"}`)
 		return
 	}

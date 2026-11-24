@@ -374,6 +374,25 @@ func (s *SourceSuite) TestAToolErrorEchoingTheCredentialIsRedacted() {
 	}
 }
 
+// An API that echoes the request's credential in a 2xx does not put it in the conversation
+// either, with or without an Exchange of the caller's; the path and query it names are kept.
+func (s *SourceSuite) TestA2xxEchoingTheCredentialIsRedactedAndKeepsItsPath() {
+	tool := core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/echo-credential-ok/{id}", ReadOnly: true,
+		Parameters: map[string]core.HTTPParameter{"id": {Type: "string", Required: true}, "q": {Type: "string"}}}
+	for name, ctx := range map[string]context.Context{"the caller's Exchange": func() context.Context {
+		ctx, _ := core.WithExchange(s.ctx)
+		return ctx
+	}(), "no Exchange": s.ctx} {
+		set, err := s.source.Open(s.ctx, s.binding(tool), s.grants(s.binding(tool), "get"))
+		s.Require().NoError(err)
+
+		result, err := set.Call(ctx, llm.ToolCall{Name: "crm__get", Arguments: `{"id":"item-7","q":"open"}`})
+
+		s.Require().NoError(err, name)
+		s.Equal(`{"self":"/api/echo-credential-ok/item-7?q=open","seen":"Bearer [redacted]"}`, llm.TextOf(result.Parts), name)
+	}
+}
+
 // A call without an Exchange of its caller's is redacted all the same, with one of its own.
 func (s *SourceSuite) TestAToolErrorIsRedactedWithNoExchangeOfTheCallers() {
 	_, err := s.call(s.binding(core.HTTPTool{Name: "get", Method: http.MethodGet, Path: "/echo-credential"}), "get", `{}`)
@@ -829,6 +848,8 @@ func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
 	case "/echo-credential":
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = io.WriteString(w, `{"error":"key `+r.Header.Get("Authorization")+` may not read this"}`)
+	case "/echo-credential-ok/item-7":
+		_, _ = io.WriteString(w, `{"self":"`+r.URL.RequestURI()+`","seen":"`+r.Header.Get("Authorization")+`"}`)
 	case "/echo-at-the-cut":
 		// The token starts 3 bytes before where core.CutResult cuts the tool error, "The API
 		// answered 403 Forbidden: " and this body: a cut made before redacting would keep "tok".
