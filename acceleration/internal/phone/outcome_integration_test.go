@@ -322,6 +322,7 @@ func (s *OutcomeSuite) TestACallThatFailedBeforeItWasSentWasNeverDialed() {
 
 	s.Require().Error(err)
 	s.ErrorIs(err, ErrNotDialed)
+	s.NotErrorIs(err, ErrCannotDial, "a second try may pass")
 	s.NotErrorIs(err, ErrNotPlaced, "nothing was cancelled")
 	s.Empty(s.vendor.dialed.To, "the vendor was never asked")
 }
@@ -334,6 +335,7 @@ func (s *OutcomeSuite) TestACallFromANumberNotHeldIsNotMarkedNeverDialed() {
 	s.Require().Error(err)
 	s.ErrorIs(err, store.ErrNoNumber)
 	s.NotErrorIs(err, ErrNotDialed)
+	s.ErrorIs(err, ErrCannotDial, "a campaign ends the contact instead")
 }
 
 // failingNumberRead fails the next left reads of phone_numbers, as a database blip would, by
@@ -359,6 +361,7 @@ func (s *OutcomeSuite) TestACallTheVendorFailedMayHaveRung() {
 
 	s.Require().Error(err)
 	s.NotErrorIs(err, ErrNotDialed)
+	s.NotErrorIs(err, ErrCannotDial)
 }
 
 func (s *OutcomeSuite) TestACallCancelledWhileTheVendorWasDialingMayHaveRung() {

@@ -1208,7 +1208,10 @@ func (s *Service) Call(ctx context.Context, request CallRequest) (Placed, error)
 	if err != nil && !sent && ctx.Err() != nil {
 		return Placed{}, fmt.Errorf("%w: %w", ErrNotPlaced, err)
 	}
-	if err != nil && !sent && !lasting(err) {
+	if err != nil && !sent {
+		if lasting(err) {
+			return Placed{}, cannotDial{err}
+		}
 		return Placed{}, notDialed{err}
 	}
 	return placed, err
@@ -1217,7 +1220,8 @@ func (s *Service) Call(ctx context.Context, request CallRequest) (Placed, error)
 // lasting reports whether a call failed before it was sent for a reason that placing it again
 // would meet again: the request itself, a number or SIP trunk the app does not hold, its Stream
 // app, or the deployment's own setup (credentials, keys, a public URL, SIP trunks). Such a
-// failure is not marked ErrNotDialed, so a campaign does not try it for ever.
+// failure is marked ErrCannotDial rather than ErrNotDialed, so a campaign ends the contact
+// instead of trying it for ever.
 func lasting(err error) bool {
 	return errors.Is(err, ErrInvalid) || errors.Is(err, store.ErrNoNumber) || errors.Is(err, store.ErrNoSIPTrunk) ||
 		errors.Is(err, ErrNoStream) || errors.Is(err, ErrNoSealerToCall) ||
@@ -1775,6 +1779,17 @@ type notDialed struct{ err error }
 func (e notDialed) Error() string        { return e.err.Error() }
 func (e notDialed) Unwrap() error        { return e.err }
 func (e notDialed) Is(target error) bool { return target == ErrNotDialed }
+
+// ErrCannotDial is a call that failed before the vendor was asked to dial it, for a reason any
+// later try meets again, such as a number the app no longer holds: nobody was rung. It marks
+// the failure, whose own text and kind are kept.
+var ErrCannotDial = errors.New("phone: the call cannot be dialed")
+
+type cannotDial struct{ err error }
+
+func (e cannotDial) Error() string        { return e.err.Error() }
+func (e cannotDial) Unwrap() error        { return e.err }
+func (e cannotDial) Is(target error) bool { return target == ErrCannotDial }
 
 // ErrUnknownStatus is a status post for no call waiting for one: its token is unknown or swept,
 // or its vendor reports no status.
