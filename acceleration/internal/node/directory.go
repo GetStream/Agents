@@ -201,7 +201,7 @@ func (d *Directory) Release(ctx context.Context, customerID, sessionID string) {
 		return
 	}
 
-	if err := d.redis.Do(ctx, d.redis.B().Del().Key(d.sessionKey(key), d.sessions+sessionID).Build()).Error(); err != nil {
+	if err := d.redis.Do(ctx, d.redis.B().Del().Key(d.sessionKey(key)).Build()).Error(); err != nil {
 		d.logger.Warn("could not take back this node's claim on a session",
 			"customer", customerID, "session", sessionID, "error", err)
 	}
@@ -209,22 +209,8 @@ func (d *Directory) Release(ctx context.Context, customerID, sessionID string) {
 
 // Node is where the node running a customer's session can be reached, and empty when no node
 // says it is running one.
-//
-// A router of the release before says only the id (node:session:<id>), so that key is read
-// when the customer's is not there. Ids are still unique across customers in every row that
-// release writes, and the node it names answers only a session of the caller's own.
 func (d *Directory) Node(ctx context.Context, customerID, sessionID string) (string, error) {
-	results := d.redis.DoMulti(ctx,
-		d.redis.B().Get().Key(d.sessionKey(heldSession{customerID, sessionID})).Build(),
-		d.redis.B().Get().Key(d.sessions+sessionID).Build())
-	for _, result := range results {
-		address, err := result.ToString()
-		if rueidis.IsRedisNil(err) {
-			continue
-		}
-		return address, err
-	}
-	return "", nil
+	return d.lookup(ctx, d.sessionKey(heldSession{customerID, sessionID}))
 }
 
 // NodeByAgent is the same for the session writing as an agent, which is what an arriving
@@ -378,12 +364,10 @@ func (d *Directory) write(ctx context.Context, key heldSession, held claim) {
 	}
 }
 
-// writeCommands hold the session under its customer and id, and under its id alone as well,
-// which is all a router of the release before reads.
+// writeCommands hold the session under its customer and id.
 func (d *Directory) writeCommands(key heldSession, held claim) []rueidis.Completed {
 	commands := []rueidis.Completed{
 		d.redis.B().Set().Key(d.sessionKey(key)).Value(d.address).Ex(holdFor).Build(),
-		d.redis.B().Set().Key(d.sessions + key.sessionID).Value(d.address).Ex(holdFor).Build(),
 	}
 	if held.agentID != "" {
 		commands = append(commands,

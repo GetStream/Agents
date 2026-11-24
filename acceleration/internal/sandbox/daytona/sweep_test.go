@@ -211,21 +211,13 @@ func (s *SweepSuite) TearDownTest() {
 // live has the directory say the customer's session runs on this router.
 func (s *SweepSuite) live(session string) {
 	s.directory.Hold(s.ctx, s.customer, session, "", "")
-	s.keys = append(s.keys, "w15sweep:"+s.prefix+":session:"+session, "w15sweep:"+s.prefix+":session:"+s.customer+":"+session)
-}
-
-// liveUnder has a router say a customer's session runs on it under the customer's key alone,
-// as one that no longer writes the key of the id does.
-func (s *SweepSuite) liveUnder(customer, session string) {
-	key := "w15sweep:" + s.prefix + ":session:" + customer + ":" + session
-	s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().Set().Key(key).Value("10.0.0.2:1").Build()).Error())
-	s.keys = append(s.keys, key)
+	s.keys = append(s.keys, "w15sweep:"+s.prefix+":session:"+s.customer+":"+session)
 }
 
 // unreadable has the directory fail to say whether session is live: its claim's key holds a
 // list, and Redis answers a GET of a list with WRONGTYPE.
 func (s *SweepSuite) unreadable(session string) {
-	key := "w15sweep:" + s.prefix + ":session:" + session
+	key := "w15sweep:" + s.prefix + ":session:" + s.customer + ":" + session
 	s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().Rpush().Key(key).Element("w17").Build()).Error())
 	s.keys = append(s.keys, key)
 }
@@ -248,7 +240,7 @@ func (s *SweepSuite) named(session, binding string) string {
 	return "va_" + s.prefix + "_" + session + "_" + s.customer + "_" + binding + "_0a1b2c3d"
 }
 
-// namedBefore is the secret a router of the release before named for session and binding, with
+// namedBefore is the secret a router of two releases before named for session and binding, with
 // no customer in it.
 func (s *SweepSuite) namedBefore(session, binding string) string {
 	return "va_" + s.prefix + "_" + session + "_" + binding + "_0a1b2c3d"
@@ -264,23 +256,13 @@ func (s *SweepSuite) TestAnEndedSessionsSecretIsDeletedAndALiveOnesKept() {
 	s.Equal([]string{s.named("session-live", "github")}, s.org.names())
 }
 
-// A router of the release before names no customer in its secrets, and holds its sessions under
-// their ids.
-func (s *SweepSuite) TestASecretNamingNoCustomerIsKeptWhileItsSessionIsLive() {
+// A secret naming no customer was made by a router of two releases before, none of which runs
+// now: a session of its id live now is somebody's, maybe another customer's, with secrets of
+// its own, so it keeps none of the old ones.
+func (s *SweepSuite) TestASecretNamingNoCustomerIsDeletedWhileASessionOfItsIdIsLive() {
 	s.live("session-live")
 	s.org.add(s.namedBefore("session-live", "github"), 2*time.Hour)
-	s.org.add(s.namedBefore("session-ended", "github"), 2*time.Hour)
-
-	s.Require().NoError(s.sweeper(s.directory).Sweep(s.ctx))
-
-	s.Equal([]string{s.namedBefore("session-live", "github")}, s.org.names())
-}
-
-// A router that holds its sessions under their customer alone still has its secrets kept.
-func (s *SweepSuite) TestASessionHeldUnderItsCustomerAloneKeepsItsSecret() {
-	s.liveUnder(s.customer, "session-live")
 	s.org.add(s.named("session-live", "github"), 2*time.Hour)
-	s.org.add(s.named("session-ended", "github"), 2*time.Hour)
 
 	s.Require().NoError(s.sweeper(s.directory).Sweep(s.ctx))
 
@@ -403,7 +385,7 @@ func (s *SweepSuite) TestASweepWithNothingToDeleteDoesNotWait() {
 func (s *SweepSuite) TestASweepAsksAgainOnlyAfterAClaimWouldBeWrittenBack() {
 	s.live("session-live")
 
-	lasts, err := s.redis.Do(s.ctx, s.redis.B().Pttl().Key("w15sweep:"+s.prefix+":session:session-live").Build()).AsInt64()
+	lasts, err := s.redis.Do(s.ctx, s.redis.B().Pttl().Key("w15sweep:"+s.prefix+":session:"+s.customer+":session-live").Build()).AsInt64()
 
 	s.Require().NoError(err)
 	s.Require().Positive(lasts, "the claim is written with a lifetime")

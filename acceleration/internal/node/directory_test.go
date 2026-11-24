@@ -59,7 +59,7 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	directory.Offer(s.ctx, "globex", "agent-s2", []byte(`{"tools":[]}`))
 	keys, err := s.client.Do(s.ctx, s.client.B().Keys().Pattern(s.prefix+":*").Build()).AsStrSlice()
 	s.Require().NoError(err)
-	s.Require().Len(keys, 3*4+2+2+1)
+	s.Require().Len(keys, 3*3+2+2+1)
 	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Del().Key(keys...).Build()).Error())
 
 	before := s.roundTrips.sent.Load()
@@ -98,20 +98,24 @@ func (s *DirectorySuite) TestTwoCustomersSessionsOfOneIdAreFoundApart() {
 	s.Equal("node-b:1", s.nodeOf(peer, "globex", "order-42"))
 }
 
-// A router of the release before holds a session under its id alone, and is still found.
-func (s *DirectorySuite) TestASessionHeldUnderItsIdAloneIsFound() {
+// A session held under its id alone, as a router of two releases before held it, says nothing
+// of whose it is, and another customer's of the id may run anywhere: it is not found.
+func (s *DirectorySuite) TestASessionHeldUnderItsIdAloneIsNotFound() {
 	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Set().Key(s.prefix+":session:order-42").Value("node-a:1").Build()).Error())
 
-	s.Equal("node-a:1", s.nodeOf(s.directoryAt("node-c:1"), "acme", "order-42"))
+	s.Empty(s.nodeOf(s.directoryAt("node-c:1"), "acme", "order-42"))
 }
 
-// A router of the release before reads a session's node by its id alone.
-func (s *DirectorySuite) TestASessionHeldHereIsFoundByItsIdAlone() {
+// A session is held under its customer and id alone: a router of the release before reads the
+// key of the id when its customer's is not there, and would carry another customer's request
+// for the id to this node.
+func (s *DirectorySuite) TestASessionIsNotHeldUnderItsIdAlone() {
 	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "order-42", "", "")
 
-	held, err := s.client.Do(s.ctx, s.client.B().Get().Key(s.prefix+":session:order-42").Build()).ToString()
+	exists, err := s.client.Do(s.ctx, s.client.B().Exists().Key(s.prefix+":session:order-42").Build()).AsInt64()
 	s.Require().NoError(err)
-	s.Equal("node-a:1", held)
+	s.Zero(exists)
+	s.Equal("node-a:1", s.nodeOf(s.directoryAt("node-c:1"), "acme", "order-42"))
 }
 
 func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhere() {
@@ -121,9 +125,6 @@ func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhere() {
 	directory.Release(s.ctx, "acme", "order-42")
 
 	s.Empty(s.nodeOf(s.directoryAt("node-c:1"), "acme", "order-42"))
-	exists, err := s.client.Do(s.ctx, s.client.B().Exists().Key(s.prefix+":session:order-42").Build()).AsInt64()
-	s.Require().NoError(err)
-	s.Zero(exists, "a router of the release before would still forward to it")
 }
 
 // directoryAt is a node's directory at address, renewing nothing for the test's length.
