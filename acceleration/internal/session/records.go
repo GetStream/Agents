@@ -479,8 +479,8 @@ func (r *sessionRecorder) write(write recordWrite) {
 			r.logger.Error("could not record the session starting", "error", err)
 			return
 		}
-		// The id is the customer's now, whether or not the close of a refused session before
-		// it reached the writer: a full queue drops a close.
+		// The id is the customer's now, so it is no longer taken, even when the close of a
+		// session refused before it never reached the writer: a full queue drops a close.
 		delete(r.taken, key)
 		if write.carriedOn {
 			if err := r.attempt(func(ctx context.Context) error {

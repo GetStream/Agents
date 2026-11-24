@@ -201,6 +201,7 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 		return nil, err
 	}
 	if err != nil {
+		s.logUnkept(customerID, err)
 		return nil, refusedRequest(err)
 	}
 	return &forkSessionResponse{Body: sessionOf(ctx, created)}, nil
