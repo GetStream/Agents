@@ -200,7 +200,7 @@ func (r *Skills) Get(ctx context.Context, customerID, id string) (Skill, error) 
 // Select returns the skills a customer holds, newest first.
 func (r *Skills) Select(ctx context.Context, customerID string, filter SkillFilter) ([]Skill, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var skills []Skill
@@ -225,7 +225,7 @@ func (r *Skills) Select(ctx context.Context, customerID string, filter SkillFilt
 // naming a built-in asks on every conversation.
 func (r *Skills) GetByNames(ctx context.Context, customerID, configID string, names []string) ([]Skill, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	// Skills belong to a config, so a session that was not created from one reaches
 	// nothing here and takes the built-in set.

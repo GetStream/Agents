@@ -212,7 +212,7 @@ func (r *CustomModels) GetByName(ctx context.Context, customerID, name string) (
 // Select returns a page of a customer's models, newest first, one more than the limit.
 func (r *CustomModels) Select(ctx context.Context, customerID string, filter CustomModelFilter) ([]CustomModel, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var models []CustomModel

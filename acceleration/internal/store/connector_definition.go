@@ -121,7 +121,7 @@ func (r *ConnectorDefinitions) Seed(ctx context.Context, fsys fs.FS) error {
 // revision is replaced: the store numbers revisions.
 func (r *ConnectorDefinitions) Revise(ctx context.Context, customerID string, manifest core.Manifest) (ConnectorDefinition, error) {
 	if customerID == BuiltinCustomer {
-		return ConnectorDefinition{}, stack.Wrap(errors.New("store: customer id is required"))
+		return ConnectorDefinition{}, stack.Wrap(errCustomerRequired)
 	}
 	probe := ConnectorDefinition{CustomerID: customerID, ID: manifest.ID, Revision: 1, Name: manifest.Name}
 	if err := probe.Validate(); err != nil {
@@ -236,7 +236,7 @@ type ConnectorDefinitionPosition struct {
 // to one more than ConnectorDefinitionLimit, so a caller can tell the page is not the last.
 func (r *ConnectorDefinitions) Select(ctx context.Context, customerID string, filter ConnectorDefinitionFilter) ([]ConnectorDefinition, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	// The newest revision first, then the text matched on it, so an older revision that

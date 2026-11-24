@@ -127,7 +127,7 @@ func (r *ProviderKeys) Upsert(ctx context.Context, key *ProviderKey) (ProviderKe
 // cache. A customer keeps at most one per provider and region, so there is no page.
 func (r *ProviderKeys) SelectAll(ctx context.Context, customerID string) ([]ProviderKey, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	return cached(ctx, r.store, providerKeysKey(customerID), func(ctx context.Context) ([]ProviderKey, error) {
 		keys := []ProviderKey{}
@@ -146,7 +146,7 @@ func (r *ProviderKeys) SelectAll(ctx context.Context, customerID string) ([]Prov
 // limit so a caller can tell whether there is another.
 func (r *ProviderKeys) Select(ctx context.Context, customerID string, filter ProviderKeyFilter) ([]ProviderKey, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	var keys []ProviderKey
 	query := r.store.global.NewSelect().Model(&keys).Where("customer_id = ?", customerID)
