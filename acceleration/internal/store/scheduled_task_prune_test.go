@@ -474,6 +474,70 @@ func (s *StoreSuite) TestARunWriteTheTaskPruneWaitsOnIsRedactedTooWithoutDeadloc
 	}, s.taskChanges("acme"), "the run write's change is emptied too")
 }
 
+func (s *StoreSuite) TestTaskPruneDoesNotWaitOnTheRunsOfTasksItKeeps() {
+	s.aged("done", "acme", ScheduledTaskCompleted, 91*day)
+	s.aged("done", "globex", ScheduledTaskActive, 91*day)
+	s.ranFor("globex-run", "globex", "done", ScheduledTaskTriggerSchedule, ScheduledTaskRunDelivered, day)
+	s.aged("live", "acme", ScheduledTaskActive, 91*day)
+	s.ranFor("live-run", "acme", "live", ScheduledTaskTriggerSchedule, ScheduledTaskRunDelivered, day)
+	writing, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer writing.Rollback() //nolint:errcheck // the test is done with it
+	_, err = writing.ExecContext(s.ctx, "UPDATE scheduled_task_runs SET prompt = 'words' WHERE id IN ('globex-run', 'live-run')")
+	s.Require().NoError(err)
+
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
+	_, tasks, err := s.store.ScheduledTasks.Prune(ctx)
+
+	s.Require().NoError(err, "the prune waited for a run of a task it keeps")
+	s.EqualValues(1, tasks)
+}
+
+// onceLocked runs once, after the statement that locks the runs of the tasks being pruned, when
+// armed.
+type onceLocked struct {
+	armed atomic.Bool
+	run   func()
+}
+
+func (*onceLocked) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context { return ctx }
+func (o *onceLocked) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if strings.Contains(event.Query, "FOR UPDATE OF r") && o.armed.CompareAndSwap(true, false) {
+		o.run()
+	}
+}
+
+// A run let go of before its task is deleted could be written, or pruned by another router, between
+// the two, and the two would deadlock over its changes.
+func (s *StoreSuite) TestTaskPruneHoldsTheRunsItLocked() {
+	s.aged("done", "acme", ScheduledTaskCompleted, 91*day)
+	s.ranFor("run", "acme", "done", ScheduledTaskTriggerManual, ScheduledTaskRunDelivered, 91*day)
+	holding, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer holding.Rollback() //nolint:errcheck // rolled back below; this only ends a failed test's transaction
+	_, err = holding.ExecContext(s.ctx, "SELECT 1 FROM scheduled_task_runs WHERE id = 'run' FOR UPDATE")
+	s.Require().NoError(err)
+	var taken error
+	hook := &onceLocked{run: func() {
+		_, taken = s.store.global.ExecContext(s.ctx, "SELECT 1 FROM scheduled_task_runs WHERE id = 'run' FOR UPDATE NOWAIT")
+	}}
+	s.store.global.AddQueryHook(hook)
+	hook.armed.Store(true)
+	defer hook.armed.Store(false)
+
+	pruned := make(chan error, 1)
+	go func() {
+		_, _, err := s.store.ScheduledTasks.Prune(s.ctx)
+		pruned <- err
+	}()
+	s.Require().Eventually(s.forgetWaiting, 10*time.Second, 10*time.Millisecond, "the prune waits on the run's row")
+	s.Require().NoError(holding.Rollback())
+	s.Require().NoError(<-pruned)
+
+	s.Require().ErrorContains(taken, "could not obtain lock", "the run is held until its task is deleted")
+}
+
 func (s *StoreSuite) TestAFollowerOfAnotherAppReadsOnFromItsCursorAfterAPrune() {
 	for _, customer := range []string{"acme", "globex"} {
 		s.Require().NoError(s.store.StartDataCapture(s.ctx, customer, time.Hour, time.Second))

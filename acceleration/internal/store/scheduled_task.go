@@ -1024,12 +1024,12 @@ const (
 // (TestPruneRedactsByTheChangesOfItsOwnRows).
 const (
 	pickScheduledTaskRunsSQL = `
-SELECT customer_id, id FROM scheduled_task_runs
+SELECT id FROM scheduled_task_runs
 WHERE finished_at < now() - make_interval(secs => ?)
 LIMIT ? FOR UPDATE SKIP LOCKED`
 	deleteScheduledTaskRunsSQL = `
 WITH deleted AS (
-    DELETE FROM scheduled_task_runs WHERE id = ANY(?1::text[]) RETURNING customer_id, task_id, id
+    DELETE FROM scheduled_task_runs WHERE id = ANY(?::text[]) RETURNING customer_id, task_id, id
 ), redacted AS (
     UPDATE data_changes AS dc SET op = 'delete', payload = NULL FROM deleted AS d
     WHERE dc.customer_id = d.customer_id AND dc.table_name = 'scheduled_task_runs' AND dc.op <> 'delete'
@@ -1084,40 +1084,45 @@ func (r *ScheduledTasks) Prune(ctx context.Context) (runs, tasks int64, err erro
 	if _, err = r.store.global.ExecContext(ctx, settleLostManualRunsSQL, scheduledTaskManualRunLost.Seconds()); err != nil {
 		return 0, 0, stack.Wrap(fmt.Errorf("store: settle lost scheduled task runs: %w", err))
 	}
-	runs, err = r.pruneInBatches(ctx, scheduledTaskRunsPruned, pickScheduledTaskRunsSQL, "", deleteScheduledTaskRunsSQL)
+	runs, err = r.pruneInBatches(ctx, scheduledTaskRunsPruned, func(ctx context.Context, tx bun.Tx) (picked int, removed int64, err error) {
+		var ids []string
+		if err := tx.NewRaw(pickScheduledTaskRunsSQL, ScheduledTasksKept.Seconds(), scheduledTaskRunsPruned).Scan(ctx, &ids); err != nil || len(ids) == 0 {
+			return 0, 0, err
+		}
+		err = tx.NewRaw(deleteScheduledTaskRunsSQL, pgdialect.Array(ids)).Scan(ctx, &removed)
+		return len(ids), removed, err
+	})
 	if err != nil {
 		return runs, 0, stack.Wrap(fmt.Errorf("store: prune scheduled task runs: %w", err))
 	}
-	tasks, err = r.pruneInBatches(ctx, scheduledTasksPruned, pickScheduledTasksSQL, lockScheduledTaskRunsSQL, deleteScheduledTasksSQL)
+	tasks, err = r.pruneInBatches(ctx, scheduledTasksPruned, func(ctx context.Context, tx bun.Tx) (picked int, removed int64, err error) {
+		var customers, ids []string
+		if err := tx.NewRaw(pickScheduledTasksSQL, ScheduledTasksKept.Seconds(), scheduledTasksPruned).Scan(ctx, &customers, &ids); err != nil || len(ids) == 0 {
+			return 0, 0, err
+		}
+		if _, err := tx.ExecContext(ctx, lockScheduledTaskRunsSQL, pgdialect.Array(customers), pgdialect.Array(ids)); err != nil {
+			return 0, 0, err
+		}
+		err = tx.NewRaw(deleteScheduledTasksSQL, pgdialect.Array(customers), pgdialect.Array(ids)).Scan(ctx, &removed)
+		return len(ids), removed, err
+	})
 	if err != nil {
 		return runs, tasks, stack.Wrap(fmt.Errorf("store: prune scheduled tasks: %w", err))
 	}
 	return runs, tasks, nil
 }
 
-// pruneInBatches picks a batch by the retention and the batch size, sends lock, if any, and then
-// remove, which delete the batch's rows by their customers and ids, until a batch is short. Each
-// batch is a transaction. remove is a statement after the locks, so it sees the changes recorded
-// by a write that committed while they waited.
-func (r *ScheduledTasks) pruneInBatches(ctx context.Context, batch int, pick, lock, remove string) (int64, error) {
+// pruneInBatches runs prune, which picks and locks a batch and then deletes it, each time in a
+// transaction of its own, until it picks a short batch. The delete is a statement after the locks,
+// so it sees the changes recorded by a write that committed while they waited.
+func (r *ScheduledTasks) pruneInBatches(ctx context.Context, batch int, prune func(context.Context, bun.Tx) (picked int, removed int64, err error)) (int64, error) {
 	var pruned int64
 	for {
 		var picked int
 		var removed int64
-		err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-			var customers, ids []string
-			if err := tx.NewRaw(pick, ScheduledTasksKept.Seconds(), batch).Scan(ctx, &customers, &ids); err != nil {
-				return err
-			}
-			if picked = len(ids); picked == 0 {
-				return nil
-			}
-			if lock != "" {
-				if _, err := tx.ExecContext(ctx, lock, pgdialect.Array(customers), pgdialect.Array(ids)); err != nil {
-					return err
-				}
-			}
-			return tx.NewRaw(remove, pgdialect.Array(customers), pgdialect.Array(ids)).Scan(ctx, &removed)
+		err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) (err error) {
+			picked, removed, err = prune(ctx, tx)
+			return err
 		})
 		if err != nil {
 			return pruned, err
