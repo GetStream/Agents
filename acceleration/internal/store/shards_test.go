@@ -416,6 +416,47 @@ func (s *ShardedStoreSuite) TestTurnsAtTheSameInstantInTwoShardsAreOrderedById()
 	s.InDelta(3.0, *tools[0].AvgTurnsBeforeUse, 0.001)
 }
 
+// Two customers may each have a session of one id in a shard: another customer's first turn
+// there does not make the row a session was carried on in count as the one it began in.
+func (s *ShardedStoreSuite) TestASessionCarriedOnBesideAnotherCustomersOfItsIdIsOneSessionOfItsActivity() {
+	session := s.opened("chat", "app", s.base, nil)
+	s.turned(session, "chat-1", s.base, nil)
+	s.carriedOnAt("chat", s.base.Add(time.Minute))
+	s.turnedThere("chat", "chat-2", "chat-1", s.base.Add(time.Minute), nil)
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &AgentSession{ID: "chat", CustomerID: "somebody-else", AgentName: "docs",
+		UserID: "sam", CallerKind: "user", CreatedAt: s.base}))
+	s.Require().NoError(s.other.Responses.Insert(s.ctx, &AgentResponse{ID: "theirs-1", SessionID: "chat", CustomerID: "somebody-else",
+		CreatedAt: s.base}))
+
+	buckets, err := s.store.CustomerActivity(s.ctx, "app", ActivityDaily, s.base, s.base.Add(24*time.Hour))
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 1)
+	s.EqualValues(1, buckets[0].Sessions)
+}
+
+// Another customer's session of the id carried on into a shard does not make a session that
+// began there one carried on: its turns before a tool's first use are counted where they are,
+// not asked of every shard again.
+func (s *ShardedStoreSuite) TestAnotherCustomersSessionOfTheIdCarriedOnHereAsksNoShardAgainForAToolsFirstUse() {
+	session := s.opened("chat", "app", s.base, nil)
+	s.turned(session, "chat-1", s.base, nil)
+	s.turned(session, "chat-2", s.base.Add(time.Minute), answeredAfter("chat-1"))
+	s.calledTool(session, "chat-2", "refund", s.base.Add(time.Minute), map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
+	theirs := s.opened("chat", "somebody-else", s.base, nil)
+	s.turned(theirs, "theirs-2", s.base.Add(time.Minute), answeredAfter("theirs-1"))
+
+	var tools []ToolUsage
+	queries := s.countQueries(func() {
+		var err error
+		_, tools, err = s.store.CustomerToolUsage(s.ctx, "app", "", s.base, s.base.Add(time.Hour))
+		s.Require().NoError(err)
+	})
+	s.Require().Len(tools, 1)
+	s.Require().NotNil(tools[0].AvgTurnsBeforeUse)
+	s.InDelta(1.0, *tools[0].AvgTurnsBeforeUse, 0.001)
+	s.Equal(2, queries, "one read of each shard")
+}
+
 // carriedOnAt writes the row a session carried on in the other shard has there.
 func (s *ShardedStoreSuite) carriedOnAt(id string, at time.Time) {
 	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &AgentSession{ID: id, CustomerID: "app", AgentName: "docs",

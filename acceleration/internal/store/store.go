@@ -206,7 +206,7 @@ func (s *Store) CustomerActivity(
 	// rows that carry it on count nothing, and what was said in them is counted as messages.
 	originOnly := ""
 	if len(s.peers) > 0 {
-		originOnly = " AND NOT " + carriedIn("sess.id")
+		originOnly = " AND NOT " + carriedIn("sess.customer_id", "sess.id")
 	}
 	// Who was seen is read apart from the counts: a person is one person however many shards
 	// they talked to in a bucket, and a guest who signed up is the account they became, which
@@ -353,21 +353,23 @@ LEFT JOIN call_counts AS c ON c.bucket = b.bucket`, unit, originOnly)
 	return buckets, nil
 }
 
-// answersAfterAnotherShard is the SQL condition, on a session id column, that the session has a
-// response here answered after one this shard does not hold: it was carried on here from
-// another shard, whose newest response a reopened session answers after (Responses.ActiveLeaf).
-func answersAfterAnotherShard(id string) string {
+// answersAfterAnotherShard is the SQL condition, on a session's customer and id, that the
+// session has a response here answered after one this shard does not hold: it was carried on
+// here from another shard, whose newest response a reopened session answers after
+// (Responses.ActiveLeaf). Another customer's session of the id is another session.
+func answersAfterAnotherShard(customer, id string) string {
 	return fmt.Sprintf(`EXISTS (SELECT 1 FROM agent_responses AS carried
-    WHERE carried.session_id = %[1]s AND carried.parent_response_id IS NOT NULL
-        AND NOT EXISTS (SELECT 1 FROM agent_responses AS parent WHERE parent.id = carried.parent_response_id))`, id)
+    WHERE carried.customer_id = %[1]s AND carried.session_id = %[2]s AND carried.parent_response_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM agent_responses AS parent WHERE parent.id = carried.parent_response_id))`, customer, id)
 }
 
-// carriedIn is the SQL condition, on a session id column, that this shard's row only carries
-// the session on: its first turn, a response with no parent, is elsewhere. A carried row with
-// no response yet cannot be told from the one it began in.
-func carriedIn(id string) string {
-	return fmt.Sprintf(`(%[2]s AND NOT EXISTS (SELECT 1 FROM agent_responses AS began
-    WHERE began.session_id = %[1]s AND began.parent_response_id IS NULL))`, id, answersAfterAnotherShard(id))
+// carriedIn is the SQL condition, on a session's customer and id, that this shard's row only
+// carries the session on: its first turn, a response with no parent, is elsewhere. A carried row
+// with no response yet cannot be told from the one it began in.
+func carriedIn(customer, id string) string {
+	return fmt.Sprintf(`(%[3]s AND NOT EXISTS (SELECT 1 FROM agent_responses AS began
+    WHERE began.customer_id = %[1]s AND began.session_id = %[2]s AND began.parent_response_id IS NULL))`,
+		customer, id, answersAfterAnotherShard(customer, id))
 }
 
 // CustomerConcurrencyPeak returns the most sessions one customer had open at the same time
@@ -526,7 +528,7 @@ func (s *Store) CustomerToolUsage(ctx context.Context, customerID, configID stri
     array_agg(CASE WHEN c.session_id IS NULL THEN '' ELSE u.session_id END ORDER BY u.session_id) AS first_carriers`
 		carriers = `
 carriers AS (
-    SELECT DISTINCT session_id FROM first_use WHERE ` + answersAfterAnotherShard("first_use.session_id") + `
+    SELECT DISTINCT session_id FROM first_use WHERE ` + answersAfterAnotherShard("?3", "first_use.session_id") + `
 ),`
 		carriedJoin = "\n    LEFT JOIN carriers AS c ON c.session_id = u.session_id"
 	}
