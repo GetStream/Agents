@@ -10,7 +10,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A table is created by one set alone, so a deployment of shards knows where each one is.
+// movingTables are the tables on their way from the shared database to the shards'. Both
+// migration sets create them until the shared set drops its copy.
+var movingTables = []string{"agent_logs"}
+
+// A table is created by one set alone, so a deployment of shards knows where each one is. One
+// moving to the shards is created by both until the shared set drops it, and is read from both.
 func TestEveryTableBelongsToOneSet(t *testing.T) {
 	global, err := setTables(globalSet)
 	require.NoError(t, err)
@@ -19,6 +24,10 @@ func TestEveryTableBelongsToOneSet(t *testing.T) {
 	require.Contains(t, global, "agent_configs")
 	require.Contains(t, shard, "requests")
 	for _, table := range shard {
+		if slices.Contains(movingTables, table) {
+			require.Contains(t, global, table, "a table moving to the shards is still in the shared set")
+			continue
+		}
 		require.NotContains(t, global, table)
 	}
 }

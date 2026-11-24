@@ -104,6 +104,7 @@ func (s *ShardedStoreSuite) SetupSuite() {
 	s.countEveryQuery()
 	s.other, err = OpenShards(Options{DSN: s.dsn, ShardDSN: peer, Shards: shards})
 	s.Require().NoError(err)
+	s.Require().NoError(s.other.Migrate(s.ctx))
 	s.base = time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
 }
 

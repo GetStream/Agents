@@ -33,6 +33,27 @@ TABLE agent_branch_switches
     CREATE INDEX agent_branch_switches_session_idx ON public.agent_branch_switches USING btree (session_id, hidden_from)
     CREATE INDEX agent_branch_switches_unfinished_idx ON public.agent_branch_switches USING btree (session_id, created_at) WHERE (state <> 'done'::text)
 
+TABLE agent_logs
+    agent_id text NOT NULL DEFAULT ''::text
+    config_id text NOT NULL DEFAULT ''::text
+    customer_id text NOT NULL
+    details jsonb NOT NULL DEFAULT '{}'::jsonb
+    event_type text NOT NULL
+    id bigint NOT NULL DEFAULT nextval('agent_logs_id_seq'::regclass)
+    ingested_at timestamp with time zone NOT NULL DEFAULT clock_timestamp()
+    message text NOT NULL
+    occurred_at timestamp with time zone NOT NULL DEFAULT now()
+    session_id text NOT NULL DEFAULT ''::text
+    severity text NOT NULL
+    source text NOT NULL
+    source_id bigint
+    user_id text NOT NULL DEFAULT ''::text
+    CONSTRAINT agent_logs_pkey PRIMARY KEY (id)
+    CREATE INDEX agent_logs_config_order ON public.agent_logs USING btree (customer_id, config_id, id DESC)
+    CREATE INDEX agent_logs_customer_order ON public.agent_logs USING btree (customer_id, id DESC)
+    CREATE INDEX agent_logs_error_order ON public.agent_logs USING btree (customer_id, severity, id DESC)
+    CREATE UNIQUE INDEX agent_logs_source_idx ON public.agent_logs USING btree (customer_id, source_id) WHERE (source_id IS NOT NULL)
+
 TABLE agent_response_items
     at timestamp with time zone NOT NULL DEFAULT now()
     kind text NOT NULL

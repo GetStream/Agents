@@ -15,6 +15,7 @@ import (
 
 	"github.com/redis/rueidis/rueidishook"
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
@@ -131,7 +132,12 @@ func (s *Store) shards() []bun.IDB {
 // shard's first. One shard failing fails the read: a page that silently left a shard out
 // would be a list of calls missing some.
 func everyShard[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) ([]T, error) {
-	all := s.shards()
+	return onEach(ctx, s.shards(), read)
+}
+
+// onEach reads every database of all at once and returns what each answered, in their order.
+// One failing fails the read.
+func onEach[T any](ctx context.Context, all []bun.IDB, read func(context.Context, bun.IDB) (T, error)) ([]T, error) {
 	if len(all) == 1 {
 		found, err := read(ctx, all[0])
 		if err != nil {
@@ -275,6 +281,60 @@ func whicheverShard[T any](ctx context.Context, s *Store, read func(context.Cont
 		}
 	}
 	return found, sql.ErrNoRows
+}
+
+// A table moving from the shared database to the shards' is written in this shard's and read
+// from every database that may hold its rows: every shard's, where they are written now, and
+// the shared one, where they were written before, until its rows there are copied over and it
+// is dropped. Shards migrate one at a time, so a peer may not have the table yet: it holds none
+// of its rows, rather than failing the read.
+
+// holders is every database that may hold the rows of a moving table: every shard's, this
+// one's first, then the shared one unless it is this shard's.
+func (s *Store) holders() []bun.IDB {
+	all := s.shards()
+	if s.Sharded() {
+		all = append(all, s.global)
+	}
+	return all
+}
+
+// everyHolder reads a moving table from every database of holders at once, in its order. The
+// shared database is also a peer's when one shard keeps its rows there, so a row may be read
+// twice: the caller drops the second by its key.
+func everyHolder[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) ([]T, error) {
+	return onEach(ctx, s.holders(), func(ctx context.Context, db bun.IDB) (T, error) {
+		found, err := read(ctx, db)
+		if absentTable(err) {
+			var none T
+			return none, nil
+		}
+		return found, err
+	})
+}
+
+// whicheverHolder reads a row of a moving table from the database holding it: the shards, as
+// whicheverShard does, then the shared one. read answers sql.ErrNoRows for a database without
+// it, and so does whicheverHolder when none has it.
+func whicheverHolder[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) (T, error) {
+	found, err := whicheverShard(ctx, s, func(ctx context.Context, db bun.IDB) (T, error) {
+		found, err := read(ctx, db)
+		if absentTable(err) {
+			return found, sql.ErrNoRows
+		}
+		return found, err
+	})
+	if !s.Sharded() || !errors.Is(err, sql.ErrNoRows) {
+		return found, err
+	}
+	return read(ctx, s.global)
+}
+
+// absentTable reports whether err is Postgres refusing a statement on a table the database
+// does not have.
+func absentTable(err error) bool {
+	var refused pgdriver.Error
+	return errors.As(err, &refused) && refused.Field('C') == undefinedTable
 }
 
 // onEveryShard runs a write on every shard's database and returns how many rows it changed
