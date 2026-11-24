@@ -209,7 +209,7 @@ func withSkipHint(err error) error {
 		return err
 	}
 	return fmt.Errorf("%w. Another app here holds that row's key, so it cannot land under this one. Once you know the row is "+
-		"not this app's to bring, run this again with --skip and the table:key named above, on this run and every later one", err)
+		"not this app's to bring, run this again with --skip and the table:key this error names, on this run and every later one", err)
 }
 
 // parseReplicate reads replicate's flags into the source it copies from and how.

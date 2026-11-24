@@ -31,8 +31,9 @@ var ErrChangesExpired = errors.New("store: the changes since that cursor are no 
 var ErrNotACustomConnector = errors.New("not a definition the API would store for a custom connector")
 
 // ErrInvalidImport is an export that cannot be written as it is: a table no export carries, a
-// row that does not read, or a row the database refuses for what it holds. Its message names
-// the table and nothing of the database. A database that failed is never one.
+// row that does not read, a row the database refuses for what it holds, or a row whose key
+// another customer holds here (ErrAnotherCustomersRow). Its message names the table, and for that
+// last one the row's own key, but nothing of the database. A database that failed is never one.
 var ErrInvalidImport = errors.New("store: the export cannot be imported")
 
 // invalidImport marks err as ErrInvalidImport without changing its message.
