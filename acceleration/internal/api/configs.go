@@ -1138,7 +1138,7 @@ func bindingSendsOut(binding store.ConnectorBinding, manifest core.Manifest) ([]
 	return unheld, len(unheld) > 0
 }
 
-// grantSendsOut reports whether the tool grant names may send data out of the conversation
+// grantSendsOut reports whether the tool that grant names may send data out of the conversation
 // (core.Manifest.SendsOutTool), with an http tool judged as the grant pins it: a session opens
 // one only at the digest its grant pins (httpsource.Source.Open), and the digest covers its
 // method, path and read_only (httpsource.ToolSchemaDigest). So an http tool that only reads at

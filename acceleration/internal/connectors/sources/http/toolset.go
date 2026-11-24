@@ -49,8 +49,9 @@ const (
 	// X-HTTP-Method-Override the model adds (AC-6 of AI-3669): it is refused, not dropped, so
 	// the model does not take a call that went without it for one that went with it.
 	undeclaredArgument = "http: %s: an argument is not one of the tool's parameters, so nothing was sent"
-	// otherResource is a path value that would make the path name another resource (path).
-	otherResource = "http: %s: a path parameter is empty, . or .., which names another resource than the tool's, so nothing was sent"
+	// otherResource is a path value that would make the path name another resource (builtPath).
+	otherResource = "http: %s: a path parameter is empty, . or .., which names another resource than the tool's, " +
+		"so nothing was sent"
 )
 
 // Toolset is the granted tools of one http source, opened for one session. It is safe for
@@ -163,7 +164,7 @@ func (t *Toolset) Call(ctx context.Context, call llm.ToolCall) (core.Result, err
 	return core.Result{Parts: llm.TextParts(core.CutResult(text))}, nil
 }
 
-// errOtherResource is a path value that would make the path name another resource (path).
+// errOtherResource is a path value that would make the path name another resource (builtPath).
 var errOtherResource = errors.New("a path value names another resource")
 
 // unreached is a call to name that got no whole answer, for cause: one sentence for every such
