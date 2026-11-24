@@ -365,6 +365,10 @@ func (s *StreamAppSuite) TestAUserTokenSaysTheRoleItIsMintedWith() {
 		_, err = jwt.ParseWithClaims(token, claims, func(*jwt.Token) (any, error) { return []byte("deploy-secret"), nil })
 		s.Require().NoError(err)
 		s.Equal(said, claims["role"])
+		expires, err := claims.GetExpirationTime()
+		s.Require().NoError(err)
+		s.Require().NotNil(expires)
+		s.WithinDuration(time.Now().Add(time.Hour), expires.Time, time.Minute)
 	}
 }
 

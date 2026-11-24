@@ -162,6 +162,16 @@ func (s *OwnerKindSuite) TestASharedConversationsCallerIsCheckedAgainAsTheKindTh
 	s.NoError(fresh.CheckCaller(s.T().Context(), "bob"))
 }
 
+func (s *OwnerKindSuite) TestAHeldSharedConversationIsCheckedAsItsCallersKind() {
+	cid := s.shared(auth.KindGuest)
+	held, _, _, err := s.service.OpenInApp(s.as(auth.KindGuest), 0, "customer", "agent", cid, "alice", "", nil, "")
+	s.Require().NoError(err)
+	s.Require().NoError(held.CheckCaller(s.T().Context(), "alice"))
+	s.custom(cid)["support_owner_kind"] = "authenticated"
+
+	s.ErrorIs(held.CheckCaller(s.T().Context(), "alice"), ErrCommandNotFound)
+}
+
 func (s *OwnerKindSuite) TestABranchSwitchReadsTheConversationAsTheKindThatOpenedIt() {
 	opened, _, _, err := s.service.OpenInApp(s.as(auth.KindAuthenticated), 0, "customer", "agent", "", "alice", "", nil, "")
 	s.Require().NoError(err)
