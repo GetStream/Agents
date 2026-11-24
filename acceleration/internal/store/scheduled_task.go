@@ -357,7 +357,7 @@ func (r *ScheduledTasks) Get(ctx context.Context, customerID, id string) (Schedu
 // ScheduledTaskLimit(filter.Limit).
 func (r *ScheduledTasks) Select(ctx context.Context, customerID string, filter ScheduledTaskFilter) ([]ScheduledTask, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	var tasks []ScheduledTask
 	query := r.store.global.NewSelect().Model(&tasks).Where("customer_id = ?", customerID)

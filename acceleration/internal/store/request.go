@@ -812,7 +812,7 @@ func (r *Requests) Spend(
 		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	if limit < 1 {
 		return nil, stack.Wrap(errors.New("store: limit must be at least 1"))
@@ -892,7 +892,7 @@ func (r *Requests) TagKeys(
 	tags map[string]string,
 ) ([]TagKeySummary, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	tags = orEmptyMap(tags)
 	filter, err := json.Marshal(tags)

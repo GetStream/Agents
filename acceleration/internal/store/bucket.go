@@ -214,7 +214,7 @@ func (r *Buckets) Select(ctx context.Context, customerID string, f BucketFilter)
 		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", f.Granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	if f.Modality == "" {
 		return nil, stack.Wrap(errors.New("store: modality is required"))

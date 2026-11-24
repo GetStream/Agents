@@ -180,7 +180,7 @@ type CampaignFilter struct {
 // Select returns a customer's campaigns, newest first.
 func (r *Campaigns) Select(ctx context.Context, customerID string, filter CampaignFilter) ([]Campaign, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var campaigns []Campaign
