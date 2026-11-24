@@ -714,7 +714,7 @@ func (s *ScheduledTasksSuite) TestTheAgentCannotMoveATaskSoonerThanAQuarterHourB
 	config := s.agentWithScheduling(nil)
 	user := s.data.createUser()
 	created := s.createTask(user, utcTaskRequest(config))
-	tomorrow := time.Now().UTC().Add(5 * time.Minute).Truncate(time.Minute).AddDate(0, 0, 1)
+	tomorrow := time.Now().UTC().Add(5*time.Minute).Truncate(time.Minute).AddDate(0, 0, 1)
 	// Weekly from six days back: its next run is tomorrow, and daily would be today.
 	s.repeatedAtSoon(created.Id, 6, "FREQ=WEEKLY", nil, store.ScheduledTaskActive, &tomorrow)
 	opened := s.openScheduling(user, config, nil)
