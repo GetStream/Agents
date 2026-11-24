@@ -149,7 +149,7 @@ type CredentialBroker interface {
 	// It returns the env vars the run of code gets on top of Mount.RunEnv, which hold what lets
 	// the run reach its grants for as long as it lasts, such as a proxy credential of its own.
 	BeforeRun(ctx context.Context) (map[string]string, error)
-	// AfterRun ends what BeforeRun gave the run once its code has ended, so nothing copied out
+	// AfterRun ends what BeforeRun gave the run once its call is over (code a cut call left may still run, without it), so nothing copied out
 	// of the run reaches the grants after it. A no-op after Close, and when BeforeRun gave
 	// nothing that ends.
 	AfterRun(ctx context.Context) error

@@ -334,8 +334,9 @@ func (s *Sandbox) Run(ctx context.Context, code string, outputs []string) (sandb
 	return result, nil
 }
 
-// endRun ends what the broker gave the run, once its code has ended, though ctx was cut: a proxy
-// credential reaches the grants until then. It holds the gate, so it is bounded as a check is. One
+// endRun ends what the broker gave the run once the call is over, though ctx was cut: a proxy
+// credential reaches the grants until then. Code a cut call left may still run in the sandbox
+// until its own timeout, and has no proxy from here on. It holds the gate, so it is bounded as a check is. One
 // the broker could not end lasts until it expires, which the log says.
 func (s *Sandbox) endRun(ctx context.Context) {
 	end, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.check)
