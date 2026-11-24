@@ -112,3 +112,19 @@ func (s *PolicySuite) TestCloseStopsWaitingForAMembershipAfterJoinTimeout() {
 		s.FailNow("Close waited on the membership past joinTimeout")
 	}
 }
+
+func (s *PolicySuite) TestAJoinAfterCloseWritesNoMembership() {
+	enforcer, err := New(s.store, quick, nil)
+	s.Require().NoError(err)
+	enforcer.Close()
+	app := "app-" + uuid.NewString()
+
+	enforcer.Join(s.ctx, app, "org-after", openTier)
+
+	s.Never(func() bool {
+		var written bool
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+			"SELECT EXISTS (SELECT 1 FROM app_organizations WHERE app_id = ?)", app).Scan(&written))
+		return written
+	}, 300*time.Millisecond, 10*time.Millisecond, "a closed enforcer starts no write")
+}

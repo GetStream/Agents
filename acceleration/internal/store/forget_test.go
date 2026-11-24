@@ -181,6 +181,12 @@ func (s *StoreSuite) TestAUsersPolicyForgottenByACommitThatLandsAfterItGaveUpIsF
 	has, err := s.store.Policies.HasUsers(s.ctx, app)
 	s.Require().NoError(err)
 	s.Require().True(has, "and the app still has a user with a policy")
+	// Past the first deletion that follows, so the COMMIT lands between two of them.
+	for deadline := time.Now().Add(2 * forgetBackoff); time.Now().Before(deadline); {
+		document, err := s.store.Policies.Get(s.ctx, ScopeUser, user)
+		s.Require().NoError(err)
+		s.Require().NotNil(document.PromptInjection, "the policy is still there while the COMMIT is held")
+	}
 	proxy.let()
 	s.Require().Eventually(func() bool {
 		held, err := s.store.global.NewSelect().Model((*Policy)(nil)).

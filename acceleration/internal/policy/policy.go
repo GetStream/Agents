@@ -457,8 +457,7 @@ func (e *Enforcer) record(ctx context.Context, appID, organizationID string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), joinTimeout)
 	defer cancel()
 	if err := e.config.AppOrganizations.Upsert(ctx, &store.AppOrganization{AppID: appID, OrganizationID: organizationID}); err != nil {
-		// Only if no request named another since, which is written next.
-		e.members.CompareAndDelete(appID, organizationID)
+		e.members.Delete(appID)
 		e.logger.Error("could not record which organization an app belongs to",
 			"app", appID, "organization", organizationID, "error", err)
 		return
