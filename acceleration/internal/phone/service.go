@@ -1307,7 +1307,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	}
 	if err != nil {
 		// Nothing was asked of the vendor, so nobody was rung.
-		return Placed{}, stack.Wrap(fmt.Errorf("%w: %w", ErrNotPlaced, err))
+		return Placed{}, stack.Wrap(fmt.Errorf("%w: %w: %w", ErrNotPlaced, ErrPlacingFailed, err))
 	}
 	// Until the dial, whose failures forget it themselves, a call that goes no further is
 	// forgotten here: it never rang.
@@ -1318,7 +1318,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 		}
 	}()
 	// Its leg counts against the organization it was placed under once it is dialled too.
-	if request.Owner.OrganizationID == "" {
+	if room.OrganizationID != "" {
 		request.Owner.OrganizationID = room.OrganizationID
 	}
 
@@ -1724,8 +1724,13 @@ func callBridgeAAD(customerID, token string) []byte {
 }
 
 // ErrNotPlaced is a call the vendor was never asked to dial, its context ended or its placing
-// failed: nobody was rung.
-var ErrNotPlaced = errors.New("phone: the call was cancelled before it was placed")
+// failed (ErrPlacingFailed): nobody was rung.
+var ErrNotPlaced = errors.New("phone: the call was not placed")
+
+// ErrPlacingFailed is a call whose placing failed other than by its organization's calls at
+// once, the count or its lock not answering in time: it is ErrNotPlaced too, and worth trying
+// again only once the database answers.
+var ErrPlacingFailed = errors.New("phone: the call could not be counted against its organization's calls")
 
 // ErrUnknownStatus is a status post for no call waiting for one: its token is unknown or swept,
 // or its vendor reports no status.

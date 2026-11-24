@@ -634,8 +634,10 @@ func (s *StoreSuite) TestARouterHoldsAtMostItsPlacementsAtOnce() {
 	for _, organization := range organizations {
 		wg.Go(func() { s.NoError(s.placeWithin(router, organization, 1)) })
 	}
-	time.Sleep(300 * time.Millisecond)
-	s.LessOrEqual(placingInUse(router), placingAtOnce, "the shared pool keeps room for every other request")
+	s.Require().Eventually(func() bool { return placingInUse(router) == placingAtOnce }, 2*time.Second, 10*time.Millisecond,
+		"as many placements as a router holds started, each waiting for its organization's lock")
+	s.Never(func() bool { return placingInUse(router) > placingAtOnce }, 300*time.Millisecond, 10*time.Millisecond,
+		"the shared pool keeps room for every other request")
 	release()
 	wg.Wait()
 }

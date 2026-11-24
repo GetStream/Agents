@@ -474,8 +474,8 @@ func (r *Runner) ring(ctx context.Context, campaign store.Campaign, contact stor
 const codeDialFailed = "dial_failed"
 
 // countDial counts a dial in the activity record, refused when it could not be tried or placed
-// no call, with its reason. A dial a shutdown cut off rang nobody and leaves the contact to be
-// rung again, so it is counted when that dial is.
+// no call, with its reason. A dial never placed, cut off by a shutdown or by a placing that
+// failed, rang nobody and leaves the contact to be rung again, so it is counted when that dial is.
 func (r *Runner) countDial(campaign store.Campaign, dialed Dialed, err error) {
 	if dialed.Result == NotPlaced {
 		return

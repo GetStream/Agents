@@ -745,8 +745,10 @@ const placingStripes = 64
 // shard can hold up only these and never the pool every request needs.
 const placingAtOnce = 8
 
-// placingFor bounds a placement once it holds its lock, so one stalled on a shard gives up
-// its connection and its organization's turn rather than hold them for as long as its caller waits.
+// placingFor bounds a placement once it has its turn, so one stalled on a shard gives up its
+// connection and its organization's turn rather than hold them for as long as its caller waits.
+// A failed placement then deletes its leg within placingFor again, so a stalled one holds its
+// turn for up to twice placingFor.
 const placingFor = 3 * time.Second
 
 // PlaceWithin is Place for a leg of leg.OrganizationID that only its calls at once leave room
@@ -808,10 +810,11 @@ func (r *CallLegs) PlaceWithin(ctx context.Context, leg *CallLeg, atOnce CallsAt
 	if errors.Is(err, ErrCallsAtOnce) {
 		return stack.Wrap(ErrCallsAtOnce)
 	}
-	if err != nil && !shared {
-		// The shard may have kept the leg, its insert's answer lost or the lock's commit failed
-		// after it, and the caller dials nothing: the leg would hold a call of the organization's
-		// for as long as it could ring. Deleting a leg the shard never kept deletes nothing.
+	if err != nil {
+		// The leg may have been kept, its insert's or commit's answer lost, or on a shard of its
+		// own the lock's commit failed after it, and the caller dials nothing: the leg would hold
+		// a call of the organization's for as long as it could ring. Deleting a leg that was
+		// never kept deletes nothing.
 		gone, stop := context.WithTimeout(context.WithoutCancel(ctx), placingFor)
 		if _, derr := r.store.shard.NewDelete().Model((*CallLeg)(nil)).Where("token_hash = ?", leg.TokenHash).Exec(gone); derr != nil {
 			err = errors.Join(err, derr)
