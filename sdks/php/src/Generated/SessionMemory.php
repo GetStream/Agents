@@ -15,7 +15,7 @@ use GetStream\VisionAgents\Json;
 final readonly class SessionMemory
 {
     public function __construct(
-        // Separates two deployments sharing one memory account.
+        // Separates two deployments sharing one memory account. A device may set it or leave it out, so it narrows re...
         public ?string $appId = null,
         // The caller's own labels, which narrow recall further. They cannot widen it: a filter is applied alongside t...
         /** @var array<string, string>|null */

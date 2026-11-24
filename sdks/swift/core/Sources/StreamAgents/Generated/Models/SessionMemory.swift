@@ -3,9 +3,9 @@ import StreamCore
 
 /// Who the session's memories are about. Without a user id nothing is recalled or stored, which is the case for a call with nobody identified on it.
 final class SessionMemory: Sendable, Codable, JSONEncodable {
-    /// Separates two deployments sharing one memory account.
+    /// Separates two deployments sharing one memory account. A device may set it or leave it out, so it narrows recall but keeps nothing from the user.
     let appId: String?
-    /// The caller's own labels, which narrow recall further. They cannot widen it: a filter is applied alongside the user id, never instead of it.
+    /// The caller's own labels, which narrow recall further. They cannot widen it: a filter is applied alongside the user id, never instead of it. A device may set them or leave them out, so they keep nothing from the user: memories a user must not reach across groups, such as workspaces, need a user id per group, named by the backend.
     let filter: [String: String]?
     /// Who the memories belong to. Empty means the customer. An end user's device may only name its own user id, and an anonymous caller none; a backend may name any of its users.
     let userId: String?

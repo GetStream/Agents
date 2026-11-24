@@ -13974,13 +13974,13 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
-        /// Separates two deployments sharing one memory account.
+        /// Separates two deployments sharing one memory account. A device may set it or leave it out, so it narrows recall but keeps nothing from the user.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("app_id")]
         public string? AppId { get; set; } = default!;
 
         /// <summary>
-        /// The caller's own labels, which narrow recall further. They cannot widen it: a filter is applied alongside the user id, never instead of it.
+        /// The caller's own labels, which narrow recall further. They cannot widen it: a filter is applied alongside the user id, never instead of it. A device may set them or leave them out, so they keep nothing from the user: memories a user must not reach across groups, such as workspaces, need a user id per group, named by the backend.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("filter")]
         public System.Collections.Generic.Dictionary<string, string>? Filter { get; set; } = default!;

@@ -210,31 +210,33 @@ def sync_detailed(
     must persist execution receipts and refuse to repeat uncertain writes. Ordinary status watchers
     should leave this disabled. Persistent text command recovery is unchanged.
     The client sends `tool_result` to answer a `tool_call`, and `say`, `respond`, `interrupt`
-    (optionally naming a `request_id`) or `close` to act on the session. A session's instructions are
-    its agent config's, so there is no command to change them. A `tool_call` is the only frame that must
-    be answered: everything else is a report. It carries `id`, `name`, `arguments`, `turn_id`,
-    `session_id`, `user` (`id` and `name` of the person whose turn asked for it, when the router knows)
-    and `conversation` (`cid` when the conversation is kept, and the session's `custom`). Every watcher
-    sees every `tool_call`, and `run` says whether this one is to run it: only a watcher that runs the
-    tool answers, and a result from any other is dropped while the call waits. A watcher says which
-    tools it runs with `tools` when it attaches. Without it, it runs the session's tools when it is on
-    the side that created the session: a backend for a session a backend created, the same person for
-    one a device created. A tool a backend declared runs only on a backend, whatever a device says it
-    holds. A call that no watcher attached runs fails at once. `tool_cancel` (`id`, `turn_id`) says a
-    call is no longer wanted: its timeout passed, or the caller interrupted a call to an `interruptible`
-    tool. Tool calls made by durable personal commands carry `request_id` and `turn_id`; their result
-    must repeat both values so a result cannot be adopted by another command or turn. A `tool_result`,
-    `tool_hold`, `tool_update` or `tool_approval` names its call with `tool_call_id`, or with `id` as
-    the `tool_call` did; `tool_call_id` wins when both are sent. A `tool_result` naming no call is
-    answered with an `error` (`context` `tool`). One no call waits for (answered already, cancelled,
-    timed out, naming another call, or a call of a durable command without its `request_id` and
-    `turn_id`) is answered with `tool_result_ignored`: the `tool_call_id`, `request_id` and `turn_id` it
-    was sent with, each left out when it was and each cut to its first 128 bytes, and `reason`, a
-    sentence saying why; the socket stays open. Every watcher is sent both. A result sent in the moment
-    its call times out may be taken and lost without either. A result from a watcher that does not run a
-    call still waiting for it is dropped without a word, since the watcher that runs it answers. Once
-    the call waits no longer, a result from any watcher, running it or not, is answered with
-    `tool_result_ignored` like any other. An `id` that is not a string names no call.
+    (optionally naming a `request_id`) or `close` to act on the session. `say` is server-side only, as
+    saySession is: from an end user's device it is answered with an `error` (`context` `command`),
+    nothing is said and the socket stays open. A session's instructions are its agent config's, so there
+    is no command to change them. A `tool_call` is the only frame that must be answered: everything else
+    is a report. It carries `id`, `name`, `arguments`, `turn_id`, `session_id`, `user` (`id` and `name`
+    of the person whose turn asked for it, when the router knows) and `conversation` (`cid` when the
+    conversation is kept, and the session's `custom`). Every watcher sees every `tool_call`, and `run`
+    says whether this one is to run it: only a watcher that runs the tool answers, and a result from any
+    other is dropped while the call waits. A watcher says which tools it runs with `tools` when it
+    attaches. Without it, it runs the session's tools when it is on the side that created the session: a
+    backend for a session a backend created, the same person for one a device created. A tool a backend
+    declared runs only on a backend, whatever a device says it holds. A call that no watcher attached
+    runs fails at once. `tool_cancel` (`id`, `turn_id`) says a call is no longer wanted: its timeout
+    passed, or the caller interrupted a call to an `interruptible` tool. Tool calls made by durable
+    personal commands carry `request_id` and `turn_id`; their result must repeat both values so a result
+    cannot be adopted by another command or turn. A `tool_result`, `tool_hold`, `tool_update` or
+    `tool_approval` names its call with `tool_call_id`, or with `id` as the `tool_call` did;
+    `tool_call_id` wins when both are sent. A `tool_result` naming no call is answered with an `error`
+    (`context` `tool`). One no call waits for (answered already, cancelled, timed out, naming another
+    call, or a call of a durable command without its `request_id` and `turn_id`) is answered with
+    `tool_result_ignored`: the `tool_call_id`, `request_id` and `turn_id` it was sent with, each left
+    out when it was and each cut to its first 128 bytes, and `reason`, a sentence saying why; the socket
+    stays open. Every watcher is sent both. A result sent in the moment its call times out may be taken
+    and lost without either. A result from a watcher that does not run a call still waiting for it is
+    dropped without a word, since the watcher that runs it answers. Once the call waits no longer, a
+    result from any watcher, running it or not, is answered with `tool_result_ignored` like any other.
+    An `id` that is not a string names no call.
     While it runs a call, the watcher running it may send `tool_hold` (`tool_call_id`) to keep the call
     going when the caller talks over the agent, which would otherwise cancel a call to an
     `interruptible` tool. Every watcher is sent `tool_held` (`id`) when it was held, or `tool_cancel`
@@ -243,12 +245,12 @@ def sync_detailed(
     agent tells a voice caller in its own words once nobody is talking, and a persistent conversation
     shows `text` as the summary of the call's step until it ends. On speech-to-speech, OpenAI Realtime,
     Gemini 3.1 Flash Live and Gemini 3.8 Live are told while the call is open; other models only report
-    it. With `verbatim` true, the agent says or posts `text` as written instead. A newer update replaces
-    one not yet said, and a call's result replaces both. `custom`, an object, replaces the call's
-    `custom` in its `ToolCallState`; an update with `custom` and no `text` changes nothing else and is
-    not said. Every watcher is sent `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`,
-    `custom`) for each update with text. An update or hold from a watcher that does not run the call is
-    dropped.
+    it. With `verbatim` true, the agent says or posts `text` as written instead; from an end user's
+    device `verbatim` is taken as false. A newer update replaces one not yet said, and a call's result
+    replaces both. `custom`, an object, replaces the call's `custom` in its `ToolCallState`; an update
+    with `custom` and no `text` changes nothing else and is not said. Every watcher is sent
+    `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`, `custom`) for each update with text. An
+    update or hold from a watcher that does not run the call is dropped.
     On a voice call, a call to a tool declared with an `approval` is asked about out loud instead, and
     sent only once the caller said yes, with `approved` true; a watcher does not ask again. In writing,
     a call to a tool declared with an `approval` waits for a person. The client reports their answer
@@ -445,31 +447,33 @@ def sync(
     must persist execution receipts and refuse to repeat uncertain writes. Ordinary status watchers
     should leave this disabled. Persistent text command recovery is unchanged.
     The client sends `tool_result` to answer a `tool_call`, and `say`, `respond`, `interrupt`
-    (optionally naming a `request_id`) or `close` to act on the session. A session's instructions are
-    its agent config's, so there is no command to change them. A `tool_call` is the only frame that must
-    be answered: everything else is a report. It carries `id`, `name`, `arguments`, `turn_id`,
-    `session_id`, `user` (`id` and `name` of the person whose turn asked for it, when the router knows)
-    and `conversation` (`cid` when the conversation is kept, and the session's `custom`). Every watcher
-    sees every `tool_call`, and `run` says whether this one is to run it: only a watcher that runs the
-    tool answers, and a result from any other is dropped while the call waits. A watcher says which
-    tools it runs with `tools` when it attaches. Without it, it runs the session's tools when it is on
-    the side that created the session: a backend for a session a backend created, the same person for
-    one a device created. A tool a backend declared runs only on a backend, whatever a device says it
-    holds. A call that no watcher attached runs fails at once. `tool_cancel` (`id`, `turn_id`) says a
-    call is no longer wanted: its timeout passed, or the caller interrupted a call to an `interruptible`
-    tool. Tool calls made by durable personal commands carry `request_id` and `turn_id`; their result
-    must repeat both values so a result cannot be adopted by another command or turn. A `tool_result`,
-    `tool_hold`, `tool_update` or `tool_approval` names its call with `tool_call_id`, or with `id` as
-    the `tool_call` did; `tool_call_id` wins when both are sent. A `tool_result` naming no call is
-    answered with an `error` (`context` `tool`). One no call waits for (answered already, cancelled,
-    timed out, naming another call, or a call of a durable command without its `request_id` and
-    `turn_id`) is answered with `tool_result_ignored`: the `tool_call_id`, `request_id` and `turn_id` it
-    was sent with, each left out when it was and each cut to its first 128 bytes, and `reason`, a
-    sentence saying why; the socket stays open. Every watcher is sent both. A result sent in the moment
-    its call times out may be taken and lost without either. A result from a watcher that does not run a
-    call still waiting for it is dropped without a word, since the watcher that runs it answers. Once
-    the call waits no longer, a result from any watcher, running it or not, is answered with
-    `tool_result_ignored` like any other. An `id` that is not a string names no call.
+    (optionally naming a `request_id`) or `close` to act on the session. `say` is server-side only, as
+    saySession is: from an end user's device it is answered with an `error` (`context` `command`),
+    nothing is said and the socket stays open. A session's instructions are its agent config's, so there
+    is no command to change them. A `tool_call` is the only frame that must be answered: everything else
+    is a report. It carries `id`, `name`, `arguments`, `turn_id`, `session_id`, `user` (`id` and `name`
+    of the person whose turn asked for it, when the router knows) and `conversation` (`cid` when the
+    conversation is kept, and the session's `custom`). Every watcher sees every `tool_call`, and `run`
+    says whether this one is to run it: only a watcher that runs the tool answers, and a result from any
+    other is dropped while the call waits. A watcher says which tools it runs with `tools` when it
+    attaches. Without it, it runs the session's tools when it is on the side that created the session: a
+    backend for a session a backend created, the same person for one a device created. A tool a backend
+    declared runs only on a backend, whatever a device says it holds. A call that no watcher attached
+    runs fails at once. `tool_cancel` (`id`, `turn_id`) says a call is no longer wanted: its timeout
+    passed, or the caller interrupted a call to an `interruptible` tool. Tool calls made by durable
+    personal commands carry `request_id` and `turn_id`; their result must repeat both values so a result
+    cannot be adopted by another command or turn. A `tool_result`, `tool_hold`, `tool_update` or
+    `tool_approval` names its call with `tool_call_id`, or with `id` as the `tool_call` did;
+    `tool_call_id` wins when both are sent. A `tool_result` naming no call is answered with an `error`
+    (`context` `tool`). One no call waits for (answered already, cancelled, timed out, naming another
+    call, or a call of a durable command without its `request_id` and `turn_id`) is answered with
+    `tool_result_ignored`: the `tool_call_id`, `request_id` and `turn_id` it was sent with, each left
+    out when it was and each cut to its first 128 bytes, and `reason`, a sentence saying why; the socket
+    stays open. Every watcher is sent both. A result sent in the moment its call times out may be taken
+    and lost without either. A result from a watcher that does not run a call still waiting for it is
+    dropped without a word, since the watcher that runs it answers. Once the call waits no longer, a
+    result from any watcher, running it or not, is answered with `tool_result_ignored` like any other.
+    An `id` that is not a string names no call.
     While it runs a call, the watcher running it may send `tool_hold` (`tool_call_id`) to keep the call
     going when the caller talks over the agent, which would otherwise cancel a call to an
     `interruptible` tool. Every watcher is sent `tool_held` (`id`) when it was held, or `tool_cancel`
@@ -478,12 +482,12 @@ def sync(
     agent tells a voice caller in its own words once nobody is talking, and a persistent conversation
     shows `text` as the summary of the call's step until it ends. On speech-to-speech, OpenAI Realtime,
     Gemini 3.1 Flash Live and Gemini 3.8 Live are told while the call is open; other models only report
-    it. With `verbatim` true, the agent says or posts `text` as written instead. A newer update replaces
-    one not yet said, and a call's result replaces both. `custom`, an object, replaces the call's
-    `custom` in its `ToolCallState`; an update with `custom` and no `text` changes nothing else and is
-    not said. Every watcher is sent `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`,
-    `custom`) for each update with text. An update or hold from a watcher that does not run the call is
-    dropped.
+    it. With `verbatim` true, the agent says or posts `text` as written instead; from an end user's
+    device `verbatim` is taken as false. A newer update replaces one not yet said, and a call's result
+    replaces both. `custom`, an object, replaces the call's `custom` in its `ToolCallState`; an update
+    with `custom` and no `text` changes nothing else and is not said. Every watcher is sent
+    `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`, `custom`) for each update with text. An
+    update or hold from a watcher that does not run the call is dropped.
     On a voice call, a call to a tool declared with an `approval` is asked about out loud instead, and
     sent only once the caller said yes, with `approved` true; a watcher does not ask again. In writing,
     a call to a tool declared with an `approval` waits for a person. The client reports their answer
@@ -675,31 +679,33 @@ async def asyncio_detailed(
     must persist execution receipts and refuse to repeat uncertain writes. Ordinary status watchers
     should leave this disabled. Persistent text command recovery is unchanged.
     The client sends `tool_result` to answer a `tool_call`, and `say`, `respond`, `interrupt`
-    (optionally naming a `request_id`) or `close` to act on the session. A session's instructions are
-    its agent config's, so there is no command to change them. A `tool_call` is the only frame that must
-    be answered: everything else is a report. It carries `id`, `name`, `arguments`, `turn_id`,
-    `session_id`, `user` (`id` and `name` of the person whose turn asked for it, when the router knows)
-    and `conversation` (`cid` when the conversation is kept, and the session's `custom`). Every watcher
-    sees every `tool_call`, and `run` says whether this one is to run it: only a watcher that runs the
-    tool answers, and a result from any other is dropped while the call waits. A watcher says which
-    tools it runs with `tools` when it attaches. Without it, it runs the session's tools when it is on
-    the side that created the session: a backend for a session a backend created, the same person for
-    one a device created. A tool a backend declared runs only on a backend, whatever a device says it
-    holds. A call that no watcher attached runs fails at once. `tool_cancel` (`id`, `turn_id`) says a
-    call is no longer wanted: its timeout passed, or the caller interrupted a call to an `interruptible`
-    tool. Tool calls made by durable personal commands carry `request_id` and `turn_id`; their result
-    must repeat both values so a result cannot be adopted by another command or turn. A `tool_result`,
-    `tool_hold`, `tool_update` or `tool_approval` names its call with `tool_call_id`, or with `id` as
-    the `tool_call` did; `tool_call_id` wins when both are sent. A `tool_result` naming no call is
-    answered with an `error` (`context` `tool`). One no call waits for (answered already, cancelled,
-    timed out, naming another call, or a call of a durable command without its `request_id` and
-    `turn_id`) is answered with `tool_result_ignored`: the `tool_call_id`, `request_id` and `turn_id` it
-    was sent with, each left out when it was and each cut to its first 128 bytes, and `reason`, a
-    sentence saying why; the socket stays open. Every watcher is sent both. A result sent in the moment
-    its call times out may be taken and lost without either. A result from a watcher that does not run a
-    call still waiting for it is dropped without a word, since the watcher that runs it answers. Once
-    the call waits no longer, a result from any watcher, running it or not, is answered with
-    `tool_result_ignored` like any other. An `id` that is not a string names no call.
+    (optionally naming a `request_id`) or `close` to act on the session. `say` is server-side only, as
+    saySession is: from an end user's device it is answered with an `error` (`context` `command`),
+    nothing is said and the socket stays open. A session's instructions are its agent config's, so there
+    is no command to change them. A `tool_call` is the only frame that must be answered: everything else
+    is a report. It carries `id`, `name`, `arguments`, `turn_id`, `session_id`, `user` (`id` and `name`
+    of the person whose turn asked for it, when the router knows) and `conversation` (`cid` when the
+    conversation is kept, and the session's `custom`). Every watcher sees every `tool_call`, and `run`
+    says whether this one is to run it: only a watcher that runs the tool answers, and a result from any
+    other is dropped while the call waits. A watcher says which tools it runs with `tools` when it
+    attaches. Without it, it runs the session's tools when it is on the side that created the session: a
+    backend for a session a backend created, the same person for one a device created. A tool a backend
+    declared runs only on a backend, whatever a device says it holds. A call that no watcher attached
+    runs fails at once. `tool_cancel` (`id`, `turn_id`) says a call is no longer wanted: its timeout
+    passed, or the caller interrupted a call to an `interruptible` tool. Tool calls made by durable
+    personal commands carry `request_id` and `turn_id`; their result must repeat both values so a result
+    cannot be adopted by another command or turn. A `tool_result`, `tool_hold`, `tool_update` or
+    `tool_approval` names its call with `tool_call_id`, or with `id` as the `tool_call` did;
+    `tool_call_id` wins when both are sent. A `tool_result` naming no call is answered with an `error`
+    (`context` `tool`). One no call waits for (answered already, cancelled, timed out, naming another
+    call, or a call of a durable command without its `request_id` and `turn_id`) is answered with
+    `tool_result_ignored`: the `tool_call_id`, `request_id` and `turn_id` it was sent with, each left
+    out when it was and each cut to its first 128 bytes, and `reason`, a sentence saying why; the socket
+    stays open. Every watcher is sent both. A result sent in the moment its call times out may be taken
+    and lost without either. A result from a watcher that does not run a call still waiting for it is
+    dropped without a word, since the watcher that runs it answers. Once the call waits no longer, a
+    result from any watcher, running it or not, is answered with `tool_result_ignored` like any other.
+    An `id` that is not a string names no call.
     While it runs a call, the watcher running it may send `tool_hold` (`tool_call_id`) to keep the call
     going when the caller talks over the agent, which would otherwise cancel a call to an
     `interruptible` tool. Every watcher is sent `tool_held` (`id`) when it was held, or `tool_cancel`
@@ -708,12 +714,12 @@ async def asyncio_detailed(
     agent tells a voice caller in its own words once nobody is talking, and a persistent conversation
     shows `text` as the summary of the call's step until it ends. On speech-to-speech, OpenAI Realtime,
     Gemini 3.1 Flash Live and Gemini 3.8 Live are told while the call is open; other models only report
-    it. With `verbatim` true, the agent says or posts `text` as written instead. A newer update replaces
-    one not yet said, and a call's result replaces both. `custom`, an object, replaces the call's
-    `custom` in its `ToolCallState`; an update with `custom` and no `text` changes nothing else and is
-    not said. Every watcher is sent `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`,
-    `custom`) for each update with text. An update or hold from a watcher that does not run the call is
-    dropped.
+    it. With `verbatim` true, the agent says or posts `text` as written instead; from an end user's
+    device `verbatim` is taken as false. A newer update replaces one not yet said, and a call's result
+    replaces both. `custom`, an object, replaces the call's `custom` in its `ToolCallState`; an update
+    with `custom` and no `text` changes nothing else and is not said. Every watcher is sent
+    `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`, `custom`) for each update with text. An
+    update or hold from a watcher that does not run the call is dropped.
     On a voice call, a call to a tool declared with an `approval` is asked about out loud instead, and
     sent only once the caller said yes, with `approved` true; a watcher does not ask again. In writing,
     a call to a tool declared with an `approval` waits for a person. The client reports their answer
@@ -908,31 +914,33 @@ async def asyncio(
     must persist execution receipts and refuse to repeat uncertain writes. Ordinary status watchers
     should leave this disabled. Persistent text command recovery is unchanged.
     The client sends `tool_result` to answer a `tool_call`, and `say`, `respond`, `interrupt`
-    (optionally naming a `request_id`) or `close` to act on the session. A session's instructions are
-    its agent config's, so there is no command to change them. A `tool_call` is the only frame that must
-    be answered: everything else is a report. It carries `id`, `name`, `arguments`, `turn_id`,
-    `session_id`, `user` (`id` and `name` of the person whose turn asked for it, when the router knows)
-    and `conversation` (`cid` when the conversation is kept, and the session's `custom`). Every watcher
-    sees every `tool_call`, and `run` says whether this one is to run it: only a watcher that runs the
-    tool answers, and a result from any other is dropped while the call waits. A watcher says which
-    tools it runs with `tools` when it attaches. Without it, it runs the session's tools when it is on
-    the side that created the session: a backend for a session a backend created, the same person for
-    one a device created. A tool a backend declared runs only on a backend, whatever a device says it
-    holds. A call that no watcher attached runs fails at once. `tool_cancel` (`id`, `turn_id`) says a
-    call is no longer wanted: its timeout passed, or the caller interrupted a call to an `interruptible`
-    tool. Tool calls made by durable personal commands carry `request_id` and `turn_id`; their result
-    must repeat both values so a result cannot be adopted by another command or turn. A `tool_result`,
-    `tool_hold`, `tool_update` or `tool_approval` names its call with `tool_call_id`, or with `id` as
-    the `tool_call` did; `tool_call_id` wins when both are sent. A `tool_result` naming no call is
-    answered with an `error` (`context` `tool`). One no call waits for (answered already, cancelled,
-    timed out, naming another call, or a call of a durable command without its `request_id` and
-    `turn_id`) is answered with `tool_result_ignored`: the `tool_call_id`, `request_id` and `turn_id` it
-    was sent with, each left out when it was and each cut to its first 128 bytes, and `reason`, a
-    sentence saying why; the socket stays open. Every watcher is sent both. A result sent in the moment
-    its call times out may be taken and lost without either. A result from a watcher that does not run a
-    call still waiting for it is dropped without a word, since the watcher that runs it answers. Once
-    the call waits no longer, a result from any watcher, running it or not, is answered with
-    `tool_result_ignored` like any other. An `id` that is not a string names no call.
+    (optionally naming a `request_id`) or `close` to act on the session. `say` is server-side only, as
+    saySession is: from an end user's device it is answered with an `error` (`context` `command`),
+    nothing is said and the socket stays open. A session's instructions are its agent config's, so there
+    is no command to change them. A `tool_call` is the only frame that must be answered: everything else
+    is a report. It carries `id`, `name`, `arguments`, `turn_id`, `session_id`, `user` (`id` and `name`
+    of the person whose turn asked for it, when the router knows) and `conversation` (`cid` when the
+    conversation is kept, and the session's `custom`). Every watcher sees every `tool_call`, and `run`
+    says whether this one is to run it: only a watcher that runs the tool answers, and a result from any
+    other is dropped while the call waits. A watcher says which tools it runs with `tools` when it
+    attaches. Without it, it runs the session's tools when it is on the side that created the session: a
+    backend for a session a backend created, the same person for one a device created. A tool a backend
+    declared runs only on a backend, whatever a device says it holds. A call that no watcher attached
+    runs fails at once. `tool_cancel` (`id`, `turn_id`) says a call is no longer wanted: its timeout
+    passed, or the caller interrupted a call to an `interruptible` tool. Tool calls made by durable
+    personal commands carry `request_id` and `turn_id`; their result must repeat both values so a result
+    cannot be adopted by another command or turn. A `tool_result`, `tool_hold`, `tool_update` or
+    `tool_approval` names its call with `tool_call_id`, or with `id` as the `tool_call` did;
+    `tool_call_id` wins when both are sent. A `tool_result` naming no call is answered with an `error`
+    (`context` `tool`). One no call waits for (answered already, cancelled, timed out, naming another
+    call, or a call of a durable command without its `request_id` and `turn_id`) is answered with
+    `tool_result_ignored`: the `tool_call_id`, `request_id` and `turn_id` it was sent with, each left
+    out when it was and each cut to its first 128 bytes, and `reason`, a sentence saying why; the socket
+    stays open. Every watcher is sent both. A result sent in the moment its call times out may be taken
+    and lost without either. A result from a watcher that does not run a call still waiting for it is
+    dropped without a word, since the watcher that runs it answers. Once the call waits no longer, a
+    result from any watcher, running it or not, is answered with `tool_result_ignored` like any other.
+    An `id` that is not a string names no call.
     While it runs a call, the watcher running it may send `tool_hold` (`tool_call_id`) to keep the call
     going when the caller talks over the agent, which would otherwise cancel a call to an
     `interruptible` tool. Every watcher is sent `tool_held` (`id`) when it was held, or `tool_cancel`
@@ -941,12 +949,12 @@ async def asyncio(
     agent tells a voice caller in its own words once nobody is talking, and a persistent conversation
     shows `text` as the summary of the call's step until it ends. On speech-to-speech, OpenAI Realtime,
     Gemini 3.1 Flash Live and Gemini 3.8 Live are told while the call is open; other models only report
-    it. With `verbatim` true, the agent says or posts `text` as written instead. A newer update replaces
-    one not yet said, and a call's result replaces both. `custom`, an object, replaces the call's
-    `custom` in its `ToolCallState`; an update with `custom` and no `text` changes nothing else and is
-    not said. Every watcher is sent `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`,
-    `custom`) for each update with text. An update or hold from a watcher that does not run the call is
-    dropped.
+    it. With `verbatim` true, the agent says or posts `text` as written instead; from an end user's
+    device `verbatim` is taken as false. A newer update replaces one not yet said, and a call's result
+    replaces both. `custom`, an object, replaces the call's `custom` in its `ToolCallState`; an update
+    with `custom` and no `text` changes nothing else and is not said. Every watcher is sent
+    `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`, `custom`) for each update with text. An
+    update or hold from a watcher that does not run the call is dropped.
     On a voice call, a call to a tool declared with an `approval` is asked about out loud instead, and
     sent only once the caller said yes, with `approved` true; a watcher does not ask again. In writing,
     a call to a tool declared with an `approval` waits for a person. The client reports their answer

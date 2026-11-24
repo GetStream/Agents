@@ -11527,10 +11527,10 @@ pub struct SessionFilter {
 ///Who the session's memories are about. Without a user id nothing is recalled or stored, which is the case for a call with nobody identified on it.
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
 pub struct SessionMemory {
-    ///Separates two deployments sharing one memory account.
+    ///Separates two deployments sharing one memory account. A device may set it or leave it out, so it narrows recall but keeps nothing from the user.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub app_id: ::std::option::Option<::std::string::String>,
-    ///The caller's own labels, which narrow recall further. They cannot widen it: a filter is applied alongside the user id, never instead of it.
+    ///The caller's own labels, which narrow recall further. They cannot widen it: a filter is applied alongside the user id, never instead of it. A device may set them or leave them out, so they keep nothing from the user: memories a user must not reach across groups, such as workspaces, need a user id per group, named by the backend.
     #[serde(
         default,
         skip_serializing_if = ":: std :: collections :: BTreeMap::is_empty"

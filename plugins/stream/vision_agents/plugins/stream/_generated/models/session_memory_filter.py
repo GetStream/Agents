@@ -13,7 +13,8 @@ T = TypeVar("T", bound="SessionMemoryFilter")
 @_attrs_define
 class SessionMemoryFilter:
     """The caller's own labels, which narrow recall further. They cannot widen it: a filter is applied alongside the user
-    id, never instead of it.
+    id, never instead of it. A device may set them or leave them out, so they keep nothing from the user: memories a
+    user must not reach across groups, such as workspaces, need a user id per group, named by the backend.
 
     """
 

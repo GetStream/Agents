@@ -438,6 +438,10 @@ var errNoApprovalWaits = errors.New("tool_approval reached no call waiting for i
 var errApprovalNeedsTurn = errors.New("tool_approval reached no call: the call of a durable command " +
 	"needs the turn_id of its tool_call with the request_id")
 
+// errDeviceSay answers a say sent by an end user's device.
+var errDeviceSay = errors.New("say is server-side only: an end user's device cannot have the agent " +
+	"say words the model did not choose")
+
 // errToolResultNeedsCall answers a tool_result that names no call.
 var errToolResultNeedsCall = errors.New("tool_result needs tool_call_id: the id of the tool_call it answers")
 
@@ -536,7 +540,8 @@ func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat 
 				"session", found.ID(), "call", command.ToolCallID)
 			return true
 		}
-		found.ToolUpdate(command.ToolCallID, command.Text, command.Verbatim, command.Custom)
+		// As with say, a device's update is told in the agent's own words, never as written.
+		found.ToolUpdate(command.ToolCallID, command.Text, command.Verbatim && owner.Kind == auth.KindServer, command.Custom)
 
 	case "tool_approval":
 		if command.Allowed == nil {
@@ -568,6 +573,11 @@ func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat 
 		found.IgnoreApproval(command.ToolCallID, command.CommandID, command.TurnID, errNoApprovalWaits)
 
 	case "say":
+		// As saySession is: a device has the agent say only what the model chose.
+		if owner.Kind != auth.KindServer {
+			found.Report(errDeviceSay, "command")
+			return true
+		}
 		if err := found.Say(ctx, command.Text); err != nil {
 			s.logger.Debug("could not say it", "session", found.ID(), "error", err)
 		}
