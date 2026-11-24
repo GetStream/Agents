@@ -703,15 +703,70 @@ func (s *GuestsSuite) TestAnAddressThatMintedItsHourInOneAppStillMintsGuestsOfAn
 }
 
 // mintSixtyGuests mints as many new guests of the suite's app as one address may in an hour,
-// each by a caller of its own. Every test's address is the same, so they are minted within
-// one hour of the clock, where the count is kept: a count that started again at the hour
-// would let the next guest through.
+// each by a caller of its own.
 func (s *GuestsSuite) mintSixtyGuests() {
-	if left := time.Until(time.Now().Truncate(time.Hour).Add(time.Hour)); left < time.Minute {
-		time.Sleep(left)
-	}
+	awayFromTheHour()
 	for range 60 {
 		s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	}
+}
+
+// GuestsProxiedSuite mints guests behind a proxy with no trusted ranges, where every request
+// arrives from the proxy's address.
+type GuestsProxiedSuite struct {
+	RouterSuite
+}
+
+func TestGuestsProxiedSuite(t *testing.T) {
+	proxied := new(GuestsProxiedSuite)
+	proxied.proxied = true
+	runSuite(t, proxied)
+}
+
+func (s *GuestsProxiedSuite) SetupTest() {
+	s.useApp(s.data.createApp())
+}
+
+func (s *GuestsProxiedSuite) TestCallersTheProxyNamesAreNotCountedTogetherByTheProxysAddress() {
+	// The address is the proxy's, so counting a caller it names by it would hold every
+	// visitor of the app to one count.
+	for range 61 {
+		status, payload := s.viaProxy(s.utils.uuid()).call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+		s.Require().Equal(http.StatusCreated, status, string(payload))
+	}
+}
+
+func (s *GuestsProxiedSuite) TestCallersTheProxyNamesNobodyForShareTheProxysAddress() {
+	awayFromTheHour()
+	for range 60 {
+		status, payload := s.viaProxy("").call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+		s.Require().Equal(http.StatusCreated, status, string(payload))
+	}
+
+	status, _ := s.viaProxy("").call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Equal(http.StatusTooManyRequests, status)
+}
+
+// viaProxy is an anonymous caller of the app as the proxy forwards it, going by user, or by
+// nobody when user is empty.
+func (s *GuestsProxiedSuite) viaProxy(user string) *testClient {
+	header := http.Header{}
+	header.Set(auth.AppHeader, s.customerID())
+	header.Set(auth.OrganizationHeader, s.app.organization.ID)
+	header.Set(auth.AuthTypeHeader, auth.AuthTypeAnonymous)
+	if user != "" {
+		header.Set(auth.UserHeader, user)
+	}
+	return &testClient{suite: &s.RouterSuite, header: header}
+}
+
+// awayFromTheHour waits out the last minute of a clock hour, so the guests a test mints next
+// are counted in one hour's window: a count that started again at the hour would let the next
+// guest through.
+func awayFromTheHour() {
+	if left := time.Until(time.Now().Truncate(time.Hour).Add(time.Hour)); left < time.Minute {
+		time.Sleep(left)
 	}
 }
 
