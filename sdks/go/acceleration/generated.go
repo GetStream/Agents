@@ -40657,6 +40657,7 @@ type ListCallsResponse200Headers struct {
 	XStreamBalanceWarning *string
 	XStreamCostEstimated  *string
 	XStreamCostMicros     *int64
+	XUnreachableShards    *string
 }
 
 // ListCallsResponse402Headers the declared response headers of an HTTP 402 response for ListCalls
@@ -40859,6 +40860,7 @@ type GetCallResponse200Headers struct {
 	XStreamBalanceWarning *string
 	XStreamCostEstimated  *string
 	XStreamCostMicros     *int64
+	XUnreachableShards    *string
 }
 
 // GetCallResponse402Headers the declared response headers of an HTTP 402 response for GetCall
@@ -74315,6 +74317,13 @@ func ParseListCallsResponse(rsp *http.Response) (*ListCallsResponse, error) {
 			}
 			headers.XStreamCostMicros = &value
 		}
+		if values := rsp.Header.Values("X-Unreachable-Shards"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Unreachable-Shards", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XUnreachableShards = &value
+		}
 		response.Headers200 = &headers
 	case rsp.StatusCode == 402:
 		var headers ListCallsResponse402Headers
@@ -74559,6 +74568,13 @@ func ParseGetCallResponse(rsp *http.Response) (*GetCallResponse, error) {
 				return nil, err
 			}
 			headers.XStreamCostMicros = &value
+		}
+		if values := rsp.Header.Values("X-Unreachable-Shards"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Unreachable-Shards", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XUnreachableShards = &value
 		}
 		response.Headers200 = &headers
 	case rsp.StatusCode == 402:

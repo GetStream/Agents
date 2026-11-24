@@ -12420,6 +12420,7 @@ export interface operations {
                     readonly "X-Stream-Balance-Warning": components["headers"]["X-Stream-Balance-Warning"];
                     readonly "X-Stream-Cost-Estimated": components["headers"]["X-Stream-Cost-Estimated"];
                     readonly "X-Stream-Cost-Micros": components["headers"]["X-Stream-Cost-Micros"];
+                    readonly "X-Unreachable-Shards"?: string;
                     readonly [name: string]: unknown;
                 };
                 content: {
@@ -12453,6 +12454,7 @@ export interface operations {
                     readonly "X-Stream-Balance-Warning": components["headers"]["X-Stream-Balance-Warning"];
                     readonly "X-Stream-Cost-Estimated": components["headers"]["X-Stream-Cost-Estimated"];
                     readonly "X-Stream-Cost-Micros": components["headers"]["X-Stream-Cost-Micros"];
+                    readonly "X-Unreachable-Shards"?: string;
                     readonly [name: string]: unknown;
                 };
                 content: {

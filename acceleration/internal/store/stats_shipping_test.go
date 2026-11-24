@@ -168,6 +168,22 @@ func (s *ShardedStoreSuite) TestShippedStatsAreEveryShardsSumWithAShardDown() {
 	s.EqualValues(3, legs[3].Turns)
 }
 
+// Defect: the list fails while a shard is down, or names a shard other than the one that did
+// not answer.
+func (s *ShardedStoreSuite) TestACallListLeavesOutAShardThatIsDownAndNamesIt() {
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{ID: "here", CustomerID: "app", StartedAt: s.base}))
+	down := s.withTheOtherShardDown()
+
+	calls, missed, err := down.Calls.SelectReachable(s.ctx, "app", CallFilter{})
+	s.Require().NoError(err)
+	s.Require().Len(calls, 1)
+	s.Equal("here", calls[0].ID)
+	s.Require().NotNil(missed)
+	s.Equal([]string{"there"}, missed.Shards())
+	_, err = down.Calls.Select(s.ctx, "app", CallFilter{})
+	s.ErrorContains(err, "there", "a read that needs every shard still fails")
+}
+
 // Defect: every router of a shard ships at once, or one router holds the lock of every shard,
 // leaving the other shards' stats unshipped.
 func (s *ShardedStoreSuite) TestOneRouterOfEachShardShips() {
