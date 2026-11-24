@@ -259,6 +259,29 @@ func (s *DataMoveSuite) TestAnImportedAgentNamedLikeOneHereIsRefusedWithoutTheIn
 	s.NotContains(failure, "agent_configs_name_idx")
 }
 
+// A row whose key another app holds here is refused by name, and the answer says nothing of who holds it.
+func (s *DataMoveSuite) TestAnImportedRowWhoseKeyAnotherAppHoldsIsRefusedNamingIt() {
+	theirs := s.data.createAgentConfig()
+	var exported dataLine
+	for _, line := range s.export() {
+		if line.Table == "agent_configs" && strings.Contains(string(line.Row), theirs.Id) {
+			exported = line
+		}
+	}
+	s.Require().NotEmpty(exported.Table)
+	s.useApp(s.data.createApp())
+
+	change := dataLine{Change: &store.DataChange{Table: "agent_configs", Op: store.ChangeUpdate,
+		Key: json.RawMessage(`{"id":"` + theirs.Id + `"}`), Payload: exported.Row}}
+
+	for _, line := range []dataLine{exported, change} {
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", ndjson([]dataLine{line}))
+
+		s.Equal(http.StatusBadRequest, status)
+		s.Equal(`store: import agent_configs:{"id":"`+theirs.Id+`"}: this row cannot be written here`, failure)
+	}
+}
+
 // importedConnector is an export's line of a custom definition id whose manifest has fields,
 // JSON members, beside its id, name and MCP source.
 func (s *DataMoveSuite) importedConnector(id, fields string) dataLine {
@@ -369,22 +392,22 @@ func (s *DataMoveSuite) TestChangesAreAppliedToAnAppThatHoldsData() {
 	s.Equal("edited at the source", s.instructionsOf(agent.Id))
 }
 
-// A row that names a row of another app's is the export's to correct, and the answer names it.
-func (s *DataMoveSuite) TestAnImportedRowThatNamesAnotherAppsRowIsRefusedNamingIt() {
-	theirs, turn := s.utils.uuid(), s.utils.uuid()
+// A row that names a row the app does not hold is the export's to correct, and the answer names it.
+func (s *DataMoveSuite) TestAnImportedRowThatNamesARowTheAppDoesNotHoldIsRefusedNamingIt() {
+	theirs, nobodys, turn := s.utils.uuid(), s.utils.uuid(), s.utils.uuid()
 	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{ID: theirs, CustomerID: s.utils.uuid(),
 		AgentName: "docs", UserID: "sam", CallerKind: "user", CreatedAt: time.Now()}))
-	row := json.RawMessage(`{"id": "` + turn + `", "session_id": "` + theirs + `", "said": "hello", "status": "completed",
-		"error": "", "created_at": "2026-01-01T00:00:00Z"}`)
 
-	for _, line := range []dataLine{{Table: "agent_responses", Row: row},
-		{Change: &store.DataChange{Seq: 1, Table: "agent_responses", Op: store.ChangeInsert, At: time.Now(), Payload: row}}} {
-		status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{line}))
+	for _, session := range []string{theirs, nobodys} {
+		row := json.RawMessage(`{"id": "` + turn + `", "session_id": "` + session + `", "said": "hello", "status": "completed",
+			"error": "", "created_at": "2026-01-01T00:00:00Z"}`)
+		for _, line := range []dataLine{{Table: "agent_responses", Row: row},
+			{Change: &store.DataChange{Seq: 1, Table: "agent_responses", Op: store.ChangeInsert, At: time.Now(), Payload: row}}} {
+			status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{line}))
 
-		s.Equal(http.StatusBadRequest, status)
-		s.Contains(failure, `agent_responses:{"id":"`+turn+`"}`)
-		s.Contains(failure, "neither the export nor this app holds")
-		s.NotContains(failure, theirs)
+			s.Equal(http.StatusBadRequest, status)
+			s.Equal(`store: import agent_responses:{"id":"`+turn+`"}: this row cannot be written here`, failure, "whoever holds the session")
+		}
 	}
 }
 

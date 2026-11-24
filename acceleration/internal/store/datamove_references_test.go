@@ -139,6 +139,7 @@ func (s *DataMoveSuite) nameOf(destination *Store, n namingRow) string {
 // and its key.
 func (s *DataMoveSuite) assertNamesNoRow(err error, n namingRow) {
 	s.Require().ErrorIs(err, ErrInvalidImport, n.table)
+	s.Require().ErrorIs(err, ErrNamesNoRow, n.table)
 	s.ErrorContains(err, n.table+`:{`, n.table)
 	s.ErrorContains(err, `"`+n.key()+`":"`+n.id+`"`, n.table)
 	s.ErrorContains(err, "a row names a row that neither the export nor this app holds", n.table)
