@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -96,6 +97,66 @@ func TestGuardKeepsTheNameOverTLSForTheCertificate(t *testing.T) {
 
 	require.NoError(t, g.check(t.Context(), req))
 	require.Equal(t, "trunk.example.com:5061", req.Destination())
+}
+
+// probe is a listener on loopback that counts the connections it accepts and closes each one.
+type probe struct {
+	port     int
+	accepted atomic.Int32
+}
+
+func startProbe(t *testing.T) *probe {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	p := &probe{port: listener.Addr().(*net.TCPAddr).Port}
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			p.accepted.Add(1)
+			_ = conn.Close()
+		}
+	}()
+	return p
+}
+
+// customerClient is the customer leg's client as Dial builds it, guarded by g.
+func customerClient(t *testing.T, g guard) *sipgo.Client {
+	t.Helper()
+	ua, client, _, _, err := newUA(g)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ua.Close() })
+	return client
+}
+
+// DNS rebinding over TLS: the guard keeps the name for the certificate, so sipgo resolves it
+// again when it dials. The guard's resolver answers localhost with a public address, and the
+// system's, which sipgo uses, with loopback.
+func TestATLSRequestNeverConnectsToAPrivateAddressTheNameRebindsTo(t *testing.T) {
+	probe := startProbe(t)
+	client := customerClient(t, guard{resolver: &answers{byHost: map[string][][]string{
+		"localhost": {{"8.8.8.8"}},
+	}}}.withDefaults())
+
+	_, err := client.TransactionRequest(t.Context(), requestTo("localhost", probe.port, "TLS"))
+
+	require.ErrorContains(t, err, "is not a public address")
+	require.Zero(t, probe.accepted.Load())
+}
+
+func TestATLSRequestConnectsToAnAddressTheGuardAllows(t *testing.T) {
+	probe := startProbe(t)
+	client := customerClient(t, guard{allow: func(ip netip.Addr) bool { return ip.IsLoopback() }}.withDefaults())
+
+	// The probe speaks no TLS, so the handshake fails once the connection is open.
+	_, err := client.TransactionRequest(t.Context(), requestTo("127.0.0.1", probe.port, "TLS"))
+
+	require.Error(t, err)
+	require.Equal(t, int32(1), probe.accepted.Load())
 }
 
 func TestDialRefusesATrunkAtAPrivateAddressBeforeCallingStream(t *testing.T) {

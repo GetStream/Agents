@@ -7,6 +7,8 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/emiago/sipgo/sip"
 
@@ -41,7 +43,7 @@ func (g guard) withDefaults() guard {
 
 // check refuses req unless every address its destination resolves to is allowed. Over UDP
 // and TCP it then sends req to the address it checked. Over TLS it keeps the name, so the
-// certificate can be checked against it.
+// certificate can be checked against it, and dialer checks the address sipgo connects to.
 func (g guard) check(ctx context.Context, req *sip.Request) error {
 	dest := req.Destination()
 	host, port, err := sip.ParseAddr(dest)
@@ -83,6 +85,24 @@ func (g guard) addrs(ctx context.Context, host string) ([]netip.Addr, error) {
 		}
 	}
 	return ips, nil
+}
+
+// dialer is sipgo's default dialer, which refuses an address the guard does not allow before
+// it connects. Over TLS check keeps the name, so sipgo resolves it again when it dials, and
+// that answer can differ from the one check saw.
+func (g guard) dialer(laddr net.Addr) net.Dialer {
+	return net.Dialer{Timeout: time.Minute, LocalAddr: laddr, Control: g.control}
+}
+
+func (g guard) control(_, address string, _ syscall.RawConn) error {
+	addr, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("sipbridge: refusing to connect to %q: %w", address, err))
+	}
+	if !g.allow(addr.Addr()) {
+		return stack.Wrap(fmt.Errorf("sipbridge: refusing to connect: %s is not a public address", addr.Addr()))
+	}
+	return nil
 }
 
 // preferIPv4 picks the address sipgo would have: it prefers IPv4 when it resolves.

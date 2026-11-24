@@ -309,8 +309,8 @@ func (l *sipLeg) Bye(ctx context.Context) error {
 		}
 		return nil
 	}
-	// WriteBye rather than Bye: Bye copies Route from the initial INVITE, which carries
-	// the route set when a 401 with Record-Route was retried, and WriteBye adds it again.
+	// A BYE built like the other in-dialog requests, with no Route: WriteBye adds the
+	// dialog's route set.
 	return stack.Wrap(l.dlg.WriteBye(ctx, l.inDialog(sip.BYE, "", nil)))
 }
 
