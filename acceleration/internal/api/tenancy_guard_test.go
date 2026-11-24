@@ -149,3 +149,26 @@ func (s *TenancyGuardSuite) TestAVoiceSessionForACustomerWithNoAppIsRefusedToo()
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, "call through the gateway with this app's own Stream keys")
 }
+
+// A customer with no Stream app has no call or channel named after a session's id, so another
+// such customer's session of the id shares nothing with its own.
+func (s *TenancyGuardSuite) TestTwoCustomersWithNoStreamAppEachRunASessionOfOneId() {
+	id := s.utils.uuid()
+	s.useApp(s.numberedApp(streamAppID()))
+	s.serverClient.createSession(incognitoText(&id))
+	s.useApp(s.numberedApp(streamAppID()))
+
+	s.Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", incognitoText(&id), nil))
+}
+
+// The same for another customer's row imported from a Stream app unknown here, which is pinned to
+// no app either.
+func (s *TenancyGuardSuite) TestACustomerWithNoStreamAppMayTakeTheIdOfAnotherCustomersImportedSession() {
+	id := s.utils.uuid()
+	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{
+		ID: id, CustomerID: "imported-" + s.utils.uuid(), StreamAppPK: store.ForeignStreamApp, CreatedAt: time.Now().UTC(),
+	}))
+	s.useApp(s.numberedApp(streamAppID()))
+
+	s.Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", incognitoText(&id), nil))
+}

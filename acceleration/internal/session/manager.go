@@ -1895,6 +1895,9 @@ func (m *Manager) HeldInApp(customerID, id string, app int64) bool {
 // heldInApp is HeldInApp with m.mu held.
 func (m *Manager) heldInApp(customerID, id string, app int64) bool {
 	scope := m.appScope(app)
+	if scope == (store.AppScope{}) {
+		return false
+	}
 	for key, held := range m.sessions {
 		if key.ID == id && key.CustomerID != customerID && m.appScope(held.spec.StreamApp) == scope {
 			return true
@@ -1903,8 +1906,12 @@ func (m *Manager) heldInApp(customerID, id string, app int64) bool {
 	return false
 }
 
-// appScope is the rows of the Stream app pinned app.
+// appScope is the rows of the Stream app pinned app. A session pinned to no Stream app has no
+// call or channel there for another customer's to share, so its scope is no app's.
 func (m *Manager) appScope(app int64) store.AppScope {
+	if app == store.ForeignStreamApp {
+		return store.AppScope{}
+	}
 	var deployment int64
 	if m.options.Stream != nil {
 		deployment = m.options.Stream.DeploymentApp()
