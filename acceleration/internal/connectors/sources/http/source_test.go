@@ -296,6 +296,8 @@ func (s *SourceSuite) TestOnlyAReadFollowsARedirect() {
 		{http.MethodGet, "/moved-303", "", ""},
 		{http.MethodHead, "/moved-308", "", ""},
 		{http.MethodHead, "/moved-303", "", ""},
+		// A 3xx with no Location is not followed (net/http): a read's is a tool error, as before.
+		{http.MethodGet, "/moved-nowhere", "The API answered 302 Found", ""},
 	} {
 		s.provider.reset()
 		tool := core.HTTPTool{Name: "act", Description: "Calls the API.", Method: test.method, Path: test.path,
@@ -859,6 +861,8 @@ func (p *provider) serve(w http.ResponseWriter, r *http.Request) {
 	case "/moved-301", "/moved-302", "/moved-303", "/moved-307", "/moved-308":
 		code, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/api/moved-"))
 		http.Redirect(w, r, "/api/target", code)
+	case "/moved-nowhere":
+		w.WriteHeader(http.StatusFound)
 	case "/target":
 		_, _ = io.WriteString(w, "moved here")
 	case "/loop":
