@@ -33,6 +33,9 @@ var (
 	errNoSuchLimit = APIError{Type: ErrorTypeNotFound, Code: codeLimitNotFound,
 		Message: "there is no such limit in the organization"}
 	errManageOrganization = invalidRequest("a management call on limits names its organization in organization_id")
+	// errNoSuchApp answers another organization's app as it answers an app that does not
+	// exist, so the answer says nothing of whose it is.
+	errNoSuchApp = notFound("app_id names no app of the organization")
 )
 
 // What a limit's ids may hold. A key is never an origin (hook:chat), which holds a ':'. A user
@@ -424,7 +427,7 @@ func (s *Server) registerLimits(api huma.API) {
 		if err != nil {
 			return nil, err
 		}
-		return s.createLimit(ctx, organization, request.Body, audit)
+		return s.createLimit(ctx, organization, s.billedOrganization(ctx), request.Body, audit)
 	})
 	manageCreate := manage(create)
 	manageCreate.Responses = created
@@ -436,7 +439,7 @@ func (s *Server) registerLimits(api huma.API) {
 		if organization == "" {
 			return nil, errManageOrganization
 		}
-		return s.createLimit(ctx, organization, request.Body.LimitInput, s.manageAudit(ctx, organization))
+		return s.createLimit(ctx, organization, true, request.Body.LimitInput, s.manageAudit(ctx, organization))
 	})
 
 	get := op("getLimit", http.MethodGet, "/v1/spend/limits/{limit_id}", "Read a spend limit", "One limit of the caller's organization.")
@@ -560,6 +563,30 @@ func (s *Server) limitsCaller(ctx context.Context) (string, store.LimitAudit, er
 // billedOrganization reports whether the caller's organization is one the usage service bills,
 // rather than an app that is its own.
 func (s *Server) billedOrganization(ctx context.Context) bool { return OrganizationFrom(ctx) != "" }
+
+// checkLimitApps answers errNoSuchApp for a subject in an app the organization does not hold,
+// so no caller reads another organization's spend or writes a limit, a reset or a grant on its
+// apps. The caller's own app is its organization's before the router has recorded it there,
+// which Enforcer.Join does in the background. An app in no organization (billed false) holds
+// only itself: an organization whose id is the same as the app's is another customer's.
+func (s *Server) checkLimitApps(ctx context.Context, organization string, billed bool, refs ...usage.SubjectRef) error {
+	own, _ := CustomerFrom(ctx)
+	// A subject of the whole organization names no app.
+	checked := map[string]bool{"": true, own: true}
+	for _, ref := range refs {
+		if checked[ref.AppID] {
+			continue
+		}
+		if !billed {
+			return errNoSuchApp
+		}
+		if err := s.checkOrganizationApp(ctx, organization, ref.AppID, errNoSuchApp); err != nil {
+			return err
+		}
+		checked[ref.AppID] = true
+	}
+	return nil
+}
 
 // manageAudit is who a management write on an organization's limits is recorded as made by.
 // The audit log keeps it under the organization, since staff act as no app.
@@ -795,7 +822,7 @@ func (s *Server) listLimits(ctx context.Context, organization string, request *L
 	return &limitPageResponse{Body: answer}, nil
 }
 
-func (s *Server) createLimit(ctx context.Context, organization string, sent LimitInput, audit store.LimitAudit) (*createdLimitResponse, error) {
+func (s *Server) createLimit(ctx context.Context, organization string, billed bool, sent LimitInput, audit store.LimitAudit) (*createdLimitResponse, error) {
 	ref, level, err := target(sent.LimitTarget, sent.Level, organization, "api_key")
 	if err != nil {
 		return nil, err
@@ -803,6 +830,9 @@ func (s *Server) createLimit(ctx context.Context, organization string, sent Limi
 	interval := usage.Interval(sent.Interval)
 	if !interval.Valid() {
 		return nil, invalidRequest(fmt.Sprintf("interval %q is not daily, weekly, biweekly or monthly", sent.Interval))
+	}
+	if err := s.checkLimitApps(ctx, organization, billed, ref); err != nil {
+		return nil, err
 	}
 	row := store.Limit{
 		Subject: ref.Subject, Level: level, OrganizationID: organization, AppID: ref.AppID, APIKey: ref.APIKey,
@@ -931,6 +961,9 @@ func (s *Server) limitUsage(ctx context.Context, organization string, billed boo
 		if refs[i], err = usageTarget(sent, organization, "api_key_id"); err != nil {
 			return nil, err
 		}
+	}
+	if err := s.checkLimitApps(ctx, organization, billed, refs...); err != nil {
+		return nil, err
 	}
 	answer, err := s.subjectsUsage(ctx, organization, refs, billed)
 	if err != nil {
@@ -1062,6 +1095,9 @@ func (s *Server) resetLimitUsage(ctx context.Context, organization string, bille
 				intervals = append(intervals, usage.Interval(interval))
 			}
 		}
+	}
+	if err := s.checkLimitApps(ctx, organization, billed, ref); err != nil {
+		return nil, err
 	}
 	limits, err := s.store.Limits.SelectOf(ctx, []string{organization})
 	if err != nil {
