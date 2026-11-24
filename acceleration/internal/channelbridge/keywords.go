@@ -34,16 +34,18 @@ import (
 //     'quit,' 'end,' 'revoke,' 'opt out,' 'cancel,' or 'unsubscribe'» (FCC 24-24, 89 FR 15756,
 //     47 CFR 64.1200(a)(10),
 //     https://www.govinfo.gov/content/pkg/FR-2024-03-05/html/2024-04587.htm); and Telnyx's
-//     default opt-out words, which add STOPALL and STOP ALL.
-//   - startWords and helpWords: Telnyx's default opt-in and help words, START, UNSTOP and HELP.
+//     default opt-out words, which add STOPALL and STOP ALL. OPTOUT, written as one word, is
+//     an opt out all the same.
+//   - startWords and helpWords: Telnyx's default opt-in and help words, START, UNSTOP and HELP;
+//     and INFO, which internal/channels' lines always answered as HELP.
 //
 // Telnyx's page: https://developers.telnyx.com/docs/messaging/messages/advanced-opt-in-out
-// (opened October 8, 2026). internal/channels/keywords.go keeps its own list until T62 moves
-// its lines here.
+// (opened October 8, 2026). internal/channels reads its lines' messages with these lists too
+// (Keyword), so a keyword means the same on either line.
 var (
-	stopWords  = []string{"STOP", "STOPALL", "STOP ALL", "END", "UNSUBSCRIBE", "CANCEL", "QUIT", "REVOKE", "OPT OUT"}
+	stopWords  = []string{"STOP", "STOPALL", "STOP ALL", "END", "UNSUBSCRIBE", "CANCEL", "QUIT", "REVOKE", "OPT OUT", "OPTOUT"}
 	startWords = []string{"START", "UNSTOP"}
-	helpWords  = []string{"HELP"}
+	helpWords  = []string{"HELP", "INFO"}
 )
 
 // What a keyword is answered with when the line's 10DLC use case says nothing
@@ -79,8 +81,7 @@ func (b *Bridge) keyword(ctx context.Context, thread store.ChannelThread, queued
 	if channel == "" {
 		return false, nil
 	}
-	word := keywordOf(message.Text)
-	stop, start, help := slices.Contains(stopWords, word), slices.Contains(startWords, word), slices.Contains(helpWords, word)
+	_, stop, start, help := Keyword(message.Text)
 	if !stop && !start && !help {
 		optedOut, err := b.store.OptOuts.OptedOut(ctx, thread.CustomerID, source.recipientOf(message.AuthorID), channel)
 		if err != nil {
@@ -218,6 +219,13 @@ func (b *Bridge) useCase(ctx context.Context, thread store.ChannelThread) store.
 			"channel", thread.ChannelID, "error", err)
 	}
 	return useCase
+}
+
+// Keyword reads a message as a carrier keyword: word is the message as the lists spell it
+// (keywordOf), and stop, start and help say which list it is in.
+func Keyword(text string) (word string, stop, start, help bool) {
+	word = keywordOf(text)
+	return word, slices.Contains(stopWords, word), slices.Contains(startWords, word), slices.Contains(helpWords, word)
 }
 
 // keywordOf is a message as a keyword: its words in upper case, without the punctuation

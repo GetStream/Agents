@@ -371,6 +371,66 @@ func (s *ChannelsSuite) TestSomebodyWhoTextsStopIsNotWrittenToAgain() {
 	s.Len(s.meta.to(writer), 1)
 }
 
+// A STOP is read without its case, spaces or punctuation, and with its synonyms, as on the
+// bridge's lines (TestKeywordsStopWrittenAnyWayIsRecordedAndConfirmed).
+func (s *ChannelsSuite) TestAStopWrittenAnyWayIsRecordedAndConfirmed() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, "")
+	for _, text := range stopTexts {
+		writer := s.writer()
+		s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), text))
+		s.Equal("You are unsubscribed and will receive no more messages. Reply START to resubscribe.", s.answer(writer), text)
+		optedOut, err := s.store.OptOuts.OptedOut(context.Background(), s.customerID(), "+"+writer, "whatsapp")
+		s.Require().NoError(err)
+		s.True(optedOut, text)
+	}
+}
+
+// A START is read as a STOP is, and lifts the opt-out.
+func (s *ChannelsSuite) TestAStartWrittenAnyWayLiftsTheOptOut() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, "")
+	for _, text := range startTexts {
+		writer := s.writer()
+		s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "STOP"))
+		s.Require().NotEmpty(s.answer(writer))
+		s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), text))
+		s.Equal("You are subscribed again. Reply STOP to unsubscribe.", s.reply(writer, 2), text)
+		optedOut, err := s.store.OptOuts.OptedOut(context.Background(), s.customerID(), "+"+writer, "whatsapp")
+		s.Require().NoError(err)
+		s.False(optedOut, text)
+	}
+}
+
+// A HELP is read as a STOP is, INFO included, and answered without the agent.
+func (s *ChannelsSuite) TestAHelpWrittenAnyWayIsAnswered() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, "")
+	for _, text := range helpTexts {
+		writer := s.writer()
+		s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), text))
+		s.Equal("Reply STOP to unsubscribe.", s.answer(writer), text)
+	}
+}
+
+// A sentence that holds a keyword is the agent's to read, and opts nobody out.
+func (s *ChannelsSuite) TestAKeywordInASentenceReachesTheAgent() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, "")
+	for _, text := range keywordInText {
+		writer := s.writer()
+		s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), text))
+		s.Equal("Noted.", s.answer(writer), text)
+		optedOut, err := s.store.OptOuts.OptedOut(context.Background(), s.customerID(), "+"+writer, "whatsapp")
+		s.Require().NoError(err)
+		s.False(optedOut, text)
+	}
+}
+
 // A STOP the store could not record fails its delivery and is taken when the provider delivers
 // it again; once taken, a further delivery of it is neither recorded nor answered again. A
 // trigger refuses the app's opt-outs for the first delivery.
