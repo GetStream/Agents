@@ -15625,7 +15625,7 @@ type ClientInterface interface {
 	// One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
 	// Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
 	// A router with shards cannot be the source of a move and answers 400 `not_configured`.
-	// An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
+	// An app runs one export at a time on a router, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
 	// Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
 	//
 	// Corresponds with GET /v1/data/export (the `ExportData` operationId).
@@ -21391,7 +21391,7 @@ func (c *Client) ListDataChanges(ctx context.Context, params *ListDataChangesPar
 // One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
 // Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
 // A router with shards cannot be the source of a move and answers 400 `not_configured`.
-// An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
+// An app runs one export at a time on a router, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
 // Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
 //
 // Corresponds with GET /v1/data/export (the `ExportData` operationId).
@@ -39068,7 +39068,7 @@ type ClientWithResponsesInterface interface {
 	// One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
 	// Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
 	// A router with shards cannot be the source of a move and answers 400 `not_configured`.
-	// An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
+	// An app runs one export at a time on a router, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
 	// Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -71818,7 +71818,7 @@ func (c *ClientWithResponses) ListDataChangesWithResponse(ctx context.Context, p
 // One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
 // Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
 // A router with shards cannot be the source of a move and answers 400 `not_configured`.
-// An app runs one export at a time, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
+// An app runs one export at a time on a router, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
 // Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
 //
 // Returns a wrapper object for the known response body format(s).

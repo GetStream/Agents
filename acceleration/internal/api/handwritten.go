@@ -949,7 +949,7 @@ func documentHandWritten(api huma.API) {
 			"sample and a call recording lives in an object bucket rather than in this database; the " +
 			"rows naming those objects are here, and copying the bucket is yours to do.\n" +
 			"A router with shards cannot be the source of a move and answers 400 `not_configured`.\n" +
-			"An app runs one export at a time, and an export ends after an hour, or when one line " +
+			"An app runs one export at a time on a router, and an export ends after an hour, or when one line " +
 			"has taken a minute to write: an export with no cursor line is one to run again.\n" +
 			"Server-side only, and refused entirely when the router runs with " +
 			"ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.",
@@ -959,7 +959,7 @@ func documentHandWritten(api huma.API) {
 			"401": {Ref: "#/components/responses/Unauthorized"},
 			"403": {Ref: "#/components/responses/Forbidden"},
 			"409": {Description: "An export of this app is already running on this router: one runs at a time.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
-			"503": {Description: "This deployment has no database to export from, or cannot record changes; or this router is running as many exports as it takes at once; or a write that was open when the export started is still open after 30 seconds: try again.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"503": {Description: "This deployment has no database to export from, or cannot record changes; or this router is running as many exports as it takes at once; or the export ran out of time before its first row; or a write that was open when the export started is still open after 30 seconds: try again.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 		},
 	})
 	document.AddOperation(&huma.Operation{

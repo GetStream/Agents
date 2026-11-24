@@ -4865,3 +4865,106 @@ func (s *DataMoveSuite) TestAConfigFromAnOlderReleaseKeepsItsRenamedSettings() {
 	s.Equal(config.EpisodeCards, moved.EpisodeCards)
 	s.Equal(config.Channels, moved.Channels)
 }
+
+func (s *StoreSuite) TestAnExportOutlastsTheIdleLimitOfAServingTransaction() {
+	limited := s.limitedStore()
+	s.boundConfig("app")
+
+	rows := 0
+	_, err := limited.ExportCustomer(s.ctx, "app", func(string, json.RawMessage) error {
+		if rows == 0 {
+			// A reader slower than the limit leaves every transaction of the export idle.
+			time.Sleep(3 * shortLimit)
+		}
+		rows++
+		return nil
+	})
+
+	s.Require().NoError(err)
+	s.Positive(rows)
+}
+
+func (s *StoreSuite) TestAnExportStatementOutlastsTheServingStatementLimit() {
+	limited := s.limitedStore()
+	s.boundConfig("app")
+	holder, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer holder.Rollback() //nolint:errcheck // only ever holds the lock
+	_, err = holder.ExecContext(s.ctx, "LOCK TABLE skills IN ACCESS EXCLUSIVE MODE")
+	s.Require().NoError(err)
+	release := time.AfterFunc(3*shortLimit, func() { _ = holder.Rollback() })
+	defer release.Stop()
+
+	_, err = limited.ExportCustomer(s.ctx, "app", func(string, json.RawMessage) error { return nil })
+
+	s.Require().NoError(err, "the read of skills waited on the lock past the serving limit")
+}
+
+func (s *DataMoveSuite) TestABacklogOfChangesIsPrunedWhole() {
+	kept := writeBatch
+	writeBatch = 1
+	s.T().Cleanup(func() { writeBatch = kept })
+	s.TestPruningDropsWhatNobodyCanResumeFrom()
+}
+
+// cutAfterFirstPrune cancels its context once a statement pruning data_changes has run.
+type cutAfterFirstPrune struct{ cancel context.CancelFunc }
+
+func (c cutAfterFirstPrune) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (c cutAfterFirstPrune) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if strings.Contains(event.Query, "DELETE FROM data_changes") {
+		c.cancel()
+	}
+}
+
+func (s *DataMoveSuite) TestAPruneCutShortAfterOneBatchHasDroppedTheLowestChangeAndSaidSo() {
+	kept := writeBatch
+	writeBatch = 1
+	s.T().Cleanup(func() { writeBatch = kept })
+	s.capture("acme")
+	for _, name := range []string{"one", "two", "three"} {
+		s.seedAgentConfig(s.source, "acme", name)
+	}
+	s.age()
+	var seqs []int64
+	s.Require().NoError(s.source.GlobalDB().NewRaw("SELECT seq FROM data_changes WHERE customer_id = 'acme' ORDER BY seq").Scan(s.ctx, &seqs))
+	s.Require().Len(seqs, 3)
+	// The lowest is rewritten, so it is the last row a read in no order meets.
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE data_changes SET at = at WHERE seq = ?", seqs[0])
+	s.Require().NoError(err)
+	var database string
+	s.Require().NoError(s.source.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	parsed, err := url.Parse(os.Getenv(DSNEnvVar))
+	s.Require().NoError(err)
+	parsed.Path = "/" + database
+	pruning, err := Open(parsed.String())
+	s.Require().NoError(err)
+	defer pruning.Close()
+	ctx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+	pruning.GlobalDB().AddQueryHook(cutAfterFirstPrune{cancel: cancel})
+
+	_, err = pruning.PruneDataChanges(ctx, 7*24*time.Hour)
+
+	s.Require().ErrorIs(err, context.Canceled)
+	var left []int64
+	s.Require().NoError(s.source.GlobalDB().NewRaw("SELECT seq FROM data_changes WHERE customer_id = 'acme' ORDER BY seq").Scan(s.ctx, &left))
+	s.Equal(seqs[1:], left, "the lowest went first")
+	var through int64
+	s.Require().NoError(s.source.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT pruned_through FROM data_change_capture WHERE customer_id = 'acme'").Scan(&through))
+	s.Equal(seqs[0], through)
+}
+
+func (s *DataMoveSuite) TestACaptureStartGivenLongerThanTheStatementLimitGivesUpAsWritesOpen() {
+	before := s.beginAt(sql.LevelRepeatableRead)
+	defer before.Rollback() //nolint:errcheck // only holds the starts
+	s.writeIn(before, "acme", "looked before the start")
+
+	err := s.source.StartDataCapture(s.ctx, "acme", time.Hour, 30*time.Second)
+
+	s.ErrorIs(err, ErrWritesOpen, "not a statement the statement limit ended: %v", err)
+}

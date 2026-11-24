@@ -274,13 +274,10 @@ func (r *ChatInbounds) ReleaseAnswer(ctx context.Context, streamApp int64, messa
 // Prune deletes the rows of answered messages finished a day before now, and of
 // given-up ones 30 days before, and returns how many it deleted.
 func (r *ChatInbounds) Prune(ctx context.Context, now time.Time) (int, error) {
-	result, err := r.store.global.NewDelete().Model((*ChatInbound)(nil)).
-		Where("(state = ? AND finished_at < ?) OR (state = ? AND finished_at < ?)",
-			ChatInboundDone, now.Add(-chatInboundDoneKeep).UTC(), ChatInboundFailed, now.Add(-chatInboundFailedKeep).UTC()).
-		Exec(ctx)
+	pruned, err := deleteInBatches(ctx, r.store.global, "chat_inbound", "(state = ? AND finished_at < ?) OR (state = ? AND finished_at < ?)",
+		ChatInboundDone, now.Add(-chatInboundDoneKeep).UTC(), ChatInboundFailed, now.Add(-chatInboundFailedKeep).UTC())
 	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: prune chat inbound: %w", err))
+		return int(pruned), stack.Wrap(fmt.Errorf("store: prune chat inbound: %w", err))
 	}
-	pruned, _ := result.RowsAffected()
 	return int(pruned), nil
 }

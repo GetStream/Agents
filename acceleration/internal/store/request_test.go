@@ -3,6 +3,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -705,4 +706,49 @@ func (s *StoreSuite) TestRequestQueryBudgets() {
 		_, err := s.store.Requests.VendorCostGaps(s.ctx, s.base.Add(-time.Hour), 3, time.Minute)
 		s.Require().NoError(err)
 	}), "VendorCostGaps")
+}
+
+func (s *StoreSuite) TestRenamingAUserWithMoreRequestsThanOneStatementTakesRenamesThemAll() {
+	s.inSmallBatches()
+	for i := range 3 {
+		s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+			Modality: "stt", CustomerID: "acme", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en",
+			StartedAt: s.base.Add(time.Duration(i) * time.Minute), Success: true,
+		}))
+	}
+
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+		Modality: "stt", CustomerID: "other-app", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true,
+	}))
+
+	var renamed int64
+	var err error
+	updates := s.statementsLike(`WITH "changes" AS (UPDATE`, func() { renamed, err = s.store.Requests.RenameUser(s.ctx, "acme", "jlahey", "forgotten") })
+
+	s.Require().NoError(err)
+	s.EqualValues(3, renamed)
+	s.Equal(4+len(s.store.shards())-1, updates, "a row per statement, then the one that finds none, and one on each shard holding none")
+	theirs, err := s.store.Requests.CountByUser(s.ctx, "other-app", "jlahey")
+	s.Require().NoError(err)
+	s.EqualValues(1, theirs, "the same id under another app is another person")
+	left, err := s.store.Requests.CountByUser(s.ctx, "acme", "jlahey")
+	s.Require().NoError(err)
+	s.Zero(left)
+	moved, err := s.store.Requests.CountByUser(s.ctx, "acme", "forgotten")
+	s.Require().NoError(err)
+	s.EqualValues(3, moved)
+}
+
+func (s *StoreSuite) TestRenamingAUserToTheirOwnIdRewritesNothing() {
+	s.inSmallBatches()
+	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+		Modality: "stt", CustomerID: "acme", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true,
+	}))
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+
+	renamed, err := s.store.Requests.RenameUser(ctx, "acme", "jlahey", "jlahey")
+
+	s.Require().NoError(err)
+	s.Zero(renamed)
 }
