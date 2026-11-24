@@ -1072,6 +1072,11 @@ func (a *Agent) sayAgain(voice *ttsrouter.Session, held *heldReply) {
 		}
 		a.mu.Lock()
 		mine := a.held == held
+		// More of an utterance refused for money leaves one this voice is saying, which settles
+		// only once it is told that is all.
+		finish := mine && refusedMoney(err) && !heard.counts && slices.ContainsFunc(held.unsaid, func(unsaid unsaidUtterance) bool {
+			return unsaid.synthesisID == heard.synthesisID && unsaid.final
+		})
 		if mine {
 			// Refused, it is never said, and neither is what comes after it.
 			held.unsaid = append(held.unsaid, heard)
@@ -1080,6 +1085,9 @@ func (a *Agent) sayAgain(voice *ttsrouter.Session, held *heldReply) {
 		a.mu.Unlock()
 		// Lost meanwhile, the voice refused it as a lost one: the next voice says it.
 		if mine {
+			if finish {
+				err = errors.Join(err, voice.Synthesize(tts.Request{ID: heard.synthesisID, Final: true}))
+			}
 			a.takeUtterance(heard.synthesisID)
 			a.unsay(held)
 			a.fail(err, "tts")

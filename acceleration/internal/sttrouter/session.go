@@ -13,8 +13,10 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -43,7 +45,8 @@ type Session struct {
 	call context.Context
 
 	events chan stt.Event
-	// failed is set once the provider reports a fatal error. The caller has been told, and
+	// failed is set once the provider reports a fatal error, or the session's money ran out
+	// (unpaid). The caller has been told, and
 	// the provider hears nothing more, so later audio is dropped rather than failing once
 	// per frame.
 	failed atomic.Bool
@@ -63,6 +66,9 @@ type Session struct {
 
 	closeOnce sync.Once
 }
+
+// leaseRenew is how often a session's lease is renewed, for three times as long.
+var leaseRenew = routing.LeaseRenew
 
 // leaseMinute is what a minute of streaming is held at.
 var leaseMinute = pricing.Quantities{pricing.AudioMs: 60_000}
@@ -98,7 +104,7 @@ func newSession(
 		readAhead: make(chan chan struct{}),
 		done:      make(chan struct{}),
 		streamed:  map[stt.STT]*streamedAudio{},
-		lease:     routing.StartLease(recorder, config, owner, "stt", uuid.NewString(), leaseMinute),
+		lease:     routing.StartLeaseEvery(recorder, config, owner, "stt", uuid.NewString(), leaseMinute, leaseRenew, 3*leaseRenew),
 	}
 	// Stamped here, as audio may reach the provider before forward runs.
 	started := time.Now()
@@ -107,10 +113,13 @@ func newSession(
 }
 
 // ProcessAudio streams audio to the selected provider, and drops it once the provider has
-// failed for good.
+// failed for good. Once the session's money runs out it answers why, once, and ends it.
 func (s *Session) ProcessAudio(pcm stt.PcmData, participant stt.Participant) error {
 	if s.failed.Load() {
 		return nil
+	}
+	if err := s.unpaid(); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	provider, config := s.provider, s.config
@@ -125,6 +134,23 @@ func (s *Session) ProcessAudio(pcm stt.PcmData, participant stt.Participant) err
 		return nil
 	}
 	return err
+}
+
+// unpaid is why the session may take no more audio: its lease was refused because money ran out
+// or the organization is suspended. It ends the session, which still transcribes and bills the
+// audio it took, so its events close after the last transcript. Money that could not be checked
+// (policy.Transient) refuses nothing: the session goes on, and what it takes is billed as before.
+func (s *Session) unpaid() error {
+	err := s.lease.Err()
+	if err == nil || policy.Transient(err) {
+		return nil
+	}
+	if !s.failed.CompareAndSwap(false, true) {
+		return nil
+	}
+	// Off the caller's goroutine, since closing may wait on the vendor for the last words.
+	goroutine.Go(s.call, func() { _ = s.Close() })
+	return stack.Wrap(err)
 }
 
 // toldOf reports whether the caller hears of provider's failure, or of the next model

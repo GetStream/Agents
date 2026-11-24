@@ -35,6 +35,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 )
 
@@ -168,6 +169,57 @@ func (s *AdmissionSuite) TestAnSTTSocketWithNoCreditIsRefusedWithTheEnvelope() {
 		}
 	}
 	s.Equal(websocket.ClosePolicyViolation, closed.Code, "the caller's to fix, by paying")
+}
+
+// The organization is suspended as the transcriber opens, after its socket was admitted.
+func (s *AdmissionSuite) TestAnSTTSocketIsEndedWhenItsOrganizationIsSuspended() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	owner := routing.Owner{CustomerID: s.customerID(), Attribution: routing.Attribution{OrganizationID: s.organization()}}
+	s.hearingOpens = func() {
+		s.usage.Suspend(s.T(), s.organization(), "a test")
+		s.Eventually(func() bool {
+			_, err := s.enforcer.Admit(s.T().Context(), owner)
+			return errors.Is(err, policy.ErrSuspended)
+		}, 10*time.Second, 5*time.Millisecond, "the suspension is read")
+	}
+	defer func() { s.hearingOpens = nil }()
+	listening := s.serverClient.opens("/v1/stt/stream")
+	s.Require().NoError(listening.WriteJSON(frame{"type": "start", "target": "stub/priced-model"}))
+	s.await(listening, "started")
+	s.ears().emitter.Send(stt.Transcript{Text: "what was said before", Mode: stt.ModeFinal, Provider: "stub", Model: "stub-stt"})
+	s.Equal("what was said before", s.await(listening, "transcript")["text"])
+
+	silence := make([]byte, 640)
+	for range 20 {
+		s.Require().NoError(listening.WriteMessage(websocket.BinaryMessage, silence))
+	}
+
+	s.Require().NoError(listening.SetReadDeadline(time.Now().Add(settleFor)))
+	var told []map[string]any
+	var closed *websocket.CloseError
+	for {
+		_, payload, err := listening.ReadMessage()
+		if err != nil {
+			s.Require().ErrorAs(err, &closed)
+			break
+		}
+		var said map[string]any
+		s.Require().NoError(json.Unmarshal(payload, &said))
+		if said["type"] != "balance" {
+			told = append(told, said)
+		}
+	}
+	s.Require().NotEmpty(told)
+	var refusals []map[string]any
+	for _, said := range told {
+		if said["type"] == "error" {
+			refusals = append(refusals, said)
+		}
+	}
+	s.Require().Len(refusals, 1, "why is said once, not for each frame")
+	s.Equal("account_suspended", refusals[0]["code"])
+	s.Equal("closed", told[len(told)-1]["type"])
+	s.Equal(1008, closed.Code)
 }
 
 // answersOnTheFreeModel asks the model the deployment runs itself, which costs nothing, for one

@@ -345,6 +345,7 @@ func (s *Server) streamSTT(
 		}
 	}()
 
+	var unpaid error
 	speaker := stt.Participant{ID: "caller"}
 	for {
 		kind, payload, err := out.connection.ReadMessage()
@@ -359,13 +360,18 @@ func (s *Server) streamSTT(
 		}
 		pcm := audio.FromBytes(payload, sampleRate, 1)
 		if err := session.ProcessAudio(pcm, speaker); err != nil {
+			if _, refused := moneyError(err); refused {
+				// The session has ended. The caller is told why after its last transcript.
+				unpaid = err
+				break
+			}
 			out.failed(err)
 		}
 	}
 
 	session.Close()
 	writing.Wait()
-	return nil
+	return unpaid
 }
 
 // streamTTS speaks what the caller sends and returns the audio as binary frames.

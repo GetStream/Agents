@@ -15,9 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy/policytest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -25,6 +27,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/breeze"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/s2pro"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 )
 
 // reservingSession is a session over a stub voice whose every character costs $1, for an
@@ -439,7 +442,7 @@ func TestASentenceSpokenAgainAfterABargeInIsBilledOnItsOwn(t *testing.T) {
 	require.ErrorIs(t, money.Spend(t, owner), policy.ErrNoCredits)
 }
 
-func TestMoreTextForAReusedIdsNewSentenceLetsItFinish(t *testing.T) {
+func TestMoreTextForAReusedIdsNewSentenceIsRefusedOnceNoCreditIsLeft(t *testing.T) {
 	money := policytest.Start(t, "ttsrouter_reserve")
 	session, provider, _ := reservingSession(t, money, 2_000_000, false)
 	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "a", Final: true}))
@@ -447,25 +450,27 @@ func TestMoreTextForAReusedIdsNewSentenceLetsItFinish(t *testing.T) {
 	// $1 is spent and the new sentence's first character holds the other.
 
 	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "b"}))
-	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "cd"}),
-		"the new sentence is speaking and its final text was not sent, so it finishes past its credit")
-	require.Len(t, provider.said, 3)
+	require.ErrorIs(t, session.Synthesize(tts.Request{ID: "u1", Text: "cd"}), policy.ErrNoCredits,
+		"the new sentence is speaking, and has no credit for more")
+	require.Len(t, provider.said, 2, "the refused text is not sent")
 }
 
 // On a voice that takes each sentence as its own request, a final text the voice took ends
 // the sentence; one it refused does not.
-func TestASentenceWhoseFinalTextWasRefusedTakesItAgainAsItsOwn(t *testing.T) {
+func TestASentenceWhoseFinalTextTheVoiceRefusedTakesItAgainAsItsOwn(t *testing.T) {
 	money := policytest.Start(t, "ttsrouter_reserve")
-	session, provider, _ := reservingSession(t, money, 1_000_000, true)
-	// Its first character holds the $1 of credit.
+	session, provider, owner := reservingSession(t, money, 4_000_000, true)
 	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "a"}))
 	provider.refuse = errors.New("the voice dropped the connection")
 	require.Error(t, session.Synthesize(tts.Request{ID: "u1", Text: "bc", Final: true}))
 	provider.refuse = nil
 
 	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "bc", Final: true}),
-		"the final text never went out, so the sentence is still speaking and finishes past its credit")
+		"the final text never went out, so the sentence is still speaking")
 	require.Len(t, provider.said, 2)
+	spoken(t, session, provider, "u1", 3)
+	rows := rowsOf(t, money, owner, 1)
+	require.EqualValues(t, 3, rows[0].Characters, "it is one sentence")
 }
 
 func TestAnIdReusedAfterItsSentenceFinishedIsBilledOnceForWhatWasSent(t *testing.T) {
@@ -497,3 +502,208 @@ func TestAnIdReusedAfterItsSentenceFinishedIsBilledOnceForWhatWasSent(t *testing
 		})
 	}
 }
+
+// drain reads the session's events until it closes.
+func drain(session *Session) {
+	go func() {
+		for range session.Events() {
+		}
+	}()
+}
+
+func TestAnUtterancesOwnTextCountsTowardTheCreditItsNextTextNeeds(t *testing.T) {
+	for name, perSentence := range voiceKinds {
+		t.Run(name, func(t *testing.T) {
+			money := policytest.Start(t, "ttsrouter_reserve")
+			session, provider, owner := reservingSession(t, money, 3_000_000, perSentence)
+			require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "a"}))
+			require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "b"}))
+			require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "c"}))
+
+			require.ErrorIs(t, session.Synthesize(tts.Request{ID: "u1", Text: "d"}), policy.ErrNoCredits,
+				"its own three characters hold all $3")
+			require.ErrorIs(t, session.Synthesize(tts.Request{ID: "u1", Text: "e"}), policy.ErrNoCredits, "and stays refused")
+			require.Len(t, provider.said, 3, "the refused text is not sent")
+
+			// The caller ends it, and what was sent is spoken and billed.
+			require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Final: true}))
+			require.Equal(t, tts.Request{ID: "u1", Final: true}, provider.said[3])
+			spoken(t, session, provider, "u1", 3)
+			rows := rowsOf(t, money, owner, 1)
+			require.EqualValues(t, 3, rows[0].Characters)
+			require.EqualValues(t, 3_000_000, rows[0].CostMicros)
+		})
+	}
+}
+
+func TestTextAnUtteranceIsRefusedForCreditIsNotLeftHeld(t *testing.T) {
+	money := policytest.Start(t, "ttsrouter_reserve")
+	session, provider, owner := reservingSession(t, money, 3_000_000, false)
+	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "a"}))
+	other, _ := reservingSessionOf(t, money, owner, false)
+	require.NoError(t, other.Synthesize(tts.Request{ID: "o1", Text: "xy"}))
+	require.ErrorIs(t, session.Synthesize(tts.Request{ID: "u1", Text: "bcdefgh"}), policy.ErrNoCredits)
+
+	require.NoError(t, other.Close())
+	require.Eventually(t, func() bool { return money.Spend(t, owner) == nil }, 2*time.Second, 10*time.Millisecond,
+		"one character is held of $3")
+	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "b"}))
+	require.NoError(t, money.Spend(t, owner), "two characters are held of $3")
+	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "c"}), "with room again the utterance goes on")
+	require.ErrorIs(t, money.Spend(t, owner), policy.ErrNoCredits, "three are held, none of them twice")
+	require.Len(t, provider.said, 3)
+}
+
+func TestAnUtteranceWhoseFinalTextIsRefusedForCreditStillEnds(t *testing.T) {
+	for name, perSentence := range voiceKinds {
+		t.Run(name, func(t *testing.T) {
+			money := policytest.Start(t, "ttsrouter_reserve")
+			session, provider, owner := reservingSession(t, money, 1_000_000, perSentence)
+			require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "a"}))
+
+			require.ErrorIs(t, session.Synthesize(tts.Request{ID: "u1", Text: "bcdefgh", Final: true}), policy.ErrNoCredits)
+
+			require.Equal(t, []tts.Request{{ID: "u1", Text: "a"}, {ID: "u1", Final: true}}, provider.said,
+				"the voice is told the utterance is over, so it says and completes what it was sent")
+			spoken(t, session, provider, "u1", 1)
+			rows := rowsOf(t, money, owner, 1)
+			require.EqualValues(t, 1, rows[0].Characters)
+			session.mu.Lock()
+			left := len(session.sentences)
+			session.mu.Unlock()
+			require.Zero(t, left, "nothing is left waiting for a completion")
+		})
+	}
+}
+
+// On a voice that takes each sentence as its own request, a sentence its refused final text
+// ended takes no more, so text for its id after is a new sentence with a completion of its own.
+func TestASentenceItsRefusedFinalTextEndedTakesNoMore(t *testing.T) {
+	money := policytest.Start(t, "ttsrouter_reserve")
+	session, provider, owner := reservingSession(t, money, 1_000_000, true)
+	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "a"}))
+	require.ErrorIs(t, session.Synthesize(tts.Request{ID: "u1", Text: "b", Final: true}), policy.ErrNoCredits)
+
+	require.ErrorIs(t, session.Synthesize(tts.Request{ID: "u1", Text: "c", Final: true}), policy.ErrNoCredits)
+	require.Len(t, provider.said, 2, "the sentence is not ended twice")
+	spoken(t, session, provider, "u1", 1)
+	rows := rowsOf(t, money, owner, 1)
+	require.EqualValues(t, 1, rows[0].Characters)
+}
+
+func TestAnUtteranceThatWasSentNoTextIsNotEndedByARefusal(t *testing.T) {
+	money := policytest.Start(t, "ttsrouter_reserve")
+	session, provider, owner := reservingSession(t, money, 1_000_000, false)
+	require.NoError(t, session.Synthesize(tts.Request{ID: "u1"}))
+	other, _ := reservingSessionOf(t, money, owner, false)
+	require.NoError(t, other.Synthesize(tts.Request{ID: "o1", Text: "x"}))
+
+	require.ErrorIs(t, session.Synthesize(tts.Request{ID: "u1", Text: "a", Final: true}), policy.ErrNoCredits)
+
+	require.Equal(t, []tts.Request{{ID: "u1"}}, provider.said, "there is nothing to say")
+	session.mu.Lock()
+	left := len(session.sentences)
+	session.mu.Unlock()
+	require.Zero(t, left)
+}
+
+func TestASuspensionRefusesMoreTextOfAnUtterance(t *testing.T) {
+	for name, perSentence := range voiceKinds {
+		t.Run(name, func(t *testing.T) {
+			money := policytest.Start(t, "ttsrouter_reserve")
+			session, provider, owner := reservingSession(t, money, 9_000_000, perSentence)
+			require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "a"}))
+
+			money.Usage.Suspend(t, owner.OrganizationID, "a test")
+			require.Eventually(t, func() bool {
+				_, err := money.Enforcer.Admit(t.Context(), owner)
+				return errors.Is(err, policy.ErrSuspended)
+			}, 5*time.Second, 5*time.Millisecond, "the suspension is read")
+
+			require.ErrorIs(t, session.Synthesize(tts.Request{ID: "u1", Text: "b"}), policy.ErrSuspended)
+			require.Len(t, provider.said, 1)
+			require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Final: true}), "what was sent is still said")
+			spoken(t, session, provider, "u1", 1)
+			rows := rowsOf(t, money, owner, 1)
+			require.EqualValues(t, 1, rows[0].Characters, "and billed")
+			require.False(t, provider.closed, "the session stays open")
+		})
+	}
+}
+
+func TestMoneyThatCannotBeCheckedLetsAnUtteranceFinish(t *testing.T) {
+	redis, sharing := policytest.SharedHolds(t)
+	money := policytest.Start(t, "ttsrouter_reserve", sharing, func(settings *policy.Settings) { settings.FlushMaxLag = 200 * time.Millisecond })
+	session, provider, owner := reservingSession(t, money, 9_000_000, false)
+	drain(session)
+	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "a"}))
+
+	redis.Stop()
+	require.Eventually(t, func() bool {
+		return errors.Is(money.Spend(t, owner), policy.ErrSpendCheckUnavailable)
+	}, 3*time.Second, 10*time.Millisecond, "holds go unshared")
+	require.ErrorIs(t, session.Synthesize(tts.Request{ID: "u2", Text: "x"}), policy.ErrSpendCheckUnavailable, "a new utterance is refused")
+
+	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "bc"}))
+	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "d", Final: true}))
+	require.Len(t, provider.said, 3, "the utterance already speaking is finished")
+	provider.emitter.Send(tts.SynthesisStarted{SynthesisID: "u1", At: time.Now()})
+	provider.emitter.Send(tts.SynthesisComplete{SynthesisID: "u1", Characters: 4})
+	require.EqualValues(t, 4, rowsOf(t, money, owner, 1)[0].Characters, "and billed all of it")
+}
+
+// unenforced is an owner with no credit on a router that does not enforce its limits.
+func unenforced(t *testing.T, money *policytest.Money) routing.Owner {
+	t.Helper()
+	app, organization := "app-"+uuid.NewString(), "org-"+uuid.NewString()
+	money.Usage.Suspend(t, organization, "a test")
+	owner := routing.Owner{CustomerID: app, Attribution: routing.Attribution{OrganizationID: organization}}
+	money.Enforcer.Join(t.Context(), app, organization, usage.DefaultTier)
+	return owner
+}
+
+func TestARouterThatDoesNotEnforceItsLimitsRefusesNoMoreText(t *testing.T) {
+	for _, mode := range []config.LimitsMode{config.LimitsOff, config.LimitsShadow} {
+		t.Run(string(mode), func(t *testing.T) {
+			money := policytest.Start(t, "ttsrouter_reserve", func(settings *policy.Settings) { settings.Mode = mode })
+			owner := unenforced(t, money)
+			session, provider := reservingSessionOf(t, money, owner, false)
+			require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "a"}))
+			if mode == config.LimitsShadow {
+				require.Eventually(t, func() bool {
+					_, read := money.Enforcer.Balance(owner.CustomerID, owner.OrganizationID)
+					return read
+				}, 5*time.Second, 5*time.Millisecond, "the organization's standing is read")
+			}
+
+			require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "b"}))
+			require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "c", Final: true}))
+			require.Len(t, provider.said, 3)
+			spoken(t, session, provider, "u1", 3)
+			require.EqualValues(t, 3, rowsOf(t, money, owner, 1)[0].Characters)
+		})
+	}
+}
+
+func BenchmarkSynthesizeDelta(b *testing.B) {
+	money := policytest.Start(b, "ttsrouter_reserve")
+	owner := money.Owner(b, 1_000_000_000_000)
+	config := routing.ProviderConfig{Provider: "stub", Model: "stub-model", Price: routing.Price{PerMillionChars: 1}}
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	prices, err := routing.Prices(routing.Config{routing.TTS: {Providers: []routing.ProviderConfig{config}}}, discard)
+	require.NoError(b, err)
+	session := newSession(context.Background(), mutedTTS{newStubTTS()}, config, owner, money.Recorder(routing.TTS, prices), discard)
+	b.Cleanup(func() { _ = session.Close() })
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if err := session.Synthesize(tts.Request{ID: "u1", Text: "a sentence of a reply, as long as most"}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// mutedTTS keeps nothing of what it is sent.
+type mutedTTS struct{ *stubTTS }
+
+func (mutedTTS) Synthesize(tts.Request) error { return nil }

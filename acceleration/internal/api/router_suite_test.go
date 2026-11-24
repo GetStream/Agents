@@ -323,6 +323,8 @@ type RouterSuite struct {
 	// voice keeps what every stub voice was told to say. Each socket is given a stub voice
 	// and transcriber of its own, so one a test left open cannot read what the next test
 	// sends; newestVoice and newestEars are the last the router started, read through
+	// hearingOpens, if set, runs as a transcriber opens, once it was admitted.
+	hearingOpens func()
 	// speaking and ears.
 	voice       *saidLog
 	speechMu    sync.Mutex
@@ -1169,8 +1171,12 @@ func (s *RouterSuite) spoke(voice *recordingTTS) {
 
 func (s *RouterSuite) heard(ears *quietSTT) {
 	s.speechMu.Lock()
-	defer s.speechMu.Unlock()
 	s.newestEars = ears
+	opening := s.hearingOpens
+	s.speechMu.Unlock()
+	if opening != nil {
+		opening()
+	}
 }
 
 // routers builds every modality against stubs that answer in process. What a real vendor
@@ -1204,7 +1210,8 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 		routing.ProviderConfig{Provider: "echoing", Model: "echoing-model", Languages: []string{"la"}, Realtime: true},
 		routing.ProviderConfig{Provider: "batch", Model: batchModel, Languages: []string{"la"}},
 		routing.ProviderConfig{Provider: "down", Model: downModel, Languages: []string{"la"}, Realtime: true},
-		routing.ProviderConfig{Provider: "unconfigured", Model: unconfiguredModel, Languages: []string{"la"}, Realtime: true})
+		routing.ProviderConfig{Provider: "unconfigured", Model: unconfiguredModel, Languages: []string{"la"}, Realtime: true},
+		routing.ProviderConfig{Provider: "stub", Model: "priced-model", Languages: []string{"la"}, Realtime: true, Price: routing.Price{PerAudioHour: 1}})
 	// As the deployment's own registries do: what cannot be built is listed unavailable.
 	hearing.Probe()
 	transcriber, err := sttrouter.New(sttrouter.Options{

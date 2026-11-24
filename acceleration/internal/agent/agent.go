@@ -1639,7 +1639,11 @@ func (a *Agent) consumeEdge() {
 
 	// Kept here as well as on the agent so a frame does not wait on the agent's lock.
 	tallies := map[string]*hearing{}
+	unpaid := false
 	for inbound := range a.options.Edge.Audio() {
+		if unpaid {
+			continue
+		}
 		tally, ok := tallies[inbound.Participant.ID]
 		if !ok {
 			tally = a.heardFrom(inbound.Participant.ID)
@@ -1660,15 +1664,27 @@ func (a *Agent) consumeEdge() {
 		if errors.Is(err, errDeparted) {
 			continue
 		}
+		if err == nil {
+			err = listener.ProcessAudio(inbound.Audio, inbound.Participant)
+		}
 		if err != nil {
 			a.fail(err, "stt")
-			continue
-		}
-		if err := listener.ProcessAudio(inbound.Audio, inbound.Participant); err != nil {
-			a.fail(err, "stt")
+			// With no money to hear anyone, the call ends, as it does when a speech-to-speech
+			// model is refused it. Closing waits for this loop.
+			if unpaid = refusedMoney(err); unpaid {
+				goroutine.Go(a.ctx, func() {
+					if err := a.Close(); err != nil {
+						a.logger.Error("could not leave after the transcriber was refused", "error", err)
+					}
+				})
+			}
 		}
 	}
 }
+
+// refusedMoney reports whether err refuses work because money ran out or the organization is
+// suspended, rather than because it could not be checked.
+func refusedMoney(err error) bool { return policy.Code(err) != "" && !policy.Transient(err) }
 
 // consumeRoster turns who comes and goes into events a watcher can wait on.
 func (a *Agent) consumeRoster(roster Roster) {

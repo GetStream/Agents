@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -902,6 +903,11 @@ type AgentSuite struct {
 	// backup, if set, is a second transcription model, after ears, that takes over a
 	// session ears refuses.
 	backup *stubSTT
+	// hearingWith and voicesWith, if set, change how the transcriber's and the voice's routers are made,
+	// and owner is whose work the agent's is, for a test of its money.
+	hearingWith func(*sttrouter.Options)
+	voicesWith  func(*ttsrouter.Options)
+	owner       routing.Owner
 	// opened counts the transcription sessions the agent asked for, which is how a test
 	// tells a transcriber that was replaced from one that was never reopened.
 	opened atomic.Int64
@@ -1245,9 +1251,11 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 		})
 		transcription.Register("backup", func(routing.Spec) (stt.STT, error) { return s.backup, nil })
 	}
-	transcriber, err := sttrouter.New(sttrouter.Options{
-		Config: transcribing, Registry: transcription, Logger: logger,
-	})
+	hearing := sttrouter.Options{Config: transcribing, Registry: transcription, Logger: logger}
+	if s.hearingWith != nil {
+		s.hearingWith(&hearing)
+	}
+	transcriber, err := sttrouter.New(hearing)
 	s.Require().NoError(err)
 	s.T().Cleanup(transcriber.Close)
 
@@ -1285,9 +1293,11 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 			return s.voice, nil
 		})
 	}
-	speaker, err := ttsrouter.New(ttsrouter.Options{
-		Config: voicing, Registry: speech, Logger: logger,
-	})
+	saying := ttsrouter.Options{Config: voicing, Registry: speech, Logger: logger}
+	if s.voicesWith != nil {
+		s.voicesWith(&saying)
+	}
+	speaker, err := ttsrouter.New(saying)
 	s.Require().NoError(err)
 	s.T().Cleanup(speaker.Close)
 
@@ -1327,7 +1337,8 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 	agent, err := New(Options{
 		Edge:               edge,
 		Instructions:       "be brief",
-		CustomerID:         "acme",
+		CustomerID:         cmp.Or(s.owner.CustomerID, "acme"),
+		Attribution:        s.owner.Attribution,
 		AgentID:            s.agentID,
 		AppID:              "router",
 		SessionID:          "session-1",
