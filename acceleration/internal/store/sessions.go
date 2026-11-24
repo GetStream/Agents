@@ -26,9 +26,7 @@ func (r *Users) Insert(ctx context.Context, user *User) error {
 	if user.CreatedAt.IsZero() {
 		user.CreatedAt = time.Now().UTC()
 	}
-	if user.Custom == nil {
-		user.Custom = map[string]any{}
-	}
+	user.Custom = orEmptyMap(user.Custom)
 
 	// Recording a user is get-or-create, so the same id arriving again is the same person
 	// coming back rather than a conflict. A row already here is left alone: a guest who

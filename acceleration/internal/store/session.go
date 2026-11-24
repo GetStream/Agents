@@ -300,13 +300,9 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 	if session.Modality == "" {
 		session.Modality = ModalityText
 	}
-	if session.Custom == nil {
-		session.Custom = map[string]any{}
-	}
+	session.Custom = orEmptyMap(session.Custom)
 	// The column's own default, which a nil slice would write as JSON null.
-	if session.ConnectorSelections == nil {
-		session.ConnectorSelections = []SessionConnectorSelection{}
-	}
+	session.ConnectorSelections = orEmpty(session.ConnectorSelections)
 
 	// No conflict target is named: every unique index arbitrates the insert, so it neither fails
 	// on one it did not name nor depends on which of them the table has. A row there already is

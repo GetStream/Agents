@@ -117,9 +117,7 @@ func (r *Users) SetGuestProfile(ctx context.Context, customerID, id, name string
 	if customerID == "" || id == "" {
 		return stack.Wrap(errors.New("store: a customer and a guest id are required"))
 	}
-	if custom == nil {
-		custom = map[string]any{}
-	}
+	custom = orEmptyMap(custom)
 
 	result, err := r.store.global.NewUpdate().Model((*User)(nil)).
 		Set("name = ?", name).

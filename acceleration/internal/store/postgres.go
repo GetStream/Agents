@@ -89,6 +89,23 @@ func nullable(text string) any {
 	return text
 }
 
+// orEmpty is list, or an empty one when it is nil, for a column or a JSON value that holds
+// an empty list and never NULL.
+func orEmpty[S ~[]E, E any](list S) S {
+	if list == nil {
+		return S{}
+	}
+	return list
+}
+
+// orEmptyMap is orEmpty for a map.
+func orEmptyMap[M ~map[K]V, K comparable, V any](values M) M {
+	if values == nil {
+		return M{}
+	}
+	return values
+}
+
 // likeEscaper makes typed text match as itself rather than as a pattern: backslash is LIKE's
 // default escape.
 var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
