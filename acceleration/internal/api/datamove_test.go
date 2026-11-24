@@ -554,6 +554,8 @@ func (s *DataMoveSuite) TestAnImportWhoseBodyStallsLetsGoOfItsPlace() {
 	}{
 		{"after a line, chunked", "{\"cursor\":1}\n", chunked},
 		{"after a line, declared length", "{\"cursor\":1}\n", declared},
+		{"after a blank line, chunked", "{\"cursor\":1}\n\n", chunked},
+		{"after a blank line, declared length", "{\"cursor\":1}\n\n", declared},
 		{"inside a line, chunked", "{\"cursor\":1}\n{\"cur", chunked},
 		{"inside a line, declared length", "{\"cursor\":1}\n{\"cur", declared},
 		{"inside the first line, chunked", "{\"cur", chunked},
@@ -652,9 +654,10 @@ func (s *DataMoveSuite) TestAnImportWhoseLinesKeepArrivingOutlastsTheLineWait() 
 	s.withImportLineWait(time.Second)
 	body, writer := io.Pipe()
 	go func() {
-		for range 4 {
+		// Blank lines count: three in a row outlast the wait the line before them began.
+		for _, line := range []string{"{\"cursor\":1}\n", "{\"cursor\":1}\n", "\n", "\n", "\n", "{\"cursor\":1}\n"} {
 			time.Sleep(400 * time.Millisecond)
-			_, _ = writer.Write([]byte("{\"cursor\":1}\n"))
+			_, _ = writer.Write([]byte(line))
 		}
 		_ = writer.Close()
 	}()
@@ -712,8 +715,8 @@ func (s *DataMoveSuite) TestARowWrittenPastTheLineWaitKeepsItsConnection() {
 
 	var first, second bool
 	status, payload := send(ndjson(lines), &first)
-	s.Require().Equal(http.StatusOK, status, "the import whose row waited on a lock: %s", payload)
-	status, payload = send(emptyImport, &second)
+	s.Equal(http.StatusOK, status, "the import whose row waited on a lock: %s", payload)
+	status, payload = send(ndjson(lines), &second)
 
 	s.Equal(http.StatusOK, status, "the request after it on the same connection: %s", payload)
 	s.True(second, "the second request went on a new connection")

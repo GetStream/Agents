@@ -242,7 +242,8 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, r, fmt.Errorf("api: import read deadline: %w", err))
 		return
 	}
-	// A read that failed leaves what came before it as a last token, which is no line.
+	// A read that failed drops what came with it: every complete line of the same read, and what
+	// the scanner hands back as a last token, which is no line.
 	for scanner.Scan() && scanner.Err() == nil {
 		if err := s.importLine(r.Context(), controller, &imported, scanner.Bytes()); err != nil {
 			writeImportFailure(w, r, err)
