@@ -5,8 +5,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -668,6 +671,185 @@ func (s *GuestsSuite) TestAClaimStillJoinsAChannelWithNoCustomerStamp() {
 	s.claim(guest, account)
 
 	s.Contains(s.chat.Members(channel), account, "a channel with no stamp is the app's to join")
+}
+
+func (s *GuestsSuite) TestAnAddressIsRefusedItsSixtyFirstNewGuestOfAnAppInAnHour() {
+	s.mintSixtyGuests()
+	written := s.profileWrites()
+
+	status, payload := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Require().Equal(http.StatusTooManyRequests, status, string(payload))
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &answered))
+	s.Equal(ErrorTypeRateLimited, answered.Error.Type)
+	s.Contains(answered.Error.Message, "60 guests of this app this hour")
+	s.Equal(written, s.profileWrites(), "a refused guest is never written to Stream")
+}
+
+func (s *GuestsSuite) TestAnAddressPastItsGuestsIsToldToWaitForTheHoursEnd() {
+	s.mintSixtyGuests()
+	left := time.Until(time.Now().Truncate(time.Hour).Add(time.Hour)).Seconds()
+
+	refused := s.data.createAnonymous().raw(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Require().Equal(http.StatusTooManyRequests, refused.StatusCode)
+	wait, err := strconv.Atoi(refused.Header.Get("Retry-After"))
+	s.Require().NoError(err)
+	s.InDelta(left, wait, 5)
+	_, message := s.data.createAnonymous().failure(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+	_, told, found := strings.Cut(message, "try again in ")
+	s.Require().True(found, message)
+	said, err := strconv.Atoi(strings.TrimSuffix(told, "s"))
+	s.Require().NoError(err, message)
+	s.InDelta(left, said, 5)
+}
+
+func (s *GuestsSuite) TestAnotherAddressStillMintsGuests() {
+	s.trustThisHost()
+	s.mintSixtyGuests()
+
+	minted := s.mint(s.from("203.0.113.9"), GuestUserRequest{})
+
+	s.Contains(minted.Id, guestPrefix)
+}
+
+func (s *GuestsSuite) TestTheAddressesOfOneIPv6NetworkMintTheHoursGuestsTogether() {
+	s.trustThisHost()
+	awayFromTheHour()
+	for i := range 60 {
+		s.mint(s.from(fmt.Sprintf("2001:db8:0:1:%x::%x", i, i+1)), GuestUserRequest{})
+	}
+
+	status, payload := s.from("2001:db8:0:1:ffff:ffff:ffff:ffff").call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Equal(http.StatusTooManyRequests, status, string(payload))
+	minted := s.mint(s.from("2001:db8:0:2::1"), GuestUserRequest{})
+	s.Contains(minted.Id, "guest-", "the next /64 has a count of its own")
+}
+
+func (s *GuestsSuite) TestNeighbouringIPv4AddressesMintGuestsApart() {
+	s.trustThisHost()
+	awayFromTheHour()
+	for range 60 {
+		s.mint(s.from("203.0.113.8"), GuestUserRequest{})
+	}
+
+	status, _ := s.from("::ffff:203.0.113.8").call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Equal(http.StatusTooManyRequests, status, "an IPv4-mapped address is the IPv4 address it carries")
+	minted := s.mint(s.from("::ffff:203.0.113.9"), GuestUserRequest{})
+	s.Contains(minted.Id, guestPrefix)
+}
+
+// trustThisHost believes the X-Forwarded-For of this host for the rest of the test.
+func (s *GuestsSuite) trustThisHost() {
+	was := s.router.trusted
+	s.router.trusted = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+	s.T().Cleanup(func() { s.router.trusted = was })
+}
+
+// from is an anonymous caller of the app from address, once trustThisHost.
+func (s *GuestsSuite) from(address string) *testClient {
+	client := s.data.createAnonymous()
+	client.header.Set(ForwardedHeader, address)
+	return client
+}
+
+func (s *GuestsSuite) TestTheBackendStillMintsGuestsOnceAnAddressHasMintedItsHour() {
+	s.mintSixtyGuests()
+
+	minted := s.mint(s.serverClient, GuestUserRequest{})
+
+	s.Contains(minted.Id, guestPrefix)
+}
+
+func (s *GuestsSuite) TestAGuestComingBackWithTheirSecretIsNotCountedAsANewGuest() {
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	for range 59 {
+		s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	}
+
+	again := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(first.Id), RefreshSecret: first.RefreshSecret})
+
+	s.Equal(first.Id, again.Id)
+}
+
+func (s *GuestsSuite) TestAnAddressThatMintedItsHourInOneAppStillMintsGuestsOfAnother() {
+	s.mintSixtyGuests()
+	s.useApp(s.data.createApp())
+
+	minted := s.mint(s.data.createAnonymous(), GuestUserRequest{})
+
+	s.Contains(minted.Id, guestPrefix)
+}
+
+// mintSixtyGuests mints as many new guests of the suite's app as one address may in an hour,
+// each by a caller of its own.
+func (s *GuestsSuite) mintSixtyGuests() {
+	awayFromTheHour()
+	for range 60 {
+		s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	}
+}
+
+// GuestsProxiedSuite mints guests behind a proxy with no trusted ranges, where every request
+// arrives from the proxy's address.
+type GuestsProxiedSuite struct {
+	RouterSuite
+}
+
+func TestGuestsProxiedSuite(t *testing.T) {
+	proxied := new(GuestsProxiedSuite)
+	proxied.proxied = true
+	runSuite(t, proxied)
+}
+
+func (s *GuestsProxiedSuite) SetupTest() {
+	s.useApp(s.data.createApp())
+}
+
+func (s *GuestsProxiedSuite) TestCallersTheProxyNamesAreNotCountedTogetherByTheProxysAddress() {
+	// The address is the proxy's, so counting a caller it names by it would hold every
+	// visitor of the app to one count.
+	for range 61 {
+		status, payload := s.viaProxy(s.utils.uuid()).call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+		s.Require().Equal(http.StatusCreated, status, string(payload))
+	}
+}
+
+func (s *GuestsProxiedSuite) TestCallersTheProxyNamesNobodyForShareTheProxysAddress() {
+	awayFromTheHour()
+	for range 60 {
+		status, payload := s.viaProxy("").call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+		s.Require().Equal(http.StatusCreated, status, string(payload))
+	}
+
+	status, _ := s.viaProxy("").call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Equal(http.StatusTooManyRequests, status)
+}
+
+// viaProxy is an anonymous caller of the app as the proxy forwards it, going by user, or by
+// nobody when user is empty.
+func (s *GuestsProxiedSuite) viaProxy(user string) *testClient {
+	header := http.Header{}
+	header.Set(auth.AppHeader, s.customerID())
+	header.Set(auth.OrganizationHeader, s.app.organization.ID)
+	header.Set(auth.AuthTypeHeader, auth.AuthTypeAnonymous)
+	if user != "" {
+		header.Set(auth.UserHeader, user)
+	}
+	return &testClient{suite: &s.RouterSuite, header: header}
+}
+
+// awayFromTheHour waits out the last minute of a clock hour, so the guests a test mints next
+// are counted in one hour's window: a count that started again at the hour would let the next
+// guest through.
+func awayFromTheHour() {
+	if left := time.Until(time.Now().Truncate(time.Hour).Add(time.Hour)); left < time.Minute {
+		time.Sleep(left)
+	}
 }
 
 // mint asks for a guest as the caller and expects one.
