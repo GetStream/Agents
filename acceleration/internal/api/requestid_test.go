@@ -244,6 +244,22 @@ func TestWhetherACallerIsAGuestCouldNotBeRead(t *testing.T) {
 	require.Contains(t, logged.String(), "store: minted guest")
 }
 
+func TestACancelledCheckOfACallerStillThereIsAFailure(t *testing.T) {
+	server, err := NewServer(Options{
+		Routers:  map[routing.Modality]routing.Inspector{routing.LLM: idleInspector{}},
+		AuthMode: auth.Custom,
+		Auth: auth.Func(func(context.Context, *http.Request) (auth.Principal, error) {
+			return auth.Principal{}, fmt.Errorf("a read another caller began: %w", context.Canceled)
+		}),
+	})
+	require.NoError(t, err)
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/agents/configs", nil))
+
+	require.Equal(t, http.StatusInternalServerError, response.Code)
+}
+
 func TestAKeyStoreDownIsAFailureEvenIfTheCallerHasGone(t *testing.T) {
 	broken, err := store.Open("postgres://router_app:hunter2@127.0.0.1:1/agents_prod?sslmode=disable")
 	require.NoError(t, err)
