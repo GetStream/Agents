@@ -194,9 +194,6 @@ func load(ctx context.Context, client *http.Client, source string) ([]byte, erro
 	request.Header.Set("User-Agent", egress.UserAgent)
 	response, err := client.Do(request)
 	if err != nil {
-		if errors.Is(err, errPrivate) {
-			return nil, stack.Wrap(errPrivate)
-		}
 		return nil, stack.Wrap(fmt.Errorf("video: fetching the clip: %w", err))
 	}
 	defer response.Body.Close()
@@ -303,6 +300,9 @@ var publicClient = &http.Client{
 		}).DialContext,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 20 * time.Second,
+		// http.DefaultTransport's idle limits.
+		MaxIdleConns:    100,
+		IdleConnTimeout: 90 * time.Second,
 	},
 }
 

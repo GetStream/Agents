@@ -871,6 +871,31 @@ func (s *TwilioSuite) TestTheInstructionsTwilioIsGivenAreValidXML() {
 	s.Equal("u", parsed.Dial.SIP.Username)
 }
 
+// The answer to Twilio's call webhook dials the trunk with its credentials as attributes, escaped,
+// in a content type Twilio reads TwiML from.
+func (s *TwilioSuite) TestTheAnswerToACallDialsTheTrunkWithItsCredentials() {
+	plan, err := RenderInbound(phone.Bridge{URI: "sip:+15125550100@trunk.sip.example.test", Username: "u", Password: `pa"ss<&>`})
+	s.Require().NoError(err)
+
+	s.Equal("application/xml", plan.ContentType)
+	s.True(strings.HasPrefix(string(plan.Body), "<?xml"), "twiml needs a declaration")
+	var parsed twiml
+	s.Require().NoError(xml.Unmarshal(plan.Body, &parsed))
+	s.Equal("sip:+15125550100@trunk.sip.example.test", parsed.Dial.SIP.URI)
+	s.Equal("u", parsed.Dial.SIP.Username)
+	s.Equal(`pa"ss<&>`, parsed.Dial.SIP.Password)
+
+	_, err = RenderInbound(phone.Bridge{URI: "https://trunk.example.test", Username: "u", Password: "p"})
+	s.Error(err, "a trunk that is not a SIP URI is not dialled")
+}
+
+func (s *TwilioSuite) TestARefusedCallIsRejectedOrHungUp() {
+	s.Equal("application/xml", RenderReject().ContentType)
+	s.Equal(`<?xml version="1.0" encoding="UTF-8"?>`+"\n"+`<Response><Reject reason="rejected"/></Response>`, string(RenderReject().Body))
+	s.Equal("application/xml", RenderHangup().ContentType)
+	s.Equal(`<?xml version="1.0" encoding="UTF-8"?>`+"\n"+`<Response><Hangup/></Response>`, string(RenderHangup().Body))
+}
+
 func (s *TwilioSuite) TestAnAnswerThatIsNotJSONIsAVendorErrorWithoutTheBody() {
 	s.respond = func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("<html>not json</html>")) }
 

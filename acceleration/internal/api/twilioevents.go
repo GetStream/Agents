@@ -63,8 +63,7 @@ type twilioAlertPayload struct {
 // is answered as the first was and not counted again. A usage trigger fires at most once per
 // interval (https://www.twilio.com/docs/usage/api/usage-trigger), so each callback is counted.
 func (s *Server) receiveTwilioEvent(w http.ResponseWriter, r *http.Request) {
-	public := strings.TrimRight(s.publicURL, "/")
-	if s.twilioAuthToken == "" || public == "" {
+	if !s.twilioConfigured() {
 		// Without the token anyone could raise the counter a monitor pages on, and without the
 		// public URL no signature Twilio made over it can match.
 		writeError(w, notFound("Twilio events are not configured"))
@@ -86,13 +85,7 @@ func (s *Server) receiveTwilioEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, invalidRequest("that is not a form"))
 		return
 	}
-	// The router is behind a proxy, so the URL Twilio called and signed is the public one.
-	called := public + twilioEventsHookPath
-	if r.URL.RawQuery != "" {
-		called += "?" + r.URL.RawQuery
-	}
-	err = twiliosig.Verify(s.twilioAuthToken, called, form, r.Header.Get(twiliosig.SignatureHeader))
-	if err != nil {
+	if err := s.twilioSigned(r, twilioEventsHookPath, form); err != nil {
 		s.logger.Warn("refused a twilio account event", "reason", err.Error())
 		writeError(w, unauthenticated("that is not an event from Twilio"))
 		return
@@ -127,6 +120,22 @@ func (s *Server) receiveTwilioEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// twilioConfigured reports whether the router can check a Twilio signature: it needs the
+// account's Auth Token, and the public URL Twilio signs over.
+func (s *Server) twilioConfigured() bool {
+	return s.twilioAuthToken != "" && strings.TrimRight(s.publicURL, "/") != ""
+}
+
+// twilioSigned checks the X-Twilio-Signature of a form Twilio posted to path. The router is
+// behind a proxy, so the URL Twilio called and signed is the public one.
+func (s *Server) twilioSigned(r *http.Request, path string, form url.Values) error {
+	called := strings.TrimRight(s.publicURL, "/") + path
+	if r.URL.RawQuery != "" {
+		called += "?" + r.URL.RawQuery
+	}
+	return twiliosig.Verify(s.twilioAuthToken, called, form, r.Header.Get(twiliosig.SignatureHeader))
 }
 
 // firstTwilioAlert marks the alert sid as counted for twilioAlertRepeatsFor, and reports

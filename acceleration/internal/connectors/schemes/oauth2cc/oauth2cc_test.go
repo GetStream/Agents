@@ -535,6 +535,27 @@ func (s *OAuth2CCSuite) TestATokenEndpointThatIsNotPublicIsRefusedBeforeTheSecre
 	s.Zero(srv.Hits(fakeprovider.PathToken))
 }
 
+func (s *OAuth2CCSuite) TestATokenEndpointThatIsNotPublicIsRefusedAsOneThatDoesNotResolve() {
+	srv := fakeprovider.New(s.T(), fakeprovider.ClientCredentials)
+	scheme, err := oauth2cc.New(oauth2cc.Config{HTTP: srv.Client(), Now: s.clock})
+	s.Require().NoError(err)
+	for endpoint, cause := range map[string]string{
+		"https://tokens.invalid/token": "egress: endpoint host could not be resolved",
+		"https://localhost/token":      "egress: endpoint host resolved to a non-public address",
+		"https://10.0.0.1/token":       "egress: endpoint host is not publicly routable",
+		"https://10.0.0.1/a?key=k-1":   "egress: endpoint host is not publicly routable",
+	} {
+		m := manifest(srv)
+		m.Endpoints["token"] = endpoint
+		_, _, err = scheme.Complete(s.ctx, core.CompleteInput{Manifest: m, Supplied: supplied(srv)})
+		before := `transient: oauth2cc: token: oauth2code: the request was not sent: oauth2code: endpoint "`
+		after := `" is not an https URL of a public host that resolves`
+		s.EqualError(err, before+endpoint+after)
+		host := strings.Join(strings.SplitN(endpoint, "/", 4)[:3], "/")
+		s.Equal(before+host+after+": "+cause, core.LoggedError(err), "the log says why, and names the host alone")
+	}
+}
+
 func (s *OAuth2CCSuite) TestRevokeWithNoEndpointSaysSoAndSendsNothing() {
 	srv := fakeprovider.New(s.T(), fakeprovider.ClientCredentials)
 	scheme := s.scheme(srv.Client())
