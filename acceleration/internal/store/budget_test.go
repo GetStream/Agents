@@ -74,7 +74,7 @@ func (s *StoreSuite) countSettledReads(run func()) int {
 
 // countEveryQuery hooks the suite's counter into every database the store holds.
 func (s *StoreSuite) countEveryQuery() {
-	databases := append([]*bun.DB{s.store.global}, s.store.peers...)
+	databases := append([]*bun.DB{s.store.global, s.store.locks}, s.store.peers...)
 	if s.store.Sharded() {
 		databases = append(databases, s.store.shard)
 	}
