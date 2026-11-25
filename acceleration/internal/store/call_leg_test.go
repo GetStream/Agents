@@ -702,10 +702,23 @@ func (s *StoreSuite) claims(customer, callID string, on NamedCall) error {
 	return s.store.CallLegs.Claim(s.ctx, customer, "agent", callID, on, func(context.Context) error { return nil })
 }
 
+// ownRouter is a router of the test's own, closed with it, so that the connections a test makes many
+// of at once are not kept by the suite's.
+func (s *StoreSuite) ownRouter() *Store {
+	router, err := s.openRouter()
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(router.Close()) })
+	return router
+}
+
 // places keeps a leg of a call a customer is about to dial, unless it is another's.
 func (s *StoreSuite) places(customer, callID string, on NamedCall, atOnce *CallsAtOnce) error {
+	return s.placesWith(s.store, customer, callID, on, atOnce)
+}
+
+func (s *StoreSuite) placesWith(router *Store, customer, callID string, on NamedCall, atOnce *CallsAtOnce) error {
 	placed := time.Now()
-	return s.store.CallLegs.PlaceOn(s.ctx, &CallLeg{Token: newID(), CustomerID: customer, OrganizationID: "org", CallType: "agent", CallID: callID,
+	return router.CallLegs.PlaceOn(s.ctx, &CallLeg{Token: newID(), CustomerID: customer, OrganizationID: "org", CallType: "agent", CallID: callID,
 		Vendor: "telnyx", Direction: Outbound, LocalNumber: "+15125550150", RemoteNumber: "+15125550151", PlacedAt: &placed}, on, atOnce)
 }
 
@@ -807,6 +820,7 @@ func (s *StoreSuite) TestACallARunningSessionHoldsIsItsCustomers() {
 // Whoever claims first is let in and the other refused, however long the first takes to keep
 // what it claimed with.
 func (s *StoreSuite) TestOfTwoCustomersClaimingACallAtOnceOneIsLetIn() {
+	router := s.ownRouter()
 	on := NamedCall{Scope: AppScope{Unpinned: true}}
 	for i := range 10 {
 		call := fmt.Sprintf("call-%d", i)
@@ -827,9 +841,9 @@ func (s *StoreSuite) TestOfTwoCustomersClaimingACallAtOnceOneIsLetIn() {
 		}
 		errs := make([]error, 3)
 		var wg sync.WaitGroup
-		wg.Go(func() { errs[0] = s.store.CallLegs.Claim(s.ctx, "a", "agent", call, holding, hold("a")) })
-		wg.Go(func() { errs[1] = s.store.CallLegs.Claim(s.ctx, "b", "agent", call, holding, hold("b")) })
-		wg.Go(func() { errs[2] = s.places("c", call, holding, nil) })
+		wg.Go(func() { errs[0] = router.CallLegs.Claim(s.ctx, "a", "agent", call, holding, hold("a")) })
+		wg.Go(func() { errs[1] = router.CallLegs.Claim(s.ctx, "b", "agent", call, holding, hold("b")) })
+		wg.Go(func() { errs[2] = s.placesWith(router, "c", call, holding, nil) })
 		wg.Wait()
 
 		in := 0
@@ -895,14 +909,13 @@ func (s *ShardedStoreSuite) TestACallsOwnerIsTheSameOnEveryShard() {
 // A call is locked while it is claimed, in the deployment's app whether a claim knows its id or
 // not, and another app's call of the name is not.
 func (s *StoreSuite) TestACallIsLockedWhileItIsClaimed() {
-	// Another router's, with turns of its own.
-	elsewhere := &CallLegs{store: s.store}
+	one, elsewhere := s.ownRouter(), s.ownRouter()
 	blocked := func(on NamedCall) (err error) {
 		unpinned := NamedCall{Scope: AppScope{Unpinned: true}}
-		s.Require().NoError(s.store.CallLegs.Claim(s.ctx, "a", "agent", "call", unpinned, func(context.Context) error {
+		s.Require().NoError(one.CallLegs.Claim(s.ctx, "a", "agent", "call", unpinned, func(context.Context) error {
 			ctx, cancel := context.WithTimeout(s.ctx, 300*time.Millisecond)
 			defer cancel()
-			err = elsewhere.Claim(ctx, "b", "agent", "call", on, func(context.Context) error { return nil })
+			err = elsewhere.CallLegs.Claim(ctx, "b", "agent", "call", on, func(context.Context) error { return nil })
 			return nil
 		}))
 		return err
@@ -954,6 +967,7 @@ func (s *StoreSuite) TestACallIsNotTheCustomersWhoPlacedALegAndDialledItLater() 
 
 // Named calls of no organization wait for no turn of each other's.
 func (s *StoreSuite) TestNamedCallsOfNoOrganizationArePlacedBesideEachOther() {
+	router := s.ownRouter()
 	asking, asked := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	waits := NamedCall{Scope: AppScope{Unpinned: true}, Holder: func(ctx context.Context) (string, error) {
@@ -966,7 +980,7 @@ func (s *StoreSuite) TestNamedCallsOfNoOrganizationArePlacedBesideEachOther() {
 	}}
 	place := func(call string, on NamedCall) error {
 		placed := time.Now()
-		return s.store.CallLegs.PlaceOn(s.ctx, &CallLeg{Token: newID(), CustomerID: "app", CallType: "agent", CallID: call, Vendor: "telnyx",
+		return router.CallLegs.PlaceOn(s.ctx, &CallLeg{Token: newID(), CustomerID: "app", CallType: "agent", CallID: call, Vendor: "telnyx",
 			Direction: Outbound, LocalNumber: "+15125550150", RemoteNumber: "+15125550151", PlacedAt: &placed}, on, nil)
 	}
 	first := make(chan error, 1)
@@ -985,10 +999,7 @@ func (s *StoreSuite) TestNamedCallsOfNoOrganizationArePlacedBesideEachOther() {
 
 // Named calls whose hold is not answered give up, and hold up no other placement meanwhile.
 func (s *StoreSuite) TestNamedCallsNotAnsweredHoldUpNoOtherPlacement() {
-	// A router of its own, closed here: the connections it opens are not the suite's to keep.
-	router, err := s.openRouter()
-	s.Require().NoError(err)
-	defer func() { s.NoError(router.Close()) }()
+	router := s.ownRouter()
 	on := NamedCall{Scope: AppScope{Unpinned: true}}
 	var holding atomic.Int64
 	var wg sync.WaitGroup
