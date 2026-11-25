@@ -1772,6 +1772,22 @@ func (s *AppsSuite) TestABuyerTransfersFromANumberWhoseLineAMoveLeftWithoutARow(
 	s.forgotten(line)
 }
 
+// The buyer's number is lined in the app of its own it had, and its lines are now made where the
+// other customer's forgotten one is.
+func (s *AppsSuite) TestABuyerAttachesInAnAppItMovedToANumberWhoseLineAMoveLeftThere() {
+	e164, _, _, line := s.squatted()
+	s.ownApp()
+	_, err := s.callFrom(e164)
+	s.Require().NoError(err)
+	s.moved(line, "deleted")
+	s.apps.give(s.customer, 0, s.deployment)
+
+	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
+	s.Require().NoError(err)
+	s.forgotten(line)
+}
+
 // The same customer adds the number again: it gets one line, not a second rule beside the first.
 func (s *AppsSuite) TestACustomerCallsAgainFromItsTrunkNumberAMoveDeleted() {
 	s.sealed()
@@ -1965,7 +1981,11 @@ func (s *AppsSuite) TestOnlyANumberBeingLinedBesideTrunkLinesListsStreamsTrunks(
 	_, err = s.callFrom(s.e164)
 	s.Require().NoError(err)
 	s.Zero(lists())
-	e164, _, _, _ := s.squatted()
+	e164, squatter, trunk, _ := s.squatted()
+	other := aNumber()
+	s.Require().NoError(s.addOnATrunk(trunk, squatter, other))
+	_, err = trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: other, To: "+15550001111"})
+	s.Require().NoError(err)
 	before := lists()
 
 	_, err = s.callFrom(e164)
