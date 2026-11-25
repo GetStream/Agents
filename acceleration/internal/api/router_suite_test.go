@@ -320,7 +320,10 @@ type RouterSuite struct {
 	knowledge *knowledgeBase
 	// knowledgeBucket is where an uploaded knowledge file waits to be read.
 	knowledgeBucket *blob.Bucket
-	memories        *keptMemories
+	// knowledgeRedis and knowledgeQueue are where uploaded files wait to be read.
+	knowledgeRedis asynq.RedisClientOpt
+	knowledgeQueue string
+	memories       *keptMemories
 	// voice keeps what every stub voice was told to say. Each socket is given a stub voice
 	// and transcriber of its own, so one a test left open cannot read what the next test
 	// sends; newestVoice and newestEars are the last the router started, read through
@@ -1836,10 +1839,12 @@ func (s *RouterSuite) knowledgeFiles(redisAddr string, base *metered.Knowledge, 
 	s.knowledgeBucket = bucket
 
 	n := redisDB.Add(1)
+	s.knowledgeRedis = asynq.RedisClientOpt{Addr: redisAddr, DB: int(n)%15 + 1}
+	s.knowledgeQueue = fmt.Sprintf("knowledge-files-%d", n)
 	service, err := files.New(files.Options{
 		Store:         s.store,
-		Redis:         asynq.RedisClientOpt{Addr: redisAddr, DB: int(n)%15 + 1},
-		Queue:         fmt.Sprintf("knowledge-files-%d", n),
+		Redis:         s.knowledgeRedis,
+		Queue:         s.knowledgeQueue,
 		Bucket:        bucket,
 		Extractor:     extract.New(extract.Options{}),
 		Knowledge:     base,
