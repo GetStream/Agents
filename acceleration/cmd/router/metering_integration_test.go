@@ -86,6 +86,6 @@ func (s *MeteringAlertsSuite) TestRowsRecordedWhileTheWriterDrainsStillAlert() {
 			s.Equal("router/test", event.Tags["source"])
 		}
 	}
-	s.Equal([]string{"usage_missing:llm/vendor/" + model}, fingerprints,
+	s.Equal([]string{"usage_missing:development:llm/vendor/" + model}, fingerprints,
 		"the row recorded after shutdown began is checked once more when the alerts stop")
 }

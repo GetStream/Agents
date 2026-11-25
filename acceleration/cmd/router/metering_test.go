@@ -74,5 +74,5 @@ func (s *RefusalAlertsSuite) TestAMem0RefusalAndARefusedKeyAlert() {
 	stop()
 
 	s.Contains(s.fingerprints(), "usage_mem0_refused:search/429")
-	s.Contains(s.fingerprints(), "usage_key_refused:"+keyVar+"/quota_exceeded")
+	s.Contains(s.fingerprints(), "usage_key_refused:development:"+keyVar+"/quota_exceeded")
 }

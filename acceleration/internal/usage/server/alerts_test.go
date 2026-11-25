@@ -65,12 +65,12 @@ func (s *AlertTextSuite) TestEveryAlertKeepsItsSentryIssue() {
 		fingerprints[name] = event.Fingerprint
 	}
 	s.Equal(map[string][]string{
-		"service_rejected":   {"usage_alert:service_rejected"},
-		"batch_refused":      {"usage_alert:batch_refused"},
-		"batch_unauthorized": {"usage_alert:batch_unauthorized"},
-		"ingest_failing":     {"usage_alert:ingest_failing"},
-		"event_lag":          {"usage_alert:event_lag"},
-		"mirror_failing":     {"usage_alert:mirror_failing"},
+		"service_rejected":   {"usage_alert:development:service_rejected"},
+		"batch_refused":      {"usage_alert:development:batch_refused"},
+		"batch_unauthorized": {"usage_alert:development:batch_unauthorized"},
+		"ingest_failing":     {"usage_alert:development:ingest_failing"},
+		"event_lag":          {"usage_alert:development:event_lag"},
+		"mirror_failing":     {"usage_alert:development:mirror_failing"},
 	}, fingerprints)
 }
 

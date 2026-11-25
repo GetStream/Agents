@@ -9,6 +9,7 @@
 package alerts
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
 	"maps"
@@ -67,7 +68,7 @@ type Condition struct {
 	Level Level
 	Check Check
 	// Items, in place of Check, is a condition that holds for items not known in advance. Each
-	// item is its own alert, fingerprinted usage_<name>:<item> and limited on its own, so one
+	// item is its own alert, fingerprinted usage_<name>:<env>:<item> and limited on its own, so one
 	// item that keeps failing does not hide another.
 	Items ItemCheck
 	// Describe, with Items, says in plain words what an item means, such as why a key was
@@ -200,6 +201,21 @@ func SendItem(name, item string, level Level, extra map[string]any) {
 	send(sentry.CurrentHub(), slog.Default(), filepath.Base(os.Args[0]), nil, name, item, "", level, extra)
 }
 
+// defaultEnvironment is the environment of a process whose Sentry client names none, as the
+// router names the sandboxes it makes (sandboxEnvironment in cmd/router).
+const defaultEnvironment = "development"
+
+// environment is the environment the hub's Sentry client reports events as (SENTRY_ENVIRONMENT,
+// which the chart sets per release). The fingerprint carries it so that the staging and the
+// prod event of one alert are two Sentry issues, each with its own limit and its own mute.
+func environment(hub *sentry.Hub) string {
+	client := hub.Client()
+	if client == nil {
+		return defaultEnvironment
+	}
+	return cmp.Or(client.Options().Environment, defaultEnvironment)
+}
+
 // send sends one alert, of one item of the condition when item is not empty, and with the
 // description (the item's, or the condition's summary) after it in the message when there is one.
 func send(hub *sentry.Hub, logger *slog.Logger, source string, tags map[string]string, name, item, description string, level Level, extra map[string]any) {
@@ -211,14 +227,15 @@ func send(hub *sentry.Hub, logger *slog.Logger, source string, tags map[string]s
 	event := sentry.NewEvent()
 	event.Level = level.sentryLevel()
 	event.Message = "usage alert: " + name
-	event.Fingerprint = []string{"usage_alert:" + name}
+	env := environment(hub)
+	event.Fingerprint = []string{"usage_alert:" + env + ":" + name}
 	event.Tags = map[string]string{}
 	for key, value := range tags {
 		event.Tags[key] = value
 	}
 	if item != "" {
 		event.Message += " " + item
-		event.Fingerprint = []string{"usage_" + name + ":" + item}
+		event.Fingerprint = []string{"usage_" + name + ":" + env + ":" + item}
 		event.Tags["item"] = item
 	}
 	if description != "" {

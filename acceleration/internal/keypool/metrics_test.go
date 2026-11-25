@@ -646,7 +646,7 @@ func (s *RefusedAttemptsSuite) TestEveryRefusalStatusAlertsWithItsReason() {
 
 			s.Require().Contains(events, item)
 			s.Equal("usage alert: key_refused "+item+": "+tc.reason, events[item].Message)
-			s.Equal([]string{"usage_key_refused:" + item}, events[item].Fingerprint)
+			s.Equal([]string{"usage_key_refused:development:" + item}, events[item].Fingerprint)
 			s.Equal("key_refused", events[item].Tags["usage_alert"])
 		})
 	}
@@ -662,7 +662,7 @@ func (s *RefusedAttemptsSuite) TestAStatusWithNoReasonKeepsItsTitle() {
 
 	s.Require().Contains(events, item)
 	s.Equal("usage alert: key_refused "+item, events[item].Message)
-	s.Equal([]string{"usage_key_refused:" + item}, events[item].Fingerprint)
+	s.Equal([]string{"usage_key_refused:development:" + item}, events[item].Fingerprint)
 	s.Empty(describeRefusal("not an item"))
 	s.Empty(describeRefusal(keyVar + "/"))
 }
