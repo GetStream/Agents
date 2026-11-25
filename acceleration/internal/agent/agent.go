@@ -2501,6 +2501,10 @@ func (a *Agent) respondTurn(
 		a.mu.Unlock()
 		return stack.Wrap(errNotJoined)
 	}
+	// Counted before this turn's reply starts, which is not the question still playing.
+	if !listened.typed {
+		a.heardLocked(drained)
+	}
 	said := participant
 	switch {
 	case listened.writer.id != "":
@@ -2529,7 +2533,6 @@ func (a *Agent) respondTurn(
 	a.lastWriter = listened.writer
 	if !listened.typed {
 		a.heardCaller = true
-		a.heardLocked(drained)
 	}
 	// A call opened with a typed instruction ("greet the caller") has nothing to act on
 	// yet, and a model offered tools then logs a summary of the empty call.

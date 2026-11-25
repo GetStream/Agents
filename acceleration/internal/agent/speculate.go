@@ -287,6 +287,7 @@ func (a *Agent) adoptSpeculation(ready candidate, note string) (adopted bool, sp
 		spec.drop()
 		return false, spec.id
 	}
+	a.heardLocked(drained)
 	a.keepTurnLocked(ready.Participant, ready.Said(), 0, nil, false)
 	a.speakingTurn = ready.ID
 	a.generating = true
@@ -298,7 +299,6 @@ func (a *Agent) adoptSpeculation(ready candidate, note string) (adopted bool, sp
 	a.lastParticipant = ready.Participant
 	a.lastWriter = writer{}
 	a.heardCaller = true
-	a.heardLocked(drained)
 	a.generatingCancel[ready.ID] = spec.cancel
 	a.mu.Unlock()
 
