@@ -1074,7 +1074,7 @@ func (a *Agent) sayAgain(voice *ttsrouter.Session, held *heldReply) {
 		mine := a.held == held
 		// More of an utterance refused for money leaves one this voice is saying, which settles
 		// only once it is told that is all.
-		finish := mine && refusedMoney(err) && !heard.counts && slices.ContainsFunc(held.unsaid, func(unsaid unsaidUtterance) bool {
+		finish := refusedMoney(err) && !heard.counts && slices.ContainsFunc(held.unsaid, func(unsaid unsaidUtterance) bool {
 			return unsaid.final
 		})
 		if mine {

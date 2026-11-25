@@ -656,7 +656,10 @@ by reason.
 Billable work is reserved before it starts, through the metering layer, so a new vendor gets
 it without writing it: `routing.Call` reserves `Meter.Estimate` (a search request, the images
 asked for, a text's segments), an LLM response its prompt and `max_output_tokens` (4,096 when
-unset), renewed every minute while it streams, a TTS utterance its characters, and a stream
+unset), renewed every minute while it streams, a TTS utterance its characters, raised as more
+text follows (what it already holds counts toward the room that text needs; text refused is not
+sent, what was sent before it is spoken and billed, and money that could not be checked lets an
+utterance already speaking finish), and a stream
 (STT, STS, `routing.Slices`) a lease of one minute of its meters, renewed every 30 s and
 released when it ends. A speech-to-speech session whose lease is refused because its money ran
 out refuses its next turn with the money error and closes; nothing else stops a voice model

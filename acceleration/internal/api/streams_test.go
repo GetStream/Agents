@@ -78,6 +78,21 @@ func (s *StreamsSuite) TestAudioSentUpComesBackTranscribed() {
 	s.Equal("en", transcript["language"])
 }
 
+func (s *StreamsSuite) TestASocketWhoseAudioCouldNotBeWrittenStaysOpen() {
+	listening := s.start("/v1/stt/stream", frame{"target": "en-low-latency"})
+	s.Equal("started", s.nextFrame(listening)["type"])
+	s.ears().fails.Store(true)
+	s.Require().NoError(listening.WriteMessage(websocket.BinaryMessage, make([]byte, 320)))
+	s.Equal("error", s.nextFrame(listening)["type"])
+
+	s.ears().fails.Store(false)
+	s.ears().emitter.Send(stt.Transcript{Text: "still here", Mode: stt.ModeFinal, Provider: "stub", Model: "stub-stt"})
+	s.Equal("still here", s.nextFrame(listening)["text"])
+	s.Require().NoError(listening.WriteMessage(websocket.BinaryMessage, make([]byte, 320)))
+	s.ears().emitter.Send(stt.Transcript{Text: "and here", Mode: stt.ModeFinal, Provider: "stub", Model: "stub-stt"})
+	s.Equal("and here", s.nextFrame(listening)["text"])
+}
+
 func (s *StreamsSuite) TestAVendorThatRefusesTheAccountSaysSoOnce() {
 	listening := s.refused()
 

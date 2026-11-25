@@ -619,6 +619,21 @@ func TestAStreamingUtteranceGoesOnAfterARefusedFinalTextOnceThereIsCredit(t *tes
 	require.EqualValues(t, 3, rows[0].Characters, "the one completion bills both texts")
 }
 
+func TestASentenceTheVoiceWouldNotEndIsLetGoByABargeIn(t *testing.T) {
+	money := policytest.Start(t, "ttsrouter_reserve")
+	session, provider, owner := reservingSession(t, money, 1_000_000, true)
+	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "a"}))
+	dropped := errors.New("the voice dropped the connection")
+	provider.refuse = dropped
+	refused := session.Synthesize(tts.Request{ID: "u1", Text: "b", Final: true})
+	require.ErrorIs(t, refused, policy.ErrNoCredits)
+	require.ErrorIs(t, refused, dropped)
+
+	require.NoError(t, session.Interrupt())
+
+	require.NoError(t, money.Spend(t, owner), "the voice never completes it, so nothing is held for it")
+}
+
 func TestAnUtteranceThatWasSentNoTextIsNotEndedByARefusal(t *testing.T) {
 	money := policytest.Start(t, "ttsrouter_reserve")
 	session, provider, owner := reservingSession(t, money, 1_000_000, false)

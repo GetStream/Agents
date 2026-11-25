@@ -176,6 +176,19 @@ func (s *MoneySuite) TestASuspensionEndsASession() {
 	s.Equal([]string{"the last words"}, s.said(session))
 }
 
+func (s *MoneySuite) TestASessionHoldsItsMinuteFromOneRenewalToTheNext() {
+	leaseRenew = 300 * time.Millisecond
+	money := policytest.Start(s.T(), "sttrouter_reserve")
+	// Less than the minute costs ($0.0167), so the lease holds all of it.
+	owner := money.Owner(s.T(), 10_000)
+	session := listening(s.T(), money, owner, &lastWordsSTT{emitter: stt.NewEmitter(64)})
+
+	for until := time.Now().Add(time.Second); time.Now().Before(until); time.Sleep(5 * time.Millisecond) {
+		s.Require().ErrorIs(money.Spend(s.T(), owner), policy.ErrNoCredits, "the minute is held without a gap")
+	}
+	s.NoError(session.ProcessAudio(speech(20), stt.Participant{}), "its own minute refuses it nothing")
+}
+
 func (s *MoneySuite) TestARefusalDoesNotWaitForTheVendorToClose() {
 	money := policytest.Start(s.T(), "sttrouter_reserve")
 	owner := money.Owner(s.T(), 0)

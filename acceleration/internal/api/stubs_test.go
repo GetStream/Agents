@@ -387,6 +387,11 @@ type quietSTT struct {
 	emitter *stt.Emitter
 	// started is told when the router starts it, which a readiness probe never does.
 	started func(*quietSTT)
+	// fails has every write of audio fail, and lastWords is how many turns it settles as it
+	// closes, when a test sets them.
+	fails     atomic.Bool
+	lastWords atomic.Int64
+	closing   sync.Once
 }
 
 func (s *quietSTT) Start(context.Context) error {
@@ -394,12 +399,23 @@ func (s *quietSTT) Start(context.Context) error {
 	return nil
 }
 
-func (s *quietSTT) ProcessAudio(stt.PcmData, stt.Participant) error { return nil }
-func (s *quietSTT) Events() <-chan stt.Event                        { return s.emitter.Events() }
-func (s *quietSTT) Provider() string                                { return "stub" }
-func (s *quietSTT) Model() string                                   { return "stub-stt" }
+func (s *quietSTT) ProcessAudio(stt.PcmData, stt.Participant) error {
+	if s.fails.Load() {
+		return errors.New("stub: the write failed")
+	}
+	return nil
+}
+
+func (s *quietSTT) Events() <-chan stt.Event { return s.emitter.Events() }
+func (s *quietSTT) Provider() string         { return "stub" }
+func (s *quietSTT) Model() string            { return "stub-stt" }
 
 func (s *quietSTT) Close() error {
+	s.closing.Do(func() {
+		for range s.lastWords.Load() {
+			s.emitter.Send(stt.Transcript{Text: "the last words", Mode: stt.ModeFinal, Provider: "stub", Model: "stub-stt"})
+		}
+	})
 	s.emitter.Close()
 	return nil
 }

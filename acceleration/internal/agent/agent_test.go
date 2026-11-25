@@ -64,6 +64,10 @@ const closeFor = 10 * time.Second
 type loopbackEdge struct {
 	inbound   chan InboundAudio
 	attending chan Attendance
+	// leaving ends as the agent leaves, and sending is held by a participant's audio on its way
+	// in, so none is sent on inbound once it is closed.
+	leaving chan struct{}
+	sending sync.RWMutex
 
 	mu sync.Mutex
 	// published is what the agent has handed over and the caller has not heard yet, so it
@@ -82,6 +86,22 @@ func newLoopbackEdge() *loopbackEdge {
 	return &loopbackEdge{
 		inbound:   make(chan InboundAudio, 16),
 		attending: make(chan Attendance, 16),
+		leaving:   make(chan struct{}),
+	}
+}
+
+// hears has a participant's audio come in, and drops it once the agent has left.
+func (e *loopbackEdge) hears(inbound InboundAudio) {
+	e.sending.RLock()
+	defer e.sending.RUnlock()
+	select {
+	case <-e.leaving:
+		return
+	default:
+	}
+	select {
+	case e.inbound <- inbound:
+	case <-e.leaving:
 	}
 }
 
@@ -146,7 +166,10 @@ func (e *loopbackEdge) Leave() error {
 		return nil
 	}
 	e.left = true
+	close(e.leaving)
+	e.sending.Lock()
 	close(e.inbound)
+	e.sending.Unlock()
 	close(e.attending)
 	return nil
 }
@@ -1415,10 +1438,10 @@ func (s *AgentSuite) closesAtEnd(agent *Agent) {
 
 // speak pushes a chunk of a participant's audio into the call.
 func (s *AgentSuite) speak(participant stt.Participant) {
-	s.edge.inbound <- InboundAudio{
+	s.edge.hears(InboundAudio{
 		Participant: participant,
 		Audio:       audio.PcmData{Samples: make([]int16, 320), SampleRate: 16_000, Channels: 1},
-	}
+	})
 }
 
 // setClock sets the time the agent reads.

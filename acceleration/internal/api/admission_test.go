@@ -188,6 +188,7 @@ func (s *AdmissionSuite) TestAnSTTSocketIsEndedWhenItsOrganizationIsSuspended() 
 	s.await(listening, "started")
 	s.ears().emitter.Send(stt.Transcript{Text: "what was said before", Mode: stt.ModeFinal, Provider: "stub", Model: "stub-stt"})
 	s.Equal("what was said before", s.await(listening, "transcript")["text"])
+	s.ears().lastWords.Store(40)
 
 	silence := make([]byte, 640)
 	for range 20 {
@@ -211,11 +212,17 @@ func (s *AdmissionSuite) TestAnSTTSocketIsEndedWhenItsOrganizationIsSuspended() 
 	}
 	s.Require().NotEmpty(told)
 	var refusals []map[string]any
+	var transcribed int
 	for _, said := range told {
+		if said["type"] == "transcript" {
+			s.Empty(refusals, "its last words come before the refusal")
+			transcribed++
+		}
 		if said["type"] == "error" {
 			refusals = append(refusals, said)
 		}
 	}
+	s.Equal(40, transcribed, "and all of them come")
 	s.Require().Len(refusals, 1, "why is said once, not for each frame")
 	s.Equal("account_suspended", refusals[0]["code"])
 	s.Equal("closed", told[len(told)-1]["type"])

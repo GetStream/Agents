@@ -189,7 +189,13 @@ func (s *Session) Synthesize(request tts.Request) error {
 		}
 		if finish {
 			request.Text = ""
-			err = errors.Join(err, s.provider.Synthesize(request))
+			if failed := s.provider.Synthesize(request); failed != nil {
+				// Not told it was over, it is still the caller's to end.
+				s.mu.Lock()
+				current.ended = false
+				s.mu.Unlock()
+				err = errors.Join(err, failed)
+			}
 		}
 	}
 	return err
