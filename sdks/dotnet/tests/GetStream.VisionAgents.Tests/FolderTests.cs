@@ -576,6 +576,216 @@ public sealed class FolderTests : IDisposable
         public int GetHashCode(ConnectorDeclaration obj) => obj.Name.GetHashCode(StringComparison.Ordinal);
     }
 
+    private const string Skill = "---\ndescription: Work it out\n---\nReason it through.\n";
+
+    /// <summary>What links out of the agent directory, what it leads to, what else is there and what the refusal names.</summary>
+    public static TheoryData<string, string, Dictionary<string, string>, Dictionary<string, string>, string> LinkedOut => new()
+    {
+        { "agent.yaml", "agent.yaml", new() { ["agent.yaml"] = "name: jean\n" }, [], "agent.yaml" },
+        { "instructions.md", "notes.md", new() { ["notes.md"] = "Elsewhere.\n" }, [], "instructions.md" },
+        { "guardrail.md", "notes.md", new() { ["notes.md"] = "Elsewhere.\n" }, [], "guardrail.md" },
+        { "skills", "skills", new() { ["skills/think.md"] = Skill }, [], "skills" },
+        { "skills/think.md", "think.md", new() { ["think.md"] = Skill }, [], "skills/think.md" },
+        { "skills/think", "think", new() { ["think/SKILL.md"] = Skill }, [], "skills/think" },
+        { "skills/think/SKILL.md", "SKILL.md", new() { ["SKILL.md"] = Skill }, [], "skills/think/SKILL.md" },
+        { "skills/think/notes.txt", "notes.txt", new() { ["notes.txt"] = "Elsewhere.\n" }, new() { ["skills/think/SKILL.md"] = Skill }, "skills/think/notes.txt" },
+        { "skills/think/reference", "reference", new() { ["reference/notes.txt"] = "Elsewhere.\n" }, new() { ["skills/think/SKILL.md"] = Skill }, "skills/think/reference" },
+        { "knowledge", "knowledge", new() { ["knowledge/doc.md"] = "Elsewhere.\n" }, [], "knowledge" },
+        { "knowledge/doc.md", "doc.md", new() { ["doc.md"] = "Elsewhere.\n" }, [], "knowledge/doc.md" },
+        // A walk of knowledge/ checks a linked folder before it lists it, so the folder is refused
+        // whether or not it holds a file that would be read.
+        { "knowledge/loose", "loose", new() { ["loose/doc.md"] = "Elsewhere.\n" }, [], "knowledge/loose" },
+        { "knowledge/loose", "loose", new() { ["loose/doc.bin"] = "Elsewhere.\n" }, [], "knowledge/loose" },
+        { "knowledge/urls.yaml", "urls.yaml", new() { ["urls.yaml"] = "- https://example.com/elsewhere\n" }, [], "knowledge/urls.yaml" },
+        { "simulations", "simulations", new() { ["simulations/calls.yaml"] = "[]\n" }, [], "simulations" },
+        { "simulations/calls.yaml", "calls.yaml", new() { ["calls.yaml"] = "[]\n" }, [], "simulations/calls.yaml" },
+    };
+
+    [Theory]
+    [MemberData(nameof(LinkedOut))]
+    public void AFileLinkedFromOutsideTheAgentDirectoryIsRefused(string linked, string to, Dictionary<string, string> outside, Dictionary<string, string> inside, string refused)
+    {
+        var elsewhere = Path.Combine(Path.GetDirectoryName(_root)!, "elsewhere");
+        foreach (var (name, content) in outside)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(elsewhere, name))!);
+            File.WriteAllText(Path.Combine(elsewhere, name), content);
+        }
+        if (linked != "agent.yaml")
+        {
+            Write("agent.yaml", "name: jean\n");
+        }
+        foreach (var (name, content) in inside)
+        {
+            Write(name, content);
+        }
+        Link(linked, Path.Combine(elsewhere, to));
+
+        var failure = Assert.Throws<ConfigurationException>(() => Folder.Load(_root));
+
+        Assert.Contains($"{refused} links outside the agent directory", failure.Message);
+    }
+
+    [Fact]
+    public void ALinkLeadingOutThroughAnotherLinkIsRefused()
+    {
+        Write("agent.yaml", "name: jean\n");
+        var elsewhere = Path.Combine(Path.GetDirectoryName(_root)!, "elsewhere");
+        Directory.CreateDirectory(elsewhere);
+        File.WriteAllText(Path.Combine(elsewhere, "doc.md"), "Elsewhere.\n");
+        // out/ is never read itself, but the document's link goes through it.
+        Link("out", elsewhere);
+        Link("knowledge/doc.md", "../out/doc.md");
+
+        var failure = Assert.Throws<ConfigurationException>(() => Folder.Load(_root));
+
+        Assert.Contains("knowledge/doc.md links outside the agent directory", failure.Message);
+    }
+
+    [Fact]
+    public void AKnowledgeDirectoryLinkedOneLevelUpIsRefused()
+    {
+        Write("agent.yaml", "name: jean\n");
+        // Nothing else is up there, so only refusing knowledge/ itself stops a walk reading the
+        // agent's own files back through it.
+        Link("knowledge", Path.GetDirectoryName(_root)!);
+
+        var failure = Assert.Throws<ConfigurationException>(() => Folder.Load(_root));
+
+        Assert.Contains("knowledge links outside the agent directory", failure.Message);
+    }
+
+    [Fact]
+    public void ALinkThatStaysInsideTheAgentDirectoryIsRead()
+    {
+        Write("agent.yaml", "name: jean\n");
+        Write("shared/notes.md", "Be brief.\n");
+        Write("shared/think.md", Skill);
+        Write("shared/pricing.md", "A penny.\n");
+        Link("instructions.md", "shared/notes.md");
+        Link("skills/think.md", "../shared/think.md");
+        Link("knowledge/pricing.md", "../shared/pricing.md");
+        // The agent directory is itself reached through a link, as a checkout often is.
+        var through = Path.Combine(Path.GetDirectoryName(_root)!, "linked");
+        Directory.CreateSymbolicLink(through, _root);
+
+        var folder = Folder.Load(through);
+
+        Assert.Equal("Be brief.", folder.Instructions);
+        Assert.Equal("Reason it through.", Assert.Single(folder.Skills).Instructions);
+        var document = Assert.Single(folder.Knowledge);
+        Assert.Equal(("pricing.md", "A penny.\n"), (document.Source, document.Text));
+    }
+
+    [Fact]
+    public void AnAgentDirectoryNamedRelativeToTheWorkingDirectoryKeepsItsLinks()
+    {
+        Write("agent.yaml", "name: jean\n");
+        Write("shared/pricing.md", "A penny.\n");
+        Link("knowledge/pricing.md", Path.Combine(_root, "shared", "pricing.md"));
+        // Relative to the working directory, without changing it under the other tests.
+        var relative = string.Concat(Enumerable.Repeat("../", Directory.GetCurrentDirectory().Count(c => c == '/'))) + _root.TrimStart('/');
+
+        Assert.Equal("pricing.md", Assert.Single(Folder.Load(relative).Knowledge).Source);
+
+        var elsewhere = Path.Combine(Path.GetDirectoryName(_root)!, "elsewhere");
+        Directory.CreateDirectory(elsewhere);
+        File.WriteAllText(Path.Combine(elsewhere, "notes.md"), "Elsewhere.\n");
+        Link("instructions.md", Path.Combine(elsewhere, "notes.md"));
+        var failure = Assert.Throws<ConfigurationException>(() => Folder.Load(relative));
+        Assert.Contains("instructions.md links outside the agent directory", failure.Message);
+    }
+
+    [Fact]
+    public void ANameThatOnlySharesAPrefixIsComparedAsAWhole()
+    {
+        Write("agent.yaml", "name: jean\n");
+        Write("..shared/a.md", "A penny.\n");
+        Link("knowledge/a.md", "../..shared/a.md");
+
+        Assert.Equal("A penny.\n", Assert.Single(Folder.Load(_root).Knowledge).Text);
+
+        Directory.CreateDirectory(_root + "-2");
+        File.WriteAllText(Path.Combine(_root + "-2", "notes.md"), "Elsewhere.\n");
+        Link("instructions.md", Path.Combine(_root + "-2", "notes.md"));
+        var failure = Assert.Throws<ConfigurationException>(() => Folder.Load(_root));
+        Assert.Contains("instructions.md links outside the agent directory", failure.Message);
+    }
+
+    [Theory]
+    [InlineData("instructions.md")]
+    [InlineData("skills/loop.md")]
+    [InlineData("knowledge/loop.md")]
+    [InlineData("simulations/loop.yaml")]
+    public void ALinkToItselfIsRefused(string linked)
+    {
+        Write("agent.yaml", "name: jean\n");
+        Link(linked, Path.Combine(_root, linked));
+
+        var failure = Assert.Throws<ConfigurationException>(() => Folder.Load(_root));
+
+        Assert.Contains($"{linked} links outside the agent directory", failure.Message);
+    }
+
+    [Fact]
+    public void HiddenFilesAreLeftOutOfKnowledge()
+    {
+        Write("agent.yaml", "name: jean\n");
+        Write("knowledge/pricing.md", "A penny.\n");
+        Write("knowledge/.draft.md", "Not yet.\n");
+        Write("knowledge/.git/notes.md", "Not a document.\n");
+        Write("knowledge/__pycache__/notes.md", "Not a document.\n");
+        Write("knowledge/guides/setup.md", "Plug it in.\n");
+        Write("knowledge/guides/.draft.md", "Not yet.\n");
+        Write("knowledge/guides/.git/notes.md", "Not a document.\n");
+
+        Assert.Equal(["guides/setup.md", "pricing.md"], Folder.Load(_root).Knowledge.Select(document => document.Source));
+    }
+
+    [Fact]
+    public void AHiddenLinkedFolderInKnowledgeIsNeverWalked()
+    {
+        Write("agent.yaml", "name: jean\n");
+        Write("knowledge/pricing.md", "A penny.\n");
+        var elsewhere = Path.Combine(Path.GetDirectoryName(_root)!, "elsewhere");
+        Directory.CreateDirectory(elsewhere);
+        File.WriteAllText(Path.Combine(elsewhere, "notes.md"), "Elsewhere.\n");
+        // Walked, it would be refused as leading out, so the load shows it was left unopened.
+        Link("knowledge/.cache", elsewhere);
+
+        Assert.Equal(["pricing.md"], Folder.Load(_root).Knowledge.Select(document => document.Source));
+    }
+
+    [Fact]
+    public void AnEditorsLockFileInSkillsAndSimulationsIsLeftOut()
+    {
+        Write("agent.yaml", "name: jean\n");
+        Write("instructions.md", "Be brief.\n");
+        Write("skills/think.md", Skill);
+        Write("skills/.draft.md", Skill);
+        Write("knowledge/pricing.md", "A penny.\n");
+        Write("simulations/calls.yaml", "- name: lunch\n  scenario: Order lunch.\n  assertion: Lunch is ordered.\n");
+        Write("simulations/.draft.yaml", "- name: draft\n  scenario: Order lunch.\n  assertion: Lunch is ordered.\n");
+        // What Emacs leaves beside a file with unsaved edits: a link to who is editing it.
+        Link("skills/.#think.md", "jean@laptop.4242:1732500000");
+        Link("simulations/.#calls.yaml", "jean@laptop.4242:1732500000");
+
+        var folder = Folder.Load(_root);
+
+        Assert.Equal("Be brief.", folder.Instructions);
+        Assert.Equal(["think"], folder.Skills.Select(skill => skill.Name));
+        Assert.Equal(["pricing.md"], folder.Knowledge.Select(document => document.Source));
+        Assert.Equal(["lunch"], folder.Simulations!.Select(simulation => simulation.Name));
+    }
+
+    /// <summary>Points <paramref name="name"/>, under the agent directory, at <paramref name="target"/>.</summary>
+    private void Link(string name, string target)
+    {
+        var path = Path.Combine(_root, name);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.CreateSymbolicLink(path, target);
+    }
+
     private void Write(string name, string content)
     {
         var path = Path.Combine(_root, name);

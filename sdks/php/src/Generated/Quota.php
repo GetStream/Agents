@@ -15,10 +15,10 @@ use GetStream\VisionAgents\Json;
  * the app's backend asks for in their name. (An app's quota counted devices only before; the
  * router's default still does.) A quota set here is counted per user only, never by the
  * address a device calls from, which many users can share; the router's default counts a
- * device by its address as well. A turn is counted on the day of the user who sent it. A
- * request over the limit is a 429 rate_limited with Retry-After, whose message names the quota
- * (user <id>, every user of app <id>, every user of organization <id>), and a counted request
- * carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+ * device by its address as well, an IPv6 address by its /64. A turn is counted on the day of
+ * the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose
+ * message names the quota (user <id>, every user of app <id>, every user of organization
+ * <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
  */
 final readonly class Quota
 {

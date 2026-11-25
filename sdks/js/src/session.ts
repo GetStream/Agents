@@ -137,7 +137,10 @@ export interface ResumeOptions extends SessionOptions {
 export interface ForkOptions
   extends Omit<Schemas["ForkSessionRequest"], "model_overwrites">,
     SessionOptions {
-  /** What to change about the models, over whatever the parent was running. */
+  /**
+   * What to change about the models, over whatever the parent was running. Server side only: a
+   * device sending it is refused with a 403.
+   */
   modelOverwrites?: Schemas["ModelOverwrites"];
 }
 

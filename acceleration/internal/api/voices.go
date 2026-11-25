@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
@@ -238,7 +239,7 @@ func (s *Server) prepareVoice(ctx context.Context, request *prepareVoiceRequest)
 	}
 
 	if err := s.voices.Prepare(ctx, customerID, request.Id, providers); err != nil {
-		return nil, unknownOr(err, store.ErrNoVoice, errUnknownVoice)
+		return nil, unknownOr(refusedVoice(err), store.ErrNoVoice, errUnknownVoice)
 	}
 
 	described, err := s.describeVoice(ctx, voice)
@@ -406,11 +407,20 @@ func (s *Server) previewVoice(ctx context.Context, request *previewVoiceRequest)
 		return nil, invalidRequest(err.Error())
 	}
 	if err != nil {
-		return nil, err
+		return nil, refusedVoice(err)
 	}
 	return &previewVoiceResponse{Body: VoicePreview{Provider: provider,
 		ContentType: speech.ContentType,
 		Audio:       speech.Audio}}, nil
+}
+
+// refusedVoice is a voice's failure as the caller is told it: what the customer's policies do not
+// allow is theirs to change, and anything else goes on as it is.
+func refusedVoice(err error) error {
+	if errors.Is(err, routing.ErrRequest) || errors.Is(err, routing.ErrModelNotAllowed) {
+		return refusedRequest(err)
+	}
+	return err
 }
 
 // describeVoice reads a voice back with its recordings and bindings, which is what every

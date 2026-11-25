@@ -67,14 +67,9 @@ import Testing
         let server = try SessionServer(answer: .session(status: 201, callID: ""))
         defer { server.listener.cancel() }
         let agents = StreamAgents(url: try await server.url(), customerID: "acme")
-        var options = SessionOptions(agent: "myagent")
-        options.greeting = Greeting("Hello.", mode: .variation)
+        _ = try await agents.createSession(SessionOptions(agent: "myagent"))
 
-        _ = try await agents.createSession(options)
-
-        let body = try await server.request().body
-        #expect(body["start_voice"] == nil)
-        #expect(body["greeting"] == .dictionary(["text": .string("Hello."), "mode": .string("variation")]))
+        #expect(try await server.request().body["start_voice"] == nil)
     }
 
     @Test func aSessionSaysWhereItsSignInsGoBackTo() async throws {
@@ -89,14 +84,13 @@ import Testing
         #expect(try await server.request().body["return_url"] == .string("com.example.app:/connected"))
     }
 
-    @Test func aSessionOpensWithItsLabelsModelsAndTheSignedInUsersMemory() async throws {
+    @Test func aSessionOpensWithItsLabelsAndTheSignedInUsersMemory() async throws {
         let server = try SessionServer(answer: .session(status: 201, callID: ""))
         defer { server.listener.cancel() }
         let agents = StreamAgents(url: try await server.url(), customerID: "acme")
         agents.setUser(User(id: "jlahey"), token: "token")
         var options = SessionOptions(agent: "myagent")
         options.custom = ["ticket": .string("T-7")]
-        options.modelOverwrites = ModelOverwrites(thinking: .low, temperature: 0, maxOutputTokens: 300)
         options.memory = .init(filter: ["topic": "billing"])
         options.timezone = "Europe/Amsterdam"
 
@@ -105,9 +99,6 @@ import Testing
         let body = try await server.request().body
         #expect(body["timezone"] == .string("Europe/Amsterdam"))
         #expect(body["custom"] == .dictionary(["ticket": .string("T-7")]))
-        #expect(
-            body["model_overwrites"]
-                == .dictionary(["thinking": .string("low"), "temperature": .number(0), "max_output_tokens": .number(300)]))
         #expect(
             body["memory"]
                 == .dictionary(["user_id": .string("jlahey"), "filter": .dictionary(["topic": .string("billing")])]))
@@ -187,7 +178,6 @@ import Testing
         var options = ForkOptions(responseID: "r2")
         options.agent = "reviewer"
         options.custom = ["branch": .string("b")]
-        options.modelOverwrites = ModelOverwrites(llm: "anthropic/claude-sonnet-5-5")
         options.incognito = true
 
         _ = try await agents.fork(sessionID: "s1", options)
@@ -198,7 +188,6 @@ import Testing
             request.body == [
                 "agent": .string("reviewer"), "response_id": .string("r2"),
                 "custom": .dictionary(["branch": .string("b")]),
-                "model_overwrites": .dictionary(["llm": .string("anthropic/claude-sonnet-5-5")]),
                 "incognito": .bool(true),
             ])
     }
