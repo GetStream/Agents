@@ -1,12 +1,15 @@
 package routing
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/alerts"
@@ -126,6 +129,59 @@ func (s *UsageAlertsSuite) TestUnownedSendsTheTenGroupsWithMostRowsAndSumsTheRes
 	s.Equal(groups[:10], held["written_by"])
 	s.Equal(3, held["other_groups"])
 	s.Equal(int64(10+9+8), held["other_rows"])
+}
+
+// An app that stays unowned is named once a day, not every minute: the first send holds the
+// next ones back for 24 h, and an app that was sent is sent again after it.
+func (s *UsageAlertsSuite) TestUnownedNamesAnAppOnceADayWhileItWaits() {
+	var sent []string
+	client, err := sentry.NewClient(sentry.ClientOptions{
+		BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
+			sent = append(sent, event.Tags["item"])
+			return nil
+		},
+	})
+	s.Require().NoError(err)
+	start := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	now := start
+	loop := alerts.New(alerts.Options{
+		Hub: sentry.NewHub(client, sentry.NewScope()), Logger: slog.New(slog.DiscardHandler),
+		Limit: time.Minute, Now: func() time.Time { return now },
+	}, s.named("unowned"))
+	check := func(at time.Duration) {
+		now = start.Add(at)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		loop.Run(ctx)
+	}
+	s.counted(
+		store.UnownedApp{App: "first", Rows: 1, OldestStartedAt: start.Add(-time.Hour)},
+		store.UnownedApp{App: "second", Rows: 1, OldestStartedAt: start.Add(-time.Hour)},
+	)
+
+	check(0)
+	s.ElementsMatch([]string{"first", "second"}, sent, "each app is named")
+	check(time.Minute)
+	check(23 * time.Hour)
+	s.Len(sent, 2, "held back within 24 h")
+	check(24*time.Hour + time.Second)
+	s.Len(sent, 4, "named again after 24 h")
+}
+
+// Ten groups fit whole: nothing is left over to count.
+func (s *UsageAlertsSuite) TestUnownedWithExactlyTenGroupsSendsThemAllAndCountsNoRest() {
+	now := time.Now()
+	var groups []store.UnownedGroup
+	for i := range 10 {
+		groups = append(groups, store.UnownedGroup{APIKey: fmt.Sprintf("key-%d", i), Rows: int64(20 - i)})
+	}
+	s.counted(store.UnownedApp{App: "ten", Rows: 155, OldestStartedAt: now.Add(-time.Hour), Groups: groups})
+
+	held := s.named("unowned").Items(now)["ten"]
+
+	s.Equal(groups, held["written_by"])
+	s.NotContains(held, "other_groups")
+	s.NotContains(held, "other_rows")
 }
 
 // A sweeper registers before its first count, which may fail: the alerts loop must not stop.
