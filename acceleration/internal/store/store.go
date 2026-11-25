@@ -71,6 +71,8 @@ type Store struct {
 	shapes tableShapes
 	// pins says how Stream app pins cross between deployments, once the router has said.
 	pins pinsHolder
+	// configRule is what an import holds the agent configs it writes to (SetConfigRule).
+	configRule atomic.Pointer[ConfigRule]
 	// retries holds a slot for each deletion forgetLater is trying again, and lost one for each
 	// lost commit it is waiting on, which it can do for longer; polls bounds how many of those
 	// ask Postgres at once. stop ends them

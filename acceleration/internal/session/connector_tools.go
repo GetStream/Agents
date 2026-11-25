@@ -13,6 +13,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/none"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sensitive"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/mcp"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -145,6 +146,14 @@ func (m *Manager) attachConnectors(ctx context.Context, spec *Spec) (*dispatcher
 	// one a stored config still holds.
 	if spec.ConfigID == "" {
 		return nil, nil, nil, stack.Wrap(errors.New("session: connector bindings come from a stored agent config, and this session names none"))
+	}
+	// A config stored past a config write's check, as one stored before the rule held was,
+	// opens none of its connectors while it breaks it.
+	config := store.AgentConfig{Connectors: spec.ConnectorBindings, Sandbox: store.AgentSandbox{Provider: spec.Sandbox, Options: spec.SandboxOptions}}
+	if message, ok, err := sensitive.ConfigComplaint(ctx, m.options.Store.ConnectorDefinitions, spec.CustomerID, config); err != nil {
+		return nil, nil, nil, err
+	} else if !ok {
+		return nil, nil, nil, stack.Wrap(invalid(errors.New("session: " + message)))
 	}
 	d := &dispatcher{store: m.options.Store, spec: *spec, routes: map[string]route{}, invocations: m.invocations,
 		limiter: m.options.Connectors.Limiter, slots: &m.slots, logger: m.logger,
