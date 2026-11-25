@@ -2,6 +2,8 @@ package egress
 
 import (
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -100,3 +102,25 @@ func (s *TimedBodySuite) TestACutOffBodyKeepsItsPassedDeadlineWhenItsHandlerRetu
 type stalledReader struct{}
 
 func (stalledReader) Read([]byte) (int, error) { return 0, os.ErrDeadlineExceeded }
+
+// deadlineWriter is a ResponseWriter whose tunnel's read deadline a test reads.
+type deadlineWriter struct {
+	http.ResponseWriter
+	deadline tunnelDeadline
+}
+
+func (w *deadlineWriter) SetReadDeadline(at time.Time) error { return w.deadline.set(at) }
+
+// TestARequestWithNoBodySetsNoDeadlineWhenItsHandlerReturns (probe R1.1): the server's background read of the
+// tunnel runs from before the handler of a request with no body, and its handler's return puts it under no deadline.
+func (s *TimedBodySuite) TestARequestWithNoBodySetsNoDeadlineWhenItsHandlerReturns() {
+	for _, body := range []io.ReadCloser{http.NoBody, nil} {
+		w := &deadlineWriter{ResponseWriter: httptest.NewRecorder()}
+		r := httptest.NewRequest(http.MethodGet, "https://api.github.test/user", nil)
+		r.Body = body
+
+		(&Proxy{bodyTimeout: time.Minute}).timeBody(w, r).stop()
+
+		s.True(w.deadline.at.IsZero(), "the handler's return set the tunnel's deadline: %v", w.deadline.at)
+	}
+}

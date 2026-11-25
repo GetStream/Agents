@@ -391,3 +391,39 @@ func (s *ProxySuite) TestARefusedRequestWhoseBodyStopsArrivingClosesItsTunnel() 
 		s.givenBack(refused.host, refused.name)
 	}
 }
+
+// TestASandboxThatReadsAnAnswerSlowlyKeepsItsTunnel: a GET with no body, whose answer the sandbox reads later than
+// the body timeout after the handler has returned, does not end the tunnel's next requests: the next two get their
+// answers, with and without a token. The tunnel is a net.Pipe, whose write waits for the sandbox's read. On head
+// 8812ba4d4 the second and third got 503 «grants cannot be read just now»; on the base they got 200.
+func (s *ProxySuite) TestASandboxThatReadsAnAnswerSlowlyKeepsItsTunnel() {
+	for _, authorization := range []string{"", "Authorization: Bearer " + s.placeholder + "\r\n"} {
+		proxy := s.newProxy(s.store, func(options *egress.Options) { options.BodyTimeout = bodyWait })
+		server, client := net.Pipe()
+		go proxy.ServeTunnel(server, s.credential, "api.github.test", "api.github.test")
+		conn := tls.Client(client, &tls.Config{ServerName: "api.github.test", RootCAs: s.trusted})
+		s.T().Cleanup(func() { _ = conn.Close() })
+		s.Require().NoError(conn.SetDeadline(time.Now().Add(10 * time.Second)))
+		reader := bufio.NewReader(conn)
+		for i := 0; i < 3; i++ {
+			_, err := io.WriteString(conn, "GET /echo HTTP/1.1\r\nHost: api.github.test\r\n"+authorization+"\r\n")
+			s.Require().NoError(err)
+			if i == 0 && authorization == "" {
+				time.Sleep(3 * bodyWait)
+			}
+			response, err := http.ReadResponse(reader, nil)
+			s.Require().NoError(err)
+			if i == 0 && authorization != "" {
+				// The answer streams: its last byte, then the chunked body's end, is left for the server's final flush.
+				one := make([]byte, 1)
+				for one[0] != '}' {
+					_, err := io.ReadFull(response.Body, one)
+					s.Require().NoError(err)
+				}
+				time.Sleep(3 * bodyWait)
+			}
+			_, _ = io.ReadAll(response.Body)
+			s.Equal(http.StatusOK, response.StatusCode, "authorization %q, request %d", authorization != "", i)
+		}
+	}
+}

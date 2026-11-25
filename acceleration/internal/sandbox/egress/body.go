@@ -35,6 +35,10 @@ func (p *Proxy) timeBody(w http.ResponseWriter, r *http.Request) *timedBody {
 	body := &timedBody{ReadCloser: r.Body, timeout: p.bodyTimeout, deadline: http.NewResponseController(w).SetReadDeadline}
 	if r.Body != nil && r.Body != http.NoBody {
 		r.Body = body
+	} else {
+		// The server's background read of the tunnel runs from before the handler of a request with no body, and
+		// stop must not put it under the deadline: the sandbox may read the answer slower than the timeout.
+		body.ended = true
 	}
 	return body
 }
