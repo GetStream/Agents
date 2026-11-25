@@ -147,6 +147,9 @@ func (s *Server) deleteKnowledgeDocument(ctx context.Context, request *deleteKno
 	return nil, nil
 }
 
+// baseDeleteTimeout bounds a knowledge base's delete, which outlives its request.
+const baseDeleteTimeout = 2 * time.Minute
+
 // deleteKnowledge deletes one of the calling customer's knowledge bases: everything the
 // provider holds of it, then the documents and pages it was filled from. One an agent reads is
 // kept, since the agent would go on looking things up in nothing.
@@ -185,6 +188,9 @@ func (s *Server) deleteKnowledge(ctx context.Context, request *deleteKnowledgeRe
 	// listed as they were, so the base can be deleted again. A page read whose write lands after
 	// the drop finds its page gone once the rows are, and takes the write back. A document
 	// finished meanwhile may have lost its passages to the drop, so it is deleted too.
+	// Once it is dropped a caller that hung up must not leave its documents listed as found.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), baseDeleteTimeout)
+	defer cancel()
 	owned := s.knowledgeFor(ctx, customerID, "")
 	existed, left := false, true
 	var documents, pages int64

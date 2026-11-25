@@ -1229,6 +1229,177 @@ func (s *KnowledgeFilesSuite) TestABaseWhoseLastDocumentAnotherRemovalTookIsDele
 	s.Equal(http.StatusNoContent, s.dropBase())
 }
 
+// Once the base is dropped its delete is finished whether or not its caller still waits.
+func (s *KnowledgeFilesSuite) TestABaseWhoseCallerHungUpOnceItWasDroppedIsDeleted() {
+	s.Require().Equal(http.StatusOK, s.post("a.md", 2))
+	ctx, hangUp := context.WithCancel(context.WithValue(
+		routing.WithAttribution(context.Background(), routing.Attribution{APIKey: s.app.key}), customerContextKey{}, s.customerID()))
+	s.knowledge.onceAfterDrop(hangUp)
+
+	_, err := s.router.deleteKnowledge(ctx, &deleteKnowledgeRequest{Namespace: s.namespace})
+
+	s.Require().NoError(err)
+	s.nothingLeft("a.md")
+	s.Equal(1, s.removals(s.namespace))
+	s.Require().Equal(http.StatusOK, s.post("a.md", 2))
+	s.indexedWith("a.md", 2)
+}
+
+func (s *KnowledgeFilesSuite) TestABaseOfPagesOnlyIsDeleted() {
+	s.Require().NoError(s.store.KnowledgeURLs.Insert(context.Background(), &store.KnowledgeURL{
+		CustomerID: s.customerID(), Namespace: s.namespace, URL: "https://acme.example/faq"}))
+
+	s.Equal(http.StatusNoContent, s.dropBase())
+	s.Equal(http.StatusNotFound, s.dropBase())
+}
+
+// holdFinish holds the read of the document's file before its last write on the row, when it has
+// no tail to delete, and returns once a read is there.
+func (s *KnowledgeFilesSuite) holdFinish(id string) (held func(), finish func()) {
+	ctx := context.Background()
+	document, err := s.store.KnowledgeDocuments.Get(ctx, s.customerID(), id)
+	s.Require().NoError(err)
+	lock, err := s.store.GlobalDB().Conn(ctx)
+	s.Require().NoError(err)
+	finish = sync.OnceFunc(func() {
+		_, err := lock.ExecContext(ctx, "SELECT pg_advisory_unlock_all()")
+		s.NoError(err)
+		s.NoError(lock.Close())
+	})
+	_, err = lock.ExecContext(ctx, "SELECT pg_advisory_lock(37711)")
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().ExecContext(ctx, "CREATE OR REPLACE FUNCTION hold_finish() RETURNS trigger AS $$ BEGIN "+
+		"IF strpos(current_query(), '"+document.ObjectKey+"') > 0 AND strpos(current_query(), '\"text\" = ') > 0 THEN "+
+		"PERFORM pg_advisory_xact_lock(37711); END IF; RETURN NULL; END $$ LANGUAGE plpgsql")
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().ExecContext(ctx, "CREATE OR REPLACE TRIGGER hold_finish BEFORE UPDATE ON knowledge_documents FOR EACH STATEMENT EXECUTE FUNCTION hold_finish()")
+	s.Require().NoError(err)
+	s.T().Cleanup(func() {
+		finish()
+		_, err := s.store.GlobalDB().ExecContext(ctx, "DROP FUNCTION IF EXISTS hold_finish() CASCADE")
+		s.NoError(err)
+	})
+	return func() {
+		s.Eventually(func() bool {
+			var waiting bool
+			err := lock.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database "+
+				"WHERE d.datname = current_database() AND l.locktype = 'advisory' AND l.objid = 37711 AND NOT l.granted)").Scan(&waiting)
+			return err == nil && waiting
+		}, 30*time.Second, 5*time.Millisecond, "the read never went to finish")
+	}, finish
+}
+
+// A read that deleted nothing leaves alone what was posted whole since it wrote.
+func (s *KnowledgeFilesSuite) TestAPostDoneSinceAReadWithoutATailIsNotWrittenAgain() {
+	for _, removed := range []bool{false, true} {
+		writing, write := s.holdWrite()
+		_, sent, _ := s.upload("whole.md", []byte(sections(3)), "")
+		s.reached(writing, "the read never wrote")
+		held, finish := s.holdFinish(sent.Id)
+		write()
+		held()
+		if removed {
+			s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+		}
+		posted, done := s.postWritten("whole.md", 3)
+		writes := 0
+		s.knowledge.onceBeforeWrite(func() { writes++ })
+		finish()
+		s.everyFileRead()
+		posted()
+
+		s.Equal(http.StatusOK, s.answer(done))
+		s.Zero(writes)
+		s.indexedWith("whole.md", 3)
+		s.knowledge.onceBeforeWrite(nil)
+		s.Require().Equal(http.StatusNoContent, s.remove(s.listed()[0].Id))
+	}
+}
+
+func (s *KnowledgeFilesSuite) TestAPostFinishedSinceAReadWithoutATailIsNotFailed() {
+	writing, write := s.holdWrite()
+	_, sent, _ := s.upload("whole.md", []byte(sections(3)), "")
+	s.reached(writing, "the read never wrote")
+	held, finish := s.holdFinish(sent.Id)
+	write()
+	held()
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+	s.Require().Equal(http.StatusOK, s.post("whole.md", 3))
+	finish()
+
+	s.everyFileRead()
+	s.indexedWith("whole.md", 3)
+}
+
+// The read wrote once the base was dropped, and is to finish once its document is deleted.
+func (s *KnowledgeFilesSuite) TestAReadWithoutATailIsDeletedWithItsBase() {
+	writing, write := s.holdWrite()
+	_, sent, _ := s.upload("base.md", []byte(sections(3)), "")
+	s.reached(writing, "the read never wrote")
+	held, finish := s.holdFinish(sent.Id)
+	s.knowledge.onceAfterDrop(func() {
+		write()
+		held()
+	})
+
+	s.Require().Equal(http.StatusNoContent, s.dropBase())
+	finish()
+	s.everyFileRead()
+
+	s.nothingLeft("base.md")
+}
+
+// A read that could not delete its tail, or record what it read, reads the file again.
+func (s *KnowledgeFilesSuite) TestAReadThatCouldNotFinishReadsItsFileAgain() {
+	s.refuseOnce("refuse_finish_once", "NEW.customer_id = '"+s.customerID()+"' AND NEW.source = 'finish.pdf' AND NEW.state = 'indexed'")
+	since := time.Now().UTC()
+	_, sent, _ := s.upload("finish.pdf", extractFixture(s.T(), "scanned.pdf"), "")
+	s.Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	s.meteredRows(routing.OCR, since, 2)
+
+	_, sent, _ = s.upload("tail.pdf", []byte(sections(30)), "")
+	s.Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	s.knowledge.onceBeforeDelete(func() error { return errors.New("down") })
+	since = time.Now().UTC()
+	_, sent, _ = s.upload("tail.pdf", extractFixture(s.T(), "scanned.pdf"), "")
+	s.Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	s.meteredRows(routing.OCR, since, 2)
+}
+
+// refuseOnce fails the first update of a document that meets when.
+func (s *KnowledgeFilesSuite) refuseOnce(name, when string) {
+	// A sequence is not rolled back with the update it counts.
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), "CREATE SEQUENCE IF NOT EXISTS "+name+"_seq")
+	s.Require().NoError(err)
+	s.T().Cleanup(func() {
+		_, err := s.store.GlobalDB().ExecContext(context.Background(), "DROP SEQUENCE IF EXISTS "+name+"_seq")
+		s.NoError(err)
+	})
+	s.trigger(name, "knowledge_documents", "UPDATE", when, "IF nextval('"+name+"_seq') = 1 THEN RAISE EXCEPTION 'refused by the test'; END IF;")
+}
+
+// The read is cancelled while its tail delete is held, and still says what it deleted.
+func (s *KnowledgeFilesSuite) TestAPostWhoseTailACancelledReadDeletedIsWrittenAgain() {
+	id, tail := s.metAt("tail.md")
+	document, err := s.store.KnowledgeDocuments.Get(context.Background(), s.customerID(), id)
+	s.Require().NoError(err)
+	finish, posted := s.postWritten("tail.md", 8)
+	inspector := asynq.NewInspector(s.knowledgeRedis)
+	defer func() { s.NoError(inspector.Close()) }()
+	s.Require().NoError(inspector.CancelProcessing(document.ObjectKey))
+	// The queue lets go of the task, whose retry finds the post, while the read is held.
+	s.everyFileRead()
+	tail()
+	s.Eventually(func() bool {
+		now, err := s.store.KnowledgeDocuments.Get(context.Background(), s.customerID(), id)
+		return err == nil && now.BeingRemoved()
+	}, 30*time.Second, 5*time.Millisecond, "the read did not say what it deleted")
+	finish()
+
+	s.Equal(http.StatusOK, s.answer(posted))
+	s.indexedWith("tail.md", 8)
+}
+
 // metAt uploads a newer version whose read is held in deleting the tail of the one before.
 func (s *KnowledgeFilesSuite) metAt(source string) (id string, finish func()) {
 	_, sent, _ := s.upload(source, []byte(sections(8)), "")

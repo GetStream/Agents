@@ -504,7 +504,8 @@ func (s *Service) write(
 	}
 	// A file that got shorter would otherwise leave its old tail behind, still findable
 	// and no longer in the file it claims to come from.
-	failed = owned.Delete(ctx, document.Namespace, ingest.IDs(document.Source, len(passages), current.Passages))
+	tail := ingest.IDs(document.Source, len(passages), current.Passages)
+	failed = owned.Delete(ctx, document.Namespace, tail)
 	if failed == nil {
 		document.Passages = len(passages)
 		finished, err := s.store.KnowledgeDocuments.Finish(ctx, document, payload.ObjectKey)
@@ -513,7 +514,11 @@ func (s *Service) write(
 		}
 		failed = err
 	}
-	// What was deleted may be a newer write's, also by a delete that failed.
+	// Whoever took the document since the look meets what was written. It does not know what was
+	// deleted, also by a delete that failed.
+	if len(tail) == 0 {
+		return false, failed
+	}
 	last, stop := context.WithTimeout(context.WithoutCancel(ctx), overtakenTimeout)
 	defer stop()
 	if now, err := s.waiting(last, payload); errors.Is(err, errOvertaken) {

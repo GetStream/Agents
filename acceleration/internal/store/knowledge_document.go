@@ -411,8 +411,8 @@ const knowledgeBaseLockSeed = 3771
 
 // TakeBase begins the removal of every document of a knowledge base, and returns the keys it
 // holds them under: one for all but those a removal already held and those that wait for a file.
-// They are listed as they were, since a base the provider does not drop keeps its passages. A post
-// that has not finished writes them again.
+// They are listed as they were, since a base the provider does not drop keeps its passages, and
+// an uploaded file waits on. A post that has not finished writes them again.
 func (r *KnowledgeDocuments) TakeBase(ctx context.Context, customerID, namespace string) ([]string, error) {
 	if customerID == "" || namespace == "" {
 		return nil, stack.Wrap(errors.New("store: a customer and a namespace are required"))
@@ -437,10 +437,12 @@ func (r *KnowledgeDocuments) TakeBase(ctx context.Context, customerID, namespace
 	return slices.Compact(held), nil
 }
 
-// DeleteBase forgets every document of one knowledge base still held under keys, and returns how
-// many there were. Their passages are the caller's to remove first, since they are not in this
-// database, and of a document written since some may have gone with them. One not finished is
-// written again, and left is whether there are others, which say their removal did not finish.
+// DeleteBase forgets every document of one knowledge base a removal still holds under keys, and
+// returns how many there were. Their passages are the caller's to remove first, since they are not
+// in this database, and of a document written since some may have gone with them. One not finished
+// is written again. Left is whether there are others, which say their removal did not finish: one
+// finished since, and one that waits for a file under keys, whose read may have written since the
+// base was dropped. They go once it is dropped again.
 func (r *KnowledgeDocuments) DeleteBase(ctx context.Context, customerID, namespace string, keys []string) (documents int64, left bool, err error) {
 	if customerID == "" || namespace == "" {
 		return 0, false, stack.Wrap(errors.New("store: a customer and a namespace are required"))
@@ -450,10 +452,14 @@ func (r *KnowledgeDocuments) DeleteBase(ctx context.Context, customerID, namespa
 		if err := lockUntilCommit(ctx, tx, customerID+"/"+namespace, knowledgeBaseLockSeed); err != nil {
 			return err
 		}
+		held := append([]string{""}, keys...) // no key is empty, and NOT IN () of none is not true
+		// Of the documents left, one posted or uploaded since is written again.
+		const unfinished = "(" + beingPosted + " OR (" + waitsForFile + " AND object_key NOT IN (?)))"
 		deleted, err := tx.NewDelete().Model((*KnowledgeDocument)(nil)).
 			Where("customer_id = ?", customerID).
 			Where("namespace = ?", namespace).
-			Where("object_key IN (?)", bun.In(keys)).
+			Where("object_key IN (?)", bun.In(held)).
+			Where("object_key LIKE ?", removalKey+"%").
 			Exec(ctx)
 		if err != nil {
 			return err
@@ -463,9 +469,10 @@ func (r *KnowledgeDocuments) DeleteBase(ctx context.Context, customerID, namespa
 		}
 		var states []string
 		err = tx.NewUpdate().Model((*KnowledgeDocument)(nil)).
-			Set("object_key = CASE WHEN "+waitsForFile+" OR object_key LIKE ? THEN object_key ELSE ? END", removalKey+"%", removalKey+newID()).
-			Set("state = CASE WHEN "+waitsForFile+" OR "+beingPosted+" THEN state ELSE ? END", KnowledgeDocumentFailed).
-			Set("error = CASE WHEN "+waitsForFile+" THEN ? WHEN "+beingPosted+" THEN error ELSE ? END", readAgain, removalUnfinished).
+			Set("object_key = CASE WHEN ("+waitsForFile+" AND object_key NOT IN (?)) OR object_key LIKE ? THEN object_key ELSE ? END",
+				bun.In(held), removalKey+"%", removalKey+newID()).
+			Set("state = CASE WHEN "+unfinished+" THEN state ELSE ? END", bun.In(held), KnowledgeDocumentFailed).
+			Set("error = CASE WHEN "+beingPosted+" THEN error WHEN "+unfinished+" THEN ? ELSE ? END", bun.In(held), readAgain, removalUnfinished).
 			Where("customer_id = ?", customerID).
 			Where("namespace = ?", namespace).
 			Returning("state").

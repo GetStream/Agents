@@ -184,7 +184,7 @@ func (s *StoreSuite) TestDeletingAKnowledgeBaseLeavesTheDocumentsItNoLongerHolds
 
 	documents, left, err := s.store.KnowledgeDocuments.DeleteBase(s.ctx, "acme-app", "docs", keys)
 	s.Require().NoError(err)
-	s.Equal(int64(3), documents)
+	s.Equal(int64(2), documents)
 	s.True(left)
 	kept, err := s.store.KnowledgeDocuments.Select(s.ctx, "acme-app", KnowledgeDocumentFilter{Namespace: "docs"})
 	s.Require().NoError(err)
@@ -193,13 +193,17 @@ func (s *StoreSuite) TestDeletingAKnowledgeBaseLeavesTheDocumentsItNoLongerHolds
 		states[document.Source], errs[document.Source] = document.State, document.Error
 	}
 	s.Equal(map[string]string{"posted.md": "failed", "uploaded.md": "pending", "read.md": "failed", "posting.md": "pending",
-		"later.md": "failed", "failing.md": "failed"}, states)
+		"later.md": "failed", "failing.md": "failed", "waiting.md": "failed"}, states)
+	let, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", waiting.ID)
+	s.Require().NoError(err)
+	s.True(let.BeingRemoved(), "its file's read may have written since the base was dropped")
 	later, err = s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", later.ID)
 	s.Require().NoError(err)
 	s.Equal(held, later.ObjectKey, "the removal that took it still holds it")
 	s.Equal(map[string]string{
 		"posted.md": "Its removal did not finish. Delete it again.", "read.md": "Its removal did not finish. Delete it again.",
 		"later.md": "Its removal did not finish. Delete it again.", "failing.md": "Its removal did not finish. Delete it again.",
+		"waiting.md":  "Its removal did not finish. Delete it again.",
 		"uploaded.md": "The file could not be read yet, and is tried again.", "posting.md": "",
 	}, errs)
 	finished, err := s.store.KnowledgeDocuments.Finish(s.ctx, &posting, posting.ObjectKey)
