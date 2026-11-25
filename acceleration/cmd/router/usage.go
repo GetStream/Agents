@@ -181,6 +181,22 @@ func startUsageSweeper(ctx context.Context, options routing.SweeperOptions) (sto
 	}
 }
 
+// startStatsShipper ships the shard's stats until the returned function stops it and it has
+// given its lock back.
+func startStatsShipper(ctx context.Context, db *store.Store, logger *slog.Logger) (stop func()) {
+	background, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	shipper := db.StatsShipper(logger, 0)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		shipper.Run(background)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 func runUsage(args []string, settings config.Config, out io.Writer) error {
 	if len(args) == 0 {
 		return errors.New(usageCommands)
@@ -285,7 +301,7 @@ func sessionUsers(ctx context.Context, pgStore *store.Store, rows []store.Reques
 // batch for a row in it, naming each row it still refuses.
 func replayRows(ctx context.Context, pgStore *store.Store, rows []store.Request, out io.Writer) (written, refused int, err error) {
 	ids, err := pgStore.Requests.InsertMany(ctx, rows)
-	if err == nil || errors.Is(err, store.ErrRequestLogsMissing) {
+	if err == nil {
 		return len(ids), 0, nil
 	}
 	if !store.Unwritable(err) {

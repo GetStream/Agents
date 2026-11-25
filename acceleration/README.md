@@ -160,7 +160,7 @@ the other commands that read them there.
 | `TWILIO_ACCOUNT_SID`    | Twilio credentials, for buying and operating numbers. A call to `/v1/phone/hooks/twilio` that names another account is hung up |
 | `TWILIO_AUTH_TOKEN`     | Twilio credentials. With `TWILIO_API_KEY_SID` set, that key's secret |
 | `TWILIO_API_KEY_SID`    | Optional Twilio API key (SK...). Requests are signed with it instead of the account SID |
-| `TWILIO_WEBHOOK_AUTH_TOKEN` | Auth Token of the Twilio account whose webhooks the router checks (`X-Twilio-Signature`). It only checks signatures: those of the Monitor alerts and usage-trigger callbacks sent to `/v1/phone/hooks/twilio/events`, and the calls sent to `/v1/phone/hooks/twilio`, each signed over `ROUTER_PUBLIC_URL` and the path. Without it, or without `ROUTER_PUBLIC_URL`, both routes answer 404. A call is answered once per `CallSid`, marked in Redis for a week: a copy of it is hung up, unless the first answer did not reach Twilio, and without Redis every call is hung up. A token with whitespace in it stops the router at start |
+| `TWILIO_WEBHOOK_AUTH_TOKEN` | Auth Token of the Twilio account whose webhooks the router checks (`X-Twilio-Signature`). It only checks signatures: those of the Monitor alerts and usage-trigger callbacks sent to `/v1/phone/hooks/twilio/events`, and the calls sent to `/v1/phone/hooks/twilio`, each signed over `ROUTER_PUBLIC_URL` and the path. Without it, or without `ROUTER_PUBLIC_URL`, both routes answer 404 and a Twilio number cannot be attached: an attached number's voice URL is `ROUTER_PUBLIC_URL` and `/v1/phone/hooks/twilio`, by POST. `ROUTER_PUBLIC_URL` must be an https address for a Twilio attach, so a local router on `http://localhost` refuses it. A call is answered once per `CallSid`, marked in Redis for a week: a copy of it is hung up, unless the first answer did not reach Twilio, and without Redis every call is hung up. A token with whitespace in it stops the router at start |
 | `TELNYX_API_KEY`        | Telnyx credentials                                         |
 | `TELNYX_CONNECTION_ID`  | The Telnyx TeXML application numbers and calls are on. Calls to the webhook from any other application are hung up |
 | `TELNYX_PUBLIC_KEY`     | Telnyx's public key (base64), to check the calls it sends to `/v1/phone/hooks/telnyx` and the account events it sends to `/v1/phone/hooks/telnyx/events`. Without it Telnyx numbers are not answered and the events route answers 404. Telnyx numbers also need a key encryption keyring (`ROUTER_DEV_KEK` locally, `ROUTER_AUTH_KEK_V<n>_WRAPPED` hosted): without one they cannot be attached |
@@ -366,15 +366,24 @@ A caller is one of four kinds, decided by the credential and not by the request:
 | --- | --- | --- |
 | server | `Stream-Auth-Type: server` and `server: true` | every session of its customer |
 | authenticated | a token naming a `user_id` | its own user's sessions |
-| guest | a token naming a `user_id`, minted for a guest | its own guest's sessions |
+| guest | a token naming a `user_id` with the role `guest` | its own guest's sessions |
 | anonymous | no token, a user id merely claimed | the sessions opened under that claim |
 
 The three that are not `server` are levels of end user, and an app may turn the bottom two
 away. That is a `settings` document on the app row — `allow_anonymous` and `allow_guest`,
 both defaulting to yes — read in the same query that resolves the API key. A level an app
 refuses is answered 403 at the door rather than given a narrower API, so a new endpoint
-cannot forget, and a missing key or a missing app row admits: `proxy` and `noauth` resolve
-no app row here at all, so the levels are enforced in `api_key` mode only.
+cannot forget, and a missing key or a missing app row admits. `proxy` and `noauth` resolve no
+key, so there only `allow_guest` is enforced, in `proxy`, for the guests the router minted.
+
+A guest the router mints (`POST /v1/agents/guests`) holds a token that names no role, so its
+kind is `authenticated` and its sessions are kept as such. The router knows it by its row in
+`users` instead, in `api_key` and `proxy` mode alike. `allow_guest` is asked on each of its
+requests, from a copy at most a minute old; behind a proxy, one whose app's settings cannot be
+read is answered 500. A user whose id starts `guest-` is answered 500 while their row cannot be
+read. As for a guest by role, it is offered no scheduling tools, uses no
+connection of its own (a required one fails the session, or the scheduled run), does not run in
+its stored timezone, and the sessions its own device opens read no episode cards.
 
 The kind is part of the identity and not a property of it, which is what makes an anonymous
 claim harmless: an anonymous caller saying `user_id=alice` is stored as anonymous alice and
@@ -1615,7 +1624,8 @@ one difference is who runs a skill: nobody is waiting on a voice, so the model h
 conversation loads the skills its config names itself, with `load_skill`, and keeps every
 tool while it follows one. It takes answers from a matching skill first, then the knowledge
 base (`lookup`), then the web (`search`). A text agent with a sandbox runs code itself with
-`run_code`, a loaded skill's scripts written under `skills/<name>/` before it runs, and the
+`run_code`, a loaded skill's scripts written under `skills/<name>/` before it runs (under a hash
+of the name or the file's key, which the model is told, when the sandbox cannot have it), and the
 files it hands back ride on `tool_ran` and the reply.
 
 It is driven over the session's own socket: `respond` goes in, `response_delta` and

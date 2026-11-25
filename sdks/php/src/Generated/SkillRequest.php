@@ -17,7 +17,7 @@ final readonly class SkillRequest
         public string $description,
         // The full prompt, which only the subagent sees.
         public string $instructions,
-        // How the config names it, which is unique among that config's own skills.
+        // How the config names it, which is unique among that config's own skills. At most 255 characters, none of th...
         public string $name,
         // Capture task-scoped visual evidence before reasoning.
         public ?bool $captureVideo = null,

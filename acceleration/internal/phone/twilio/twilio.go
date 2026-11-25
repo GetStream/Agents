@@ -27,6 +27,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/twiliosig"
 )
 
 const (
@@ -68,6 +69,9 @@ type Options struct {
 	APIKeySID string
 	// AuthToken defaults to TWILIO_AUTH_TOKEN. With APIKeySID set it is that key's secret.
 	AuthToken string
+	// WebhookAuthToken defaults to TWILIO_WEBHOOK_AUTH_TOKEN, which the router checks its call
+	// webhook's signatures with. Without it no number is pointed at that webhook.
+	WebhookAuthToken string
 	// BaseURL defaults to Twilio's API host.
 	BaseURL string
 	// PricingURL defaults to Twilio's pricing host.
@@ -76,6 +80,10 @@ type Options struct {
 	Timeout time.Duration
 	// HTTPClient replaces the one built from Timeout.
 	HTTPClient *http.Client
+	// PlainHTTPHook lets a number's voice URL be an http address. Without it only https is
+	// taken, as the webhook's answer holds the number's trunk credentials. Only a bench whose
+	// answer holds none sets it.
+	PlainHTTPHook bool
 }
 
 // Provider is Twilio. It satisfies phone.Provider.
@@ -87,6 +95,10 @@ type Provider struct {
 	baseURL    string
 	pricingURL string
 	client     *http.Client
+	// hookSigned is whether the router checks the signature of its call webhook.
+	hookSigned bool
+	// plainHTTPHook is whether the voice URL may be an http address.
+	plainHTTPHook bool
 
 	mu     sync.Mutex
 	prices map[string]countryPrices
@@ -109,6 +121,9 @@ func New(options Options) (*Provider, error) {
 	if options.APIKeySID == "" {
 		options.APIKeySID = os.Getenv(apiKeySIDEnvVar)
 	}
+	if options.WebhookAuthToken == "" {
+		options.WebhookAuthToken = os.Getenv(twiliosig.AuthTokenEnvVar)
+	}
 	if options.AccountSID == "" || options.AuthToken == "" {
 		return nil, stack.Wrap(errors.New("twilio: " + accountSIDEnvVar + " and " + authTokenEnvVar + " are required"))
 	}
@@ -129,10 +144,13 @@ func New(options Options) (*Provider, error) {
 		accountSID: options.AccountSID,
 		user:       cmp.Or(options.APIKeySID, options.AccountSID),
 		authToken:  options.AuthToken,
-		baseURL:    strings.TrimSuffix(options.BaseURL, "/"),
-		pricingURL: strings.TrimSuffix(options.PricingURL, "/"),
-		client:     options.HTTPClient,
-		prices:     map[string]countryPrices{},
+		hookSigned: options.WebhookAuthToken != "",
+
+		plainHTTPHook: options.PlainHTTPHook,
+		baseURL:       strings.TrimSuffix(options.BaseURL, "/"),
+		pricingURL:    strings.TrimSuffix(options.PricingURL, "/"),
+		client:        options.HTTPClient,
+		prices:        map[string]countryPrices{},
 	}, nil
 }
 
@@ -329,14 +347,19 @@ func (p *Provider) ReleaseNumber(ctx context.Context, e164 string) error {
 	return p.do(ctx, http.MethodDelete, p.baseURL, path, nil, nil, nil)
 }
 
-// ConfigureInbound points the number's voice webhook at TwiML that dials the Stream trunk,
-// so an incoming call is bridged straight to the agent.
+// ConfigureInbound points the number's voice webhook at the router's Twilio call webhook, which
+// runs the checks a call passes before it is answered and answers one that passes with TwiML
+// dialing the number's Stream trunk. The trunk's credentials are only in that answer's body.
 //
-// The TwiML is served inline through Twilio's echo endpoint rather than from a webhook of
-// this service's own: the instruction never varies per call, so a server that answers with
-// a constant would be one more thing to run and to be down.
+// The URL carries no connection overrides (#rp=, #rt=): the webhook answers each CallSid once,
+// which holds because Twilio by default sends a call again only when connecting failed
+// (https://www.twilio.com/docs/usage/webhooks/webhooks-connection-overrides).
 func (p *Provider) ConfigureInbound(ctx context.Context, inbound phone.Inbound) error {
 	if err := inbound.Bridge.Validate(); err != nil {
+		return err
+	}
+	hook, err := p.callHook(inbound.PublicURL)
+	if err != nil {
 		return err
 	}
 	sid, err := p.sidFor(ctx, inbound.E164)
@@ -344,17 +367,40 @@ func (p *Provider) ConfigureInbound(ctx context.Context, inbound phone.Inbound) 
 		return err
 	}
 
-	instructions, err := dialBridge(inbound.Bridge)
-	if err != nil {
-		return err
-	}
-
 	form := url.Values{
-		"VoiceUrl":    {echoURL(instructions)},
-		"VoiceMethod": {http.MethodGet},
+		"VoiceUrl":    {hook},
+		"VoiceMethod": {http.MethodPost},
 	}
 	path := fmt.Sprintf("/2010-04-01/Accounts/%s/IncomingPhoneNumbers/%s.json", p.accountSID, sid)
 	return p.do(ctx, http.MethodPost, p.baseURL, path, nil, form, nil)
+}
+
+// CallHookReady reports which setting the router lacks to answer calls at its Twilio call
+// webhook on publicURL: the token it checks Twilio's signature with, or a public URL.
+func (p *Provider) CallHookReady(publicURL string) error {
+	_, err := p.callHook(publicURL)
+	return err
+}
+
+// callHook is the router's Twilio call webhook on publicURL. It is only given when the router
+// checks the webhook's signature, and publicURL is a bare https address: a query or a
+// fragment would reach Twilio as part of the URL, and a user would put a credential in it.
+func (p *Provider) callHook(publicURL string) (string, error) {
+	if !p.hookSigned {
+		return "", stack.Wrap(phone.NotConfigured(errors.New("twilio: " + twiliosig.AuthTokenEnvVar +
+			" is required to answer calls to a twilio number")))
+	}
+	if publicURL == "" {
+		return "", stack.Wrap(phone.NotConfigured(errors.New("twilio: ROUTER_PUBLIC_URL is required, " +
+			"as twilio asks the router there where each call to a number goes")))
+	}
+	parsed, err := url.Parse(publicURL)
+	if err != nil || (parsed.Scheme != "https" && !(p.plainHTTPHook && parsed.Scheme == "http")) ||
+		parsed.Host == "" || strings.ContainsAny(publicURL, "?#@") {
+		return "", stack.Wrap(phone.NotConfigured(errors.New("twilio: ROUTER_PUBLIC_URL must be an https " +
+			"address with no user, query or fragment")))
+	}
+	return strings.TrimSuffix(publicURL, "/") + phone.TwilioCallHookPath, nil
 }
 
 // StopInbound clears the number's voice webhook, so a caller no longer reaches the trunk.
@@ -633,12 +679,6 @@ func dialBridge(bridge phone.Bridge) (string, error) {
 		return "", stack.Wrap(fmt.Errorf("twilio: encode twiml: %w", err))
 	}
 	return xml.Header + string(encoded), nil
-}
-
-// echoURL wraps TwiML in Twilio's echo endpoint, which answers a webhook with whatever
-// was put in it. It is what lets a fixed instruction be configured without hosting it.
-func echoURL(instructions string) string {
-	return "https://twimlets.com/echo?Twiml=" + url.QueryEscape(instructions)
 }
 
 func dollarsToMicros(dollars string) int64 {

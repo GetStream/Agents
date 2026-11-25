@@ -187,7 +187,11 @@ func (s *Server) getOrganizationActivity(ctx context.Context, request *organizat
 	if err != nil {
 		return nil, err
 	}
-	legs, err := s.store.TurnBuckets.Latency(ctx, apps, since)
+	latency := s.store.TurnBuckets.Latency
+	if s.store.StatsShipped() {
+		latency = s.store.TurnBuckets.ShippedLatency
+	}
+	legs, err := latency(ctx, apps, since)
 	if err != nil {
 		return nil, err
 	}

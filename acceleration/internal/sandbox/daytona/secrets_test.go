@@ -139,7 +139,7 @@ func (s *SecretsSuite) TestDaytonasBrokerSendsDaytonaWhatItDidBefore() {
 		regexp.MustCompile(`va_stg_session-1_app-1_github_[0-9a-f]{8}`).ReplaceAllString(string(created), "SECRET"))
 	s.Equal(`[{"authorization":"Bearer key-1","code":"print(1)","language":"python","path":"/toolbox/sandbox-2/process/code-run","timeout":30}]`,
 		string(ran))
-	s.Equal([]string{"{\"command\":\"mkdir -p 'dir'\"}\n"}, s.platform.rawCommands)
+	s.Equal([]string{"{\"command\":\"mkdir -p -- 'dir'\"}\n"}, s.platform.rawCommands)
 }
 
 // lateBox is a sandbox of session-1 with github and a late grant of linear, whose Bind gives the

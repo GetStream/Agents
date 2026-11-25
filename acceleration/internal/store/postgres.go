@@ -19,6 +19,7 @@ import (
 const (
 	foreignKeyViolation = "23503"
 	uniqueViolation     = "23505"
+	undefinedTable      = "42P01"
 )
 
 // isViolation reports whether err is Postgres refusing a write with the given code.

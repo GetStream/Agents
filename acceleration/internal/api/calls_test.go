@@ -939,6 +939,44 @@ func (s *CallsSuite) TestAVoiceCallsDecisionsAreNotAnEmptyListWhenTheirReadFails
 	s.Contains(served(), "store: call events")
 }
 
+// Defect: one shard being down fails every app's call list, or the list leaves that shard's
+// calls out with nothing saying the list is short.
+func (s *CallsSuite) TestACallListWithAShardDownListsTheOthersAndNamesTheShard() {
+	call := s.started(store.Call{})
+	client, _ := s.onAShardDown()
+
+	response := client.raw(http.MethodGet, "/v1/agents/calls", nil)
+	defer response.Body.Close()
+
+	s.Require().Equal(http.StatusOK, response.StatusCode)
+	s.Equal("there", response.Header.Get(unreachableShardsHeader))
+	var listed []Call
+	s.Require().NoError(json.NewDecoder(response.Body).Decode(&listed))
+	s.Require().Len(listed, 1)
+	s.Equal(call.ID, listed[0].Id)
+
+	healthy := s.serverClient.raw(http.MethodGet, "/v1/agents/calls", nil)
+	defer healthy.Body.Close()
+	s.Require().Equal(http.StatusOK, healthy.StatusCode)
+	s.Empty(healthy.Header.Values(unreachableShardsHeader), "every shard answered")
+}
+
+// Defect: a call's details fail while a shard holding its usage is down, or leave its usage
+// out with nothing saying so.
+func (s *CallsSuite) TestACallReadWithAShardDownNamesTheShard() {
+	call := s.started(store.Call{})
+	client, _ := s.onAShardDown()
+
+	response := client.raw(http.MethodGet, "/v1/agents/calls/"+call.ID, nil)
+	defer response.Body.Close()
+
+	s.Require().Equal(http.StatusOK, response.StatusCode)
+	s.Equal("there", response.Header.Get(unreachableShardsHeader))
+	var read Call
+	s.Require().NoError(json.NewDecoder(response.Body).Decode(&read))
+	s.Equal(call.CallID, read.CallId)
+}
+
 // callEventsOnClosedRedis has the decisions and floor checks every read of the suite's store
 // makes come from a Redis that is closed, as an unreachable one is. The test's end puts them back.
 func (s *CallsSuite) callEventsOnClosedRedis() {

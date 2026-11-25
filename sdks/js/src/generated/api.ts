@@ -10446,7 +10446,7 @@ export type components = {
             };
             /** @description The full prompt, which only the subagent sees. */
             readonly instructions: string;
-            /** @description How the config names it, which is unique among that config's own skills. */
+            /** @description How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox. */
             readonly name: string;
         };
         readonly SkippedVendor: {
@@ -12420,6 +12420,7 @@ export interface operations {
                     readonly "X-Stream-Balance-Warning": components["headers"]["X-Stream-Balance-Warning"];
                     readonly "X-Stream-Cost-Estimated": components["headers"]["X-Stream-Cost-Estimated"];
                     readonly "X-Stream-Cost-Micros": components["headers"]["X-Stream-Cost-Micros"];
+                    readonly "X-Unreachable-Shards"?: string;
                     readonly [name: string]: unknown;
                 };
                 content: {
@@ -12453,6 +12454,7 @@ export interface operations {
                     readonly "X-Stream-Balance-Warning": components["headers"]["X-Stream-Balance-Warning"];
                     readonly "X-Stream-Cost-Estimated": components["headers"]["X-Stream-Cost-Estimated"];
                     readonly "X-Stream-Cost-Micros": components["headers"]["X-Stream-Cost-Micros"];
+                    readonly "X-Unreachable-Shards"?: string;
                     readonly [name: string]: unknown;
                 };
                 content: {
