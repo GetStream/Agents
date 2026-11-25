@@ -434,3 +434,14 @@ func (s *RouterConfigsSuite) createConfig(body map[string]any) RouterConfig {
 		s.serverClient.do(http.MethodPost, "/v1/router/configs", body, &created))
 	return created
 }
+
+func (s *RouterConfigsSuite) TestAnUncheckedSyncOverAnEditBehindTheCacheStillWrites() {
+	created := s.createConfig(s.syncedClinic("hash-one"))
+	s.readConfig(created.Id)
+	_, err := s.store.GlobalDB().ExecContext(s.T().Context(),
+		"UPDATE router_configs SET name = ?, sync_hash = '', updated_at = now() WHERE id = ?", "clinic-dash", created.Id)
+	s.Require().NoError(err)
+	replaced := s.replaceConfig(created.Id, s.syncedClinic("hash-two"))
+	s.Equal("clinic", replaced.Name)
+	s.Equal("hash-two", s.readConfig(created.Id).SyncHash)
+}

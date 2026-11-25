@@ -215,3 +215,33 @@ func (s *StoreSuite) TestARefusedRouterConfigSaveForgetsTheCachedCopy() {
 	s.Require().NoError(err)
 	s.Equal("hash-elsewhere", stored.SyncHash)
 }
+
+func (s *StoreSuite) TestARouterConfigSaveWaitsForARowLockAndRefuses() {
+	s.routerConfig("acme-app", "fast")
+	read, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.Require().NoError(err)
+	holder, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	_, err = holder.ExecContext(s.ctx, "UPDATE router_configs SET name = 'cheap', updated_at = now() WHERE id = ?", read.ID)
+	s.Require().NoError(err)
+
+	mine := read
+	mine.SyncHash = "hash-two"
+	done := make(chan error, 1)
+	go func() { done <- s.store.RouterConfigs.Save(s.ctx, &mine, read.UpdatedAt) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var waiting int
+		s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%router_configs%'").Scan(s.ctx, &waiting))
+		if waiting > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	s.Require().NoError(holder.Commit())
+	s.Require().ErrorIs(<-done, ErrStaleRouterConfig)
+	stored, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", read.ID)
+	s.Require().NoError(err)
+	s.Equal("cheap", stored.Name)
+	s.Empty(stored.SyncHash)
+}
