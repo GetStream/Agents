@@ -491,9 +491,8 @@ func (s *BrokerSuite) TestARecordLastsNoLongerThanARunMayTakeAndAMinute() {
 }
 
 // TestARecordLastsTheRunTimeoutItIsGivenAndTwoMinutes: with the default run timeout and with
-// the longest a config may name, every run's record outlasts the run and the 60 s of checks and
-// 5 s of call buffer before and after it (runMargin), and ends two minutes after the run's
-// timeout.
+// the longest a config may name, every run's record outlasts the run, the 60 s of checks before
+// it and the 5 s its call waits past it, and ends two minutes after the run's timeout (runMargin).
 func (s *BrokerSuite) TestARecordLastsTheRunTimeoutItIsGivenAndTwoMinutes() {
 	for _, timeout := range []time.Duration{sandbox.DefaultRunTimeout, sandbox.MaxTimeout} {
 		broker, mount := s.timed(timeout)
