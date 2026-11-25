@@ -1960,6 +1960,60 @@ func (s *AppsSuite) TestANumberAddedAgainAfterAMoveIsGivenBack() {
 	s.Empty(s.deployment.Rules())
 }
 
+// Whatever keeps its trunk at Stream, the number stays held, and giving it back again works.
+func (s *AppsSuite) TestANumberWhoseTrunkStreamKeepsIsGivenBackLater() {
+	for failing, says := range map[string]string{
+		"the list of rules":  "list sip routing rules",
+		"the rule left":      "delete sip routing rule",
+		"the trunk, for now": "delete sip trunk",
+	} {
+		s.Run(failing, func() {
+			e164, customer, trunk, line := s.readded()
+			method, path, status := http.MethodDelete, "/sip/inbound_routing_rules/"+line.StreamRouteID, http.StatusInternalServerError
+			switch failing {
+			case "the list of rules":
+				method, path = http.MethodGet, "/sip/inbound_routing_rules"
+			case "the trunk, for now":
+				path, status = "/sip/inbound_trunks/"+line.StreamTrunkID, http.StatusTooManyRequests
+			}
+			s.deployment.FailWith(method, path, status)
+			before := s.lists()
+
+			s.ErrorContains(trunk.service.Release(s.ctx, customer, e164), says)
+
+			held, err := s.store.PhoneNumbers.GetByE164(s.ctx, customer, e164)
+			s.Require().NoError(err)
+			s.Equal(line.StreamTrunkID, held.StreamTrunkID)
+			if status == http.StatusTooManyRequests {
+				s.Equal(before, s.lists(), "not refused for a rule")
+			}
+			s.deployment.Heal(method, path)
+			s.Require().NoError(trunk.service.Release(s.ctx, customer, e164))
+			s.forgotten(line)
+		})
+	}
+}
+
+// The trunk keeps another number, so nothing but its rule stands in the way.
+func (s *AppsSuite) TestAForgottenLineWhoseRuleStreamKeepsOnASharedTrunkFailsTheAttach() {
+	e164, squatter, trunk, line := s.squatted()
+	other := aNumber()
+	s.Require().NoError(s.addOnATrunk(trunk, squatter, other))
+	_, err := trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: other, To: "+15550001111"})
+	s.Require().NoError(err)
+	s.moved(line, "deleted")
+	path := "/sip/inbound_routing_rules/" + line.StreamRouteID
+	s.deployment.Fail(http.MethodDelete, path)
+
+	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
+	s.ErrorContains(err, "delete sip routing rule")
+	s.deployment.Heal(http.MethodDelete, path)
+	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+	s.Require().NoError(err)
+	s.Nil(s.deployment.Rule(line.StreamRouteID))
+}
+
 func (s *AppsSuite) TestANumberAddedAgainAfterAMoveIsAttachedByItsBuyer() {
 	e164, _, _, line := s.readded()
 	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
