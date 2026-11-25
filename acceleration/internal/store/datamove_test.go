@@ -311,6 +311,100 @@ func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 	s.ErrorIs(err, ErrGuestClaimed)
 }
 
+// mintedOn is whether a guest of customerID's was minted by store's own router, and whether an
+// import said another deployment's did.
+func (s *DataMoveSuite) mintedOn(store *Store, customerID, id string) [2]bool {
+	guest, err := store.Users.GetGuest(s.ctx, customerID, id)
+	s.Require().NoError(err)
+	return [2]bool{guest.Minted, guest.MintedElsewhere}
+}
+
+// moveBack is move the other way, from the destination to the source.
+func (s *DataMoveSuite) moveBack(from, to string) {
+	for _, row := range s.exportFrom(s.destination, from).of("users") {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+		s.Require().NoError(s.source.ImportRow(s.ctx, to, "users", encoded))
+	}
+}
+
+func (s *DataMoveSuite) TestAMoveKeepsWhichGuestsARouterMintedAsTheSourcesWord() {
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "minted", CustomerID: "acme"}))
+	s.Require().NoError(s.source.Users.Seen(s.ctx, "acme", "signed", UserKindGuest))
+
+	for range 2 {
+		s.move("acme", "moved")
+		s.Equal([2]bool{false, true}, s.mintedOn(s.destination, "moved", "minted"))
+		s.Equal([2]bool{false, false}, s.mintedOn(s.destination, "moved", "signed"))
+	}
+
+	// Their own token, of no role, leaves the minted one a guest; the other is an account's.
+	for _, id := range []string{"minted", "signed"} {
+		s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", id, UserKindAuthenticated))
+	}
+	s.Equal(UserKindGuest, s.userKind(s.destination, "moved", "minted"))
+	s.Equal(UserKindAuthenticated, s.userKind(s.destination, "moved", "signed"))
+}
+
+func (s *DataMoveSuite) TestAGuestMovedBackIsTheRoutersOwnWhereItWasMinted() {
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "minted", CustomerID: "acme"}))
+	s.move("acme", "moved")
+
+	s.moveBack("moved", "acme")
+	s.Equal([2]bool{true, true}, s.mintedOn(s.source, "acme", "minted"))
+
+	// Where its row is gone, it is back as one minted somewhere, however many moves ago.
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM users WHERE customer_id = 'acme'")
+	s.Require().NoError(err)
+	s.moveBack("moved", "acme")
+	s.Equal([2]bool{false, true}, s.mintedOn(s.source, "acme", "minted"))
+}
+
+func (s *DataMoveSuite) TestAReplayedGuestKeepsThatARouterMintedIt() {
+	s.capture("acme")
+	cursor := s.move("acme", "moved")
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "minted", CustomerID: "acme"}))
+	s.Require().NoError(s.source.Users.SetGuestProfile(s.ctx, "acme", "minted", "Alice", nil))
+
+	for range 2 {
+		s.replay(s.destination, "acme", "moved", cursor)
+		s.Equal([2]bool{false, true}, s.mintedOn(s.destination, "moved", "minted"))
+	}
+
+	_, err := s.source.ForgetUserSettings(s.ctx, "acme", "minted", "deleted-user", &AuditEntry{
+		CustomerID: "acme", ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "tester"})
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "moved", cursor)
+	s.Zero(s.usersHeld(s.destination, "moved", "minted"))
+}
+
+// An export of a release that kept neither column says nothing of either, and the release before has minted alone.
+func (s *DataMoveSuite) TestAGuestWhoseRowDoesNotSayItWasMintedArrivesAsNone() {
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "minted", CustomerID: "acme"}))
+
+	s.moveEdited("acme", "moved", "users", func(row map[string]any) {
+		delete(row, "minted")
+		delete(row, "minted_elsewhere")
+	})
+	s.Equal([2]bool{false, false}, s.mintedOn(s.destination, "moved", "minted"))
+	s.moveEdited("acme", "moved", "users", func(row map[string]any) { row["minted"], row["minted_elsewhere"] = nil, nil })
+	s.Equal([2]bool{false, false}, s.mintedOn(s.destination, "moved", "minted"))
+	s.moveEdited("acme", "moved", "users", func(row map[string]any) { delete(row, "minted_elsewhere") })
+	s.Equal([2]bool{false, true}, s.mintedOn(s.destination, "moved", "minted"))
+}
+
+// What a file says never takes from a guest minted here that it was.
+func (s *DataMoveSuite) TestAGuestMintedHereStaysSoWhateverAFileSays() {
+	s.Require().NoError(s.destination.Users.InsertGuest(s.ctx, &User{ID: "minted", CustomerID: "moved"}))
+	s.Require().NoError(s.source.Users.Seen(s.ctx, "acme", "minted", UserKindGuest))
+
+	s.move("acme", "moved")
+
+	s.Equal([2]bool{true, false}, s.mintedOn(s.destination, "moved", "minted"))
+	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "minted", UserKindAuthenticated))
+	s.Equal(UserKindGuest, s.userKind(s.destination, "moved", "minted"))
+}
+
 func (s *DataMoveSuite) TestAMovedConnectionKeepsItsOwnerAndWhatItsConsentGranted() {
 	// The owner is who reaches it, and the account is what a reconnect has to match.
 	id := s.seedConnectorConnection(s.source, "acme")
@@ -2576,7 +2670,7 @@ func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainByTheReplicaThat
 // A user recorded here from their own token, then imported as the guest the source still had them
 // as, is recorded again from their next token.
 func (s *DataMoveSuite) TestAUserImportedOverOneSeenHereIsRecordedAgainOnTheirNextRequest() {
-	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "bob", CustomerID: "acme", Name: "Guest"}))
+	s.Require().NoError(s.source.Users.Seen(s.ctx, "acme", "bob", UserKindGuest))
 	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "bob", UserKindAuthenticated))
 	row, err := json.Marshal(s.export("acme").of("users")[0])
 	s.Require().NoError(err)

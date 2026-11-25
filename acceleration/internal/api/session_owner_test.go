@@ -436,10 +436,10 @@ func (s *SessionOwnershipSuite) TestAMintedGuestCarriesOnItsBackfilledConversati
 	s.carriesOn(s.data.signedInAs(minted), opened)
 }
 
-// An import does not carry which guests the router minted, so a minted guest it brought reads as
-// one whose app signed its token: its refresh says the role, though its sessions say none. Its
-// conversation is left as it is, and the token it is refreshed to carries it on.
-func (s *SessionOwnershipSuite) TestAConversationOfAMintedGuestAnImportBroughtIsLeftAlone() {
+// A minted guest of no record of it reads as one whose app signed its token: its refresh says the
+// role, though its sessions say none. Its conversation is left as it is, and the token it is
+// refreshed to carries it on.
+func (s *SessionOwnershipSuite) TestAConversationOfAMintedGuestFromBeforeTheRecordIsLeftAlone() {
 	minted := s.mintedGuest()
 	opened := s.withNoKindRecorded(s.ended(s.data.signedInAs(minted)), minted)
 	_, err := s.store.GlobalDB().NewUpdate().Model((*store.User)(nil)).Set("minted = false").
@@ -449,6 +449,18 @@ func (s *SessionOwnershipSuite) TestAConversationOfAMintedGuestAnImportBroughtIs
 	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindLeftAlone: 1}, s.backfilled(true))
 
 	s.carriesOn(s.guestNamed(minted), opened)
+}
+
+// A minted guest an import brought is refreshed to a token of no role, so its conversation is
+// recorded as a signed-in user's, and it carries it on.
+func (s *SessionOwnershipSuite) TestAMintedGuestAnImportBroughtCarriesOnItsBackfilledConversation() {
+	minted := s.mintedGuest()
+	opened := s.withNoKindRecorded(s.ended(s.data.signedInAs(minted)), minted)
+	s.importedUsersAgain()
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindStamped: 1}, s.backfilled(true))
+
+	s.carriesOn(s.data.signedInAs(minted), opened)
 }
 
 // A guest whose id went on as a signed-in user's account is no guest the role is minted for any

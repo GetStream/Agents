@@ -46,7 +46,7 @@ func (r *Users) Insert(ctx context.Context, user *User) error {
 // app's own guest token wrote for the id becomes an account's: kept a guest's, the account
 // would stay one a guest token is minted for (createGuestUser). A guest the router minted
 // stays a guest, because the token minted for them names no role and so reads as a full
-// user's too; so does a claimed one, whose claim stands.
+// user's too, as does one an import brought as minted; so does a claimed one, whose claim stands.
 func (r *Users) RecordAccount(ctx context.Context, customerID, userID string) error {
 	user := &User{
 		CustomerID: customerID, ID: userID, Kind: UserKindAuthenticated,
@@ -58,6 +58,7 @@ func (r *Users) RecordAccount(ctx context.Context, customerID, userID string) er
 		Where("u.kind = ?", UserKindGuest).
 		Where("u.claimed_by IS NULL").
 		Where("NOT u.minted").
+		Where("u.minted_elsewhere IS NOT TRUE").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: record account: %w", err))

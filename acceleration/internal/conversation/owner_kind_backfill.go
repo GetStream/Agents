@@ -77,12 +77,13 @@ func (s *Service) BackfillOwnerKinds(ctx context.Context, held *store.Store, mod
 //   - sessions of more than one kind, or of none: one may be somebody else's going by the id,
 //     and a deleted session leaves its channel behind;
 //   - an anonymous caller's, whose name nobody checked;
-//   - a guest's, unless the id is still a guest the router did not mint, and the mode is not
-//     proxy: a minted guest's refreshed token, and any behind a proxy, says no role, and an id
-//     that is an account's now went on as a signed-in user;
+//   - a guest's, unless the id is still a guest no router minted, and the mode is not proxy: a
+//     minted guest's refreshed token, and any behind a proxy, says no role, and an id that is an
+//     account's now went on as a signed-in user;
 //   - a signed-in user's of an id a guest whose token said the role held a session under
-//     (Sessions.HeldAsGuest), or that is still a guest the router did not mint, as one an import
-//     brought or one from before the router recorded which it minted: their token says the role.
+//     (Sessions.HeldAsGuest), or that is still a guest not known as minted, here or where an import
+//     brought it from, as one from before the router recorded which it minted: their token says
+//     the role.
 //
 // A guest that went on as a signed-in user and whose sessions as a guest were all deleted leaves
 // nothing that says so, and is stamped a signed-in user's.
@@ -128,7 +129,7 @@ func (s *Service) backfillOwnerKind(ctx context.Context, held *store.Store, mode
 		if err != nil && !errors.Is(err, store.ErrNotAGuest) {
 			return OwnerKindFailed, err
 		}
-		keepsTheRole := err == nil && !guest.Minted && mode != auth.Proxy
+		keepsTheRole := err == nil && !guest.Minted && !guest.MintedElsewhere && mode != auth.Proxy
 		if kind == auth.KindGuest && !keepsTheRole {
 			return OwnerKindLeftAlone, nil
 		}

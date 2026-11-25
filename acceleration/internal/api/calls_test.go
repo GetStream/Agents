@@ -223,7 +223,7 @@ func (s *CallsSuite) TestAGuestImportedAsMintedIsNoGuestTheRouterMinted() {
 	// the router handed a guest out is this deployment's to say.
 	call := s.started(store.Call{})
 	imported := "visitor-" + s.utils.uuid()
-	row := `{"customer_id":"x","id":"` + imported + `","kind":"guest","minted":true,"name":"","email":"",` +
+	row := `{"customer_id":"x","id":"` + imported + `","kind":"guest","minted":true,"minted_elsewhere":true,"name":"","email":"",` +
 		`"timezone":"","custom":{},"created_at":"2026-01-01T00:00:00Z"}`
 	var written struct {
 		Tables map[string]int64 `json:"tables"`

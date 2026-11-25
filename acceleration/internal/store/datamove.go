@@ -127,7 +127,8 @@ type dataTable struct {
 	copied string
 	// vouched are the columns this deployment sets on its own word, such as users.minted: the
 	// router handed that guest out. An import leaves them to the local default, since a row
-	// the customer sends is the customer's word, not this deployment's.
+	// the customer sends is the customer's word, not this deployment's. What it says of
+	// users.minted is kept as that word, in users.minted_elsewhere.
 	vouched []string
 }
 
@@ -904,6 +905,10 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	if i := slices.Index(columns, "sync_hash"); i >= 0 {
 		// A row from a release before sync hashes carries none, and no sync wrote it here.
 		picked[i] = "COALESCE(r.sync_hash, '')"
+	}
+	if i := slices.Index(columns, "minted_elsewhere"); i >= 0 {
+		// Minted at the source, or where the source had the guest from.
+		picked[i] = "r.minted IS TRUE OR r.minted_elsewhere IS TRUE"
 	}
 	if i := slices.Index(columns, "usage_id"); spec.name == "requests" && i >= 0 {
 		// The usage id is this deployment's, made from the one the row had where it was first
