@@ -173,6 +173,9 @@ A release is a tagged build, published once, then deployed per shard:
   checkout of its `master` branch). Without either, it stops with "could not locate infra/ directory"
   before it takes the lock, so nothing moves.
 - Migrations run on start and take an advisory lock, so shards starting together are safe.
+  A deployment that sets `postgres.migrate_dsn` runs `router migrate` per shard first instead,
+  and its routers refuse to start until it has (`acceleration/README.md`, «A serving role that
+  owns no table»).
   A migration has to be right for both databases: the global tables and the shard tables
   share one migration set.
 - Prod runs with the overlap deploy on, so a restarted pod drains its calls (up to 1 h),
@@ -194,7 +197,8 @@ wrapped value, set `ROUTER_AUTH_KEK_V1_WRAPPED` back to the previous one and res
 
 - Commit and push first, and build from a clean tree: the version has to name a commit somebody else can check out.
 - Values and router are one deployment. Rolling the auth work also meant moving `ROUTER_AUTH_MODE` to `proxy`, because `noauth` had changed meaning underneath it. Render the chart, diff it against the live release, explain every line.
-- Migrations run on start. Additive is fine; anything else wants a plan first.
+- Migrations run on start, or in `router migrate` where `postgres.migrate_dsn` is set. Additive
+  is fine; anything else wants a plan first.
 - Never roll back below `accelerate-v0.6.135`, the first tag with f38926d2 (#1182): an older
   router ignores `require_approval` on connector bindings, so their write tools run without
   the person's approval. This floor holds in every environment.

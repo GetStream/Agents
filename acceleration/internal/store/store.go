@@ -50,8 +50,8 @@ type Store struct {
 	locks *bun.DB
 	// lockSlots caps how many of locks' connections one customer's locks hold.
 	lockSlots lockSlots
-	// globalDSN and shardDSN are what global and shard were opened with, for the pool a
-	// migration runs on.
+	// globalDSN and shardDSN are what a migration of global and shard connects with: the
+	// migrate DSNs, or what they were opened with.
 	globalDSN, shardDSN string
 	// cache is the shared Redis, holding copies of rows read on every request, and redis the
 	// shard's, holding the state of its running calls. Both are nil without Redis.
@@ -114,16 +114,25 @@ func (s *Store) detachedWrite(ctx context.Context, write func(context.Context, b
 func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Context, bun.Tx) error, keys func() []string) (told bool, err error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.writeTimeout)
 	defer cancel()
+	return s.cachedWrite(ctx, s.global, write, keys, func() bool { return true })
+}
+
+// cachedWrite is detachedWriteTold on ctx itself, for a write too long for the write timeout. ctx
+// ending before the COMMIT is sent rolls the transaction back. cached is asked in the transaction
+// whether there is a key to drop, which keys may take a query of its own to say (Policies.keys). db
+// may be another than the shared database only for a write that has none: a lost commit is asked
+// about there (ended).
+func (s *Store) cachedWrite(ctx context.Context, db *bun.DB, write func(context.Context, bun.Tx) error, keys func() []string, cached func() bool) (told bool, err error) {
 	var committing bool
 	var xid sql.NullInt64
-	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err = db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := write(ctx, tx); err != nil {
 			return err
 		}
 		// The transaction's id, for asking Postgres later whether a COMMIT whose answer was
 		// lost has landed. Without a cache there is nothing to drop again, and a write that
 		// changed nothing has no id, so nothing to wait for either.
-		if s.cache != nil {
+		if s.cache != nil && cached() {
 			if err := tx.NewSelect().ColumnExpr("pg_current_xact_id_if_assigned()").Scan(ctx, &xid); err != nil {
 				return err
 			}
@@ -208,8 +217,8 @@ func deleteInBatches(ctx context.Context, db bun.IDB, table, where string, args 
 	}
 }
 
-// connect opens a pool of at most conns connections.
-func connect(dsn string, conns int) (_ *bun.DB, err error) {
+// connectorFor is pgdriver's connector of a DSN.
+func connectorFor(dsn string, opts ...pgdriver.Option) (_ *pgdriver.Connector, err error) {
 	// pgdriver panics on a DSN it cannot parse, and the panic holds the whole DSN, password
 	// included, which would reach the logs past their redaction.
 	defer func() {
@@ -217,7 +226,16 @@ func connect(dsn string, conns int) (_ *bun.DB, err error) {
 			err = stack.Wrap(errors.New("store: the database DSN does not parse"))
 		}
 	}()
-	sqldb := sql.OpenDB(primaryOnly{pgdriver.NewConnector(pgdriver.WithDSN(dsn), sessionDefaults)})
+	return pgdriver.NewConnector(append([]pgdriver.Option{pgdriver.WithDSN(dsn)}, opts...)...), nil
+}
+
+// connect opens a pool of at most conns connections.
+func connect(dsn string, conns int) (*bun.DB, error) {
+	connector, err := connectorFor(dsn, sessionDefaults)
+	if err != nil {
+		return nil, err
+	}
+	sqldb := sql.OpenDB(primaryOnly{connector})
 	// database/sql keeps two idle connections by default, so every burst of writes past two
 	// dials Postgres and shakes hands over TLS again, and under load those handshakes are
 	// what times out. The pool is kept instead, and bounded so that two pods, each running
