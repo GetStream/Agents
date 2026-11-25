@@ -236,8 +236,20 @@ func (s *StoreSuite) TestQueueingAChatInboundForgetsTheKeysOfADayAgo() {
 	s.Zero(kept, "a key of a day ago is still recorded")
 }
 
+// received_at is Postgres's now() at the insert, so a message due at the same instant is due on the
+// clock a claim judges it by, whatever a router's own clock says.
+func (s *StoreSuite) TestAChatMessageQueuedWithNoDueTimeIsDueNowOnTheDatabasesClock() {
+	s.queuedChat("msg-one", func(delivery *ChatInbound) { delivery.NextAttemptAt = time.Time{} })
+
+	var onReceipt bool
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT next_attempt_at = received_at FROM chat_inbound WHERE message_id = 'msg-one'").Scan(&onReceipt))
+	s.True(onReceipt)
+	s.claimedChat("msg-one")
+}
+
 func (s *StoreSuite) TestAChatMessageIsNotClaimedBeforeItIsDue() {
-	s.queuedChat("msg-one", func(delivery *ChatInbound) { delivery.NextAttemptAt = time.Now().Add(time.Hour) })
+	s.queuedChat("msg-one", func(delivery *ChatInbound) { delivery.NextAttemptAt = s.databaseNow().Add(time.Hour) })
 
 	s.Empty(s.claimChats())
 	s.timePasses("chat_inbound", time.Hour)
@@ -299,7 +311,7 @@ func (s *StoreSuite) TestARetriedChatMessageIsDueAtItsNextAttempt() {
 	s.queuedChat("msg-one")
 	claimed := s.claimedChat("msg-one")
 
-	retried, err := s.store.ChatInbounds.Retry(s.ctx, claimed, time.Now().Add(time.Hour))
+	retried, err := s.store.ChatInbounds.Retry(s.ctx, claimed, s.databaseNow().Add(time.Hour))
 
 	s.Require().NoError(err)
 	s.True(retried)
@@ -523,7 +535,7 @@ func (s *StoreSuite) TestTheNextChatMessageIsTheQueuedOneDueFirst() {
 	s.False(found, "none when nothing is queued")
 
 	s.queuedChat("msg-one")
-	s.queuedChat("msg-two", func(delivery *ChatInbound) { delivery.NextAttemptAt = time.Now().Add(time.Hour) })
+	s.queuedChat("msg-two", func(delivery *ChatInbound) { delivery.NextAttemptAt = s.databaseNow().Add(time.Hour) })
 	s.queuedChat("msg-three", func(delivery *ChatInbound) { delivery.NextAttemptAt = s.base.Add(-time.Hour) })
 	claimed, err := s.store.ChatInbounds.Claim(s.ctx, 1, chatLease)
 	s.Require().NoError(err)
@@ -561,7 +573,7 @@ func (s *StoreSuite) TestNoChatMessageIsNextOnceAllAreAnsweredOrGivenUp() {
 
 func (s *StoreSuite) TestPruningKeepsAnAnsweredChatMessageADayAndAGivenUpOneThirtyDays() {
 	for _, id := range []string{"done-old", "done-new", "failed-old", "failed-new"} {
-		s.queuedChat(id, func(delivery *ChatInbound) { delivery.NextAttemptAt = time.Now().Add(time.Hour) })
+		s.queuedChat(id, func(delivery *ChatInbound) { delivery.NextAttemptAt = s.databaseNow().Add(time.Hour) })
 	}
 	s.queuedChat("queued", func(delivery *ChatInbound) { delivery.NextAttemptAt = s.base.Add(-60 * 24 * time.Hour) })
 	finishedAt := map[string]time.Time{
@@ -573,7 +585,7 @@ func (s *StoreSuite) TestPruningKeepsAnAnsweredChatMessageADayAndAGivenUpOneThir
 	claimed, err := s.store.ChatInbounds.Claim(s.ctx, 10, chatLease)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1, "only the long-queued row is due")
-	_, err = s.store.ChatInbounds.Retry(s.ctx, claimed[0], time.Now().Add(2*time.Hour))
+	_, err = s.store.ChatInbounds.Retry(s.ctx, claimed[0], s.databaseNow().Add(2*time.Hour))
 	s.Require().NoError(err)
 	s.timePasses("chat_inbound", time.Hour)
 	for _, claimed := range s.claimChats() {

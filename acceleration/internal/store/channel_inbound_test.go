@@ -203,8 +203,20 @@ func (s *StoreSuite) TestAClaimedInboundMessageIsNotClaimedAgainUntilItsLeaseRun
 	s.claimedOne("1759740000.000100")
 }
 
+// created_at is Postgres's now() at the insert, so a message due at the same instant is due on the
+// clock a claim judges it by, whatever a router's own clock says.
+func (s *StoreSuite) TestAnInboundMessageQueuedWithNoDueTimeIsDueNowOnTheDatabasesClock() {
+	s.inbound("thread-one", "1759740000.000100", func(message *ChannelInbound) { message.NextAttemptAt = time.Time{} })
+
+	var onCreation bool
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT next_attempt_at = created_at FROM channel_thread_inbound WHERE channel_id = 'thread-one'").Scan(&onCreation))
+	s.True(onCreation)
+	s.claimedOne("1759740000.000100")
+}
+
 func (s *StoreSuite) TestAnInboundMessageIsNotClaimedBeforeItIsDue() {
-	s.inbound("thread-one", "1759740000.000100", func(message *ChannelInbound) { message.NextAttemptAt = time.Now().Add(time.Hour) })
+	s.inbound("thread-one", "1759740000.000100", func(message *ChannelInbound) { message.NextAttemptAt = s.databaseNow().Add(time.Hour) })
 
 	s.Empty(s.claim())
 	s.timePasses("channel_thread_inbound", time.Hour)
@@ -270,7 +282,7 @@ func (s *StoreSuite) TestAThreadsMessageQueuedWhileAnEarlierOneCommitsWaitsForIt
 }
 
 func (s *StoreSuite) TestAThreadsMessagesAreTakenInTheOrderTheyWereQueuedNotByWhenTheyAreDue() {
-	s.inbound("thread-one", "1759740000.000100", func(message *ChannelInbound) { message.NextAttemptAt = time.Now().Add(time.Hour) })
+	s.inbound("thread-one", "1759740000.000100", func(message *ChannelInbound) { message.NextAttemptAt = s.databaseNow().Add(time.Hour) })
 	s.inbound("thread-one", "1759740000.000200")
 
 	s.Empty(s.claim(), "the second is due, but the first is not yet")
@@ -299,7 +311,7 @@ func (s *StoreSuite) TestARetriedInboundMessageHoldsItsThreadUntilItsNextAttempt
 	s.inbound("thread-one", "1759740000.000200")
 	first := s.claimedOne("1759740000.000100")
 
-	changed, err := s.store.ChannelInbounds.Retry(s.ctx, first, time.Now().Add(time.Hour))
+	changed, err := s.store.ChannelInbounds.Retry(s.ctx, first, s.databaseNow().Add(time.Hour))
 	s.Require().NoError(err)
 	s.True(changed)
 
@@ -467,7 +479,7 @@ func (s *StoreSuite) TestTheNextInboundMessageIsTheOneAClaimMayTakeFirst() {
 
 	s.inbound("thread-one", "1759740000.000100")
 	s.inbound("thread-one", "1759740000.000200")
-	s.inbound("thread-two", "1759740000.000300", func(message *ChannelInbound) { message.NextAttemptAt = time.Now().Add(time.Hour) })
+	s.inbound("thread-two", "1759740000.000300", func(message *ChannelInbound) { message.NextAttemptAt = s.databaseNow().Add(time.Hour) })
 	s.claimedOne("1759740000.000100")
 
 	next, found, err := s.store.ChannelInbounds.NextDue(s.ctx)

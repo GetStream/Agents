@@ -131,7 +131,7 @@ func (s *Server) queueChatInbound(ctx context.Context, origin hookOrigin, delive
 	}
 	queued, err := s.store.ChatInbounds.QueueFirst(ctx, deliveryKey(origin, delivery.Type, delivery.stamp()), store.ChatInbound{
 		StreamAppPK: origin.app, MessageID: delivery.Message.ID, CustomerID: origin.customer,
-		Deployment: origin.deployment, APIKey: origin.apiKey, Body: body, NextAttemptAt: time.Now(),
+		Deployment: origin.deployment, APIKey: origin.apiKey, Body: body,
 	})
 	if err != nil {
 		return err

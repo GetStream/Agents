@@ -69,6 +69,18 @@ func (s *ChatInboundQueueSuite) TestAQueuedDeliveryIsAnsweredOnce() {
 	s.Eventually(func() bool { return s.row(queued).State == store.ChatInboundDone }, settleFor, 20*time.Millisecond)
 }
 
+// The worker claims on Postgres's clock as soon as it is woken, so the message is due on that clock
+// as it is queued, not on the router's.
+func (s *ChatInboundQueueSuite) TestADeliveryIsDueOnTheDatabasesClockAsItIsQueued() {
+	s.Require().Equal(http.StatusOK, s.delivers(&s.RouterSuite, s.message(suiteStreamApp, deliveredConfig(&s.RouterSuite, s.customerID()), ""), s.current))
+
+	var dueOnReceipt bool
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
+		"SELECT next_attempt_at = received_at FROM chat_inbound WHERE position(? in body) > 0",
+		[]byte(`"`+s.channelID+`"`)).Scan(&dueOnReceipt))
+	s.True(dueOnReceipt)
+}
+
 // A queued delivery's row is settled as its answer starts, so no other try answers it while the
 // model writes, and the answer runs in line: the worker's slot, and Close, wait for it rather
 // than a goroutine nobody waits for.

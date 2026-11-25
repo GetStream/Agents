@@ -484,6 +484,10 @@ func (s *EventForwardingSuite) TestAMessageARouterQueuedBeforeItStoppedIsWritten
 
 	s.Require().NoError(err)
 	s.True(answered)
+	var dueOnCreation bool
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
+		"SELECT next_attempt_at = created_at FROM channel_thread_inbound WHERE customer_id = ?", s.customerID()).Scan(&dueOnCreation))
+	s.True(dueOnCreation, "it is due as it is queued, on the clock a claim judges it by")
 	next := s.anotherRouter()
 	next.Start(context.Background(), s.router.AnswerQueued)
 	defer next.Close()
