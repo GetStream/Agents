@@ -331,13 +331,13 @@ func (s *Server) writeEvents(connection *websocket.Conn, events <-chan session.E
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteJSON(encoded); err != nil {
 				s.logger.Debug("session socket write failed", "error", err)
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 
 		case <-ping.C:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 		}
 	}
