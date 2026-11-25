@@ -1,4 +1,5 @@
 import 'convert.dart';
+import 'errors.dart' show RouterException;
 import 'generated/api.dart' as api;
 import 'models.dart';
 
@@ -47,6 +48,9 @@ final class ScheduledTasks {
   /// minutes from now at the soonest, unless it is no earlier than the current next occurrence.
   /// An empty [deliverTo] is the conversation alone, but for a task made in a thread, whose
   /// delivery cannot change; [quietHours] with both ends empty clears the hold.
+  ///
+  /// A 409 whose [RouterException.code] is `task_changed` means the task changed while this was
+  /// being saved, and nothing was: [get] it again and retry. A completed task is a final 409.
   Future<ScheduledTask> update(
     String id, {
     String? title,
@@ -70,6 +74,9 @@ final class ScheduledTasks {
   /// Holds a task.
   ///
   /// Nothing comes due while it is paused, and what it slept through is never replayed.
+  ///
+  /// A 409 whose [RouterException.code] is `task_changed` means the task changed while this was
+  /// being saved, and nothing was: [get] it again and retry. A completed task is a final 409.
   Future<ScheduledTask> pause(String id) async =>
       scheduledTaskOf(await _operations.pauseScheduledTask(id: id));
 
@@ -77,6 +84,10 @@ final class ScheduledTasks {
   ///
   /// A one-shot whose time came while it was paused is completed instead, and a task with no
   /// occurrence left needs a new schedule first.
+  ///
+  /// A 409 whose [RouterException.code] is `task_changed` means the task changed while this was
+  /// being saved, and nothing was: [get] it again and retry. Any other 409 is final: a
+  /// completed task, or `too_many_tasks` at the active limit.
   Future<ScheduledTask> resume(String id) async =>
       scheduledTaskOf(await _operations.resumeScheduledTask(id: id));
 

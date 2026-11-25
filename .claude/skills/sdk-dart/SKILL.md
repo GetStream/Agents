@@ -103,6 +103,8 @@ stream property. Answering a tool call does not depend on anybody listening: it 
   anything else throws `SocketClosedException` with the code.
 - A frame that cannot be decoded is skipped, not fatal.
 - Closing is idempotent and sends 1000.
+- A handshake carries no headers, neither `X-Stream-Client` nor `User-Agent`:
+  `package:web_socket` takes a URL only, so a socket's credentials are all in its query.
 - **No automatic reconnection.** `respond` and `tool_result` are not idempotent and the protocol
   has nothing to resume from. `AgentSession.connection` reports `Disconnected(failure)` and the
   caller decides.
@@ -275,8 +277,9 @@ docker run --rm -v "$PWD":/repo -v va-dart-pub:/pub-cache -e PUB_CACHE=/pub-cach
 with every other SDK (see the `release-sdks` skill); by hand it is `flutter pub publish` from
 `sdks/dart/stream_agents`, after the CI dry run passes. A release
 sets `sdkVersion` in `lib/src/core/backend.dart` with the `version` in `pubspec.yaml`, since a
-package cannot read its own pubspec when it runs: it is the release `X-Stream-Client` names, and
-a test fails until the two match. The first
+package cannot read its own pubspec when it runs: it is the release `X-Stream-Client` and
+`User-Agent` name, and a test fails until the two match. A browser sends no `User-Agent` of
+the SDK's (`userAgent` is null there), since neither CORS list allows it. The first
 release of `stream_agents` also discontinues `stream_agents_core`, `stream_agents_chat` and
 `stream_agents_rtc` on pub.dev, each with `stream_agents` as its replacement (the package's
 admin page, "Mark as discontinued"), so an app on 0.1.0 is pointed at the one package.

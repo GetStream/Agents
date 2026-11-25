@@ -104,6 +104,7 @@ void main() {
       expect(request.header('Stream-Auth-Type'), 'jwt');
       expect(request.header('X-Stream-User-Id'), 'ada');
       expect(request.header('X-Stream-Client'), 'stream-agents-dart-v$sdkVersion');
+      expect(request.header('User-Agent'), 'stream-agents-dart/$sdkVersion');
       expect(request.header('Authorization'), isNull);
     });
 
@@ -141,6 +142,7 @@ void main() {
       expect(request.header('Authorization'), 'Bearer token-1');
       expect(request.header('Stream-Auth-Type'), 'jwt');
       expect(request.header('X-Stream-Client'), 'stream-agents-dart-v$sdkVersion');
+      expect(request.header('User-Agent'), 'stream-agents-dart/$sdkVersion');
       expect(request.header('X-Customer-Id'), isNull);
       expect(router.upgrades.single.query['token'], 'token-1');
     });
@@ -1447,6 +1449,7 @@ void main() {
       final request = router.last('POST /v1/agents/guests');
       expect(request.header('Stream-Auth-Type'), 'anonymous');
       expect(request.header('X-Stream-Client'), 'stream-agents-dart-v$sdkVersion');
+      expect(request.header('User-Agent'), 'stream-agents-dart/$sdkVersion');
       expect(request.header('Authorization'), isNull);
       expect(request.query['api_key'], 'key');
     });

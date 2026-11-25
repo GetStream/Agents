@@ -89,7 +89,11 @@ final class HttpWire implements Wire {
     final request = http.Request(method, backend.requestUri(path, query))..followRedirects = false;
     request.headers.addAll(
       anonymously
-          ? const {'Stream-Auth-Type': 'anonymous', 'X-Stream-Client': streamClient}
+          ? const {
+              'Stream-Auth-Type': 'anonymous',
+              'X-Stream-Client': streamClient,
+              'User-Agent': ?userAgent,
+            }
           : await backend.headers(),
     );
     if (body != null) {
