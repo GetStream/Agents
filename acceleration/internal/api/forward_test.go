@@ -178,6 +178,22 @@ func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerOnAChannelTwoCustome
 		"one of the customers' sessions answered a message nothing says is theirs")
 }
 
+// The same when the message lands on the node running one of the two: that session is no more
+// the channel's than the other.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerLandingBesideOneOfTwoCustomersWritingInItIsAnsweredByNeither() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	s.onTheOtherNode(CreateSessionRequest{AgentId: &channel, Llm: pointerTo("vision/vision-model")})
+	s.data.backendOfAnotherApp().createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+
+	s.Require().Equal(http.StatusOK,
+		s.signedly("/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Never(func() bool { return s.wasAsked(written) }, time.Second, 10*time.Millisecond,
+		"the session where the message landed answered a message nothing says is its customer's")
+}
+
 // Two customers may each run a session of one id, each on a node of its own: a request reaches
 // the session of the caller's own customer, wherever it lands.
 func (s *ForwardedSessionSuite) TestARequestReachesTheSessionOfTheCallersCustomerOfAnIdTwoRun() {
@@ -224,7 +240,7 @@ func (s *ForwardedSessionSuite) TestAnApprovalIsCarriedToTheCallersNodeThoughAno
 	cid := "messaging:" + s.utils.uuid()
 	s.heldWhereNothingAnswers(s.customerID(), s.utils.uuid(), "", cid)
 	s.nodeDirectory(s.server, s.shard, slog.New(slog.DiscardHandler)).
-		Hold(s.T().Context(), "another-customer", s.utils.uuid(), "", cid)
+		Hold(s.T().Context(), "another-customer", 0, s.utils.uuid(), "", cid)
 
 	s.Equal(http.StatusServiceUnavailable, s.serverClient.do(http.MethodPost, approvalsIn(cid), anApproval, nil),
 		"answered on the node of the customer that held the cid last")
@@ -251,12 +267,12 @@ func approvalsIn(cid string) string {
 }
 
 // heldWhereNothingAnswers has the directory say a node that cannot be reached runs a customer's
-// session id, writing as agent and answering in the conversation cid.
+// session id in the deployment's own app, writing as agent and answering in the conversation cid.
 func (s *RouterSuite) heldWhereNothingAnswers(customer, id, agent, cid string) {
 	gone := httptest.NewUnstartedServer(nil)
 	directory := s.nodeDirectory(gone, s.shard, slog.New(slog.DiscardHandler))
 	gone.Close()
-	directory.Hold(s.T().Context(), customer, id, agent, cid)
+	directory.Hold(s.T().Context(), customer, 0, id, agent, cid)
 }
 
 // wasAsked reports whether the model was given something to answer.
