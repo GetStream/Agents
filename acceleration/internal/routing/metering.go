@@ -71,11 +71,17 @@ func MeteringAlerts(limit time.Duration) []alerts.Condition {
 	per := func(counter *prometheus.CounterVec, where map[string]string) alerts.ItemCheck {
 		return alerts.IncreasedPer(counter, limit, itemLabels, where)
 	}
+	// An alert's text is the same for every item: the item is named before it.
+	says := func(text string) func(string) string { return func(string) string { return text } }
 	return []alerts.Condition{
-		{Name: "missing", Level: alerts.Warn, Items: per(usageMissing, nil)},
-		{Name: "estimated", Level: alerts.Warn, Items: per(usageEstimated, map[string]string{"reason": estimatedMissing})},
-		{Name: "unpriced", Level: alerts.Warn, Items: alerts.IncreasedPer(usageUnpriced, limit, pricedItemLabels, nil)},
-		{Name: "mismatch", Level: alerts.Warn, Items: per(usageMismatch, nil)},
+		{Name: "missing", Level: alerts.Warn, Items: per(usageMissing, nil),
+			Describe: says("billable work finished and recorded none of what its price rates, so it was written at nothing; the vendor's adapter or the session lost the usage and needs a fix")},
+		{Name: "estimated", Level: alerts.Warn, Items: per(usageEstimated, map[string]string{"reason": estimatedMissing}),
+			Describe: says("billable work finished and the vendor never said its usage, so it was billed on the router's own count; the vendor's adapter needs a fix")},
+		{Name: "unpriced", Level: alerts.Warn, Items: alerts.IncreasedPer(usageUnpriced, limit, pricedItemLabels, nil),
+			Describe: says("billable work succeeded with no price and was written at nothing until the item is priced; add its price for this region and BYOK state")},
+		{Name: "mismatch", Level: alerts.Warn, Items: per(usageMismatch, nil),
+			Describe: says("the billed input and output tokens do not add up to the vendor's total, so part of the bill is missed; the vendor's adapter needs a fix")},
 	}
 }
 
