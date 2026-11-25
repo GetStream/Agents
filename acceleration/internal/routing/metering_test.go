@@ -42,7 +42,7 @@ func (s *MeteringAlertTextSuite) sent() map[string]*sentry.Event {
 	var mu sync.Mutex
 	events := map[string]*sentry.Event{}
 	client, err := sentry.NewClient(sentry.ClientOptions{
-		BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
+		Environment: "test", BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 			mu.Lock()
 			defer mu.Unlock()
 			if strings.Contains(event.Tags["item"], s.config.Model) {
@@ -126,12 +126,14 @@ func (s *MeteringAlertTextSuite) TestUsageMismatchHelpSaysItRunsEitherWay() {
 }
 
 // The fingerprints are what the alerts sent before they had a description, read on the base
-// commit: a change in one is a new Sentry issue for the rules and the people who muted the old.
+// commit, with the environment after the alert's name (these tests' Sentry client names the
+// environment "test"): a change in one is a new Sentry issue for the rules and the people who
+// muted the old.
 func (s *MeteringAlertTextSuite) TestEveryAlertKeepsItsSentryIssue() {
 	s.each(func(r meteringRow, item string, events map[string]*sentry.Event) {
 		s.Require().Len(events, 1, "a row raises only its own alert")
 		s.Require().Contains(events, r.alert)
-		s.Equal([]string{"usage_" + r.alert + ":" + item + r.suffix}, events[r.alert].Fingerprint)
+		s.Equal([]string{"usage_" + r.alert + ":test:" + item + r.suffix}, events[r.alert].Fingerprint)
 	})
 }
 
