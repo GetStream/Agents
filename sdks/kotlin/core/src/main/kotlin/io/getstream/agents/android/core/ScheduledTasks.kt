@@ -45,6 +45,10 @@ public class ScheduledTasks internal constructor(private val backend: Backend) {
      * minutes from now at the soonest, unless it is no earlier than the current next occurrence.
      * An empty [deliverTo] is the conversation alone, and [quietHours] with both ends empty clears
      * the hold.
+     *
+     * A 409 whose [AgentsException.Http.code] is `task_changed` means the task changed while this
+     * was being saved, and nothing was: [get] it again and retry. A completed task is a final
+     * 409.
      */
     public suspend fun update(
         id: String,
@@ -73,6 +77,10 @@ public class ScheduledTasks internal constructor(private val backend: Backend) {
     /**
      * Holds a task: nothing comes due while it is paused, and what it slept through is never
      * replayed.
+     *
+     * A 409 whose [AgentsException.Http.code] is `task_changed` means the task changed while this
+     * was being saved, and nothing was: [get] it again and retry. A completed task is a final
+     * 409.
      */
     public suspend fun pause(id: String): ScheduledTask =
         ScheduledTask.of(backend.send(HttpMethod.Post, path(id, "pause"), TaskSchema.serializer())!!)
@@ -81,6 +89,10 @@ public class ScheduledTasks internal constructor(private val backend: Backend) {
      * Starts a paused or failed task again, counting its next occurrence from now. A one-shot
      * whose time came while it was paused is completed instead, and a task with no occurrence
      * left needs a new schedule first.
+     *
+     * A 409 whose [AgentsException.Http.code] is `task_changed` means the task changed while this
+     * was being saved, and nothing was: [get] it again and retry. Any other 409 is final: a
+     * completed task, or `too_many_tasks` at the active limit.
      */
     public suspend fun resume(id: String): ScheduledTask =
         ScheduledTask.of(backend.send(HttpMethod.Post, path(id, "resume"), TaskSchema.serializer())!!)

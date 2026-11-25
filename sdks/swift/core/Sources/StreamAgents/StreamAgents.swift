@@ -327,7 +327,6 @@ public struct StreamAgents: Sendable {
             description: options.description,
             incognito: options.incognito,
             messages: options.withoutHistory ? false : nil,
-            modelOverwrites: options.modelOverwrites?.schema,
             projectId: options.projectID,
             responseId: options.responseID.flatMap { $0.isEmpty ? nil : $0 },
             title: options.title)
