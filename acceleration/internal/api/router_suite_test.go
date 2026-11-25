@@ -643,6 +643,10 @@ func (s *RouterSuite) SetupSuite() {
 		}
 		s.otherStore, err = store.OpenShards(otherOptions)
 		s.Require().NoError(err)
+		s.otherStore.GlobalDB().AddQueryHook(s.failing)
+		if s.otherStore.Sharded() {
+			s.otherStore.ShardDB().AddQueryHook(s.failing)
+		}
 		s.T().Cleanup(func() { s.Require().NoError(s.otherStore.Close()) })
 		if s.otherShardApart {
 			s.Require().NoError(migrate(ctx, s.otherStore, otherOptions.ShardDSN))
