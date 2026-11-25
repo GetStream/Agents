@@ -280,6 +280,9 @@ func (a *Agent) runSpeculation(spec *speculation) {
 // When it is not used, speculated is the id of the speculative replies thrown away on the
 // turn, which the answer asked for instead shares, and empty when nothing was speculated.
 func (a *Agent) adoptSpeculation(ready candidate, note string) (adopted bool, speculated string) {
+	// Read like at every site that counts a caller turn. No test reaches this with the edge busy:
+	// speculate refuses while the agent speaks and a reply under way makes usable false, so
+	// the edge can fill between the two only by speech that is neither.
 	drained := !a.waitingForPlayout()
 	a.mu.Lock()
 	// The turn is answered here, with the reply started for it or another, so whatever is

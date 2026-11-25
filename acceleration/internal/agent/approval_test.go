@@ -821,6 +821,10 @@ func (s *AgentSuite) TestNoToALapsedCallLeavesTheOtherWaiting() {
 		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
 
 		s.confirmationSays("call-2", "did not say yes in time")
+		s.agent.mu.Lock()
+		_, waits := s.agent.approvals["call-3"]
+		s.agent.mu.Unlock()
+		s.True(waits, "a no naming a lapsed call declined the other call waiting")
 		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-4", Name: confirmTool, Arguments: `{"tool_call_id":"call-3","allowed":false}`}})
 		s.confirmationSays("call-4", "The caller declined")
 	})
@@ -861,5 +865,22 @@ func (s *AgentSuite) TestTypedTurnWhileTheQuestionStillPlaysRunsNothing() {
 
 		s.confirmationSays("call-2", "has not heard the question")
 		s.Empty(s.runner.asked(), "a yes to a turn typed while the question still played ran the call")
+	})
+}
+
+// With speculative replies on, a yes spoken over a question still on its way out of the edge runs nothing.
+func (s *AgentSuite) TestASpeculatedYesWhileTheQuestionIsOnTheEdgeRunsNothing() {
+	s.onFakeClock(func() {
+		s.speculates = true
+		s.agentAsksAndWaits(time.Minute)
+		s.edge.holdSpeech(true)
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+
+		s.confirmationSays("call-2", "has not heard the question")
+		s.Empty(s.runner.asked(), "a yes spoken over the question ran the call")
 	})
 }
