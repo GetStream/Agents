@@ -687,8 +687,8 @@ func (f *Forwarder) send(ctx context.Context, delivery store.ClaimedEventDeliver
 // receiver not yet on the new one, and the current secret alone is a valid signature: a previous
 // secret that does not open, because no router holds its key version or for another reason, or
 // that signs nothing (webhook.Key), is left out with a warning, once a lease for each
-// destination, and the forward is sent with the current one. A current secret that does not open is an error: nothing is sent, and attempt
-// leaves it to another router or gives it up.
+// destination, and the forward is sent with the current one. A current secret that does not open is
+// an error: nothing is sent, and attempt leaves it to another router or gives it up.
 func (f *Forwarder) openSecrets(delivery store.ClaimedEventDelivery) ([]string, error) {
 	aad := secretAAD(delivery.CustomerID, delivery.ConnectorID, delivery.DestinationID)
 	current, err := f.secrets.OpenWithAADVersion(delivery.SecretSealed, aad, delivery.KEKVersion)

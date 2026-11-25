@@ -77,7 +77,7 @@ func (s *ForwarderSuite) TestAForwardWhosePreviousSecretDoesNotOpenIsSignedWithT
 		"its ciphertext is corrupt":                  s.corrupt(),
 		"it is shorter than a nonce":                 s.truncated(),
 		"it is empty":                                s.holding("whsec_"),
-		"it is not base64":                           s.holding("whsec_!!"),
+		"it is not base64":                           s.holding("whsec_AAAA!!"),
 	}
 	for name, previous := range cases {
 		s.Run(name, func() {
