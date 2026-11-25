@@ -210,10 +210,15 @@ const suiteManageKey = "suite-manage-key"
 type RouterSuite struct {
 	suite.Suite
 
-	store   *store.Store
-	configs *store.Store
-	live    *live.Client
-	sealer  *auth.Sealer
+	store *store.Store
+	// otherStore is the store of otherNode, on the same databases, named for its shard.
+	otherStore *store.Store
+	// otherShardApart keeps otherStore's shard rows in a database of their own, as a shard in
+	// another region keeps them, for a suite to set before it starts.
+	otherShardApart bool
+	configs         *store.Store
+	live            *live.Client
+	sealer          *auth.Sealer
 	// storeOptions are what the suite's store was opened with, for a node on the same databases.
 	storeOptions store.Options
 	// activity is the activity record every node of the suite counts in.
@@ -303,6 +308,9 @@ type RouterSuite struct {
 	shard, otherShard string
 	// shardRouting is where every node of the suite sends a hook's work, by shard.
 	shardRouting shardmap.Map
+	// shards are the shards every node of the suite knows (Options.Shards), for a suite to set
+	// before it starts the harness.
+	shards []string
 
 	// unauthenticatedClient sends no credentials. The rest hold the app's key:
 	// anonymousClient goes by a name nothing proves, guestClient and client are signed-in
@@ -613,6 +621,7 @@ func (s *RouterSuite) SetupSuite() {
 	if shardDSN := os.Getenv("ROUTER_POSTGRES_SHARD_DSN"); shardDSN != "" {
 		options.ShardDSN = testDatabase(s.T(), shardDSN)
 	}
+	options.Shard = s.shard
 	s.storeOptions = options
 	pgStore, err := store.OpenShards(options)
 	s.Require().NoError(err)
@@ -625,6 +634,20 @@ func (s *RouterSuite) SetupSuite() {
 		pgStore.ShardDB().AddQueryHook(s.failing)
 	}
 	s.T().Cleanup(func() { s.Require().NoError(pgStore.Close()) })
+	s.otherStore = pgStore
+	if s.otherShard != s.shard {
+		otherOptions := options
+		otherOptions.Shard = s.otherShard
+		if s.otherShardApart {
+			otherOptions.ShardDSN = testenv.Database(options.DSN, "othershard")
+		}
+		s.otherStore, err = store.OpenShards(otherOptions)
+		s.Require().NoError(err)
+		s.T().Cleanup(func() { s.Require().NoError(s.otherStore.Close()) })
+		if s.otherShardApart {
+			s.Require().NoError(migrate(ctx, s.otherStore, otherOptions.ShardDSN))
+		}
+	}
 	// Registered before everything that records, so it runs once all of it has closed and
 	// written what it held.
 	s.T().Cleanup(s.assertEveryRowNamesAKey)
@@ -794,6 +817,7 @@ func (s *RouterSuite) SetupSuite() {
 		// App mode is served only behind a gateway that declares kinds.
 		ProxyDeclaresKind: s.appMode,
 		ShardRouting:      s.shardRouting,
+		Shards:            s.shards,
 		Phone:             s.telephony(logger),
 		Simulations:       s.simulations(sessions, streams, logger),
 		Channels:          s.inbound,
@@ -1932,11 +1956,11 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 		Memory:        metered.NewMemory(&keptMemories{}, s.metering),
 		Conversations: s.conversations,
 		Stream:        s.stream,
-		Store:         s.store,
+		Store:         s.otherStore,
 		Live:          s.live,
 		Directory:     directory,
 		Logger:        logger,
-		Writer:        s.routerWriter(s.store, s.live, nil, logger),
+		Writer:        s.routerWriter(s.otherStore, s.live, nil, logger),
 		Edge: func(context.Context, session.Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
 			return &silentEdge{inbound: make(chan agent.InboundAudio, 4)}, nil
 		},
@@ -1954,9 +1978,10 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 		Sessions:          sessions,
 		Directory:         directory,
 		ShardRouting:      s.shardRouting,
+		Shards:            s.shards,
 		Dispatch:          workers,
 		Workers:           everyWorker,
-		Store:             s.store,
+		Store:             s.otherStore,
 		Activity:          s.activity,
 		Live:              s.live,
 		Auth:              s.authenticator(),
@@ -1992,11 +2017,8 @@ func (s *RouterSuite) otherNodeServingFrom(served *store.Store, workers *dispatc
 	return s.otherNodeHolding(workers, keyring, logger, func(o *Options) { o.Store = served })
 }
 
-// unreachableShardDSN is a DSN no Postgres answers on.
-const unreachableShardDSN = "postgres://postgres:postgres@127.0.0.1:1/down?sslmode=disable&dial_timeout=1s"
-
 // onAShardDown is the app's client on a node of the suite's databases, shard "here", whose
-// other shard, "there", does not answer; and the store that node reads.
+// other shard, "there", has no node up; and the store that node reads.
 func (s *RouterSuite) onAShardDown() (*testClient, *store.Store) {
 	shared := testDatabase(s.T(), os.Getenv("ROUTER_POSTGRES_DSN"))
 	if s.database != "" {
@@ -2006,8 +2028,7 @@ func (s *RouterSuite) onAShardDown() (*testClient, *store.Store) {
 	if shardDSN := os.Getenv("ROUTER_POSTGRES_SHARD_DSN"); shardDSN != "" {
 		own = testDatabase(s.T(), shardDSN)
 	}
-	served, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: own,
-		Shards: map[string]string{"here": own, "there": unreachableShardDSN}})
+	served, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: own, Shard: "here", Shards: []string{"here", "there"}})
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.NoError(served.Close()) })
 	other, _, _ := s.otherNodeServingFrom(served, nil, s.sealer, slog.New(slog.DiscardHandler))

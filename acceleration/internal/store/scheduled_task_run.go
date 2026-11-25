@@ -137,9 +137,16 @@ func (r *ScheduledTaskRuns) FinishManual(ctx context.Context, customerID, runID,
 // an earlier attempt, or a worker that stopped, placed a call for this
 // occurrence, so the user is not rung again. reason is then the one the run
 // records, such as how that call ended (SetCallReason), if any.
+//
+// Taking the call clears the run's error: with no call placed, the only error a running run
+// holds is the reason an earlier attempt failed under (SetAttemptReason), and once a call is
+// taken, how that call ends is the run's reason, as on a run that never had an earlier attempt.
+// A call given back (ReleaseCall) leaves the run with no reason until the next failed attempt
+// records its own.
 func (r *ScheduledTaskRuns) TakeCall(ctx context.Context, customerID, runID, sessionID string) (took bool, reason string, err error) {
 	result, err := r.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 		Set("session_id = ?", sessionID).
+		Set("error = NULL").
 		Where("customer_id = ?", customerID).
 		Where("id = ?", runID).
 		Where("state = ?", ScheduledTaskRunRunning).
@@ -179,6 +186,33 @@ func (r *ScheduledTaskRuns) SetCallReason(ctx context.Context, customerID, runID
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: set scheduled task run call reason: %w", err))
+	}
+	return nil
+}
+
+// SetAttemptReason records on a running run the reason an attempt failed under, for the
+// attempt after it: a worker that takes the run over reads it from the row, as the worker that
+// made the attempt reads it from memory. It writes only under the claim leasedBy, so a worker
+// that lost its claim cannot overwrite the next one's, as far as the claim is checked
+// when the statement starts (a write that waits on the run's row behind a takeover's claim still
+// lands after it, with a reason of the same occurrence), and only while no call is placed for
+// the run: the reason that call ended under is the run's (SetCallReason).
+func (r *ScheduledTaskRuns) SetAttemptReason(ctx context.Context, customerID, runID, leasedBy, reason string) error {
+	claimed := r.store.global.NewSelect().Model((*ScheduledTask)(nil)).
+		ColumnExpr("1").
+		Where("st.customer_id = str.customer_id").
+		Where("st.id = str.task_id").
+		Where("st.leased_by = ?", leasedBy)
+	_, err := r.store.global.NewUpdate().Model((*ScheduledTaskRun)(nil)).
+		Set("error = ?", reason).
+		Where("customer_id = ?", customerID).
+		Where("id = ?", runID).
+		Where("state = ?", ScheduledTaskRunRunning).
+		Where("session_id = ''").
+		Where("EXISTS (?)", claimed).
+		Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: set scheduled task run attempt reason: %w", err))
 	}
 	return nil
 }

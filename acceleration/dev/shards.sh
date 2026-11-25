@@ -5,7 +5,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 api=${TOXIPROXY_URL:-http://localhost:8474}
-proxies="pg_global redis_global pg_eu_from_us pg_us_from_eu"
+
+# links is every link Toxiproxy holds: compose.shards.yaml's two, and shards-local.sh's
+# forwards too.
+links() {
+  proxies=$(curl -sSf "$api/proxies" | grep -oE '"[A-Za-z0-9_]+":\{"name"' | cut -d'"' -f2 | sort | tr '\n' ' ')
+}
 
 clear() {
   for proxy in $proxies; do
@@ -19,6 +24,7 @@ up)
   ;;
 latency)
   ms=${2:?say the latency in milliseconds}; jitter=${3:-10}
+  links
   clear
   for proxy in $proxies; do
     curl -sSf -o /dev/null -X POST "$api/proxies/$proxy/toxics" -H 'Content-Type: application/json' \
@@ -27,6 +33,7 @@ latency)
   echo "$proxies: ${ms}ms ±${jitter}ms"
   ;;
 clear)
+  links
   clear
   echo "$proxies: no latency"
   ;;

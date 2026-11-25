@@ -82,12 +82,11 @@ type recordWrite struct {
 	// customerID is whose session the write is to: an id alone may be another customer's.
 	customerID string
 	// session is a session that opened or was renamed, nil otherwise, and tools what its
-	// model is offered. carriedOn says it was carried on from a row it had. refused is called
-	// if the store refuses its row because another customer's session has its id.
-	session   *store.AgentSession
-	tools     []store.ToolDefinition
-	carriedOn bool
-	refused   func()
+	// model is offered. refused is called if the store refuses its row because another
+	// customer's session has its id.
+	session *store.AgentSession
+	tools   []store.ToolDefinition
+	refused func()
 	// offered is the session whose model is now offered tools.
 	offered string
 	// closed is the session that ended, opened when the router closing it opened it, closedAt
@@ -159,8 +158,6 @@ type sessionRecords interface {
 	// Opened says a session started. refused is called, on the writer, if its id turns out to
 	// be another customer's session's.
 	Opened(row store.AgentSession, tools []store.ToolDefinition, refused func())
-	// CarriedOn says a session was carried on from a row it had; refused is as for Opened.
-	CarriedOn(row store.AgentSession, tools []store.ToolDefinition, refused func())
 	Closed(customerID, id string, opened, at time.Time, reason EndReason)
 	Close()
 }
@@ -225,12 +222,6 @@ func newSessionRecorder(pgStore *store.Store, logger *slog.Logger) *sessionRecor
 // Opened queues the row for a session that has just started.
 func (r *sessionRecorder) Opened(row store.AgentSession, tools []store.ToolDefinition, refused func()) {
 	r.queueWrite(recordWrite{session: &row, tools: tools, refused: refused})
-}
-
-// CarriedOn queues the row of a session carried on from a row it had, maybe in another shard,
-// which it supersedes once written.
-func (r *sessionRecorder) CarriedOn(row store.AgentSession, tools []store.ToolDefinition, refused func()) {
-	r.queueWrite(recordWrite{session: &row, tools: tools, carriedOn: true, refused: refused})
 }
 
 // Offered queues what a session's model is now offered.
@@ -482,13 +473,6 @@ func (r *sessionRecorder) write(write recordWrite) {
 		// The id is the customer's now, so it is no longer taken, even when the close of a
 		// session refused before it never reached the writer: a full queue drops a close.
 		delete(r.taken, key)
-		if write.carriedOn {
-			if err := r.attempt(func(ctx context.Context) error {
-				return r.store.Sessions.Supersede(ctx, write.session.CustomerID, write.session.ID, write.session.OpenedAt)
-			}); err != nil {
-				r.logger.Error("could not supersede the rows of a session carried on", "session", write.session.ID, "error", err)
-			}
-		}
 		if err := r.attempt(func(ctx context.Context) error {
 			return r.store.SessionTools.Upsert(ctx, write.session.CustomerID, write.session.ID, write.tools)
 		}); err != nil {

@@ -110,13 +110,10 @@ ON CONFLICT DO NOTHING`,
 // Get is what a session of the customer's model was last offered. A session that recorded
 // none, or that the customer does not have, is ErrNoSessionTools.
 func (r *SessionTools) Get(ctx context.Context, customerID, sessionID string) ([]ToolDefinition, error) {
-	stored, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (agentSessionTools, error) {
-		var stored agentSessionTools
-		err := db.NewSelect().Model(&stored).Where("session_id = ?", sessionID).
-			Where(customersTools, customerID, customerID).
-			Scan(ctx)
-		return stored, err
-	})
+	var stored agentSessionTools
+	err := r.store.shard.NewSelect().Model(&stored).Where("session_id = ?", sessionID).
+		Where(customersTools, customerID, customerID).
+		Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, stack.Wrap(ErrNoSessionTools)
 	}
