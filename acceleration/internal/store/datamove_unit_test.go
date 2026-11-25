@@ -89,3 +89,16 @@ func TestOnlyAClientCredentialsDefinitionIsSkipped(t *testing.T) {
 		require.Empty(t, SkippedRow("connector_definitions", json.RawMessage(row)), row)
 	}
 }
+
+// A row is named only when it is one the API could have stored, by the id and revision it
+// holds; any other is the import's to refuse, so its id is never held or echoed.
+func TestAClientCredentialsDefinitionWithAnIDOrRevisionTheAPIRefusesIsNotNamed(t *testing.T) {
+	for _, extra := range []string{`, "id": "github"`, `, "id": "custom_"`, `, "id": "Custom_acme"`, `, "id": 12`, `, "id": null`,
+		`, "id": "custom_a` + strings.Repeat("x", 57) + `"`, `, "id": "custom_a` + strings.Repeat("x", 1<<16) + `"`,
+		`, "revision": 0`, `, "revision": -1`, `, "revision": "2"`, `, "revision": 1.5`, `, "revision": null`} {
+		require.Empty(t, SkippedRow("connector_definitions", definitionRow(extra, `"schemes": ["oauth2_client_credentials"]`)), extra[:min(len(extra), 40)])
+	}
+	longest := "custom_a" + strings.Repeat("x", 56)
+	require.Equal(t, `connector_definitions:{"id":"`+longest+`","revision":1}`,
+		SkippedRow("connector_definitions", definitionRow(`, "id": "`+longest+`", "revision": 1`, `"schemes": ["oauth2_client_credentials"]`)))
+}

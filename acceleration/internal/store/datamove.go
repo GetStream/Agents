@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1868,12 +1869,22 @@ func SkippedRow(table string, row json.RawMessage) string {
 		!slices.Contains(manifest.Schemes, "oauth2_client_credentials") {
 		return ""
 	}
+	// A row is named only by a key the API could have written: anything else is refused by
+	// importableDefinition as before, and never held in a list or echoed back.
+	var id string
+	var revision int64
+	if json.Unmarshal(fields["id"], &id) != nil || !skippedID.MatchString(id) ||
+		json.Unmarshal(fields["revision"], &revision) != nil || revision < 1 {
+		return ""
+	}
 	key, err := rowKey(table, []string{"id", "revision"}, row)
 	if err != nil {
 		return ""
 	}
 	return key
 }
+
+var skippedID = regexp.MustCompile(core.CustomIDPattern)
 
 // identity is what the importing deployment overwrites on every row of this table, which
 // is whose it is. A table holding more than one kind of row has the kind forced too, so
