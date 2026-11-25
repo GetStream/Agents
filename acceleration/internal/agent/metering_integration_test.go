@@ -94,7 +94,7 @@ func (s *AgentMeteringSuite) TestALookupRecordsItsBytes() {
 	s.Equal(metered.KnowledgeLookup, row.Model)
 	s.True(row.Success)
 	s.Equal(pricing.Quantities{
-		pricing.Requests: 1, pricing.BytesQueried: stubQueried, pricing.Results: 1,
+		pricing.Requests: 1, pricing.BytesQueried: 1_280_000_000, pricing.Results: 1,
 		pricing.BytesReturned: int64(len("Delivery is free over $50.") + len("shipping.md")),
 	}, row.Quantities(), "what the store billed, not a row at $0 with nothing on it")
 }

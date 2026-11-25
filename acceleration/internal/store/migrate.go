@@ -255,6 +255,10 @@ var usageIndexes = []struct{ set, name, create string }{
 	// A customer's session's call episode.
 	{"global", "episodes_customer_call_session", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS episodes_customer_call_session " +
 		"ON episodes (customer_id, session_id)"},
+	// The recorded changes of a task and of its runs, which deleting them rewrites.
+	{"global", "data_changes_tasks_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS data_changes_tasks_idx ON data_changes " +
+		"(customer_id, (COALESCE(payload->>'task_id', payload->>'id')), (payload->>'id')) " +
+		"WHERE table_name IN ('scheduled_tasks', 'scheduled_task_runs') AND op <> 'delete'"},
 }
 
 // ensureUsageIndexes builds each usage index of the set that is missing, dropping one a failed

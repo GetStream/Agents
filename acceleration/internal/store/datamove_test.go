@@ -1821,6 +1821,43 @@ func (s *DataMoveSuite) TestADeletedTaskIsReplayedUnderTheIDTheAppMovedTo() {
 	s.Equal([]string{"kept"}, left)
 }
 
+// The changes of a task deleted, or pruned, before its follower read them are deletes, which
+// replayed, twice too, leave the follower neither the task nor its run, and the rest as it was.
+func (s *DataMoveSuite) TestAFollowerThatHasNotReadATaskDeletedOrPrunedReplaysItsDelete() {
+	s.capture("acme")
+	s.seedScheduledTask("kept", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("moved", "acme", ScheduledTaskCompleted)
+	cursor := s.move("acme", "moved")
+	s.seedScheduledTask("unread", "acme", ScheduledTaskCompleted)
+	s.seedScheduledTask("deleted", "acme", ScheduledTaskActive)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"UPDATE scheduled_task_runs SET prompt = 'words', finished_at = now() - interval '91 days' WHERE task_id <> 'kept'")
+	s.Require().NoError(err)
+	_, err = s.source.GlobalDB().ExecContext(s.ctx,
+		"UPDATE scheduled_tasks SET updated_at = now() - interval '91 days' WHERE state = 'completed'")
+	s.Require().NoError(err)
+	s.Require().NoError(s.source.ScheduledTasks.Delete(s.ctx, "acme", "deleted"))
+	_, tasks, err := s.source.ScheduledTasks.Prune(s.ctx)
+	s.Require().NoError(err)
+	s.Require().EqualValues(2, tasks)
+
+	for range 2 {
+		s.replay(s.destination, "acme", "moved", cursor)
+
+		var left []string
+		s.Require().NoError(s.destination.GlobalDB().NewRaw(
+			"SELECT id FROM scheduled_tasks UNION ALL SELECT id FROM scheduled_task_runs").Scan(s.ctx, &left))
+		s.Equal([]string{"kept", "kept-run"}, left)
+	}
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 1000)
+	s.Require().NoError(err)
+	s.Require().NotEmpty(changes)
+	for _, change := range changes {
+		s.Equal(ChangeDelete, change.Op, string(change.Key))
+		s.Empty(change.Payload)
+	}
+}
+
 // An organization's policy is recorded under its id, which can be an app's too.
 func (s *DataMoveSuite) TestAnOrganizationsPolicyIsNotReplayedOverTheAppsOfTheSameID() {
 	s.capture("acme")

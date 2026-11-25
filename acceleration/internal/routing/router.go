@@ -22,6 +22,7 @@ import (
 	"maps"
 	"math"
 	"net/http"
+	"net/netip"
 	"slices"
 	"sort"
 	"strings"
@@ -247,6 +248,30 @@ func (a Admission) Labelled(tags Tags) Tags {
 	return merged
 }
 
+// Allowed narrows models to the ones the admission lets the customer's work go to: those on its
+// Models, and of them those whose handling of data its DataPolicy permits. None left is the
+// refusal a routed request gets. No models given is that refusal too, unless the admission holds
+// the customer to neither, which returns none and no error.
+func (a Admission) Allowed(models []ProviderConfig) ([]ProviderConfig, error) {
+	candidates := make([]Candidate, len(models))
+	for i, model := range models {
+		candidates[i].Config = model
+	}
+	candidates, err := allowed(candidates, a.Models)
+	if err != nil {
+		return nil, err
+	}
+	candidates, err = permitted(candidates, a.DataPolicy)
+	if err != nil {
+		return nil, err
+	}
+	kept := make([]ProviderConfig, len(candidates))
+	for i, candidate := range candidates {
+		kept[i] = candidate.Config
+	}
+	return kept, nil
+}
+
 // Options configures a Router. Store, Live and Voices are optional: without them the
 // router still routes, it just stops recording and stops resolving custom voices.
 type Options[P Provider] struct {
@@ -311,6 +336,23 @@ type Caller struct {
 	// or a delivery the app's channel or plugin signed. An anonymous caller's name is not,
 	// so it is never held to that user's own quota nor spends their day.
 	Verified bool
+}
+
+// CountedAddress is what a count by address is keyed by: an IPv4 address itself, an IPv4-mapped
+// IPv6 one as the IPv4 address it carries, and any other IPv6 address as its /64, since one
+// device holds a whole /64 and may call from any address of it. An IP that is not an address
+// is counted as it is written.
+func (c Caller) CountedAddress() string {
+	address, err := netip.ParseAddr(c.IP)
+	if err != nil {
+		return c.IP
+	}
+	if address = address.Unmap(); address.Is4() {
+		return address.String()
+	}
+	// No error: every IPv6 address has 64 bits. The prefix carries no zone.
+	network, _ := address.Prefix(64)
+	return network.String()
 }
 
 // IsZero says nobody was named: a turn that was heard, not typed.
