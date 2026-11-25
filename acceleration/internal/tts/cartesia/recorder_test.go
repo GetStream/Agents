@@ -95,6 +95,15 @@ func (s *RecorderSuite) TestARecordingThatAsksForNothingIsAnMp3OfTheRecordersVoi
 	s.Equal(tts.Recorded{Audio: []byte("audio"), Format: "mp3_44100_128", Characters: 5}, recorded)
 }
 
+func (s *RecorderSuite) TestAVoiceIdInUpperCaseIsSentInLowercase() {
+	const id = "a0e99841-438c-4a64-b679-ae501e7d6091"
+	_, fromRecorder := s.record(RecorderOptions{VoiceID: "A0E99841-438C-4A64-B679-AE501E7D6091"}, tts.Recording{})
+	_, fromRecording := s.record(RecorderOptions{VoiceID: "v1"}, tts.Recording{Voice: "A0E99841-438C-4A64-B679-AE501E7D6091"})
+
+	s.Contains(fromRecorder.body, `"voice":{"id":"`+id+`"}`)
+	s.Contains(fromRecording.body, `"voice":{"id":"`+id+`"}`)
+}
+
 func (s *RecorderSuite) TestTheVoiceAndLanguageARecordingNamesWinOverTheRecorders() {
 	_, request := s.record(RecorderOptions{VoiceID: "v1", Language: "en"}, tts.Recording{Voice: "v2", Language: "de"})
 

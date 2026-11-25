@@ -762,10 +762,27 @@ func (s *LibrarySuite) TestAVoiceIdThatIsNotTheVendorsIsSentNowhere() {
 		}
 		s.Empty(s.seen, "%q reached the vendor", id)
 	}
-	// A Cartesia id in another spelling than the one it was handed out in is refused too.
-	_, err := cartesia.Preview(s.ctx, strings.ToUpper(cartesiaVoiceID))
+	// An unhyphenated Cartesia id is no UUID of theirs either.
+	_, err := cartesia.Preview(s.ctx, strings.ReplaceAll(cartesiaVoiceID, "-", ""))
 	s.ErrorIs(err, voiceid.ErrInvalid)
 	s.Empty(s.seen)
+}
+
+// An upper case copy of an id is the same voice, and the vendor is asked about the lowercase
+// spelling the ownership check compared, never the one the caller typed.
+func (s *LibrarySuite) TestACartesiaIdInUpperCaseReachesTheVendorInLowercase() {
+	s.routes["/voices/"+cartesiaVoiceID] = `{"preview_file_url":"` + s.server.URL + `/sample.mp3"}`
+	s.routes["/sample.mp3"] = "mp3"
+	s.seen = nil
+
+	_, err := s.cartesia().Preview(s.ctx, strings.ToUpper(cartesiaVoiceID))
+	s.Require().NoError(err)
+	s.Contains(s.seen, "/voices/"+cartesiaVoiceID+"?expand[]=preview_file_url")
+
+	s.seen = nil
+	s.routes["/voices/"+cartesiaVoiceID] = "{}"
+	s.Require().NoError(s.cartesia().Delete(s.ctx, strings.ToUpper(cartesiaVoiceID)))
+	s.Equal([]string{"/voices/" + cartesiaVoiceID}, s.seen)
 }
 
 // The ids the vendors hand out are sent as they are, to their own resource.

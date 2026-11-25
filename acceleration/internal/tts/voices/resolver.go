@@ -100,8 +100,12 @@ func (r *Resolver) Unvouched(ctx context.Context, customerID, voice string, prov
 // overwrites the provider's own factory refuses it (elevenlabs.checkVoice), since the voice
 // asked at the top level is then not the one it speaks.
 func (r *Resolver) passThrough(ctx context.Context, customerID, provider, voice string) (string, error) {
-	if err := voiceid.Check(provider, voice); err != nil && !routing.VoiceOverwritten(ctx) {
+	canonical, err := voiceid.Canonical(provider, voice)
+	if err != nil && !routing.VoiceOverwritten(ctx) {
 		return "", routing.Refused(err)
+	}
+	if err == nil {
+		voice = canonical
 	}
 	if r.store != nil {
 		elsewhere, err := r.store.VoiceBindings.Elsewhere(ctx, customerID, provider, voice)

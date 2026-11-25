@@ -120,7 +120,8 @@ func (c *Cartesia) Delete(ctx context.Context, externalID string) error {
 	if externalID == "" {
 		return nil
 	}
-	if err := voiceid.Cartesia(externalID); err != nil {
+	externalID, err := voiceid.Cartesia(externalID)
+	if err != nil {
 		return err
 	}
 
@@ -271,7 +272,8 @@ func (c *Cartesia) List(ctx context.Context) ([]Library, error) {
 // Preview fetches the sample Cartesia holds for the voice. The URL it hands out wants the
 // same key the listing did, so the audio is read here rather than handed to a browser.
 func (c *Cartesia) Preview(ctx context.Context, id string) (Speech, error) {
-	if err := voiceid.Cartesia(id); err != nil {
+	id, err := voiceid.Cartesia(id)
+	if err != nil {
 		return Speech{}, err
 	}
 	url := strings.TrimSuffix(c.options.BaseURL, "/") + "/voices/" + url.PathEscape(id) + "?expand[]=preview_file_url"

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 )
 
@@ -140,7 +141,6 @@ func (s *VoicesSuite) TestALibraryVoiceIdThatIsNotTheVendorsIsRefusedNamingTheFi
 		"elevenlabs/el-cloned%2525",
 		"elevenlabs/el%20cloned",
 		"elevenlabs/el.cloned",
-		"cartesia/" + strings.ToUpper(cartesiaVoice),
 		"cartesia/" + strings.ReplaceAll(cartesiaVoice, "-", ""),
 		"cartesia/" + cartesiaVoice + "%2F..",
 	} {
@@ -153,6 +153,28 @@ func (s *VoicesSuite) TestALibraryVoiceIdThatIsNotTheVendorsIsRefusedNamingTheFi
 	for _, path := range []string{"elevenlabs/EXAVITQu4vr4xnSDxMaL", "cartesia/" + cartesiaVoice} {
 		s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
 			"/v1/agents/voices/library/"+path+"/preview", nil, nil), path)
+	}
+}
+
+// A Cartesia id is a UUID, the same voice in any case: an upper case copy of another
+// customer's id is as much theirs as the id, and the owner may still preview with either.
+func (s *VoicesSuite) TestAnUpperCaseCopyOfAnotherCustomersCartesiaIdIsNotTheirsToHear() {
+	s.library.Register("cartesia", accountVoices{{Provider: "cartesia", ID: cartesiaVoice, Name: "Barbershop Man"}})
+	created := s.createVoice(map[string]any{"name": "founder"})
+	s.Require().NoError(s.store.VoiceBindings.Upsert(context.Background(), &store.VoiceBinding{
+		VoiceID: created.Id, Provider: "cartesia", ExternalID: cartesiaVoice, State: store.VoiceReady,
+	}))
+	for _, spelled := range []string{cartesiaVoice, strings.ToUpper(cartesiaVoice)} {
+		s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+			"/v1/agents/voices/library/cartesia/"+spelled+"/preview", nil, nil), "its owner, "+spelled)
+	}
+
+	s.useApp(s.data.createApp())
+
+	for _, spelled := range []string{cartesiaVoice, strings.ToUpper(cartesiaVoice)} {
+		status, _ := s.serverClient.failure(http.MethodGet,
+			"/v1/agents/voices/library/cartesia/"+spelled+"/preview", nil)
+		s.Equal(http.StatusNotFound, status, "another customer, "+spelled)
 	}
 }
 

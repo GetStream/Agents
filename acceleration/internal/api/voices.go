@@ -341,11 +341,12 @@ func (s *Server) previewLibraryVoice(ctx context.Context, request *previewLibrar
 		return nil, errNoLibrary
 	}
 	// Refused before the ownership check, so the id it compares is the one sent to the vendor.
-	if voiceid.Check(request.Provider, request.Voice) != nil {
+	voice, err := voiceid.Canonical(request.Provider, request.Voice)
+	if err != nil {
 		return nil, invalidRequest(fmt.Sprintf("voice: %q is not shaped like a voice id of %s", request.Voice, request.Provider))
 	}
 	if s.store != nil {
-		elsewhere, err := s.store.VoiceBindings.Elsewhere(ctx, customerID, request.Provider, request.Voice)
+		elsewhere, err := s.store.VoiceBindings.Elsewhere(ctx, customerID, request.Provider, voice)
 		if err != nil {
 			return nil, err
 		}
@@ -354,7 +355,7 @@ func (s *Server) previewLibraryVoice(ctx context.Context, request *previewLibrar
 		}
 	}
 
-	spoken, err := s.library.Preview(ctx, request.Provider, request.Voice)
+	spoken, err := s.library.Preview(ctx, request.Provider, voice)
 	if err != nil && !slices.Contains(s.library.Providers(), request.Provider) {
 		// The catalogue's own refusal of a provider that publishes no library here.
 		return nil, notFound(err.Error())

@@ -232,7 +232,7 @@ func (s *OptionsSuite) TestAVoiceValidateRejectsAnOverwriteWithNoProvider() {
 func (s *OptionsSuite) TestAVoiceValidateRejectsAnOverwriteVoiceIdThatIsNotTheVendors() {
 	for provider, block := range map[string]string{
 		"elevenlabs": `{"voice_id":"a/../../v1/user"}`,
-		"cartesia":   `{"voice_id":"A0E99841-438C-4A64-B679-AE501E7D6091"}`,
+		"cartesia":   `{"voice_id":"a0e99841438c4a64b679ae501e7d6091"}`,
 	} {
 		err := TTS{Overwrites: map[string]json.RawMessage{provider: json.RawMessage(block)}}.Validate()
 		s.ErrorIs(err, voiceid.ErrInvalid, provider)
@@ -240,7 +240,7 @@ func (s *OptionsSuite) TestAVoiceValidateRejectsAnOverwriteVoiceIdThatIsNotTheVe
 	}
 	for provider, block := range map[string]string{
 		"elevenlabs": `{"voice_id":"21m00Tcm4TlvDq8ikWAM"}`,
-		"cartesia":   `{"voice_id":"a0e99841-438c-4a64-b679-ae501e7d6091"}`,
+		"cartesia":   `{"voice_id":"A0E99841-438C-4A64-B679-AE501E7D6091"}`,
 		// A vendor with no rule, a block with no voice and a voice_id of another type are
 		// left as the base left them.
 		"inworld":   `{"voice_id":"a/b"}`,

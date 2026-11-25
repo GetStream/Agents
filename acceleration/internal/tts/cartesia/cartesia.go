@@ -28,6 +28,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // ProviderName is the stable name used in routing config and stats.
@@ -194,6 +195,7 @@ func New(options Options) (*TTS, error) {
 	if options.VoiceID == "" {
 		options.VoiceID = DefaultVoiceID
 	}
+	options.VoiceID = spelled(options.VoiceID)
 	if options.Model == "" {
 		options.Model = DefaultModel
 	}
@@ -452,7 +454,7 @@ func (t *TTS) utteranceFor(request tts.Request) (*utterance, bool, error) {
 		if existing, ok := t.active[request.ID]; ok {
 			// Cartesia binds a context to the voice it was opened with, so changing it
 			// halfway would be one utterance said in two voices.
-			if request.Voice != "" && request.Voice != existing.voice {
+			if request.Voice != "" && spelled(request.Voice) != existing.voice {
 				return nil, false, stack.Wrap(fmt.Errorf(
 					"cartesia: utterance %s is being said in voice %s, not %s",
 					request.ID, existing.voice, request.Voice))
@@ -461,13 +463,23 @@ func (t *TTS) utteranceFor(request tts.Request) (*utterance, bool, error) {
 		}
 	}
 
-	speaker := request.Voice
+	speaker := spelled(request.Voice)
 	if speaker == "" {
 		speaker = t.options.VoiceID
 	}
 	current := &utterance{tracker: tts.NewSynthesis(request.ID), voice: speaker}
 	t.active[current.tracker.ID] = current
 	return current, true, nil
+}
+
+// spelled is the voice id in the one spelling the ownership check compared (voiceid.Cartesia),
+// so the body names the voice that was checked. A name that is no id is left as it came:
+// this body is no URL, and the routing layer has refused what it should have.
+func spelled(voice string) string {
+	if canonical, err := voiceid.Cartesia(voice); err == nil {
+		return canonical
+	}
+	return voice
 }
 
 func (t *TTS) send(message any) error {

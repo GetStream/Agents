@@ -533,6 +533,24 @@ func (s *CartesiaSuite) TestAnUtteranceCanPickItsOwnVoice() {
 	s.Equal("chosen-voice", s.generations(conn, 1)[0].Voice.ID)
 }
 
+// The id the ownership check compared is the one in the body, whatever case it was typed in.
+func (s *CartesiaSuite) TestAVoiceIdInUpperCaseIsSentInLowercase() {
+	const id = "a0e99841-438c-4a64-b679-ae501e7d6091"
+	fake := newFakeCartesia()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{VoiceID: "A0E99841-438C-4A64-B679-AE501E7D6091"})
+	defer provider.Close()
+
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "hello"}))
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: " again", Voice: "A0E99841-438C-4A64-B679-AE501E7D6091"}),
+		"the same voice in another case is the same voice")
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u2", Text: "hi", Voice: "A0e99841-438c-4a64-b679-aE501e7d6091"}))
+
+	for _, generation := range s.generations(conn, 3) {
+		s.Equal(id, generation.Voice.ID)
+	}
+}
+
 func (s *CartesiaSuite) TestAServerErrorIsReportedAndSettlesTheUtterance() {
 	// An error ends the context upstream, so an utterance left in flight after one would
 	// never be settled and the turn would never finish being spoken.

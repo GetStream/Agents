@@ -40,8 +40,34 @@ func (s *VoiceIDSuite) TestRealIdsPass() {
 		"5619d38c-cf51-4d8e-9575-48f61a280413",
 	} {
 		s.NoError(voiceid.Check(cartesia.ProviderName, id), id)
-		s.NoError(voiceid.Cartesia(id), id)
+		canonical, err := voiceid.Cartesia(id)
+		s.NoError(err, id)
+		s.Equal(id, canonical)
 	}
+}
+
+// A UUID is read without regard to case, so an upper or mixed case copy of an id is the same
+// voice. It takes the lowercase spelling the ownership check holds.
+func (s *VoiceIDSuite) TestACartesiaIdInAnyCaseTakesTheLowercaseSpelling() {
+	for _, id := range []string{
+		"A0E99841-438C-4A64-B679-AE501E7D6091",
+		"A0e99841-438c-4A64-b679-aE501e7d6091",
+		"a0E99841-438c-4a64-b679-ae501e7d6091",
+	} {
+		canonical, err := voiceid.Cartesia(id)
+		s.NoError(err, id)
+		s.Equal("a0e99841-438c-4a64-b679-ae501e7d6091", canonical, id)
+		viaProvider, err := voiceid.Canonical(cartesia.ProviderName, id)
+		s.NoError(err, id)
+		s.Equal(canonical, viaProvider)
+	}
+}
+
+// ElevenLabs ids are case sensitive: lowercasing one would name another voice.
+func (s *VoiceIDSuite) TestAnElevenLabsIdKeepsItsCase() {
+	canonical, err := voiceid.Canonical(elevenlabs.ProviderName, "21m00Tcm4TlvDq8ikWAM")
+	s.NoError(err)
+	s.Equal("21m00Tcm4TlvDq8ikWAM", canonical)
 }
 
 func (s *VoiceIDSuite) TestAnElevenLabsIdThatCouldLeaveItsPathSegmentIsRefused() {
@@ -72,13 +98,12 @@ func (s *VoiceIDSuite) TestAnElevenLabsIdThatCouldLeaveItsPathSegmentIsRefused()
 	}
 }
 
-func (s *VoiceIDSuite) TestACartesiaIdThatIsNotACanonicalUuidIsRefused() {
+func (s *VoiceIDSuite) TestACartesiaIdThatIsNotAUuidIsRefused() {
 	for _, id := range []string{
 		"",
 		"x",
 		"ct-42",
-		"A0E99841-438C-4A64-B679-AE501E7D6091", // the same voice in upper case
-		"a0e99841-438c-4a64-b679-ae501e7d609A",
+		"A0E99841438C4A64B679AE501E7D6091", // upper case and unhyphenated
 		"a0e99841438c4a64b679ae501e7d6091", // the same voice unhyphenated
 		"{a0e99841-438c-4a64-b679-ae501e7d6091}",
 		"urn:uuid:a0e99841-438c-4a64-b679-ae501e7d6091",
@@ -92,7 +117,8 @@ func (s *VoiceIDSuite) TestACartesiaIdThatIsNotACanonicalUuidIsRefused() {
 		"..",
 	} {
 		s.ErrorIs(voiceid.Check(cartesia.ProviderName, id), voiceid.ErrInvalid, "%q", id)
-		s.ErrorIs(voiceid.Cartesia(id), voiceid.ErrInvalid, "%q", id)
+		_, err := voiceid.Cartesia(id)
+		s.ErrorIs(err, voiceid.ErrInvalid, "%q", id)
 	}
 }
 
