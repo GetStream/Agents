@@ -278,6 +278,72 @@ func (s *SocketCloseLogSuite) TestARelayedSocketLogsWhyItClosedOnTheNodeItLanded
 	s.NotContains(line, "end_reason=")
 }
 
+func (s *SocketCloseLogSuite) TestARelayedSocketWhoseSessionEndedIsTheSessionsEnd() {
+	// Catches the relay's end taking the place of the session's: this session did end.
+	opened, connection, id := s.watched(s.other)
+
+	s.serverClient.stopSession(opened.Id)
+	_, ended := s.socketEnd(connection)
+
+	var closed *websocket.CloseError
+	s.Require().ErrorAs(ended, &closed)
+	s.Equal(websocket.CloseNormalClosure, closed.Code)
+	s.Equal("the session ended", closed.Text)
+	s.Contains(s.closeLine(id), " close_reason=session_ended close_code=1000 ")
+}
+
+func (s *SocketCloseLogSuite) TestARelayedSocketWhoseWatcherExpiredIsTheRelaysEnd() {
+	// Catches a watcher the holder gave back for a socket it took to be gone logged, and
+	// closed, as the session's end while the session still runs.
+	held := s.proxiesHeld()
+	opened, connection, id := s.watched(s.other)
+	s.quieten(held)
+
+	s.router.dropExpired(s.router.relayed)
+	_, ended := s.socketEnd(connection)
+
+	var closed *websocket.CloseError
+	s.Require().ErrorAs(ended, &closed)
+	s.Equal(websocket.CloseInternalServerErr, closed.Code)
+	s.Equal("the relay to the session ended", closed.Text)
+	line := s.closeLine(id)
+	s.Contains(line, " close_reason=relay_ended close_code=1011 ")
+	s.NotContains(line, "end_reason=")
+	// The session goes on, so a socket opened again is watching it.
+	again := s.serverClient.on(s.other).opens("/v1/agents/sessions/" + opened.Id + "/events")
+	s.Require().NoError(again.Close())
+}
+
+// proxiesHeld names the watchers the suite's node holds for sockets elsewhere.
+func (s *SocketCloseLogSuite) proxiesHeld() map[string]bool {
+	state := s.router.relayed
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	held := map[string]bool{}
+	for watcher := range state.proxies {
+		held[watcher] = true
+	}
+	return held
+}
+
+// quieten makes the one watcher the suite's node holds that is not in before look as if its
+// socket was last heard from past pongWait.
+func (s *SocketCloseLogSuite) quieten(before map[string]bool) {
+	state := s.router.relayed
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	var quiet []string
+	for watcher, held := range state.proxies {
+		if !before[watcher] {
+			held.seen = time.Now().Add(-2 * pongWait)
+			quiet = append(quiet, watcher)
+		}
+	}
+	s.Require().Len(quiet, 1, "the socket's watcher is not the one new watcher")
+}
+
 func (s *SocketCloseLogSuite) TestARelayedCloseCommandIsTheCallersClose() {
 	// Catches the session's end, which the holder reports back, logged in place of the command.
 	_, connection, id := s.watched(s.other)
