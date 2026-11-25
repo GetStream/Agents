@@ -748,6 +748,9 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 			credential, server.peerCredentials = options.Secrets.Derive(node.CredentialPurpose)
 		}
 		server.forwarder = node.NewForwarder(logger, credential)
+		if options.Store != nil && options.ShardRouting.Enabled() {
+			options.Directory.KeepWithin(server.workerShards)
+		}
 	}
 	if server.phone != nil {
 		server.phone.OnUnanswered(server.endUnanswered)
