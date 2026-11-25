@@ -226,6 +226,26 @@ func (s *ScheduledTasksSuite) TestATaskTheAgentMadeOnAThreadIsNotCheckedAgainstI
 	s.Equal(asked, s.usersRead(chat), "Stream was not asked about the thread's person")
 }
 
+// A task in a chat opened on no config has no team to be kept to: it is delivered to its user,
+// who is in a team, and Stream is not asked about them.
+func (s *ScheduledTasksSuite) TestATaskTheAgentMadeInAChatOnNoConfigIsDeliveredWithoutAskingStream() {
+	chat := s.teamsApp()
+	anya := s.inTeam(chat, "red")
+	opened := anya.createSession(textSession(nil))
+	running, ok := s.manager.Get(opened.Id, session.Owner{CustomerID: s.customerID(), Kind: auth.KindServer})
+	s.Require().True(ok)
+	task := s.agentsTask(anya, "", func(task *store.ScheduledTask) {
+		task.SessionID, task.OriginSessionID = opened.Id, opened.Id
+		task.ConversationID = running.Spec().ConversationID
+	})
+	asked := s.usersRead(chat)
+	s.makeDue(task)
+	s.runWorker()
+
+	s.Equal(store.ScheduledTaskDeliveredConversation, s.delivered(task).DeliveredTo)
+	s.Equal(asked, s.usersRead(chat), "Stream was not asked about the user's teams")
+}
+
 func (s *ScheduledTasksSuite) TestATaskOfAUserStillInItsAgentsTeamIsDelivered() {
 	chat := s.teamsApp()
 	anya := s.inTeam(chat, "red")

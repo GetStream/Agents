@@ -829,6 +829,19 @@ func (s *AgentTeamsSuite) TestACallerWithNoTokenWatchingFromAnotherNodeIsInNoTea
 	s.Equal(asked, s.teamReads(), "Stream is not asked about the user it claims to be")
 }
 
+// A guest's token is signed as a user's is, so the node running a chat takes a guest watching
+// from another node for the Stream user they are, in that user's teams.
+func (s *AgentTeamsSuite) TestASignedGuestInTheTeamWatchesAChatRunningOnAnotherNode() {
+	other, _ := s.otherRouter(nil)
+	guest := s.data.createGuest()
+	s.teamsChat.PutUser(map[string]any{"id": guest.userID, "teams": []any{"red"}})
+	opened := guest.createSession(s.naming(s.configOf("red")))
+
+	_, status := guest.on(other).watch("/v1/agents/sessions/" + opened.Id + "/events")
+
+	s.Equal(http.StatusSwitchingProtocols, status)
+}
+
 // A backend is not limited by teams on whichever node it watches from, and a watcher relayed
 // for it asks Stream nothing.
 func (s *AgentTeamsSuite) TestABackendWatchesAChatOfAnyTeamRunningOnAnotherNodeWithoutAskingStream() {
