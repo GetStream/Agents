@@ -24,7 +24,8 @@ func definitionRow(id, schemes string) json.RawMessage {
 }
 
 // A copy and a page of changes each holding a custom connector definition with
-// oauth2_client_credentials carry on past it, write the rest and log the row each left out.
+// oauth2_client_credentials carry on past it, write the rest and log the row each left out. A
+// delete that carries one in its payload left nothing out.
 func (s *ReplicateIDsSuite) TestAReplicateLeavesOutAClientCredentialsDefinitionAndSaysWhich() {
 	copied, copiedSkip, followed, followedSkip := "custom_copied", "custom_copied_cc", "custom_followed", "custom_followed_cc"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +39,9 @@ func (s *ReplicateIDsSuite) TestAReplicateLeavesOutAClientCredentialsDefinitionA
 				return store.DataChange{Table: "connector_definitions", Op: store.ChangeInsert,
 					Key: json.RawMessage(fmt.Sprintf(`{"customer_id":"acme","id":%q,"revision":1}`, id)), Payload: definitionRow(id, schemes), At: time.Now().UTC()}
 			}
-			page := changePage{Changes: []store.DataChange{change(followedSkip, `["oauth2_client_credentials"]`), change(followed, `["bearer"]`)},
+			deleted := change("custom_deleted_cc", `["oauth2_client_credentials"]`)
+			deleted.Op = store.ChangeDelete
+			page := changePage{Changes: []store.DataChange{change(followedSkip, `["oauth2_client_credentials"]`), change(followed, `["bearer"]`), deleted},
 				Cursor: 3, CaughtUp: true}
 			s.NoError(json.NewEncoder(w).Encode(page))
 		default:
@@ -61,12 +64,18 @@ func (s *ReplicateIDsSuite) TestAReplicateLeavesOutAClientCredentialsDefinitionA
 	var left []string
 	for line := range strings.Lines(logged.String()) {
 		var record struct {
-			Msg string `json:"msg"`
-			Row string `json:"row"`
+			Msg  string `json:"msg"`
+			Row  string `json:"row"`
+			Rows *int   `json:"rows"`
 		}
 		s.Require().NoError(json.Unmarshal([]byte(line), &record))
 		if record.Msg == skippedRowMessage {
 			left = append(left, record.Row)
+		}
+		if record.Msg == "copied a customer" {
+			// The row left out is not one copied.
+			s.Require().NotNil(record.Rows)
+			s.Equal(1, *record.Rows)
 		}
 	}
 	s.Equal([]string{`connector_definitions:{"id":"custom_copied_cc","revision":1}`, `connector_definitions:{"id":"custom_followed_cc","revision":1}`}, left)
