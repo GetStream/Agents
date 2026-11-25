@@ -171,6 +171,8 @@ const (
 	// An account read on a deployment, or for an app, that the usage service bills nothing for
 	// (account.go).
 	codeBillingNotEnabled = "billing_not_enabled"
+	// A number another app holds where this one's lines are made (phone.go).
+	codePhoneNumberHeldElsewhere = "phone_number_held_elsewhere"
 )
 
 // APIError is a failure an operation answers with on purpose: its type decides the

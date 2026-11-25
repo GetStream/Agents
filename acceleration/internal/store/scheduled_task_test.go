@@ -256,6 +256,31 @@ func (s *StoreSuite) TestAFinishAdvancesTheTask() {
 	s.Empty(after.LeasedBy)
 }
 
+func (s *StoreSuite) TestDeletingATaskRedactsTheChangesRecordedOfItAndItsRuns() {
+	for _, customer := range []string{"acme", "globex"} {
+		s.Require().NoError(s.store.StartDataCapture(s.ctx, customer, time.Hour, time.Second))
+	}
+	due := s.base.Add(-time.Minute)
+	s.task("reminder", func(task *ScheduledTask) { task.NextRunAt = &due })
+	s.task("other", func(task *ScheduledTask) { task.NextRunAt = &due })
+	s.task("reminder", func(task *ScheduledTask) { task.CustomerID = "globex"; task.NextRunAt = nil })
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "reminder"))
+
+	left := []string{
+		"scheduled_tasks insert other", "scheduled_tasks update other", "scheduled_task_runs insert other",
+		"scheduled_tasks delete reminder", "scheduled_tasks delete reminder", "scheduled_task_runs delete ",
+		"scheduled_tasks delete reminder", "scheduled_task_runs delete ",
+	}
+	s.ElementsMatch(left, s.taskChanges("acme"), "its insert, the claim's update and the run's insert are deletes, and another task keeps its changes")
+	s.Equal([]string{"scheduled_tasks insert reminder"}, s.taskChanges("globex"), "another app's task by the same id keeps its change")
+
+	s.Require().ErrorIs(s.store.ScheduledTasks.Delete(s.ctx, "acme", "reminder"), ErrNoScheduledTask)
+	s.ElementsMatch(left, s.taskChanges("acme"), "a second delete changes nothing")
+}
+
 func (s *StoreSuite) TestDeletingASessionDeletesItsTasks() {
 	s.task("one", func(task *ScheduledTask) { task.SessionID = "session-1" })
 	s.task("two", func(task *ScheduledTask) { task.SessionID = "session-2" })
@@ -1541,10 +1566,21 @@ func (s *StoreSuite) TestScheduledTaskQueryBudgets() {
 	s.Equal(3, s.countQueries(func() {
 		s.Require().NoError(s.store.ScheduledTasks.DeleteForSession(s.ctx, "acme", "session-none"))
 	}), "DeleteForSession of a session with no tasks")
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "st-new")) }), "Delete")
-	// The lost runs by hand settled, then one batch of runs and one of tasks, with nothing to prune.
+	s.Equal(5, s.countQueries(func() { s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "st-new")) }), "Delete")
 	s.Equal(3, s.countQueries(func() {
+		s.Require().ErrorIs(s.store.ScheduledTasks.Delete(s.ctx, "acme", "st-new"), ErrNoScheduledTask)
+	}), "Delete of no task")
+	// The lost runs by hand settled, then the transaction and the pick of a batch of runs and of
+	// one of tasks, with nothing to prune.
+	s.Equal(7, s.countQueries(func() {
 		_, _, err := s.store.ScheduledTasks.Prune(s.ctx)
 		s.Require().NoError(err)
 	}), "Prune")
+	s.aged("st-old", "acme", ScheduledTaskCompleted, 91*day)
+	s.ranFor("run-old", "acme", "st-old", ScheduledTaskTriggerManual, ScheduledTaskRunDelivered, 91*day)
+	// A batch of runs adds their delete, and one of tasks the lock of their runs and their delete.
+	s.Equal(10, s.countQueries(func() {
+		_, _, err := s.store.ScheduledTasks.Prune(s.ctx)
+		s.Require().NoError(err)
+	}), "Prune of a task and its run")
 }

@@ -8258,7 +8258,7 @@ type Policy struct {
 	// PromptInjection Screen what every LLM response is asked for prompt injection. The newest input - the user's turn and any tool results - goes to a decision model beside the model call, so it adds nothing to time to first token. The end of the response is held until the verdict, and a response whose input reads as an injection fails with prompt_injection before its tool calls can be acted on.
 	PromptInjection *bool `json:"prompt_injection,omitempty"`
 
-	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
 	Quota *Quota `json:"quota,omitempty"`
 
 	// RequireOwnStreamApp Keep the app out of the router's own Stream app: in app mode it is never written there for want of a registered Stream app of its own, and what it wrote there before can only be read. True at either scope requires it, so an app cannot turn its organization's off. An organization's is set by the router's operator and read here; sending it back unchanged is fine, and changing it is refused.
@@ -8825,7 +8825,7 @@ type ProviderPrice struct {
 	PerMillionOutputTokens *float64 `json:"per_million_output_tokens,omitempty"`
 }
 
-// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
 type Quota struct {
 	// MessagesPerUserPerDay How many responses one end user may ask for in a UTC day. 0 is no cap. Left out, the next level's applies: the app's, then the organization's, then the router's default.
 	//
@@ -9310,7 +9310,7 @@ type ScheduledTaskRun struct {
 	// DeliveredTo Where the follow-up landed: conversation, sms, whatsapp, imessage or phone. Empty until it lands.
 	DeliveredTo string `json:"delivered_to"`
 
-	// Error Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
+	// Error Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), not_in_team (in an app that keeps each team's agents to its own users, the user who made the task is no longer in its agent's team, so the agent is not run; not tried again), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
 	Error      *string    `json:"error"`
 	FinishedAt *time.Time `json:"finished_at"`
 	Id         string     `json:"id"`
@@ -11540,7 +11540,7 @@ type UserPolicy struct {
 	// Messages Responses counted today toward a quota the customer set, the app's backend acting for the user included. A day held only to the router's default counts the user's devices alone, which this leaves out.
 	Messages int64 `json:"messages"`
 
-	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
 	Quota *Quota `json:"quota,omitempty"`
 
 	// ResetsAt When the day ends and the count starts again: the next UTC midnight.
@@ -11553,7 +11553,7 @@ type UserPolicy struct {
 
 // UserPolicyEntry defines model for UserPolicyEntry.
 type UserPolicyEntry struct {
-	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
 	Quota     *Quota    `json:"quota,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 	UserId    string    `json:"user_id"`
@@ -11561,7 +11561,7 @@ type UserPolicyEntry struct {
 
 // UserPolicyInput One end user's own policy, which holds a quota only.
 type UserPolicyInput struct {
-	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
 	Quota *Quota `json:"quota,omitempty"`
 }
 
@@ -14324,7 +14324,7 @@ type ClientInterface interface {
 	// CreateGuestUserWithBody Mint a guest so somebody can talk to an agent before signing up
 	//
 	// Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -14334,7 +14334,7 @@ type ClientInterface interface {
 	// CreateGuestUser Mint a guest so somebody can talk to an agent before signing up
 	//
 	// Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -15659,9 +15659,10 @@ type ClientInterface interface {
 
 	// ImportDataWithBody Write an export, or a batch of changes, into this deployment
 	//
-	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not hold here is refused with 400.
 	// An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
-	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
+	// A number on the app's own SIP trunk that another app holds here is not written, nor counted in `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
+	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 	// Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 	//
 	// Takes any type of body and a specified content type.
@@ -16071,7 +16072,7 @@ type ClientInterface interface {
 
 	// AddTrunkNumberWithBody Add a number that is on this SIP trunk
 	//
-	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -16080,7 +16081,7 @@ type ClientInterface interface {
 
 	// AddTrunkNumber Add a number that is on this SIP trunk
 	//
-	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -18733,7 +18734,7 @@ func (c *Client) AnswerConversationToolApproval(ctx context.Context, cid string,
 // CreateGuestUserWithBody Mint a guest so somebody can talk to an agent before signing up
 //
 // Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 //
 // Takes any type of body and a specified content type.
 //
@@ -18753,7 +18754,7 @@ func (c *Client) CreateGuestUserWithBody(ctx context.Context, contentType string
 // CreateGuestUser Mint a guest so somebody can talk to an agent before signing up
 //
 // Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -21438,9 +21439,10 @@ func (c *Client) ExportData(ctx context.Context, reqEditors ...RequestEditorFn) 
 
 // ImportDataWithBody Write an export, or a batch of changes, into this deployment
 //
-// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not hold here is refused with 400.
 // An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
-// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
+// A number on the app's own SIP trunk that another app holds here is not written, nor counted in `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
+// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 // Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 //
 // Takes any type of body and a specified content type.
@@ -22320,7 +22322,7 @@ func (c *Client) UpdateSipTrunk(ctx context.Context, id string, body UpdateSipTr
 
 // AddTrunkNumberWithBody Add a number that is on this SIP trunk
 //
-// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 //
 // Takes any type of body and a specified content type.
 //
@@ -22339,7 +22341,7 @@ func (c *Client) AddTrunkNumberWithBody(ctx context.Context, id string, contentT
 
 // AddTrunkNumber Add a number that is on this SIP trunk
 //
-// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -37643,7 +37645,7 @@ type ClientWithResponsesInterface interface {
 	// CreateGuestUserWithBodyWithResponse Mint a guest so somebody can talk to an agent before signing up
 	//
 	// Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -37653,7 +37655,7 @@ type ClientWithResponsesInterface interface {
 	// CreateGuestUserWithResponse Mint a guest so somebody can talk to an agent before signing up
 	//
 	// Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -39110,9 +39112,10 @@ type ClientWithResponsesInterface interface {
 
 	// ImportDataWithBodyWithResponse Write an export, or a batch of changes, into this deployment
 	//
-	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not hold here is refused with 400.
 	// An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
-	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
+	// A number on the app's own SIP trunk that another app holds here is not written, nor counted in `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
+	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 	// Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -39558,7 +39561,7 @@ type ClientWithResponsesInterface interface {
 
 	// AddTrunkNumberWithBodyWithResponse Add a number that is on this SIP trunk
 	//
-	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -39567,7 +39570,7 @@ type ClientWithResponsesInterface interface {
 
 	// AddTrunkNumberWithResponse Add a number that is on this SIP trunk
 	//
-	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -48645,6 +48648,8 @@ type CreateGuestUserResponse struct {
 	JSON402 *PaymentRequired
 	// JSON403 the response for an HTTP 403 `application/json` response
 	JSON403 *ErrorResponse
+	// JSON429 the response for an HTTP 429 `application/json` response
+	JSON429 *ErrorResponse
 	// JSON500 the response for an HTTP 500 `application/json` response
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
@@ -48678,6 +48683,11 @@ func (r CreateGuestUserResponse) GetJSON402() *PaymentRequired {
 // GetJSON403 returns the response for an HTTP 403 `application/json` response
 func (r CreateGuestUserResponse) GetJSON403() *ErrorResponse {
 	return r.JSON403
+}
+
+// GetJSON429 returns the response for an HTTP 429 `application/json` response
+func (r CreateGuestUserResponse) GetJSON429() *ErrorResponse {
+	return r.JSON429
 }
 
 // GetJSON500 returns the response for an HTTP 500 `application/json` response
@@ -59243,6 +59253,8 @@ type ImportDataResponse struct {
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
 	JSON503 *ErrorResponse
+	// JSON504 the response for an HTTP 504 `application/json` response
+	JSON504 *ErrorResponse
 	// Headers200 the parsed response headers for an HTTP 200 response
 	Headers200 *ImportDataResponse200Headers
 	// Headers402 the parsed response headers for an HTTP 402 response
@@ -59292,6 +59304,11 @@ func (r ImportDataResponse) GetJSON500() *InternalError {
 // GetJSON503 returns the response for an HTTP 503 `application/json` response
 func (r ImportDataResponse) GetJSON503() *ErrorResponse {
 	return r.JSON503
+}
+
+// GetJSON504 returns the response for an HTTP 504 `application/json` response
+func (r ImportDataResponse) GetJSON504() *ErrorResponse {
+	return r.JSON504
 }
 
 // GetBody returns the raw response body bytes
@@ -60000,6 +60017,8 @@ type TransferPhoneCallResponse struct {
 	JSON403 *Forbidden
 	// JSON404 the response for an HTTP 404 `application/json` response
 	JSON404 *NotFound
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
 	// JSON500 the response for an HTTP 500 `application/json` response
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
@@ -60038,6 +60057,11 @@ func (r TransferPhoneCallResponse) GetJSON403() *Forbidden {
 // GetJSON404 returns the response for an HTTP 404 `application/json` response
 func (r TransferPhoneCallResponse) GetJSON404() *NotFound {
 	return r.JSON404
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r TransferPhoneCallResponse) GetJSON409() *ErrorResponse {
+	return r.JSON409
 }
 
 // GetJSON500 returns the response for an HTTP 500 `application/json` response
@@ -69587,7 +69611,7 @@ func (c *ClientWithResponses) AnswerConversationToolApprovalWithResponse(ctx con
 // CreateGuestUserWithBodyWithResponse Mint a guest so somebody can talk to an agent before signing up
 //
 // Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -69603,7 +69627,7 @@ func (c *ClientWithResponses) CreateGuestUserWithBodyWithResponse(ctx context.Co
 // CreateGuestUserWithResponse Mint a guest so somebody can talk to an agent before signing up
 //
 // Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -71876,9 +71900,10 @@ func (c *ClientWithResponses) ExportDataWithResponse(ctx context.Context, reqEdi
 
 // ImportDataWithBodyWithResponse Write an export, or a batch of changes, into this deployment
 //
-// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not hold here is refused with 400.
 // An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
-// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
+// A number on the app's own SIP trunk that another app holds here is not written, nor counted in `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
+// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 // Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -72606,7 +72631,7 @@ func (c *ClientWithResponses) UpdateSipTrunkWithResponse(ctx context.Context, id
 
 // AddTrunkNumberWithBodyWithResponse Add a number that is on this SIP trunk
 //
-// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -72621,7 +72646,7 @@ func (c *ClientWithResponses) AddTrunkNumberWithBodyWithResponse(ctx context.Con
 
 // AddTrunkNumberWithResponse Add a number that is on this SIP trunk
 //
-// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -83459,6 +83484,13 @@ func ParseCreateGuestUserResponse(rsp *http.Response) (*CreateGuestUserResponse,
 			return nil, err
 		}
 		response.JSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON429 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
 		var dest InternalError
@@ -95914,6 +95946,13 @@ func ParseImportDataResponse(rsp *http.Response) (*ImportDataResponse, error) {
 		}
 		response.JSON503 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON504 = &dest
+
 	}
 
 	switch {
@@ -96781,6 +96820,13 @@ func ParseTransferPhoneCallResponse(rsp *http.Response) (*TransferPhoneCallRespo
 			return nil, err
 		}
 		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
 		var dest InternalError

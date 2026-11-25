@@ -159,7 +159,7 @@ func (r *ConversationDocuments) Select(ctx context.Context, customerID string, s
 		query := db.NewSelect().Model((*ConversationDocument)(nil)).
 			Where("cd.customer_id = ?", customerID).
 			Where("cd.owner_user_id = ?", scope.Owner).
-			Where("NOT EXISTS (SELECT 1 FROM agent_responses AS r WHERE r.id = cd.response_id AND r.rewound_at IS NOT NULL)").
+			Where("NOT EXISTS (SELECT 1 FROM agent_responses AS r WHERE r.id = cd.response_id AND r.customer_id = cd.customer_id AND r.rewound_at IS NOT NULL)").
 			Order("cd.created_at ASC", "cd.id ASC")
 		if scope.ConversationID != "" {
 			query = query.Where("cd.conversation_id = ?", scope.ConversationID)
@@ -169,7 +169,7 @@ func (r *ConversationDocuments) Select(ctx context.Context, customerID string, s
 		// A document is written by the router that took its turn, beside the turn's row.
 		if !until.IsZero() {
 			query = query.Where("cd.response_id = '' OR EXISTS (SELECT 1 FROM agent_responses AS sent "+
-				"WHERE sent.id = cd.response_id AND sent.created_at <= ?)", until)
+				"WHERE sent.id = cd.response_id AND sent.customer_id = cd.customer_id AND sent.created_at <= ?)", until)
 		}
 		var documents []ConversationDocument
 		err := query.Scan(ctx, &documents)

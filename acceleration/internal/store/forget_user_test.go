@@ -127,7 +127,9 @@ func (s *StoreSuite) TestForgettingAUserRedactsTheChangesOfTheRunsOfATaskTheyDel
 	s.task("reminder", func(task *ScheduledTask) { task.NextRunAt = &due })
 	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "reminder"))
+	// As a release before Delete redacted, or a follower's replay of a delete, leaves the changes.
+	_, err = s.store.global.ExecContext(s.ctx, "DELETE FROM scheduled_tasks WHERE customer_id = 'acme' AND id = 'reminder'")
+	s.Require().NoError(err)
 
 	counts := s.forgetSam()
 
@@ -159,7 +161,9 @@ func (s *StoreSuite) TestForgettingAUserKeepsTheRunsOfAnotherUsersTaskUnderAnIDT
 	s.task("reminder", func(task *ScheduledTask) { task.NextRunAt = &due })
 	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "reminder"))
+	// As a release before Delete redacted, or a follower's replay of a delete, leaves the changes.
+	_, err = s.store.global.ExecContext(s.ctx, "DELETE FROM scheduled_tasks WHERE customer_id = 'acme' AND id = 'reminder'")
+	s.Require().NoError(err)
 	s.task("reminder", func(task *ScheduledTask) { task.UserID = "grace"; task.NextRunAt = &due })
 	_, err = s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
 	s.Require().NoError(err)

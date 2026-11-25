@@ -145,6 +145,8 @@ type Backend interface {
 	// Stored samples a knowledge base's size, as an hour of it in ByteHours. One the provider
 	// does not have is ErrNoNamespace.
 	Stored(ctx context.Context, namespace string) (Billed, error)
+	// MinimumQueried is the fewest bytes the provider bills a query for.
+	MinimumQueried() int64
 	Provider() string
 	Close() error
 }
