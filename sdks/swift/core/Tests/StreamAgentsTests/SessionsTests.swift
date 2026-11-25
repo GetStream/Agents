@@ -178,7 +178,6 @@ import Testing
         var options = ForkOptions(responseID: "r2")
         options.agent = "reviewer"
         options.custom = ["branch": .string("b")]
-        options.modelOverwrites = ModelOverwrites(llm: "anthropic/claude-sonnet-5-5")
         options.incognito = true
 
         _ = try await agents.fork(sessionID: "s1", options)
@@ -189,7 +188,6 @@ import Testing
             request.body == [
                 "agent": .string("reviewer"), "response_id": .string("r2"),
                 "custom": .dictionary(["branch": .string("b")]),
-                "model_overwrites": .dictionary(["llm": .string("anthropic/claude-sonnet-5-5")]),
                 "incognito": .bool(true),
             ])
     }
