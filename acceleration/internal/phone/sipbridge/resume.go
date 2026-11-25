@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -76,8 +77,19 @@ func Resume(ctx context.Context, cfg ResumeConfig, state CallState) (*Call, erro
 	var streamURI sip.Uri
 	_ = sip.ParseUri(cfg.Stream.URI, &streamURI)
 	guard := cfg.guard.withDefaults()
-	if _, err := guard.addrs(ctx, cfg.CustomerTrunk.Host); err != nil {
-		return nil, stack.Wrap(fmt.Errorf("sipbridge: customer trunk: %w", err))
+	// A refusal here ends the call, but only once both legs exist: a leg is what gets the BYE.
+	var refused error
+	var trunkAddr netip.Addr
+	trunkIPs, err := guard.addrs(ctx, cfg.CustomerTrunk.Host)
+	if err != nil {
+		refused = stack.Wrap(fmt.Errorf("sipbridge: customer trunk: %w", err))
+	} else {
+		trunkAddr = preferIPv4(trunkIPs).Unmap()
+		// A call an older build set up stored the customer's SDP as the last one Stream got, so the
+		// re-INVITE that moves Stream's dialog here sends it rebuilt, as every later one is.
+		if state.Stream.LastSDP, err = toStream(state.Stream.LastSDP, trunkAddr); err != nil {
+			refused = stack.Wrap(fmt.Errorf("sipbridge: stream leg sdp: %w", err))
+		}
 	}
 
 	ua, customerClient, streamClient, srvs, err := newUA(guard)
@@ -99,6 +111,11 @@ func Resume(ctx context.Context, cfg ResumeConfig, state CallState) (*Call, erro
 	}
 	stream.username, stream.password = cfg.Stream.Username, cfg.Stream.Password
 	stream.reinviteHost = streamURI.Host
+	if refused != nil {
+		hangUp(ctx, cfg.Logger, customer, stream)
+		ua.Close()
+		return nil, refused
+	}
 
 	reg := newRegistry()
 	reg.add(state.Customer.CallID, customer)
@@ -106,6 +123,7 @@ func Resume(ctx context.Context, cfg ResumeConfig, state CallState) (*Call, erro
 	call := newCall(ctx, customer, stream, cfg.Logger)
 	call.onChange = cfg.OnChange
 	call.media = state.Media
+	call.trunkAddr = trunkAddr
 	for _, srv := range srvs {
 		handle(srv, reg, call)
 	}

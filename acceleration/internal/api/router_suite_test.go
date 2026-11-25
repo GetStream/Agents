@@ -93,6 +93,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox/daytona/daytonatest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/simulation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
@@ -299,6 +300,8 @@ type RouterSuite struct {
 	// about shards to set before it starts the harness. Nodes in two shards have a relay
 	// each. Empty is one deployment of one shard.
 	shard, otherShard string
+	// shardRouting is where every node of the suite sends a hook's work, by shard.
+	shardRouting shardmap.Map
 
 	// unauthenticatedClient sends no credentials. The rest hold the app's key:
 	// anonymousClient goes by a name nothing proves, guestClient and client are signed-in
@@ -431,6 +434,9 @@ type RouterSuite struct {
 	// twilioAuthToken, set by a suite about Twilio's webhooks before it starts the harness, is
 	// the Auth Token Twilio's requests are checked against. Empty leaves it unconfigured.
 	twilioAuthToken string
+	// twilioAccountSID is the Twilio account the router's Twilio numbers are under, for the
+	// same suite to set. Empty is a router with none, which answers no Twilio call.
+	twilioAccountSID string
 	// chatInboundKeys, set by a suite about Stream Chat's delivery endpoint before it starts
 	// the harness, are what its deliveries are checked against, on every node. Nil leaves it
 	// unconfigured.
@@ -786,6 +792,7 @@ func (s *RouterSuite) SetupSuite() {
 		AuthMode:  s.authMode(),
 		// App mode is served only behind a gateway that declares kinds.
 		ProxyDeclaresKind: s.appMode,
+		ShardRouting:      s.shardRouting,
 		Phone:             s.telephony(logger),
 		Simulations:       s.simulations(sessions, streams, logger),
 		Channels:          s.inbound,
@@ -815,6 +822,7 @@ func (s *RouterSuite) SetupSuite() {
 		HookSecret:         suiteStreamSecret,
 		TelnyxPublicKey:    s.telnyxPublicKey,
 		TwilioAuthToken:    s.twilioAuthToken,
+		TwilioAccountSID:   s.twilioAccountSID,
 		ChatInboundKeys:    s.chatInboundKeys,
 		TelnyxConnectionID: s.telnyxConnectionID,
 		AudioFloor:         s.audioFloor,
@@ -1942,6 +1950,7 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 		Streams:           s.streams,
 		Sessions:          sessions,
 		Directory:         directory,
+		ShardRouting:      s.shardRouting,
 		Dispatch:          workers,
 		Workers:           everyWorker,
 		Store:             s.store,

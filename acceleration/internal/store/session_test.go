@@ -500,6 +500,109 @@ func (s *StoreSuite) TestAReopenedSessionHasNotEnded() {
 	s.Empty(found.EndReason, "a reopened session shows why its last run ended")
 }
 
+// The project a session is tagged with is written as it opens. A router of the release before,
+// which carries it on during a deploy or after a rollback, names no column for it, and a later
+// write of this release's does not change it.
+func (s *StoreSuite) TestACarriedOnSessionKeepsItsProjectTag() {
+	for id, tag := range map[string]string{"backends": "alpha", "devices": ""} {
+		s.opened(id, "app", s.base, func(session *AgentSession) { session.ProjectTag = &tag })
+
+		s.Require().NoError(s.savedAsBefore(s.ctx, &AgentSession{ID: id, CustomerID: "app"}))
+		s.opened(id, "app", s.base, func(session *AgentSession) { session.ProjectTag = new("beta") })
+
+		found, err := s.store.Sessions.Get(s.ctx, "app", id)
+		s.Require().NoError(err)
+		s.Require().NotNil(found.ProjectTag)
+		s.Equal(tag, *found.ProjectTag)
+	}
+}
+
+// A row from before the project tag was kept is given it once, as the session is carried on.
+func (s *StoreSuite) TestACarriedOnRowFromBeforeIsGivenItsProjectTag() {
+	s.Require().NoError(s.savedAsBefore(s.ctx, &AgentSession{ID: "one", CustomerID: "app", Project: "alpha"}))
+
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.ProjectTag = new("alpha") })
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.ProjectTag = new("beta") })
+
+	found, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Require().NotNil(found.ProjectTag)
+	s.Equal("alpha", *found.ProjectTag)
+}
+
+// A read of a session asks no other shard for its project tag, whenever the row was written: a
+// router writes when it opened a few microseconds after when it was created.
+func (s *StoreSuite) TestASilentShardDoesNotHoldASessionsRead() {
+	if s.store.Sharded() {
+		s.T().Skip("the silent shard stands beside a deployment of one database")
+	}
+	down := s.withAShardThatNeverAnswers()
+	for id, opened := range map[string]time.Duration{"once": 3 * time.Microsecond, "carried": time.Hour} {
+		s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: id, CustomerID: "app", Project: "alpha",
+			CallerKind: "server", CreatedAt: s.base, OpenedAt: s.base.Add(opened)}))
+
+		began := time.Now()
+		_, err := down.Sessions.Get(s.ctx, "app", id)
+
+		s.Require().NoError(err)
+		s.Less(time.Since(began), time.Second, id)
+	}
+}
+
+// Asked for its tag, a row that does not say it waits out a silent shard no longer than its
+// bound, and is given none: that shard may say another. One with no project has none to ask for.
+func (s *StoreSuite) TestASilentShardLeavesAProjectTagUnreadWithinItsBound() {
+	if s.store.Sharded() {
+		s.T().Skip("the silent shard stands beside a deployment of one database")
+	}
+	down := s.withAShardThatNeverAnswers()
+	row := AgentSession{ID: "one", CustomerID: "app", Project: "alpha", CallerKind: "server"}
+
+	began := time.Now()
+	s.ErrorIs(down.Sessions.ReadProjectTag(s.ctx, &row), ErrProjectTagUnread)
+	s.Less(time.Since(began), 3*time.Second)
+	s.Nil(row.ProjectTag)
+
+	began = time.Now()
+	for _, known := range []AgentSession{{Project: "alpha", ProjectTag: new("beta")}, {ID: "none", CustomerID: "app", CallerKind: "server"}} {
+		s.Require().NoError(down.Sessions.ReadProjectTag(s.ctx, &known))
+	}
+	s.Less(time.Since(began), time.Second)
+}
+
+func (s *StoreSuite) TestAProjectTagIsFoundWithoutWaitingOnASilentShard() {
+	if s.store.Sharded() {
+		s.T().Skip("the silent shard stands beside a deployment of one database")
+	}
+	down := s.withAShardThatNeverAnswers()
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.ProjectTag = new("beta") })
+	// As read before the row said its tag.
+	row := AgentSession{ID: "one", CustomerID: "app", Project: "alpha"}
+
+	began := time.Now()
+	s.Require().NoError(down.Sessions.ReadProjectTag(s.ctx, &row))
+
+	s.Equal("beta", row.TaggedProject())
+	s.Less(time.Since(began), time.Second)
+}
+
+// A router of the release before opens a session without saying its project tag, so the kind of
+// caller that opened it says, unless it is a fork.
+func (s *StoreSuite) TestASessionOpenedByTheReleaseBeforeIsTaggedByWhoOpenedIt() {
+	for id, opened := range map[string]AgentSession{
+		"backend": {CallerKind: "server"}, "user": {CallerKind: "authenticated"}, "guest": {CallerKind: "guest"},
+		"anonymous": {CallerKind: "anonymous"}, "fork": {CallerKind: "server", ForkedFrom: "backend"},
+	} {
+		opened.ID, opened.CustomerID, opened.Project = id, "app", "alpha"
+		s.Require().NoError(s.savedAsBefore(s.ctx, &opened))
+
+		found, err := s.store.Sessions.Get(s.ctx, "app", id)
+		s.Require().NoError(err)
+		s.Nil(found.ProjectTag)
+		s.Equal(map[string]string{"backend": "alpha"}[id], found.TaggedProject(), id)
+	}
+}
+
 func (s *StoreSuite) TestACloseFromTheRouterThatHeldASessionBeforeItWasReopenedLeavesItOpen() {
 	first, again := s.base, s.base.Add(time.Hour)
 	s.opened("one", "app", s.base, func(session *AgentSession) { session.OpenedAt = first })
@@ -1682,4 +1785,77 @@ func (s *StoreSuite) TestATurnOfExactlyTheCeilingIsKeptWhole() {
 	response, err := s.store.Responses.Get(s.ctx, "app", "one", "first")
 	s.Require().NoError(err)
 	s.Equal(len(exact), len(response.Said), "a turn of exactly 256 KiB is not cut")
+}
+
+// The conversations sessions held are walked a page at a time, each once and in order, and a
+// customer's alone when one is named.
+func (s *StoreSuite) TestHeldConversationsAreWalkedAPageAtATimeEachOnce() {
+	for i, held := range []HeldConversation{
+		{"acme", "agent:b"}, {"acme", "agent:a"}, {"acme", "agent:a"}, {"globex", "agent:a"}, {"acme", ""},
+	} {
+		s.opened(fmt.Sprintf("session-%d", i), held.CustomerID, time.Now(), func(row *AgentSession) {
+			row.ConversationID = held.ConversationID
+		})
+	}
+
+	var walked []HeldConversation
+	var after HeldConversation
+	for {
+		page, err := s.store.Sessions.HeldConversations(s.ctx, "", after, 2)
+		s.Require().NoError(err)
+		walked = append(walked, page...)
+		if len(page) < 2 {
+			break
+		}
+		after = page[len(page)-1]
+	}
+	acmes, err := s.store.Sessions.HeldConversations(s.ctx, "acme", HeldConversation{}, 10)
+	s.Require().NoError(err)
+
+	s.Equal([]HeldConversation{{"acme", "agent:a"}, {"acme", "agent:b"}, {"globex", "agent:a"}}, walked)
+	s.Equal([]HeldConversation{{"acme", "agent:a"}, {"acme", "agent:b"}}, acmes)
+}
+
+// The kinds of caller that held a conversation under a user id are each said once, and only
+// that user's on that conversation of that customer's.
+func (s *StoreSuite) TestTheKindsOfCallerThatHeldAConversationUnderAnIdAreThatIdsEachOnce() {
+	for i, kind := range []string{"authenticated", "guest", "guest"} {
+		s.opened(fmt.Sprintf("session-%d", i), "acme", time.Now(), func(row *AgentSession) {
+			row.ConversationID, row.UserID, row.CallerKind = "agent:a", "alice", kind
+		})
+	}
+	for id, row := range map[string]AgentSession{
+		"session-bob":    {CustomerID: "acme", ConversationID: "agent:a", UserID: "bob", CallerKind: "server"},
+		"session-other":  {CustomerID: "acme", ConversationID: "agent:b", UserID: "alice", CallerKind: "anonymous"},
+		"session-globex": {CustomerID: "globex", ConversationID: "agent:a", UserID: "alice", CallerKind: "server"},
+	} {
+		s.opened(id, row.CustomerID, time.Now(), func(opened *AgentSession) {
+			opened.ConversationID, opened.UserID, opened.CallerKind = row.ConversationID, row.UserID, row.CallerKind
+		})
+	}
+
+	kinds, err := s.store.Sessions.CallerKinds(s.ctx, "acme", "agent:a", "alice")
+
+	s.Require().NoError(err)
+	s.ElementsMatch([]string{"authenticated", "guest"}, kinds)
+}
+
+// A user id held a session as a guest when a guest's session of that customer's is under it, on
+// any conversation.
+func (s *StoreSuite) TestAUserIdHeldASessionAsAGuestOnlyWhenAGuestsSessionOfTheCustomersIsUnderIt() {
+	s.opened("session-alice", "acme", time.Now(), func(row *AgentSession) {
+		row.ConversationID, row.UserID, row.CallerKind = "agent:a", "alice", "guest"
+	})
+	s.opened("session-bob", "acme", time.Now(), func(row *AgentSession) {
+		row.ConversationID, row.UserID, row.CallerKind = "agent:a", "bob", "authenticated"
+	})
+	s.opened("session-carol", "globex", time.Now(), func(row *AgentSession) {
+		row.UserID, row.CallerKind = "carol", "guest"
+	})
+
+	for user, guest := range map[string]bool{"alice": true, "bob": false, "carol": false} {
+		held, err := s.store.Sessions.HeldAsGuest(s.ctx, "acme", user)
+		s.Require().NoError(err)
+		s.Equal(guest, held, user)
+	}
 }

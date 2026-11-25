@@ -98,6 +98,7 @@ TABLE agent_sessions
     opened_at timestamp with time zone
     pinned_at timestamp with time zone
     project text NOT NULL DEFAULT ''::text
+    project_tag text
     remembers boolean
     resume_history jsonb NOT NULL DEFAULT '{}'::jsonb
     return_url text

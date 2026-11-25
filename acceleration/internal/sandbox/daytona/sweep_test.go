@@ -210,7 +210,7 @@ func (s *SweepSuite) TearDownTest() {
 
 // live has the directory say the customer's session runs on this router.
 func (s *SweepSuite) live(session string) {
-	s.directory.Hold(s.ctx, s.customer, session, "", "")
+	s.directory.Hold(s.ctx, s.customer, 0, session, "", "")
 	s.keys = append(s.keys, "w15sweep:"+s.prefix+":session:"+session, "w15sweep:"+s.prefix+":session:"+s.customer+":"+session)
 }
 

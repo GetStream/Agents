@@ -3482,6 +3482,26 @@ export type paths = {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/v1/phone/hooks/twilio": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Receive a Twilio call
+         * @description Where Twilio asks what to do with a call to one of this router's Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number's own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.
+         */
+        readonly post: operations["receiveTwilioCall"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/v1/phone/hooks/twilio/events": {
         readonly parameters: {
             readonly query?: never;
@@ -7121,7 +7141,7 @@ export type components = {
             readonly navigating?: boolean;
             /** @description Server-side only: a device sending it is refused with a 403. */
             readonly phone?: components["schemas"]["SessionPhone"];
-            /** @description What the conversation belongs to. Also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins. */
+            /** @description What the conversation belongs to. Sent server-side it is also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in tags, or the agent config's, wins. A device's groups the session and is no cost tag. */
             readonly project_id?: string;
             /** @description How a conversation this session carries on is handed back to the model, over the agent config's and the app's and organization's policy, field by field: a field given here wins, one left out keeps the next level's. The session keeps what it was opened with, so reopening it after it ended reads the conversation the same way. Server-side only: a device sending it is refused with a 403, because what the model is sent is billed to the app. */
             readonly resume_history?: components["schemas"]["ResumeHistory"];
@@ -7348,6 +7368,13 @@ export type components = {
              * @description How many rows were written.
              */
             readonly rows: number;
+            /** @description The rows left out rather than written, by table and primary key, as connector_definitions:{"id":"custom_crm","revision":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set. */
+            readonly skipped?: readonly string[];
+            /**
+             * Format: int64
+             * @description How many more rows were left out than skipped names, which holds the first 100.
+             */
+            readonly skipped_more?: number;
             /** @description How many of them went into each table. */
             readonly tables?: {
                 readonly [key: string]: number;
@@ -7623,6 +7650,7 @@ export type components = {
             readonly messages?: boolean;
             /** @description Server-side only: a device sending it is refused with a 403. */
             readonly model_overwrites?: components["schemas"]["ModelOverwrites"];
+            /** @description What the fork belongs to. Omitted, the parent's is kept. Sent server-side it is also the "project" cost tag, as on createSession; a device's groups the fork, whose cost tag stays the project a backend named for its parent. A tag spelled out in a running parent's tags, or the agent config's, wins. */
             readonly project_id?: string;
             /** @description Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false. */
             readonly response_id?: string;
@@ -12443,7 +12471,7 @@ export interface operations {
     readonly getCallEvents: {
         readonly parameters: {
             readonly query?: {
-                /** @description How many to return, oldest first. */
+                /** @description How many to return, oldest first. Up to the 10000 a call keeps. */
                 readonly limit?: number;
             };
             readonly header?: never;
@@ -13535,7 +13563,7 @@ export interface operations {
                     readonly "text/plain": string;
                 };
             };
-            /** @description That is not this line's verify token */
+            /** @description The query is not this line's check: another mode or verify token, a challenge that is not digits, or a line that is not WhatsApp's */
             readonly 403: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -17110,7 +17138,7 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
-            /** @description A session with that id already exists, or the call placed for this phone session ended without an answer (call_unanswered) */
+            /** @description A session with that id already exists, another session holds the conversation it names open, or the call placed for this phone session ended without an answer (call_unanswered) */
             readonly 409: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -18243,6 +18271,7 @@ export interface operations {
     readonly listSimulationRuns: {
         readonly parameters: {
             readonly query?: {
+                /** @description Up to 500. Omitted is 50. */
                 readonly limit?: number;
                 readonly simulation_id?: string;
                 readonly state?: "running" | "passed" | "failed" | "cancelled" | "errored";
@@ -20250,6 +20279,55 @@ export interface operations {
                 content?: never;
             };
             /** @description The event is over 64 KiB */
+            readonly 413: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            readonly 500: components["responses"]["InternalError"];
+        };
+    };
+    readonly receiveTwilioCall: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description TwiML dialling the number's trunk, rejecting the call, or hanging up */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/xml": string;
+                };
+            };
+            /** @description The body is not a form */
+            readonly 400: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The call is not signed by Twilio */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Twilio calls are not configured */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The call is over 64 KiB */
             readonly 413: {
                 headers: {
                     readonly [name: string]: unknown;

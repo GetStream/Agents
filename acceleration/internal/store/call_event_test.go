@@ -2,7 +2,10 @@
 
 package store
 
-import "time"
+import (
+	"strconv"
+	"time"
+)
 
 // decision is one judgement made at, defaulting what a test does not care about.
 func decision(kind, reason string, at time.Time) CallEvent {
@@ -102,6 +105,22 @@ func (s *StoreSuite) TestALimitKeepsTheEarliestDecisions() {
 	s.Require().NoError(err)
 	s.Require().Len(read, 2)
 	s.Equal("second", read[1].Reason)
+}
+
+func (s *StoreSuite) TestAReadOfEveryDecisionACallKeepsHoldsTenThousand() {
+	now := time.Now()
+	events := make([]CallEvent, 10_005)
+	for i := range events {
+		events[i] = decision("wait", strconv.Itoa(i), now.Add(time.Duration(i-len(events))*time.Millisecond))
+	}
+	s.Require().NoError(s.store.CallEvents.InsertMany(s.ctx, events))
+
+	for _, limit := range []int{10_000, 1_000_000_000} {
+		read, err := s.store.CallEvents.Select(s.ctx, "acme", "call-1", now.Add(-time.Minute), nil, limit)
+		s.Require().NoError(err)
+		s.Require().Len(read, 10_000)
+		s.Equal("5", read[0].Reason)
+	}
 }
 
 func (s *StoreSuite) TestRecordingNoDecisionsIsNotAnError() {

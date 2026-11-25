@@ -78,7 +78,7 @@ func (s *BridgeSuite) TestAnAuthorUserIDKeepsToLettersDigitsUnderscoreAndHyphen(
 // A Linq chat is one person's when its event says is_group false, as the 2026-02-03 payload
 // writes it.
 func (s *BridgeSuite) TestALinqChatIsOnePersonsWhenItsEventSaysItIsNoGroup() {
-	s.True(linqOneToOne([]byte(`{"event_type":"message.received","data":{"chat":{"id":"c1","is_group":false,"owner_handle":{"handle":"+12025550100"}}}}`)))
+	s.True(LinqOneToOne([]byte(`{"event_type":"message.received","data":{"chat":{"id":"c1","is_group":false,"owner_handle":{"handle":"+12025550100"}}}}`)))
 }
 
 // Anything but an explicit false is a group's chat, whose tasks would reach everyone in it.
@@ -101,7 +101,7 @@ func (s *BridgeSuite) TestALinqChatIsAGroupsUnlessItsEventSaysOtherwise() {
 		// A decode that fails after it read is_group false says two things at once.
 		"a second chat after it": `{"data":{"chat":{"id":"c1","is_group":false},"chat":"c2"}}`,
 	} {
-		s.False(linqOneToOne([]byte(raw)), name)
+		s.False(LinqOneToOne([]byte(raw)), name)
 	}
 }
 

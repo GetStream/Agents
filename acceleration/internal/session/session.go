@@ -329,6 +329,9 @@ type Session struct {
 	// addedTools are the caller's tools added while the session ran (AddTools), which a
 	// watcher that named the tools it runs is asked to run as well. Guarded by labelMu.
 	addedTools map[string]bool
+	// declaredEver are the names of every tool the caller has declared, at open or since
+	// (AddTools), kept after one is removed: what it returned is still in the conversation.
+	declaredEver map[string]bool
 	// labelMu guards title and description, which are what naming last called the
 	// conversation, over the spec's own. It also guards the spec's fields a running session
 	// changes: its labels (Describe), connector selections (chose), models and voice
