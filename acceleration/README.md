@@ -2730,8 +2730,10 @@ rather than a property of the number, and it is declared missing rather than hal
 
 A Twilio number attached before the router answered its calls itself still has its old voice URL.
 `router phone move-twilio` points those numbers at `/v1/phone/hooks/twilio`, as an attach does now;
-attaching such a number again does the same for that one number. Run it with the router's own
-config: first with no flag, which only lists each number and what it would do; then with `--apply
+attaching such a number again does the same for that one number. Run it from the image the router
+runs (the same tag), with the router's own config: it opens the database as the router does, which
+migrates it unless a migrate DSN is set, so a newer image would migrate the shared database. Run
+it first with no flag, which only lists each number and what it would do; then with `--apply
 --one <e164>`, and call that number; then with `--apply` for the rest (`--app <id>` keeps one Stream
 app's). A number already on the webhook is left alone, and so is one whose trunk credentials were
 not kept (`no stored bridge`): it needs a detach and an attach. It refuses before it asks Twilio
