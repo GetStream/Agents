@@ -443,48 +443,6 @@ func (s *RecordedCreateSuite) managerOn(on *store.Store, conversations *persiste
 	return m
 }
 
-func (s *RecordedCreateSuite) TestAChatReopenedInAnotherShardIsListedByTheRowItRunsIn() {
-	here, there := s.twoShards()
-	chat := chattest.Client(s.T())
-	held := s.chatting(there, chat)
-	first, err := held.Create(s.ctx, Spec{CustomerID: s.customer, Text: true, PersistConversation: true,
-		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "employee-1"}})
-	s.Require().NoError(err)
-	s.Require().NoError(first.Close())
-	s.Require().NoError(held.records.Flush(s.ctx))
-	_, err = there.Sessions.Pin(s.ctx, s.customer, first.ID(), true, time.Now().UTC())
-	s.Require().NoError(err)
-
-	carrying := s.chatting(here, chat)
-	reopened, err := carrying.Create(s.ctx, Spec{ID: first.ID(), CustomerID: s.customer, Text: true, PersistConversation: true,
-		ConversationID: first.Spec().ConversationID, Reopened: first.CreatedAt(), LLMTarget: "en-low-latency",
-		Caller: routing.Caller{UserID: "employee-1"}})
-	s.Require().NoError(err)
-	s.T().Cleanup(func() { _ = reopened.Close() })
-	s.Require().NoError(carrying.records.Flush(s.ctx))
-
-	running, err := here.Sessions.Get(s.ctx, s.customer, first.ID())
-	s.Require().NoError(err)
-	s.NotNil(running.PinnedAt, "the row it runs in lost the pin it had before")
-	left, err := there.Sessions.Get(s.ctx, s.customer, first.ID())
-	s.Require().NoError(err)
-	s.Equal(store.SessionRunning, left.State, "read where it left, it is listed by its closed row there")
-}
-
-// twoShards are the stores of a router of each of two shards, over the suite's database.
-func (s *RecordedCreateSuite) twoShards() (here, there *store.Store) {
-	dsn := os.Getenv("ROUTER_POSTGRES_DSN")
-	a, b := testenv.Database(dsn, "recorded_shard_a"), testenv.Database(dsn, "recorded_shard_b")
-	open := func(own string) *store.Store {
-		router, err := store.OpenShards(store.Options{DSN: s.dsn, ShardDSN: own, Shards: map[string]string{"a": a, "b": b}})
-		s.Require().NoError(err)
-		s.T().Cleanup(func() { s.Require().NoError(router.Close()) })
-		s.Require().NoError(router.Migrate(s.ctx))
-		return router
-	}
-	return open(a), open(b)
-}
-
 // chatting is a session manager over on that keeps its conversations in chat.
 func (s *RecordedCreateSuite) chatting(on *store.Store, chat *getstream.Stream) *Manager {
 	conversations := persistent.NewForChat(chat)

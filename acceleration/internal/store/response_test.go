@@ -238,32 +238,6 @@ func (s *StoreSuite) TestMovingToAResponseTheSessionDoesNotHaveFails() {
 	s.ErrorIs(err, ErrUnknownResponse)
 }
 
-func (s *ShardedStoreSuite) TestMovingThePathMovesItInEveryShard() {
-	// first and second were answered here; the session was carried on in the other shard,
-	// where second was regenerated and answered on.
-	s.opened("one", "app", s.base, nil)
-	s.branchAnswered(s.store, "first", "", "", s.base)
-	s.branchAnswered(s.store, "second", "first", "", s.base.Add(time.Minute))
-	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", CreatedAt: s.base}))
-	s.Require().NoError(s.other.Responses.Rewind(s.ctx, "app", "one", "first", s.base.Add(2*time.Minute)))
-	s.branchAnswered(s.other, "second-again", "first", "second", s.base.Add(3*time.Minute))
-	s.branchAnswered(s.other, "third-again", "second-again", "", s.base.Add(4*time.Minute))
-	s.Require().Equal([]string{"first", "second-again", "third-again"}, s.conversation())
-
-	s.Require().NoError(s.store.Responses.MoveActivePathUntil(s.ctx, "app", "one", "second", s.base.Add(5*time.Minute), time.Time{}))
-	s.Equal([]string{"first", "second"}, s.conversation())
-
-	tail, err := s.other.Responses.BranchTail(s.ctx, "app", "one", "second-again")
-	s.Require().NoError(err)
-	s.Equal([]string{"second-again", "third-again"}, responseIDs(tail))
-	s.Require().NoError(s.other.Responses.MoveActivePathUntil(s.ctx, "app", "one", "third-again", s.base.Add(6*time.Minute), time.Time{}))
-	s.Equal([]string{"first", "second-again", "third-again"}, s.conversation())
-
-	questions, err := s.store.Responses.Siblings(s.ctx, "app", "one", "second-again", SiblingsOfReply)
-	s.Require().NoError(err)
-	s.Equal([]string{"second", "second-again"}, responseIDs(questions))
-}
-
 func (s *StoreSuite) TestResponseQueryBudgets() {
 	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
 	s.opened("conversed", "app", at, func(row *AgentSession) { row.ConversationID = "conversation" })
@@ -288,43 +262,43 @@ func (s *StoreSuite) TestResponseQueryBudgets() {
 		{"Finish", 2, 0, func() error {
 			return s.store.Responses.Finish(s.ctx, retry.CustomerID, retry.ID, ResponseCompleted, "", at.Add(time.Hour))
 		}},
-		{"Select", 0, 1, func() error {
+		{"Select", 1, 0, func() error {
 			listed, err := s.store.Responses.Select(s.ctx, "app", "conversed", ResponseFilter{Limit: 10})
 			s.Len(listed, 11)
 			return err
 		}},
 		{"Get", 1, 0, func() error { _, err := s.store.Responses.Get(s.ctx, "app", "conversed", retry.ID); return err }},
-		{"Exchanges", 0, 2, func() error { _, err := s.store.Responses.Exchanges(s.ctx, "app", "conversed", ""); return err }},
-		{"Replies", 0, 1, func() error {
+		{"Exchanges", 2, 0, func() error { _, err := s.store.Responses.Exchanges(s.ctx, "app", "conversed", ""); return err }},
+		{"Replies", 1, 0, func() error {
 			_, err := s.store.Responses.Replies(s.ctx, "app", "conversation", []string{"turn-1"})
 			return err
 		}},
-		{"Opening", 0, 1, func() error { _, err := s.store.Responses.Opening(s.ctx, "app", "conversation"); return err }},
-		{"Siblings", 1, 1, func() error {
+		{"Opening", 1, 0, func() error { _, err := s.store.Responses.Opening(s.ctx, "app", "conversation"); return err }},
+		{"Siblings", 2, 0, func() error {
 			_, err := s.store.Responses.Siblings(s.ctx, "app", "conversed", retry.ID, SiblingsOfReply)
 			return err
 		}},
-		{"QuestionsAt", 0, 1, func() error {
+		{"QuestionsAt", 1, 0, func() error {
 			_, err := s.store.Responses.QuestionsAt(s.ctx, "app", "conversed", "response-28")
 			return err
 		}},
-		{"BranchTail", 0, 1, func() error {
+		{"BranchTail", 1, 0, func() error {
 			_, err := s.store.Responses.BranchTail(s.ctx, "app", "conversed", "response-10")
 			return err
 		}},
-		{"ActiveChild", 0, 1, func() error {
+		{"ActiveChild", 1, 0, func() error {
 			_, _, err := s.store.Responses.ActiveChild(s.ctx, "app", "conversed", "response-28")
 			return err
 		}},
-		{"ActiveLeaf", 0, 1, func() error { _, err := s.store.Responses.ActiveLeaf(s.ctx, "app", "conversed"); return err }},
-		{"MoveActivePathUntil with no until", 0, 2, func() error {
+		{"ActiveLeaf", 1, 0, func() error { _, err := s.store.Responses.ActiveLeaf(s.ctx, "app", "conversed"); return err }},
+		{"MoveActivePathUntil with no until", 2, 0, func() error {
 			return s.store.Responses.MoveActivePathUntil(s.ctx, "app", "conversed", retry.ID, at.Add(2*time.Hour), time.Time{})
 		}},
-		{"MoveActivePathUntil", 0, 2, func() error {
+		{"MoveActivePathUntil", 2, 0, func() error {
 			return s.store.Responses.MoveActivePathUntil(s.ctx, "app", "conversed", "response-29",
 				at.Add(3*time.Hour), at.Add(4*time.Hour))
 		}},
-		{"Rewind", 1, 1, func() error {
+		{"Rewind", 2, 0, func() error {
 			return s.store.Responses.Rewind(s.ctx, "app", "conversed", "response-20", at.Add(5*time.Hour))
 		}},
 	})

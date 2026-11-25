@@ -449,12 +449,12 @@ func (s *StoreSuite) TestForgettingAUserKeepsTheChangesOfOtherTablesThatNameThem
 // forgottenUserColumns are the columns naming an end user that forgetting a user reaches: the
 // requests and call legs of every shard (Requests.RenameUser, CallLegs.RenameUser), the tasks
 // ForgetUserTasks deletes, the logs AgentLogs.DeleteUser deletes and the rows ForgetUserSettings
-// deletes or rewrites.
+// deletes or rewrites, the hourly spend and people the shards shipped among them.
 var forgottenUserColumns = []string{
 	"requests.user_id", "call_legs.user_id", "scheduled_tasks.user_id", "agent_logs.user_id",
 	"limits.user_id", "usage_resets.user_id", "limit_grants.user_id", "campaigns.user_id",
 	"user_phones.user_id", "user_phone_history.user_id", "contact_map.user_id", "channel_links.user_id",
-	"users.id", "users.claimed_by",
+	"users.id", "users.claimed_by", "shard_spend_hourly.user_id", "shard_people_hourly.user_id",
 }
 
 // keptUserColumns are the columns naming an end user that forgetting a user leaves as they are,
@@ -462,6 +462,8 @@ var forgottenUserColumns = []string{
 var keptUserColumns = map[string]string{
 	"agent_sessions.user_id": "the user's conversations, which the app deletes one by one (DELETE /v1/agents/sessions/{id}), " +
 		"their tasks with them and the changes recorded of those tasks and their runs emptied (DeleteForSession)",
+	"session_index.user_id": "the shared copy of agent_sessions.user_id, which a ship writes again while the session is kept, " +
+		"deleted with it (Sessions.Delete)",
 	"conversation_documents.owner_user_id": "the files read into one of the user's conversations, deleted with it (Sessions.Delete)",
 	"agent_branch_messages.author_id": "copies of messages a rewind hid, deleted with their session: those of the user's sessions " +
 		"by forget (BranchMessages.DeleteUser), one they wrote in another user's session with that session",

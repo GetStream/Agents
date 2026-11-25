@@ -427,7 +427,8 @@ func (r *Episodes) Cards(ctx context.Context, query CardsQuery) ([]EpisodeCard, 
 }
 
 // closeCardsWithSessions ends each card no later than its call's session closed. Sessions are
-// kept in the shards and episodes in the shared database, so they are read apart.
+// kept in the shards and episodes in the shared database, so they are read apart: this shard's,
+// and the other shards' from the copies they ship (session_index).
 func (r *Episodes) closeCardsWithSessions(ctx context.Context, customerID string, cards []EpisodeCard) error {
 	var ids []string
 	for _, card := range cards {
@@ -438,15 +439,12 @@ func (r *Episodes) closeCardsWithSessions(ctx context.Context, customerID string
 	if len(ids) == 0 {
 		return nil
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentSession, error) {
-		var closed []AgentSession
-		err := db.NewSelect().Model(&closed).Column("id", "closed_at").
-			Where("customer_id = ?", customerID).
-			Where("id IN (?)", bun.In(ids)).
-			Where("closed_at IS NOT NULL").
-			Scan(ctx)
-		return closed, err
-	})
+	lists, err := indexedLists(ctx, r.store, indexedSessions, customerID, func(query *bun.SelectQuery) *bun.SelectQuery {
+		return query.Column("id", "closed_at").
+			Where("?TableAlias.customer_id = ?", customerID).
+			Where("?TableAlias.id IN (?)", bun.In(ids)).
+			Where("?TableAlias.closed_at IS NOT NULL")
+	}, inRegion)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: episode cards: sessions: %w", err))
 	}

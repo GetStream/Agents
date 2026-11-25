@@ -110,6 +110,8 @@ class Session:
             else the one the session was opened with, else its agent config's tags: team. Absent for a session counted under
             none.
         pinned_at (datetime.datetime | Unset): When the session was pinned. Absent for one that is not pinned.
+        region (str | Unset): The shard the session is kept in, which answers for its logs. Set on a listed session of a
+            deployment with shards.
     """
 
     agent_id: str
@@ -153,6 +155,7 @@ class Session:
     voice: str | Unset = UNSET
     team: str | Unset = UNSET
     pinned_at: datetime.datetime | Unset = UNSET
+    region: str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -262,6 +265,8 @@ class Session:
         if not isinstance(self.pinned_at, Unset):
             pinned_at = self.pinned_at.isoformat()
 
+        region = self.region
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -342,6 +347,8 @@ class Session:
             field_dict["team"] = team
         if pinned_at is not UNSET:
             field_dict["pinned_at"] = pinned_at
+        if region is not UNSET:
+            field_dict["region"] = region
 
         return field_dict
 
@@ -496,6 +503,8 @@ class Session:
         else:
             pinned_at = datetime.datetime.fromisoformat(_pinned_at)
 
+        region = d.pop("region", UNSET)
+
         session = cls(
             agent_id=agent_id,
             call_id=call_id,
@@ -538,6 +547,7 @@ class Session:
             voice=voice,
             team=team,
             pinned_at=pinned_at,
+            region=region,
         )
 
         session.additional_properties = d

@@ -1067,13 +1067,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		created.closers = append(created.closers, func() {
 			m.records.Closed(spec.CustomerID, created.id, row.OpenedAt, time.Now().UTC(), created.kept())
 		})
-		if spec.Reopened.IsZero() {
-			m.records.Opened(row, toolRows(created), func() { m.idTaken(created) })
-		} else {
-			// A carry-on skips the check that the id is free, so another customer's row written
-			// on another shard meanwhile refuses it too.
-			m.records.CarriedOn(row, toolRows(created), func() { m.idTaken(created) })
-		}
+		m.records.Opened(row, toolRows(created), func() { m.idTaken(created) })
 		created.startRecording()
 	}
 
