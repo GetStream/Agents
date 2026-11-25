@@ -251,7 +251,7 @@ func (s *MeteredSuite) TestARunningSandboxIsStoppedOnceItsOrganizationRunsOutOfC
 
 func (s *MeteredSuite) TestARunningSandboxRunsOnWhileOtherWorkHoldsMoreThanItsOrganizationsCredit() {
 	money, server := s.money(), daytonatest.Start(s.T())
-	// Recorded through the enforcer, so the sandbox holds a lease of its own as it runs.
+	// Recorded through the enforcer, as the router records sandboxes.
 	sandboxes := NewSandboxes(SandboxesOptions{Recorder: money.Recorder(routing.Sandbox, s.prices), Gate: money.Enforcer,
 		Lifecycle: sandbox.Lifecycle{IdleStop: time.Minute}, APIKey: "key-1", APIURL: server.APIURL(), Every: 50 * time.Millisecond,
 		Logger: slog.New(slog.DiscardHandler)})

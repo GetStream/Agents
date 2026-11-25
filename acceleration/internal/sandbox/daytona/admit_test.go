@@ -384,6 +384,56 @@ func (s *LifecycleSuite) TestARefusedSandboxSomeoneElseDeletedIsForgottenAndNotS
 	s.Equal([]string{"sandbox-1", "sandbox-2"}, s.daytona.Created(), "another is made once its owner may pay")
 }
 
+func (s *LifecycleSuite) TestARefusedSandboxThatWasStoppingIsBilledAsStopped() {
+	stops := &failingStops{}
+	var refused atomic.Bool
+	box := s.refusable(&refused, func(o *Options) { o.HTTPClient = &http.Client{Transport: stops} })
+	s.run(box)
+	s.daytona.SetState("sandbox-1", "stopping")
+	stops.fail.Store(true)
+	refused.Store(true)
+
+	_, err := box.Run(s.ctx, "print(2)", nil)
+
+	s.Require().ErrorIs(err, unpaid)
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped"}, s.meter.all(),
+		"a stop whose wait ran out leaves it stopping, which bills as stopped")
+}
+
+func (s *LifecycleSuite) TestARefusedSandboxFoundDestroyedIsForgotten() {
+	stops := &failingStops{}
+	var refused atomic.Bool
+	box := s.refusable(&refused, func(o *Options) { o.HTTPClient = &http.Client{Transport: stops} })
+	s.run(box)
+	s.daytona.SetState("sandbox-1", daytonatest.Destroyed)
+	stops.fail.Store(true)
+	refused.Store(true)
+
+	_, err := box.Run(s.ctx, "print(2)", nil)
+
+	s.Require().ErrorIs(err, unpaid)
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "gone"}, s.meter.all())
+}
+
+func (s *LifecycleSuite) TestARunAdmittedAfterARefusalWhileCodeRanLeavesTheSandboxRunning() {
+	runs := newStallingRuns()
+	var refused atomic.Bool
+	box := s.refusable(&refused, func(o *Options) {
+		o.HTTPClient, o.RunTimeout, o.AdmitEvery = &http.Client{Transport: runs}, 30*time.Minute, 50*time.Millisecond
+	})
+	ran := s.running(box, runs)
+	refused.Store(true)
+	s.Require().ErrorIs(<-ran, unpaid)
+	refused.Store(false)
+	runs.stall.Store(false)
+
+	s.run(box)
+
+	held, _ := s.daytona.Sandbox("sandbox-1")
+	s.Equal(daytonatest.Started, held.State, "the refusal stopped it once, not after every run since")
+	s.Equal(1, s.stops("sandbox-1"))
+}
+
 func (s *LifecycleSuite) TestARunMadeAgainInANewSandboxIsWatchedToo() {
 	runs := newStallingRuns()
 	runs.in = "sandbox-2"
