@@ -140,7 +140,8 @@ func unchecked(err error) bool {
 }
 
 // Move has the lease hold a minute of the model that took the stream over, from the next
-// renewal, and nothing when it bills nothing. The refusals counted so far are kept.
+// renewal, and nothing when it bills nothing. The refusals counted so far
+// are kept, and forgotten when it bills nothing.
 func (l *Lease) Move(config ProviderConfig) {
 	if l == nil {
 		return
@@ -150,6 +151,9 @@ func (l *Lease) Move(config ProviderConfig) {
 	l.config = config
 	if l.recorder.QuoteStat(config, l.stat()).CostMicros <= 0 {
 		l.recorder.Release(l.id)
+		l.mu.Lock()
+		l.refused, l.refusal, l.refusals, l.refusedSince = nil, nil, 0, time.Time{}
+		l.mu.Unlock()
 	}
 }
 

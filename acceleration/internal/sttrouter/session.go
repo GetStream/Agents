@@ -45,8 +45,10 @@ type Session struct {
 	call context.Context
 
 	events chan stt.Event
-	// failed is set once the provider reports a fatal error, or the session's money ran out
-	// (unpaid). The caller has been told, and
+	// spent is set once the session's money ran out (unpaid), for good: a failover clears failed.
+	spent atomic.Bool
+	// failed is set once the provider reports a fatal error, or the session's money ran out. The
+	// caller has been told, and
 	// the provider hears nothing more, so later audio is dropped rather than failing once
 	// per frame.
 	failed atomic.Bool
@@ -116,7 +118,7 @@ func newSession(
 // ProcessAudio streams audio to the selected provider, and drops it once the provider has
 // failed for good. Once the session's money runs out it answers why, once, and ends it.
 func (s *Session) ProcessAudio(pcm stt.PcmData, participant stt.Participant) error {
-	if s.failed.Load() {
+	if s.failed.Load() || s.spent.Load() {
 		return nil
 	}
 	s.mu.Lock()
@@ -150,9 +152,10 @@ func (s *Session) unpaid(lease *routing.Lease) error {
 	if err == nil || refusals < maxRefusals && !errors.Is(err, policy.ErrSuspended) {
 		return nil
 	}
-	if !s.failed.CompareAndSwap(false, true) {
+	if !s.spent.CompareAndSwap(false, true) {
 		return nil
 	}
+	s.failed.Store(true)
 	// Off the caller's goroutine, since closing may wait on the vendor for the last words.
 	goroutine.Go(s.call, func() { _ = s.Close() })
 	return stack.Wrap(err)

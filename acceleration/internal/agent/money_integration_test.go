@@ -101,10 +101,37 @@ func (s *AgentMoneySuite) TestACallWhoseMoneyCannotBeCheckedGoesOn() {
 	s.agents.eventually(func() bool { return errors.Is(s.money.Spend(s.T(), s.owner), policy.ErrSpendCheckUnavailable) }, "holds go unshared")
 	s.agents.speak(stt.Participant{ID: "bob"})
 	s.agents.eventually(func() bool { return len(s.failures("stt")) == 1 }, "bob's transcriber is refused until it can be checked")
+	s.False(refusedMoney(s.failures("stt")[0]), "the money did not run out")
 	s.agents.speak(caller)
 
 	s.agents.eventually(func() bool { return len(s.agents.ears.transcribed()) == 2 }, "the caller is still heard")
 	s.Zero(countOf[Left](s.agents.reported()), "the call goes on")
+}
+
+func (s *AgentMoneySuite) TestACallEndsOnceNobodyOnItCanBeHeard() {
+	s.hearsPriced(func() {})
+	s.agents.join(true)
+	alice, bob := stt.Participant{ID: "alice"}, stt.Participant{ID: "bob"}
+	s.agents.speak(alice)
+	s.agents.eventually(func() bool { return len(s.agents.ears.transcribed()) == 1 }, "alice was not heard")
+	s.spend(20_000_000)
+	refused := time.Now()
+	s.agents.setClock(refused)
+	s.agents.speak(bob)
+	s.agents.eventually(func() bool { return len(s.failures("stt")) == 1 }, "bob was not refused a transcriber")
+
+	s.agents.setClock(refused.Add(31 * time.Second))
+	s.agents.speak(bob)
+	s.agents.speak(alice)
+	s.agents.eventually(func() bool { return len(s.agents.ears.transcribed()) == 2 }, "alice is no longer heard")
+	s.Zero(countOf[Left](s.agents.reported()), "the call goes on while alice is heard")
+
+	s.agents.edge.attending <- Attendance{Participant: alice}
+	s.agents.eventually(func() bool { return countOf[ParticipantLeft](s.agents.reported()) == 1 }, "alice did not leave")
+	s.agents.setClock(refused.Add(33 * time.Second))
+	s.agents.speak(bob)
+	s.agents.eventually(func() bool { return countOf[Left](s.agents.reported()) == 1 }, "nobody can be heard, and the call went on")
+	s.Len(s.failures("stt"), 1)
 }
 
 func (s *AgentMoneySuite) TestAReplyRefusedMoreCreditSaysWhatItWasSentAndEnds() {

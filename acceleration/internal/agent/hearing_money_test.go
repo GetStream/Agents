@@ -114,8 +114,7 @@ func (s *AgentSuite) TestACallGoesOnWhenATranscriberRefusedMoneyIsGrantedOneSoon
 			s.talks(1)
 			s.EqualValues(1, s.opened.Load(), "heard within a second of the grant")
 			s.opened.Store(0)
-			s.ears = newStubSTT()
-			s.dropsListener()
+			s.vendorCuts()
 		}
 		s.Len(s.hearingFailures(), 3, "one for each run of refusals")
 		s.False(s.callEnded())
@@ -143,11 +142,10 @@ func (s *AgentSuite) TestARunOfRefusalsIsOverOnceATranscriberIsGranted() {
 		s.talks(1)
 		gate.Refuse(policy.ErrNoCredits)
 		s.talks(40)
-		s.dropsListener()
+		s.vendorCuts()
 		gate.Refuse(nil)
-		s.ears = newStubSTT()
 		s.talks(40)
-		s.dropsListener()
+		s.vendorCuts()
 		gate.Refuse(policy.ErrNoCredits)
 		s.talks(20)
 
@@ -162,7 +160,7 @@ func (s *AgentSuite) TestARunOfRefusalsIsCountedFromItsFirst() {
 		// Nobody speaks through three refusals, and the vendor cuts it.
 		time.Sleep(90 * time.Second)
 		synctest.Wait()
-		s.dropsListener()
+		s.vendorCuts()
 
 		s.talks(1)
 
@@ -170,13 +168,22 @@ func (s *AgentSuite) TestARunOfRefusalsIsCountedFromItsFirst() {
 	})
 }
 
-// dropsListener ends alice's transcriber, as a vendor that cuts it does.
-func (s *AgentSuite) dropsListener() {
-	s.agent.mu.Lock()
-	listener := s.agent.listeners["alice"]
-	s.agent.mu.Unlock()
-	s.Require().NotNil(listener)
-	s.agent.dropListener("alice", listener)
+// vendorCuts has the vendor cut the transcriber of everyone heard, and the next one opened be a
+// new one.
+func (s *AgentSuite) vendorCuts() {
+	cut := s.ears
+	s.ears = newStubSTT()
+	cut.emitter.Send(stt.Disconnected{Provider: "stub", Model: "stub-stt", Reason: "idle"})
+	synctest.Wait()
+}
+
+func (s *AgentSuite) leavesCall(id string) {
+	s.edge.attending <- Attendance{Participant: stt.Participant{ID: id}}
+	synctest.Wait()
+}
+
+func (s *AgentSuite) joinsCall(id string) {
+	s.edge.attending <- Attendance{Participant: stt.Participant{ID: id}, Joined: true}
 	synctest.Wait()
 }
 
@@ -212,7 +219,7 @@ func (s *AgentSuite) TestATranscriberOpenedAgainGoesOnFromTheRefusalsOfTheLast()
 		gate.Refuse(policy.ErrNoCredits)
 		// Its lease is refused at 30 s, and the vendor cuts it at 50 s.
 		s.talks(49)
-		s.dropsListener()
+		s.vendorCuts()
 		s.talks(9)
 		s.False(s.callEnded())
 
@@ -237,16 +244,108 @@ func (s *AgentSuite) TestAParticipantWhoLeftStartsTheCountAgain() {
 	s.hearsOn(func(gate *gatetest.Answers) {
 		s.talks(1)
 		gate.Refuse(policy.ErrNoCredits)
-		s.talks(49)
-		s.dropsListener()
-		s.edge.attending <- Attendance{Participant: stt.Participant{ID: "alice"}}
-		synctest.Wait()
-		s.edge.attending <- Attendance{Participant: stt.Participant{ID: "alice"}, Joined: true}
-		synctest.Wait()
+		// Refused once on its lease.
+		s.talks(40)
+		s.leavesCall("alice")
+		s.joinsCall("alice")
 
 		s.talks(29)
 
+		s.Len(s.hearingFailures(), 1)
 		s.False(s.callEnded())
+	})
+}
+
+func (s *AgentSuite) TestAParticipantRefusedOnceBeforeALongAbsenceAndOnceAfterIsNotRefusedTwiceInARow() {
+	s.hearsOn(func(gate *gatetest.Answers) {
+		s.talks(1)
+		gate.Refuse(policy.ErrNoCredits)
+		s.talks(40)
+		s.leavesCall("alice")
+		gate.Refuse(nil)
+		time.Sleep(10 * time.Minute)
+		s.joinsCall("alice")
+		gate.Refuse(policy.ErrNoCredits)
+
+		s.talks(1)
+
+		s.Len(s.hearingFailures(), 1)
+		s.False(s.callEnded())
+	})
+}
+
+func (s *AgentSuite) TestAParticipantRefusedATranscriberBeforeTheyLeftAndOnceAfterIsNotRefusedTwiceInARow() {
+	for _, absence := range []time.Duration{40 * time.Second, 10 * time.Minute} {
+		s.hearsOn(func(gate *gatetest.Answers) {
+			gate.Refuse(policy.ErrNoCredits)
+			s.talks(2)
+			s.leavesCall("alice")
+			gate.Refuse(nil)
+			time.Sleep(absence)
+			s.joinsCall("alice")
+			gate.Refuse(policy.ErrNoCredits)
+
+			s.talks(1)
+
+			s.Len(s.hearingFailures(), 2, "each run is reported")
+			s.False(s.callEnded())
+		})
+	}
+}
+
+func (s *AgentSuite) TestRefusalsMinutesApartAreNotARow() {
+	s.hearsOn(func(gate *gatetest.Answers) {
+		gate.Refuse(policy.ErrNoCredits)
+		s.talks(1)
+		time.Sleep(10 * time.Minute)
+		s.talks(1)
+
+		s.Len(s.hearingFailures(), 2)
+		s.False(s.callEnded())
+
+		s.talks(29)
+		s.False(s.callEnded())
+		s.talks(1)
+		s.True(s.callEnded(), "a row of its own, 30 s long")
+	})
+}
+
+func (s *AgentSuite) TestRefusalsWithinTwoRenewalsAreARow() {
+	s.hearsOn(func(gate *gatetest.Answers) {
+		gate.Refuse(policy.ErrNoCredits)
+		s.talks(1)
+		time.Sleep(59 * time.Second)
+		s.talks(1)
+
+		s.True(s.callEnded())
+	})
+}
+
+func (s *AgentSuite) TestAWriteThatFailsDoesNotEndACall() {
+	s.hearsOn(func(gate *gatetest.Answers) {
+		s.ears.mu.Lock()
+		s.ears.writeErr = errors.New("the write failed")
+		s.ears.mu.Unlock()
+		s.talks(3)
+
+		s.Len(s.hearingFailures(), 3)
+		s.False(s.callEnded())
+	})
+}
+
+func (s *AgentSuite) TestACallGoesOnWhileAnotherParticipantIsHeard() {
+	s.hearsOn(func(gate *gatetest.Answers) {
+		s.talks(5)
+		gate.Refuse(policy.ErrSuspended)
+		s.speak(stt.Participant{ID: "bob"})
+		synctest.Wait()
+
+		s.Len(s.hearingFailures(), 1, "bob is refused a transcriber")
+		s.False(s.callEnded(), "alice is heard")
+
+		// Her lease is refused at 30 s, and it ends her transcription and the call.
+		s.talks(27)
+		s.True(s.callEnded())
 	})
 }
 

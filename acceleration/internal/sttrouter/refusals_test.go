@@ -81,6 +81,9 @@ func (s *RefusalsSuite) goesOn(session *Session) {
 func (s *RefusalsSuite) ends(session *Session, refusal error) {
 	s.Require().ErrorIs(session.ProcessAudio(speech(20), stt.Participant{}), refusal)
 	s.NoError(session.ProcessAudio(speech(20), stt.Participant{}), "why is said once")
+	// As a model that takes over as it ends does.
+	session.failed.Store(false)
+	s.NoError(session.ProcessAudio(speech(20), stt.Participant{}), "and not again after a failover")
 	synctest.Wait()
 	_, open := <-session.Events()
 	s.False(open, "its events end")
@@ -158,6 +161,36 @@ func (s *RefusalsSuite) takesOver(session *Session, model routing.ProviderConfig
 	synctest.Wait()
 }
 
+func (s *RefusalsSuite) TestASuspensionThatEndedEndsNothing() {
+	s.asked(paidModel, nil, func(gate *gatetest.Answers, session *Session) {
+		s.renewals(gate, policy.ErrSuspended, nil)
+		s.goesOn(session)
+	})
+}
+
+func (s *RefusalsSuite) TestASuspensionIsNotForgottenForMoneyThatCouldNotBeChecked() {
+	s.asked(paidModel, nil, func(gate *gatetest.Answers, session *Session) {
+		s.renewals(gate, policy.ErrSuspended, gatetest.Unchecked{})
+		s.ends(session, policy.ErrSuspended)
+	})
+}
+
+func (s *RefusalsSuite) TestAModelThatBillsNothingTakingOverForgetsTheRefusals() {
+	for _, model := range []routing.ProviderConfig{freeModel, ownKeyModel} {
+		s.asked(paidModel, nil, func(gate *gatetest.Answers, session *Session) {
+			s.renewals(gate, policy.ErrNoCredits, policy.ErrNoCredits)
+			s.takesOver(session, model)
+			s.goesOn(session)
+			s.True(session.RefusedSince().IsZero())
+			s.NoError(session.lease.Err())
+			s.renewals(gate, policy.ErrNoCredits)
+			s.takesOver(session, paidModel)
+			s.renewals(gate, policy.ErrNoCredits)
+			s.goesOn(session)
+		})
+	}
+}
+
 func (s *RefusalsSuite) TestTheNextModelKeepsTheCount() {
 	s.asked(paidModel, nil, func(gate *gatetest.Answers, session *Session) {
 		s.renewals(gate, policy.ErrNoCredits)
@@ -172,6 +205,7 @@ func (s *RefusalsSuite) TestTheNextModelsMinuteIsHeldAtItsPrice() {
 	s.asked(paidModel, nil, func(gate *gatetest.Answers, session *Session) {
 		s.EqualValues(16_667, gate.Held())
 		s.takesOver(session, otherModel)
+		s.EqualValues(16_667, gate.Held(), "what was held is kept until then")
 		s.renewals(gate, nil)
 		s.EqualValues(33_333, gate.Held())
 	})

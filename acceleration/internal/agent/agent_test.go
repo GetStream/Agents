@@ -187,8 +187,10 @@ func (e *loopbackEdge) heard() []audio.PcmData {
 type stubSTT struct {
 	emitter *stt.Emitter
 
-	mu    sync.Mutex
-	heard []audio.PcmData
+	mu sync.Mutex
+	// writeErr, if set, is what every write of audio fails with.
+	writeErr error
+	heard    []audio.PcmData
 	// terms is the last vocabulary it was retuned to.
 	terms []string
 	// holdClose, if set, is waited on by Close, as a provider that flushes a final transcript
@@ -229,6 +231,9 @@ func (s *stubSTT) Start(ctx context.Context) error {
 func (s *stubSTT) ProcessAudio(pcm stt.PcmData, participant stt.Participant) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.writeErr != nil {
+		return s.writeErr
+	}
 	s.heard = append(s.heard, pcm)
 	return nil
 }
