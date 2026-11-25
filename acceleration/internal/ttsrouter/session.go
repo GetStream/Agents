@@ -139,8 +139,8 @@ func newSession(
 // text is.
 //
 // A voice named for one utterance must be the session's: the one it was opened with, as asked
-// or as the provider was handed it once resolved and checked as this customer's. The provider
-// is then asked for no voice of its own, so it speaks the one it was given. Any other voice
+// or as the provider was handed it once resolved and checked as this customer's. The text then
+// goes to the provider with no voice, so it speaks the one it was built with. Any other voice
 // was never resolved nor checked, so it is refused and nothing is sent.
 func (s *Session) Synthesize(request tts.Request) error {
 	if request.Voice != "" {
