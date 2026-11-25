@@ -122,6 +122,10 @@ const (
 	invalidKeyStatus    = "invalid_key"
 )
 
+// spendLimitStatus is the label of a 429 that says the account is past its spend cap, which
+// is no rate limit: the key stays refused until the cap is raised or resets.
+const spendLimitStatus = "spend_limit"
+
 // outOfFundsStatus is the label of a refusal in a frame for the lack of money, the one the
 // same refusal gets at the handshake as an HTTP 402.
 var outOfFundsStatus = strconv.Itoa(http.StatusPaymentRequired)
@@ -480,7 +484,7 @@ func (p *Pool) sendTimes(ctx context.Context, attempts int, send func(key string
 		p.observe(key, response)
 		rest, refused := p.refused(response)
 		if refused || rejectsKey(response) {
-			p.countRefused(strconv.Itoa(response.StatusCode))
+			p.countRefused(refusalStatus(response))
 		}
 		if !refused {
 			return response, nil
@@ -629,7 +633,7 @@ func (p *Pool) Dial(
 		}
 		rest, refused := p.refused(response)
 		if refused || rejectsKey(response) {
-			p.countRefused(strconv.Itoa(response.StatusCode))
+			p.countRefused(refusalStatus(response))
 		}
 		if !refused {
 			return conn, response, key, err
