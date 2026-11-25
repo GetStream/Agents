@@ -1112,7 +1112,7 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 		}
 		fields = append(fields, failure.closed.fields()...)
 		if failure.err != nil {
-			fields = append(fields, "error", failure.err.Error())
+			fields = append(fields, "error", core.LoggedError(failure.err))
 		}
 		if failure.trace != "" {
 			fields = append(fields, "stack", failure.trace)

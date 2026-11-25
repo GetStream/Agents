@@ -3,6 +3,7 @@
 package resolver_test
 
 import (
+	"errors"
 	"io/fs"
 	"strings"
 	"testing/fstest"
@@ -60,6 +61,23 @@ func (s *ResolverSuite) TestASalesforceTokenEndpointThatIsDownAfterExpiryKeepsTh
 	stored := s.f.stored(ref)
 	s.Equal(store.ConnectionConnected, stored.Status)
 	s.Equal(temporarilyUnavailable, stored.LastError)
+}
+
+func (s *ResolverSuite) TestARenewalWhoseEndpointIsRefusedTellsItsCallerOneSentenceAndLogsWhy() {
+	s.f.srv.Use(fakeprovider.ClientCredentials, fakeprovider.IdentityURL)
+	for _, ref := range []core.ConnectionRef{s.salesforceConnection(), s.f.connected()} {
+		s.f.due()
+		reason := errors.New("the test's reason for " + ref.ConnectionID)
+		s.f.endpointRefused = reason
+
+		_, err := s.f.router(s.f.srv.Client()).Resolve(s.f.ctx, ref, core.CredentialRequest{})
+
+		s.f.endpointRefused = nil
+		s.Require().ErrorContains(err, "is not an https URL of a public host that resolves")
+		s.ErrorIs(err, reason)
+		s.NotContains(err.Error(), "the test's reason")
+		s.Contains(s.f.logs.String(), "is not an https URL of a public host that resolves: the test's reason for "+ref.ConnectionID)
+	}
 }
 
 // The follow-up to AI-846: after the client a grant was issued to is removed, the next
