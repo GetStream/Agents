@@ -327,12 +327,32 @@ func (s *ResumeSuite) TestAResumeSendsStreamTheSDPAnOlderBuildStoredRebuilt() {
 	s.Equal(string(want), string(invites[0].Body()))
 }
 
-func (s *ResumeSuite) TestAResumeWithAStoredStreamSDPItCannotRebuildSendsNothing() {
+func (s *ResumeSuite) TestAResumeWithAStoredStreamSDPItCannotRebuildEndsBothDialogs() {
 	s.state.Stream.LastSDP = []byte("v=0 to stream\r\n")
 
-	_, err := Resume(s.T().Context(), s.cfg, s.state)
+	call, err := Resume(s.T().Context(), s.cfg, s.state)
 
+	s.Nil(call)
 	s.ErrorContains(err, "stream leg sdp")
+	s.requireBothByed()
 	s.Empty(s.customer.requests(sip.INVITE, customerCallID))
 	s.Empty(s.stream.requests(sip.INVITE, streamCallID))
+}
+
+func (s *ResumeSuite) TestAResumeWhoseCustomerTrunkTheGuardRefusesEndsBothDialogs() {
+	s.cfg.CustomerTrunk.Host = "10.1.2.3"
+
+	call, err := Resume(s.T().Context(), s.cfg, s.state)
+
+	s.Nil(call)
+	s.ErrorContains(err, "customer trunk")
+	s.requireBothByed()
+	s.Empty(s.customer.requests(sip.INVITE, customerCallID))
+	s.Empty(s.stream.requests(sip.INVITE, streamCallID))
+}
+
+func (s *ResumeSuite) requireBothByed() {
+	s.Eventually(func() bool {
+		return len(s.customer.requests(sip.BYE, customerCallID)) == 1 && len(s.stream.requests(sip.BYE, streamCallID)) == 1
+	}, 2*time.Second, 10*time.Millisecond)
 }
