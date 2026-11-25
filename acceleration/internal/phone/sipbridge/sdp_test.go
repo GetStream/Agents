@@ -279,6 +279,23 @@ func TestToStreamRefusesWhatItCannotRebuild(t *testing.T) {
 	}
 }
 
+func TestToStreamKeepsTheCustomersPacketTime(t *testing.T) {
+	for name, tc := range map[string]struct{ attrs, want string }{
+		"none":            {attrs: "", want: "a=ptime:20\r\na=sendrecv\r\n"},
+		"ptime":           {attrs: "a=ptime:30\r\n", want: "a=ptime:30\r\na=sendrecv\r\n"},
+		"maxptime":        {attrs: "a=maxptime:40\r\n", want: "a=ptime:20\r\na=maxptime:40\r\na=sendrecv\r\n"},
+		"both":            {attrs: "a=maxptime:60\r\na=ptime:30\r\n", want: "a=ptime:30\r\na=maxptime:60\r\na=sendrecv\r\n"},
+		"not a number":    {attrs: "a=ptime:x30\r\na=maxptime:40 ms\r\n", want: "a=ptime:20\r\na=sendrecv\r\n"},
+		"on another line": {attrs: "m=video 30002 RTP/AVP 96\r\na=ptime:30\r\n", want: "a=ptime:20\r\na=sendrecv\r\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := toStream(offerAt("c=IN IP4 1.1.1.1\r\n", "m=audio 30000 RTP/AVP 0\r\n"+tc.attrs), testTrunkAddr)
+			require.NoError(t, err)
+			require.True(t, strings.HasSuffix(string(got), "\r\n"+tc.want), string(got))
+		})
+	}
+}
+
 func TestToStreamReadsTheAudioCodecsFromTheAudioLineOnly(t *testing.T) {
 	// The video line comes first and names payload type 96 for another codec.
 	media := "m=video 30002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n" +

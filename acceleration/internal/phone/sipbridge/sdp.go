@@ -85,6 +85,9 @@ type Media struct {
 	Port      int
 	Codecs    []Codec
 	Direction string
+	// Ptime and MaxPtime are the a=ptime and a=maxptime buildSDP writes, in milliseconds: a ptime of 20
+	// and no maxptime when zero. Only toStream sets them, from the customer's audio line.
+	Ptime, MaxPtime int
 }
 
 func (m Media) audioCodec() (Codec, bool) {
@@ -223,7 +226,14 @@ func buildSDP(m Media, sessionID, version uint64) []byte {
 			fmt.Fprintf(&b, "a=fmtp:%d 0-16\r\n", codec.PayloadType)
 		}
 	}
-	b.WriteString("a=ptime:20\r\n")
+	ptime := 20
+	if m.Ptime > 0 {
+		ptime = m.Ptime
+	}
+	fmt.Fprintf(&b, "a=ptime:%d\r\n", ptime)
+	if m.MaxPtime > 0 {
+		fmt.Fprintf(&b, "a=maxptime:%d\r\n", m.MaxPtime)
+	}
 	fmt.Fprintf(&b, "a=%s\r\n", m.Direction)
 	return []byte(b.String())
 }
@@ -302,10 +312,12 @@ func rejectAnswer(offer Media) Media {
 // dropped. The o= line keeps the customer's session id and version, as the body passed on unchanged did,
 // so a re-INVITE that changes nothing still says so (RFC 3264 §8).
 func toStream(body []byte, trunk netip.Addr) ([]byte, error) {
-	m, sd, _, err := parseAudio(body)
+	m, sd, at, err := parseAudio(body)
 	if err != nil {
 		return nil, err
 	}
+	m.Ptime = millis(sd.MediaDescriptions[at], "ptime")
+	m.MaxPtime = millis(sd.MediaDescriptions[at], "maxptime")
 	m.Codecs = slices.DeleteFunc(m.Codecs, func(c Codec) bool {
 		_, ok := staticCodecs[c.Name]
 		return !ok && c.Name != dtmfCodec.Name
@@ -314,6 +326,20 @@ func toStream(body []byte, trunk netip.Addr) ([]byte, error) {
 		return nil, stack.Wrap(errors.New("the customer's sdp has no codec Stream accepts"))
 	}
 	return buildSDP(reachable(m, trunk), sd.Origin.SessionID, sd.Origin.SessionVersion), nil
+}
+
+// millis reads the attribute key of md as a whole number of milliseconds, 0 when it is missing or
+// is not one.
+func millis(md *sdp.MediaDescription, key string) int {
+	v, ok := md.Attribute(key)
+	if !ok {
+		return 0
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(v), 10, 16)
+	if err != nil {
+		return 0
+	}
+	return int(n)
 }
 
 // reachable returns m with an address Stream may send RTP to. A trunk behind NAT often names its
