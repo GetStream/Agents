@@ -405,8 +405,7 @@ func (s *Service) process(ctx context.Context, task *asynq.Task) error {
 	return nil
 }
 
-// waiting is the document, with errOvertaken when it no longer waits for the payload's file,
-// and zero when it is gone.
+// waiting is the document, with errOvertaken when it no longer waits for the payload's file.
 func (s *Service) waiting(ctx context.Context, payload readPayload) (store.KnowledgeDocument, error) {
 	document, err := s.store.KnowledgeDocuments.Get(ctx, payload.CustomerID, payload.ID)
 	if errors.Is(err, store.ErrNoKnowledgeDocument) {
@@ -517,7 +516,7 @@ func (s *Service) overtaken(
 	if err == nil {
 		return errOvertaken
 	}
-	gone := now.ID == "" || now.BeingRemoved() || errors.Is(err, store.ErrNoKnowledgeDocument)
+	gone := now.BeingRemoved() || errors.Is(err, store.ErrNoKnowledgeDocument)
 	if !gone {
 		return err
 	}
