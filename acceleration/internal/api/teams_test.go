@@ -145,6 +145,7 @@ func (s *AgentTeamsSuite) TestAUserAddedToATeamRightAfterARefusalIsLetInOnTheNex
 // Stream one more read of their teams each teamsRecheck, not one a message.
 func (s *AgentTeamsSuite) TestAUserRefusedOverAndOverAsksStreamOnceEachTeamsRecheck() {
 	anya, opened := s.runningChatAnyaLeft()
+	s.teamsStill(s.router)
 	asked := s.teamReads()
 	writes := func() {
 		for range 5 {
@@ -160,10 +161,12 @@ func (s *AgentTeamsSuite) TestAUserRefusedOverAndOverAsksStreamOnceEachTeamsRech
 }
 
 // While Stream cannot be asked again, the held teams' refusal stands rather than turning into
-// a 503, and each refusal does not try Stream again.
+// a 503, or into the no teams a failed read told, and each refusal does not try Stream again. A
+// config of no team is the one no teams would open.
 func (s *AgentTeamsSuite) TestARefusalOfHeldTeamsStandsWhileStreamCannotBeAskedAgain() {
 	anya := s.inTeams("blue")
-	config := s.configOf("red")
+	config := s.configOf("")
+	s.teamsStill(s.router)
 	s.Require().Equal(http.StatusNotFound, anya.do(http.MethodPost, "/v1/agents/sessions", s.naming(config), nil))
 	s.teamsChat.Fail(http.MethodGet, "/users")
 	s.T().Cleanup(func() { s.teamsChat.Heal(http.MethodGet, "/users") })
@@ -175,6 +178,16 @@ func (s *AgentTeamsSuite) TestARefusalOfHeldTeamsStandsWhileStreamCannotBeAskedA
 		s.Equal(errUnknownConfig.Message, message)
 	}
 	s.Equal(asked+1, s.teamReads(), "a failed read counts as the one ask of teamsRecheck")
+}
+
+// A gate whose held teams are gone by the time Stream would be asked again keeps its refusal: no
+// teams to go by is not a user in no team, whom a config of no team would let in.
+func (s *AgentTeamsSuite) TestARefusalWhoseHeldTeamsAreGoneStands() {
+	gate := teamsGate{checked: true, teams: []string{"blue"}, again: func(context.Context) ([]string, bool) {
+		return nil, false
+	}}
+
+	s.True(gate.refuses(s.T().Context(), store.AgentConfig{}))
 }
 
 // Refusals of one user's held teams made while Stream is asked again wait for that one read and
@@ -1060,6 +1073,21 @@ func (s *AgentTeamsSuite) running(id string) {
 // long has passed: what a test changed of a user's teams in Stream is read from then on.
 func (s *RouterSuite) teamsLapse(node *Server) {
 	s.teamsAge(node, teamsFor)
+}
+
+// teamsStill stops the clock node tells its held teams' age by, until the test ends, so that
+// what a test asks runs within one teamsRecheck however slowly it runs. teamsAge still moves it.
+func (s *RouterSuite) teamsStill(node *Server) {
+	held := node.teams
+	held.mu.Lock()
+	defer held.mu.Unlock()
+	clock, still := held.now, held.now()
+	held.now = func() time.Time { return still }
+	s.T().Cleanup(func() {
+		held.mu.Lock()
+		defer held.mu.Unlock()
+		held.now = clock
+	})
 }
 
 // teamsAge has node take every user's teams it holds, and every time it asked Stream again, as
