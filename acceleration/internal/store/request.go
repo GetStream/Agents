@@ -162,10 +162,6 @@ type InputParts struct {
 	VideoTokens          int64 `bun:"video_tokens,notnull"`
 }
 
-// ErrRequestLogsMissing is InsertMany writing its rows and failing to write the agent log
-// rows of some of them: the usage is recorded, and a timeline has a gap.
-var ErrRequestLogsMissing = errors.New("store: request log rows missing")
-
 // ErrorCancelled is the error code of a request its caller gave up on, whether before the
 // provider answered or by closing the stream it had opened. It is not a success, but it is no
 // failure either, so the rollups count it as a request and for what it cost and leave it out
@@ -290,9 +286,8 @@ type Requests struct {
 // database, and returns the usage ids it wrote. A row whose usage id is already there is
 // skipped, so writing a batch again after a failure whose commit did land writes nothing twice.
 // A row InsertMany wrote has its ID set, and one with an agent a provider_request agent log
-// row. With one database each row it wrote counts toward the grants it names, and is logged,
-// in the same transaction (addGrantUses); with shards the grants are the caller's to count,
-// apart, and the log rows are written to the shared database after the commit.
+// row, in the same transaction. With one database each row it wrote also counts toward the
+// grants it names in it (addGrantUses); with shards the grants are the caller's to count, apart.
 func (r *Requests) InsertMany(ctx context.Context, requests []Request) ([]uuid.UUID, error) {
 	for i := range requests {
 		if err := prepareRequest(&requests[i]); err != nil {
@@ -317,15 +312,16 @@ func (r *Requests) InsertMany(ctx context.Context, requests []Request) ([]uuid.U
 			On("CONFLICT (usage_id) DO NOTHING").
 			Returning("id, usage_id").
 			Exec(ctx, &written)
-		if err != nil || sharded {
+		if err != nil {
 			return err
 		}
-		// One database: the rows count toward their grants, and are logged, in the transaction
-		// that writes them.
-		if _, err := addGrantUses(ctx, tx, GrantUsesOf(sorted, usageIDsOf(written))); err != nil {
-			return err
+		// One database: the rows count toward their grants in the transaction that writes them.
+		if !sharded {
+			if _, err := addGrantUses(ctx, tx, GrantUsesOf(sorted, usageIDsOf(written))); err != nil {
+				return err
+			}
 		}
-		return r.store.AgentLogs.logRequests(ctx, tx, tx, toLog(sorted, written))
+		return r.store.AgentLogs.logRequests(ctx, tx, toLog(sorted, written))
 	})
 	if err != nil {
 		if IDTaken(err) {
@@ -349,12 +345,6 @@ func (r *Requests) InsertMany(ctx context.Context, requests []Request) ([]uuid.U
 		// Only the first of two rows sent with one usage id was written.
 		delete(byUsage, requests[i].UsageID)
 		requests[i].ID = id
-	}
-	if !sharded {
-		return ids, nil
-	}
-	if err := r.store.AgentLogs.logRequests(ctx, r.store.shard, r.store.global, toLog(sorted, written)); err != nil {
-		return ids, stack.Wrap(fmt.Errorf("%w: %w", ErrRequestLogsMissing, err))
 	}
 	return ids, nil
 }

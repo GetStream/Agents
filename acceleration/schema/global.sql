@@ -1193,6 +1193,12 @@ TABLE scheduled_tasks
     CREATE INDEX scheduled_tasks_user_idx ON public.scheduled_tasks USING btree (customer_id, user_id, created_at DESC, id DESC)
     CREATE INDEX scheduled_tasks_wake_idx ON public.scheduled_tasks USING btree (GREATEST(next_run_at, lease_until)) WHERE ((state = 'active'::text) AND (next_run_at IS NOT NULL))
 
+TABLE shard_numbers
+    name text NOT NULL
+    number integer NOT NULL
+    CONSTRAINT shard_numbers_number_key UNIQUE (number)
+    CONSTRAINT shard_numbers_pkey PRIMARY KEY (name)
+
 TABLE simulation_cases
     call_id text
     ended text NOT NULL DEFAULT ''::text

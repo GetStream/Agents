@@ -714,6 +714,9 @@ func (s *ForgetUserSuite) namingRows(app, user string) map[string]int {
 		count, err := shard.ShardDB().NewSelect().Model((*store.CallLeg)(nil)).Where("customer_id = ? AND user_id = ?", app, user).Count(s.ctx)
 		s.Require().NoError(err)
 		found["call_legs"] += count
+		logs, err := shard.ShardDB().NewSelect().Model((*store.AgentLog)(nil)).Where("customer_id = ? AND user_id = ?", app, user).Count(s.ctx)
+		s.Require().NoError(err)
+		found["agent_logs"] += logs
 	}
 	for table, where := range map[string]string{
 		"agent_logs": "user_id = ?", "user_phones": "user_id = ?", "channel_links": "user_id = ?", "contact_map": "user_id = ?", "users": "id = ?",
@@ -721,7 +724,7 @@ func (s *ForgetUserSuite) namingRows(app, user string) map[string]int {
 		var count int
 		s.Require().NoError(s.shards[0].GlobalDB().QueryRowContext(s.ctx,
 			"SELECT count(*) FROM "+table+" WHERE customer_id = ? AND "+where, app, user).Scan(&count))
-		found[table] = count
+		found[table] += count
 	}
 	return found
 }

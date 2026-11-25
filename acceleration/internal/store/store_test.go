@@ -90,11 +90,6 @@ func (s *ShardedStoreSuite) SetupSuite() {
 	shard, peer := s.emptyDatabase("store_shard"), s.emptyDatabase("store_peer")
 	s.shardDSN = shard
 
-	other, err := Open(peer)
-	s.Require().NoError(err)
-	s.Require().NoError(other.Migrate(s.ctx))
-	s.Require().NoError(other.Close())
-
 	shards := map[string]string{"here": shard, "there": peer}
 	store, err := OpenShards(Options{DSN: s.dsn, ShardDSN: shard, Shards: shards, Redis: s.redis(), redisHook: &s.roundTrips})
 	s.Require().NoError(err)
@@ -104,6 +99,7 @@ func (s *ShardedStoreSuite) SetupSuite() {
 	s.countEveryQuery()
 	s.other, err = OpenShards(Options{DSN: s.dsn, ShardDSN: peer, Shards: shards})
 	s.Require().NoError(err)
+	s.Require().NoError(s.other.Migrate(s.ctx))
 	s.base = time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
 }
 
