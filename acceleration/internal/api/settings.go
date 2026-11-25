@@ -9,12 +9,37 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
 // AppSettings is what the router does for the calling app, as far as the app can see it.
 type AppSettings struct {
-	Stream StreamSettings `json:"stream"`
+	Stream        StreamSettings `json:"stream"`
+	RoutingPolicy RoutingPolicy  `json:"routing_policy" doc:"Which regions the app's work may be placed in, unless its agent config sets its own routing_policy. closest when the app never set one."`
+}
+
+// UpdateAppSettings is what the calling app changes of its settings. A field left out stays.
+type UpdateAppSettings struct {
+	RoutingPolicy *RoutingPolicy `json:"routing_policy,omitempty" doc:"Which regions the app's work may be placed in, unless its agent config sets its own. Empty is closest."`
+}
+
+// RoutingPolicy is which regions an app's or an agent's work may be placed in (shardmap.Policy).
+type RoutingPolicy string
+
+func (RoutingPolicy) Schema(registry huma.Registry) *huma.Schema {
+	ref := namedEnum(registry, "RoutingPolicy", "Which regions work may be placed in. closest is the region "+
+		"nearest the person: where a request landed, the called number's country, or the region that last "+
+		"served the user. us_east is the region holding the configs, for everything. us_only, eu_only and "+
+		"canada_only keep all of the work and its data in that geography, and fail it (503 shard_unavailable) "+
+		"rather than place it anywhere else when none of its regions is up. Empty is the app's own on an agent "+
+		"config, and closest on the app.", "", string(shardmap.PolicyClosest), string(shardmap.PolicyUSEast),
+		string(shardmap.PolicyUSOnly), string(shardmap.PolicyEUOnly), string(shardmap.PolicyCanadaOnly))
+	// Named, so the Go SDK's constants are not a bare Empty and Closest.
+	registry.Map()["RoutingPolicy"].Extensions = map[string]any{"x-enum-varnames": []string{"RoutingPolicyUnset",
+		"RoutingPolicyClosest", "RoutingPolicyUSEast", "RoutingPolicyUSOnly", "RoutingPolicyEUOnly", "RoutingPolicyCanadaOnly"}}
+	return ref
 }
 
 func (*AppSettings) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
@@ -80,6 +105,10 @@ type appSettingsResponse struct {
 	Body AppSettings
 }
 
+type updateAppSettingsRequest struct {
+	Body UpdateAppSettings
+}
+
 func (s *Server) registerSettings(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "getAppSettings",
@@ -88,11 +117,44 @@ func (s *Server) registerSettings(api huma.API) {
 		Summary:     "What the router does for the calling app",
 		Description: "Which Stream app the router writes the calling app's conversations and " +
 			"calls into, and whether that app holds the agent channel and call types. Stream is " +
-			"asked at most once a minute.\n\nServer-side only: it needs a server-side token, so " +
+			"asked at most once a minute. Also which regions the app's work may be placed in.\n\nServer-side only: it needs a server-side token, so " +
 			"it cannot be reached from an end user's device.",
 		Responses: map[string]*huma.Response{"200": {Description: "The app's settings"}},
 		Errors:    []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusServiceUnavailable},
 	}, s.getAppSettings)
+	huma.Register(api, huma.Operation{
+		OperationID: "updateAppSettings",
+		Method:      http.MethodPatch,
+		Path:        "/v1/settings/app",
+		Summary:     "Change the calling app's settings",
+		Description: "Writes only the fields sent, and answers with the app's settings as they now are. " +
+			"Work already placed stays where it is.\n\nServer-side only: it needs a server-side token, so " +
+			"it cannot be reached from an end user's device.",
+		Responses: map[string]*huma.Response{"200": {Description: "The app's settings"}},
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+			http.StatusServiceUnavailable},
+	}, s.updateAppSettings)
+}
+
+// updateAppSettings writes what the calling app changed of its settings.
+func (s *Server) updateAppSettings(ctx context.Context, request *updateAppSettingsRequest) (*appSettingsResponse, error) {
+	customerID, ok := CustomerFrom(ctx)
+	if !ok {
+		return nil, errMissingCustomer
+	}
+	if s.store == nil {
+		return nil, errNoConfigs
+	}
+	if request.Body.RoutingPolicy != nil {
+		err := s.store.Apps.SetRoutingPolicy(ctx, customerID, shardmap.Policy(*request.Body.RoutingPolicy))
+		if errors.Is(err, store.ErrNoApp) {
+			return nil, notFound("this app is not registered with the router, so it has no settings to change")
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return s.getAppSettings(ctx, nil)
 }
 
 // getAppSettings reports which Stream app the calling app's work goes into, and whether it
@@ -103,6 +165,14 @@ func (s *Server) getAppSettings(ctx context.Context, _ *struct{}) (*appSettingsR
 	if !ok {
 		return nil, errMissingCustomer
 	}
+	policy := shardmap.PolicyClosest
+	if s.store != nil {
+		stored, err := s.store.Apps.GetSettings(ctx, customerID)
+		if err != nil {
+			return nil, err
+		}
+		policy = shardmap.Effective(stored.RoutingPolicy, "")
+	}
 	settings := StreamSettings{
 		Tenancy:     s.tenancy(),
 		WritesInto:  WritesIntoNowhere,
@@ -111,7 +181,7 @@ func (s *Server) getAppSettings(ctx context.Context, _ *struct{}) (*appSettingsR
 	}
 	bound, found, err := s.streamFor(ctx, customerID)
 	if errors.Is(err, streamapp.ErrStreamAppDisconnected) || (err == nil && !found) {
-		return &appSettingsResponse{Body: AppSettings{Stream: settings}}, nil
+		return &appSettingsResponse{Body: AppSettings{Stream: settings, RoutingPolicy: RoutingPolicy(policy)}}, nil
 	}
 	if errors.Is(err, streamapp.ErrDeploymentAppUnknown) {
 		return nil, streamWaiting()
@@ -130,7 +200,7 @@ func (s *Server) getAppSettings(ctx context.Context, _ *struct{}) (*appSettingsR
 	} else {
 		s.logger.Warn("stream: could not read what an app holds", "customer_id", customerID, "error", err)
 	}
-	return &appSettingsResponse{Body: AppSettings{Stream: settings}}, nil
+	return &appSettingsResponse{Body: AppSettings{Stream: settings, RoutingPolicy: RoutingPolicy(policy)}}, nil
 }
 
 // writesInto names the app an identity acts in, as the calling app should read it. The

@@ -301,6 +301,11 @@ func (s *Server) tryUpdateAgentConfig(ctx context.Context, request *updateAgentC
 	if request.Body.Region == nil {
 		config.Region = existing.Region
 	}
+	// Kept for the same reason: a client that does not know the policy must not move the
+	// agent's work out of the regions it is kept in by saving.
+	if request.Body.RoutingPolicy == nil {
+		config.RoutingPolicy = existing.RoutingPolicy
+	}
 	// Kept for the same reason: a client that does not know the list must not take away the
 	// model a custom one falls back to by saving.
 	if request.Body.LlmFallbacks == nil {
@@ -1511,11 +1516,12 @@ func storedConfig(request AgentConfigRequest, customerID string) store.AgentConf
 	named, _ := harnessOf(request.Harness)
 	greeting, greetingMode := greetingOf(request.Greeting)
 	config := store.AgentConfig{
-		CustomerID: customerID,
-		Name:       strings.TrimSpace(request.Name),
-		Role:       string(value(request.Role)),
-		Mode:       mode,
-		Region:     value(request.Region),
+		CustomerID:    customerID,
+		Name:          strings.TrimSpace(request.Name),
+		Role:          string(value(request.Role)),
+		Mode:          mode,
+		Region:        value(request.Region),
+		RoutingPolicy: string(value(request.RoutingPolicy)),
 		Models: store.AgentModels{
 			STT:          value(request.Stt),
 			TTS:          value(request.Tts),
@@ -1618,6 +1624,10 @@ func agentConfigOf(config store.AgentConfig) AgentConfig {
 	if config.Role != "" {
 		role := AgentRole(config.Role)
 		rendered.Role = &role
+	}
+	if config.RoutingPolicy != "" {
+		policy := RoutingPolicy(config.RoutingPolicy)
+		rendered.RoutingPolicy = &policy
 	}
 	rendered.Stt = optional(config.Models.STT)
 	rendered.Tts = optional(config.Models.TTS)
@@ -1940,6 +1950,7 @@ type AgentConfigRequest struct {
 	Name               string                   `json:"name" doc:"What the config is called, which is unique among the customer's own."`
 	Region             *string                  `json:"region,omitempty" pattern:"^[a-z][a-z0-9-]{0,31}$" patternDescription:"a letter and up to 31 of a-z, 0-9 and hyphens, such as us or eu" example:"eu" doc:"Where the agent's work is done: us or eu for now. Every model its sessions run, its knowledge base and its sandbox are in it, and none of its work is served in another region. A config naming a model with no instance there, a knowledge_namespace kept in another region, or a sandbox where none runs there is refused (400), naming each: a knowledge base is never moved. Left out, a new agent is in us and an update keeps the stored region."`
 	Role               *AgentRole               `json:"role,omitempty"`
+	RoutingPolicy      *RoutingPolicy           `json:"routing_policy,omitempty" doc:"Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's. Left out, a new agent follows the app's and an update keeps the stored policy."`
 	Review             *AgentReview             `json:"review,omitempty" doc:"How a finished call under this agent is reviewed. Left out on an update, the stored instructions stay."`
 	Tools              *[]ToolGroup             `json:"tools,omitempty" maxItems:"64" doc:"The functions an SDK provides that the agent may offer, in named groups, each with how it is loaded. A function an SDK registers, declares on a session or hosts in a worker is offered only when a group names it: a session declaring one that none names is refused (400 tool_not_configured), and a worker's is left out. The router's own tools, connector tools and other agents are not named here. Omitted or null on an update, the groups stored stay; an empty list removes them all. The mapping this field once was, with progressive and output_retention, is refused: loading summary and output_retention on a group or a connector binding replaced them."`
 	Scheduling         *AgentScheduling         `json:"scheduling,omitempty" doc:"Whether the agent may schedule tasks for its users, and the defaults those tasks take. Left out on an update, the stored settings stay."`
@@ -1988,6 +1999,7 @@ type AgentConfig struct {
 	Name               string                   `json:"name"`
 	Region             string                   `json:"region" example:"us" doc:"Where the agent's work is done: every model its sessions run, its knowledge base and its sandbox are in it. us unless the agent's agent.yaml or config names another."`
 	Role               *AgentRole               `json:"role,omitempty"`
+	RoutingPolicy      *RoutingPolicy           `json:"routing_policy,omitempty" doc:"Which regions the agent's work may be placed in, over the app's own routing_policy. Absent when the agent follows the app's."`
 	Review             *AgentReview             `json:"review,omitempty" doc:"Absent when calls are reviewed by Stream's default guide."`
 	Tools              *[]ToolGroup             `json:"tools,omitempty" doc:"The functions an SDK provides that the agent may offer, in named groups. Empty when there are none, and then the agent offers no function."`
 	Scheduling         *AgentScheduling         `json:"scheduling,omitempty"`
