@@ -140,30 +140,48 @@ func (s *StoreSuite) TestARolledBackVersionWithNoFileIsNotRefused() {
 // on a database with a migration older than its newest applied one. So the migration sorts after that version,
 // and a database that ran it under its first version, 20270201001200, applies it again as a no-op.
 func (s *StoreSuite) TestTheSyncHashMigrationSortsAfterAGlobalVersionStagingHad() {
-	db, err := Open(s.emptyDatabase("sync_hash_slot"))
-	s.Require().NoError(err)
+	db := s.syncHashDatabase("sync_hash_slot")
 	defer db.Close()
-	hasColumns := func() (hasColumn bool) {
-		s.Require().NoError(db.global.QueryRowContext(s.ctx, `SELECT count(*) = 2 FROM information_schema.columns
-			WHERE column_name = 'sync_hash' AND table_name IN ('connector_definitions', 'router_configs')`).Scan(&hasColumn))
-		return hasColumn
-	}
-
-	s.upTo(db, globalSet, 20270202000000)
-	s.False(hasColumns(), "a database at 20270202000000 has not run the sync_hash migration")
 	for _, table := range []string{"connector_definitions", "router_configs"} {
-		_, err = db.global.ExecContext(s.ctx, "ALTER TABLE ? ADD COLUMN sync_hash TEXT NOT NULL DEFAULT ''", bun.Ident(table))
+		_, err := db.global.ExecContext(s.ctx, "ALTER TABLE ? ADD COLUMN sync_hash TEXT NOT NULL DEFAULT ''", bun.Ident(table))
 		s.Require().NoError(err)
 	}
-	_, err = db.global.ExecContext(s.ctx, "INSERT INTO ? (version_id, is_applied) VALUES (20270201001200, true)", bun.Ident(globalSet.table))
+	_, err := db.global.ExecContext(s.ctx, "INSERT INTO ? (version_id, is_applied) VALUES (20270201001200, true)", bun.Ident(globalSet.table))
 	s.Require().NoError(err)
 
 	s.Require().NoError(db.Migrate(s.ctx))
-	s.True(hasColumns())
-	var recorded bool
+	s.True(s.syncHashRecorded(db), "the migration is recorded under its new version")
+}
+
+// Staging's own path: at 20270202000000 with neither column and no row of the first version, Migrate adds both.
+func (s *StoreSuite) TestTheSyncHashMigrationAddsTheColumnsToAGlobalDatabaseAt20270202000000() {
+	db := s.syncHashDatabase("sync_hash_add")
+	defer db.Close()
+
+	s.Require().NoError(db.Migrate(s.ctx))
+	s.True(s.syncHashColumns(db), "Migrate adds sync_hash to connector_definitions and router_configs")
+	s.True(s.syncHashRecorded(db), "the migration is recorded under its new version")
+}
+
+// syncHashDatabase opens an empty database with the global set applied up to 20270202000000.
+func (s *StoreSuite) syncHashDatabase(name string) *Store {
+	db, err := Open(s.emptyDatabase(name))
+	s.Require().NoError(err)
+	s.upTo(db, globalSet, 20270202000000)
+	s.False(s.syncHashColumns(db), "a database at 20270202000000 has not run the sync_hash migration")
+	return db
+}
+
+func (s *StoreSuite) syncHashColumns(db *Store) (hasColumns bool) {
+	s.Require().NoError(db.global.QueryRowContext(s.ctx, `SELECT count(*) = 2 FROM information_schema.columns
+		WHERE column_name = 'sync_hash' AND table_name IN ('connector_definitions', 'router_configs')`).Scan(&hasColumns))
+	return hasColumns
+}
+
+func (s *StoreSuite) syncHashRecorded(db *Store) (recorded bool) {
 	s.Require().NoError(db.global.QueryRowContext(s.ctx, "SELECT EXISTS (SELECT 1 FROM ? WHERE version_id = 20270202000100 AND is_applied)",
 		bun.Ident(globalSet.table)).Scan(&recorded))
-	s.True(recorded, "the migration is recorded under its new version")
+	return recorded
 }
 
 // A database a later release migrated holds versions this one has no file for, after the
