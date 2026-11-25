@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 )
@@ -316,6 +318,108 @@ func (s *AgentSuite) TestAYesToACallWhoseToolChangedSinceDoesNotRunIt() {
 		s.never(func() bool { return len(s.runner.asked()) > 0 },
 			"a yes to a call asked about as the tool was ran the tool as it is now")
 	})
+}
+
+// A yes the model gives in the turn that made the call runs nothing: the caller has not heard
+// the question yet, let alone answered it.
+func (s *AgentSuite) TestAYesInTheTurnThatMadeTheCallRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-1", Name: "lookup_order", Arguments: `{"order":"12"}`}})
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":true}`}})
+
+		s.confirmationSays("call-2", "has not heard the question for lookup_order")
+		s.never(func() bool { return len(s.runner.asked()) > 0 }, "a yes the caller never gave ran the call")
+		s.Zero(countOf[ToolApprovalDecided](s.reported()), "the call stopped waiting for the caller")
+	})
+}
+
+// A no needs nothing of the caller: given at once, it still closes the call unrun.
+func (s *AgentSuite) TestANoInTheTurnThatMadeTheCallDeclinesIt() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-1", Name: "lookup_order", Arguments: `{"order":"12"}`}})
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+
+		s.confirmationSays("call-2", "The caller declined")
+		decided, _ := firstOf[ToolApprovalDecided](s.reported())
+		s.Equal(ToolApprovalDecided{ID: "call-1", TurnID: "turn-1"}, decided)
+		s.Empty(s.runner.asked())
+	})
+}
+
+// Once the question has played, a yes still waits for the caller to speak: one in a turn they
+// did not speak, a typed one included, runs nothing and leaves the call waiting for theirs.
+func (s *AgentSuite) TestAYesBeforeTheCallerSpokeRunsNothingAndTheCallWaits() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		time.Sleep(time.Second) // A tick of the fake clock: the question has finished playing.
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-9", Call: llm.ToolCall{ID: "call-8", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":true}`}})
+		s.confirmationSays("call-8", "has not spoken since they were asked about lookup_order")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+		_, err := s.agent.RespondTo(s.ctx, "yes", nil, options.LLM{})
+		s.Require().NoError(err)
+		s.confirmationSays("call-2", "has not spoken since")
+		s.Empty(s.runner.asked(), "a yes the caller did not speak ran the call")
+
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+
+		s.eventually(func() bool { return len(s.runner.asked()) == 1 }, "the caller's own yes never ran the call")
+	})
+}
+
+// A yes runs only the call whose id it names, not the only one waiting.
+func (s *AgentSuite) TestAYesUnderAnotherIDRunsNothing() {
+	for _, id := range []string{"", "call-9"} {
+		s.Run(strconv.Quote(id), func() {
+			s.onFakeClock(func() {
+				s.askedToApprove()
+				s.confirms(`{"tool_call_id":"` + id + `","allowed":true}`)
+
+				s.says(stt.Participant{ID: "alice"}, "yes please")
+
+				s.confirmationSays("call-2", "no question waiting")
+				s.Empty(s.runner.asked(), "a yes under another id ran the waiting call")
+			})
+		})
+	}
+}
+
+// A question the caller talked over was never heard out, so a yes to it runs nothing and closes it.
+func (s *AgentSuite) TestAYesToAQuestionTheCallerTalkedOverRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.voice.mu.Lock()
+		s.voice.silent = true
+		s.voice.mu.Unlock()
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "yes do it")
+
+		s.confirmationSays("call-2", "talked over the question")
+		s.Empty(s.runner.asked(), "a yes to a question talked over ran the call")
+		decided, _ := firstOf[ToolApprovalDecided](s.reported())
+		s.Equal(ToolApprovalDecided{ID: "call-1", TurnID: decided.TurnID, Summary: "Question talked over"}, decided)
+	})
+}
+
+// confirmationSays waits for the model to be answered for the confirm_tool_call with id, and
+// checks the answer has text.
+func (s *AgentSuite) confirmationSays(id, text string) {
+	var result string
+	s.eventually(func() bool {
+		for _, event := range s.reported() {
+			if ran, ok := event.(ToolRan); ok && ran.ID == id {
+				result = ran.Result
+				return true
+			}
+		}
+		return false
+	}, "the confirmation was never answered")
+	s.Contains(result, text)
 }
 
 func (s *AgentSuite) TestConfirmToolCallIsOfferedOnlyWhenAToolNeedsApproval() {

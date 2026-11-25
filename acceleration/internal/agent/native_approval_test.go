@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
@@ -22,6 +23,7 @@ func (s *AgentSuite) TestANativeModelsConfirmationRunsTheCallWithItsOwnID() {
 	peer := s.nativeAsked(time.Minute)
 	s.nativeFrame(peer, "conversation.item.create")
 	s.nativeQuestionSaid(peer)
+	s.nativeCallerSpoke(peer)
 	var approved bool
 	s.runner.run = func(ctx context.Context, _ llm.ToolCall) ([]llm.ContentPart, error) {
 		approved = Approved(ctx)
@@ -38,6 +40,72 @@ func (s *AgentSuite) TestANativeModelsConfirmationRunsTheCallWithItsOwnID() {
 	s.Require().Len(s.runner.asked(), 1)
 	s.Equal("call1", s.runner.asked()[0].ID)
 	s.True(approved)
+}
+
+// A yes the model gives right after it was told to ask runs nothing: the caller has not heard
+// the question.
+func (s *AgentSuite) TestANativeYesBeforeTheQuestionWasSaidRunsNothing() {
+	peer := s.nativeAsked(time.Minute)
+	s.nativeFrame(peer, "conversation.item.create")
+	s.nativeFrame(peer, "response.create")
+
+	s.nativeConfirms(peer, "r2")
+
+	s.Contains(string(s.nativeFrame(peer, "conversation.item.create")["item"]), "has not heard the question for lookup_order")
+	s.never(func() bool { return len(s.runner.asked()) > 0 }, "a yes the caller never gave ran the call")
+}
+
+// A reply that said nothing did not ask the question, nor does the caller's silence answer it.
+func (s *AgentSuite) TestANativeYesAfterAReplyThatSaidNothingRunsNothing() {
+	peer := s.nativeAsked(time.Minute)
+	s.nativeFrame(peer, "conversation.item.create")
+	s.nativeFrame(peer, "response.create")
+	s.nativeSend(peer, `{"type":"response.created","response":{"id":"r2"}}`)
+	s.nativeSend(peer, `{"type":"response.done","response":{"id":"r2","status":"completed"}}`)
+	s.nativeCallerSpoke(peer)
+
+	s.nativeConfirms(peer, "r3")
+
+	s.Contains(string(s.nativeFrame(peer, "conversation.item.create")["item"]), "has not heard the question for lookup_order")
+	s.Empty(s.runner.asked())
+}
+
+// Once the model said the question, a yes still waits for the caller to speak after it.
+func (s *AgentSuite) TestANativeYesBeforeTheCallerSpokeRunsNothing() {
+	peer := s.nativeAsked(time.Minute)
+	s.nativeFrame(peer, "conversation.item.create")
+	s.nativeQuestionSaid(peer)
+	s.eventually(func() bool {
+		s.agent.mu.Lock()
+		defer s.agent.mu.Unlock()
+		return s.agent.approvals["call1"].played
+	}, "the question never finished playing")
+
+	s.nativeConfirms(peer, "r3")
+
+	s.Contains(string(s.nativeFrame(peer, "conversation.item.create")["item"]), "has not spoken since they were asked about lookup_order")
+	s.Empty(s.runner.asked())
+}
+
+// A question the caller cut into was never heard out: a yes to it runs nothing and closes it.
+func (s *AgentSuite) TestANativeYesToAQuestionTheCallerCutIntoRunsNothing() {
+	peer := s.nativeAsked(time.Minute)
+	s.nativeFrame(peer, "conversation.item.create")
+	s.nativeFrame(peer, "response.create")
+	s.nativeSend(peer, `{"type":"response.created","response":{"id":"r2"}}`)
+	s.nativeSend(peer, `{"type":"response.output_audio.delta","response_id":"r2","delta":"AQACAA=="}`)
+	s.nativeSend(peer, `{"type":"input_audio_buffer.speech_started"}`)
+	s.nativeSend(peer, `{"type":"response.done","response":{"id":"r2","status":"cancelled"}}`)
+	s.nativeReplied("r2")
+	s.stoppedSpeaking(peer)
+
+	s.nativeConfirms(peer, "r3")
+
+	s.Contains(string(s.nativeFrame(peer, "conversation.item.create")["item"]), "talked over the question")
+	s.Empty(s.runner.asked())
+	s.eventually(func() bool { return countOf[ToolApprovalDecided](s.reported()) == 1 }, "the closed call was never reported")
+	decided, _ := firstOf[ToolApprovalDecided](s.reported())
+	s.Equal("Question talked over", decided.Summary)
 }
 
 func (s *AgentSuite) TestANativeCallerWhoSaysNothingDeclinesOnceTheQuestionWasSaid() {
@@ -74,9 +142,34 @@ func (s *AgentSuite) nativeAsked(wait time.Duration) *nativePeer {
 	return peer
 }
 
-// nativeQuestionSaid is the model saying the question it was told to ask.
+// nativeQuestionSaid is the model saying the question it was told to ask, to its end.
 func (s *AgentSuite) nativeQuestionSaid(peer *nativePeer) {
 	s.nativeFrame(peer, "response.create")
 	s.nativeSend(peer, `{"type":"response.created","response":{"id":"r2"}}`)
+	s.nativeSend(peer, `{"type":"response.output_audio.delta","response_id":"r2","delta":"AQACAA=="}`)
 	s.nativeSend(peer, `{"type":"response.done","response":{"id":"r2","status":"completed"}}`)
+	s.nativeReplied("r2")
+}
+
+// nativeReplied waits for the agent to settle the model's reply id.
+func (s *AgentSuite) nativeReplied(id string) {
+	s.eventually(func() bool {
+		return slices.ContainsFunc(s.reported(), func(event Event) bool {
+			said, ok := event.(Responded)
+			return ok && said.TurnID == id
+		})
+	}, "the reply never settled")
+}
+
+// nativeCallerSpoke is the caller saying something, once the model has stopped.
+func (s *AgentSuite) nativeCallerSpoke(peer *nativePeer) {
+	s.nativeSend(peer, `{"type":"input_audio_buffer.speech_started"}`)
+	s.stoppedSpeaking(peer)
+}
+
+// nativeConfirms is the model's reply id answering call1's question with a yes.
+func (s *AgentSuite) nativeConfirms(peer *nativePeer, id string) {
+	s.nativeSend(peer, `{"type":"response.created","response":{"id":"`+id+`"}}`)
+	s.nativeSend(peer, `{"type":"response.function_call_arguments.done","response_id":"`+id+`","call_id":"call2","name":"confirm_tool_call","arguments":"{\"tool_call_id\":\"call1\",\"allowed\":true}"}`)
+	s.nativeSend(peer, `{"type":"response.done","response":{"id":"`+id+`","status":"completed"}}`)
 }
