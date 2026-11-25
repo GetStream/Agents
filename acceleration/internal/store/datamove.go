@@ -1301,13 +1301,11 @@ func (s *Store) refuseImportedDefinitions(ctx context.Context, db bun.IDB, custo
 	}
 	definitions := definitionsOn{db}
 	for _, row := range rows {
-		var fields struct {
-			ID string `json:"id"`
+		id, err := importedID("connector_definitions", row)
+		if err != nil {
+			return err
 		}
-		if err := json.Unmarshal(row, &fields); err != nil {
-			return invalidImport(fmt.Errorf("store: import connector_definitions: %w", err))
-		}
-		bound, err := json.Marshal([]map[string]string{{"connector_id": fields.ID}})
+		bound, err := json.Marshal([]map[string]string{{"connector_id": id}})
 		if err != nil {
 			return stack.Wrap(err)
 		}
@@ -1318,7 +1316,7 @@ func (s *Store) refuseImportedDefinitions(ctx context.Context, db bun.IDB, custo
 			Where("deleted_at IS NULL").
 			Order("created_at", "id").
 			Scan(ctx); err != nil {
-			return stack.Wrap(fmt.Errorf("store: import connector_definitions: configs binding %s: %w", fields.ID, err))
+			return stack.Wrap(fmt.Errorf("store: import connector_definitions: configs binding %s: %w", id, err))
 		}
 		for _, config := range binding {
 			message, ok, err := importedComplaint(ctx, db, definitions, rule, customerID, config)

@@ -184,6 +184,33 @@ func (s *DataMoveSuite) TestAnImportedConnectorAnAgentBindsBesideASensitiveOneIs
 		"the refused definition is not written")
 }
 
+// A definition is weighed by the id it is written under, its exact "id" key, whatever another
+// key of that name in another case says: on a row and on a change line.
+func (s *DataMoveSuite) TestAnImportedConnectorIsWeighedByTheIDItIsWrittenUnder() {
+	template := s.agentTemplate()
+	for _, change := range []bool{false, true} {
+		s.useInternalApp()
+		connector := "custom_a" + store.NewID()
+		agent, _ := s.importedAgent(template, map[string]any{
+			"connectors": []map[string]any{sessionNessy("customers"), sessionCustom("crm", connector)}})
+		raw := string(s.customConnector(connector).Row)
+		row := json.RawMessage(raw[:len(raw)-1] + `, "ID": "custom_a` + store.NewID() + `"}`)
+		lines := []dataLine{agent, {Table: "connector_definitions", Row: row}}
+		if change {
+			s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import", ndjson([]dataLine{agent}), nil))
+			lines = []dataLine{{Change: &store.DataChange{Table: "connector_definitions", Op: store.ChangeUpdate,
+				Key: json.RawMessage(`{"id":"` + connector + `","revision":1}`), Payload: row}}}
+		}
+
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", ndjson(lines))
+
+		s.Equal(http.StatusBadRequest, status, "change: %v", change)
+		s.Contains(failure, `store: import connector_definitions:{"id":"`+connector+`","revision":1}: the agent "`, "change: %v", change)
+		s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+connector, nil, nil),
+			"change: %v", change)
+	}
+}
+
 // The control: the same import, with the custom connector's tool held for a person's approval.
 func (s *DataMoveSuite) TestAnImportedConnectorAnAgentBindsWithApprovalBesideASensitiveOneIsWritten() {
 	template := s.agentTemplate()
