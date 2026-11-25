@@ -1373,6 +1373,8 @@ type metaAPI struct {
 	mu        sync.Mutex
 	sent      map[string][]string
 	documents map[string][]string
+	// chats is the text of every message posted to a Linq chat, by the chat's id.
+	chats map[string][]string
 }
 
 func (m *metaAPI) serve(w http.ResponseWriter, r *http.Request) {
@@ -1384,6 +1386,11 @@ func (m *metaAPI) serve(w http.ResponseWriter, r *http.Request) {
 		Document struct {
 			Link string `json:"link"`
 		} `json:"document"`
+		Message struct {
+			Parts []struct {
+				Value string `json:"value"`
+			} `json:"parts"`
+		} `json:"message"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
@@ -1391,8 +1398,13 @@ func (m *metaAPI) serve(w http.ResponseWriter, r *http.Request) {
 	if m.sent == nil {
 		m.sent = map[string][]string{}
 		m.documents = map[string][]string{}
+		m.chats = map[string][]string{}
 	}
-	if body.Document.Link != "" {
+	// Linq's POST /api/partner/v3/chats/{chat}/messages.
+	if chat, ok := strings.CutPrefix(r.URL.Path, "/api/partner/v3/chats/"); ok && len(body.Message.Parts) > 0 {
+		chat = strings.TrimSuffix(chat, "/messages")
+		m.chats[chat] = append(m.chats[chat], body.Message.Parts[0].Value)
+	} else if body.Document.Link != "" {
 		m.documents[body.To] = append(m.documents[body.To], body.Document.Link)
 	} else {
 		m.sent[body.To] = append(m.sent[body.To], body.Text.Body)
@@ -1407,6 +1419,13 @@ func (m *metaAPI) to(number string) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string(nil), m.sent[number]...)
+}
+
+// postedIn is the text of every message posted to a Linq chat, in order.
+func (m *metaAPI) postedIn(chat string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.chats[chat]...)
 }
 
 // documentsTo is the link of every document sent to one number, in order.

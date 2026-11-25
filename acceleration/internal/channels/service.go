@@ -426,6 +426,14 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 	if s.keyword(ctx, account, line, provider, message) {
 		return
 	}
+	// The agent answers in the sender's own conversation, with their history and connectors,
+	// and a reply to a group reaches everyone in it. So a group's message is not answered, and
+	// the group does not become the chat the sender's later messages go to (identify). A
+	// keyword above is still confirmed there, as the channel bridge does.
+	if message.Group {
+		logger.Debug("not answering a message in a group chat", "channel", account.Kind, "number", account.E164)
+		return
+	}
 	config, found, err := s.store.ConfigOnChannel(ctx, account.CustomerID, account.Kind, account.E164)
 	if err != nil {
 		logger.Error("could not find the agent on a channel", "channel", account.Kind,
