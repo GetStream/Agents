@@ -630,29 +630,24 @@ func (s *StoreSuite) TestMigrateRebuildsTheCampaignIndexLeftInvalid() {
 }
 
 func (s *StoreSuite) TestMigrateRebuildsTheChangesUserIndexLeftInvalid() {
-	databases := []bun.IDB{s.store.GlobalDB(), s.store.ShardDB()}
-	built := func(db bun.IDB) (valid bool, definition string) {
-		s.Require().NoError(db.QueryRowContext(s.ctx, "SELECT indisvalid, pg_get_indexdef(indexrelid) FROM pg_index "+
+	built := func() (valid bool, definition string) {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT indisvalid, pg_get_indexdef(indexrelid) FROM pg_index "+
 			"WHERE indexrelid = to_regclass('data_changes_user_idx')").Scan(&valid, &definition))
 		return valid, definition
 	}
 	const want = "CREATE INDEX data_changes_user_idx ON public.data_changes USING btree (customer_id, table_name, " +
 		"((payload ->> 'user_id'::text)), ((payload ->> 'id'::text))) WHERE ((payload ->> 'user_id'::text) IS NOT NULL)"
-	for _, db := range databases {
-		_, definition := built(db)
-		s.Equal(want, definition, "as the migration builds it")
-		// As a CONCURRENTLY build that failed leaves it, on both sides, which both keep changes.
-		_, err := db.ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('data_changes_user_idx')")
-		s.Require().NoError(err)
-	}
+	_, definition := built()
+	s.Equal(want, definition, "as the migration builds it")
+	// As a CONCURRENTLY build that failed leaves it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('data_changes_user_idx')")
+	s.Require().NoError(err)
 
 	s.Require().NoError(s.store.Migrate(s.ctx))
 
-	for _, db := range databases {
-		valid, definition := built(db)
-		s.True(valid, "dropped and built again")
-		s.Equal(want, definition, "built again as the migration builds it")
-	}
+	valid, definition := built()
+	s.True(valid, "dropped and built again")
+	s.Equal(want, definition, "built again as the migration builds it")
 }
 
 // The reconcile reads every shard every few minutes, so it reads only the rows naming a grant,

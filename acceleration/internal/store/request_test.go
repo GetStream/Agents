@@ -681,8 +681,8 @@ func (s *StoreSuite) TestRequestQueryBudgets() {
 		s.Require().NoError(err)
 		s.Equal(int64(1), count)
 	}), "CountByUser")
-	// One batch, then the last statement.
-	s.Equal(2*shards, s.countQueries(func() {
+	// What is left of rows and of changes, and the batch on the shard holding one.
+	s.Equal(2*shards+1, s.countQueries(func() {
 		renamed, err := s.store.Requests.RenameUser(s.ctx, "acme", "sam", "someone")
 		s.Require().NoError(err)
 		s.Equal(int64(1), renamed)
@@ -723,11 +723,11 @@ func (s *StoreSuite) TestRenamingAUserWithMoreRequestsThanOneStatementTakesRenam
 
 	var renamed int64
 	var err error
-	updates := s.statementsLike(`WITH "batch" AS (SELECT`, func() { renamed, err = s.store.Requests.RenameUser(s.ctx, "acme", "jlahey", "forgotten") })
+	updates := s.statementsLike(`WITH "changes" AS (UPDATE`, func() { renamed, err = s.store.Requests.RenameUser(s.ctx, "acme", "jlahey", "forgotten") })
 
 	s.Require().NoError(err)
 	s.EqualValues(3, renamed)
-	s.Equal(5+2*(len(s.store.shards())-1), updates, "a row per statement, the one that finds none and the last, and those two on each shard holding none")
+	s.Equal(3, updates, "a row per statement")
 	theirs, err := s.store.Requests.CountByUser(s.ctx, "other-app", "jlahey")
 	s.Require().NoError(err)
 	s.EqualValues(1, theirs, "the same id under another app is another person")

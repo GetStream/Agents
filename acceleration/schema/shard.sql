@@ -314,7 +314,6 @@ TABLE data_changes
     CONSTRAINT data_changes_pkey PRIMARY KEY (seq)
     CREATE INDEX data_changes_at_idx ON public.data_changes USING btree (at)
     CREATE INDEX data_changes_customer_idx ON public.data_changes USING btree (customer_id, seq)
-    CREATE INDEX data_changes_user_idx ON public.data_changes USING btree (customer_id, table_name, ((payload ->> 'user_id'::text)), ((payload ->> 'id'::text))) WHERE ((payload ->> 'user_id'::text) IS NOT NULL)
 
 TABLE recordings
     callback text
