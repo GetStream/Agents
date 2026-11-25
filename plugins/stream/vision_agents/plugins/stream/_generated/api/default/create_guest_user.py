@@ -59,6 +59,11 @@ def _parse_response(
 
         return response_403
 
+    if response.status_code == 429:
+        response_429 = ErrorResponse.from_dict(response.json())
+
+        return response_429
+
     if response.status_code == 500:
         response_500 = ErrorResponse.from_dict(response.json())
 
@@ -102,7 +107,9 @@ def sync_detailed(
     any other caller naming an id is minted a new guest.
     Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor
     costs a round trip through the customer's own servers, which is exactly the integration this is
-    meant to remove. An app that has turned guests off refuses it.
+    meant to remove. An app that has turned guests off refuses it, and so does a suspended organization.
+    One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's
+    backend is not counted.
 
     Args:
         body (GuestUserRequest | Unset):
@@ -142,7 +149,9 @@ def sync(
     any other caller naming an id is minted a new guest.
     Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor
     costs a round trip through the customer's own servers, which is exactly the integration this is
-    meant to remove. An app that has turned guests off refuses it.
+    meant to remove. An app that has turned guests off refuses it, and so does a suspended organization.
+    One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's
+    backend is not counted.
 
     Args:
         body (GuestUserRequest | Unset):
@@ -177,7 +186,9 @@ async def asyncio_detailed(
     any other caller naming an id is minted a new guest.
     Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor
     costs a round trip through the customer's own servers, which is exactly the integration this is
-    meant to remove. An app that has turned guests off refuses it.
+    meant to remove. An app that has turned guests off refuses it, and so does a suspended organization.
+    One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's
+    backend is not counted.
 
     Args:
         body (GuestUserRequest | Unset):
@@ -215,7 +226,9 @@ async def asyncio(
     any other caller naming an id is minted a new guest.
     Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor
     costs a round trip through the customer's own servers, which is exactly the integration this is
-    meant to remove. An app that has turned guests off refuses it.
+    meant to remove. An app that has turned guests off refuses it, and so does a suspended organization.
+    One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's
+    backend is not counted.
 
     Args:
         body (GuestUserRequest | Unset):

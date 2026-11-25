@@ -799,7 +799,7 @@ func (s *RouterSuite) SetupSuite() {
 		KnowledgeLimits:   s.knowledgeLimits,
 		KnowledgeURLs:     s.pages(redisAddr),
 		KnowledgeFiles:    s.knowledgeFiles(redisAddr, knowledgeBase, streams.OCR),
-		Voices:            s.voiceService(),
+		Voices:            s.voiceService(policies),
 		VoiceLibrary:      s.library,
 		Dispatch:          s.dispatch,
 		Policies:          policies,
@@ -1852,7 +1852,7 @@ func (s *RouterSuite) knowledgeFiles(redisAddr string, base *metered.Knowledge, 
 
 // voiceService keeps the voices a customer brought with them in a directory of its own,
 // and clones them at a provider answering in process.
-func (s *RouterSuite) voiceService() *voices.Service {
+func (s *RouterSuite) voiceService(gate routing.Gate) *voices.Service {
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/v1/text-to-speech/") {
 			_, _ = w.Write([]byte("spoken"))
@@ -1871,7 +1871,8 @@ func (s *RouterSuite) voiceService() *voices.Service {
 	cloners := voices.NewRegistry()
 	cloners.Register("elevenlabs", cloner)
 
-	service, err := voices.NewService(voices.Options{Store: s.store, Bucket: bucket, Cloners: cloners, Recorder: s.metering})
+	service, err := voices.NewService(voices.Options{Store: s.store, Bucket: bucket, Cloners: cloners, Recorder: s.metering, Gate: gate,
+		Models: s.ttsConfig.Providers})
 	s.Require().NoError(err)
 	return service
 }

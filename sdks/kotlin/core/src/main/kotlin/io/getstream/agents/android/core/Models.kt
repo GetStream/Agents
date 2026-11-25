@@ -4,7 +4,6 @@ import io.getstream.agents.android.core.generated.AgentResponse as ResponseSchem
 import io.getstream.agents.android.core.generated.AgentResponseItem as ItemSchema
 import io.getstream.agents.android.core.generated.GuestUser as GuestSchema
 import io.getstream.agents.android.core.generated.ImageSource as ImageSchema
-import io.getstream.agents.android.core.generated.ModelOverwrites as OverwritesSchema
 import io.getstream.agents.android.core.generated.Session as SessionSchema
 import io.getstream.agents.android.core.generated.SessionModality
 import io.getstream.agents.android.core.generated.SessionState
@@ -242,41 +241,6 @@ public data class ImageSource(
                 Detail.High -> ImageSchema.Detail.high
                 null -> null
             },
-        )
-}
-
-/**
- * What to change about the models for one conversation, over whatever its config decided.
- *
- * Null leaves the config's choice alone.
- */
-public data class ModelOverwrites(
-    val llm: String? = null,
-    val stt: String? = null,
-    val tts: String? = null,
-    val sts: String? = null,
-    val search: String? = null,
-    val thinking: Thinking? = null,
-    /** Zero is a real request for a deterministic model, which null is not. */
-    val temperature: Double? = null,
-    val maxOutputTokens: Int? = null,
-    val verbosity: Verbosity? = null,
-) {
-    public enum class Thinking { None, Minimal, Low, Medium, High }
-
-    public enum class Verbosity { Low, Medium, High }
-
-    internal val schema: OverwritesSchema
-        get() = OverwritesSchema(
-            llm = llm,
-            stt = stt,
-            tts = tts,
-            sts = sts,
-            search = search,
-            thinking = thinking?.let { OverwritesSchema.Thinking.valueOf(it.name.lowercase()) },
-            temperature = temperature,
-            maxOutputTokens = maxOutputTokens,
-            verbosity = verbosity?.let { OverwritesSchema.Verbosity.valueOf(it.name.lowercase()) },
         )
 }
 

@@ -458,6 +458,9 @@ type Server struct {
 	// runSlots counts each app's runs in flight against runsPerApp; nil counts none.
 	runSlots   *concurrency.Slots
 	runsPerApp int64
+	// newGuests counts the guests each address mints in an app (guestsPerAddress); nil counts
+	// none.
+	newGuests *core.Limiter
 	// imageHTTP fetches the images a run is handed by URL.
 	imageHTTP *http.Client
 	// documents reads the files sent with a question.
@@ -671,6 +674,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	server.proxyCallsPerMinute = options.ProxyCallsPerMinute
 	if options.Live != nil {
 		server.runSlots, server.runsPerApp = concurrency.New(options.Live.Redis(), nil), options.RunsPerApp
+		server.newGuests = core.NewLimiter(options.Live.Redis(), nil)
 		server.twilioAlertSids = options.Live.Redis()
 	}
 	server.imageHTTP = options.ImageHTTP

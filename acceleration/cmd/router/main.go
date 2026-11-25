@@ -1312,7 +1312,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// Bringing a voice needs somewhere to keep the recordings, a place to record them and
 	// at least one provider willing to be taught. Missing any of those, the voice paths
 	// say so rather than half-working.
-	voiceService, err := buildVoices(configs, bucket, routing.NewRecorderOn(routing.TTS, usageWriter, prices, logger), logger)
+	voiceService, err := buildVoices(configs, bucket, routing.NewRecorderOn(routing.TTS, usageWriter, prices, logger), gate,
+		capabilities[routing.TTS].Providers, logger)
 	if err != nil {
 		return err
 	}
@@ -2320,7 +2321,7 @@ func queueRedis(redis config.Redis, shared rueidis.Client) asynq.RedisConnOpt {
 }
 
 // newKnowledge is the knowledge base every lookup and write goes through, a backend in each
-// region the settings map, recorded by recorder, each write admitted by gate, and the place
+// region the settings map, recorded by recorder, each read and write admitted by gate, and the place
 // each base is kept recorded in pgStore: its region, and the customer's own account there when
 // keys holds their turbopuffer key for it as the base is first written. Nil without a
 // turbopuffer key of the deployment's.
@@ -2474,6 +2475,8 @@ func buildVoices(
 	configs *store.Store,
 	bucket *blob.Bucket,
 	recorder *routing.Recorder,
+	gate routing.Gate,
+	models []routing.ProviderConfig,
 	logger *slog.Logger,
 ) (*voices.Service, error) {
 	if configs == nil || bucket == nil {
@@ -2501,6 +2504,8 @@ func buildVoices(
 		Bucket:   bucket,
 		Cloners:  cloners,
 		Recorder: recorder,
+		Gate:     gate,
+		Models:   models,
 		Logger:   logger,
 	})
 }
