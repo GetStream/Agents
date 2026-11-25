@@ -471,6 +471,14 @@ func TestFlowAPassesOnAnOpusOrG729OfferRebuilt(t *testing.T) {
 			media: "m=audio 30000 RTP/AVP 18\r\na=fmtp:18 annexb=no\r\n",
 			want:  "m=audio 30000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\na=fmtp:18 annexb=no\r\n" + tail,
 		},
+		"fmtp of 200 characters": {
+			media: "m=audio 30000 RTP/AVP 111\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 " + strings.Repeat("a", 200) + "\r\n",
+			want:  "m=audio 30000 RTP/AVP 111\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 " + strings.Repeat("a", 200) + "\r\n" + tail,
+		},
+		"fmtp of 201 characters": {
+			media: "m=audio 30000 RTP/AVP 111\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 " + strings.Repeat("a", 201) + "\r\n",
+			want:  "m=audio 30000 RTP/AVP 111\r\na=rtpmap:111 opus/48000/2\r\n" + tail,
+		},
 		"fmtp Stream is not given": {
 			media: "m=audio 30000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\na=fmtp:18 annexb=no\"<x>\r\n",
 			want:  "m=audio 30000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\n" + tail,

@@ -62,7 +62,7 @@ var g729Codec = Codec{Name: "G729", PayloadType: 18, ClockRate: 8000}
 // streamCodecs are the codecs toStream passes on to Stream, keyed by the name parseAudio gives them,
 // with the encoding name buildSDP writes for each. Every name is in IANA's RTP Payload Format media
 // types registry (rtp-parameters): PCMU, PCMA, G722 and G729 are RFC 3551's, opus is RFC 7587's
-// (written opus/48000/2) and telephone-event is RFC 4733's.
+// (buildSDP writes the customer's own opus/48000 or opus/48000/2) and telephone-event is RFC 4733's.
 var streamCodecs = map[string]string{
 	"PCMU": "PCMU", "PCMA": "PCMA", "G722": "G722", "G729": "G729", "OPUS": "opus", dtmfCodec.Name: dtmfCodec.Name,
 }
