@@ -275,7 +275,8 @@ func (s *TwilioHookSuite) TestABodyThatIsNoFormOrTooLargeIsRefused() {
 		status int
 	}{
 		"not a form": {"To=%zz", http.StatusBadRequest},
-		"too large":  {"To=" + strings.Repeat("1", twilioCallLimit), http.StatusRequestEntityTooLarge},
+		// The 64 KiB the spec declares, written out so a changed limit cannot pass.
+		"too large": {"To=" + strings.Repeat("1", 64<<10), http.StatusRequestEntityTooLarge},
 	} {
 		request, err := http.NewRequest(http.MethodPost, s.server.URL+twilioCallHookPath, strings.NewReader(sent.body))
 		s.Require().NoError(err)
