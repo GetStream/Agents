@@ -81,7 +81,6 @@ func (s *ShardedStoreSuite) TestAShardedStoreServesEachOfItsPoolsByShard() {
 
 	s.Equal(40.0, series["router_db_pool_max_open_connections shared "])
 	s.Equal(40.0, series["router_db_pool_max_open_connections shard here"])
-	s.Equal(8.0, series["router_db_pool_max_open_connections peer there"])
-	// Five metrics for each of the three pools, and no fourth.
-	s.Len(series, 15)
+	// Five metrics for each of the two pools, and none for the other shard's, which is not opened.
+	s.Len(series, 10)
 }

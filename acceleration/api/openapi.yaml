@@ -2026,6 +2026,10 @@ components:
           type: string
         mode:
           $ref: '#/components/schemas/SessionMode'
+        region:
+          description: The shard the call is kept in. Set on a listed call of a deployment with shards.
+          readOnly: true
+          type: string
         review_notes:
           type: string
         review_score:
@@ -7168,7 +7172,7 @@ components:
           $ref: '#/components/schemas/ActivitySessions'
           description: The sessions the organization's apps opened from since on, from the shards listed in shards.
         shards:
-          description: The names of the shards whose requests the meters sum, this one's first. A deployment that sets no postgres.shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
+          description: The names of the shards whose requests the meters sum, this one's first. A deployment that sets no shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
           items:
             type: string
           nullable: true
@@ -9320,6 +9324,10 @@ components:
           type: string
         project_id:
           type: string
+        region:
+          description: The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards.
+          readOnly: true
+          type: string
         review_notes:
           description: Why the review scored the conversation as it did. Read by a backend only.
           type: string
@@ -10194,7 +10202,7 @@ components:
           description: The full prompt, which only the subagent sees.
           type: string
         name:
-          description: How the config names it, which is unique among that config's own skills.
+          description: How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox.
           type: string
       required:
         - config_id
@@ -15556,6 +15564,13 @@ paths:
           schema:
             description: The next_cursor of the previous page. Omitted is the first page.
             type: string
+        - description: The region whose calls to list, as X-Shard or a session's region names it. Each region keeps the calls it ran. Omitted is the region answering.
+          explode: false
+          in: query
+          name: region
+          schema:
+            description: The region whose calls to list, as X-Shard or a session's region names it. Each region keeps the calls it ran. Omitted is the region answering.
+            type: string
       responses:
         "200":
           content:
@@ -15564,6 +15579,10 @@ paths:
                 $ref: '#/components/schemas/ConnectionInvocationPage'
           description: A page of tool calls
           headers:
+            X-Shard:
+              schema:
+                description: The region that answered. Absent on a deployment of one region.
+                type: string
             X-Stream-Balance-Micros:
               $ref: '#/components/headers/X-Stream-Balance-Micros'
             X-Stream-Balance-Warning:
@@ -17951,6 +17970,11 @@ paths:
           schema:
             format: date-time
             type: string
+        - description: The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering; session_id reads the session's region instead.
+          in: query
+          name: region
+          schema:
+            type: string
         - in: query
           name: cursor
           schema:
@@ -17970,6 +17994,10 @@ paths:
                 $ref: '#/components/schemas/AgentLogPage'
           description: Newest first; resume cursor marks the history/live handoff.
           headers:
+            X-Shard:
+              description: The region that answered. Absent on a deployment of one region.
+              schema:
+                type: string
             X-Stream-Balance-Micros:
               $ref: '#/components/headers/X-Stream-Balance-Micros'
             X-Stream-Balance-Warning:
@@ -17993,7 +18021,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Log storage is unavailable.
+          description: Log storage is unavailable, or the region asked for, or the session's, could not be reached (shard_unavailable).
       summary: Latest structured agent logs, with backward cursor pagination
   /v1/agents/logs/{id}:
     get:
@@ -18004,6 +18032,11 @@ paths:
           required: true
           schema:
             type: string
+        - description: The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering.
+          in: query
+          name: region
+          schema:
+            type: string
       responses:
         "200":
           content:
@@ -18012,6 +18045,10 @@ paths:
                 $ref: '#/components/schemas/AgentLog'
           description: One log with full safe metadata.
           headers:
+            X-Shard:
+              description: The region that answered. Absent on a deployment of one region.
+              schema:
+                type: string
             X-Stream-Balance-Micros:
               $ref: '#/components/headers/X-Stream-Balance-Micros'
             X-Stream-Balance-Warning:
@@ -18020,6 +18057,8 @@ paths:
               $ref: '#/components/headers/X-Stream-Cost-Estimated'
             X-Stream-Cost-Micros:
               $ref: '#/components/headers/X-Stream-Cost-Micros'
+        "400":
+          $ref: '#/components/responses/BadRequest'
         "401":
           $ref: '#/components/responses/Unauthorized'
         "402":
@@ -18035,7 +18074,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Log storage is unavailable.
+          description: Log storage is unavailable, or the region asked for could not be reached (shard_unavailable).
       summary: Redacted structured log details scoped to the customer
   /v1/agents/logs/stream:
     get:
@@ -18083,6 +18122,11 @@ paths:
           schema:
             format: date-time
             type: string
+        - description: The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering; session_id reads the session's region instead.
+          in: query
+          name: region
+          schema:
+            type: string
         - in: query
           name: cursor
           schema:
@@ -18099,6 +18143,10 @@ paths:
                 type: string
           description: SSE events logs, checkpoint and reset.
           headers:
+            X-Shard:
+              description: The region that answered. Absent on a deployment of one region.
+              schema:
+                type: string
             X-Stream-Balance-Micros:
               $ref: '#/components/headers/X-Stream-Balance-Micros'
             X-Stream-Balance-Warning:
@@ -18122,7 +18170,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Log storage is unavailable.
+          description: Log storage is unavailable, or the region asked for, or the session's, could not be reached (shard_unavailable).
       summary: Read-only SSE of durable logs with replay
   /v1/agents/models:
     get:
@@ -24018,7 +24066,7 @@ paths:
   /v1/ops/orgs/{org_id}/activity:
     get:
       description: |-
-        Whether an organization tried Agents, how far it got and how much it used: what its apps did in each area of the API, from each client, and what their work came to by modality, summed over every shard in postgres.shards, which the answer names, with the sessions they opened, how those ended and how long their turns took. An organization with nothing recorded is answered with empty lists and furthest_step none. Every area and client is one item, so the lists are short and have no cursor. Areas, first_seen, last_seen, furthest_step and steps come from counts kept since they were first recorded, while meters come from every request, so an organization whose use is older than the counts can read furthest_step none with meters that show use. steps lists every step reached, not only the furthest, with the UTC day each was first answered: an organization that only texts reaches conversations and never voice_video.
+        Whether an organization tried Agents, how far it got and how much it used: what its apps did in each area of the API, from each client, and what their work came to by modality, summed over every shard the shards setting lists, which the answer names, with the sessions they opened, how those ended and how long their turns took. An organization with nothing recorded is answered with empty lists and furthest_step none. Every area and client is one item, so the lists are short and have no cursor. Areas, first_seen, last_seen, furthest_step and steps come from counts kept since they were first recorded, while meters come from every request, so an organization whose use is older than the counts can read furthest_step none with meters that show use. steps lists every step reached, not only the furthest, with the UTC day each was first answered: an organization that only texts reaches conversations and never voice_video.
 
         Stream staff only: it needs the ops key or the activity key.
       operationId: getOrganizationActivity

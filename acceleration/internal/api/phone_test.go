@@ -354,6 +354,21 @@ func TestCallStatusSuite(t *testing.T) {
 const unreachableVendor = "http://127.0.0.1:1"
 
 func (s *CallStatusSuite) SetupSuite() {
+	s.phoneVendors = s.unreachableVendors()
+	s.phoneOnChat = true
+	s.sessionTelephony = true
+	s.logged = &lockedLog{}
+	s.logs = s.logged
+	s.RouterSuite.SetupSuite()
+}
+
+func (s *CallStatusSuite) SetupTest() {
+	s.useFixture("standard")
+}
+
+// unreachableVendors are the vendors the router knows, twilio and telnyx pointed at
+// unreachableVendor.
+func (s *RouterSuite) unreachableVendors() *phone.Registry {
 	config, err := phone.DefaultConfig()
 	s.Require().NoError(err)
 	// The suites share one process, so the credentials are not set in it: the two vendors
@@ -370,16 +385,7 @@ func (s *CallStatusSuite) SetupSuite() {
 	registry.Register("telnyx", func() (phone.Provider, error) {
 		return telnyx.New(telnyx.Options{APIKey: "k", BaseURL: unreachableVendor})
 	})
-	s.phoneVendors = registry
-	s.phoneOnChat = true
-	s.sessionTelephony = true
-	s.logged = &lockedLog{}
-	s.logs = s.logged
-	s.RouterSuite.SetupSuite()
-}
-
-func (s *CallStatusSuite) SetupTest() {
-	s.useFixture("standard")
+	return registry
 }
 
 // placed keeps a call placed at vendor and returns its status token and call id.

@@ -486,6 +486,10 @@ func (s *Server) createSkill(ctx context.Context, request *createSkillRequest) (
 		return nil, invalidRequest(message)
 	}
 
+	if message, ok := skillNameComplaint(request.Body.Name); !ok {
+		return nil, invalidRequest(message)
+	}
+
 	skill := storedSkill(*request.Body, customerID)
 	if err := s.store.Skills.Insert(ctx, &skill); err != nil {
 		return nil, storeFailure(err, errSkillNameTaken)
@@ -544,6 +548,9 @@ func (s *Server) updateSkill(ctx context.Context, request *updateSkillRequest) (
 	}
 
 	skill := storedSkill(*request.Body, customerID)
+	if message, ok := skillNameComplaint(skill.Name); !ok && skill.Name != strings.TrimSpace(existing.Name) {
+		return nil, invalidRequest(message)
+	}
 	skill.ID = existing.ID
 	skill.CreatedAt = existing.CreatedAt
 	if err := s.store.Skills.Update(ctx, &skill); err != nil {
@@ -1390,9 +1397,8 @@ func skillComplaint(request SkillRequest) (string, bool) {
 	}
 	size := 0
 	for name, content := range files {
-		if name == "" || path.IsAbs(name) || path.Clean(name) != name || name == ".." ||
-			strings.HasPrefix(name, "../") || strings.Contains(name, `\`) {
-			return fmt.Sprintf("skill file %q is not a path inside the skill's folder", name), false
+		if !harness.ValidSkillFile(name) {
+			return fmt.Sprintf("skill file %.64q is not a path inside the skill's folder", name), false
 		}
 		size += len(content)
 	}
@@ -1400,6 +1406,40 @@ func skillComplaint(request SkillRequest) (string, bool) {
 		return fmt.Sprintf("a skill's files may hold at most %d bytes in all", maxSkillBytes), false
 	}
 	return "", true
+}
+
+// skillNameComplaint refuses a name a skill is being given that its folder in the sandbox
+// could not have. A skill stored under one before they were refused keeps it.
+func skillNameComplaint(name string) (string, bool) {
+	if name := strings.TrimSpace(name); !harness.ValidSkillName(name) {
+		return fmt.Sprintf("skill name %.64q is not a folder's name: it may have at most 255 characters, "+
+			`none of them / or \ or a control character, and not start with . or -`, name), false
+	}
+	return "", true
+}
+
+// newSkillNamesComplaint is skillNameComplaint for the names a config holds no skill by yet.
+func (s *Server) newSkillNamesComplaint(ctx context.Context, customerID, configID string, names []string) (string, bool, error) {
+	var refused []string
+	for _, name := range names {
+		if _, ok := skillNameComplaint(name); !ok {
+			refused = append(refused, name)
+		}
+	}
+	if len(refused) == 0 {
+		return "", true, nil
+	}
+	held, err := s.store.Skills.GetByNames(ctx, customerID, configID, refused)
+	if err != nil {
+		return "", false, err
+	}
+	for _, name := range refused {
+		if !slices.ContainsFunc(held, func(skill store.Skill) bool { return skill.Name == name }) {
+			message, _ := skillNameComplaint(name)
+			return message, false, nil
+		}
+	}
+	return "", true, nil
 }
 
 // maxSkillFiles and maxSkillBytes bound what one skill folder may bring with it.

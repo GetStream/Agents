@@ -685,10 +685,10 @@ func (f *Forwarder) send(ctx context.Context, delivery store.ClaimedEventDeliver
 // openSecrets are the secrets a send is signed with: the destination's, and the one its last
 // rotation replaced while that still signs. The previous secret is only a grace window for a
 // receiver not yet on the new one, and the current secret alone is a valid signature: a previous
-// secret that does not open, because no router holds its key version or for another reason, is
-// left out with a warning, once a lease for each destination, and the forward is sent with the
-// current one. A current secret that does not open is an error: nothing is sent, and attempt
-// leaves it to another router or gives it up.
+// secret that does not open, because no router holds its key version or for another reason, or
+// that signs nothing (webhook.Key), is left out with a warning, once a lease for each
+// destination, and the forward is sent with the current one. A current secret that does not open is
+// an error: nothing is sent, and attempt leaves it to another router or gives it up.
 func (f *Forwarder) openSecrets(delivery store.ClaimedEventDelivery) ([]string, error) {
 	aad := secretAAD(delivery.CustomerID, delivery.ConnectorID, delivery.DestinationID)
 	current, err := f.secrets.OpenWithAADVersion(delivery.SecretSealed, aad, delivery.KEKVersion)
@@ -698,9 +698,12 @@ func (f *Forwarder) openSecrets(delivery store.ClaimedEventDelivery) ([]string, 
 	secrets := []string{current}
 	if len(delivery.PreviousSecretSealed) > 0 && delivery.PreviousUntil != nil && time.Now().Before(*delivery.PreviousUntil) {
 		previous, err := f.secrets.OpenWithAADVersion(delivery.PreviousSecretSealed, aad, delivery.PreviousKEKVersion)
+		if err == nil {
+			_, err = webhook.Key(previous)
+		}
 		if err != nil {
 			if f.dueOnce("previous/" + delivery.DestinationID) {
-				f.logger.Warn("this router cannot open an event destination's previous signing secret; its forwards are signed with the current one alone",
+				f.logger.Warn("this router cannot sign with an event destination's previous signing secret; its forwards are signed with the current one alone",
 					"connector", delivery.ConnectorID, "customer", delivery.CustomerID, "destination", delivery.DestinationID, "error", err)
 			}
 			return secrets, nil

@@ -122,6 +122,7 @@ type Call struct {
 	Llm          *string            `json:"llm,omitempty" doc:"The target that held the conversation."`
 	LlmUsed      *string            `json:"llm_used,omitempty" doc:"The provider/model that held the conversation."`
 	Mode         *SessionMode       `json:"mode,omitempty"`
+	Region       *string            `json:"region,omitempty" readOnly:"true" doc:"The shard the call is kept in. Set on a listed call of a deployment with shards."`
 	ReviewNotes  *string            `json:"review_notes,omitempty"`
 	ReviewScore  *int               `json:"review_score,omitempty" doc:"How well the agent handled it, from 1 to 5."`
 	SessionId    *string            `json:"session_id,omitempty" doc:"The session the call was part of. A session starts a new call each time voice is started or stopped on it. Absent once the session is deleted."`
@@ -856,6 +857,7 @@ type Session struct {
 	ModelOverwrites  *ModelOverwrites        `json:"model_overwrites,omitempty"`
 	PinnedAt         *time.Time              `json:"pinned_at,omitempty" doc:"When the session was pinned. Absent for one that is not pinned."`
 	ProjectId        *string                 `json:"project_id,omitempty"`
+	Region           *string                 `json:"region,omitempty" readOnly:"true" doc:"The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards."`
 	ReviewNotes      *string                 `json:"review_notes,omitempty" doc:"Why the review scored the conversation as it did. Read by a backend only."`
 	ReviewScore      *int                    `json:"review_score,omitempty" doc:"How well the agent handled the conversation, from 1 to 5, written a few seconds after it ended. Read by a backend only."`
 	State            SessionState            `json:"state"`
@@ -1310,7 +1312,7 @@ type SkillRequest struct {
 	Description  string             `json:"description" doc:"The one line the fast model sees."`
 	Files        *map[string]string `json:"files,omitempty" doc:"The rest of the skill's folder beside SKILL.md, each file's text by its path relative to the folder, such as reference/forms.md or scripts/fill.py. The model reads them one at a time when it needs them. A file that is not .md, .mdx or .txt is a script, run in the sandbox, so a skill with one belongs only to an agent with a sandbox. At most 64 files and 1 MB in all."`
 	Instructions string             `json:"instructions" doc:"The full prompt, which only the subagent sees."`
-	Name         string             `json:"name" doc:"How the config names it, which is unique among that config's own skills."`
+	Name         string             `json:"name" doc:"How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \\ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox."`
 }
 
 // Speech is the Speech schema.

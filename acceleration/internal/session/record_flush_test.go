@@ -349,7 +349,7 @@ func (s *RecordFlushSuite) TestACloseQueuedByTheRouterThatHeldASessionBeforeItWa
 	s.T().Cleanup(reopening.Close)
 	reopened := row
 	reopened.OpenedAt = row.OpenedAt.Add(time.Minute)
-	reopening.CarriedOn(reopened, nil, nil)
+	reopening.Opened(reopened, nil, nil)
 	s.Require().NoError(reopening.Flush(s.bounded()))
 
 	s.records.Closed(s.customer, row.ID, row.OpenedAt, time.Now().UTC(), TimeoutHangup)

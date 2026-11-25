@@ -11,12 +11,13 @@ import (
 
 	"github.com/redis/rueidis"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/vendors"
 )
 
-// twilioCallHookPath is the voice URL a Twilio number is to be pointed at. Twilio asks it what
-// to do with each call to the number.
-const twilioCallHookPath = "/v1/phone/hooks/twilio"
+// twilioCallHookPath is the voice URL a Twilio number is pointed at. Twilio asks it what to do
+// with each call to the number.
+const twilioCallHookPath = phone.TwilioCallHookPath
 
 // twilioCallLimit caps the form Twilio posts, which is a few hundred bytes
 // (https://www.twilio.com/docs/voice/twiml, "Twilio's request to your application").

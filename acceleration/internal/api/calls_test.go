@@ -939,6 +939,43 @@ func (s *CallsSuite) TestAVoiceCallsDecisionsAreNotAnEmptyListWhenTheirReadFails
 	s.Contains(served(), "store: call events")
 }
 
+// Defect: a call list reads every shard, so one shard being down fails it or leaves that
+// shard's calls out; or it lists a call without the shard it is kept in.
+func (s *CallsSuite) TestACallListWithAShardDownListsItsCallsFromTheIndex() {
+	call := s.started(store.Call{})
+	client, served := s.onAShardDown()
+	elsewhere := s.utils.uuid()
+	_, err := served.GlobalDB().ExecContext(context.Background(), `
+INSERT INTO call_index (shard, id, customer_id, call_type, call_id, agent_id, direction, started_at, changed_at)
+VALUES ('there', ?, ?, 'default', ?, 'agent', 'inbound', ?, now())`, elsewhere, s.customerID(), s.utils.uuid(), time.Now().UTC())
+	s.Require().NoError(err)
+
+	var listed []Call
+	s.Require().Equal(http.StatusOK, client.do(http.MethodGet, "/v1/agents/calls", nil, &listed))
+
+	regions := map[string]string{}
+	for _, each := range listed {
+		regions[each.Id] = value(each.Region)
+	}
+	s.Equal(map[string]string{call.ID: "here", elsewhere: "there"}, regions)
+}
+
+// Defect: a call kept in a shard no node answers for is read here, where it is missing, and
+// answered as not found rather than as a region that could not be reached.
+func (s *CallsSuite) TestACallReadOfAShardNoNodeAnswersIsUnavailable() {
+	client, served := s.onAShardDown()
+	elsewhere := s.utils.uuid()
+	_, err := served.GlobalDB().ExecContext(context.Background(), `
+INSERT INTO call_index (shard, id, customer_id, call_type, call_id, agent_id, direction, started_at, changed_at)
+VALUES ('there', ?, ?, 'default', ?, 'agent', 'inbound', ?, now())`, elsewhere, s.customerID(), s.utils.uuid(), time.Now().UTC())
+	s.Require().NoError(err)
+
+	status, failure := client.failure(http.MethodGet, "/v1/agents/calls/"+elsewhere, nil)
+
+	s.Equal(http.StatusServiceUnavailable, status)
+	s.Contains(failure, errCallShardDown.Message)
+}
+
 // callEventsOnClosedRedis has the decisions and floor checks every read of the suite's store
 // makes come from a Redis that is closed, as an unreachable one is. The test's end puts them back.
 func (s *CallsSuite) callEventsOnClosedRedis() {

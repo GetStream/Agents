@@ -988,6 +988,7 @@ func callOf(call store.Call) Call {
 		EndedAt:   call.EndedAt,
 	}
 	rendered.SessionId = optional(call.SessionID)
+	rendered.Region = optional(call.Region)
 	rendered.CampaignId = optional(call.CampaignID)
 	rendered.ContactId = optional(call.ContactID)
 	rendered.FromNumber = optional(call.FromNumber)

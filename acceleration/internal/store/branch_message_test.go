@@ -129,19 +129,24 @@ func (s *StoreSuite) TestBranchMessageQueryBudgets() {
 		messages = append(messages, AgentBranchMessage{SessionID: "branched", CustomerID: "app", Message: map[string]any{},
 			OriginalMessageID: fmt.Sprintf("message-%02d", i), ResponseID: fmt.Sprintf("response-%02d", i)})
 	}
+	// Sharded, a delete queues a job for every shard, then claims, reads, runs and finishes this one's run.
+	deletes := 1
+	if s.store.HasShards() {
+		deletes = 5
+	}
 	s.withinQueryBudgets([]queryBudget{
 		{"BranchMessages.UpsertMany", 1, 0, func() error { return s.store.BranchMessages.UpsertMany(s.ctx, messages) }},
-		{"BranchMessages.Select", 0, 1, func() error {
+		{"BranchMessages.Select", 1, 0, func() error {
 			listed, err := s.store.BranchMessages.Select(s.ctx, "app", "branched", []string{"response-01", "response-02"})
 			s.Len(listed, 2)
 			return err
 		}},
-		{"BranchMessages.CountUser", 0, 1, func() error {
+		{"BranchMessages.CountUser", 1, 0, func() error {
 			counted, err := s.store.BranchMessages.CountUser(s.ctx, "app", "jlahey")
 			s.EqualValues(30, counted)
 			return err
 		}},
-		{"BranchMessages.DeleteUser", 0, 1, func() error {
+		{"BranchMessages.DeleteUser", deletes, 0, func() error {
 			_, err := s.store.BranchMessages.DeleteUser(s.ctx, "app", "jlahey")
 			return err
 		}},

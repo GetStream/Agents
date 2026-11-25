@@ -3,10 +3,7 @@
 package api
 
 import (
-	"bytes"
-	"cmp"
 	"context"
-	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -181,6 +178,35 @@ func (s *ProjectTagSuite) TestAForkIsTaggedWithTheProjectABackendNamedLast() {
 	}
 }
 
+// A fork of a session carried on is tagged as one of a session never carried on is.
+func (s *ProjectTagSuite) TestAForkOfARunningSessionCarriedOnIsTaggedWithTheProjectABackendNamedLast() {
+	for _, tried := range []struct{ opener, forker, project, want string }{
+		{"backend", "backend", "-", "alpha"}, {"backend", "backend", "beta", "beta"}, {"backend", "backend", "", ""},
+		{"backend", "device", "-", "alpha"}, {"backend", "device", "beta", "alpha"}, {"backend", "device", "", "alpha"},
+		{"device", "backend", "-", ""}, {"device", "backend", "beta", "beta"}, {"device", "backend", "", ""},
+		{"device", "device", "-", ""}, {"device", "device", "beta", ""}, {"device", "device", "", ""},
+	} {
+		s.Run(strings.Join([]string{tried.opener, tried.forker, tried.project}, " "), func() {
+			owner := s.data.createUser()
+			as := map[string]*testClient{"device": owner, "backend": s.serverClient.actingFor(owner)}
+			parent := s.open(as[tried.opener], "alpha")
+			s.stop(parent.Id)
+			s.Require().Equal(http.StatusOK, owner.do(http.MethodPost, "/v1/agents/sessions/"+parent.Id+"/resume", ResumeSessionRequest{}, nil))
+			owner.opens("/v1/agents/sessions/" + parent.Id + "/events")
+			var request ForkSessionRequest
+			if tried.project != "-" {
+				request.ProjectId = &tried.project
+			}
+
+			forked := s.fork(as[tried.forker], parent.Id, request)
+
+			s.Equal(map[string]string{"-": "alpha", "beta": "beta", "": ""}[tried.project], value(forked.ProjectId))
+			s.Equal([]string{tried.want}, s.answered(as[tried.forker], forked.Id))
+			s.Equal([]string{tried.want}, s.reopened(owner, forked.Id))
+		})
+	}
+}
+
 // A backend naming a project on a fork of its running session leaves the session its own tag,
 // and an agent's project tag stands over both.
 func (s *ProjectTagSuite) TestABackendsForkNamingAProjectLeavesItsParentsTags() {
@@ -336,65 +362,6 @@ func (s *ProjectTagSuite) TestACarriedOnRowFromBeforeSaysItsProjectTag() {
 		s.Require().NotNil(row.ProjectTag)
 		s.Equal(want, *row.ProjectTag)
 	}
-}
-
-// While a shard that may say its tag is down, a row from before is neither carried on nor forked:
-// its usage would be tagged with a guess. It is read all the same.
-func (s *ProjectTagSuite) TestARowFromBeforeIsNotCarriedOnOrForkedWhileAShardIsDown() {
-	owner := s.data.createUser()
-	backend := s.serverClient.actingFor(owner)
-	unread, known := s.open(backend, "alpha"), s.open(backend, "alpha")
-	s.fromBefore(unread.Id)
-	s.stop(known.Id)
-	served := s.storeWithAShardDown()
-	other, _, _ := s.otherNodeServingFrom(served, nil, s.sealer, slog.New(slog.DiscardHandler))
-	asking := backend.on(other)
-
-	for path, body := range map[string]any{
-		"/fork":      ForkSessionRequest{Messages: pointerTo(false)},
-		"/resume":    ResumeSessionRequest{},
-		"/responses": CreateResponseRequest{Text: "hello"},
-	} {
-		status, message := asking.failure(http.MethodPost, "/v1/agents/sessions/"+unread.Id+path, body)
-		s.Equal(http.StatusServiceUnavailable, status, path)
-		s.Contains(message, "try again shortly", path)
-	}
-
-	device := ForkSessionRequest{ProjectId: pointerTo("beta"), Messages: pointerTo(false)}
-	status, _ := owner.on(other).failure(http.MethodPost, "/v1/agents/sessions/"+unread.Id+"/fork", device)
-	s.Equal(http.StatusServiceUnavailable, status, "a device names no tag")
-	named := s.fork(asking, unread.Id, device)
-	s.Equal([]string{"beta"}, s.answered(asking, named.Id), "a backend naming the fork's project needs no other")
-
-	status, _ = asking.call(http.MethodGet, "/v1/agents/sessions/"+unread.Id, nil)
-	s.NotEqual(http.StatusServiceUnavailable, status)
-	s.Equal([]string{"alpha"}, s.answered(asking, s.fork(asking, known.Id, ForkSessionRequest{}).Id))
-}
-
-// A shard that did not answer is logged, and a caller that hung up is not one.
-func (s *ProjectTagSuite) TestAnUnreadProjectTagIsLoggedUnlessTheCallerLeft() {
-	var logged bytes.Buffer
-	_, server, _ := s.otherNodeServingFrom(s.storeWithAShardDown(), nil, s.sealer, slog.New(slog.DiscardHandler))
-	server.logger = slog.New(slog.NewTextHandler(&logged, nil))
-	row := store.AgentSession{ID: "one", CustomerID: s.customerID(), Project: "alpha"}
-
-	left, leave := context.WithCancel(context.Background())
-	leave()
-	s.Error(server.readProjectTag(left, &row))
-	s.Empty(logged.String())
-
-	s.Error(server.readProjectTag(context.Background(), &row))
-	s.Contains(logged.String(), "level=ERROR")
-}
-
-func (s *ProjectTagSuite) storeWithAShardDown() *store.Store {
-	options := s.storeOptions
-	options.ShardDSN = cmp.Or(options.ShardDSN, options.DSN)
-	options.Shards = map[string]string{"own": options.ShardDSN, "down": "postgres://postgres:postgres@127.0.0.1:1/down?sslmode=disable"}
-	served, err := store.OpenShards(options)
-	s.Require().NoError(err)
-	s.T().Cleanup(func() { s.NoError(served.Close()) })
-	return served
 }
 
 func (s *ProjectTagSuite) TestAForksRowFromBeforeIsNotTagged() {
