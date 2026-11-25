@@ -40,6 +40,7 @@ func TestKnowledgeFilesSuite(t *testing.T) {
 func (s *KnowledgeFilesSuite) SetupTest() {
 	s.useApp(s.data.createApp())
 	s.namespace = "files-" + uuid.NewString()
+	s.knowledge.forget()
 	s.T().Cleanup(func() {
 		s.knowledge.onceBeforeWrite(nil)
 		s.knowledge.onceAfterWrite(nil)
@@ -594,22 +595,80 @@ func (s *KnowledgeFilesSuite) TestAPostThatFailsOnceItsDocumentIsGoneIsListedAsF
 	s.Empty(s.listed())
 }
 
-func (s *KnowledgeFilesSuite) TestOnlyTheDocumentOfAPostThatWasRemovedIsWrittenAgain() {
-	writing, write := s.holdWrite()
-	posted := make(chan int, 1)
-	go func() {
-		posted <- s.serverClient.do(http.MethodPost, "/v1/agents/knowledge", map[string]any{
-			"namespace": s.namespace, "documents": []map[string]string{
-				{"source": "first.md", "text": sections(2)}, {"source": "second.md", "text": sections(3)},
-			},
-		}, nil)
-	}()
-	s.reached(writing, "the post never wrote")
+// postBoth sends first.md and second.md, of 2 and 3 sections, in one post.
+func (s *KnowledgeFilesSuite) postBoth() int {
+	return s.serverClient.do(http.MethodPost, "/v1/agents/knowledge", map[string]any{
+		"namespace": s.namespace, "documents": []map[string]string{
+			{"source": "first.md", "text": sections(2)}, {"source": "second.md", "text": sections(3)},
+		},
+	}, nil)
+}
+
+func (s *KnowledgeFilesSuite) removeSource(source string) {
 	for _, document := range s.listed() {
-		if document.Source == "second.md" {
+		if document.Source == source {
 			s.Require().Equal(http.StatusNoContent, s.remove(document.Id))
 		}
 	}
+}
+
+// bothFailed checks first.md and second.md are listed, each failed.
+func (s *KnowledgeFilesSuite) bothFailed() {
+	listed := s.listed()
+	s.Len(listed, 2)
+	for _, document := range listed {
+		s.Equal(KnowledgeDocumentStateFailed, document.State, document.Source)
+	}
+}
+
+// One was removed meanwhile and waited to be written again, the other could not be finished.
+func (s *KnowledgeFilesSuite) TestEveryDocumentOfAPostThatCannotFinishIsListedAsFailed() {
+	s.trigger("refuse_finish", "knowledge_documents", "UPDATE", "NEW.customer_id = '"+s.customerID()+
+		"' AND NEW.source = 'second.md' AND NEW.state = 'indexed'", "RAISE EXCEPTION 'refused by the test';")
+	writing, write := s.holdWrite()
+	posted := make(chan int, 1)
+	go func() { posted <- s.postBoth() }()
+	s.reached(writing, "the post never wrote")
+	s.removeSource("first.md")
+	write()
+
+	s.Equal(http.StatusInternalServerError, s.answer(posted))
+	s.bothFailed()
+}
+
+func (s *KnowledgeFilesSuite) TestEveryDocumentOfAPostThatCannotDeleteItsTailIsListedAsFailed() {
+	s.Require().Equal(http.StatusOK, s.post("second.md", 6))
+	writing, write := s.holdWrite()
+	posted := make(chan int, 1)
+	go func() { posted <- s.postBoth() }()
+	s.reached(writing, "the post never wrote")
+	s.removeSource("first.md")
+	s.knowledge.onceBeforeDelete(func() error { return errors.New("down") })
+	write()
+
+	s.Equal(http.StatusInternalServerError, s.answer(posted))
+	s.bothFailed()
+}
+
+func (s *KnowledgeFilesSuite) TestEveryDocumentOfAPostThatCannotHoldOneIsListedAsFailed() {
+	s.Require().Equal(http.StatusOK, s.postBoth())
+	s.trigger("refuse_hold", "knowledge_documents", "UPDATE", "NEW.customer_id = '"+s.customerID()+
+		"' AND NEW.source = 'second.md' AND NEW.state = 'pending'", "RAISE EXCEPTION 'refused by the test';")
+
+	s.Equal(http.StatusInternalServerError, s.serverClient.do(http.MethodPost, "/v1/agents/knowledge", map[string]any{
+		"namespace": s.namespace, "documents": []map[string]string{
+			{"source": "first.md", "text": sections(4)}, {"source": "second.md", "text": sections(4)},
+		},
+	}, nil))
+	s.bothFailed()
+}
+
+func (s *KnowledgeFilesSuite) TestOnlyTheDocumentOfAPostThatWasRemovedIsWrittenAgain() {
+	writing, write := s.holdWrite()
+	posted := make(chan int, 1)
+	go func() { posted <- s.postBoth() }()
+	s.reached(writing, "the post never wrote")
+	s.removeSource("second.md")
 	// Gone from the base, it is there again only if the second write holds it.
 	s.knowledge.onceAfterWrite(func() error {
 		s.knowledge.onceBeforeWrite(func() { s.forgetStored("first.md") })

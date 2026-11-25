@@ -1026,6 +1026,13 @@ type knowledgeBase struct {
 	afterDelete  func()
 }
 
+// forget empties every base.
+func (b *knowledgeBase) forget() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	clear(b.passages)
+}
+
 // onceBeforeWrite runs hook before the next write.
 func (b *knowledgeBase) onceBeforeWrite(hook func()) {
 	b.mu.Lock()
