@@ -1549,12 +1549,119 @@ func (s *ConfigSuite) TestAShardDatabaseWithoutTheSharedOneIsRefused() {
 	s.ErrorContains(err, "set postgres.dsn")
 }
 
+func (s *ConfigSuite) TestNoMigrateDSNIsSetByDefault() {
+	config, _, err := Load("")
+	s.Require().NoError(err)
+
+	s.Empty(config.Postgres.MigrateDSN)
+	s.Empty(config.Postgres.ShardMigrateDSN)
+}
+
+func (s *ConfigSuite) TestTheMigrateDSNsAreReadFromAFileAndExported() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte(`
+shard: us-west1
+postgres:
+  dsn: postgres://global/router
+  migrate_dsn: postgres://owner@global/router
+  shard_dsn: postgres://usw/router
+  shard_migrate_dsn: postgres://owner@usw/router
+  shards:
+    us-west1: postgres://usw/router
+`), 0o600))
+
+	config, _, err := Load(path)
+	s.Require().NoError(err)
+
+	s.Equal("postgres://owner@global/router", config.Postgres.MigrateDSN)
+	s.Equal("postgres://owner@usw/router", config.Postgres.ShardMigrateDSN)
+	s.Equal("postgres://owner@global/router", os.Getenv("ROUTER_POSTGRES_MIGRATE_DSN"))
+	s.Equal("postgres://owner@usw/router", os.Getenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN"))
+}
+
+func (s *ConfigSuite) TestTheMigrateDSNsAreReadFromTheEnvironment() {
+	s.T().Setenv("ROUTER_SHARD", "us-west1")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-west1=postgres://usw/router")
+	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@usw/router")
+
+	config, _, err := Load("")
+	s.Require().NoError(err)
+
+	s.Equal("postgres://owner@global/router", config.Postgres.MigrateDSN)
+	s.Equal("postgres://owner@usw/router", config.Postgres.ShardMigrateDSN)
+}
+
+func (s *ConfigSuite) TestADeploymentOfOneDatabaseNeedsNoShardMigrateDSN() {
+	s.T().Setenv("ROUTER_POSTGRES_DSN", "postgres://global/router")
+	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+	_, _, err := Load("")
+	s.NoError(err)
+
+	s.T().Setenv("ROUTER_SHARD", "us-west1")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://global/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-west1=postgres://global/router")
+	_, _, err = Load("")
+	s.NoError(err)
+}
+
+func (s *ConfigSuite) TestAMigrateDSNWithoutTheDatabaseItMigratesIsRefused() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte("postgres:\n  dsn: \"\"\n  migrate_dsn: postgres://owner@global/router\n"), 0o600))
+
+	_, _, err := Load(path)
+	s.ErrorContains(err, "postgres.migrate_dsn migrates postgres.dsn's database: set postgres.dsn")
+}
+
+func (s *ConfigSuite) TestAShardWithOnlyTheSharedMigrateDSNIsRefused() {
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
+	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "set postgres.shard_migrate_dsn too")
+}
+
+func (s *ConfigSuite) TestAShardMigrateDSNWithoutTheSharedOneIsRefused() {
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@usw/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "set postgres.shard_dsn and postgres.migrate_dsn")
+}
+
+func (s *ConfigSuite) TestAShardMigrateDSNForTheSharedDatabaseIsRefused() {
+	s.T().Setenv("ROUTER_POSTGRES_DSN", "postgres://global/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://global/router")
+	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@global/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "postgres.shard_dsn's own database")
+}
+
+func (s *ConfigSuite) TestAShardMigrateDSNWithoutAShardIsRefused() {
+	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@usw/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "set postgres.shard_dsn and postgres.migrate_dsn")
+}
+
 func (s *ConfigSuite) TestAShardRedisWithoutTheSharedOneIsRefused() {
 	path := filepath.Join(s.T().TempDir(), "router.yaml")
 	s.Require().NoError(os.WriteFile(path, []byte("redis:\n  addr: \"\"\n  shard:\n    addr: usw:6379\n"), 0o600))
 
 	_, _, err := Load(path)
 	s.ErrorContains(err, "set redis.addr")
+}
+
+func (s *ConfigSuite) TestAShardDatabaseWithoutTheShardListIsRefused() {
+	s.T().Setenv("ROUTER_SHARD", "us-west1")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "set postgres.shards")
 }
 
 func (s *ConfigSuite) TestShardsThatLeaveThisOneOutAreRefused() {
