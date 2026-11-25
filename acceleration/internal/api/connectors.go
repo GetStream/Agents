@@ -356,7 +356,7 @@ func (s *Server) createConnector(ctx context.Context, request *createConnectorRe
 }
 
 // deleteConnector deletes one of the caller's own definitions, refused while something uses
-// it unless forced (store.DeleteConnectorDefinition).
+// it unless forced (store.ConnectorDefinitions.Delete).
 func (s *Server) deleteConnector(ctx context.Context, request *deleteConnectorRequest) (*struct{}, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {

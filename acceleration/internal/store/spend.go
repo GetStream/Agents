@@ -58,14 +58,20 @@ type TeamAppSpend struct {
 
 // Teams sums, across every shard, the billable cost of the rows of every app of the
 // organization that carry a team's category since each of since, per app and team, for a
-// deployment with no usage service to count it. Rows are read from the earliest moment.
-func (r *Spend) Teams(ctx context.Context, organizationID string, since []time.Time, month time.Time) ([]TeamAppSpend, error) {
+// deployment with no usage service to count it. Rows are read from the earliest moment. A
+// billed organization's apps are its Members; an app in no organization, whose id
+// organizationID is, is its own only app. Neither counts an app of another customer's whose id
+// is the same, as Subject does not.
+func (r *Spend) Teams(ctx context.Context, organizationID string, since []time.Time, month time.Time, billed bool) ([]TeamAppSpend, error) {
 	if len(since) == 0 {
 		return nil, nil
 	}
-	apps, err := r.store.AppOrganizations.Apps(ctx, organizationID)
-	if err != nil {
-		return nil, err
+	apps := []string{organizationID}
+	if billed {
+		var err error
+		if apps, err = r.store.AppOrganizations.Members(ctx, organizationID); err != nil {
+			return nil, err
+		}
 	}
 	earliest := slices.MinFunc(append(slices.Clone(since), month), func(a, b time.Time) int { return a.Compare(b) })
 	var sums strings.Builder
@@ -130,18 +136,21 @@ GROUP BY 1, 2`
 
 // Subject sums the billable cost of a subject's rows since a moment, across every
 // shard, for a deployment with no usage service to count it. A subject of the whole
-// organization (the organization, a category) counts every app seen under it, and the app
-// whose id the organization's is, for an app that is its own organization.
-func (r *Spend) Subject(ctx context.Context, ref usage.SubjectRef, since time.Time) (int64, error) {
+// organization (the organization, a category) counts every app seen under it when billed, or,
+// for an app in no organization, whose id ref.OrganizationID is, that app alone. Neither
+// counts an app of another customer's whose id is the same: an app whose id is a billed
+// organization's, or one seen under an organization whose id is an unbilled app's.
+func (r *Spend) Subject(ctx context.Context, ref usage.SubjectRef, since time.Time, billed bool) (int64, error) {
 	apps := []string{ref.AppID}
 	if ref.Subject == usage.SubjectOrganization || ref.Subject == usage.SubjectCategory {
 		apps = []string{ref.OrganizationID}
-		var members []string
-		if err := r.store.global.NewSelect().Model((*AppOrganization)(nil)).Column("app_id").
-			Where("organization_id = ?", ref.OrganizationID).Scan(ctx, &members); err != nil {
-			return 0, stack.Wrap(fmt.Errorf("store: subject spend since: %w", err))
+		if billed {
+			apps = nil
+			if err := r.store.global.NewSelect().Model((*AppOrganization)(nil)).Column("app_id").
+				Where("organization_id = ?", ref.OrganizationID).Scan(ctx, &apps); err != nil {
+				return 0, stack.Wrap(fmt.Errorf("store: subject spend since: %w", err))
+			}
 		}
-		apps = append(apps, members...)
 	}
 	answers, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int64, error) {
 		var spent int64

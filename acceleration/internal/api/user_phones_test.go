@@ -233,6 +233,22 @@ func (s *UserPhonesSuite) TestANumberAnotherUserHoldsIsAConflict() {
 	s.NotContains(string(payload), s.user)
 }
 
+// A number is never linked to a user id Stream keeps for itself.
+func (s *UserPhonesSuite) TestANumberIsNotLinkedToAReservedUserID() {
+	status, payload := s.serverClient.call(http.MethodPut, "/v1/agents/users/!anon", `{"phone": "`+s.person+`"}`)
+
+	s.Equal(http.StatusBadRequest, status, string(payload))
+	s.Contains(string(payload), "user_id may not start with !")
+	s.Empty(s.links())
+}
+
+// Unlinking is never refused, so a number kept under a reserved id before can still be let go.
+func (s *UserPhonesSuite) TestAReservedUserIDCanStillBeUnlinked() {
+	status, payload := s.serverClient.call(http.MethodPut, "/v1/agents/users/!anon", `{"phone": null}`)
+
+	s.Equal(http.StatusOK, status, string(payload))
+}
+
 // Catches a null that is refused or keeps the link, and a number still held after it.
 func (s *UserPhonesSuite) TestNullUnlinksAndFreesTheNumber() {
 	s.Require().Equal(http.StatusOK, s.put(s.user, `{"phone": "`+s.person+`"}`, nil))
@@ -475,7 +491,7 @@ func (s *LinqSandboxSuite) SetupTest() {
 // Catches a one-to-one chat under a config with episode_cards off, which opens no episode, whose
 // replies would reach nobody the sandbox lists: the person a chat's replies reach is its
 // episode's row, and with none it is the person who started the chat
-// (store.ChannelThreadStarter), as the sender admit checked. Its reply and a scheduled delivery
+// (store.ChannelThreads.Starter), as the sender admit checked. Its reply and a scheduled delivery
 // go out (AI-2856).
 func (s *LinqSandboxSuite) TestAOneToOneChatUnderAConfigWithTheCardsOffIsAnswered() {
 	s.config.EpisodeCards.On = false
@@ -490,7 +506,7 @@ func (s *LinqSandboxSuite) TestAOneToOneChatUnderAConfigWithTheCardsOffIsAnswere
 }
 
 // A group chat under a config with episode_cards off has no episode and no one person, and its
-// replies and scheduled deliveries reach the person who started it (store.ChannelThreadStarter),
+// replies and scheduled deliveries reach the person who started it (store.ChannelThreads.Starter),
 // whom the sandbox lists, as base 518ac7e9f's did through the episode it opened whatever the
 // config said (AI-2856 R1.1). Catches a group chat with no episode whose replies reach nobody,
 // so the sandbox holds them back.

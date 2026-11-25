@@ -276,6 +276,18 @@ func (s *RouterSuite) config(model string) string {
 	return created.Id
 }
 
+// orderConfig is the id of an agent config the backend as writes on the model that reaches for
+// lookup_order, which a tool group of it names, so a session may declare it.
+func (s *RouterSuite) orderConfig(as *testClient) string {
+	var created AgentConfig
+	s.Require().Equal(http.StatusCreated, as.do(
+		http.MethodPost, "/v1/agents/configs", AgentConfigRequest{
+			Name: "orders-" + s.utils.uuid(), Llm: pointerTo("tooling/tool-model"),
+			Tools: &[]ToolGroup{{Name: "orders", Loading: pointerTo(ToolLoadingFull), Tools: []string{lookupOrder}}},
+		}, &created))
+	return created.Id
+}
+
 // UnbilledCostSuite runs the router as a deployment that bills nobody: no usage service.
 type UnbilledCostSuite struct {
 	RouterSuite

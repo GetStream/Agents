@@ -28,6 +28,8 @@ type fakeTelnyx struct {
 	campaigns map[string]string
 	bodies    map[string]map[string]any
 	assigned  []string
+	// listed is what a list of a brand's campaigns answers, and listedFor the brand asked for.
+	listed, listedFor string
 }
 
 func (f *fakeTelnyx) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -47,6 +49,9 @@ func (f *fakeTelnyx) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && r.URL.Path == "/v2/10dlc/campaignBuilder":
 		f.campaigns["C1"] = "TCR_PENDING"
 		_, _ = io.WriteString(w, `{"campaignId":"C1","campaignStatus":"TCR_PENDING"}`)
+	case r.Method == http.MethodGet && r.URL.Path == "/v2/10dlc/campaign":
+		f.listedFor = r.URL.Query().Get("brandId")
+		_, _ = io.WriteString(w, f.listed)
 	case r.Method == http.MethodGet && r.URL.Path == "/v2/10dlc/campaign/C1":
 		_, _ = io.WriteString(w, `{"campaignId":"C1","campaignStatus":"`+f.campaigns["C1"]+`"}`)
 	case r.Method == http.MethodPost && r.URL.Path == "/v2/10dlc/phone_number_campaigns":
@@ -106,6 +111,53 @@ func (s *TelnyxSuite) TestAVerifiedBrandIsReadyForACampaign() {
 	s.Equal("PUBLIC_PROFIT", sent["entityType"])
 	s.Equal("Acme Inc", sent["displayName"], "the legal name stands in for a missing brand name")
 	s.Equal("TECHNOLOGY", sent["vertical"])
+}
+
+// A request that never reached Telnyx, its dial refused, was not carried out and may be asked
+// for again; one Telnyx read and never answered may have been.
+func (s *TelnyxSuite) TestOnlyARequestThatNeverReachedTelnyxIsNotCarriedOut() {
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+	unreachable, err := New(Options{APIKey: "key", BaseURL: closed.URL})
+	s.Require().NoError(err)
+
+	_, err = unreachable.RegisterBrand(s.ctx, store.BusinessProfile{LegalBusinessName: "Acme Inc"})
+	s.ErrorIs(err, dlc.ErrNotCarriedOut)
+
+	silent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		if connection, _, err := http.NewResponseController(w).Hijack(); err == nil {
+			_ = connection.Close()
+		}
+	}))
+	s.T().Cleanup(silent.Close)
+	unanswered, err := New(Options{APIKey: "key", BaseURL: silent.URL})
+	s.Require().NoError(err)
+
+	_, err = unanswered.RegisterBrand(s.ctx, store.BusinessProfile{LegalBusinessName: "Acme Inc"})
+	s.Require().Error(err)
+	s.NotErrorIs(err, dlc.ErrNotCarriedOut, "Telnyx had the whole request")
+}
+
+// A campaign is registered with its use case's id as its reference, and found under its brand
+// by it.
+func (s *TelnyxSuite) TestACampaignIsFoundByTheUseCaseItWasRegisteredFor() {
+	_, err := s.registrar.RegisterCampaign(s.ctx, "B1", store.UseCase{ID: "use-case-2"}, "")
+	s.Require().NoError(err)
+	s.Equal("use-case-2", s.fake.bodies["POST /v2/10dlc/campaignBuilder"]["referenceId"])
+	s.fake.listed = `{"records":[{"campaignId":"C0","campaignStatus":"ACTIVE","referenceId":"use-case-1"},` +
+		`{"campaignId":"C1","campaignStatus":"TCR_PENDING","referenceId":"use-case-2"}],"page":1,"totalRecords":2}`
+
+	campaign, found, err := s.registrar.FindCampaign(s.ctx, "B1", "use-case-2")
+
+	s.Require().NoError(err)
+	s.True(found)
+	s.Equal("C1", campaign.ID)
+	s.Equal("TCR_PENDING", campaign.Status)
+	s.Equal("B1", s.fake.listedFor)
+	_, found, err = s.registrar.FindCampaign(s.ctx, "B1", "use-case-3")
+	s.Require().NoError(err)
+	s.False(found)
 }
 
 func (s *TelnyxSuite) TestACampaignIsOnlyApprovedOnceCarriersProvisionedIt() {

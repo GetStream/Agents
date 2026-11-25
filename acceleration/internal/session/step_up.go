@@ -110,7 +110,7 @@ func (d *dispatcher) stepUp(ctx context.Context, r route, turnID string, asked c
 }
 
 // attemptOpen reports whether the attempt is still open: not used, not expired, and on a
-// connection that was not deleted (store.ConnectorAuthorizationAttemptByID).
+// connection that was not deleted (store.ConnectorAuthorizationAttempts.Get).
 func (d *dispatcher) attemptOpen(ctx context.Context, id string) bool {
 	_, err := d.store.ConnectorAuthorizationAttempts.Get(ctx, id)
 	return err == nil

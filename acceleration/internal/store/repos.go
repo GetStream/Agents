@@ -51,7 +51,6 @@ type repos struct {
 	Episodes                       *Episodes
 	EventDeliveries                *EventDeliveries
 	EventDestinations              *EventDestinations
-	Guests                         *Guests
 	ImageJobs                      *ImageJobs
 	KnowledgeDocuments             *KnowledgeDocuments
 	KnowledgeNamespaces            *KnowledgeNamespaces
@@ -64,6 +63,7 @@ type repos struct {
 	OptOuts                        *OptOuts
 	OrganizationTiers              *OrganizationTiers
 	Organizations                  *Organizations
+	PhoneNumberOrders              *PhoneNumberOrders
 	PhoneNumbers                   *PhoneNumbers
 	Policies                       *Policies
 	PriceChanges                   *PriceChanges
@@ -155,7 +155,6 @@ func (s *Store) wire() {
 		Episodes:                       &Episodes{store: s},
 		EventDeliveries:                &EventDeliveries{store: s},
 		EventDestinations:              &EventDestinations{store: s},
-		Guests:                         &Guests{store: s},
 		ImageJobs:                      &ImageJobs{store: s},
 		KnowledgeDocuments:             &KnowledgeDocuments{store: s},
 		KnowledgeNamespaces:            &KnowledgeNamespaces{store: s},
@@ -168,6 +167,7 @@ func (s *Store) wire() {
 		OptOuts:                        &OptOuts{store: s},
 		OrganizationTiers:              &OrganizationTiers{store: s},
 		Organizations:                  &Organizations{store: s},
+		PhoneNumberOrders:              &PhoneNumberOrders{store: s},
 		PhoneNumbers:                   &PhoneNumbers{store: s},
 		Policies:                       &Policies{store: s},
 		PriceChanges:                   &PriceChanges{store: s},

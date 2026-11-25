@@ -22,7 +22,7 @@ class OptOut:
             channel (OptOutChannel): The channel a recipient opted out of, or all of them.
             created_at (datetime.datetime):
             id (str):
-            recipient (str): The number, in E.164.
+            recipient (str): The number in E.164, or an iMessage handle's email address.
             source (str): keyword when they texted STOP, campaign when they asked a campaign call not to call again,
                 otherwise api or dashboard.
     """

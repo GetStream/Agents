@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sts"
 )
 
@@ -96,7 +97,7 @@ func (a *Agent) sayToolUpdate() {
 	a.composing = true
 	a.mu.Unlock()
 
-	go func() {
+	goroutine.Go(a.ctx, func() {
 		defer func() {
 			a.mu.Lock()
 			a.composing = false
@@ -114,7 +115,7 @@ func (a *Agent) sayToolUpdate() {
 			return
 		}
 		a.sayComposed(participant, line, statusPurpose, asked)
-	}()
+	})
 }
 
 // sayNativeToolUpdate asks a speech-to-speech model to say one update waiting for the line,

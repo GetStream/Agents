@@ -17,9 +17,8 @@ enum Demo {
     /// a Stream token with, so it asks this for one.
     static let backendURL = URL(string: "http://localhost:8099")!
 
-    /// Whichever customer id you started the router with. `compose.yaml` builds the
-    /// dashboard with `examples`, and a config belongs to one customer, so anything else
-    /// here works but will not appear on the dashboard.
+    /// Whichever customer id you stored the agent under: a config belongs to one customer.
+    /// The Volt dashboard shows a numeric app id's configs, not those under `examples`.
     static let customerID = "examples"
 
     /// The `STREAM_API_KEY` the router runs with: the chat channel a written conversation is

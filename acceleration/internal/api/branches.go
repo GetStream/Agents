@@ -130,7 +130,7 @@ func (s *Server) listResponseSiblings(ctx context.Context, request *listResponse
 			}
 		}
 	}
-	rows, more := page(siblings[start:], clampLimit(value(request.Limit.ptr()), defaultSiblingLimit, maxSiblingLimit))
+	rows, more := page(siblings[start:], store.ClampLimit(value(request.Limit.ptr()), defaultSiblingLimit, maxSiblingLimit))
 	listed := ResponseSiblingPage{Items: make([]ResponseSibling, 0, len(rows)), HasMore: more}
 	for i, row := range rows {
 		active, err := s.siblingActive(ctx, customer, found.ID(), row, of)
@@ -186,7 +186,7 @@ func (s *Server) getResponseBranch(ctx context.Context, request *getResponseBran
 		return &getResponseBranchResponse{Body: listed}, nil
 	}
 
-	rows, more := page(shown[branchFrom(shown, after):], clampLimit(value(request.Limit.ptr()), defaultBranchLimit, maxBranchLimit))
+	rows, more := page(shown[branchFrom(shown, after):], store.ClampLimit(value(request.Limit.ptr()), defaultBranchLimit, maxBranchLimit))
 	listed.HasMore = more
 	for _, row := range rows {
 		listed.Items = append(listed.Items, branchMessageOf(row))
@@ -263,14 +263,6 @@ func (s *Server) branchedSession(ctx context.Context, id string) (session.Found,
 // positionAfter is whether (at, id) sorts after the cursor's (afterAt, afterID).
 func positionAfter(at time.Time, id string, afterAt time.Time, afterID string) bool {
 	return cmp.Or(at.Compare(afterAt), strings.Compare(id, afterID)) > 0
-}
-
-// clampLimit is the page size for the limit asked for: fallback when none was, at most most.
-func clampLimit(asked, fallback, most int) int {
-	if asked <= 0 {
-		return fallback
-	}
-	return min(asked, most)
 }
 
 // branchPosition is the last message of a branch page.

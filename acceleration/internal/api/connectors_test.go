@@ -715,7 +715,7 @@ func (s *ConnectorsSuite) TestABindingToAConnectorDeletedMeanwhileIsRefused() {
 
 // duringADeleteOf makes call while a delete of the app's connector id holds its lock on the
 // definition: a SHARE lock on connector_oauth_clients holds the delete at its DELETE there,
-// which comes after that lock (store.DeleteConnectorDefinition). The call is let go once it
+// which comes after that lock (store.ConnectorDefinitions.Delete). The call is let go once it
 // waits for the definition, and it answers after the delete committed. Suites beside this one
 // may wait on the table meanwhile; the waits counted are the delete's and the call's alone.
 func (s *ConnectorsSuite) duringADeleteOf(id string, call func() (int, string)) (int, string) {
@@ -726,7 +726,7 @@ func (s *ConnectorsSuite) duringADeleteOf(id string, call func() (int, string)) 
 	s.Require().NoError(err)
 	deleted := make(chan int, 1)
 	go func() { deleted <- s.serverClient.do(http.MethodDelete, "/v1/agents/connectors/"+id, nil, nil) }()
-	// The two seconds and the ten milliseconds are assertTheWaitEnded's (internal/store/credentials_test.go).
+	// The two seconds and the ten milliseconds are assertTheWaitEnded's (internal/store/credential_lock_test.go).
 	s.Require().Eventually(func() bool { return s.waitingFor(`DELETE FROM "connector_oauth_clients"`, id) == 1 },
 		2*time.Second, 10*time.Millisecond, "the delete waits at its DELETE")
 	type answer struct {

@@ -94,7 +94,7 @@ func (s *StoreSuite) TestCallResourceQueryBudgets() {
 			first = resource
 		}
 	}
-	s.Equal(shards, s.countQueries(func() {
+	s.Equal(shards, s.countSettledReads(func() {
 		resources, err := s.store.CallResources.Select(s.ctx, AppScope{Unpinned: true}, "default", "call-1")
 		s.Require().NoError(err)
 		s.Len(resources, 3)

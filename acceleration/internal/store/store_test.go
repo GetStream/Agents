@@ -5,6 +5,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -14,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 )
@@ -37,6 +41,18 @@ type StoreSuite struct {
 	roundTrips roundTrips
 	// seededDSN is the database the EXPLAIN checks read, seeded on the suite's first use.
 	seededDSN string
+}
+
+// insertRequest writes one request as the writer does, through InsertMany, giving it a usage
+// id when it has none, and leaves on request what the write set.
+func insertRequest(ctx context.Context, db *Store, request *Request) error {
+	if request.UsageID == uuid.Nil {
+		request.UsageID = uuid.Must(uuid.NewV7())
+	}
+	rows := []Request{*request}
+	_, err := db.Requests.InsertMany(ctx, rows)
+	*request = rows[0]
+	return err
 }
 
 func TestStoreSuite(t *testing.T) {
@@ -185,29 +201,29 @@ func (s *StoreSuite) TestOpenRequiresADSN() {
 }
 
 func (s *StoreSuite) TestACallReportsTheModelsThatServedIt() {
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "stt", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "deepgram", Model: "flux-general-en",
 		StartedAt: s.base.Add(time.Second), Success: true,
 	}))
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "gemini", Model: "gemini-3.5-flash-lite",
 		StartedAt: s.base.Add(2 * time.Second), Success: true,
 	}))
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "openai", Model: "gpt-5.6-sol",
 		StartedAt: s.base.Add(3 * time.Second), Success: true,
 	}))
 	// A failed start is not what served the call.
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "tts", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "cartesia", Model: "sonic-preview",
 		StartedAt: s.base.Add(4 * time.Second), Success: false, ErrorCode: "start_failed",
 	}))
 	// Another agent is not this call.
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "stt", CustomerID: "acme", AgentID: "agent-2",
 		Provider: "grok", Model: "grok-stt",
 		StartedAt: s.base.Add(2 * time.Second), Success: true,
@@ -223,21 +239,21 @@ func (s *StoreSuite) TestACallReportsTheModelsThatServedIt() {
 }
 
 func (s *StoreSuite) TestACallAddsUpWhatEveryOneOfItsRequestsSpent() {
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base.Add(time.Second),
 		InputTokens: 800, CachedInputTokens: 500, OutputTokens: 120,
 		CostMicros: 1400, Success: true,
 	}))
 	// A turn the model read and then failed on is still billed for the reading.
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base.Add(2 * time.Second),
 		InputTokens: 200, OutputTokens: 0, CostMicros: 100,
 		Success: false, ErrorCode: "overloaded",
 	}))
 	// Another agent's spend is not this call's.
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-2",
 		Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base.Add(time.Second),
 		InputTokens: 9000, OutputTokens: 9000, CostMicros: 90000, Success: true,
@@ -260,7 +276,7 @@ func (s *StoreSuite) TestACallsRuntimeIsItsOwnSessionsAndNoRequest() {
 		{Modality: RuntimeModality, SessionID: "session-2", Provider: "stream", Model: "voice", CostMicros: 900},
 	} {
 		row.CustomerID, row.AgentID, row.StartedAt, row.Success = "acme", "agent-1", s.base.Add(time.Second), true
-		s.Require().NoError(s.store.Requests.Insert(s.ctx, &row))
+		s.Require().NoError(insertRequest(s.ctx, s.store, &row))
 	}
 
 	spent, err := s.store.Calls.Usage(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
@@ -289,7 +305,7 @@ func (s *StoreSuite) TestACallDoesNotCountAnotherSessionOfItsAgent() {
 		{Modality: "llm", Provider: "anthropic", Model: "claude-opus-5-5", InputTokens: 7, CostMicros: 3},
 	} {
 		row.CustomerID, row.AgentID, row.StartedAt, row.Success = "acme", "agent-1", s.base.Add(time.Second), true
-		s.Require().NoError(s.store.Requests.Insert(s.ctx, &row))
+		s.Require().NoError(insertRequest(s.ctx, s.store, &row))
 	}
 
 	spent, err := s.store.Calls.Usage(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
@@ -313,12 +329,12 @@ func (s *StoreSuite) TestACallThatMadeNoRequestsSpentNothing() {
 
 func (s *StoreSuite) TestWhatWasSpentAfterACallEndedIsNotTheCallsToPayFor() {
 	ended := s.base.Add(10 * time.Second)
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base.Add(time.Second),
 		InputTokens: 300, CostMicros: 400, Success: true,
 	}))
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "openai", Model: "gpt-5.6-sol", StartedAt: ended.Add(time.Minute),
 		InputTokens: 7000, CostMicros: 8000, Success: true,
@@ -410,7 +426,7 @@ func (s *StoreSuite) TestAReleasedNumbersCallIsNotAttributedToItsFormerHolder() 
 	}))
 	s.Require().NoError(s.store.PhoneNumbers.Attach(
 		s.ctx, "acme", "+15125551234", NumberAttachment{TrunkID: "trunk-7", CallType: "default", CallID: "phone-+15125551234"}))
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15125551234", s.base.Add(time.Hour)))
+	s.Require().NoError(giveBack(s.ctx, s.store, "acme", "+15125551234", s.base.Add(time.Hour)))
 
 	_, err := s.store.NumberByCallInApp(s.ctx, AppScope{Unpinned: true}, "default", "phone-+15125551234")
 
@@ -518,6 +534,46 @@ func (s *StoreSuite) TestMigrateRebuildsTheContactIndexLeftInvalid() {
 	s.True(valid, "dropped and built again")
 }
 
+func (s *StoreSuite) TestMigrateRebuildsTheSessionLogIndexLeftInvalid() {
+	// As a CONCURRENTLY build that failed leaves it: the migration's IF NOT EXISTS skips it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('agent_logs_session_order')")
+	s.Require().NoError(err)
+	var valid bool
+	read := func() {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+			"SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('agent_logs_session_order')").Scan(&valid))
+	}
+	read()
+	s.Require().False(valid)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	read()
+	s.True(valid, "dropped and built again")
+	var definition string
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT pg_get_indexdef(to_regclass('agent_logs_session_order'))").Scan(&definition))
+	s.Equal("CREATE INDEX agent_logs_session_order ON public.agent_logs USING btree (customer_id, session_id, id DESC)", definition)
+}
+
+func (s *StoreSuite) TestMigrateRebuildsTheCampaignAttemptIndexLeftInvalid() {
+	// As a CONCURRENTLY build that failed leaves it: the migration's IF NOT EXISTS skips it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('campaign_attempts_campaign_idx')")
+	s.Require().NoError(err)
+	var valid bool
+	read := func() {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+			"SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('campaign_attempts_campaign_idx')").Scan(&valid))
+	}
+	read()
+	s.Require().False(valid)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	read()
+	s.True(valid, "dropped and built again")
+}
+
 func (s *StoreSuite) TestMigrateRebuildsTheResponseParentIndexLeftInvalid() {
 	// As a CONCURRENTLY build that failed leaves it: the migration's IF NOT EXISTS skips it.
 	s.onShard("UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('agent_responses_parent_idx')")
@@ -613,4 +669,125 @@ func (s *StoreSuite) TestARouterWaitingToMigrateDoesNotHoldUpTheOneMigrating() {
 	case <-time.After(30 * time.Second):
 		s.FailNow("the waiting router never migrated once the lock was free")
 	}
+}
+
+// shortLimit is the statement and idle limit of a limitedStore's connections.
+const shortLimit = 300 * time.Millisecond
+
+// limitedDSN is dsn with a statement and idle limit of shortLimit on every connection, as a
+// DSN may set them, so a test can show what outlasts the serving limits without waiting for
+// them.
+func (s *StoreSuite) limitedDSN(dsn string) string {
+	parsed, err := url.Parse(dsn)
+	s.Require().NoError(err)
+	query := parsed.Query()
+	limit := fmt.Sprintf("%dms", shortLimit.Milliseconds())
+	query.Set("statement_timeout", limit)
+	query.Set("idle_in_transaction_session_timeout", limit)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+// limitedStore is another router's store on the suite's databases, every connection of it
+// held to shortLimit.
+func (s *StoreSuite) limitedStore() *Store {
+	store, err := OpenShards(Options{DSN: s.limitedDSN(s.dsn), ShardDSN: s.limitedDSN(s.shardDSN)})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(store.Close()) })
+	return store
+}
+
+// postgresCode is the SQLSTATE Postgres answered err with, empty for an error of another kind.
+func postgresCode(err error) string {
+	var refused pgdriver.Error
+	if errors.As(err, &refused) {
+		return refused.Field('C')
+	}
+	return ""
+}
+
+func (s *StoreSuite) TestAStatementPastTheLimitIsEndedOnTheServer() {
+	started := time.Now()
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "SELECT pg_sleep(20)")
+	took := time.Since(started)
+
+	s.Equal("57014", postgresCode(err), "the server cancelled it, not the driver: %v", err)
+	s.InDelta(8, took.Seconds(), 1)
+	var running int
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, `
+SELECT count(*) FROM pg_stat_activity
+WHERE datname = current_database() AND state = 'active' AND query LIKE '%pg_sleep(20)%' AND pid <> pg_backend_pid()`).Scan(&running))
+	s.Zero(running, "nothing is left running on the server")
+}
+
+func (s *StoreSuite) TestAWaitOnAnotherSessionsLockIsEnded() {
+	config := s.boundConfig("app")
+	holder, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer holder.Rollback() //nolint:errcheck // only ever holds the lock
+	_, err = holder.ExecContext(s.ctx, "SELECT 1 FROM agent_configs WHERE id = ? FOR UPDATE", config.ID)
+	s.Require().NoError(err)
+
+	started := time.Now()
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET name = name WHERE id = ?", config.ID)
+
+	s.Equal("55P03", postgresCode(err), "the wait was ended as a lock timeout: %v", err)
+	s.InDelta(3, time.Since(started).Seconds(), 1)
+}
+
+func (s *StoreSuite) TestAServingConnectionBoundsAnIdleTransaction() {
+	var limit string
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SHOW idle_in_transaction_session_timeout").Scan(&limit))
+	s.Equal("30s", limit)
+}
+
+func (s *StoreSuite) TestDaysAreCutInUTCWhateverTheDatabaseSays() {
+	var database string
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "ALTER DATABASE ? SET timezone = 'Pacific/Kiritimati'", bun.Ident(database))
+	s.Require().NoError(err)
+	s.T().Cleanup(func() {
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, "ALTER DATABASE ? RESET timezone", bun.Ident(database))
+		s.NoError(err)
+	})
+	fresh, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN})
+	s.Require().NoError(err)
+	defer fresh.Close()
+	// One in the morning in UTC is the afternoon of the same day at UTC+14, whose day began
+	// the evening before in UTC.
+	morning := time.Date(2026, 3, 1, 1, 0, 0, 0, time.UTC)
+	s.opened("one", "acme", morning, nil)
+
+	buckets, err := fresh.CustomerActivity(s.ctx, "acme", ActivityDaily, morning.Add(-48*time.Hour), morning.Add(48*time.Hour))
+
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 1)
+	s.Equal(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC), buckets[0].Bucket.UTC())
+}
+
+func (s *StoreSuite) TestALimitTheDSNSetsIsKeptOverTheDefault() {
+	limited := s.limitedStore()
+	tx, err := limited.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer tx.Rollback() //nolint:errcheck // ended by the server
+	_, err = tx.ExecContext(s.ctx, "SELECT 1")
+	s.Require().NoError(err)
+
+	time.Sleep(3 * shortLimit)
+	_, err = tx.ExecContext(s.ctx, "SELECT 1")
+
+	s.Error(err, "the transaction was ended at the DSN's idle limit, not the default's")
+	_ = tx.Rollback()
+	for range 3 {
+		_, err := limited.GlobalDB().ExecContext(s.ctx, "SELECT 1")
+		s.Require().NoError(err, "the pool hands out no connection the server ended")
+	}
+}
+
+// inSmallBatches makes every batched prune and rename take one row per statement for the
+// test, so a backlog of a few rows is more than one statement's worth.
+func (s *StoreSuite) inSmallBatches() {
+	kept := writeBatch
+	writeBatch = 1
+	s.T().Cleanup(func() { writeBatch = kept })
 }

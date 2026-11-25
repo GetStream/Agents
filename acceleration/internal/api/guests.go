@@ -116,7 +116,7 @@ func (s *Server) newGuest(ctx context.Context, customerID string, bound streamap
 		guest := &store.User{
 			ID: userID, CustomerID: customerID, Name: name, Custom: value(body.Custom), RefreshSecretHash: hash,
 		}
-		if err := s.store.RecordGuest(ctx, guest); err != nil {
+		if err := s.store.Users.InsertGuest(ctx, guest); err != nil {
 			return nil, err
 		}
 		rendered.RefreshSecret = &secret
@@ -152,7 +152,7 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 		return s.redeemGuestSecret(ctx, customerID, bound, requested, strings.TrimSpace(value(body.RefreshSecret)))
 	}
 
-	held, err := s.store.Guest(ctx, customerID, requested)
+	held, err := s.store.Users.GetGuest(ctx, customerID, requested)
 	switch {
 	case err != nil || (!held.Minted && !s.ownApp(customerID, bound.Identity.StreamApp)):
 		// Not a guest this customer was handed. It may be nobody at all, or a real user, which
@@ -176,7 +176,7 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 		if err := s.updateGuestProfile(ctx, bound, requested, name, custom); err != nil {
 			return nil, err
 		}
-		if err := s.store.Guests.SetProfile(ctx, customerID, requested, name, custom); err != nil {
+		if err := s.store.Users.SetGuestProfile(ctx, customerID, requested, name, custom); err != nil {
 			return nil, err
 		}
 	}
@@ -195,9 +195,9 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 	// holding none, such as one minted before secrets existed; one holding a secret keeps it.
 	issued := true
 	if server {
-		err = s.store.Guests.SetSecret(ctx, customerID, requested, hash)
+		err = s.store.Users.SetGuestSecret(ctx, customerID, requested, hash)
 	} else {
-		issued, err = s.store.Guests.GiveSecret(ctx, customerID, requested, hash)
+		issued, err = s.store.Users.GiveGuestSecret(ctx, customerID, requested, hash)
 	}
 	if err != nil {
 		return nil, err
@@ -229,7 +229,7 @@ func (s *Server) redeemGuestSecret(ctx context.Context, customerID string, bound
 	if err != nil {
 		return nil, err
 	}
-	held, err := s.store.Guests.RotateSecret(ctx, customerID, requested, store.GuestSecretHash(secret), hash)
+	held, err := s.store.Users.RotateGuestSecret(ctx, customerID, requested, store.GuestSecretHash(secret), hash)
 	if errors.Is(err, store.ErrGuestSecretRefused) {
 		return nil, nil
 	}
@@ -296,24 +296,30 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 	if guestID == "" || userID == "" {
 		return nil, invalidRequest("a guest id and a user id are required")
 	}
+	if failure, refused := refuseReservedUserID("user_id", userID); refused {
+		return nil, failure
+	}
 	if guestID == userID {
 		return nil, invalidRequest("a guest cannot be claimed by itself")
 	}
 
-	guest, err := s.store.Guest(ctx, customerID, guestID)
+	guest, err := s.store.Users.GetGuest(ctx, customerID, guestID)
 	if err != nil {
 		return nil, unknownOr(err, store.ErrNotAGuest, notFound("no such guest"))
 	}
-	if guest.ClaimedBy != "" {
-		// A second claim naming the same account is the same claim arriving twice, which is
-		// not a conflict: a retried request must not read as somebody else's.
-		if guest.ClaimedBy == userID {
-			return &claimGuestUserResponse{Body: ClaimGuestResult{GuestId: guestID, UserId: userID, SessionsMoved: 0}}, nil
-		}
+	// A second claim naming the same account is the same claim arriving twice, which is not a
+	// conflict: a retried request must not read as somebody else's.
+	if guest.ClaimedBy != "" && guest.ClaimedBy != userID {
 		return nil, conflict("that guest was already claimed")
 	}
+	// Once every step below ran, the same claim has nothing left to do. Until then it runs them
+	// all again, since the first may have stopped after marking the guest, before the sessions
+	// in a shard moved or the account joined their channels.
+	if guest.ClaimFinishedAt != nil {
+		return &claimGuestUserResponse{Body: ClaimGuestResult{GuestId: guestID, UserId: userID, SessionsMoved: 0}}, nil
+	}
 
-	moved, err := s.store.ClaimGuest(ctx, customerID, guestID, userID)
+	moved, err := s.store.Users.ClaimGuest(ctx, customerID, guestID, userID)
 	// Another claim won since the guest was read.
 	if errors.Is(err, store.ErrGuestClaimed) {
 		return nil, conflict("that guest was already claimed")
@@ -334,6 +340,10 @@ func (s *Server) claimGuestUser(ctx context.Context, request *claimGuestUserRequ
 	if err := s.addToGuestChannels(ctx, customerID, guestID, userID); err != nil {
 		s.logger.Error("claimed a guest but could not add the account to their channels",
 			"guest", guestID, "user", userID, "error", err)
+	}
+	// Last, so a claim that stopped before here is finished by the same claim sent again.
+	if err := s.store.Users.FinishGuestClaim(ctx, customerID, guestID, userID); err != nil {
+		return nil, err
 	}
 
 	return &claimGuestUserResponse{Body: ClaimGuestResult{GuestId: guestID, UserId: userID, SessionsMoved: int(moved)}}, nil
@@ -456,7 +466,8 @@ func (s *Server) registerGuests(api huma.API) {
 			"own backend knows that a given guest is a given account -- it is the thing that just " +
 			"authenticated them. A page allowed to ask this could claim anybody's conversations by " +
 			"guessing a guest id, which is the whole attack.\n" +
-			"A guest already claimed is refused rather than moved again.",
+			"A guest another account already claimed is refused. The same claim sent again finishes " +
+			"whatever the first left undone, and moves nothing twice.",
 		Responses: map[string]*huma.Response{
 			"200": {Description: "The conversations were moved"},
 			"409": errorResponse("That guest was already claimed"),

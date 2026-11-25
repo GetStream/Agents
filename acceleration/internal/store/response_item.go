@@ -119,7 +119,7 @@ const (
 
 // ItemLimit is the page size an item list uses for the limit asked for. ResponseItems.Select
 // returns one row more than this, the same as the session queries.
-func ItemLimit(asked int) int { return clampLimit(asked, defaultItemLimit, maxItemLimit) }
+func ItemLimit(asked int) int { return ClampLimit(asked, defaultItemLimit, maxItemLimit) }
 
 // ResponseItems are what happened in each turn, in the shard that ran it.
 type ResponseItems struct {
@@ -141,7 +141,14 @@ func (r *ResponseItems) InsertMany(ctx context.Context, items []AgentResponseIte
 		if err := items[i].Validate(); err != nil {
 			return stack.Wrap(err)
 		}
-		items[i].Text = SafeLogText(items[i].Text)
+		// What was said is the conversation, read back to the model when it is carried on, so
+		// it is kept whole, up to maxTurnText. A tool's output and an error are cut as a log line is.
+		switch items[i].Kind {
+		case ItemSaid, ItemThought, ItemAnswer:
+			items[i].Text = turnText(items[i].Text)
+		default:
+			items[i].Text = SafeLogText(items[i].Text)
+		}
 		if items[i].At.IsZero() {
 			items[i].At = time.Now().UTC()
 		}

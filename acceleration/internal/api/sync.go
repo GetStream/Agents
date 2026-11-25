@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
@@ -79,7 +80,7 @@ func (*SyncAgentRequest) TransformSchema(_ huma.Registry, schema *huma.Schema) *
 // The caps are the ones the same values have elsewhere: 63 is the longest alias
 // AgentConnectorBinding's name pattern allows, 64 the longest custom connector id
 // (custom_ and 57 more, internal/api/connectors.go) and 120 the longest connection label
-// (CreateConnectionRequest). A built-in connector id is shorter than a custom one.
+// (ConnectionRequest). A built-in connector id is shorter than a custom one.
 type LeftOutConnector struct {
 	Name        string `json:"name" minLength:"1" maxLength:"63" doc:"The alias agent.yaml gave the connector."`
 	ConnectorId string `json:"connector_id" minLength:"1" maxLength:"64" doc:"The connector agent.yaml named, or the alias when it named none."`
@@ -196,6 +197,11 @@ func (s *Server) registerSync(api huma.API) {
 // The hash is a fingerprint of that directory. A second call with the same hash does
 // nothing, so a process that syncs on startup is cheap when nothing has changed.
 func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syncAgentResponse, error) {
+	return onTheConfigAsItIs(func() (*syncAgentResponse, error) { return s.trySyncAgent(ctx, request) })
+}
+
+// trySyncAgent is one try of syncAgent, on the config as it reads it.
+func (s *Server) trySyncAgent(ctx context.Context, request *syncAgentRequest) (*syncAgentResponse, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer
@@ -413,10 +419,14 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	config.UIInstructions = value(body.UiInstructions)
 	config.Skills = named
 	config.KnowledgeNamespace = namespace
-	config.SyncHash = hash
+	// The hash is written last, after the skills and simulations: written here, a sync whose
+	// skills then failed was found unchanged when sent again, and never wrote them.
+	config.SyncHash = ""
 
 	if found {
-		if err := s.store.AgentConfigs.Update(ctx, &config); err != nil {
+		// Only over existing, which may have come from the cache: every setting the directory
+		// does not declare is what another save since then wrote.
+		if err := s.store.AgentConfigs.Save(ctx, &config, existing.UpdatedAt, time.Time{}); err != nil {
 			return nil, storeFailure(err, errAgentNameTaken)
 		}
 	} else {
@@ -441,6 +451,15 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 		if err := s.replaceSimulations(ctx, customerID, config.ID, *body.Simulations); err != nil {
 			return nil, err
 		}
+	}
+	// Only over the config as this sync left it: one saved since no longer holds what the
+	// directory says, and is written again by the next sync of it.
+	marked := config
+	marked.SyncHash = hash
+	if err := s.store.AgentConfigs.Save(ctx, &marked, config.UpdatedAt, time.Time{}); err == nil {
+		config = marked
+	} else if !errors.Is(err, store.ErrStaleAgentConfig) {
+		return nil, err
 	}
 	// Recorded last, after the skills the directory brought with it, because what it marks
 	// is the moment the whole directory and the whole stored agent agreed. An entry written
