@@ -1317,3 +1317,33 @@ func (s *StoreSuite) TestNamedCallsPlacedAtOnceKeepToTheOrganizationsLimit() {
 	}
 	s.Equal(3, kept)
 }
+
+// A named call kept to its organization's limit names its organization.
+func (s *StoreSuite) TestANamedCallKeptToALimitNamesItsOrganization() {
+	placed := time.Now()
+	err := s.store.CallLegs.PlaceOn(s.ctx, &CallLeg{Token: newID(), CustomerID: "app", CallType: "agent", CallID: "call-" + newID(),
+		Vendor: "telnyx", Direction: Outbound, LocalNumber: "+15125550150", RemoteNumber: "+15125550151", PlacedAt: &placed},
+		NamedCall{Scope: AppScope{Unpinned: true}}, &CallsAtOnce{Limit: 3, Ringing: time.Hour})
+
+	s.ErrorContains(err, "organization_id")
+}
+
+// A named call whose home the shared database refuses keeps no leg in this shard.
+func (s *ShardedStoreSuite) TestANamedCallWhoseHomeIsRefusedKeepsNoLeg() {
+	_, err := s.store.global.ExecContext(s.ctx, `CREATE FUNCTION refuse_home() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'no home'; END $$;
+CREATE TRIGGER refuse_home BEFORE INSERT ON call_homes FOR EACH ROW EXECUTE FUNCTION refuse_home()`)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() {
+		_, err := s.store.global.ExecContext(s.ctx, "DROP TRIGGER refuse_home ON call_homes; DROP FUNCTION refuse_home()")
+		s.NoError(err)
+	})
+	token, placed := newID(), time.Now()
+
+	err = s.store.CallLegs.PlaceOn(s.ctx, &CallLeg{Token: token, CustomerID: "app", OrganizationID: "org", CallType: "agent", CallID: "call-" + newID(),
+		Vendor: "telnyx", Direction: Outbound, LocalNumber: "+15125550150", RemoteNumber: "+15125550151", PlacedAt: &placed},
+		NamedCall{Scope: AppScope{Unpinned: true}}, &CallsAtOnce{Limit: 3, Ringing: time.Hour})
+
+	s.Require().ErrorContains(err, "no home")
+	_, err = s.store.CallLegs.GetByToken(s.ctx, token)
+	s.Error(err, "the leg was kept")
+}
