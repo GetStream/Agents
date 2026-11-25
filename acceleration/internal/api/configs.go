@@ -823,6 +823,24 @@ func identityComplaint(identity *AgentIdentity) (string, bool) {
 	return "", true
 }
 
+// ImportRule is what an import holds the agent configs it writes to (store.SetConfigRule), as a
+// config write holds them: a config's identity (identityComplaint), then the sensitive-connector
+// rule.
+func ImportRule() store.ConfigRule {
+	return store.ConfigRule{Config: importedConfigComplaint, Graph: sensitive.GraphComplaint}
+}
+
+// importedConfigComplaint is identityComplaint over an imported config's identity, then
+// sensitive.ConfigComplaint.
+func importedConfigComplaint(ctx context.Context, definitions store.Definitions, customerID string,
+	config store.AgentConfig) (string, bool, error) {
+	identity := config.Identity
+	if complaint, ok := identityComplaint(&AgentIdentity{AgentId: identity.AgentID, UserId: identity.UserID, UserName: identity.UserName}); !ok {
+		return complaint, false, nil
+	}
+	return sensitive.ConfigComplaint(ctx, definitions, customerID, config)
+}
+
 // identityOf is an agent identity as stored.
 func identityOf(identity *AgentIdentity) store.AgentIdentity {
 	if identity == nil {
