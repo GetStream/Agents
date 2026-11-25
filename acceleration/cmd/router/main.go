@@ -879,6 +879,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	limiter.Start(ctx)
+	defer limiter.Close()
 
 	if settings.Agent.SpeculativeReplies {
 		logger.Info("starting replies before the flow controller rules on them",
