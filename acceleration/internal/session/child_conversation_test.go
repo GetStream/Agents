@@ -174,6 +174,31 @@ func (s *ChildConversationSuite) handsOff(shape func(*Spec)) probed {
 	return asked
 }
 
+// TestAChildOfABackendOpenedThreadUsesNoOnesConnection: a backend opens a thread for one of its
+// users (api.threadConversation): Thread with a server-side caller naming alice. The child gets none
+// of alice's connection either.
+func (s *ChildConversationSuite) TestAChildOfABackendOpenedThreadUsesNoOnesConnection() {
+	s.connection("alice", "primary")
+
+	asked := s.handsOff(func(spec *Spec) { spec.Thread, spec.CallerKind = true, auth.KindServer })
+
+	s.NotContains(asked.tools, "crm__whoami", "the child of a backend-opened thread was handed alice's connection")
+}
+
+// TestAThreadChildKeepsTheAppsOwnConnection: sharing takes away a person's connection, not the app's
+// own, so a child bound to the app's connection keeps it in a thread.
+func (s *ChildConversationSuite) TestAThreadChildKeepsTheAppsOwnConnection() {
+	app := s.connection("", "primary")
+	s.child = store.AgentConfig{CustomerID: s.customerID, Name: "kid-" + uuid.NewString(), Mode: store.AgentModeText,
+		Models: store.AgentModels{LLM: "en-low-latency"}, Connectors: []store.ConnectorBinding{s.fixed("crm", app, "whoami")}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &s.child))
+	s.model.childID = s.child.ID
+
+	asked := s.handsOff(func(spec *Spec) { spec.Thread, spec.CallerKind = true, auth.KindServer })
+
+	s.Contains(asked.tools, "crm__whoami", "the child of a thread lost the app's own connection")
+}
+
 // TestAChildOfAThreadEveryoneWritesInUsesNoOnesConnection: alice has one connected connection
 // the child's binding would use for her. A thread's other participants' messages reach the
 // parent as hers, so in a thread the child is offered none of it, as the parent is not.
@@ -201,9 +226,10 @@ func (s *ChildConversationSuite) TestAChildOfOnePersonsConversationKeepsTheirCon
 	s.Empty(asked.child.HandedOutBy)
 }
 
-// TestAChildOfAHandedOutMessageAnswersForThePersonItWasHandedOutBy: a child of a worker's
-// session on a chat's channel is that conversation's too, for the person who wrote the message.
-func (s *ChildConversationSuite) TestAChildOfAHandedOutMessageAnswersForThePersonItWasHandedOutBy() {
+// TestAChildOfAHandedOutMessageIsMarkedAsTheSameHandOut: the child keeps Dispatched and
+// HandedOutBy only to mark it as the same hand-out as its parent; nothing reads them for a child
+// today. The parent's shape (dispatched with a verified caller) is no shape a router path builds.
+func (s *ChildConversationSuite) TestAChildOfAHandedOutMessageIsMarkedAsTheSameHandOut() {
 	asked := s.handsOff(func(spec *Spec) { spec.Dispatched, spec.HandedOutBy = true, "writer-1" })
 
 	s.True(asked.child.Dispatched)

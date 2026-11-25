@@ -136,7 +136,8 @@ func (r *childRunner) Run(ctx context.Context, call llm.ToolCall) ([]llm.Content
 	spec.Caller, spec.CallerKind = r.spec.Caller, r.spec.CallerKind
 	// What the parent's conversation is, as the router opened it, goes on to the child: a child of a
 	// thread everyone writes in is as shared as the thread (Spec.Shared), so it attaches no one
-	// person's connection, and a child of a hand-out answers for the person it was handed out by.
+	// person's connection. Dispatched and HandedOutBy only mark the child as the same hand-out as its
+	// parent; nothing reads them for a child today.
 	spec.Thread, spec.Dispatched, spec.HandedOutBy = r.spec.Thread, r.spec.Dispatched, r.spec.HandedOutBy
 	spec.MaxToolRounds = child.MaxToolRounds
 	// The parent's cost labels go on the child's requests too, so its spend is counted
