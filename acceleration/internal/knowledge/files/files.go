@@ -244,7 +244,7 @@ func (s *Service) Upload(ctx context.Context, upload Upload) (store.KnowledgeDoc
 // Forget deletes the file of a document removed before it was read. The read finds the
 // document gone and stops; this frees the bucket sooner.
 func (s *Service) Forget(ctx context.Context, document store.KnowledgeDocument) error {
-	if document.ObjectKey == "" {
+	if !document.WaitsForFile() {
 		return nil
 	}
 	return s.bucket.Delete(ctx, document.ObjectKey)
@@ -502,22 +502,16 @@ func (s *Service) read(ctx context.Context, owned metered.OwnedKnowledge, payloa
 // overtaken ends a read that wrote passages and then found the row, seen as now, no longer
 // waits for its file. A removal still holding the row may have deleted the passages before they
 // were written, so it is made to delete them again. With the row gone, or a removal that could
-// not be told, they are taken back here. A newer write of the document keeps the row.
+// not be told, they are taken back here. A newer write of the document keeps the row, which
+// counts them too.
 func (s *Service) overtaken(
 	ctx context.Context, owned metered.OwnedKnowledge, payload readPayload, now store.KnowledgeDocument, read *store.KnowledgeDocument, passages int,
 ) error {
-	interrupted, err := s.store.KnowledgeDocuments.Interrupt(ctx, payload.CustomerID, payload.ID, passages)
-	if interrupted {
+	kept, err := s.store.KnowledgeDocuments.Interrupt(ctx, payload.CustomerID, payload.ID, passages)
+	if kept {
 		return errOvertaken
 	}
-	if err == nil {
-		_, err = s.store.KnowledgeDocuments.Get(ctx, payload.CustomerID, payload.ID)
-	}
-	if err == nil {
-		return errOvertaken
-	}
-	gone := now.BeingRemoved() || errors.Is(err, store.ErrNoKnowledgeDocument)
-	if !gone {
+	if err != nil && !now.BeingRemoved() {
 		return err
 	}
 	if err := owned.Delete(ctx, read.Namespace, ingest.IDs(read.Source, 0, passages)); err != nil {

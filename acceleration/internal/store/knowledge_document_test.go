@@ -176,11 +176,8 @@ func (s *StoreSuite) TestARemovalDeletesOnlyTheDocumentItStillHolds() {
 	untouched, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", other.ID)
 	s.Require().NoError(err)
 	s.Equal(KnowledgeDocumentIndexed, untouched.State)
-	interrupted, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", other.ID, 3)
-	s.Require().NoError(err)
-	s.False(interrupted, "nothing removes it")
 
-	interrupted, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, 3)
+	interrupted, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, 3)
 	s.Require().NoError(err)
 	s.True(interrupted)
 	deleted, err = s.store.KnowledgeDocuments.Delete(s.ctx, "acme-app", mine.ID, key)
@@ -313,6 +310,40 @@ func (s *StoreSuite) TestAnInterruptedRemovalCountsThePassagesWritten() {
 	_, passages, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
 	s.Require().NoError(err)
 	s.Equal(8, passages)
+}
+
+// A read overtaken by a post or an upload has written passages too.
+func (s *StoreSuite) TestAnOvertakenReadsPassagesAreCountedOnItsDocumentOnly() {
+	mine, other := s.knowledgeDocument("acme-app", "docs", "faq.md"), s.knowledgeDocument("acme-app", "docs", "hours.md")
+	kept, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, 8)
+	s.Require().NoError(err)
+	s.True(kept)
+
+	counted, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	s.Equal(8, counted.Passages)
+	s.Equal(mine.ObjectKey, counted.ObjectKey, "the post still holds it")
+	untouched, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", other.ID)
+	s.Require().NoError(err)
+	s.Equal(3, untouched.Passages)
+	kept, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", newID(), 8)
+	s.Require().NoError(err)
+	s.False(kept, "it is gone")
+}
+
+func (s *StoreSuite) TestOnlyAnUploadedDocumentWaitsForAFile() {
+	mine := s.knowledgeDocument("acme-app", "docs", "faq.md")
+	s.False(mine.WaitsForFile())
+	s.False((&KnowledgeDocument{}).WaitsForFile())
+	_, _, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	taken, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	s.False(taken.WaitsForFile())
+
+	upload := KnowledgeDocument{CustomerID: "acme-app", Namespace: "docs", Source: "faq.md", ObjectKey: "acme-app/one/faq.md"}
+	s.Require().NoError(s.store.KnowledgeDocuments.Pend(s.ctx, &upload))
+	s.True(upload.WaitsForFile())
 }
 
 func (s *StoreSuite) TestAPostDoesNotFinishOnceTheRemovalItOvertookFailed() {

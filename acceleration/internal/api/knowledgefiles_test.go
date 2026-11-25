@@ -845,6 +845,68 @@ func (s *KnowledgeFilesSuite) TestAReadThatCannotTellTheRemovalItWroteTakesItBac
 	s.Empty(s.listed())
 }
 
+// The removal deleted the read's count, the post's shorter version took the row, and then the
+// read wrote.
+func (s *KnowledgeFilesSuite) TestAReadOvertakenByAPostWhileItsDocumentIsRemovedLeavesNothing() {
+	writing, write := s.holdWrite()
+	_, sent, _ := s.upload("between.md", []byte(sections(8)), "")
+	s.reached(writing, "the read never wrote")
+	s.knowledge.onceAfterDelete(func() {
+		s.Equal(http.StatusOK, s.post("between.md", 2))
+		write()
+		s.everyFileRead()
+	})
+
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+
+	s.Zero(s.passagesOf("between.md"))
+	s.Empty(s.listed())
+}
+
+// A read overtaken by a post of fewer passages leaves more, which go with the document.
+func (s *KnowledgeFilesSuite) TestAReadOvertakenByAShorterPostIsRemovedWhole() {
+	writing, write := s.holdWrite()
+	_, sent, _ := s.upload("shorter.md", []byte(sections(8)), "")
+	s.reached(writing, "the read never wrote")
+	s.Require().Equal(http.StatusOK, s.post("shorter.md", 2))
+	write()
+	s.everyFileRead()
+	s.indexedWith("shorter.md", 8)
+
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+	s.Zero(s.passagesOf("shorter.md"))
+}
+
+// Not told whether it is removed, the read leaves the post's passages alone.
+func (s *KnowledgeFilesSuite) TestAReadThatCannotCountItsPassagesLeavesAPostsAlone() {
+	writing, write := s.holdWrite()
+	_, _, _ = s.upload("uncounted.md", []byte(sections(3)), "")
+	s.reached(writing, "the read never wrote")
+	s.Require().Equal(http.StatusOK, s.post("uncounted.md", 3))
+	s.trigger("refuse_counts", "knowledge_documents", "UPDATE", "OLD.customer_id = '"+s.customerID()+
+		"' AND OLD.updated_at = NEW.updated_at", "RAISE EXCEPTION 'refused by the test';")
+	write()
+
+	s.everyFileRead()
+	s.indexedWith("uncounted.md", 3)
+}
+
+// A key that names no file is not asked of the bucket.
+func (s *KnowledgeFilesSuite) TestRemovingPostedTextAsksNothingOfTheBucket() {
+	s.Require().Equal(http.StatusOK, s.post("text.md", 2))
+	id := s.listed()[0].Id
+	document, err := s.store.KnowledgeDocuments.Get(context.Background(), s.customerID(), id)
+	s.Require().NoError(err)
+	_, err = s.knowledgeBucket.Write(context.Background(), document.ObjectKey, "text/plain", strings.NewReader("kept"))
+	s.Require().NoError(err)
+
+	s.Require().Equal(http.StatusNoContent, s.remove(id))
+
+	kept, err := s.knowledgeBucket.Read(context.Background(), document.ObjectKey)
+	s.Require().NoError(err)
+	s.Equal("kept", string(kept))
+}
+
 // What it was overtaken by is a post, whose passages are not the read's to take.
 func (s *KnowledgeFilesSuite) TestAReadOvertakenByAPostLeavesItsPassages() {
 	writing, write := s.holdWrite()

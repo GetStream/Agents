@@ -285,6 +285,11 @@ const removalUnfinished = "Its removal did not finish. Delete it again."
 // BeingRemoved is whether a removal holds the document.
 func (k *KnowledgeDocument) BeingRemoved() bool { return strings.HasPrefix(k.ObjectKey, removalKey) }
 
+// WaitsForFile is whether the document's ObjectKey is a file in the bucket.
+func (k *KnowledgeDocument) WaitsForFile() bool {
+	return k.ObjectKey != "" && !k.BeingRemoved() && !strings.HasPrefix(k.ObjectKey, postKey)
+}
+
 // Take begins the removal of a document, and returns the key the removal holds it under and
 // how many passages to remove. The row lets go of its file, as it does for a newer upload, so
 // a read of it finds it was overtaken. The row says failed until it is removed, so a removal
@@ -333,21 +338,20 @@ func (r *KnowledgeDocuments) FailRemoval(ctx context.Context, customerID, id str
 	return nil
 }
 
-// Interrupt makes the removal a document is under take its passages away again, for a read
-// that wrote passages of them after the removal began, which the row counts if it did not. It
-// is false when no removal holds the document.
+// Interrupt counts the passages a read of the document wrote after it was overtaken, and makes
+// a removal the document is under take its passages away again. It is false when the document
+// is gone.
 func (r *KnowledgeDocuments) Interrupt(ctx context.Context, customerID, id string, passages int) (bool, error) {
 	result, err := r.store.global.NewUpdate().Model((*KnowledgeDocument)(nil)).
-		Set("object_key = ?", removalKey+newID()).
+		Set("object_key = CASE WHEN object_key LIKE ? THEN ? ELSE object_key END", removalKey+"%", removalKey+newID()).
 		Set("passages = GREATEST(passages, ?)", passages).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
-		Where("object_key LIKE ?", removalKey+"%").
 		Exec(ctx)
 	if err != nil {
-		return false, stack.Wrap(fmt.Errorf("store: interrupt knowledge document removal: %w", err))
+		return false, stack.Wrap(fmt.Errorf("store: interrupt knowledge document: %w", err))
 	}
-	return updatedOne(result, "interrupt knowledge document removal")
+	return updatedOne(result, "interrupt knowledge document")
 }
 
 // Delete forgets a document whose removal still holds it under key, once its passages are
