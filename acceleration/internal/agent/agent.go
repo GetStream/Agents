@@ -1674,7 +1674,7 @@ func (a *Agent) consumeEdge() {
 		if err == nil {
 			continue
 		}
-		report, over := true, opened
+		report, over := true, true
 		if !opened && refusedMoney(err) {
 			report, over = a.refusedToHear(inbound.Participant.ID, err)
 		}

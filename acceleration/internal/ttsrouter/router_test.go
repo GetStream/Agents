@@ -32,6 +32,8 @@ type stubTTS struct {
 	perSentence bool
 	// refuse, when set, is what Synthesize answers instead of taking the text.
 	refuse error
+	// refuseText is refuse for a request with text alone.
+	refuseText error
 }
 
 func newStubTTS() *stubTTS {
@@ -43,6 +45,9 @@ func (s *stubTTS) Start(context.Context) error { return nil }
 func (s *stubTTS) Synthesize(request tts.Request) error {
 	if s.refuse != nil {
 		return s.refuse
+	}
+	if s.refuseText != nil && request.Text != "" {
+		return s.refuseText
 	}
 	s.said = append(s.said, request)
 	return nil

@@ -473,6 +473,18 @@ func TestASentenceWhoseFinalTextTheVoiceRefusedTakesItAgainAsItsOwn(t *testing.T
 	require.EqualValues(t, 3, rows[0].Characters, "it is one sentence")
 }
 
+// Text the voice would not take is not a refusal for money: the caller may send it again.
+func TestASentenceWhoseFinalTextTheVoiceRefusedIsNotEndedForIt(t *testing.T) {
+	money := policytest.Start(t, "ttsrouter_reserve")
+	session, provider, _ := reservingSession(t, money, 4_000_000, false)
+	require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "a"}))
+	provider.refuseText = errors.New("the voice does not take it")
+
+	require.Error(t, session.Synthesize(tts.Request{ID: "u1", Text: "bc", Final: true}))
+
+	require.Equal(t, []tts.Request{{ID: "u1", Text: "a"}}, provider.said)
+}
+
 func TestAnIdReusedAfterItsSentenceFinishedIsBilledOnceForWhatWasSent(t *testing.T) {
 	for name, perSentence := range voiceKinds {
 		t.Run(name, func(t *testing.T) {

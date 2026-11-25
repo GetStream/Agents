@@ -47,8 +47,7 @@ type Session struct {
 	events chan stt.Event
 	// spent is set once the session's money ran out (unpaid), for good: a failover clears failed.
 	spent atomic.Bool
-	// failed is set once the provider reports a fatal error, or the session's money ran out. The
-	// caller has been told, and
+	// failed is set once the provider reports a fatal error. The caller has been told, and
 	// the provider hears nothing more, so later audio is dropped rather than failing once
 	// per frame.
 	failed atomic.Bool
@@ -155,7 +154,6 @@ func (s *Session) unpaid(lease *routing.Lease) error {
 	if !s.spent.CompareAndSwap(false, true) {
 		return nil
 	}
-	s.failed.Store(true)
 	// Off the caller's goroutine, since closing may wait on the vendor for the last words.
 	goroutine.Go(s.call, func() { _ = s.Close() })
 	return stack.Wrap(err)

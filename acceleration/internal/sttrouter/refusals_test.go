@@ -73,17 +73,30 @@ func (s *RefusalsSuite) renewals(gate *gatetest.Answers, answers ...error) {
 
 // goesOn checks that the session takes audio still.
 func (s *RefusalsSuite) goesOn(session *Session) {
+	before := s.taken(session)
 	s.Require().NoError(session.ProcessAudio(speech(20), stt.Participant{}))
-	s.Require().False(session.failed.Load(), "the audio was taken, not dropped")
+	s.Require().EqualValues(before+20, s.taken(session), "the audio was taken, not dropped")
+}
+
+// taken is how many milliseconds of audio the model serving the session took.
+func (s *RefusalsSuite) taken(session *Session) float64 {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if streamed := session.streamed[session.provider]; streamed != nil {
+		return streamed.total
+	}
+	return 0
 }
 
 // ends checks that the session answers refusal to its next audio, once, and ends.
 func (s *RefusalsSuite) ends(session *Session, refusal error) {
+	before := s.taken(session)
 	s.Require().ErrorIs(session.ProcessAudio(speech(20), stt.Participant{}), refusal)
 	s.NoError(session.ProcessAudio(speech(20), stt.Participant{}), "why is said once")
 	// As a model that takes over as it ends does.
 	session.failed.Store(false)
 	s.NoError(session.ProcessAudio(speech(20), stt.Participant{}), "and not again after a failover")
+	s.EqualValues(before, s.taken(session), "nothing more is taken")
 	synctest.Wait()
 	_, open := <-session.Events()
 	s.False(open, "its events end")

@@ -293,6 +293,44 @@ func (s *AgentSuite) TestAParticipantRefusedATranscriberBeforeTheyLeftAndOnceAft
 	}
 }
 
+func (s *AgentSuite) TestARefusalThatComesAsAParticipantLeavesIsNotKept() {
+	s.hearsOn(func(gate *gatetest.Answers) {
+		s.leavesCall("alice")
+		report, over := s.agent.refusedToHear("alice", policy.ErrNoCredits)
+		s.False(report)
+		s.False(over)
+		s.joinsCall("alice")
+		gate.Refuse(policy.ErrNoCredits)
+		time.Sleep(40 * time.Second)
+
+		s.talks(1)
+
+		s.Len(s.hearingFailures(), 1)
+		s.False(s.callEnded())
+	})
+}
+
+func (s *AgentSuite) TestACallEndsWhenTheOnlyOtherTranscriberIsRefusedToo() {
+	s.hearsOn(func(gate *gatetest.Answers) {
+		s.talks(1)
+		gate.Refuse(policy.ErrNoCredits)
+		// Alice is silent from here, and her lease is refused at 30 s.
+		for range 28 {
+			s.speak(stt.Participant{ID: "bob"})
+			time.Sleep(time.Second)
+			synctest.Wait()
+		}
+		s.False(s.callEnded())
+		for range 4 {
+			s.speak(stt.Participant{ID: "bob"})
+			time.Sleep(time.Second)
+			synctest.Wait()
+		}
+
+		s.True(s.callEnded())
+	})
+}
+
 func (s *AgentSuite) TestRefusalsMinutesApartAreNotARow() {
 	s.hearsOn(func(gate *gatetest.Answers) {
 		gate.Refuse(policy.ErrNoCredits)
