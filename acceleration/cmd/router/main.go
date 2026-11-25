@@ -1312,7 +1312,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// Bringing a voice needs somewhere to keep the recordings, a place to record them and
 	// at least one provider willing to be taught. Missing any of those, the voice paths
 	// say so rather than half-working.
-	voiceService, err := buildVoices(configs, bucket, routing.NewRecorderOn(routing.TTS, usageWriter, prices, logger), logger)
+	voiceService, err := buildVoices(configs, bucket, routing.NewRecorderOn(routing.TTS, usageWriter, prices, logger), gate,
+		capabilities[routing.TTS].Providers, logger)
 	if err != nil {
 		return err
 	}
@@ -2473,6 +2474,8 @@ func buildVoices(
 	configs *store.Store,
 	bucket *blob.Bucket,
 	recorder *routing.Recorder,
+	gate routing.Gate,
+	models []routing.ProviderConfig,
 	logger *slog.Logger,
 ) (*voices.Service, error) {
 	if configs == nil || bucket == nil {
@@ -2500,6 +2503,8 @@ func buildVoices(
 		Bucket:   bucket,
 		Cloners:  cloners,
 		Recorder: recorder,
+		Gate:     gate,
+		Models:   models,
 		Logger:   logger,
 	})
 }

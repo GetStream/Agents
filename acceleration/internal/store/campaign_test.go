@@ -494,6 +494,48 @@ func (s *StoreSuite) TestAContactListsItsAttemptsOldestFirst() {
 	s.Equal("b-second", attempts[1].ID)
 }
 
+// strayDial is a dial of another campaign than its contact's, which no dial is, at.
+func (s *StoreSuite) strayDial(contact Contact, at time.Time) {
+	stray := s.draftCampaign(newID(), "+15550009")
+	_, err := s.store.GlobalDB().NewInsert().Model(&CampaignAttempt{ID: newID(), CampaignID: stray.ID, ContactID: contact.ID, StepID: "step_1",
+		Attempt: 1, Dial: 1, StartedAt: at, CallOutcome: "completed", ClassifyState: classifyPending, ClassifyAfter: &at}).Exec(s.ctx)
+	s.Require().NoError(err)
+}
+
+func (s *StoreSuite) TestAContactListsOnlyItsCampaignsAttempts() {
+	campaign := s.draftCampaign(newID(), "+15550001")
+	contact := s.contactsOf(campaign)[0]
+	s.strayDial(contact, s.base)
+
+	_, attempts, err := s.store.CampaignContacts.Get(s.ctx, campaign.ID, contact.ID)
+
+	s.Require().NoError(err)
+	s.Empty(attempts)
+}
+
+func (s *StoreSuite) TestAnalyticsCountOnlyTheCampaignsDials() {
+	campaign := s.draftCampaign(newID(), "+15550001")
+	s.strayDial(s.contactsOf(campaign)[0], s.base)
+
+	got, err := s.store.Campaigns.Analytics(s.ctx, campaign.ID)
+
+	s.Require().NoError(err)
+	s.Zero(got.Dialed)
+	s.Zero(got.Connected)
+}
+
+func (s *StoreSuite) TestADuplicateOfNotContactedReadsOnlyTheCampaignsDials() {
+	campaign := s.draftCampaign(newID(), "+15550001")
+	s.launch(campaign, s.base)
+	s.strayDial(s.contactsOf(campaign)[0], s.base)
+	s.Require().NoError(s.store.Campaigns.Stop(s.ctx, campaign.CustomerID, campaign.ID, s.base))
+
+	copied, err := s.store.Campaigns.Duplicate(s.ctx, campaign.CustomerID, campaign.ID, "not_contacted")
+
+	s.Require().NoError(err)
+	s.Len(s.contactsOf(copied), 1)
+}
+
 func (s *StoreSuite) TestCampaignsListNewestFirstByStateAndPage() {
 	customerID := newID()
 	var made []Campaign
