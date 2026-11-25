@@ -528,6 +528,10 @@ type RouterSuite struct {
 	// manageOff builds the router with no manage key, as a deployment that never set
 	// ROUTER_AUTH_MANAGE_KEY has, for a suite about that to set before it starts the harness.
 	manageOff bool
+	// activityKey and previousActivityKey are what the activity paths take in X-Activity-Key,
+	// as ROUTER_AUTH_ACTIVITY_KEY and its _PREVIOUS are, for a suite about them to set before it
+	// starts the harness. Empty, as a deployment that never set them has.
+	activityKey, previousActivityKey string
 	// pricedFromDatabase seeds the price list from the embedded vendor list, as a router's
 	// first start does, and prices the LLM router's rows and the API from it, read every
 	// priceReload, for a suite about the price list to set before it starts the harness.
@@ -785,6 +789,7 @@ func (s *RouterSuite) SetupSuite() {
 		Gate:              s.gate,
 		OpsKey:            suiteOpsKey,
 		ManageKey:         manageKey,
+		ActivityKeys:      []string{s.activityKey, s.previousActivityKey},
 		Secrets:           s.sealer,
 		Knowledge:         knowledgeBase,
 		KnowledgeLimits:   s.knowledgeLimits,
@@ -2100,6 +2105,8 @@ func (s *RouterSuite) policies(logger *slog.Logger) *policy.Enforcer {
 type usageFront struct {
 	server *httptest.Server
 	down   atomic.Bool
+	// stalled, while set, takes each call and answers none until the channel is closed.
+	stalled atomic.Pointer[chan struct{}]
 }
 
 func newUsageFront(t *testing.T, service *usagetest.Service) *usageFront {
@@ -2109,6 +2116,13 @@ func newUsageFront(t *testing.T, service *usagetest.Service) *usageFront {
 	front := &usageFront{}
 	front.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if front.down.Load() {
+			panic(http.ErrAbortHandler)
+		}
+		if stalled := front.stalled.Load(); stalled != nil {
+			select {
+			case <-*stalled:
+			case <-r.Context().Done():
+			}
 			panic(http.ErrAbortHandler)
 		}
 		proxy.ServeHTTP(w, r)

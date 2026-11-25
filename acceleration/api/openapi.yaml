@@ -3552,6 +3552,10 @@ components:
         setup:
           $ref: '#/components/schemas/ConnectorSetup'
           description: What a person does at the provider before the first consent, such as registering an OAuth client. Absent when the manifest says nothing.
+        sync_hash:
+          description: The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
+          readOnly: true
+          type: string
       required:
         - id
         - revision
@@ -4695,6 +4699,12 @@ components:
           nullable: true
           type: array
           uniqueItems: true
+        sync_hash:
+          description: 'The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one.'
+          maxLength: 128
+          pattern: ^[!-~]*$
+          patternDescription: printable ASCII without a space
+          type: string
       required:
         - id
         - name
@@ -7176,6 +7186,9 @@ components:
       type: object
     OrganizationProgress:
       properties:
+        funded:
+          description: 'The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the credit granted minus the trial credit is above zero. Spending the credit does not lower it. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer.'
+          type: boolean
         furthest_step:
           $ref: '#/components/schemas/ActivityStep'
           description: The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since.
@@ -8722,6 +8735,10 @@ components:
           $ref: '#/components/schemas/StsOptions'
         stt:
           $ref: '#/components/schemas/SttOptions'
+        sync_hash:
+          description: The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync.
+          readOnly: true
+          type: string
         tts:
           $ref: '#/components/schemas/TtsOptions'
         updated_at:
@@ -8746,6 +8763,12 @@ components:
           $ref: '#/components/schemas/StsOptions'
         stt:
           $ref: '#/components/schemas/SttOptions'
+        sync_hash:
+          description: The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing.
+          maxLength: 128
+          pattern: ^[!-~]*$
+          patternDescription: printable ASCII without a space
+          type: string
         tts:
           $ref: '#/components/schemas/TtsOptions'
       required:
@@ -12667,6 +12690,11 @@ components:
         - spent_micros
       type: object
   securitySchemes:
+    ActivityKey:
+      description: Stream staff's read-only key for organizations' activity, held by the job that reads it. It reaches listActivity and getOrganizationActivity and nothing else, and is never held by an app or a browser.
+      in: header
+      name: X-Activity-Key
+      type: apiKey
     ApiKey:
       description: The public half of a credential, which names the app and the secret to verify with. A socket sends it as the api_key query parameter, because a browser WebSocket cannot set a header.
       in: header
@@ -23670,10 +23698,10 @@ paths:
 
         - Tried: at least one request answered in agent_setup or a later step, a step in steps other than dashboard_reads. dashboard_reads alone is opening the dashboard's Agents tab.
         - API calls: answered requests, requests less refused, of every area but dashboard_reads, hooks_in and webhooks_out. Those are the dashboard's own reads, vendors' hooks and the router's own deliveries.
-        - Production: funded, and conversations answered, an item of conversations with requests above refused, on 5 of the last 7 UTC days. Funded is credit that is not trial credit: the usage service holds it, and the router does not compute it, so join it from there. The 5 of 7 is a judgement, not a measurement.
+        - Production: funded true on the organization, and conversations answered, an item of conversations with requests above refused, on 5 of the last 7 UTC days. The 5 of 7 is a judgement, not a measurement.
         - Churned: was in production, then had no request answered in conversations or model_api for 30 days.
 
-        Stream staff only: it needs the ops key.
+        Stream staff only: it needs the ops key or the activity key.
       operationId: listActivity
       parameters:
         - description: The first UTC day read, YYYY-MM-DD.
@@ -23740,6 +23768,7 @@ paths:
           $ref: '#/components/responses/InternalError'
       security:
         - OpsKey: []
+        - ActivityKey: []
       summary: List every organization's Agents activity by day
       tags:
         - Staff
@@ -23949,7 +23978,7 @@ paths:
       description: |-
         Whether an organization tried Agents, how far it got and how much it used: what its apps did in each area of the API, from each client, and what their work came to by modality, summed over every shard in postgres.shards, which the answer names, with the sessions they opened, how those ended and how long their turns took. An organization with nothing recorded is answered with empty lists and furthest_step none. Every area and client is one item, so the lists are short and have no cursor. Areas, first_seen, last_seen, furthest_step and steps come from counts kept since they were first recorded, while meters come from every request, so an organization whose use is older than the counts can read furthest_step none with meters that show use. steps lists every step reached, not only the furthest, with the UTC day each was first answered: an organization that only texts reaches conversations and never voice_video.
 
-        Stream staff only: it needs the ops key.
+        Stream staff only: it needs the ops key or the activity key.
       operationId: getOrganizationActivity
       parameters:
         - description: The organization.
@@ -23983,6 +24012,7 @@ paths:
           $ref: '#/components/responses/InternalError'
       security:
         - OpsKey: []
+        - ActivityKey: []
       summary: Get an organization's Agents activity
       tags:
         - Staff
