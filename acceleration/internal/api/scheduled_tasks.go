@@ -180,7 +180,7 @@ func (s *Server) reachableTaskConfigs(ctx context.Context, customerID string, sc
 	}
 	reachable := []string{}
 	for _, config := range configs {
-		if !teams.refuses(config) {
+		if !teams.refuses(ctx, config) {
 			reachable = append(reachable, config.ID)
 		}
 	}

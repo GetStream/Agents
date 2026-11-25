@@ -31,6 +31,10 @@ var errSharedStream = errors.New("api: the customer has no Stream app of its own
 type teamsGate struct {
 	checked bool
 	teams   []string
+	// again asks Stream for the teams once more when they are the ones held rather than read for
+	// this request, so that what they refuse is asked again before it stands (heldTeams.again).
+	// nil when they were read for it.
+	again func(context.Context) ([]string, bool)
 }
 
 // teamsGateFor reads the settings and the caller's teams before any config is looked up, so
@@ -52,17 +56,22 @@ func (s *Server) userTeamsGate(ctx context.Context, customerID string, user rout
 	if !settings.AgentTeamsChecked() {
 		return teamsGate{}, nil
 	}
-	teams, err := s.callerTeams(ctx, customerID, user)
-	if err != nil {
-		return teamsGate{}, err
-	}
-	return teamsGate{checked: true, teams: teams}, nil
+	return s.callerTeams(ctx, customerID, user)
 }
 
 // refuses reports whether config is of a team the end user asking is not in, which the caller
-// is told as it is of a config that does not exist.
-func (g teamsGate) refuses(config store.AgentConfig) bool {
-	return g.checked && !hasCommonTeam(g.teams, strings.TrimSpace(config.Tags[session.TeamTag]))
+// is told as it is of a config that does not exist. Held teams that refuse are asked of Stream
+// again first, so a user added to the team since is let in.
+func (g teamsGate) refuses(ctx context.Context, config store.AgentConfig) bool {
+	team := strings.TrimSpace(config.Tags[session.TeamTag])
+	if !g.checked || hasCommonTeam(g.teams, team) {
+		return false
+	}
+	if g.again == nil {
+		return true
+	}
+	teams, held := g.again(ctx)
+	return !held || !hasCommonTeam(teams, team)
 }
 
 // configOpenedWith is the config a session was opened with, as it is now, for a fork or a
@@ -78,7 +87,7 @@ func (s *Server) configOpenedWith(ctx context.Context, customerID, id string, te
 		return nil, errUnknownConfig
 	case err != nil:
 		return nil, err
-	case teams.refuses(read):
+	case teams.refuses(ctx, read):
 		return nil, errUnknownConfig
 	}
 	return &read, nil
@@ -116,16 +125,16 @@ func (s *Server) refuseOwnerOutsideTeam(ctx context.Context, owner session.Owner
 	return err
 }
 
-// callerTeams is the teams of the end user caller, as their user in the customer's own
-// Stream app holds them: an app the customer holds a token for, or the deployment's own app
-// when the customer is that app's. A customer that only borrows the deployment's app reads
-// none: user ids there are not the customer's and whoever holds that app writes their teams.
-// A caller with no token is in none: the user id it goes by is a claim nobody checked,
-// and reading that user's teams would let anybody borrow them. What Stream tells is held for
-// teamsFor (heldTeams).
-func (s *Server) callerTeams(ctx context.Context, customerID string, caller routing.Caller) ([]string, error) {
+// callerTeams is the gate of the end user caller, by their teams as their user in the
+// customer's own Stream app holds them: an app the customer holds a token for, or the
+// deployment's own app when the customer is that app's. A customer that only borrows the
+// deployment's app reads none: user ids there are not the customer's and whoever holds that
+// app writes their teams. A caller with no token is in none: the user id it goes by is a claim
+// nobody checked, and reading that user's teams would let anybody borrow them. What Stream
+// tells is held for teamsFor (heldTeams), and held teams that refuse ask it again.
+func (s *Server) callerTeams(ctx context.Context, customerID string, caller routing.Caller) (teamsGate, error) {
 	if !caller.Verified {
-		return nil, nil
+		return teamsGate{checked: true}, nil
 	}
 	bound, ok, err := s.streamFor(ctx, customerID)
 	switch {
@@ -136,31 +145,48 @@ func (s *Server) callerTeams(ctx context.Context, customerID string, caller rout
 	}
 	if err == nil {
 		key := heldTeamsKey(customerID, bound.Client, caller.UserID)
+		read := func(ctx context.Context) ([]string, error) {
+			return conversation.UserTeams(ctx, bound.Client, caller.UserID)
+		}
 		if teams, held := s.teams.of(key); held {
-			return teams, nil
+			again := func(ctx context.Context) ([]string, bool) {
+				teams, held, err := s.teams.again(ctx, key, read)
+				if err != nil {
+					s.logger.Warn("could not read a user's teams from Stream again, the held ones stand",
+						"user", caller.UserID, "error", err)
+				}
+				return teams, held
+			}
+			return teamsGate{checked: true, teams: teams, again: again}, nil
 		}
 		var teams []string
-		if teams, err = conversation.UserTeams(ctx, bound.Client, caller.UserID); err == nil {
+		if teams, err = read(ctx); err == nil {
 			s.teams.keep(key, teams)
-			return teams, nil
+			return teamsGate{checked: true, teams: teams}, nil
 		}
 	}
 	s.logger.Error("could not read a user's teams from Stream", "user", caller.UserID, "error", err)
-	return nil, errTeamsUnreadable
+	return teamsGate{}, errTeamsUnreadable
 }
 
 // teamsFor is how long a user's teams read from Stream are taken on trust. Every message and
 // socket of a running chat in a teams app asks, and every occurrence of a task, and Stream rate
 // limits the query per app. A user taken out of a team reaches its agents for up to this long
-// after.
+// after. A user added to one is not kept out as long: held teams that refuse ask again
+// (teamsRecheck).
 const teamsFor = 30 * time.Second
+
+// teamsRecheck is how often held teams that refuse a user are asked of Stream again. A user
+// refused over and over costs Stream one query this often, and one added to a team since the
+// last time Stream was asked is let in once this long has passed at most.
+const teamsRecheck = time.Second
 
 // maxHeldTeams bounds the users whose teams one router holds, across every app it serves.
 const maxHeldTeams = 100_000
 
 // heldTeams are end users' teams as Stream last told them, each for teamsFor, by customer, Stream
 // app and user (heldTeamsKey). A read that failed is not held: while Stream fails, a user it told
-// nothing in the last teamsFor is refused as before.
+// nothing in the last teamsFor is refused as before, and held teams that refuse stand (again).
 type heldTeams struct {
 	mu sync.Mutex
 	// now is the clock a read's age is told by, read under mu.
@@ -172,6 +198,10 @@ type heldTeams struct {
 type teamsRead struct {
 	teams []string
 	at    time.Time
+	// asked is when Stream was last asked again for a refusal of these teams, answered or not.
+	// asking is closed once that read ends, and is nil when none is running.
+	asked  time.Time
+	asking chan struct{}
 }
 
 func newHeldTeams() *heldTeams {
@@ -204,6 +234,54 @@ func (h *heldTeams) keep(key string, teams []string) {
 		clear(h.read)
 	}
 	h.read[key] = teamsRead{teams: teams, at: h.now()}
+}
+
+// again is the teams held under key once Stream is asked for them through read again, for a
+// refusal they make: a user added to a team since is let in now, not once teamsFor has passed.
+// Stream is asked for a key at most once per teamsRecheck, answered or not, and a refusal while
+// it is being asked waits for that answer, so a user refused over and over does not ask each
+// time. held is false when nothing is held under key any more. err is read's, for the caller
+// that ran it; the teams held before stand.
+func (h *heldTeams) again(ctx context.Context, key string, read func(context.Context) ([]string, error)) (teams []string, held bool, err error) {
+	h.mu.Lock()
+	entry, ok := h.read[key]
+	asking := entry.asking
+	due := ok && asking == nil && h.now().Sub(entry.asked) >= teamsRecheck
+	if due {
+		asking = make(chan struct{})
+		entry.asked, entry.asking = h.now(), asking
+		h.read[key] = entry
+	}
+	h.mu.Unlock()
+	if !due {
+		if asking != nil {
+			select {
+			case <-asking:
+			case <-ctx.Done():
+			}
+		}
+		teams, held = h.of(key)
+		return teams, held, nil
+	}
+
+	fresh, err := read(ctx)
+	h.mu.Lock()
+	// The entry may have been replaced or dropped while Stream was asked: only the one asking
+	// takes the answer.
+	if entry, ok := h.read[key]; ok && entry.asking == asking {
+		entry.asking = nil
+		if err == nil {
+			entry.teams, entry.at = fresh, h.now()
+		}
+		h.read[key] = entry
+	}
+	h.mu.Unlock()
+	close(asking)
+	if err != nil {
+		teams, held = h.of(key)
+		return teams, held, err
+	}
+	return fresh, true, nil
 }
 
 // hasCommonTeam is Chat's shared-team rule for a config, which is in one team or none: a

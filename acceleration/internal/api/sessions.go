@@ -54,7 +54,7 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 		if err != nil {
 			return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 		}
-		if teams.refuses(found) {
+		if teams.refuses(ctx, found) {
 			return nil, errUnknownConfig
 		}
 		return &found, nil
@@ -70,7 +70,7 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 	if err != nil {
 		return nil, err
 	}
-	if teams.refuses(found) {
+	if teams.refuses(ctx, found) {
 		return nil, notFound("there is no agent called " + named)
 	}
 	return &found, nil

@@ -13,8 +13,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
@@ -124,6 +128,83 @@ func (s *AgentTeamsSuite) TestTheTeamsHeldForAUserAreNotLentToTheSameIdInAnother
 	s.teamsChat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
 
 	s.Equal(http.StatusNotFound, namesake.do(http.MethodPost, "/v1/agents/sessions", s.naming(s.configOf("red")), nil))
+}
+
+// Teams held that refuse are asked of Stream again before the refusal stands, so a user added to
+// a team right after being refused its agent is let in on the next ask, not once teamsFor passed.
+func (s *AgentTeamsSuite) TestAUserAddedToATeamRightAfterARefusalIsLetInOnTheNextAsk() {
+	anya := s.inTeams("blue")
+	config := s.configOf("red")
+	s.Require().Equal(http.StatusNotFound, anya.do(http.MethodPost, "/v1/agents/sessions", s.naming(config), nil))
+	s.teamsChat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue", "red"}})
+
+	s.Equal(http.StatusCreated, anya.do(http.MethodPost, "/v1/agents/sessions", s.naming(config), nil))
+}
+
+// A user taken out of a team who goes on writing to its agent is refused each time, and costs
+// Stream one more read of their teams each teamsRecheck, not one a message.
+func (s *AgentTeamsSuite) TestAUserRefusedOverAndOverAsksStreamOnceEachTeamsRecheck() {
+	anya, opened := s.runningChatAnyaLeft()
+	asked := s.teamReads()
+	writes := func() {
+		for range 5 {
+			s.Equal(http.StatusNotFound, s.status(anya.call(http.MethodPost, "/v1/agents/sessions/"+opened+"/responses", s.asking())))
+		}
+	}
+
+	writes()
+	s.Equal(asked+2, s.teamReads(), "read once the held teams lapsed, then asked again once")
+	s.teamsAge(s.router, teamsRecheck)
+	writes()
+	s.Equal(asked+3, s.teamReads(), "asked again once more after teamsRecheck")
+}
+
+// While Stream cannot be asked again, the held teams' refusal stands rather than turning into
+// a 503, and each refusal does not try Stream again.
+func (s *AgentTeamsSuite) TestARefusalOfHeldTeamsStandsWhileStreamCannotBeAskedAgain() {
+	anya := s.inTeams("blue")
+	config := s.configOf("red")
+	s.Require().Equal(http.StatusNotFound, anya.do(http.MethodPost, "/v1/agents/sessions", s.naming(config), nil))
+	s.teamsChat.Fail(http.MethodGet, "/users")
+	s.T().Cleanup(func() { s.teamsChat.Heal(http.MethodGet, "/users") })
+	asked := s.teamReads()
+
+	for range 3 {
+		status, message := anya.failure(http.MethodPost, "/v1/agents/sessions", s.naming(config))
+		s.Equal(http.StatusNotFound, status, message)
+		s.Equal(errUnknownConfig.Message, message)
+	}
+	s.Equal(asked+1, s.teamReads(), "a failed read counts as the one ask of teamsRecheck")
+}
+
+// Refusals of one user's held teams made while Stream is asked again wait for that one read and
+// take what it told, rather than asking it each or standing on the teams held before.
+func (s *AgentTeamsSuite) TestRefusalsWhileStreamIsAskedAgainWaitForItsOneAnswer() {
+	synctest.Test(s.T(), func(t *testing.T) {
+		held := newHeldTeams()
+		held.keep("anya", nil)
+		var reads atomic.Int32
+		told := make(chan struct{})
+		read := func(context.Context) ([]string, error) {
+			reads.Add(1)
+			<-told
+			return []string{"red"}, nil
+		}
+		answers := make(chan []string, 3)
+		for range 3 {
+			go func() {
+				teams, _, _ := held.again(t.Context(), "anya", read)
+				answers <- teams
+			}()
+		}
+
+		synctest.Wait()
+		require.Equal(t, int32(1), reads.Load(), "each refusal asked Stream")
+		close(told)
+		for range 3 {
+			require.Equal(t, []string{"red"}, <-answers, "a refusal took the teams held before the read")
+		}
+	})
 }
 
 func (s *AgentTeamsSuite) TestAConfigOfAnotherTeamIsAnsweredAsAnUnknownOne() {
@@ -311,7 +392,7 @@ func (s *AgentTeamsSuite) TestTheDeploymentAppsOwnCustomerReadsItsUsersTeamsTher
 	s.Equal(missing, refused, "the same answer as a config that does not exist")
 	s.Equal(http.StatusCreated, dana.do(http.MethodPost, "/v1/agents/sessions", s.naming(s.configOf("")), nil))
 	s.Equal(http.StatusNotFound, dana.do(http.MethodPost, "/v1/agents/sessions", s.naming(s.configOf("red")), nil))
-	s.Equal(asked+2, s.teamReads(), "each user's teams are asked of the deployment's app")
+	s.Equal(asked+4, s.teamReads(), "each user's teams are asked of the deployment's app, and again for their refusal")
 }
 
 // In deployment tenancy the customer of the deployment's app has no app of its own: it acts in
@@ -347,7 +428,7 @@ func (s *AgentTeamsSuite) TestTheDeploymentAppsOwnCustomerWithNoPinReadsItsUsers
 	s.Equal(missing, refused, "the same answer as a config that does not exist")
 	s.Equal(http.StatusCreated, dana.do(http.MethodPost, "/v1/agents/sessions", s.naming(s.configOf("")), nil))
 	s.Equal(http.StatusNotFound, dana.do(http.MethodPost, "/v1/agents/sessions", s.naming(s.configOf("red")), nil))
-	s.Equal(asked+2, s.teamReadsOn(suiteStreamKey), "each user's teams are asked of the deployment's app")
+	s.Equal(asked+4, s.teamReadsOn(suiteStreamKey), "each user's teams are asked of the deployment's app, and again for their refusal")
 }
 
 func (s *AgentTeamsSuite) TestTheDeploymentAppsOwnCustomersForkIsCheckedAgainstItsUsersTeams() {
@@ -964,11 +1045,17 @@ func (s *AgentTeamsSuite) running(id string) {
 // teamsLapse has node take every user's teams it holds as read teamsFor ago, as they are once that
 // long has passed: what a test changed of a user's teams in Stream is read from then on.
 func (s *RouterSuite) teamsLapse(node *Server) {
+	s.teamsAge(node, teamsFor)
+}
+
+// teamsAge has node take every user's teams it holds, and every time it asked Stream again, as
+// by older than they are.
+func (s *RouterSuite) teamsAge(node *Server, by time.Duration) {
 	held := node.teams
 	held.mu.Lock()
 	defer held.mu.Unlock()
 	clock := held.now
-	held.now = func() time.Time { return clock().Add(teamsFor) }
+	held.now = func() time.Time { return clock().Add(by) }
 }
 
 // detachOf is closed once a node has said on the relay that a watcher of the session id is no
@@ -1010,7 +1097,7 @@ func (s *AgentTeamsSuite) proxyHeldFor(user string) bool {
 }
 
 // teamChecksRunning is how many relayed watchers' team checks are running, on any node of the
-// process: each ends within attachWait.
+// process: each ends within teamCheckWait.
 func (s *AgentTeamsSuite) teamChecksRunning() int {
 	var dump bytes.Buffer
 	s.Require().NoError(pprof.Lookup("goroutine").WriteTo(&dump, 1))
