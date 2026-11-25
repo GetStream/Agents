@@ -1021,7 +1021,9 @@ type knowledgeBase struct {
 	beforeWrite func()
 	afterWrite  func() error
 	// writing is the context of the last write.
-	writing      context.Context
+	writing context.Context
+	// wrote is what the last write kept.
+	wrote        []knowledge.Document
 	beforeDelete func() error
 	afterDelete  func()
 }
