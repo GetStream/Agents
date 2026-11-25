@@ -547,7 +547,7 @@ func (s *Server) updateSkill(ctx context.Context, request *updateSkillRequest) (
 	}
 
 	skill := storedSkill(*request.Body, customerID)
-	if message, ok := skillNameComplaint(skill.Name); !ok && skill.Name != existing.Name {
+	if message, ok := skillNameComplaint(skill.Name); !ok && skill.Name != strings.TrimSpace(existing.Name) {
 		return nil, invalidRequest(message)
 	}
 	skill.ID = existing.ID
@@ -1523,8 +1523,7 @@ func skillNameComplaint(name string) (string, bool) {
 func (s *Server) newSkillNamesComplaint(ctx context.Context, customerID, configID string, names []string) (string, bool, error) {
 	var refused []string
 	for _, name := range names {
-		// A missing name is skillComplaint's.
-		if _, ok := skillNameComplaint(name); !ok && name != "" {
+		if _, ok := skillNameComplaint(name); !ok {
 			refused = append(refused, name)
 		}
 	}

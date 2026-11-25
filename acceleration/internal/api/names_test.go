@@ -228,6 +228,11 @@ func (s *NamesSuite) TestASkillStoredUnderAnotherNameStaysUsable() {
 	status, _ = s.skillWith(http.MethodPut, "/v1/agents/skills/"+stored.ID, config.Id, "refund", nil)
 	s.Equal(http.StatusOK, status, "it can be renamed to a name its folder can have")
 	s.Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/skills/"+stored.ID, nil, nil))
+
+	padded := store.Skill{CustomerID: s.customerID(), ConfigID: config.Id, Name: " billing/refund ", Description: "d", Instructions: "i"}
+	s.Require().NoError(s.store.Skills.Insert(s.T().Context(), &padded))
+	status, failure = s.skillWith(http.MethodPut, "/v1/agents/skills/"+padded.ID, config.Id, " billing/refund ", nil)
+	s.Equal(http.StatusOK, status, failure.Message)
 }
 
 func (s *NamesSuite) TestASkillsFileIsAPathInsideItsFolder() {
@@ -235,13 +240,13 @@ func (s *NamesSuite) TestASkillsFileIsAPathInsideItsFolder() {
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs",
 		map[string]any{"name": "support", "sandbox": "daytona"}, &config))
 
-	for _, key := range []string{"", ".", "..", "../a.py", "/a.py", "a/", "a//b", "a/../b", `a\b`, "a\x00b", strings.Repeat("a", 1025)} {
+	for _, key := range []string{"", ".", "..", "../a.py", "/a.py", "a/", "a//b", "a/../b", `a\b`, "a\x00b", strings.Repeat("a/", 512) + "a", strings.Repeat("a", 256), strings.Repeat("a", 256) + "/a.md", "a/" + strings.Repeat("a", 256)} {
 		status, failure := s.skillWith(http.MethodPost, "/v1/agents/skills", config.Id, "pdf", map[string]string{key: "x"})
 		s.Equal(http.StatusBadRequest, status, key)
 		s.Contains(failure.Message, "is not a path inside the skill's folder", key)
 		s.Less(len(failure.Message), 300)
 	}
 	status, failure := s.skillWith(http.MethodPost, "/v1/agents/skills", config.Id, "pdf",
-		map[string]string{"-v.py": "x", ".env.sample": "x", "a b/返金.md": "x", "..notes": "x", strings.Repeat("a", 1024): "x", "Icon\r": ""})
+		map[string]string{"-v.py": "x", ".env.sample": "x", "a b/返金.md": "x", "..notes": "x", strings.Repeat("a", 255) + "/" + strings.Repeat("b/", 383) + "bc": "x", "Icon\r": ""})
 	s.Equal(http.StatusCreated, status, failure.Message)
 }

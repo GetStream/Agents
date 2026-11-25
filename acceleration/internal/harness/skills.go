@@ -262,23 +262,33 @@ func ValidSkillName(name string) bool {
 
 // ValidSkillFile reports whether a file's key is a path inside its skill's folder.
 func ValidSkillFile(file string) bool {
+	tooLong := func(part string) bool { return len(part) > maxPathPart }
 	return len(file) <= maxSkillFile && file != "." && !path.IsAbs(file) && path.Clean(file) == file && file != ".." &&
-		!strings.HasPrefix(file, "../") && !strings.ContainsAny(file, "\\\x00")
+		!strings.HasPrefix(file, "../") && !strings.ContainsAny(file, "\\\x00") &&
+		!slices.ContainsFunc(strings.Split(file, "/"), tooLong)
 }
 
-// BundlePath is where a skill's file is put in the sandbox, relative to where code runs. It is
-// inside the skill's own folder for every row: one stored or imported before its name or key
-// was refused, or longer than Linux takes, is put under a hash of it. No valid name starts with a dot, so none is another's
-// hash.
+// BundlePath is where a skill's file is put in the sandbox, relative to where code runs: inside
+// the skill's own folder, whatever name and key are stored.
 func BundlePath(skill, file string) string {
+	return path.Join(bundleFolder(skill), bundleFile(file))
+}
+
+// bundleFolder is a skill's folder in the sandbox. A name no folder may have is hashed. No valid
+// name starts with a dot, so none is another's hash.
+func bundleFolder(skill string) string {
 	if !ValidSkillName(skill) || len(skill) > maxPathPart {
 		skill = fmt.Sprintf(".skill-%x", sha256.Sum256([]byte(skill)))
 	}
-	tooLong := func(part string) bool { return len(part) > maxPathPart }
-	if file != "" && (!ValidSkillFile(file) || slices.ContainsFunc(strings.Split(file, "/"), tooLong)) {
-		file = fmt.Sprintf(".file-%x", sha256.Sum256([]byte(file)))
+	return path.Join("skills", skill)
+}
+
+// bundleFile is where a file is in its skill's folder, hashed when its key is no path there.
+func bundleFile(file string) string {
+	if !ValidSkillFile(file) {
+		return fmt.Sprintf(".file-%x", sha256.Sum256([]byte(file)))
 	}
-	return path.Join("skills", skill, file)
+	return file
 }
 
 // Listing tells the model which files a skill brought, so it can read the ones it needs
@@ -286,11 +296,15 @@ func BundlePath(skill, file string) string {
 func Listing(skill string, paths []string, sandboxed bool) string {
 	var listing strings.Builder
 	listing.WriteString("This skill comes with these files. Read one only when you need it.")
-	if sandboxed && len(Scripts(paths)) > 0 {
-		fmt.Fprintf(&listing, " In the sandbox they are under %s/, so run the scripts from there.", BundlePath(skill, ""))
+	staged := sandboxed && len(Scripts(paths)) > 0
+	if staged {
+		fmt.Fprintf(&listing, " In the sandbox they are under %s/, so run the scripts from there.", bundleFolder(skill))
 	}
 	for _, file := range paths {
 		listing.WriteString("\n- " + file)
+		if staged && bundleFile(file) != file {
+			listing.WriteString(" (in the sandbox: " + BundlePath(skill, file) + ")")
+		}
 	}
 	return listing.String()
 }

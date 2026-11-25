@@ -980,6 +980,30 @@ func (s *SyncSuite) TestASkillFileOutsideItsFolderIsRefused() {
 	s.Contains(failure, "not a path inside the skill's folder")
 }
 
+func (s *SyncSuite) TestASyncRefusedForASkillLeavesItsConfigAsItWas() {
+	kept := s.sync(map[string]any{"name": "forms", "hash": "v1", "sandbox": "daytona", "instructions": "Be kind.", "skills": pdfSkill()})
+	refused := func(change func(skill map[string]any)) {
+		extra := map[string]any{"config_id": "", "name": "extra", "description": "d", "instructions": "i"}
+		change(extra)
+		for _, name := range []string{"forms", "fresh"} {
+			status, _ := s.serverClient.failure(http.MethodPost, "/v1/agents/sync", map[string]any{
+				"name": name, "hash": "v2", "sandbox": "daytona", "instructions": "Be brief.", "skills": append(pdfSkill(), extra)})
+			s.Equal(http.StatusBadRequest, status)
+		}
+	}
+	refused(func(skill map[string]any) { skill["files"] = map[string]string{"../a.py": "x"} })
+	refused(func(skill map[string]any) { skill["instructions"] = " " })
+	refused(func(skill map[string]any) { skill["name"] = "a/b" })
+
+	config := s.configsNamed("forms")[0]
+	s.Equal("Be kind.", value(config.Instructions))
+	s.Equal([]string{"pdf"}, value(config.Skills))
+	s.Equal(value(kept.Config.SyncHash), value(config.SyncHash))
+	s.Equal("v1", value(config.SyncHash))
+	s.Empty(s.skillNamed(config.Id, "extra").Id)
+	s.Empty(s.configsNamed("fresh"))
+}
+
 func (s *SyncSuite) TestASkillWithScriptsCannotBeAddedToAnAgentWithoutASandbox() {
 	result := s.sync(map[string]any{"name": "forms", "hash": "v1"})
 

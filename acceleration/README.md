@@ -1601,7 +1601,8 @@ one difference is who runs a skill: nobody is waiting on a voice, so the model h
 conversation loads the skills its config names itself, with `load_skill`, and keeps every
 tool while it follows one. It takes answers from a matching skill first, then the knowledge
 base (`lookup`), then the web (`search`). A text agent with a sandbox runs code itself with
-`run_code`, a loaded skill's scripts written under `skills/<name>/` before it runs, and the
+`run_code`, a loaded skill's scripts written under `skills/<name>/` before it runs (under a hash
+of the name or the file's key, which the model is told, when the sandbox cannot have it), and the
 files it hands back ride on `tool_ran` and the reply.
 
 It is driven over the session's own socket: `respond` goes in, `response_delta` and

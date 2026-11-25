@@ -349,6 +349,11 @@ func (s *Server) trySyncAgent(ctx context.Context, request *syncAgentRequest) (*
 	}
 	named := make([]string, 0, len(skills))
 	for _, skill := range skills {
+		// Filled in by upsertSkills, since a new config has no id yet.
+		skill.ConfigId = name
+		if message, ok := skillComplaint(skill); !ok {
+			return nil, invalidRequest(message)
+		}
 		named = append(named, strings.TrimSpace(skill.Name))
 	}
 	if message, ok, err := s.newSkillNamesComplaint(ctx, customerID, existing.ID, named); err != nil {
@@ -683,12 +688,6 @@ func documentsOf(list *[]KnowledgeDocument) []KnowledgeDocument {
 func (s *Server) upsertSkills(ctx context.Context, customerID, configID string, skills []SkillRequest) error {
 	names := make([]string, 0, len(skills))
 	for _, skill := range skills {
-		// The directory names the skill and the config owns it, so the caller does not
-		// repeat the config id per skill and it is filled in here.
-		skill.ConfigId = configID
-		if message, ok := skillComplaint(skill); !ok {
-			return invalidRequest(message)
-		}
 		names = append(names, strings.TrimSpace(skill.Name))
 	}
 
@@ -702,6 +701,8 @@ func (s *Server) upsertSkills(ctx context.Context, customerID, configID string, 
 	}
 
 	for _, skill := range skills {
+		// The directory names the skill and the config owns it, so the caller does not
+		// repeat the config id per skill and it is filled in here.
 		skill.ConfigId = configID
 		row := storedSkill(skill, customerID)
 		if existing, ok := known[row.Name]; ok {
