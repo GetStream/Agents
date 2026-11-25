@@ -61,3 +61,18 @@ func TestTwoKeysMaskedAlikeAreBothLogged(t *testing.T) {
 		require.NotContains(t, string(row), digits)
 	}
 }
+
+func TestALostRowLogsNoEndUserEmailOrNumber(t *testing.T) {
+	for id, want := range map[string]string{
+		"ali@example.com":      "masked:•••@example.com",
+		"Ali.Khan@Example.COM": "masked:•••@Example.COM",
+		"phone:15550001101":    "masked:phone:•••01",
+		"phone:+15550001101":   "masked:phone:+1•••01",
+		"sip-+15550001101":     "masked:phone_caller",
+		"user-42":              "user-42",
+	} {
+		logged := loggable(store.Request{UserID: id})
+
+		require.Equal(t, want, logged.UserID, id)
+	}
+}

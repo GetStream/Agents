@@ -50,8 +50,10 @@ import (
 
 var tracer = tracing.Tracer("policy")
 
-// joinTimeout bounds recording which organization an app belongs to, and every read of an
-// app's policies: in the background, and the one a request with no decision yet waits on.
+// joinTimeout bounds every read of an app's policies: in the background, and the one a request
+// with no decision yet waits on, and how long Close waits on the memberships being written.
+// Recording which organization an app belongs to is given it too, but that write outlives it,
+// within the store's write timeout (AppOrganizations.Upsert).
 const joinTimeout = 2 * time.Second
 
 // tierTTL is how long an organization's tier is believed without a request naming it before
@@ -206,6 +208,14 @@ type Enforcer struct {
 	// members is which organization each app has already been recorded under by this
 	// process, so a membership is written once rather than on every request.
 	members sync.Map
+	// joins is, for each app whose membership is being written, the organization to write
+	// next, empty for none: one write per app runs at a time, and the last organization named
+	// while it ran waits behind it. joining is those writes, which Close waits on; joinsClosed
+	// says Close has begun, after which none starts.
+	joinsMu     sync.Mutex
+	joins       map[string]string
+	joining     sync.WaitGroup
+	joinsClosed bool
 	// tiers is each organization's tier as this process last knew it, from a request or from
 	// organization_tiers, and what it last wrote there.
 	tiersMu sync.Mutex
@@ -272,16 +282,30 @@ func New(config *store.Store, settings Settings, logger *slog.Logger) (*Enforcer
 	}
 	e := &Enforcer{
 		config: config, logger: logger, settings: settings.withDefaults(),
-		decisions: map[string]decision{}, tiers: map[string]tierSeen{}, now: time.Now,
+		decisions: map[string]decision{}, tiers: map[string]tierSeen{}, joins: map[string]string{}, now: time.Now,
 	}
 	e.money.start(e)
 	return e, nil
 }
 
-// Close stops the money loop and waits for it. Admit keeps answering from what it last read.
+// Close stops the money loop and waits for it, and waits up to joinTimeout for the memberships
+// being written. Admit keeps answering from what it last read.
 func (e *Enforcer) Close() {
 	if e == nil {
 		return
+	}
+	e.joinsMu.Lock()
+	e.joinsClosed = true
+	e.joinsMu.Unlock()
+	joined := make(chan struct{})
+	go func() {
+		e.joining.Wait()
+		close(joined)
+	}()
+	select {
+	case <-joined:
+	case <-time.After(joinTimeout):
+		e.logger.Error("closed with memberships still being written")
 	}
 	e.money.stop()
 }
@@ -402,17 +426,46 @@ func (e *Enforcer) Join(ctx context.Context, appID, organizationID, tier string)
 		return
 	}
 	e.members.Store(appID, organizationID)
+	e.joinsMu.Lock()
+	defer e.joinsMu.Unlock()
+	if e.joinsClosed {
+		return
+	}
+	if _, running := e.joins[appID]; running {
+		e.joins[appID] = organizationID
+		return
+	}
+	e.joins[appID] = ""
+	e.joining.Add(1)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), joinTimeout)
-		defer cancel()
-		if err := e.config.AppOrganizations.Upsert(ctx, &store.AppOrganization{AppID: appID, OrganizationID: organizationID}); err != nil {
-			e.members.Delete(appID)
-			e.logger.Error("could not record which organization an app belongs to",
-				"app", appID, "organization", organizationID, "error", err)
-			return
+		defer e.joining.Done()
+		// An organization named later is written on a context of its own, not that request's.
+		for ctx, organization := ctx, organizationID; ; ctx = context.Background() {
+			e.record(ctx, appID, organization)
+			e.joinsMu.Lock()
+			organization = e.joins[appID]
+			if organization == "" || e.joinsClosed {
+				delete(e.joins, appID)
+				e.joinsMu.Unlock()
+				return
+			}
+			e.joins[appID] = ""
+			e.joinsMu.Unlock()
 		}
-		e.refresh(ctx, appID)
 	}()
+}
+
+// record writes that an app is in an organization, and reads its decision again once it is.
+func (e *Enforcer) record(ctx context.Context, appID, organizationID string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), joinTimeout)
+	defer cancel()
+	if err := e.config.AppOrganizations.Upsert(ctx, &store.AppOrganization{AppID: appID, OrganizationID: organizationID}); err != nil {
+		e.members.Delete(appID)
+		e.logger.Error("could not record which organization an app belongs to",
+			"app", appID, "organization", organizationID, "error", err)
+		return
+	}
+	e.refresh(ctx, appID)
 }
 
 // warm starts reading an app's decision in the background when this process has none.

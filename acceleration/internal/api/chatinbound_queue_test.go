@@ -483,6 +483,21 @@ func (s *ChatInboundQueueSuite) TestADeliveryForANodeThatCannotBeReachedIsTriedA
 	s.False(s.reachesWorker(worker.Messages()), "a worker here answered in the conversation the other node holds")
 }
 
+// A channel naming no customer, which two customers' sessions write in on other nodes, is
+// answered by neither, and that is the delivery's answer: unlike a node that cannot be reached,
+// it is not tried again.
+func (s *ChatInboundQueueSuite) TestADeliveryOnAChannelTwoCustomersWriteInIsSettledForNeither() {
+	s.heldWhereNothingAnswers(s.customerID(), s.utils.uuid(), s.channelID, "")
+	s.heldWhereNothingAnswers("someone-"+s.utils.uuid(), s.utils.uuid(), s.channelID, "")
+	queued := s.queue(s.message(suiteStreamApp, "", ""))
+
+	s.answering()
+
+	s.Eventually(func() bool { return s.row(queued).State == store.ChatInboundDone }, settleFor, 20*time.Millisecond,
+		"the delivery was left queued to be tried again")
+	s.Equal(1, s.row(queued).Attempts)
+}
+
 // A peer that took a delivery answers it itself: handing it on to a third node's worker could
 // pass it back and forth between nodes that each believe the other answers.
 func (s *ChatInboundQueueSuite) TestADeliveryAPeerHandedOverIsNotHandedOnAgain() {

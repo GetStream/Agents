@@ -35,7 +35,7 @@ type SessionPosition struct {
 }
 ```
 
-Store, in `QuerySessions`:
+Store, in `Sessions.Select`:
 
 ```go
 if after := filter.Cursor; after != nil {

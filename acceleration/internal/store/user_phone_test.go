@@ -166,7 +166,7 @@ func (s *StoreSuite) TestALinkSetsAsideTheRowsOfAConfigThatRecordsTheCards() {
 
 // Catches a set-aside row whose thread and call no longer name the number: a Linq chat's
 // replies would check opt-outs, the sandbox and the limits against retired:<id>
-// (ThreadContact, channelbridge.replyTo), and a call going on at the link would close with no
+// (ContactMapEntries.GetByThread, channelbridge.replyTo), and a call going on at the link would close with no
 // caller its lines are said by (the closed episodes' contact_address, omnichannel.callerOf).
 // Its cards started before the link, so no session reads them; the cards of a set-aside row a
 // link gives the user name the number (TestALinkWithAllOfTheHistoryReadsWhatTheNumberSaidBeforeIt).
@@ -196,14 +196,14 @@ func (s *StoreSuite) TestASetAsideRowIsStillReachedAtItsNumber() {
 	s.Equal("+15550100", found.Address, "a reply on the thread reaches the number")
 	s.Empty(s.cardsOf("agent:omni-sms", CardsQuery{}), "both started before the link")
 	now := time.Now()
-	ended, err := s.store.Episodes.EndCall(s.ctx, AppScope{Unpinned: true}, callID, now, now.Add(-time.Minute), "router-a")
+	ended, err := s.store.Episodes.EndCall(s.ctx, AppScope{Unpinned: true}, callID, now, -time.Minute, "router-a")
 	s.Require().NoError(err)
 	s.Require().Len(ended, 1)
 	s.Equal("+15550100", ended[0].ContactAddress, "the call's caller")
-	idle, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 1000, now.Add(-time.Minute), "router-a")
+	idle, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 1000, -time.Minute, "router-a")
 	s.Require().NoError(err)
 	s.Equal(map[string]string{thread.ID: "+15550100"}, s.addressesOf(idle, thread.ID))
-	claimed, err := s.store.Episodes.ClaimSummaries(s.ctx, now, 1000, now.Add(time.Hour), "router-a")
+	claimed, err := s.store.Episodes.ClaimSummaries(s.ctx, 1000, time.Hour, "router-a")
 	s.Require().NoError(err)
 	s.Equal(map[string]string{thread.ID: "+15550100", call.ID: "+15550100"}, s.addressesOf(claimed, thread.ID, call.ID))
 }
@@ -578,7 +578,7 @@ func (s *StoreSuite) smsAt(row *ContactMapEntry, at time.Time) string {
 	return episode.ID
 }
 
-// linkDated links a user to a number as LinkUserPhone does, dated at linkedAt: the link's time its
+// linkDated links a user to a number as UserPhones.Link does, dated at linkedAt: the link's time its
 // history row was written for too, and its boundary when the link is bounded at its own time.
 func (s *StoreSuite) linkDated(link *UserPhone) {
 	s.Require().NoError(s.store.UserPhones.Link(s.ctx, link))

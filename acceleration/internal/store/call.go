@@ -135,7 +135,8 @@ type Calls struct {
 // It is written when the agent joins rather than when the call ends, so a call that is
 // still running is findable and one the process died during is not simply lost. Starting
 // the same call twice updates the row instead of failing: a retried write must not turn
-// into a second call.
+// into a second call. An id another customer's call has is ErrIDTaken, and their row is left
+// as it is.
 func (r *Calls) Start(ctx context.Context, call *Call) error {
 	if err := call.Validate(); err != nil {
 		return stack.Wrap(err)
@@ -158,18 +159,26 @@ func (r *Calls) Start(ctx context.Context, call *Call) error {
 			call.FromNumber, call.ToNumber = placed[0].LocalNumber, placed[0].RemoteNumber
 		}
 	}
-	if call.Tags == nil {
-		call.Tags = map[string]string{}
-	}
+	call.Tags = orEmptyMap(call.Tags)
 
-	_, err := r.store.shard.NewInsert().Model(call).
+	result, err := r.store.shard.NewInsert().Model(call).
 		On("CONFLICT (id) DO UPDATE").
 		Set("ended_at = NULL").
 		Set("agent_user_id = COALESCE(c.agent_user_id, EXCLUDED.agent_user_id)").
 		Set("conversation_id = COALESCE(c.conversation_id, EXCLUDED.conversation_id)").
+		// The router mints a call's id (NewID), so only a row imported under it can be another
+		// customer's.
+		Where("c.customer_id = EXCLUDED.customer_id").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: start call: %w", err))
+	}
+	written, err := result.RowsAffected()
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: start call: %w", err))
+	}
+	if written == 0 {
+		return stack.Wrap(fmt.Errorf("%w: call %s", ErrIDTaken, call.ID))
 	}
 	return nil
 }
@@ -306,7 +315,7 @@ func (r *Calls) Get(ctx context.Context, customerID, id string) (Call, error) {
 // A session that never held a call is not in it.
 func (r *Calls) Latest(ctx context.Context, customerID string, sessionIDs []string) (map[string]Call, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	latest := map[string]Call{}
 	if len(sessionIDs) == 0 {
@@ -365,7 +374,7 @@ func (r *Calls) LastVoiced(ctx context.Context, customerID, sessionID string) (C
 // Select returns a customer's calls, newest first.
 func (r *Calls) Select(ctx context.Context, customerID string, filter CallFilter) ([]Call, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	limit := filter.Limit

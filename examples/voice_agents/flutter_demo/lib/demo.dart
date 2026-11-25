@@ -37,7 +37,8 @@ abstract final class Demo {
 
   /// The customer id the router was started with.
   ///
-  /// `compose.yaml` builds the dashboard with `examples`, and a config belongs to one customer.
+  /// A config belongs to one customer. The Volt dashboard shows a numeric app id's configs,
+  /// not those under `examples`.
   static const customerId = 'examples';
 
   /// The `STREAM_API_KEY` the router runs with, passed as

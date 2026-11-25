@@ -20,7 +20,7 @@ type ResumeHistories interface {
 
 // restoring is ctx with the session's resume_history applied to every conversation it
 // reads back, and a thread channel's history cut at the boundary of its number's link
-// (store.ThreadHistorySince). A session asking for nothing, on no linked number's thread, gets
+// (store.UserPhones.ThreadHistorySince). A session asking for nothing, on no linked number's thread, gets
 // ctx as it was, and the default with it. The boundary that cannot be read refuses the session:
 // it is the linked user's word on what they may be told.
 func (m *Manager) restoring(ctx context.Context, spec Spec) (context.Context, error) {

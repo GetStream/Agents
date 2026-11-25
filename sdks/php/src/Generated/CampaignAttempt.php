@@ -11,7 +11,7 @@ use GetStream\VisionAgents\Json;
 final readonly class CampaignAttempt
 {
     public function __construct(
-        // Minutes after the previous attempt started, pushed into the calling hours.
+        // Minutes after the previous attempt started, pushed into the calling hours. At most 43200 (30 days).
         public int $delayMinutes,
     ) {
     }

@@ -654,8 +654,7 @@ func (s *Service) SweepOrders(ctx context.Context) (int, error) {
 	if s.store == nil {
 		return 0, nil
 	}
-	now := s.now()
-	orders, err := s.store.PhoneNumberOrders.Claim(ctx, now, now.Add(orderRetry), orderSweepBatch)
+	orders, err := s.store.PhoneNumberOrders.Claim(ctx, orderRetry, orderSweepBatch)
 	if err != nil {
 		return 0, err
 	}
@@ -1209,8 +1208,33 @@ func (s *Service) Call(ctx context.Context, request CallRequest) (Placed, error)
 	if err != nil && !sent && ctx.Err() != nil {
 		return Placed{}, fmt.Errorf("%w: %w", ErrNotPlaced, err)
 	}
+	if err != nil && !sent && !lasting(err) {
+		return Placed{}, notDialed{err}
+	}
 	return placed, err
 }
+
+// lasting reports whether a call failed before it was sent for a reason that placing it again
+// would meet again: the request itself, a number or SIP trunk the app does not hold, its Stream
+// app, or the deployment's own setup (credentials, keys, a public URL, SIP trunks). Such a
+// failure is not marked ErrNotDialed, so a campaign does not try it for ever.
+func lasting(err error) bool {
+	return errors.Is(err, ErrInvalid) || errors.Is(err, store.ErrNoNumber) || errors.Is(err, store.ErrNoSIPTrunk) ||
+		errors.Is(err, ErrNoStream) || errors.Is(err, ErrNoSealerToCall) ||
+		errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrSIPTrunksDisabled) ||
+		errors.Is(err, errLasting) || (err != nil && streamapp.Settled(err))
+}
+
+// errLasting marks a failure that has no kind of its own and that a second try meets again: a
+// vendor that cannot be built from its configuration, or a password the router's keys cannot
+// open or seal.
+var errLasting = errors.New("phone: a lasting failure")
+
+type lastingError struct{ err error }
+
+func (e lastingError) Error() string        { return e.err.Error() }
+func (e lastingError) Unwrap() error        { return e.err }
+func (e lastingError) Is(target error) bool { return target == errLasting }
 
 // call is Call. It sets sent once the vendor is asked to dial: from then on the phone may ring
 // whatever the call returns.
@@ -1223,7 +1247,8 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 			return Placed{}, err
 		}
 	}
-	if err := s.gate.Allow(ctx, request.Owner.CustomerID, dlc.Voice, request.To); err != nil {
+	room, err := s.gate.AllowCall(ctx, request.Owner.CustomerID, request.To)
+	if err != nil {
 		return Placed{}, stack.Wrap(err)
 	}
 	stream, pin, err := s.streamFor(ctx, request.Owner.CustomerID)
@@ -1286,6 +1311,39 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 		return Placed{}, stack.Wrap(Invalid(fmt.Errorf("phone: the session id %q is not one a session can have", sessionID)))
 	}
 	callID, callType := sessionID, defaultCallType
+
+	// The call is kept, and counted against the calls its organization may have at once, before
+	// anything is made at Stream for it: a call the count refuses costs nothing there.
+	// Only a vendor the router can be reached by can post how the call ended. A call through
+	// a customer's own trunk is told by the router's own bridge.
+	_, reader := provider.(StatusReader)
+	reports := reader && s.publicURL != ""
+	token, err := s.outcomes.PlacedWithin(ctx, outcome.Call{
+		Key: outcome.Key{
+			CustomerID: request.Owner.CustomerID, StreamAppPK: pin, CallType: callType, CallID: callID,
+			Local: request.From, Remote: request.To,
+		},
+		Vendor:  held.Vendor,
+		Reports: reports || trunk != nil,
+	}, room.OrganizationID, room.AtOnce)
+	if errors.Is(err, store.ErrCallsAtOnce) {
+		return Placed{}, room.Refusal(err)
+	}
+	if err != nil {
+		return Placed{}, notPlaced(ctx, err)
+	}
+	// Until the dial, whose failures forget it themselves, a call that goes no further is
+	// forgotten here: it never rang.
+	forget := true
+	defer func() {
+		if forget {
+			s.forgetOutcome(ctx, token, callID)
+		}
+	}()
+	// Its leg counts against the organization it was placed under once it is dialled too.
+	if room.OrganizationID != "" {
+		request.Owner.OrganizationID = room.OrganizationID
+	}
 
 	line, shared, err := s.sharedLine(ctx, stream, pin, provider, held)
 	if err != nil {
@@ -1370,21 +1428,6 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 		}
 	}
 
-	// Only a vendor the router can be reached by can post how the call ended. A call through
-	// a customer's own trunk is told by the router's own bridge.
-	_, reader := provider.(StatusReader)
-	reports := reader && s.publicURL != ""
-	token, err := s.outcomes.Placed(ctx, outcome.Call{
-		Key: outcome.Key{
-			CustomerID: request.Owner.CustomerID, StreamAppPK: pin, CallType: callType, CallID: callID,
-			Local: request.From, Remote: request.To,
-		},
-		Vendor:  held.Vendor,
-		Reports: reports || trunk != nil,
-	})
-	if err != nil {
-		return Placed{}, err
-	}
 	if reports {
 		outbound.StatusURL = s.publicURL + "/v1/phone/status/" + token
 	}
@@ -1418,8 +1461,9 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 		StreamAppPK: pin,
 		Shared:      shared,
 	}
+	forget = false
 	// A shared line outlives the call, so its row costs nothing to undo when the dial fails,
-	// and the call's app (CallPin) is known before its leg arrives.
+	// and the call's app (store.CallResources.Pin) is known before its leg arrives.
 	if shared {
 		if err := s.store.CallResources.Insert(ctx, resource); err != nil {
 			s.forgetOutcome(ctx, token, callID)
@@ -1637,7 +1681,7 @@ func (s *Service) park(
 		}
 		sealed, err := s.sealer.SealWithAAD(outbound.Bridge.Password, callBridgeAAD(customerID, token))
 		if err != nil {
-			return "", stack.Wrap(fmt.Errorf("phone: seal a parked bridge's trunk password: %w", err))
+			return "", stack.Wrap(lastingError{fmt.Errorf("phone: seal a parked bridge's trunk password: %w", err)})
 		}
 		bridge.TrunkPasswordSealed, bridge.TrunkKEKVersion = sealed, s.sealer.CurrentVersion()
 	}
@@ -1702,9 +1746,35 @@ func callBridgeAAD(customerID, token string) []byte {
 	return []byte("call_bridges/" + customerID + "/" + token)
 }
 
-// ErrNotPlaced is a call whose context ended before the vendor was asked to dial it: nobody
-// was rung.
-var ErrNotPlaced = errors.New("phone: the call was cancelled before it was placed")
+// ErrNotPlaced is a call the vendor was never asked to dial, its context ended or its placing
+// failed (ErrPlacingFailed): nobody was rung.
+var ErrNotPlaced = errors.New("phone: the call was not placed")
+
+// notPlaced is err, the failure of placing a call, as ErrNotPlaced: nothing was asked of the
+// vendor, so nobody was rung. It is ErrPlacingFailed too unless ctx ended, as a shutdown ends
+// it, which is no failure of the database's to wait out.
+func notPlaced(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return stack.Wrap(fmt.Errorf("%w: %w", ErrNotPlaced, err))
+	}
+	return stack.Wrap(fmt.Errorf("%w: %w: %w", ErrNotPlaced, ErrPlacingFailed, err))
+}
+
+// ErrPlacingFailed is a call whose placing failed other than by its organization's calls at
+// once, the count or its lock not answering in time: it is ErrNotPlaced too, and worth trying
+// again only once the database answers.
+var ErrPlacingFailed = errors.New("phone: the call could not be counted against its organization's calls")
+
+// ErrNotDialed is a call that failed before the vendor was asked to dial it, for a reason that
+// may not be met again, such as a database blip: nobody was rung. It marks the failure, whose
+// own text and kind are kept.
+var ErrNotDialed = errors.New("phone: the call failed before it was dialed")
+
+type notDialed struct{ err error }
+
+func (e notDialed) Error() string        { return e.err.Error() }
+func (e notDialed) Unwrap() error        { return e.err }
+func (e notDialed) Is(target error) bool { return target == ErrNotDialed }
 
 // ErrUnknownStatus is a status post for no call waiting for one: its token is unknown or swept,
 // or its vendor reports no status.

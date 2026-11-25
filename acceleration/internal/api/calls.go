@@ -278,6 +278,9 @@ func (s *Server) createCallToken(ctx context.Context, request *createCallTokenRe
 	if request.Body != nil {
 		wanted = *request.Body
 	}
+	if failure, refused := refuseReservedUserID("user_id", value(wanted.UserId)); refused {
+		return nil, failure
+	}
 	listener := "listener-" + call.ID
 	userID := cmp.Or(value(wanted.UserId), listener)
 	userName := value(wanted.UserName)
@@ -341,6 +344,12 @@ func (s *Server) createChatToken(ctx context.Context, request *createChatTokenRe
 	agentID := strings.TrimSpace(request.Body.AgentId)
 	if agentID == "" {
 		return nil, invalidRequest("an agent id is required, since it names the channel")
+	}
+	if failure, refused := refuseReservedUserID("agent_id", agentID); refused {
+		return nil, failure
+	}
+	if failure, refused := refuseReservedUserID("user_id", value(request.Body.UserId)); refused {
+		return nil, failure
 	}
 
 	// Somebody reading a conversation is not the agent, and two readers of the same one are
@@ -424,7 +433,7 @@ func (s *Server) refuseUserOutside(ctx context.Context, customerID string, bound
 	}
 	// A guest id the router minted is recorded per customer, so it is nobody else's. One only
 	// seen in a guest token is not: the customer signs those for any id it likes.
-	guest, err := s.store.Guest(ctx, customerID, userID)
+	guest, err := s.store.Users.GetGuest(ctx, customerID, userID)
 	if err != nil || !guest.Minted {
 		return errUserInSharedApp
 	}

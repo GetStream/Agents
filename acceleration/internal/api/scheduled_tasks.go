@@ -221,7 +221,7 @@ func (s *Server) createScheduledTask(ctx context.Context, request *createSchedul
 		task.ConfigID = config.ID
 	}
 
-	stored, err := s.store.UserTimezone(ctx, customerID, userID)
+	stored, err := s.store.Users.GetTimezone(ctx, customerID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -491,6 +491,16 @@ func (s *Server) rescheduleTask(task *store.ScheduledTask, written ScheduledTask
 			return scheduleFailure(err)
 		}
 		task.NextRunAt = &next
+	}
+	// A failed task's resume, and the agent's reschedule of a completed one that names no new
+	// time, arm the next occurrence of this schedule as written and check nothing, so that
+	// occurrence is held to the floor here.
+	if task.State == store.ScheduledTaskFailed || task.State == store.ScheduledTaskCompleted {
+		if next, ok := parsed.Next(now); ok {
+			if err := scheduling.CheckMove(next, current, now); err != nil {
+				return scheduleFailure(err)
+			}
+		}
 	}
 	task.StartLocal, task.Timezone, task.RRule = parsed.StartLocal, parsed.Timezone, parsed.Repeat
 	task.UntilDate = nil

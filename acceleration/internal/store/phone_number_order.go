@@ -87,11 +87,11 @@ func (r *PhoneNumberOrders) Delete(ctx context.Context, id int64) error {
 // phoneNumberOrders is the queue of orders the sweep settles.
 var phoneNumberOrders = queue{name: "phone number orders", alias: "pno", key: "id"}
 
-// Claim takes up to limit orders due by now, oldest due first, and moves each one's next
-// attempt to leaseUntil: another router's claim skips them, and one the sweep could not settle
+// Claim takes up to limit orders due now, oldest due first, and moves each one's next
+// attempt to the end of lease: another router's claim skips them, and one the sweep could not settle
 // is tried again behind the orders due before it.
-func (r *PhoneNumberOrders) Claim(ctx context.Context, now, leaseUntil time.Time, limit int) ([]PhoneNumberOrder, error) {
-	return claim[PhoneNumberOrder](ctx, r.store.global, phoneNumberOrders, now, leaseUntil, limit, nil, "pno.*")
+func (r *PhoneNumberOrders) Claim(ctx context.Context, lease time.Duration, limit int) ([]PhoneNumberOrder, error) {
+	return claim[PhoneNumberOrder](ctx, r.store.global, phoneNumberOrders, lease, limit, nil, "pno.*")
 }
 
 // Bought records the number an order bought and forgets the order, as one. It reports false,

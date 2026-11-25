@@ -55,8 +55,8 @@ To reach the Mac over the network instead, add `assistant.routerUrl` and
 `http://192.168.1.20:8098`. From Android 17 that is the local network, which the app then asks
 for when it opens.
 
-The chat asks for `xai/grok-4.7`, a model that streams its reasoning, so the router needs
-`XAI_API_KEY`. Web search needs one of `EXA_API_KEY`, `TAVILY_API_KEY` or `PERPLEXITY_API_KEY`.
+The chat runs on the agent's own model, as a call does: which model a session runs on is the
+backend's to choose, and the router refuses a device that names one. Web search needs one of `EXA_API_KEY`, `TAVILY_API_KEY` or `PERPLEXITY_API_KEY`.
 Stream Chat is on `https://stream-io-repo.com` rather than Maven Central, which
 `settings.gradle.kts` adds. The sign-in card and `AIConversation`'s `contentPadding` need 7.17.0
 or newer, generated UI replies 7.18.0, and `AIConversationState` 7.19.0: `stream-chat-android-ai-compose`,

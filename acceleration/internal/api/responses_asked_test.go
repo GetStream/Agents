@@ -172,7 +172,7 @@ func (s *ResponsesAskedSuite) TestAVideoSentWithAPhotoWithoutTextShowsOnlyThePho
 // question, and the person's message shows the text they typed, no frame.
 func (s *ResponsesAskedSuite) TestAVideoSentWithARequestIDToAPersonalConversationIsShownToTheModel() {
 	clip := s.clip()
-	opened := s.client.createSession(CreateSessionRequest{Llm: pointerTo("vision/vision-model")})
+	opened := s.client.createSession(CreateSessionRequest{ConfigId: pointerTo(s.config("vision/vision-model"))})
 	command, text := s.utils.uuid(), "What happens in this clip "+s.utils.uuid()+"?"
 	frames := 2
 	before := len(s.chat.Uploads())
@@ -205,7 +205,7 @@ func (s *ResponsesAskedSuite) TestAVideoSentWithARequestIDToAPersonalConversatio
 // question as "video: reading the frame at 812.5ms".
 func (s *ResponsesAskedSuite) TestAVideoNamingNoFrameCountShowsTheFramesAShortClipHas() {
 	clip := s.clip()
-	opened := s.client.createSession(CreateSessionRequest{Llm: pointerTo("vision/vision-model")})
+	opened := s.client.createSession(CreateSessionRequest{ConfigId: pointerTo(s.config("vision/vision-model"))})
 	command, text := s.utils.uuid(), "What happens in this clip "+s.utils.uuid()+"?"
 
 	s.Require().Equal(http.StatusAccepted, s.client.do(http.MethodPost,
@@ -229,7 +229,7 @@ func (s *ResponsesAskedSuite) TestAVideoNamingNoFrameCountShowsTheFramesAShortCl
 // asked twice.
 func (s *ResponsesAskedSuite) TestARetryOfAVideoQuestionDoesNotSampleItsVideosAgain() {
 	clip := s.clip()
-	opened := s.client.createSession(CreateSessionRequest{Llm: pointerTo("vision/vision-model")})
+	opened := s.client.createSession(CreateSessionRequest{ConfigId: pointerTo(s.config("vision/vision-model"))})
 	command, text := s.utils.uuid(), "What happens in this clip "+s.utils.uuid()+"?"
 	path := "/v1/agents/sessions/" + opened.Id + "/responses"
 	asked := func() int {
@@ -259,7 +259,7 @@ func (s *ResponsesAskedSuite) TestARetryOfAVideoQuestionDoesNotSampleItsVideosAg
 // What a personal conversation refuses a question without a request id for is refused before
 // its video is sampled, and the limits on a response's videos hold for a command.
 func (s *ResponsesAskedSuite) TestAPersonalConversationsVideoQuestionIsRefusedBeforeItsVideoIsSampled() {
-	opened := s.client.createSession(CreateSessionRequest{Llm: pointerTo("vision/vision-model")})
+	opened := s.client.createSession(CreateSessionRequest{ConfigId: pointerTo(s.config("vision/vision-model"))})
 	path := "/v1/agents/sessions/" + opened.Id + "/responses"
 	broken := VideoSource{Url: "data:video/mp4;base64,bm90IGEgY2xpcA=="}
 
@@ -297,7 +297,7 @@ func (s *ResponsesAskedSuite) TestAVideoQuestionWhileAnAnswerRunsIsRefusedBefore
 	}{
 		"a command of a personal conversation": {
 			session: func() Session {
-				return s.client.createSession(CreateSessionRequest{Llm: pointerTo("vision/vision-model")})
+				return s.client.createSession(CreateSessionRequest{ConfigId: pointerTo(s.config("vision/vision-model"))})
 			},
 			client: s.client,
 			first: func(text string) CreateResponseRequest {
@@ -346,7 +346,7 @@ func (s *ResponsesAskedSuite) TestAVideoQuestionWhileAnAnswerRunsIsRefusedBefore
 // the agent's, which no retry cures: not_configured, as the check before the note is heard answers it. A
 // retry told "running" would otherwise pay for the video fetch before meeting the 501.
 func (s *ResponsesAskedSuite) TestAVideoQuestionWithAVoiceNoteToAnAgentThatCannotSeeIsRefusedForThatFirst() {
-	opened := s.client.createSession(CreateSessionRequest{Llm: pointerTo("noted/noted-model")})
+	opened := s.client.createSession(CreateSessionRequest{ConfigId: pointerTo(s.config("noted/noted-model"))})
 	path := "/v1/agents/sessions/" + opened.Id + "/responses"
 	s.notedMu.Lock()
 	model := s.noted[len(s.noted)-1]
@@ -368,7 +368,7 @@ func (s *ResponsesAskedSuite) TestAVideoQuestionWithAVoiceNoteToAnAgentThatCanno
 // videos and an answer still running is refused for the answer, as the question is without a
 // note, whose check for the agent's refusal comes only with a note.
 func (s *ResponsesAskedSuite) TestAVideoQuestionWithoutAVoiceNoteToAnAgentThatCannotSeeIsRefusedForTheAnswerRunning() {
-	opened := s.client.createSession(CreateSessionRequest{Llm: pointerTo("noted/noted-model")})
+	opened := s.client.createSession(CreateSessionRequest{ConfigId: pointerTo(s.config("noted/noted-model"))})
 	path := "/v1/agents/sessions/" + opened.Id + "/responses"
 	s.notedMu.Lock()
 	model := s.noted[len(s.noted)-1]
@@ -389,7 +389,7 @@ func (s *ResponsesAskedSuite) TestAVideoQuestionWithoutAVoiceNoteToAnAgentThatCa
 // A text past the limit of a command is refused before the video sent with it is fetched. Only
 // a question with a voice note may be that big, as the body is held to 1 MiB without one.
 func (s *ResponsesAskedSuite) TestAVideoQuestionWithATextPastTheLimitOfACommandIsRefusedBeforeItsVideoIsFetched() {
-	opened := s.client.createSession(CreateSessionRequest{Llm: pointerTo("vision/vision-model")})
+	opened := s.client.createSession(CreateSessionRequest{ConfigId: pointerTo(s.config("vision/vision-model"))})
 	path := "/v1/agents/sessions/" + opened.Id + "/responses"
 	command := s.utils.uuid()
 	question := func(text string) CreateResponseRequest {
