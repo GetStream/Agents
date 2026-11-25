@@ -195,6 +195,10 @@ func (s *MoneySuite) TestARefusalDoesNotWaitForTheVendorToClose() {
 	provider := &lastWordsSTT{emitter: stt.NewEmitter(64), closing: make(chan struct{})}
 	session := listening(s.T(), money, owner, provider)
 
+	s.Require().Eventually(func() bool {
+		_, refusals, _ := session.lease.Refusals()
+		return refusals >= 2
+	}, 5*time.Second, 5*time.Millisecond, "two renewals are refused")
 	answered := make(chan error, 1)
 	go func() { answered <- session.ProcessAudio(speech(20), stt.Participant{}) }()
 	select {
@@ -203,7 +207,7 @@ func (s *MoneySuite) TestARefusalDoesNotWaitForTheVendorToClose() {
 	case <-time.After(5 * time.Second):
 		s.Fail("the refusal waited for the vendor")
 	}
-	s.Zero(provider.frames(), "refused from its first minute, the vendor hears nothing")
+	s.Zero(provider.frames(), "the vendor hears nothing")
 	close(provider.closing)
 	s.said(session)
 }
@@ -218,7 +222,9 @@ func (s *MoneySuite) TestMoneyThatCannotBeCheckedRefusesNoAudio() {
 	redis.Stop()
 	s.Require().Eventually(func() bool { return errors.Is(session.lease.Err(), policy.ErrSpendCheckUnavailable) },
 		5*time.Second, 10*time.Millisecond, "a renewal could not be checked")
+	// Through more renewals than end a session refused.
 	for range 10 {
+		time.Sleep(2 * leaseRenew)
 		s.Require().NoError(session.ProcessAudio(speech(20), stt.Participant{}))
 	}
 	s.Equal(10, provider.frames())

@@ -61,7 +61,8 @@ type Session struct {
 	// each vendor the audio that vendor took. Guarded by mu.
 	streamed map[stt.STT]*streamedAudio
 	// lease holds a minute of audio while the session streams, so the other routers count
-	// it before its turns are recorded.
+	// it before its turns are recorded. It follows the model serving the session (swap). Guarded
+	// by mu.
 	lease *routing.Lease
 
 	closeOnce sync.Once
@@ -104,8 +105,8 @@ func newSession(
 		readAhead: make(chan chan struct{}),
 		done:      make(chan struct{}),
 		streamed:  map[stt.STT]*streamedAudio{},
-		lease:     routing.StartLeaseEvery(recorder, config, owner, "stt", uuid.NewString(), leaseMinute, leaseRenew, 3*leaseRenew),
 	}
+	session.lease = session.leaseOf(config)
 	// Stamped here, as audio may reach the provider before forward runs.
 	started := time.Now()
 	goroutine.Go(ctx, func() { session.forward(started) })
@@ -118,12 +119,12 @@ func (s *Session) ProcessAudio(pcm stt.PcmData, participant stt.Participant) err
 	if s.failed.Load() {
 		return nil
 	}
-	if err := s.unpaid(); err != nil {
+	s.mu.Lock()
+	provider, config, lease := s.provider, s.config, s.lease
+	s.mu.Unlock()
+	if err := s.unpaid(lease); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	provider, config := s.provider, s.config
-	s.mu.Unlock()
 	err := provider.ProcessAudio(pcm, participant)
 	if err == nil {
 		s.took(provider, config, pcm.DurationMs())
@@ -136,13 +137,17 @@ func (s *Session) ProcessAudio(pcm stt.PcmData, participant stt.Participant) err
 	return err
 }
 
-// unpaid is why the session may take no more audio: its lease was refused because money ran out
-// or the organization is suspended. It ends the session, which still transcribes and bills the
-// audio it took, so its events close after the last transcript. Money that could not be checked
-// (policy.Transient) refuses nothing: the session goes on, and what it takes is billed as before.
-func (s *Session) unpaid() error {
-	err := s.lease.Err()
-	if err == nil || policy.Transient(err) {
+// maxRefusals is how many renewals of its lease in a row, LeaseRenew apart, are refused before a
+// session ends: one alone may come from another reservation that is soon let go.
+const maxRefusals = 2
+
+// unpaid is why the session may take no more audio: maxRefusals renewals of its lease in a row
+// were refused because money ran out, or one because the organization is suspended. It ends the
+// session, which still transcribes and bills the audio it took, so its events close after the
+// last transcript. Money that could not be checked (policy.Transient) counts for nothing.
+func (s *Session) unpaid(lease *routing.Lease) error {
+	err, refusals, _ := lease.Refusals()
+	if err == nil || refusals < maxRefusals && !errors.Is(err, policy.ErrSuspended) {
 		return nil
 	}
 	if !s.failed.CompareAndSwap(false, true) {
@@ -151,6 +156,16 @@ func (s *Session) unpaid() error {
 	// Off the caller's goroutine, since closing may wait on the vendor for the last words.
 	goroutine.Go(s.call, func() { _ = s.Close() })
 	return stack.Wrap(err)
+}
+
+// RefusedSince is when the first of the refusals of the session's lease in a row was, zero when
+// the last it was granted.
+func (s *Session) RefusedSince() time.Time {
+	s.mu.Lock()
+	lease := s.lease
+	s.mu.Unlock()
+	_, _, since := lease.Refusals()
+	return since
 }
 
 // toldOf reports whether the caller hears of provider's failure, or of the next model
@@ -223,7 +238,7 @@ func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.closed = true
-		provider := s.provider
+		provider, lease := s.provider, s.lease
 		s.mu.Unlock()
 		err = provider.Close()
 		// After the provider has closed: a provider started under this context may hold its
@@ -231,7 +246,7 @@ func (s *Session) Close() error {
 		if s.cancel != nil {
 			s.cancel()
 		}
-		s.lease.Stop()
+		lease.Stop()
 	})
 	return err
 }
@@ -378,6 +393,12 @@ func (s *Session) swap(refusing, next stt.STT, config routing.ProviderConfig) bo
 		return false
 	}
 	s.provider, s.config = next, config
+	if s.lease == nil {
+		// The model that refused billed nothing, so nothing was held.
+		s.lease = s.leaseOf(config)
+	} else {
+		s.lease.Move(config)
+	}
 	s.mu.Unlock()
 	s.failed.Store(false)
 
@@ -385,6 +406,11 @@ func (s *Session) swap(refusing, next stt.STT, config routing.ProviderConfig) bo
 	// call: ElevenLabs's Close flushes for up to FlushTimeout (elevenlabs.go, flush).
 	goroutine.Go(s.call, func() { _ = refusing.Close() })
 	return true
+}
+
+// leaseOf holds a minute of audio on the model, nil when it bills nothing.
+func (s *Session) leaseOf(config routing.ProviderConfig) *routing.Lease {
+	return routing.StartLeaseEvery(s.recorder, config, s.owner, "stt", uuid.NewString(), leaseMinute, leaseRenew, 3*leaseRenew)
 }
 
 func (s *Session) observe(current *relay, event stt.Event) {

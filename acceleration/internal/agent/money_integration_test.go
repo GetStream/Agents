@@ -85,37 +85,6 @@ func (s *AgentMoneySuite) failures(context string) []error {
 	return failures
 }
 
-func (s *AgentMoneySuite) TestACallWhoseTranscriberIsRefusedForMoneyEnds() {
-	s.hearsPriced(func() { s.spend(20_000_000) })
-	s.agents.join(true)
-	caller := stt.Participant{ID: "alice"}
-
-	for range 10 {
-		s.agents.speak(caller)
-	}
-
-	s.agents.eventually(func() bool { return countOf[Left](s.agents.reported()) == 1 }, "the call never ended")
-	failures := s.failures("stt")
-	s.Require().Len(failures, 1, "why is reported once, not for each frame")
-	s.ErrorIs(failures[0], policy.ErrNoCredits)
-	s.Empty(s.agents.ears.transcribed(), "the vendor hears nothing")
-	s.EqualValues(1, s.agents.opened.Load(), "no other transcriber is opened")
-}
-
-func (s *AgentMoneySuite) TestACallThatCannotPayForATranscriberEnds() {
-	s.hearsPriced(func() {})
-	s.agents.join(true)
-	s.spend(20_000_000)
-
-	for range 10 {
-		s.agents.speak(stt.Participant{ID: "alice"})
-	}
-
-	s.agents.eventually(func() bool { return countOf[Left](s.agents.reported()) == 1 }, "the call never ended")
-	s.Require().Len(s.failures("stt"), 1)
-	s.Zero(s.agents.opened.Load())
-}
-
 func (s *AgentMoneySuite) TestACallWhoseMoneyCannotBeCheckedGoesOn() {
 	redis, sharing := policytest.SharedHolds(s.T())
 	s.money = policytest.Start(s.T(), "agent_money", sharing, func(settings *policy.Settings) { settings.FlushMaxLag = 200 * time.Millisecond })

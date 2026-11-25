@@ -392,7 +392,9 @@ type quietSTT struct {
 	// closes, when a test sets them.
 	fails     atomic.Bool
 	lastWords atomic.Int64
-	closing   sync.Once
+	// heard is how many frames of audio it took.
+	heard   atomic.Int64
+	closing sync.Once
 }
 
 func (s *quietSTT) Start(context.Context) error {
@@ -404,6 +406,7 @@ func (s *quietSTT) ProcessAudio(stt.PcmData, stt.Participant) error {
 	if s.fails.Load() {
 		return errors.New("stub: the write failed")
 	}
+	s.heard.Add(1)
 	return nil
 }
 

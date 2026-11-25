@@ -229,6 +229,34 @@ func (s *AdmissionSuite) TestAnSTTSocketIsEndedWhenItsOrganizationIsSuspended() 
 	s.Equal(1008, closed.Code)
 }
 
+// Another reservation holds the last of the credit as the transcriber opens, so the first minute
+// of its lease is refused.
+func (s *AdmissionSuite) TestAnSTTSocketWhoseLeaseIsRefusedOnceStaysOpen() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	owner := routing.Owner{CustomerID: s.customerID(), Attribution: routing.Attribution{OrganizationID: s.organization()}}
+	held := uuid.Must(uuid.NewV7())
+	s.hearingOpens = func() {
+		s.Eventually(func() bool {
+			s.NoError(s.enforcer.Reserve(owner, held, 10_000_000, time.Minute))
+			admitted, err := s.enforcer.Admit(s.T().Context(), owner)
+			return err == nil && errors.Is(admitted.Spend, policy.ErrNoCredits)
+		}, 10*time.Second, 5*time.Millisecond, "the credit is held")
+	}
+	defer func() { s.hearingOpens = nil }()
+	listening := s.serverClient.opens("/v1/stt/stream")
+	s.Require().NoError(listening.WriteJSON(frame{"type": "start", "target": "stub/priced-model"}))
+	s.await(listening, "started")
+	for range 20 {
+		s.Require().NoError(listening.WriteMessage(websocket.BinaryMessage, make([]byte, 640)))
+	}
+	s.enforcer.Release(held)
+
+	s.ears().emitter.Send(stt.Transcript{Text: "still here", Mode: stt.ModeFinal, Provider: "stub", Model: "stub-stt"})
+
+	s.Equal("still here", s.await(listening, "transcript")["text"])
+	s.Eventually(func() bool { return s.ears().heard.Load() == 20 }, settleFor, 5*time.Millisecond, "every frame is transcribed")
+}
+
 // answersOnTheFreeModel asks the model the deployment runs itself, which costs nothing, for one
 // response over the LLM socket and says whether it answered.
 func (s *AdmissionSuite) answersOnTheFreeModel() {

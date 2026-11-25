@@ -79,6 +79,9 @@ type refused struct {
 func (r *refused) Error() string { return r.message }
 func (r *refused) Unwrap() error { return r.kind }
 
+// Unchecked is what Transient reports, as a lease reads it (routing.Lease).
+func (r *refused) Unchecked() bool { return r.unchecked }
+
 func refusedWith(kind error, format string, args ...any) error {
 	return &refused{kind: kind, message: fmt.Sprintf(format, args...)}
 }

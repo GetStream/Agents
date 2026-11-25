@@ -666,7 +666,15 @@ released when it ends. A speech-to-speech session whose lease is refused because
 out refuses its next turn with the money error and closes; nothing else stops a voice model
 replying. One refused because the money could not be checked (holds unshared, a balance
 unread; `policy.Transient`) refuses that turn and stays open until a renewal lands. A transcription
-keeps running, and an agent's next turn is refused by its LLM's reservation. A reservation is a
+ends once two renewals of its lease in a row, 30 s apart, are refused because money ran out, and
+at the first refused because the organization is suspended. A renewal granted in between starts
+the count again; one whose money could not be checked neither counts nor does so, and one refusal
+alone changes nothing. The count is the session's: it is kept when another model takes the session
+over, and a model that bills nothing (free, or on the customer's own key) ends nothing. The session
+writes its last transcript and bills the audio it took. `/v1/stt/stream` then sends the money error
+and closes with 1008, and an agent's call ends. A call refused a transcriber to open keeps asking,
+and ends when it has been refused for 30 s. An agent's next turn is refused by its LLM's reservation
+meanwhile. A reservation is a
 hold under the usage id its row will carry, checked in the order above and answered from
 memory; a refusal asks no vendor and records no row. The row settles it at its cost, and a
 reservation never recorded expires (2 minutes, 90 s for a lease). Holds are shared through
