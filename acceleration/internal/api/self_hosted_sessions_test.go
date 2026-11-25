@@ -67,7 +67,7 @@ func (s *SelfHostedSessionsSuite) TestARefusalForTheKeysIsLoggedUnderItsRequestI
 func (s *SelfHostedSessionsSuite) TestASessionTheDeploymentIsNotSetUpForIsAnsweredInFixedWords() {
 	// The suite routes no speech-to-speech model.
 	native := textSession(nil)
-	native.Sts = pointerTo("stub/stub-sts")
+	native.Sts, native.StartVoice = pointerTo("stub/stub-sts"), pointerTo(true)
 
 	status, failure := s.serverClient.withRequestID("refused-sts").failure(http.MethodPost, "/v1/agents/sessions", native)
 
