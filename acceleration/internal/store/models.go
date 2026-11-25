@@ -471,8 +471,9 @@ type User struct {
 	// wrote from a guest token is not: an app signs those itself, for any id it likes.
 	Minted bool `bun:"minted,notnull"`
 	// MintedElsewhere says an import brought this guest as one another deployment's router
-	// minted. It is the importing app's word, so it only says which role the guest's tokens say
-	// (api.seenAsGuest), and never that the id is this customer's.
+	// minted. It is the importing app's word, so it decides which role the guest's tokens say
+	// (api.seenAsGuest), that their own token leaves them a guest (RecordAccount) and which kind
+	// a backfill records as their conversation's owner's, and never that the id is this customer's.
 	MintedElsewhere bool   `bun:"minted_elsewhere,nullzero"`
 	Name            string `bun:"name,notnull"`
 	// Timezone is the IANA zone the user was last explicitly known to be in,

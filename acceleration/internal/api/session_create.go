@@ -357,12 +357,13 @@ func (s *Server) refuseCallOutside(ctx context.Context, customerID string, call 
 }
 
 // ownApp reports whether app is the customer's own Stream app, as ownKey in the session
-// manager tells it. Zero is the deployment's app, which only its own customer owns.
+// manager tells it (streamapp.Own).
 func (s *Server) ownApp(customerID string, app int64) bool {
-	if app == 0 && s.stream != nil {
-		app = s.stream.DeploymentApp()
+	var deployment int64
+	if s.stream != nil {
+		deployment = s.stream.DeploymentApp()
 	}
-	return app != 0 && streamapp.CustomerOf(app) == customerID
+	return streamapp.Own(customerID, app, deployment)
 }
 
 // refuseDeviceModels reports the failure a request is refused with when an end user's device
