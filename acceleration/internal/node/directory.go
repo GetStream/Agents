@@ -79,8 +79,8 @@ type Directory struct {
 	cancel      context.CancelFunc
 
 	mu sync.Mutex
-	// held maps a session this node is running to the agent it writes as and the
-	// conversation it answers in, each empty for a session without one.
+	// held maps a session this node is running to the Stream app it acts in, the agent it
+	// writes as and the conversation it answers in, the last two empty for a session without one.
 	held map[heldSession]claim
 	// waiting counts the dispatch workers connected here, by customer.
 	waiting map[string]int
@@ -262,9 +262,11 @@ func (d *Directory) NodeByAgent(ctx context.Context, customerID string, app int6
 	return "", nil
 }
 
-// NodesByAgent is where the nodes running the sessions that write as an agent can be reached, by
-// customer, among the sessions admits takes by their customer and Stream app, for a message that
-// names no customer. A customer with sessions in two apps it admits is one entry, either node.
+// NodesByAgent is where the other nodes running the sessions that write as an agent can be
+// reached, by customer, among the sessions admits takes by their customer and Stream app, for a
+// message that names no customer. A customer with sessions in two apps it admits is one entry,
+// either node. This node is never among them: what runs here is what its own sessions say, and a
+// claim of a session that ended here lasts until it lapses.
 func (d *Directory) NodesByAgent(ctx context.Context, agentID string, admits func(customer string, app int64) bool) (map[string]string, error) {
 	entries, err := d.redis.Do(ctx, d.redis.B().Hgetall().Key(d.writingAsIn+agentID).Build()).AsStrMap()
 	if err != nil {
@@ -278,7 +280,7 @@ func (d *Directory) NodesByAgent(ctx context.Context, agentID string, admits fun
 			continue
 		}
 		address, live := liveClaim(entry, now)
-		if !live {
+		if !live || address == d.address {
 			continue
 		}
 		if nodes == nil {
@@ -476,13 +478,13 @@ func (d *Directory) write(ctx context.Context, key heldSession, held claim) {
 }
 
 // writeCommands hold the session, its agent and its conversation under its customer, and under
-// their ids alone as well, which is all a router of the release before reads.
+// their ids alone as well, which is all an older router reads.
 //
 // The agent is one hash for every customer and Stream app writing as it, a field each, because a
 // message in the deployment's app may name no customer, and the node answering it is then picked
 // from all of theirs in that app. A hash cannot expire its fields one at a time, so each says when
 // it lapses, before the address. The hash by customer alone is the one a router of the release
-// before reads.
+// before reads, and the agent by its id alone a router older than that.
 func (d *Directory) writeCommands(key heldSession, held claim) []rueidis.Completed {
 	commands := []rueidis.Completed{
 		d.redis.B().Set().Key(d.sessionKey(key)).Value(d.address).Ex(holdFor).Build(),

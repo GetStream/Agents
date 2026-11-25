@@ -194,6 +194,26 @@ func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerLandingBesideOneOfTw
 		"the session where the message landed answered a message nothing says is its customer's")
 }
 
+// A session that ended here leaves its claim on the agent behind until it lapses, and is no
+// second customer writing in the channel: the session still running here answers.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredHereThoughAnotherCustomersSessionEndedHere() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	another := s.data.backendOfAnotherApp()
+	ended := another.createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+	another.stopSession(ended.Id)
+	s.serverClient.createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+
+	s.Require().Equal(http.StatusOK,
+		s.signedly("/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Require().Eventually(func() bool { return s.wasAsked(written) },
+		settleFor, 10*time.Millisecond, "the session running here was asked nothing")
+}
+
 // Two customers may each run a session of one id, each on a node of its own: a request reaches
 // the session of the caller's own customer, wherever it lands.
 func (s *ForwardedSessionSuite) TestARequestReachesTheSessionOfTheCallersCustomerOfAnIdTwoRun() {

@@ -168,6 +168,19 @@ func (s *DirectorySuite) TestTheNodesWritingAsAnAgentAreThoseOfTheSessionsAdmitt
 	s.Equal(map[string]string{"globex": "node-b:1"}, globexes)
 }
 
+// The nodes writing as an agent are the others: a node's own claim names a session it runs, which
+// it finds among its own, or one that ended there and has not lapsed yet.
+func (s *DirectorySuite) TestTheNodesWritingAsAnAgentAreNeverTheOneAsking() {
+	here := s.directoryAt("node-a:1")
+	here.Hold(s.ctx, "acme", 7, "s1", "support", "")
+	s.directoryAt("node-b:1").Hold(s.ctx, "globex", 7, "s2", "support", "")
+
+	writing, err := here.NodesByAgent(s.ctx, "support", everyApp)
+
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"globex": "node-b:1"}, writing)
+}
+
 // A customer id may hold a colon, and an app id holds none: the customer is all that follows the
 // first.
 func (s *DirectorySuite) TestACustomerWritingAsAnAgentIsFoundByItsWholeIdThoughItHoldsAColon() {
