@@ -178,11 +178,11 @@ func (s *Stored) place(ctx context.Context, customer string, acting bool) (Ident
 		}
 	}
 	if !falls {
-		// With no fallback, an app's work is made in its own app or nowhere. Read without
-		// acting, a token that has run out is the gateway's to replace, not another app. With
-		// the fallback on, a policy here requires an app of its own, or, acting, could not be
-		// read: neither places anything.
-		if app, couldBe := ParseAppID(customer); couldBe && !acting && !s.fallback {
+		// With no fallback, or a policy that requires an app of its own, an app's work is made
+		// in its own app or nowhere. Read without acting, a token that has run out is the
+		// gateway's to replace, not another app. Acting, a policy that could not be read places
+		// nothing.
+		if app, couldBe := ParseAppID(customer); couldBe && !acting {
 			return Identity{CustomerID: customer, StreamApp: app}, nil
 		}
 		return Identity{}, ErrNoIdentity
