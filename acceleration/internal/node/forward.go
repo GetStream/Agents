@@ -9,6 +9,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,7 +40,30 @@ const maxForward = 14 << 20
 // credentialKey is the metadata a peer's credential travels in.
 const credentialKey = "x-acceleration-node-credential"
 
+// shardHeader carries the shard a peer handed a request to (ToShard). It is read only on a
+// request a peer forwarded, and never passed on.
+const shardHeader = "X-Acceleration-Shard"
+
 type forwardedKey struct{}
+
+type toShardKey struct{}
+
+type handedToShardKey struct{}
+
+// ToShard marks the requests a Forwarder hands over on ctx as handed to shard, because their
+// work is done there rather than because the peer runs something they are about.
+func ToShard(ctx context.Context, shard string) context.Context {
+	return context.WithValue(ctx, toShardKey{}, shard)
+}
+
+// HandedToShard reports whether a peer handed a request here because its work is done in this
+// node's shard (ToShard). The node that handed it over did not answer any of it, so a request
+// marked so may still be carried on once, to the node running what it is about or to a worker,
+// and never to another shard.
+func HandedToShard(ctx context.Context) bool {
+	handed, _ := ctx.Value(handedToShardKey{}).(bool)
+	return handed
+}
 
 // Forwarded reports whether a request was handed over by a peer.
 //
@@ -195,6 +219,12 @@ func (f *Forwarder) Ask(
 		sent.Set("Content-Length", strconv.Itoa(len(body)))
 	}
 	headers := headersOf(sent)
+	headers = slices.DeleteFunc(headers, func(header *Header) bool {
+		return http.CanonicalHeaderKey(header.GetName()) == shardHeader
+	})
+	if shard, ok := ctx.Value(toShardKey{}).(string); ok {
+		headers = append(headers, &Header{Name: shardHeader, Values: []string{shard}})
+	}
 	// Carried as a header because it is one, and because the request is rebuilt on the
 	// other side from nothing but these: a handler reading the host it was reached at
 	// would otherwise see none.
@@ -260,14 +290,20 @@ type forwarded struct {
 }
 
 func (f *forwarded) Forward(ctx context.Context, request *ForwardRequest) (*ForwardResponse, error) {
-	replayed, err := http.NewRequestWithContext(context.WithValue(ctx, forwardedKey{}, true),
-		request.GetMethod(), request.GetUrl(), bytes.NewReader(request.GetBody()))
+	ctx = context.WithValue(ctx, forwardedKey{}, true)
+	headers := http.Header{}
+	for _, header := range request.GetHeaders() {
+		headers[http.CanonicalHeaderKey(header.GetName())] = header.GetValues()
+	}
+	if headers.Get(shardHeader) != "" {
+		ctx = context.WithValue(ctx, handedToShardKey{}, true)
+		headers.Del(shardHeader)
+	}
+	replayed, err := http.NewRequestWithContext(ctx, request.GetMethod(), request.GetUrl(), bytes.NewReader(request.GetBody()))
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	for _, header := range request.GetHeaders() {
-		replayed.Header[http.CanonicalHeaderKey(header.GetName())] = header.GetValues()
-	}
+	replayed.Header = headers
 	if host := replayed.Header.Get("Host"); host != "" {
 		replayed.Host = host
 		replayed.Header.Del("Host")
