@@ -9,8 +9,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/uptrace/bun"
-
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -261,21 +259,18 @@ WHERE modality = ? AND customer_id = ?
 GROUP BY modality, customer_id, provider, model, bucket
 ORDER BY bucket ASC, provider ASC, model ASC`, f.Granularity.truncateUnit(), measured(""))
 
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]Bucket, error) {
-		var buckets []Bucket
-		err := db.NewRaw(query, f.Modality, customerID, f.From, f.To, string(filter)).Scan(ctx, &buckets)
-		return buckets, err
-	})
-	if err != nil {
+	var buckets []Bucket
+	if err := r.store.shard.NewRaw(query, f.Modality, customerID, f.From, f.To, string(filter)).Scan(ctx, &buckets); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer stats by tag: %w", err))
 	}
-	return mergeBuckets(lists), nil
+	return buckets, nil
 }
 
 // Shipped is Select read from the rollups every shard shipped to the shared database
 // (Store.ShipStats), so a shard that is down does not fail it and no other shard is read. It
 // is the whole buckets [From, To) touches, as they were at the last ship, a minute old at most
-// while the shard ships. A rollup keeps no request's labels, so Tags cannot narrow it.
+// while the shard ships. Narrowed by Tags, it is read from the requests' hourly sums
+// (shard_spend_hourly), which keep the labels and no latency.
 func (r *Buckets) Shipped(ctx context.Context, customerID string, f BucketFilter) ([]Bucket, error) {
 	if !f.Granularity.Valid() {
 		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", f.Granularity))
@@ -287,7 +282,38 @@ func (r *Buckets) Shipped(ctx context.Context, customerID string, f BucketFilter
 		return nil, stack.Wrap(errors.New("store: modality is required"))
 	}
 	if len(f.Tags) > 0 {
-		return nil, stack.Wrap(errors.New("store: shipped stats cannot be filtered by label"))
+		filter, err := json.Marshal(f.Tags)
+		if err != nil {
+			return nil, stack.Wrap(fmt.Errorf("store: shipped customer stats: encode tag filter: %w", err))
+		}
+		var buckets []Bucket
+		err = r.store.global.NewRaw(fmt.Sprintf(`
+SELECT
+    modality,
+    customer_id,
+    provider,
+    model,
+    date_trunc('%[1]s', started_at, 'UTC') AS bucket,
+    SUM(audio_ms) AS audio_ms_total,
+    SUM(characters) AS characters_total,
+    SUM(input_tokens) AS input_tokens_total,
+    SUM(cached_input_tokens) AS cached_input_tokens_total,
+    SUM(output_tokens) AS output_tokens_total,
+    SUM(images) AS images_total,
+    SUM(cost_micros) AS cost_micros_total,
+    SUM(rows) AS request_count,
+    COALESCE(SUM(rows) FILTER (WHERE NOT success AND measured), 0) AS error_count,
+    (SUM(rows) - COALESCE(SUM(rows) FILTER (WHERE NOT success AND measured), 0))::double precision
+        / NULLIF(SUM(rows), 0) AS uptime
+FROM %[2]s
+WHERE modality = ? AND customer_id = ? AND %[3]s AND tags @> ?::jsonb
+GROUP BY modality, customer_id, provider, model, bucket
+ORDER BY bucket ASC, provider ASC, model ASC`, f.Granularity.truncateUnit(), shippedSpend.name, wholeBuckets(f.Granularity, "started_at")),
+			f.Modality, customerID, f.From, f.To, string(filter)).Scan(ctx, &buckets)
+		if err != nil {
+			return nil, stack.Wrap(fmt.Errorf("store: shipped customer stats by tag: %w", err))
+		}
+		return buckets, nil
 	}
 	var rows []struct {
 		Shard string `bun:"shard"`

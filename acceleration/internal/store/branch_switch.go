@@ -1,13 +1,11 @@
 package store
 
 import (
-	"cmp"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -125,16 +123,14 @@ func (r *BranchSwitches) Advance(ctx context.Context, customerID, id, state stri
 	if !slices.Contains(switchStates, state) {
 		return stack.Wrap(fmt.Errorf("store: advance branch switch: unknown state %q", state))
 	}
-	_, err := onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewUpdate().Model((*AgentBranchSwitch)(nil)).
-			Set("state = ?", state).
-			Set("updated_at = ?", time.Now().UTC()).
-			Where("customer_id = ?", customerID).
-			Where("id = ?", id).
-			Where("array_position(?::text[], state) < array_position(?::text[], ?)",
-				pgdialect.Array(switchStates), pgdialect.Array(switchStates), state).
-			Exec(ctx)
-	})
+	_, err := r.store.shard.NewUpdate().Model((*AgentBranchSwitch)(nil)).
+		Set("state = ?", state).
+		Set("updated_at = ?", time.Now().UTC()).
+		Where("customer_id = ?", customerID).
+		Where("id = ?", id).
+		Where("array_position(?::text[], state) < array_position(?::text[], ?)",
+			pgdialect.Array(switchStates), pgdialect.Array(switchStates), state).
+		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: advance branch switch: %w", err))
 	}
@@ -148,23 +144,19 @@ func (r *BranchSwitches) Abandon(ctx context.Context, customerID, sessionID, id 
 	if customerID == "" || sessionID == "" || id == "" {
 		return stack.Wrap(errors.New("store: a customer, a session and a switch id are required"))
 	}
-	_, err := onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewDelete().Model((*AgentBranchMessage)(nil)).
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Where("switch_id = ?", id).
-			Exec(ctx)
-	})
+	_, err := r.store.shard.NewDelete().Model((*AgentBranchMessage)(nil)).
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Where("switch_id = ?", id).
+		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: abandon branch switch: copies: %w", err))
 	}
-	_, err = onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewDelete().Model((*AgentBranchSwitch)(nil)).
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Where("id = ?", id).
-			Exec(ctx)
-	})
+	_, err = r.store.shard.NewDelete().Model((*AgentBranchSwitch)(nil)).
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Where("id = ?", id).
+		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: abandon branch switch: %w", err))
 	}
@@ -177,17 +169,14 @@ func (r *BranchSwitches) CountResent(ctx context.Context, customerID, id string)
 	if customerID == "" || id == "" {
 		return 0, stack.Wrap(errors.New("store: a customer and a switch id are required"))
 	}
-	resent, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int, error) {
-		var resent int
-		err := db.NewUpdate().Model((*AgentBranchSwitch)(nil)).
-			Set("resent = resent + 1").
-			Set("updated_at = ?", time.Now().UTC()).
-			Where("customer_id = ?", customerID).
-			Where("id = ?", id).
-			Returning("resent").
-			Scan(ctx, &resent)
-		return resent, err
-	})
+	var resent int
+	err := r.store.shard.NewUpdate().Model((*AgentBranchSwitch)(nil)).
+		Set("resent = resent + 1").
+		Set("updated_at = ?", time.Now().UTC()).
+		Where("customer_id = ?", customerID).
+		Where("id = ?", id).
+		Returning("resent").
+		Scan(ctx, &resent)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, stack.Wrap(fmt.Errorf("store: count branch resent: no switch %s", id))
 	}
@@ -202,24 +191,17 @@ func (r *BranchSwitches) Unfinished(ctx context.Context, customerID, sessionID s
 	if customerID == "" || sessionID == "" {
 		return nil, stack.Wrap(errors.New("store: a customer and a session id are required"))
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentBranchSwitch, error) {
-		var switches []AgentBranchSwitch
-		err := db.NewSelect().Model((*AgentBranchSwitch)(nil)).
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Where("state <> ?", SwitchDone).
-			Order("created_at ASC", "id ASC").
-			Scan(ctx, &switches)
-		return switches, err
-	})
+	var switches []AgentBranchSwitch
+	err := r.store.shard.NewSelect().Model((*AgentBranchSwitch)(nil)).
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Where("state <> ?", SwitchDone).
+		Order("created_at ASC", "id ASC").
+		Scan(ctx, &switches)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: unfinished branch switches: %w", err))
 	}
-	return merged(lists, oldestSwitchFirst, 0), nil
-}
-
-func oldestSwitchFirst(a, b AgentBranchSwitch) int {
-	return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), strings.Compare(a.ID, b.ID))
+	return switches, nil
 }
 
 // MergedRangeCount is how many hidden ranges Stream Chat keeps for a session's channel after
@@ -230,20 +212,17 @@ func (r *BranchSwitches) MergedRangeCount(ctx context.Context, customerID, sessi
 	if customerID == "" || sessionID == "" {
 		return 0, stack.Wrap(errors.New("store: a customer and a session id are required"))
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentBranchSwitch, error) {
-		var switches []AgentBranchSwitch
-		err := db.NewSelect().Model((*AgentBranchSwitch)(nil)).
-			Column("id", "kind", "hidden_from", "inclusive", "created_at").
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Where("state <> ?", SwitchSnapshotted).
-			Scan(ctx, &switches)
-		return switches, err
-	})
+	var switches []AgentBranchSwitch
+	err := r.store.shard.NewSelect().Model((*AgentBranchSwitch)(nil)).
+		Column("id", "kind", "hidden_from", "inclusive", "created_at").
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Where("state <> ?", SwitchSnapshotted).
+		Order("created_at ASC", "id ASC").
+		Scan(ctx, &switches)
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: merged range count: %w", err))
 	}
-	switches := distinct(merged(lists, oldestSwitchFirst, 0), func(b AgentBranchSwitch) string { return b.ID })
 	copied, err := r.copyingActivations(ctx, customerID, sessionID, switches)
 	if err != nil {
 		return 0, err
@@ -258,8 +237,7 @@ func (r *BranchSwitches) MergedRangeCount(ctx context.Context, customerID, sessi
 	return len(MergeHiddenRanges(ranges)), nil
 }
 
-// copyingActivations are the activations among switches that copied a message, in whichever
-// shard the copies are.
+// copyingActivations are the activations among switches that copied a message.
 func (r *BranchSwitches) copyingActivations(ctx context.Context, customerID, sessionID string, switches []AgentBranchSwitch) (map[string]bool, error) {
 	var activations []string
 	for _, b := range switches {
@@ -270,25 +248,20 @@ func (r *BranchSwitches) copyingActivations(ctx context.Context, customerID, ses
 	if len(activations) == 0 {
 		return nil, nil
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]string, error) {
-		var ids []string
-		err := db.NewSelect().Model((*AgentBranchMessage)(nil)).
-			Distinct().
-			Column("switch_id").
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Where("switch_id IN (?)", bun.In(activations)).
-			Scan(ctx, &ids)
-		return ids, err
-	})
+	var ids []string
+	err := r.store.shard.NewSelect().Model((*AgentBranchMessage)(nil)).
+		Distinct().
+		Column("switch_id").
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Where("switch_id IN (?)", bun.In(activations)).
+		Scan(ctx, &ids)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: merged range count: copies: %w", err))
 	}
 	copied := map[string]bool{}
-	for _, ids := range lists {
-		for _, id := range ids {
-			copied[id] = true
-		}
+	for _, id := range ids {
+		copied[id] = true
 	}
 	return copied, nil
 }

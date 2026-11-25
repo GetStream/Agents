@@ -484,11 +484,6 @@ func (s *Server) answerPhoneCall(w http.ResponseWriter, r *http.Request) {
 		// The vendor is about to bridge a live call to nowhere, so this is worth a log
 		// line even though there is nobody to return the detail to.
 		logger.Error("could not answer a placed call", "error", err)
-		// The vendor fetches again on a 5xx, by when the shard holding the bridge may answer.
-		if errors.Is(err, store.ErrShardUnanswered) {
-			writeError(w, unavailable("could not read the call's plan, try again"))
-			return
-		}
 		writeError(w, notFound("that call is not waiting to be answered"))
 		return
 	}

@@ -345,12 +345,11 @@ func (s *AnomalySuite) TestCloseStopsTheCheckAndGivesTheLockBack() {
 }
 
 // A holder whose check fails gives the lock back, so that a router that can check takes it:
-// kept, the lock would leave every router without a check while a shard stays down.
+// kept, the lock would leave every router without a check while its own cannot read.
 func (s *AnomalySuite) TestACheckThatFailsGivesTheLockBack() {
 	own := testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "anomaly")
-	broken, err := store.OpenShards(store.Options{DSN: own, Shards: map[string]string{
-		"here": own, "down": "postgres://postgres:postgres@127.0.0.1:1/none?sslmode=disable&dial_timeout=1s",
-	}})
+	// The lock is taken in pg_catalog, which every search path has; the spend it reads is not.
+	broken, err := store.OpenShards(store.Options{DSN: own + "&search_path=nowhere"})
 	s.Require().NoError(err)
 	defer broken.Close()
 	failing := NewAnomalies(AnomalyOptions{

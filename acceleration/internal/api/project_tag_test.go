@@ -3,10 +3,7 @@
 package api
 
 import (
-	"bytes"
-	"cmp"
 	"context"
-	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -365,65 +362,6 @@ func (s *ProjectTagSuite) TestACarriedOnRowFromBeforeSaysItsProjectTag() {
 		s.Require().NotNil(row.ProjectTag)
 		s.Equal(want, *row.ProjectTag)
 	}
-}
-
-// While a shard that may say its tag is down, a row from before is neither carried on nor forked:
-// its usage would be tagged with a guess. It is read all the same.
-func (s *ProjectTagSuite) TestARowFromBeforeIsNotCarriedOnOrForkedWhileAShardIsDown() {
-	owner := s.data.createUser()
-	backend := s.serverClient.actingFor(owner)
-	unread, known := s.open(backend, "alpha"), s.open(backend, "alpha")
-	s.fromBefore(unread.Id)
-	s.stop(known.Id)
-	served := s.storeWithAShardDown()
-	other, _, _ := s.otherNodeServingFrom(served, nil, s.sealer, slog.New(slog.DiscardHandler))
-	asking := backend.on(other)
-
-	for path, body := range map[string]any{
-		"/fork":      ForkSessionRequest{Messages: pointerTo(false)},
-		"/resume":    ResumeSessionRequest{},
-		"/responses": CreateResponseRequest{Text: "hello"},
-	} {
-		status, message := asking.failure(http.MethodPost, "/v1/agents/sessions/"+unread.Id+path, body)
-		s.Equal(http.StatusServiceUnavailable, status, path)
-		s.Contains(message, "try again shortly", path)
-	}
-
-	device := ForkSessionRequest{ProjectId: pointerTo("beta"), Messages: pointerTo(false)}
-	status, _ := owner.on(other).failure(http.MethodPost, "/v1/agents/sessions/"+unread.Id+"/fork", device)
-	s.Equal(http.StatusServiceUnavailable, status, "a device names no tag")
-	named := s.fork(asking, unread.Id, device)
-	s.Equal([]string{"beta"}, s.answered(asking, named.Id), "a backend naming the fork's project needs no other")
-
-	status, _ = asking.call(http.MethodGet, "/v1/agents/sessions/"+unread.Id, nil)
-	s.NotEqual(http.StatusServiceUnavailable, status)
-	s.Equal([]string{"alpha"}, s.answered(asking, s.fork(asking, known.Id, ForkSessionRequest{}).Id))
-}
-
-// A shard that did not answer is logged, and a caller that hung up is not one.
-func (s *ProjectTagSuite) TestAnUnreadProjectTagIsLoggedUnlessTheCallerLeft() {
-	var logged bytes.Buffer
-	_, server, _ := s.otherNodeServingFrom(s.storeWithAShardDown(), nil, s.sealer, slog.New(slog.DiscardHandler))
-	server.logger = slog.New(slog.NewTextHandler(&logged, nil))
-	row := store.AgentSession{ID: "one", CustomerID: s.customerID(), Project: "alpha"}
-
-	left, leave := context.WithCancel(context.Background())
-	leave()
-	s.Error(server.readProjectTag(left, &row))
-	s.Empty(logged.String())
-
-	s.Error(server.readProjectTag(context.Background(), &row))
-	s.Contains(logged.String(), "level=ERROR")
-}
-
-func (s *ProjectTagSuite) storeWithAShardDown() *store.Store {
-	options := s.storeOptions
-	options.ShardDSN = cmp.Or(options.ShardDSN, options.DSN)
-	options.Shards = map[string]string{"own": options.ShardDSN, "down": "postgres://postgres:postgres@127.0.0.1:1/down?sslmode=disable"}
-	served, err := store.OpenShards(options)
-	s.Require().NoError(err)
-	s.T().Cleanup(func() { s.NoError(served.Close()) })
-	return served
 }
 
 func (s *ProjectTagSuite) TestAForksRowFromBeforeIsNotTagged() {

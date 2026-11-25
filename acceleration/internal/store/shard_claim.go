@@ -24,7 +24,7 @@ type ShardClaim struct {
 	// meant for.
 	Routing shardmap.Map
 	// Shards are the deployment's shards besides the ones Routing names, such as
-	// postgres.shards lists. A user last served by one of them has their work claimed there.
+	// the shards setting lists. A user last served by one of them has their work claimed there.
 	Shards []string
 }
 
@@ -62,6 +62,12 @@ const scheduledTaskShard = `COALESCE(
         WHERE ac.id = st.config_id),
     (SELECT u.shard FROM users AS u WHERE u.customer_id = st.customer_id AND u.id = st.user_id),
     '') <> ALL(?::text[])`
+
+// scheduledTaskHomedHere is the condition that the scheduled task st is about no session that
+// lives in another shard than the claim's. Such a session's rows are there alone, so its task
+// is claimed there however overdue.
+const scheduledTaskHomedHere = `NOT EXISTS (SELECT 1 FROM session_homes AS sh
+    WHERE sh.customer_id = st.customer_id AND sh.session_id = st.session_id AND sh.shard <> ?)`
 
 // scheduledTaskClaimable is the claim's condition on the scheduled task st: it is the claim's,
 // or it was claimable for longer than claimOverdue, its due time or the lease or hold on it
