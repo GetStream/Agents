@@ -293,7 +293,7 @@ func (s *CallShardSuite) TestTwoShardsPlacingAtOnceCannotRingPastTheOrganization
 					Key: outcome.Key{CustomerID: s.customerID(), CallType: "default", CallID: s.utils.uuid(),
 						Local: s.utils.number(), Remote: s.utils.number()},
 					Vendor: "telnyx",
-				}, organization, &atOnce)
+				}, organization, &atOnce, nil)
 				if err == nil {
 					placed.Add(1)
 					return
@@ -526,4 +526,37 @@ func (s *ShardRowsSuite) TestAnotherShardsInvocationsAreListedOnlyWhenItsRegionI
 	remote, shard := s.invocations(path + "?region=there")
 	s.Equal([]string{there.ID}, remote)
 	s.Equal("there", shard)
+}
+
+// A call another shard answered is its customer's here too: another customer's call is not routed
+// into it, nor a session opened under its id, and its own customer's are.
+func (s *CallShardSuite) TestACallAnotherShardAnsweredIsItsCustomersHereToo() {
+	arrived := func(customer string) string {
+		call := s.utils.uuid()
+		s.otherPhone.OpenLeg(context.Background(), routing.Owner{CustomerID: customer}, store.CallLeg{
+			CallType: "agent", CallID: call, StreamSessionID: "stream-" + call, Vendor: "twilio", Direction: store.Inbound,
+			LocalNumber: s.utils.number(), RemoteNumber: s.utils.number(), DialedAt: time.Now().Add(-time.Minute),
+		}, true)
+		return call
+	}
+	e164 := s.utils.number()
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &store.PhoneNumber{
+		E164: e164, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
+	}))
+	callInto := func(session string) (int, string) {
+		status, payload := s.serverClient.call(http.MethodPost, "/v1/phone/calls", PlaceCallRequest{
+			From: e164, To: "+15550001111", SessionId: &session,
+		})
+		return status, string(payload)
+	}
+	theirs, mine := arrived("customer-"+s.utils.uuid()), arrived(s.customerID())
+
+	status, payload := callInto(theirs)
+	s.Equal(http.StatusConflict, status, payload)
+	s.Contains(payload, "session_id is taken")
+	s.Equal(http.StatusConflict, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", textSession(&theirs), nil))
+	status, payload = callInto(mine)
+	s.Equal(http.StatusServiceUnavailable, status, payload)
+	s.Contains(payload, "phone_vendor_failed")
+	s.Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/sessions", textSession(&mine), nil))
 }
