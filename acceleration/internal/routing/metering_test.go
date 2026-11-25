@@ -63,55 +63,71 @@ func (s *MeteringAlertTextSuite) sent() map[string]*sentry.Event {
 	return events
 }
 
-// raiseAll records one row for each of the four alerts.
-func (s *MeteringAlertTextSuite) raiseAll() {
+// meteringRow is one billable row and what it raises: the alert, and the text it is sent with.
+type meteringRow struct {
+	name    string
+	alert   string
+	stat    Stat
+	request store.Request
+	quote   pricing.Quote
+	// suffix is what the item carries after its model: unpriced adds its region and BYOK state.
+	suffix string
+	text   string
+}
+
+func meteringRows() []meteringRow {
 	billable := store.Request{Billable: true, Success: true}
-	// The vendor's total is 100 and 10 plus 20 were billed.
-	s.recorder.watch(s.config, Stat{VendorTotalTokens: 100}, store.Request{Billable: true, InputTokens: 10, OutputTokens: 20}, pricing.Quote{})
-	s.recorder.watch(s.config, Stat{}, billable, pricing.Quote{})
-	s.recorder.watch(s.config, Stat{Attributes: map[string]string{AttributeUsageEstimated: "true"}}, billable, pricing.Quote{Rated: true})
-	s.recorder.watch(s.config, Stat{}, billable, pricing.Quote{Unpriced: true})
+	return []meteringRow{
+		{name: "missing", alert: "missing", request: billable,
+			text: "billable work finished and recorded none of what its price rates, " +
+				"so it was written at nothing; the vendor's adapter or the session lost the usage and needs a fix"},
+		{name: "estimated", alert: "estimated", request: billable, quote: pricing.Quote{Rated: true},
+			stat: Stat{Attributes: map[string]string{AttributeUsageEstimated: "true"}},
+			text: "billable work finished and the vendor never said its usage, " +
+				"so it was billed on the router's own count; the vendor's adapter needs a fix"},
+		{name: "unpriced", alert: "unpriced", request: billable, quote: pricing.Quote{Unpriced: true}, suffix: "/us/false",
+			text: "billable work succeeded with no price and was written " +
+				"at nothing until the item is priced; add its price for this region and BYOK state"},
+		// The vendor's total is 100 and 10 plus 20 were billed.
+		{name: "mismatch under-billed", alert: "mismatch", stat: Stat{VendorTotalTokens: 100},
+			request: store.Request{Billable: true, InputTokens: 10, OutputTokens: 20},
+			text: "the billed input and output tokens do not add up to the vendor's total, " +
+				"so the row is billed wrong; the vendor's adapter needs a fix"},
+		// The vendor's total is 20 and 10 plus 20 were billed: more than the vendor counted.
+		{name: "mismatch over-billed", alert: "mismatch", stat: Stat{VendorTotalTokens: 20},
+			request: store.Request{Billable: true, InputTokens: 10, OutputTokens: 20},
+			text: "the billed input and output tokens do not add up to the vendor's total, " +
+				"so the row is billed wrong; the vendor's adapter needs a fix"},
+	}
+}
+
+// each records every row alone, on a model of its own, so that an alert sent is the alert its
+// row raises, and runs check on what the alerts sent.
+func (s *MeteringAlertTextSuite) each(check func(r meteringRow, item string, events map[string]*sentry.Event)) {
+	for _, r := range meteringRows() {
+		s.Run(r.name, func() {
+			s.SetupTest()
+			s.recorder.watch(s.config, r.stat, r.request, r.quote)
+			check(r, "llm/vendor/"+s.config.Model, s.sent())
+		})
+	}
 }
 
 // The fingerprints are what the alerts sent before they had a description, read on the base
 // commit: a change in one is a new Sentry issue for the rules and the people who muted the old.
 func (s *MeteringAlertTextSuite) TestEveryAlertKeepsItsSentryIssue() {
-	s.raiseAll()
-
-	events := s.sent()
-
-	fingerprints := map[string][]string{}
-	for name, event := range events {
-		fingerprints[name] = event.Fingerprint
-	}
-	item := "llm/vendor/" + s.config.Model // unpriced adds its region and BYOK state
-	s.Equal(map[string][]string{
-		"missing":   {"usage_missing:" + item},
-		"estimated": {"usage_estimated:" + item},
-		"unpriced":  {"usage_unpriced:" + item + "/us/false"},
-		"mismatch":  {"usage_mismatch:" + item},
-	}, fingerprints)
+	s.each(func(r meteringRow, item string, events map[string]*sentry.Event) {
+		s.Require().Len(events, 1, "a row raises only its own alert")
+		s.Require().Contains(events, r.alert)
+		s.Equal([]string{"usage_" + r.alert + ":" + item + r.suffix}, events[r.alert].Fingerprint)
+	})
 }
 
 // What a person reads in Slack after the item: what the alert means and who acts.
 func (s *MeteringAlertTextSuite) TestEveryAlertSaysWhatItMeansAfterTheItem() {
-	s.raiseAll()
-
-	events := s.sent()
-
-	item := "llm/vendor/" + s.config.Model
-	messages := map[string]string{}
-	for name, event := range events {
-		messages[name] = event.Message
-	}
-	s.Equal(map[string]string{
-		"missing": "usage alert: missing " + item + ": billable work finished and recorded none of what its price rates, " +
-			"so it was written at nothing; the vendor's adapter or the session lost the usage and needs a fix",
-		"estimated": "usage alert: estimated " + item + ": billable work finished and the vendor never said its usage, " +
-			"so it was billed on the router's own count; the vendor's adapter needs a fix",
-		"unpriced": "usage alert: unpriced " + item + "/us/false: billable work succeeded with no price and was written " +
-			"at nothing until the item is priced; add its price for this region and BYOK state",
-		"mismatch": "usage alert: mismatch " + item + ": the billed input and output tokens do not add up to the vendor's total, " +
-			"so part of the bill is missed; the vendor's adapter needs a fix",
-	}, messages)
+	s.each(func(r meteringRow, item string, events map[string]*sentry.Event) {
+		s.Require().Len(events, 1, "a row raises only its own alert")
+		s.Require().Contains(events, r.alert)
+		s.Equal("usage alert: "+r.alert+" "+item+r.suffix+": "+r.text, events[r.alert].Message)
+	})
 }

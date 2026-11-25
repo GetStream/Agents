@@ -81,7 +81,7 @@ func MeteringAlerts(limit time.Duration) []alerts.Condition {
 		{Name: "unpriced", Level: alerts.Warn, Items: alerts.IncreasedPer(usageUnpriced, limit, pricedItemLabels, nil),
 			Describe: says("billable work succeeded with no price and was written at nothing until the item is priced; add its price for this region and BYOK state")},
 		{Name: "mismatch", Level: alerts.Warn, Items: per(usageMismatch, nil),
-			Describe: says("the billed input and output tokens do not add up to the vendor's total, so part of the bill is missed; the vendor's adapter needs a fix")},
+			Describe: says("the billed input and output tokens do not add up to the vendor's total, so the row is billed wrong; the vendor's adapter needs a fix")},
 	}
 }
 
