@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -258,6 +259,98 @@ func (s *SocketSessionSuite) TestADeviceMayNotHandTheSocketAnotherAgentIdentity(
 			s.assertSocketRefuses(device, map[string]any{"user_name": "Your Bank"}, errDeviceAgentUserName)
 		})
 	}
+}
+
+// allowDevices has the suite's router let the identity through to a device of the suite's app, as
+// ROUTER_DEVICE_IDENTITY_ALLOW does (AI-3959), until the test is done.
+func (s *SocketSessionSuite) allowDevices(app string, identity DeviceIdentity) {
+	identity.App = app
+	s.router.deviceIdentities = DeviceIdentityAllow{identity}
+	s.T().Cleanup(func() { s.router.deviceIdentities = nil })
+}
+
+// TEMPORARY (AI-3959): an identity the operator listed for the device's app opens a session
+// that keeps its conversation, by createSession and by the socket's start frame, and every other
+// identity is refused as it was.
+func (s *SocketSessionSuite) TestADeviceMayHandOverAnIdentityTheOperatorListedForItsApp() {
+	for _, device := range []*testClient{s.client, s.guestClient, s.anonymousClient} {
+		listed := DeviceIdentity{AgentID: "docs-" + s.utils.uuid(), UserID: "docs-user", UserName: "Docs: AI"}
+		s.allowDevices(s.customerID(), listed)
+		sent := map[string]any{"agent_id": listed.AgentID, "user_id": listed.UserID, "user_name": listed.UserName}
+
+		var created Session
+		status, payload := device.call(http.MethodPost, "/v1/agents/sessions", sent)
+		s.Require().Equal(http.StatusCreated, status, "%s: %s", device.kind, payload)
+		s.Require().NoError(json.Unmarshal(payload, &created))
+		s.Equal(listed.AgentID, created.AgentId, string(device.kind))
+		s.Equal(listed.UserID, created.UserId, string(device.kind))
+
+		sent["id"] = "socket-" + s.utils.uuid()
+		answered := s.socketStartedWith(device, sent)
+		s.Equal(listed.AgentID, answered["agent_id"], string(device.kind))
+	}
+}
+
+// A device that sends one field the entry does not hold, is of another app, or keeps nothing of
+// its conversation is refused with the errors it was refused with before the setting existed.
+func (s *SocketSessionSuite) TestAnIdentityNotListedForTheDeviceIsStillRefused() {
+	listed := DeviceIdentity{AgentID: "docs-" + s.utils.uuid(), UserID: "docs-user", UserName: "Docs: AI"}
+	exact := func(change map[string]any) map[string]any {
+		sent := map[string]any{"agent_id": listed.AgentID, "user_id": listed.UserID, "user_name": listed.UserName}
+		for field, value := range change {
+			sent[field] = value
+		}
+		return sent
+	}
+	s.allowDevices(s.customerID(), listed)
+	for _, device := range []*testClient{s.client, s.guestClient, s.anonymousClient} {
+		s.Run("agent_id/"+string(device.kind), func() {
+			s.assertSocketRefuses(device, exact(map[string]any{"agent_id": listed.AgentID + "-2"}), errDeviceAgentID)
+		})
+		s.Run("user_id/"+string(device.kind), func() {
+			s.assertSocketRefuses(device, exact(map[string]any{"user_id": "docs-user-2"}), errDeviceAgentID)
+			s.assertSocketRefuses(device, map[string]any{"user_id": "docs-user-2"}, errDeviceAgentUser)
+		})
+		s.Run("user_name/"+string(device.kind), func() {
+			s.assertSocketRefuses(device, exact(map[string]any{"user_name": "Docs: AI 2"}), errDeviceAgentID)
+			s.assertSocketRefuses(device, map[string]any{"user_name": "Docs: AI 2"}, errDeviceAgentUserName)
+		})
+		s.Run("incognito/"+string(device.kind), func() {
+			s.assertSocketRefuses(device, exact(map[string]any{"incognito": true}), errDeviceAgentID)
+		})
+	}
+
+	s.allowDevices("another-app-"+s.utils.uuid(), listed)
+	s.Run("another app", func() {
+		s.assertSocketRefuses(s.client, exact(nil), errDeviceAgentID)
+	})
+
+	s.allowDevices(s.customerID(), listed)
+	s.Run("the backend is not held to the list", func() {
+		status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/sessions", exact(map[string]any{"agent_id": "support"}))
+		s.Equal(http.StatusCreated, status, string(payload))
+	})
+}
+
+// The list a router is started with (Options.DeviceIdentityAllow, which cmd/router fills from the
+// setting) is the one its sessions are checked against.
+func (s *SocketSessionSuite) TestARouterStartedWithTheListLetsTheDeviceThrough() {
+	listed := DeviceIdentity{App: s.customerID(), AgentID: "docs-" + s.utils.uuid(), UserID: "docs-user", UserName: "Docs: AI"}
+	started, _, _ := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler), func(o *Options) {
+		o.DeviceIdentityAllow = DeviceIdentityAllow{listed}
+	})
+	sent := map[string]any{"agent_id": listed.AgentID, "user_id": listed.UserID, "user_name": listed.UserName}
+
+	status, payload := s.anonymousClient.on(started).call(http.MethodPost, "/v1/agents/sessions", sent)
+
+	s.Equal(http.StatusCreated, status, string(payload))
+}
+
+// Without the setting a device that names the identity of an entry is refused as before.
+func (s *SocketSessionSuite) TestWithoutTheSettingADeviceIsRefusedAsBefore() {
+	s.Nil(s.router.deviceIdentities)
+	s.assertSocketRefuses(s.client, map[string]any{"agent_id": "docs-" + s.utils.uuid(), "user_id": "docs-user", "user_name": "Docs: AI"},
+		errDeviceAgentID)
 }
 
 // A voice session is keyed under its call id, which is the session id a device may choose, so

@@ -228,6 +228,9 @@ type Options struct {
 	// meant to answer a phone, in which case the dispatch socket says so rather than
 	// accepting a worker whose calls would never arrive.
 	Dispatch *dispatch.Pool
+	// DeviceIdentityAllow is the identities a device of one app may send for the agent
+	// (ROUTER_DEVICE_IDENTITY_ALLOW). TEMPORARY (AI-3959): see DeviceIdentityAllow.
+	DeviceIdentityAllow DeviceIdentityAllow
 	// HookSecret is the deployment app's secret, which signs the events Stream sends to
 	// the hooks. Without it the hooks refuse every request, because an unsigned hook is
 	// anyone who found the URL.
@@ -378,6 +381,7 @@ type Server struct {
 	stream             *streamapp.Clients
 	proxyDeclaresKind  bool
 	hookSecret         string
+	deviceIdentities   DeviceIdentityAllow // TEMPORARY (AI-3959)
 	telnyxPublicKey    ed25519.PublicKey
 	chatInboundKeys    []ed25519.PublicKey
 	twilioAuthToken    string
@@ -618,6 +622,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		hookSecret:         options.HookSecret,
 		telnyxPublicKey:    options.TelnyxPublicKey,
 		chatInboundKeys:    options.ChatInboundKeys,
+		deviceIdentities:   options.DeviceIdentityAllow,
 		twilioAuthToken:    options.TwilioAuthToken,
 		twilioAccountSID:   options.TwilioAccountSID,
 		telnyxConnectionID: options.TelnyxConnectionID,

@@ -17,23 +17,23 @@ func backendAsking(categories ...string) context.Context {
 }
 
 func TestADeviceMayNotNameASessionsTeam(t *testing.T) {
-	failure, refused := refuseSessionRequest(context.Background(), CreateSessionRequest{Team: new("finance")})
+	failure, refused := refuseSessionRequest(context.Background(), CreateSessionRequest{Team: new("finance")}, nil)
 
 	require.True(t, refused)
 	require.Equal(t, errDeviceTeam, failure)
 }
 
 func TestABackendNamesATeamOrTheOneItsTokenWasSignedFor(t *testing.T) {
-	_, refused := refuseSessionRequest(backendAsking(), CreateSessionRequest{Team: new("finance")})
+	_, refused := refuseSessionRequest(backendAsking(), CreateSessionRequest{Team: new("finance")}, nil)
 	require.False(t, refused)
-	_, refused = refuseSessionRequest(backendAsking("team:finance"), CreateSessionRequest{Team: new("finance")})
+	_, refused = refuseSessionRequest(backendAsking("team:finance"), CreateSessionRequest{Team: new("finance")}, nil)
 	require.False(t, refused, "the team its token names")
 
-	failure, refused := refuseSessionRequest(backendAsking("team:sales"), CreateSessionRequest{Team: new("finance")})
+	failure, refused := refuseSessionRequest(backendAsking("team:sales"), CreateSessionRequest{Team: new("finance")}, nil)
 	require.True(t, refused)
 	require.Contains(t, failure.Message, `the team "sales" the token was signed for`)
 
-	failure, refused = refuseSessionRequest(backendAsking(), CreateSessionRequest{Team: new("fin:ance")})
+	failure, refused = refuseSessionRequest(backendAsking(), CreateSessionRequest{Team: new("fin:ance")}, nil)
 	require.True(t, refused)
 	require.Equal(t, ErrorTypeInvalidRequest, failure.Type)
 }

@@ -139,7 +139,7 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 
 	// The start frame carries POST /v1/agents/sessions's body, so a request is refused here
 	// as it is refused there.
-	if failure, refused := refuseSessionRequest(ctx, start.Session); refused {
+	if failure, refused := refuseSessionRequest(ctx, start.Session, s.deviceIdentities); refused {
 		refuseWith(refusedByRouter, failure)
 		return
 	}

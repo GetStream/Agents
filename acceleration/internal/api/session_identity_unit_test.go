@@ -19,7 +19,7 @@ func deviceAsking(kind auth.Kind, userID string) context.Context {
 
 func TestADeviceMayNotNameAnotherUserForTheAgentToJoinAndWriteAs(t *testing.T) {
 	for _, kind := range []auth.Kind{auth.KindAuthenticated, auth.KindGuest, auth.KindAnonymous} {
-		failure, refused := refuseSessionRequest(deviceAsking(kind, "alice"), CreateSessionRequest{UserId: new("bob")})
+		failure, refused := refuseSessionRequest(deviceAsking(kind, "alice"), CreateSessionRequest{UserId: new("bob")}, nil)
 
 		require.True(t, refused, string(kind))
 		require.Equal(t, errDeviceAgentUser, failure, string(kind))
@@ -27,7 +27,7 @@ func TestADeviceMayNotNameAnotherUserForTheAgentToJoinAndWriteAs(t *testing.T) {
 }
 
 func TestAnAnonymousCallerMayNotNameItsOwnClaimedIdForTheAgent(t *testing.T) {
-	failure, refused := refuseSessionRequest(deviceAsking(auth.KindAnonymous, "bob"), CreateSessionRequest{UserId: new("bob")})
+	failure, refused := refuseSessionRequest(deviceAsking(auth.KindAnonymous, "bob"), CreateSessionRequest{UserId: new("bob")}, nil)
 
 	require.True(t, refused, "an anonymous caller's name is a claim nobody checked")
 	require.Equal(t, errDeviceAgentUser, failure)
@@ -35,7 +35,7 @@ func TestAnAnonymousCallerMayNotNameItsOwnClaimedIdForTheAgent(t *testing.T) {
 
 func TestASignedInDeviceMayNameItsOwnUserIdForTheAgent(t *testing.T) {
 	for _, kind := range []auth.Kind{auth.KindAuthenticated, auth.KindGuest} {
-		_, refused := refuseSessionRequest(deviceAsking(kind, "alice"), CreateSessionRequest{UserId: new("alice")})
+		_, refused := refuseSessionRequest(deviceAsking(kind, "alice"), CreateSessionRequest{UserId: new("alice")}, nil)
 
 		require.False(t, refused, string(kind))
 	}
@@ -43,7 +43,7 @@ func TestASignedInDeviceMayNameItsOwnUserIdForTheAgent(t *testing.T) {
 
 func TestADeviceMayNotNameTheAgentsId(t *testing.T) {
 	for _, kind := range []auth.Kind{auth.KindAuthenticated, auth.KindGuest, auth.KindAnonymous} {
-		failure, refused := refuseSessionRequest(deviceAsking(kind, "alice"), CreateSessionRequest{AgentId: new("alice")})
+		failure, refused := refuseSessionRequest(deviceAsking(kind, "alice"), CreateSessionRequest{AgentId: new("alice")}, nil)
 
 		require.True(t, refused, string(kind))
 		require.Equal(t, errDeviceAgentID, failure, string(kind))
@@ -52,7 +52,7 @@ func TestADeviceMayNotNameTheAgentsId(t *testing.T) {
 
 func TestADeviceMayNotRenameTheAgentsChatUser(t *testing.T) {
 	failure, refused := refuseSessionRequest(deviceAsking(auth.KindAuthenticated, "alice"),
-		CreateSessionRequest{UserName: new("Your Bank")})
+		CreateSessionRequest{UserName: new("Your Bank")}, nil)
 
 	require.True(t, refused)
 	require.Equal(t, errDeviceAgentUserName, failure)
@@ -64,7 +64,7 @@ func TestADeviceSendingTheDefaultAgentIdentityIsLetThrough(t *testing.T) {
 		UserId: new(session.DefaultUserID), UserName: new(session.DefaultUserName), AgentId: new(""),
 	}
 	for _, kind := range []auth.Kind{auth.KindAuthenticated, auth.KindGuest, auth.KindAnonymous} {
-		_, refused := refuseSessionRequest(deviceAsking(kind, "alice"), sent)
+		_, refused := refuseSessionRequest(deviceAsking(kind, "alice"), sent, nil)
 
 		require.False(t, refused, string(kind))
 	}
@@ -72,7 +72,7 @@ func TestADeviceSendingTheDefaultAgentIdentityIsLetThrough(t *testing.T) {
 
 func TestABackendNamesAnyAgentIdentity(t *testing.T) {
 	_, refused := refuseSessionRequest(backendAsking(),
-		CreateSessionRequest{UserId: new("support-bot"), UserName: new("Support"), AgentId: new("support")})
+		CreateSessionRequest{UserId: new("support-bot"), UserName: new("Support"), AgentId: new("support")}, nil)
 
 	require.False(t, refused)
 }

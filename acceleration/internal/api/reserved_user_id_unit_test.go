@@ -37,7 +37,7 @@ func TestABackendNamingAReservedUserIdForASessionIsRefused(t *testing.T) {
 		"agent_id":       {AgentId: new("!anon")},
 		"memory.user_id": {Memory: &SessionMemory{UserId: new("!anon")}},
 	} {
-		failure, refused := refuseSessionRequest(backendAsking(), sent)
+		failure, refused := refuseSessionRequest(backendAsking(), sent, nil)
 
 		require.True(t, refused, field)
 		require.Contains(t, failure.Message, field+" may not start with !", field)
@@ -47,7 +47,7 @@ func TestABackendNamingAReservedUserIdForASessionIsRefused(t *testing.T) {
 func TestABackendNamingOrdinaryIdsForASessionIsLetThrough(t *testing.T) {
 	_, refused := refuseSessionRequest(backendAsking(), CreateSessionRequest{
 		UserId: new("support-bot"), AgentId: new("support"), Memory: &SessionMemory{UserId: new("alice")},
-	})
+	}, nil)
 
 	require.False(t, refused)
 }
@@ -60,14 +60,14 @@ func actingFor(userID string) context.Context {
 func TestABackendActingForAReservedUserIdOpensNoSession(t *testing.T) {
 	t.Setenv(reservedIDsSwitch.Env, "true")
 
-	failure, refused := refuseSessionRequest(actingFor("!anon"), CreateSessionRequest{})
+	failure, refused := refuseSessionRequest(actingFor("!anon"), CreateSessionRequest{}, nil)
 
 	require.True(t, refused)
 	require.Contains(t, failure.Message, "may not start with !")
 }
 
 func TestABackendActingForAnOrdinaryUserIdOpensASession(t *testing.T) {
-	_, refused := refuseSessionRequest(actingFor("alice"), CreateSessionRequest{})
+	_, refused := refuseSessionRequest(actingFor("alice"), CreateSessionRequest{}, nil)
 
 	require.False(t, refused)
 }
@@ -78,7 +78,7 @@ func TestABackendsCallIdThatWouldBecomeAReservedAgentIdIsRefused(t *testing.T) {
 
 	failure, refused := refuseSessionRequest(backendAsking(), CreateSessionRequest{
 		Call: &SessionCall{Type: "default", Id: "!anon"}, StartVoice: new(true),
-	})
+	}, nil)
 
 	require.True(t, refused)
 	require.Contains(t, failure.Message, "call.id may not start with !")
@@ -88,7 +88,7 @@ func TestABackendsCallIdThatWouldBecomeAReservedAgentIdIsRefused(t *testing.T) {
 func TestWithTheSwitchOffAReservedActingForIdOrCallIdIsLetThrough(t *testing.T) {
 	_, refused := refuseSessionRequest(actingFor("!anon"), CreateSessionRequest{
 		Call: &SessionCall{Type: "default", Id: "!anon"}, StartVoice: new(true),
-	})
+	}, nil)
 
 	require.False(t, refused)
 }

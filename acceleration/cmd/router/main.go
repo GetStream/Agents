@@ -915,6 +915,17 @@ func run(settings config.Config, logger *slog.Logger) error {
 			"setting", "trusted_proxies")
 	}
 
+	// TEMPORARY (AI-3959): a value that does not read is refused at start rather than ignored,
+	// since ignoring it would bring the refusal back for the device it was set for.
+	deviceIdentityAllow, err := api.ParseDeviceIdentityAllow(settings.DeviceIdentityAllow)
+	if err != nil {
+		return err
+	}
+	if len(deviceIdentityAllow) > 0 {
+		logger.Warn("devices may send an agent identity", "entries", len(deviceIdentityAllow),
+			"setting", "device_identity_allow")
+	}
+
 	// Voices a customer brought with them live in an object bucket and a few tables. The
 	// resolver only reads the tables, so a deployment with a database but no bucket can
 	// still speak in voices another one prepared.
@@ -1554,6 +1565,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		Connectors:            connectors,
 		ConnectorSecrets:      connectorSecrets,
 		TrustedProxies:        trustedProxies,
+		DeviceIdentityAllow:   deviceIdentityAllow,
 		AuthMode:              authMode,
 		DataRetention:         settings.DataMove.Retention,
 		PrivateModelEndpoints: settings.Models.PrivateEndpoints,

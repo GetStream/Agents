@@ -44,12 +44,12 @@ func TestADeviceMayNotChooseASessionsPhoneModelsOrLabels(t *testing.T) {
 	backend := context.WithValue(context.Background(), serverSideContextKey{}, true)
 	for field, refused := range fields {
 		t.Run(field, func(t *testing.T) {
-			failure, ok := refuseSessionRequest(context.Background(), refused.sent)
+			failure, ok := refuseSessionRequest(context.Background(), refused.sent, nil)
 			require.True(t, ok, "a device is refused")
 			require.Equal(t, ErrorTypePermission, failure.Type)
 			require.Contains(t, failure.Message, refused.refusal)
 
-			_, ok = refuseSessionRequest(backend, refused.sent)
+			_, ok = refuseSessionRequest(backend, refused.sent, nil)
 			require.False(t, ok, "the backend names it")
 		})
 	}
@@ -64,7 +64,7 @@ func TestADeviceStillLabelsAndShapesItsOwnSession(t *testing.T) {
 		Tools: &[]SessionTool{{Name: "get_location"}}, StartVoice: new(true),
 	}
 
-	_, refused := refuseSessionRequest(context.Background(), sent)
+	_, refused := refuseSessionRequest(context.Background(), sent, nil)
 
 	require.False(t, refused)
 }

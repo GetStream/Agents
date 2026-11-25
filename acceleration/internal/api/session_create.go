@@ -30,7 +30,7 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	if request.Body == nil {
 		return nil, invalidRequest("a request body is required")
 	}
-	if failure, refused := refuseSessionRequest(ctx, *request.Body); refused {
+	if failure, refused := refuseSessionRequest(ctx, *request.Body, s.deviceIdentities); refused {
 		return nil, failure
 	}
 	if failure := s.refuseCall(ctx, customerID, *request.Body); failure != nil {
@@ -227,16 +227,17 @@ var errDeviceAgentID = forbidden("agent_id is sent server-side: the agent's Chat
 //
 // Why: generated clients fill in the schema defaults for user_id and user_name, so a device
 // sending exactly those is let through rather than refused.
-func refuseDeviceAgentIdentity(ctx context.Context, request CreateSessionRequest) (APIError, bool) {
-	if ServerSideFrom(ctx) {
+//
+// TEMPORARY (AI-3959): an identity that allow lists for the device's app passes too.
+func refuseDeviceAgentIdentity(ctx context.Context, request CreateSessionRequest, allow DeviceIdentityAllow) (APIError, bool) {
+	if ServerSideFrom(ctx) || allow.lets(ctx, request) {
 		return APIError{}, false
 	}
 	if id := value(request.AgentId); id != "" {
 		return errDeviceAgentID, true
 	}
 	if user := value(request.UserId); user != "" && user != session.DefaultUserID {
-		caller := CallerFrom(ctx).UserID
-		if !KindFrom(ctx).Verified() || caller == "" || user != caller {
+		if !namesOwnUser(ctx, user) {
 			return errDeviceAgentUser, true
 		}
 	}
@@ -253,14 +254,14 @@ var errAnonymousConversation = forbidden("conversation_id needs a verified calle
 // refuseSessionRequest reports the failure a new session's request is refused with before
 // anything is made for it. createSession and the session socket both call it, so a request one
 // of them refuses the other refuses too, with the same error.
-func refuseSessionRequest(ctx context.Context, request CreateSessionRequest) (APIError, bool) {
+func refuseSessionRequest(ctx context.Context, request CreateSessionRequest, allow DeviceIdentityAllow) (APIError, bool) {
 	if failure, refused := refuseReservedActingFor(ctx, "CreateSession"); refused {
 		return failure, true
 	}
 	if failure, refused := refuseServerSideFields(ctx, request); refused {
 		return failure, true
 	}
-	if failure, refused := refuseDeviceAgentIdentity(ctx, request); refused {
+	if failure, refused := refuseDeviceAgentIdentity(ctx, request, allow); refused {
 		return failure, true
 	}
 	// The same rules as createAuthorization's, since it is the same attempt that seals it.

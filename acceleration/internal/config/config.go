@@ -72,6 +72,11 @@ type Config struct {
 	// TrustedProxies are the CIDR ranges this deployment's own proxies sit in, and they
 	// decide how much of X-Forwarded-For is believed. Empty means none of it is.
 	TrustedProxies []string `koanf:"trusted_proxies"`
+	// DeviceIdentityAllow lets one exact identity through the refusal of a device that names
+	// the agent's agent_id, user_id or user_name: entries separated by ";", each
+	// "app|agent_id|user_id|user_name", app being the Stream app id. TEMPORARY (AI-3959):
+	// removed once getstream.io#1264 is live on the prod site. Empty allows none.
+	DeviceIdentityAllow string `koanf:"device_identity_allow"`
 	// RoutingConfig and PhoneConfig are paths to the capability files. Empty means the
 	// ones embedded in the binary.
 	RoutingConfig string `koanf:"routing_config"`
@@ -719,6 +724,9 @@ var variables = map[string]string{
 	"knowledge.max_heading": "ROUTER_KNOWLEDGE_MAX_HEADING",
 	"knowledge.regions":     "ROUTER_KNOWLEDGE_REGIONS",
 
+	// TEMPORARY (AI-3959).
+	"device_identity_allow": "ROUTER_DEVICE_IDENTITY_ALLOW",
+
 	"shard_routing.default":   "ROUTER_SHARD_ROUTING_DEFAULT",
 	"shard_routing.countries": "ROUTER_SHARD_ROUTING_COUNTRIES",
 	"shard_routing.regions":   "ROUTER_SHARD_ROUTING_REGIONS",
@@ -1297,6 +1305,7 @@ func (c Config) export() error {
 		"log_level":                     c.LogLevel,
 		"dashboard_url":                 c.DashboardURL,
 		"trusted_proxies":               strings.Join(c.TrustedProxies, ","),
+		"device_identity_allow":         c.DeviceIdentityAllow,
 		"routing_config":                c.RoutingConfig,
 		"phone_config":                  c.PhoneConfig,
 		"prices_file":                   c.PricesFile,

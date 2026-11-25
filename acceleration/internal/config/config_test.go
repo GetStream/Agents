@@ -862,6 +862,19 @@ func (s *ConfigSuite) TestTheInboundKeysAreACommaSeparatedListAndExported() {
 	s.Equal("current-key=,previous-key=", os.Getenv("ROUTER_CHAT_INBOUND_KEYS"))
 }
 
+// TEMPORARY (AI-3959): the setting is one string, since an entry's user name may hold a comma.
+func (s *ConfigSuite) TestTheDeviceIdentityAllowIsOneStringAndNothingByDefault() {
+	config, _, err := Load("")
+	s.Require().NoError(err)
+	s.Empty(config.DeviceIdentityAllow)
+
+	s.T().Setenv("ROUTER_DEVICE_IDENTITY_ALLOW", "app-1|docs|u1|Docs, AI;app-2|b||")
+	config, _, err = Load("")
+
+	s.Require().NoError(err)
+	s.Equal("app-1|docs|u1|Docs, AI;app-2|b||", config.DeviceIdentityAllow)
+}
+
 func (s *ConfigSuite) TestTheInboundKeysAreASequenceInAFile() {
 	path := filepath.Join(s.T().TempDir(), "router.yaml")
 	s.Require().NoError(os.WriteFile(path, []byte("chat:\n  inbound_keys: [current-key=, previous-key=]\n"), 0o600))
