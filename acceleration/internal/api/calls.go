@@ -75,16 +75,21 @@ func (s *Server) listCalls(ctx context.Context, request *listCallsRequest) (*lis
 		filter.To = *request.To.ptr()
 	}
 
-	stored, err := s.store.Calls.Select(ctx, customerID, filter)
+	stored, missed, err := s.store.Calls.SelectReachable(ctx, customerID, filter)
 	if err != nil {
 		return nil, err
+	}
+	var unreachable []string
+	if missed != nil {
+		unreachable = missed.Shards()
+		s.logger.Warn("listed calls without the shards that did not answer", "shards", unreachable, "error", missed)
 	}
 
 	listed := make([]Call, 0, len(stored))
 	for _, call := range stored {
 		listed = append(listed, callOf(call))
 	}
-	return &listCallsResponse{Body: listed}, nil
+	return &listCallsResponse{UnreachableShards: strings.Join(unreachable, ","), Body: listed}, nil
 }
 
 // getCall returns one call and whatever was made of it afterwards.
@@ -102,23 +107,24 @@ func (s *Server) getCall(ctx context.Context, request *getCallRequest) (*getCall
 		return nil, unknownOr(err, store.ErrNoCall, errUnknownCall)
 	}
 	rendered := callOf(call)
-	s.attachUsed(ctx, customerID, call, &rendered)
-	s.attachUsage(ctx, customerID, call, &rendered)
-	return &getCallResponse{Body: rendered}, nil
+	unreachable := slices.Concat(s.attachUsed(ctx, customerID, call, &rendered), s.attachUsage(ctx, customerID, call, &rendered))
+	slices.Sort(unreachable)
+	return &getCallResponse{UnreachableShards: strings.Join(slices.Compact(unreachable), ","), Body: rendered}, nil
 }
 
 // attachUsage totals what the call spent, once there is a total to give. A running call is
 // left without one: the sum would be read again on every poll and be wrong by a turn each
-// time, and what a conversation cost is a question asked after it, not during.
-func (s *Server) attachUsage(ctx context.Context, customerID string, call store.Call, rendered *Call) {
+// time, and what a conversation cost is a question asked after it, not during. It names the
+// shards that did not answer when that is why there is none.
+func (s *Server) attachUsage(ctx context.Context, customerID string, call store.Call, rendered *Call) []string {
 	if call.EndedAt == nil || s.store == nil {
-		return
+		return nil
 	}
 
 	spent, err := s.store.Calls.Usage(ctx, customerID, call.AgentID, call.SessionID, call.StartedAt, call.EndedAt)
 	if err != nil {
 		s.logger.Error("could not read what a call spent", "call", call.ID, "error", err)
-		return
+		return unreachableOf(err)
 	}
 	rendered.Usage = &CallUsage{
 		InputTokens:       spent.InputTokens,
@@ -127,6 +133,7 @@ func (s *Server) attachUsage(ctx context.Context, customerID string, call store.
 		CostMicros:        spent.CostMicros,
 		Requests:          spent.Requests,
 	}
+	return nil
 }
 
 // getCallTokens is getSessionTokens under the path it had before tokens moved to the
@@ -1023,8 +1030,9 @@ func callOf(call store.Call) Call {
 // A live session knows the current selection before any request row has been written. A
 // finished call has only the request rows, and those also cover a live call after the
 // first turn. Failover can leave more than one model per modality; the one that still
-// satisfies the target is the one shown.
-func (s *Server) attachUsed(ctx context.Context, customerID string, call store.Call, rendered *Call) {
+// satisfies the target is the one shown. It names the shards that did not answer when that
+// is why the request rows could not be read.
+func (s *Server) attachUsed(ctx context.Context, customerID string, call store.Call, rendered *Call) []string {
 	if s.sessions != nil && call.EndedAt == nil {
 		if found, ok := s.sessions.Get(call.SessionID, OwnerFrom(ctx)); ok {
 			// The row is written off the request path, so what a running session is on
@@ -1050,13 +1058,13 @@ func (s *Server) attachUsed(ctx context.Context, customerID string, call store.C
 	}
 
 	if filledUsed(rendered) || s.store == nil {
-		return
+		return nil
 	}
 
 	used, err := s.store.Calls.UsedModels(ctx, customerID, call.AgentID, call.StartedAt, call.EndedAt)
 	if err != nil {
 		s.logger.Error("could not read the models a call used", "call", call.ID, "error", err)
-		return
+		return unreachableOf(err)
 	}
 
 	if value(rendered.Sts) != "" {
@@ -1067,6 +1075,7 @@ func (s *Server) attachUsed(ctx context.Context, customerID string, call store.C
 		rendered.LlmUsed = firstUsed(rendered.LlmUsed, matchUsed(value(rendered.Llm), namesOf(used, "llm"), s.candidateNames(ctx, routing.LLM, value(rendered.Llm))))
 	}
 	rendered.SubagentUsed = firstUsed(rendered.SubagentUsed, matchUsed(value(rendered.Subagent), namesOf(used, "llm"), s.candidateNames(ctx, routing.LLM, value(rendered.Subagent))))
+	return nil
 }
 
 func filledUsed(call *Call) bool {
@@ -1277,7 +1286,8 @@ type listCallsRequest struct {
 }
 
 type listCallsResponse struct {
-	Body []Call `nullable:"false"`
+	UnreachableShards string `header:"X-Unreachable-Shards" doc:"The shards that did not answer, by name and comma-separated: their calls are missing from the list. Absent when every shard answered."`
+	Body              []Call `nullable:"false"`
 }
 
 type getCallRequest struct {
@@ -1285,7 +1295,20 @@ type getCallRequest struct {
 }
 
 type getCallResponse struct {
-	Body Call
+	UnreachableShards string `header:"X-Unreachable-Shards" doc:"The shards that did not answer, by name and comma-separated: the models the call used and its usage are left out when they could not all be read. Absent when every shard answered."`
+	Body              Call
+}
+
+// unreachableShardsHeader names the shards a read of every shard left out.
+const unreachableShardsHeader = "X-Unreachable-Shards"
+
+// unreachableOf names the shards err says did not answer, none for any other error.
+func unreachableOf(err error) []string {
+	var missed *store.ShardsFailed
+	if errors.As(err, &missed) {
+		return missed.Shards()
+	}
+	return nil
 }
 
 type getCallTokensRequest struct {

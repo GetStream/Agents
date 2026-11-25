@@ -10194,7 +10194,7 @@ components:
           description: The full prompt, which only the subagent sees.
           type: string
         name:
-          description: How the config names it, which is unique among that config's own skills.
+          description: How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox.
           type: string
       required:
         - config_id
@@ -13291,6 +13291,10 @@ paths:
               $ref: '#/components/headers/X-Stream-Cost-Estimated'
             X-Stream-Cost-Micros:
               $ref: '#/components/headers/X-Stream-Cost-Micros'
+            X-Unreachable-Shards:
+              schema:
+                description: 'The shards that did not answer, by name and comma-separated: their calls are missing from the list. Absent when every shard answered.'
+                type: string
         "400":
           $ref: '#/components/responses/BadRequest'
         "401":
@@ -13331,6 +13335,10 @@ paths:
               $ref: '#/components/headers/X-Stream-Cost-Estimated'
             X-Stream-Cost-Micros:
               $ref: '#/components/headers/X-Stream-Cost-Micros'
+            X-Unreachable-Shards:
+              schema:
+                description: 'The shards that did not answer, by name and comma-separated: the models the call used and its usage are left out when they could not all be read. Absent when every shard answered.'
+                type: string
         "400":
           $ref: '#/components/responses/BadRequest'
         "401":

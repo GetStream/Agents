@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -371,6 +372,8 @@ type ScheduledTasksSuite struct {
 	sink *channelSink
 	// runReads counts what the router reads of scheduled_task_runs while on.
 	runReads *runReads
+	// slowRead holds up the router's next read of the task a test names.
+	slowRead *slowTaskRead
 	// worker is the test's running worker, if it started one.
 	worker *scheduling.Scheduler
 	// attempts counts the deliveries the test's worker has started, a retry included.
@@ -391,6 +394,24 @@ func (r *runReads) AfterQuery(_ context.Context, event *bun.QueryEvent) {
 	}
 }
 
+// slowTaskRead holds up the router's next read of one task, as a loaded runner holds up a
+// request, so a test can say what happens meanwhile.
+type slowTaskRead struct {
+	task  atomic.Pointer[string]
+	delay time.Duration
+}
+
+func (r *slowTaskRead) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	task := r.task.Load()
+	if task != nil && strings.HasPrefix(event.Query, "SELECT") && strings.Contains(event.Query, "scheduled_tasks") &&
+		strings.Contains(event.Query, *task) && r.task.CompareAndSwap(task, nil) {
+		time.Sleep(r.delay)
+	}
+	return ctx
+}
+
+func (*slowTaskRead) AfterQuery(context.Context, *bun.QueryEvent) {}
+
 func TestScheduledTasksSuite(t *testing.T) {
 	runSuite(t, new(ScheduledTasksSuite))
 }
@@ -407,6 +428,10 @@ func (s *ScheduledTasksSuite) SetupSuite() {
 	s.runReads = &runReads{}
 	if s.store != nil {
 		s.store.GlobalDB().AddQueryHook(s.runReads)
+		// A request held up 200 ms outlasts the 10 ms between two looks of waitForBlockedBy,
+		// so a look at the wrong backend commits before the request reads. It waits for nothing.
+		s.slowRead = &slowTaskRead{delay: 200 * time.Millisecond}
+		s.store.GlobalDB().AddQueryHook(s.slowRead)
 	}
 }
 
@@ -1468,12 +1493,7 @@ func (s *ScheduledTasksSuite) TestACallerThatHangsUpAfterTheDeleteStillLeavesIts
 		_, err := s.router.deleteAgentConfig(request, &deleteAgentConfigRequest{Id: config})
 		answered <- err
 	}()
-	s.Require().Eventually(func() bool {
-		var waiting int
-		err := s.store.GlobalDB().QueryRowContext(ctx,
-			"SELECT count(*) FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid))", holder).Scan(&waiting)
-		return err == nil && waiting > 0
-	}, 5*time.Second, 10*time.Millisecond, "the delete never reached its config's tasks")
+	s.waitForBlockedBy(holder, "the delete never reached its config's tasks")
 	hangUp()
 	s.Require().NoError(hold.Rollback())
 	s.Require().NoError(<-answered)
@@ -1632,6 +1652,8 @@ func (s *ScheduledTasksSuite) whileDeleting(config string, request func()) {
 	deleting, err := s.store.GlobalDB().BeginTx(ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = deleting.Rollback() }()
+	var holder int
+	s.Require().NoError(deleting.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&holder))
 	_, err = deleting.ExecContext(ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = ?", config)
 	s.Require().NoError(err)
 
@@ -1640,13 +1662,7 @@ func (s *ScheduledTasksSuite) whileDeleting(config string, request func()) {
 		defer close(done)
 		request()
 	}()
-	// The suite's database is its own, so a backend waiting on a lock in it is the request.
-	s.Require().Eventually(func() bool {
-		var waiting int
-		err := s.store.GlobalDB().QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity"+
-			" WHERE datname = current_database() AND wait_event_type = 'Lock'").Scan(&waiting)
-		return err == nil && waiting > 0
-	}, 5*time.Second, 10*time.Millisecond, "the request read the config without waiting for the delete under way")
+	s.waitForBlockedBy(holder, "the request read the config without waiting for the delete under way")
 	s.Require().NoError(deleting.Commit())
 	<-done
 }
@@ -1735,6 +1751,8 @@ func (s *ScheduledTasksSuite) whileChanging(id, set string, request func()) {
 	changing, err := s.store.GlobalDB().BeginTx(ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = changing.Rollback() }()
+	var holder int
+	s.Require().NoError(changing.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&holder))
 	_, err = changing.ExecContext(ctx, "UPDATE scheduled_tasks SET "+set+", updated_at = now() WHERE id = ?", id)
 	s.Require().NoError(err)
 
@@ -1743,14 +1761,22 @@ func (s *ScheduledTasksSuite) whileChanging(id, set string, request func()) {
 		defer close(done)
 		request()
 	}()
-	s.Require().Eventually(func() bool {
-		var waiting int
-		err := s.store.GlobalDB().QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity"+
-			" WHERE datname = current_database() AND wait_event_type = 'Lock'").Scan(&waiting)
-		return err == nil && waiting > 0
-	}, 5*time.Second, 10*time.Millisecond, "the request saved the task without waiting for the write under way")
+	s.waitForBlockedBy(holder, "the request saved the task without waiting for the write under way")
 	s.Require().NoError(changing.Commit())
 	<-done
+}
+
+// waitForBlockedBy waits until a backend waits on a lock the backend holder holds. It does not
+// take any other backend waiting on a lock in the database for the request: the suite's
+// background writers wait on locks of their own, and a write committed for one of them can
+// land before the request has read the task.
+func (s *ScheduledTasksSuite) waitForBlockedBy(holder int, failure string) {
+	s.Require().Eventually(func() bool {
+		var waiting int
+		err := s.store.GlobalDB().QueryRowContext(context.Background(),
+			"SELECT count(*) FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid))", holder).Scan(&waiting)
+		return err == nil && waiting > 0
+	}, 5*time.Second, 10*time.Millisecond, failure)
 }
 
 func (s *ScheduledTasksSuite) TestAnEditOfATaskPausedMeanwhileIsRefusedAndLeavesItPaused() {
@@ -1786,6 +1812,47 @@ func (s *ScheduledTasksSuite) TestAPauseOfATaskEditedMeanwhileIsRefusedAndKeepsT
 	s.Equal(http.StatusConflict, status)
 	s.Equal("task_changed", failure.Error.Code)
 	s.Equal("Renamed", s.taskReloaded(store.ScheduledTask{ID: created.Id}).Title)
+}
+
+// A write under way is committed for the request that waits on it, not for any other backend
+// waiting on a lock in the suite's database. Otherwise a request slower than the write's
+// commit reads the task after it and saves over it: a 200 where the test expects a 409.
+func (s *ScheduledTasksSuite) TestAWriteUnderWayIsNotCommittedForAnotherBackendsLockWait() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	created := s.createTask(user, taskRequest(config))
+
+	ctx := context.Background()
+	key := rand.Text()
+	holding, err := s.store.GlobalDB().BeginTx(ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = holding.Rollback() }()
+	var holder int
+	s.Require().NoError(holding.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&holder))
+	_, err = holding.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", key)
+	s.Require().NoError(err)
+	waiting, err := s.store.GlobalDB().BeginTx(ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = waiting.Rollback() }()
+	stray := make(chan error, 1)
+	go func() {
+		_, err := waiting.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", key)
+		stray <- err
+	}()
+	s.waitForBlockedBy(holder, "no other backend waits on a lock")
+
+	var status int
+	var failure ErrorResponse
+	s.slowRead.task.Store(&created.Id)
+	s.whileChanging(created.Id, "title = 'Renamed'", func() {
+		status, failure = s.taskFailure(user, http.MethodPost, "/v1/agents/scheduled-tasks/"+created.Id+"/pause", nil)
+	})
+
+	s.Equal(http.StatusConflict, status)
+	s.Equal("task_changed", failure.Error.Code)
+	s.Equal("Renamed", s.taskReloaded(store.ScheduledTask{ID: created.Id}).Title)
+	s.Require().NoError(holding.Rollback())
+	s.Require().NoError(<-stray)
 }
 
 func (s *ScheduledTasksSuite) TestAResumeOfATaskEditedMeanwhileIsRefusedAndKeepsTheEdit() {

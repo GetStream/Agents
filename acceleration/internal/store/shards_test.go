@@ -32,20 +32,18 @@ func (s *ShardedStoreSuite) TestSpendIsCountedInEveryShard() {
 	s.EqualValues(500, spent)
 }
 
-func (s *ShardedStoreSuite) TestARequestsLogIsInTheSharedDatabase() {
+func (s *ShardedStoreSuite) TestARequestsLogIsInTheShardThatWroteIt() {
 	s.sessionCall(s.other, Call{ID: "call", SessionID: "session", CustomerID: "app", AgentID: "agent", StartedAt: s.base}, "cfg")
 	s.Require().NoError(insertRequest(s.ctx, s.other, &Request{Modality: "tts", CustomerID: "app", AgentID: "agent", Provider: "cartesia", Model: "sonic", StartedAt: s.base.Add(time.Second), Success: true}))
 
 	logs, err := s.store.AgentLogs.Select(s.ctx, "app", AgentLogFilter{Limit: 10})
 	s.Require().NoError(err)
-	s.Require().Len(logs, 1, "one row, in the shared database, rather than one in the shard as well")
+	s.Require().Len(logs, 1, "one row, in the shard, rather than one in the shared database as well")
 	s.Equal("tts request completed", logs[0].Message)
 	s.Equal("cfg", logs[0].ConfigID)
 	s.Equal("session", logs[0].SessionID, "the session of the call, not the call")
-
-	var inShard int
-	s.Require().NoError(s.other.shard.NewSelect().Table("agent_logs").ColumnExpr("count(*)").Scan(s.ctx, &inShard))
-	s.Zero(inShard)
+	s.Equal(1, s.logsIn(s.other.shard, "app"))
+	s.Zero(s.logsIn(s.store.global, "app"))
 }
 
 // requestLogged is the log row a request the agent made writes, in a shard. Each test names its

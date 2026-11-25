@@ -373,8 +373,21 @@ func (r *Calls) LastVoiced(ctx context.Context, customerID, sessionID string) (C
 
 // Select returns a customer's calls, newest first.
 func (r *Calls) Select(ctx context.Context, customerID string, filter CallFilter) ([]Call, error) {
+	calls, missed, err := r.SelectReachable(ctx, customerID, filter)
+	if err != nil {
+		return nil, err
+	}
+	if missed != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: customer calls: %w", missed))
+	}
+	return calls, nil
+}
+
+// SelectReachable is Select from the shards that answer, and names the others: a page of calls
+// that one region being down leaves without its calls, rather than with none.
+func (r *Calls) SelectReachable(ctx context.Context, customerID string, filter CallFilter) ([]Call, *ShardsFailed, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errCustomerRequired)
+		return nil, nil, stack.Wrap(errCustomerRequired)
 	}
 
 	limit := filter.Limit
@@ -385,7 +398,7 @@ func (r *Calls) Select(ctx context.Context, customerID string, filter CallFilter
 		limit = maxCallLimit
 	}
 
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]Call, error) {
+	lists, missed, err := reachableShards(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]Call, error) {
 		query := db.NewSelect().Model((*Call)(nil)).
 			Where("customer_id = ?", customerID).
 			Order("started_at DESC").
@@ -416,9 +429,9 @@ func (r *Calls) Select(ctx context.Context, customerID string, filter CallFilter
 		return calls, err
 	})
 	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: customer calls: %w", err))
+		return nil, nil, stack.Wrap(fmt.Errorf("store: customer calls: %w", err))
 	}
-	return merged(lists, func(a, b Call) int { return b.StartedAt.Compare(a.StartedAt) }, limit), nil
+	return merged(lists, func(a, b Call) int { return b.StartedAt.Compare(a.StartedAt) }, limit), missed, nil
 }
 
 // ModelCalls returns every model response in one call, including flow and delegated

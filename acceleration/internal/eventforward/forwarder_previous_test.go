@@ -76,6 +76,8 @@ func (s *ForwarderSuite) TestAForwardWhosePreviousSecretDoesNotOpenIsSignedWithT
 		"it is bound to another destination":         s.boundToAnother(),
 		"its ciphertext is corrupt":                  s.corrupt(),
 		"it is shorter than a nonce":                 s.truncated(),
+		"it is empty":                                s.holding("whsec_"),
+		"it is not base64":                           s.holding("whsec_AAAA!!"),
 	}
 	for name, previous := range cases {
 		s.Run(name, func() {
@@ -276,6 +278,16 @@ func (s *ForwarderSuite) TestACurrentSecretThatDoesNotOpenIsLeftToAnotherRouterT
 		s.Require().Eventually(func() bool { return s.pending(destination.customer) == 0 }, 5*time.Second, 10*time.Millisecond)
 		s.Empty(arrived)
 	})
+	s.Run("given up at once when it is empty", func() {
+		target, arrived := s.receiver()
+		router := s.routerOn(s.sealer, target, &logLines{}, Options{})
+		destination := s.rotated(target.URL, s.under(s.sealer), s.holding("whsec_"), time.Now().Add(time.Hour))
+
+		s.Require().NoError(s.send(router, destination, `{"n":1}`))
+
+		s.Require().Eventually(func() bool { return s.pending(destination.customer) == 0 }, 5*time.Second, 10*time.Millisecond)
+		s.Empty(arrived)
+	})
 	s.Run("given up at once when it does not open for another reason", func() {
 		target, arrived := s.receiver()
 		router := s.routerOn(s.sealer, target, &logLines{}, Options{})
@@ -389,6 +401,11 @@ func (s *ForwarderSuite) boundToAnother() seal {
 	return func(plain string, _ []byte) ([]byte, int) {
 		return s.under(s.sealer)(plain, secretAAD("customer-other", "slack_bot", "destination-other"))
 	}
+}
+
+// holding seals secret in place of the destination's own.
+func (s *ForwarderSuite) holding(secret string) seal {
+	return func(_ string, aad []byte) ([]byte, int) { return s.under(s.sealer)(secret, aad) }
 }
 
 // corrupt seals with this suite's key and flips a bit of the ciphertext.

@@ -10,11 +10,13 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/redis/rueidis/rueidishook"
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
@@ -128,8 +130,8 @@ func (s *Store) shards() []bun.IDB {
 }
 
 // everyShard reads every shard's database at once and returns what each answered, this
-// shard's first. One shard failing fails the read: a page that silently left a shard out
-// would be a list of calls missing some.
+// shard's first. One shard failing fails the read, with a *ShardsFailed naming it: a page
+// that silently left a shard out would be a list of calls missing some.
 func everyShard[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) ([]T, error) {
 	all := s.shards()
 	if len(all) == 1 {
@@ -139,6 +141,50 @@ func everyShard[T any](ctx context.Context, s *Store, read func(context.Context,
 		}
 		return []T{found}, nil
 	}
+	found, failed := readShards(ctx, all, read)
+	if missed := s.failedShards(failed); missed != nil {
+		return nil, missed
+	}
+	return found, nil
+}
+
+// onEach reads every database of all at once and returns what each answered, in their order.
+// One failing fails the read.
+func onEach[T any](ctx context.Context, all []bun.IDB, read func(context.Context, bun.IDB) (T, error)) ([]T, error) {
+	if len(all) == 1 {
+		found, err := read(ctx, all[0])
+		if err != nil {
+			return nil, err
+		}
+		return []T{found}, nil
+	}
+	found, failed := readShards(ctx, all, read)
+	if err := errors.Join(failed...); err != nil {
+		return nil, err
+	}
+	return found, nil
+}
+
+// reachableShards is everyShard for a page that says which shards it left out rather than
+// failing: another shard's answer is left out when it fails, and named in the *ShardsFailed
+// returned beside what the others answered. This shard failing still fails the read, its
+// database being this router's own.
+func reachableShards[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) ([]T, *ShardsFailed, error) {
+	all := s.shards()
+	found, failed := readShards(ctx, all, read)
+	if failed[0] != nil {
+		return nil, nil, failed[0]
+	}
+	var answered []T
+	for i := range all {
+		if failed[i] == nil {
+			answered = append(answered, found[i])
+		}
+	}
+	return answered, s.failedShards(failed), nil
+}
+
+func readShards[T any](ctx context.Context, all []bun.IDB, read func(context.Context, bun.IDB) (T, error)) ([]T, []error) {
 	found := make([]T, len(all))
 	failed := make([]error, len(all))
 	var wg sync.WaitGroup
@@ -146,11 +192,39 @@ func everyShard[T any](ctx context.Context, s *Store, read func(context.Context,
 		wg.Go(func() { found[i], failed[i] = read(ctx, db) })
 	}
 	wg.Wait()
-	if err := errors.Join(failed...); err != nil {
-		return nil, err
-	}
-	return found, nil
+	return found, failed
 }
+
+// ShardsFailed is a read of every shard that some of them did not answer, by name.
+type ShardsFailed struct {
+	names  []string
+	errors []error
+}
+
+// failedShards names the shards of failed, as shards() orders them, that failed, or is nil
+// when none did.
+func (s *Store) failedShards(failed []error) *ShardsFailed {
+	var shards ShardsFailed
+	for i, err := range failed {
+		if err != nil {
+			shards.names = append(shards.names, s.shardNames[i])
+			shards.errors = append(shards.errors, err)
+		}
+	}
+	if len(shards.names) == 0 {
+		return nil
+	}
+	return &shards
+}
+
+// Shards names the shards that did not answer.
+func (e *ShardsFailed) Shards() []string { return e.names }
+
+func (e *ShardsFailed) Error() string {
+	return "store: shards " + strings.Join(e.names, ", ") + " did not answer: " + errors.Join(e.errors...).Error()
+}
+
+func (e *ShardsFailed) Unwrap() []error { return e.errors }
 
 // ErrShardUnanswered is a read no shard that answered could settle while another did not: the
 // row may be on that one, so asking again once it answers may find it.
@@ -275,6 +349,60 @@ func whicheverShard[T any](ctx context.Context, s *Store, read func(context.Cont
 		}
 	}
 	return found, sql.ErrNoRows
+}
+
+// A table moving from the shared database to the shards' is written in this shard's and read
+// from every database that may hold its rows: every shard's, where they are written now, and
+// the shared one, where they were written before, until its rows there are copied over and it
+// is dropped. Shards migrate one at a time, so a peer may not have the table yet: it holds none
+// of its rows, rather than failing the read.
+
+// holders is every database that may hold the rows of a moving table: every shard's, this
+// one's first, then the shared one unless it is already one of the shards.
+func (s *Store) holders() []bun.IDB {
+	all := s.shards()
+	if s.Sharded() && !s.globalIsShard {
+		all = append(all, s.global)
+	}
+	return all
+}
+
+// everyHolder reads a moving table from every database of holders at once, in its order. The
+// shared database is also a peer's when one shard keeps its rows there, so a row may be read
+// twice: the caller drops the second by its key.
+func everyHolder[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) ([]T, error) {
+	return onEach(ctx, s.holders(), func(ctx context.Context, db bun.IDB) (T, error) {
+		found, err := read(ctx, db)
+		if absentTable(err) {
+			var none T
+			return none, nil
+		}
+		return found, err
+	})
+}
+
+// whicheverHolder reads a row of a moving table from the database holding it: the shards, as
+// whicheverShard does, then the shared one. read answers sql.ErrNoRows for a database without
+// it, and so does whicheverHolder when none has it.
+func whicheverHolder[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) (T, error) {
+	found, err := whicheverShard(ctx, s, func(ctx context.Context, db bun.IDB) (T, error) {
+		found, err := read(ctx, db)
+		if absentTable(err) {
+			return found, sql.ErrNoRows
+		}
+		return found, err
+	})
+	if !s.Sharded() || !errors.Is(err, sql.ErrNoRows) {
+		return found, err
+	}
+	return read(ctx, s.global)
+}
+
+// absentTable reports whether err is Postgres refusing a statement on a table the database
+// does not have.
+func absentTable(err error) bool {
+	var refused pgdriver.Error
+	return errors.As(err, &refused) && refused.Field('C') == undefinedTable
 }
 
 // onEveryShard runs a write on every shard's database and returns how many rows it changed
