@@ -450,7 +450,7 @@ func (s *DataMoveSuite) TestASessionsDeleteAndAnImportOfItsTurnsDoNotDeadlock() 
 var bareColumns = map[string][]string{
 	"agent_configs": {"agents", "calls", "channels_chat", "channels_lines", "connectors", "floor_control", "keyterms",
 		"left_out_connectors", "llm_fallbacks", "resume_history", "sandbox_options", "scheduling", "skills", "tags", "tool_groups",
-		"turn_taking", "video", "visible_tools", "workflow"},
+		"turn_taking", "video", "visible_tools", "voice", "workflow"},
 	"skills":                 {"config_id", "files"},
 	"connector_definitions":  {"manifest"},
 	"connector_connections":  {"account_id", "cached_tools", "connector_id", "granted_scopes", "inputs", "metadata", "owner_id"},
@@ -497,7 +497,7 @@ var bareTexts = map[string][]string{
 
 // words are the text columns of each moved table that hold no row's id.
 var words = map[string]string{
-	"agent_configs":          "greeting greeting_mode guardrail harness image instructions knowledge_namespace llm mode name region review_instructions role sandbox_provider search sts stt subagent sync_hash tts ui_instructions video_source voice",
+	"agent_configs":          "greeting greeting_mode guardrail harness image instructions knowledge_namespace llm mode name region review_instructions role sandbox_provider search sts stt subagent sync_hash tts ui_instructions video_source",
 	"skills":                 "description instructions name",
 	"connector_definitions":  "category description name sync_hash",
 	"connector_connections":  "auth_scheme client_registration label last_error owner_type status tls_scheme tools_digest validation_code validation_error validation_status",
@@ -696,7 +696,15 @@ func (s *DataMoveSuite) TestADeleteOfATrunkWithANumberIsRefused() {
 
 	s.Require().ErrorIs(err, ErrInvalidImport)
 	s.NotErrorIs(err, ErrNamesNoRow)
-	s.ErrorContains(err, "store: delete sip_trunks: another row here still names this row")
+	s.EqualError(err, "store: delete sip_trunks: another row here still names this row")
+	s.True(isViolation(err, foreignKeyViolation))
+}
+
+func (s *DataMoveSuite) TestADeleteWhoseKeyDoesNotReadIsNotRefusedAsNamed() {
+	err := s.destination.ApplyChanges(s.ctx, "acme", []DataChange{{Table: "phone_numbers", Op: ChangeDelete, Key: []byte(`{"id": "not a number"}`)}})
+
+	s.Require().ErrorIs(err, ErrInvalidImport)
+	s.EqualError(err, "store: import phone_numbers: a row holds a value its column cannot take")
 }
 
 func (s *DataMoveSuite) TestAnImportOfARowThatNamesAnotherIsTwoQueries() {
