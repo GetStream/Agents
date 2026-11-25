@@ -109,7 +109,8 @@ type Identified interface {
 // Call makes one request to a vendor and records it however it ends: one row for a result, an
 // error or a panic. A failure is recorded without quantities, so it is not billed. With an
 // estimate, its price is reserved first; a refusal is answered at once, with no vendor asked
-// and no row.
+// and no row. ask is made for the recorder's modality and the meter's model, which a refusal of
+// a pooled key names (keypool.WithCaller).
 func Call[R pricing.Metered](ctx context.Context, meter Meter, ask func(context.Context) (R, error)) (R, error) {
 	started := time.Now()
 	stat := meter.stat(started)
