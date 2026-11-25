@@ -295,6 +295,21 @@ func (s *ForwardSuite) TestACarriedRequestStatesTheLengthOfWhatIsCarried() {
 	s.Equal("100", request.Header.Get("Content-Length"), "the caller's own request was changed")
 }
 
+func (s *ForwardSuite) TestACarriedRequestThatStatesNoLengthIsGivenNone() {
+	stated := make(chan []string, 1)
+	server := httptest.NewServer(Serve(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		stated <- r.Header.Values("Content-Length")
+	}), [][]byte{[]byte("current")}))
+	s.T().Cleanup(server.Close)
+	request, err := http.NewRequest(http.MethodPost, "/", nil)
+	s.Require().NoError(err)
+
+	_, err = NewForwarder(nil, []byte("current")).Ask(s.ctx, server.Listener.Addr().String(), request, []byte("four"))
+
+	s.Require().NoError(err)
+	s.Empty(<-stated)
+}
+
 func (s *ForwardSuite) TestAnAnswerOfAnySizeIsCarriedBack() {
 	whole := bytes.Repeat([]byte("a"), 16<<20)
 	server := httptest.NewServer(Serve(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

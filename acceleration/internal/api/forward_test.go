@@ -576,6 +576,47 @@ func (s *ForwardedSessionSuite) TestARequestTheOtherNodeIsLongAboutIsAnswered() 
 	s.Len(carried, 1)
 }
 
+func (s *ForwardedSessionSuite) TestACallerThatHangsUpEndsWhatItAsked() {
+	for _, body := range []string{"", `{"text":"hello"}`} {
+		began, ended := make(chan struct{}, 1), make(chan struct{}, 1)
+		_, accepted := s.sealer.Derive(node.CredentialPurpose)
+		owner := httptest.NewServer(node.Serve(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			began <- struct{}{}
+			<-r.Context().Done()
+			ended <- struct{}{}
+		}), accepted))
+		s.T().Cleanup(func() {
+			owner.CloseClientConnections()
+			owner.Close()
+		})
+		id := s.utils.uuid()
+		s.nodeDirectory(owner, s.shard, slog.New(slog.DiscardHandler)).Hold(s.T().Context(), s.customerID(), 0, id, "", "")
+		ctx, cancel := context.WithCancel(s.T().Context())
+		s.T().Cleanup(cancel)
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverClient.base()+"/v1/agents/sessions/"+id+"/say", strings.NewReader(body))
+		s.Require().NoError(err)
+		request.Header = s.serverClient.header.Clone()
+		go func() {
+			if response, err := s.server.Client().Do(request); err == nil {
+				_ = response.Body.Close()
+			}
+		}()
+		select {
+		case <-began:
+		case <-time.After(settleFor):
+			s.FailNow("nothing was carried", "body %q", body)
+		}
+
+		cancel()
+
+		select {
+		case <-ended:
+		case <-time.After(settleFor):
+			s.Fail("the other node went on", "body %q", body)
+		}
+	}
+}
+
 // arrived is the body a request was carried with: its stated length and what was read.
 type arrived struct {
 	declared string

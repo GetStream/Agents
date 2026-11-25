@@ -55,7 +55,7 @@ func (s *Server) handedToShard(ctx context.Context, handOver func(context.Contex
 		return false, false
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, forwardTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.forwardTimeout)
 	defer cancel()
 	answer, err := handOver(node.ToShard(ctx, shard), address)
 	switch {
