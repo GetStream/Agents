@@ -4,6 +4,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
@@ -157,6 +159,40 @@ func (s *SettingsSuite) TestARoutingPolicyThatIsNoneIsRefusedAndTheStoredOneStay
 		s.Equal(http.StatusBadRequest, status, "%v", sent)
 		s.Contains(string(body), `"code":"validation_failed"`, "%v", sent)
 	}
+	s.Equal(RoutingPolicy("us_only"), s.routingPolicy())
+}
+
+// onShardedNode is the app's backend on a node of a sharded deployment that runs a shard in the
+// EU and none in the US.
+func (s *RouterSuite) onShardedNode() *testClient {
+	other, _, _ := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler), func(o *Options) {
+		o.ShardRouting = shardmap.Map{Home: "there", Residency: map[string][]string{shardmap.GeographyEU: {"there"}}}
+	})
+	return s.serverClient.on(other)
+}
+
+// Catches a policy whose work every request would refuse, and no shard would claim, stored.
+func (s *SettingsSuite) TestAResidencyPolicyOfAGeographyWithNoShardIsRefusedOnAShardedDeployment() {
+	status, body := s.onShardedNode().call(http.MethodPatch, "/v1/settings/app", map[string]any{"routing_policy": "us_only"})
+
+	s.Equal(http.StatusBadRequest, status, string(body))
+	s.Contains(string(body), `"code":"invalid_request"`)
+	s.Contains(string(body), "shard_routing.residency")
+	s.Equal(RoutingPolicy("closest"), s.routingPolicy())
+}
+
+func (s *SettingsSuite) TestAResidencyPolicyOfAGeographyWithAShardIsTakenOnAShardedDeployment() {
+	s.Require().Equal(http.StatusOK, s.onShardedNode().do(http.MethodPatch, "/v1/settings/app",
+		map[string]any{"routing_policy": "eu_only"}, nil))
+
+	s.Equal(RoutingPolicy("eu_only"), s.routingPolicy())
+}
+
+// An unsharded deployment keeps work where it lands, so no geography lacks a shard.
+func (s *SettingsSuite) TestAResidencyPolicyIsTakenOnAnUnshardedDeployment() {
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/settings/app",
+		map[string]any{"routing_policy": "us_only"}, nil))
+
 	s.Equal(RoutingPolicy("us_only"), s.routingPolicy())
 }
 

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -145,6 +146,9 @@ func (s *Server) updateAppSettings(ctx context.Context, request *updateAppSettin
 	if s.store == nil {
 		return nil, errNoConfigs
 	}
+	if message, ok := s.residencyComplaint(request.Body.RoutingPolicy); !ok {
+		return nil, invalidRequest(message)
+	}
 	if request.Body.RoutingPolicy != nil {
 		err := s.store.Apps.SetRoutingPolicy(ctx, customerID, shardmap.Policy(*request.Body.RoutingPolicy))
 		if errors.Is(err, store.ErrNoApp) {
@@ -155,6 +159,21 @@ func (s *Server) updateAppSettings(ctx context.Context, request *updateAppSettin
 		}
 	}
 	return s.getAppSettings(ctx, nil)
+}
+
+// residencyComplaint refuses a residency policy whose geography this sharded deployment runs no
+// shard in (shardmap.Map.Allowed): its work would be refused wherever it landed, and its
+// reminders and campaign dials claimed by no shard. An unsharded deployment allows any.
+func (s *Server) residencyComplaint(policy *RoutingPolicy) (string, bool) {
+	if policy == nil {
+		return "", true
+	}
+	if allowed := s.shards.Allowed(shardmap.Policy(*policy)); allowed == nil || len(allowed) > 0 {
+		return "", true
+	}
+	geography := shardmap.Policy(*policy).Residency()
+	return fmt.Sprintf("routing_policy %s keeps work in the %s geography, which this deployment runs no region in: "+
+		"shard_routing.residency lists no shard for %s", *policy, geography, geography), false
 }
 
 // getAppSettings reports which Stream app the calling app's work goes into, and whether it

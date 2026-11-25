@@ -144,6 +144,9 @@ func (s *Server) createAgentConfig(ctx context.Context, request *createAgentConf
 	if err := retiredComplaint(request.Body.Plugins, request.Body.PluginEvents, request.Body.McpServers); err != nil {
 		return nil, err
 	}
+	if message, ok := s.residencyComplaint(request.Body.RoutingPolicy); !ok {
+		return nil, invalidRequest(message)
+	}
 	if message, ok, err := s.unboundConnectors(ctx, customerID, request.Body.Connectors); err != nil {
 		return nil, err
 	} else if !ok {
@@ -257,6 +260,9 @@ func (s *Server) tryUpdateAgentConfig(ctx context.Context, request *updateAgentC
 	}
 	if err := retiredComplaint(request.Body.Plugins, request.Body.PluginEvents, request.Body.McpServers); err != nil {
 		return nil, err
+	}
+	if message, ok := s.residencyComplaint(request.Body.RoutingPolicy); !ok {
+		return nil, invalidRequest(message)
 	}
 
 	existing, err := s.store.AgentConfigs.Get(ctx, customerID, request.Id)

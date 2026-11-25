@@ -178,6 +178,9 @@ func (s *Server) tryPatchAgentConfig(ctx context.Context, request *patchAgentCon
 	}); !ok {
 		return nil, invalidRequest(message)
 	}
+	if message, ok := s.residencyComplaint(patch.RoutingPolicy); !ok {
+		return nil, invalidRequest(message)
+	}
 	if message, ok, err := s.unboundConnectors(ctx, customerID, patch.Connectors); err != nil {
 		return nil, err
 	} else if !ok {

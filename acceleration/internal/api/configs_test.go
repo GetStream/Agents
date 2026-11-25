@@ -3004,6 +3004,45 @@ func (s *ConfigsSuite) TestAPatchSetsAnAgentsRoutingPolicy() {
 	s.Equal("canada_only", stored.RoutingPolicy)
 }
 
+// Catches a policy whose work every request would refuse, and no shard would claim, stored by
+// any of the three writes.
+func (s *ConfigsSuite) TestAResidencyPolicyOfAGeographyWithNoShardIsRefusedOnEveryWriteOnAShardedDeployment() {
+	created := s.createConfig(map[string]any{"name": "resident-" + s.utils.uuid()})
+	sharded := s.onShardedNode()
+	for _, write := range []struct{ method, path string }{
+		{http.MethodPost, "/v1/agents/configs"},
+		{http.MethodPut, "/v1/agents/configs/" + created.Id},
+		{http.MethodPatch, "/v1/agents/configs/" + created.Id},
+	} {
+		status, body := sharded.call(write.method, write.path,
+			map[string]any{"name": "resident-" + s.utils.uuid(), "routing_policy": "us_only"})
+		s.Equal(http.StatusBadRequest, status, "%s: %s", write.method, body)
+		s.Contains(string(body), `"code":"invalid_request"`, write.method)
+		s.Contains(string(body), "shard_routing.residency", write.method)
+	}
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), created.Id)
+	s.Require().NoError(err)
+	s.Empty(stored.RoutingPolicy)
+	configs, err := s.store.AgentConfigs.Select(context.Background(), s.customerID())
+	s.Require().NoError(err)
+	s.Len(configs, 1, "the create was refused")
+}
+
+func (s *ConfigsSuite) TestAResidencyPolicyOfAGeographyWithAShardIsTakenOnAShardedDeployment() {
+	var created AgentConfig
+	s.Require().Equal(http.StatusCreated, s.onShardedNode().do(http.MethodPost, "/v1/agents/configs",
+		map[string]any{"name": "resident-" + s.utils.uuid(), "routing_policy": "eu_only"}, &created))
+
+	s.Equal(RoutingPolicy("eu_only"), value(created.RoutingPolicy))
+}
+
+// An unsharded deployment keeps work where it lands, so no geography lacks a shard.
+func (s *ConfigsSuite) TestAResidencyPolicyIsTakenOnAnUnshardedDeployment() {
+	created := s.createConfig(map[string]any{"name": "resident-" + s.utils.uuid(), "routing_policy": "us_only"})
+
+	s.Equal(RoutingPolicy("us_only"), value(created.RoutingPolicy))
+}
+
 // Catches a value the enum does not name accepted and stored, on any of the three writes.
 func (s *ConfigsSuite) TestARoutingPolicyThatIsNoneIsRefusedOnEveryWrite() {
 	created := s.createConfig(map[string]any{"name": "resident-" + s.utils.uuid(), "routing_policy": "us_only"})
