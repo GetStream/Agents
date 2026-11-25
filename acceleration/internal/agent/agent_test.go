@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -6980,6 +6982,63 @@ func (s *AgentSuite) answerToSilentVoice() {
 		return countOf[Responded](s.reported()) == 2 && !s.agent.generating
 	}, "the answer was never written")
 	s.Require().False(s.agent.harness.Pending())
+}
+
+func (s *AgentSuite) TestTurnsStampedAtOnceGetAnIDEach() {
+	s.onFakeClock(func() {
+		// The cadence, the voice and the presence tick each start turns on goroutines of their
+		// own, so two can take a stamp at the same moment.
+		// They are released together from one signal and take many stamps each, on at least
+		// four threads even under -cpu 1, so the takers overlap: a stamp taken by a plain
+		// store, or a compare-and-swap that does not retry, names two turns alike.
+		const takers, each = 8, 20000
+		defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(max(takers/2, runtime.GOMAXPROCS(0))))
+		stamps := make([][]string, takers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for taker := range takers {
+			wg.Go(func() {
+				<-start
+				for range each {
+					stamps[taker] = append(stamps[taker], turnStamp())
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+		unique := map[string]struct{}{}
+		for _, taken := range stamps {
+			for _, stamp := range taken {
+				unique[stamp] = struct{}{}
+			}
+		}
+		s.Len(unique, takers*each)
+	})
+}
+
+func (s *AgentSuite) TestTwoLinesSaidAtOnceAreTwoTurns() {
+	s.onFakeClock(func() {
+		s.join(true)
+		s.Require().NoError(s.agent.Say(s.ctx, "Hello."))
+		s.Require().NoError(s.agent.Say(s.ctx, "Welcome back."))
+		s.eventually(func() bool { return countOf[Said](s.reported()) == 2 }, "a line was never said")
+		var turns []string
+		for _, event := range s.reported() {
+			if said, ok := event.(Said); ok {
+				turns = append(turns, said.TurnID)
+			}
+		}
+		s.NotEqual(turns[0], turns[1])
+	})
+}
+
+func (s *AgentSuite) TestATurnIsStampedWithTheTime() {
+	before := time.Now().UnixNano()
+	stamp, err := strconv.ParseInt(turnStamp(), 10, 64)
+	after := time.Now().UnixNano()
+	s.Require().NoError(err)
+	s.GreaterOrEqual(stamp, before)
+	s.LessOrEqual(stamp, after)
 }
 
 func (s *AgentSuite) TestAnAnswerNoVoiceSaidIsOwedAgain() {

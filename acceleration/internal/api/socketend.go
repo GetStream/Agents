@@ -25,6 +25,9 @@ const (
 	timedOut closeCause = "timeout"
 	// sessionEnded is a session that ended, for the end_reason logged beside it.
 	sessionEnded closeCause = "session_ended"
+	// relayEnded is a relayed socket whose watcher the node holding the session gave back while
+	// the session went on, such as one it took for a socket gone quiet (expireProxies).
+	relayEnded closeCause = "relay_ended"
 	// refusedByRouter is a caller the router refused: a start frame, a session it would not
 	// open, a frame it could not read or one past maxSocketMessage.
 	refusedByRouter closeCause = "refused"
