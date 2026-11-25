@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/suite"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 type OptionsSuite struct {
@@ -225,6 +227,30 @@ func (s *OptionsSuite) TestAVoiceValidateRejectsAnOverwriteWithNoProvider() {
 		TTS{Overwrites: map[string]json.RawMessage{"": json.RawMessage(`{}`)}}.Validate(),
 		"has to name the provider",
 	)
+}
+
+func (s *OptionsSuite) TestAVoiceValidateRejectsAnOverwriteVoiceIdThatIsNotTheVendors() {
+	for provider, block := range map[string]string{
+		"elevenlabs": `{"voice_id":"a/../../v1/user"}`,
+		"cartesia":   `{"voice_id":"A0E99841-438C-4A64-B679-AE501E7D6091"}`,
+	} {
+		err := TTS{Overwrites: map[string]json.RawMessage{provider: json.RawMessage(block)}}.Validate()
+		s.ErrorIs(err, voiceid.ErrInvalid, provider)
+		s.ErrorContains(err, "overwrites."+provider+".voice_id", "it names the field")
+	}
+	for provider, block := range map[string]string{
+		"elevenlabs": `{"voice_id":"21m00Tcm4TlvDq8ikWAM"}`,
+		"cartesia":   `{"voice_id":"a0e99841-438c-4a64-b679-ae501e7d6091"}`,
+		// A vendor with no rule, a block with no voice and a voice_id of another type are
+		// left as the base left them.
+		"inworld":   `{"voice_id":"a/b"}`,
+		"gemini":    `{"temperature":1}`,
+		"speechify": `{"voice_id":7}`,
+	} {
+		s.NoError(TTS{Overwrites: map[string]json.RawMessage{provider: json.RawMessage(block)}}.Validate(), provider)
+	}
+	s.NoError(TTS{Overwrites: map[string]json.RawMessage{"elevenlabs": json.RawMessage(`{"voice_id":""}`)}}.Validate(),
+		"an empty voice_id names no voice")
 }
 
 func (s *OptionsSuite) TestADataPolicyIsNotSomethingAVoiceHasToExpress() {

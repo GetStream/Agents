@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
@@ -125,6 +126,38 @@ func (s *VoicesSuite) TestAnotherCustomersCloneIsNeitherListedNorHeard() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
 		"/v1/agents/voices/library/elevenlabs/EXAVITQu4vr4xnSDxMaL/preview", nil, nil))
 }
+
+// A voice id the vendor would not read as one of its own is refused before the ownership
+// check, so the id that check compares is the one the vendor is sent.
+func (s *VoicesSuite) TestALibraryVoiceIdThatIsNotTheVendorsIsRefusedNamingTheField() {
+	s.library.Register("elevenlabs", accountVoices{{Provider: "elevenlabs", ID: "EXAVITQu4vr4xnSDxMaL", Name: "Sarah"}})
+	s.library.Register("cartesia", accountVoices{{Provider: "cartesia", ID: cartesiaVoice, Name: "Barbershop Man"}})
+	for _, path := range []string{
+		"elevenlabs/el-cloned%2F..%2F..%2Fuser",
+		"elevenlabs/%2E%2E",
+		"elevenlabs/el-cloned%3Fx%3D1",
+		"elevenlabs/el-cloned%23x",
+		"elevenlabs/el-cloned%2525",
+		"elevenlabs/el%20cloned",
+		"elevenlabs/el.cloned",
+		"cartesia/" + strings.ToUpper(cartesiaVoice),
+		"cartesia/" + strings.ReplaceAll(cartesiaVoice, "-", ""),
+		"cartesia/" + cartesiaVoice + "%2F..",
+	} {
+		status, body := s.serverClient.call(http.MethodGet, "/v1/agents/voices/library/"+path+"/preview", nil)
+
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Contains(string(body), `"code":"invalid_request"`, path)
+		s.Contains(string(body), "voice: ", "%s: it names the field", path)
+	}
+	for _, path := range []string{"elevenlabs/EXAVITQu4vr4xnSDxMaL", "cartesia/" + cartesiaVoice} {
+		s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+			"/v1/agents/voices/library/"+path+"/preview", nil, nil), path)
+	}
+}
+
+// cartesiaVoice is a Cartesia voice id as Cartesia hands them out.
+const cartesiaVoice = "a0e99841-438c-4a64-b679-ae501e7d6091"
 
 func (s *VoicesSuite) libraryIDs() []string {
 	var listed LibraryVoices

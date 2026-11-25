@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 	"github.com/danielgtaylor/huma/v2"
 )
@@ -338,6 +339,10 @@ func (s *Server) previewLibraryVoice(ctx context.Context, request *previewLibrar
 	}
 	if s.library == nil {
 		return nil, errNoLibrary
+	}
+	// Refused before the ownership check, so the id it compares is the one sent to the vendor.
+	if voiceid.Check(request.Provider, request.Voice) != nil {
+		return nil, invalidRequest(fmt.Sprintf("voice: %q is not shaped like a voice id of %s", request.Voice, request.Provider))
 	}
 	if s.store != nil {
 		elsewhere, err := s.store.VoiceBindings.Elsewhere(ctx, customerID, request.Provider, request.Voice)

@@ -13,6 +13,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/cartesia"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // cartesiaBaseURL is the production endpoint. The streaming provider's is a WebSocket URL,
@@ -119,8 +120,11 @@ func (c *Cartesia) Delete(ctx context.Context, externalID string) error {
 	if externalID == "" {
 		return nil
 	}
+	if err := voiceid.Cartesia(externalID); err != nil {
+		return err
+	}
 
-	url := strings.TrimSuffix(c.options.BaseURL, "/") + "/voices/" + externalID
+	url := strings.TrimSuffix(c.options.BaseURL, "/") + "/voices/" + url.PathEscape(externalID)
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return stack.Wrap(err)
@@ -267,7 +271,10 @@ func (c *Cartesia) List(ctx context.Context) ([]Library, error) {
 // Preview fetches the sample Cartesia holds for the voice. The URL it hands out wants the
 // same key the listing did, so the audio is read here rather than handed to a browser.
 func (c *Cartesia) Preview(ctx context.Context, id string) (Speech, error) {
-	url := strings.TrimSuffix(c.options.BaseURL, "/") + "/voices/" + id + "?expand[]=preview_file_url"
+	if err := voiceid.Cartesia(id); err != nil {
+		return Speech{}, err
+	}
+	url := strings.TrimSuffix(c.options.BaseURL, "/") + "/voices/" + url.PathEscape(id) + "?expand[]=preview_file_url"
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return Speech{}, stack.Wrap(err)
