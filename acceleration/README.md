@@ -2430,6 +2430,8 @@ arriving late warns (other producers ship late by design and are not measured), 
 a batch sent without the ingest token (`batch_unauthorized`, a 401): a misconfigured
 producer, or no producer at all. `usage_batches_refused_total{status}` counts both kinds of
 refusal.
+Each alert's Sentry message follows its name with a plain-words line of what it means and what to
+check first; the line is not in the fingerprint, so rewording it keeps the alert's Sentry issue.
 
 Each alerts loop, the router's two and the service's, adds to the counter
 `router_alert_holds_total{alert,level}` on its process's `/metrics` at every check (every 15 s),
