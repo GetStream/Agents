@@ -1021,6 +1021,14 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		}
 		return attached, nil
 	}
+	// Refused before anything is made for the number, as a number pointed at a webhook that
+	// refuses its calls would look fine and never answer. A number attached already is not
+	// pointed anywhere again, so it is not refused.
+	if hooked, ok := provider.(CallHooked); ok {
+		if err := hooked.CallHookReady(s.publicURL); err != nil {
+			return Attached{}, err
+		}
+	}
 	if err := s.clearLinesFor(ctx, held, pin); err != nil {
 		return Attached{}, err
 	}
@@ -1132,7 +1140,7 @@ func (s *Service) finishAttach(ctx context.Context, provider Provider, attachmen
 		ConfigID: held.ConfigID,
 	}
 
-	err := provider.ConfigureInbound(ctx, Inbound{E164: attachment.E164, Bridge: attached.Bridge})
+	err := provider.ConfigureInbound(ctx, Inbound{E164: attachment.E164, Bridge: attached.Bridge, PublicURL: s.publicURL})
 	if err != nil {
 		return stack.Wrap(err)
 	}
