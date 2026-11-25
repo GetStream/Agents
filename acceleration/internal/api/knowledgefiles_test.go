@@ -699,10 +699,11 @@ func (s *KnowledgeFilesSuite) TestOnlyTheDocumentOfAPostThatWasRemovedIsWrittenA
 	s.Equal(2, s.recorded(), "each document is recorded once")
 }
 
-// Posts of one source at once do not make each other write again: the last to finish is kept.
+// Posts of one source at once that take no passage away do not make each other write again: the
+// last to finish is kept.
 func (s *KnowledgeFilesSuite) TestTwoPostsOfASourceAtOnceAreEachWrittenOnce() {
 	write, posted := s.postHeld("both.md", 6)
-	s.Require().Equal(http.StatusOK, s.post("both.md", 3))
+	s.Require().Equal(http.StatusOK, s.post("both.md", 6))
 	writes := 0
 	s.knowledge.onceAfterWrite(func() error {
 		s.knowledge.onceBeforeWrite(func() { writes++ })
@@ -713,6 +714,42 @@ func (s *KnowledgeFilesSuite) TestTwoPostsOfASourceAtOnceAreEachWrittenOnce() {
 	s.Equal(http.StatusOK, s.answer(posted))
 	s.Zero(writes)
 	s.indexedWith("both.md", 6)
+}
+
+// The shorter post's delete of the tail took what the longer one had written, so the longer is
+// written, and billed, once more.
+func (s *KnowledgeFilesSuite) TestAPostWhosePassagesAShorterOneTookIsWrittenAgainOnce() {
+	for _, base := range []int{0, 6} {
+		source := "base" + strconv.Itoa(base) + ".md"
+		if base > 0 {
+			s.Require().Equal(http.StatusOK, s.post(source, base))
+		}
+		since := time.Now().UTC()
+		finish, posted := s.postTextWritten(source, strings.ReplaceAll(sections(6), "says", "says at length"))
+		s.Require().Equal(http.StatusOK, s.post(source, 2))
+		finish()
+
+		s.Equal(http.StatusOK, s.answer(posted))
+		s.Equal(6, s.passagesOf(source))
+		s.passageContaining("What section 0 says at length.")
+		s.passageContaining("What section 5 says at length.")
+		s.meteredRows(routing.Knowledge, since, 4) // two posts, the tail's delete and the longer post again
+	}
+}
+
+// Two posts of one length that shrink a document each take the same tail away, and the one that
+// finishes last is written, and billed, once more.
+func (s *KnowledgeFilesSuite) TestOneOfTwoPostsThatShrinkADocumentAtOnceIsWrittenAgainOnce() {
+	s.Require().Equal(http.StatusOK, s.post("shrunk.md", 6))
+	since := time.Now().UTC()
+	finish, posted := s.postTextWritten("shrunk.md", strings.ReplaceAll(sections(3), "says", "says last"))
+	s.Require().Equal(http.StatusOK, s.post("shrunk.md", 3))
+	finish()
+
+	s.Equal(http.StatusOK, s.answer(posted))
+	s.indexedWith("shrunk.md", 3)
+	s.passageContaining("What section 2 says last.")
+	s.meteredRows(routing.Knowledge, since, 5) // two posts, each one's delete of the tail, and one post again
 }
 
 func (s *KnowledgeFilesSuite) TestTwoPostsOfASourceWrittenAtOnceAreEachWrittenOnce() {
@@ -936,9 +973,17 @@ func (s *KnowledgeFilesSuite) holdAfterWrite() (wrote chan struct{}, done func()
 
 // postWritten begins a post of n sections that is held once its passages are written.
 func (s *KnowledgeFilesSuite) postWritten(source string, n int) (finish func(), posted chan int) {
+	return s.postTextWritten(source, sections(n))
+}
+
+func (s *KnowledgeFilesSuite) postTextWritten(source, text string) (finish func(), posted chan int) {
 	wrote, finish := s.holdAfterWrite()
 	posted = make(chan int, 1)
-	go func() { posted <- s.post(source, n) }()
+	go func() {
+		posted <- s.serverClient.do(http.MethodPost, "/v1/agents/knowledge", map[string]any{
+			"namespace": s.namespace, "documents": []map[string]string{{"source": source, "text": text}},
+		}, nil)
+	}()
 	s.reached(wrote, "the post never wrote")
 	return finish, posted
 }

@@ -413,7 +413,7 @@ func (s *Server) writeKnowledge(
 		// What the base had, and what others wrote since.
 		key := document.ObjectKey
 		stale := ingest.IDs(document.Source, document.Passages, document.Covered)
-		if document.Covered > max(was.Passages, document.Passages) {
+		if document.Covered > document.Passages {
 			// A post it shares the row with may have written some of them.
 			document.ObjectKey = store.NewPost()
 		}
