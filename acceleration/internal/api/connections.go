@@ -300,6 +300,9 @@ func (s *Server) registerConnections(api huma.API) {
 // createConnection records a pending connection for the app or the user the
 // backend acts for.
 func (s *Server) createConnection(ctx context.Context, request *createConnectionRequest) (*connectionResponse, error) {
+	if failure, refused := refuseReservedActingFor(ctx, "CreateConnection"); refused {
+		return nil, failure
+	}
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer

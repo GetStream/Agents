@@ -218,6 +218,9 @@ var errAnonymousConversation = forbidden("conversation_id needs a verified calle
 // anything is made for it. createSession and the session socket both call it, so a request one
 // of them refuses the other refuses too, with the same error.
 func refuseSessionRequest(ctx context.Context, request CreateSessionRequest) (APIError, bool) {
+	if failure, refused := refuseReservedActingFor(ctx, "CreateSession"); refused {
+		return failure, true
+	}
 	if failure, refused := refuseServerSideFields(ctx, request); refused {
 		return failure, true
 	}
@@ -248,6 +251,9 @@ func refuseSessionRequest(ctx context.Context, request CreateSessionRequest) (AP
 		if failure, refused := refuseReservedUserID(named[0], named[1]); refused {
 			return failure, true
 		}
+	}
+	if failure, refused := refuseReservedNewly(ctx, "CreateSession", "call.id", callAgentID(request)); refused {
+		return failure, true
 	}
 	// A zone nobody knows is refused where it is named, rather than at the first task
 	// that would have run in it.
@@ -360,6 +366,15 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 		}
 	}
 	return APIError{}, false
+}
+
+// callAgentID is the call id a voice session is keyed under as its agent id, when it names no
+// agent id of its own (Spec.KeyedAgentID), and empty otherwise.
+func callAgentID(request CreateSessionRequest) string {
+	if request.Call == nil || value(request.AgentId) != "" {
+		return ""
+	}
+	return request.Call.Id
 }
 
 // memoryUserID is the user id a session's memory names, empty when it names none.
