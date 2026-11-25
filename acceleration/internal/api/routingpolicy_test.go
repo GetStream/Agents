@@ -235,6 +235,38 @@ func (s *RoutingPolicySuite) TestASocketWhoseFirstShardCannotBeReachedIsServedIn
 	s.Equal(s.other.Listener.Addr().String(), s.runningOn(id))
 }
 
+// A carried run was cut at forwardTimeout, which cancelled it in the shard doing it. The cap is
+// a constant, and a run held for less passes either way, so the test waits it out.
+func (s *RoutingPolicySuite) TestARunCarriedToItsShardMayTakeLongerThanAnyOtherCarriedRequest() {
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(), Mode: store.AgentModeText,
+		Models: store.AgentModels{LLM: "holding/holding-model"}, RoutingPolicy: string(shardmap.PolicyEUOnly)}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
+	s.holding.holds()
+	s.T().Cleanup(s.holding.answers)
+	asked := len(s.holding.requests())
+	finished := make(chan int, 1)
+	go func() {
+		status, _ := s.serverClient.call(http.MethodPost, "/v1/agents/runs", CreateRunRequest{ConfigId: config.ID, Input: "hold"})
+		finished <- status
+	}()
+	s.Require().Eventually(func() bool { return len(s.holding.requests()) > asked }, settleFor, 10*time.Millisecond,
+		"the run never reached its model")
+
+	select {
+	case status := <-finished:
+		s.FailNowf("the carried run ended before its model answered", "status %d", status)
+	case <-time.After(forwardTimeout + time.Second):
+	}
+	s.holding.answers()
+
+	select {
+	case status := <-finished:
+		s.Equal(http.StatusOK, status)
+	case <-time.After(settleFor):
+		s.FailNow("the carried run never answered once its model did")
+	}
+}
+
 func (s *RoutingPolicySuite) TestWorkKeptInAGeographyWithNoShardIsRefused() {
 	config := s.agent(shardmap.PolicyUSOnly)
 

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -191,7 +192,7 @@ func (s *Server) carriedToPlace(w http.ResponseWriter, r *http.Request, place pl
 // request; any other failure is answered on w.
 func (s *Server) carryTo(w http.ResponseWriter, r *http.Request, shard, address string, body []byte) error {
 	r.Body = io.NopCloser(bytes.NewReader(body))
-	ctx, cancel := context.WithTimeout(r.Context(), forwardTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), carriedFor(r, body))
 	defer cancel()
 	err := s.forwarder.Forward(node.ToShard(ctx, shard), address, w, r)
 	// Unavailable is a node that never got the request. After any other failure it may have
@@ -205,6 +206,23 @@ func (s *Server) carryTo(w http.ResponseWriter, r *http.Request, shard, address 
 		writeError(w, unavailable(unreachableNode))
 	}
 	return nil
+}
+
+// carriedFor is how long new work carried to another shard may take to be answered. The node
+// doing it is cancelled with the carry, so a run is given its own timeout (timeout_ms) and the
+// grace its node takes to close it, rather than forwardTimeout alone.
+func carriedFor(r *http.Request, body []byte) time.Duration {
+	if r.URL.Path != "/v1/agents/runs" {
+		return forwardTimeout
+	}
+	timeout := defaultRunTimeout
+	var run struct {
+		TimeoutMs *int `json:"timeout_ms"`
+	}
+	if json.Unmarshal(body, &run) == nil && run.TimeoutMs != nil {
+		timeout = time.Duration(*run.TimeoutMs) * time.Millisecond
+	}
+	return max(timeout+runLeaseGrace, forwardTimeout)
 }
 
 // carrySocketTo is carryTo for a socket, which has no body. The error is the node never getting
