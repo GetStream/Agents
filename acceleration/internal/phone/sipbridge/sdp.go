@@ -276,7 +276,7 @@ func toStream(body []byte, trunk netip.Addr) ([]byte, error) {
 		return !ok && c.Name != dtmfCodec.Name
 	})
 	if _, ok := m.audioCodec(); !ok {
-		return nil, stack.Wrap(errors.New("customer offered no codec Stream accepts"))
+		return nil, stack.Wrap(errors.New("the customer's sdp has no codec Stream accepts"))
 	}
 	return buildSDP(reachable(m, trunk), sd.Origin.SessionID, sd.Origin.SessionVersion), nil
 }
