@@ -65,7 +65,7 @@ type ConnectorDefinition struct {
 	Description string        `bun:"description,notnull"`
 	Manifest    core.Manifest `bun:"manifest,type:jsonb,notnull"`
 	// SyncHash is a fingerprint of the file the CLI last synced onto this revision
-	// (20270201001200_connector_router_sync_hash.sql). Empty for a built-in, and for a revision
+	// (20270202000100_connector_router_sync_hash.sql). Empty for a built-in, and for a revision
 	// that was never synced or was written since by anything that is not a sync.
 	SyncHash  string    `bun:"sync_hash,notnull"`
 	CreatedAt time.Time `bun:"created_at,notnull"`
