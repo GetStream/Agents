@@ -47,7 +47,7 @@ type approvals struct {
 // answers.
 type heldCall struct {
 	commandID string
-	asked     string
+	asked     Owner
 	answer    chan approvalAnswer
 }
 
@@ -92,7 +92,7 @@ func (d *dispatcher) holdForApproval(ctx context.Context, r route, call llm.Tool
 		if a.held == nil {
 			a.held = map[string]heldCall{}
 		}
-		a.held[call.ID] = heldCall{commandID: commandID, asked: person, answer: answer}
+		a.held[call.ID] = heldCall{commandID: commandID, asked: d.askedAs(person), answer: answer}
 	}
 	a.mu.Unlock()
 	if asked {
@@ -157,10 +157,22 @@ func (a *approvals) tell(event agent.Event) {
 	}
 }
 
+// askedAs is the person a call is held for, as whoever answers it has to reach them
+// (Owner.Reaches): the session's own user as the kind of caller that opened it, and the writer of
+// the message the reply answers as a backend names a user. The hook that brought their message
+// says who wrote it and not what proved it, so any verified caller of their id answers for them.
+func (d *dispatcher) askedAs(person string) Owner {
+	kind := auth.KindServer
+	if person == d.spec.Caller.UserID {
+		kind = d.spec.CallerKind
+	}
+	return Owner{CustomerID: d.spec.CustomerID, UserID: person, Kind: kind}
+}
+
 // answerApproval hands an answer to the call id held for a person, when it names the command
 // the call's reply answers and may says the one answering may answer for whom was asked. The
 // call is taken as it is answered, so it is answered once.
-func (d *dispatcher) answerApproval(callID, commandID string, may func(asked string) bool, allowed bool, summary string) error {
+func (d *dispatcher) answerApproval(callID, commandID string, may func(asked Owner) bool, allowed bool, summary string) error {
 	d.approvals.mu.Lock()
 	held, ok := d.approvals.held[callID]
 	if !ok || held.commandID != commandID {
@@ -198,14 +210,13 @@ func approvalText(status, message string) []llm.ContentPart {
 // AnswerConnectorApproval hands a person's answer to a connector call the router holds for
 // their approval, by the call's id and the command its reply answers. Allowed, the call is
 // sent; declined, it is not, and the model is told so. Only the person the call asks, the
-// session's own user or the writer of the message its reply answers (holdForApproval), or the
-// customer's backend may answer: ErrApprovalAskedOfAnother for anyone else, and
-// ErrNoApprovalHeld when no call is held for the answer.
+// session's own user or the writer of the message its reply answers (holdForApproval), by their
+// id and kind as a session's owner is reached (askedAs), or the customer's backend may answer:
+// ErrApprovalAskedOfAnother for anyone else, and ErrNoApprovalHeld when no call is held for the
+// answer.
 func (s *Session) AnswerConnectorApproval(id, commandID string, allowed bool, summary string, by Owner) error {
 	if s.connectors == nil || by.CustomerID != s.spec.CustomerID {
 		return stack.Wrap(ErrNoApprovalHeld)
 	}
-	return s.connectors.answerApproval(id, commandID, func(asked string) bool {
-		return by.Kind == auth.KindServer || by.UserID == asked
-	}, allowed, summary)
+	return s.connectors.answerApproval(id, commandID, by.Reaches, allowed, summary)
 }
