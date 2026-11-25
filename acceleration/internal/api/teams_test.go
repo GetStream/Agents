@@ -199,8 +199,9 @@ func (s *AgentTeamsSuite) TestRefusalsWhileStreamIsAskedAgainWaitForItsOneAnswer
 		}
 
 		synctest.Wait()
-		require.Equal(t, int32(1), reads.Load(), "each refusal asked Stream")
+		asked := reads.Load()
 		close(told)
+		require.Equal(t, int32(1), asked, "each refusal asked Stream")
 		for range 3 {
 			require.Equal(t, []string{"red"}, <-answers, "a refusal took the teams held before the read")
 		}
