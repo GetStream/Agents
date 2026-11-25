@@ -496,8 +496,9 @@ var bareTexts = map[string][]string{
 }
 
 // words are the text columns of each moved table that hold no row's id. The identity_* columns of
-// agent_configs name a Chat user of the customer's app and a display name: no moved table holds
-// that user, so the move carries them as they are.
+// agent_configs name a Chat user of the customer's own app and a display name. users may hold that
+// user id for the same customer, and the same customer's rows move together; what it names is read
+// with the customer, as agent_sessions.user_id is (bareColumns). The move carries them as they are.
 var words = map[string]string{
 	"agent_configs":          "greeting greeting_mode guardrail harness image identity_agent_id identity_user_id identity_user_name instructions knowledge_namespace llm mode name region review_instructions role routing_policy sandbox_provider search sts stt subagent sync_hash tts ui_instructions video_source",
 	"skills":                 "description instructions name",
