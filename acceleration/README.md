@@ -1706,30 +1706,31 @@ in Redis. Any shard serves any app.
 
 ```yaml
 shard: us-west1
+shards: [us-east4, us-west1, europe-west4] # every shard's name, this one's included
 postgres:
   dsn: postgres://global/router
   shard_dsn: postgres://usw1/router
-  shards: # every shard's, this one's included
-    us-east4: postgres://use4/router
-    us-west1: postgres://usw1/router
-    europe-west4: postgres://euw4/router
 redis:
   addr: global:6379
   shard:
     addr: usw1:6379
 ```
 
-Writes go to this shard's database. Reads of one call, session or recording look in every
-shard, and lists merge every shard's rows, so a session carried on in another region is
-still one session. Each database runs the migration set it holds: `migrations/global` on the
-global one and `migrations/shard` on each shard's, both on the one database of a single node
-(`schema/global.sql` and `schema/shard.sql` list what each set leaves). A socket for a session
-held in another shard is proxied to the node holding it, since that shard's relay is not this
-one's. Empty shard settings fall back to the global ones, which is the single-node setup.
+A shard reads and writes its own database and the global one, never another shard's. A request
+about a call or session another shard holds is forwarded to a router of that shard; lists and
+stats read the copies every shard ships to the global database; and work about every shard's
+rows (forgetting a user, a guest's sessions) is a job each shard runs on its own. Each database
+runs the migration set it holds: `migrations/global` on the global one and `migrations/shard`
+on each shard's, both on the one database of a single node (`schema/global.sql` and
+`schema/shard.sql` list what each set leaves). A socket for a session held in another shard is
+proxied to the node holding it, since that shard's relay is not this one's. Empty shard settings
+fall back to the global ones, which is the single-node setup.
 
-`shard_dsn` without `shards` is refused. The routers sharing a global Redis keep the shard names
-they agree on there (`node:shards`), and a router naming others refuses to start with
-`postgres.shards differs from the running routers'`. A changed list starts 30 seconds after the
+`shard_dsn` without `shards` is refused, and so is `postgres.shards` (`ROUTER_POSTGRES_SHARDS`),
+the list of every shard's DSN routers once read: set `shards` (`ROUTER_SHARDS`, such as
+`us-east4,us-west1,europe-west4`) to the names instead. The routers sharing a global Redis keep
+the shard names they agree on there (`node:shards`), and a router naming others refuses to start
+with `shards differs from the running routers'`. A changed list starts 30 seconds after the
 last router with the old one stopped, so roll a change out by stopping every router first.
 
 Percentiles merged from several shards' rollups are approximate: they are weighted by request
@@ -1749,7 +1750,7 @@ With no node of that shard up, the work is done where it landed and counted in
 Work a router claims from the global database is claimed the same way. A scheduled task goes
 to its agent's region's shard, or else its user's `users.shard`; a campaign's dials and their
 take-overs go to the shard of the country of the number it rings from. Work meant for no shard
-the deployment has (`shard_routing` or `postgres.shards`), such as a user no client of theirs
+the deployment has (`shard_routing` or `shards`), such as a user no client of theirs
 has reached yet, is claimed anywhere, and so is work left unclaimed five minutes past when it
 could have been, so a shard that is down holds up nothing for longer.
 
@@ -2246,7 +2247,7 @@ the ops key or the manage key. `openssl rand -hex 32` prints a key it takes.
 | `POST /v1/ops/stats/rollup` | Aggregate request rows into a rollup table |
 
 An organization's activity reads `customer_activity` for every app of the organization and
-`requests` on every shard in `postgres.shards`, from `since` (RFC 3339, at most 90 days ago, 30 days ago when left
+the requests every shard in `shards` shipped, from `since` (RFC 3339, at most 90 days ago, 30 days ago when left
 out):
 
 ```bash
@@ -2287,7 +2288,7 @@ were answered on three UTC days, else `none`. Areas, `first_seen`, `last_seen` a
 and `meters` from every request in the window: for an organization whose use is older, up to 90
 days back, `furthest_step` can read `none` while `meters` show use. An organization with nothing recorded is a 200
 with empty lists. `shards` names the shards whose `requests` the meters sum, this one's
-first. A deployment that leaves `postgres.shards` unset reads its own shard's `requests` alone
+first. A deployment that leaves `shards` unset reads its own shard's `requests` alone
 and lists only that shard, named by a digest of its DSN, so its meters are not the organization's
 whole use; areas are kept in the database every shard shares and are complete (see Shards).
 
@@ -2617,7 +2618,7 @@ region.
 | `router prices show [--at <time>] [--json] [--unpriced]` | The list in force: each entry's item, region and BYOK state, its SKU, its vendor rates and its price; `--unpriced` lists the billed items (`billable.Items`) no entry prices, each in its region |
 | `router prices sync --dry-run` | What the next start would load, each item with its region and BYOK state, writing nothing |
 | `router prices check [--file <path>]` | Parses a price file (default `vendor.json`) and builds a list from it, with no database, counting its entries by region and BYOK state |
-| `router prices drift [--since 168h] [--json]` | Per model, over every shard, how far each row's cost at the vendor's rates is from what the vendor said it charged (`attributes.vendor_cost_micros`) |
+| `router prices drift [--since 168h] [--json]` | Per model, over this shard's rows (run it in each region), how far each row's cost at the vendor's rates is from what the vendor said it charged (`attributes.vendor_cost_micros`) |
 | `router prices export [--from <routing config>] [--phone] [--out <path>] [--strip]` | Writes a routing config's old `price:` blocks as a price file, and with `--strip` takes them out of it |
 | `router prices reload --development [--dry-run]` | Development only: empties the price list and seeds it again from the price files, as a fresh database's first start does. See below |
 
@@ -2940,7 +2941,7 @@ object per line, as an export writes it, and a line over 64 MiB is answered 413.
 
 The source must be a router without shards. A shard's tables (calls, call bridges, recordings,
 sessions, responses, requests and their stats) record no changes, so a router with a shard database
-of its own, or with other shards' databases listed in `postgres.shards`, answers the export and the
+of its own, or beside other shards listed in `shards`, answers the export and the
 changes 400 `not_configured` before it records anything: moving off it is not supported yet. Any router can be the
 target.
 

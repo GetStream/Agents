@@ -60,7 +60,9 @@ func TestStoreSuite(t *testing.T) {
 }
 
 // ShardedStoreSuite runs every store test again with the shared tables in one database, this
-// shard's in another, and a second shard beside it, as a hosted deployment keeps them.
+// shard's in another, and a second shard beside it, as a hosted deployment keeps them. Neither
+// shard opens the other's database: what one writes reaches the other only through what it
+// ships to the shared one (ShipIndex, ShipStats) and the jobs it runs (ShardJobs).
 type ShardedStoreSuite struct {
 	StoreSuite
 	// other is a router of the second shard: the same shared database, the other shard's own.
@@ -90,14 +92,14 @@ func (s *ShardedStoreSuite) SetupSuite() {
 	shard, peer := s.emptyDatabase("store_shard"), s.emptyDatabase("store_peer")
 	s.shardDSN = shard
 
-	shards := map[string]string{"here": shard, "there": peer}
-	store, err := OpenShards(Options{DSN: s.dsn, ShardDSN: shard, Shards: shards, Redis: s.redis(), redisHook: &s.roundTrips})
+	shards := []string{"here", "there"}
+	store, err := OpenShards(Options{DSN: s.dsn, ShardDSN: shard, Shard: "here", Shards: shards, Redis: s.redis(), redisHook: &s.roundTrips})
 	s.Require().NoError(err)
 	s.store = store
 	s.Require().NoError(store.Ping(s.ctx))
 	s.Require().NoError(store.Migrate(s.ctx))
 	s.countEveryQuery()
-	s.other, err = OpenShards(Options{DSN: s.dsn, ShardDSN: peer, Shards: shards})
+	s.other, err = OpenShards(Options{DSN: s.dsn, ShardDSN: peer, Shard: "there", Shards: shards, Redis: s.redis()})
 	s.Require().NoError(err)
 	s.Require().NoError(s.other.Migrate(s.ctx))
 	s.base = time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
@@ -177,14 +179,16 @@ func (s *StoreSuite) emptyTables(db bun.IDB) {
 // SetupTest empties the tables one time in each database, and the store's keys in Redis. With
 // one database, the shard database and the shared database are the same database.
 func (s *StoreSuite) SetupTest() {
-	databases := s.store.shards()
+	s.emptyTables(s.store.shard)
 	if s.store.Sharded() {
-		databases = append(databases, s.store.global)
-	}
-	for _, db := range databases {
-		s.emptyTables(db)
+		s.emptyTables(s.store.global)
 	}
 	s.forgetRedis()
+}
+
+func (s *ShardedStoreSuite) SetupTest() {
+	s.StoreSuite.SetupTest()
+	s.emptyTables(s.other.shard)
 }
 
 func (s *StoreSuite) TestMigrateIsIdempotent() {
@@ -447,6 +451,21 @@ func (s *StoreSuite) TestAReleasedNumbersCallIsNotAttributedToItsFormerHolder() 
 	_, err := s.store.NumberByCallInApp(s.ctx, AppScope{Unpinned: true}, "default", "phone-+15125551234")
 
 	s.ErrorContains(err, "no number reaches call")
+}
+
+// shipStats ships this shard's stats as of now when its stats pages read what every shard ships,
+// as a sharded store's do, so a test reads one answer whichever suite runs it.
+func (s *StoreSuite) shipStats(now time.Time) {
+	if s.store.StatsShipped() {
+		s.Require().NoError(s.store.ShipStats(s.ctx, now))
+	}
+}
+
+// shipIndex is shipStats for the session and call lists.
+func (s *StoreSuite) shipIndex() {
+	if s.store.Indexed() {
+		s.Require().NoError(s.store.ShipIndex(s.ctx, time.Now()))
+	}
 }
 
 // onShard runs a statement on this shard's database, failing the test if it fails.
@@ -837,6 +856,7 @@ func (s *StoreSuite) TestDaysAreCutInUTCWhateverTheDatabaseSays() {
 	// the evening before in UTC.
 	morning := time.Date(2026, 3, 1, 1, 0, 0, 0, time.UTC)
 	s.opened("one", "acme", morning, nil)
+	s.shipStats(morning.Add(48 * time.Hour))
 
 	buckets, err := fresh.CustomerActivity(s.ctx, "acme", ActivityDaily, morning.Add(-48*time.Hour), morning.Add(48*time.Hour))
 

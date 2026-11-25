@@ -52,7 +52,7 @@ func TestAShardedWriterNeverWaitsOnCountingGrants(t *testing.T) {
 		require.NoError(t, db.Migrate(ctx))
 		require.NoError(t, db.Close())
 	}
-	db, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shards: map[string]string{"here": shard}})
+	db, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shard: "here"})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	grant := store.LimitGrant{OrganizationID: "org-" + uuid.NewString(), Subject: usage.SubjectOrganization,

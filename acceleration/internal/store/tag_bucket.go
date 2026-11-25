@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/uptrace/bun"
-
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -170,15 +168,11 @@ WHERE modality = ?1 AND customer_id = ?2
 GROUP BY modality, customer_id, tag_value, bucket
 ORDER BY bucket ASC, tag_value ASC`, f.Granularity.truncateUnit(), measured(""))
 
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]TagBucket, error) {
-		var buckets []TagBucket
-		err := db.NewRaw(query, f.Key, f.Modality, customerID, f.From, f.To).Scan(ctx, &buckets)
-		return buckets, err
-	})
-	if err != nil {
+	var buckets []TagBucket
+	if err := r.store.shard.NewRaw(query, f.Key, f.Modality, customerID, f.From, f.To).Scan(ctx, &buckets); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer tag stats: %w", err))
 	}
-	return mergeTagBuckets(lists), nil
+	return buckets, nil
 }
 
 // Shipped is Select read from the rollups every shard shipped to the shared database, as

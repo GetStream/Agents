@@ -1,13 +1,10 @@
 package store
 
 import (
-	"cmp"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
-	"slices"
-	"strings"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -79,6 +76,9 @@ type Call struct {
 	ReviewScore *int              `bun:"review_score"`
 	ReviewNotes string            `bun:"review_notes,nullzero"`
 	Tags        map[string]string `bun:"tags,type:jsonb,nullzero"`
+	// Region is the shard the call lives in, as a list read it; empty on a deployment of one
+	// unnamed shard, and on a row read any other way.
+	Region string `bun:"shard,scanonly"`
 }
 
 // Validate refuses a call no list could read back. An empty direction is the inbound one
@@ -240,33 +240,26 @@ func (r *Calls) Review(ctx context.Context, customerID, id, summary string, scor
 	type reviewed struct {
 		SessionID sql.NullString `bun:"session_id"`
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]reviewed, error) {
-		var calls []reviewed
-		_, err := db.NewUpdate().Model((*Call)(nil)).
-			Set("summary = ?", summary).
-			Set("review_score = ?", score).
-			Set("review_notes = ?", notes).
-			Where("id = ?", id).
-			Where("customer_id = ?", customerID).
-			Returning("session_id").
-			Exec(ctx, &calls)
-		return calls, err
-	})
+	var calls []reviewed
+	_, err := r.store.shard.NewUpdate().Model((*Call)(nil)).
+		Set("summary = ?", summary).
+		Set("review_score = ?", score).
+		Set("review_notes = ?", notes).
+		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
+		Returning("session_id").
+		Exec(ctx, &calls)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: review call: %w", err))
 	}
-	var sessions []string
-	found := false
-	for _, calls := range lists {
-		for _, call := range calls {
-			found = true
-			if call.SessionID.Valid {
-				sessions = append(sessions, call.SessionID.String)
-			}
-		}
-	}
-	if !found {
+	if len(calls) == 0 {
 		return unknownCall(id)
+	}
+	var sessions []string
+	for _, call := range calls {
+		if call.SessionID.Valid {
+			sessions = append(sessions, call.SessionID.String)
+		}
 	}
 	// The session carries the score too, so a session list filters and sorts on it without a
 	// join. A call whose session was deleted or never kept has nothing to write to, which is
@@ -274,13 +267,11 @@ func (r *Calls) Review(ctx context.Context, customerID, id, summary string, scor
 	if len(sessions) == 0 {
 		return nil
 	}
-	_, err = onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewUpdate().Model((*AgentSession)(nil)).
-			Set("review_score = ?", score).
-			Where("id IN (?)", bun.In(sessions)).
-			Where("customer_id = ?", customerID).
-			Exec(ctx)
-	})
+	_, err = r.store.shard.NewUpdate().Model((*AgentSession)(nil)).
+		Set("review_score = ?", score).
+		Where("id IN (?)", bun.In(sessions)).
+		Where("customer_id = ?", customerID).
+		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: review call: session score: %w", err))
 	}
@@ -293,15 +284,12 @@ func (r *Calls) Get(ctx context.Context, customerID, id string) (Call, error) {
 		return Call{}, stack.Wrap(errors.New("store: a customer and a call id are required"))
 	}
 
-	call, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (Call, error) {
-		var call Call
-		err := db.NewSelect().Model(&call).
-			Where("id = ?", id).
-			Where("customer_id = ?", customerID).
-			Limit(1).
-			Scan(ctx)
-		return call, err
-	})
+	var call Call
+	err := r.store.shard.NewSelect().Model(&call).
+		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
+		Limit(1).
+		Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Call{}, unknownCall(id)
 	}
@@ -309,6 +297,29 @@ func (r *Calls) Get(ctx context.Context, customerID, id string) (Call, error) {
 		return Call{}, stack.Wrap(fmt.Errorf("store: call: %w", err))
 	}
 	return call, nil
+}
+
+// Elsewhere is the shard a customer's call lives in when the shared copy of the lists says it
+// is another one, and empty when it is this one's, not shipped yet, or lists are not indexed.
+func (r *Calls) Elsewhere(ctx context.Context, customerID, id string) (string, error) {
+	if !r.store.Indexed() {
+		return "", nil
+	}
+	var shard string
+	err := r.store.global.NewSelect().TableExpr(indexedCalls.index).Column("shard").
+		Where("customer_id = ?", customerID).
+		Where("id = ?", id).
+		Scan(ctx, &shard)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", stack.Wrap(fmt.Errorf("store: call shard: %w", err))
+	}
+	if shard == r.store.ShardName() {
+		return "", nil
+	}
+	return shard, nil
 }
 
 // Latest is the newest call of each of a customer's sessions that held one, by session id.
@@ -321,16 +332,13 @@ func (r *Calls) Latest(ctx context.Context, customerID string, sessionIDs []stri
 	if len(sessionIDs) == 0 {
 		return latest, nil
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]Call, error) {
-		var calls []Call
-		err := db.NewSelect().Model(&calls).
+	lists, err := indexedLists(ctx, r.store, indexedCalls, customerID, func(query *bun.SelectQuery) *bun.SelectQuery {
+		return query.ColumnExpr("?TableColumns").
 			DistinctOn("c.session_id").
 			Where("c.customer_id = ?", customerID).
 			Where("c.session_id IN (?)", bun.In(sessionIDs)).
-			Order("c.session_id", "c.started_at DESC").
-			Scan(ctx)
-		return calls, err
-	})
+			Order("c.session_id", "c.started_at DESC")
+	}, callInRegion)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: latest calls: %w", err))
 	}
@@ -344,6 +352,9 @@ func (r *Calls) Latest(ctx context.Context, customerID string, sessionIDs []stri
 	return latest, nil
 }
 
+// callInRegion names the shard a call read from this one lives in.
+func callInRegion(call *Call, shard string) { call.Region = shard }
+
 // LastVoiced is the newest call of a session that was in a Stream call, which voice goes back
 // to once started again. ErrNoCall when voice was never started on it.
 func (r *Calls) LastVoiced(ctx context.Context, customerID, sessionID string) (Call, error) {
@@ -351,17 +362,14 @@ func (r *Calls) LastVoiced(ctx context.Context, customerID, sessionID string) (C
 		return Call{}, stack.Wrap(errors.New("store: a customer and a session id are required"))
 	}
 
-	call, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (Call, error) {
-		var call Call
-		err := db.NewSelect().Model(&call).
-			Where("c.customer_id = ?", customerID).
-			Where("c.session_id = ?", sessionID).
-			Where("c.call_id <> ''").
-			Order("c.started_at DESC").
-			Limit(1).
-			Scan(ctx)
-		return call, err
-	})
+	var call Call
+	err := r.store.shard.NewSelect().Model(&call).
+		Where("c.customer_id = ?", customerID).
+		Where("c.session_id = ?", sessionID).
+		Where("c.call_id <> ''").
+		Order("c.started_at DESC").
+		Limit(1).
+		Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Call{}, unknownCall(sessionID)
 	}
@@ -373,21 +381,8 @@ func (r *Calls) LastVoiced(ctx context.Context, customerID, sessionID string) (C
 
 // Select returns a customer's calls, newest first.
 func (r *Calls) Select(ctx context.Context, customerID string, filter CallFilter) ([]Call, error) {
-	calls, missed, err := r.SelectReachable(ctx, customerID, filter)
-	if err != nil {
-		return nil, err
-	}
-	if missed != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: customer calls: %w", missed))
-	}
-	return calls, nil
-}
-
-// SelectReachable is Select from the shards that answer, and names the others: a page of calls
-// that one region being down leaves without its calls, rather than with none.
-func (r *Calls) SelectReachable(ctx context.Context, customerID string, filter CallFilter) ([]Call, *ShardsFailed, error) {
 	if customerID == "" {
-		return nil, nil, stack.Wrap(errCustomerRequired)
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	limit := filter.Limit
@@ -398,40 +393,38 @@ func (r *Calls) SelectReachable(ctx context.Context, customerID string, filter C
 		limit = maxCallLimit
 	}
 
-	lists, missed, err := reachableShards(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]Call, error) {
-		query := db.NewSelect().Model((*Call)(nil)).
-			Where("customer_id = ?", customerID).
-			Order("started_at DESC").
+	lists, err := indexedLists(ctx, r.store, indexedCalls, customerID, func(query *bun.SelectQuery) *bun.SelectQuery {
+		query = query.ColumnExpr("?TableColumns").
+			Where("c.customer_id = ?", customerID).
+			Order("c.started_at DESC").
 			Limit(limit)
 		if filter.AgentID != "" {
-			query = query.Where("agent_id = ?", filter.AgentID)
+			query = query.Where("c.agent_id = ?", filter.AgentID)
 		}
 		if filter.SessionID != "" {
-			query = query.Where("session_id = ?", filter.SessionID)
+			query = query.Where("c.session_id = ?", filter.SessionID)
 		}
 		if filter.CampaignID != "" {
-			query = query.Where("campaign_id = ?", filter.CampaignID)
+			query = query.Where("c.campaign_id = ?", filter.CampaignID)
 		}
 		if filter.Running {
-			query = query.Where("ended_at IS NULL")
+			query = query.Where("c.ended_at IS NULL")
 		}
 		if !filter.From.IsZero() {
-			query = query.Where("started_at >= ?", filter.From)
+			query = query.Where("c.started_at >= ?", filter.From)
 		}
 		if !filter.To.IsZero() {
-			query = query.Where("started_at < ?", filter.To)
+			query = query.Where("c.started_at < ?", filter.To)
 		}
 		if filter.MaxReviewScore > 0 {
-			query = query.Where("review_score <= ?", filter.MaxReviewScore)
+			query = query.Where("c.review_score <= ?", filter.MaxReviewScore)
 		}
-		var calls []Call
-		err := query.Scan(ctx, &calls)
-		return calls, err
-	})
+		return query
+	}, callInRegion)
 	if err != nil {
-		return nil, nil, stack.Wrap(fmt.Errorf("store: customer calls: %w", err))
+		return nil, stack.Wrap(fmt.Errorf("store: customer calls: %w", err))
 	}
-	return merged(lists, func(a, b Call) int { return b.StartedAt.Compare(a.StartedAt) }, limit), missed, nil
+	return merged(lists, func(a, b Call) int { return b.StartedAt.Compare(a.StartedAt) }, limit), nil
 }
 
 // ModelCalls returns every model response in one call, including flow and delegated
@@ -440,29 +433,23 @@ func (r *Calls) ModelCalls(ctx context.Context, customerID, agentID, callID stri
 	if customerID == "" || agentID == "" {
 		return nil, stack.Wrap(errors.New("store: a customer and an agent id are required"))
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]Request, error) {
-		query := db.NewSelect().Model((*Request)(nil)).
-			Where("customer_id = ?", customerID).
-			Where("agent_id = ?", agentID).
-			Where("modality = ?", "llm").
-			Where("started_at >= ?", from).
-			Order("started_at ASC", "id ASC")
-		if callID != "" {
-			query = query.Where("call_id = ?", callID)
-		}
-		if to != nil {
-			query = query.Where("started_at <= ?", *to)
-		}
-		var requests []Request
-		err := query.Scan(ctx, &requests)
-		return requests, err
-	})
-	if err != nil {
+	query := r.store.shard.NewSelect().Model((*Request)(nil)).
+		Where("customer_id = ?", customerID).
+		Where("agent_id = ?", agentID).
+		Where("modality = ?", "llm").
+		Where("started_at >= ?", from).
+		Order("started_at ASC", "id ASC")
+	if callID != "" {
+		query = query.Where("call_id = ?", callID)
+	}
+	if to != nil {
+		query = query.Where("started_at <= ?", *to)
+	}
+	var requests []Request
+	if err := query.Scan(ctx, &requests); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: call model calls: %w", err))
 	}
-	return merged(lists, func(a, b Request) int {
-		return cmp.Or(a.StartedAt.Compare(b.StartedAt), cmp.Compare(a.ID, b.ID))
-	}, 0), nil
+	return requests, nil
 }
 
 // UsedModel is a provider/model that successfully served a call.
@@ -480,36 +467,21 @@ func (r *Calls) UsedModels(ctx context.Context, customerID, agentID string, from
 		return nil, stack.Wrap(errors.New("store: a customer and an agent id are required"))
 	}
 
-	type usedAt struct {
-		UsedModel
-		LastUsed time.Time `bun:"last_used"`
+	query := r.store.shard.NewSelect().
+		TableExpr("requests").
+		ColumnExpr("modality, provider, model").
+		Where("customer_id = ?", customerID).
+		Where("agent_id = ?", agentID).
+		Where("success").
+		Where("started_at >= ?", from).
+		Group("modality", "provider", "model").
+		OrderExpr("MAX(started_at) DESC")
+	if to != nil {
+		query = query.Where("started_at <= ?", *to)
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]usedAt, error) {
-		query := db.NewSelect().
-			TableExpr("requests").
-			ColumnExpr("modality, provider, model, MAX(started_at) AS last_used").
-			Where("customer_id = ?", customerID).
-			Where("agent_id = ?", agentID).
-			Where("success").
-			Where("started_at >= ?", from).
-			Group("modality", "provider", "model").
-			OrderExpr("MAX(started_at) DESC")
-		if to != nil {
-			query = query.Where("started_at <= ?", *to)
-		}
-		var used []usedAt
-		err := query.Scan(ctx, &used)
-		return used, err
-	})
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: call used models: %w", err))
-	}
-
-	all := distinct(merged(lists, func(a, b usedAt) int { return b.LastUsed.Compare(a.LastUsed) }, 0),
-		func(u usedAt) string { return u.Modality + "\x00" + u.Provider + "\x00" + u.Model })
 	var used []UsedModel
-	for _, model := range all {
-		used = append(used, model.UsedModel)
+	if err := query.Scan(ctx, &used); err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: call used models: %w", err))
 	}
 	return used, nil
 }
@@ -567,35 +539,23 @@ func (r *Calls) Usage(ctx context.Context, customerID, agentID, sessionID string
 		return CallUsage{}, stack.Wrap(errors.New("store: a customer and an agent id are required"))
 	}
 
-	answers, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (CallUsage, error) {
-		query := db.NewSelect().
-			TableExpr("requests").
-			ColumnExpr("COALESCE(SUM(input_tokens), 0) AS input_tokens").
-			ColumnExpr("COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens").
-			ColumnExpr("COALESCE(SUM(output_tokens), 0) AS output_tokens").
-			ColumnExpr("COALESCE(SUM(cost_micros), 0) AS cost_micros").
-			ColumnExpr(requestCount+" AS requests").
-			Where("customer_id = ?", customerID).
-			Where("agent_id = ?", agentID).
-			Where(sessionFilter(sessionID), sessionID).
-			Where("started_at >= ?", from)
-		if to != nil {
-			query = query.Where("started_at <= ?", *to)
-		}
-		var spent CallUsage
-		err := query.Scan(ctx, &spent)
-		return spent, err
-	})
-	if err != nil {
-		return CallUsage{}, stack.Wrap(fmt.Errorf("store: call usage: %w", err))
+	query := r.store.shard.NewSelect().
+		TableExpr("requests").
+		ColumnExpr("COALESCE(SUM(input_tokens), 0) AS input_tokens").
+		ColumnExpr("COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens").
+		ColumnExpr("COALESCE(SUM(output_tokens), 0) AS output_tokens").
+		ColumnExpr("COALESCE(SUM(cost_micros), 0) AS cost_micros").
+		ColumnExpr(requestCount+" AS requests").
+		Where("customer_id = ?", customerID).
+		Where("agent_id = ?", agentID).
+		Where(sessionFilter(sessionID), sessionID).
+		Where("started_at >= ?", from)
+	if to != nil {
+		query = query.Where("started_at <= ?", *to)
 	}
 	var spent CallUsage
-	for _, answer := range answers {
-		spent.InputTokens += answer.InputTokens
-		spent.CachedInputTokens += answer.CachedInputTokens
-		spent.OutputTokens += answer.OutputTokens
-		spent.CostMicros += answer.CostMicros
-		spent.Requests += answer.Requests
+	if err := query.Scan(ctx, &spent); err != nil {
+		return CallUsage{}, stack.Wrap(fmt.Errorf("store: call usage: %w", err))
 	}
 	return spent, nil
 }
@@ -623,74 +583,33 @@ func (r *Calls) Tokens(ctx context.Context, customerID, agentID, sessionID strin
 		return nil, stack.Wrap(errors.New("store: a customer and an agent id are required"))
 	}
 
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]ModelTokens, error) {
-		query := db.NewSelect().
-			TableExpr("requests").
-			ColumnExpr("modality, provider, model").
-			ColumnExpr("COALESCE(SUM(input_tokens), 0) AS input_tokens").
-			ColumnExpr("COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens").
-			ColumnExpr("COALESCE(SUM(output_tokens), 0) AS output_tokens").
-			ColumnExpr("COALESCE(SUM(cost_micros), 0) AS cost_micros").
-			ColumnExpr("COALESCE(SUM(output_cost_micros), 0) AS output_cost_micros").
-			ColumnExpr(requestCount+" AS requests").
-			ColumnExpr("COALESCE(SUM(input_instruction_tokens), 0) AS input_instruction_tokens").
-			ColumnExpr("COALESCE(SUM(input_message_tokens), 0) AS input_message_tokens").
-			ColumnExpr("COALESCE(SUM(input_tool_definition_tokens), 0) AS input_tool_definition_tokens").
-			ColumnExpr("COALESCE(SUM(input_tool_use_tokens), 0) AS input_tool_use_tokens").
-			ColumnExpr("COALESCE(SUM(input_image_tokens), 0) AS input_image_tokens").
-			ColumnExpr("COALESCE(SUM(input_video_tokens), 0) AS input_video_tokens").
-			Where("customer_id = ?", customerID).
-			Where("agent_id = ?", agentID).
-			Where(sessionFilter(sessionID), sessionID).
-			Where("started_at >= ?", from).
-			Group("modality", "provider", "model").
-			OrderExpr("SUM(input_tokens + output_tokens) DESC, provider, model")
-		if to != nil {
-			query = query.Where("started_at <= ?", *to)
-		}
-		var used []ModelTokens
-		err := query.Scan(ctx, &used)
-		return used, err
-	})
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: call tokens: %w", err))
-	}
-	if len(lists) == 1 {
-		return lists[0], nil
-	}
-
-	var order []string
-	sums := map[string]*ModelTokens{}
-	for _, list := range lists {
-		for _, m := range list {
-			key := m.Modality + "\x00" + m.Provider + "\x00" + m.Model
-			sum := sums[key]
-			if sum == nil {
-				sum = &ModelTokens{Modality: m.Modality, Provider: m.Provider, Model: m.Model}
-				sums[key] = sum
-				order = append(order, key)
-			}
-			sum.InputTokens += m.InputTokens
-			sum.CachedInputTokens += m.CachedInputTokens
-			sum.OutputTokens += m.OutputTokens
-			sum.CostMicros += m.CostMicros
-			sum.OutputCostMicros += m.OutputCostMicros
-			sum.Requests += m.Requests
-			sum.InputParts.InstructionTokens += m.InputParts.InstructionTokens
-			sum.InputParts.MessageTokens += m.InputParts.MessageTokens
-			sum.InputParts.ToolDefinitionTokens += m.InputParts.ToolDefinitionTokens
-			sum.InputParts.ToolUseTokens += m.InputParts.ToolUseTokens
-			sum.InputParts.ImageTokens += m.InputParts.ImageTokens
-			sum.InputParts.VideoTokens += m.InputParts.VideoTokens
-		}
+	query := r.store.shard.NewSelect().
+		TableExpr("requests").
+		ColumnExpr("modality, provider, model").
+		ColumnExpr("COALESCE(SUM(input_tokens), 0) AS input_tokens").
+		ColumnExpr("COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens").
+		ColumnExpr("COALESCE(SUM(output_tokens), 0) AS output_tokens").
+		ColumnExpr("COALESCE(SUM(cost_micros), 0) AS cost_micros").
+		ColumnExpr("COALESCE(SUM(output_cost_micros), 0) AS output_cost_micros").
+		ColumnExpr(requestCount+" AS requests").
+		ColumnExpr("COALESCE(SUM(input_instruction_tokens), 0) AS input_instruction_tokens").
+		ColumnExpr("COALESCE(SUM(input_message_tokens), 0) AS input_message_tokens").
+		ColumnExpr("COALESCE(SUM(input_tool_definition_tokens), 0) AS input_tool_definition_tokens").
+		ColumnExpr("COALESCE(SUM(input_tool_use_tokens), 0) AS input_tool_use_tokens").
+		ColumnExpr("COALESCE(SUM(input_image_tokens), 0) AS input_image_tokens").
+		ColumnExpr("COALESCE(SUM(input_video_tokens), 0) AS input_video_tokens").
+		Where("customer_id = ?", customerID).
+		Where("agent_id = ?", agentID).
+		Where(sessionFilter(sessionID), sessionID).
+		Where("started_at >= ?", from).
+		Group("modality", "provider", "model").
+		OrderExpr("SUM(input_tokens + output_tokens) DESC, provider, model")
+	if to != nil {
+		query = query.Where("started_at <= ?", *to)
 	}
 	var used []ModelTokens
-	for _, key := range order {
-		used = append(used, *sums[key])
+	if err := query.Scan(ctx, &used); err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: call tokens: %w", err))
 	}
-	slices.SortStableFunc(used, func(a, b ModelTokens) int {
-		return cmp.Or(cmp.Compare(b.InputTokens+b.OutputTokens, a.InputTokens+a.OutputTokens),
-			strings.Compare(a.Provider, b.Provider), strings.Compare(a.Model, b.Model))
-	})
 	return used, nil
 }

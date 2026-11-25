@@ -99,7 +99,11 @@ type Config struct {
 	// Shard names the part of a deployment this router is in, when its calls are kept apart
 	// from what every part shares (see Postgres.ShardDSN and Redis.Shard). Empty is a
 	// deployment of one part.
-	Shard      string     `koanf:"shard"`
+	Shard string `koanf:"shard"`
+	// Shards names every shard of the deployment, this one's included. No shard opens
+	// another's database: they agree on the list (node:shards) and each runs its part of the
+	// work queued for all of them.
+	Shards     []string   `koanf:"shards"`
 	Postgres   Postgres   `koanf:"postgres"`
 	Redis      Redis      `koanf:"redis"`
 	Node       Node       `koanf:"node"`
@@ -250,9 +254,6 @@ type Postgres struct {
 	// ShardDSN is where this shard writes the calls, sessions and requests it runs. Empty
 	// writes them to DSN.
 	ShardDSN string `koanf:"shard_dsn"`
-	// Shards is every shard's DSN by name, this one's included, which reads of calls,
-	// sessions and requests cover. Empty reads this shard's alone.
-	Shards map[string]string `koanf:"shards"`
 	// MigrateDSN is DSN's database as the role that owns its schema, which router migrate
 	// connects with. Set, every other command checks the schema and never changes it. Empty
 	// migrates with DSN on every start.
@@ -618,9 +619,9 @@ var variables = map[string]string{
 	"pprof_addr":           "ROUTER_PPROF_ADDR",
 	"metrics_addr":         "ROUTER_METRICS_ADDR",
 	"shard":                "ROUTER_SHARD",
+	"shards":               "ROUTER_SHARDS",
 	"postgres.dsn":         "ROUTER_POSTGRES_DSN",
 	"postgres.shard_dsn":   "ROUTER_POSTGRES_SHARD_DSN",
-	"postgres.shards":      "ROUTER_POSTGRES_SHARDS",
 	"redis.addr":           "ROUTER_REDIS_ADDR",
 	"redis.username":       "ROUTER_REDIS_USERNAME",
 	"redis.password":       "ROUTER_REDIS_PASSWORD",
@@ -724,11 +725,11 @@ var variables = map[string]string{
 }
 
 // lists are the settings written as a comma-separated variable and as a sequence in YAML.
-var lists = map[string]bool{"trusted_proxies": true, "chat.inbound_keys": true}
+var lists = map[string]bool{"trusted_proxies": true, "chat.inbound_keys": true, "shards": true}
 
 // pairs are the settings written as a comma-separated variable of name=value and as a
 // mapping in YAML.
-var pairs = map[string]bool{"postgres.shards": true, "knowledge.regions": true, "code_sandbox.targets": true,
+var pairs = map[string]bool{"knowledge.regions": true, "code_sandbox.targets": true,
 	"shard_routing.countries": true, "shard_routing.regions": true}
 
 // countryCode is an ISO 3166-1 alpha-2 country code, as phone_numbers.country holds it.
@@ -849,6 +850,12 @@ func Load(path string) (Config, string, error) {
 	if k.Exists("auth.kek") {
 		return Config{}, "", fmt.Errorf("config: %s: auth.kek is no longer read: set ROUTER_DEV_KEK on a laptop "+
 			"or in CI, or ROUTER_AUTH_KEK_V1_WRAPPED with auth.kms_key on a hosted router", name)
+	}
+	// A router that still reads it would open every other shard's database.
+	if os.Getenv("ROUTER_POSTGRES_SHARDS") != "" || k.Exists("postgres.shards") {
+		return Config{}, "", fmt.Errorf("config: %s: postgres.shards (ROUTER_POSTGRES_SHARDS) is no longer read, since no shard "+
+			"opens another's database: set shards (ROUTER_SHARDS) to every shard's name, this one's included, such as "+
+			"us-east4,europe-west4, and keep this shard's own DSN in postgres.shard_dsn (ROUTER_POSTGRES_SHARD_DSN)", name)
 	}
 	if os.Getenv("ROUTER_CHORUS_ASR_MODE") != "" || k.Exists("agent.chorus_asr_mode") {
 		config.Retired = append(config.Retired, chorusASRModeRetired)
@@ -1231,22 +1238,23 @@ func (c Config) validateShard() error {
 	if c.Redis.Shard.Addr != "" && c.Redis.Addr == "" {
 		return errors.New("config: redis.shard.addr is a shard's half of redis.addr: set redis.addr")
 	}
-	if len(c.Postgres.Shards) == 0 {
+	if len(c.Shards) == 0 {
 		if c.Postgres.ShardDSN != "" {
-			return errors.New("config: postgres.shard_dsn writes calls where readers only look if postgres.shards lists it: " +
-				"set postgres.shards to every shard, this one's included")
+			return errors.New("config: postgres.shard_dsn keeps this shard's calls apart, and every shard runs its part of " +
+				"the work queued for all of them only if shards lists it: set shards (ROUTER_SHARDS) to every shard's name, " +
+				"this one's included")
 		}
 		return nil
 	}
 	if c.Shard == "" {
-		return errors.New("config: postgres.shards names every shard: set shard to this one's name")
+		return errors.New("config: shards (ROUTER_SHARDS) names every shard: set shard (ROUTER_SHARD) to this one's name")
 	}
-	own, listed := c.Postgres.Shards[c.Shard]
-	if !listed {
-		return fmt.Errorf("config: postgres.shards does not list this shard, %q", c.Shard)
+	if !slices.Contains(c.Shards, c.Shard) {
+		return fmt.Errorf("config: shards (ROUTER_SHARDS) does not list this shard, %q", c.Shard)
 	}
-	if own != c.Postgres.ShardDSN {
-		return fmt.Errorf("config: postgres.shards lists shard %q at another DSN than postgres.shard_dsn", c.Shard)
+	if c.Usage.URL == "" {
+		return errors.New("config: a deployment of shards counts spend against limits in the usage service, " +
+			"since no shard reads another's requests: set usage.url (ROUTER_USAGE_URL)")
 	}
 	return nil
 }
@@ -1298,9 +1306,9 @@ func (c Config) export() error {
 		"pprof_addr":                    c.PprofAddr,
 		"metrics_addr":                  c.MetricsAddr,
 		"shard":                         c.Shard,
+		"shards":                        strings.Join(c.Shards, ","),
 		"postgres.dsn":                  c.Postgres.DSN,
 		"postgres.shard_dsn":            c.Postgres.ShardDSN,
-		"postgres.shards":               joinPairs(c.Postgres.Shards),
 		"postgres.migrate_dsn":          c.Postgres.MigrateDSN,
 		"postgres.shard_migrate_dsn":    c.Postgres.ShardMigrateDSN,
 		"redis.addr":                    c.Redis.Addr,

@@ -680,22 +680,16 @@ func (r *Requests) Reship(ctx context.Context, since time.Time, rejected bool) (
 	}
 }
 
-// CountByUser is how many requests on every shard name an app's end user.
+// CountByUser is how many requests on this shard name an app's end user.
 func (r *Requests) CountByUser(ctx context.Context, appID, userID string) (int64, error) {
-	counts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int, error) {
-		return db.NewSelect().Model((*Request)(nil)).Where("customer_id = ?", appID).Where("user_id = ?", userID).Count(ctx)
-	})
+	count, err := r.store.shard.NewSelect().Model((*Request)(nil)).Where("customer_id = ?", appID).Where("user_id = ?", userID).Count(ctx)
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: user requests: %w", err))
 	}
-	var total int64
-	for _, count := range counts {
-		total += int64(count)
-	}
-	return total, nil
+	return int64(count), nil
 }
 
-// RenameUser replaces an app's end user id with replacement on every shard's requests,
+// RenameUser replaces an app's end user id with replacement on this shard's requests,
 // writeBatch of them per statement, and in the changes recorded of those requests in the same
 // statement (renamedChanges). Then it does the same from the changes left that name the user: of
 // requests deleted, no longer theirs, or recorded since. It answers how many rows it rewrote. A
@@ -707,56 +701,47 @@ func (r *Requests) RenameUser(ctx context.Context, appID, userID, replacement st
 		// Nothing to rewrite, and every batch would match the rows it just wrote.
 		return 0, nil
 	}
-	counts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int64, error) {
-		var renamed int64
-		for _, left := range []*bun.SelectQuery{
-			db.NewSelect().Model((*Request)(nil)).Column("id").
-				Where("customer_id = ?", appID).Where("user_id = ?", userID).Limit(writeBatch),
-			db.NewSelect().Model((*dataChange)(nil)).ColumnExpr("(payload->>'id')::bigint").
-				Where("customer_id = ? AND table_name = 'requests' AND payload->>'user_id' = ?", appID, userID).Limit(writeBatch),
-		} {
-			for {
-				// Read first and sent as literals: the planner expects few values of a subquery's
-				// array, and then compares each of the user's changes with all of them.
-				var ids []int64
-				if err := left.Scan(ctx, &ids); err != nil {
-					return renamed, err
-				}
-				if len(ids) == 0 {
-					break
-				}
-				named := make([]string, len(ids))
-				for i, id := range ids {
-					named[i] = strconv.FormatInt(id, 10)
-				}
-				// One statement, so a request and its changes name one user whenever it stops. A
-				// data-modifying WITH runs to the end whether or not the statement reads it.
-				changes := renamedChanges(db, appID, "requests", userID, replacement).
-					Where("payload->>'id' = ANY (?)", pgdialect.Array(named))
-				result, err := db.NewUpdate().With("changes", changes).Model((*Request)(nil)).Set("user_id = ?", replacement).
-					Where("id = ANY (?)", pgdialect.Array(ids)).
-					Where("customer_id = ? AND user_id = ?", appID, userID).Exec(ctx)
-				if err != nil {
-					return renamed, err
-				}
-				n, err := result.RowsAffected()
-				renamed += n
-				if err != nil {
-					return renamed, err
-				}
-				if len(ids) < writeBatch {
-					break
-				}
+	db := r.store.shard
+	var renamed int64
+	for _, left := range []*bun.SelectQuery{
+		db.NewSelect().Model((*Request)(nil)).Column("id").
+			Where("customer_id = ?", appID).Where("user_id = ?", userID).Limit(writeBatch),
+		db.NewSelect().Model((*dataChange)(nil)).ColumnExpr("(payload->>'id')::bigint").
+			Where("customer_id = ? AND table_name = 'requests' AND payload->>'user_id' = ?", appID, userID).Limit(writeBatch),
+	} {
+		for {
+			// Read first and sent as literals: the planner expects few values of a subquery's
+			// array, and then compares each of the user's changes with all of them.
+			var ids []int64
+			if err := left.Scan(ctx, &ids); err != nil {
+				return renamed, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
+			}
+			if len(ids) == 0 {
+				break
+			}
+			named := make([]string, len(ids))
+			for i, id := range ids {
+				named[i] = strconv.FormatInt(id, 10)
+			}
+			// One statement, so a request and its changes name one user whenever it stops. A
+			// data-modifying WITH runs to the end whether or not the statement reads it.
+			changes := renamedChanges(db, appID, "requests", userID, replacement).
+				Where("payload->>'id' = ANY (?)", pgdialect.Array(named))
+			result, err := db.NewUpdate().With("changes", changes).Model((*Request)(nil)).Set("user_id = ?", replacement).
+				Where("id = ANY (?)", pgdialect.Array(ids)).
+				Where("customer_id = ? AND user_id = ?", appID, userID).Exec(ctx)
+			if err != nil {
+				return renamed, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
+			}
+			n, err := result.RowsAffected()
+			renamed += n
+			if err != nil {
+				return renamed, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
+			}
+			if len(ids) < writeBatch {
+				break
 			}
 		}
-		return renamed, nil
-	})
-	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
-	}
-	var renamed int64
-	for _, count := range counts {
-		renamed += count
 	}
 	return renamed, nil
 }
@@ -859,29 +844,24 @@ func (r *Requests) Spend(
 	narrowed, narrowing := who.where()
 	args = append(args, narrowing...)
 
-	// Each shard's groups unfolded, and the biggest picked over all of them: a group too small
-	// to keep in one shard may be the biggest once the others are added.
+	source := r.store.spendRows()
 	query := fmt.Sprintf(`
 SELECT
     date_trunc('%s', started_at, 'UTC') AS bucket,
     %s AS value,
     COALESCE(SUM(cost_micros), 0) AS cost_micros_total,
     %s AS request_count
-FROM requests%s
+FROM %s%s
 WHERE %s
   AND started_at >= ? AND started_at < ?
   AND tags @> ?::jsonb%s
-GROUP BY 1, 2`, granularity.truncateUnit(), valueExpr, requestCount, join, scope, narrowed)
+GROUP BY 1, 2`, granularity.truncateUnit(), valueExpr, source.requests, source.table, join, scope, narrowed)
 
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]spendRow, error) {
-		var rows []spendRow
-		err := db.NewRaw(query, args...).Scan(ctx, &rows)
-		return rows, err
-	})
-	if err != nil {
+	var rows []spendRow
+	if err := source.db.NewRaw(query, args...).Scan(ctx, &rows); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer spend: %w", err))
 	}
-	return foldSpend(lists, limit), nil
+	return foldSpend([][]spendRow{rows}, limit), nil
 }
 
 // tagValueRow is what one value of one cost label key was spent on.
@@ -925,62 +905,43 @@ func (r *Requests) TagKeys(
 		rows, total int64
 		values      []tagValueRow
 	}
-	answers, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (shardTags, error) {
-		var read shardTags
-		err := db.NewSelect().
-			Table("requests").
-			ColumnExpr("COUNT(*)").
-			ColumnExpr(requestCount).
-			Where("customer_id = ?", customerID).
-			Where("started_at >= ?", from).
-			Where("started_at < ?", to).
-			Where("tags @> ?::jsonb", string(filter)).
-			Scan(ctx, &read.rows, &read.total)
-		if err != nil || read.rows == 0 {
-			return read, err
-		}
-		err = db.NewSelect().Model((*Request)(nil)).
-			ColumnExpr("tag.key AS key, tag.value AS value").
-			ColumnExpr("SUM(r.cost_micros) AS cost_micros_total").
-			ColumnExpr(requestCount+" AS request_count").
-			Join("CROSS JOIN LATERAL jsonb_each_text(r.tags) AS tag(key, value)").
-			Where("r.customer_id = ?", customerID).
-			Where("r.started_at >= ? AND r.started_at < ?", from, to).
-			Where("r.tags @> ?::jsonb", string(filter)).
-			Group("tag.key", "tag.value").
-			Scan(ctx, &read.values)
-		return read, err
-	})
+	source := r.store.spendRows()
+	var rows, total int64
+	err = source.db.NewSelect().
+		TableExpr(source.table).
+		ColumnExpr(source.rows).
+		ColumnExpr(source.requests).
+		Where("customer_id = ?", customerID).
+		Where("started_at >= ?", from).
+		Where("started_at < ?", to).
+		Where("tags @> ?::jsonb", string(filter)).
+		Scan(ctx, &rows, &total)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer tag keys: %w", err))
 	}
-
-	var rows, total int64
-	type valueKey struct{ key, value string }
-	var order []valueKey
-	values := map[valueKey]*tagValueRow{}
-	for _, answer := range answers {
-		rows += answer.rows
-		total += answer.total
-		for _, row := range answer.values {
-			k := valueKey{row.Key, row.Value}
-			if values[k] == nil {
-				values[k] = &tagValueRow{Key: row.Key, Value: row.Value}
-				order = append(order, k)
-			}
-			values[k].CostMicrosTotal += row.CostMicrosTotal
-			values[k].RequestCount += row.RequestCount
-		}
-	}
 	if rows == 0 {
 		return nil, nil
+	}
+	var values []tagValueRow
+	err = source.db.NewSelect().TableExpr(source.table+" AS r").
+		ColumnExpr("tag.key AS key, tag.value AS value").
+		ColumnExpr("SUM(r.cost_micros) AS cost_micros_total").
+		ColumnExpr(source.requests+" AS request_count").
+		Join("CROSS JOIN LATERAL jsonb_each_text(r.tags) AS tag(key, value)").
+		Where("r.customer_id = ?", customerID).
+		Where("r.started_at >= ? AND r.started_at < ?", from, to).
+		Where("r.tags @> ?::jsonb", string(filter)).
+		Group("tag.key", "tag.value").
+		OrderExpr("tag.key, tag.value").
+		Scan(ctx, &values)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: customer tag keys: %w", err))
 	}
 
 	byKey := map[string]*TagKeySummary{}
 	ranked := map[string][]tagValueRow{}
 	var keys []string
-	for _, k := range order {
-		row := *values[k]
+	for _, row := range values {
 		summary := byKey[row.Key]
 		if summary == nil {
 			summary = &TagKeySummary{Key: row.Key}
@@ -1043,27 +1004,23 @@ func (r *Requests) CountByModel(ctx context.Context, modality string, since time
 		Model    string `bun:"model"`
 		Requests int64  `bun:"requests"`
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]modelRow, error) {
-		var rows []modelRow
-		err := db.NewSelect().
-			Table("requests").
-			Column("provider", "model").
-			ColumnExpr("COUNT(*) AS requests").
-			Where("modality = ?", modality).
-			Where("started_at >= ?", since).
-			Group("provider", "model").
-			Scan(ctx, &rows)
-		return rows, err
-	})
+	source := r.store.spendRows()
+	var rows []modelRow
+	err := source.db.NewSelect().
+		TableExpr(source.table).
+		Column("provider", "model").
+		ColumnExpr(source.rows+" AS requests").
+		Where("modality = ?", modality).
+		Where("started_at >= ?", since).
+		Group("provider", "model").
+		Scan(ctx, &rows)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: model requests: %w", err))
 	}
 
 	counts := map[string]int64{}
-	for _, rows := range lists {
-		for _, row := range rows {
-			counts[row.Provider+"/"+row.Model] += row.Requests
-		}
+	for _, row := range rows {
+		counts[row.Provider+"/"+row.Model] += row.Requests
 	}
 	return counts, nil
 }
@@ -1085,40 +1042,20 @@ FROM (
 ) AS reported
 WHERE vendor > 0`
 
-// VendorCostGaps reads, over every shard, the rows since a time whose vendor reported what it
-// charged, per model, with up to widest of the rows whose gap is widest. Each shard is read
-// once, in a read-only transaction that gives up after timeout: the read takes every row
-// since then off requests_started_idx, and a large shard must not hold a connection for long.
+// VendorCostGaps reads this shard's rows since a time whose vendor reported what it charged,
+// per model, with up to widest of the rows whose gap is widest; it is run in each region. The
+// shard is read once, in a read-only transaction that gives up after timeout: the read takes
+// every row since then off requests_started_idx, and a large shard must not hold a connection
+// for long.
 func (r *Requests) VendorCostGaps(ctx context.Context, since time.Time, widest int, timeout time.Duration) ([]VendorCostModel, error) {
-	shards, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]VendorCostModel, error) {
-		return vendorCostGaps(ctx, db, since, widest, timeout)
-	})
+	models, err := vendorCostGaps(ctx, r.store.shard, since, widest, timeout)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: vendor cost gaps: %w", err))
 	}
-	byModel := map[string]*VendorCostModel{}
-	var order []string
-	for _, models := range shards {
-		for _, model := range models {
-			key := model.Modality + "/" + model.Provider + "/" + model.Model
-			found, ok := byModel[key]
-			if !ok {
-				found = &VendorCostModel{Modality: model.Modality, Provider: model.Provider, Model: model.Model}
-				byModel[key] = found
-				order = append(order, key)
-			}
-			found.Gaps = append(found.Gaps, model.Gaps...)
-			found.Widest = append(found.Widest, model.Widest...)
-		}
-	}
-	slices.Sort(order)
-	merged := make([]VendorCostModel, 0, len(order))
-	for _, key := range order {
-		model := byModel[key]
-		model.Widest = widestOf(model.Widest, widest)
-		merged = append(merged, *model)
-	}
-	return merged, nil
+	slices.SortFunc(models, func(a, b VendorCostModel) int {
+		return strings.Compare(a.Modality+"/"+a.Provider+"/"+a.Model, b.Modality+"/"+b.Provider+"/"+b.Model)
+	})
+	return models, nil
 }
 
 // widestOf is the rows with the widest gaps, widest first, at most n of them; ties go to the
