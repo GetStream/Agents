@@ -169,14 +169,15 @@ func (s *SimulationsSuite) TestTheLogOfRunsIsNotOneOfTheRuns() {
 
 func (s *SimulationsSuite) TestAListOfRunsIsAskedForUpToFiveHundred() {
 	created := s.createSimulation(s.against(s.data.createAgentConfig()))
-	started := s.run(created.Id)
+	s.run(created.Id)
+	newest := s.run(created.Id)
 
-	for _, limit := range []string{"1", "500"} {
+	for limit, held := range map[string]int{"1": 1, "500": 2} {
 		var log []SimulationRun
 		s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
 			"/v1/agents/simulation-runs?simulation_id="+created.Id+"&limit="+limit, nil, &log))
-		s.Require().Len(log, 1)
-		s.Equal(started.Id, log[0].Id)
+		s.Require().Len(log, held, limit)
+		s.Equal(newest.Id, log[0].Id, "newest first")
 	}
 	for _, limit := range []string{"0", "-1", "501", "1000000000"} {
 		status, answered := s.serverClient.failure(http.MethodGet, "/v1/agents/simulation-runs?limit="+limit, nil)

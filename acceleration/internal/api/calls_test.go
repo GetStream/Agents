@@ -324,15 +324,20 @@ func (s *CallsSuite) TestWhatACallDecidedIsFoundByTheRowRecordingIt() {
 
 func (s *CallsSuite) TestDecisionsAreAskedForUpToTheTenThousandACallKeeps() {
 	call := s.started(store.Call{StartedAt: time.Now().Add(-time.Minute)})
-	s.Require().NoError(s.store.CallEvents.InsertMany(context.Background(), []store.CallEvent{{
-		CustomerID: s.customerID(), CallID: call.CallID, AgentID: call.AgentID, At: time.Now(), Kind: "answer",
-	}}))
+	first := store.CallEvent{
+		CustomerID: s.customerID(), CallID: call.CallID, AgentID: call.AgentID,
+		At: time.Now().Add(-time.Second), Kind: "wait",
+	}
+	second := first
+	second.At, second.Kind = time.Now(), "answer"
+	s.Require().NoError(s.store.CallEvents.InsertMany(context.Background(), []store.CallEvent{first, second}))
 
-	for _, limit := range []string{"1", "500", "10000"} {
+	for limit, held := range map[string]int{"1": 1, "500": 2, "10000": 2} {
 		var decided []CallEvent
 		s.Require().Equal(http.StatusOK,
 			s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+call.ID+"/events?limit="+limit, nil, &decided))
-		s.Len(decided, 1, limit)
+		s.Require().Len(decided, held, limit)
+		s.Equal(DecisionKind("wait"), decided[0].Kind, "oldest first")
 	}
 	for _, limit := range []string{"0", "-1", "10001", "1000000000"} {
 		status, answered := s.serverClient.failure(http.MethodGet, "/v1/agents/calls/"+call.ID+"/events?limit="+limit, nil)
