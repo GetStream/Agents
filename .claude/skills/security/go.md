@@ -165,34 +165,40 @@ resolver, so never quote the egress error (`createEventDestination`, AI-3575).
 - A 500 says only "something went wrong" (`apierror.go`).
 - Error text that a caller gets (the message of any status, a socket frame, a stored field
   that a caller reads later) is for the caller that sent the request: the end user's device
-  or the customer's backend. Three levels set what a request uses:
+  or the customer's backend. A request uses data from three levels:
   - **Request:** what the caller sends: the request body and the socket frames.
   - **Customer settings:** what the customer's backend writes: agent configs
     (`sandbox_options`, connector bindings, `floor_control`), the app's settings and the
     app's own Stream keys.
   - **Deployment settings:** what the operator sets: the router's config and environment
     (`ROUTER_*`, `STREAM_API_*`, `code_sandbox.*`), and what they control: which components
-    the deployment has, and the rules that egress, limits and the sandbox network apply.
-- The text shows only what the caller itself set. A device sees no customer settings and no
-  deployment settings. A backend sees no deployment settings.
-- No caller sees what only the operator sets or controls: no setting name (such as an
-  environment variable name), no setting value, no part of the router's config, and no rule
-  that the deployment applies because of such a setting.
-- When the caller can correct the error in what it sent, the text tells it what to change.
-  This code wrote the full text (`*oauth2code.ManifestError`), with no wrapped cause:
-  `fmt.Errorf("%w: %w", ErrInvalid, err)` still contains the store's text.
-- When only a level above the caller can correct the error, the text says in fixed words
-  that the caller cannot correct it, with the error `code`. The caller sends the `code` and
-  the `X-Request-Id` to whoever supports it. The router logs the full cause with
-  `request_id` where it makes the error.
+    the deployment has, and the rules that egress, limits and the sandbox network use.
+- A device sets the request. A backend sets the request and the customer settings. The text
+  shows only the levels that the caller sets: a device sees no customer settings and no
+  deployment settings.
+- No caller sees the deployment settings, which only the operator sets or controls: no
+  setting name (such as an environment variable name), no setting value, no part of the
+  router's config, no component, and no rule that the deployment uses because of such a
+  setting.
+- When the caller can correct the error in a level that it sets, the text tells it what to
+  change. The router's code writes all of the text (`*oauth2code.ManifestError`), with no
+  wrapped cause: `fmt.Errorf("%w: %w", ErrInvalid, err)` still contains the store's text.
+- When only a level that the caller does not set can correct the error, the text says in
+  fixed words that the caller cannot correct it, with the error `code`. The caller sends the
+  `code` and the `X-Request-Id` to the team that helps it. For a stored field, it sends the
+  id of the resource that holds the field. The router logs the full cause one time, with the
+  same id: `request_id` on the access line of the request (`recordFailure`,
+  `withRequestLog`), or, for a stored field, the ids in [logging.md «What to
+  log»](../go/logging.md#what-to-log) (`session`, `call`, `turn`, `task`, `run`).
 - The text never contains the text of a store, vendor, network or DNS error (it shows hosts,
   ports, SQL, constraint names, URLs, bodies and the cluster's DNS server), the rule of a
   security control that refused the request (rule 6 for refused URLs), or internal
   components and hosts.
-- Flag `invalidRequest(err.Error())`, `"...: " + err.Error()`, `fmt.Sprintf("...: %v", err)`,
-  a stored `err.Error()`, and a session error (`session.ErrInvalid`,
-  `session.ErrNotConfigured`) that shows customer settings to a device. How to translate an
-  error is in [errors.md «HTTP»](../go/errors.md#http).
+- Flag `invalidRequest(err.Error())`, `"...: " + err.Error()`, `fmt.Sprintf("...: %v", err)`
+  and a stored `err.Error()`, unless the router's code wrote all of the error's text for the
+  caller to correct. Flag a session error (`session.ErrInvalid`, `session.ErrNotConfigured`)
+  that shows deployment settings to a caller, or customer settings to a device. How to
+  translate an error is in [errors.md «HTTP»](../go/errors.md#http).
 - Refused outbound URLs: see rule 6.
 - The ops key (`X-Ops-Key`) is compared in constant time and turns the paths off when empty.
 - The activity key (`X-Activity-Key`, `ROUTER_AUTH_ACTIVITY_KEY` and `_PREVIOUS`) is compared in
