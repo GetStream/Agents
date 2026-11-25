@@ -1282,7 +1282,7 @@ func cachedKeys(customerID, table string, row []byte) []string {
 		}
 		return keys
 	case "users":
-		return []string{userKey(customerID, text("id"))}
+		return []string{userKey(customerID, text("id")), mintedKey(customerID, text("id"))}
 	}
 	return []string{skillsKey(customerID, text("config_id"))}
 }

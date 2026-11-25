@@ -222,8 +222,9 @@ func (s *Store) ForgetUserSettings(ctx context.Context, appID, userID, replaceme
 		entry.Changes = append(entry.Changes, counts.Changes()...)
 		return recordAuditEntry(ctx, tx, entry)
 	}, func() []string {
-		return append(s.Policies.keys(ctx, ScopeUser, UserScopeID(appID, userID)), userKey(appID, userID))
+		return append(s.Policies.keys(ctx, ScopeUser, UserScopeID(appID, userID)), userKey(appID, userID), mintedKey(appID, userID))
 	})
+	s.Users.minted.Remove(appID, userID)
 	if err != nil {
 		return UserSettings{}, stack.Wrap(fmt.Errorf("store: forget user settings: %w", err))
 	}

@@ -82,7 +82,9 @@ func (s *ScheduledTasksSuite) placeCall(user *testClient) placedCall {
 	to := s.writerNumber()
 	found, live := s.router.sessions.Get(opened.Id, delivery.owner())
 	s.Require().True(live)
-	spec := callSpec(config, delivery, found.Spec().AgentID, phone.Placed{SessionID: uuid.NewString()}, s.lineNumber(), to)
+	caller, err := s.router.scheduledCaller(context.Background(), delivery)
+	s.Require().NoError(err)
+	spec := callSpec(config, delivery, caller, found.Spec().AgentID, phone.Placed{SessionID: uuid.NewString()}, s.lineNumber(), to)
 	s.True(spec.MintedID)
 	s.True(callRequest(delivery, spec.ID, s.lineNumber(), to).MintedID)
 	// The call is taken on the run before it is placed.

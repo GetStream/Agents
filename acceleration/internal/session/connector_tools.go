@@ -666,10 +666,11 @@ func mayUse(spec Spec, binding store.ConnectorBinding, connection store.Connecto
 
 // verifiedCaller reports whether the caller's name was vouched for: an end user whose token
 // was verified, or the app's backend naming the user it acts for, as the connection
-// endpoints take it (api.mayReach). A guest is refused, though its token was verified: its
-// account is a temporary one the app does not know.
+// endpoints take it (api.mayReach). A guest is refused, though its token was verified, whether
+// its kind says so or only routing.Caller.Guest does: its account is a temporary one the app
+// does not know.
 func verifiedCaller(spec Spec) bool {
-	return spec.Caller.UserID != "" && (spec.CallerKind == auth.KindAuthenticated || spec.CallerKind == auth.KindServer)
+	return spec.Caller.UserID != "" && !spec.Caller.Guest && (spec.CallerKind == auth.KindAuthenticated || spec.CallerKind == auth.KindServer)
 }
 
 // connectorCollision is a connector tool called what another of the session's tools is.
