@@ -30,7 +30,7 @@ func (s *AlertTextSuite) sentBy() map[string]*sentry.Event {
 	var mu sync.Mutex
 	events := map[string]*sentry.Event{}
 	client, err := sentry.NewClient(sentry.ClientOptions{
-		BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
+		Environment: "test", BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 			mu.Lock()
 			defer mu.Unlock()
 			events[event.Tags["usage_alert"]] = event
@@ -65,12 +65,12 @@ func (s *AlertTextSuite) TestEveryAlertKeepsItsSentryIssue() {
 		fingerprints[name] = event.Fingerprint
 	}
 	s.Equal(map[string][]string{
-		"service_rejected":   {"usage_alert:service_rejected"},
-		"batch_refused":      {"usage_alert:batch_refused"},
-		"batch_unauthorized": {"usage_alert:batch_unauthorized"},
-		"ingest_failing":     {"usage_alert:ingest_failing"},
-		"event_lag":          {"usage_alert:event_lag"},
-		"mirror_failing":     {"usage_alert:mirror_failing"},
+		"service_rejected":   {"usage_alert:test:service_rejected"},
+		"batch_refused":      {"usage_alert:test:batch_refused"},
+		"batch_unauthorized": {"usage_alert:test:batch_unauthorized"},
+		"ingest_failing":     {"usage_alert:test:ingest_failing"},
+		"event_lag":          {"usage_alert:test:event_lag"},
+		"mirror_failing":     {"usage_alert:test:mirror_failing"},
 	}, fingerprints)
 }
 
