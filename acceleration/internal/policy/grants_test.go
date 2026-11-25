@@ -150,3 +150,31 @@ func TestAnExpiredGrantIsNotDrawn(t *testing.T) {
 
 	require.False(t, ok, "at expires_at exactly it is expired")
 }
+
+// Two reads asked at one instant cannot be told apart, so neither is dropped.
+func TestAReadAskedAtTheInstantOfTheLastIsKept(t *testing.T) {
+	acct := &account{}
+	acct.keepGrants([]store.LimitGrant{{ID: 1}}, grantNow)
+	acct.keepGrants([]store.LimitGrant{{ID: 2}}, grantNow)
+	require.Len(t, acct.grants, 1)
+	require.EqualValues(t, 2, acct.grants[0].grant.ID)
+	acct.keepGrants(nil, grantNow.Add(-time.Nanosecond))
+	require.Len(t, acct.grants, 1, "a nanosecond earlier is older")
+
+	m := &money{}
+	m.keepLimits(acct, []store.Limit{financeLimit(usage.Daily, 10)}, nil, grantNow, grantNow)
+	m.keepLimits(acct, nil, nil, grantNow, grantNow)
+	require.False(t, acct.limited)
+	m.keepLimits(acct, []store.Limit{financeLimit(usage.Daily, 10)}, nil, grantNow.Add(-time.Nanosecond), grantNow)
+	require.False(t, acct.limited, "a nanosecond earlier is older")
+}
+
+// Of two reads under way at once, the one asked later is kept though the other landed after it
+// was asked.
+func TestALimitsReadAskedWhileAnOlderOneWasUnderWayIsKept(t *testing.T) {
+	acct, m := &account{}, &money{}
+	m.keepLimits(acct, []store.Limit{financeLimit(usage.Daily, 10)}, nil, grantNow, grantNow.Add(2*time.Second))
+	m.keepLimits(acct, nil, nil, grantNow.Add(time.Second), grantNow.Add(3*time.Second))
+
+	require.False(t, acct.limited)
+}
