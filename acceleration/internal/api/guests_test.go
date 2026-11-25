@@ -274,25 +274,39 @@ func (s *GuestsSuite) TestAGuestTokenWithTheGuestRoleRefreshesTheSameGuest() {
 }
 
 func (s *GuestsSuite) TestAGuestOfTheAppsOwnTokenCarriesOnItsConversationWithTheTokenItRefreshesTo() {
-	id := streamAppID()
-	s.useApp(s.numberedApp(id))
-	s.giveApp(s.customerID(), id, "key-"+s.customerID())
-	seen := s.guestSeenInAToken()
-	opened := s.asGuest(seen).createSession(textSession(nil))
-	s.asGuest(seen).stopSession(opened.Id)
-	resume := textSession(nil)
-	resume.LegacyConversationId = opened.ConversationId
-	s.Require().NotNil(opened.ConversationId)
+	seen, resume := s.conversationOfAGuestSeenInAToken()
 
 	again := s.mint(s.asGuest(seen), GuestUserRequest{Id: &seen})
 
-	resumed := s.holding(again).createSession(resume)
-	s.Equal(*opened.ConversationId, value(resumed.ConversationId))
-	status, _ := s.data.signedInAs(seen).failure(http.MethodPost, "/v1/agents/sessions", resume)
-	s.Equal(http.StatusBadRequest, status, "a signed-in user of the same name")
+	s.carriesOn(again, resume)
+	s.refusedToASignedInUser(seen, resume)
 }
 
-func (s *GuestsSuite) TestARefreshedTokenSaysTheRoleOnlyOfTheTokenPresented() {
+func (s *GuestsSuite) TestAGuestOfTheAppsOwnTokenCarriesOnItsConversationWithTheTokensItsRefreshSecretBringsIt() {
+	seen, resume := s.conversationOfAGuestSeenInAToken()
+	again := s.mint(s.asGuest(seen), GuestUserRequest{Id: &seen})
+	s.Require().NotNil(again.RefreshSecret)
+
+	// Twice: presenting the first token leaves the guest one that may come back again.
+	for range 2 {
+		again = s.mint(s.data.createAnonymous(), GuestUserRequest{Id: &seen, RefreshSecret: again.RefreshSecret})
+
+		s.Require().Equal(seen, again.Id)
+		s.carriesOn(again, resume)
+	}
+	s.refusedToASignedInUser(seen, resume)
+}
+
+func (s *GuestsSuite) TestAGuestOfTheAppsOwnTokenCarriesOnItsConversationWithTheTokenItsBackendRefreshes() {
+	seen, resume := s.conversationOfAGuestSeenInAToken()
+
+	again := s.mint(s.serverClient, GuestUserRequest{Id: &seen})
+
+	s.carriesOn(again, resume)
+	s.refusedToASignedInUser(seen, resume)
+}
+
+func (s *GuestsSuite) TestAMintedGuestsRefreshedTokenSaysTheRoleOnlyOfTheTokenPresented() {
 	first := s.mint(s.data.createAnonymous(), GuestUserRequest{})
 	asked := GuestUserRequest{Id: &first.Id, Custom: &map[string]any{"role": "guest"}}
 
@@ -304,6 +318,17 @@ func (s *GuestsSuite) TestARefreshedTokenSaysTheRoleOnlyOfTheTokenPresented() {
 	again := s.mint(s.data.createAnonymous(), asked)
 	s.Equal(first.Id, again.Id)
 	s.NotContains(s.claimsOf(again), "role", "by their refresh secret")
+}
+
+func (s *GuestsSuite) TestAFullTokenWhoseAccountCannotBeRecordedRefreshesToOneOfNoRole() {
+	seen, resume := s.conversationOfAGuestSeenInAToken()
+	s.failQueries(`INSERT INTO "users"`)
+
+	again := s.mint(s.data.signedInAs(seen), GuestUserRequest{Id: &seen})
+
+	s.Equal(seen, again.Id)
+	s.NotContains(s.claimsOf(again), "role")
+	s.refusedToASignedInUser(seen, resume)
 }
 
 func (s *GuestsSuite) TestAClaimedGuestWhoseTokenSaysTheRoleIsNotMintedAgain() {
@@ -359,6 +384,28 @@ func (s *GuestsSuite) TestAWrongRefreshSecretMintsANewGuest() {
 
 	s.NotEqual(first.Id, minted.Id)
 	s.Equal(before.RefreshSecretHash, s.storedGuest(first.Id).RefreshSecretHash)
+}
+
+func (s *GuestsSuite) TestARefreshSecretNamingAnIdThatIsNotAGuestMintsANewGuest() {
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	for _, named := range []string{s.utils.uuid(), s.data.createUser().userID} {
+		minted := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: &named, RefreshSecret: first.RefreshSecret})
+
+		s.NotEqual(named, minted.Id)
+		s.NotContains(s.claimsOf(minted), "role")
+	}
+}
+
+func (s *GuestsSuite) TestAGuestWhoseRowCannotBeReadKeepsTheSecretItCameWith() {
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	comingBack := GuestUserRequest{Id: &first.Id, RefreshSecret: first.RefreshSecret}
+	s.Run("while it cannot", func() {
+		s.failQueries(`SELECT "u"."customer_id"`)
+		status, _ := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests", comingBack)
+		s.Equal(http.StatusInternalServerError, status)
+	})
+
+	s.Equal(store.GuestSecretHash(*first.RefreshSecret), s.storedGuest(first.Id).RefreshSecretHash)
 }
 
 func (s *GuestsSuite) TestAClaimedGuestsRefreshSecretMintsANewGuest() {
@@ -828,6 +875,36 @@ func (s *GuestsSuite) claimsOf(minted GuestUser) jwt.MapClaims {
 // secret than its API key, so the token itself is signed again.
 func (s *GuestsSuite) holding(minted GuestUser) *testClient {
 	return s.signedIn(s.claimsOf(minted), auth.AuthTypeJWT, guest, minted.Id)
+}
+
+// conversationOfAGuestSeenInAToken is a guest of the app's own token, in a Stream app of its own,
+// and a session carrying on the conversation it had.
+func (s *GuestsSuite) conversationOfAGuestSeenInAToken() (string, CreateSessionRequest) {
+	id := streamAppID()
+	s.useApp(s.numberedApp(id))
+	s.giveApp(s.customerID(), id, "key-"+s.customerID())
+	seen := s.guestSeenInAToken()
+	opened := s.asGuest(seen).createSession(textSession(nil))
+	s.asGuest(seen).stopSession(opened.Id)
+	s.Require().NotNil(opened.ConversationId)
+	resume := textSession(nil)
+	resume.LegacyConversationId = opened.ConversationId
+	return seen, resume
+}
+
+func (s *GuestsSuite) carriesOn(guest GuestUser, resume CreateSessionRequest) {
+	var resumed Session
+	status, body := s.holding(guest).call(http.MethodPost, "/v1/agents/sessions", resume)
+	s.Require().Equal(http.StatusCreated, status, "%s", body)
+	s.Require().NoError(json.Unmarshal(body, &resumed))
+	s.Equal(*resume.LegacyConversationId, value(resumed.ConversationId))
+	s.holding(guest).stopSession(resumed.Id)
+}
+
+func (s *GuestsSuite) refusedToASignedInUser(name string, resume CreateSessionRequest) {
+	status, body := s.data.signedInAs(name).failure(http.MethodPost, "/v1/agents/sessions", resume)
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(body, "another user")
 }
 
 // scheduledFor is a task for the user, written as a caller of that kind would have.

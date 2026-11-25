@@ -133,8 +133,8 @@ func (s *Server) newGuest(ctx context.Context, customerID string, bound streamap
 //   - the app's backend, which can mint a token for anyone anyway;
 //   - the guest's own token, still valid, naming this id. A token the router first mints
 //     carries no role claim, so it reads as KindAuthenticated rather than KindGuest; the token
-//     a KindGuest refreshes to says the role theirs did. A caller that
-//     only named an id in a header is KindAnonymous and proves nothing;
+//     a KindGuest refreshes to says the role theirs did. A caller that only named an id in a
+//     header is KindAnonymous and proves nothing;
 //   - the refresh secret the guest was last handed, which is spent by being used.
 func (s *Server) returningGuest(ctx context.Context, customerID string, bound streamapp.Bound, requested string, body GuestUserRequest) (*createGuestUserResponse, error) {
 	kind := KindFrom(ctx)
@@ -183,9 +183,9 @@ func (s *Server) returningGuest(ctx context.Context, customerID string, bound st
 	}
 
 	// What a guest keeps is kept for the kind their token proves (auth.Kind.Reaches), so the
-	// next token proves the same one.
+	// next token proves the same one. The backend's says nothing of the guest's.
 	var role string
-	if kind == auth.KindGuest {
+	if kind == auth.KindGuest || (server && s.seenAsGuest(held)) {
 		role = guestRole
 	}
 	token, expiresAt, err := s.mintGuestToken(ctx, bound, requested, role)
@@ -232,11 +232,21 @@ func (s *Server) redeemGuestSecret(ctx context.Context, customerID string, bound
 	if err != nil {
 		return nil, err
 	}
-	token, expiresAt, err := s.mintGuestToken(ctx, bound, requested, "")
+	// What the guest keeps is kept for the kind their token said, so the next one says it too. A
+	// row that is no guest's is refused below.
+	held, err := s.store.Users.GetGuest(ctx, customerID, requested)
+	if err != nil && !errors.Is(err, store.ErrNotAGuest) {
+		return nil, err
+	}
+	var role string
+	if s.seenAsGuest(held) {
+		role = guestRole
+	}
+	token, expiresAt, err := s.mintGuestToken(ctx, bound, requested, role)
 	if err != nil {
 		return nil, err
 	}
-	held, err := s.store.Users.RotateGuestSecret(ctx, customerID, requested, store.GuestSecretHash(secret), hash)
+	held, err = s.store.Users.RotateGuestSecret(ctx, customerID, requested, store.GuestSecretHash(secret), hash)
 	if errors.Is(err, store.ErrGuestSecretRefused) {
 		return nil, nil
 	}
@@ -267,6 +277,13 @@ func (s *Server) mintGuestToken(ctx context.Context, bound streamapp.Bound, user
 		return "", time.Time{}, stack.Wrap(err)
 	}
 	return token, expiresAt, nil
+}
+
+// seenAsGuest reports whether a guest's tokens say the guest role: they are recorded from one
+// the app signed (Users.Seen), and not minted here with none. Behind a proxy no token is read,
+// and its gateway signs no role.
+func (s *Server) seenAsGuest(held store.User) bool {
+	return !held.Minted && s.authMode != auth.Proxy
 }
 
 // returned renders a guest coming back, with no refresh_secret when none was issued.
