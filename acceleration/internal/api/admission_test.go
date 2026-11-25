@@ -225,6 +225,44 @@ func (s *AdmissionSuite) TestASuspendedAccountIsForbidden() {
 	}, 10*time.Second, 50*time.Millisecond, "restored, it is admitted again")
 }
 
+func (s *AdmissionSuite) TestASuspendedOrganizationMintsNoGuest() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	s.usage.Suspend(s.T(), s.organization(), "fraud review "+s.utils.uuid())
+	s.refused(http.MethodPost, "/v1/agents/runs", s.run("echo/local-model"))
+
+	status, payload := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Require().Equal(http.StatusForbidden, status, string(payload))
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &answered))
+	s.Equal("account_suspended", answered.Error.Code)
+}
+
+func (s *AdmissionSuite) TestASuspendedOrganizationRefreshesNoGuest() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	var held GuestUser
+	s.Require().Equal(http.StatusCreated,
+		s.data.createAnonymous().do(http.MethodPost, "/v1/agents/guests", GuestUserRequest{}, &held))
+	s.usage.Suspend(s.T(), s.organization(), "fraud review "+s.utils.uuid())
+	s.refused(http.MethodPost, "/v1/agents/runs", s.run("echo/local-model"))
+
+	status, _ := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests",
+		GuestUserRequest{Id: &held.Id, RefreshSecret: held.RefreshSecret})
+	s.Equal(http.StatusForbidden, status, "the guest's own secret")
+
+	status, _ = s.serverClient.call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{Id: &held.Id})
+	s.Equal(http.StatusForbidden, status, "the backend")
+}
+
+func (s *AdmissionSuite) TestAnOrganizationWithNoCreditStillMintsAGuest() {
+	// A guest costs nothing, and the models that cost nothing still answer them.
+	s.refused(http.MethodPost, "/v1/agents/runs", s.run("echo/echo-model"))
+
+	status, payload := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Equal(http.StatusCreated, status, string(payload))
+}
+
 // recordedVoice is a voice of the app's with one recording, prepared with elevenlabs.
 func (s *AdmissionSuite) recordedVoice() string {
 	var created Voice
