@@ -74,6 +74,15 @@ var graphWrites = []graphWrite{
 			[]string{strconv.Quote(parent.Name) + `'s connector binding "customers" binds "nessy"`,
 				`connector binding "code" of the agent ` + strconv.Quote(written) + " can send data out"}
 	}},
+	// A child the parent still names but that is gone runs nothing: it is left out, and the
+	// children after it are still weighed.
+	{name: "a child gaining a tool that sends out under a sensitive parent that names a gone child first", around: func(s *ChildAgentsSuite, written string) (map[string]any, []string) {
+		parent := s.agentWith("fanning/fanning-model", map[string]any{"connectors": []map[string]any{sessionNessy("customers")}})
+		s.calls(parent, "gone-"+s.utils.uuid(), written)
+		return map[string]any{"connectors": []map[string]any{sessionGitHubGranting("code", "create_issue")}},
+			[]string{strconv.Quote(parent.Name) + `'s connector binding "customers" binds "nessy"`,
+				`connector binding "code" of the agent ` + strconv.Quote(written) + " can send data out"}
+	}},
 	// The parent that is not sensitive is the older one, which is the one a single lookup finds.
 	{name: "a child gaining a tool that sends out under the second of two parents", around: func(s *ChildAgentsSuite, written string) (map[string]any, []string) {
 		s.calls(s.agentWith("fanning/fanning-model", nil), written)
