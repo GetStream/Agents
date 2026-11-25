@@ -82,15 +82,13 @@ export async function loadFolder(path: string): Promise<Folder> {
   if (!info?.isDirectory()) {
     throw new ConfigurationError(`${path} is not an agent directory`);
   }
-  // Every file read below is refused when its real path is outside this one.
-  const root = await realpath(path);
-  const declaration = await readInside(root, join(path, AGENT_FILE));
+  const declaration = await readFile(join(path, AGENT_FILE), "utf8").catch(missing);
   if (declaration === undefined) {
     throw new ConfigurationError(`${path} has no ${AGENT_FILE}, so it is not an agent directory`);
   }
   const settings = parseDeclaration(declaration, join(path, AGENT_FILE));
-  const simulations = await loadSimulations(join(path, SIMULATIONS_DIR), root);
-  const instructions = ((await readInside(root, join(path, INSTRUCTIONS_FILE))) ?? "").trim();
+  const simulations = await loadSimulations(join(path, SIMULATIONS_DIR));
+  const instructions = (await maybeRead(join(path, INSTRUCTIONS_FILE))).trim();
   // Kept apart from instructions.md, so a session opened with `ui: false` is not told it.
   const uiInstructions = settings.ui ? await loadUIPrompt(path, settings.ui) : "";
 
@@ -101,11 +99,11 @@ export async function loadFolder(path: string): Promise<Folder> {
     stamp: stampAt(join(path, AGENT_STAMP)),
     instructions,
     ...(uiInstructions ? { uiInstructions } : {}),
-    guardrail: ((await readInside(root, join(path, GUARDRAIL_FILE))) ?? "").trim(),
-    skills: await loadSkills(join(path, SKILLS_DIR), root),
-    knowledge: await loadKnowledge(join(path, KNOWLEDGE_DIR), root),
+    guardrail: (await maybeRead(join(path, GUARDRAIL_FILE))).trim(),
+    skills: await loadSkills(join(path, SKILLS_DIR), await realpath(path)),
+    knowledge: await loadKnowledge(join(path, KNOWLEDGE_DIR), await realpath(path)),
     knowledgeURLs: parsePages(
-      (await readInside(root, join(path, KNOWLEDGE_DIR, KNOWLEDGE_URLS_FILE))) ?? "",
+      await maybeRead(join(path, KNOWLEDGE_DIR, KNOWLEDGE_URLS_FILE)),
       join(path, KNOWLEDGE_DIR, KNOWLEDGE_URLS_FILE),
     ),
     ...(simulations ? { simulations } : {}),
@@ -121,7 +119,6 @@ export async function loadFolder(path: string): Promise<Folder> {
  */
 async function loadSimulations(
   path: string,
-  root: string,
 ): Promise<Schemas["SimulationDeclaration"][] | undefined> {
   const info = await stat(path).catch(missing);
   if (!info) {
@@ -130,21 +127,16 @@ async function loadSimulations(
   if (!info.isDirectory()) {
     throw new ConfigurationError(`${path} is not a directory`);
   }
-  await insideAgent(root, path);
 
   const simulations: Schemas["SimulationDeclaration"][] = [];
   const named = new Map<string, string>();
   const entries = await readdir(path, { withFileTypes: true });
   for (const entry of entries.sort((one, other) => one.name.localeCompare(other.name))) {
     const extension = extname(entry.name).toLowerCase();
-    const file = join(path, entry.name);
-    if (
-      !(entry.isFile() || entry.isSymbolicLink()) ||
-      (extension !== ".yaml" && extension !== ".yml") ||
-      !(await syncedFile(root, file, entry))
-    ) {
+    if (!entry.isFile() || (extension !== ".yaml" && extension !== ".yml")) {
       continue;
     }
+    const file = join(path, entry.name);
     for (const simulation of parseSimulations(await readFile(file, "utf8"), file)) {
       const first = named.get(simulation.name);
       if (first) {
@@ -177,11 +169,7 @@ async function loadSkills(path: string, root: string): Promise<Skill[]> {
     let file = join(path, name);
     if (entry.isDirectory()) {
       file = join(file, SKILL_FILE);
-    } else if (
-      (entry.isFile() || entry.isSymbolicLink()) &&
-      extname(name) === ".md" &&
-      (await syncedFile(root, file, entry))
-    ) {
+    } else if (entry.isFile() && extname(name) === ".md") {
       name = name.replace(/\.md$/, "");
     } else {
       continue;
@@ -291,15 +279,6 @@ async function insideAgent(root: string, path: string): Promise<void> {
   if (target !== undefined && leaves(root, target)) {
     throw new ConfigurationError(`${path} links outside the agent directory`);
   }
-}
-
-/**
- * Reads one of the agent directory's own files, refusing one that links outside `root`.
- * Undefined when there is no such file, or it is a link to nothing.
- */
-async function readInside(root: string, path: string): Promise<string | undefined> {
-  await insideAgent(root, path);
-  return readFile(path, "utf8").catch(missing);
 }
 
 /** Whether `target` is outside `root`, both real paths. */
@@ -1786,6 +1765,10 @@ function stampAt(path: string): SyncStamp {
       await writeFile(path, `${JSON.stringify({ hash, synced_at: syncedAt })}\n`);
     },
   };
+}
+
+async function maybeRead(path: string): Promise<string> {
+  return (await readFile(path, "utf8").catch(missing)) ?? "";
 }
 
 function missing(cause: unknown): undefined {

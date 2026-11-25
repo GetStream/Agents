@@ -588,61 +588,6 @@ describe("loadFolder", () => {
     await assert.rejects(() => loadFolder(skills), /skills links outside the agent directory/);
   });
 
-  describe("refuses each file the agent directory is read from when it links outside", () => {
-    const skill = "---\ndescription: Work it out\n---\nReason it through.\n";
-    const simulation = "- name: lunch\n  scenario: Order lunch.\n  assertion: Lunch is ordered.\n";
-    const cases: { linked: string; outside: Record<string, string>; inside?: Record<string, string> }[] = [
-      { linked: "agent.yaml", outside: { "agent.yaml": "name: jean\n" } },
-      { linked: "instructions.md", outside: { "instructions.md": "Elsewhere.\n" } },
-      { linked: "guardrail.md", outside: { "guardrail.md": "Elsewhere.\n" } },
-      { linked: "skills/think.md", outside: { "skills/think.md": skill } },
-      { linked: "knowledge/urls.yaml", outside: { "knowledge/urls.yaml": "- https://example.com\n" }, inside: { "knowledge/doc.md": "Here.\n" } },
-      { linked: "simulations", outside: { "simulations/lunch.yaml": simulation } },
-      { linked: "simulations/lunch.yaml", outside: { "simulations/lunch.yaml": simulation } },
-    ];
-    for (const { linked, outside, inside } of cases) {
-      it(linked, async () => {
-        const elsewhere = await agentDir(outside);
-        const path = await agentDir(inside ?? {});
-        await rm(join(path, linked), { force: true });
-        await mkdir(join(path, linked, ".."), { recursive: true });
-        await symlink(join(elsewhere, linked), join(path, linked));
-
-        await assert.rejects(() => loadFolder(path), (error: unknown) => {
-          assert.ok(error instanceof ConfigurationError);
-          assert.ok(error.message.includes(`${linked.split("/").pop()} links outside the agent directory`), error.message);
-          return true;
-        });
-      });
-    }
-  });
-
-  it("reads the agent directory's own files and simulations through links that stay inside it", async () => {
-    const path = await agentDir({
-      "shared/agent.yaml": "name: jean\n",
-      "shared/notes.md": "Be brief.\n",
-      "shared/think.md": "---\ndescription: Work it out\n---\nReason it through.\n",
-      "shared/lunch.yaml": "- name: lunch\n  scenario: Order lunch.\n  assertion: Lunch is ordered.\n",
-    });
-    await rm(join(path, "agent.yaml"));
-    await symlink(join(path, "shared", "agent.yaml"), join(path, "agent.yaml"));
-    await symlink(join("shared", "notes.md"), join(path, "instructions.md"));
-    await mkdir(join(path, "skills"));
-    await symlink(join("..", "shared", "think.md"), join(path, "skills", "think.md"));
-    await mkdir(join(path, "simulations"));
-    await symlink(join(path, "shared", "lunch.yaml"), join(path, "simulations", "lunch.yaml"));
-    // The agent directory is itself reached through a link, as a checkout often is.
-    const through = join(path, "..", "linked");
-    await symlink(path, through);
-
-    const folder = await loadFolder(through);
-
-    assert.equal(folder.name, "jean");
-    assert.equal(folder.instructions, "Be brief.");
-    assert.deepEqual(folder.skills.map((one) => one.instructions), ["Reason it through."]);
-    assert.deepEqual(folder.simulations?.map((one) => one.name), ["lunch"]);
-  });
-
   it("reads skills in name order", async () => {
     const path = await agentDir({
       "skills/recall.md": "---\ndescription: Remember\n---\nLook back.",
