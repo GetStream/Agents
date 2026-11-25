@@ -307,7 +307,8 @@ func TestAnswerForPassesOnAnAnswerItDoesNotFit(t *testing.T) {
 	two := offerAt("c=IN IP4 1.1.1.1\r\n", "m=video 30002 RTP/AVP 96\r\nm=audio 30000 RTP/AVP 0\r\n")
 	twoAnswer := append(append([]byte{}, answer...), "m=video 0 RTP/AVP 96\r\n"...)
 	for name, tc := range map[string]struct{ offer, answer []byte }{
-		"one line offered":      {offer: offerAt("c=IN IP4 1.1.1.1\r\n", ""), answer: answer},
+		// Line feeds alone, which a rewrite would turn into CRLF: the answer must keep its bytes.
+		"one line offered":      {offer: offerAt("c=IN IP4 1.1.1.1\r\n", ""), answer: []byte(strings.ReplaceAll(string(answer), "\r\n", "\n"))},
 		"offer not sdp":         {offer: []byte("offer"), answer: answer},
 		"answer not sdp":        {offer: two, answer: []byte("answer")},
 		"answer with two lines": {offer: two, answer: twoAnswer},
