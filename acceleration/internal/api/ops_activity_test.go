@@ -15,21 +15,27 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 )
 
-// OpsActivitySuite is Stream staff reading every organization's activity by day. Every test
+// opsActivityReader is Stream staff reading every organization's activity by day. Every test
 // has organizations of its own, and reads only its own out of what every suite wrote.
-type OpsActivitySuite struct {
+type opsActivityReader struct {
 	RouterSuite
 	// staff is Stream's own tool, holding the ops key and no app's credentials.
 	staff *testClient
+}
+
+// OpsActivitySuite reads the activity on a deployment with no usage service.
+type OpsActivitySuite struct {
+	opsActivityReader
 }
 
 func TestOpsActivitySuite(t *testing.T) {
 	runSuite(t, new(OpsActivitySuite))
 }
 
-func (s *OpsActivitySuite) SetupTest() {
+func (s *opsActivityReader) SetupTest() {
 	s.useApp(s.data.createApp())
 	s.staff = &testClient{suite: &s.RouterSuite, header: http.Header{opsKeyHeader: {suiteOpsKey}}, kind: noCredential}
 }
@@ -42,7 +48,7 @@ func daysAgo(n, spread int) time.Time {
 
 // on is a day of requests of app's, in its organization, in area from client, refused of them
 // refused.
-func (s *OpsActivitySuite) on(app testApp, appID, area, client string, day time.Time, requests, refused int64) store.ActivityDelta {
+func (s *opsActivityReader) on(app testApp, appID, area, client string, day time.Time, requests, refused int64) store.ActivityDelta {
 	return store.ActivityDelta{
 		OrganizationID: app.organization.ID, AppID: appID, Area: area, Client: client,
 		Day: day, Requests: requests, Refused: refused, FirstAt: day.Add(time.Hour), LastAt: day.Add(2 * time.Hour),
@@ -58,12 +64,12 @@ func activityPath(from, to time.Time, limit int) string {
 }
 
 // walk is every page from from to to, limit items at a time, following next_cursor.
-func (s *OpsActivitySuite) walk(from, to time.Time, limit int) []ActivityPage {
+func (s *opsActivityReader) walk(from, to time.Time, limit int) []ActivityPage {
 	return s.walkFiltered(from, to, limit, "")
 }
 
 // walkFiltered is walk with filter, a query string such as "&org_id=x", sent with every page.
-func (s *OpsActivitySuite) walkFiltered(from, to time.Time, limit int, filter string) []ActivityPage {
+func (s *opsActivityReader) walkFiltered(from, to time.Time, limit int, filter string) []ActivityPage {
 	var pages []ActivityPage
 	path := activityPath(from, to, limit) + filter
 	for {
@@ -472,4 +478,157 @@ func (s *OpsActivitySuite) TestACursorSentWithOtherFiltersIsRefused() {
 		s.Contains(string(payload), "cursor", path)
 	}
 	s.Equal(http.StatusOK, s.staff.do(http.MethodGet, activityPath(day, day, 1)+filter+cursor, nil, nil))
+}
+
+// Defect: funded told on a deployment with no usage service, as false, which reads as an
+// organization with only trial credit.
+func (s *OpsActivitySuite) TestFundedIsAbsentWithNoUsageService() {
+	day := daysAgo(200, 100)
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{
+		s.on(s.app, s.customerID(), activity.AreaConversations, store.AuditSourceSDK, day, 1, 0),
+	}))
+
+	status, payload := s.staff.call(http.MethodGet, activityPath(day, day, 0)+"&org_id="+url.QueryEscape(s.app.organization.ID), nil)
+
+	s.Require().Equal(http.StatusOK, status, string(payload))
+	var page struct {
+		Organizations []map[string]json.RawMessage `json:"organizations"`
+	}
+	s.Require().NoError(json.Unmarshal(payload, &page))
+	s.Require().Len(page.Organizations, 1)
+	s.NotContains(page.Organizations[0], "funded", string(payload))
+	s.Contains(page.Organizations[0], "furthest_step")
+}
+
+// OpsActivityFundedSuite is the activity read on a deployment with a usage service, which
+// says which organizations are funded.
+type OpsActivityFundedSuite struct {
+	opsActivityReader
+	// logged is what the router logged.
+	logged *lockedLog
+}
+
+func TestOpsActivityFundedSuite(t *testing.T) {
+	runSuite(t, new(OpsActivityFundedSuite))
+}
+
+func (s *OpsActivityFundedSuite) SetupSuite() {
+	s.limited = true
+	s.logged = &lockedLog{}
+	s.logs = s.logged
+	s.opsActivityReader.SetupSuite()
+}
+
+// credit writes a credit entry of kind for organization, as the operator does.
+func (s *OpsActivityFundedSuite) credit(organization string, kind usage.CreditKind, micros int64) {
+	status := s.usage.Manage(s.T(), http.MethodPost, "/accounts/"+organization+"/credits", map[string]any{"kind": kind, "amount_micros": micros})
+	s.Require().Equal(http.StatusCreated, status, kind)
+}
+
+// fundedOn is funded as every page tells it of organization, one per page it is on.
+func fundedOn(pages []ActivityPage, organization string) []*bool {
+	var told []*bool
+	for _, page := range pages {
+		for _, progress := range page.Organizations {
+			if progress.OrganizationId == organization {
+				told = append(told, progress.Funded)
+			}
+		}
+	}
+	return told
+}
+
+// Defect: funded read from granted credit with trial credit counted, from the first
+// organization's standing for the whole page, or for the organizations of one page only; or
+// a refund left uncounted.
+func (s *OpsActivityFundedSuite) TestEachOrganizationOnEachPageIsFundedByItsOwnNonTrialCredit() {
+	day := daysAgo(200, 100)
+	toppedUp, granted, trialOnly, trialAndGrant, refunded, spentOnly, noAccount, spentTopUp :=
+		s.data.createApp(), s.data.createApp(), s.data.createApp(), s.data.createApp(), s.data.createApp(), s.data.createApp(), s.data.createApp(), s.data.createApp()
+	s.credit(spentTopUp.organization.ID, usage.CreditTopUp, 5_000_000)
+	s.usage.Spend(s.T(), spentTopUp.organization.ID, 5_000_000)
+	s.credit(toppedUp.organization.ID, usage.CreditTopUp, 5_000_000)
+	s.credit(granted.organization.ID, usage.CreditGrant, 5_000_000)
+	s.credit(trialOnly.organization.ID, usage.CreditTrial, 5_000_000)
+	s.credit(trialAndGrant.organization.ID, usage.CreditTrial, 5_000_000)
+	s.credit(trialAndGrant.organization.ID, usage.CreditGrant, 1)
+	s.credit(refunded.organization.ID, usage.CreditTopUp, 5_000_000)
+	s.credit(refunded.organization.ID, usage.CreditRefund, -5_000_000)
+	s.usage.Spend(s.T(), spentOnly.organization.ID, 1_000)
+	want := map[string]bool{
+		toppedUp.organization.ID: true, granted.organization.ID: true, trialOnly.organization.ID: false,
+		trialAndGrant.organization.ID: true, refunded.organization.ID: false, spentOnly.organization.ID: false,
+		noAccount.organization.ID: false, spentTopUp.organization.ID: true,
+	}
+	var deltas []store.ActivityDelta
+	for _, app := range []testApp{toppedUp, granted, trialOnly, trialAndGrant, refunded, spentOnly, noAccount, spentTopUp} {
+		deltas = append(deltas, s.on(app, app.app.ID, activity.AreaConversations, store.AuditSourceSDK, day, 1, 0))
+	}
+	s.Require().NoError(s.store.Activities.Add(context.Background(), deltas))
+
+	pages := s.walk(day, day, 2)
+
+	s.Require().Greater(len(pages), 3, "seven organizations at two a page span pages")
+	for organization, funded := range want {
+		told := fundedOn(pages, organization)
+		s.Require().Len(told, 1, organization)
+		s.Require().NotNil(told[0], organization)
+		s.Equal(funded, *told[0], organization)
+	}
+}
+
+// Defect: a usage service that does not answer failing the whole page with a 500, or read as
+// every organization unfunded.
+func (s *OpsActivityFundedSuite) TestFundedIsAbsentWhileTheUsageServiceDoesNotAnswer() {
+	day := daysAgo(200, 100)
+	s.credit(s.app.organization.ID, usage.CreditGrant, 5_000_000)
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{
+		s.on(s.app, s.customerID(), activity.AreaConversations, store.AuditSourceSDK, day, 1, 0),
+	}))
+	filter := "&org_id=" + url.QueryEscape(s.app.organization.ID)
+	s.usageFront.down.Store(true)
+	defer s.usageFront.down.Store(false)
+
+	down := s.walkFiltered(day, day, 0, filter)
+	s.usageFront.down.Store(false)
+	up := s.walkFiltered(day, day, 0, filter)
+
+	s.Require().Len(down, 1)
+	s.Require().Len(down[0].Organizations, 1)
+	s.Nil(down[0].Organizations[0].Funded)
+	s.Contains(s.logged.String(), "could not read whether organizations are funded")
+	s.Equal(activityStepConversations, down[0].Organizations[0].FurthestStep, "how far it got is still told")
+	funded := true
+	s.Equal([]*bool{&funded}, fundedOn(up, s.app.organization.ID), "once the service answers again")
+}
+
+// Defect: a usage service that takes the call and never answers holding the page until the
+// caller gives up, rather than answering it with funded absent.
+func (s *OpsActivityFundedSuite) TestFundedIsAbsentWhileTheUsageServiceHangs() {
+	day := daysAgo(200, 100)
+	s.Require().NoError(s.store.Activities.Add(context.Background(), []store.ActivityDelta{
+		s.on(s.app, s.customerID(), activity.AreaConversations, store.AuditSourceSDK, day, 1, 0),
+	}))
+	stalled := make(chan struct{})
+	s.usageFront.stalled.Store(&stalled)
+	defer func() { s.usageFront.stalled.Store(nil); close(stalled) }()
+
+	answered := make(chan []byte, 1)
+	go func() {
+		status, payload := s.staff.call(http.MethodGet, activityPath(day, day, 0)+"&org_id="+url.QueryEscape(s.app.organization.ID), nil)
+		if status != http.StatusOK {
+			payload = nil
+		}
+		answered <- payload
+	}()
+	select {
+	case payload := <-answered:
+		s.Require().NotNil(payload, "the page is answered 200")
+		var page ActivityPage
+		s.Require().NoError(json.Unmarshal(payload, &page))
+		s.Require().Len(page.Organizations, 1)
+		s.Nil(page.Organizations[0].Funded)
+	case <-time.After(15 * time.Second):
+		s.Fail("the page waited on the usage service for 15 s")
+	}
 }

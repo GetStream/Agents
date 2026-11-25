@@ -10577,6 +10577,12 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
+        /// The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the credit granted minus the trial credit is above zero. Spending the credit does not lower it. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("funded")]
+        public bool? Funded { get; set; } = default!;
+
+        /// <summary>
         /// The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("furthest_step")]
