@@ -228,12 +228,26 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 	}
 	// In deployment mode the number is what says whose call it is.
 	activity.NoteCustomer(r.Context(), number.CustomerID, activity.AreaHooksIn)
+	country := cmp.Or(number.Country, phone.Country(number.E164))
+	// The call is answered in the shard of the number's country, so every delivery for it goes
+	// there. Recorded as delivered first, as a hook carried to a worker's node is: the node
+	// it reaches does not record it again.
+	acted := false
+	if shard := s.shards.ForCountry(country); s.routesByShard(r.Context()) && shard != "" && shard != s.directory.Shard() {
+		if !s.acting(r.Context(), origin, getstream.EventTypeCallSessionStarted, payload) {
+			return true
+		}
+		acted = true
+		if elsewhere, _ := s.handedToShard(r.Context(), s.replayed(r, payload), shard, shardWorkCall); elsewhere {
+			return true
+		}
+	}
 	// The caller is on the line from here, whether an agent answers or the call is refused
 	// and ended below, and the vendor bills every second of it. No key placed it, so its
 	// minutes are the app's, and priced by the country of the number rung. One leg per Stream
 	// session, however often or late this is delivered; a delivery another node handed over
-	// was opened there.
-	if s.phone != nil && !node.Forwarded(r.Context()) {
+	// was opened there, unless it was handed to this node's shard before it was opened.
+	if s.phone != nil && (!node.Forwarded(r.Context()) || node.HandedToShard(r.Context())) {
 		caller := phoneCallerOf(event)
 		s.phone.OpenLeg(r.Context(), routing.Owner{
 			CustomerID:  number.CustomerID,
@@ -243,7 +257,7 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 			StreamAppPK: number.StreamAppPK, CallType: callType, CallID: callID,
 			StreamSessionID: event.SessionID, ParticipantSession: caller.UserSessionID, Vendor: number.Vendor,
 			Direction: store.Inbound, LocalNumber: number.E164, RemoteNumber: caller.number,
-			Country:  cmp.Or(number.Country, phone.Country(number.E164)),
+			Country:  country,
 			DialedAt: eventTime(event.CreatedAt),
 		}, true)
 	}
@@ -266,7 +280,7 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 	}
 	// Only a call that rings a number is worth recording as delivered: every video call in
 	// the app arrives here too.
-	if !s.acting(r.Context(), origin, getstream.EventTypeCallSessionStarted, payload) {
+	if !acted && !s.acting(r.Context(), origin, getstream.EventTypeCallSessionStarted, payload) {
 		return true
 	}
 	// A number with an agent never goes to a worker, even one waiting: the router answers
