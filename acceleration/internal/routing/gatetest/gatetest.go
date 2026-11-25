@@ -18,6 +18,15 @@ type Answers struct {
 	mu   sync.Mutex
 	err  error
 	held map[uuid.UUID]int64
+	// admitted is how many times it was asked for an admission.
+	admitted int
+}
+
+// Admitted is how many admissions it was asked for.
+func (a *Answers) Admitted() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.admitted
 }
 
 // Refuse answers err from now on, and grants when it is nil.
@@ -46,6 +55,7 @@ func (a *Answers) Writer() *routing.Writer {
 func (a *Answers) Admit(context.Context, routing.Owner) (routing.Admission, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.admitted++
 	return routing.Admission{Spend: a.err}, nil
 }
 

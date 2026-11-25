@@ -77,7 +77,10 @@ func (s *AgentSuite) TestACallEndsWhenItsTranscriberIsRefusedMoneyTwiceInARow() 
 		heard := len(s.ears.transcribed())
 		s.Equal(60, heard)
 
-		s.talks(5)
+		for range 10 {
+			s.speak(stt.Participant{ID: "alice"})
+		}
+		synctest.Wait()
 
 		s.True(s.callEnded())
 		failures := s.hearingFailures()
@@ -105,7 +108,7 @@ func (s *AgentSuite) TestACallGoesOnWhenATranscriberRefusedMoneyIsGrantedOneSoon
 	s.hearsOn(func(gate *gatetest.Answers) {
 		for range 3 {
 			gate.Refuse(policy.ErrNoCredits)
-			s.talks(20)
+			s.talks(18)
 			s.Zero(s.opened.Load())
 			gate.Refuse(nil)
 			s.talks(1)
@@ -116,6 +119,54 @@ func (s *AgentSuite) TestACallGoesOnWhenATranscriberRefusedMoneyIsGrantedOneSoon
 		}
 		s.Len(s.hearingFailures(), 3, "one for each run of refusals")
 		s.False(s.callEnded())
+	})
+}
+
+func (s *AgentSuite) TestATranscriberRefusedMoneyIsAskedForOnceASecond() {
+	s.hearsOn(func(gate *gatetest.Answers) {
+		gate.Refuse(policy.ErrNoCredits)
+		before := gate.Admitted()
+		for range 3 {
+			for range 50 {
+				s.speak(stt.Participant{ID: "alice"})
+			}
+			time.Sleep(time.Second)
+			synctest.Wait()
+		}
+
+		s.Equal(3, gate.Admitted()-before)
+	})
+}
+
+func (s *AgentSuite) TestARunOfRefusalsIsOverOnceATranscriberIsGranted() {
+	s.hearsOn(func(gate *gatetest.Answers) {
+		s.talks(1)
+		gate.Refuse(policy.ErrNoCredits)
+		s.talks(40)
+		s.dropsListener()
+		gate.Refuse(nil)
+		s.ears = newStubSTT()
+		s.talks(40)
+		s.dropsListener()
+		gate.Refuse(policy.ErrNoCredits)
+		s.talks(20)
+
+		s.False(s.callEnded())
+	})
+}
+
+func (s *AgentSuite) TestARunOfRefusalsIsCountedFromItsFirst() {
+	s.hearsOn(func(gate *gatetest.Answers) {
+		s.talks(1)
+		gate.Refuse(policy.ErrNoCredits)
+		// Nobody speaks through three refusals, and the vendor cuts it.
+		time.Sleep(90 * time.Second)
+		synctest.Wait()
+		s.dropsListener()
+
+		s.talks(1)
+
+		s.True(s.callEnded())
 	})
 }
 

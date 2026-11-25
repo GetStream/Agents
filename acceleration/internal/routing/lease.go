@@ -148,7 +148,7 @@ func (l *Lease) Move(config ProviderConfig) {
 	l.holding.Lock()
 	defer l.holding.Unlock()
 	l.config = config
-	if !l.recorder.billableFor(config, l.attributes) || l.recorder.QuoteStat(config, l.stat()).CostMicros <= 0 {
+	if l.recorder.QuoteStat(config, l.stat()).CostMicros <= 0 {
 		l.recorder.Release(l.id)
 	}
 }
