@@ -445,6 +445,206 @@ final class FolderTest extends TestCase
         Folder::load($this->dir);
     }
 
+    /**
+     * @return iterable<string, array{array<string, string>, array<string, string>, string, string}>
+     */
+    public static function linkedOut(): iterable
+    {
+        $skill = "---\ndescription: Work it out\n---\nReason it through.\n";
+        yield 'agent.yaml' => [['agent.yaml' => "name: jean\n"], [], 'agent.yaml', 'agent.yaml'];
+        yield 'instructions' => [['notes.md' => "Elsewhere.\n"], [], 'instructions.md', 'notes.md'];
+        yield 'guardrail' => [['notes.md' => "Elsewhere.\n"], [], 'guardrail.md', 'notes.md'];
+        yield 'skills directory' => [['skills/think.md' => $skill], [], 'skills', 'skills'];
+        yield 'skill file' => [['think.md' => $skill], [], 'skills/think.md', 'think.md'];
+        yield 'skill folder' => [['other/SKILL.md' => $skill], [], 'skills/other', 'other'];
+        yield "skill folder's SKILL.md" => [['SKILL.md' => $skill], [], 'skills/other/SKILL.md', 'SKILL.md'];
+        yield 'file in a skill folder' => [['notes.txt' => "Elsewhere.\n"], ['skills/other/SKILL.md' => $skill], 'skills/other/notes.txt', 'notes.txt'];
+        yield 'folder in a skill folder' => [['reference/notes.txt' => "Elsewhere.\n"], ['skills/other/SKILL.md' => $skill], 'skills/other/reference', 'reference'];
+        yield 'knowledge directory' => [['knowledge/doc.md' => "Elsewhere.\n"], [], 'knowledge', 'knowledge'];
+        yield 'knowledge document' => [['doc.md' => "Elsewhere.\n"], [], 'knowledge/doc.md', 'doc.md'];
+        yield 'knowledge pages' => [['urls.yaml' => "- https://example.com/elsewhere\n"], [], 'knowledge/urls.yaml', 'urls.yaml'];
+        yield 'simulations directory' => [['simulations/calls.yaml' => "[]\n"], [], 'simulations', 'simulations'];
+        yield 'simulation file' => [['calls.yaml' => "[]\n"], [], 'simulations/calls.yaml', 'calls.yaml'];
+    }
+
+    /**
+     * @param array<string, string> $outside
+     * @param array<string, string> $inside
+     */
+    #[DataProvider('linkedOut')]
+    public function testAFileLinkedFromOutsideTheAgentDirectoryIsRefused(array $outside, array $inside, string $linked, string $to): void
+    {
+        $elsewhere = dirname($this->dir) . '/elsewhere';
+        foreach ($outside as $name => $contents) {
+            $this->write('../elsewhere/' . $name, $contents);
+        }
+        foreach ($inside as $name => $contents) {
+            $this->write($name, $contents);
+        }
+        $this->link($linked, $elsewhere . '/' . $to);
+
+        $this->expectException(ConfigurationException::class);
+        $this->expectExceptionMessage("jean/{$linked} links outside the agent directory");
+        Folder::load($this->dir);
+    }
+
+    public function testAKnowledgeDirectoryLinkedOneLevelUpIsRefused(): void
+    {
+        // Nothing else is up there, so only refusing knowledge/ itself stops a walk reading the
+        // agent's own files back through it.
+        $this->link('knowledge', dirname($this->dir));
+
+        $this->expectException(ConfigurationException::class);
+        $this->expectExceptionMessage('jean/knowledge links outside the agent directory');
+        Folder::load($this->dir);
+    }
+
+    public function testALinkThatStaysInsideTheAgentDirectoryIsRead(): void
+    {
+        $this->write('shared/notes.md', "Be brief.\n");
+        $this->write('shared/pricing.md', "A penny.\n");
+        $this->link('instructions.md', 'shared/notes.md');
+        $this->write('shared/think.md', "---\ndescription: Work it out\n---\nReason it through.\n");
+        $this->link('skills/think.md', '../shared/think.md');
+        $this->link('knowledge/pricing.md', '../shared/pricing.md');
+        // The agent directory is itself reached through a link, as a checkout often is.
+        $through = dirname($this->dir) . '/linked';
+        symlink($this->dir, $through);
+
+        $folder = Folder::load($through);
+
+        self::assertSame('Be brief.', $folder->instructions);
+        self::assertSame(['Reason it through.'], array_map(static fn ($skill) => $skill->instructions, $folder->skills));
+        self::assertSame([['pricing.md', "A penny.\n"]], array_map(static fn ($document) => [$document->source, $document->text], $folder->knowledge));
+    }
+
+    public function testAnAgentDirectoryNamedRelativeToTheWorkingDirectoryKeepsItsLinks(): void
+    {
+        $this->write('shared/pricing.md', "A penny.\n");
+        $this->link('knowledge/pricing.md', $this->dir . '/shared/pricing.md');
+        // Relative to the working directory, without changing it under the other tests.
+        $relative = str_repeat('../', substr_count((string) getcwd(), '/')) . ltrim($this->dir, '/');
+
+        self::assertSame(['pricing.md'], array_map(static fn ($document) => $document->source, Folder::load($relative)->knowledge));
+
+        $this->write('../elsewhere/notes.md', "Elsewhere.\n");
+        $this->link('instructions.md', dirname($this->dir) . '/elsewhere/notes.md');
+        $this->expectException(ConfigurationException::class);
+        $this->expectExceptionMessage('instructions.md links outside the agent directory');
+        Folder::load($relative);
+    }
+
+    public function testANameThatOnlySharesAPrefixIsComparedAsAWhole(): void
+    {
+        $this->write('..shared/a.md', "A penny.\n");
+        $this->link('knowledge/pricing.md', '../..shared/a.md');
+
+        self::assertSame("A penny.\n", Folder::load($this->dir)->knowledge[0]->text);
+
+        $this->write('../jean-2/notes.md', "Elsewhere.\n");
+        $this->link('instructions.md', $this->dir . '-2/notes.md');
+        $this->expectException(ConfigurationException::class);
+        $this->expectExceptionMessage('instructions.md links outside the agent directory');
+        Folder::load($this->dir);
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function loops(): iterable
+    {
+        yield 'instructions' => ['instructions.md'];
+        yield 'skill file' => ['skills/loop.md'];
+        yield 'knowledge document' => ['knowledge/loop.md'];
+        yield 'simulation file' => ['simulations/loop.yaml'];
+    }
+
+    #[DataProvider('loops')]
+    public function testALinkToItselfIsRefused(string $linked): void
+    {
+        $this->link($linked, $this->dir . '/' . $linked);
+
+        $this->expectException(ConfigurationException::class);
+        $this->expectExceptionMessage("{$linked} links outside the agent directory");
+        Folder::load($this->dir);
+    }
+
+    public function testHiddenFilesAreLeftOutOfKnowledge(): void
+    {
+        $this->write('knowledge/.draft.md', "Not yet.\n");
+        $this->write('knowledge/.git/notes.md', "Not a document.\n");
+        $this->write('knowledge/__pycache__/notes.md', "Not a document.\n");
+        $this->write('knowledge/guides/setup.md', "Plug it in.\n");
+        $this->write('knowledge/guides/.draft.md', "Not yet.\n");
+        $this->write('knowledge/guides/.git/notes.md', "Not a document.\n");
+
+        self::assertSame(['guides/setup.md', 'pricing.md'], array_map(static fn ($document) => $document->source, Folder::load($this->dir)->knowledge));
+    }
+
+    public function testAnEditorsLockFileInSkillsAndSimulationsIsLeftOut(): void
+    {
+        $this->write('skills/.draft.md', "---\ndescription: Not yet\n---\nLater.\n");
+        $this->write('simulations/calls.yaml', "- name: lunch\n  scenario: Order lunch.\n  assertion: Lunch is ordered.\n");
+        $this->write('simulations/.draft.yaml', "- name: draft\n  scenario: Order lunch.\n  assertion: Lunch is ordered.\n");
+        // What Emacs leaves beside a file with unsaved edits: a link to who is editing it.
+        $this->link('skills/.#think.md', 'jean@laptop.4242:1732500000');
+        $this->link('simulations/.#calls.yaml', 'jean@laptop.4242:1732500000');
+
+        $folder = Folder::load($this->dir);
+
+        self::assertSame('You are Jean.', $folder->instructions);
+        self::assertSame(['think'], array_map(static fn ($skill) => $skill->name, $folder->skills));
+        self::assertSame(['pricing.md'], array_map(static fn ($document) => $document->source, $folder->knowledge));
+        self::assertSame(['lunch'], array_map(static fn ($simulation) => $simulation->name, $folder->simulations ?? []));
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function linksToNothing(): iterable
+    {
+        yield 'skill file' => ['skills/old.md'];
+        yield 'file in a skill folder' => ['skills/report/old.txt'];
+        yield 'knowledge document' => ['knowledge/old.md'];
+        yield 'simulation file' => ['simulations/old.yaml'];
+    }
+
+    #[DataProvider('linksToNothing')]
+    public function testALinkToNothingInAFolderIsRefusedAsOne(string $linked): void
+    {
+        $this->write('skills/report/SKILL.md', "---\ndescription: Write the report\n---\nWrite it.\n");
+        $this->link($linked, 'gone');
+
+        $this->expectException(ConfigurationException::class);
+        $this->expectExceptionMessage("{$linked} is a link to nothing");
+        Folder::load($this->dir);
+    }
+
+    public function testATopLevelFileLinkedToNothingIsNotThere(): void
+    {
+        $this->link('instructions.md', 'gone.md');
+        $this->link('guardrail.md', 'gone.md');
+        $this->link('knowledge/urls.yaml', 'gone.yaml');
+
+        $folder = Folder::load($this->dir);
+
+        self::assertSame(['', '', []], [$folder->instructions, $folder->guardrail, $folder->knowledgeUrls]);
+        self::assertSame(['think'], array_map(static fn ($skill) => $skill->name, $folder->skills));
+    }
+
+    /**
+     * Points $relative, under the agent directory, at $target, in place of whatever is there.
+     */
+    private function link(string $relative, string $target): void
+    {
+        $path = $this->dir . '/' . $relative;
+        exec('rm -rf ' . escapeshellarg($path));
+        if (!is_dir(dirname($path))) {
+            mkdir(dirname($path), 0o777, true);
+        }
+        symlink($target, $path);
+    }
+
     private function write(string $relative, string $contents): void
     {
         $path = $this->dir . '/' . $relative;
