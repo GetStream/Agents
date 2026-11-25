@@ -257,7 +257,18 @@ func (a *Agent) runSpeculation(spec *speculation) {
 	if abandoned || closed {
 		stream.Close()
 	}
-	a.pump(turnID, stream)
+	// A unified reply was ruled on from its first stream's lead; a second stream would be
+	// spoken without a ruling of its own.
+	var again func() (*llm.Stream, error)
+	if !spec.unified {
+		again = func() (*llm.Stream, error) {
+			if err := spec.ctx.Err(); err != nil {
+				return nil, err
+			}
+			return spec.harness.Respond(spec.ctx, spec.turn)
+		}
+	}
+	a.pump(turnID, stream, again)
 }
 
 // adoptSpeculation answers a turn with the reply already started for it, and reports

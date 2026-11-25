@@ -16,6 +16,7 @@ import (
 type regionSuite struct {
 	suite.Suite
 	httpClient *http.Client
+	host       string
 }
 
 func TestRegionalClients(t *testing.T) {
@@ -28,10 +29,11 @@ func (s *regionSuite) SetupTest() {
 	s.T().Setenv(stream.CustomerEnv, "")
 	s.T().Setenv(stream.APIKeyEnv, "test-key")
 	s.T().Setenv(stream.APISecretEnv, "test-secret")
+	s.host = "accelerate-us-east4.gcp.stream-io-api.com"
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/settings/app", func(w http.ResponseWriter, r *http.Request) {
-		if r.Host != "accelerate-us-east4.gcp.stream-io-api.com" ||
+		if r.Host != s.host ||
 			r.Header.Get(stream.APIKeyHeader) != "test-key" ||
 			r.Header.Get(stream.AuthTypeHeader) != stream.AuthTypeJWT ||
 			r.Header.Get(stream.AuthorizationHeader) == "" {
@@ -63,6 +65,7 @@ func (s *regionSuite) readSettings(backend stream.Backend) {
 }
 
 func (s *regionSuite) TestTheDefaultClientReadsAppSettings() {
+	s.host = "accelerate.gcp.stream-io-api.com"
 	s.readSettings(stream.Backend{})
 }
 
@@ -76,7 +79,9 @@ func (s *regionSuite) TestARegionFromTheEnvironmentReadsAppSettings() {
 }
 
 func (s *regionSuite) TestARegionsOwnURLWithATrailingSlashReadsAppSettings() {
-	s.readSettings(stream.Backend{Region: "us-east4", URL: stream.DefaultURL + "/"})
+	url, err := stream.RegionURL("us-east4")
+	s.Require().NoError(err)
+	s.readSettings(stream.Backend{Region: "us-east4", URL: url + "/"})
 }
 
 func (s *regionSuite) TestAConflictingURLAndRegionAreRefused() {
@@ -94,7 +99,7 @@ func (s *regionSuite) TestARegionalClientCanActForAUser() {
 	s.Require().NoError(err)
 	user, err := api.SetUser("jean", "user-token")
 	s.Require().NoError(err)
-	s.Equal(stream.DefaultURL, user.Backend().URL)
+	s.Equal("https://accelerate-us-east4.gcp.stream-io-api.com", user.Backend().URL)
 	s.Equal("jean", user.Backend().UserID)
 	s.Equal("user-token", user.Backend().Token)
 }
