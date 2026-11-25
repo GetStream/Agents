@@ -2283,9 +2283,6 @@ func (m *Manager) claimCall(ctx context.Context, spec Spec, named bool) (func(),
 		hold = func(ctx context.Context) error {
 			said, err := directory.HoldCall(ctx, spec.CustomerID, app, spec.ID)
 			release = sync.OnceFunc(func() { said(context.WithoutCancel(ctx)) })
-			if errors.Is(err, node.ErrCallHeld) {
-				return store.ErrCallTaken
-			}
 			return err
 		}
 	}

@@ -939,7 +939,7 @@ func (r *CallLegs) claiming(ctx context.Context, on NamedCall, customerID string
 }
 
 // Claim runs hold, which says a customer's session is on a named call, or refuses with
-// ErrCallTaken when the call is another customer's, as hold itself may. Both are under the lock PlaceOn keeps a leg
+// ErrCallTaken when the call is another customer's. Both are under the lock PlaceOn keeps a leg
 // under, so of a session and a call placed at once, or of two sessions, one sees the other.
 func (r *CallLegs) Claim(ctx context.Context, customerID, callType, callID string, on NamedCall, hold func(context.Context) error) error {
 	release, err := r.claiming(ctx, on, customerID)
@@ -957,9 +957,7 @@ func (r *CallLegs) Claim(ctx context.Context, customerID, callType, callID strin
 		if err := on.claim(ctx, tx, dbs, customerID, callType, callID); err != nil {
 			return err
 		}
-		if err := hold(ctx); errors.Is(err, ErrCallTaken) {
-			return err
-		} else if err != nil {
+		if err := hold(ctx); err != nil {
 			return errors.Join(ErrCallUnchecked, err)
 		}
 		return nil
