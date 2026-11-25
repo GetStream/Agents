@@ -183,14 +183,28 @@ func (s *Server) deleteKnowledge(ctx context.Context, request *deleteKnowledgeRe
 
 	// The provider's copy goes first: a delete that failed there leaves the documents and pages
 	// listed, so the base can be deleted again. A page read whose write lands after the drop
-	// finds its page gone once the rows are, and takes the write back.
-	existed, err := s.knowledgeFor(ctx, customerID, "").Drop(ctx, namespace)
-	if err != nil {
-		return nil, err
-	}
-	documents, pages, err := s.store.KnowledgeDocuments.DeleteBase(ctx, customerID, namespace)
-	if err != nil {
-		return nil, err
+	// finds its page gone once the rows are, and takes the write back. A document
+	// finished meanwhile may have lost its passages to the drop, so it is deleted too.
+	owned := s.knowledgeFor(ctx, customerID, "")
+	existed, left := false, true
+	var documents, pages int64
+	for attempt := 0; left; attempt++ {
+		if attempt == removeAttempts {
+			return nil, conflict("the knowledge base is being written while it is deleted: delete it again")
+		}
+		keys, err := s.store.KnowledgeDocuments.TakeBase(ctx, customerID, namespace)
+		if err != nil {
+			return nil, err
+		}
+		dropped, err := owned.Drop(ctx, namespace)
+		if err != nil {
+			return nil, err
+		}
+		var deleted, marked int64
+		if deleted, marked, left, err = s.store.KnowledgeDocuments.DeleteBase(ctx, customerID, namespace, keys); err != nil {
+			return nil, err
+		}
+		existed, documents, pages = existed || dropped, documents+deleted, pages+marked
 	}
 	if !existed && documents == 0 && pages == 0 {
 		return nil, errUnknownKnowledgeBase
@@ -382,11 +396,18 @@ func (s *Server) writeKnowledge(
 	for i := range documents {
 		document := &documents[i].KnowledgeDocument
 		was, had := before[document.Source]
-		stale := ingest.IDs(document.Source, document.Passages, was.Passages)
+		// What the base had, and what was written since by an upload this post took the row from.
+		key, stored := document.ObjectKey, max(was.Passages, document.Passages)
+		stale := ingest.IDs(document.Source, len(documents[i].passages), stored)
+		if stored > max(was.Passages, len(documents[i].passages)) {
+			// A post it shares the row with may have written some of them.
+			document.ObjectKey = store.NewPost()
+		}
+		document.Passages = len(documents[i].passages)
 		if err := writer.Delete(ctx, namespace, stale); err != nil {
 			return append(overtaken, documents[i:]...), err
 		}
-		finished, err := s.store.KnowledgeDocuments.Finish(ctx, document, document.ObjectKey)
+		finished, err := s.store.KnowledgeDocuments.Finish(ctx, document, key)
 		if err != nil {
 			return append(overtaken, documents[i:]...), err
 		}
@@ -498,9 +519,9 @@ const postAttempts = removeAttempts + 2
 // deleted only if it still holds it, and otherwise the passages are deleted again.
 func (s *Server) removeKnowledgeDocument(ctx context.Context, document store.KnowledgeDocument) (err error) {
 	owned := s.knowledgeFor(ctx, document.CustomerID, "")
-	rewritten := false
+	taken, rewritten := false, false
 	defer func() {
-		if err == nil {
+		if err == nil || !taken {
 			return
 		}
 		// The document is marked failed for a caller that hung up as well. On the first
@@ -527,6 +548,7 @@ func (s *Server) removeKnowledgeDocument(ctx context.Context, document store.Kno
 		if err != nil {
 			return err
 		}
+		taken = true
 		if err := owned.Delete(ctx, document.Namespace, ingest.IDs(document.Source, 0, passages)); err != nil {
 			return err
 		}
@@ -623,7 +645,8 @@ func (s *Server) registerKnowledge(api huma.API) {
 		Summary:     "Delete a knowledge base",
 		Description: "Everything in it goes, for good: its passages, the documents it was filled with and the " +
 			"pages it was kept filled from. A knowledge base an agent config reads is refused with a 409 " +
-			"naming those agents, so no agent is left looking things up in nothing.\n" +
+			"naming those agents, so no agent is left looking things up in nothing. One that keeps being " +
+			"written while it is deleted is refused with a 409 too: delete it again.\n" +
 			"Server-side only: it needs a server-side token, so it cannot be reached from an end " +
 			"user's device.",
 		DefaultStatus: http.StatusNoContent,

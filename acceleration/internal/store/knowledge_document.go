@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -100,12 +101,16 @@ type KnowledgeDocuments struct {
 // begins with its customer, so it is never one.
 const postKey = "posting:"
 
+// NewPost is a key of a post of its own.
+func NewPost() string { return postKey + newID() }
+
 // Upsert records text posted as a document whose passages are to be written, or may have been,
 // and holds the row under document.ObjectKey, which Finish takes. The posts of one source
 // share a key, which an upload and a removal change. A source the knowledge base already has
 // is updated in place and keeps its id, since posting it again replaced the same passages
 // rather than adding a second copy, and its count still covers the passages it had. The row
-// takes the state and error the caller sets.
+// takes the state and error the caller sets. The document comes back with the passages the row
+// counts when this post took the row, and its own when it shares the row with another's.
 func (r *KnowledgeDocuments) Upsert(ctx context.Context, document *KnowledgeDocument) error {
 	if err := document.Validate(); err != nil {
 		return stack.Wrap(err)
@@ -115,7 +120,8 @@ func (r *KnowledgeDocuments) Upsert(ctx context.Context, document *KnowledgeDocu
 	now := time.Now().UTC()
 	document.CreatedAt = now
 	document.UpdatedAt = now
-	document.ObjectKey = postKey + newID()
+	key, passages := NewPost(), document.Passages
+	document.ObjectKey = key
 
 	// Text posted over a file still waiting to be read is the newer of the two, so the row
 	// lets go of the file and the read that finds it gone leaves the row alone.
@@ -130,10 +136,13 @@ func (r *KnowledgeDocuments) Upsert(ctx context.Context, document *KnowledgeDocu
 		Set("bytes = EXCLUDED.bytes").
 		Set("object_key = CASE WHEN kd.object_key LIKE ? THEN kd.object_key ELSE EXCLUDED.object_key END", postKey+"%").
 		Set("updated_at = EXCLUDED.updated_at").
-		Returning("id, created_at, object_key").
+		Returning("id, created_at, object_key, passages").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save knowledge document: %w", err))
+	}
+	if document.ObjectKey != key {
+		document.Passages = passages
 	}
 	return nil
 }
@@ -174,11 +183,12 @@ func (r *KnowledgeDocuments) Pend(ctx context.Context, document *KnowledgeDocume
 }
 
 // Cover raises the document's passage count to cover passages about to be written for its
-// file, under the same condition as Finish, so a write that stops part way leaves a row whose
-// delete removes every passage either version wrote.
+// file, as long as objectKey still holds the row, so a write that stops part way leaves a row
+// whose delete removes every passage either version wrote. What readAgain asked for is begun.
 func (r *KnowledgeDocuments) Cover(ctx context.Context, customerID, id, objectKey string, passages int) (bool, error) {
 	result, err := r.store.global.NewUpdate().Model((*KnowledgeDocument)(nil)).
 		Set("passages = GREATEST(passages, ?)", passages).
+		Set("error = ''").
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Where("object_key = ?", objectKey).
@@ -191,29 +201,30 @@ func (r *KnowledgeDocuments) Cover(ctx context.Context, customerID, id, objectKe
 
 // Finish records a file read, or text posted, into its passages, as long as objectKey still
 // holds the row. It is false when the document was removed or uploaded again meanwhile, or the
-// file's was posted: the row is no longer this write's. A post leaves its key for the others it
-// shares it with.
+// file's was posted: the row is no longer this write's. It is also false for a file whose row
+// says readAgain, which is written again. A post leaves the row under document.ObjectKey: its
+// key, for the others it shares it with, or a NewPost's, which makes them write theirs again.
 func (r *KnowledgeDocuments) Finish(ctx context.Context, document *KnowledgeDocument, objectKey string) (bool, error) {
 	document.UpdatedAt = time.Now().UTC()
 	document.State = KnowledgeDocumentIndexed
 	document.Error = ""
-	document.ObjectKey = ""
-	if strings.HasPrefix(objectKey, postKey) {
-		document.ObjectKey = objectKey
-	}
-	result, err := r.store.global.NewUpdate().Model(document).
+	query := r.store.global.NewUpdate().Model(document).
 		Column("text", "passages", "pages", "state", "error", "content_type", "bytes", "object_key", "updated_at").
 		Where("id = ?", document.ID).
 		Where("customer_id = ?", document.CustomerID).
-		Where("object_key = ?", objectKey).
-		Exec(ctx)
+		Where("object_key = ?", objectKey)
+	if !strings.HasPrefix(objectKey, postKey) {
+		document.ObjectKey = ""
+		query = query.Where("error = ''")
+	}
+	result, err := query.Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: finish knowledge document: %w", err))
 	}
 	return updatedOne(result, "finish knowledge document")
 }
 
-// Fail records why a file could not be read, under the same condition as Finish. A last
+// Fail records why a file could not be read, as long as objectKey still holds the row. A last
 // failure marks the document failed and lets go of the file; an earlier one leaves it pending,
 // to be tried again.
 func (r *KnowledgeDocuments) Fail(ctx context.Context, customerID, id, objectKey, reason string, last bool) (bool, error) {
@@ -282,6 +293,16 @@ const removalKey = "removing:"
 // removalUnfinished is the error of a document whose removal has not finished.
 const removalUnfinished = "Its removal did not finish. Delete it again."
 
+// waitsForFile is WaitsForFile in SQL.
+const waitsForFile = "object_key <> '' AND object_key NOT LIKE '" + removalKey + "%' AND object_key NOT LIKE '" + postKey + "%'"
+
+// beingPosted is a document a post holds and has not finished.
+const beingPosted = "(object_key LIKE '" + postKey + "%' AND state = '" + KnowledgeDocumentPending + "')"
+
+// readAgain is the error of a document waiting for its file whose passages another write or a
+// removal may have met since its read began to write them, so the read writes them again.
+const readAgain = "The file could not be read yet, and is tried again."
+
 // BeingRemoved is whether a removal holds the document.
 func (k *KnowledgeDocument) BeingRemoved() bool { return strings.HasPrefix(k.ObjectKey, removalKey) }
 
@@ -319,18 +340,18 @@ func (r *KnowledgeDocuments) Take(ctx context.Context, customerID, id string) (k
 	return taken[0].ObjectKey, taken[0].Passages, nil
 }
 
-// FailRemoval says a document's removal did not finish, unless a file uploaded since waits to
-// be read. It holds the row as Take does, so a post that took the row from the removal writes
-// its passages again, as the failed removal may have deleted them.
+// FailRemoval says a document's removal did not finish. It holds the row as Take does, so a post
+// that took the row from the removal writes its passages again, as the failed removal may have
+// deleted them. A file uploaded since is left to its read, which writes them again too.
 func (r *KnowledgeDocuments) FailRemoval(ctx context.Context, customerID, id string) error {
 	_, err := r.store.global.NewUpdate().Model((*KnowledgeDocument)(nil)).
-		Set("object_key = ?", removalKey+newID()).
-		Set("state = ?", KnowledgeDocumentFailed).
-		Set("error = ?", removalUnfinished).
+		Set("object_key = CASE WHEN "+waitsForFile+" THEN object_key ELSE ? END", removalKey+newID()).
+		Set("state = CASE WHEN "+waitsForFile+" THEN state ELSE ? END", KnowledgeDocumentFailed).
+		Set("error = CASE WHEN "+waitsForFile+" THEN ? ELSE ? END", readAgain, removalUnfinished).
 		Set("updated_at = ?", time.Now().UTC()).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
-		Where("(object_key = '' OR object_key LIKE ?)", postKey+"%").
+		Where("object_key NOT LIKE ?", removalKey+"%").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: fail knowledge document removal: %w", err))
@@ -338,15 +359,18 @@ func (r *KnowledgeDocuments) FailRemoval(ctx context.Context, customerID, id str
 	return nil
 }
 
-// Interrupt counts the passages a read of the document wrote after it was overtaken, and makes
-// a removal the document is under take its passages away again. It is false when the document
-// is gone.
-func (r *KnowledgeDocuments) Interrupt(ctx context.Context, customerID, id string, passages int) (bool, error) {
+// Interrupt counts the passages a read of the source wrote after it was overtaken, on the document
+// the source has now. A removal it is under takes its passages away again, and a post or a newer
+// file's read that has not finished writes them again. It is false when the source has none.
+func (r *KnowledgeDocuments) Interrupt(ctx context.Context, customerID, namespace, source string, passages int) (bool, error) {
 	result, err := r.store.global.NewUpdate().Model((*KnowledgeDocument)(nil)).
-		Set("object_key = CASE WHEN object_key LIKE ? THEN ? ELSE object_key END", removalKey+"%", removalKey+newID()).
+		Set("object_key = CASE WHEN object_key LIKE ? OR "+beingPosted+" THEN ? ELSE object_key END",
+			removalKey+"%", removalKey+newID()).
+		Set("error = CASE WHEN "+waitsForFile+" THEN ? ELSE error END", readAgain).
 		Set("passages = GREATEST(passages, ?)", passages).
-		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
+		Where("namespace = ?", namespace).
+		Where("source = ?", source).
 		Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: interrupt knowledge document: %w", err))
@@ -373,19 +397,46 @@ func (r *KnowledgeDocuments) Delete(ctx context.Context, customerID, id, key str
 	return updatedOne(result, "delete knowledge document")
 }
 
-// DeleteBase forgets every document and marks every page of one knowledge base as gone, and
-// returns how many of each there were. Their passages are the caller's to remove, since they
-// are not in this database. The pages are another repository's rows, written here so the two
-// go in one transaction.
-func (r *KnowledgeDocuments) DeleteBase(ctx context.Context, customerID, namespace string) (documents, pages int64, err error) {
+// TakeBase begins the removal of every document of a knowledge base, as Take does of one, and
+// returns the keys it holds them under: one for all but those a removal already held.
+func (r *KnowledgeDocuments) TakeBase(ctx context.Context, customerID, namespace string) ([]string, error) {
 	if customerID == "" || namespace == "" {
-		return 0, 0, stack.Wrap(errors.New("store: a customer and a namespace are required"))
+		return nil, stack.Wrap(errors.New("store: a customer and a namespace are required"))
+	}
+
+	var held []string
+	err := r.store.global.NewUpdate().Model((*KnowledgeDocument)(nil)).
+		Set("object_key = CASE WHEN object_key LIKE ? THEN object_key ELSE ? END", removalKey+"%", removalKey+newID()).
+		Set("state = ?", KnowledgeDocumentFailed).
+		Set("error = ?", removalUnfinished).
+		Set("updated_at = ?", time.Now().UTC()).
+		Where("customer_id = ?", customerID).
+		Where("namespace = ?", namespace).
+		Returning("object_key").
+		Scan(ctx, &held)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: take knowledge base: %w", err))
+	}
+	slices.Sort(held)
+	return slices.Compact(held), nil
+}
+
+// DeleteBase forgets every document of one knowledge base a removal holds under keys, marks every
+// page of it as gone, and returns how many of each there were. Their passages are the caller's to
+// remove first, since they are not in this database, and of a document written since some may have
+// gone with them. One not finished is written again, and left is whether there are others, which
+// say their removal did not finish. The pages are another repository's rows, written here so the
+// two go in one transaction.
+func (r *KnowledgeDocuments) DeleteBase(ctx context.Context, customerID, namespace string, keys []string) (documents, pages int64, left bool, err error) {
+	if customerID == "" || namespace == "" {
+		return 0, 0, false, stack.Wrap(errors.New("store: a customer and a namespace are required"))
 	}
 
 	err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		deleted, err := tx.NewDelete().Model((*KnowledgeDocument)(nil)).
 			Where("customer_id = ?", customerID).
 			Where("namespace = ?", namespace).
+			Where("object_key IN (?)", bun.In(keys)).
 			Exec(ctx)
 		if err != nil {
 			return err
@@ -402,13 +453,25 @@ func (r *KnowledgeDocuments) DeleteBase(ctx context.Context, customerID, namespa
 		if err != nil {
 			return err
 		}
-		pages, err = marked.RowsAffected()
+		if pages, err = marked.RowsAffected(); err != nil {
+			return err
+		}
+		var states []string
+		err = tx.NewUpdate().Model((*KnowledgeDocument)(nil)).
+			Set("object_key = CASE WHEN "+waitsForFile+" OR object_key LIKE ? THEN object_key ELSE ? END", removalKey+"%", removalKey+newID()).
+			Set("state = CASE WHEN "+waitsForFile+" OR "+beingPosted+" THEN state ELSE ? END", KnowledgeDocumentFailed).
+			Set("error = CASE WHEN "+waitsForFile+" THEN ? WHEN "+beingPosted+" THEN error ELSE ? END", readAgain, removalUnfinished).
+			Where("customer_id = ?", customerID).
+			Where("namespace = ?", namespace).
+			Returning("state").
+			Scan(ctx, &states)
+		left = slices.Contains(states, KnowledgeDocumentFailed)
 		return err
 	})
 	if err != nil {
-		return 0, 0, stack.Wrap(fmt.Errorf("store: delete knowledge base: %w", err))
+		return 0, 0, false, stack.Wrap(fmt.Errorf("store: delete knowledge base: %w", err))
 	}
-	return documents, pages, nil
+	return documents, pages, left, nil
 }
 
 // updatedOne is whether result changed exactly one row.

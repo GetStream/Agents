@@ -1027,6 +1027,7 @@ type knowledgeBase struct {
 	wrote        []knowledge.Document
 	beforeDelete func() error
 	afterDelete  func()
+	afterDrop    func()
 }
 
 // onceBeforeWrite runs hook before the next write.
@@ -1069,6 +1070,13 @@ func (b *knowledgeBase) onceAfterDelete(hook func()) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.afterDelete = hook
+}
+
+// onceAfterDrop runs hook after the next drop, before its caller hears of it.
+func (b *knowledgeBase) onceAfterDrop(hook func()) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.afterDrop = hook
 }
 
 func newKnowledgeBase() *knowledgeBase {
@@ -1165,6 +1173,13 @@ func (b *knowledgeBase) Delete(_ context.Context, namespace string, ids []string
 }
 
 func (b *knowledgeBase) Drop(_ context.Context, namespace string) (knowledge.Dropped, error) {
+	b.mu.Lock()
+	after := b.afterDrop
+	b.afterDrop = nil
+	b.mu.Unlock()
+	if after != nil {
+		defer after()
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
