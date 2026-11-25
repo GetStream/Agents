@@ -2701,6 +2701,27 @@ func (s *DataMoveSuite) TestASessionsProjectTagMovesWithIt() {
 	s.Equal("alpha", arrived.TaggedProject())
 }
 
+// A session carried on in another shard is exported as a row of each shard, under one id. The one
+// that does not say its project tag takes it from neither the copy nor the change of the one that does.
+func (s *DataMoveSuite) TestASessionsTwoRowsArriveWithTheProjectTagOneSays() {
+	s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "acme", Project: "alpha", CallerKind: "server"}))
+	row := s.export("acme").of("agent_sessions")[0]
+	for id, tags := range map[string][]any{"said first": {"", nil}, "said last": {nil, ""}} {
+		for _, tag := range tags {
+			row["id"], row["project_tag"] = id, tag
+			encoded, err := json.Marshal(row)
+			s.Require().NoError(err)
+			s.Require().NoError(s.destination.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
+			s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme",
+				[]DataChange{{Table: "agent_sessions", Op: "update", Payload: encoded}}))
+		}
+
+		arrived, err := s.destination.Sessions.Get(s.ctx, "acme", id)
+		s.Require().NoError(err)
+		s.Equal(new(""), arrived.ProjectTag, id)
+	}
+}
+
 func (s *DataMoveSuite) assertProjectTags(store *Store) {
 	for id, want := range map[string]string{"backends": `"alpha"`, "devices": `""`, "before": "null"} {
 		row, err := store.Sessions.Get(s.ctx, "acme", id)

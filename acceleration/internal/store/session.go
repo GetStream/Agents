@@ -677,37 +677,53 @@ func (r *Sessions) Get(ctx context.Context, customerID, id string) (AgentSession
 	return AgentSession{}, stack.Wrap(fmt.Errorf("store: stored session: %w", err))
 }
 
-// ReadProjectTag gives a row that does not say its project tag the one it has: what an earlier
-// run's row says, or, when no row does, what TaggedProject derives. A router of the release before
-// writes such a row as it carries the session on in another shard, so every shard is asked, this one again, for
+// ReadProjectTag gives a row that does not say its project tag the one it has: what another run's
+// row says, or, when no row does, what TaggedProject derives from the row of the run that opened
+// it. A router of the release before writes such a row as it carries the session on in another
+// shard, with the kind of caller that carried it on, so every shard is asked, this one again, for
 // peerReadTimeout at most. A shard that does not answer may be the one that says it, so with no
 // row found it is an error: usage is not tagged with a guess.
 func (r *Sessions) ReadProjectTag(ctx context.Context, session *AgentSession) error {
 	if session.ProjectTag != nil {
 		return nil
 	}
+	opener := *session
 	// A session that never had a project, which only a fork may have a tag without, has none.
 	if len(r.store.peers) > 0 && (session.Project != "" || session.ForkedFrom != "") {
-		tags, failed := answeringShards(ctx, r.store, "project tag", peerReadTimeout, func(tag *string) bool { return tag != nil },
-			func(ctx context.Context, db bun.IDB) (*string, error) {
-				var tag *string
-				err := db.NewSelect().Model((*AgentSession)(nil)).Column("project_tag").
+		lists, failed := answeringShards(ctx, r.store, "project tag", peerReadTimeout,
+			func(rows []AgentSession) bool { return len(rows) > 0 && rows[0].ProjectTag != nil },
+			func(ctx context.Context, db bun.IDB) ([]AgentSession, error) {
+				var rows []AgentSession
+				err := db.NewSelect().Model(&rows).
+					Column("project_tag", "project", "caller_kind", "forked_from").
+					// When the session was first run in the shard: opened_at moves as it is carried
+					// on there again, its first response's time does not. NULL is from before
+					// opened_at was kept, and reads as first.
+					ColumnExpr("LEAST(opened_at, (SELECT min(created_at) FROM agent_responses WHERE session_id = ?TableAlias.id)) AS opened_at").
 					Where("id = ?", session.ID).
 					Where("customer_id = ?", session.CustomerID).
-					Scan(ctx, &tag)
-				if errors.Is(err, sql.ErrNoRows) {
-					err = nil
-				}
-				return tag, err
+					Scan(ctx, &rows)
+				return rows, err
 			})
-		if session.ProjectTag = cmp.Or(tags...); session.ProjectTag != nil {
+		rows := merged(lists, func(a, b AgentSession) int { return a.OpenedAt.Compare(b.OpenedAt) }, 0)
+		if said := slices.IndexFunc(rows, func(row AgentSession) bool { return row.ProjectTag != nil }); said >= 0 {
+			session.ProjectTag = rows[said].ProjectTag
 			return nil
 		}
 		if err := errors.Join(failed...); err != nil {
 			return stack.Wrap(fmt.Errorf("%w: %w", ErrProjectTagUnread, err))
 		}
+		if len(rows) > 0 {
+			opener = rows[0]
+		}
+		// Rows first run at one moment do not say which opened it: one tag they agree on, or none.
+		for _, row := range rows {
+			if row.OpenedAt.Equal(opener.OpenedAt) && row.TaggedProject() != opener.TaggedProject() {
+				opener.ProjectTag = new("")
+			}
+		}
 	}
-	session.ProjectTag = new(session.TaggedProject())
+	session.ProjectTag = new(opener.TaggedProject())
 	return nil
 }
 

@@ -222,6 +222,66 @@ func (s *ShardedStoreSuite) TestASessionTheReleaseBeforeCarriedOnElsewhereKeepsI
 	}
 }
 
+// No row says the tag of a session from before it was kept. The kind of caller that opened it
+// decides, not of who carried it on elsewhere, wherever it is read and wherever it ran since.
+func (s *ShardedStoreSuite) TestASessionFromBeforeCarriedOnElsewhereIsTaggedByWhoOpenedIt() {
+	type run struct {
+		at    *Store
+		opens time.Duration
+		kind  string
+		// answered is when it answered first, zero for a run that never did.
+		answered time.Duration
+	}
+	const before = -1
+	server, device := "server", "authenticated"
+	for name, tried := range map[string]struct {
+		runs []run
+		fork bool
+		want string
+	}{
+		"a device's carried on by a backend":       {runs: []run{{s.store, 0, device, 0}, {s.other, 1, server, 0}}},
+		"a backend's carried on by a device":       {runs: []run{{s.store, 0, server, 0}, {s.other, 1, device, 0}}, want: "alpha"},
+		"a device's from before opened_at":         {runs: []run{{s.store, before, device, 0}, {s.other, 1, server, 0}}},
+		"a backend's from before opened_at":        {runs: []run{{s.store, before, server, 0}, {s.other, 1, device, 0}}, want: "alpha"},
+		"a device's that went back":                {runs: []run{{s.store, 4, device, 1}, {s.other, 2, server, 3}}},
+		"a backend's that went back":               {runs: []run{{s.store, 4, server, 1}, {s.other, 2, device, 3}}, want: "alpha"},
+		"a device's that went back, from before":   {runs: []run{{s.store, 4, device, 1}, {s.other, before, server, 3}}},
+		"a backend's that went back, from before":  {runs: []run{{s.store, 4, server, 1}, {s.other, before, device, 3}}, want: "alpha"},
+		"a backend's carried on twice":             {runs: []run{{s.store, 2, server, 1}, {s.other, 4, device, 5}}, want: "alpha"},
+		"a device's answered only once carried on": {runs: []run{{s.store, 1, device, 0}, {s.other, 2, server, 3}}},
+		"both before opened_at, a device's first":  {runs: []run{{s.store, before, device, 1}, {s.other, before, server, 2}}},
+		"both before opened_at, a backend's first": {runs: []run{{s.store, before, server, 1}, {s.other, before, device, 2}}, want: "alpha"},
+		"run at one moment":                        {runs: []run{{s.store, 1, server, 0}, {s.other, 1, device, 0}}},
+		"run at one moment, the other way":         {runs: []run{{s.store, 1, device, 0}, {s.other, 1, server, 0}}},
+		"run at one moment by backends":            {runs: []run{{s.store, 1, server, 0}, {s.other, 1, server, 0}}, want: "alpha"},
+		"a backend's fork":                         {runs: []run{{s.store, 0, server, 0}, {s.other, 1, server, 0}}, fork: true},
+	} {
+		s.Run(name, func() {
+			for at, ran := range tried.runs {
+				row := AgentSession{ID: name, CustomerID: "app", Project: "alpha", CallerKind: ran.kind, CreatedAt: s.base}
+				if ran.opens != before {
+					row.OpenedAt = s.base.Add(ran.opens * time.Hour)
+				}
+				if tried.fork {
+					row.ForkedFrom = "parent"
+				}
+				s.Require().NoError(ran.at.Sessions.Upsert(s.ctx, &row))
+				if ran.answered != 0 {
+					s.Require().NoError(ran.at.Responses.Insert(s.ctx, &AgentResponse{ID: fmt.Sprint(name, at), SessionID: name,
+						CustomerID: "app", CreatedAt: s.base.Add(ran.answered * time.Hour)}))
+				}
+			}
+
+			for _, store := range []*Store{s.store, s.other} {
+				found, err := store.Sessions.Get(s.ctx, "app", name)
+				s.Require().NoError(err)
+				s.Require().NoError(store.Sessions.ReadProjectTag(s.ctx, &found))
+				s.Equal(tried.want, found.TaggedProject())
+			}
+		})
+	}
+}
+
 // A device's fork naming no project has its backend's tag all the same.
 func (s *ShardedStoreSuite) TestAForkNamingNoProjectCarriedOnElsewhereKeepsItsProjectTag() {
 	opened := s.base.Add(time.Hour)
