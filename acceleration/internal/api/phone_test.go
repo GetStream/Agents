@@ -1589,7 +1589,8 @@ func (s *CallStatusSuite) TestASessionResumedInAnotherAppIsRefusedACallOfAnother
 	spec.ConversationID, spec.AgentID = first.Spec().ConversationID, first.Spec().AgentID
 	s.Require().True(sessions.Close(first.ID(), session.OwnerOf(first.Spec())))
 	spec.ID = s.arrivedFor("customer-" + s.utils.uuid())
-	s.giveApp(s.customerID(), streamAppID(), "key-"+s.customerID())
+	app := streamAppID()
+	s.giveApp(s.customerID(), app, "key-"+s.customerID())
 
 	_, err = sessions.Create(context.Background(), spec)
 	s.ErrorIs(err, session.ErrSessionExists)
@@ -1599,6 +1600,8 @@ func (s *CallStatusSuite) TestASessionResumedInAnotherAppIsRefusedACallOfAnother
 	s.Require().NoError(err)
 	s.Equal(http.StatusConflict, s.data.backendOfAnotherApp().do(http.MethodPost, "/v1/agents/sessions", textSession(pointerTo(resumed.ID())), nil),
 		"the session holds its call in the app it acts in")
+	_, err = s.router.directory.HoldCall(context.Background(), "another-customer", app, resumed.ID())
+	s.NoError(err, "and no longer in the one it was to act in")
 }
 
 // A session that ends, or fails to open, leaves its call to whoever opens it next.
@@ -1640,7 +1643,9 @@ func (s *CallStatusSuite) TestASessionOfAMintedIdOrReopenedIsAskedNothing() {
 
 // deafRedis is the suite's Redis until deaf is set: from then on it takes what is sent it and
 // answers nothing, as a Redis cut off by the network does.
-func (s *CallStatusSuite) deafRedis(deaf *atomic.Bool) rueidis.Client {
+//
+// It goes deaf by itself on being sent any of deafTo.
+func (s *CallStatusSuite) deafRedis(deaf *atomic.Bool, deafTo ...string) rueidis.Client {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = listener.Close() })
@@ -1657,7 +1662,21 @@ func (s *CallStatusSuite) deafRedis(deaf *atomic.Bool) rueidis.Client {
 			}
 			go func() {
 				defer upstream.Close()
-				_, _ = io.Copy(upstream, conn)
+				buffer := make([]byte, 64<<10)
+				for {
+					n, err := conn.Read(buffer)
+					if err != nil {
+						return
+					}
+					for _, word := range deafTo {
+						if strings.Contains(string(buffer[:n]), word) {
+							deaf.Store(true)
+						}
+					}
+					if _, err := upstream.Write(buffer[:n]); err != nil {
+						return
+					}
+				}
 			}()
 			go func() {
 				buffer := make([]byte, 4096)
@@ -1691,15 +1710,7 @@ func (s *CallStatusSuite) TestADirectoryThatDoesNotAnswerHoldsUpNoSession() {
 	directory, err := node.NewDirectory(node.DirectoryOptions{Redis: s.deafRedis(&deaf), Address: "node-deaf:1", Prefix: s.relayPrefix, Logger: logger})
 	s.Require().NoError(err)
 	s.T().Cleanup(directory.Close)
-	sessions, err := session.NewManager(session.ManagerOptions{
-		LLM: s.streams.LLM, Conversations: s.conversations, Stream: s.stream, Store: s.store, Directory: directory, Logger: logger,
-		Writer: s.routerWriter(s.store, s.live, nil, logger),
-		Edge: func(context.Context, session.Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
-			return &silentEdge{inbound: make(chan agent.InboundAudio, 4)}, nil
-		},
-	})
-	s.Require().NoError(err)
-	s.T().Cleanup(func() { _ = sessions.Shutdown() })
+	sessions := s.sessionsWith(directory)
 	s.Require().NoError(heldOn(sessions, s.customerID(), s.utils.uuid()))
 	deaf.Store(true)
 
@@ -1716,6 +1727,13 @@ func (s *CallStatusSuite) TestADirectoryThatDoesNotAnswerHoldsUpNoSession() {
 	s.NoError(err)
 	s.Less(time.Since(began), 10*time.Second)
 
+	// Letting go of a call is no slower.
+	began = time.Now()
+	release, err := directory.HoldCall(context.Background(), s.customerID(), 0, s.utils.uuid())
+	s.Require().Error(err)
+	release(context.Background())
+	s.Less(time.Since(began), 2900*time.Millisecond)
+
 	answering := s.router.directory
 	s.router.directory = directory
 	s.T().Cleanup(func() { s.router.directory = answering })
@@ -1724,4 +1742,58 @@ func (s *CallStatusSuite) TestADirectoryThatDoesNotAnswerHoldsUpNoSession() {
 	s.Less(time.Since(began), 2900*time.Millisecond)
 	s.Equal(http.StatusServiceUnavailable, status, payload)
 	s.Contains(payload, "could not tell whose call")
+}
+
+// sessionsWith is a node's sessions, said to be there by directory.
+func (s *CallStatusSuite) sessionsWith(directory *node.Directory) *session.Manager {
+	logger := slog.New(slog.DiscardHandler)
+	sessions, err := session.NewManager(session.ManagerOptions{
+		LLM: s.streams.LLM, Conversations: s.conversations, Stream: s.stream, Store: s.store, Directory: directory, Logger: logger,
+		Writer: s.routerWriter(s.store, s.live, nil, logger),
+		Edge: func(context.Context, session.Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
+			return &silentEdge{inbound: make(chan agent.InboundAudio, 4)}, nil
+		},
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = sessions.Shutdown() })
+	return sessions
+}
+
+// Sessions of chosen ids that the directory does not answer for hold up no other placement.
+func (s *CallStatusSuite) TestSessionsNotAnsweredForHoldUpNoOtherPlacement() {
+	s.useApp(s.data.createApp())
+	var deaf atomic.Bool
+	directory, err := node.NewDirectory(node.DirectoryOptions{Redis: s.deafRedis(&deaf), Address: "node-deaf:2", Prefix: s.relayPrefix})
+	s.Require().NoError(err)
+	s.T().Cleanup(directory.Close)
+	sessions := s.sessionsWith(directory)
+	deaf.Store(true)
+	var wg sync.WaitGroup
+	began := time.Now()
+	for range 64 {
+		wg.Go(func() { s.ErrorIs(heldOn(sessions, s.customerID(), s.utils.uuid()), store.ErrCallUnchecked) })
+	}
+
+	at := time.Now()
+	s.Require().NoError(s.store.CallLegs.PlaceWithin(context.Background(), &store.CallLeg{Token: s.utils.uuid(), CustomerID: s.customerID(),
+		OrganizationID: s.utils.uuid(), CallType: "agent", CallID: s.utils.uuid(), Vendor: "telnyx", Direction: store.Outbound,
+		LocalNumber: s.utils.number(), RemoteNumber: s.utils.number(), PlacedAt: &at}, store.CallsAtOnce{Limit: 9, Ringing: time.Hour}))
+
+	s.Less(time.Since(at), time.Second)
+	wg.Wait()
+	s.Less(time.Since(began), 2900*time.Millisecond)
+}
+
+// A session refused after it said it is on its call says so no longer.
+func (s *CallStatusSuite) TestASessionRefusedAfterItHeldItsCallLeavesIt() {
+	s.useApp(s.data.createApp())
+	var deaf atomic.Bool
+	// Deaf to the hold, which Redis takes all the same.
+	directory, err := node.NewDirectory(node.DirectoryOptions{Redis: s.deafRedis(&deaf, "HSET"), Address: "node-deaf:3", Prefix: s.relayPrefix})
+	s.Require().NoError(err)
+	s.T().Cleanup(directory.Close)
+	id := s.utils.uuid()
+	s.Require().ErrorIs(heldOn(s.sessionsWith(directory), "customer-"+s.utils.uuid(), id), store.ErrCallUnchecked)
+
+	s.NoError(heldOn(s.manager, s.customerID(), id))
 }

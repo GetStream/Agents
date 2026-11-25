@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/url"
@@ -80,8 +81,9 @@ type Directory struct {
 	// held maps a session this node is running to the agent it writes as and the
 	// conversation it answers in, each empty for a session without one.
 	held map[heldSession]claim
-	// onCalls counts the sessions running here by the call each is on.
-	onCalls map[heldCall]int
+	// onCalls are the calls the sessions running here are on, and holds how many were ever said.
+	onCalls map[heldCall]struct{}
+	holds   uint64
 	// waiting counts the dispatch workers connected here, by customer.
 	waiting map[string]int
 	// offered is what the workers here host, by customer and agent.
@@ -94,12 +96,9 @@ type offerKey struct{ customerID, agentID string }
 // one id.
 type heldSession struct{ customerID, sessionID string }
 
-// heldCall is a customer's session's call, agent:<id>, in a Stream app: 0 for the deployment's own.
-type heldCall struct {
-	customerID string
-	app        int64
-	id         string
-}
+// heldCall is what one session says of the call it is on: its customer, where the call is held, and
+// the session's own field there.
+type heldCall struct{ customerID, key, field string }
 
 // claim is what a session this node holds is found by besides its own id.
 type claim struct{ agentID, conversationID string }
@@ -146,7 +145,7 @@ func NewDirectory(options DirectoryOptions) (*Directory, error) {
 		logger:      logger,
 		cancel:      cancel,
 		held:        map[heldSession]claim{},
-		onCalls:     map[heldCall]int{},
+		onCalls:     map[heldCall]struct{}{},
 		waiting:     map[string]int{},
 		offered:     map[offerKey][]byte{},
 	}
@@ -212,64 +211,67 @@ func (d *Directory) Hold(ctx context.Context, customerID, sessionID, agentID, co
 // waits for each to open.
 const callTimeout = time.Second
 
-// holdCallScript says a call is a customer's on a node, for a while, unless another customer's
-// says so already. A renewal, whose third argument is empty, leaves the customer's own on another
-// node too.
-const holdCallScript = `
-local said = redis.call('GET', KEYS[1])
-if said and said ~= ARGV[1] and (ARGV[3] == '' or string.sub(said, 1, #ARGV[3]) ~= ARGV[3]) then return said end
-redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
-return ARGV[1]`
+// A call is a hash, a field for each session on it, which says when it lapses, since a hash cannot
+// expire its fields one at a time, then its customer. liveCall walks the fields, passes over those
+// that lapsed and runs what it is given for the customer of each other.
+const liveCall = `
+local time = redis.call('TIME')
+local now = time[1] * 1000 + math.floor(time[2] / 1000)
+local fields = redis.call('HGETALL', KEYS[1])
+for i = 1, #fields, 2 do
+  local space = string.find(fields[i + 1], ' ', 1, true)
+  local customer = string.sub(fields[i + 1], space + 1)
+  if tonumber(string.sub(fields[i + 1], 1, space - 1)) > now then
+    %s
+  end
+end
+`
 
-// releaseCallScript takes back what this node said of a call, and nothing said since.
-const releaseCallScript = `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0`
+// holdCallScript says a session of a customer's is on a call, for a while, and 1, or 0 when another
+// customer's is on it. callHolderScript is the customer whose session is on a call, or empty.
+var (
+	holdCallScript = fmt.Sprintf(liveCall, `if customer ~= ARGV[2] then return 0 end`) + `
+redis.call('HSET', KEYS[1], ARGV[1], string.format('%d %s', now + ARGV[3], ARGV[2]))
+redis.call('PEXPIRE', KEYS[1], ARGV[3])
+return 1`
+	callHolderScript = fmt.Sprintf(liveCall, `return customer`) + `
+return ''`
+)
 
-// ErrCallHeld is a call another customer's session holds.
+// ErrCallHeld is a call another customer's session is on.
 var ErrCallHeld = errors.New("node: the call is another customer's")
 
 // HoldCall says a customer's session is on the call agent:<id> in a Stream app, 0 for the
-// deployment's own, and goes on saying so until ReleaseCall. A call another
-// customer's session holds stays its own, and is ErrCallHeld. One that failed says nothing more.
-func (d *Directory) HoldCall(ctx context.Context, customerID string, app int64, id string) error {
-	call := heldCall{customerID, app, id}
+// deployment's own, and goes on saying so until release. It is ErrCallHeld, and says nothing, when
+// another customer's session is on it. Any other error is one of saying so: it is said again with
+// the next renewal, unless released.
+func (d *Directory) HoldCall(ctx context.Context, customerID string, app int64, id string) (release func(context.Context), _ error) {
 	d.mu.Lock()
-	d.onCalls[call]++
+	d.holds++
+	call := heldCall{customerID, d.callKey(app, id), d.address + "#" + strconv.FormatUint(d.holds, 10)}
+	d.onCalls[call] = struct{}{}
 	d.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	said, err := d.redis.Do(ctx, d.holdCall(call, customerOf(d.onCall(call)))).ToString()
-	if err == nil && said != d.onCall(call) {
-		err = ErrCallHeld
+	held, err := d.redis.Do(ctx, d.holdCall(call)).AsInt64()
+	if err == nil && held == 0 {
+		d.mu.Lock()
+		delete(d.onCalls, call)
+		d.mu.Unlock()
+		return func(context.Context) {}, ErrCallHeld
 	}
-	if err != nil {
-		d.leaveCall(call)
-	}
-	return err
+	return func(ctx context.Context) { d.releaseCall(ctx, call) }, err
 }
 
-// leaveCall is one session here fewer on a call, and true for the last.
-func (d *Directory) leaveCall(call heldCall) bool {
+// releaseCall takes back what one session said of a call, and what no other did.
+func (d *Directory) releaseCall(ctx context.Context, call heldCall) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.onCalls[call]--
-	if d.onCalls[call] > 0 {
-		return false
-	}
 	delete(d.onCalls, call)
-	return true
-}
-
-// ReleaseCall says a session HoldCall said was on a call is not any more.
-func (d *Directory) ReleaseCall(ctx context.Context, customerID string, app int64, id string) {
-	call := heldCall{customerID, app, id}
-	if !d.leaveCall(call) {
-		return
-	}
+	d.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	release := d.redis.B().Eval().Script(releaseCallScript).Numkeys(1).Key(d.callKey(app, id)).Arg(d.onCall(call)).Build()
-	if err := d.redis.Do(ctx, release).Error(); err != nil {
-		d.logger.Warn("could not take back this node's claim on a call", "customer", customerID, "call", id, "error", err)
+	if err := d.redis.Do(ctx, d.redis.B().Hdel().Key(call.key).Field(call.field).Build()).Error(); err != nil {
+		d.logger.Warn("could not take back a session's hold on a call", "customer", call.customerID, "call", call.key, "error", err)
 	}
 }
 
@@ -278,11 +280,7 @@ func (d *Directory) ReleaseCall(ctx context.Context, customerID string, app int6
 func (d *Directory) CallHolder(ctx context.Context, app int64, id string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	said, err := d.lookup(ctx, d.callKey(app, id))
-	if err != nil || said == "" {
-		return "", err
-	}
-	return url.QueryUnescape(customerOf(said))
+	return d.redis.Do(ctx, d.redis.B().Eval().Script(callHolderScript).Numkeys(1).Key(d.callKey(app, id)).Build()).ToString()
 }
 
 // callKey is where a call is held: node:call:<app>:<id>.
@@ -290,24 +288,9 @@ func (d *Directory) callKey(app int64, id string) string {
 	return d.calls + strconv.FormatInt(app, 10) + ":" + id
 }
 
-// onCall is what this node says of a call: its customer, escaped so that it holds no space, and
-// the node's address.
-func (d *Directory) onCall(call heldCall) string {
-	return url.QueryEscape(call.customerID) + " " + d.address
-}
-
-// customerOf is the escaped customer of what a node says of a call.
-func customerOf(said string) string {
-	customer, _, _ := strings.Cut(said, " ")
-	return customer
-}
-
-func (d *Directory) holdCall(call heldCall, over string) rueidis.Completed {
-	if over != "" {
-		over += " "
-	}
-	return d.redis.B().Eval().Script(holdCallScript).Numkeys(1).Key(d.callKey(call.app, call.id)).
-		Arg(d.onCall(call), strconv.FormatInt(holdFor.Milliseconds(), 10), over).Build()
+func (d *Directory) holdCall(call heldCall) rueidis.Completed {
+	return d.redis.B().Eval().Script(holdCallScript).Numkeys(1).Key(call.key).
+		Arg(call.field, call.customerID, strconv.FormatInt(holdFor.Milliseconds(), 10)).Build()
 }
 
 // Release says this node is not running a customer's session any more.
@@ -675,7 +658,7 @@ func (d *Directory) renewAll(ctx context.Context) {
 		commands = append(commands, d.writeCommands(key, claimed)...)
 	}
 	for call := range onCalls {
-		commands = append(commands, d.holdCall(call, ""))
+		commands = append(commands, d.holdCall(call))
 	}
 	for customerID := range waiting {
 		commands = append(commands, d.advertiseCommands(customerID)...)

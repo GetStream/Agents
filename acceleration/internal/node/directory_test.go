@@ -55,7 +55,7 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	for _, session := range []string{"s1", "s2", "s3"} {
 		directory.Hold(s.ctx, "acme", session, "agent-"+session, "messaging:"+session)
 	}
-	s.Require().NoError(directory.HoldCall(s.ctx, "acme", 0, "s1"))
+	s.callOf(directory, "acme")
 	directory.Wait(s.ctx, "acme")
 	directory.Wait(s.ctx, "globex")
 	directory.Offer(s.ctx, "acme", "agent-s1", []byte(`{"tools":[]}`))
@@ -226,14 +226,27 @@ func (s *DirectorySuite) holder(app int64, id string) string {
 	return customer
 }
 
-// lapsed drops what a node said of a call, as its expiry does.
+// callOf has a directory say a customer's session is on the call order-42 of app 7.
+func (s *DirectorySuite) callOf(directory *Directory, customer string) func() {
+	release, err := directory.HoldCall(s.ctx, customer, 7, "order-42")
+	s.Require().NoError(err)
+	return func() { release(s.ctx) }
+}
+
+// lapsed puts what is said of the call, as a node that stopped renewing leaves it, in the past.
 func (s *DirectorySuite) lapsed() {
-	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Del().Key(s.prefix+":call:7:order-42").Build()).Error())
+	key := s.prefix + ":call:7:order-42"
+	fields, err := s.client.Do(s.ctx, s.client.B().Hgetall().Key(key).Build()).AsStrMap()
+	s.Require().NoError(err)
+	for field, said := range fields {
+		_, customer, _ := strings.Cut(said, " ")
+		s.Require().NoError(s.client.Do(s.ctx, s.client.B().Hset().Key(key).FieldValue().FieldValue(field, "1 "+customer).Build()).Error())
+	}
 }
 
 func (s *DirectorySuite) TestASessionsCallIsFoundByItsAppUntilItIsReleased() {
 	directory := s.directoryAt("node-a:1")
-	s.Require().NoError(directory.HoldCall(s.ctx, "a customer:1", 7, "order-42"))
+	release := s.callOf(directory, "a customer:1")
 
 	s.Equal("a customer:1", s.holder(7, "order-42"))
 	s.Empty(s.holder(0, "order-42"), "another app's call of the name")
@@ -242,59 +255,84 @@ func (s *DirectorySuite) TestASessionsCallIsFoundByItsAppUntilItIsReleased() {
 	s.Require().NoError(err)
 	s.InDelta(30000, ttl, 5000, "it lapses with the node")
 	s.lapsed()
+	s.Empty(s.holder(7, "order-42"))
 	directory.renewAll(s.ctx)
 	s.Equal("a customer:1", s.holder(7, "order-42"))
 
-	directory.ReleaseCall(s.ctx, "a customer:1", 7, "order-42")
+	release()
 	s.Empty(s.holder(7, "order-42"))
 	directory.renewAll(s.ctx)
 	s.Empty(s.holder(7, "order-42"))
+}
+
+func (s *DirectorySuite) TestAHoldLapsesThirtySecondsAfterItIsSaid() {
+	s.callOf(s.directoryAt("node-a:1"), "acme")
+
+	fields, err := s.client.Do(s.ctx, s.client.B().Hgetall().Key(s.prefix+":call:7:order-42").Build()).AsStrMap()
+	s.Require().NoError(err)
+	s.Require().Len(fields, 1)
+	for _, said := range fields {
+		until, _, _ := strings.Cut(said, " ")
+		at, err := strconv.ParseInt(until, 10, 64)
+		s.Require().NoError(err)
+		s.InDelta(time.Now().Add(30*time.Second).UnixMilli(), at, 5000)
+	}
 }
 
 func (s *DirectorySuite) TestACallAnotherCustomerHoldsStaysItsOwn() {
 	first, second := s.directoryAt("node-a:1"), s.directoryAt("node-b:1")
-	s.Require().NoError(first.HoldCall(s.ctx, "acme", 7, "order-42"))
+	release := s.callOf(first, "acme")
 
-	s.ErrorIs(second.HoldCall(s.ctx, "acm", 7, "order-42"), ErrCallHeld)
-	s.Equal("acme", s.holder(7, "order-42"))
+	refused, err := second.HoldCall(s.ctx, "acm", 7, "order-42")
+	s.ErrorIs(err, ErrCallHeld)
+	refused(s.ctx)
 	second.renewAll(s.ctx)
 	s.Equal("acme", s.holder(7, "order-42"))
-	// A hold refused is not renewed once the call is free.
+	// A hold refused is not said once the call is free.
 	s.lapsed()
 	second.renewAll(s.ctx)
 	s.Empty(s.holder(7, "order-42"))
-	first.renewAll(s.ctx)
 
-	// A claim that lapsed and was taken is not renewed over.
-	s.lapsed()
-	s.Require().NoError(second.HoldCall(s.ctx, "globex", 7, "order-42"))
+	// One that lapsed and was taken is not renewed over, nor taken back with it.
+	s.callOf(second, "globex")
 	first.renewAll(s.ctx)
 	s.Equal("globex", s.holder(7, "order-42"))
-	first.ReleaseCall(s.ctx, "acme", 7, "order-42")
+	release()
 	s.Equal("globex", s.holder(7, "order-42"))
 }
 
-// A customer's session moving to another node holds its call there, and the node it left takes
-// back nothing.
-func (s *DirectorySuite) TestACallIsHeldByTheNodeItsSessionMovedTo() {
+// A customer's sessions on one call, here and on another node, each hold it until the last is gone.
+func (s *DirectorySuite) TestACallIsHeldUntilTheLastSessionOnItIsGone() {
 	first, second := s.directoryAt("node-a:1"), s.directoryAt("node-b:1")
-	s.Require().NoError(first.HoldCall(s.ctx, "acme", 7, "order-42"))
-	s.Require().NoError(second.HoldCall(s.ctx, "acme", 7, "order-42"))
-	first.renewAll(s.ctx)
+	here, again, there := s.callOf(first, "acme"), s.callOf(first, "acme"), s.callOf(second, "acme")
+	refused := func() {
+		_, err := s.directoryAt("node-c:1").HoldCall(s.ctx, "globex", 7, "order-42")
+		s.ErrorIs(err, ErrCallHeld)
+	}
 
-	first.ReleaseCall(s.ctx, "acme", 7, "order-42")
-
+	refused()
+	there()
+	refused()
+	here()
+	refused()
 	s.Equal("acme", s.holder(7, "order-42"))
+	again()
+	s.Empty(s.holder(7, "order-42"))
 }
 
-func (s *DirectorySuite) TestACallTwoSessionsHereAreOnIsHeldUntilBothAreGone() {
+// A hold Redis did not take is said with the next renewal, until it is released.
+func (s *DirectorySuite) TestAHoldThatWasNotSaidIsSaidWithTheNextRenewal() {
 	directory := s.directoryAt("node-a:1")
-	s.Require().NoError(directory.HoldCall(s.ctx, "acme", 7, "order-42"))
-	s.Require().NoError(directory.HoldCall(s.ctx, "acme", 7, "order-42"))
+	cancelled, cancel := context.WithCancel(s.ctx)
+	cancel()
+	release, err := directory.HoldCall(cancelled, "acme", 7, "order-42")
+	s.Require().Error(err)
+	s.Require().NotErrorIs(err, ErrCallHeld)
+	s.Require().Empty(s.holder(7, "order-42"))
 
-	directory.ReleaseCall(s.ctx, "acme", 7, "order-42")
+	directory.renewAll(s.ctx)
 	s.Equal("acme", s.holder(7, "order-42"))
-	directory.ReleaseCall(s.ctx, "acme", 7, "order-42")
+	release(s.ctx)
 	s.Empty(s.holder(7, "order-42"))
 }
 

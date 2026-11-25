@@ -772,6 +772,8 @@ func placing(campaign store.Campaign, contact store.Contact, step Step) phone.Ca
 		Owner: routing.Owner{CustomerID: campaign.CustomerID, Attribution: scheduledBy(campaign), Tags: campaign.Tags},
 		From:  campaign.FromNumber,
 		To:    contact.ToNumber,
+		// The session is the runner's to name (Dial.SessionID).
+		MintedID: true,
 		// Only a campaign that does something on a machine asks the vendor who answered.
 		DetectMachine: !step.Voicemail.off(),
 	}

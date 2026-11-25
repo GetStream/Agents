@@ -928,3 +928,93 @@ func (s *StoreSuite) TestACallWhoseLegsCannotBeReadIsNotClaimed() {
 
 	s.False(held)
 }
+
+// A leg counts as on its call until ten minutes after it was placed.
+func (s *StoreSuite) TestALegPlacedNineMinutesAgoIsOnItsCall() {
+	on := NamedCall{Scope: AppScope{Unpinned: true}}
+	s.Require().NoError(s.places("app", "call", on, nil))
+	_, err := s.store.shard.NewUpdate().Model((*CallLeg)(nil)).Set("placed_at = now() - interval '9 minutes'").Where("call_id = 'call'").Exec(s.ctx)
+	s.Require().NoError(err)
+
+	s.ErrorIs(s.places("other", "call", on, nil), ErrCallTaken)
+}
+
+// A leg placed and dialled is on its call from its dial.
+func (s *StoreSuite) TestACallIsNotTheCustomersWhoPlacedALegAndDialledItLater() {
+	placed := s.base.Add(-time.Minute)
+	leg := CallLeg{CustomerID: "placed", CallType: "agent", CallID: "call", Vendor: "telnyx", Direction: Outbound,
+		LocalNumber: "+15125550150", RemoteNumber: "+15125550152", PlacedAt: &placed, DialedAt: s.base.Add(time.Minute)}
+	_, err := s.store.CallLegs.Open(s.ctx, &leg)
+	s.Require().NoError(err)
+	s.onCall("dialled", "call", 0, s.base)
+
+	s.Equal("dialled", s.ownerOf(AppScope{Unpinned: true}, "call"))
+}
+
+// Named calls of no organization wait for no turn of each other's.
+func (s *StoreSuite) TestNamedCallsOfNoOrganizationArePlacedBesideEachOther() {
+	asking, asked := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	waits := NamedCall{Scope: AppScope{Unpinned: true}, Holder: func(ctx context.Context) (string, error) {
+		once.Do(func() { close(asking) })
+		select {
+		case <-asked:
+		case <-ctx.Done():
+		}
+		return "", ctx.Err()
+	}}
+	place := func(call string, on NamedCall) error {
+		placed := time.Now()
+		return s.store.CallLegs.PlaceOn(s.ctx, &CallLeg{Token: newID(), CustomerID: "app", CallType: "agent", CallID: call, Vendor: "telnyx",
+			Direction: Outbound, LocalNumber: "+15125550150", RemoteNumber: "+15125550151", PlacedAt: &placed}, on, nil)
+	}
+	first := make(chan error, 1)
+	go func() { first <- place("one", waits) }()
+	<-asking
+
+	s.NoError(place("two", NamedCall{Scope: AppScope{Unpinned: true}}))
+
+	close(asked)
+	s.NoError(<-first)
+}
+
+// Named calls whose hold is not answered give up, and hold up no other placement meanwhile.
+func (s *StoreSuite) TestNamedCallsNotAnsweredHoldUpNoOtherPlacement() {
+	on := NamedCall{Scope: AppScope{Unpinned: true}}
+	var holding atomic.Int64
+	var wg sync.WaitGroup
+	began := time.Now()
+	for i := range 64 {
+		wg.Go(func() {
+			s.ErrorIs(s.store.CallLegs.Claim(s.ctx, "app", "agent", fmt.Sprintf("call-%d", i), on, func(ctx context.Context) error {
+				holding.Add(1)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(20 * time.Second):
+					return nil
+				}
+			}), ErrCallUnchecked)
+		})
+	}
+	s.Require().Eventually(func() bool { return holding.Load() >= 8 }, 5*time.Second, 5*time.Millisecond)
+
+	at := time.Now()
+	s.Require().NoError(s.store.CallLegs.PlaceWithin(s.ctx, &CallLeg{Token: newID(), CustomerID: "other", OrganizationID: "org", CallType: "agent",
+		CallID: "unrelated", Vendor: "telnyx", Direction: Outbound, LocalNumber: "+15125550150", RemoteNumber: "+15125550151", PlacedAt: &at},
+		CallsAtOnce{Limit: 9, Ringing: time.Hour}))
+	s.Less(time.Since(at), time.Second)
+	wg.Wait()
+	s.Less(time.Since(began), 10*time.Second)
+}
+
+// Who is on a call is asked before the claim takes a place: one not answered holds none.
+func (s *StoreSuite) TestACallWhoseHolderDoesNotAnswerTakesNoPlace() {
+	on := NamedCall{Scope: AppScope{Unpinned: true}, Holder: func(context.Context) (string, error) { return "", errors.New("redis is down") }}
+	legs := &CallLegs{store: s.store, claims: make(chan struct{})}
+	legs.claimsOnce.Do(func() {})
+
+	began := time.Now()
+	s.ErrorIs(legs.Claim(s.ctx, "app", "agent", "call", on, func(context.Context) error { return nil }), ErrCallUnchecked)
+	s.Less(time.Since(began), time.Second, "it waits for no place to be told so")
+}

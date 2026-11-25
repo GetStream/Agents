@@ -133,6 +133,9 @@ type CallLegs struct {
 	stripes     [placingStripes]chan struct{}
 	placings    chan struct{}
 	stripesOnce sync.Once
+	// claims are the places of the named calls being claimed, at most claimingAtOnce.
+	claims     chan struct{}
+	claimsOnce sync.Once
 }
 
 // Open records a leg of a call in this shard: an outbound one ringing, an inbound one
@@ -777,7 +780,14 @@ func (r *CallLegs) placeOn(ctx context.Context, leg *CallLeg, on *NamedCall, atO
 	// A campaign tick places many calls of one organization at once, and each waiting on the
 	// advisory lock holds a connection of the shared database's pool: waiting here first keeps a
 	// router to one per organization, and to placingAtOnce in all.
-	release, err := r.placing(ctx, cmp.Or(leg.OrganizationID, leg.CallID))
+	turn := func(ctx context.Context) (func(), error) { return r.placing(ctx, leg.OrganizationID) }
+	if on != nil {
+		turn = func(ctx context.Context) (func(), error) { return r.claiming(ctx, *on, leg.CustomerID) }
+	}
+	release, err := turn(ctx)
+	if errors.Is(err, ErrCallTaken) || errors.Is(err, ErrCallUnchecked) {
+		return stack.Wrap(err)
+	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: place call leg: %w", err))
 	}
@@ -878,14 +888,8 @@ func (c NamedCall) claim(ctx context.Context, tx bun.IDB, dbs []bun.IDB, custome
 	if err := lockUntilCommit(ctx, tx, strconv.FormatInt(app, 10)+":"+callType+":"+callID, callLockSeed); err != nil {
 		return err
 	}
-	if c.Holder != nil {
-		holder, err := c.Holder(ctx)
-		if err != nil {
-			return errors.Join(ErrCallUnchecked, err)
-		}
-		if holder != "" && holder != customerID {
-			return ErrCallTaken
-		}
+	if err := c.held(ctx, customerID); err != nil {
+		return err
 	}
 	owner, err := callOwner(ctx, dbs, c.Scope, callType, callID)
 	if err != nil {
@@ -897,11 +901,48 @@ func (c NamedCall) claim(ctx context.Context, tx bun.IDB, dbs []bun.IDB, custome
 	return nil
 }
 
+// held refuses a call another customer's running session is on.
+func (c NamedCall) held(ctx context.Context, customerID string) error {
+	if c.Holder == nil {
+		return nil
+	}
+	holder, err := c.Holder(ctx)
+	if err != nil {
+		return errors.Join(ErrCallUnchecked, err)
+	}
+	if holder != "" && holder != customerID {
+		return ErrCallTaken
+	}
+	return nil
+}
+
+// claimingAtOnce is how many named calls a router claims at once, each holding a connection of
+// the shared database's pool, apart from placingAtOnce so that they hold up no other placement.
+const claimingAtOnce = 8
+
+// claiming waits, for no longer than placingFor, for a place among the named calls being claimed,
+// and returns what gives it up. Who is on the call is asked before: a holder that does not answer
+// then holds no place.
+func (r *CallLegs) claiming(ctx context.Context, on NamedCall, customerID string) (func(), error) {
+	if err := on.held(ctx, customerID); err != nil {
+		return nil, err
+	}
+	r.claimsOnce.Do(func() { r.claims = make(chan struct{}, claimingAtOnce) })
+	ctx, cancel := context.WithTimeout(ctx, placingFor)
+	defer cancel()
+	select {
+	case r.claims <- struct{}{}:
+		return func() { <-r.claims }, nil
+	case <-ctx.Done():
+		return nil, errors.Join(ErrCallUnchecked, ctx.Err())
+	}
+}
+
 // Claim runs hold, which says a customer's session is on a named call, or refuses with
 // ErrCallTaken when the call is another customer's, as hold itself may. Both are under the lock PlaceOn keeps a leg
 // under, so of a session and a call placed at once, or of two sessions, one sees the other.
 func (r *CallLegs) Claim(ctx context.Context, customerID, callType, callID string, on NamedCall, hold func(context.Context) error) error {
-	release, err := r.placing(ctx, callID)
+	release, err := r.claiming(ctx, on, customerID)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: claim call: %w", err))
 	}

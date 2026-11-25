@@ -1173,17 +1173,22 @@ func (s *Server) placeCall(ctx context.Context, delivery scheduledDelivery, foun
 	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < s.phoneWindow+s.callLimit {
 		return session.Spec{}, &scheduling.Missed{Err: fmt.Errorf("the call would have %s left to ring and be held", lateFor(time.Until(deadline)))}
 	}
-	placed, err := s.phone.Call(ctx, phone.CallRequest{
+	placed, err := s.phone.Call(ctx, callRequest(delivery, sessionID, from, to))
+	if err != nil {
+		return session.Spec{}, unpaid(overTier(err))
+	}
+	return callSpec(config, delivery, found.Spec().AgentID, placed, from, to), nil
+}
+
+// callRequest is the call a task rings its user on, into the session the run took.
+func callRequest(delivery scheduledDelivery, sessionID, from, to string) phone.CallRequest {
+	return phone.CallRequest{
 		Owner:     routing.Owner{CustomerID: delivery.CustomerID, Attribution: delivery.attribution()},
 		From:      from,
 		To:        to,
 		SessionID: sessionID,
 		MintedID:  true,
-	})
-	if err != nil {
-		return session.Spec{}, unpaid(overTier(err))
 	}
-	return callSpec(config, delivery, found.Spec().AgentID, placed, from, to), nil
 }
 
 // callSpec is the session a call a task placed is held in: the config as it
