@@ -97,6 +97,20 @@ func (s *TTSRouterSuite) TestAnUtteranceNamingTheSessionsVoiceIsSpokenInIt() {
 	}
 }
 
+// A voice is checked on every piece of an utterance, not only its first: a later piece of a
+// still-open utterance naming another voice is refused, and the text already sent stays.
+func (s *TTSRouterSuite) TestAPieceOfAnOpenUtteranceInAnotherVoiceIsRefused() {
+	for _, vendor := range vendors {
+		session, provider := s.startVoiced(vendor, ownVoices{}, "founder")
+
+		s.Require().NoError(session.Synthesize(tts.Request{ID: "open", Text: "hello", Final: false}), vendor)
+		err := session.Synthesize(tts.Request{ID: "open", Text: " there", Voice: "el-globex", Final: true})
+
+		s.ErrorIs(err, routing.ErrRequest, vendor)
+		s.Len(provider.said, 1, vendor+": the refused piece must not reach the vendor")
+	}
+}
+
 // A session opened with no voice speaks the vendor's default, which is its voice as well; a
 // voice of the customer's own the start frame never asked for is still another voice.
 func (s *TTSRouterSuite) TestASessionOpenedWithNoVoiceTakesOnlyItsDefault() {
