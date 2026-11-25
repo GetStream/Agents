@@ -192,6 +192,13 @@ func (s *PolicySuite) TestALimitsPassAskedBeforeALimitWasLoweredLeavesItLowered(
 
 	s.ErrorIs(s.admit(enforcer, s.app).Spend, ErrBudgetSpent, "the older read does not raise the limit again")
 	s.Equal(read, limitsReadAt(enforcer, s.org), "an older read makes the limits no fresher")
+
+	s.stale(enforcer)
+	land = s.holdRead(reads, "limits", func() { enforcer.money.readLimits(s.ctx, enforcer.config, []string{s.org}) })
+	released := time.Now()
+	land()
+
+	s.True(limitsReadAt(enforcer, s.org).After(released), "a kept one was read when it landed, not when it was asked")
 }
 
 func (s *PolicySuite) TestALimitsPassAskedBeforeAResetLeavesItReset() {
