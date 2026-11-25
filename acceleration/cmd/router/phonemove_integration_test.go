@@ -54,6 +54,10 @@ type PhoneMoveSuite struct {
 	telnyx   *fakeTwilio
 	token    string
 	customer string
+	// owners is the customer each number attachedEarlier gave out is held by.
+	owners map[string]string
+	// updatesBefore is how many requests Stream was sent when the last number was attached.
+	updatesBefore int
 }
 
 func TestPhoneMoveSuite(t *testing.T) {
@@ -85,6 +89,7 @@ func (s *PhoneMoveSuite) SetupTest() {
 	s.telnyx = newFakeTwilio(s.T())
 	s.token = rand.Text()
 	s.customer = uuid.NewString()
+	s.owners = map[string]string{}
 }
 
 // A dry run, the default, says what it would do with each number and writes nothing at Twilio.
@@ -95,13 +100,16 @@ func (s *PhoneMoveSuite) TestADryRunSaysWhatItWouldMoveAndWritesNothing() {
 	out, err := s.move(s.ready())
 
 	s.Require().NoError(err)
-	s.Contains(out, first+"\tapp deployment\twould move\n")
-	s.Contains(out, second+"\tapp deployment\twould move\n")
+	s.Contains(out, second+"\tapp deployment\twould move\twould set allowlist\n")
 	s.Contains(out, kept+"\tapp deployment\tno stored bridge, needs a re-attach\n")
 	s.Contains(out, "0 moved, 2 to move, 0 already moved, 1 with no stored bridge\n")
-	s.Contains(out, "nothing was written at Twilio")
+	s.Contains(out, "nothing was written at Twilio or Stream")
 	s.Empty(s.twilio.posted(), "nothing was written at Twilio")
 	s.Equal(moveTestOldURL, s.twilio.voiceURL(first))
+	s.Contains(out, first+"\tapp deployment\twould move\twould set allowlist\n")
+	s.Contains(out, "allowlist: 0 set, 2 to set, 0 already set\n")
+	s.Zero(s.trunkUpdates(), "nothing was written at Stream")
+	s.Empty(s.addresses(first))
 }
 
 // --apply points each number at the webhook once, by POST; a second run finds them there and
@@ -109,12 +117,11 @@ func (s *PhoneMoveSuite) TestADryRunSaysWhatItWouldMoveAndWritesNothing() {
 func (s *PhoneMoveSuite) TestApplyMovesEachNumberOnceAndAgainMovesNone() {
 	first, second := s.attachedEarlier(), s.attachedEarlier()
 	kept := s.attachedWithNoStoredBridge()
+	passwordBefore, _ := s.chat.TrunkAuth(s.trunkOf(first))
 
 	out, err := s.move(s.ready(), "--apply")
 
 	s.Require().NoError(err)
-	s.Contains(out, first+"\tapp deployment\tmoved\n")
-	s.Contains(out, second+"\tapp deployment\tmoved\n")
 	s.Contains(out, "2 moved, 0 to move, 0 already moved, 1 with no stored bridge\n")
 	s.NotContains(out, "nothing was written")
 	posted := s.twilio.posted()
@@ -130,13 +137,26 @@ func (s *PhoneMoveSuite) TestApplyMovesEachNumberOnceAndAgainMovesNone() {
 		s.Require().NotEmpty(password)
 		s.NotContains(out, password, "the output names numbers only")
 	}
+	// Both numbers are on the customer's one shared trunk, which is written once, keeping its
+	// numbers and password.
+	s.Equal(s.trunkOf(first), s.trunkOf(second))
+	s.Contains(out, first+"\tapp deployment\tmoved\tallowlist set\n")
+	s.Contains(out, second+"\tapp deployment\tmoved\tallowlist already set\n")
+	s.Contains(out, "allowlist: 1 set, 0 to set, 1 already set\n")
+	s.Equal(1, s.trunkUpdates())
+	s.Equal(s.twilioRanges(), s.addresses(first))
+	password, _ := s.chat.TrunkAuth(s.trunkOf(first))
+	s.Equal(passwordBefore, password)
+	s.ElementsMatch([]string{first, second}, s.chat.TrunkNumbers(s.trunkOf(first)))
 
 	again, err := s.move(s.ready(), "--apply")
 
 	s.Require().NoError(err)
-	s.Contains(again, first+"\tapp deployment\talready moved\n")
+	s.Contains(again, first+"\tapp deployment\talready moved\tallowlist already set\n")
 	s.Contains(again, "0 moved, 0 to move, 2 already moved, 1 with no stored bridge\n")
+	s.Contains(again, "allowlist: 0 set, 0 to set, 2 already set\n")
 	s.Len(s.twilio.posted(), 2, "nothing more was written")
+	s.Equal(1, s.trunkUpdates(), "nothing more was written at Stream")
 }
 
 // A run reads past one page of the store, and reports each number once.
@@ -163,19 +183,26 @@ func (s *PhoneMoveSuite) TestANumberOnTheWebhookByGetIsMoved() {
 	out, err := s.move(s.ready())
 
 	s.Require().NoError(err)
-	s.Contains(out, number+"\tapp deployment\twould move\n")
+	s.Contains(out, number+"\tapp deployment\twould move\twould set allowlist\n")
 }
 
-// --one moves that number only, as the first step of a move.
+// --one moves that number and sets that number's trunk only, as the first step of a move.
 func (s *PhoneMoveSuite) TestOneMovesOnlyThatNumber() {
-	first, second := s.attachedEarlier(), s.attachedEarlier()
+	first := s.attachedEarlier()
+	// Another customer's number, on a shared trunk of its own.
+	s.customer = uuid.NewString()
+	second := s.attachedEarlier()
+	s.Require().NotEqual(s.trunkOf(first), s.trunkOf(second))
 
 	out, err := s.move(s.ready(), "--apply", "--one", second)
 
 	s.Require().NoError(err)
-	s.Equal(second+"\tapp deployment\tmoved\n1 moved, 0 to move, 0 already moved, 0 with no stored bridge\n", out)
+	s.Equal(second+"\tapp deployment\tmoved\tallowlist set\n1 moved, 0 to move, 0 already moved, 0 with no stored bridge\n"+
+		"allowlist: 1 set, 0 to set, 0 already set\n", out)
 	s.Equal(moveTestOldURL, s.twilio.voiceURL(first))
 	s.Equal(moveTestHookURL, s.twilio.voiceURL(second))
+	s.Empty(s.addresses(first))
+	s.Equal(s.twilioRanges(), s.addresses(second))
 }
 
 // --app moves the numbers made in that Stream app only.
@@ -187,7 +214,8 @@ func (s *PhoneMoveSuite) TestAppMovesOnlyTheNumbersOfThatApp() {
 	out, err := s.move(s.ready(), "--apply", "--app", "4242")
 
 	s.Require().NoError(err)
-	s.Equal(theApps+"\tapp 4242\tmoved\n1 moved, 0 to move, 0 already moved, 0 with no stored bridge\n", out)
+	s.Equal(theApps+"\tapp 4242\tmoved\tallowlist set\n1 moved, 0 to move, 0 already moved, 0 with no stored bridge\n"+
+		"allowlist: 1 set, 0 to set, 0 already set\n", out)
 	s.Equal(moveTestOldURL, s.twilio.voiceURL(deployments))
 }
 
@@ -233,7 +261,7 @@ func (s *PhoneMoveSuite) TestATelnyxNumberIsNeverTouched() {
 	out, err := s.move(s.ready(), "--apply")
 
 	s.Require().NoError(err)
-	s.Contains(out, twilioNumber+"\tapp deployment\tmoved\n")
+	s.Contains(out, twilioNumber+"\tapp deployment\tmoved\tallowlist set\n")
 	s.NotContains(out, telnyxNumber)
 	s.Empty(s.telnyx.asked())
 
@@ -263,7 +291,8 @@ func (s *PhoneMoveSuite) TestAFlagWrittenWrongIsRefused() {
 }
 
 // Attaching a number attached earlier again points it at the webhook, so an app can move a
-// number itself; attaching it once more writes nothing.
+// number itself; attaching it once more writes nothing. Its trunk's addresses are the run's to
+// set, not an attach's.
 func (s *PhoneMoveSuite) TestAttachingANumberAttachedEarlierAgainMovesIt() {
 	number := s.attachedEarlier()
 
@@ -272,6 +301,7 @@ func (s *PhoneMoveSuite) TestAttachingANumberAttachedEarlierAgainMovesIt() {
 	s.Require().NoError(err)
 	s.Equal(moveTestHookURL, s.twilio.voiceURL(number))
 	s.Len(s.twilio.posted(), 1)
+	s.Empty(s.addresses(number))
 
 	_, err = s.service(s.ready()).Attach(s.ctx, phone.Attachment{CustomerID: s.customer, E164: number})
 
@@ -302,10 +332,26 @@ func (s *PhoneMoveSuite) TestARunStopsAtTheFirstNumberItCouldNotMove() {
 			s.twilio.release(number)
 			return s.ready()
 		}, failure: "not one of this account's numbers", dryRun: true},
+		"a trunk stream does not have": {breakNumber: func(number string) moverSettings {
+			s.Require().NoError(phone.NewStreamFromClient(s.chat.Client).DeleteTrunk(s.ctx, s.trunkOf(number)))
+			return s.ready()
+		}, failure: "stream has no sip trunk"},
+		"trunks stream would not list": {breakNumber: func(string) moverSettings {
+			s.chat.Fail(http.MethodGet, "/sip/inbound_trunks")
+			return s.ready()
+		}, failure: "list sip trunks", dryRun: true},
+		"an update stream refused": {breakNumber: func(number string) moverSettings {
+			s.chat.Fail(http.MethodPut, "/sip/inbound_trunks/"+s.trunkOf(number))
+			return s.ready()
+		}, failure: "update sip trunk"},
 	} {
 		s.Run(name, func() {
 			s.releaseAll()
-			broken, after := s.attachedEarlier(), s.attachedEarlier()
+			s.chat = chattest.NewServer(s.T())
+			broken := s.attachedEarlier()
+			// On a trunk of its own, which a broken trunk leaves as it is.
+			s.customer = uuid.NewString()
+			after := s.attachedEarlier()
 			settings := test.breakNumber(broken)
 			args := []string{"--apply"}
 			if test.dryRun {
@@ -317,6 +363,7 @@ func (s *PhoneMoveSuite) TestARunStopsAtTheFirstNumberItCouldNotMove() {
 			s.ErrorContains(err, test.failure)
 			s.ErrorContains(err, broken)
 			s.Equal(moveTestOldURL, s.twilio.voiceURL(after), "no number after it was moved")
+			s.Empty(s.addresses(after), "no trunk after it was set")
 		})
 	}
 }
@@ -482,9 +529,49 @@ func (s *PhoneMoveSuite) attachedEarlier() string {
 	s.hold(number, "twilio")
 	_, err := s.service(s.ready()).Attach(s.ctx, phone.Attachment{CustomerID: s.customer, E164: number})
 	s.Require().NoError(err)
+	s.owners[number] = s.customer
 	s.twilio.point(number, moveTestOldURL, http.MethodGet)
 	s.twilio.forget()
+	// A trunk made before the router gave Twilio trunks their addresses has none.
+	trunk := s.trunkOf(number)
+	s.Require().NoError(phone.NewStreamFromClient(s.chat.Client).UpdateTrunk(s.ctx, trunk,
+		phone.Trunk{Name: "made earlier", Numbers: s.chat.TrunkNumbers(trunk)}))
+	s.Require().Empty(s.addresses(number))
+	s.updatesBefore = len(s.chat.Requests(s.chat.Key))
 	return number
+}
+
+// twilioRanges are the signalling addresses Twilio is declared with.
+func (s *PhoneMoveSuite) twilioRanges() []string {
+	declared, err := phone.DefaultConfig()
+	s.Require().NoError(err)
+	twilio, _ := declared.Lookup("twilio")
+	s.Require().NotEmpty(twilio.Signalling)
+	return twilio.Signalling
+}
+
+// trunkOf is the id of the Stream trunk the number is on.
+func (s *PhoneMoveSuite) trunkOf(e164 string) string {
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.owners[e164], e164)
+	s.Require().NoError(err)
+	return held.StreamTrunkID
+}
+
+// addresses are the addresses the trunk the number is on takes calls from.
+func (s *PhoneMoveSuite) addresses(e164 string) []string {
+	_, allowed := s.chat.TrunkAuth(s.trunkOf(e164))
+	return allowed
+}
+
+// trunkUpdates is how many trunk updates Stream was sent since the last number was attached.
+func (s *PhoneMoveSuite) trunkUpdates() int {
+	updates := 0
+	for _, request := range s.chat.Requests(s.chat.Key)[s.updatesBefore:] {
+		if request.Method == http.MethodPut && strings.Contains(request.Path, "/sip/inbound_trunks/") {
+			updates++
+		}
+	}
+	return updates
 }
 
 // attachedWithNoStoredBridge is a Twilio number attached with no trunk credentials kept, as one

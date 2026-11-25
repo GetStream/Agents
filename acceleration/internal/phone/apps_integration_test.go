@@ -208,9 +208,51 @@ func (s *AppsSuite) TestACallsTrunkHasAPasswordTheVendorIsGiven() {
 	trunks := s.deployment.Trunks()
 	s.Require().Len(trunks, 1)
 	password, allowed := s.deployment.TrunkAuth(trunks[0])
-	s.NotEmpty(password, "a trunk with no allowlist and no password lets anybody in")
-	s.Empty(allowed)
+	s.NotEmpty(password, "every Twilio account calls from the same addresses, so they alone let in anybody's call")
+	s.Equal(s.twilioSignalling(), allowed)
 	s.Equal(password, s.vendor.dialed.Bridge.Password, "the vendor answers the challenge with it")
+}
+
+// twilioSignalling are the addresses Twilio is declared to call from.
+func (s *AppsSuite) twilioSignalling() []string {
+	declared, ok := s.config().Lookup("twilio")
+	s.Require().True(ok)
+	s.Require().NotEmpty(declared.Signalling)
+	return declared.Signalling
+}
+
+// A vendor that sends a password and declares no addresses gets a trunk as before: a password
+// and no allowlist.
+func (s *AppsSuite) TestACallOnAPasswordVendorWithNoAddressesHasAPasswordAndNoAllowlist() {
+	telnyx := s.numberOn("telnyx")
+
+	_, err := s.service.Call(s.ctx, CallRequest{
+		Owner: routing.Owner{CustomerID: s.customer}, From: telnyx, To: "+15550001111",
+	})
+	s.Require().NoError(err)
+
+	trunks := s.deployment.Trunks()
+	s.Require().Len(trunks, 1)
+	password, allowed := s.deployment.TrunkAuth(trunks[0])
+	s.NotEmpty(password)
+	s.Empty(allowed)
+}
+
+// A shared Twilio trunk has Twilio's addresses and a password when it is made, and keeps both
+// when another number joins it.
+func (s *AppsSuite) TestASharedTwilioTrunkHasTwiliosAddressesAndAPassword() {
+	s.sealed()
+	first, err := s.lineFor(s.customer, s.e164)
+	s.Require().NoError(err)
+	made, _ := s.deployment.TrunkAuth(first.TrunkID)
+	second, err := s.lineFor(s.customer, s.anotherNumber(s.customer, s.vendor.vendor))
+	s.Require().NoError(err)
+
+	s.Require().Equal(first.TrunkID, second.TrunkID)
+	password, allowed := s.deployment.TrunkAuth(first.TrunkID)
+	s.NotEmpty(made)
+	s.Equal(made, password)
+	s.Equal(s.twilioSignalling(), allowed)
 }
 
 func (s *AppsSuite) TestEveryCallsTrunkHasAPasswordOfItsOwn() {
@@ -231,7 +273,7 @@ func (s *AppsSuite) TestAnAttachedNumbersTrunkHasAPasswordTheVendorIsGiven() {
 
 	password, allowed := s.deployment.TrunkAuth(attached.TrunkID)
 	s.NotEmpty(password)
-	s.Empty(allowed)
+	s.Equal(s.twilioSignalling(), allowed)
 	s.Equal(password, s.vendor.inbound.Bridge.Password)
 }
 
@@ -2054,7 +2096,7 @@ func (s *AppsSuite) TestATransfersTrunkHasAPasswordTheVendorIsGiven() {
 	s.Require().Len(trunks, 1)
 	password, allowed := s.deployment.TrunkAuth(trunks[0])
 	s.NotEmpty(password)
-	s.Empty(allowed)
+	s.Equal(s.twilioSignalling(), allowed)
 	s.Equal(password, s.vendor.dialed.Bridge.Password)
 }
 
