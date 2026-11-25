@@ -213,11 +213,11 @@ func trimIdle(store *Store) {
 	}
 }
 
-// warm leaves conns idle connections in each of store's pools, as a test that ran that many
-// statements at once leaves them.
-func (s *StoreSuite) warm(store *Store, conns int) {
+// warm leaves as many idle connections in each of store's pools as the pool may open, as a test
+// that ran that many statements at once leaves them.
+func (s *StoreSuite) warm(store *Store) {
 	for _, db := range []*bun.DB{store.global, store.shard, store.locks} {
-		held := make([]*sql.Conn, conns)
+		held := make([]*sql.Conn, db.Stats().MaxOpenConnections)
 		for i := range held {
 			conn, err := db.DB.Conn(s.ctx)
 			s.Require().NoError(err)
@@ -230,28 +230,34 @@ func (s *StoreSuite) warm(store *Store, conns int) {
 }
 
 func (s *StoreSuite) TestATestStartsWithoutTheIdleConnectionsAnEarlierOneLeft() {
-	s.warm(s.store, 8)
-	s.Require().Equal(8, s.store.locks.Stats().Idle, "a pool keeps the connections a test opened")
+	s.warm(s.store)
+	s.Require().Equal(lockConns, s.store.locks.Stats().Idle, "a pool keeps the connections a test opened")
 
 	s.SetupTest()
 
 	s.LessOrEqual(s.store.global.Stats().OpenConnections, 2, "keptIdle")
 	s.LessOrEqual(s.store.shard.Stats().OpenConnections, 2, "keptIdle")
 	s.LessOrEqual(s.store.locks.Stats().OpenConnections, 2, "keptIdle")
-	s.warm(s.store, 8)
-	s.Equal(8, s.store.locks.Stats().Idle, "and keeps them again, up to its size")
+	s.warm(s.store)
+	s.Equal(maxConns, s.store.global.Stats().Idle, "and keeps them again, up to its size")
+	s.Equal(maxConns, s.store.shard.Stats().Idle, "and keeps them again, up to its size")
+	s.Equal(lockConns, s.store.locks.Stats().Idle, "and keeps them again, up to its size")
 	s.Equal(lockConns, s.store.locks.Stats().MaxOpenConnections)
 }
 
 func (s *ShardedStoreSuite) TestATestStartsWithoutTheIdleConnectionsAnEarlierOneLeftInTheOtherShard() {
-	s.warm(s.other, 8)
-	s.Require().Equal(8, s.other.global.Stats().Idle, "a pool keeps the connections a test opened")
+	s.warm(s.other)
+	s.Require().Equal(maxConns, s.other.global.Stats().Idle, "a pool keeps the connections a test opened")
 
 	s.SetupTest()
 
 	s.LessOrEqual(s.other.global.Stats().OpenConnections, 2, "keptIdle")
 	s.LessOrEqual(s.other.shard.Stats().OpenConnections, 2, "keptIdle")
 	s.LessOrEqual(s.other.locks.Stats().OpenConnections, 2, "keptIdle")
+	s.warm(s.other)
+	s.Equal(maxConns, s.other.global.Stats().Idle, "and keeps them again, up to its size")
+	s.Equal(maxConns, s.other.shard.Stats().Idle, "and keeps them again, up to its size")
+	s.Equal(lockConns, s.other.locks.Stats().Idle, "and keeps them again, up to its size")
 }
 
 func (s *StoreSuite) TestMigrateIsIdempotent() {
