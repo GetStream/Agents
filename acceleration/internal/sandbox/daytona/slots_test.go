@@ -20,9 +20,10 @@ func (s *LifecycleSuite) slotsFor(most int) sandbox.Slots {
 	owner := money.Owner(s.T(), 1_000_000)
 	money.Usage.SetLimits(s.T(), owner.Attribution.OrganizationID, usage.Limits{Sandbox: &usage.SandboxLimits{MaxConcurrent: &most}})
 	var slots sandbox.Slots
+	ctx := s.ctx
 	s.Require().Eventually(func() bool {
 		var err error
-		slots, err = money.Enforcer.Sandbox(s.ctx, owner, policy.SandboxAsk{})
+		slots, err = money.Enforcer.Sandbox(ctx, owner, policy.SandboxAsk{})
 		if err != nil || slots == nil {
 			return false
 		}
@@ -33,13 +34,13 @@ func (s *LifecycleSuite) slotsFor(most int) sandbox.Slots {
 			}
 		}()
 		for range most {
-			release, err := slots.Take(s.ctx, false)
+			release, err := slots.Take(ctx, false)
 			if err != nil {
 				return false
 			}
 			releases = append(releases, release)
 		}
-		_, err = slots.Take(s.ctx, false)
+		_, err = slots.Take(ctx, false)
 		return err != nil
 	}, 5*time.Second, 20*time.Millisecond, "the organization's sandbox limits are read")
 	return slots

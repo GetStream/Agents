@@ -42,8 +42,8 @@ dependency_overrides:
     path: ../../../../stream-chat-flutter-ai/packages/stream_chat_flutter_ai
 ```
 
-The Chat tab asks for `xai/grok-4.7`, a model that streams its reasoning, so the router needs
-`XAI_API_KEY`; a call keeps the agent's faster model.
+The Chat tab runs on the agent's own model, as a call does: which model a session runs on is the
+backend's to choose, and the router refuses a device that names one.
 
 ## What the app shows
 

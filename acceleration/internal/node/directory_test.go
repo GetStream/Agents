@@ -3,8 +3,14 @@
 package node
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -59,7 +65,9 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	directory.Offer(s.ctx, "globex", "agent-s2", []byte(`{"tools":[]}`))
 	keys, err := s.client.Do(s.ctx, s.client.B().Keys().Pattern(s.prefix+":*").Build()).AsStrSlice()
 	s.Require().NoError(err)
-	s.Require().Len(keys, 3*4+2+2+1)
+	// Each session: itself, its agent and its conversation, each under its customer and under
+	// its id alone.
+	s.Require().Len(keys, 3*6+2+2+1)
 	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Del().Key(keys...).Build()).Error())
 
 	before := s.roundTrips.sent.Load()
@@ -74,9 +82,12 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	peer, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: "node-b:1", Prefix: s.prefix})
 	s.Require().NoError(err)
 	peer.Close()
-	held, err := peer.NodeByConversation(s.ctx, "messaging:s3")
+	held, err := peer.NodeByConversation(s.ctx, "acme", "messaging:s3")
 	s.Require().NoError(err)
 	s.Equal("node-a:1", held)
+	writing, err := peer.NodesByAgent(s.ctx, "agent-s2")
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"acme": "node-a:1"}, writing)
 	waiting, err := peer.Waiting(s.ctx, "globex")
 	s.Require().NoError(err)
 	s.Equal([]string{"node-a:1"}, waiting)
@@ -114,6 +125,92 @@ func (s *DirectorySuite) TestASessionHeldHereIsFoundByItsIdAlone() {
 	s.Equal("node-a:1", held)
 }
 
+// Two customers may each run a session writing as one agent: each customer's is found, whichever
+// node said so last.
+func (s *DirectorySuite) TestTwoCustomersWritingAsOneAgentAreFoundApart() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "support", "")
+	s.directoryAt("node-b:1").Hold(s.ctx, "globex", "s2", "support", "")
+
+	peer := s.directoryAt("node-c:1")
+	s.Equal("node-a:1", s.writingAs(peer, "acme", "support"))
+	s.Equal("node-b:1", s.writingAs(peer, "globex", "support"))
+	writing, err := peer.NodesByAgent(s.ctx, "support")
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"acme": "node-a:1", "globex": "node-b:1"}, writing)
+}
+
+// The same for two customers answering in conversations of one cid.
+func (s *DirectorySuite) TestTwoCustomersAnsweringInOneConversationAreFoundApart() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "", "messaging:general")
+	s.directoryAt("node-b:1").Hold(s.ctx, "globex", "s2", "", "messaging:general")
+
+	peer := s.directoryAt("node-c:1")
+	s.Equal("node-a:1", s.answeringIn(peer, "acme", "messaging:general"))
+	s.Equal("node-b:1", s.answeringIn(peer, "globex", "messaging:general"))
+}
+
+// A customer id may hold a colon, as a cid does, so customer "a:b" in "c:d" and customer "a" in
+// "b:c:d" are two conversations.
+func (s *DirectorySuite) TestACustomerAndCidAreNotTakenForAnother() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "a:b", "s1", "", "c:d")
+	s.directoryAt("node-b:1").Hold(s.ctx, "a", "s2", "", "b:c:d")
+
+	peer := s.directoryAt("node-c:1")
+	s.Equal("node-a:1", s.answeringIn(peer, "a:b", "c:d"))
+	s.Equal("node-b:1", s.answeringIn(peer, "a", "b:c:d"))
+}
+
+// A node that died stops renewing its customer's claim on an agent while another customer's
+// renewals keep the agent's entry alive: that claim lapses all the same.
+func (s *DirectorySuite) TestAClaimOnAnAgentThatLapsedIsFoundNowhere() {
+	lapsed := strconv.FormatInt(time.Now().Add(-time.Second).UnixMilli(), 10)
+	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Hset().Key(s.prefix+":writing-as:support").
+		FieldValue().FieldValue("acme", lapsed+" node-a:1").Build()).Error())
+	s.directoryAt("node-b:1").Hold(s.ctx, "globex", "s2", "support", "")
+
+	peer := s.directoryAt("node-c:1")
+	s.Empty(s.writingAs(peer, "acme", "support"))
+	writing, err := peer.NodesByAgent(s.ctx, "support")
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"globex": "node-b:1"}, writing)
+}
+
+// A router of the release before holds a conversation under its cid alone, and an approval in it
+// is still carried there.
+func (s *DirectorySuite) TestAConversationHeldUnderItsCidAloneIsFound() {
+	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Set().Key(s.prefix+":channel:messaging:general").Value("node-a:1").Build()).Error())
+
+	s.Equal("node-a:1", s.answeringIn(s.directoryAt("node-c:1"), "acme", "messaging:general"))
+}
+
+// A claim on an agent lapses thirty seconds after it is made unless its node renews it, though
+// other customers' renewals keep the agent's entry alive.
+func (s *DirectorySuite) TestAClaimOnAnAgentLapsesThirtySecondsAfterItIsMade() {
+	before := time.Now()
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "support", "")
+	after := time.Now()
+
+	entry, err := s.client.Do(s.ctx, s.client.B().Hget().Key(s.prefix+":writing-as:support").Field("acme").Build()).ToString()
+	s.Require().NoError(err)
+	until, address, _ := strings.Cut(entry, " ")
+	lapses, err := strconv.ParseInt(until, 10, 64)
+	s.Require().NoError(err)
+	s.Equal("node-a:1", address)
+	s.GreaterOrEqual(lapses, before.Add(30*time.Second).UnixMilli())
+	s.LessOrEqual(lapses, after.Add(30*time.Second).UnixMilli())
+}
+
+// A router of the release before reads a session's agent and conversation by their ids alone.
+func (s *DirectorySuite) TestASessionHeldHereIsFoundByItsAgentAndConversationAlone() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "support", "messaging:general")
+
+	for _, key := range []string{s.prefix + ":agent:support", s.prefix + ":channel:messaging:general"} {
+		held, err := s.client.Do(s.ctx, s.client.B().Get().Key(key).Build()).ToString()
+		s.Require().NoError(err, key)
+		s.Equal("node-a:1", held, key)
+	}
+}
+
 func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhere() {
 	directory := s.directoryAt("node-a:1")
 	directory.Hold(s.ctx, "acme", "order-42", "", "")
@@ -124,6 +221,89 @@ func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhere() {
 	exists, err := s.client.Do(s.ctx, s.client.B().Exists().Key(s.prefix+":session:order-42").Build()).AsInt64()
 	s.Require().NoError(err)
 	s.Zero(exists, "a router of the release before would still forward to it")
+}
+
+// Each claim that cannot be taken back is said, so a Redis that refuses one of the two leaves the
+// other's failure in the log too.
+func (s *DirectorySuite) TestEachClaimThatCannotBeTakenBackIsLogged() {
+	var logged bytes.Buffer
+	directory, err := NewDirectory(DirectoryOptions{
+		Redis: s.client, Address: "node-a:1", Prefix: s.prefix,
+		Logger: slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	s.Require().NoError(err)
+	directory.Close()
+	directory.Hold(s.ctx, "acme", "order-42", "", "")
+	gone, cancel := context.WithCancel(s.ctx)
+	cancel()
+
+	directory.Release(gone, "acme", "order-42")
+
+	s.Equal(2, strings.Count(logged.String(), "could not take back this node's claim on a session"))
+}
+
+// A DEL naming two keys is refused on a Redis Cluster when they are in different hash slots, and a
+// session's two keys are. This holds with no cluster: each key is deleted by a command of its own.
+func (s *DirectorySuite) TestAReleasedSessionsKeysAreDeletedOneCommandEach() {
+	sent := &sentCommands{}
+	directory, err := NewDirectory(DirectoryOptions{Redis: rueidishook.WithHook(s.client, sent), Address: "node-a:1", Prefix: s.prefix})
+	s.Require().NoError(err)
+	directory.Close()
+	directory.Hold(s.ctx, "acme", "order-42", "", "")
+	sent.reset()
+
+	directory.Release(s.ctx, "acme", "order-42")
+
+	var deleted []string
+	for _, command := range sent.all() {
+		if strings.EqualFold(command[0], "DEL") {
+			s.Len(command, 2, "a DEL names one key: %v", command)
+			deleted = append(deleted, command[1:]...)
+		}
+	}
+	s.ElementsMatch([]string{s.prefix + ":session:order-42", directory.sessionKey(heldSession{"acme", "order-42"})}, deleted)
+}
+
+// clusterAddressVar names a node of a Redis Cluster with more than one shard, which CI does not
+// run. Three `redis-server --cluster-enabled yes` joined by `redis-cli --cluster create` make one.
+const clusterAddressVar = "ROUTER_TEST_REDIS_CLUSTER_ADDR"
+
+// On a cluster, a command naming keys of different hash slots panics in the client before it is
+// sent, and a session's key under its customer and under its id alone are in different slots.
+// Closing a session must drop both.
+func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhereOnACluster() {
+	address := os.Getenv(clusterAddressVar)
+	if address == "" {
+		s.T().Skipf("%s not set", clusterAddressVar)
+	}
+	cluster, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{address}, DisableCache: true})
+	s.Require().NoError(err)
+	s.T().Cleanup(cluster.Close)
+	directory, err := NewDirectory(DirectoryOptions{Redis: cluster, Address: "node-a:1", Prefix: s.prefix})
+	s.Require().NoError(err)
+	directory.Close()
+	keys := []string{directory.sessionKey(heldSession{"acme", "order-42"}), s.prefix + ":session:order-42"}
+	slots := map[int64]bool{}
+	for _, key := range keys {
+		slot, err := cluster.Do(s.ctx, cluster.B().ClusterKeyslot().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		slots[slot] = true
+	}
+	s.Require().Len(slots, 2, "the two keys of a session sit in different slots")
+	directory.Hold(s.ctx, "acme", "order-42", "", "")
+	for _, key := range keys {
+		exists, err := cluster.Do(s.ctx, cluster.B().Exists().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		s.Require().EqualValues(1, exists, "%s is held", key)
+	}
+
+	directory.Release(s.ctx, "acme", "order-42")
+
+	for _, key := range keys {
+		exists, err := cluster.Do(s.ctx, cluster.B().Exists().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		s.Zero(exists, "%s is still held", key)
+	}
 }
 
 // directoryAt is a node's directory at address, renewing nothing for the test's length.
@@ -137,6 +317,20 @@ func (s *DirectorySuite) directoryAt(address string) *Directory {
 // nodeOf is where directory says a customer's session runs.
 func (s *DirectorySuite) nodeOf(directory *Directory, customer, session string) string {
 	address, err := directory.Node(s.ctx, customer, session)
+	s.Require().NoError(err)
+	return address
+}
+
+// writingAs is where directory says a customer's session writing as an agent runs.
+func (s *DirectorySuite) writingAs(directory *Directory, customer, agent string) string {
+	address, err := directory.NodeByAgent(s.ctx, customer, agent)
+	s.Require().NoError(err)
+	return address
+}
+
+// answeringIn is where directory says a customer's session answering in a conversation runs.
+func (s *DirectorySuite) answeringIn(directory *Directory, customer, cid string) string {
+	address, err := directory.NodeByConversation(s.ctx, customer, cid)
 	s.Require().NoError(err)
 	return address
 }
@@ -176,5 +370,62 @@ func (r *roundTrips) DoStream(client rueidis.Client, ctx context.Context, cmd ru
 
 func (r *roundTrips) DoMultiStream(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) rueidis.MultiRedisResultStream {
 	r.sent.Add(1)
+	return client.DoMultiStream(ctx, multi...)
+}
+
+// sentCommands keeps every command sent to Redis, in order.
+type sentCommands struct {
+	mu       sync.Mutex
+	commands [][]string
+}
+
+func (c *sentCommands) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.commands = nil
+}
+
+func (c *sentCommands) all() [][]string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([][]string(nil), c.commands...)
+}
+
+func (c *sentCommands) keep(commands ...rueidis.Completed) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, command := range commands {
+		// The client reuses a command's slice once it is sent.
+		c.commands = append(c.commands, slices.Clone(command.Commands()))
+	}
+}
+
+func (c *sentCommands) Do(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+	c.keep(cmd)
+	return client.Do(ctx, cmd)
+}
+
+func (c *sentCommands) DoMulti(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) []rueidis.RedisResult {
+	c.keep(multi...)
+	return client.DoMulti(ctx, multi...)
+}
+
+func (c *sentCommands) DoCache(client rueidis.Client, ctx context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	return client.DoCache(ctx, cmd, ttl)
+}
+
+func (c *sentCommands) DoMultiCache(client rueidis.Client, ctx context.Context, multi ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	return client.DoMultiCache(ctx, multi...)
+}
+
+func (c *sentCommands) Receive(client rueidis.Client, ctx context.Context, subscribe rueidis.Completed, fn func(msg rueidis.PubSubMessage)) error {
+	return client.Receive(ctx, subscribe, fn)
+}
+
+func (c *sentCommands) DoStream(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResultStream {
+	return client.DoStream(ctx, cmd)
+}
+
+func (c *sentCommands) DoMultiStream(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) rueidis.MultiRedisResultStream {
 	return client.DoMultiStream(ctx, multi...)
 }

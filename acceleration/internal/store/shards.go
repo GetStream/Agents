@@ -59,7 +59,7 @@ func OpenShards(options Options) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{global: db, shard: db, globalDSN: options.DSN, shardDSN: options.DSN,
-		retries: make(chan struct{}, forgetSlots), writeTimeout: cmp.Or(options.writeTimeout, writeTimeout)}
+		retries: make(chan struct{}, forgetSlots), lost: make(chan struct{}, forgetSlots), polls: make(chan struct{}, pollSlots), writeTimeout: cmp.Or(options.writeTimeout, writeTimeout)}
 	s.closing, s.stop = context.WithCancel(context.Background())
 	if options.ShardDSN != "" && options.ShardDSN != options.DSN {
 		shard, err := connect(options.ShardDSN, maxConns)

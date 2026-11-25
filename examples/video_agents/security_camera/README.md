@@ -45,20 +45,6 @@ on each crop. Nothing has to be set up in Roboflow. Matching is cosine similarit
 people 0.76. CLIP is not a face recognition model, so treat a name as a good guess rather
 than an identity.
 
-To use a Workflow of your own instead, with a better embedding model, point the faces
-processor at `roboflow/workflow` and name it:
-
-```python
-stream.DetectionProcessor(
-    target="roboflow/workflow",
-    embeddings=True,
-    overwrites={"roboflow": {"workspace": "my-workspace", "workflow_id": "faces"}},
-    ...
-)
-```
-
-It has to output `predictions` and `embeddings`, one embedding per prediction.
-
 ## Prerequisites
 
 A running acceleration router from the repo root, rebuilt so it has detection:
