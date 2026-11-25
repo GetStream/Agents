@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/providers"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
@@ -82,6 +83,8 @@ func (s *ChildAgentsSuite) SetupSuite() {
 		})
 	}
 	s.RouterSuite.SetupSuite()
+	// The catalog, for the children that bind its connectors (child_agents_sensitive_test.go).
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *ChildAgentsSuite) SetupTest() {
