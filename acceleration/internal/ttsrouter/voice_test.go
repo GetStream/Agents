@@ -111,6 +111,62 @@ func (s *TTSRouterSuite) TestAPieceOfAnOpenUtteranceInAnotherVoiceIsRefused() {
 	}
 }
 
+// The same holds for a piece that is not the last of its utterance: a caller streaming a
+// sentence sends final false until the end, and each of those pieces is checked too.
+func (s *TTSRouterSuite) TestAStreamedPieceOfAnOpenUtteranceInAnotherVoiceIsRefused() {
+	for _, vendor := range vendors {
+		session, provider := s.startVoiced(vendor, ownVoices{}, "founder")
+
+		s.Require().NoError(session.Synthesize(tts.Request{ID: "open", Text: "hello", Final: false}), vendor)
+		err := session.Synthesize(tts.Request{ID: "open", Text: " there", Voice: "el-globex", Final: false})
+
+		s.ErrorIs(err, routing.ErrRequest, vendor)
+		s.Len(provider.said, 1, vendor+": the refused piece must not reach the vendor")
+	}
+}
+
+// Every shape of a frame is held to the rule: the first piece of an utterance, streamed or
+// final, one with no id, and text for an id whose utterance already ended.
+func (s *TTSRouterSuite) TestAFirstOrFreshPieceInAnotherVoiceIsRefused() {
+	for _, vendor := range vendors {
+		session, provider := s.startVoiced(vendor, ownVoices{}, "founder")
+
+		for _, request := range []tts.Request{
+			{ID: "first-streamed", Text: "hello", Voice: "el-globex", Final: false},
+			{ID: "first-final", Text: "hello", Voice: "el-globex", Final: true},
+			{Text: "hello", Voice: "el-globex", Final: false},
+			{Text: "hello", Voice: "el-globex", Final: true},
+		} {
+			s.ErrorIs(session.Synthesize(request), routing.ErrRequest, vendor+" "+request.ID)
+		}
+		s.Empty(provider.said, vendor)
+
+		s.Require().NoError(session.Synthesize(tts.Request{ID: "done", Text: "hello", Final: true}), vendor)
+		for _, final := range []bool{false, true} {
+			err := session.Synthesize(tts.Request{ID: "done", Text: " again", Voice: "el-globex", Final: final})
+			s.ErrorIs(err, routing.ErrRequest, vendor)
+		}
+		s.Len(provider.said, 1, vendor+": text for an ended utterance in another voice must not reach the vendor")
+	}
+}
+
+// The session's own voice on a later piece, streamed or final, is spoken in the voice the
+// vendor was built with, and the vendor is asked for no other.
+func (s *TTSRouterSuite) TestALaterPieceNamingTheSessionsVoiceIsSpoken() {
+	for _, vendor := range vendors {
+		session, provider := s.startVoiced(vendor, ownVoices{}, "founder")
+
+		s.Require().NoError(session.Synthesize(tts.Request{ID: "open", Text: "hello", Final: false}), vendor)
+		s.Require().NoError(session.Synthesize(tts.Request{ID: "open", Text: " there", Voice: "founder", Final: false}), vendor)
+		s.Require().NoError(session.Synthesize(tts.Request{ID: "open", Text: " friend", Voice: "el-founder", Final: true}), vendor)
+
+		s.Require().Len(provider.said, 3, vendor)
+		for _, said := range provider.said {
+			s.Empty(said.Voice, vendor)
+		}
+	}
+}
+
 // A session opened with no voice speaks the vendor's default, which is its voice as well; a
 // voice of the customer's own the start frame never asked for is still another voice.
 func (s *TTSRouterSuite) TestASessionOpenedWithNoVoiceTakesOnlyItsDefault() {
