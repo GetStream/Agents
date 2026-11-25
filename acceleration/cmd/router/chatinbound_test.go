@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -145,4 +146,75 @@ func (s *ChatInboundStartupSuite) TestTheAccessLineNamesTheRelease() {
 		}
 		return false
 	}, 30*time.Second, 50*time.Millisecond)
+}
+
+// TEMPORARY (AI-3959): a ROUTER_DEVICE_IDENTITY_ALLOW that does not read stops the router at
+// start, naming the setting and never its value, rather than bringing the refusal back for the
+// device it was set for.
+func (s *ChatInboundStartupSuite) TestADeviceIdentityAllowThatDoesNotReadStopsTheRouter() {
+	s.settings.Addr = "127.0.0.1:0"
+	s.settings.DeviceIdentityAllow = "x-secret|x-secret"
+
+	s.start()
+
+	select {
+	case <-s.stopped:
+		s.ErrorContains(s.err, "ROUTER_DEVICE_IDENTITY_ALLOW")
+		s.NotContains(s.err.Error(), "x-secret")
+	case <-time.After(10 * time.Second):
+		s.Fail("the router started with a setting that does not read")
+	}
+}
+
+// TEMPORARY (AI-3959): the router logs how many entries ROUTER_DEVICE_IDENTITY_ALLOW holds,
+// never their values, and its server checks a device against them: the listed app's device is
+// let past the refusal, another app's is refused as before.
+func (s *ChatInboundStartupSuite) TestTheDeviceIdentityAllowIsLoggedByCountAndServed() {
+	logged := &lockedBuffer{}
+	s.logger = slog.New(slog.NewTextHandler(logged, nil))
+	s.settings.Auth.Mode = string(auth.Proxy)
+	s.settings.DeviceIdentityAllow = "app-9|agent-secret|user-secret|Name Secret"
+	opened, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	s.settings.Addr = opened.Addr().String()
+	s.Require().NoError(opened.Close())
+
+	s.start()
+
+	transport := &http.Transport{}
+	s.T().Cleanup(transport.CloseIdleConnections)
+	client := http.Client{Timeout: 5 * time.Second, Transport: transport}
+	ask := func(app string) (int, string, error) {
+		request, err := http.NewRequest(http.MethodPost, "http://"+s.settings.Addr+"/v1/agents/sessions",
+			strings.NewReader(`{"agent_id":"agent-secret","user_id":"user-secret","user_name":"Name Secret"}`))
+		s.Require().NoError(err)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set(auth.AppHeader, app)
+		request.Header.Set(auth.AuthTypeHeader, auth.AuthTypeAnonymous)
+		response, err := client.Do(request)
+		if err != nil {
+			return 0, "", err
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		return response.StatusCode, string(body), err
+	}
+	s.Require().Eventually(func() bool {
+		_, _, err := ask("app-9")
+		return err == nil
+	}, 30*time.Second, 50*time.Millisecond, "the router never answered")
+
+	listedStatus, listedBody, err := ask("app-9")
+	s.Require().NoError(err)
+	otherStatus, otherBody, err := ask("app-8")
+	s.Require().NoError(err)
+
+	s.Equal(http.StatusForbidden, otherStatus, otherBody)
+	s.Contains(otherBody, "agent_id is sent server-side")
+	s.NotEqual(http.StatusForbidden, listedStatus, listedBody)
+	s.NotContains(listedBody, "agent_id is sent server-side")
+	s.Contains(logged.String(), "entries=1")
+	for _, value := range []string{"agent-secret", "user-secret", "Name Secret"} {
+		s.NotContains(logged.String(), value)
+	}
 }
