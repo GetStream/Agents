@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -242,9 +245,51 @@ func (s Skills) File(ctx context.Context, name, file string) (string, error) {
 // and only when it decides it needs one.
 const ReadSkillFileTool = "read_skill_file"
 
-// BundlePath is where a skill's file is put in the sandbox, relative to where code runs.
+// maxSkillName is how many characters a skill's name may have, maxSkillFile how many bytes of
+// a file's key are staged as they are, and maxPathPart how many bytes the name of a folder or file
+// may have on Linux.
+const (
+	maxSkillName = 255
+	maxSkillFile = 1024
+	maxPathPart  = 255
+)
+
+// ValidSkillName reports whether a name is one its skill's folder may have in the sandbox.
+func ValidSkillName(name string) bool {
+	return name != "" && utf8.RuneCountInString(name) <= maxSkillName &&
+		!strings.ContainsAny(name, `/\`) && !strings.ContainsAny(name[:1], ".-") &&
+		!strings.ContainsFunc(name, unicode.IsControl)
+}
+
+// ValidSkillFile reports whether a file's key is a path inside its skill's folder.
+func ValidSkillFile(file string) bool {
+	return file != "." && !path.IsAbs(file) && path.Clean(file) == file && file != ".." &&
+		!strings.HasPrefix(file, "../") && !strings.ContainsAny(file, "\\\x00")
+}
+
+// BundlePath is where a skill's file is put in the sandbox, relative to where code runs: inside
+// the skill's own folder, whatever name and key are stored.
 func BundlePath(skill, file string) string {
-	return path.Join("skills", skill, file)
+	return path.Join(bundleFolder(skill), bundleFile(file))
+}
+
+// bundleFolder is a skill's folder in the sandbox. A name no folder may have is hashed. No valid
+// name starts with a dot, so none is another's hash.
+func bundleFolder(skill string) string {
+	if !ValidSkillName(skill) || len(skill) > maxPathPart {
+		skill = fmt.Sprintf(".skill-%x", sha256.Sum256([]byte(skill)))
+	}
+	return path.Join("skills", skill)
+}
+
+// bundleFile is where a file is in its skill's folder, hashed when its key is no path there or is
+// longer than Linux takes.
+func bundleFile(file string) string {
+	tooLong := func(part string) bool { return len(part) > maxPathPart }
+	if !ValidSkillFile(file) || len(file) > maxSkillFile || slices.ContainsFunc(strings.Split(file, "/"), tooLong) {
+		return fmt.Sprintf(".file-%x", sha256.Sum256([]byte(file)))
+	}
+	return file
 }
 
 // Listing tells the model which files a skill brought, so it can read the ones it needs
@@ -252,11 +297,15 @@ func BundlePath(skill, file string) string {
 func Listing(skill string, paths []string, sandboxed bool) string {
 	var listing strings.Builder
 	listing.WriteString("This skill comes with these files. Read one only when you need it.")
-	if sandboxed && len(Scripts(paths)) > 0 {
-		fmt.Fprintf(&listing, " In the sandbox they are under %s/, so run the scripts from there.", BundlePath(skill, ""))
+	staged := sandboxed && len(Scripts(paths)) > 0
+	if staged {
+		fmt.Fprintf(&listing, " In the sandbox they are under %s/, so run the scripts from there.", bundleFolder(skill))
 	}
 	for _, file := range paths {
 		listing.WriteString("\n- " + file)
+		if staged && bundleFile(file) != file {
+			listing.WriteString(" (in the sandbox: " + BundlePath(skill, file) + ")")
+		}
 	}
 	return listing.String()
 }

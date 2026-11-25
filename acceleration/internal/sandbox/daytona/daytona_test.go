@@ -840,9 +840,10 @@ func (s *DaytonaSuite) TestAFileFarTooLargeIsRefusedWithoutBeingReadWhole() {
 	s.Empty(result.Files)
 	s.Equal([]string{"/tmp/dump.bin"}, result.Missing)
 	var sent int64
+	platform := s.platform
 	s.Eventually(func() bool {
 		var ended bool
-		sent, ended = s.platform.sent("/tmp/dump.bin")
+		sent, ended = platform.sent("/tmp/dump.bin")
 		return ended
 	}, 10*time.Second, 10*time.Millisecond)
 	// What passed the limit is only what the connection's buffers took before the router
@@ -858,9 +859,10 @@ func (s *DaytonaSuite) TestADownloadsErrorFarTooLargeIsNotReadWhole() {
 	s.Require().NoError(err)
 	s.Equal([]string{"/tmp/dump.bin"}, result.Missing)
 	var sent int64
+	platform := s.platform
 	s.Eventually(func() bool {
 		var ended bool
-		sent, ended = s.platform.sent("/tmp/dump.bin")
+		sent, ended = platform.sent("/tmp/dump.bin")
 		return ended
 	}, 10*time.Second, 10*time.Millisecond)
 	// The SDK reads an error part whole; past its bound the router stops reading it.
@@ -875,9 +877,10 @@ func (s *DaytonaSuite) TestAnUploadsRefusalFarTooLargeIsNotReadWhole() {
 
 	s.Require().Error(err)
 	var sent int64
+	platform := s.platform
 	s.Eventually(func() bool {
 		var ended bool
-		sent, ended = s.platform.sent("upload")
+		sent, ended = platform.sent("upload")
 		return ended
 	}, 10*time.Second, 10*time.Millisecond)
 	// The SDK reads a refused upload's answer whole; past its bound the router stops reading it.

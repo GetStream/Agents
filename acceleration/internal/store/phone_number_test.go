@@ -8,6 +8,14 @@ import (
 	"time"
 )
 
+// giveBack releases a customer's number in db at at, as the phone service does: in a trunk
+// group's transaction. The group only names the lock, so any vendor's reaches the number.
+func giveBack(ctx context.Context, db *Store, customerID, e164 string, at time.Time) error {
+	return db.StreamTrunks.InGroup(ctx, TrunkGroup{CustomerID: customerID, Vendor: "twilio"}, func(_ context.Context, tx *TrunkGroupTx) error {
+		return tx.ReleaseNumber(e164, at)
+	})
+}
+
 func (s *StoreSuite) TestANumberIsHeldUntilItIsReleased() {
 	number := &PhoneNumber{
 		E164: "+15125551234", Vendor: "twilio", Country: "US",
@@ -22,7 +30,7 @@ func (s *StoreSuite) TestANumberIsHeldUntilItIsReleased() {
 	s.Equal("+15125551234", held[0].E164)
 	s.Equal([]string{"voice"}, held[0].Capabilities)
 
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15125551234", s.base.Add(time.Hour)))
+	s.Require().NoError(giveBack(s.ctx, s.store, "acme", "+15125551234", s.base.Add(time.Hour)))
 
 	held, err = s.store.PhoneNumbers.Select(s.ctx, "acme", PhoneNumberFilter{})
 	s.Require().NoError(err)
@@ -41,7 +49,7 @@ func (s *StoreSuite) TestANumberSomebodyElseHoldsCannotBeReleased() {
 		CustomerID: "acme", PurchasedAt: s.base,
 	}))
 
-	err := s.store.PhoneNumbers.Release(s.ctx, "globex", "+15125551234", s.base)
+	err := giveBack(s.ctx, s.store, "globex", "+15125551234", s.base)
 
 	s.ErrorIs(err, ErrNoNumber)
 	s.EqualError(err, "store: +15125551234 is not a number globex holds")
@@ -155,7 +163,7 @@ func (s *StoreSuite) TestANumberOnASharedTrunkHasTheTrunksCredentials() {
 
 func (s *StoreSuite) TestAReleasedNumbersTrunkCredentialsAreGone() {
 	s.attachWithBridge("telnyx", "+15125551234")
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15125551234", s.base.Add(time.Hour)))
+	s.Require().NoError(giveBack(s.ctx, s.store, "acme", "+15125551234", s.base.Add(time.Hour)))
 
 	_, err := s.store.PhoneNumbers.AttachedBridge(s.ctx, "telnyx", "+15125551234")
 	s.ErrorIs(err, ErrNoNumber)
@@ -198,7 +206,7 @@ func (s *StoreSuite) TestTheSameNumberCanBeBoughtAgainAfterBeingReleased() {
 		CustomerID: "acme", PurchasedAt: s.base,
 	}
 	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, first))
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15125551234", s.base.Add(time.Hour)))
+	s.Require().NoError(giveBack(s.ctx, s.store, "acme", "+15125551234", s.base.Add(time.Hour)))
 
 	again := &PhoneNumber{
 		E164: "+15125551234", Vendor: "twilio", Country: "US",
@@ -228,9 +236,26 @@ func (s *StoreSuite) TestPhoneNumberQueryBudgets() {
 			E164: "+15125550199", Vendor: "twilio", Country: "US", CustomerID: "acme", PurchasedAt: s.base,
 		}))
 	}), "Insert")
-	s.Equal(3, s.countQueries(func() {
+	// The number's holders are read and it is inserted in a transaction, BEGIN to COMMIT, under
+	// a lock taken first.
+	s.Equal(6, s.countQueries(func() {
 		s.Require().NoError(s.trunkNumber("acme", trunk.ID, "+15125550198"))
-	}), "InsertOnSIPTrunk reads the trunk and the number before it inserts")
+	}), "InsertOnSIPTrunk reads the trunk, then locks the number and reads who holds it before it inserts")
+	s.Equal(1, s.countQueries(func() {
+		bought, err := s.store.PhoneNumbers.BoughtElsewhere(s.ctx, "acme", "+15125550198")
+		s.Require().NoError(err)
+		s.Empty(bought)
+	}), "BoughtElsewhere")
+	s.Equal(1, s.countQueries(func() {
+		held, err := s.store.PhoneNumbers.Holders(s.ctx, "+15125550198")
+		s.Require().NoError(err)
+		s.Equal([]string{"acme"}, held)
+	}), "Holders")
+	s.Equal(1, s.countQueries(func() {
+		lines, err := s.store.PhoneNumbers.TrunkLinesElsewhere(s.ctx, "other", "+15125550198", 0)
+		s.Require().NoError(err)
+		s.Empty(lines)
+	}), "TrunkLinesElsewhere")
 	// A write to a number is a transaction, BEGIN to COMMIT, that waits on the row as long as a
 	// trunk group may hold it.
 	s.Equal(4, s.countQueries(func() {
@@ -261,7 +286,56 @@ func (s *StoreSuite) TestPhoneNumberQueryBudgets() {
 		s.Require().NoError(err)
 		s.Len(held, 7)
 	}), "HeldSince")
-	s.Equal(4, s.countQueries(func() {
-		s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15125550199", s.base.Add(time.Hour)))
-	}), "Release")
+}
+
+// lineOn is a number on a customer's own trunk with a line made for it in the app pinned.
+func (s *StoreSuite) lineOn(customerID, e164 string, app int64) {
+	s.lined(TrunkGroup{CustomerID: customerID, StreamAppPK: app, Vendor: sipTrunkVendor}, e164, "trunk-"+customerID)
+}
+
+func (s *StoreSuite) TestTheTrunkLinesElsewhereAreOtherCustomersLinesForTheNumberInTheApp() {
+	s.lineOn("globex", "+15125557001", 0)
+	s.lineOn("acme", "+15125557001", 0)
+	s.lineOn("initech", "+15125557002", 0)
+	s.lineOn("umbrella", "+15125557001", 77)
+	s.lined(TrunkGroup{CustomerID: "hooli", Vendor: "telnyx"}, "+15125557001", "trunk-hooli")
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15125557001", Vendor: sipTrunkVendor, Country: "US", CustomerID: "soylent", PurchasedAt: s.base,
+	}))
+	s.lineOn("wayne", "+15125557001", 0)
+	s.Require().NoError(giveBack(s.ctx, s.store, "wayne", "+15125557001", time.Time{}))
+
+	lines, err := s.store.PhoneNumbers.TrunkLinesElsewhere(s.ctx, "acme", "+15125557001", 0)
+
+	s.Require().NoError(err)
+	s.Require().Len(lines, 1, "acme's own, another number, another app, a bought number, one with no line and one given back are left")
+	s.Equal("globex", lines[0].CustomerID)
+	s.Equal("trunk-globex", lines[0].StreamTrunkID)
+}
+
+// A line made in the deployment's own app before lines were pinned has no pin; one made since
+// has its id.
+func (s *StoreSuite) TestATrunkLineInTheDeploymentsAppIsFoundByItsIdOrNoPin() {
+	s.store.SetStreamPins(StreamPins{Deployment: func() int64 { return 1 }})
+	s.T().Cleanup(func() { s.store.SetStreamPins(StreamPins{}) })
+	s.lineOn("globex", "+15125557003", 0)
+	s.lineOn("initech", "+15125557003", 1)
+	s.lineOn("umbrella", "+15125557003", 77)
+
+	for _, app := range []int64{0, 1} {
+		lines, err := s.store.PhoneNumbers.TrunkLinesElsewhere(s.ctx, "acme", "+15125557003", app)
+		s.Require().NoError(err)
+		s.ElementsMatch([]string{"globex", "initech"}, customersHolding(lines), "app %d", app)
+	}
+	lines, err := s.store.PhoneNumbers.TrunkLinesElsewhere(s.ctx, "acme", "+15125557003", 77)
+	s.Require().NoError(err)
+	s.Equal([]string{"umbrella"}, customersHolding(lines))
+}
+
+func customersHolding(numbers []PhoneNumber) []string {
+	customers := make([]string, 0, len(numbers))
+	for _, number := range numbers {
+		customers = append(customers, number.CustomerID)
+	}
+	return customers
 }

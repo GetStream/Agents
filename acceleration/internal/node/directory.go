@@ -17,8 +17,11 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
+	"math/rand/v2"
+	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,18 +62,27 @@ type Directory struct {
 	address  string
 	shard    string
 	sessions string
+	// agents and channels are a session's agent and conversation by their ids alone: a router
+	// of the release before reads channels, when a customer's own key is not there, as this one
+	// does, and only an older one reads agents.
 	agents   string
 	channels string
-	workers  string
-	hosted   string
-	shards   string
-	handouts string
-	logger   *slog.Logger
-	cancel   context.CancelFunc
+	// writingAs is a claim on an agent by customer alone, which a router of the release before
+	// reads, and writingAsIn the same by the Stream app as well, which is what is read here.
+	writingAs   string
+	writingAsIn string
+	answeringIn string
+	workers     string
+	hosted      string
+	shards      string
+	inShard     string
+	handouts    string
+	logger      *slog.Logger
+	cancel      context.CancelFunc
 
 	mu sync.Mutex
-	// held maps a session this node is running to the agent it writes as and the
-	// conversation it answers in, each empty for a session without one.
+	// held maps a session this node is running to the Stream app it acts in, the agent it
+	// writes as and the conversation it answers in, the last two empty for a session without one.
 	held map[heldSession]claim
 	// waiting counts the dispatch workers connected here, by customer.
 	waiting map[string]int
@@ -84,8 +96,12 @@ type offerKey struct{ customerID, agentID string }
 // one id.
 type heldSession struct{ customerID, sessionID string }
 
-// claim is what a session this node holds is found by besides its own id.
-type claim struct{ agentID, conversationID string }
+// claim is what a session this node holds is found by besides its own id, and the Stream app it
+// acts in.
+type claim struct {
+	app                     int64
+	agentID, conversationID string
+}
 
 // offerEntry is one node's offer as Redis holds it. A hash cannot expire its fields one at
 // a time, so each says when it lapses.
@@ -113,21 +129,25 @@ func NewDirectory(options DirectoryOptions) (*Directory, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	directory := &Directory{
-		redis:    options.Redis,
-		address:  options.Address,
-		shard:    options.Shard,
-		sessions: prefix + ":session:",
-		agents:   prefix + ":agent:",
-		channels: prefix + ":channel:",
-		workers:  prefix + ":workers:",
-		hosted:   prefix + ":hosted:",
-		shards:   prefix + ":shard:",
-		handouts: prefix + ":handout:",
-		logger:   logger,
-		cancel:   cancel,
-		held:     map[heldSession]claim{},
-		waiting:  map[string]int{},
-		offered:  map[offerKey][]byte{},
+		redis:       options.Redis,
+		address:     options.Address,
+		shard:       options.Shard,
+		sessions:    prefix + ":session:",
+		agents:      prefix + ":agent:",
+		channels:    prefix + ":channel:",
+		writingAs:   prefix + ":writing-as:",
+		writingAsIn: prefix + ":writing-as-in:",
+		answeringIn: prefix + ":answering-in:",
+		workers:     prefix + ":workers:",
+		hosted:      prefix + ":hosted:",
+		shards:      prefix + ":shard:",
+		inShard:     prefix + ":inshard:",
+		handouts:    prefix + ":handout:",
+		logger:      logger,
+		cancel:      cancel,
+		held:        map[heldSession]claim{},
+		waiting:     map[string]int{},
+		offered:     map[offerKey][]byte{},
 	}
 	directory.sayShard(ctx)
 	go directory.renew(ctx)
@@ -137,6 +157,21 @@ func NewDirectory(options DirectoryOptions) (*Directory, error) {
 
 // Address is where this node's peers reach it.
 func (d *Directory) Address() string { return d.address }
+
+// Shard is the shard this node is in, empty for a deployment of one.
+func (d *Directory) Shard() string { return d.shard }
+
+// NodeInShard is where a node of shard can be reached, picked at random among those saying
+// they are in it, and empty when none is.
+func (d *Directory) NodeInShard(ctx context.Context, shard string) (string, error) {
+	now := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	addresses, err := d.redis.Do(ctx, d.redis.B().Zrange().Key(d.inShard+shard).
+		Min("("+now).Max("+inf").Byscore().Build()).AsStrSlice()
+	if err != nil || len(addresses) == 0 {
+		return "", err
+	}
+	return addresses[rand.IntN(len(addresses))], nil
+}
 
 // InAnotherShard reports whether the node at an address is in a shard other than this one's.
 // A node that has not said is taken to be in this one, which is every node of a deployment of
@@ -151,38 +186,49 @@ func (d *Directory) InAnotherShard(ctx context.Context, address string) (bool, e
 
 // sayShard says which shard this node is in, for holdFor.
 func (d *Directory) sayShard(ctx context.Context) {
-	commands := d.shardCommands()
-	if len(commands) == 0 {
-		return
-	}
-	if err := d.redis.Do(ctx, commands[0]).Error(); err != nil {
-		d.logger.Warn("could not say which shard this node is in", "shard", d.shard, "error", err)
+	for _, result := range d.redis.DoMulti(ctx, d.shardCommands()...) {
+		if err := result.Error(); err != nil {
+			d.logger.Warn("could not say which shard this node is in", "shard", d.shard, "error", err)
+			return
+		}
 	}
 }
 
-// shardCommands say which shard this node is in, none for a node that has not been told.
+// shardCommands say which shard this node is in, by its address and among the shard's nodes,
+// none for a node that has not been told. The shard's nodes are a sorted set scored by when
+// each one's claim lapses, as a customer's workers are (advertiseCommands).
 func (d *Directory) shardCommands() []rueidis.Completed {
 	if d.shard == "" {
 		return nil
 	}
-	return []rueidis.Completed{d.redis.B().Set().Key(d.shards + d.address).Value(d.shard).Ex(holdFor).Build()}
+	key := d.inShard + d.shard
+	now := time.Now()
+	return []rueidis.Completed{
+		d.redis.B().Set().Key(d.shards + d.address).Value(d.shard).Ex(holdFor).Build(),
+		d.redis.B().Zadd().Key(key).ScoreMember().
+			ScoreMember(float64(now.Add(holdFor).UnixMilli()), d.address).Build(),
+		d.redis.B().Zremrangebyscore().Key(key).
+			Min("-inf").Max(strconv.FormatInt(now.UnixMilli(), 10)).Build(),
+		d.redis.B().Pexpire().Key(key).Milliseconds(holdFor.Milliseconds()).Build(),
+	}
 }
 
-// Hold says this node is running a customer's session, and goes on saying so until Release.
+// Hold says this node is running a customer's session in a Stream app, and goes on saying so
+// until Release.
 //
 // The agent id is held beside it because an arriving message names a channel and no
 // session at all, so the node that can answer it has to be findable by the agent writing
-// there. The conversation id (the channel's cid) is held too, because a person's answer to
-// a call held for their approval names the conversation and no session either: the
-// Router's own session in a channel of a type an agent config answers in runs on whichever
-// node took the hook.
-func (d *Directory) Hold(ctx context.Context, customerID, sessionID, agentID, conversationID string) {
-	key := heldSession{customerID, sessionID}
+// there, and by the app, which is the only thing a hook says is whose. The conversation id (the
+// channel's cid) is held too, because a person's answer to a call held for their approval names
+// the conversation and no session either: the Router's own session in a channel of a type an
+// agent config answers in runs on whichever node took the hook.
+func (d *Directory) Hold(ctx context.Context, customerID string, app int64, sessionID, agentID, conversationID string) {
+	key, held := heldSession{customerID, sessionID}, claim{app, agentID, conversationID}
 	d.mu.Lock()
-	d.held[key] = claim{agentID, conversationID}
+	d.held[key] = held
 	d.mu.Unlock()
 
-	d.write(ctx, key, claim{agentID, conversationID})
+	d.write(ctx, key, held)
 }
 
 // Release says this node is not running a customer's session any more.
@@ -201,9 +247,17 @@ func (d *Directory) Release(ctx context.Context, customerID, sessionID string) {
 		return
 	}
 
-	if err := d.redis.Do(ctx, d.redis.B().Del().Key(d.sessionKey(key), d.sessions+sessionID).Build()).Error(); err != nil {
-		d.logger.Warn("could not take back this node's claim on a session",
-			"customer", customerID, "session", sessionID, "error", err)
+	// One DEL a key: on a Redis Cluster the two keys are in different hash slots, and one DEL over
+	// both is refused before it is sent.
+	deletes := []rueidis.Completed{
+		d.redis.B().Del().Key(d.sessionKey(key)).Build(),
+		d.redis.B().Del().Key(d.sessions + sessionID).Build(),
+	}
+	for _, result := range d.redis.DoMulti(ctx, deletes...) {
+		if err := result.Error(); err != nil {
+			d.logger.Warn("could not take back this node's claim on a session",
+				"customer", customerID, "session", sessionID, "error", err)
+		}
 	}
 }
 
@@ -214,29 +268,66 @@ func (d *Directory) Release(ctx context.Context, customerID, sessionID string) {
 // when the customer's is not there. Ids are still unique across customers in every row that
 // release writes, and the node it names answers only a session of the caller's own.
 func (d *Directory) Node(ctx context.Context, customerID, sessionID string) (string, error) {
-	results := d.redis.DoMulti(ctx,
-		d.redis.B().Get().Key(d.sessionKey(heldSession{customerID, sessionID})).Build(),
-		d.redis.B().Get().Key(d.sessions+sessionID).Build())
-	for _, result := range results {
-		address, err := result.ToString()
-		if rueidis.IsRedisNil(err) {
-			continue
-		}
-		return address, err
+	return d.lookup(ctx, d.sessionKey(heldSession{customerID, sessionID}), d.sessions+sessionID)
+}
+
+// NodeByAgent is the same for a customer's session in a Stream app writing as an agent, which is
+// what an arriving message has to be answered by. An agent id is any customer's to choose, so
+// each customer's is held apart, and one customer starting a session as another's agent does not
+// move where the other's messages go. Each app's is held apart too, as a message is answered only
+// in the app it was written in.
+func (d *Directory) NodeByAgent(ctx context.Context, customerID string, app int64, agentID string) (string, error) {
+	entry, err := d.redis.Do(ctx, d.redis.B().Hget().Key(d.writingAsIn+agentID).Field(writerField(customerID, app)).Build()).ToString()
+	if rueidis.IsRedisNil(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if address, live := liveClaim(entry, time.Now().UnixMilli()); live {
+		return address, nil
 	}
 	return "", nil
 }
 
-// NodeByAgent is the same for the session writing as an agent, which is what an arriving
-// message has to be answered by.
-func (d *Directory) NodeByAgent(ctx context.Context, agentID string) (string, error) {
-	return d.lookup(ctx, d.agents+agentID)
+// NodesByAgent is where the other nodes running the sessions that write as an agent can be
+// reached, by customer, among the sessions admits takes by their customer and Stream app, for a
+// message that names no customer. A customer with sessions in two apps it admits is one entry,
+// either node. This node is never among them: what runs here is what its own sessions say, and a
+// claim of a session that ended here lasts until it lapses.
+func (d *Directory) NodesByAgent(ctx context.Context, agentID string, admits func(customer string, app int64) bool) (map[string]string, error) {
+	entries, err := d.redis.Do(ctx, d.redis.B().Hgetall().Key(d.writingAsIn+agentID).Build()).AsStrMap()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UnixMilli()
+	var nodes map[string]string
+	for field, entry := range entries {
+		customerID, app, ok := parseWriterField(field)
+		if !ok || !admits(customerID, app) {
+			continue
+		}
+		address, live := liveClaim(entry, now)
+		if !live || address == d.address {
+			continue
+		}
+		if nodes == nil {
+			nodes = map[string]string{}
+		}
+		nodes[customerID] = address
+	}
+	return nodes, nil
 }
 
-// NodeByConversation is the same for the session answering in a conversation, by the
+// NodeByConversation is the same for a customer's session answering in a conversation, by the
 // channel's cid, which is what an answer to a call held for a person's approval names.
-func (d *Directory) NodeByConversation(ctx context.Context, conversationID string) (string, error) {
-	return d.lookup(ctx, d.channels+conversationID)
+//
+// A router of the release before says only the cid (node:channel:<cid>), so that key is read when
+// the customer's is not there, as Node reads a session's. The node it names answers an approval
+// only for a session of the caller's own, and a customer whose session holds the cid on a node of
+// this release is found by its own key first.
+func (d *Directory) NodeByConversation(ctx context.Context, customerID, conversationID string) (string, error) {
+	return d.lookup(ctx, d.answeringKey(customerID, conversationID), d.channels+conversationID)
 }
 
 // Wait says this node has a dispatch worker connected for a customer, and goes on saying
@@ -350,21 +441,68 @@ func (d *Directory) HandedOut(ctx context.Context, customerID, cid string) ([]by
 
 // Close stops renewing. What this node held expires rather than being given up, because
 // a process on its way out has a shutdown grace period to finish the calls it is carrying
-// and is still the only node that can answer for them.
-func (d *Directory) Close() { d.cancel() }
-
-func (d *Directory) lookup(ctx context.Context, key string) (string, error) {
-	address, err := d.redis.Do(ctx, d.redis.B().Get().Key(key).Build()).ToString()
-	if rueidis.IsRedisNil(err) {
-		return "", nil
+// and is still the only node that can answer for them. New work for its shard is another
+// matter: the node leaves the shard's nodes at once (NodeInShard).
+func (d *Directory) Close() {
+	d.cancel()
+	if d.shard == "" {
+		return
 	}
-	return address, err
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := d.redis.Do(ctx, d.redis.B().Zrem().Key(d.inShard+d.shard).Member(d.address).Build()).Error(); err != nil {
+		d.logger.Warn("could not say this node left its shard", "shard", d.shard, "error", err)
+	}
+}
+
+// lookup is the first of keys that is set, in one round trip, and empty when none is.
+func (d *Directory) lookup(ctx context.Context, keys ...string) (string, error) {
+	gets := make([]rueidis.Completed, 0, len(keys))
+	for _, key := range keys {
+		gets = append(gets, d.redis.B().Get().Key(key).Build())
+	}
+	for _, result := range d.redis.DoMulti(ctx, gets...) {
+		address, err := result.ToString()
+		if rueidis.IsRedisNil(err) {
+			continue
+		}
+		return address, err
+	}
+	return "", nil
 }
 
 // sessionKey is where a customer's session is held: node:session:<customer>:<id>. A session id
 // holds no colon, so no customer and id make the key of another.
 func (d *Directory) sessionKey(key heldSession) string {
 	return d.sessions + key.customerID + ":" + key.sessionID
+}
+
+// writerField is the field of a customer's claim on an agent in a Stream app: <app>:<customer>. An
+// app id holds no colon, so the first one ends it.
+func writerField(customerID string, app int64) string {
+	return strconv.FormatInt(app, 10) + ":" + customerID
+}
+
+// parseWriterField is the customer and app of a writerField, false for a field that is not one.
+func parseWriterField(field string) (string, int64, bool) {
+	prefix, customerID, found := strings.Cut(field, ":")
+	app, err := strconv.ParseInt(prefix, 10, 64)
+	return customerID, app, found && err == nil
+}
+
+// liveClaim is the address a customer's claim on an agent names, as writeCommands writes it, and
+// false once it lapsed: when, then the address.
+func liveClaim(entry string, now int64) (string, bool) {
+	until, address, _ := strings.Cut(entry, " ")
+	lapses, err := strconv.ParseInt(until, 10, 64)
+	return address, err == nil && lapses > now
+}
+
+// answeringKey is where a customer's session answering in a conversation is held:
+// node:answering-in:<customer>:<cid>. A cid holds a colon and a customer id may, so the customer
+// is escaped, and no customer and cid make the key of another.
+func (d *Directory) answeringKey(customerID, conversationID string) string {
+	return d.answeringIn + url.QueryEscape(customerID) + ":" + conversationID
 }
 
 // write says this node holds a session, for holdFor.
@@ -378,19 +516,32 @@ func (d *Directory) write(ctx context.Context, key heldSession, held claim) {
 	}
 }
 
-// writeCommands hold the session under its customer and id, and under its id alone as well,
-// which is all a router of the release before reads.
+// writeCommands hold the session, its agent and its conversation under its customer, and under
+// their ids alone as well, which is all an older router reads.
+//
+// The agent is one hash for every customer and Stream app writing as it, a field each, because a
+// message in the deployment's app may name no customer, and the node answering it is then picked
+// from all of theirs in that app. A hash cannot expire its fields one at a time, so each says when
+// it lapses, before the address. The hash by customer alone is the one a router of the release
+// before reads, and the agent by its id alone a router older than that.
 func (d *Directory) writeCommands(key heldSession, held claim) []rueidis.Completed {
 	commands := []rueidis.Completed{
 		d.redis.B().Set().Key(d.sessionKey(key)).Value(d.address).Ex(holdFor).Build(),
 		d.redis.B().Set().Key(d.sessions + key.sessionID).Value(d.address).Ex(holdFor).Build(),
 	}
 	if held.agentID != "" {
+		entry := strconv.FormatInt(time.Now().Add(holdFor).UnixMilli(), 10) + " " + d.address
+		writers, byCustomer := d.writingAsIn+held.agentID, d.writingAs+held.agentID
 		commands = append(commands,
+			d.redis.B().Hset().Key(writers).FieldValue().FieldValue(writerField(key.customerID, held.app), entry).Build(),
+			d.redis.B().Pexpire().Key(writers).Milliseconds(holdFor.Milliseconds()).Build(),
+			d.redis.B().Hset().Key(byCustomer).FieldValue().FieldValue(key.customerID, entry).Build(),
+			d.redis.B().Pexpire().Key(byCustomer).Milliseconds(holdFor.Milliseconds()).Build(),
 			d.redis.B().Set().Key(d.agents+held.agentID).Value(d.address).Ex(holdFor).Build())
 	}
 	if held.conversationID != "" {
 		commands = append(commands,
+			d.redis.B().Set().Key(d.answeringKey(key.customerID, held.conversationID)).Value(d.address).Ex(holdFor).Build(),
 			d.redis.B().Set().Key(d.channels+held.conversationID).Value(d.address).Ex(holdFor).Build())
 	}
 	return commands

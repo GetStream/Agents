@@ -33,7 +33,7 @@ final readonly class CreateSessionRequest
         public ?string $description = null,
         // The model that controls the floor in this session, and how long a caller may wait once they stop, over the...
         public ?FloorControl $floorControl = null,
-        // What the agent opens the call with, over what the config says.
+        // What the agent opens the call with, over what the config says. Server-side only: a device sending it is ref...
         public ?Greeting $greeting = null,
         // The conversation so far, for a backend that keeps its own: a thread in its own Slack app, say, that outlive...
         /** @var list<HistoryMessage>|null */
@@ -52,29 +52,32 @@ final readonly class CreateSessionRequest
         public ?array $languages = null,
         // A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no con...
         public ?string $llm = null,
+        // Server-side only: a device sending it is refused with a 403.
         public ?int $maxTokens = null,
         // The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to an...
         public ?int $maxToolRounds = null,
         public ?SessionMemory $memory = null,
         // How sure the transcriber must be before the agent answers rather than checks what was meant.
         public ?float $minConfidence = null,
+        // Server-side only: a device sending it is refused with a 403.
         public ?ModelOverwrites $modelOverwrites = null,
         // The agent placed this call, so let recordings finish and answer their menus.
         public ?bool $navigating = null,
+        // Server-side only: a device sending it is refused with a 403.
         public ?SessionPhone $phone = null,
-        // What the conversation belongs to. Also recorded as the "project" cost tag, so spend breaks down by project...
+        // What the conversation belongs to. Sent server-side it is also recorded as the "project" cost tag, so spend...
         public ?string $projectId = null,
         // How a conversation this session carries on is handed back to the model, over the agent config's and the app...
         public ?ResumeHistory $resumeHistory = null,
         // The app's own page a login or step-up the chat asks for goes back to, as createAuthorization's return_url:...
         public ?string $returnUrl = null,
-        // Omit it and the config decides, or search-fast when there is no config.
+        // Omit it and the config decides, or search-fast when there is no config. Server-side only: a device sending...
         public ?string $search = null,
         // Start voice as the session opens, as startSessionVoice does: the agent joins the call named in call, else a...
         public ?bool $startVoice = null,
         // A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and s...
         public ?string $sts = null,
-        // Omit it and the config decides, or en-low-latency when there is no config.
+        // Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sendi...
         public ?string $stt = null,
         // Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both...
         /** @var array<string, string>|null */
@@ -87,7 +90,7 @@ final readonly class CreateSessionRequest
         public ?int $toolTimeoutMs = null,
         /** @var list<SessionTool>|null */
         public ?array $tools = null,
-        // Omit it and the config decides, or en-low-latency when there is no config.
+        // Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sendi...
         public ?string $tts = null,
         // The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its...
         public ?string $userId = null,

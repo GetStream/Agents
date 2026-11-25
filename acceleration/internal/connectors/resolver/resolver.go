@@ -101,7 +101,7 @@ var revokedErrors = map[core.SignalKind]string{
 
 // ErrNotConnected says the connection's status is not connected: it is pending a consent, it
 // needs a reconnect, or it was disconnected. Or it is connected on a definition revision a
-// later one marked broken (store.BrokenConnectorRevision). Only the person who owns it can fix
+// later one marked broken (store.ConnectorBrokenRevisions.Get). Only the person who owns it can fix
 // that.
 var ErrNotConnected = errors.New("resolver: the connection is not connected")
 
@@ -403,6 +403,11 @@ func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connect
 				return nil
 			},
 		})
+		if _, refused := errors.AsType[*core.EndpointError](err); refused {
+			// What the resolver returns is read by callers, who are not told why.
+			r.logger.Warn("a connector endpoint was refused", "connection", ref.ConnectionID, "connector", connection.ConnectorID,
+				"error", core.LoggedError(err))
+		}
 		var outcome *core.OutcomeError
 		switch {
 		case err == nil:

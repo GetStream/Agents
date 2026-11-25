@@ -142,7 +142,7 @@ func syncPrices(ctx context.Context, tx bun.Tx, load PriceLoad) (PriceChange, []
 	}
 	// The database's clock, so routers whose clocks disagree still name and time their
 	// changes in one order.
-	now, err := databaseNow(ctx, tx)
+	now, err := transactionStart(ctx, tx)
 	if err != nil {
 		return PriceChange{}, nil, err
 	}
@@ -237,7 +237,7 @@ func (r *PriceChanges) Reload(ctx context.Context, load PriceLoad, dryRun bool) 
 			return err
 		}
 		var err error
-		if reload.At, err = databaseNow(ctx, tx); err != nil {
+		if reload.At, err = transactionStart(ctx, tx); err != nil {
 			return err
 		}
 		reload.Changes = []PriceChange{}
@@ -330,12 +330,8 @@ func ReleaseName(release string) string {
 	return notInName.ReplaceAllString(strings.ToLower(release), "_")
 }
 
-// NextAt is when the next change not cancelled takes effect after after, and
+// nextPriceChangeAt is when the next change not cancelled takes effect after after, and
 // whether one is scheduled, so a list in memory can switch at that moment.
-func (r *PriceChanges) NextAt(ctx context.Context, after time.Time) (time.Time, bool, error) {
-	return nextPriceChangeAt(ctx, r.store.global, after)
-}
-
 func nextPriceChangeAt(ctx context.Context, db bun.IDB, after time.Time) (time.Time, bool, error) {
 	var next sql.NullTime
 	err := db.NewSelect().Model((*PriceChange)(nil)).ColumnExpr("min(effective_at)").
@@ -372,7 +368,7 @@ const (
 // PriceChangeLimit is the page size a list of price changes uses for the limit asked for.
 // PriceChanges.Select returns one row more than this.
 func PriceChangeLimit(asked int) int {
-	return clampLimit(asked, defaultPriceChangeLimit, maxPriceChangeLimit)
+	return ClampLimit(asked, defaultPriceChangeLimit, maxPriceChangeLimit)
 }
 
 // PriceChangePosition is the last change of a page.
@@ -705,8 +701,10 @@ func (r *PriceChanges) Cancel(ctx context.Context, name, reason, actorID, actorN
 		if change.CancelledAt != nil {
 			return nil
 		}
-		now, err := databaseNow(ctx, tx)
-		if err != nil {
+		// The clock now, not the transaction's start: the cancel may have waited for the lock
+		// while the change came into force.
+		var now time.Time
+		if err := tx.QueryRowContext(ctx, "SELECT clock_timestamp()").Scan(&now); err != nil {
 			return err
 		}
 		if change.Kind != PriceChangeAPI || !change.EffectiveAt.After(now) {

@@ -37,7 +37,7 @@ type AppSettings struct {
 	AllowAnonymous *bool `json:"allow_anonymous,omitempty"`
 	AllowGuest     *bool `json:"allow_guest,omitempty"`
 	// InternalConnectors is whether the app sees the connectors whose manifest says internal
-	// (visibleTo in connectors.go). Stream sets it on its own apps; no operation writes
+	// (visibleTo in connector_definition.go). Stream sets it on its own apps; no operation writes
 	// settings, so an app cannot set it on itself. Nil is no.
 	InternalConnectors *bool `json:"internal_connectors,omitempty"`
 	// AgentTeams is whether an end user opens only the agent configs of a team they are in,
@@ -77,6 +77,8 @@ var ErrNoApp = errors.New("store: no such app")
 // an end user starts, so they are cached.
 type Apps struct {
 	store *Store
+	// guests is what GuestAllowed read, in a router with no Redis to hold it.
+	guests *seen
 }
 
 // Insert stores a new app and fills in its timestamp. An id the caller already chose is
@@ -124,20 +126,39 @@ func (r *Apps) GetSettings(ctx context.Context, appID string) (AppSettings, erro
 		return AppSettings{}, stack.Wrap(errors.New("store: an app id is required"))
 	}
 	return cached(ctx, r.store, cacheKey("app-settings", appID), func(ctx context.Context) (AppSettings, error) {
-		var app App
-		err := r.store.global.NewSelect().Model(&app).
-			Column("settings").
-			Where("id = ?", appID).
-			Limit(1).
-			Scan(ctx)
-		if errors.Is(err, sql.ErrNoRows) {
-			return AppSettings{}, nil
-		}
-		if err != nil {
-			return AppSettings{}, stack.Wrap(fmt.Errorf("store: app settings: %w", err))
-		}
-		return app.Settings, nil
+		return r.readSettings(ctx, appID)
 	})
+}
+
+func (r *Apps) readSettings(ctx context.Context, appID string) (AppSettings, error) {
+	var app App
+	err := r.store.global.NewSelect().Model(&app).
+		Column("settings").
+		Where("id = ?", appID).
+		Limit(1).
+		Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AppSettings{}, nil
+	}
+	if err != nil {
+		return AppSettings{}, stack.Wrap(fmt.Errorf("store: app settings: %w", err))
+	}
+	return app.Settings, nil
+}
+
+// GuestAllowed reports whether an app takes guests, as its settings say and GetSettings reads
+// them: an app with no row does. It is asked on each request of a guest's behind a proxy, so it
+// is held for a minute, as a key's levels are (APIKeys.GetLive), and that long in this router
+// with no Redis.
+func (r *Apps) GuestAllowed(ctx context.Context, appID string) (bool, error) {
+	if appID == "" {
+		return false, stack.Wrap(errors.New("store: an app id is required"))
+	}
+	return cachedFact(ctx, r.store, r.guests, appID, "", cacheKey("app-guests", appID), keyCacheTTL, keyCacheTTL,
+		func(ctx context.Context) (bool, error) {
+			settings, err := r.readSettings(ctx, appID)
+			return settings.GuestAllowed(), err
+		})
 }
 
 // Known is which of ids this deployment knows: an app registered here, or one a request

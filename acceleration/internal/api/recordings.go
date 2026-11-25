@@ -100,7 +100,6 @@ func (s *Server) transcribeRecording(ctx context.Context, request *transcribeRec
 	job := store.Recording{
 		CustomerID: customerID,
 		Modality:   string(Stt),
-		Source:     source.URL,
 		STT:        held,
 		Callback:   value(request.Body.Callback),
 		Tags:       tags,
@@ -237,7 +236,6 @@ func (s *Server) recordSpeech(ctx context.Context, request *recordSpeechRequest)
 		CustomerID: customerID,
 		Modality:   string(Tts),
 		Text:       request.Body.Text,
-		TTS:        held,
 		Callback:   value(request.Body.Callback),
 		Tags:       tags,
 	}
@@ -408,6 +406,9 @@ func (s *Server) callBack(ctx context.Context, callback string, body any) {
 
 // withoutURL is err without the URL a failed request names, which carries the query.
 func withoutURL(err error) error {
+	if fetch, ok := errors.AsType[fetchFailedError](err); ok {
+		err = fetch.err
+	}
 	var failed *url.Error
 	if errors.As(err, &failed) {
 		return failed.Err

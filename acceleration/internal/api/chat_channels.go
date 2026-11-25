@@ -6,7 +6,6 @@ import (
 	"errors"
 	"slices"
 	"strings"
-	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -20,7 +19,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
-// A channel of a type an agent config names (store.AgentConfig.ChatChannels), such as a team's
+// A channel of a type an agent config names (store.AgentConfig.Channels.Chat), such as a team's
 // group channel, is answered by the Router itself, as a thread channel is:
 //
 //	message.new, no source, in callouts:team-1          receiveMessageEvent, receiveChatInbound
@@ -162,6 +161,10 @@ func (s *Server) answerChatChannel(ctx context.Context, origin hookOrigin, event
 	if !found || !answersTo(config, event) || strings.TrimSpace(event.Message.Text) == "" && len(event.photos()) == 0 {
 		return true
 	}
+	if elsewhere, taken := s.handedToShard(ctx, origin.handOver,
+		s.userShard(ctx, config.CustomerID, config.Region, event.Message.User.ID), shardWorkMessage); elsewhere {
+		return taken
+	}
 	if answer, settled := s.answerOnce(ctx, origin, event); !answer {
 		return settled
 	}
@@ -178,8 +181,8 @@ func (s *Server) answerChatChannelTurn(ctx context.Context, origin hookOrigin, c
 	ctx, cancel := context.WithTimeout(ctx, askTimeout)
 	defer cancel()
 	holder := uuid.NewString()
-	if err := takeTurn(ctx, func(ctx context.Context, until time.Time) (bool, error) {
-		return s.store.ChannelTurns.Take(ctx, store.ChannelTurn{StreamAppPK: origin.app, CID: cid, LeasedBy: holder, LeaseUntil: until})
+	if err := takeTurn(ctx, func(ctx context.Context) (bool, error) {
+		return s.store.ChannelTurns.Take(ctx, store.ChannelTurn{StreamAppPK: origin.app, CID: cid, LeasedBy: holder, Lease: threadTurnLease})
 	}); err != nil {
 		s.logger.Error("a message in a channel the Router answers in waited too long for the channel's turn", "channel", cid, "error", err)
 		return

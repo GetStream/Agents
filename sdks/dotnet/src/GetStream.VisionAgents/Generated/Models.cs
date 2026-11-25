@@ -3445,7 +3445,7 @@ namespace GetStream.VisionAgents.Models
         public string Name { get; set; } = default!;
 
         /// <summary>
-        /// Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it.
+        /// Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, stream_app_disconnected or stream_app_moved when the app's Stream app was disconnected or moved, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("paused_reason")]
         public string? PausedReason { get; set; } = default!;
@@ -3550,7 +3550,7 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
-        /// Minutes after the previous attempt started, pushed into the calling hours.
+        /// Minutes after the previous attempt started, pushed into the calling hours. At most 43200 (30 days).
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("delay_minutes")]
         public long DelayMinutes { get; set; } = default!;
@@ -5312,6 +5312,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("setup")]
         public ConnectorSetup? Setup { get; set; } = default!;
 
+        /// <summary>
+        /// The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
+        public string? SyncHash { get; set; } = default!;
+
         private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
 
         [System.Text.Json.Serialization.JsonExtensionData]
@@ -6167,7 +6173,7 @@ namespace GetStream.VisionAgents.Models
         public string? Outcome { get; set; } = default!;
 
         /// <summary>
-        /// Why the dial placed no call: invalid_number, refused, deferred, paused or not_placed (the router stopped before the call went out). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says.
+        /// Why the dial placed no call: invalid_number, refused, deferred, paused, not_placed (the router stopped before the call went out) or dial_failed (it failed before anything rang, and is tried again shortly). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("result")]
         public string Result { get; set; } = default!;
@@ -6401,7 +6407,7 @@ namespace GetStream.VisionAgents.Models
         public string Channel { get; set; } = default!;
 
         /// <summary>
-        /// The number, in E.164.
+        /// The number in E.164, or an iMessage handle's email address, for channel imessage or all.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("recipient")]
         public string Recipient { get; set; } = default!;
@@ -6688,7 +6694,7 @@ namespace GetStream.VisionAgents.Models
         public FloorControl? FloorControl { get; set; } = default!;
 
         /// <summary>
-        /// What the agent opens the call with, over what the config says.
+        /// What the agent opens the call with, over what the config says. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("greeting")]
         public Greeting? Greeting { get; set; } = default!;
@@ -6730,16 +6736,19 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<string>? Languages { get; set; } = default!;
 
         /// <summary>
-        /// A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured.
+        /// A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("llm")]
         public string? Llm { get; set; } = default!;
 
+        /// <summary>
+        /// Server-side only: a device sending it is refused with a 403.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("max_tokens")]
         public int? MaxTokens { get; set; } = default!;
 
         /// <summary>
-        /// The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups.
+        /// The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("max_tool_rounds")]
         public int? MaxToolRounds { get; set; } = default!;
@@ -6753,6 +6762,9 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("min_confidence")]
         public double? MinConfidence { get; set; } = default!;
 
+        /// <summary>
+        /// Server-side only: a device sending it is refused with a 403.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("model_overwrites")]
         public ModelOverwrites? ModelOverwrites { get; set; } = default!;
 
@@ -6762,11 +6774,14 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("navigating")]
         public bool? Navigating { get; set; } = default!;
 
+        /// <summary>
+        /// Server-side only: a device sending it is refused with a 403.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("phone")]
         public SessionPhone? Phone { get; set; } = default!;
 
         /// <summary>
-        /// What the conversation belongs to. Also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins.
+        /// What the conversation belongs to. Sent server-side it is also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in tags, or the agent config's, wins. A device's groups the session and is no cost tag.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("project_id")]
         public string? ProjectId { get; set; } = default!;
@@ -6784,7 +6799,7 @@ namespace GetStream.VisionAgents.Models
         public string? ReturnUrl { get; set; } = default!;
 
         /// <summary>
-        /// Omit it and the config decides, or search-fast when there is no config.
+        /// Omit it and the config decides, or search-fast when there is no config. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("search")]
         public string? Search { get; set; } = default!;
@@ -6796,19 +6811,19 @@ namespace GetStream.VisionAgents.Models
         public bool? StartVoice { get; set; } = default!;
 
         /// <summary>
-        /// A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides.
+        /// A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("sts")]
         public string? Sts { get; set; } = default!;
 
         /// <summary>
-        /// Omit it and the config decides, or en-low-latency when there is no config.
+        /// Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("stt")]
         public string? Stt { get; set; } = default!;
 
         /// <summary>
-        /// Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins.
+        /// Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("tags")]
         public System.Collections.Generic.Dictionary<string, string>? Tags { get; set; } = default!;
@@ -6841,7 +6856,7 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<SessionTool>? Tools { get; set; } = default!;
 
         /// <summary>
-        /// Omit it and the config decides, or en-low-latency when there is no config.
+        /// Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("tts")]
         public string? Tts { get; set; } = default!;
@@ -6865,7 +6880,7 @@ namespace GetStream.VisionAgents.Models
         public SessionVideo? Video { get; set; } = default!;
 
         /// <summary>
-        /// The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI.
+        /// The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("voice")]
         public string? Voice { get; set; } = default!;
@@ -7049,6 +7064,12 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("scopes")]
         public System.Collections.Generic.List<string>? Scopes { get; set; } = default!;
+
+        /// <summary>
+        /// The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
+        public string? SyncHash { get; set; } = default!;
 
     }
 
@@ -7317,6 +7338,18 @@ namespace GetStream.VisionAgents.Models
         public long Rows { get; set; } = default!;
 
         /// <summary>
+        /// The rows left out rather than written, by table and primary key, as connector_definitions:{"id":"custom_crm","revision":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("skipped")]
+        public System.Collections.Generic.List<string>? Skipped { get; set; } = default!;
+
+        /// <summary>
+        /// How many more rows were left out than skipped names, which holds the first 100.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("skipped_more")]
+        public long? SkippedMore { get; set; } = default!;
+
+        /// <summary>
         /// How many of them went into each table.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("tables")]
@@ -7458,7 +7491,7 @@ namespace GetStream.VisionAgents.Models
         public double? MinConfidence { get; set; } = default!;
 
         /// <summary>
-        /// Settings for one provider that the options above have no word for, keyed by provider. roboflow takes workspace and workflow_id, or specification, for the roboflow/workflow model. An overwrite for a provider that is not a candidate is refused.
+        /// Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it and the next candidate is asked without it. One naming a provider that is not a candidate is refused.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("overwrites")]
         public System.Collections.Generic.Dictionary<string, object>? Overwrites { get; set; } = default!;
@@ -7688,7 +7721,7 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
-        /// What went wrong, for a program to branch on. Every type has a code of its own name (invalid_request, unauthenticated, forbidden, payment_required, not_found, method_not_allowed, not_acceptable, conflict, gone, payload_too_large, unsupported_media_type, rate_limited, internal_error, unavailable, timeout) that a failure has when nothing names it better. The others are validation_failed, missing_customer, missing_organization, server_side_only, not_configured (this deployment does not offer the feature), modality_not_routed, unsynced_changes (a sync asked to check would write over somebody's edits), name_taken (a 409: another agent config, router config or voice, or another skill of the same agent config, already has the name, so another name will do), channel_connection_taken (a 409: another live agent config binds the channel connection as fixed, and one agent answers a channel connection's messages, so the message names that config), call_unanswered (a 409: the call placed for a phone session ended with nobody answering, and the message names how: busy, no_answer, failed or canceled. Opening the session is refused, or, when the status came while the agent was joining the call, the session is ended at once and kept as ended), no_oauth_client (a 400: a consent found no OAuth client for the connector, and the message names each way the connector lets the app give it one), invalid_config (a 400: an agent config a run names does not start a session), tool_not_configured (a 400: a session under an agent config was declared or given a function that none of the config's tool groups names, and the message names it), insufficient_credits (a 402: the organization's credit is spent, so work that costs money is refused until credit is added; a model that costs nothing is still served), system_limit_reached (a 402: the organization's spend hard limit for the day or the month is reached, whatever its credit, and the message names the interval, the amount and when it resets), spend_limit_reached (a 402: one of the organization's own spend limits is spent, on the organization, an app, a key, a usage category or a team, and the message says which and when it resets, so retrying before then is refused again), user_limit_reached (a 429: a spend limit on the one end user the request is for is spent, which stops that user and no one else, and Retry-After says when its window ends), spend_check_unavailable (a 503: the router could not share what the organization is spending with the other routers for a while, so work that costs money is refused until it can; a model that costs nothing is still served, and Retry-After says to try again in a few seconds), budget_moved (a 400: a policy sent a budget, which spend limits replaced), limit_above_parent (a 400: a spend limit is above a limit of its parent in the same interval, and the message names the parent's limit), limit_exists (a 409: the subject already has a limit at that level and interval, and the message names its id), no_limit (a 404: the subject has no spend limit to reset or grant past), use_team (a 400: a category starting team: was sent, where the team field names a team), invalid_expiry (a 400: a grant's expires_at is not in the future, or is more than 366 days away), too_many_grants (a 409: the organization has 20 live grants, as many as it may), tier_limit_reached (the organization's tier limits refuse the work, and limit says which: a 403 for a call or a transfer, to a country the tier does not reach, past its minutes or recipients of the day, or past its calls at once; a 400 for an agent config whose sandbox is bigger or more open than the organization's sandbox limits allow. The message names the tier and the limit), account_suspended (a 403: the organization is suspended, and every request is refused, one for a model that costs nothing included, until it is restored; the message says to contact support), concurrency_limited (a 429: the app has as many runs in flight as it may, and Retry-After says when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input does not fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG, WebP or GIF, which retrying the same image does not fix), document_too_large (a 413: a file sent with a response has more pages or text than one may, alone or with the files the conversation already holds, and the message names the limit), document_unreadable (a 400: a file sent with a response could not be read, such as one with a password, one that is damaged or one with no text in it, which retrying the same file does not fix), invalid_usage_categories (a 400: the usage categories the request names, in the token's usage_categories and team claims or in X-Stream-Usage-Categories, are more than 10, one is not 1 to 64 characters of A-Z, a-z, 0-9, _ . : -, more than one names a team, or the team is over 59 characters), memory_unavailable (a 503: the memory store could not delete what was asked, so nothing that waits on it was deleted either, and the same request later can succeed), billing_not_enabled (a 404: this deployment bills nobody, or the caller's app is in no organization it bills, so there is no account to read), provider_takes_no_key (a 400: a key was put for a provider whose work is never routed on a customer's own key here, and the message names the ones that are), campaign_locked (a 409: the campaign's state does not allow the change, such as a launched campaign's sequence, or resuming one that is running), campaign_not_ready (a 400: a launch found the campaign missing what it needs to ring anybody, and the message says what), consent_required (a 400: a launch did not say the people on the campaign agreed to be called), branch_limit_reached (a 409: the conversation has as many edit and regenerate points as Stream Chat keeps for it, 100, so a regenerate or an edit is refused and the conversation is continued in a new chat; asking and reading are unaffected), branch_too_long (a 409: the branch an activation would bring back is more than 100 messages to send again, so it is continued in a new chat), branch_unavailable (a 410: the copies of a hidden branch were deleted, as a memory truncate deletes them, so it can be neither read nor brought back), switch_unfinished (a 409: a regenerate, an edit or an activation of the session failed after Stream Chat may have rewound, and finishing it still fails because Stream Chat does not answer, so the session's questions, regenerates, edits and activations are refused meanwhile; try again: each one tries to finish it first, so it clears once Stream Chat answers), and &lt;resource&gt;_not_found for agent_config, call, campaign, channel_account, command, connection, grant, knowledge_document, knowledge_url, limit, provider_key, router_config, scheduled_task, session, simulation, simulation_run, skill and voice. A scheduled task also has invalid_schedule (a schedule that does not read: at and in both or neither, a date, time or duration that does not parse, or until without repeat), schedule_in_past, schedule_too_far (a one-shot, or an in, more than a year ahead), invalid_timezone, timezone_unknown (no zone was given and neither the user nor the config has one), invalid_repeat, interval_too_short (a run moved to less than 15 minutes from now and earlier than the run it replaces), too_many_tasks (a 409: the user is at their active-task limit) and task_changed (a 409: the task changed between the request's read and its save, by another edit or pause or by a delivery; nothing was saved, and reading it again and retrying can succeed). More may be added, so a client should expect one it does not know.
+        /// What went wrong, for a program to branch on. Every type has a code of its own name (invalid_request, unauthenticated, forbidden, payment_required, not_found, method_not_allowed, not_acceptable, conflict, gone, payload_too_large, unsupported_media_type, rate_limited, internal_error, unavailable, timeout) that a failure has when nothing names it better. The others are validation_failed, missing_customer, missing_organization, server_side_only, not_configured (this deployment does not offer the feature), modality_not_routed, unsynced_changes (a sync asked to check would write over somebody's edits), name_taken (a 409: another agent config, router config or voice, or another skill of the same agent config, already has the name, so another name will do), import_running (a 409: an import of the app is already running on this router, which runs one at a time, so the same import once it ends can succeed), channel_connection_taken (a 409: another live agent config binds the channel connection as fixed, and one agent answers a channel connection's messages, so the message names that config), call_unanswered (a 409: the call placed for a phone session ended with nobody answering, and the message names how: busy, no_answer, failed or canceled. Opening the session is refused, or, when the status came while the agent was joining the call, the session is ended at once and kept as ended), no_oauth_client (a 400: a consent found no OAuth client for the connector, and the message names each way the connector lets the app give it one), invalid_config (a 400: an agent config a run names does not start a session), tool_not_configured (a 400: a session under an agent config was declared or given a function that none of the config's tool groups names, and the message names it), insufficient_credits (a 402: the organization's credit is spent, so work that costs money is refused until credit is added; a model that costs nothing is still served), system_limit_reached (a 402: the organization's spend hard limit for the day or the month is reached, whatever its credit, and the message names the interval, the amount and when it resets), spend_limit_reached (a 402: one of the organization's own spend limits is spent, on the organization, an app, a key, a usage category or a team, and the message says which and when it resets, so retrying before then is refused again), user_limit_reached (a 429: a spend limit on the one end user the request is for is spent, which stops that user and no one else, and Retry-After says when its window ends), spend_check_unavailable (a 503: the router could not share what the organization is spending with the other routers for a while, so work that costs money is refused until it can; a model that costs nothing is still served, and Retry-After says to try again in a few seconds), budget_moved (a 400: a policy sent a budget, which spend limits replaced), limit_above_parent (a 400: a spend limit is above a limit of its parent in the same interval, and the message names the parent's limit), limit_exists (a 409: the subject already has a limit at that level and interval, and the message names its id), no_limit (a 404: the subject has no spend limit to reset or grant past), use_team (a 400: a category starting team: was sent, where the team field names a team), invalid_expiry (a 400: a grant's expires_at is not in the future, or is more than 366 days away), too_many_grants (a 409: the organization has 20 live grants, as many as it may), tier_limit_reached (the organization's tier limits refuse the work, and limit says which: a 403 for a call or a transfer, to a country the tier does not reach, past its minutes or recipients of the day, or past its calls at once; a 400 for an agent config whose sandbox is bigger or more open than the organization's sandbox limits allow. The message names the tier and the limit), account_suspended (a 403: the organization is suspended, and every request is refused, one for a model that costs nothing included, until it is restored; the message says to contact support), concurrency_limited (a 429: the app has as many runs in flight as it may, and Retry-After says when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input does not fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG, WebP or GIF, which retrying the same image does not fix), document_too_large (a 413: a file sent with a response has more pages or text than one may, alone or with the files the conversation already holds, and the message names the limit), document_unreadable (a 400: a file sent with a response could not be read, such as one with a password, one that is damaged or one with no text in it, which retrying the same file does not fix), invalid_usage_categories (a 400: the usage categories the request names, in the token's usage_categories and team claims or in X-Stream-Usage-Categories, are more than 10, one is not 1 to 64 characters of A-Z, a-z, 0-9, _ . : -, more than one names a team, or the team is over 59 characters), memory_unavailable (a 503: the memory store could not delete what was asked, so nothing that waits on it was deleted either, and the same request later can succeed), billing_not_enabled (a 404: this deployment bills nobody, or the caller's app is in no organization it bills, so there is no account to read), provider_takes_no_key (a 400: a key was put for a provider whose work is never routed on a customer's own key here, and the message names the ones that are), campaign_locked (a 409: the campaign's state does not allow the change, such as a launched campaign's sequence, or resuming one that is running), campaign_not_ready (a 400: a launch found the campaign missing what it needs to ring anybody, and the message says what), consent_required (a 400: a launch did not say the people on the campaign agreed to be called), branch_limit_reached (a 409: the conversation has as many edit and regenerate points as Stream Chat keeps for it, 100, so a regenerate or an edit is refused and the conversation is continued in a new chat; asking and reading are unaffected), branch_too_long (a 409: the branch an activation would bring back is more than 100 messages to send again, so it is continued in a new chat), branch_unavailable (a 410: the copies of a hidden branch were deleted, as a memory truncate deletes them, so it can be neither read nor brought back), switch_unfinished (a 409: a regenerate, an edit or an activation of the session failed after Stream Chat may have rewound, and finishing it still fails because Stream Chat does not answer, so the session's questions, regenerates, edits and activations are refused meanwhile; try again: each one tries to finish it first, so it clears once Stream Chat answers), and &lt;resource&gt;_not_found for agent_config, call, campaign, channel_account, command, connection, grant, knowledge_document, knowledge_url, limit, provider_key, router_config, scheduled_task, session, simulation, simulation_run, skill and voice. A scheduled task also has invalid_schedule (a schedule that does not read: at and in both or neither, a date, time or duration that does not parse, or until without repeat), schedule_in_past, schedule_too_far (a one-shot, or an in, more than a year ahead), invalid_timezone, timezone_unknown (no zone was given and neither the user nor the config has one), invalid_repeat, interval_too_short (a run moved to less than 15 minutes from now and earlier than the run it replaces), too_many_tasks (a 409: the user is at their active-task limit) and task_changed (a 409: the task changed between the request's read and its save, by another edit or pause or by a delivery; nothing was saved, and reading it again and retrying can succeed). More may be added, so a client should expect one it does not know.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("code")]
         public string Code { get; set; } = default!;
@@ -7945,9 +7978,15 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("messages")]
         public bool? Messages { get; set; } = default!;
 
+        /// <summary>
+        /// Server-side only: a device sending it is refused with a 403.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("model_overwrites")]
         public ModelOverwrites? ModelOverwrites { get; set; } = default!;
 
+        /// <summary>
+        /// What the fork belongs to. Omitted, the parent's is kept. Sent server-side it is also the "project" cost tag, as on createSession; a device's groups the fork, whose cost tag stays the project a backend named for its parent. A tag spelled out in a running parent's tags, or the agent config's, wins.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("project_id")]
         public string? ProjectId { get; set; } = default!;
 
@@ -8509,7 +8548,7 @@ namespace GetStream.VisionAgents.Models
         public System.DateTimeOffset CreatedAt { get; set; } = default!;
 
         /// <summary>
-        /// Why the uploaded file could not be read, or why the passages of posted text could not all be written, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
+        /// Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("error")]
         public string? Error { get; set; } = default!;
@@ -8527,7 +8566,7 @@ namespace GetStream.VisionAgents.Models
         public int Pages { get; set; } = default!;
 
         /// <summary>
-        /// How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote.
+        /// How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote. An indexed one whose file was still being read when newer text or a newer file replaced it can count more than it was cut into, for the same reason, until it is written again.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("passages")]
         public int Passages { get; set; } = default!;
@@ -10421,7 +10460,7 @@ namespace GetStream.VisionAgents.Models
         public string Id { get; set; } = default!;
 
         /// <summary>
-        /// The number, in E.164.
+        /// The number in E.164, or an iMessage handle's email address.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("recipient")]
         public string Recipient { get; set; } = default!;
@@ -10551,6 +10590,12 @@ namespace GetStream.VisionAgents.Models
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class OrganizationProgress
     {
+
+        /// <summary>
+        /// The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the credit granted minus the trial credit is above zero. Spending the credit does not lower it. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("funded")]
+        public bool? Funded { get; set; } = default!;
 
         /// <summary>
         /// The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since.
@@ -12158,7 +12203,7 @@ namespace GetStream.VisionAgents.Models
     }
 
     /// <summary>
-    /// What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user &lt;id&gt;, every user of app &lt;id&gt;, every user of organization &lt;id&gt;), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+    /// What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user &lt;id&gt;, every user of app &lt;id&gt;, every user of organization &lt;id&gt;), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
     /// </summary>
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class Quota
@@ -12865,6 +12910,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("stt")]
         public SttOptions? Stt { get; set; } = default!;
 
+        /// <summary>
+        /// The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
+        public string? SyncHash { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("tts")]
         public TtsOptions? Tts { get; set; } = default!;
 
@@ -12903,6 +12954,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("stt")]
         public SttOptions? Stt { get; set; } = default!;
+
+        /// <summary>
+        /// The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
+        public string? SyncHash { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("tts")]
         public TtsOptions? Tts { get; set; } = default!;
@@ -13274,7 +13331,7 @@ namespace GetStream.VisionAgents.Models
         public string DeliveredTo { get; set; } = default!;
 
         /// <summary>
-        /// Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
+        /// Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), not_in_team (in an app that keeps each team's agents to its own users, the user who made the task is no longer in its agent's team, so the agent is not run; not tried again), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("error")]
         public string? Error { get; set; } = default!;
@@ -15018,7 +15075,7 @@ namespace GetStream.VisionAgents.Models
         public string Instructions { get; set; } = default!;
 
         /// <summary>
-        /// How the config names it, which is unique among that config's own skills.
+        /// How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("name")]
         public string Name { get; set; } = default!;
@@ -15185,11 +15242,17 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("cost_micros_total")]
         public long CostMicrosTotal { get; set; } = default!;
 
+        /// <summary>
+        /// True on the row that is everything outside the biggest few, summed. Its value is "other", which a label can also have: a label of that value is a row of its own, without other.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("other")]
+        public bool? Other { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("request_count")]
         public long RequestCount { get; set; } = default!;
 
         /// <summary>
-        /// The modality or label value this row is for. "other" is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
+        /// The modality or label value this row is for. "other" with other true is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("value")]
         public string Value { get; set; } = default!;

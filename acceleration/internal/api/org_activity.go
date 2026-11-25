@@ -187,7 +187,11 @@ func (s *Server) getOrganizationActivity(ctx context.Context, request *organizat
 	if err != nil {
 		return nil, err
 	}
-	legs, err := s.store.TurnBuckets.Latency(ctx, apps, since)
+	latency := s.store.TurnBuckets.Latency
+	if s.store.StatsShipped() {
+		latency = s.store.TurnBuckets.ShippedLatency
+	}
+	legs, err := latency(ctx, apps, since)
 	if err != nil {
 		return nil, err
 	}
@@ -298,9 +302,9 @@ func (s *Server) registerOrganizationActivity(api huma.API) {
 			"than the counts can read furthest_step none with meters that show use. steps lists every " +
 			"step reached, not only the furthest, with the UTC day each was first answered: an " +
 			"organization that only texts reaches conversations and never voice_video.\n\n" +
-			"Stream staff only: it needs the ops key.",
+			"Stream staff only: it needs the ops key or the activity key.",
 		Tags:      []string{staffTag},
-		Security:  opsSecurity,
+		Security:  activitySecurity,
 		Responses: map[string]*huma.Response{"200": {Description: "The organization's activity"}},
 		Errors:    []int{http.StatusBadRequest, http.StatusUnauthorized},
 	}, s.getOrganizationActivity)

@@ -18,7 +18,7 @@ func (s *StoreSuite) runningCampaign(concurrency int, numbers ...string) Campaig
 }
 
 func (s *StoreSuite) claimDue(owner string, now time.Time, max int) []Claimed {
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, owner, now, time.Minute, max)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, owner, ShardClaim{}, now, time.Minute, max)
 	s.Require().NoError(err)
 	return claimed
 }
@@ -60,7 +60,7 @@ func (s *StoreSuite) TestAClaimNeverExceedsTheCampaignsConcurrency() {
 		go func() {
 			defer wg.Done()
 			<-start
-			claimed, err := s.store.CampaignContacts.Claim(s.ctx, owner, s.base, time.Minute, 100)
+			claimed, err := s.store.CampaignContacts.Claim(s.ctx, owner, ShardClaim{}, s.base, time.Minute, 100)
 			s.NoError(err)
 			mu.Lock()
 			results[owner] = claimed
@@ -105,7 +105,8 @@ func (s *StoreSuite) TestAClaimTakesTheEarliestDueFirstAndStopsAtMax() {
 	numbers := []string{claimed[0].Contact.ToNumber, claimed[1].Contact.ToNumber}
 	s.ElementsMatch([]string{"+15550002", "+15550001"}, numbers)
 	s.Equal(campaign.ID, claimed[0].Campaign.ID)
-	s.Equal(s.base.Add(time.Minute), claimed[0].Contact.LeaseUntil.UTC())
+	s.Require().NotNil(claimed[0].Contact.LeaseUntil)
+	s.InDelta(time.Minute, s.leftOnTheDatabasesClock(*claimed[0].Contact.LeaseUntil), float64(time.Second), "a minute on Postgres's clock")
 }
 
 func (s *StoreSuite) TestAContactNotYetDueIsNotClaimed() {
@@ -151,21 +152,23 @@ func (s *StoreSuite) TestAScheduledCampaignStartsWhenItsTimeComes() {
 func (s *StoreSuite) TestAnExpiredLeaseIsTakenOverAndALiveOneIsNot() {
 	campaign := s.runningCampaign(5, "+15550001", "+15550002")
 	s.dueAt(s.contactByNumber(campaign, "+15550002"), s.base.Add(5*time.Minute))
-	_, err := s.store.CampaignContacts.Claim(s.ctx, "a", s.base, 10*time.Minute, 10)
+	_, err := s.store.CampaignContacts.Claim(s.ctx, "a", ShardClaim{}, s.base, 10*time.Minute, 10)
 	s.Require().NoError(err)
-	_, err = s.store.CampaignContacts.Claim(s.ctx, "a", s.base.Add(5*time.Minute), time.Minute, 10)
+	_, err = s.store.CampaignContacts.Claim(s.ctx, "a", ShardClaim{}, s.base.Add(5*time.Minute), time.Minute, 10)
 	s.Require().NoError(err)
+	s.leasesPass("campaign_contacts", 2*time.Minute)
 
-	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "b", s.base.Add(7*time.Minute), time.Minute, 10)
+	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "b", ShardClaim{}, time.Minute, 10)
 
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1)
 	s.Equal("+15550002", taken[0].Contact.ToNumber)
 	s.Equal("b", taken[0].Contact.LeasedBy)
-	s.Equal(s.base.Add(8*time.Minute), taken[0].Contact.LeaseUntil.UTC())
+	s.Require().NotNil(taken[0].Contact.LeaseUntil)
+	s.InDelta(time.Minute, s.leftOnTheDatabasesClock(*taken[0].Contact.LeaseUntil), float64(time.Second), "a minute on Postgres's clock")
 	s.Equal(campaign.ID, taken[0].Campaign.ID)
 	s.Equal("a", s.contactByNumber(campaign, "+15550001").LeasedBy, "a live lease stays")
-	again, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "c", s.base.Add(7*time.Minute), time.Minute, 10)
+	again, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "c", ShardClaim{}, time.Minute, 10)
 	s.Require().NoError(err)
 	s.Empty(again, "b's new lease is live")
 }
@@ -304,17 +307,18 @@ func (s *StoreSuite) TestAnAnsweredDialWaitsToBeClassifiedAndIsClaimedOnce() {
 	s.Equal(1, won[0].Attempt.ClassifyTries)
 	s.Equal(classifyAfter.Add(time.Minute), won[0].Attempt.ClassifyAfter.UTC())
 	s.Equal(winner, won[0].Contact.LeasedBy)
+	s.Require().NotNil(won[0].Contact.LeaseUntil)
+	s.InDelta(time.Minute, s.leftOnTheDatabasesClock(*won[0].Contact.LeaseUntil), float64(time.Second), "the contact's lease, a minute on Postgres's clock")
 	s.Equal(AwaitingOutcome, won[0].Contact.Stage)
 	s.Equal(campaign.ID, won[0].Campaign.ID)
 
-	s.Require().NoError(s.store.CampaignAttempts.Classified(s.ctx, attempt.ID, "success", true))
 	s.ErrorIs(s.store.CampaignContacts.Settle(s.ctx, loser, claimed.Contact.ID, Settle{Stage: ContactCompleted}), ErrNotLeaseHolder)
-	s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, winner, claimed.Contact.ID, Settle{Stage: ContactCompleted, Attempt: 1, Outcome: "success", Converted: true}))
+	s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, winner, Classification{AttemptID: attempt.ID, Outcome: "success"},
+		claimed.Contact.ID, Settle{Stage: ContactCompleted, Attempt: 1, Outcome: "success", Converted: true}))
 	latest, _, err = s.store.CampaignAttempts.Latest(s.ctx, claimed.Contact.ID)
 	s.Require().NoError(err)
 	s.Equal("done", latest.ClassifyState)
 	s.Equal("success", latest.Outcome)
-	s.True(latest.Converted)
 	s.Equal(ContactCompleted, s.contactByNumber(campaign, "+15550001").Stage)
 	later, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "a", classifyAfter.Add(time.Hour), time.Minute, 10)
 	s.Require().NoError(err)
@@ -344,7 +348,6 @@ func (s *StoreSuite) TestTheLatestDialIsTheSecondOfADoubleDial() {
 
 func (s *StoreSuite) TestEndingADialOfADeletedCampaignIsNothing() {
 	s.NoError(s.store.CampaignAttempts.End(s.ctx, "app", "deleted-attempt", "", "completed", "call-1", "", s.base, nil))
-	s.NoError(s.store.CampaignAttempts.Classified(s.ctx, "deleted-attempt", "success", true))
 }
 
 func (s *StoreSuite) TestACampaignCompletesWhenNobodyIsLeft() {
@@ -453,8 +456,8 @@ func (s *StoreSuite) TestOnlyTheLatestAnsweredDialOfAContactIsClassified() {
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	s.Equal(latest.ID, claimed[0].Attempt.ID)
-	s.Require().NoError(s.store.CampaignAttempts.Classified(s.ctx, latest.ID, "success", true))
-	s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", contact.ID, Settle{Stage: ContactCompleted, Attempt: 1, Outcome: "success"}))
+	s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: latest.ID, Outcome: "success"},
+		contact.ID, Settle{Stage: ContactCompleted, Attempt: 1, Outcome: "success"}))
 	_, attempts, err := s.store.CampaignContacts.Get(s.ctx, campaign.ID, contact.ID)
 	s.Require().NoError(err)
 	for _, attempt := range attempts {
@@ -465,6 +468,66 @@ func (s *StoreSuite) TestOnlyTheLatestAnsweredDialOfAContactIsClassified() {
 	later, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "b", classifyAfter.Add(time.Hour), time.Minute, 10)
 	s.Require().NoError(err)
 	s.Empty(later)
+}
+
+func (s *StoreSuite) TestOnlyADialOfTheContactsCampaignIsClassified() {
+	campaign := s.runningCampaign(5, "+15550001", "+15550002")
+	due := s.claimDue("a", s.base, 10)
+	s.Require().Len(due, 2)
+	answered, stray := due[0].Contact, due[1].Contact
+	dial := s.answered("a", campaign, answered, s.base, s.base)
+	for _, contact := range []Contact{answered, stray} {
+		s.strayDial(contact, s.base.Add(time.Minute))
+		s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", contact.ID, Settle{Stage: AwaitingOutcome, Attempt: 1}))
+	}
+
+	claimed, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "a", s.base.Add(time.Hour), time.Minute, 10)
+
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 1)
+	s.Equal(dial.ID, claimed[0].Attempt.ID)
+}
+
+func (s *StoreSuite) TestTheLatestDialIsOfTheContactsCampaign() {
+	contact := s.contactsOf(s.draftCampaign(newID(), "+15550001"))[0]
+	s.strayDial(contact, s.base)
+
+	_, found, err := s.store.CampaignAttempts.Latest(s.ctx, contact.ID)
+
+	s.Require().NoError(err)
+	s.False(found)
+}
+
+func (s *StoreSuite) TestDialsMadeAreOfTheContactsCampaign() {
+	contact := s.contactsOf(s.draftCampaign(newID(), "+15550001"))[0]
+	s.strayDial(contact, s.base)
+
+	made, err := s.store.CampaignAttempts.Made(s.ctx, []string{contact.ID})
+
+	s.Require().NoError(err)
+	s.Empty(made)
+}
+
+func (s *StoreSuite) TestDialsCountedByResultAreOfTheContactsCampaign() {
+	contact := s.contactsOf(s.draftCampaign(newID(), "+15550001"))[0]
+	s.strayDial(contact, s.base)
+
+	count, err := s.store.CampaignAttempts.CountResult(s.ctx, contact.ID, 1, "")
+
+	s.Require().NoError(err)
+	s.Zero(count)
+}
+
+func (s *StoreSuite) TestSettlingAContactLeavesAnotherCampaignsDial() {
+	s.runningCampaign(5, "+15550001")
+	contact := s.claimDue("a", s.base, 10)[0].Contact
+	s.strayDial(contact, s.base)
+
+	s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", contact.ID, Settle{Stage: ContactCompleted, Attempt: 1}))
+
+	var states []string
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Table("campaign_attempts").Column("classify_state").Scan(s.ctx, &states))
+	s.Equal([]string{"pending"}, states)
 }
 
 func (s *StoreSuite) TestADialWhoseContactAnotherRunnerHoldsIsNotClassified() {
@@ -478,10 +541,12 @@ func (s *StoreSuite) TestADialWhoseContactAnotherRunnerHoldsIsNotClassified() {
 	_, err = s.store.GlobalDB().NewUpdate().Model((*CampaignAttempt)(nil)).Set("classify_after = ?", s.base.Add(time.Minute)).Where("id = ?", attempt.ID).Exec(s.ctx)
 	s.Require().NoError(err)
 
+	s.leasesPass("campaign_contacts", 9*time.Minute)
 	taken, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "b", s.base.Add(2*time.Minute), time.Minute, 10)
 	s.Require().NoError(err)
 	s.Empty(taken, "a still holds the contact")
 
+	s.leasesPass("campaign_contacts", 2*time.Minute)
 	taken, err = s.store.CampaignAttempts.ClaimClassifications(s.ctx, "b", s.base.Add(12*time.Minute), time.Minute, 10)
 	s.Require().NoError(err)
 	s.Len(taken, 1, "a's lease ran out")
@@ -503,6 +568,7 @@ func (s *StoreSuite) TestAContactStoppedMidCallThatFailsKeepsWhyItFailed() {
 	s.Equal("opted_out", settled.Reason)
 }
 
+// The contact settles each time, so only the dial's own state keeps a late answer off it.
 func (s *StoreSuite) TestALateClassificationChangesNothing() {
 	campaign := s.runningCampaign(5, "+15550001")
 	contact := s.claimDue("a", s.base, 10)[0].Contact
@@ -511,11 +577,16 @@ func (s *StoreSuite) TestALateClassificationChangesNothing() {
 	s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", contact.ID, Settle{Stage: AwaitingOutcome, Attempt: 1}))
 	_, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "a", s.base.Add(time.Minute), time.Minute, 10)
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.CampaignAttempts.Classified(s.ctx, latest.ID, "success", true))
-	s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", contact.ID, Settle{Stage: ContactCompleted, Attempt: 1}))
+	again := s.base.Add(time.Hour)
+	s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: latest.ID, Outcome: "no_response"},
+		contact.ID, Settle{Stage: Enrolled, Attempt: 1, NextAttemptAt: &again}))
 
-	s.NoError(s.store.CampaignAttempts.Classified(s.ctx, latest.ID, "other", false), "a done dial")
-	s.NoError(s.store.CampaignAttempts.Classified(s.ctx, older.ID, "other", false), "an abandoned dial")
+	for _, late := range []CampaignAttempt{latest, older} {
+		s.Require().Len(s.claimDue("a", again, 10), 1)
+		again = again.Add(time.Hour)
+		s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: late.ID, Outcome: "other"},
+			contact.ID, Settle{Stage: Enrolled, Attempt: 1, NextAttemptAt: &again}))
+	}
 
 	_, attempts, err := s.store.CampaignContacts.Get(s.ctx, campaign.ID, contact.ID)
 	s.Require().NoError(err)
@@ -523,9 +594,8 @@ func (s *StoreSuite) TestALateClassificationChangesNothing() {
 	for _, attempt := range attempts {
 		byID[attempt.ID] = attempt
 	}
-	s.Equal("success", byID[latest.ID].Outcome)
-	s.True(byID[latest.ID].Converted)
-	s.Equal("abandoned", byID[older.ID].ClassifyState)
+	s.Equal("no_response", byID[latest.ID].Outcome, "a done dial")
+	s.Equal("abandoned", byID[older.ID].ClassifyState, "an abandoned dial")
 	s.Empty(byID[older.ID].Outcome)
 }
 
@@ -574,7 +644,7 @@ func (s *StoreSuite) TestAClassificationWhoseContactCannotSettleStaysPending() {
 	_, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "b", s.base, time.Minute, 10)
 	s.Require().NoError(err)
 
-	err = s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: attempt.ID, Outcome: "success", Converted: true},
+	err = s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: attempt.ID, Outcome: "success"},
 		claimed.Contact.ID, Settle{Stage: ContactCompleted, Attempt: 1, Outcome: "success", Converted: true})
 
 	s.ErrorIs(err, ErrNotLeaseHolder)
@@ -593,7 +663,7 @@ func (s *StoreSuite) TestAClassificationAndItsContactSettleTogether() {
 	_, err := s.store.CampaignAttempts.ClaimClassifications(s.ctx, "a", s.base, time.Minute, 10)
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: attempt.ID, Outcome: "success", Converted: true},
+	s.Require().NoError(s.store.CampaignContacts.ClassifyAndSettle(s.ctx, "a", Classification{AttemptID: attempt.ID, Outcome: "success"},
 		claimed.Contact.ID, Settle{Stage: ContactCompleted, Attempt: 1, Outcome: "success", Converted: true}))
 
 	latest, _, err := s.store.CampaignAttempts.Latest(s.ctx, claimed.Contact.ID)
@@ -663,8 +733,9 @@ func (s *StoreSuite) TestCampaignContactQueryBudgets() {
 	s.Equal(2+1+len(running), s.countQueries(func() { claimed = s.claimDue("a", s.base, 10) }),
 		"Claim locks the due campaigns, then claims each one's share in one statement")
 	s.Len(claimed, 6, "two of each campaign's three, its concurrency")
+	s.leasesPass("campaign_contacts", time.Hour)
 	s.Equal(2, s.countQueries(func() {
-		taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "b", s.base.Add(time.Hour), time.Minute, 10)
+		taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "b", ShardClaim{}, time.Minute, 10)
 		s.Require().NoError(err)
 		s.Len(taken, 6)
 	}), "TakeOverExpired takes every lapsed contact, then reads their campaigns, in one query each")
@@ -699,6 +770,26 @@ func (s *StoreSuite) TestCampaignContactQueryBudgets() {
 		s.Require().NoError(err)
 		s.Len(stages, 3)
 	}), "Stages")
+}
+
+// An owner is one process, and a call that outlives its lease can find the contact taken over
+// by that same process. The settle of the first claim must not land on the second.
+func (s *StoreSuite) TestASettleUnderALeaseTakenOverSinceSettlesNothing() {
+	campaign := s.runningCampaign(5, "+15550001")
+	first := s.claimDue("a", s.base, 10)[0].Contact
+	s.leasesPass("campaign_contacts", 2*time.Minute)
+	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "a", ShardClaim{}, time.Minute, 10)
+	s.Require().NoError(err)
+	s.Require().Len(taken, 1)
+	second := taken[0].Contact
+	next := s.base.Add(time.Hour)
+
+	err = s.store.CampaignContacts.Settle(s.ctx, "a", first.ID, Settle{Stage: Enrolled, Attempt: 1, NextAttemptAt: &next, LeaseUntil: first.LeaseUntil})
+	s.ErrorIs(err, ErrNotLeaseHolder)
+	s.Equal(InProgress, s.contactByNumber(campaign, "+15550001").Stage)
+
+	s.Require().NoError(s.store.CampaignContacts.Settle(s.ctx, "a", second.ID, Settle{Stage: ContactCompleted, Attempt: 1, LeaseUntil: second.LeaseUntil}))
+	s.Equal(ContactCompleted, s.contactByNumber(campaign, "+15550001").Stage)
 }
 
 // autoEnrollCampaign is a draft auto-enroll campaign for a fresh customer, launched to start at
@@ -919,4 +1010,81 @@ func (s *StoreSuite) TestChangingOrRemovingAContactOfAnotherCampaignFindsNone() 
 	s.ErrorIs(err, ErrNoCampaignContact)
 	s.ErrorIs(s.store.CampaignContacts.Delete(s.ctx, campaign.ID, contact.ID), ErrNoCampaignContact)
 	s.Equal("+15550001", s.contactByNumber(other, "+15550001").ToNumber)
+}
+
+// campaignFrom launches a campaign of one contact due at s.base, ringing from a number of
+// country.
+func (s *StoreSuite) campaignFrom(number, country string) Campaign {
+	campaign := s.runningCampaign(5, "+15550001")
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: number, Vendor: "telnyx", Country: country, CustomerID: campaign.CustomerID,
+	}))
+	_, err := s.store.GlobalDB().NewUpdate().Model((*Campaign)(nil)).Set("from_number = ?", number).
+		Where("id = ?", campaign.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+	return campaign
+}
+
+// campaignsClaimed is the campaigns of the contacts claimed in claim's shard at now.
+func (s *StoreSuite) campaignsClaimed(claim ShardClaim, now time.Time) []string {
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-"+claim.Shard, claim, now, time.Minute, 10)
+	s.Require().NoError(err)
+	var campaigns []string
+	for _, one := range claimed {
+		campaigns = append(campaigns, one.Campaign.ID)
+	}
+	return campaigns
+}
+
+func (s *StoreSuite) TestACampaignIsDialledInTheShardOfItsNumbersCountry() {
+	german := s.campaignFrom("+4930123456", "DE")
+	american := s.campaignFrom("+12125550100", "US")
+
+	s.Equal([]string{german.ID}, s.campaignsClaimed(ShardClaim{Shard: "europe-west4", Routing: regional}, s.base))
+	s.Equal([]string{american.ID}, s.campaignsClaimed(ShardClaim{Shard: "us-east4", Routing: regional}, s.base))
+}
+
+func (s *StoreSuite) TestACampaignLeftUndialledInItsShardPastTheOverdueTimeIsDialledByAnother() {
+	german := s.campaignFrom("+4930123456", "DE")
+	us := ShardClaim{Shard: "us-east4", Routing: regional}
+	s.Require().Empty(s.campaignsClaimed(us, s.base.Add(claimOverdue-time.Minute)), "not overdue yet")
+
+	s.Equal([]string{german.ID}, s.campaignsClaimed(us, s.base.Add(claimOverdue+time.Minute)))
+}
+
+func (s *StoreSuite) TestAnExpiredLeaseIsTakenOverInTheShardOfTheCampaignsNumber() {
+	german := s.campaignFrom("+4930123456", "DE")
+	europe, us := ShardClaim{Shard: "europe-west4", Routing: regional}, ShardClaim{Shard: "us-east4", Routing: regional}
+	s.Require().Len(s.campaignsClaimed(europe, s.base), 1)
+	s.leasesPass("campaign_contacts", 2*time.Minute)
+
+	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "router-us", us, time.Minute, 10)
+	s.Require().NoError(err)
+	s.Empty(taken)
+	taken, err = s.store.CampaignContacts.TakeOverExpired(s.ctx, "router-eu", europe, time.Minute, 10)
+	s.Require().NoError(err)
+	s.Require().Len(taken, 1)
+	s.Equal(german.ID, taken[0].Campaign.ID)
+}
+
+func (s *StoreSuite) TestALeaseExpiredPastTheOverdueTimeIsTakenOverByAnyShard() {
+	s.campaignFrom("+4930123456", "DE")
+	s.Require().Len(s.campaignsClaimed(ShardClaim{Shard: "europe-west4", Routing: regional}, s.base), 1)
+	us := ShardClaim{Shard: "us-east4", Routing: regional}
+	s.leasesPass("campaign_contacts", time.Minute+claimOverdue-10*time.Second)
+
+	taken, err := s.store.CampaignContacts.TakeOverExpired(s.ctx, "router-us", us, time.Minute, 10)
+	s.Require().NoError(err)
+	s.Require().Empty(taken, "not overdue yet")
+	s.leasesPass("campaign_contacts", 20*time.Second)
+	taken, err = s.store.CampaignContacts.TakeOverExpired(s.ctx, "router-us", us, time.Minute, 10)
+	s.Require().NoError(err)
+	s.Len(taken, 1)
+}
+
+func (s *StoreSuite) TestACampaignsNumberIsMatchedToItsCountryWhateverItsCase() {
+	german := s.campaignFrom("+4930123456", "de")
+
+	s.Empty(s.campaignsClaimed(ShardClaim{Shard: "us-east4", Routing: regional}, s.base))
+	s.Equal([]string{german.ID}, s.campaignsClaimed(ShardClaim{Shard: "europe-west4", Routing: regional}, s.base))
 }

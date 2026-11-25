@@ -7,13 +7,16 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/redis/rueidis/rueidishook"
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
@@ -38,6 +41,10 @@ type Options struct {
 	// Shards is every shard's DSN by name, this one's included. Reads of calls, sessions and
 	// requests cover them all. Empty is this shard's alone.
 	Shards map[string]string
+	// MigrateDSN and ShardMigrateDSN are what Migrate connects with to DSN's database and to
+	// ShardDSN's, as the role that owns the schema. Empty is DSN and ShardDSN.
+	MigrateDSN      string
+	ShardMigrateDSN string
 	// Redis is where rows read on every request are cached. Empty reads Postgres every time.
 	Redis Redis
 	// ShardRedis is where this shard's running calls keep their state. Empty is Redis.
@@ -57,8 +64,13 @@ func OpenShards(options Options) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{global: db, shard: db, globalDSN: options.DSN, shardDSN: options.DSN,
-		retries: make(chan struct{}, forgetSlots), writeTimeout: cmp.Or(options.writeTimeout, writeTimeout)}
+	locks, err := connect(options.DSN, lockConns)
+	if err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
+	s := &Store{global: db, shard: db, locks: locks,
+		globalDSN: cmp.Or(options.MigrateDSN, options.DSN), shardDSN: cmp.Or(options.MigrateDSN, options.DSN),
+		retries: make(chan struct{}, forgetSlots), lost: make(chan struct{}, forgetSlots), polls: make(chan struct{}, pollSlots), writeTimeout: cmp.Or(options.writeTimeout, writeTimeout)}
 	s.closing, s.stop = context.WithCancel(context.Background())
 	if options.ShardDSN != "" && options.ShardDSN != options.DSN {
 		shard, err := connect(options.ShardDSN, maxConns)
@@ -66,7 +78,7 @@ func OpenShards(options Options) (*Store, error) {
 			return nil, errors.Join(err, s.Close())
 		}
 		s.shard = shard
-		s.shardDSN = options.ShardDSN
+		s.shardDSN = cmp.Or(options.ShardMigrateDSN, options.ShardDSN)
 	}
 	own := cmp.Or(options.ShardDSN, options.DSN)
 	s.shardNames = []string{unnamedShard(own)}
@@ -118,8 +130,8 @@ func (s *Store) shards() []bun.IDB {
 }
 
 // everyShard reads every shard's database at once and returns what each answered, this
-// shard's first. One shard failing fails the read: a page that silently left a shard out
-// would be a list of calls missing some.
+// shard's first. One shard failing fails the read, with a *ShardsFailed naming it: a page
+// that silently left a shard out would be a list of calls missing some.
 func everyShard[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) ([]T, error) {
 	all := s.shards()
 	if len(all) == 1 {
@@ -129,6 +141,50 @@ func everyShard[T any](ctx context.Context, s *Store, read func(context.Context,
 		}
 		return []T{found}, nil
 	}
+	found, failed := readShards(ctx, all, read)
+	if missed := s.failedShards(failed); missed != nil {
+		return nil, missed
+	}
+	return found, nil
+}
+
+// onEach reads every database of all at once and returns what each answered, in their order.
+// One failing fails the read.
+func onEach[T any](ctx context.Context, all []bun.IDB, read func(context.Context, bun.IDB) (T, error)) ([]T, error) {
+	if len(all) == 1 {
+		found, err := read(ctx, all[0])
+		if err != nil {
+			return nil, err
+		}
+		return []T{found}, nil
+	}
+	found, failed := readShards(ctx, all, read)
+	if err := errors.Join(failed...); err != nil {
+		return nil, err
+	}
+	return found, nil
+}
+
+// reachableShards is everyShard for a page that says which shards it left out rather than
+// failing: another shard's answer is left out when it fails, and named in the *ShardsFailed
+// returned beside what the others answered. This shard failing still fails the read, its
+// database being this router's own.
+func reachableShards[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) ([]T, *ShardsFailed, error) {
+	all := s.shards()
+	found, failed := readShards(ctx, all, read)
+	if failed[0] != nil {
+		return nil, nil, failed[0]
+	}
+	var answered []T
+	for i := range all {
+		if failed[i] == nil {
+			answered = append(answered, found[i])
+		}
+	}
+	return answered, s.failedShards(failed), nil
+}
+
+func readShards[T any](ctx context.Context, all []bun.IDB, read func(context.Context, bun.IDB) (T, error)) ([]T, []error) {
 	found := make([]T, len(all))
 	failed := make([]error, len(all))
 	var wg sync.WaitGroup
@@ -136,10 +192,135 @@ func everyShard[T any](ctx context.Context, s *Store, read func(context.Context,
 		wg.Go(func() { found[i], failed[i] = read(ctx, db) })
 	}
 	wg.Wait()
-	if err := errors.Join(failed...); err != nil {
-		return nil, err
+	return found, failed
+}
+
+// ShardsFailed is a read of every shard that some of them did not answer, by name.
+type ShardsFailed struct {
+	names  []string
+	errors []error
+}
+
+// failedShards names the shards of failed, as shards() orders them, that failed, or is nil
+// when none did.
+func (s *Store) failedShards(failed []error) *ShardsFailed {
+	var shards ShardsFailed
+	for i, err := range failed {
+		if err != nil {
+			shards.names = append(shards.names, s.shardNames[i])
+			shards.errors = append(shards.errors, err)
+		}
 	}
-	return found, nil
+	if len(shards.names) == 0 {
+		return nil
+	}
+	return &shards
+}
+
+// Shards names the shards that did not answer.
+func (e *ShardsFailed) Shards() []string { return e.names }
+
+func (e *ShardsFailed) Error() string {
+	return "store: shards " + strings.Join(e.names, ", ") + " did not answer: " + errors.Join(e.errors...).Error()
+}
+
+func (e *ShardsFailed) Unwrap() []error { return e.errors }
+
+// ErrShardUnanswered is a read no shard that answered could settle while another did not: the
+// row may be on that one, so asking again once it answers may find it.
+var ErrShardUnanswered = errors.New("store: a shard that may hold it did not answer")
+
+// peerReadTimeout bounds a read of another shard's database that one shard's answer can settle
+// (answeringShards). Each is one indexed lookup, answered in milliseconds by a peer that is up,
+// even across regions. A peer partitioned away would otherwise hold the caller for pgdriver's
+// 5 s dial timeout, or its 10 s read timeout on a host that accepts and never answers, and the
+// callers here are a vendor and Stream waiting on a call.
+const peerReadTimeout = 2 * time.Second
+
+// claimReadTimeout bounds a bridge claim's read of another shard, longer than peerReadTimeout.
+// The claim deletes what it reads, and a peer that commits the delete after the caller stopped
+// waiting has spent the bridge with nobody to hand it to. The longer bound narrows that to a
+// peer slower than pgdriver's own 5 s dial timeout, which is one that is down; a vendor's fetch
+// is one per answered call, so holding a peer connection that long is not load.
+const claimReadTimeout = 5 * time.Second
+
+// answeringShards reads every shard's database at once, as everyShard does, for a read one
+// shard's answer can settle: it returns what each shard answered and, apart, how each that
+// did not answer failed, this shard's first. A shard down then costs only what is on it.
+//
+// Another shard's read is given bound. Once an answer settles the read, the others are
+// cancelled and not waited for, so a slow peer gives its pool connection back at once: their
+// entries stay zero. Each shard that failed before the answer settled is logged
+// (settledWithout); one cut off by the settle is not known to be down, and a shard that is
+// down fails the reads that do need it.
+func answeringShards[T any](ctx context.Context, s *Store, read string, bound time.Duration, settles func(T) bool, query func(context.Context, bun.IDB) (T, error)) ([]T, []error) {
+	all := s.shards()
+	found := make([]T, len(all))
+	failed := make([]error, len(all))
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type answer struct {
+		shard int
+		found T
+		err   error
+	}
+	// Buffered for every shard, so a read still running when the answer is settled finishes
+	// into it rather than waiting on a reader that has gone.
+	answers := make(chan answer, len(all))
+	for i, db := range all {
+		go func() {
+			readCtx := ctx
+			if i > 0 {
+				var stop context.CancelFunc
+				readCtx, stop = context.WithTimeout(ctx, bound)
+				defer stop()
+			}
+			found, err := query(readCtx, db)
+			answers <- answer{shard: i, found: found, err: err}
+		}()
+	}
+	for range all {
+		got := <-answers
+		found[got.shard], failed[got.shard] = got.found, got.err
+		if got.err != nil || !settles(got.found) {
+			continue
+		}
+		for shard, err := range failed {
+			s.settledWithout(ctx, read, shard, err)
+		}
+		break
+	}
+	return found, failed
+}
+
+// settledWithout logs a shard that failed a read the others' answers settled, at most once a
+// minute a shard: a shard that is down fails every call's reads until it is back. A read the
+// caller cancelled says nothing of its shard.
+func (s *Store) settledWithout(ctx context.Context, read string, shard int, err error) {
+	if err != nil && !errors.Is(err, context.Canceled) && s.shardsDown.due(s.shardNames[shard], time.Now()) {
+		slog.Default().WarnContext(ctx, "a shard did not answer, settled on the others", "read", read, "shard", s.shardNames[shard], "error", err)
+	}
+}
+
+// shardWarnings is when each shard was last logged as not answering. Its keys are the shards'
+// names, so it holds at most one entry a shard.
+type shardWarnings struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+// due reports whether shard may be logged at now, and counts it as logged if so.
+func (w *shardWarnings) due(shard string, now time.Time) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if last, ok := w.last[shard]; ok && now.Sub(last) < time.Minute {
+		return false
+	}
+	if w.last == nil {
+		w.last = map[string]time.Time{}
+	}
+	w.last[shard] = now
+	return true
 }
 
 // whicheverShard reads a row from the shard holding it: this one first, where the row almost
@@ -168,6 +349,60 @@ func whicheverShard[T any](ctx context.Context, s *Store, read func(context.Cont
 		}
 	}
 	return found, sql.ErrNoRows
+}
+
+// A table moving from the shared database to the shards' is written in this shard's and read
+// from every database that may hold its rows: every shard's, where they are written now, and
+// the shared one, where they were written before, until its rows there are copied over and it
+// is dropped. Shards migrate one at a time, so a peer may not have the table yet: it holds none
+// of its rows, rather than failing the read.
+
+// holders is every database that may hold the rows of a moving table: every shard's, this
+// one's first, then the shared one unless it is already one of the shards.
+func (s *Store) holders() []bun.IDB {
+	all := s.shards()
+	if s.Sharded() && !s.globalIsShard {
+		all = append(all, s.global)
+	}
+	return all
+}
+
+// everyHolder reads a moving table from every database of holders at once, in its order. The
+// shared database is also a peer's when one shard keeps its rows there, so a row may be read
+// twice: the caller drops the second by its key.
+func everyHolder[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) ([]T, error) {
+	return onEach(ctx, s.holders(), func(ctx context.Context, db bun.IDB) (T, error) {
+		found, err := read(ctx, db)
+		if absentTable(err) {
+			var none T
+			return none, nil
+		}
+		return found, err
+	})
+}
+
+// whicheverHolder reads a row of a moving table from the database holding it: the shards, as
+// whicheverShard does, then the shared one. read answers sql.ErrNoRows for a database without
+// it, and so does whicheverHolder when none has it.
+func whicheverHolder[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) (T, error) {
+	found, err := whicheverShard(ctx, s, func(ctx context.Context, db bun.IDB) (T, error) {
+		found, err := read(ctx, db)
+		if absentTable(err) {
+			return found, sql.ErrNoRows
+		}
+		return found, err
+	})
+	if !s.Sharded() || !errors.Is(err, sql.ErrNoRows) {
+		return found, err
+	}
+	return read(ctx, s.global)
+}
+
+// absentTable reports whether err is Postgres refusing a statement on a table the database
+// does not have.
+func absentTable(err error) bool {
+	var refused pgdriver.Error
+	return errors.As(err, &refused) && refused.Field('C') == undefinedTable
 }
 
 // onEveryShard runs a write on every shard's database and returns how many rows it changed

@@ -145,7 +145,7 @@ func (s *StoreSuite) TestVoiceBindingQueryBudgets() {
 	}
 	binding := VoiceBinding{VoiceID: voice.ID, Provider: "elevenlabs", ExternalID: "el-1", State: VoiceReady}
 
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.VoiceBindings.Upsert(s.ctx, &binding)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.VoiceBindings.Upsert(s.ctx, &binding)) }), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 	s.Equal(1, s.countQueries(func() {
 		bindings, err := s.store.VoiceBindings.Select(s.ctx, voice.ID)
 		s.Require().NoError(err)

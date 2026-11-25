@@ -65,6 +65,8 @@ const (
 	defaultQueue = "knowledge-files"
 	// readTimeout is reading the file, then every picture in it four at a time.
 	readTimeout = 30 * time.Minute
+	// overtakenTimeout bounds what a read does with passages of a document that was removed.
+	overtakenTimeout = 30 * time.Second
 	// maxRetry is how many more times a read that failed for a reason that may pass is tried
 	// before the document is marked failed.
 	maxRetry = 3
@@ -242,7 +244,7 @@ func (s *Service) Upload(ctx context.Context, upload Upload) (store.KnowledgeDoc
 // Forget deletes the file of a document removed before it was read. The read finds the
 // document gone and stops; this frees the bucket sooner.
 func (s *Service) Forget(ctx context.Context, document store.KnowledgeDocument) error {
-	if document.ObjectKey == "" {
+	if !document.WaitsForFile() {
 		return nil
 	}
 	return s.bucket.Delete(ctx, document.ObjectKey)
@@ -253,7 +255,7 @@ func (s *Service) Forget(ctx context.Context, document store.KnowledgeDocument) 
 // is a second file and the read of the first can tell it was overtaken.
 func objectKey(customerID, source string) string {
 	name := path.Base(strings.ReplaceAll(source, "\\", "/"))
-	if name == "." || name == "/" || name == "" {
+	if name == "." || name == ".." || name == "/" || name == "" {
 		name = "file"
 	}
 	return customerID + "/" + uuid.NewString() + "/" + name
@@ -403,7 +405,7 @@ func (s *Service) process(ctx context.Context, task *asynq.Task) error {
 	return nil
 }
 
-// waiting is the document, while it still waits for the payload's file.
+// waiting is the document, with errOvertaken when it no longer waits for the payload's file.
 func (s *Service) waiting(ctx context.Context, payload readPayload) (store.KnowledgeDocument, error) {
 	document, err := s.store.KnowledgeDocuments.Get(ctx, payload.CustomerID, payload.ID)
 	if errors.Is(err, store.ErrNoKnowledgeDocument) {
@@ -413,7 +415,7 @@ func (s *Service) waiting(ctx context.Context, payload readPayload) (store.Knowl
 		return store.KnowledgeDocument{}, err
 	}
 	if document.ObjectKey != payload.ObjectKey {
-		return store.KnowledgeDocument{}, errOvertaken
+		return document, errOvertaken
 	}
 	return document, nil
 }
@@ -462,17 +464,18 @@ func (s *Service) read(ctx context.Context, owned metered.OwnedKnowledge, payloa
 	if !covered {
 		return errOvertaken
 	}
-	if err := owned.Upsert(ctx, document.Namespace, passages); err != nil {
-		return err
-	}
-	current, err := s.waiting(ctx, payload)
+	// A write that failed may have written some of them.
+	failed := owned.Upsert(ctx, document.Namespace, passages)
+	// Looked at whatever ended the write, the read's time running out included: a retry no
+	// longer knows what was written.
+	after, cancel := context.WithTimeout(context.WithoutCancel(ctx), overtakenTimeout)
+	defer cancel()
+	current, err := s.waiting(after, payload)
 	if errors.Is(err, errOvertaken) {
-		if _, gone := s.store.KnowledgeDocuments.Get(ctx, payload.CustomerID, payload.ID); errors.Is(gone, store.ErrNoKnowledgeDocument) {
-			if taken := owned.Delete(ctx, document.Namespace, ingest.IDs(document.Source, 0, len(passages))); taken != nil {
-				return fmt.Errorf("files: take back what was read for a document removed meanwhile: %w", taken)
-			}
-		}
-		return err
+		return s.overtaken(after, owned, payload, current, document, len(passages))
+	}
+	if failed != nil {
+		return failed
 	}
 	if err != nil {
 		return err
@@ -494,6 +497,27 @@ func (s *Service) read(ctx context.Context, owned metered.OwnedKnowledge, payloa
 		return errOvertaken
 	}
 	return nil
+}
+
+// overtaken ends a read that wrote passages and then found the row, seen as now, no longer
+// waits for its file. A removal still holding the row may have deleted the passages before they
+// were written, so it is made to delete them again. With the row gone, or a removal that could
+// not be told, they are taken back here. A newer write of the document keeps the row, which
+// counts them too.
+func (s *Service) overtaken(
+	ctx context.Context, owned metered.OwnedKnowledge, payload readPayload, now store.KnowledgeDocument, read *store.KnowledgeDocument, passages int,
+) error {
+	kept, err := s.store.KnowledgeDocuments.Interrupt(ctx, payload.CustomerID, payload.ID, passages)
+	if kept {
+		return errOvertaken
+	}
+	if err != nil && !now.BeingRemoved() {
+		return err
+	}
+	if err := owned.Delete(ctx, read.Namespace, ingest.IDs(read.Source, 0, passages)); err != nil {
+		return fmt.Errorf("files: take back what was read for a document removed meanwhile: %w", err)
+	}
+	return errOvertaken
 }
 
 // readPictures has every scanned page read for its text and figures, every page with

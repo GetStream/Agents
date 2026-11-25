@@ -15,6 +15,7 @@ import (
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -103,9 +104,13 @@ type AgentSession struct {
 	Team        string `bun:"team,notnull"`
 	Title       string `bun:"title,notnull"`
 	Description string `bun:"description,notnull"`
-	// Project is what the conversation belongs to, a column as well as a cost tag so a
-	// list grouped by project needs no JSON unpacking.
+	// Project is what the conversation belongs to.
 	Project string `bun:"project,notnull"`
+	// ProjectTag is the project the session's usage is tagged with unless its config's tags, or
+	// explicit ones, name another: the last a server-side caller named, which a device's fork may
+	// have named another Project over. Empty for none. Written as the session opens, or is carried
+	// on from a row made before it was kept, where it is nil (ReadProjectTag), and never changed.
+	ProjectTag *string `bun:"project_tag"`
 	// Custom is the caller's own, handed back untouched and never read by the router.
 	Custom          map[string]any  `bun:"custom,type:jsonb,nullzero"`
 	ModelOverwrites ModelOverwrites `bun:"model_overwrites,type:jsonb,nullzero"`
@@ -176,6 +181,22 @@ func (s *AgentSession) Validate() error {
 		check(s.ReviewScore == nil || *s.ReviewScore >= 1 && *s.ReviewScore <= 5, "review_score", "is not from 1 to 5").
 		done()
 }
+
+// TaggedProject is what ProjectTag says, empty for none. For a row
+// from before it was kept it is the session's project if a server-side caller opened it, except
+// for a fork: its project may be its parent's, which anybody may have named.
+func (s *AgentSession) TaggedProject() string {
+	switch {
+	case s.ProjectTag != nil:
+		return *s.ProjectTag
+	case s.ForkedFrom == "" && s.CallerKind == string(auth.KindServer):
+		return s.Project
+	}
+	return ""
+}
+
+// ErrProjectTagUnread is a session whose project tag a shard that did not answer may say.
+var ErrProjectTagUnread = errors.New("store: a shard did not answer for a session's project tag")
 
 // ErrNoSession is a session that is not there: never saved, or deleted since.
 var ErrNoSession = errors.New("store: there is no session")
@@ -260,9 +281,10 @@ const (
 //
 // The queries return one row more than this, so a caller can tell the page is not the last
 // without counting.
-func SessionLimit(asked int) int { return clampLimit(asked, defaultSessionLimit, maxSessionLimit) }
+func SessionLimit(asked int) int { return ClampLimit(asked, defaultSessionLimit, maxSessionLimit) }
 
-func clampLimit(asked, fallback, most int) int {
+// ClampLimit is the page size for the limit asked for: fallback when none was, at most most.
+func ClampLimit(asked, fallback, most int) int {
 	if asked <= 0 {
 		return fallback
 	}
@@ -299,13 +321,9 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 	if session.Modality == "" {
 		session.Modality = ModalityText
 	}
-	if session.Custom == nil {
-		session.Custom = map[string]any{}
-	}
+	session.Custom = orEmptyMap(session.Custom)
 	// The column's own default, which a nil slice would write as JSON null.
-	if session.ConnectorSelections == nil {
-		session.ConnectorSelections = []SessionConnectorSelection{}
-	}
+	session.ConnectorSelections = orEmpty(session.ConnectorSelections)
 
 	// No conflict target is named: every unique index arbitrates the insert, so it neither fails
 	// on one it did not name nor depends on which of them the table has. A row there already is
@@ -348,6 +366,7 @@ func (r *Sessions) Upsert(ctx context.Context, session *AgentSession) error {
 			// remembered before is still in the store, so once true it stays true. Not known
 			// stays not known: NULL OR false is NULL.
 			Set("remembers = ?TableAlias.remembers OR saved.remembers").
+			Set("project_tag = COALESCE(?TableAlias.project_tag, saved.project_tag)").
 			Where("?TableAlias.customer_id = saved.customer_id").
 			Where("?TableAlias.id = saved.id").
 			// A write of a run opened before the one the row holds is late, from a router that held
@@ -658,6 +677,56 @@ func (r *Sessions) Get(ctx context.Context, customerID, id string) (AgentSession
 	return AgentSession{}, stack.Wrap(fmt.Errorf("store: stored session: %w", err))
 }
 
+// ReadProjectTag gives a row that does not say its project tag the one it has: what another run's
+// row says, or, when no row does, what TaggedProject derives from the row of the run that opened
+// it. A router of the release before writes such a row as it carries the session on in another
+// shard, with the kind of caller that carried it on, so every shard is asked, this one again and
+// each other for peerReadTimeout at most. A shard that does not answer may be the one that says it, so with no
+// row found it is an error: usage is not tagged with a guess.
+func (r *Sessions) ReadProjectTag(ctx context.Context, session *AgentSession) error {
+	if session.ProjectTag != nil {
+		return nil
+	}
+	opener := *session
+	// A session that never had a project, which only a fork may have a tag without, has none.
+	if len(r.store.peers) > 0 && (session.Project != "" || session.ForkedFrom != "") {
+		lists, failed := answeringShards(ctx, r.store, "project tag", peerReadTimeout,
+			func(rows []AgentSession) bool { return len(rows) > 0 && rows[0].ProjectTag != nil },
+			func(ctx context.Context, db bun.IDB) ([]AgentSession, error) {
+				var rows []AgentSession
+				err := db.NewSelect().Model(&rows).
+					Column("project_tag", "project", "caller_kind", "forked_from").
+					// When the session was first run in the shard: opened_at moves as it is carried
+					// on there again, its first response's time does not. NULL is from before
+					// opened_at was kept, and reads as first.
+					ColumnExpr("LEAST(opened_at, (SELECT min(created_at) FROM agent_responses WHERE session_id = ?TableAlias.id AND customer_id = ?)) AS opened_at", session.CustomerID).
+					Where("id = ?", session.ID).
+					Where("customer_id = ?", session.CustomerID).
+					Scan(ctx, &rows)
+				return rows, err
+			})
+		rows := merged(lists, func(a, b AgentSession) int { return a.OpenedAt.Compare(b.OpenedAt) }, 0)
+		if said := slices.IndexFunc(rows, func(row AgentSession) bool { return row.ProjectTag != nil }); said >= 0 {
+			session.ProjectTag = rows[said].ProjectTag
+			return nil
+		}
+		if err := errors.Join(failed...); err != nil {
+			return stack.Wrap(fmt.Errorf("%w: %w", ErrProjectTagUnread, err))
+		}
+		if len(rows) > 0 {
+			opener = rows[0]
+		}
+		// Rows first run at one moment do not say which opened it: one tag they agree on, or none.
+		for _, row := range rows {
+			if row.OpenedAt.Equal(opener.OpenedAt) && row.TaggedProject() != opener.TaggedProject() {
+				opener.ProjectTag = new("")
+			}
+		}
+	}
+	session.ProjectTag = new(opener.TaggedProject())
+	return nil
+}
+
 // ConversationPin is the Stream app a customer's conversation was kept in, read off the
 // newest session that held it. Found is false for a conversation no session of theirs did.
 func (r *Sessions) ConversationPin(ctx context.Context, customerID, conversationID string) (int64, bool, error) {
@@ -685,6 +754,78 @@ func (r *Sessions) ConversationPin(ctx context.Context, customerID, conversation
 	return newest[0].Pin.Int64, true, nil
 }
 
+// HeldConversation is a customer's conversation a session held.
+type HeldConversation struct {
+	CustomerID     string `bun:"customer_id"`
+	ConversationID string `bun:"conversation_id"`
+}
+
+// HeldConversations pages through the conversations this shard's sessions held, by customer and
+// then conversation, from after the one given: the zero value starts at the first. Only
+// customerID's when it is not empty. For a job that walks them all, which each shard does for
+// its own.
+func (r *Sessions) HeldConversations(ctx context.Context, customerID string, after HeldConversation, limit int) ([]HeldConversation, error) {
+	query := r.store.shard.NewSelect().Model((*AgentSession)(nil)).
+		Distinct().Column("customer_id", "conversation_id").
+		Where("conversation_id <> ''").
+		Where("(customer_id, conversation_id) > (?, ?)", after.CustomerID, after.ConversationID).
+		OrderExpr("customer_id, conversation_id").
+		Limit(limit)
+	if customerID != "" {
+		query = query.Where("customer_id = ?", customerID)
+	}
+	var held []HeldConversation
+	if err := query.Scan(ctx, &held); err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: held conversations: %w", err))
+	}
+	return held, nil
+}
+
+// CallerKinds are the kinds of caller whose sessions held a customer's conversation under a
+// user id, on every shard, each once.
+func (r *Sessions) CallerKinds(ctx context.Context, customerID, conversationID, userID string) ([]string, error) {
+	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]string, error) {
+		var kinds []string
+		err := db.NewSelect().Model((*AgentSession)(nil)).
+			Distinct().Column("caller_kind").
+			Where("customer_id = ?", customerID).
+			Where("conversation_id = ?", conversationID).
+			Where("user_id = ?", userID).
+			Scan(ctx, &kinds)
+		return kinds, err
+	})
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: caller kinds: %w", err))
+	}
+	var kinds []string
+	for _, list := range lists {
+		for _, kind := range list {
+			if !slices.Contains(kinds, kind) {
+				kinds = append(kinds, kind)
+			}
+		}
+	}
+	return kinds, nil
+}
+
+// HeldAsGuest reports whether a guest whose token said the role held a session under a customer's
+// user id, on any shard. Such a user's next token says the role though other sessions they held
+// may say none: before a refreshed guest token kept the role, a guest came back from a refresh as
+// a signed-in user.
+func (r *Sessions) HeldAsGuest(ctx context.Context, customerID, userID string) (bool, error) {
+	held, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (bool, error) {
+		return db.NewSelect().Model((*AgentSession)(nil)).
+			Where("customer_id = ?", customerID).
+			Where("user_id = ?", userID).
+			Where("caller_kind = ?", UserKindGuest).
+			Exists(ctx)
+	})
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: held as guest: %w", err))
+	}
+	return slices.Contains(held, true), nil
+}
+
 // Delete deletes one of a customer's sessions, and its turns and their items with it. A
 // session that is not there is not an error: a retried delete has nothing left to do.
 func (r *Sessions) Delete(ctx context.Context, customerID, id string) error {
@@ -705,9 +846,9 @@ func (r *Sessions) Delete(ctx context.Context, customerID, id string) error {
 	}
 	_, err = onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
 		// The copies of hidden messages go with the session, and the changes recorded of them,
-		// which hold the same words, are emptied (forgottenCopies). A data-modifying WITH runs
+		// which hold the same words, are emptied (forgottenChanges). A data-modifying WITH runs
 		// whether or not it is read.
-		changes := forgottenCopies(db, customerID).Where("payload->>'session_id' = ?", id)
+		changes := forgottenChanges(db, customerID, "agent_branch_messages").Where("payload->>'session_id' = ?", id)
 		return db.NewDelete().With("changes", changes).Model((*AgentSession)(nil)).
 			Where("id = ?", id).
 			Where("customer_id = ?", customerID).
@@ -727,7 +868,7 @@ func (r *Sessions) Delete(ctx context.Context, customerID, id string) error {
 // the other half, for when what the caller has is words rather than a filter.
 func (r *Sessions) Select(ctx context.Context, customerID string, filter SessionFilter) ([]AgentSession, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	// Relevance is a search's: without words there is no rank to sort on.
 	if filter.Order.By == SessionSortRelevance {
@@ -764,7 +905,7 @@ func (r *Sessions) Select(ctx context.Context, customerID string, filter Session
 // conversations.
 func (r *Sessions) Search(ctx context.Context, customerID, text string, filter SessionFilter) ([]AgentSession, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	if text == "" {
 		return r.Select(ctx, customerID, filter)

@@ -80,7 +80,7 @@ func (*SyncAgentRequest) TransformSchema(_ huma.Registry, schema *huma.Schema) *
 // The caps are the ones the same values have elsewhere: 63 is the longest alias
 // AgentConnectorBinding's name pattern allows, 64 the longest custom connector id
 // (custom_ and 57 more, internal/api/connectors.go) and 120 the longest connection label
-// (CreateConnectionRequest). A built-in connector id is shorter than a custom one.
+// (ConnectionRequest). A built-in connector id is shorter than a custom one.
 type LeftOutConnector struct {
 	Name        string `json:"name" minLength:"1" maxLength:"63" doc:"The alias agent.yaml gave the connector."`
 	ConnectorId string `json:"connector_id" minLength:"1" maxLength:"64" doc:"The connector agent.yaml named, or the alias when it named none."`
@@ -349,7 +349,17 @@ func (s *Server) trySyncAgent(ctx context.Context, request *syncAgentRequest) (*
 	}
 	named := make([]string, 0, len(skills))
 	for _, skill := range skills {
+		// Filled in by upsertSkills, since a new config has no id yet.
+		skill.ConfigId = name
+		if message, ok := skillComplaint(skill); !ok {
+			return nil, invalidRequest(message)
+		}
 		named = append(named, strings.TrimSpace(skill.Name))
+	}
+	if message, ok, err := s.newSkillNamesComplaint(ctx, customerID, existing.ID, named); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, invalidRequest(message)
 	}
 
 	// Before anything is written, and before the knowledge is filled: a caller that asked
@@ -678,12 +688,6 @@ func documentsOf(list *[]KnowledgeDocument) []KnowledgeDocument {
 func (s *Server) upsertSkills(ctx context.Context, customerID, configID string, skills []SkillRequest) error {
 	names := make([]string, 0, len(skills))
 	for _, skill := range skills {
-		// The directory names the skill and the config owns it, so the caller does not
-		// repeat the config id per skill and it is filled in here.
-		skill.ConfigId = configID
-		if message, ok := skillComplaint(skill); !ok {
-			return invalidRequest(message)
-		}
 		names = append(names, strings.TrimSpace(skill.Name))
 	}
 
@@ -697,6 +701,8 @@ func (s *Server) upsertSkills(ctx context.Context, customerID, configID string, 
 	}
 
 	for _, skill := range skills {
+		// The directory names the skill and the config owns it, so the caller does not
+		// repeat the config id per skill and it is filled in here.
 		skill.ConfigId = configID
 		row := storedSkill(skill, customerID)
 		if existing, ok := known[row.Name]; ok {

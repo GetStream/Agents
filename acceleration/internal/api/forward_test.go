@@ -7,10 +7,16 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
+	"github.com/redis/rueidis"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
 )
 
 // ForwardedSessionSuite covers what is asked of a session over HTTP when the request does
@@ -115,7 +121,7 @@ func (s *ForwardedSessionSuite) TestAMessageArrivingOnTheWrongNodeIsAnsweredByTh
 	defer release()
 
 	s.Require().Equal(http.StatusOK,
-		s.signedly("/v1/chat/hooks/stream", writtenTo(channel, written)))
+		s.signedly("/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
 
 	s.Require().Eventually(func() bool { return s.wasAsked(written) },
 		settleFor, 10*time.Millisecond,
@@ -126,6 +132,145 @@ func (s *ForwardedSessionSuite) TestAMessageArrivingOnTheWrongNodeIsAnsweredByTh
 	case message := <-worker.Messages():
 		s.Failf("a second agent was started", "%s was given to a worker as well", message.ChannelID)
 	default:
+	}
+}
+
+// A message on a channel stamped with its customer reaches the node running that customer's
+// conversation, though another customer has since said it runs a session writing as the agent.
+func (s *ForwardedSessionSuite) TestAMessageReachesTheNodeOfTheChannelsCustomerThoughAnotherWritesAsItsAgent() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	s.onTheOtherNode(CreateSessionRequest{AgentId: &channel, Llm: pointerTo("vision/vision-model")})
+	s.heldWhereNothingAnswers("another-customer", s.utils.uuid(), channel, "")
+
+	stamped := fmt.Sprintf(`{%q: %q}`, conversation.CustomerField, s.customerID())
+	s.Require().Equal(http.StatusOK,
+		s.signedly("/v1/chat/hooks/stream", writtenTo(channel, stamped, written)))
+
+	s.Require().Eventually(func() bool { return s.wasAsked(written) },
+		settleFor, 10*time.Millisecond,
+		"the message went to the node of the customer that wrote as the agent last")
+}
+
+// The same for a channel stamped with no customer, which the config it names says is whose.
+func (s *ForwardedSessionSuite) TestAMessageReachesTheNodeOfTheCustomerWhoseConfigTheChannelNames() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	config := s.data.instructedAgent("answer whatever is asked")
+	s.onTheOtherNode(CreateSessionRequest{AgentId: &channel, Llm: pointerTo("vision/vision-model")})
+	s.heldWhereNothingAnswers("another-customer", s.utils.uuid(), channel, "")
+
+	named := fmt.Sprintf(`{%q: %q}`, ConfigField, *config)
+	s.Require().Equal(http.StatusOK,
+		s.signedly("/v1/chat/hooks/stream", writtenTo(channel, named, written)))
+
+	s.Require().Eventually(func() bool { return s.wasAsked(written) },
+		settleFor, 10*time.Millisecond,
+		"the message went to the node of the customer that wrote as the agent last")
+}
+
+// A message on a channel that names no customer, which sessions of two customers write in on
+// other nodes, is answered by neither: nothing says whose it is.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerOnAChannelTwoCustomersWriteInIsAnsweredByNeither() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	s.onTheOtherNode(CreateSessionRequest{AgentId: &channel, Llm: pointerTo("vision/vision-model")})
+	s.data.backendOfAnotherApp().on(s.otherNode()).createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+
+	s.Require().Equal(http.StatusOK,
+		s.signedly("/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Never(func() bool { return s.wasAsked(written) }, time.Second, 10*time.Millisecond,
+		"one of the customers' sessions answered a message nothing says is theirs")
+}
+
+// The same when the message lands on the node running one of the two: that session is no more
+// the channel's than the other.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerLandingBesideOneOfTwoCustomersWritingInItIsAnsweredByNeither() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	s.onTheOtherNode(CreateSessionRequest{AgentId: &channel, Llm: pointerTo("vision/vision-model")})
+	s.data.backendOfAnotherApp().createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+
+	s.Require().Equal(http.StatusOK,
+		s.signedly("/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Never(func() bool { return s.wasAsked(written) }, time.Second, 10*time.Millisecond,
+		"the session where the message landed answered a message nothing says is its customer's")
+}
+
+// A session that ended here leaves its claim on the agent behind until it lapses, and is no
+// second customer writing in the channel: the session still running here answers.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredHereThoughAnotherCustomersSessionEndedHere() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	another := s.data.backendOfAnotherApp()
+	ended := another.createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+	another.stopSession(ended.Id)
+	s.serverClient.createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+
+	s.Require().Equal(http.StatusOK,
+		s.signedly("/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Require().Eventually(func() bool { return s.wasAsked(written) },
+		settleFor, 10*time.Millisecond, "the session running here was asked nothing")
+}
+
+// The customer of the session running here writing as the agent on another node too is no second
+// customer writing in the channel: the session here answers.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredHereThoughItsCustomerWritesElsewhereToo() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	s.serverClient.createSession(CreateSessionRequest{AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true)})
+	// Second, so the claim by customer and app names the other node.
+	s.onTheOtherNode(CreateSessionRequest{AgentId: &channel, Llm: pointerTo("vision/vision-model")})
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Require().Eventually(func() bool { return s.wasAsked(written) },
+		settleFor, 10*time.Millisecond, "the customer's session here was asked nothing")
+}
+
+// A directory that cannot be read says nobody writes as the agent elsewhere, as forwardedMessage
+// answers here when it cannot find the node: the session running where the message landed
+// answers it.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredHereWhenTheDirectoryCannotBeRead() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	unread, _, _ := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler),
+		func(options *Options) { options.Directory = s.unreadableDirectory() })
+	s.serverClient.on(unread).createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+
+	s.Require().Equal(http.StatusOK, s.signedlyOn(unread, "/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Require().Eventually(func() bool { return s.wasAsked(written) },
+		settleFor, 10*time.Millisecond, "the session where the message landed was asked nothing")
+}
+
+// A channel stamped with its customer is answered in the hook's app: that customer's session
+// writing as the agent in another app is not where the message goes, and with nothing of theirs
+// running in this app, their worker here is handed it.
+func (s *ForwardedSessionSuite) TestAMessageStampedWithItsCustomerIsNotCarriedToTheirSessionInAnotherApp() {
+	channel := "chat-" + s.utils.uuid()
+	config := s.data.instructedAgent("answer whatever is asked")
+	// Another customer writing as the agent in this app is what has the stamp read at all.
+	s.heldWhereNothingAnswers("another-customer", s.utils.uuid(), channel, "")
+	s.heldInWhereNothingAnswers(streamAppID(), s.customerID(), s.utils.uuid(), channel, "")
+	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
+	defer release()
+
+	stamped := fmt.Sprintf(`{%q: %q, %q: %q}`, conversation.CustomerField, s.customerID(), ConfigField, *config)
+	s.Require().Equal(http.StatusOK,
+		s.signedly("/v1/chat/hooks/stream", writtenTo(channel, stamped, "is anybody there?")))
+
+	select {
+	case message := <-worker.Messages():
+		s.Equal(channel, message.ChannelID)
+	case <-time.After(settleFor):
+		s.Fail("the message was carried to the customer's session in another app")
 	}
 }
 
@@ -149,7 +294,7 @@ func (s *ForwardedSessionSuite) TestARequestReachesTheSessionOfTheCallersCustome
 // stranger the session is live.
 func (s *ForwardedSessionSuite) TestARequestWithNoCredentialsIsRefusedHereRatherThanCarried() {
 	id := s.utils.uuid()
-	s.heldWhereNothingAnswers(id, "")
+	s.heldWhereNothingAnswers(s.customerID(), id, "", "")
 	path := "/v1/agents/sessions/" + id
 
 	s.Require().Equal(http.StatusServiceUnavailable, s.serverClient.do(http.MethodGet, path, nil, nil),
@@ -160,26 +305,89 @@ func (s *ForwardedSessionSuite) TestARequestWithNoCredentialsIsRefusedHereRather
 // The same for an answer to a call held for approval, which names a conversation, not a session.
 func (s *ForwardedSessionSuite) TestAnApprovalWithNoCredentialsIsRefusedHereRatherThanCarried() {
 	cid := "messaging:" + s.utils.uuid()
-	s.heldWhereNothingAnswers(s.utils.uuid(), cid)
-	path := "/v1/agents/conversations/" + cid + "/tool_approvals"
-	answer := map[string]any{"tool_call_id": "call", "request_id": "request", "allowed": true}
+	s.heldWhereNothingAnswers(s.customerID(), s.utils.uuid(), "", cid)
+	path := approvalsIn(cid)
 
-	s.Require().Equal(http.StatusServiceUnavailable, s.serverClient.do(http.MethodPost, path, answer, nil),
+	s.Require().Equal(http.StatusServiceUnavailable, s.serverClient.do(http.MethodPost, path, anApproval, nil),
 		"the customer's own answer is carried to the node, which cannot be reached")
-	s.Equal(http.StatusUnauthorized, s.unauthenticatedClient.do(http.MethodPost, path, answer, nil))
+	s.Equal(http.StatusUnauthorized, s.unauthenticatedClient.do(http.MethodPost, path, anApproval, nil))
 }
 
-// heldWhereNothingAnswers has the directory say a node that cannot be reached runs the
-// customer's session id, answering in the conversation cid.
-func (s *ForwardedSessionSuite) heldWhereNothingAnswers(id, cid string) {
+// Another customer saying since that it answers in a conversation of the same cid does not move
+// where the caller's answer goes. Carried to the caller's node, which cannot be reached, it is a
+// 503.
+func (s *ForwardedSessionSuite) TestAnApprovalIsCarriedToTheCallersNodeThoughAnotherCustomerHoldsItsCid() {
+	cid := "messaging:" + s.utils.uuid()
+	s.heldWhereNothingAnswers(s.customerID(), s.utils.uuid(), "", cid)
+	s.nodeDirectory(s.server, s.shard, slog.New(slog.DiscardHandler)).
+		Hold(s.T().Context(), "another-customer", 0, s.utils.uuid(), "", cid)
+
+	s.Equal(http.StatusServiceUnavailable, s.serverClient.do(http.MethodPost, approvalsIn(cid), anApproval, nil),
+		"answered on the node of the customer that held the cid last")
+}
+
+// Another customer's session answering here in a conversation of the same cid is no reason to
+// answer the caller here.
+func (s *ForwardedSessionSuite) TestAnApprovalIsCarriedPastAnotherCustomersSessionInItsCid() {
+	theirs := s.data.backendOfAnotherApp().createSession(CreateSessionRequest{Llm: pointerTo("llm-flow")})
+	s.Require().NotNil(theirs.ConversationId)
+	cid := *theirs.ConversationId
+	s.heldWhereNothingAnswers(s.customerID(), s.utils.uuid(), "", cid)
+
+	s.Equal(http.StatusServiceUnavailable, s.serverClient.do(http.MethodPost, approvalsIn(cid), anApproval, nil),
+		"answered here, where only the other customer's session runs")
+}
+
+// anApproval is an answer to a call held for approval.
+var anApproval = map[string]any{"tool_call_id": "call", "request_id": "request", "allowed": true}
+
+// approvalsIn is where an answer to a call held for approval in a conversation is posted.
+func approvalsIn(cid string) string {
+	return "/v1/agents/conversations/" + cid + "/tool_approvals"
+}
+
+// heldWhereNothingAnswers has the directory say a node that cannot be reached runs a customer's
+// session id in the deployment's own app, writing as agent and answering in the conversation cid.
+func (s *RouterSuite) heldWhereNothingAnswers(customer, id, agent, cid string) {
+	s.heldInWhereNothingAnswers(0, customer, id, agent, cid)
+}
+
+// heldInWhereNothingAnswers is heldWhereNothingAnswers in a Stream app.
+func (s *RouterSuite) heldInWhereNothingAnswers(app int64, customer, id, agent, cid string) {
 	gone := httptest.NewUnstartedServer(nil)
 	directory := s.nodeDirectory(gone, s.shard, slog.New(slog.DiscardHandler))
 	gone.Close()
-	directory.Hold(s.T().Context(), s.customerID(), id, "", cid)
+	directory.Hold(s.T().Context(), customer, app, id, agent, cid)
+}
+
+// unreadableDirectory is a node's directory over a Redis connection already closed, so every read
+// of it fails, as one with Redis down does.
+func (s *RouterSuite) unreadableDirectory() *node.Directory {
+	redis, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{s.redisAddr}, DisableCache: true})
+	s.Require().NoError(err)
+	redis.Close()
+	directory, err := node.NewDirectory(node.DirectoryOptions{
+		Redis: redis, Address: "unreadable", Prefix: s.relayPrefix, Logger: slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(directory.Close)
+	return directory
+}
+
+// signedlyOn is signedly delivered to the node at rather than the suite's own.
+func (s *RouterSuite) signedlyOn(at *httptest.Server, path, body string) int {
+	request := s.request(path, body, sign(body, suiteStreamSecret))
+	target, err := url.Parse(at.URL + path)
+	s.Require().NoError(err)
+	request.URL, request.Host = target, target.Host
+	response, err := at.Client().Do(request)
+	s.Require().NoError(err)
+	s.Require().NoError(response.Body.Close())
+	return response.StatusCode
 }
 
 // wasAsked reports whether the model was given something to answer.
-func (s *ForwardedSessionSuite) wasAsked(text string) bool {
+func (s *RouterSuite) wasAsked(text string) bool {
 	for _, request := range s.vision.requests() {
 		for _, message := range request.Input {
 			if message.Content == text {
@@ -203,18 +411,19 @@ func (s *ForwardedSessionSuite) onTheOtherNode(request CreateSessionRequest) Ses
 	return s.serverClient.on(s.other).createSession(request)
 }
 
-// writtenTo is a message.new for a channel, as Stream would deliver it.
-func writtenTo(channel, text string) string {
+// writtenTo is a message.new for a channel with custom, a JSON object, as Stream would deliver
+// it.
+func writtenTo(channel, custom, text string) string {
 	return fmt.Sprintf(`{
   "type": "message.new",
   "cid": "agent:%s",
   "channel_id": "%s",
   "channel_type": "agent",
-  "channel_custom": {},
+  "channel_custom": %s,
   "message": {
-    "id": "message-1",
+    "id": "message-%s",
     "text": "%s",
     "user": {"id": "sam", "name": "Sam"}
   }
-}`, channel, channel, text)
+}`, channel, channel, custom, channel, text)
 }

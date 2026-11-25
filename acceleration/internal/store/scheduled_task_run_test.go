@@ -87,7 +87,7 @@ func (s *StoreSuite) TestAnotherCustomersFinishOfARunIdChangesNothing() {
 func (s *StoreSuite) TestARunsCallKeepsTheReasonItEndedUnderForTheWorkerTakingItOver() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	run := claimed[0].Run
@@ -112,7 +112,7 @@ func (s *StoreSuite) TestARunsCallKeepsTheReasonItEndedUnderForTheWorkerTakingIt
 		Set("lease_until = ?", s.base.Add(-time.Minute)).
 		Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
-	reclaimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	reclaimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(reclaimed, 1)
 

@@ -430,7 +430,7 @@ func (s *ResponseBranchesSuite) TestATurnSentThroughRespondCanBeRewoundTo() {
 
 // opens a conversation kept in Stream Chat, for as.
 func (s *ResponseBranchesSuite) opens(as *testClient) Session {
-	return as.createSession(CreateSessionRequest{Llm: pointerTo("noted/noted-model")})
+	return as.createSession(CreateSessionRequest{ConfigId: pointerTo(s.config("noted/noted-model"))})
 }
 
 // asks text of the session under a new request id, which lastRequest keeps, waits for the

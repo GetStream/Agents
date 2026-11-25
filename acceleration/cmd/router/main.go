@@ -88,6 +88,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/search/exa"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/simulation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
@@ -149,7 +150,9 @@ const (
 	// A hosted router keeps its keys wrapped, so this is refused beside a KMS setting.
 	devKEKEnvVar = "ROUTER_DEV_KEK"
 	// setAKeyring is what a refusal for a missing keyring tells the operator to set.
-	setAKeyring = "set " + devKEKEnvVar + " on a laptop or in CI, or " + authKEKEnvVar + "_V1" +
+	// A compose user meets it first, so it says what the key is and where compose reads it.
+	setAKeyring = "set " + devKEKEnvVar + " on a laptop or in CI (once, to any random string such as " +
+		"`openssl rand -hex 32`, kept for good; compose reads it from .env), or " + authKEKEnvVar + "_V1" +
 		authKEKWrappedSuffix + " with auth.kms_key (ROUTER_AUTH_KMS_KEY) on a hosted router"
 	shutdownGrace     = 10 * time.Second
 	readHeaderTimeout = 10 * time.Second
@@ -189,11 +192,14 @@ const (
 const usage = `usage: router [--config path] [command]
 
   serve                 serve the API (the default)
+  migrate               bring the database's schema up to date, with postgres.migrate_dsn when it is set
   keys create           mint a credential for an app, printing the secret once
   keys revoke           stop one of an app's keys (--app, --key)
   replicate             copy another deployment's data here and follow its changes
   stream-apps           look after the Stream apps customers registered in app mode
+  conversations         look after the conversations kept in Stream Chat
   prices                read and check the price list (router prices for its commands)
+  opt-outs normalize    rewrite opt-outs stored before E.164 was enforced into E.164
   usage replay          write the usage rows a log says were lost, once each (--from path)
   usage reship          send this shard's shipped or refused rows to the usage service again (--since, --rejected)
   usage storage         record the last hour of every knowledge base's size, once each (hourly, one job per turbopuffer key)
@@ -271,14 +277,20 @@ func dispatchCommand(command string, args []string, settings config.Config, logg
 	switch command {
 	case "serve":
 		return run(settings, logger)
+	case "migrate":
+		return runMigrate(context.Background(), settings)
 	case "keys":
 		return runKeys(args, settings, logger)
 	case "replicate":
 		return runReplicate(args, settings, logger)
 	case "stream-apps":
 		return runStreamApps(args, settings, logger)
+	case "conversations":
+		return runConversations(args, settings, logger)
 	case "prices":
 		return runPrices(args, settings, logger)
+	case "opt-outs":
+		return runOptOuts(args, settings, logger)
 	case "usage":
 		return runUsage(args, settings, os.Stdout)
 	case "help", "-h", "--help":
@@ -737,6 +749,14 @@ func run(settings config.Config, logger *slog.Logger) error {
 			return err
 		}
 		defer liveClient.Close()
+		// Held until run returns rather than until ctx ends: a draining router still writes
+		// the calls it carries to its shard.
+		agreed, stopAgreeing := context.WithCancel(context.WithoutCancel(ctx))
+		defer stopAgreeing()
+		shards := slices.Collect(maps.Keys(settings.Postgres.Shards))
+		if err := node.AgreeOnShards(agreed, liveClient.Redis(), node.ShardsKey, shards, logger); err != nil {
+			return err
+		}
 	} else {
 		logger.Warn("no redis configured, routing will not use live health", "setting", "redis.addr")
 	}
@@ -843,6 +863,13 @@ func run(settings config.Config, logger *slog.Logger) error {
 		stopSweeper := startUsageSweeper(ctx, routing.SweeperOptions{Store: pgStore, Usage: usageClient, Source: source, Logger: logger, Shipped: shipped})
 		defer stopSweeper()
 	}
+	// The stats pages of a deployment with other shards read what each shard ships to the
+	// shared database, so that one shard down leaves its own stats behind rather than failing
+	// everybody's.
+	if pgStore != nil && pgStore.StatsShipped() {
+		stopStats := startStatsShipper(ctx, pgStore, logger)
+		defer stopStats()
+	}
 
 	// One router of the deployment checks every organization's spend for a jump each hour, posts
 	// the day before's activity digest each day, and deletes the activity past its keep each day.
@@ -859,6 +886,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	limiter.Start(ctx)
+	defer limiter.Close()
 
 	if settings.Agent.SpeculativeReplies {
 		logger.Info("starting replies before the flow controller rules on them",
@@ -1054,6 +1083,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 			Registry: stsrouter.DefaultRegistry(),
 			Store:    pgStore,
 			Live:     liveClient,
+			Quota:    limiter,
 			Gate:     gate,
 			Pricer:   prices,
 			Writer:   usageWriter,
@@ -1306,7 +1336,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// Bringing a voice needs somewhere to keep the recordings, a place to record them and
 	// at least one provider willing to be taught. Missing any of those, the voice paths
 	// say so rather than half-working.
-	voiceService, err := buildVoices(configs, bucket, routing.NewRecorderOn(routing.TTS, usageWriter, prices, logger), logger)
+	voiceService, err := buildVoices(configs, bucket, routing.NewRecorderOn(routing.TTS, usageWriter, prices, logger), gate,
+		capabilities[routing.TTS].Providers, logger)
 	if err != nil {
 		return err
 	}
@@ -1463,6 +1494,10 @@ func run(settings config.Config, logger *slog.Logger) error {
 
 	documents := api.NewDocumentReader(extract.Options{Logger: logger})
 	defer documents.Close()
+	shardRouting := shardmap.Map{Default: settings.ShardRouting.Default,
+		Countries: settings.ShardRouting.Countries, Regions: settings.ShardRouting.Regions}
+	shardClaim := store.ShardClaim{Shard: settings.Shard, Routing: shardRouting,
+		Shards: slices.Collect(maps.Keys(settings.Postgres.Shards))}
 	options := api.Options{
 		Documents:             documents,
 		Routers:               routers,
@@ -1480,6 +1515,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		Sessions:              sessions,
 		Relay:                 sessionRelay,
 		Directory:             directory,
+		ShardRouting:          shardRouting,
 		Workers:               everyWorker,
 		Streams:               streams,
 		AudioFloor:            floor,
@@ -1489,12 +1525,14 @@ func run(settings config.Config, logger *slog.Logger) error {
 		TelnyxPublicKey:       telnyxPublicKey,
 		ChatInboundKeys:       chatInboundKeys,
 		TwilioAuthToken:       settings.Twilio.WebhookAuthToken,
+		TwilioAccountSID:      settings.Twilio.AccountSID,
 		TelnyxConnectionID:    settings.Telnyx.ConnectionID,
 		Simulations:           simulations,
 		DLC:                   registrations,
 		Gate:                  dlcGate,
 		OpsKey:                settings.Auth.OpsKey,
 		ManageKey:             settings.Auth.ManageKey,
+		ActivityKeys:          []string{settings.Auth.ActivityKey, settings.Auth.ActivityKeyPrevious},
 		Dispatch:              workers,
 		Quota:                 limiter,
 		RunsPerApp:            settings.Runs.ConcurrentPerApp,
@@ -1683,6 +1721,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if pgStore != nil && sessions != nil {
 		scheduler = scheduling.NewScheduler(pgStore, server.DeliverScheduledTask, logger)
 		scheduler.SetActivity(activityRecord)
+		scheduler.SetShard(shardClaim)
 		// Before Start: a session the first delivery opens takes the kick then.
 		server.SetSchedulerKick(scheduler.Kick)
 		scheduler.Start(ctx)
@@ -1697,6 +1736,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 			Dialer:      campaign.NewPhoneDialer(telephony, sessions, pgStore, logger),
 			Transcripts: server,
 			Classifier:  campaign.NewClassifier(streams.LLM),
+			Shard:       shardClaim,
 			Activity:    activityRecord,
 			Logger:      logger,
 		})
@@ -2053,28 +2093,19 @@ func redactToolOutput(ctx context.Context, pgStore *store.Store, logger *slog.Lo
 	}
 }
 
-// openStore opens the database and brings the schema up to date. Every command that
-// touches a customer's rows starts here, so migrating is part of opening rather than
-// something only serving does.
+// openStore opens the database and brings the schema up to date, or checks that it is when
+// router migrate does that (postgres.migrate_dsn). Every command that touches a customer's rows
+// starts here, so migrating is part of opening rather than something only serving does.
 func openStore(ctx context.Context, settings config.Config) (*store.Store, error) {
-	if settings.Postgres.DSN == "" {
-		return nil, errors.New("this needs a database: set postgres.dsn")
-	}
-	pgStore, err := store.OpenShards(store.Options{
-		DSN:      settings.Postgres.DSN,
-		ShardDSN: settings.Postgres.ShardDSN,
-		Shards:   settings.Postgres.Shards,
-		Redis:    store.Redis{Address: settings.Redis.Addr, Username: settings.Redis.Username, Password: settings.Redis.Password},
-		ShardRedis: store.Redis{
-			Address:  settings.Redis.Shard.Addr,
-			Username: settings.Redis.Shard.Username,
-			Password: settings.Redis.Shard.Password,
-		},
-	})
+	pgStore, err := openShards(settings)
 	if err != nil {
 		return nil, err
 	}
-	if err := pgStore.Migrate(ctx); err != nil {
+	prepare := pgStore.Migrate
+	if settings.Postgres.MigrateDSN != "" {
+		prepare = pgStore.CheckMigrated
+	}
+	if err := prepare(ctx); err != nil {
 		pgStore.Close()
 		return nil, err
 	}
@@ -2085,6 +2116,40 @@ func openStore(ctx context.Context, settings config.Config) (*store.Store, error
 		return nil, err
 	}
 	return pgStore, nil
+}
+
+// runMigrate brings the schema up to date, then checks it as a start does: with the serving
+// DSNs, which may name another database, or a role that cannot read this one.
+func runMigrate(ctx context.Context, settings config.Config) error {
+	pgStore, err := openShards(settings)
+	if err != nil {
+		return err
+	}
+	defer pgStore.Close()
+	if err := pgStore.Migrate(ctx); err != nil {
+		return err
+	}
+	return pgStore.CheckMigrated(ctx)
+}
+
+// openShards opens the databases and their Redis.
+func openShards(settings config.Config) (*store.Store, error) {
+	if settings.Postgres.DSN == "" {
+		return nil, errors.New("this needs a database: set postgres.dsn")
+	}
+	return store.OpenShards(store.Options{
+		DSN:             settings.Postgres.DSN,
+		ShardDSN:        settings.Postgres.ShardDSN,
+		Shards:          settings.Postgres.Shards,
+		MigrateDSN:      settings.Postgres.MigrateDSN,
+		ShardMigrateDSN: settings.Postgres.ShardMigrateDSN,
+		Redis:           store.Redis{Address: settings.Redis.Addr, Username: settings.Redis.Username, Password: settings.Redis.Password},
+		ShardRedis: store.Redis{
+			Address:  settings.Redis.Shard.Addr,
+			Username: settings.Redis.Shard.Username,
+			Password: settings.Redis.Shard.Password,
+		},
+	})
 }
 
 // newDirectory wires the register of which node of this deployment is running which
@@ -2211,7 +2276,7 @@ func buildSessions(
 	if err := sandboxBroker(settings.CodeSandbox, liveClient, &options); err != nil {
 		return nil, err
 	}
-	options.Sandboxes = newSandboxes(settings, usageWriter, prices, keys, logger)
+	options.Sandboxes = newSandboxes(settings, usageWriter, prices, keys, policies, logger)
 	options.SandboxLimits = policies
 	options.ResumeHistories = policies
 	return session.NewManager(options)
@@ -2312,7 +2377,7 @@ func queueRedis(redis config.Redis, shared rueidis.Client) asynq.RedisConnOpt {
 }
 
 // newKnowledge is the knowledge base every lookup and write goes through, a backend in each
-// region the settings map, recorded by recorder, each write admitted by gate, and the place
+// region the settings map, recorded by recorder, each read and write admitted by gate, and the place
 // each base is kept recorded in pgStore: its region, and the customer's own account there when
 // keys holds their turbopuffer key for it as the base is first written. Nil without a
 // turbopuffer key of the deployment's.
@@ -2466,6 +2531,8 @@ func buildVoices(
 	configs *store.Store,
 	bucket *blob.Bucket,
 	recorder *routing.Recorder,
+	gate routing.Gate,
+	models []routing.ProviderConfig,
 	logger *slog.Logger,
 ) (*voices.Service, error) {
 	if configs == nil || bucket == nil {
@@ -2493,6 +2560,8 @@ func buildVoices(
 		Bucket:   bucket,
 		Cloners:  cloners,
 		Recorder: recorder,
+		Gate:     gate,
+		Models:   models,
 		Logger:   logger,
 	})
 }

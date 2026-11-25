@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -148,6 +150,33 @@ func (g Granularity) length() string {
 	return "1 hour"
 }
 
+// rollupSelect is the rows of granularity's rollup table for the whole buckets the window its
+// two parameters give touches, aggregated from the requests and named as the table's columns.
+func rollupSelect(granularity Granularity) string {
+	return fmt.Sprintf(`
+SELECT
+    modality,
+    customer_id,
+    provider,
+    model,
+    date_trunc('%[1]s', started_at, 'UTC') AS bucket,
+    COALESCE(SUM(audio_ms), 0) AS audio_ms_total,
+    COALESCE(SUM(characters), 0) AS characters_total,
+    COALESCE(SUM(input_tokens), 0) AS input_tokens_total,
+    COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens_total,
+    COALESCE(SUM(output_tokens), 0) AS output_tokens_total,
+    COALESCE(SUM(images), 0) AS images_total,
+    COALESCE(SUM(cost_micros), 0) AS cost_micros_total,
+    COUNT(*) AS request_count,
+    COUNT(*) FILTER (WHERE NOT success AND %[2]s) AS error_count,
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE %[2]s) AS latency_p50_ms,
+    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE %[2]s) AS latency_p95_ms
+FROM requests
+WHERE %[3]s
+GROUP BY modality, customer_id, provider, model, bucket`,
+		granularity.truncateUnit(), measured(""), wholeBuckets(granularity, "started_at"))
+}
+
 func (r *Buckets) rollup(ctx context.Context, granularity Granularity, from, to time.Time) (int64, error) {
 	query := fmt.Sprintf(`
 INSERT INTO %[1]s (
@@ -158,27 +187,7 @@ INSERT INTO %[1]s (
     cost_micros_total,
     request_count, error_count,
     latency_p50_ms, latency_p95_ms
-)
-SELECT
-    modality,
-    customer_id,
-    provider,
-    model,
-    date_trunc('%[2]s', started_at, 'UTC') AS bucket,
-    COALESCE(SUM(audio_ms), 0),
-    COALESCE(SUM(characters), 0),
-    COALESCE(SUM(input_tokens), 0),
-    COALESCE(SUM(cached_input_tokens), 0),
-    COALESCE(SUM(output_tokens), 0),
-    COALESCE(SUM(images), 0),
-    COALESCE(SUM(cost_micros), 0),
-    COUNT(*),
-    COUNT(*) FILTER (WHERE NOT success AND %[3]s),
-    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE %[3]s),
-    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE %[3]s)
-FROM requests
-WHERE %[4]s
-GROUP BY modality, customer_id, provider, model, bucket
+)%[2]s
 ON CONFLICT (modality, customer_id, provider, model, bucket) DO UPDATE SET
     audio_ms_total = EXCLUDED.audio_ms_total,
     characters_total = EXCLUDED.characters_total,
@@ -191,7 +200,7 @@ ON CONFLICT (modality, customer_id, provider, model, bucket) DO UPDATE SET
     error_count = EXCLUDED.error_count,
     latency_p50_ms = EXCLUDED.latency_p50_ms,
     latency_p95_ms = EXCLUDED.latency_p95_ms`,
-		granularity.table(), granularity.truncateUnit(), measured(""), wholeBuckets(granularity, "started_at"))
+		granularity.table(), rollupSelect(granularity))
 
 	// Each shard rolls up the requests it recorded, into its own rollups.
 	result, err := r.store.shard.ExecContext(ctx, query, from, to)
@@ -214,15 +223,12 @@ func (r *Buckets) Select(ctx context.Context, customerID string, f BucketFilter)
 		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", f.Granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	if f.Modality == "" {
 		return nil, stack.Wrap(errors.New("store: modality is required"))
 	}
-	tags := f.Tags
-	if tags == nil {
-		tags = map[string]string{}
-	}
+	tags := orEmptyMap(f.Tags)
 	filter, err := json.Marshal(tags)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer stats: encode tag filter: %w", err))
@@ -264,4 +270,53 @@ ORDER BY bucket ASC, provider ASC, model ASC`, f.Granularity.truncateUnit(), mea
 		return nil, stack.Wrap(fmt.Errorf("store: customer stats by tag: %w", err))
 	}
 	return mergeBuckets(lists), nil
+}
+
+// Shipped is Select read from the rollups every shard shipped to the shared database
+// (Store.ShipStats), so a shard that is down does not fail it and no other shard is read. It
+// is the whole buckets [From, To) touches, as they were at the last ship, a minute old at most
+// while the shard ships. A rollup keeps no request's labels, so Tags cannot narrow it.
+func (r *Buckets) Shipped(ctx context.Context, customerID string, f BucketFilter) ([]Bucket, error) {
+	if !f.Granularity.Valid() {
+		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", f.Granularity))
+	}
+	if customerID == "" {
+		return nil, stack.Wrap(errors.New("store: customer id is required"))
+	}
+	if f.Modality == "" {
+		return nil, stack.Wrap(errors.New("store: modality is required"))
+	}
+	if len(f.Tags) > 0 {
+		return nil, stack.Wrap(errors.New("store: shipped stats cannot be filtered by label"))
+	}
+	var rows []struct {
+		Shard string `bun:"shard"`
+		Bucket
+	}
+	err := r.store.global.NewSelect().
+		TableExpr(shippedStats(f.Granularity).name).
+		ColumnExpr("*").
+		Where("modality = ?", f.Modality).
+		Where("customer_id = ?", customerID).
+		Where(wholeBuckets(f.Granularity, "bucket"), f.From, f.To).
+		OrderExpr("bucket ASC, provider ASC, model ASC, shard ASC").
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: shipped customer stats: %w", err))
+	}
+	byShard := map[string][]Bucket{}
+	for _, row := range rows {
+		byShard[row.Shard] = append(byShard[row.Shard], row.Bucket)
+	}
+	return mergeBuckets(shardOrder(byShard)), nil
+}
+
+// shardOrder is each shard's rows, by the shard's name, so what is merged from them is summed
+// in the same order every time.
+func shardOrder[T any](byShard map[string][]T) [][]T {
+	lists := make([][]T, 0, len(byShard))
+	for _, shard := range slices.Sorted(maps.Keys(byShard)) {
+		lists = append(lists, byShard[shard])
+	}
+	return lists
 }

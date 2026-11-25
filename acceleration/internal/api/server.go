@@ -67,6 +67,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/relay"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/simulation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -151,6 +152,10 @@ type Options struct {
 	// only that node can answer is carried to it rather than answered with a 404. Absent
 	// when there is no Redis to keep it in, or no address this node's peers reach it at.
 	Directory *node.Directory
+	// ShardRouting is which shard a hook's work is done in, the same on every router. A hook
+	// meant for another shard than the Directory's is handed to a node there. The zero Map, or
+	// no Directory, keeps every hook where it lands.
+	ShardRouting shardmap.Map
 	// Workers is the deployment's dispatch workers, wherever they are connected: told what
 	// the ones here host, and how a running session's text reaches one elsewhere. Absent
 	// when the Directory or the Relay is.
@@ -188,6 +193,9 @@ type Options struct {
 	// ManageKey is what Stream staff's billing paths, under /v1/manage, are reached with.
 	// Empty turns them off: they answer 404 not_configured.
 	ManageKey string
+	// ActivityKeys are what a job reads the two activity paths with, and nothing else: the
+	// current key and the one being rotated out. An empty one is no key.
+	ActivityKeys []string
 	// Documents reads the files a person sends with a question (createResponse files). Nil
 	// refuses them as a feature this deployment does not offer.
 	Documents *extract.Extractor
@@ -231,6 +239,9 @@ type Options struct {
 	// TwilioAuthToken checks that a webhook came from Twilio (TWILIO_WEBHOOK_AUTH_TOKEN).
 	// Without it no Twilio webhook is believed.
 	TwilioAuthToken string
+	// TwilioAccountSID is the Twilio account this router's Twilio numbers are under
+	// (TWILIO_ACCOUNT_SID). A call webhook naming any other is hung up.
+	TwilioAccountSID string
 	// TelnyxConnectionID is the TeXML application this router's Telnyx numbers are on
 	// (TELNYX_CONNECTION_ID). A call webhook for any other is hung up.
 	TelnyxConnectionID string
@@ -354,6 +365,7 @@ type Server struct {
 	sessions           *session.Manager
 	relayed            *relayed
 	directory          *node.Directory
+	shards             shardmap.Map
 	workers            *node.Workers
 	forwarder          *node.Forwarder
 	peerCredentials    [][]byte // what a peer may present: one credential per key of the keyring
@@ -366,6 +378,8 @@ type Server struct {
 	chatInboundKeys    []ed25519.PublicKey
 	twilioAuthToken    string
 	twilioAlertSids    rueidis.Client // nil without Redis: every copy of an alert is counted
+	twilioCallSids     rueidis.Client // nil without Redis: every Twilio call is hung up
+	twilioAccountSID   string
 	telnyxConnectionID string
 	simulations        *simulation.Runner
 	knowledge          *metered.Knowledge
@@ -385,11 +399,13 @@ type Server struct {
 	gate               *dlc.Gate
 	opsKey             string
 	manageKey          string
+	activityKeys       []string
 	authenticator      auth.Authenticator
 	authMode           auth.Mode
 	dataRetention      time.Duration
 	exportWritesWait   time.Duration
 	exportLineWait     time.Duration
+	importLineWait     time.Duration
 	exportWait         time.Duration
 	quota              *quota.Limiter
 	policies           *policy.Enforcer
@@ -398,6 +414,9 @@ type Server struct {
 	// exports a place for each export running on it, of maxExports.
 	exporting sync.Map
 	exports   chan struct{}
+	// importing and imports are the same for imports, of maxImports.
+	importing sync.Map
+	imports   chan struct{}
 	// healthLogs throttles the line a dependency that did not answer the health check logs:
 	// every probe asks.
 	healthLogs quota.Throttle
@@ -446,6 +465,9 @@ type Server struct {
 	// runSlots counts each app's runs in flight against runsPerApp; nil counts none.
 	runSlots   *concurrency.Slots
 	runsPerApp int64
+	// newGuests counts the guests each address mints in an app (guestsPerAddress); nil counts
+	// none.
+	newGuests *core.Limiter
 	// imageHTTP fetches the images a run is handed by URL.
 	imageHTTP *http.Client
 	// documents reads the files sent with a question.
@@ -482,6 +504,7 @@ type Server struct {
 	serverSide *http.ServeMux
 	upgrader   websocket.Upgrader
 	popularity *popularity
+	teams      *heldTeams
 	logger     *slog.Logger
 	// release is Options.Release.
 	release string
@@ -581,6 +604,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		phone:              options.Phone,
 		sessions:           options.Sessions,
 		directory:          options.Directory,
+		shards:             options.ShardRouting,
 		workers:            options.Workers,
 		streams:            options.Streams,
 		audioFloor:         options.AudioFloor,
@@ -590,6 +614,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		telnyxPublicKey:    options.TelnyxPublicKey,
 		chatInboundKeys:    options.ChatInboundKeys,
 		twilioAuthToken:    options.TwilioAuthToken,
+		twilioAccountSID:   options.TwilioAccountSID,
 		telnyxConnectionID: options.TelnyxConnectionID,
 		simulations:        options.Simulations,
 		knowledge:          options.Knowledge,
@@ -609,8 +634,10 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		dataRetention:      retention,
 		exportWritesWait:   exportWritesWait,
 		exportLineWait:     exportLineWait,
+		importLineWait:     importLineWait,
 		exportWait:         exportWait,
 		exports:            make(chan struct{}, maxExports),
+		imports:            make(chan struct{}, maxImports),
 		scheduledPoll:      2 * time.Second,
 		scheduledPeerWait:  30 * time.Second,
 		replyPoll:          100 * time.Millisecond,
@@ -638,7 +665,9 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		gate:               options.Gate,
 		opsKey:             options.OpsKey,
 		manageKey:          options.ManageKey,
+		activityKeys:       options.ActivityKeys,
 		popularity:         newPopularity(options.Store, logger),
+		teams:              newHeldTeams(),
 		logger:             logger,
 		release:            options.Release,
 		draining:           make(chan struct{}),
@@ -655,13 +684,24 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	server.proxyCallsPerMinute = options.ProxyCallsPerMinute
 	if options.Live != nil {
 		server.runSlots, server.runsPerApp = concurrency.New(options.Live.Redis(), nil), options.RunsPerApp
+		server.newGuests = core.NewLimiter(options.Live.Redis(), nil)
 		server.twilioAlertSids = options.Live.Redis()
+		server.twilioCallSids = options.Live.Redis()
 	}
 	server.imageHTTP = options.ImageHTTP
 	server.documents = options.Documents
 	if server.imageHTTP == nil {
 		// No proxy, which would dial on the client's behalf where the check cannot see.
-		server.imageHTTP = &http.Client{Transport: &http.Transport{Proxy: nil, DialContext: egress.DialPublic}}
+		// A host may take as long to begin its answer as the longest fetch may take in all. The
+		// TLS limit and the idle limits are http.DefaultTransport's.
+		server.imageHTTP = &http.Client{Transport: &http.Transport{
+			Proxy:                 nil,
+			DialContext:           egress.DialPublic,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: inlineDeadline,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+		}}
 	}
 	server.callbackHTTP = options.CallbackHTTP
 	if server.callbackHTTP == nil {
@@ -803,6 +843,7 @@ func (s *Server) Handler() http.Handler {
 	handle(mux, "POST "+phone.CallHookPath+"/{app}", "PhoneHook", s.receiveCallEvent)
 	handle(mux, "POST "+telnyxCallHookPath, "ReceiveTelnyxCall", s.receiveTelnyxCall)
 	handle(mux, "POST "+telnyxEventsHookPath, "ReceiveTelnyxEvent", s.receiveTelnyxEvent)
+	handle(mux, "POST "+twilioCallHookPath, "ReceiveTwilioCall", s.receiveTwilioCall)
 	handle(mux, "POST "+twilioEventsHookPath, "ReceiveTwilioEvent", s.receiveTwilioEvent)
 	handle(mux, "POST "+chat.MessageHookPath, "ChatHook", s.receiveMessageEvent)
 	handle(mux, "POST "+chat.MessageHookPath+"/{app}", "ChatHook", s.receiveMessageEvent)
@@ -1086,7 +1127,7 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 		}
 		fields = append(fields, failure.closed.fields()...)
 		if failure.err != nil {
-			fields = append(fields, "error", failure.err.Error())
+			fields = append(fields, "error", core.LoggedError(failure.err))
 		}
 		if failure.trace != "" {
 			fields = append(fields, "stack", failure.trace)
@@ -1287,9 +1328,8 @@ func (n operationName) ServeHTTP(_ http.ResponseWriter, r *http.Request) {
 // withServerSide refuses the generated operations only a backend may reach.
 //
 // It sits after withCustomer, because refusing a caller for what it is means having worked
-// out what it is first. The four sockets are left out of the embedded spec by being left
-// out of generation, so socketRoutes puts them back rather than leaving them to be open by
-// omission.
+// out what it is first. The routes served by hand are in the spec too (documentHandWritten),
+// so none is open by omission.
 //
 // A caller that authenticated and asked for one of these gets a 403 rather than a 401: it
 // has already proved who it is, so there is nothing to be learned from a specific answer
@@ -1323,6 +1363,10 @@ var errServerSideOnly = APIError{
 	Message: "this operation is server-side only: it needs " + auth.AuthTypeHeader + ": " +
 		auth.AuthTypeServer + " and a token carrying server: true",
 }
+
+// statusClientClosed is what a request whose caller hung up before it was answered is counted
+// as, nginx's 499: no caller reads it.
+const statusClientClosed = 499
 
 // withCustomer lifts the authenticated principal into the request context so handlers can
 // read it without each one reaching into the raw request.
@@ -1358,13 +1402,7 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 		principal, err := s.authenticator.Authenticate(ctx, r)
 		span.End()
 		if errors.Is(err, auth.ErrLevelRefused) {
-			s.logger.Debug("refused a level of user this app turns away",
-				"method", r.Method, "path", loggedPath(s.mux, r), "kind", principal.Kind)
-			// The caller proved which app it is of, so its lines name the app, though it is
-			// no customer here: nothing it asked for is counted under the app.
-			r = r.WithContext(WithLoggedApp(r.Context(), principal.AppID, principal.APIKey))
-			s.refuseLogged(w, r, forbidden("this app does not accept "+
-				"requests from this level of user"))
+			s.refuseLevel(w, r, principal)
 			return
 		}
 		// The categories are what the request's usage is counted under, so a request naming
@@ -1374,17 +1412,29 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 				Message: strings.TrimPrefix(err.Error(), "auth: ")})
 			return
 		}
-		// A credential that could not be checked (the key store down, a key that would not
-		// unseal) is the router's failure, not a wrong key. It is logged here: withRequestLog
-		// runs after this.
 		if err != nil && !errors.Is(err, auth.ErrUnauthenticated) {
-			s.logger.Error("could not check a credential", "method", r.Method,
-				"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()),
-				"error", err, "stack", stack.Trace(err))
-			writeError(w, internalError())
+			s.refuseUnchecked(w, r, err)
 			return
 		}
 		if err == nil && principal.AppID != "" {
+			guest, err := s.guestUser(r.Context(), principal.AppID, principal.UserID, principal.Kind)
+			if err != nil {
+				s.refuseUnchecked(w, r, err)
+				return
+			}
+			// The authenticator asked whether the app admits a KindGuest. One this router minted
+			// it took for an account, so that is asked here.
+			if guest {
+				admitted, err := s.guestAdmitted(r.Context(), principal)
+				if err != nil {
+					s.refuseUnchecked(w, r, err)
+					return
+				}
+				if !admitted {
+					s.refuseLevel(w, r, principal)
+					return
+				}
+			}
 			ctx := context.WithValue(r.Context(), customerContextKey{}, principal.AppID)
 			ctx = context.WithValue(ctx, organizationContextKey{}, principal.OrganizationID)
 			ctx = context.WithValue(ctx, serverSideContextKey{}, principal.ServerSide)
@@ -1396,17 +1446,75 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 				IP:         s.callerIP(r, principal.UserID),
 				ServerSide: principal.ServerSide,
 				Verified:   principal.UserID != "" && principal.Kind.Verified(),
+				Guest:      guest,
 			})
 			ctx = context.WithValue(ctx, actorContextKey{}, actorOf(r, principal.ServerSide))
 			ctx = routing.WithAttribution(ctx, attributionOf(principal))
 			r = r.WithContext(ctx)
 			s.policies.Join(ctx, principal.AppID, principal.OrganizationID, principal.OrganizationTier)
 			s.recordUser(ctx, principal)
+			s.recordShard(ctx, principal)
 			s.recordEmail(ctx, principal)
 			s.keepServerToken(ctx, r, principal.AppID)
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// refuseUnchecked answers a caller whose credential, whether it is a guest, or whether its app
+// takes it, could not be checked.
+func (s *Server) refuseUnchecked(w http.ResponseWriter, r *http.Request, err error) {
+	// A caller that hung up while its credential was checked is no failure of the router's,
+	// and nobody is left to answer. The status is for withMetrics, which counts and times it
+	// as a 4xx: callers giving up on a stalled key store still show there.
+	if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
+		s.logger.Debug("the caller left before its credential was checked", "method", r.Method,
+			"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()))
+		w.WriteHeader(statusClientClosed)
+		return
+	}
+	// A credential that could not be checked (the key store down, a key that would not
+	// unseal) is the router's failure, not a wrong key. It is logged here: withRequestLog
+	// runs after this.
+	s.logger.Error("could not check a credential", "method", r.Method,
+		"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()),
+		"error", err, "stack", stack.Trace(err))
+	writeError(w, internalError())
+}
+
+// refuseLevel answers a caller whose level the app turns away.
+func (s *Server) refuseLevel(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	s.logger.Debug("refused a level of user this app turns away",
+		"method", r.Method, "path", loggedPath(s.mux, r), "kind", principal.Kind)
+	// The caller proved which app it is of, so its lines name the app, though it is
+	// no customer here: nothing it asked for is counted under the app.
+	r = r.WithContext(WithLoggedApp(r.Context(), principal.AppID, principal.APIKey))
+	s.refuseLogged(w, r, forbidden("this app does not accept "+
+		"requests from this level of user"))
+}
+
+// guestUser reports whether a user a credential of that kind named is a guest: by kind, or one
+// this router minted, whose token reads as an account's. A backend naming a guest is a backend.
+// Only an id the router could have minted is looked up. A row that cannot be read is an error: it
+// makes a guest of no account, and an account of no guest.
+func (s *Server) guestUser(ctx context.Context, customerID, userID string, kind auth.Kind) (bool, error) {
+	if kind != auth.KindAuthenticated {
+		return kind == auth.KindGuest, nil
+	}
+	if s.store == nil || !strings.HasPrefix(userID, guestPrefix) {
+		return false, nil
+	}
+	return s.store.Users.Minted(ctx, customerID, userID)
+}
+
+// guestAdmitted reports whether the caller's app takes guests: as its key's levels say, or behind
+// a proxy, which resolves none, as its settings do. Settings that cannot be read are an error, as
+// a key that cannot be is.
+func (s *Server) guestAdmitted(ctx context.Context, principal auth.Principal) (bool, error) {
+	if s.authMode == auth.Proxy && s.store != nil {
+		return s.store.Apps.GuestAllowed(ctx, principal.AppID)
+	}
+	return principal.Levels.Admits(auth.KindGuest), nil
 }
 
 // attributionOf is who a request's usage is recorded as asked for by. The user is recorded as
@@ -1496,6 +1604,23 @@ func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
 	}
 }
 
+// recordShard keeps the shard that served a request the user's own client sent, which the load
+// balancer picked by where they are, so their messages are answered there (userShard). A
+// backend's request says nothing of where its user is, and one a peer handed over was routed to
+// another node. A failure is logged, as recordUser's is.
+func (s *Server) recordShard(ctx context.Context, principal auth.Principal) {
+	if s.store == nil || s.directory == nil || s.directory.Shard() == "" || node.Forwarded(ctx) {
+		return
+	}
+	if principal.Kind != auth.KindAuthenticated && principal.Kind != auth.KindGuest {
+		return
+	}
+	if err := s.store.Users.Served(ctx, principal.AppID, principal.UserID, s.directory.Shard()); err != nil {
+		s.logger.Error("could not record the shard serving an end user",
+			"customer", principal.AppID, "user", principal.UserID, "error", err)
+	}
+}
+
 // recordEmail keeps the address a backend said its user signs in with (auth.EmailHeader),
 // which a consent for a connector whose manifest sets owner_email is checked against. Only a
 // server-side caller has one (auth.Principal.Email), and store.Users.Email does nothing
@@ -1535,7 +1660,7 @@ const corsMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
 
 // corsExposedHeaders are the response headers a page's script may read.
 const corsExposedHeaders = "Server-Timing, " + RequestIDHeader + ", " + quotaLimitHeader + ", " +
-	quotaRemainingHeader + ", " + quotaResetHeader + ", Retry-After"
+	quotaRemainingHeader + ", " + quotaResetHeader + ", Retry-After, " + unreachableShardsHeader
 
 // withCORS lets a browser at the API from the origins originAllowed accepts.
 //
@@ -1881,7 +2006,12 @@ func (s *Server) getStats(ctx context.Context, request *getStatsRequest) (*getSt
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.Buckets.Select(ctx, customerID, store.BucketFilter{
+	// A rollup keeps no request's labels, so a label filter reads the requests of every shard.
+	read := s.store.Buckets.Select
+	if s.store.StatsShipped() && len(tags) == 0 {
+		read = s.store.Buckets.Shipped
+	}
+	buckets, err := read(ctx, customerID, store.BucketFilter{
 		Modality: string(request.Modality), Granularity: granularity, From: request.From, To: request.To, Tags: tags})
 	if err != nil {
 		return nil, err
@@ -1924,7 +2054,11 @@ func (s *Server) getTagStats(ctx context.Context, request *getTagStatsRequest) (
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.TagBuckets.Select(ctx, customerID, store.TagBucketFilter{
+	read := s.store.TagBuckets.Select
+	if s.store.StatsShipped() {
+		read = s.store.TagBuckets.Shipped
+	}
+	buckets, err := read(ctx, customerID, store.TagBucketFilter{
 		Modality: string(request.Modality), Key: request.Key, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
 		return nil, err
@@ -1972,7 +2106,11 @@ func (s *Server) getTurnStats(ctx context.Context, request *getTurnStatsRequest)
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.TurnBuckets.Select(ctx, customerID, store.TurnBucketFilter{
+	read := s.store.TurnBuckets.Select
+	if s.store.StatsShipped() {
+		read = s.store.TurnBuckets.Shipped
+	}
+	buckets, err := read(ctx, customerID, store.TurnBucketFilter{
 		AgentID: agentID, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
 		return nil, err
@@ -2054,6 +2192,7 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 		spend = append(spend, SpendBucket{
 			Bucket:          bucket.Bucket,
 			Value:           bucket.Value,
+			Other:           bucket.Other,
 			CostMicrosTotal: bucket.CostMicrosTotal,
 			RequestCount:    bucket.RequestCount,
 		})
@@ -2475,9 +2614,9 @@ func (s *Server) registerServer(api huma.API) {
 			"app alone; grouped by \"who:user\" the value is then <app_id>/<user_id>, since a user id is " +
 			"only unique within its app.\n" +
 			"Only the biggest values keep a series of their own, because a label such as customer_id " +
-			"has as many values as the customer has customers. The rest are summed into \"other\", and " +
-			"spend carrying no such label at all into the empty value, so the rows still add up to " +
-			"the total.\n" +
+			"has as many values as the customer has customers. The rest are summed into a row marked " +
+			"other, whose value is \"other\", and spend carrying no such label at all into the empty " +
+			"value, so the rows still add up to the total.\n" +
 			"Reads the request rows rather than the rollups, so today's spend is there without a " +
 			"rollup having run.",
 		// Declared rather than read off the input, so the default is documented without
@@ -2848,8 +2987,9 @@ type RollupResult struct {
 type SpendBucket struct {
 	Bucket          time.Time `json:"bucket"`
 	CostMicrosTotal int64     `json:"cost_micros_total" doc:"Millionths of a dollar, priced from the configured rates."`
+	Other           bool      `json:"other,omitempty" doc:"True on the row that is everything outside the biggest few, summed. Its value is \"other\", which a label can also have: a label of that value is a row of its own, without other."`
 	RequestCount    int64     `json:"request_count"`
-	Value           string    `json:"value" doc:"The modality or label value this row is for. \"other\" is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part." example:"support"`
+	Value           string    `json:"value" doc:"The modality or label value this row is for. \"other\" with other true is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part." example:"support"`
 }
 
 // StatsBucket is the StatsBucket schema.

@@ -593,6 +593,15 @@ func (a *Agent) prepareTool(requested harness.ToolRequested) (context.Context, c
 	if requester := a.requesterLocked(); requester != (Requester{}) {
 		parent = WithRequester(parent, requester)
 	}
+	// A call is the scheduled task's when its reply is known to be (scheduledReply), or when
+	// the last thing is a scheduled turn and the call's reply is not known to be the one that
+	// answered the caller (answerReply).
+	known := requested.TurnID != ""
+	scheduled := a.scheduled && !(known && requested.TurnID == a.answerReply) ||
+		known && requested.TurnID == a.scheduledReply
+	if scheduled {
+		parent = WithScheduledCall(parent)
+	}
 	ctx, cancel := context.WithCancel(parent)
 	if a.toolCancels == nil {
 		a.toolCancels = map[string]context.CancelFunc{}
@@ -609,12 +618,7 @@ func (a *Agent) prepareTool(requested harness.ToolRequested) (context.Context, c
 	if a.toolScheduled == nil {
 		a.toolScheduled = map[string]bool{}
 	}
-	// A call is the scheduled task's when its reply is known to be (scheduledReply), or when
-	// the last thing is a scheduled turn and the call's reply is not known to be the one that
-	// answered the caller (answerReply).
-	known := requested.TurnID != ""
-	a.toolScheduled[requested.Call.ID] = a.scheduled && !(known && requested.TurnID == a.answerReply) ||
-		known && requested.TurnID == a.scheduledReply
+	a.toolScheduled[requested.Call.ID] = scheduled
 	if a.toolsRunning == nil {
 		a.toolsRunning = map[string]string{}
 	}
@@ -693,7 +697,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 		parts = llm.TextParts(unfoundIDResult(key, value, known))
 	} else if blank := blankRequired(tool, requested.Call.Arguments); len(blank) > 0 && !telephonyTool(tool.Name) {
 		parts = llm.TextParts(fmt.Sprintf(leftBlank, requested.Call.Name, strings.Join(blank, ", ")))
-	} else if to, unsourced := unsourcedTransfer(record, requested.Call, told); unsourced && len(a.options.Destinations) == 0 {
+	} else if to, unsourced := unsourcedTransfer(record, requested.Call, told, a.transferCallersTool()); unsourced && len(a.options.Destinations) == 0 {
 		parts = llm.TextParts(unsourcedTransferResult(to))
 	} else if key, value, heard, unheard := unheardNumber(record, requested.Call, told); unheard {
 		parts = llm.TextParts(unheardResult(key, value, heard))
@@ -1013,6 +1017,15 @@ func (a *Agent) refuseCallLocked(id string, why error) {
 		a.refusedCalls = map[string]error{}
 	}
 	a.refusedCalls[id] = why
+}
+
+// transferCallersTool is Options.CallersTool for a transfer's number, nil when Destinations
+// are set: a transfer then goes to a destination by name, never to a number a tool gave.
+func (a *Agent) transferCallersTool() func(string) bool {
+	if len(a.options.Destinations) > 0 {
+		return nil
+	}
+	return a.options.CallersTool
 }
 
 // offeredTool is the tool called name as the model is offered it now, the native model's

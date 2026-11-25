@@ -33,6 +33,28 @@ TABLE agent_branch_switches
     CREATE INDEX agent_branch_switches_session_idx ON public.agent_branch_switches USING btree (session_id, hidden_from)
     CREATE INDEX agent_branch_switches_unfinished_idx ON public.agent_branch_switches USING btree (session_id, created_at) WHERE (state <> 'done'::text)
 
+TABLE agent_logs
+    agent_id text NOT NULL DEFAULT ''::text
+    config_id text NOT NULL DEFAULT ''::text
+    customer_id text NOT NULL
+    details jsonb NOT NULL DEFAULT '{}'::jsonb
+    event_type text NOT NULL
+    id bigint NOT NULL DEFAULT nextval('agent_logs_id_seq'::regclass)
+    ingested_at timestamp with time zone NOT NULL DEFAULT clock_timestamp()
+    message text NOT NULL
+    occurred_at timestamp with time zone NOT NULL DEFAULT now()
+    session_id text NOT NULL DEFAULT ''::text
+    severity text NOT NULL
+    source text NOT NULL
+    source_id bigint
+    user_id text NOT NULL DEFAULT ''::text
+    CONSTRAINT agent_logs_pkey PRIMARY KEY (id)
+    CREATE INDEX agent_logs_config_order ON public.agent_logs USING btree (customer_id, config_id, id DESC)
+    CREATE INDEX agent_logs_customer_order ON public.agent_logs USING btree (customer_id, id DESC)
+    CREATE INDEX agent_logs_error_order ON public.agent_logs USING btree (customer_id, severity, id DESC)
+    CREATE INDEX agent_logs_session_order ON public.agent_logs USING btree (customer_id, session_id, id DESC)
+    CREATE UNIQUE INDEX agent_logs_source_idx ON public.agent_logs USING btree (customer_id, source_id) WHERE (source_id IS NOT NULL)
+
 TABLE agent_response_items
     at timestamp with time zone NOT NULL DEFAULT now()
     kind text NOT NULL
@@ -98,6 +120,7 @@ TABLE agent_sessions
     opened_at timestamp with time zone
     pinned_at timestamp with time zone
     project text NOT NULL DEFAULT ''::text
+    project_tag text
     remembers boolean
     resume_history jsonb NOT NULL DEFAULT '{}'::jsonb
     return_url text
@@ -202,6 +225,7 @@ TABLE call_legs
     CREATE INDEX call_legs_token_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token IS NOT NULL)
     CREATE UNIQUE INDEX call_legs_transfer_idx ON public.call_legs USING btree (call_type, call_id, COALESCE(stream_app_pk, (0)::bigint), vendor_call_id) WHERE ((placed_at IS NULL) AND (vendor_call_id IS NOT NULL))
     CREATE INDEX call_legs_unanswered_idx ON public.call_legs USING btree (call_type, call_id) WHERE ((direction = 'outbound'::text) AND (end_reason = 'unanswered'::text))
+    CREATE INDEX call_legs_user_idx ON public.call_legs USING btree (customer_id, user_id) WHERE (user_id <> ''::text)
     CREATE INDEX call_legs_vendor_call_idx ON public.call_legs USING btree (vendor_call_id) WHERE (vendor_call_id IS NOT NULL)
 
 TABLE call_participants
@@ -270,6 +294,26 @@ TABLE calls
     CREATE INDEX calls_customer_idx ON public.calls USING btree (customer_id, started_at DESC)
     CREATE INDEX calls_session_started_idx ON public.calls USING btree (session_id, started_at DESC) WHERE (session_id IS NOT NULL)
     CREATE INDEX calls_tags_idx ON public.calls USING gin (tags)
+
+TABLE connector_invocations
+    arguments jsonb
+    binding text NOT NULL
+    config_id text NOT NULL
+    connection_id text NOT NULL
+    connector_id text NOT NULL
+    customer_id text NOT NULL
+    error_message text NOT NULL DEFAULT ''::text
+    error_type text NOT NULL DEFAULT ''::text
+    id text NOT NULL
+    latency_ms integer NOT NULL
+    provider_status integer
+    session_id text NOT NULL DEFAULT ''::text
+    started_at timestamp with time zone NOT NULL
+    tool text NOT NULL
+    CONSTRAINT connector_invocations_error_type_check CHECK ((error_type = ANY (ARRAY[''::text, 'customer_auth'::text, 'external_server'::text, 'client_timeout'::text, 'outcome_unknown'::text, 'denied'::text])))
+    CONSTRAINT connector_invocations_latency_ms_check CHECK ((latency_ms >= 0))
+    CONSTRAINT connector_invocations_pkey PRIMARY KEY (id)
+    CREATE INDEX connector_invocations_connection_idx ON public.connector_invocations USING btree (customer_id, connection_id, started_at DESC, id DESC)
 
 TABLE conversation_documents
     conversation_id text NOT NULL DEFAULT ''::text

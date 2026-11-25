@@ -142,9 +142,7 @@ func (s *Server) receiveChannelMessage(w http.ResponseWriter, r *http.Request) {
 func writeChannelAnswer(w http.ResponseWriter, answer channels.Answer) {
 	noteAnswered(w, answer.Status)
 	if answer.Text != "" {
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(answer.Status)
-		_, _ = w.Write([]byte(answer.Text))
+		writeChallenge(w, answer.Text)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -175,6 +173,9 @@ func (s *Server) linkChannelNumber(ctx context.Context, request *linkChannelRequ
 			"so there is nothing to link: set channels.identity to link to need a code")
 	}
 
+	if failure, refused := refuseReservedUserID("user_id", request.Body.UserId); refused {
+		return nil, failure
+	}
 	link, err := s.channels.Link(ctx, customerID, config.ID, request.Body.UserId)
 	if err != nil {
 		return nil, err

@@ -4,9 +4,7 @@ package store
 
 import (
 	"context"
-	"errors"
 	"strings"
-	"sync"
 	"testing/fstest"
 	"time"
 
@@ -73,7 +71,6 @@ func (s *StoreSuite) TestACreatedConnectionIsPendingAtRevisionOneWithNoCredentia
 	s.Equal(OwnerApp, found.OwnerType)
 	s.Empty(found.OwnerID)
 	s.Equal("test_key", found.AuthScheme)
-	s.Empty(found.TLSScheme)
 	s.Equal(map[string]string{"region": "eu"}, found.Inputs)
 	s.Equal(map[string]string{}, found.Metadata)
 	s.Equal("Support workspace", found.Label)
@@ -86,24 +83,6 @@ func (s *StoreSuite) TestACreatedConnectionIsPendingAtRevisionOneWithNoCredentia
 	s.Nil(found.DeletedAt)
 }
 
-func (s *StoreSuite) TestATLSSchemeIsStoredBesideTheAuthScheme() {
-	created := s.connection("acme-app", func(connection *ConnectorConnection) { connection.TLSScheme = "test_mtls" })
-
-	found, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", created.ID)
-	s.Require().NoError(err)
-	s.Equal("test_mtls", found.TLSScheme)
-
-	var stored *string
-	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT tls_scheme FROM connector_connections WHERE id = ?", created.ID).Scan(&stored))
-	s.Require().NotNil(stored)
-
-	plain := s.connection("acme-app", nil)
-	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
-		"SELECT tls_scheme FROM connector_connections WHERE id = ?", plain.ID).Scan(&stored))
-	s.Nil(stored, "no TLS scheme is NULL, not an empty name")
-}
-
 func (s *StoreSuite) TestARegisteredAuthSchemeItsConnectorDoesNotListIsRefused() {
 	s.seed(acmeManifest)
 	connection := appConnection()
@@ -113,17 +92,6 @@ func (s *StoreSuite) TestARegisteredAuthSchemeItsConnectorDoesNotListIsRefused()
 
 	s.ErrorIs(err, ErrSchemeNotAllowed)
 	s.ErrorContains(err, `acme revision 1 does not list auth scheme "test_unlisted"`)
-}
-
-func (s *StoreSuite) TestARegisteredTLSSchemeItsConnectorDoesNotListIsRefused() {
-	s.seed(acmeManifest)
-	connection := appConnection()
-	connection.TLSScheme = "test_unlisted"
-
-	err := s.store.ConnectorConnections.Insert(s.ctx, testSchemes, connection)
-
-	s.ErrorIs(err, ErrSchemeNotAllowed)
-	s.ErrorContains(err, `acme revision 1 does not list tls scheme "test_unlisted"`)
 }
 
 func (s *StoreSuite) TestTheDatabaseRefusesAnAppOwnedConnectionNamingAUser() {
@@ -197,9 +165,6 @@ func (s *StoreSuite) TestAConnectionIsOnlyItsOwnCustomers() {
 	listed, err := s.store.ConnectorConnections.Select(s.ctx, "other-app", ConnectionFilter{OwnerType: OwnerApp})
 	s.Require().NoError(err)
 	s.Empty(listed)
-
-	_, err = s.store.ConnectorConnections.Referenced(s.ctx, "other-app", mine.ID)
-	s.ErrorIs(err, ErrNoConnectorConnection)
 
 	s.ErrorIs(s.store.ConnectorConnections.Delete(s.ctx, "other-app", mine.ID), ErrNoConnectorConnection)
 	_, err = s.store.ConnectorConnections.Get(s.ctx, "acme-app", mine.ID)
@@ -277,15 +242,6 @@ func (s *StoreSuite) TestADeletedConnectionIsNotListed() {
 	s.Equal(kept.ID, listed[0].ID)
 }
 
-func (s *StoreSuite) TestADeletedConnectionIsNotAskedAboutReferences() {
-	connection := s.connection("acme-app", nil)
-	s.bind("acme-app", fixedBinding(connection.ID))
-	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
-
-	_, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-	s.ErrorIs(err, ErrNoConnectorConnection)
-}
-
 func (s *StoreSuite) TestADeletedConnectionCannotBeDeletedAgain() {
 	connection := s.connection("acme-app", nil)
 	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
@@ -346,7 +302,7 @@ func (s *StoreSuite) TestABindThatCommitsBeforeTheDeleteTakesItsSnapshotStopsIt(
 	deleter := s.router()
 	deleted := make(chan error, 1)
 	go func() { deleted <- deleter.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID) }()
-	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credentials_test.go).
+	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credential_lock_test.go).
 	s.Require().Eventually(func() bool { return s.waitingForTable("connector_connections") == 1 },
 		2*time.Second, 10*time.Millisecond, "the delete waits for the table lock")
 	s.bind("acme-app", fixedBinding(connection.ID))
@@ -399,7 +355,7 @@ func (s *StoreSuite) TestABindThatCommitsWhileTheDeleteWaitsForTheRowStopsIt() {
 	deleter := s.router()
 	deleted := make(chan error, 1)
 	go func() { deleted <- deleter.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID) }()
-	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credentials_test.go).
+	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credential_lock_test.go).
 	s.Require().Eventually(func() bool { return s.waitingForALock() == 1 },
 		2*time.Second, 10*time.Millisecond, "the delete waits for the row")
 	s.bind("acme-app", fixedBinding(connection.ID))
@@ -530,34 +486,13 @@ func (s *StoreSuite) TestDeletingAConnectionDropsItsCredentials() {
 	s.Nil(expires)
 }
 
-func (s *StoreSuite) TestAFixedBindingReferencesItsConnection() {
-	connection := s.connection("acme-app", nil)
-	s.bind("acme-app", fixedBinding(connection.ID))
-
-	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-	s.Require().NoError(err)
-	s.True(referenced)
-}
-
-func (s *StoreSuite) TestAnUnboundConnectionIsNotReferenced() {
-	connection := s.connection("acme-app", nil)
-	other := s.connection("acme-app", nil)
-	s.bind("acme-app", fixedBinding(other.ID))
-
-	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-	s.Require().NoError(err)
-	s.False(referenced)
-}
-
 func (s *StoreSuite) TestASessionBindingReferencesNoConnection() {
 	connection := s.connection("acme-app", userOwned("alice"))
 	// A session binding names no connection; it carries an id here only to show the type is
 	// what decides.
 	s.bind("acme-app", `[{"name": "acme", "connector_id": "acme", "connection": {"type": "session", "connection_id": "`+connection.ID+`"}}]`)
 
-	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-	s.Require().NoError(err)
-	s.False(referenced)
+	s.NoError(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID))
 }
 
 func (s *StoreSuite) TestADeletedConfigReferencesNothing() {
@@ -565,18 +500,14 @@ func (s *StoreSuite) TestADeletedConfigReferencesNothing() {
 	configID := s.bind("acme-app", fixedBinding(connection.ID))
 	s.Require().NoError(s.store.AgentConfigs.Delete(s.ctx, "acme-app", configID))
 
-	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-	s.Require().NoError(err)
-	s.False(referenced)
+	s.NoError(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID))
 }
 
 func (s *StoreSuite) TestAnotherCustomersConfigReferencesNothingOfMine() {
 	connection := s.connection("acme-app", nil)
 	s.bind("other-app", fixedBinding(connection.ID))
 
-	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-	s.Require().NoError(err)
-	s.False(referenced)
+	s.NoError(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID))
 }
 
 func (s *StoreSuite) TestTheStateItselfIsNotStored() {
@@ -622,11 +553,6 @@ channel:
       text: "{text}"
 `
 
-// ownLineManifest is lineManifest verified with the customer's own provider app instead, so
-// each customer's events arrive at a URL of their own.
-var ownLineManifest = strings.Replace(strings.Replace(lineManifest, "id: line", "id: own_line", 1),
-	"secret: operator", "secret: provider_app", 1)
-
 // lineConnection creates a connected, app-owned connection of the customer's to a built-in
 // channel connector, seeding it from raw first.
 func (s *StoreSuite) lineConnection(customerID, raw string) ConnectorConnection {
@@ -648,92 +574,6 @@ func (s *StoreSuite) moveTo(connection ConnectorConnection, status string) {
 			locked.Status = status
 			return true, nil
 		}))
-}
-
-func (s *StoreSuite) TestAConnectionIsFoundByItsConnectorAndProviderUnitWithoutItsCustomer() {
-	connection := s.lineConnection("acme-app", lineManifest)
-	s.lineConnection("acme-app", lineManifest)
-	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "106540352242922"))
-
-	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "106540352242922")
-
-	s.Require().NoError(err)
-	s.Equal(connection.ID, found.ID)
-	s.Equal("acme-app", found.CustomerID, "the event names no customer; the connection does")
-	s.Equal("106540352242922", found.ProviderUnitID)
-}
-
-func (s *StoreSuite) TestAProviderUnitNoConnectionHoldsIsNotFound() {
-	connection := s.lineConnection("acme-app", lineManifest)
-	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1"))
-
-	_, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-2")
-
-	s.ErrorIs(err, ErrNoConnectorConnection)
-}
-
-func (s *StoreSuite) TestAProviderUnitAnotherCustomerHoldsIsRefused() {
-	first := s.lineConnection("acme-app", lineManifest)
-	second := s.lineConnection("other-app", lineManifest)
-	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", first.ID, "unit-1"))
-
-	err := s.store.ConnectorConnections.SetProviderUnit(s.ctx, "other-app", second.ID, "unit-1")
-
-	s.ErrorIs(err, ErrProviderUnitTaken)
-	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
-	s.Require().NoError(err)
-	s.Equal(first.ID, found.ID, "the first holder keeps the unit")
-}
-
-func (s *StoreSuite) TestDeletingAConnectionFreesItsProviderUnit() {
-	first := s.lineConnection("acme-app", lineManifest)
-	second := s.lineConnection("other-app", lineManifest)
-	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", first.ID, "unit-1"))
-	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", first.ID))
-
-	_, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
-	s.ErrorIs(err, ErrNoConnectorConnection, "a deleted connection is not routed to")
-
-	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "other-app", second.ID, "unit-1"))
-	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
-	s.Require().NoError(err)
-	s.Equal(second.ID, found.ID)
-}
-
-func (s *StoreSuite) TestARevokedConnectionFreesItsProviderUnitForTheNextConsent() {
-	revoked := s.lineConnection("acme-app", lineManifest)
-	next := s.lineConnection("other-app", lineManifest)
-	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", revoked.ID, "unit-1"))
-
-	s.moveTo(revoked, ConnectionNeedsReauthorization)
-
-	_, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
-	s.ErrorIs(err, ErrNoConnectorConnection, "an ended grant is not routed to")
-	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "other-app", next.ID, "unit-1"))
-	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
-	s.Require().NoError(err)
-	s.Equal(next.ID, found.ID)
-
-	s.moveTo(revoked, ConnectionConnected)
-	err = s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", revoked.ID, "unit-1")
-	s.ErrorIs(err, ErrProviderUnitTaken, "a reconnect proves the unit again, and it is taken now")
-}
-
-func (s *StoreSuite) TestASaveThatStaysConnectedKeepsTheProviderUnitTheRowHolds() {
-	connection := s.lineConnection("acme-app", lineManifest)
-	readBefore, err := s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
-	s.Require().NoError(err)
-	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1"))
-
-	// A refresh that read the row before the unit was stored.
-	readBefore.Revision++
-	readBefore.CredentialsSealed = []byte("refreshed")
-	readBefore.CredentialsKEKVersion = 1
-	s.Require().NoError(s.store.ConnectorConnections.SaveAtRevision(s.ctx, &readBefore, readBefore.Revision-1))
-
-	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
-	s.Require().NoError(err)
-	s.Equal(connection.ID, found.ID)
 }
 
 func (s *StoreSuite) TestValidatedToolsSurviveACredentialsSaveThatReadTheRowBefore() {
@@ -764,152 +604,6 @@ func (s *StoreSuite) TestToolsAreNotStoredOnADeletedConnection() {
 	err := s.store.ConnectorConnections.SetTools(s.ctx, "acme-app", connection.ID, nil, "list-1", time.Now())
 
 	s.ErrorIs(err, ErrNoConnectorConnection)
-}
-
-func (s *StoreSuite) TestAConnectionThatIsNotConnectedTakesNoProviderUnit() {
-	connection := s.lineConnection("acme-app", lineManifest)
-	s.moveTo(connection, ConnectionPending)
-
-	err := s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1")
-
-	s.ErrorIs(err, ErrConnectorConnectionNotConnected)
-	_, err = s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
-	s.ErrorIs(err, ErrNoConnectorConnection)
-}
-
-// A revocation's save holds the row while the unit is being set: the set read the connection
-// as connected, waits for the row, and then finds the grant ended.
-func (s *StoreSuite) TestARevocationThatCommitsWhileTheUnitIsSetWins() {
-	connection := s.lineConnection("acme-app", lineManifest)
-	held := s.begin()
-	_, err := held.ExecContext(s.ctx, "UPDATE connector_connections SET status = ?, provider_unit_id = NULL WHERE id = ?",
-		ConnectionNeedsReauthorization, connection.ID)
-	s.Require().NoError(err)
-
-	setter := s.router()
-	set := make(chan error, 1)
-	go func() { set <- setter.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1") }()
-	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credentials_test.go).
-	s.Require().Eventually(func() bool { return s.waitingForALock() == 1 },
-		2*time.Second, 10*time.Millisecond, "the set waits for the row")
-	s.Require().NoError(held.Commit())
-
-	s.ErrorIs(<-set, ErrConnectorConnectionChanged)
-	_, err = s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
-	s.ErrorIs(err, ErrNoConnectorConnection)
-}
-
-func (s *StoreSuite) TestTheSameProviderUnitUnderAnotherConnectorIsAllowed() {
-	other := strings.Replace(lineManifest, "id: line", "id: line_two", 1)
-	first := s.lineConnection("acme-app", lineManifest)
-	second := s.lineConnection("other-app", other)
-	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", first.ID, "unit-1"))
-
-	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "other-app", second.ID, "unit-1"))
-
-	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line_two", "unit-1")
-	s.Require().NoError(err)
-	s.Equal(second.ID, found.ID)
-	found, err = s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
-	s.Require().NoError(err)
-	s.Equal(first.ID, found.ID)
-}
-
-func (s *StoreSuite) TestANewProviderUnitReplacesAndFreesTheOldOne() {
-	connection := s.lineConnection("acme-app", lineManifest)
-	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1"))
-
-	s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-2"))
-
-	_, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
-	s.ErrorIs(err, ErrNoConnectorConnection)
-	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-2")
-	s.Require().NoError(err)
-	s.Equal(connection.ID, found.ID)
-}
-
-func (s *StoreSuite) TestAnotherCustomersConnectionTakesNoProviderUnitFromMe() {
-	theirs := s.lineConnection("other-app", lineManifest)
-
-	err := s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", theirs.ID, "unit-1")
-
-	s.ErrorIs(err, ErrNoConnectorConnection)
-}
-
-func (s *StoreSuite) TestADeletedConnectionTakesNoProviderUnit() {
-	connection := s.lineConnection("acme-app", lineManifest)
-	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connection.ID))
-
-	err := s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1")
-
-	s.ErrorIs(err, ErrNoConnectorConnection)
-}
-
-func (s *StoreSuite) TestAConnectorWhoseEventsURLNamesTheCustomerTakesNoProviderUnit() {
-	own := s.lineConnection("acme-app", ownLineManifest)
-	tools := s.connection("acme-app", nil)
-
-	s.ErrorIs(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", own.ID, "T0001"), ErrNoSharedWebhook,
-		"two customers' own apps may sit in one workspace")
-	s.ErrorIs(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", tools.ID, "T0001"), ErrNoSharedWebhook,
-		"a connector with no channel has no events to route")
-}
-
-func (s *StoreSuite) TestACustomDefinitionTakesNoProviderUnit() {
-	custom, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme-app",
-		parsed(s.T(), strings.Replace(lineManifest, "id: line", "id: custom_line", 1)))
-
-	s.Require().NoError(err)
-	connection := appConnection()
-	connection.ConnectorID = custom.ID
-	s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, testSchemes, connection))
-
-	err = s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", connection.ID, "unit-1")
-
-	s.ErrorIs(err, ErrNoSharedWebhook, "one customer's definition does not speak for the operator's app")
-}
-
-func (s *StoreSuite) TestCustomersRacingForOneProviderUnitLeaveOneHolder() {
-	// Each customer is a router of its own with a pool of its own, connected before they all
-	// start at once, so the writes overlap in Postgres rather than queue on one pool.
-	const customers = 8
-	connections := make([]ConnectorConnection, customers)
-	routers := make([]*Store, customers)
-	for i := range customers {
-		connections[i] = s.lineConnection("app-"+newID(), lineManifest)
-		router, err := s.openRouter()
-		s.Require().NoError(err)
-		s.T().Cleanup(func() { router.Close() })
-		s.Require().NoError(router.Ping(s.ctx))
-		routers[i] = router
-	}
-	errs := make([]error, customers)
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	for i, router := range routers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-			errs[i] = router.ConnectorConnections.SetProviderUnit(s.ctx, connections[i].CustomerID, connections[i].ID, "unit-1")
-		}()
-	}
-	close(start)
-	wg.Wait()
-
-	winner := -1
-	for i, err := range errs {
-		if err == nil {
-			s.Equal(-1, winner, "a second customer also took the unit")
-			winner = i
-			continue
-		}
-		s.True(errors.Is(err, ErrProviderUnitTaken), "a customer that loses is told the unit is taken: %v", err)
-	}
-	s.Require().NotEqual(-1, winner)
-	found, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
-	s.Require().NoError(err)
-	s.Equal(connections[winner].ID, found.ID)
 }
 
 // TestAUsersGrantedConnectionsAreHerLiveOnesThatHoldCredentials: what the user delete revokes
@@ -982,7 +676,7 @@ func (s *StoreSuite) TestDeletingAUsersConnectionsRemovesEveryOneOfThemAndNothin
 		"SELECT count(*) FROM connector_connections WHERE customer_id = 'acme-app' AND owner_id = 'alice'").Scan(&left))
 	s.Zero(left, "the soft deleted row, which still held the owner and account ids, is gone too")
 	var invocations, attempts int
-	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.ShardDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM connector_invocations WHERE connection_id = ?", live.ID).Scan(&invocations))
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", pending.ID).Scan(&attempts))
@@ -991,6 +685,29 @@ func (s *StoreSuite) TestDeletingAUsersConnectionsRemovesEveryOneOfThemAndNothin
 	for _, kept := range []ConnectorConnection{bob, app, elsewhere} {
 		_, err := s.store.ConnectorConnections.Get(s.ctx, kept.CustomerID, kept.ID)
 		s.NoError(err, "another user's, the app's and another customer's stay")
+	}
+}
+
+func (s *ShardedStoreSuite) TestDeletingAUsersConnectionsDeletesTheirInvocationsInEveryDatabase() {
+	alices := s.connection("acme-app", userOwned("alice"))
+	bobs := s.connection("acme-app", userOwned("bob"))
+	for _, connection := range []ConnectorConnection{alices, bobs} {
+		s.invocation(connection, time.Second, "")
+		s.Require().NoError(s.other.ConnectorInvocations.Insert(s.ctx, &ConnectorInvocation{CustomerID: "acme-app",
+			ConnectionID: connection.ID, ConnectorID: "acme", Tool: "search", StartedAt: s.base}))
+		s.legacyInvocation(connection, 0)
+	}
+
+	_, err := s.store.ConnectorConnections.DeleteUser(s.ctx, "acme-app", "alice")
+
+	s.Require().NoError(err)
+	for _, db := range s.store.holders() {
+		alice, err := db.NewSelect().Model((*ConnectorInvocation)(nil)).Where("connection_id = ?", alices.ID).Count(s.ctx)
+		s.Require().NoError(err)
+		bob, err := db.NewSelect().Model((*ConnectorInvocation)(nil)).Where("connection_id = ?", bobs.ID).Count(s.ctx)
+		s.Require().NoError(err)
+		s.Zero(alice, "none of the deleted user's calls stays in any database")
+		s.Equal(1, bob, "another user's stay")
 	}
 }
 
@@ -1012,7 +729,7 @@ func (s *StoreSuite) TestDeletingAUsersConnectionsDeletesTheirEventSubscriptions
 		s.eventSubscription("acme-app", app.ID, "config-1", "key-1"),
 		s.eventSubscription("other-app", elsewhere.ID, "config-1", "key-1"),
 		// A row of another customer that names her connection's id: the customer is part of the match.
-		s.eventSubscription("other-app", first.ID, "config-2", "key-1"),
+		s.strayEventSubscription("other-app", first.ID),
 	}
 
 	_, err := s.store.ConnectorConnections.DeleteUser(s.ctx, "acme-app", "alice")
@@ -1055,6 +772,75 @@ func (s *StoreSuite) TestAUserDeleteThatFailsKeepsTheirEventSubscriptions() {
 	s.Require().NoError(err, "the connection stays")
 	_, err = s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
 	s.NoError(err, "so does its subscription")
+}
+
+// TestDeletingAConnectionDeletesItsEventSubscriptions: a forced and an unforced delete each take
+// the connection's subscriptions, with their sealed secrets and callback tokens, and leave another
+// connection's and another customer's.
+func (s *StoreSuite) TestDeletingAConnectionDeletesItsEventSubscriptions() {
+	forced := s.connection("acme-app", nil)
+	unbound := s.connection("acme-app", nil)
+	kept := s.connection("acme-app", nil)
+	elsewhere := s.connection("other-app", nil)
+	gone := []ConnectionEventSubscription{
+		s.eventSubscription("acme-app", forced.ID, "config-1", "key-1"),
+		s.eventSubscription("acme-app", forced.ID, "config-1", "key-2"),
+		s.eventSubscription("acme-app", unbound.ID, "config-1", "key-1"),
+	}
+	stay := []ConnectionEventSubscription{
+		s.eventSubscription("acme-app", kept.ID, "config-1", "key-1"),
+		s.eventSubscription("other-app", elsewhere.ID, "config-1", "key-1"),
+		// A row of another customer that names the deleted connection's id: the customer is part
+		// of the match.
+		s.strayEventSubscription("other-app", forced.ID),
+	}
+
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", forced.ID))
+	s.Require().NoError(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", unbound.ID))
+
+	for _, sub := range gone {
+		_, err := s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
+		s.ErrorIs(err, ErrNoConnectionEventSubscription, "subscription %s is gone", sub.Token)
+	}
+	for _, sub := range stay {
+		got, err := s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
+		s.Require().NoError(err, "subscription %s stays", sub.Token)
+		s.Equal(sub.ID, got.ID)
+	}
+}
+
+// TestAConnectionDeleteThatFailsKeepsItsEventSubscriptions: the subscriptions go in the delete's
+// transaction, so a delete that fails dropping them leaves the connection live with them.
+func (s *StoreSuite) TestAConnectionDeleteThatFailsKeepsItsEventSubscriptions() {
+	connection := s.connection("acme-app", nil)
+	sub := s.eventSubscription("acme-app", connection.ID, "config-1", "key-1")
+	// Another transaction holds the subscription, so the delete waits for it until its deadline.
+	holder := s.begin()
+	_, err := holder.ExecContext(s.ctx, "SELECT 1 FROM connection_event_subscriptions WHERE id = ? FOR UPDATE", sub.ID)
+	s.Require().NoError(err)
+	ctx, cancel := context.WithTimeout(s.ctx, 500*time.Millisecond)
+	defer cancel()
+
+	err = s.store.ConnectorConnections.Delete(ctx, "acme-app", connection.ID)
+
+	s.Require().ErrorContains(err, "delete connection event subscriptions")
+	s.Require().NoError(holder.Rollback())
+	_, err = s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
+	s.Require().NoError(err, "the connection stays")
+	_, err = s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
+	s.NoError(err, "so does its subscription")
+}
+
+// strayEventSubscription stores a subscription of customer's that names connectionID, a
+// connection of another customer's, which Insert refuses: the row a delete must leave alone.
+func (s *StoreSuite) strayEventSubscription(customerID, connectionID string) ConnectionEventSubscription {
+	sub := s.subscriptionOf(customerID, connectionID)
+	// Another config, so its owner's row of the connection does not take its key.
+	sub.ConfigID = "config-stray"
+	sub.ID, sub.Arguments, sub.CreatedAt, sub.UpdatedAt = newID(), map[string]any{}, s.base, s.base
+	_, err := s.store.GlobalDB().NewInsert().Model(&sub).Exec(s.ctx)
+	s.Require().NoError(err)
+	return sub
 }
 
 // TestDeletingAUsersConnectionsUnlinksTheirAuditFromTheUser: the rows stay, with no id that
@@ -1280,14 +1066,6 @@ func (s *StoreSuite) TestConnectorConnectionQueryBudgets() {
 		s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, testSchemes, appConnection()))
 	}), "Insert")
 	s.Equal(1, s.countQueries(func() { s.storedConnection(connection.ID) }), "Get")
-	line := s.lineConnection("acme-app", lineManifest)
-	s.Equal(3, s.countQueries(func() {
-		s.Require().NoError(s.store.ConnectorConnections.SetProviderUnit(s.ctx, "acme-app", line.ID, "unit-1"))
-	}), "SetProviderUnit")
-	s.Equal(1, s.countQueries(func() {
-		_, err := s.store.ConnectorConnections.GetByProviderUnit(s.ctx, "line", "unit-1")
-		s.Require().NoError(err)
-	}), "GetByProviderUnit")
 	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.ConnectorConnections.SetTools(s.ctx, "acme-app", connection.ID, []ConnectorTool{}, "digest", now))
 	}), "SetTools")
@@ -1305,10 +1083,6 @@ func (s *StoreSuite) TestConnectorConnectionQueryBudgets() {
 		_, err := s.store.ConnectorConnections.Uses(s.ctx, "acme-app", ids)
 		s.Require().NoError(err)
 	}), "Uses")
-	s.Equal(1, s.countQueries(func() {
-		_, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-		s.Require().NoError(err)
-	}), "Referenced")
 	for _, id := range ids {
 		s.Require().NoError(s.store.ConnectorConnections.PutClient(s.ctx, "acme-app", id, ConnectorConnectionClient{
 			Registration: core.ClientDCR, ClientID: "dcr-client"}))
@@ -1350,14 +1124,20 @@ func (s *StoreSuite) TestConnectorConnectionQueryBudgets() {
 		_, err := s.store.ConnectorConnections.SelectByIdentity(s.ctx, "acme", map[string]string{"workspace": "acme"}, nil)
 		s.Require().NoError(err)
 	}), "SelectByIdentity")
-	s.Equal(1, s.countQueries(func() {
+	// BEGIN, the soft delete, the event subscriptions' delete, COMMIT.
+	s.Equal(4, s.countQueries(func() {
 		s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connections[1].ID))
 	}), "Delete")
-	s.Equal(4, s.countQueries(func() {
+	// And the lock before the soft delete.
+	s.Equal(5, s.countQueries(func() {
 		s.Require().NoError(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connections[2].ID))
 	}), "DeleteUnbound")
-	s.Equal(7, s.countQueries(func() {
+	shards := 0
+	if s.store.HasShards() {
+		shards = len(s.store.shards())
+	}
+	s.Equal(7+shards, s.countQueries(func() {
 		_, err := s.store.ConnectorConnections.DeleteUser(s.ctx, "acme-app", "alice")
 		s.Require().NoError(err)
-	}), "DeleteUser")
+	}), "DeleteUser, with a delete of its invocations in each shard")
 }

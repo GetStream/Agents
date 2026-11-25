@@ -498,8 +498,9 @@ func (s *ForgetUserSuite) TestTheAuditRowNeverNamesTheUser() {
 		counts[change.Field] = change.After.(float64)
 	}
 	s.Equal(map[string]float64{
-		"requests": 1, "branch_messages": 1, "events": 1, "windows": 4, "redis_keys": 1,
+		"requests": 1, "call_legs": 0, "branch_messages": 1, "agent_logs": 0, "events": 1, "windows": 4, "redis_keys": 1,
 		"policies_deleted": 1, "limits_deleted": 1, "resets": 1, "grants": 1, "campaigns": 1, "tasks_deleted": 1, "task_changes_redacted": 0,
+		"phones_unlinked": 0, "contacts_unlinked": 0, "channel_links_deleted": 0, "profiles_deleted": 0, "claims": 0,
 	}, counts)
 	var audits []ledger.ManageAudit
 	s.Require().NoError(s.service.Ledger.DB().NewSelect().Model(&audits).Where("action = ?", ledger.ActionForgetUser).Scan(s.ctx))
@@ -516,8 +517,10 @@ func (s *ForgetUserSuite) TestADryRunChangesNothing() {
 
 	out := s.forget(s.app, person, "--dry-run")
 
-	s.Equal("dry run, nothing is changed\nscheduled tasks: 1 to delete, 0 recorded changes to redact\nrequests: 2 rows\nbranch snapshots: 0 messages to delete\nusage service: 2 events, 4 windows\nredis: 8 keys\n"+
-		"shared database: 1 policies and 1 limits to delete; 1 resets, 1 grants and 1 campaigns to rewrite\n", out)
+	s.Equal("dry run, nothing is changed\nscheduled tasks: 1 to delete, 0 recorded changes to redact\nrequests: 2 rows\ncall legs: 0 rows\n"+
+		"branch snapshots: 0 messages to delete\nagent logs: 0 to delete\nusage service: 2 events, 4 windows\nredis: 8 keys\n"+
+		"shared database: 1 policies and 1 limits to delete; 1 resets, 1 grants and 1 campaigns to rewrite\n"+
+		"links: 0 phone links, 0 channel link codes and 0 profiles to delete; 0 contacts to unlink; 0 claimed guests to rewrite\n", out)
 	s.Equal(person, s.requests()[id].UserID)
 	s.Equal(person, s.events()[id].UserID)
 	s.Equal(len(usageservice.Intervals), s.windows(s.app, person))
@@ -683,4 +686,74 @@ func (s *ForgetUserSuite) TestForgettingAUserDeletesTheirScheduledTasks() {
 	s.ErrorIs(err, store.ErrNoScheduledTask)
 	_, err = s.shards[0].ScheduledTasks.Get(s.ctx, "other-"+s.app, "reminder")
 	s.Require().NoError(err, "the same user id in another app keeps theirs")
+}
+
+// reachedOf writes, for app's user, a call leg on each shard, an agent log, a phone link, a
+// channel link code, a contact map row linked to them and their profile.
+func (s *ForgetUserSuite) reachedOf(app, user, phone string) {
+	shared := s.shards[0]
+	for _, shard := range s.shards {
+		_, err := shard.ShardDB().NewInsert().Model(&store.CallLeg{CustomerID: app, UserID: user, CallType: "phone", CallID: "call-" + uuid.NewString(),
+			Vendor: "twilio", Direction: store.Outbound, LocalNumber: "+15550100", RemoteNumber: phone, DialedAt: time.Now()}).Exec(s.ctx)
+		s.Require().NoError(err)
+	}
+	s.Require().NoError(shared.AgentLogs.Insert(s.ctx, &store.AgentLog{CustomerID: app, UserID: user, Source: "agent", Severity: "info",
+		EventType: "turn", Message: "a turn"}))
+	s.Require().NoError(shared.UserPhones.Link(s.ctx, &store.UserPhone{CustomerID: app, UserID: user, Phone: phone}))
+	s.Require().NoError(shared.ChannelLinks.Insert(s.ctx, &store.ChannelLink{CustomerID: app, ConfigID: "agent", UserID: user,
+		ExpiresAt: time.Now().Add(time.Hour)}, func() (string, error) { return phone[len(phone)-6:], nil }))
+	s.Require().NoError(shared.ContactMapEntries.Upsert(s.ctx, &store.ContactMapEntry{CustomerID: app, ConfigID: "agent", Kind: "sms",
+		Address: phone, ConversationID: "conversation", UserID: user}))
+	s.Require().NoError(shared.Users.Insert(s.ctx, &store.User{CustomerID: app, ID: user, Kind: store.UserKindAuthenticated, Email: user}))
+}
+
+// namingRows counts, for each table that reachedOf writes, the rows of app naming user.
+func (s *ForgetUserSuite) namingRows(app, user string) map[string]int {
+	found := map[string]int{}
+	for _, shard := range s.shards {
+		count, err := shard.ShardDB().NewSelect().Model((*store.CallLeg)(nil)).Where("customer_id = ? AND user_id = ?", app, user).Count(s.ctx)
+		s.Require().NoError(err)
+		found["call_legs"] += count
+		logs, err := shard.ShardDB().NewSelect().Model((*store.AgentLog)(nil)).Where("customer_id = ? AND user_id = ?", app, user).Count(s.ctx)
+		s.Require().NoError(err)
+		found["agent_logs"] += logs
+	}
+	for table, where := range map[string]string{
+		"agent_logs": "user_id = ?", "user_phones": "user_id = ?", "channel_links": "user_id = ?", "contact_map": "user_id = ?", "users": "id = ?",
+	} {
+		var count int
+		s.Require().NoError(s.shards[0].GlobalDB().QueryRowContext(s.ctx,
+			"SELECT count(*) FROM "+table+" WHERE customer_id = ? AND "+where, app, user).Scan(&count))
+		found[table] += count
+	}
+	return found
+}
+
+func (s *ForgetUserSuite) TestForgettingAUserReachesTheirCallLegsLogsLinksAndProfile() {
+	other := "other-" + s.app
+	s.recorded(0, s.app, person, 100)
+	s.reachedOf(s.app, person, "+15550199")
+	s.reachedOf(s.app, "grace", "+15550198")
+	s.reachedOf(other, person, "+15550199")
+	every := map[string]int{"call_legs": 2, "agent_logs": 1, "user_phones": 1, "channel_links": 1, "contact_map": 1, "users": 1}
+	s.Require().Equal(every, s.namingRows(s.app, person))
+
+	dry := s.forget(s.app, person, "--dry-run")
+
+	s.Contains(dry, "\ncall legs: 2 rows\n")
+	s.Contains(dry, "\nagent logs: 1 to delete\n")
+	s.Contains(dry, "\nlinks: 1 phone links, 1 channel link codes and 1 profiles to delete; 1 contacts to unlink; 0 claimed guests to rewrite\n")
+	s.Equal(every, s.namingRows(s.app, person), "a dry run changes nothing")
+
+	out := s.forget(s.app, person)
+
+	replacement := s.forgottenAs(out)
+	s.Contains(out, "\ncall legs: 2 rows rewritten\n")
+	s.Contains(out, "\nagent logs: 1 deleted\n")
+	s.Contains(out, "\nlinks: 1 phone links, 1 channel link codes and 1 profiles deleted; 1 contacts unlinked; 0 claimed guests rewritten\n")
+	s.Equal(map[string]int{"call_legs": 0, "agent_logs": 0, "user_phones": 0, "channel_links": 0, "contact_map": 0, "users": 0},
+		s.namingRows(s.app, person))
+	s.Equal(2, s.namingRows(s.app, replacement)["call_legs"], "the legs stay, as billed, on both shards")
+	s.Equal(every, s.namingRows(s.app, "grace"), "another user keeps theirs")
+	s.Equal(every, s.namingRows(other, person), "the same user id in another app keeps theirs")
 }

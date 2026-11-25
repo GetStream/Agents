@@ -317,8 +317,12 @@ func newRouter(t *testing.T) *router {
 	mux.HandleFunc("GET /v1/agents/calls", func(w http.ResponseWriter, r *http.Request) {
 		backend.record(r)
 		calls := []acceleration.Call{}
-		if r.URL.Query().Get("session_id") == "session-1" {
+		switch r.URL.Query().Get("session_id") {
+		case "session-1":
 			calls = []acceleration.Call{{Id: "call-2", SessionId: ptr("session-1")}, {Id: "call-1", SessionId: ptr("session-1")}}
+		case "session-on-a-shard-down":
+			w.Header().Set("X-Unreachable-Shards", "there")
+			calls = []acceleration.Call{{Id: "call-1", SessionId: ptr("session-on-a-shard-down")}}
 		}
 		answer(w, http.StatusOK, calls)
 	})
@@ -1242,6 +1246,22 @@ func TestASessionsMetricsOfAnUnknownSessionAreRefused(t *testing.T) {
 	for read, err := range map[string]error{"timeline": timeline, "decisions": decisions} {
 		if !errors.Is(err, ErrNoCall) {
 			t.Errorf("the %s of an unknown session came back as %v, want ErrNoCall", read, err)
+		}
+	}
+}
+
+// Defect: a call list missing a shard's calls is read as whole, so a session's metrics come
+// from an older call while its newest is on the shard that did not answer.
+func TestASessionsMetricsWithAShardDownAreRefused(t *testing.T) {
+	backend := newRouter(t)
+	sessions := backend.client(t).Agent("docs").Sessions
+
+	_, timeline := sessions.Timeline(t.Context(), "session-on-a-shard-down")
+	_, decisions := sessions.Decisions(t.Context(), "session-on-a-shard-down")
+
+	for read, err := range map[string]error{"timeline": timeline, "decisions": decisions} {
+		if err == nil || errors.Is(err, ErrNoCall) || !strings.Contains(err.Error(), "there") {
+			t.Errorf("the %s of a session with a shard down came back as %v, want the shard named", read, err)
 		}
 	}
 }

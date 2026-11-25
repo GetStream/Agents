@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
@@ -472,11 +473,13 @@ func (s *DigestSuite) TestActivityIsDeletedWithoutASlackAndNothingIsPosted() {
 	s.Require().NoError(err)
 	s.Require().True(claimed)
 	for daysAgo, cost := range []int64{40_000_000, 4_000_000, 4_000_000, 4_000_000, 4_000_000, 4_000_000, 4_000_000, 4_000_000} {
-		s.Require().NoError(s.db.Requests.Insert(s.ctx, &store.Request{
-			Modality: "llm", CustomerID: "app-" + pinned, OrganizationID: pinned, Provider: "openai", Model: "m",
+		_, err := s.db.Requests.InsertMany(s.ctx, []store.Request{{
+			UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app-" + pinned, OrganizationID: pinned,
+			Provider: "openai", Model: "m",
 			StartedAt: time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC).AddDate(0, 0, -daysAgo), CostMicros: cost,
 			Billable: true, Success: true,
-		}))
+		}})
+		s.Require().NoError(err)
 	}
 
 	anomalies := NewAnomalies(AnomalyOptions{

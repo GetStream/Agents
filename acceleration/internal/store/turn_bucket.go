@@ -3,7 +3,6 @@ package store
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -148,12 +147,38 @@ ON CONFLICT (customer_id, agent_id, bucket, leg, bin) DO UPDATE SET
 // starts in. A day is those hours of one UTC day, as the request statistics' day is the
 // window's part of it, whatever the server's time zone.
 func (r *TurnBuckets) Select(ctx context.Context, customerID string, f TurnBucketFilter) ([]TurnBucket, error) {
+	return r.selected(ctx, customerID, f, false)
+}
+
+// Shipped is Select read from the copies every shard shipped to the shared database
+// (Store.ShipStats), so a shard that is down does not fail it and no other shard is read. It is
+// as the hours were at the last ship, a minute old at most while the shard ships.
+func (r *TurnBuckets) Shipped(ctx context.Context, customerID string, f TurnBucketFilter) ([]TurnBucket, error) {
+	return r.selected(ctx, customerID, f, true)
+}
+
+// turnTables reads every shard's turn tables, or with shipped their copies in the shared
+// database, where one read sums every shard's rows.
+func turnTables[T any](ctx context.Context, s *Store, shipped bool, read func(ctx context.Context, db bun.IDB, counts, bins string) (T, error)) ([]T, error) {
+	if shipped {
+		found, err := read(ctx, s.global, shippedTurns.name, shippedLatency.name)
+		if err != nil {
+			return nil, err
+		}
+		return []T{found}, nil
+	}
+	return everyShard(ctx, s, func(ctx context.Context, db bun.IDB) (T, error) {
+		return read(ctx, db, "turn_stats_hourly", "turn_latency_hourly")
+	})
+}
+
+func (r *TurnBuckets) selected(ctx context.Context, customerID string, f TurnBucketFilter, shipped bool) ([]TurnBucket, error) {
 	granularity, agentID, from, to := f.Granularity, f.AgentID, f.From, f.To
 	if !granularity.Valid() {
 		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	bucket := fmt.Sprintf("date_trunc('%s', bucket, 'UTC')", granularity.truncateUnit())
 
@@ -168,9 +193,9 @@ func (r *TurnBuckets) Select(ctx context.Context, customerID string, f TurnBucke
 		buckets []TurnBucket
 		bins    []binRow
 	}
-	answers, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (shardRows, error) {
+	answers, err := turnTables(ctx, r.store, shipped, func(ctx context.Context, db bun.IDB, countsTable, binsTable string) (shardRows, error) {
 		counts := db.NewSelect().
-			Table("turn_stats_hourly").
+			Table(countsTable).
 			ColumnExpr("customer_id, agent_id").
 			ColumnExpr(bucket+" AS bucket").
 			ColumnExpr("SUM(turn_count) AS turn_count").
@@ -181,7 +206,7 @@ func (r *TurnBuckets) Select(ctx context.Context, customerID string, f TurnBucke
 			GroupExpr("customer_id, agent_id, " + bucket).
 			OrderExpr(bucket + " ASC, agent_id ASC")
 		bins := db.NewSelect().
-			Table("turn_latency_hourly").
+			Table(binsTable).
 			ColumnExpr("agent_id, leg, bin").
 			ColumnExpr(bucket+" AS bucket").
 			ColumnExpr("SUM(count) AS count").
@@ -282,15 +307,25 @@ type LegLatency struct {
 // Latency is how long the turns apps started from the hour of since on took, every agent of
 // theirs and every shard summed, one per leg in the order of turnLegs.
 func (r *TurnBuckets) Latency(ctx context.Context, apps []string, since time.Time) ([]LegLatency, error) {
+	return r.latency(ctx, apps, since, false)
+}
+
+// ShippedLatency is Latency read from the copies every shard shipped to the shared database,
+// as Shipped is.
+func (r *TurnBuckets) ShippedLatency(ctx context.Context, apps []string, since time.Time) ([]LegLatency, error) {
+	return r.latency(ctx, apps, since, true)
+}
+
+func (r *TurnBuckets) latency(ctx context.Context, apps []string, since time.Time, shipped bool) ([]LegLatency, error) {
 	type binRow struct {
 		Leg   string `bun:"leg"`
 		Bin   int    `bun:"bin"`
 		Count int64  `bun:"count"`
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]binRow, error) {
+	lists, err := turnTables(ctx, r.store, shipped, func(ctx context.Context, db bun.IDB, _, binsTable string) ([]binRow, error) {
 		var bins []binRow
 		err := db.NewSelect().
-			Table("turn_latency_hourly").
+			Table(binsTable).
 			ColumnExpr("leg, bin, SUM(count) AS count").
 			Where("customer_id IN (?)", bun.In(apps)).
 			Where("bucket >= ?", since.UTC().Truncate(time.Hour)).
