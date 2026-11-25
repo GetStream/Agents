@@ -12814,7 +12814,7 @@ pub struct SkillRequest {
     pub files: ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
     ///The full prompt, which only the subagent sees.
     pub instructions: ::std::string::String,
-    ///How the config names it, which is unique among that config's own skills.
+    ///How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox.
     pub name: ::std::string::String,
 }
 ///`SkippedVendor`

@@ -392,7 +392,7 @@ func (s *Sandbox) Write(ctx context.Context, name string, data []byte) error {
 		write, end := context.WithTimeout(ctx, s.check)
 		defer end()
 		if dir := path.Dir(name); dir != "." {
-			made, err := s.box.Process.ExecuteCommand(write, "mkdir -p "+quoted(dir), options.WithCommandEnv(s.mount.RunEnv))
+			made, err := s.box.Process.ExecuteCommand(write, "mkdir -p -- "+quoted(dir), options.WithCommandEnv(s.mount.RunEnv))
 			if err != nil {
 				return stack.Wrap(err)
 			}

@@ -15060,7 +15060,7 @@ namespace GetStream.VisionAgents.Models
         public string Instructions { get; set; } = default!;
 
         /// <summary>
-        /// How the config names it, which is unique among that config's own skills.
+        /// How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("name")]
         public string Name { get; set; } = default!;

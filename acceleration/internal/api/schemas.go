@@ -1310,7 +1310,7 @@ type SkillRequest struct {
 	Description  string             `json:"description" doc:"The one line the fast model sees."`
 	Files        *map[string]string `json:"files,omitempty" doc:"The rest of the skill's folder beside SKILL.md, each file's text by its path relative to the folder, such as reference/forms.md or scripts/fill.py. The model reads them one at a time when it needs them. A file that is not .md, .mdx or .txt is a script, run in the sandbox, so a skill with one belongs only to an agent with a sandbox. At most 64 files and 1 MB in all."`
 	Instructions string             `json:"instructions" doc:"The full prompt, which only the subagent sees."`
-	Name         string             `json:"name" doc:"How the config names it, which is unique among that config's own skills."`
+	Name         string             `json:"name" doc:"How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \\ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox."`
 }
 
 // Speech is the Speech schema.

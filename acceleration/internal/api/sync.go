@@ -351,6 +351,11 @@ func (s *Server) trySyncAgent(ctx context.Context, request *syncAgentRequest) (*
 	for _, skill := range skills {
 		named = append(named, strings.TrimSpace(skill.Name))
 	}
+	if message, ok, err := s.newSkillNamesComplaint(ctx, customerID, existing.ID, named); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, invalidRequest(message)
+	}
 
 	// Before anything is written, and before the knowledge is filled: a caller that asked
 	// to be told is told instead of having its answer half applied. What the sync would

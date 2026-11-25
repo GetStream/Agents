@@ -10416,7 +10416,7 @@ export type components = {
             };
             /** @description The full prompt, which only the subagent sees. */
             readonly instructions: string;
-            /** @description How the config names it, which is unique among that config's own skills. */
+            /** @description How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox. */
             readonly name: string;
         };
         readonly SkippedVendor: {
