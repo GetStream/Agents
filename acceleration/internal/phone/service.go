@@ -1396,6 +1396,9 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	if errors.Is(err, store.ErrCallsAtOnce) {
 		return Placed{}, room.Refusal(err)
 	}
+	if errors.Is(err, store.ErrCallUnchecked) {
+		s.logger.Warn("refused a phone call: could not tell whose its call is", "session", sessionID, "customer", request.Owner.CustomerID, "error", err)
+	}
 	if errors.Is(err, store.ErrCallTaken) || errors.Is(err, store.ErrCallUnchecked) {
 		return Placed{}, err
 	}

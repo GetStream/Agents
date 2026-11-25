@@ -5,6 +5,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -411,6 +412,23 @@ func (s *DirectorySuite) TestARenewalAnotherCustomersHoldRefusesIsLogged() {
 	s.Contains(logged.String(), s.prefix+":call:7:order-42")
 }
 
+// A session Redis could not be told of is logged.
+func (s *DirectorySuite) TestASessionThatCannotBeSaidIsLogged() {
+	var logged bytes.Buffer
+	client, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{os.Getenv("ROUTER_REDIS_ADDR")}, DisableCache: true})
+	s.Require().NoError(err)
+	directory, err := NewDirectory(DirectoryOptions{
+		Redis: client, Address: "node-a:1", Prefix: s.prefix, Logger: slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	s.Require().NoError(err)
+	directory.Close()
+	client.Close()
+
+	directory.Hold(s.ctx, "acme", 7, "order-42", "", "")
+
+	s.Equal(1, strings.Count(logged.String(), "could not say this node is running a session"))
+}
+
 // A client redialling a Redis that does not answer keeps every caller on the connection waiting
 // for the dial of another: one with less time is answered in its own all the same.
 func (s *DirectorySuite) TestACallerIsAnsweredInTimeBesideAnothersRedial() {
@@ -455,15 +473,26 @@ func (s *DirectorySuite) TestACallerIsAnsweredInTimeBesideAnothersRedial() {
 	hung.Store(true)
 	redialling, stop := context.WithTimeout(s.ctx, 20*time.Second)
 	defer stop()
-	go func() {
-		for redialling.Err() == nil {
-			_, _ = directory.Node(redialling, "acme", "order-42")
-		}
-	}()
+	// The client has several connections, and a key is always asked of the same one: these are
+	// enough keys for every connection to be redialled.
+	for i := range 32 {
+		go func() {
+			for redialling.Err() == nil {
+				_, _ = directory.Node(redialling, "acme", fmt.Sprintf("order-%d", i))
+			}
+		}()
+	}
 	select {
 	case <-dialled:
 	case <-time.After(10 * time.Second):
 		s.FailNow("nobody redialled")
+	}
+	for more := true; more; {
+		select {
+		case <-dialled:
+		case <-time.After(300 * time.Millisecond):
+			more = false
+		}
 	}
 
 	for what, call := range map[string]func(){
