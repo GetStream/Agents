@@ -61,6 +61,7 @@ func (s *PlacesSuite) TestACustomerWithAllItsPlacesIsToldSoOnAFullRunner() {
 	s.together("a", "a", "a", "a", "b", "b", "b", "b")
 
 	s.ErrorIs(s.runner.take("a"), ErrCustomerBusy)
+	s.ErrorIs(s.runner.take("c"), ErrBusy)
 }
 
 func (s *PlacesSuite) TestAPlaceLeftIsGivenAgainAndACustomerWithNoneIsForgotten() {
@@ -73,6 +74,17 @@ func (s *PlacesSuite) TestAPlaceLeftIsGivenAgainAndACustomerWithNoneIsForgotten(
 		s.runner.leave("a")
 	}
 	s.Empty(s.runner.places)
+}
+
+func (s *PlacesSuite) TestACancelledRunKeepsItsPlaceWhileItsConversationsEnd() {
+	s.together("a", "a", "a", "a")
+	stopped, cancel := context.WithCancel(s.T().Context())
+	s.runner.running["run"] = cancel
+
+	s.runner.forget("run")
+
+	s.Error(stopped.Err())
+	s.ErrorIs(s.runner.take("a"), ErrCustomerBusy)
 }
 
 func (s *PlacesSuite) TestAClosedRunnerGivesNoPlace() {
