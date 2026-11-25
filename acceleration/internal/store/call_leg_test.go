@@ -1150,6 +1150,10 @@ func (s *StoreSuite) TestNamedCallsOfNoOrganizationArePlacedBesideEachOther() {
 // Named calls whose hold is not answered give up, and hold up no other placement meanwhile.
 func (s *StoreSuite) TestNamedCallsNotAnsweredHoldUpNoOtherPlacement() {
 	router := s.ownRouter()
+	if router.shard != router.global {
+		// Each claim holds a connection of the shared database, which is what is tested.
+		router.shard.SetMaxOpenConns(1)
+	}
 	on := NamedCall{Scope: AppScope{Unpinned: true}}
 	var holding atomic.Int64
 	var wg sync.WaitGroup
@@ -1233,4 +1237,22 @@ func (s *StoreSuite) TestANamedCallWaitingOnItsCallHoldsUpNoOtherPlacementOfItsO
 	close(release)
 	s.NoError(<-held)
 	s.NoError(<-waiting)
+}
+
+// A call whose homes cannot be read is not claimed.
+func (s *ShardedStoreSuite) TestACallWhoseHomesCannotBeReadIsNotClaimed() {
+	_, err := s.store.global.ExecContext(s.ctx, "ALTER TABLE call_homes RENAME TO call_homes_unmigrated")
+	s.Require().NoError(err)
+	defer func() {
+		_, err := s.store.global.ExecContext(context.WithoutCancel(s.ctx), "ALTER TABLE call_homes_unmigrated RENAME TO call_homes")
+		s.Require().NoError(err)
+	}()
+	held := false
+
+	s.Error(s.store.CallLegs.Claim(s.ctx, "mine", "agent", "call", NamedCall{Scope: AppScope{Unpinned: true}}, func(context.Context) error {
+		held = true
+		return nil
+	}))
+
+	s.False(held)
 }
