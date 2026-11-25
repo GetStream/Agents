@@ -334,9 +334,6 @@ public struct ForkOptions: Sendable {
     public var projectID: String?
     /// The fork's own labels, in place of the parent's.
     public var custom: [String: RawJSON]?
-    /// What to change about the models for the fork alone, which is the usual reason to fork:
-    /// asking the same question of another model.
-    public var modelOverwrites: ModelOverwrites?
     /// Keeps the fork off the record. The parent is kept as it was.
     public var incognito: Bool?
     /// Start the fork with none of the parent's history. Cannot be combined with
@@ -345,65 +342,6 @@ public struct ForkOptions: Sendable {
 
     public init(responseID: String? = nil) {
         self.responseID = responseID
-    }
-}
-
-/// What to change about the models for one conversation, over whatever its config decided.
-///
-/// `nil` leaves a field to the config. Instructions and tools are not here: a device that could
-/// rewrite those could make the agent another one.
-public struct ModelOverwrites: Sendable, Hashable {
-    /// A provider/model or a capability shortcut.
-    public var llm: String?
-    public var stt: String?
-    public var tts: String?
-    /// A speech-to-speech target, which opens no transcriber, model or voice.
-    public var sts: String?
-    public var search: String?
-    /// How hard the model reasons before answering. A model that does not reason ignores it.
-    public var thinking: Thinking?
-    /// Zero is a real request for a deterministic model, which nil is not.
-    public var temperature: Double?
-    /// Caps every reply, reasoning included.
-    public var maxOutputTokens: Int?
-    /// How much detail to give. A model that does not take it ignores it.
-    public var verbosity: Verbosity?
-
-    public enum Thinking: String, Sendable {
-        case none
-        case minimal
-        case low
-        case medium
-        case high
-    }
-
-    public enum Verbosity: String, Sendable {
-        case low
-        case medium
-        case high
-    }
-
-    public init(
-        llm: String? = nil, stt: String? = nil, tts: String? = nil, sts: String? = nil,
-        search: String? = nil, thinking: Thinking? = nil, temperature: Double? = nil,
-        maxOutputTokens: Int? = nil, verbosity: Verbosity? = nil
-    ) {
-        self.llm = llm
-        self.stt = stt
-        self.tts = tts
-        self.sts = sts
-        self.search = search
-        self.thinking = thinking
-        self.temperature = temperature
-        self.maxOutputTokens = maxOutputTokens
-        self.verbosity = verbosity
-    }
-
-    var schema: ModelOverwritesPayload {
-        .init(
-            llm: llm, maxOutputTokens: maxOutputTokens, search: search, sts: sts, stt: stt,
-            temperature: temperature, thinking: thinking.map { .init(rawValue: $0.rawValue) }, tts: tts,
-            verbosity: verbosity.map { .init(rawValue: $0.rawValue) })
     }
 }
 
