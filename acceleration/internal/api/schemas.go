@@ -122,6 +122,7 @@ type Call struct {
 	Llm          *string            `json:"llm,omitempty" doc:"The target that held the conversation."`
 	LlmUsed      *string            `json:"llm_used,omitempty" doc:"The provider/model that held the conversation."`
 	Mode         *SessionMode       `json:"mode,omitempty"`
+	Region       *string            `json:"region,omitempty" readOnly:"true" doc:"The shard the call is kept in. Set on a listed call of a deployment with shards."`
 	ReviewNotes  *string            `json:"review_notes,omitempty"`
 	ReviewScore  *int               `json:"review_score,omitempty" doc:"How well the agent handled it, from 1 to 5."`
 	SessionId    *string            `json:"session_id,omitempty" doc:"The session the call was part of. A session starts a new call each time voice is started or stopped on it. Absent once the session is deleted."`
@@ -281,7 +282,7 @@ type CreateSessionRequest struct {
 	ResumeHistory        *ResumeHistory     `json:"resume_history,omitempty" doc:"How a conversation this session carries on is handed back to the model, over the agent config's and the app's and organization's policy, field by field: a field given here wins, one left out keeps the next level's. The session keeps what it was opened with, so reopening it after it ended reads the conversation the same way. Server-side only: a device sending it is refused with a 403, because what the model is sent is billed to the app."`
 	Navigating           *bool              `json:"navigating,omitempty" doc:"The agent placed this call, so let recordings finish and answer their menus." default:"false"`
 	Phone                *SessionPhone      `json:"phone,omitempty" doc:"Server-side only: a device sending it is refused with a 403."`
-	ProjectId            *string            `json:"project_id,omitempty" doc:"What the conversation belongs to. Also recorded as the \"project\" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins."`
+	ProjectId            *string            `json:"project_id,omitempty" doc:"What the conversation belongs to. Sent server-side it is also recorded as the \"project\" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in tags, or the agent config's, wins. A device's groups the session and is no cost tag."`
 	ReturnUrl            *string            `json:"return_url,omitempty" doc:"The app's own page a login or step-up the chat asks for goes back to, as createAuthorization's return_url: the launch page takes the handoff only from a page of its origin, and the browser comes back to it with connection_id and status added to its query. The same rules as createAuthorization's return_url apply, and a URL they refuse is answered with a 400 invalid_request naming the rule (an error frame on the session socket). Absent or empty, those consents go back to the dashboard. It is kept with the session, so a chat carried on after it ended and a fork go back to it too. An end user's device may send it: a consent the chat asks for is only ever for the caller's own connection, shown to the caller alone, and bound to the first browser that hands it off, so the URL only decides where the caller's own consent lands."`
 	Search               *string            `json:"search,omitempty" doc:"Omit it and the config decides, or search-fast when there is no config. Server-side only: a device sending it is refused with a 403."`
 	StartVoice           *bool              `json:"start_voice,omitempty" doc:"Start voice as the session opens, as startSessionVoice does: the agent joins the call named in call, else agent:<session id>, which joining creates, and returns once it is there. Left out, the conversation is held in writing until voice is started." default:"false"`
@@ -784,6 +785,7 @@ type RouterConfig struct {
 	Sts       *StsOptions    `json:"sts,omitempty"`
 	Stt       *SttOptions    `json:"stt,omitempty"`
 	Tts       *TtsOptions    `json:"tts,omitempty"`
+	SyncHash  string         `json:"sync_hash,omitempty" readOnly:"true" doc:"The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync."`
 	UpdatedAt time.Time      `json:"updated_at"`
 }
 
@@ -855,6 +857,7 @@ type Session struct {
 	ModelOverwrites  *ModelOverwrites        `json:"model_overwrites,omitempty"`
 	PinnedAt         *time.Time              `json:"pinned_at,omitempty" doc:"When the session was pinned. Absent for one that is not pinned."`
 	ProjectId        *string                 `json:"project_id,omitempty"`
+	Region           *string                 `json:"region,omitempty" readOnly:"true" doc:"The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards."`
 	ReviewNotes      *string                 `json:"review_notes,omitempty" doc:"Why the review scored the conversation as it did. Read by a backend only."`
 	ReviewScore      *int                    `json:"review_score,omitempty" doc:"How well the agent handled the conversation, from 1 to 5, written a few seconds after it ended. Read by a backend only."`
 	State            SessionState            `json:"state"`
@@ -1309,7 +1312,7 @@ type SkillRequest struct {
 	Description  string             `json:"description" doc:"The one line the fast model sees."`
 	Files        *map[string]string `json:"files,omitempty" doc:"The rest of the skill's folder beside SKILL.md, each file's text by its path relative to the folder, such as reference/forms.md or scripts/fill.py. The model reads them one at a time when it needs them. A file that is not .md, .mdx or .txt is a script, run in the sandbox, so a skill with one belongs only to an agent with a sandbox. At most 64 files and 1 MB in all."`
 	Instructions string             `json:"instructions" doc:"The full prompt, which only the subagent sees."`
-	Name         string             `json:"name" doc:"How the config names it, which is unique among that config's own skills."`
+	Name         string             `json:"name" doc:"How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \\ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox."`
 }
 
 // Speech is the Speech schema.

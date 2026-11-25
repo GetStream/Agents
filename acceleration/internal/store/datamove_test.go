@@ -1821,6 +1821,43 @@ func (s *DataMoveSuite) TestADeletedTaskIsReplayedUnderTheIDTheAppMovedTo() {
 	s.Equal([]string{"kept"}, left)
 }
 
+// The changes of a task deleted, or pruned, before its follower read them are deletes, which
+// replayed, twice too, leave the follower neither the task nor its run, and the rest as it was.
+func (s *DataMoveSuite) TestAFollowerThatHasNotReadATaskDeletedOrPrunedReplaysItsDelete() {
+	s.capture("acme")
+	s.seedScheduledTask("kept", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("moved", "acme", ScheduledTaskCompleted)
+	cursor := s.move("acme", "moved")
+	s.seedScheduledTask("unread", "acme", ScheduledTaskCompleted)
+	s.seedScheduledTask("deleted", "acme", ScheduledTaskActive)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"UPDATE scheduled_task_runs SET prompt = 'words', finished_at = now() - interval '91 days' WHERE task_id <> 'kept'")
+	s.Require().NoError(err)
+	_, err = s.source.GlobalDB().ExecContext(s.ctx,
+		"UPDATE scheduled_tasks SET updated_at = now() - interval '91 days' WHERE state = 'completed'")
+	s.Require().NoError(err)
+	s.Require().NoError(s.source.ScheduledTasks.Delete(s.ctx, "acme", "deleted"))
+	_, tasks, err := s.source.ScheduledTasks.Prune(s.ctx)
+	s.Require().NoError(err)
+	s.Require().EqualValues(2, tasks)
+
+	for range 2 {
+		s.replay(s.destination, "acme", "moved", cursor)
+
+		var left []string
+		s.Require().NoError(s.destination.GlobalDB().NewRaw(
+			"SELECT id FROM scheduled_tasks UNION ALL SELECT id FROM scheduled_task_runs").Scan(s.ctx, &left))
+		s.Equal([]string{"kept", "kept-run"}, left)
+	}
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 1000)
+	s.Require().NoError(err)
+	s.Require().NotEmpty(changes)
+	for _, change := range changes {
+		s.Equal(ChangeDelete, change.Op, string(change.Key))
+		s.Empty(change.Payload)
+	}
+}
+
 // An organization's policy is recorded under its id, which can be an app's too.
 func (s *DataMoveSuite) TestAnOrganizationsPolicyIsNotReplayedOverTheAppsOfTheSameID() {
 	s.capture("acme")
@@ -2172,6 +2209,25 @@ func (s *DataMoveSuite) TestAReplayedRouterConfigChangeIsServedRightAfterIt() {
 	config, err := destination.RouterConfigs.Get(s.ctx, app, id)
 	s.Require().NoError(err)
 	s.Equal("slow", config.Name)
+}
+
+// TestARouterConfigFromAReleaseBeforeSyncHashesImportsWithNone: an export from before
+// sync_hash has no such key, and its row written over one synced here leaves no hash a sync
+// did not write.
+func (s *DataMoveSuite) TestARouterConfigFromAReleaseBeforeSyncHashesImportsWithNone() {
+	id := newID()
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO router_configs (id, customer_id, name, sync_hash) VALUES (?, 'moved', ?, 'hash-one')", id, "synced-"+id[:8])
+	s.Require().NoError(err)
+	row := `{"id": "` + id + `", "customer_id": "moved", "name": "old-` + id[:8] + `", "stt": {}, "tts": {}, "llm": {}, "sts": {}, "search": {},
+	  "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z"}`
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", "router_configs", json.RawMessage(row)))
+
+	config, err := s.destination.RouterConfigs.Get(s.ctx, "moved", id)
+	s.Require().NoError(err)
+	s.Equal("old-"+id[:8], config.Name)
+	s.Empty(config.SyncHash)
 }
 
 func (s *DataMoveSuite) TestASkillMovedByAReplayLeavesItsOldConfig() {
@@ -2646,6 +2702,80 @@ func (s *DataMoveSuite) TestAnImportedRowCannotChooseItsStreamApp() {
 	s.Equal(ForeignStreamApp, *s.pinOnDestination(unpinned), "an unpinned row was in somebody's deployment app, not this customer's")
 }
 
+// A session's project tag moves with it, there and back, as a row and as a change. A row of a
+// source from before it was kept arrives not knowing.
+func (s *DataMoveSuite) TestASessionsProjectTagMovesWithIt() {
+	for id, tag := range map[string]*string{"backends": new("alpha"), "devices": new(""), "before": nil} {
+		s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{
+			ID: id, CustomerID: "acme", Project: "alpha", ProjectTag: tag, AgentID: "agent", UserID: "user",
+		}))
+	}
+
+	s.capture("acme")
+	cursor := s.move("acme", "acme")
+	s.assertProjectTags(s.destination)
+	_, err := s.source.shard.NewUpdate().Model((*AgentSession)(nil)).
+		Set("title = 'renamed'").Where("customer_id = 'acme'").Exec(s.ctx)
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "acme", cursor)
+	s.assertProjectTags(s.destination)
+	for _, row := range s.exportFrom(s.destination, "acme").of("agent_sessions") {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+		s.Require().NoError(s.source.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
+	}
+	s.assertProjectTags(s.source)
+
+	s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "acme", Project: "alpha", ProjectTag: new("alpha")}))
+	s.Require().NoError(s.destination.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "acme", ProjectTag: new("")}))
+	s.move("acme", "acme")
+	moved, err := s.destination.Sessions.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Equal(new("alpha"), moved.ProjectTag, "the tag that arrives stands over the one here")
+
+	older := s.export("acme").of("agent_sessions")[0]
+	delete(older, "project_tag")
+	older["id"], older["caller_kind"] = "older", "server"
+	encoded, err := json.Marshal(older)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
+	arrived, err := s.destination.Sessions.Get(s.ctx, "acme", "older")
+	s.Require().NoError(err)
+	s.Nil(arrived.ProjectTag)
+	s.Equal("alpha", arrived.TaggedProject())
+}
+
+// A session carried on in another shard is exported as a row of each shard, under one id. The one
+// that does not say its project tag takes it from neither the copy nor the change of the one that does.
+func (s *DataMoveSuite) TestASessionsTwoRowsArriveWithTheProjectTagOneSays() {
+	s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "acme", Project: "alpha", CallerKind: "server"}))
+	row := s.export("acme").of("agent_sessions")[0]
+	for id, tags := range map[string][]any{"said first": {"", nil}, "said last": {nil, ""}} {
+		for _, tag := range tags {
+			row["id"], row["project_tag"] = id, tag
+			encoded, err := json.Marshal(row)
+			s.Require().NoError(err)
+			s.Require().NoError(s.destination.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
+			s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme",
+				[]DataChange{{Table: "agent_sessions", Op: "update", Payload: encoded}}))
+		}
+
+		arrived, err := s.destination.Sessions.Get(s.ctx, "acme", id)
+		s.Require().NoError(err)
+		s.Equal(new(""), arrived.ProjectTag, id)
+	}
+}
+
+func (s *DataMoveSuite) assertProjectTags(store *Store) {
+	for id, want := range map[string]string{"backends": `"alpha"`, "devices": `""`, "before": "null"} {
+		row, err := store.Sessions.Get(s.ctx, "acme", id)
+		s.Require().NoError(err)
+		got, err := json.Marshal(row.ProjectTag)
+		s.Require().NoError(err)
+		s.Equal(want, string(got), id)
+	}
+}
+
 func (s *DataMoveSuite) TestAnExportNamesTheAppANullPinMeant() {
 	// NULL is the app of whichever deployment wrote it, which means nothing elsewhere.
 	s.source.SetStreamPins(StreamPins{Deployment: func() int64 { return 1 }})
@@ -2941,7 +3071,7 @@ func (s *DataMoveSuite) TestAnImportedDefinitionWhoseIDIsNoStringIsRefused() {
 }
 
 func (s *DataMoveSuite) TestAChangeCarryingADefinitionTheAPIWouldRefuseIsRefused() {
-	id := "custom_" + newID()
+	id := "custom_a" + newID()
 	manifest := strings.Replace(customManifestWith(`"client": {"registration": ["operator"], "env": "GOOGLE"}, "schemes": ["oauth2_code"]`),
 		"custom_acme", id, 1)
 
@@ -2950,6 +3080,75 @@ func (s *DataMoveSuite) TestAChangeCarryingADefinitionTheAPIWouldRefuseIsRefused
 
 	s.ErrorIs(err, ErrNotACustomConnector)
 	s.Zero(s.definitionsNamed(id))
+}
+
+// A change recorded by a release before sync hashes carries no sync_hash key.
+func (s *DataMoveSuite) TestADefinitionChangeFromAReleaseBeforeSyncHashesApplies() {
+	id := "custom_a" + newID()
+	manifest := strings.Replace(customAcme, "custom_acme", id, 1)
+
+	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: "connector_definitions", Op: ChangeInsert,
+		Payload: json.RawMessage(`{"id": "` + id + `", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + manifest + `}`)}})
+
+	s.Require().NoError(err)
+	s.Equal(1, s.definitionsNamed(id))
+}
+
+// An export from before custom connectors lost oauth2_client_credentials may hold a definition
+// with it, which no connection could use: the import skips it and writes every other row.
+func (s *DataMoveSuite) TestAnImportSkipsAClientCredentialsDefinitionAndWritesTheRest() {
+	skipped, err := s.importDefinition(customManifestWith(`"schemes": ["oauth2_client_credentials"]`))
+	s.Require().NoError(err)
+	written, err := s.importDefinition(customAcme)
+	s.Require().NoError(err)
+
+	s.Zero(s.definitionsNamed(skipped))
+	s.Equal(1, s.definitionsNamed(written))
+}
+
+// A page of changes holding such a definition applies, all but that row.
+func (s *DataMoveSuite) TestAChangePageWithAClientCredentialsDefinitionAppliesTheRest() {
+	change := func(manifest string) (string, DataChange) {
+		id := "custom_a" + newID()
+		manifest = strings.Replace(manifest, "custom_acme", id, 1)
+		return id, DataChange{Table: "connector_definitions", Op: ChangeInsert, Payload: json.RawMessage(`{"id": "` + id +
+			`", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + manifest + `}`)}
+	}
+	before, first := change(customAcme)
+	skipped, second := change(customManifestWith(`"schemes": ["oauth2_code", "oauth2_client_credentials"], "client": {"registration": ["customer"]}`))
+	after, third := change(customAcme)
+
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "moved", []DataChange{first, second, third}))
+
+	s.Equal(1, s.definitionsNamed(before))
+	s.Zero(s.definitionsNamed(skipped))
+	s.Equal(1, s.definitionsNamed(after))
+}
+
+// The API's limits hold for an imported definition, which is refused naming its id.
+func (s *DataMoveSuite) TestAnImportedDefinitionPastAnAPILimitIsRefused() {
+	id, err := s.importDefinition(customManifestWith(`"name": "` + strings.Repeat("a", 121) + `"`))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, id)
+	s.Zero(s.definitionsNamed(id))
+}
+
+// A definition at every limit imports: 64 characters of id, 120 of name in two-byte characters,
+// a scope of each edge of RFC 6749's scope-token and a sync hash of 128.
+func (s *DataMoveSuite) TestAnImportedDefinitionAtTheAPIsLimitsImports() {
+	id := "custom_a" + strings.Repeat("b", 56)
+	name := strings.Repeat("é", 120)
+	row := `{"id": "` + id + `", "revision": 1, "name": "` + name + `", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z",
+		"sync_hash": "` + strings.Repeat("!~", 64) + `", "manifest": ` + strings.Replace(customManifestWith(`"name": "`+name+`", "scopes": {"list": ["!", "#", "[", "]", "~"]}`),
+		"custom_acme", id, 1) + `}`
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", "connector_definitions", json.RawMessage(row)))
+
+	definition, err := s.destination.ConnectorDefinitions.Latest(s.ctx, "moved", id)
+	s.Require().NoError(err)
+	s.Equal(name, definition.Name)
+	s.Equal(strings.Repeat("!~", 64), definition.SyncHash)
 }
 
 // customAcme is a manifest the API stores for a custom connector custom_acme: an MCP server
@@ -2976,7 +3175,7 @@ func (s *DataMoveSuite) importDefinitionRow(manifest string) (string, error) {
 }
 
 func (s *DataMoveSuite) importDefinitionWith(manifest func(id string) string) (string, error) {
-	id := "custom_" + newID()
+	id := "custom_a" + newID()
 	row := `{"customer_id": "moved", "id": "` + id + `", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", ` + manifest(id) + `}`
 	return id, s.destination.ImportRow(s.ctx, "moved", "connector_definitions", json.RawMessage(row))
 }
@@ -4209,14 +4408,14 @@ func (s *DataMoveSuite) TestAContactMidCallIsSettledHereFromItsCallOnceTheMoveIs
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT EXTRACT(EPOCH FROM lease_until - now()) FROM campaign_contacts WHERE campaign_id = ? AND to_number = ?", campaign, "+15550000001").Scan(&left))
 	s.Less(left, -(24 * time.Hour).Seconds(), "ended on Postgres's clock, also when the clock of this router is ahead")
-	taken, err := s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", time.Hour, 10)
+	taken, err := s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", ShardClaim{}, time.Hour, 10)
 	s.Require().NoError(err)
 	s.Empty(taken, "the source is still ringing it until the cut-over")
 	_, campaigns := s.resume("moved")
 	s.Require().Equal([]string{campaign}, campaigns)
 	s.Require().NoError(s.destination.Campaigns.Resume(s.ctx, "moved", campaign))
 
-	taken, err = s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", time.Hour, 10)
+	taken, err = s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", ShardClaim{}, time.Hour, 10)
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1, "settled from its call rather than rung again at once")
 	ada := taken[0].Contact
@@ -4323,7 +4522,7 @@ func (s *DataMoveSuite) dueOnSource() string {
 // ringOnSource rings the source's next due contact, as a runner there does, and returns it in
 // a call.
 func (s *DataMoveSuite) ringOnSource() Contact {
-	claimed, err := s.source.CampaignContacts.Claim(s.ctx, "router-a", time.Now(), time.Hour, 1)
+	claimed, err := s.source.CampaignContacts.Claim(s.ctx, "router-a", ShardClaim{}, time.Now(), time.Hour, 1)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	return claimed[0].Contact
@@ -4338,7 +4537,7 @@ func (s *DataMoveSuite) hangUpOnSource(contact Contact) {
 // there rings first.
 func (s *DataMoveSuite) resumeHere(campaign string) []Contact {
 	s.Require().NoError(s.destination.Campaigns.Resume(s.ctx, "moved", campaign))
-	claimed, err := s.destination.CampaignContacts.Claim(s.ctx, "router-b", time.Now().Add(time.Minute), time.Hour, 10)
+	claimed, err := s.destination.CampaignContacts.Claim(s.ctx, "router-b", ShardClaim{}, time.Now().Add(time.Minute), time.Hour, 10)
 	s.Require().NoError(err)
 	contacts := make([]Contact, 0, len(claimed))
 	for _, claim := range claimed {
@@ -4772,7 +4971,7 @@ func (s *DataMoveSuite) TestCopyingAgainDoesNotKeepTheLineOfANumberTheSourceGave
 func (s *DataMoveSuite) ownNumber(e164 string) {
 	s.Require().NoError(s.source.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: e164, Country: "US", CustomerID: "acme", SIPTrunkID: s.trunkOf(s.source, "acme").ID,
-	}))
+	}, nil))
 }
 
 // numberAttachedHere is a number the source holds on acme's own trunk, copied here and attached
@@ -4866,25 +5065,179 @@ func (s *DataMoveSuite) TestANumberIsReadByItsColumnsAsTheyAreNamed() {
 	s.Empty(held)
 }
 
-func (s *DataMoveSuite) TestANumberOnItsOwnTrunkIsImportedWhoeverElseHoldsIt() {
+func (s *DataMoveSuite) TestANumberOnItsOwnTrunkIsImportedOnceWhoHeldItHereGaveItBack() {
 	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000115", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
 	s.Require().NoError(giveBack(s.ctx, s.destination, "acme", "+15550000115", time.Time{}))
+
+	trunk := s.trunkOf(s.destination, "other").ID
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers",
+		s.importedNumber("+15550000115", sipTrunkVendor, "sip_trunk_id", trunk)))
+	_, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000115")
+	s.NoError(err)
+}
+
+func (s *DataMoveSuite) TestANumberAnotherCustomerHoldsHereIsLeftOutOfAnImport() {
 	s.Require().NoError(s.destination.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: "+15550000116", Country: "US", CustomerID: "acme", SIPTrunkID: s.trunkOf(s.destination, "acme").ID,
-	}))
+	}, nil))
 	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000117", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
 
 	trunk := s.trunkOf(s.destination, "other").ID
-	for _, e164 := range []string{"+15550000115", "+15550000116", "+15550000117"} {
-		s.NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers",
-			s.importedNumber(e164, sipTrunkVendor, "sip_trunk_id", trunk)), e164)
-		_, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", e164)
-		s.NoError(err, e164)
+	for _, e164 := range []string{"+15550000116", "+15550000117"} {
+		err := s.destination.ImportRow(s.ctx, "other", "phone_numbers", s.importedNumber(e164, sipTrunkVendor, "sip_trunk_id", trunk))
+
+		left, ok := errors.AsType[*NumbersLeftOutError](err)
+		s.Require().True(ok, "%s: %v", e164, err)
+		s.Equal([]string{e164}, left.Numbers)
+		s.ErrorIs(err, ErrNumberHeldElsewhere, e164)
+		s.NotErrorIs(err, ErrInvalidImport, "the import carries on past it")
+		s.NotContains(err.Error(), "acme", e164)
 	}
+
+	held, err := s.destination.PhoneNumbers.Select(s.ctx, "other", PhoneNumberFilter{IncludeReleased: true})
+	s.Require().NoError(err)
+	s.Empty(held)
+}
+
+// The source sends the number with every change to its row, so a batch refused for it would be
+// refused on every run after it, and the move would never get past it.
+func (s *DataMoveSuite) TestABatchOfChangesWritesEverythingButANumberAnotherCustomerHoldsHere() {
+	s.Require().NoError(s.destination.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
+		E164: "+15550000124", Country: "US", CustomerID: "acme", SIPTrunkID: s.trunkOf(s.destination, "acme").ID,
+	}, nil))
+	trunk := s.trunkOf(s.destination, "other").ID
+
+	err := s.destination.ApplyChanges(s.ctx, "other", []DataChange{
+		{Table: "phone_numbers", Op: ChangeInsert, Payload: s.importedNumber("+15550000124", sipTrunkVendor, "sip_trunk_id", trunk)},
+		{Table: "phone_numbers", Op: ChangeInsert, Payload: s.importedNumber("+15550000125", sipTrunkVendor, "sip_trunk_id", trunk)},
+	})
+
+	left, ok := errors.AsType[*NumbersLeftOutError](err)
+	s.Require().True(ok, "%v", err)
+	s.Equal([]string{"+15550000124"}, left.Numbers)
+	_, err = s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000125")
+	s.NoError(err, "the change after it is written")
+	_, err = s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000124")
+	s.ErrorIs(err, ErrNoNumber)
+}
+
+// Another batch holds the lock of the number that sorts first and waits, uncommitted. A batch
+// naming the other number first takes no lock of the two before it has the first: taken in the
+// batch's order, it would hold the second while it waited, and a batch waiting on that second
+// one would deadlock with it.
+func (s *DataMoveSuite) TestABatchOfChangesTakesItsNumbersLocksInOneOrder() {
+	trunk := s.trunkOf(s.destination, "other").ID
+	tx, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = holders(s.ctx, tx, "+15550000126")
+	s.Require().NoError(err)
+
+	applied := make(chan error, 1)
+	go func() {
+		applied <- s.destination.ApplyChanges(s.ctx, "other", []DataChange{
+			{Table: "phone_numbers", Op: ChangeInsert, Payload: s.importedNumber("+15550000127", sipTrunkVendor, "sip_trunk_id", trunk)},
+			{Table: "phone_numbers", Op: ChangeInsert, Payload: s.importedNumber("+15550000126", sipTrunkVendor, "sip_trunk_id", trunk)},
+		})
+	}()
+	s.Require().Eventually(func() bool {
+		var waiting int
+		s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx, `
+SELECT count(*) FROM pg_locks
+WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&waiting))
+		return waiting > 0
+	}, 5*time.Second, 10*time.Millisecond)
+
+	var free bool
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT pg_try_advisory_xact_lock(hashtextextended(?, ?))", "+15550000127", numberHoldersLockSeed).Scan(&free))
+	s.True(free, "the number that sorts second is not held while the first is waited for")
+	s.Require().NoError(tx.Commit())
+	s.NoError(<-applied)
+}
+
+// A number given back at the source is only its bill's history, which moves whoever holds the
+// number here now.
+func (s *DataMoveSuite) TestANumberGivenBackIsImportedWhoeverHoldsItHere() {
+	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15550000118", Vendor: "plivo", Country: "US", CustomerID: "acme",
+	}))
+
+	trunk := s.trunkOf(s.destination, "other").ID
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers",
+		s.importedNumber("+15550000118", sipTrunkVendor, "sip_trunk_id", trunk, "released_at", time.Now().UTC())))
+
+	held, err := s.destination.PhoneNumbers.Select(s.ctx, "other", PhoneNumberFilter{IncludeReleased: true})
+	s.Require().NoError(err)
+	s.Require().Len(held, 1)
+	s.NotNil(held[0].ReleasedAt)
+}
+
+// Both customers hold the number on their own trunks here, as two that added it before a
+// number was held by one customer at a time can. The source's change to one's row still
+// arrives, so its changes do not stop at the number.
+func (s *DataMoveSuite) TestANumberTheCustomerHoldsHereIsWrittenAgainWhoeverElseHoldsIt() {
+	trunk := s.trunkOf(s.destination, "other").ID
+	row := s.importedNumber("+15550000120", sipTrunkVendor, "sip_trunk_id", trunk)
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "other", "phone_numbers", row))
+	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15550000120", Vendor: sipTrunkVendor, Country: "US", CustomerID: "acme",
+		SIPTrunkID: s.trunkOf(s.destination, "acme").ID,
+	}))
+	var changed map[string]any
+	s.Require().NoError(json.Unmarshal(row, &changed))
+	changed["tags"] = map[string]string{"team": "sales"}
+	again, err := json.Marshal(changed)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "other", []DataChange{{Table: "phone_numbers", Op: ChangeUpdate, Payload: again}}))
+
+	held, err := s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000120")
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"team": "sales"}, held.Tags)
+}
+
+// The import holds the number's lock until it commits: its insert is kept waiting on its trunk's
+// row while a customer adds the number to its own trunk, which has to wait for the import and
+// then finds the number held.
+func (s *DataMoveSuite) TestOfAnImportAndAnAddOfOneNumberAtOnceTheSecondIsRefused() {
+	theirs, ours := s.trunkOf(s.destination, "other"), s.trunkOf(s.destination, "acme")
+	tx, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(s.ctx, "SELECT 1 FROM sip_trunks WHERE id = ? FOR UPDATE", theirs.ID)
+	s.Require().NoError(err)
+	waiting := func(want int) func() bool {
+		return func() bool {
+			var count int
+			s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx, `
+SELECT count(*) FROM pg_stat_activity
+WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&count))
+			return count >= want
+		}
+	}
+
+	imported := make(chan error, 1)
+	go func() {
+		imported <- s.destination.ImportRow(s.ctx, "other", "phone_numbers",
+			s.importedNumber("+15550000121", sipTrunkVendor, "sip_trunk_id", theirs.ID))
+	}()
+	s.Require().Eventually(waiting(1), 5*time.Second, 10*time.Millisecond)
+	added := make(chan error, 1)
+	go func() {
+		added <- s.destination.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
+			E164: "+15550000121", Country: "US", CustomerID: "acme", SIPTrunkID: ours.ID,
+		}, nil)
+	}()
+	s.Require().Eventually(waiting(2), 5*time.Second, 10*time.Millisecond)
+	s.Require().NoError(tx.Commit())
+
+	s.NoError(<-imported)
+	s.ErrorIs(<-added, ErrNumberHeldElsewhere)
 }
 
 // importedNumber is a number as an import file can carry it, under an id nothing here has,
@@ -4913,7 +5266,7 @@ func (s *DataMoveSuite) TestAnImportedNumberCannotPointAtAnotherCustomersTrunk()
 	own := s.trunkOf(s.source, "acme")
 	s.Require().NoError(s.source.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: "+15550000109", Country: "US", CustomerID: "acme", SIPTrunkID: own.ID,
-	}))
+	}, nil))
 	numbers := s.export("acme").of("phone_numbers")
 	s.Require().Len(numbers, 1)
 	numbers[0]["sip_trunk_id"] = trunk.ID

@@ -408,8 +408,8 @@ func (s *OrganizationActivitySuite) TestASinceInAnotherOffsetCountsDaysFromItsUT
 }
 
 // Defect: the answer silent on which shards its meters were read from, so a deployment that
-// reads only its own shard looks complete. Without postgres.shards the one shard is named by a
-// digest of its DSN, never by the DSN.
+// reads only its own shard looks complete. Without the shards setting the one shard is named by
+// a digest of its DSN, never by the DSN.
 func (s *OrganizationActivitySuite) TestTheAnswerNamesTheShardsItsMetersWereReadFrom() {
 	answer := s.read(s.app.organization.ID, time.Time{})
 

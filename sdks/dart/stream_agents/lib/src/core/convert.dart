@@ -89,22 +89,15 @@ api.CreateSessionRequest createRequestOf(
   startVoice: startVoice ? true : null,
   agent: _set(options.agent) ?? (_set(options.configId) == null ? _set(agent) : null),
   configId: _set(options.configId),
-  greeting: greetingOf(options.greeting),
-  llm: _set(options.llm),
-  stt: _set(options.stt),
-  tts: _set(options.tts),
-  voice: _set(options.voice),
   title: options.title,
   description: options.description,
   projectId: options.projectId,
   custom: options.custom,
   incognito: options.incognito,
-  modelOverwrites: overwritesOf(options.modelOverwrites),
   // Unwatched, nothing here answers a call, so no tool is declared.
   tools: !options.watch || options.tools.isEmpty
       ? null
       : [for (final tool in options.tools) sessionToolOf(tool)],
-  tags: options.tags.isEmpty ? null : options.tags,
   returnUrl: _set(options.returnUrl),
   // The router remembers only for a user id, and a device only ever means its own user.
   memory: switch (options.memory) {
@@ -130,7 +123,6 @@ api.ForkSessionRequest forkRequestOf(ForkOptions options) => api.ForkSessionRequ
   // Only ever false: true is the default, and sending the default is how a caller loses what
   // the parent was opened with.
   messages: options.withoutHistory ? false : null,
-  modelOverwrites: overwritesOf(options.modelOverwrites),
 );
 
 /// A tool as the router is told of it, when a session opens or while it runs.
@@ -151,23 +143,6 @@ api.SessionTool sessionToolOf(AgentTool tool) => api.SessionTool(
     ),
   },
 );
-
-api.Greeting? greetingOf(Greeting? greeting) =>
-    greeting == null ? null : api.Greeting(text: greeting.text, mode: greeting.mode?.name);
-
-api.ModelOverwrites? overwritesOf(ModelOverwrites? overwrites) => overwrites == null
-    ? null
-    : api.ModelOverwrites(
-        llm: _set(overwrites.llm),
-        stt: _set(overwrites.stt),
-        tts: _set(overwrites.tts),
-        sts: _set(overwrites.sts),
-        search: _set(overwrites.search),
-        thinking: overwrites.thinking?.name,
-        temperature: overwrites.temperature,
-        maxOutputTokens: overwrites.maxOutputTokens,
-        verbosity: overwrites.verbosity?.name,
-      );
 
 List<api.ImageSource>? imagesOf(List<AgentImage> images) => images.isEmpty
     ? null

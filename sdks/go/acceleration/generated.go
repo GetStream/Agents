@@ -4803,8 +4803,11 @@ type Call struct {
 	LlmUsed *string `json:"llm_used,omitempty"`
 
 	// Mode How the session hears and speaks: a transcriber, a conversation model and a voice; one speech-to-speech model; or in writing.
-	Mode        *SessionMode `json:"mode,omitempty"`
-	ReviewNotes *string      `json:"review_notes,omitempty"`
+	Mode *SessionMode `json:"mode,omitempty"`
+
+	// Region The shard the call is kept in. Set on a listed call of a deployment with shards.
+	Region      *string `json:"region,omitempty"`
+	ReviewNotes *string `json:"review_notes,omitempty"`
 
 	// ReviewScore How well the agent handled it, from 1 to 5.
 	ReviewScore *int `json:"review_score,omitempty"`
@@ -5766,6 +5769,9 @@ type Connector struct {
 
 	// Setup What a person does at the provider before the first consent.
 	Setup *ConnectorSetup `json:"setup,omitempty"`
+
+	// SyncHash The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
+	SyncHash *string `json:"sync_hash,omitempty"`
 }
 
 // ConnectorAuditAction grant_created: a consent or a credentials write gave the connection a grant. grant_refreshed: the router renewed its credential. grant_revoked: the grant ended, because the provider refused or revoked it or the connection was deleted. token_export: the app's backend exported its access credential. proxy_call: a direct call went to the provider through the connection. tool_reapproved: the app's backend approved tools at the schema the provider lists now (POST .../tools/approve); tools names them.
@@ -6388,7 +6394,7 @@ type CreateSessionRequest struct {
 	// Phone The number the session acts from, which is what turns transferring on.
 	Phone *SessionPhone `json:"phone,omitempty"`
 
-	// ProjectId What the conversation belongs to. Also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins.
+	// ProjectId What the conversation belongs to. Sent server-side it is also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in tags, or the agent config's, wins. A device's groups the session and is no cost tag.
 	ProjectId *string `json:"project_id,omitempty"`
 
 	// ResumeHistory How a conversation is handed back to the model when a session carries it on.
@@ -6509,6 +6515,9 @@ type CustomConnectorRequest struct {
 
 	// Scopes The scopes a consent asks for, each an RFC 6749 scope token.
 	Scopes *[]string `json:"scopes,omitempty"`
+
+	// SyncHash The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one.
+	SyncHash *string `json:"sync_hash,omitempty"`
 }
 
 // CustomModel defines model for CustomModel.
@@ -6628,6 +6637,12 @@ type DataImport struct {
 
 	// Rows How many rows were written.
 	Rows int64 `json:"rows"`
+
+	// Skipped The rows left out rather than written, by table and primary key, as connector_definitions:{"id":"custom_crm","revision":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set.
+	Skipped *[]string `json:"skipped,omitempty"`
+
+	// SkippedMore How many more rows were left out than skipped names, which holds the first 100.
+	SkippedMore *int64 `json:"skipped_more,omitempty"`
 
 	// Tables How many of them went into each table.
 	Tables *map[string]int64 `json:"tables,omitempty"`
@@ -6927,7 +6942,9 @@ type ForkSessionRequest struct {
 	// ModelOverwrites What to change about the models for one session, over whatever its agent config decided.
 	// It is one object rather than a dozen fields at the top level because it is one idea: everything here overrides the config, and a caller reading a session back wants to see what they changed in one place rather than diffed against a config they would have to fetch. Only the safe knobs are here. Instructions and tools are not, because a caller able to rewrite those could make a session impersonate a different agent. A backend sets one session's instructions with the instructions of CreateSessionRequest instead, which a device may not send.
 	ModelOverwrites *ModelOverwrites `json:"model_overwrites,omitempty"`
-	ProjectId       *string          `json:"project_id,omitempty"`
+
+	// ProjectId What the fork belongs to. Omitted, the parent's is kept. Sent server-side it is also the "project" cost tag, as on createSession; a device's groups the fork, whose cost tag stays the project a backend named for its parent. A tag spelled out in a running parent's tags, or the agent config's, wins.
+	ProjectId *string `json:"project_id,omitempty"`
 
 	// ResponseId Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false.
 	ResponseId *string `json:"response_id,omitempty"`
@@ -7194,7 +7211,7 @@ type IndexedKnowledgeDocument struct {
 	ContentType string    `json:"content_type"`
 	CreatedAt   time.Time `json:"created_at"`
 
-	// Error Why the uploaded file could not be read, or why the passages of posted text could not all be written, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
+	// Error Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
 	Error     *string `json:"error,omitempty"`
 	Id        string  `json:"id"`
 	Namespace string  `json:"namespace"`
@@ -7202,7 +7219,7 @@ type IndexedKnowledgeDocument struct {
 	// Pages How many pages the uploaded file has. 0 for text, and for a file without pages, such as a spreadsheet.
 	Pages int `json:"pages"`
 
-	// Passages How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote.
+	// Passages How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote. An indexed one whose file was still being read when newer text or a newer file replaced it can count more than it was cut into, for the same reason, until it is written again.
 	Passages int `json:"passages"`
 
 	// Source What the document was posted as, and what its passages are keyed by.
@@ -7210,7 +7227,7 @@ type IndexedKnowledgeDocument struct {
 	// Example: pricing.md
 	Source string `json:"source"`
 
-	// State Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, or posted text whose write stopped part way, and error says why: the passages written before the failure can still be looked up, and posting the document again or deleting it fixes it.
+	// State Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
 	State KnowledgeDocumentState `json:"state"`
 
 	// Text The document as it was last posted, or as its file was read: Markdown, each page of a file opening with an <!-- page N --> comment. Only reading one document fills it in, and one written before its text was kept has none.
@@ -7292,7 +7309,7 @@ type KnowledgeDocument struct {
 	Text string `json:"text"`
 }
 
-// KnowledgeDocumentState Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, or posted text whose write stopped part way, and error says why: the passages written before the failure can still be looked up, and posting the document again or deleting it fixes it.
+// KnowledgeDocumentState Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
 type KnowledgeDocumentState string
 
 // KnowledgePassage defines model for KnowledgePassage.
@@ -8090,7 +8107,7 @@ type OrganizationActivity struct {
 	OrganizationId string           `json:"organization_id"`
 	Sessions       ActivitySessions `json:"sessions"`
 
-	// Shards The names of the shards whose requests the meters sum, this one's first. A deployment that sets no postgres.shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
+	// Shards The names of the shards whose requests the meters sum, this one's first. A deployment that sets no shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
 	Shards *[]string `json:"shards"`
 
 	// Since The start of what was read. Areas are kept by UTC day, so they count the whole day it falls on.
@@ -8102,6 +8119,9 @@ type OrganizationActivity struct {
 
 // OrganizationProgress defines model for OrganizationProgress.
 type OrganizationProgress struct {
+	// Funded The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the credit granted minus the trial credit is above zero. Spending the credit does not lower it. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer.
+	Funded *bool `json:"funded,omitempty"`
+
 	// FurthestStep The furthest an organization got: none, dashboard_reads, agent_setup, workers, conversations, voice_video, phone_sms, then steady_use, which is conversations or model calls answered on three UTC days or more. A step counts only answered requests: an area whose every request was refused was tried, not reached.
 	FurthestStep ActivityStep `json:"furthest_step"`
 
@@ -8246,7 +8266,7 @@ type Policy struct {
 	// PromptInjection Screen what every LLM response is asked for prompt injection. The newest input - the user's turn and any tool results - goes to a decision model beside the model call, so it adds nothing to time to first token. The end of the response is held until the verdict, and a response whose input reads as an injection fails with prompt_injection before its tool calls can be acted on.
 	PromptInjection *bool `json:"prompt_injection,omitempty"`
 
-	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
 	Quota *Quota `json:"quota,omitempty"`
 
 	// RequireOwnStreamApp Keep the app out of the router's own Stream app: in app mode it is never written there for want of a registered Stream app of its own, and what it wrote there before can only be read. True at either scope requires it, so an app cannot turn its organization's off. An organization's is set by the router's operator and read here; sending it back unchanged is fine, and changing it is refused.
@@ -8813,7 +8833,7 @@ type ProviderPrice struct {
 	PerMillionOutputTokens *float64 `json:"per_million_output_tokens,omitempty"`
 }
 
-// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
 type Quota struct {
 	// MessagesPerUserPerDay How many responses one end user may ask for in a UTC day. 0 is no cap. Left out, the next level's applies: the app's, then the organization's, then the router's default.
 	//
@@ -9104,6 +9124,9 @@ type RouterConfig struct {
 	// Stt How this config transcribes, live or from a recording. A field that only means something on one of the two forms says so: a recording has no endpointing to do, and a socket has no file to write subtitles from. A provider that cannot express a term refuses the request rather than dropping it silently.
 	Stt *SttOptions `json:"stt,omitempty"`
 
+	// SyncHash The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync.
+	SyncHash *string `json:"sync_hash,omitempty"`
+
 	// Tts How this config speaks. A provider that cannot express a term refuses the request rather than dropping it silently, since a voice asked to sound urgent and speaking flatly is worse than one that says it cannot.
 	Tts       *TtsOptions `json:"tts,omitempty"`
 	UpdatedAt time.Time   `json:"updated_at"`
@@ -9125,6 +9148,9 @@ type RouterConfigRequest struct {
 
 	// Stt How this config transcribes, live or from a recording. A field that only means something on one of the two forms says so: a recording has no endpointing to do, and a socket has no file to write subtitles from. A provider that cannot express a term refuses the request rather than dropping it silently.
 	Stt *SttOptions `json:"stt,omitempty"`
+
+	// SyncHash The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing.
+	SyncHash *string `json:"sync_hash,omitempty"`
 
 	// Tts How this config speaks. A provider that cannot express a term refuses the request rather than dropping it silently, since a voice asked to sound urgent and speaking flatly is worse than one that says it cannot.
 	Tts *TtsOptions `json:"tts,omitempty"`
@@ -9289,7 +9315,7 @@ type ScheduledTaskRun struct {
 	// DeliveredTo Where the follow-up landed: conversation, sms, whatsapp, imessage or phone. Empty until it lands.
 	DeliveredTo string `json:"delivered_to"`
 
-	// Error Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
+	// Error Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), not_in_team (in an app that keeps each team's agents to its own users, the user who made the task is no longer in its agent's team, so the agent is not run; not tried again), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
 	Error      *string    `json:"error"`
 	FinishedAt *time.Time `json:"finished_at"`
 	Id         string     `json:"id"`
@@ -9498,6 +9524,9 @@ type Session struct {
 	// PinnedAt When the session was pinned. Absent for one that is not pinned.
 	PinnedAt  *time.Time `json:"pinned_at,omitempty"`
 	ProjectId *string    `json:"project_id,omitempty"`
+
+	// Region The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards.
+	Region *string `json:"region,omitempty"`
 
 	// ReviewNotes Why the review scored the conversation as it did. Read by a backend only.
 	ReviewNotes *string `json:"review_notes,omitempty"`
@@ -10064,7 +10093,7 @@ type SkillRequest struct {
 	// Instructions The full prompt, which only the subagent sees.
 	Instructions string `json:"instructions"`
 
-	// Name How the config names it, which is unique among that config's own skills.
+	// Name How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox.
 	Name string `json:"name"`
 }
 
@@ -11519,7 +11548,7 @@ type UserPolicy struct {
 	// Messages Responses counted today toward a quota the customer set, the app's backend acting for the user included. A day held only to the router's default counts the user's devices alone, which this leaves out.
 	Messages int64 `json:"messages"`
 
-	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
 	Quota *Quota `json:"quota,omitempty"`
 
 	// ResetsAt When the day ends and the count starts again: the next UTC midnight.
@@ -11532,7 +11561,7 @@ type UserPolicy struct {
 
 // UserPolicyEntry defines model for UserPolicyEntry.
 type UserPolicyEntry struct {
-	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
 	Quota     *Quota    `json:"quota,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 	UserId    string    `json:"user_id"`
@@ -11540,7 +11569,7 @@ type UserPolicyEntry struct {
 
 // UserPolicyInput One end user's own policy, which holds a quota only.
 type UserPolicyInput struct {
-	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+	// Quota What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
 	Quota *Quota `json:"quota,omitempty"`
 }
 
@@ -11749,7 +11778,7 @@ type ListCallsParams struct {
 
 // GetCallEventsParams defines parameters for GetCallEvents.
 type GetCallEventsParams struct {
-	// Limit How many to return, oldest first.
+	// Limit How many to return, oldest first. Up to the 10000 a call keeps.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
@@ -11824,6 +11853,9 @@ type ListConnectionInvocationsParams struct {
 
 	// Cursor The next_cursor of the previous page. Omitted is the first page.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Region The region whose calls to list, as X-Shard or a session's region names it. Each region keeps the calls it ran. Omitted is the region answering.
+	Region *string `form:"region,omitempty" json:"region,omitempty"`
 }
 
 // ListConnectorAuditParams defines parameters for ListConnectorAudit.
@@ -11931,8 +11963,11 @@ type ListAgentLogsParams struct {
 	Q      *string    `form:"q,omitempty" json:"q,omitempty"`
 	From   *time.Time `form:"from,omitempty" json:"from,omitempty"`
 	To     *time.Time `form:"to,omitempty" json:"to,omitempty"`
-	Cursor *string    `form:"cursor,omitempty" json:"cursor,omitempty"`
-	Limit  *int       `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Region The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering; session_id reads the session's region instead.
+	Region *string `form:"region,omitempty" json:"region,omitempty"`
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // ListAgentLogsParamsSeverity defines parameters for ListAgentLogs.
@@ -11948,16 +11983,25 @@ type StreamAgentLogsParams struct {
 	Severity *StreamAgentLogsParamsSeverity `form:"severity,omitempty" json:"severity,omitempty"`
 
 	// Source Comma-separated user/agent/tool/system sources.
-	Source      *string    `form:"source,omitempty" json:"source,omitempty"`
-	Q           *string    `form:"q,omitempty" json:"q,omitempty"`
-	From        *time.Time `form:"from,omitempty" json:"from,omitempty"`
-	To          *time.Time `form:"to,omitempty" json:"to,omitempty"`
-	Cursor      *string    `form:"cursor,omitempty" json:"cursor,omitempty"`
-	LastEventID *string    `json:"Last-Event-ID,omitempty"`
+	Source *string    `form:"source,omitempty" json:"source,omitempty"`
+	Q      *string    `form:"q,omitempty" json:"q,omitempty"`
+	From   *time.Time `form:"from,omitempty" json:"from,omitempty"`
+	To     *time.Time `form:"to,omitempty" json:"to,omitempty"`
+
+	// Region The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering; session_id reads the session's region instead.
+	Region      *string `form:"region,omitempty" json:"region,omitempty"`
+	Cursor      *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	LastEventID *string `json:"Last-Event-ID,omitempty"`
 }
 
 // StreamAgentLogsParamsSeverity defines parameters for StreamAgentLogs.
 type StreamAgentLogsParamsSeverity string
+
+// GetAgentLogParams defines parameters for GetAgentLog.
+type GetAgentLogParams struct {
+	// Region The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering.
+	Region *string `form:"region,omitempty" json:"region,omitempty"`
+}
 
 // ListCustomModelsParams defines parameters for ListCustomModels.
 type ListCustomModelsParams struct {
@@ -12068,7 +12112,9 @@ type ListResponseSiblingsParamsOf string
 type ListSimulationRunsParams struct {
 	SimulationId *string                        `form:"simulation_id,omitempty" json:"simulation_id,omitempty"`
 	State        *ListSimulationRunsParamsState `form:"state,omitempty" json:"state,omitempty"`
-	Limit        *int                           `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Limit Up to 500. Omitted is 50.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // ListSimulationRunsParamsState defines parameters for ListSimulationRuns.
@@ -14303,7 +14349,7 @@ type ClientInterface interface {
 	// CreateGuestUserWithBody Mint a guest so somebody can talk to an agent before signing up
 	//
 	// Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -14313,7 +14359,7 @@ type ClientInterface interface {
 	// CreateGuestUser Mint a guest so somebody can talk to an agent before signing up
 	//
 	// Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -14354,6 +14400,7 @@ type ClientInterface interface {
 	//
 	// The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 	// Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+	// A document that is removed again and again while it is written is refused with a 409: post it again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes any type of body and a specified content type.
@@ -14365,6 +14412,7 @@ type ClientInterface interface {
 	//
 	// The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 	// Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+	// A document that is removed again and again while it is written is refused with a 409: post it again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes a body of the `application/json` content type.
@@ -14381,7 +14429,7 @@ type ClientInterface interface {
 
 	// DeleteKnowledgeDocument Take a document out of a knowledge base
 	//
-	// The passages it was cut into are removed too, so the agent stops answering out of it.
+	// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, so it can be deleted again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Corresponds with DELETE /v1/agents/knowledge/documents/{id} (the `DeleteKnowledgeDocument` operationId).
@@ -14486,7 +14534,7 @@ type ClientInterface interface {
 	// GetAgentLog Redacted structured log details scoped to the customer
 	//
 	// Corresponds with GET /v1/agents/logs/{id} (the `GetAgentLog` operationId).
-	GetAgentLog(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetAgentLog(ctx context.Context, id string, params *GetAgentLogParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListCustomModels The language models the calling customer serves themselves
 	//
@@ -15638,9 +15686,10 @@ type ClientInterface interface {
 
 	// ImportDataWithBody Write an export, or a batch of changes, into this deployment
 	//
-	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not hold here is refused with 400.
 	// An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
-	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
+	// A number on the app's own SIP trunk that another app holds here is not written, nor counted in `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
+	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 	// Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 	//
 	// Takes any type of body and a specified content type.
@@ -15817,6 +15866,13 @@ type ClientInterface interface {
 	//
 	// Corresponds with POST /v1/phone/hooks/telnyx/events (the `ReceiveTelnyxEvent` operationId).
 	ReceiveTelnyxEvent(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ReceiveTwilioCall Receive a Twilio call
+	//
+	// Where Twilio asks what to do with a call to one of this router's Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number's own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.
+	//
+	// Corresponds with POST /v1/phone/hooks/twilio (the `ReceiveTwilioCall` operationId).
+	ReceiveTwilioCall(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ReceiveTwilioEvent Receive a Twilio account event
 	//
@@ -16050,7 +16106,7 @@ type ClientInterface interface {
 
 	// AddTrunkNumberWithBody Add a number that is on this SIP trunk
 	//
-	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -16059,7 +16115,7 @@ type ClientInterface interface {
 
 	// AddTrunkNumber Add a number that is on this SIP trunk
 	//
-	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -18712,7 +18768,7 @@ func (c *Client) AnswerConversationToolApproval(ctx context.Context, cid string,
 // CreateGuestUserWithBody Mint a guest so somebody can talk to an agent before signing up
 //
 // Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 //
 // Takes any type of body and a specified content type.
 //
@@ -18732,7 +18788,7 @@ func (c *Client) CreateGuestUserWithBody(ctx context.Context, contentType string
 // CreateGuestUser Mint a guest so somebody can talk to an agent before signing up
 //
 // Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -18813,6 +18869,7 @@ func (c *Client) DeleteKnowledge(ctx context.Context, params *DeleteKnowledgePar
 //
 // The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 // Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+// A document that is removed again and again while it is written is refused with a 409: post it again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes any type of body and a specified content type.
@@ -18834,6 +18891,7 @@ func (c *Client) IngestKnowledgeWithBody(ctx context.Context, contentType string
 //
 // The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 // Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+// A document that is removed again and again while it is written is refused with a 409: post it again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes a body of the `application/json` content type.
@@ -18870,7 +18928,7 @@ func (c *Client) ListKnowledgeDocuments(ctx context.Context, params *ListKnowled
 
 // DeleteKnowledgeDocument Take a document out of a knowledge base
 //
-// The passages it was cut into are removed too, so the agent stops answering out of it.
+// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, so it can be deleted again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Corresponds with DELETE /v1/agents/knowledge/documents/{id} (the `DeleteKnowledgeDocument` operationId).
@@ -19105,8 +19163,8 @@ func (c *Client) StreamAgentLogs(ctx context.Context, params *StreamAgentLogsPar
 // GetAgentLog Redacted structured log details scoped to the customer
 //
 // Corresponds with GET /v1/agents/logs/{id} (the `GetAgentLog` operationId).
-func (c *Client) GetAgentLog(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetAgentLogRequest(c.Server, id)
+func (c *Client) GetAgentLog(ctx context.Context, id string, params *GetAgentLogParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetAgentLogRequest(c.Server, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -21417,9 +21475,10 @@ func (c *Client) ExportData(ctx context.Context, reqEditors ...RequestEditorFn) 
 
 // ImportDataWithBody Write an export, or a batch of changes, into this deployment
 //
-// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not hold here is refused with 400.
 // An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
-// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
+// A number on the app's own SIP trunk that another app holds here is not written, nor counted in `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
+// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 // Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 //
 // Takes any type of body and a specified content type.
@@ -21777,6 +21836,23 @@ func (c *Client) ReceiveTelnyxCall(ctx context.Context, reqEditors ...RequestEdi
 // Corresponds with POST /v1/phone/hooks/telnyx/events (the `ReceiveTelnyxEvent` operationId).
 func (c *Client) ReceiveTelnyxEvent(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewReceiveTelnyxEventRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ReceiveTwilioCall Receive a Twilio call
+//
+// Where Twilio asks what to do with a call to one of this router's Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number's own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.
+//
+// Corresponds with POST /v1/phone/hooks/twilio (the `ReceiveTwilioCall` operationId).
+func (c *Client) ReceiveTwilioCall(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReceiveTwilioCallRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -22299,7 +22375,7 @@ func (c *Client) UpdateSipTrunk(ctx context.Context, id string, body UpdateSipTr
 
 // AddTrunkNumberWithBody Add a number that is on this SIP trunk
 //
-// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 //
 // Takes any type of body and a specified content type.
 //
@@ -22318,7 +22394,7 @@ func (c *Client) AddTrunkNumberWithBody(ctx context.Context, id string, contentT
 
 // AddTrunkNumber Add a number that is on this SIP trunk
 //
-// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -25979,6 +26055,18 @@ func NewListConnectionInvocationsRequest(server string, id string, params *ListC
 
 		}
 
+		if params.Region != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "region", *params.Region, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
 		if encoded := queryValues.Encode(); encoded != "" {
 			rawQueryFragments = append(rawQueryFragments, encoded)
 		}
@@ -28171,6 +28259,18 @@ func NewListAgentLogsRequest(server string, params *ListAgentLogsParams) (*http.
 
 		}
 
+		if params.Region != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "region", *params.Region, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
 		if params.Cursor != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
@@ -28333,6 +28433,18 @@ func NewStreamAgentLogsRequest(server string, params *StreamAgentLogsParams) (*h
 
 		}
 
+		if params.Region != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "region", *params.Region, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
 		if params.Cursor != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
@@ -28375,7 +28487,7 @@ func NewStreamAgentLogsRequest(server string, params *StreamAgentLogsParams) (*h
 }
 
 // NewGetAgentLogRequest constructs an http.Request for the GetAgentLog method
-func NewGetAgentLogRequest(server string, id string) (*http.Request, error) {
+func NewGetAgentLogRequest(server string, id string, params *GetAgentLogParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -28398,6 +28510,33 @@ func NewGetAgentLogRequest(server string, id string) (*http.Request, error) {
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Region != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "region", *params.Region, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
 	}
 
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
@@ -32605,6 +32744,33 @@ func NewReceiveTelnyxEventRequest(server string) (*http.Request, error) {
 	}
 
 	operationPath := fmt.Sprintf("/v1/phone/hooks/telnyx/events")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewReceiveTwilioCallRequest constructs an http.Request for the ReceiveTwilioCall method
+func NewReceiveTwilioCallRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/phone/hooks/twilio")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -37622,7 +37788,7 @@ type ClientWithResponsesInterface interface {
 	// CreateGuestUserWithBodyWithResponse Mint a guest so somebody can talk to an agent before signing up
 	//
 	// Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -37632,7 +37798,7 @@ type ClientWithResponsesInterface interface {
 	// CreateGuestUserWithResponse Mint a guest so somebody can talk to an agent before signing up
 	//
 	// Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+	// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -37675,6 +37841,7 @@ type ClientWithResponsesInterface interface {
 	//
 	// The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 	// Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+	// A document that is removed again and again while it is written is refused with a 409: post it again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -37686,6 +37853,7 @@ type ClientWithResponsesInterface interface {
 	//
 	// The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 	// Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+	// A document that is removed again and again while it is written is refused with a 409: post it again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
@@ -37704,7 +37872,7 @@ type ClientWithResponsesInterface interface {
 
 	// DeleteKnowledgeDocumentWithResponse Take a document out of a knowledge base
 	//
-	// The passages it was cut into are removed too, so the agent stops answering out of it.
+	// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, so it can be deleted again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -37831,7 +37999,7 @@ type ClientWithResponsesInterface interface {
 	// Returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with GET /v1/agents/logs/{id} (the `GetAgentLog` operationId).
-	GetAgentLogWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*GetAgentLogResponse, error)
+	GetAgentLogWithResponse(ctx context.Context, id string, params *GetAgentLogParams, reqEditors ...RequestEditorFn) (*GetAgentLogResponse, error)
 
 	// ListCustomModelsWithResponse The language models the calling customer serves themselves
 	//
@@ -39089,9 +39257,10 @@ type ClientWithResponsesInterface interface {
 
 	// ImportDataWithBodyWithResponse Write an export, or a batch of changes, into this deployment
 	//
-	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not hold here is refused with 400.
 	// An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
-	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
+	// A number on the app's own SIP trunk that another app holds here is not written, nor counted in `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
+	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 	// Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -39276,6 +39445,15 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /v1/phone/hooks/telnyx/events (the `ReceiveTelnyxEvent` operationId).
 	ReceiveTelnyxEventWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ReceiveTelnyxEventResponse, error)
+
+	// ReceiveTwilioCallWithResponse Receive a Twilio call
+	//
+	// Where Twilio asks what to do with a call to one of this router's Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number's own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /v1/phone/hooks/twilio (the `ReceiveTwilioCall` operationId).
+	ReceiveTwilioCallWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ReceiveTwilioCallResponse, error)
 
 	// ReceiveTwilioEventWithResponse Receive a Twilio account event
 	//
@@ -39537,7 +39715,7 @@ type ClientWithResponsesInterface interface {
 
 	// AddTrunkNumberWithBodyWithResponse Add a number that is on this SIP trunk
 	//
-	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -39546,7 +39724,7 @@ type ClientWithResponsesInterface interface {
 
 	// AddTrunkNumberWithResponse Add a number that is on this SIP trunk
 	//
-	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -45414,6 +45592,7 @@ func (r PutConnectionCredentialsResponse) ContentType() string {
 
 // ListConnectionInvocationsResponse200Headers the declared response headers of an HTTP 200 response for ListConnectionInvocations
 type ListConnectionInvocationsResponse200Headers struct {
+	XShard                *string
 	XStreamBalanceMicros  *int64
 	XStreamBalanceWarning *string
 	XStreamCostEstimated  *string
@@ -48624,6 +48803,8 @@ type CreateGuestUserResponse struct {
 	JSON402 *PaymentRequired
 	// JSON403 the response for an HTTP 403 `application/json` response
 	JSON403 *ErrorResponse
+	// JSON429 the response for an HTTP 429 `application/json` response
+	JSON429 *ErrorResponse
 	// JSON500 the response for an HTTP 500 `application/json` response
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
@@ -48657,6 +48838,11 @@ func (r CreateGuestUserResponse) GetJSON402() *PaymentRequired {
 // GetJSON403 returns the response for an HTTP 403 `application/json` response
 func (r CreateGuestUserResponse) GetJSON403() *ErrorResponse {
 	return r.JSON403
+}
+
+// GetJSON429 returns the response for an HTTP 429 `application/json` response
+func (r CreateGuestUserResponse) GetJSON429() *ErrorResponse {
+	return r.JSON429
 }
 
 // GetJSON500 returns the response for an HTTP 500 `application/json` response
@@ -48948,6 +49134,8 @@ type IngestKnowledgeResponse struct {
 	JSON402 *PaymentRequired
 	// JSON403 the response for an HTTP 403 `application/json` response
 	JSON403 *Forbidden
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
 	// JSON500 the response for an HTTP 500 `application/json` response
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
@@ -48981,6 +49169,11 @@ func (r IngestKnowledgeResponse) GetJSON402() *PaymentRequired {
 // GetJSON403 returns the response for an HTTP 403 `application/json` response
 func (r IngestKnowledgeResponse) GetJSON403() *Forbidden {
 	return r.JSON403
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r IngestKnowledgeResponse) GetJSON409() *ErrorResponse {
+	return r.JSON409
 }
 
 // GetJSON500 returns the response for an HTTP 500 `application/json` response
@@ -49150,6 +49343,8 @@ type DeleteKnowledgeDocumentResponse struct {
 	JSON403 *Forbidden
 	// JSON404 the response for an HTTP 404 `application/json` response
 	JSON404 *NotFound
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
 	// JSON500 the response for an HTTP 500 `application/json` response
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
@@ -49183,6 +49378,11 @@ func (r DeleteKnowledgeDocumentResponse) GetJSON403() *Forbidden {
 // GetJSON404 returns the response for an HTTP 404 `application/json` response
 func (r DeleteKnowledgeDocumentResponse) GetJSON404() *NotFound {
 	return r.JSON404
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r DeleteKnowledgeDocumentResponse) GetJSON409() *ErrorResponse {
+	return r.JSON409
 }
 
 // GetJSON500 returns the response for an HTTP 500 `application/json` response
@@ -50177,6 +50377,7 @@ func (r ListKnowledgeUrlPassagesResponse) ContentType() string {
 
 // ListAgentLogsResponse200Headers the declared response headers of an HTTP 200 response for ListAgentLogs
 type ListAgentLogsResponse200Headers struct {
+	XShard                *string
 	XStreamBalanceMicros  *int64
 	XStreamBalanceWarning *string
 	XStreamCostEstimated  *string
@@ -50278,6 +50479,7 @@ func (r ListAgentLogsResponse) ContentType() string {
 
 // StreamAgentLogsResponse200Headers the declared response headers of an HTTP 200 response for StreamAgentLogs
 type StreamAgentLogsResponse200Headers struct {
+	XShard                *string
 	XStreamBalanceMicros  *int64
 	XStreamBalanceWarning *string
 	XStreamCostEstimated  *string
@@ -50372,6 +50574,7 @@ func (r StreamAgentLogsResponse) ContentType() string {
 
 // GetAgentLogResponse200Headers the declared response headers of an HTTP 200 response for GetAgentLog
 type GetAgentLogResponse200Headers struct {
+	XShard                *string
 	XStreamBalanceMicros  *int64
 	XStreamBalanceWarning *string
 	XStreamCostEstimated  *string
@@ -50389,6 +50592,8 @@ type GetAgentLogResponse struct {
 	HTTPResponse *http.Response
 	// JSON200 the response for an HTTP 200 `application/json` response
 	JSON200 *AgentLog
+	// JSON400 the response for an HTTP 400 `application/json` response
+	JSON400 *BadRequest
 	// JSON401 the response for an HTTP 401 `application/json` response
 	JSON401 *Unauthorized
 	// JSON402 the response for an HTTP 402 `application/json` response
@@ -50410,6 +50615,11 @@ type GetAgentLogResponse struct {
 // GetJSON200 returns the response for an HTTP 200 `application/json` response
 func (r GetAgentLogResponse) GetJSON200() *AgentLog {
 	return r.JSON200
+}
+
+// GetJSON400 returns the response for an HTTP 400 `application/json` response
+func (r GetAgentLogResponse) GetJSON400() *BadRequest {
+	return r.JSON400
 }
 
 // GetJSON401 returns the response for an HTTP 401 `application/json` response
@@ -59222,6 +59432,8 @@ type ImportDataResponse struct {
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
 	JSON503 *ErrorResponse
+	// JSON504 the response for an HTTP 504 `application/json` response
+	JSON504 *ErrorResponse
 	// Headers200 the parsed response headers for an HTTP 200 response
 	Headers200 *ImportDataResponse200Headers
 	// Headers402 the parsed response headers for an HTTP 402 response
@@ -59271,6 +59483,11 @@ func (r ImportDataResponse) GetJSON500() *InternalError {
 // GetJSON503 returns the response for an HTTP 503 `application/json` response
 func (r ImportDataResponse) GetJSON503() *ErrorResponse {
 	return r.JSON503
+}
+
+// GetJSON504 returns the response for an HTTP 504 `application/json` response
+func (r ImportDataResponse) GetJSON504() *ErrorResponse {
+	return r.JSON504
 }
 
 // GetBody returns the raw response body bytes
@@ -59979,6 +60196,8 @@ type TransferPhoneCallResponse struct {
 	JSON403 *Forbidden
 	// JSON404 the response for an HTTP 404 `application/json` response
 	JSON404 *NotFound
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
 	// JSON500 the response for an HTTP 500 `application/json` response
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
@@ -60017,6 +60236,11 @@ func (r TransferPhoneCallResponse) GetJSON403() *Forbidden {
 // GetJSON404 returns the response for an HTTP 404 `application/json` response
 func (r TransferPhoneCallResponse) GetJSON404() *NotFound {
 	return r.JSON404
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r TransferPhoneCallResponse) GetJSON409() *ErrorResponse {
+	return r.JSON409
 }
 
 // GetJSON500 returns the response for an HTTP 500 `application/json` response
@@ -60283,6 +60507,54 @@ func (r ReceiveTelnyxEventResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r ReceiveTelnyxEventResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ReceiveTwilioCallResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// XML200 the response for an HTTP 200 `application/xml` response
+	XML200 *string
+	// JSON500 the response for an HTTP 500 `application/json` response
+	JSON500 *InternalError
+}
+
+// GetXML200 returns the response for an HTTP 200 `application/xml` response
+func (r ReceiveTwilioCallResponse) GetXML200() *string {
+	return r.XML200
+}
+
+// GetJSON500 returns the response for an HTTP 500 `application/json` response
+func (r ReceiveTwilioCallResponse) GetJSON500() *InternalError {
+	return r.JSON500
+}
+
+// GetBody returns the raw response body bytes
+func (r ReceiveTwilioCallResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ReceiveTwilioCallResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ReceiveTwilioCallResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ReceiveTwilioCallResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -69566,7 +69838,7 @@ func (c *ClientWithResponses) AnswerConversationToolApprovalWithResponse(ctx con
 // CreateGuestUserWithBodyWithResponse Mint a guest so somebody can talk to an agent before signing up
 //
 // Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -69582,7 +69854,7 @@ func (c *ClientWithResponses) CreateGuestUserWithBodyWithResponse(ctx context.Co
 // CreateGuestUserWithResponse Mint a guest so somebody can talk to an agent before signing up
 //
 // Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+// Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -69649,6 +69921,7 @@ func (c *ClientWithResponses) DeleteKnowledgeWithResponse(ctx context.Context, p
 //
 // The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 // Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+// A document that is removed again and again while it is written is refused with a 409: post it again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -69666,6 +69939,7 @@ func (c *ClientWithResponses) IngestKnowledgeWithBodyWithResponse(ctx context.Co
 //
 // The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 // Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+// A document that is removed again and again while it is written is refused with a 409: post it again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
@@ -69696,7 +69970,7 @@ func (c *ClientWithResponses) ListKnowledgeDocumentsWithResponse(ctx context.Con
 
 // DeleteKnowledgeDocumentWithResponse Take a document out of a knowledge base
 //
-// The passages it was cut into are removed too, so the agent stops answering out of it.
+// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, so it can be deleted again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Returns a wrapper object for the known response body format(s).
@@ -69901,8 +70175,8 @@ func (c *ClientWithResponses) StreamAgentLogsWithResponse(ctx context.Context, p
 // Returns a wrapper object for the known response body format(s).
 //
 // Corresponds with GET /v1/agents/logs/{id} (the `GetAgentLog` operationId).
-func (c *ClientWithResponses) GetAgentLogWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*GetAgentLogResponse, error) {
-	rsp, err := c.GetAgentLog(ctx, id, reqEditors...)
+func (c *ClientWithResponses) GetAgentLogWithResponse(ctx context.Context, id string, params *GetAgentLogParams, reqEditors ...RequestEditorFn) (*GetAgentLogResponse, error) {
+	rsp, err := c.GetAgentLog(ctx, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -71855,9 +72129,10 @@ func (c *ClientWithResponses) ExportDataWithResponse(ctx context.Context, reqEdi
 
 // ImportDataWithBodyWithResponse Write an export, or a batch of changes, into this deployment
 //
-// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not hold here is refused with 400.
 // An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
-// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
+// A number on the app's own SIP trunk that another app holds here is not written, nor counted in `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
+// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 // Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -72155,6 +72430,21 @@ func (c *ClientWithResponses) ReceiveTelnyxEventWithResponse(ctx context.Context
 		return nil, err
 	}
 	return ParseReceiveTelnyxEventResponse(rsp)
+}
+
+// ReceiveTwilioCallWithResponse Receive a Twilio call
+//
+// Where Twilio asks what to do with a call to one of this router's Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number's own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /v1/phone/hooks/twilio (the `ReceiveTwilioCall` operationId).
+func (c *ClientWithResponses) ReceiveTwilioCallWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ReceiveTwilioCallResponse, error) {
+	rsp, err := c.ReceiveTwilioCall(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReceiveTwilioCallResponse(rsp)
 }
 
 // ReceiveTwilioEventWithResponse Receive a Twilio account event
@@ -72585,7 +72875,7 @@ func (c *ClientWithResponses) UpdateSipTrunkWithResponse(ctx context.Context, id
 
 // AddTrunkNumberWithBodyWithResponse Add a number that is on this SIP trunk
 //
-// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -72600,7 +72890,7 @@ func (c *ClientWithResponses) AddTrunkNumberWithBodyWithResponse(ctx context.Con
 
 // AddTrunkNumberWithResponse Add a number that is on this SIP trunk
 //
-// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -79755,6 +80045,13 @@ func ParseListConnectionInvocationsResponse(rsp *http.Response) (*ListConnection
 	switch {
 	case rsp.StatusCode == 200:
 		var headers ListConnectionInvocationsResponse200Headers
+		if values := rsp.Header.Values("X-Shard"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Shard", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XShard = &value
+		}
 		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
 			var value int64
 			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
@@ -83439,6 +83736,13 @@ func ParseCreateGuestUserResponse(rsp *http.Response) (*CreateGuestUserResponse,
 		}
 		response.JSON403 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON429 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
 		var dest InternalError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -83820,6 +84124,13 @@ func ParseIngestKnowledgeResponse(rsp *http.Response) (*IngestKnowledgeResponse,
 		}
 		response.JSON403 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
 		var dest InternalError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -84060,6 +84371,13 @@ func ParseDeleteKnowledgeDocumentResponse(rsp *http.Response) (*DeleteKnowledgeD
 			return nil, err
 		}
 		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
 		var dest InternalError
@@ -85315,6 +85633,13 @@ func ParseListAgentLogsResponse(rsp *http.Response) (*ListAgentLogsResponse, err
 	switch {
 	case rsp.StatusCode == 200:
 		var headers ListAgentLogsResponse200Headers
+		if values := rsp.Header.Values("X-Shard"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Shard", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XShard = &value
+		}
 		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
 			var value int64
 			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
@@ -85427,6 +85752,13 @@ func ParseStreamAgentLogsResponse(rsp *http.Response) (*StreamAgentLogsResponse,
 	switch {
 	case rsp.StatusCode == 200:
 		var headers StreamAgentLogsResponse200Headers
+		if values := rsp.Header.Values("X-Shard"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Shard", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XShard = &value
+		}
 		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
 			var value int64
 			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
@@ -85499,6 +85831,13 @@ func ParseGetAgentLogResponse(rsp *http.Response) (*GetAgentLogResponse, error) 
 		}
 		response.JSON200 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest BadRequest
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
 		var dest Unauthorized
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -85546,6 +85885,13 @@ func ParseGetAgentLogResponse(rsp *http.Response) (*GetAgentLogResponse, error) 
 	switch {
 	case rsp.StatusCode == 200:
 		var headers GetAgentLogResponse200Headers
+		if values := rsp.Header.Values("X-Shard"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Shard", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XShard = &value
+		}
 		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
 			var value int64
 			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
@@ -95893,6 +96239,13 @@ func ParseImportDataResponse(rsp *http.Response) (*ImportDataResponse, error) {
 		}
 		response.JSON503 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON504 = &dest
+
 	}
 
 	switch {
@@ -96761,6 +97114,13 @@ func ParseTransferPhoneCallResponse(rsp *http.Response) (*TransferPhoneCallRespo
 		}
 		response.JSON404 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
 		var dest InternalError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -97049,6 +97409,51 @@ func ParseReceiveTelnyxEventResponse(rsp *http.Response) (*ReceiveTelnyxEventRes
 	switch {
 	case rsp.StatusCode == 204:
 		break // No content-type
+
+	case rsp.StatusCode == 400:
+		break // No content-type
+
+	case rsp.StatusCode == 401:
+		break // No content-type
+
+	case rsp.StatusCode == 404:
+		break // No content-type
+
+	case rsp.StatusCode == 413:
+		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest InternalError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON500 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseReceiveTwilioCallResponse parses an HTTP response from a ReceiveTwilioCallWithResponse call
+func ParseReceiveTwilioCallResponse(rsp *http.Response) (*ReceiveTwilioCallResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ReceiveTwilioCallResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "xml") && rsp.StatusCode == 200:
+		var dest string
+		if err := xml.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.XML200 = &dest
 
 	case rsp.StatusCode == 400:
 		break // No content-type

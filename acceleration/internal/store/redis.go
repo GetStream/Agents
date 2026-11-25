@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -191,6 +192,34 @@ func cachedFor[T any](ctx context.Context, s *Store, name string, ttl time.Durat
 		return value, stack.Wrap(fmt.Errorf("store: decode %s: %w", name, err))
 	}
 	return value, nil
+}
+
+// cachedFact is a yes or no about one of an app's things, cached as a row is, yes for yesTTL and
+// no for noTTL. With no Redis it is held in this router's lru instead, for missTTL, as nothing
+// there tells of another router's write.
+func cachedFact(ctx context.Context, s *Store, lru *seen, app, id, name string, yesTTL, noTTL time.Duration,
+	load func(context.Context) (bool, error)) (bool, error) {
+	if s.cache != nil {
+		return cachedFor(ctx, s, name, yesTTL, func(ctx context.Context) (bool, error) {
+			yes, err := load(ctx)
+			if err == nil && !yes {
+				rueidisaside.OverrideCacheTTL(ctx, noTTL)
+			}
+			return yes, err
+		})
+	}
+	for _, yes := range []bool{true, false} {
+		if lru.Holds(app, id, strconv.FormatBool(yes), time.Now()) {
+			return yes, nil
+		}
+	}
+	removals := lru.Removals()
+	yes, err := load(ctx)
+	if err != nil {
+		return false, err
+	}
+	lru.KeepSince(removals, app, id, strconv.FormatBool(yes), time.Now().Add(missTTL))
+	return yes, nil
 }
 
 // cacheReadKey marks the context of a cached read, whose Redis commands cacheReadBound bounds.

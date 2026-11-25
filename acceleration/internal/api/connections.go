@@ -304,6 +304,9 @@ func (s *Server) createConnection(ctx context.Context, request *createConnection
 	if !ok {
 		return nil, errMissingCustomer
 	}
+	if failure, refused := refuseReservedActingFor(ctx, "CreateConnection"); refused {
+		return nil, failure
+	}
 	if s.store == nil {
 		return nil, errNoConnections
 	}
@@ -556,7 +559,7 @@ func (s *Server) revokeAtProvider(ctx context.Context, connection store.Connecto
 	revoked, err := s.revokeHeld(ctx, connection, held)
 	if err != nil {
 		s.logger.Error("could not revoke a grant at the provider", "after", after, "connection", connection.ID,
-			"connector", connection.ConnectorID, "error", err)
+			"connector", connection.ConnectorID, "error", core.LoggedError(err))
 	}
 	return revoked
 }
@@ -633,19 +636,12 @@ func (s *Server) revokeHeld(ctx context.Context, connection store.ConnectorConne
 // connectionDeleted lets go of what a connection the store just soft deleted still has
 // outside its row, as deleteConnection and deleteConnector both leave it.
 func (s *Server) connectionDeleted(ctx context.Context, customerID string, connection store.DeletedConnection, ended core.CredentialChange) {
-	// Its outbound client goes too. A session holding a copy is refused by the resolver, and
-	// by its dispatcher's check before every call.
+	// Its MCP event subscriptions went with the row, in the delete's transaction
+	// (store.softDeleteConnections), so a delivery to one is answered 410. Its outbound client
+	// goes too. A session holding a copy is refused by the resolver, and by its dispatcher's
+	// check before every call.
 	if s.connectorTransports != nil {
 		s.connectorTransports.Close(core.ConnectionRef{CustomerID: customerID, ConnectionID: connection.ID})
-	}
-	// So do its MCP event subscriptions: a delivery to one is answered 410 from here on. The
-	// connection is deleted whatever happens here, so a failure is logged, not answered with a
-	// 500 a retry would turn into a 404: a row left behind goes at its next delivery or its
-	// next look, which comes a day later at most (mcpevents.refreshAt, retryWait, waitUntil).
-	if s.mcpEvents != nil {
-		if err := s.mcpEvents.Stop(ctx, customerID, connection.ID); err != nil {
-			s.logger.Error("could not drop a deleted connection's MCP event subscriptions", "connection", connection.ID, "error", err)
-		}
 	}
 	// The delete dropped its credentials. One that held none, pending since it was made, had
 	// no grant to revoke.

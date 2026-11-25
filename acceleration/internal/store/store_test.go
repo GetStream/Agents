@@ -60,7 +60,9 @@ func TestStoreSuite(t *testing.T) {
 }
 
 // ShardedStoreSuite runs every store test again with the shared tables in one database, this
-// shard's in another, and a second shard beside it, as a hosted deployment keeps them.
+// shard's in another, and a second shard beside it, as a hosted deployment keeps them. Neither
+// shard opens the other's database: what one writes reaches the other only through what it
+// ships to the shared one (ShipIndex, ShipStats) and the jobs it runs (ShardJobs).
 type ShardedStoreSuite struct {
 	StoreSuite
 	// other is a router of the second shard: the same shared database, the other shard's own.
@@ -90,20 +92,16 @@ func (s *ShardedStoreSuite) SetupSuite() {
 	shard, peer := s.emptyDatabase("store_shard"), s.emptyDatabase("store_peer")
 	s.shardDSN = shard
 
-	other, err := Open(peer)
-	s.Require().NoError(err)
-	s.Require().NoError(other.Migrate(s.ctx))
-	s.Require().NoError(other.Close())
-
-	shards := map[string]string{"here": shard, "there": peer}
-	store, err := OpenShards(Options{DSN: s.dsn, ShardDSN: shard, Shards: shards, Redis: s.redis(), redisHook: &s.roundTrips})
+	shards := []string{"here", "there"}
+	store, err := OpenShards(Options{DSN: s.dsn, ShardDSN: shard, Shard: "here", Shards: shards, Redis: s.redis(), redisHook: &s.roundTrips})
 	s.Require().NoError(err)
 	s.store = store
 	s.Require().NoError(store.Ping(s.ctx))
 	s.Require().NoError(store.Migrate(s.ctx))
 	s.countEveryQuery()
-	s.other, err = OpenShards(Options{DSN: s.dsn, ShardDSN: peer, Shards: shards})
+	s.other, err = OpenShards(Options{DSN: s.dsn, ShardDSN: peer, Shard: "there", Shards: shards, Redis: s.redis()})
 	s.Require().NoError(err)
+	s.Require().NoError(s.other.Migrate(s.ctx))
 	s.base = time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
 }
 
@@ -181,14 +179,16 @@ func (s *StoreSuite) emptyTables(db bun.IDB) {
 // SetupTest empties the tables one time in each database, and the store's keys in Redis. With
 // one database, the shard database and the shared database are the same database.
 func (s *StoreSuite) SetupTest() {
-	databases := s.store.shards()
+	s.emptyTables(s.store.shard)
 	if s.store.Sharded() {
-		databases = append(databases, s.store.global)
-	}
-	for _, db := range databases {
-		s.emptyTables(db)
+		s.emptyTables(s.store.global)
 	}
 	s.forgetRedis()
+}
+
+func (s *ShardedStoreSuite) SetupTest() {
+	s.StoreSuite.SetupTest()
+	s.emptyTables(s.other.shard)
 }
 
 func (s *StoreSuite) TestMigrateIsIdempotent() {
@@ -407,6 +407,26 @@ func (s *StoreSuite) TestANumberAttachedBeforeItsCallWasRecordedIsStillFound() {
 	s.Equal("acme", number.CustomerID)
 }
 
+// Another customer's row for the number on its own trunk, lined in the same app to place calls
+// from it, as one added before a number was held by one customer at a time can be.
+func (s *StoreSuite) TestANumberOnAnotherCustomersOwnTrunkDoesNotMakeACallNamedForTheNumberNobodys() {
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15125551234", Vendor: "twilio", Country: "US",
+		CustomerID: "acme", PurchasedAt: s.base,
+	}))
+	_, err := s.store.global.NewUpdate().Model((*PhoneNumber)(nil)).
+		Set("stream_trunk_id = ?", "trunk-7").
+		Where("e164 = ?", "+15125551234").
+		Exec(s.ctx)
+	s.Require().NoError(err)
+	s.lined(TrunkGroup{CustomerID: "globex", Vendor: sipTrunkVendor}, "+15125551234", "trunk-9")
+
+	number, err := s.store.NumberByCallInApp(s.ctx, AppScope{Unpinned: true}, "default", "phone-+15125551234")
+
+	s.Require().NoError(err)
+	s.Equal("acme", number.CustomerID)
+}
+
 func (s *StoreSuite) TestACallNoNumberReachesIsNotAttributedToAnybody() {
 	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15125551234", Vendor: "twilio", Country: "US",
@@ -431,6 +451,21 @@ func (s *StoreSuite) TestAReleasedNumbersCallIsNotAttributedToItsFormerHolder() 
 	_, err := s.store.NumberByCallInApp(s.ctx, AppScope{Unpinned: true}, "default", "phone-+15125551234")
 
 	s.ErrorContains(err, "no number reaches call")
+}
+
+// shipStats ships this shard's stats as of now when its stats pages read what every shard ships,
+// as a sharded store's do, so a test reads one answer whichever suite runs it.
+func (s *StoreSuite) shipStats(now time.Time) {
+	if s.store.StatsShipped() {
+		s.Require().NoError(s.store.ShipStats(s.ctx, now))
+	}
+}
+
+// shipIndex is shipStats for the session and call lists.
+func (s *StoreSuite) shipIndex() {
+	if s.store.Indexed() {
+		s.Require().NoError(s.store.ShipIndex(s.ctx, time.Now()))
+	}
 }
 
 // onShard runs a statement on this shard's database, failing the test if it fails.
@@ -554,6 +589,48 @@ func (s *StoreSuite) TestMigrateRebuildsTheSessionLogIndexLeftInvalid() {
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT pg_get_indexdef(to_regclass('agent_logs_session_order'))").Scan(&definition))
 	s.Equal("CREATE INDEX agent_logs_session_order ON public.agent_logs USING btree (customer_id, session_id, id DESC)", definition)
+}
+
+func (s *StoreSuite) TestMigrateRebuildsTheTaskChangesIndexLeftInvalid() {
+	built := func() (valid bool, definition string) {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT indisvalid, pg_get_indexdef(indexrelid) FROM pg_index "+
+			"WHERE indexrelid = to_regclass('data_changes_tasks_idx')").Scan(&valid, &definition))
+		return valid, definition
+	}
+	const want = "CREATE INDEX data_changes_tasks_idx ON public.data_changes USING btree (customer_id, " +
+		"COALESCE((payload ->> 'task_id'::text), (payload ->> 'id'::text)), ((payload ->> 'id'::text))) " +
+		"WHERE ((table_name = ANY (ARRAY['scheduled_tasks'::text, 'scheduled_task_runs'::text])) AND (op <> 'delete'::text))"
+	_, definition := built()
+	s.Equal(want, definition, "as the migration builds it")
+	// As a CONCURRENTLY build that failed leaves it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('data_changes_tasks_idx')")
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	valid, definition := built()
+	s.True(valid, "dropped and built again")
+	s.Equal(want, definition, "built again as the migration builds it")
+}
+
+func (s *StoreSuite) TestMigrateRebuildsTheHeldNumberIndexLeftInvalid() {
+	built := func() (valid bool, definition string) {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT indisvalid, pg_get_indexdef(indexrelid) FROM pg_index "+
+			"WHERE indexrelid = to_regclass('phone_numbers_e164_held_idx')").Scan(&valid, &definition))
+		return valid, definition
+	}
+	const want = "CREATE INDEX phone_numbers_e164_held_idx ON public.phone_numbers USING btree (e164) WHERE (released_at IS NULL)"
+	_, definition := built()
+	s.Equal(want, definition, "as the migration builds it")
+	// As a CONCURRENTLY build that failed leaves it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('phone_numbers_e164_held_idx')")
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	valid, definition := built()
+	s.True(valid, "dropped and built again")
+	s.Equal(want, definition, "built again as the migration builds it")
 }
 
 func (s *StoreSuite) TestMigrateRebuildsTheCampaignAttemptIndexLeftInvalid() {
@@ -757,6 +834,7 @@ func (s *StoreSuite) TestDaysAreCutInUTCWhateverTheDatabaseSays() {
 	// the evening before in UTC.
 	morning := time.Date(2026, 3, 1, 1, 0, 0, 0, time.UTC)
 	s.opened("one", "acme", morning, nil)
+	s.shipStats(morning.Add(48 * time.Hour))
 
 	buckets, err := fresh.CustomerActivity(s.ctx, "acme", ActivityDaily, morning.Add(-48*time.Hour), morning.Add(48*time.Hour))
 

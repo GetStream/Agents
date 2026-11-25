@@ -9,7 +9,8 @@
 //
 // The deployment's default is counted in two buckets rather than one: a user id, which is the
 // honest answer to "who is this", and an address, which is the answer that still holds when a
-// backend mints a fresh user id per request. A customer's quota is counted per user, in a
+// backend mints a fresh user id per request. An IPv6 address is counted by its /64
+// (routing.Caller.CountedAddress). A customer's quota is counted per user, in a
 // bucket of its own, and never against the address, which many of its users can share.
 //
 // A day is a UTC calendar day, so a new day is a new key and nothing has to be reset.
@@ -38,9 +39,9 @@ var tracer = tracing.Tracer("quota")
 // be confused with the same date a year later.
 const retention = 48 * time.Hour
 
-// writeTimeout bounds how long a debit holds its caller, because it is taken on the goroutine
-// draining a response and a slow Redis should cost that goroutine a moment rather than the
-// rest of the answer. It bounds the wait, not the write: see Debit.
+// writeTimeout bounds how long a debit holds its caller reading the limits, because it is
+// taken on the goroutine draining a response and a slow policy store should cost that
+// goroutine a moment rather than the rest of the answer. The write is not waited for: see Debit.
 const writeTimeout = 2 * time.Second
 
 const (
@@ -173,13 +174,29 @@ type Status struct {
 // Every path through it fails open: an unreachable Redis, an unreadable counter or a nil
 // Limiter all allow the request. Redis is optional in this deployment, and a limiter that
 // failed closed would turn a cache blip into an outage of the thing it is protecting.
+//
+// The counters live in a Redis every router shares, often in another region, so a router
+// keeps a copy of the ones its callers use: read on first use, counted in at once on each
+// debit here, and reread every refreshEvery while Start runs. Allow answers from the copy.
 type Limiter struct {
 	redis    rueidis.Client
 	defaults Limits
 	source   Source
 	logger   *slog.Logger
-	// unreadLogs throttles the warning a debit logs for a user whose own quota could not be read.
-	unreadLogs Throttle
+	now      func() time.Time
+	// unreadLogs throttles the warning a debit logs for a user whose own quota could not be
+	// read, and refreshLogs the one a failed refresh logs.
+	unreadLogs  Throttle
+	refreshLogs Throttle
+
+	// mu guards counters, keyed by bucket, and closed.
+	mu       sync.Mutex
+	counters map[string]*counter
+	closed   bool
+	// writes are the debits still being written, which Close waits for.
+	writes sync.WaitGroup
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // New returns a Limiter counting against the quota source gives each user, or against
@@ -192,7 +209,7 @@ func New(client rueidis.Client, defaults Limits, source Source, logger *slog.Log
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Limiter{redis: client, defaults: defaults, source: source, logger: logger}, nil
+	return &Limiter{redis: client, defaults: defaults, source: source, logger: logger, now: time.Now, counters: map[string]*counter{}}, nil
 }
 
 // bucket is one counter and the limits read against it.
@@ -215,7 +232,7 @@ func (l *Limiter) Allow(ctx context.Context, customerID string, caller routing.C
 	defer span.End()
 
 	// One clock reading names the day counted and the midnight it resets at.
-	now := time.Now()
+	now := l.now()
 	held := l.quota(ctx, customerID, named(caller))
 	if !held.Enforced() {
 		return Status{}, nil
@@ -240,7 +257,7 @@ func (l *Limiter) Allow(ctx context.Context, customerID string, caller routing.C
 		// An address answers for the deployment's limits only, the guard against a backend
 		// minting a fresh user id per request. Many people share one address (an office, a
 		// carrier's NAT), so a customer's quota on one user is counted for that user alone.
-		if key := addressKey(customerID, caller.IP, now); key != "" {
+		if key := addressKey(customerID, caller, now); key != "" {
 			if limits := held.enforced(false); len(limits) > 0 {
 				buckets = append(buckets, bucket{key: key, limits: limits})
 			}
@@ -253,7 +270,7 @@ func (l *Limiter) Allow(ctx context.Context, customerID string, caller routing.C
 	for i, counter := range buckets {
 		keys[i] = counter.key
 	}
-	spent, err := l.spent(ctx, keys...)
+	spent, err := l.current(ctx, now, keys)
 	if err != nil {
 		l.logger.Error("could not read a quota, allowing the request", "error", err)
 		return Status{}, nil
@@ -281,19 +298,19 @@ func (l *Limiter) Allow(ctx context.Context, customerID string, caller routing.C
 // is logged and the caller keeps the tokens. A user whose own quota could not be read is
 // counted as one held to a limit of the customer's, since that is where the limit would count.
 //
-// It waits for the write at most writeTimeout, counted from the call, and leaves a write
-// still going then to finish on its own. A write held to that deadline would never be sent
-// once the limits took the whole of it to read, or once this process stalled past it, and
-// the response would go uncounted. The write is bounded by the Redis client's own
-// ConnWriteTimeout instead (rueidis gives up on a connection that answers nothing for that
-// long, 10 s unless set), and ends with the client.
+// It waits at most writeTimeout for the limits, and not for the write: the debit is in this
+// router's copy at once, and the write to Redis finishes on its own, which Close waits for. A
+// write held to a deadline would never be sent once the limits took the whole of it to read,
+// or once this process stalled past it, and the response would go uncounted. The write is
+// bounded by the Redis client's own ConnWriteTimeout instead (rueidis gives up on a
+// connection that answers nothing for that long, 10 s unless set), and ends with the client.
 func (l *Limiter) Debit(ctx context.Context, customerID string, caller routing.Caller, tokens int64) {
 	if l == nil || !countable(customerID, caller) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
-	now := time.Now()
+	now := l.now()
 	held := l.quota(ctx, customerID, named(caller))
 	if !held.Enforced() && !held.Unread {
 		return
@@ -326,20 +343,30 @@ func (l *Limiter) Debit(ctx context.Context, customerID string, caller routing.C
 		)
 	}
 
-	written := make(chan struct{})
+	bumped, tracked := l.bump(keys, tokens, now)
+	writing := context.WithoutCancel(ctx)
 	go func() {
-		defer close(written)
-		for _, response := range l.redis.DoMulti(context.WithoutCancel(ctx), commands...) {
-			if err := response.Error(); err != nil {
+		if tracked {
+			defer l.writes.Done()
+		}
+		responses := l.redis.DoMulti(writing, commands...)
+		totals := make([]spend, len(keys))
+		for i, response := range responses {
+			total, err := response.AsInt64()
+			if err != nil {
 				l.logger.Error("could not record what a caller spent", "error", err)
+				l.settle(bumped, tokens, nil, time.Time{})
 				return
 			}
+			switch i % 3 {
+			case 0:
+				totals[i/3].messages = total
+			case 1:
+				totals[i/3].tokens = total
+			}
 		}
+		l.settle(bumped, tokens, totals, l.now())
 	}()
-	select {
-	case <-written:
-	case <-ctx.Done():
-	}
 }
 
 // Effective is the quota one of a customer's users is held to now. A nil Limiter enforces
@@ -431,7 +458,7 @@ func deviceKeys(customerID string, caller routing.Caller, now time.Time) []strin
 	if key := userKey(customerID, caller.UserID, now); key != "" {
 		keys = append(keys, key)
 	}
-	if key := addressKey(customerID, caller.IP, now); key != "" {
+	if key := addressKey(customerID, caller, now); key != "" {
 		keys = append(keys, key)
 	}
 	return keys
@@ -460,11 +487,11 @@ func UserKeys(customerID, userID string, now time.Time) []string {
 
 // addressKey is a device caller's bucket by address. It is keyed by the customer as well, since
 // each customer sets its own limit for an address.
-func addressKey(customerID, ip string, now time.Time) string {
-	if ip == "" {
+func addressKey(customerID string, caller routing.Caller, now time.Time) string {
+	if caller.IP == "" {
 		return ""
 	}
-	return "quota:" + day(now) + ":ip:" + customerID + ":" + ip
+	return "quota:" + day(now) + ":ip:" + customerID + ":" + caller.CountedAddress()
 }
 
 func day(now time.Time) string { return now.UTC().Format("20060102") }

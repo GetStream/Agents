@@ -52,6 +52,7 @@ func onlyQueries(r *http.Request) error {
 	// A body cut short is checked as far as it came, and the host gets those bytes.
 	body, _ := io.ReadAll(io.LimitReader(r.Body, maxGraphQLBody+1))
 	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 	switch {
 	case len(body) > maxGraphQLBody:
 		return errors.New("a GraphQL POST over the size the proxy reads")

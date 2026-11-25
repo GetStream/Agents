@@ -134,6 +134,9 @@ const (
 	ReasonConnectionRemoved = "connection_removed"
 	// ReasonTierLimit is a call or a text its organization's tier limits refuse.
 	ReasonTierLimit = "tier_limit_reached"
+	// ReasonNotInTeam is a task its end user made on an agent config of a team they are no
+	// longer in, in an app that keeps each team's configs to its own users.
+	ReasonNotInTeam = "not_in_team"
 	// ReasonPaused is not a failure: it is on the missed run of a one-shot
 	// whose time came while the task was paused, and of an occurrence the
 	// cut-over of a move skipped whose run the source had started.
@@ -197,6 +200,8 @@ type Scheduler struct {
 	logger  *slog.Logger
 	// activity counts each occurrence settled under its task's app. Nil counts none.
 	activity *activity.Recorder
+	// shard is whose tasks the worker claims. The zero ShardClaim claims every shard's.
+	shard store.ShardClaim
 
 	now           func() time.Time
 	lease         time.Duration
@@ -253,6 +258,12 @@ func (s *Scheduler) SetFinishRetries(waits []time.Duration) {
 // it before Start.
 func (s *Scheduler) SetActivity(record *activity.Recorder) {
 	s.activity = record
+}
+
+// SetShard has the worker claim only shard's tasks, and any left unclaimed where they are meant
+// for. Call it before Start.
+func (s *Scheduler) SetShard(shard store.ShardClaim) {
+	s.shard = shard
 }
 
 // Start runs the worker until ctx ends or Close: it looks at start, when Kick
@@ -320,7 +331,7 @@ func (s *Scheduler) runDue(ctx context.Context) (time.Duration, bool) {
 		if free == 0 {
 			return 0, false
 		}
-		claimed, err := s.store.ScheduledTasks.Claim(ctx, free, s.lease)
+		claimed, err := s.store.ScheduledTasks.Claim(ctx, free, s.lease, s.shard)
 		if err != nil {
 			if ctx.Err() == nil {
 				s.logger.Error("could not claim the scheduled tasks due", "error", err)
@@ -496,6 +507,11 @@ func (s *Scheduler) deliverWithRetries(ctx, draining context.Context, claim stor
 		if err == nil || errors.As(err, &held) || final(err) {
 			return deliveredTo, sessionID, err
 		}
+		// The next attempt reads the reason this one failed under as the run's, as a worker
+		// taking the run over reads how its call ended (store.ScheduledTaskRuns.TakeCall). The
+		// row keeps it too, for a worker that takes the run over during the wait.
+		reason := ReasonOf(err)
+		s.keepReason(claim, reason)
 		timer := time.NewTimer(wait)
 		select {
 		case <-draining.Done():
@@ -507,14 +523,24 @@ func (s *Scheduler) deliverWithRetries(ctx, draining context.Context, claim stor
 		case <-timer.C:
 		}
 		earlier := err
-		// The next attempt reads the reason this one failed under as the run's, as a worker
-		// taking the run over reads how its call ended (store.ScheduledTaskRuns.TakeCall).
-		reason := ReasonOf(earlier)
 		claim.Run.Error = &reason
 		deliveredTo, sessionID, err = s.deliver(ctx, claim)
 		err = rungEarlier(earlier, err)
 	}
 	return deliveredTo, sessionID, err
+}
+
+// keepReason records on claim's run the reason its attempt failed under, before the wait for the
+// next attempt: a router that stops or loses the lease meanwhile leaves the run to another worker,
+// which rebuilds the delivery from the row. A write that fails leaves that worker no reason, as
+// before the write was made, and this worker's next attempt reads it from memory still.
+func (s *Scheduler) keepReason(claim store.ClaimedScheduledTask, reason string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 15*time.Second)
+	defer cancel()
+	if err := s.store.ScheduledTaskRuns.SetAttemptReason(ctx, claim.Task.CustomerID, claim.Run.ID, claim.LeasedBy, reason); err != nil {
+		s.logger.Error("could not record why a scheduled task's attempt failed",
+			"task", claim.Task.ID, "run", claim.Run.ID, "customer", claim.Task.CustomerID, "error", err)
+	}
 }
 
 // rungEarlier is a later attempt's failure, kept under the reason the earlier

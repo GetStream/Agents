@@ -131,7 +131,7 @@ func (s *Server) queueChatInbound(ctx context.Context, origin hookOrigin, delive
 	}
 	queued, err := s.store.ChatInbounds.QueueFirst(ctx, deliveryKey(origin, delivery.Type, delivery.stamp()), store.ChatInbound{
 		StreamAppPK: origin.app, MessageID: delivery.Message.ID, CustomerID: origin.customer,
-		Deployment: origin.deployment, APIKey: origin.apiKey, Body: body, NextAttemptAt: time.Now(),
+		Deployment: origin.deployment, APIKey: origin.apiKey, Body: body,
 	})
 	if err != nil {
 		return err
@@ -286,7 +286,15 @@ func (s *Server) answerChatInboundForPeer(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.logger.Info("answering a queued chat inbound message another node handed over", "seq", queued.Seq, "stream_app", queued.StreamApp)
-	if !s.routeArrivingMessage(r.Context(), queued.origin(), event.messageEvent) {
+	origin := queued.origin()
+	// Handed to this node's shard rather than to what runs here, so it may still go on to a
+	// worker or the node running its conversation (node.HandedToShard).
+	if node.HandedToShard(r.Context()) {
+		origin.handOver = func(ctx context.Context, address string) (*node.ForwardResponse, error) {
+			return s.handChatInboundToPeer(ctx, address, queued)
+		}
+	}
+	if !s.routeArrivingMessage(r.Context(), origin, event.messageEvent) {
 		writeError(w, unavailable("nothing took the queued delivery"))
 		return
 	}

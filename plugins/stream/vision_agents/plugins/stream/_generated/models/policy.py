@@ -50,9 +50,10 @@ class Policy:
                 everything recorded with the user: what their devices ask for and what the app's backend asks for in their name.
                 (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per
                 user only, never by the address a device calls from, which many users can share; the router's default counts a
-                device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is
-                a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every
-                user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+                device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it.
+                A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every
+                user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-
+                Remaining and X-Quota-Reset.
             require_own_stream_app (bool | Unset): Keep the app out of the router's own Stream app: in app mode it is never
                 written there for want of a registered Stream app of its own, and what it wrote there before can only be read.
                 True at either scope requires it, so an app cannot turn its organization's off. An organization's is set by the

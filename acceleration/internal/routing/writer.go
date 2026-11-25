@@ -510,10 +510,7 @@ func (w *Writer) writeRows(rows []pending) {
 		ctx, cancel := w.attempt()
 		written, err := w.store.Requests.InsertMany(ctx, requests)
 		cancel()
-		if err == nil || errors.Is(err, store.ErrRequestLogsMissing) {
-			if err != nil {
-				w.logger.Warn("usage rows written without some of their agent log rows", "error", err)
-			}
+		if err == nil {
 			w.countGrants(requests, written)
 			if unknown > 0 {
 				usageUnresolved.Add(float64(unknown))

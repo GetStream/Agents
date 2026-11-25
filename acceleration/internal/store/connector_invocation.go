@@ -1,9 +1,11 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -119,17 +121,31 @@ type ConnectorInvocations struct {
 
 // Insert stores one call.
 func (r *ConnectorInvocations) Insert(ctx context.Context, invocation *ConnectorInvocation) error {
-	if err := invocation.Validate(); err != nil {
-		return stack.Wrap(err)
+	invocations := []ConnectorInvocation{*invocation}
+	err := r.InsertMany(ctx, invocations)
+	*invocation = invocations[0]
+	return err
+}
+
+// InsertMany stores calls in one statement, and none of them when one is refused.
+func (r *ConnectorInvocations) InsertMany(ctx context.Context, invocations []ConnectorInvocation) error {
+	for i := range invocations {
+		invocation := &invocations[i]
+		if err := invocation.Validate(); err != nil {
+			return stack.Wrap(err)
+		}
+		// A caller that names the call before the row exists (the session's log line, AI-1242)
+		// keeps its id.
+		if invocation.ID == "" {
+			invocation.ID = newID()
+		}
+		// Truncated to what Postgres keeps, so the row handed back is the row a read returns.
+		invocation.StartedAt = invocation.StartedAt.UTC().Truncate(time.Microsecond)
 	}
-	// A caller that names the call before the row exists (the session's log line, AI-1242)
-	// keeps its id.
-	if invocation.ID == "" {
-		invocation.ID = newID()
+	if len(invocations) == 0 {
+		return nil
 	}
-	// Truncated to what Postgres keeps, so the row handed back is the row a read returns.
-	invocation.StartedAt = invocation.StartedAt.UTC().Truncate(time.Microsecond)
-	_, err := r.store.global.NewInsert().Model(invocation).Exec(ctx)
+	_, err := r.store.shard.NewInsert().Model(&invocations).Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: record connector invocation: %w", err))
 	}
@@ -142,19 +158,31 @@ func (r *ConnectorInvocations) Select(ctx context.Context, customerID string, fi
 	if customerID == "" || filter.ConnectionID == "" {
 		return nil, stack.Wrap(errors.New("store: a customer and a connection id are required"))
 	}
-	invocations := []ConnectorInvocation{}
-	query := r.store.global.NewSelect().Model(&invocations).
-		Where("customer_id = ?", customerID).
-		Where("connection_id = ?", filter.ConnectionID)
-	if after := filter.After; after != nil {
-		query = query.Where("(started_at, id) < (?, ?)", after.StartedAt, after.ID)
-	}
-	err := query.
-		Order("started_at DESC", "id DESC").
-		Limit(InvocationLimit(filter.Limit) + 1).
-		Scan(ctx)
+	lists, err := everyHolder(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]ConnectorInvocation, error) {
+		invocations := []ConnectorInvocation{}
+		query := db.NewSelect().Model(&invocations).
+			Where("customer_id = ?", customerID).
+			Where("connection_id = ?", filter.ConnectionID)
+		if after := filter.After; after != nil {
+			query = query.Where("(started_at, id) < (?, ?)", after.StartedAt, after.ID)
+		}
+		err := query.
+			Order("started_at DESC", "id DESC").
+			Limit(InvocationLimit(filter.Limit) + 1).
+			Scan(ctx)
+		return invocations, err
+	})
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: list connector invocations: %w", err))
 	}
+	invocations := distinct(merged(lists, newestInvocationFirst, 0), func(i ConnectorInvocation) string { return i.ID })
+	if limit := InvocationLimit(filter.Limit) + 1; len(invocations) > limit {
+		invocations = invocations[:limit]
+	}
 	return invocations, nil
+}
+
+// newestInvocationFirst is the order Select lists invocations in.
+func newestInvocationFirst(a, b ConnectorInvocation) int {
+	return cmp.Or(b.StartedAt.Compare(a.StartedAt), strings.Compare(b.ID, a.ID))
 }
