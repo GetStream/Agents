@@ -126,10 +126,20 @@ func (f *fixture) router(client *http.Client) *resolver.Resolver {
 
 // routerLogging is router with logger as its resolver's Config.Logger, nil for its default.
 func (f *fixture) routerLogging(client *http.Client, logger *slog.Logger) *resolver.Resolver {
+	return f.routerOn(f.open(), client, logger)
+}
+
+// open is another router's store: a pool of its own, connected before it is used.
+func (f *fixture) open() *store.Store {
 	db, err := store.Open(f.dsn)
 	require.NoError(f.tb, err)
 	f.tb.Cleanup(func() { _ = db.Close() })
 	require.NoError(f.tb, db.Ping(f.ctx))
+	return db
+}
+
+// routerOn is a router whose resolver runs on db, logging to logger.
+func (f *fixture) routerOn(db *store.Store, client *http.Client, logger *slog.Logger) *resolver.Resolver {
 	sealed, err := pgsealed.New(db, f.sealer)
 	require.NoError(f.tb, err)
 	var credentials core.CredentialStore = sealed

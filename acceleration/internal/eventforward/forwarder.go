@@ -158,7 +158,7 @@ type Forwarder struct {
 	mu      sync.Mutex
 	sending map[string]int
 	// unopenedAt is when this router last logged that it cannot open a destination's signing
-	// secret, by destination id (unopened).
+	// secret, or its previous one, by line and destination id (unopened, openSecrets).
 	unopenedAt map[string]time.Time
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -569,17 +569,23 @@ func (f *Forwarder) unsignedWait() time.Duration {
 // unopened logs that this router cannot open a destination's signing secret, once a lease for
 // each destination: a destination's whole backlog fails alike, and one line says it.
 func (f *Forwarder) unopened(log *slog.Logger, destinationID string, err error) {
-	f.mu.Lock()
-	last, seen := f.unopenedAt[destinationID]
-	due := !seen || time.Since(last) >= f.lease
-	if due {
-		f.unopenedAt[destinationID] = time.Now()
-	}
-	f.mu.Unlock()
-	if !due {
+	if !f.dueOnce("unopened/" + destinationID) {
 		return
 	}
 	log.Error("this router cannot open an event destination's signing secret; its forwards are left to another", "error", err)
+}
+
+// dueOnce says whether a line is due, and marks it written when it is: at most once a lease
+// for each key. A key names the line and the destination, so one line does not hide another.
+func (f *Forwarder) dueOnce(key string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	last, seen := f.unopenedAt[key]
+	due := !seen || time.Since(last) >= f.lease
+	if due {
+		f.unopenedAt[key] = time.Now()
+	}
+	return due
 }
 
 // giveUpUnsent drops a delivery claimed more times than it may be tried: each claim before
@@ -677,7 +683,12 @@ func (f *Forwarder) send(ctx context.Context, delivery store.ClaimedEventDeliver
 }
 
 // openSecrets are the secrets a send is signed with: the destination's, and the one its last
-// rotation replaced while that still signs.
+// rotation replaced while that still signs. The previous secret is only a grace window for a
+// receiver not yet on the new one, and the current secret alone is a valid signature: a previous
+// secret that does not open, because no router holds its key version or for another reason, is
+// left out with a warning, once a lease for each destination, and the forward is sent with the
+// current one. A current secret that does not open is an error: nothing is sent, and attempt
+// leaves it to another router or gives it up.
 func (f *Forwarder) openSecrets(delivery store.ClaimedEventDelivery) ([]string, error) {
 	aad := secretAAD(delivery.CustomerID, delivery.ConnectorID, delivery.DestinationID)
 	current, err := f.secrets.OpenWithAADVersion(delivery.SecretSealed, aad, delivery.KEKVersion)
@@ -688,7 +699,11 @@ func (f *Forwarder) openSecrets(delivery store.ClaimedEventDelivery) ([]string, 
 	if len(delivery.PreviousSecretSealed) > 0 && delivery.PreviousUntil != nil && time.Now().Before(*delivery.PreviousUntil) {
 		previous, err := f.secrets.OpenWithAADVersion(delivery.PreviousSecretSealed, aad, delivery.PreviousKEKVersion)
 		if err != nil {
-			return nil, stack.Wrap(fmt.Errorf("eventforward: the previous signing secret of destination %s does not open: %w", delivery.DestinationID, err))
+			if f.dueOnce("previous/" + delivery.DestinationID) {
+				f.logger.Warn("this router cannot open an event destination's previous signing secret; its forwards are signed with the current one alone",
+					"connector", delivery.ConnectorID, "customer", delivery.CustomerID, "destination", delivery.DestinationID, "error", err)
+			}
+			return secrets, nil
 		}
 		secrets = append(secrets, previous)
 	}
