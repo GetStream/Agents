@@ -364,30 +364,33 @@ SELECT customer_id, 'requests', 'insert', jsonb_build_object('usage_id', usage_i
 	_, err := s.store.shard.ExecContext(s.ctx, fmt.Sprintf(requests, "known")+"ANALYZE requests, data_changes")
 	s.Require().NoError(err)
 
+	// By the whole key or by the user with a filter, whichever the version of Postgres picks.
+	const byID = `((payload ->> 'id'::text) = ANY ('{`
 	read := plan("known")
-	s.Contains(read, "Index Scan using data_changes_user_idx on data_changes", "with statistics")
-	s.Regexp(`Index Cond: .*\(\(payload ->> 'user_id'::text\) = 'jlahey'::text\) AND \(\(payload ->> 'id'::text\) = ANY \('{`, read, "with statistics")
+	s.Contains(read, "data_changes_user_idx", "with statistics")
+	s.Contains(read, byID, "with statistics")
 
 	_, err = s.store.shard.ExecContext(s.ctx, fmt.Sprintf(requests, "new"))
 	s.Require().NoError(err)
 
-	s.Contains(plan("new"), `((payload ->> 'id'::text) = ANY ('{`, "with statistics from before the app's changes")
+	read = plan("new")
+	s.Regexp("Index Scan using data_changes_(user|customer)_idx", read, "with statistics from before the app's changes")
+	s.Contains(read, byID, "with statistics from before the app's changes")
 }
 
+// More changes of requests deleted than one statement takes.
 func (s *StoreSuite) TestRenamingAUserRenamesThemInTheChangesOfARequestDeletedBefore() {
-	if s.store.Sharded() {
-		s.T().Skip("a shard's own tables record no changes (watchDataChanges)")
-	}
-	s.Require().NoError(s.store.StartDataCapture(s.ctx, "app", time.Hour, time.Second))
-	gone := &Request{Modality: "stt", CustomerID: "app", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true}
-	s.Require().NoError(insertRequest(s.ctx, s.store, gone))
-	_, err := s.store.shard.ExecContext(s.ctx, "DELETE FROM requests WHERE usage_id = ?", gone.UsageID)
+	s.renaming()
+	s.requestOf("jlahey")
+	s.requestOf("jlahey")
+	_, err := s.store.shard.ExecContext(s.ctx, "DELETE FROM requests WHERE customer_id = 'app'")
 	s.Require().NoError(err)
-	s.Require().NotEmpty(s.payloadsNaming("app", "jlahey"), "the request's insert was recorded")
+	s.Require().Len(s.payloadsNaming("app", "jlahey"), 2, "the requests' inserts were recorded")
 
-	_, err = s.store.Requests.RenameUser(s.ctx, "app", "jlahey", "forgotten")
+	renamed, err := s.store.Requests.RenameUser(s.ctx, "app", "jlahey", "forgotten")
+
 	s.Require().NoError(err)
-
+	s.Zero(renamed)
 	s.Empty(s.payloadsNaming("app", "jlahey"))
 }
 
