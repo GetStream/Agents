@@ -245,8 +245,9 @@ func (s Skills) File(ctx context.Context, name, file string) (string, error) {
 // and only when it decides it needs one.
 const ReadSkillFileTool = "read_skill_file"
 
-// maxSkillName is how many characters a skill's name may have, maxSkillFile how many bytes a
-// file's key may, and maxPathPart how many bytes the name of a folder or file may have on Linux.
+// maxSkillName is how many characters a skill's name may have, maxSkillFile how many bytes of
+// a file's key are staged as they are, and maxPathPart how many bytes the name of a folder or file
+// may have on Linux.
 const (
 	maxSkillName = 255
 	maxSkillFile = 1024
@@ -262,10 +263,8 @@ func ValidSkillName(name string) bool {
 
 // ValidSkillFile reports whether a file's key is a path inside its skill's folder.
 func ValidSkillFile(file string) bool {
-	tooLong := func(part string) bool { return len(part) > maxPathPart }
-	return len(file) <= maxSkillFile && file != "." && !path.IsAbs(file) && path.Clean(file) == file && file != ".." &&
-		!strings.HasPrefix(file, "../") && !strings.ContainsAny(file, "\\\x00") &&
-		!slices.ContainsFunc(strings.Split(file, "/"), tooLong)
+	return file != "." && !path.IsAbs(file) && path.Clean(file) == file && file != ".." &&
+		!strings.HasPrefix(file, "../") && !strings.ContainsAny(file, "\\\x00")
 }
 
 // BundlePath is where a skill's file is put in the sandbox, relative to where code runs: inside
@@ -283,9 +282,11 @@ func bundleFolder(skill string) string {
 	return path.Join("skills", skill)
 }
 
-// bundleFile is where a file is in its skill's folder, hashed when its key is no path there.
+// bundleFile is where a file is in its skill's folder, hashed when its key is no path there or is
+// longer than Linux takes.
 func bundleFile(file string) string {
-	if !ValidSkillFile(file) {
+	tooLong := func(part string) bool { return len(part) > maxPathPart }
+	if !ValidSkillFile(file) || len(file) > maxSkillFile || slices.ContainsFunc(strings.Split(file, "/"), tooLong) {
 		return fmt.Sprintf(".file-%x", sha256.Sum256([]byte(file)))
 	}
 	return file

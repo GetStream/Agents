@@ -161,6 +161,8 @@ func (s *SkillsSuite) TestASkillsFilesArePutInAFolderOfItsName() {
 	}
 	s.Equal("skills/pdf/.env.sample", BundlePath("pdf", ".env.sample"))
 	deep := strings.Repeat(long+"/", 3) + long
+	whole := strings.Repeat("a/", 511) + "aa"
+	s.Equal("skills/pdf/"+whole, BundlePath("pdf", whole))
 	s.Equal("skills/pdf/"+deep, BundlePath("pdf", deep))
 	s.Equal("skills/pdf/-v/..notes", BundlePath("pdf", "-v/..notes"))
 }

@@ -240,13 +240,15 @@ func (s *NamesSuite) TestASkillsFileIsAPathInsideItsFolder() {
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs",
 		map[string]any{"name": "support", "sandbox": "daytona"}, &config))
 
-	for _, key := range []string{"", ".", "..", "../a.py", "/a.py", "a/", "a//b", "a/../b", `a\b`, "a\x00b", strings.Repeat("a/", 512) + "a", strings.Repeat("a", 256), strings.Repeat("a", 256) + "/a.md", "a/" + strings.Repeat("a", 256)} {
+	for _, key := range []string{"", ".", "..", "../a.py", "/a.py", "a/", "a//b", "a/../b", `a\b`, "a\x00b"} {
 		status, failure := s.skillWith(http.MethodPost, "/v1/agents/skills", config.Id, "pdf", map[string]string{key: "x"})
 		s.Equal(http.StatusBadRequest, status, key)
 		s.Contains(failure.Message, "is not a path inside the skill's folder", key)
-		s.Less(len(failure.Message), 300)
 	}
+	_, failure := s.skillWith(http.MethodPost, "/v1/agents/skills", config.Id, "pdf", map[string]string{"../" + strings.Repeat("a", 500): "x"})
+	s.Less(len(failure.Message), 300)
 	status, failure := s.skillWith(http.MethodPost, "/v1/agents/skills", config.Id, "pdf",
-		map[string]string{"-v.py": "x", ".env.sample": "x", "a b/返金.md": "x", "..notes": "x", strings.Repeat("a", 255) + "/" + strings.Repeat("b/", 383) + "bc": "x", "Icon\r": ""})
+		map[string]string{strings.Repeat("a/", 512) + "a": "x", strings.Repeat("a", 256): "x", strings.Repeat("a", 256) + "/a.md": "x",
+			"a/" + strings.Repeat("a", 256): "x", "-v.py": "x", ".env.sample": "x", "a b/返金.md": "x", "..notes": "x", strings.Repeat("a", 255) + "/" + strings.Repeat("b/", 383) + "bc": "x", "Icon\r": ""})
 	s.Equal(http.StatusCreated, status, failure.Message)
 }

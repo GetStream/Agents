@@ -967,6 +967,20 @@ func (s *SyncSuite) TestASkillWithOnlyReferencesNeedsNoSandbox() {
 	s.Equal([]string{"reference/forms.md"}, value(s.skillNamed(result.Config.Id, "pdf").FilePaths))
 }
 
+func (s *SyncSuite) TestASkillWithOnlyReferencesMayHaveLongFileNames() {
+	long, deep := strings.Repeat("返", 86)+".md", strings.Repeat("reference/", 104)+"a.md"
+	s.Require().Len(deep, 1044)
+	result := s.sync(map[string]any{
+		"name": "forms", "hash": "v1",
+		"skills": []map[string]any{{
+			"config_id": "", "name": "pdf", "description": "fill PDF forms", "instructions": "Fill the form.",
+			"files": map[string]string{long: "# Forms", deep: "# Forms"},
+		}},
+	})
+
+	s.ElementsMatch([]string{long, deep}, value(s.skillNamed(result.Config.Id, "pdf").FilePaths))
+}
+
 func (s *SyncSuite) TestASkillFileOutsideItsFolderIsRefused() {
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/sync", map[string]any{
 		"name": "forms", "hash": "v1", "sandbox": "daytona",
