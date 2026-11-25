@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -203,14 +204,14 @@ func (s *ElevenlabsSocketSuite) refusedOn(greeting string) float64 {
 	fake := newFakeSTT()
 	fake.greeting = greeting
 	defer fake.close()
-	before := keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key")
+	before := keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/invalid_key"]
 
 	provider, err := New(Options{APIKey: "sk_" + rand.Text(), URL: fake.endpoint()})
 	s.Require().NoError(err)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "stt", "scribe_v2_realtime"), 5*time.Second)
 	defer cancel()
 	s.Require().Error(provider.Start(ctx))
-	return keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key") - before
+	return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/invalid_key"] - before
 }
 
 // The frame Scribe sent a made-up key on 2026-10-28, right after the handshake.

@@ -889,6 +889,9 @@ A `recipient` that is neither an E.164 number nor, for channel `imessage` or `al
 
 ## Bug Fixes
 
+### The `unowned` usage alert is sent once a day, not once a minute
+
+The router's `unowned` alert holds for as long as usage rows wait for an app to join an organization, which can be days, and was sent again every minute it held. It is now sent again at most once a day while it holds; it is still sent as soon as it starts holding, including when it holds again after it stopped. Every other usage alert is unchanged (#2115).
 ### The JavaScript SDK's channel stops the agent's reply from the default stop button
 
 The default stop button of stream-chat-react's composer, `StopAIGenerationButton`, calls the channel's `stopAIResponse()`, as React Native's composer does, which only sent `ai_indicator.stop`, an event the agent does not act on, so the reply went on and apps replaced the button with one calling `session.interrupt()`. On the channel `session.chat()` opens, `stopAIResponse()` now interrupts the session's reply first and still sends the event, so the default button works and the override can go. The channel gets Stream Chat's own back when the session is closed.
