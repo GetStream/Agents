@@ -145,11 +145,11 @@ func (s *Server) listScheduledTasks(ctx context.Context, request *listScheduledT
 }
 
 func (s *Server) createScheduledTask(ctx context.Context, request *createScheduledTaskRequest) (*createScheduledTaskResponse, error) {
-	if failure, refused := refuseReservedActingFor(ctx, "CreateScheduledTask"); refused {
-		return nil, failure
-	}
 	customerID, failure := s.scheduledTasksCustomer(ctx)
 	if failure != nil {
+		return nil, failure
+	}
+	if failure, refused := refuseReservedActingFor(ctx, "CreateScheduledTask"); refused {
 		return nil, failure
 	}
 	if request.Body == nil {

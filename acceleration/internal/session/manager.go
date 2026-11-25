@@ -461,9 +461,12 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		// A session's channel is named after it, and a thread channel's id is taken by the
 		// external thread it holds. Compared case-folded, as threadConversation does.
 		if folded := strings.ToLower(spec.ID); !taken && strings.HasPrefix(folded, persistent.ThreadChannelPrefix) {
-			// Why: to an end user's device every id in the thread namespace is taken, so the
-			// answer does not tell it whether a thread channel has the id.
-			if endUserKind(spec.CallerKind) && threadShaped(folded) && ThreadSessionIDsSwitch.Applies(spec.CustomerID, "CreateSession") {
+			// Why: to an end user's device every id shaped like a thread channel's is taken, so
+			// the answer does not tell it whether a thread channel has the id. Counted only
+			// where that changes the answer: an id no thread channel has.
+			probe := endUserKind(spec) && threadShaped(folded)
+			if probe && ThreadSessionIDsSwitch.On(spec.CustomerID) {
+				ThreadSessionIDsSwitch.Applies(spec.CustomerID, "CreateSession")
 				taken = true
 			} else {
 				_, err := m.options.Store.ChannelThreads.Get(ctx, folded)
@@ -471,6 +474,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 					return nil, stack.Wrap(err)
 				}
 				taken = err == nil
+				if probe && !taken {
+					ThreadSessionIDsSwitch.Applies(spec.CustomerID, "CreateSession")
+				}
 			}
 		}
 		if taken {
@@ -2678,9 +2684,13 @@ func threadShaped(folded string) bool {
 	return err == nil && len(rest) == 36
 }
 
-// endUserKind reports whether kind is an end user's device rather than the customer's
+// endUserKind reports whether spec was opened by an end user's device rather than the customer's
 // backend. A spec the router opens itself names no kind.
-func endUserKind(kind auth.Kind) bool {
+func endUserKind(spec Spec) bool {
+	if spec.Caller.ServerSide {
+		return false
+	}
+	kind := spec.CallerKind
 	return kind == auth.KindAuthenticated || kind == auth.KindGuest || kind == auth.KindAnonymous
 }
 
