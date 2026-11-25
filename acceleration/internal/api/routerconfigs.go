@@ -140,7 +140,17 @@ func (s *Server) updateRouterConfig(ctx context.Context, request *updateRouterCo
 	}
 	config.ID = existing.ID
 	config.CreatedAt = existing.CreatedAt
-	if err := s.store.RouterConfigs.Update(ctx, &config); err != nil {
+	// A checked sync is written only over the config it was checked against: a write that
+	// lands in between is one the check never saw, so the sync is refused as it would be after.
+	if request.Body.CheckChanges {
+		err = s.store.RouterConfigs.Save(ctx, &config, existing.UpdatedAt)
+	} else {
+		err = s.store.RouterConfigs.Update(ctx, &config)
+	}
+	if errors.Is(err, store.ErrStaleRouterConfig) {
+		return nil, errChangedOutsideSync
+	}
+	if err != nil {
 		return nil, storeFailure(err, errRouterNameTaken)
 	}
 	stored := routerConfigOf(config)

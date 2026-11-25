@@ -355,6 +355,26 @@ func (s *RouterConfigsSuite) TestASyncWithoutTheCheckWritesOverAnEditOutsideSync
 	s.Equal("hash-two", s.readConfig(created.Id).SyncHash)
 }
 
+// A checked sync read the config through the cache and wrote it with an update made on the id
+// alone, so an edit landing between the check and the write, one the read never saw, was
+// written over. The edit here goes to the table behind the cache's back, as another replica's
+// does before its invalidation arrives.
+func (s *RouterConfigsSuite) TestACheckedSyncIsRefusedOverAnEditItsCheckNeverSaw() {
+	created := s.createConfig(s.syncedClinic("hash-one"))
+	s.readConfig(created.Id)
+	_, err := s.store.GlobalDB().ExecContext(s.T().Context(),
+		"UPDATE router_configs SET name = ?, sync_hash = '', updated_at = now() WHERE id = ?", "clinic-dash", created.Id)
+	s.Require().NoError(err)
+	changed := s.checkedClinic("hash-two")
+	changed["stt"] = map[string]any{"target": "llm-flow"}
+
+	s.assertRefusedAsUnsynced(s.serverClient, http.MethodPut, "/v1/router/configs/"+created.Id, changed)
+
+	read := s.readConfig(created.Id)
+	s.Equal("clinic-dash", read.Name, "the edit is kept, and the cached copy the check read is forgotten")
+	s.Empty(read.SyncHash)
+}
+
 // Another app's config of the same name, edited outside sync, refuses only that app's sync.
 func (s *RouterConfigsSuite) TestAnotherAppsEditOutsideSyncRefusesOnlyItsOwnCheckedSync() {
 	stranger := s.data.backendOfAnotherApp()

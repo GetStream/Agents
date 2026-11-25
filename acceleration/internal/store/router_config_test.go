@@ -159,3 +159,59 @@ func (s *StoreSuite) TestRouterConfigQueryBudgets() {
 	}
 	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Delete(s.ctx, "acme-app", config.ID)) }), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 }
+
+// AI-3831: a save checked against one copy of a config wrote over whatever was stored, so a
+// write that landed after the copy was read was lost.
+func (s *StoreSuite) TestARouterConfigSaveMadeFromACopyAnotherWriteReplacedWritesNothing() {
+	s.routerConfig("acme-app", "fast")
+	listed, err := s.store.RouterConfigs.Select(s.ctx, "acme-app")
+	s.Require().NoError(err)
+	read := listed[0]
+	other := read
+	other.Name = "cheap"
+	s.Require().NoError(s.store.RouterConfigs.Update(s.ctx, &other))
+
+	mine := read
+	mine.SyncHash = "hash-two"
+	s.Require().ErrorIs(s.store.RouterConfigs.Save(s.ctx, &mine, read.UpdatedAt), ErrStaleRouterConfig)
+
+	stored, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", read.ID)
+	s.Require().NoError(err)
+	s.Equal("cheap", stored.Name, "the other write is kept")
+	s.Empty(stored.SyncHash, "nothing of the stale copy is written")
+}
+
+func (s *StoreSuite) TestARouterConfigSaveMadeFromTheStoredCopyIsWritten() {
+	s.routerConfig("acme-app", "fast")
+	read, err := s.store.RouterConfigs.GetByName(s.ctx, "acme-app", "fast")
+	s.Require().NoError(err)
+
+	mine := read
+	mine.SyncHash = "hash-two"
+	s.Require().NoError(s.store.RouterConfigs.Save(s.ctx, &mine, read.UpdatedAt))
+
+	stored, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", read.ID)
+	s.Require().NoError(err)
+	s.Equal("hash-two", stored.SyncHash)
+}
+
+// A refused save is compared with the row, not the cache, and leaves no stale copy cached: a
+// write the cache has not heard of yet (another replica's, before its invalidation arrives)
+// refuses it, and the next read returns that write.
+func (s *StoreSuite) TestARefusedRouterConfigSaveForgetsTheCachedCopy() {
+	config := s.routerConfig("acme-app", "fast")
+	cachedCopy, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().NewUpdate().Model((*RouterConfig)(nil)).
+		Set("sync_hash = ?", "hash-elsewhere").Set("updated_at = now()").
+		Where("id = ?", config.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	mine := cachedCopy
+	mine.SyncHash = "hash-two"
+	s.Require().ErrorIs(s.store.RouterConfigs.Save(s.ctx, &mine, cachedCopy.UpdatedAt), ErrStaleRouterConfig)
+
+	stored, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
+	s.Require().NoError(err)
+	s.Equal("hash-elsewhere", stored.SyncHash)
+}
