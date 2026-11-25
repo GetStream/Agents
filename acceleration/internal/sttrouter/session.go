@@ -147,8 +147,8 @@ const maxRefusals = 2
 // session, which still transcribes and bills the audio it took, so its events close after the
 // last transcript. Money that could not be checked (policy.Transient) counts for nothing.
 func (s *Session) unpaid(lease *routing.Lease) error {
-	err, refusals, _ := lease.Refusals()
-	if err == nil || refusals < maxRefusals && !errors.Is(err, policy.ErrSuspended) {
+	err := refusedFor(lease)
+	if err == nil {
 		return nil
 	}
 	if !s.spent.CompareAndSwap(false, true) {
@@ -157,6 +157,24 @@ func (s *Session) unpaid(lease *routing.Lease) error {
 	// Off the caller's goroutine, since closing may wait on the vendor for the last words.
 	goroutine.Go(s.call, func() { _ = s.Close() })
 	return stack.Wrap(err)
+}
+
+// refusedFor is the refusal of the lease that ends a session, nil while none does.
+func refusedFor(lease *routing.Lease) error {
+	err, refusals, _ := lease.Refusals()
+	if refusals >= maxRefusals || errors.Is(err, policy.ErrSuspended) {
+		return err
+	}
+	return nil
+}
+
+// Unpaid reports whether the session's money ran out: it ended for that (unpaid), or its next
+// audio ends it.
+func (s *Session) Unpaid() bool {
+	s.mu.Lock()
+	lease := s.lease
+	s.mu.Unlock()
+	return s.spent.Load() || refusedFor(lease) != nil
 }
 
 // RefusedSince is when the first of the refusals of the session's lease in a row was, zero when

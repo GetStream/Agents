@@ -1737,12 +1737,13 @@ func (a *Agent) keepRefusals(participantID string, session *sttrouter.Session) {
 	}
 }
 
-// hearsAnyone reports whether anyone on the call has a transcriber that is not refused.
+// hearsAnyone reports whether anyone on the call has a transcriber still running: one refused
+// once still hears them.
 func (a *Agent) hearsAnyone() bool {
 	a.mu.Lock()
 	listeners := slices.Collect(maps.Values(a.listeners))
 	a.mu.Unlock()
-	return slices.ContainsFunc(listeners, func(listener *sttrouter.Session) bool { return listener.RefusedSince().IsZero() })
+	return slices.ContainsFunc(listeners, func(listener *sttrouter.Session) bool { return !listener.Unpaid() })
 }
 
 // refusedMoney reports whether err refuses work because money ran out or the organization is

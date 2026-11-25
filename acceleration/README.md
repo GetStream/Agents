@@ -677,9 +677,10 @@ over, and forgotten when that model bills nothing (free, or on the customer's ow
 nothing. The session writes its last transcript and bills the audio it took. `/v1/stt/stream` then
 sends the money error and closes with 1008. A call asks again once a second for a transcriber it
 was refused to open, and goes on from the refusals of one that ended; a participant refused for
-30 s, or for a suspension, is not heard. The call ends when it has nobody left whose transcriber is
-open and not refused. A participant who leaves, or is not asked for in a minute, starts again. An
-agent's next turn is refused by its LLM's reservation meanwhile. A reservation is a
+30 s, or for a suspension, is not heard. The call ends when nobody on it has a
+transcription still running, and one whose lease was refused once still runs. A participant who
+leaves, or is not asked for in a minute, starts again. An agent's next turn is refused by its LLM's
+reservation meanwhile. A reservation is a
 hold under the usage id its row will carry, checked in the order above and answered from
 memory; a refusal asks no vendor and records no row. The row settles it at its cost, and a
 reservation never recorded expires (2 minutes, 90 s for a lease). Holds are shared through

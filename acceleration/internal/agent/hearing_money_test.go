@@ -347,24 +347,62 @@ func (s *AgentSuite) TestATranscriberThatEndsRefusedAfterItsParticipantIsBackIsN
 	})
 }
 
-func (s *AgentSuite) TestACallEndsWhenTheOnlyOtherTranscriberIsRefusedToo() {
+// talksAs is talks for another participant.
+func (s *AgentSuite) talksAs(id string, seconds int) {
+	for range seconds {
+		s.speak(stt.Participant{ID: id})
+		synctest.Wait()
+		time.Sleep(time.Second)
+		synctest.Wait()
+	}
+}
+
+func (s *AgentSuite) TestACallGoesOnWhileAParticipantRefusedOnceIsHeard() {
 	s.hearsOn(func(gate *gatetest.Answers) {
 		s.talks(1)
 		gate.Refuse(policy.ErrNoCredits)
-		// Alice is silent from here, and her lease is refused at 30 s.
-		for range 28 {
-			s.speak(stt.Participant{ID: "bob"})
-			time.Sleep(time.Second)
-			synctest.Wait()
-		}
+		// Bob is refused a transcriber for longer than 30 s, and alice's lease once, at 30 s.
+		s.talksAs("bob", 55)
+		s.False(s.callEnded(), "one refusal changes nothing for alice")
+		s.talks(1)
+		s.Len(s.ears.transcribed(), 2, "she is heard")
+
+		// Hers ends at 60 s, refused twice in a row, and with it the call.
+		s.talksAs("bob", 2)
 		s.False(s.callEnded())
-		for range 4 {
-			s.speak(stt.Participant{ID: "bob"})
-			time.Sleep(time.Second)
-			synctest.Wait()
-		}
+		s.talksAs("bob", 3)
+		s.True(s.callEnded())
+	})
+}
+
+func (s *AgentSuite) TestACallEndsWhenTheOnlyOtherTranscriptionIsSuspended() {
+	s.hearsOn(func(gate *gatetest.Answers) {
+		s.talks(1)
+		gate.Refuse(policy.ErrNoCredits)
+		s.talksAs("bob", 27)
+		gate.Refuse(policy.ErrSuspended)
+		s.talksAs("bob", 1)
+		s.False(s.callEnded())
+
+		s.talksAs("bob", 3)
 
 		s.True(s.callEnded())
+	})
+}
+
+func (s *AgentSuite) TestACallGoesOnWhileAParticipantGrantedAgainIsHeard() {
+	s.hearsOn(func(gate *gatetest.Answers) {
+		s.talks(1)
+		gate.Refuse(policy.ErrNoCredits)
+		s.talksAs("bob", 50)
+		// Granted at 60 s, between two refusals of her lease, as bob does not ask.
+		gate.Refuse(nil)
+		time.Sleep(11 * time.Second)
+		synctest.Wait()
+		gate.Refuse(policy.ErrNoCredits)
+		s.talksAs("bob", 40)
+
+		s.False(s.callEnded(), "her lease was refused once since")
 	})
 }
 
