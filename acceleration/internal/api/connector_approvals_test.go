@@ -533,7 +533,7 @@ func (s *SessionConnectorsSuite) TestACallBesideNessyIsHeldForApproval() {
 }
 
 // TestAPatternCallBesideNessyIsHeldByAWildcardEntry: the session holds the call through
-// store.ConnectorBinding.RequiresApproval, not the config check's holdsPattern, so "*" must hold
+// store.ConnectorBinding.RequiresApproval, not the config check's sensitive.holdsPattern, so "*" must hold
 // the ec* pattern's echo in the session too.
 func (s *SessionConnectorsSuite) TestAPatternCallBesideNessyIsHeldByAWildcardEntry() {
 	s.useApp(s.data.createAppAdmitting(store.AppSettings{InternalConnectors: new(true)}))
