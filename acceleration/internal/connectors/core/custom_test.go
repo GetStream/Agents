@@ -72,7 +72,9 @@ func (s *CustomConnectorSuite) TestAConnectorAsksForAtMost100Scopes() {
 
 // RFC 6749 section 3.3: scope-token = 1*( %x21 / %x23-5B / %x5D-7E ).
 func (s *CustomConnectorSuite) TestAScopeIsAnRFC6749ScopeToken() {
-	s.NoError(s.manifest(func(c *CustomConnector) { c.Scopes = []string{"!", "#", "[", "]", "~", "repo:read", "https://acme.example/read"} }))
+	s.NoError(s.manifest(func(c *CustomConnector) {
+		c.Scopes = []string{"!", "#", "[", "]", "~", "repo:read", "https://acme.example/read"}
+	}))
 	for _, scope := range []string{"", "a b", `a"b`, `a\b`, "é", "a\x00", "a\tb"} {
 		s.ErrorContains(s.manifest(func(c *CustomConnector) { c.Scopes = []string{"read", scope} }), "scopes[1] is not an RFC 6749 scope token",
 			"%q", scope)

@@ -2456,7 +2456,7 @@ module GetStream
           required: %w[changes cursor].freeze, open: false
         }.freeze,
         "DataImport" => {
-          properties: %w[cursor rows tables].freeze,
+          properties: %w[cursor rows skipped tables].freeze,
           required: %w[rows].freeze, open: false
         }.freeze,
         "DataPolicy" => {

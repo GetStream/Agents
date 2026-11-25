@@ -7346,6 +7346,8 @@ export type components = {
              * @description How many rows were written.
              */
             readonly rows: number;
+            /** @description The rows left out rather than written, by table and primary key, as connector_definitions:{"id":"custom_crm","revision":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set. */
+            readonly skipped?: readonly string[];
             /** @description How many of them went into each table. */
             readonly tables?: {
                 readonly [key: string]: number;
