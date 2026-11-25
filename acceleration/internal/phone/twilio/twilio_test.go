@@ -532,7 +532,7 @@ func (s *TwilioSuite) TestTheWebhookTokenComesFromTheEnvironment() {
 }
 
 // A public URL that is missing, or that would put a query, a fragment or a user into the
-// voice URL, is refused before Twilio is asked anything; a bare http(s) address is taken.
+// voice URL, is refused before Twilio is asked anything; a bare https address is taken.
 func (s *TwilioSuite) TestThePublicURLMustBeABareAddress() {
 	for name, test := range map[string]struct {
 		publicURL string
