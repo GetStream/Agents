@@ -215,6 +215,26 @@ func (s *TwilioHookSuite) TestWithoutAKeyringACallSaysWhatToSet() {
 	s.True(s.loggedLine(masked(s.e164), "hung up a twilio call: this router has no key to open trunk passwords"))
 }
 
+// The router's own failure, here a trunk password its key cannot open, is a hang-up counted as
+// a server error rather than an answered call.
+func (s *TwilioHookSuite) TestATrunkPasswordThatCannotBeOpenedIsHungUpAndCountedRefused() {
+	s.line.attach(s.e164, "sip:"+s.e164+"@trunk.sip.example.test", "trunk-user", "trunk-password")
+	_, err := s.store.GlobalDB().NewUpdate().Table("stream_trunks").
+		Set("bridge_password_sealed = ?", []byte("not sealed")).
+		Where("customer_id = ?", s.customerID()).Exec(context.Background())
+	s.Require().NoError(err)
+	form := s.line.call(s.e164)
+
+	status, _, body := s.line.deliver(form, s.line.sign(form))
+
+	s.Equal(http.StatusOK, status)
+	s.Contains(body, "<Response><Hangup/></Response>")
+	s.True(s.loggedLine("hung up a twilio call: could not find its trunk", masked(s.e164)))
+	row := s.countedOnce(activity.AreaPhoneSMS, store.AuditSourceAPI)
+	s.Equal(int64(1), row.refused)
+	s.Equal(internalError().Code, row.code)
+}
+
 func (s *TwilioHookSuite) TestWithoutTelephonyACallIsHungUp() {
 	configured := s.router.phone
 	s.router.phone = nil
