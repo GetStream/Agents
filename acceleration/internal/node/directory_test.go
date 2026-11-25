@@ -7,8 +7,10 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -240,6 +242,28 @@ func (s *DirectorySuite) TestEachClaimThatCannotBeTakenBackIsLogged() {
 	s.Equal(2, strings.Count(logged.String(), "could not take back this node's claim on a session"))
 }
 
+// A DEL naming two keys is refused on a Redis Cluster when they are in different hash slots, and a
+// session's two keys are. This holds with no cluster: each key is deleted by a command of its own.
+func (s *DirectorySuite) TestAReleasedSessionsKeysAreDeletedOneCommandEach() {
+	sent := &sentCommands{}
+	directory, err := NewDirectory(DirectoryOptions{Redis: rueidishook.WithHook(s.client, sent), Address: "node-a:1", Prefix: s.prefix})
+	s.Require().NoError(err)
+	directory.Close()
+	directory.Hold(s.ctx, "acme", "order-42", "", "")
+	sent.reset()
+
+	directory.Release(s.ctx, "acme", "order-42")
+
+	var deleted []string
+	for _, command := range sent.all() {
+		if strings.EqualFold(command[0], "DEL") {
+			s.Len(command, 2, "a DEL names one key: %v", command)
+			deleted = append(deleted, command[1:]...)
+		}
+	}
+	s.ElementsMatch([]string{s.prefix + ":session:order-42", directory.sessionKey(heldSession{"acme", "order-42"})}, deleted)
+}
+
 // clusterAddressVar names a node of a Redis Cluster with more than one shard, which CI does not
 // run. Three `redis-server --cluster-enabled yes` joined by `redis-cli --cluster create` make one.
 const clusterAddressVar = "ROUTER_TEST_REDIS_CLUSTER_ADDR"
@@ -346,5 +370,62 @@ func (r *roundTrips) DoStream(client rueidis.Client, ctx context.Context, cmd ru
 
 func (r *roundTrips) DoMultiStream(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) rueidis.MultiRedisResultStream {
 	r.sent.Add(1)
+	return client.DoMultiStream(ctx, multi...)
+}
+
+// sentCommands keeps every command sent to Redis, in order.
+type sentCommands struct {
+	mu       sync.Mutex
+	commands [][]string
+}
+
+func (c *sentCommands) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.commands = nil
+}
+
+func (c *sentCommands) all() [][]string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([][]string(nil), c.commands...)
+}
+
+func (c *sentCommands) keep(commands ...rueidis.Completed) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, command := range commands {
+		// The client reuses a command's slice once it is sent.
+		c.commands = append(c.commands, slices.Clone(command.Commands()))
+	}
+}
+
+func (c *sentCommands) Do(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+	c.keep(cmd)
+	return client.Do(ctx, cmd)
+}
+
+func (c *sentCommands) DoMulti(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) []rueidis.RedisResult {
+	c.keep(multi...)
+	return client.DoMulti(ctx, multi...)
+}
+
+func (c *sentCommands) DoCache(client rueidis.Client, ctx context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	return client.DoCache(ctx, cmd, ttl)
+}
+
+func (c *sentCommands) DoMultiCache(client rueidis.Client, ctx context.Context, multi ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	return client.DoMultiCache(ctx, multi...)
+}
+
+func (c *sentCommands) Receive(client rueidis.Client, ctx context.Context, subscribe rueidis.Completed, fn func(msg rueidis.PubSubMessage)) error {
+	return client.Receive(ctx, subscribe, fn)
+}
+
+func (c *sentCommands) DoStream(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResultStream {
+	return client.DoStream(ctx, cmd)
+}
+
+func (c *sentCommands) DoMultiStream(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) rueidis.MultiRedisResultStream {
 	return client.DoMultiStream(ctx, multi...)
 }
