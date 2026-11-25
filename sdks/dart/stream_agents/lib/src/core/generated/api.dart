@@ -2011,6 +2011,7 @@ final class Session {
     this.modelOverwrites,
     this.pinnedAt,
     this.projectId,
+    this.region,
     this.reviewNotes,
     this.reviewScore,
     required this.state,
@@ -2117,6 +2118,10 @@ final class Session {
         null => null,
         final Object value => _string(value, 'Session.project_id'),
       },
+      region: switch (json['region']) {
+        null => null,
+        final Object value => _string(value, 'Session.region'),
+      },
       reviewNotes: switch (json['review_notes']) {
         null => null,
         final Object value => _string(value, 'Session.review_notes'),
@@ -2200,6 +2205,7 @@ final class Session {
   final ModelOverwrites? modelOverwrites;
   final DateTime? pinnedAt;
   final String? projectId;
+  final String? region;
   final String? reviewNotes;
   final int? reviewScore;
   final String state;
@@ -2243,6 +2249,7 @@ final class Session {
     if (modelOverwrites case final value?) 'model_overwrites': value.toJson(),
     if (pinnedAt case final value?) 'pinned_at': value.toUtc().toIso8601String(),
     'project_id': ?projectId,
+    'region': ?region,
     'review_notes': ?reviewNotes,
     'review_score': ?reviewScore,
     'state': state,
