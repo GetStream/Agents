@@ -111,6 +111,8 @@ type Response struct {
 	Halted bool `json:"halted,omitempty"`
 	// ByCommand is a Closed for a session that a close command from the watcher ended.
 	ByCommand bool `json:"by_command,omitempty"`
+	// Detached is a Closed for a watcher the holder gave back while its session still ran.
+	Detached bool `json:"detached,omitempty"`
 }
 
 // Options configures a Bus.

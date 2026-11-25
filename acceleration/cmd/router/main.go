@@ -1501,6 +1501,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		Gate:                  dlcGate,
 		OpsKey:                settings.Auth.OpsKey,
 		ManageKey:             settings.Auth.ManageKey,
+		ActivityKeys:          []string{settings.Auth.ActivityKey, settings.Auth.ActivityKeyPrevious},
 		Dispatch:              workers,
 		Quota:                 limiter,
 		RunsPerApp:            settings.Runs.ConcurrentPerApp,

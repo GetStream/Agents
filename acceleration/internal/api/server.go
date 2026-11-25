@@ -188,6 +188,9 @@ type Options struct {
 	// ManageKey is what Stream staff's billing paths, under /v1/manage, are reached with.
 	// Empty turns them off: they answer 404 not_configured.
 	ManageKey string
+	// ActivityKeys are what a job reads the two activity paths with, and nothing else: the
+	// current key and the one being rotated out. An empty one is no key.
+	ActivityKeys []string
 	// Documents reads the files a person sends with a question (createResponse files). Nil
 	// refuses them as a feature this deployment does not offer.
 	Documents *extract.Extractor
@@ -385,6 +388,7 @@ type Server struct {
 	gate               *dlc.Gate
 	opsKey             string
 	manageKey          string
+	activityKeys       []string
 	authenticator      auth.Authenticator
 	authMode           auth.Mode
 	dataRetention      time.Duration
@@ -644,6 +648,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		gate:               options.Gate,
 		opsKey:             options.OpsKey,
 		manageKey:          options.ManageKey,
+		activityKeys:       options.ActivityKeys,
 		popularity:         newPopularity(options.Store, logger),
 		logger:             logger,
 		release:            options.Release,

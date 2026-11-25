@@ -622,6 +622,33 @@ func (s *RouterStartSuite) TestARunningRouterCountsAnAppsRequestAndWritesItWhenI
 	s.Equal(int64(1), requests)
 }
 
+// Defect: the router built without the activity key or the one being rotated out, so the job
+// holding either is refused. A call with neither key is the control: the route checks a key.
+func (s *RouterStartSuite) TestAStartingRouterTakesBothActivityKeys() {
+	settings := s.settings
+	settings.Addr = freeAddress(s.T())
+	settings.Auth.OpsKey = rand.Text()
+	settings.Auth.ActivityKey, settings.Auth.ActivityKeyPrevious = rand.Text()+rand.Text(), rand.Text()+rand.Text()
+	s.start(settings)
+	day := time.Now().UTC().AddDate(0, 0, -1).Format(time.DateOnly)
+	for name, tc := range map[string]struct {
+		key    string
+		status int
+	}{
+		"current":  {settings.Auth.ActivityKey, http.StatusOK},
+		"previous": {settings.Auth.ActivityKeyPrevious, http.StatusOK},
+		"none":     {"", http.StatusUnauthorized},
+	} {
+		request, err := http.NewRequest(http.MethodGet, "http://"+settings.Addr+"/v1/ops/activity?from="+day+"&to="+day, nil)
+		s.Require().NoError(err)
+		request.Header.Set("X-Activity-Key", tc.key)
+		response, err := http.DefaultClient.Do(request)
+		s.Require().NoError(err)
+		s.Require().NoError(response.Body.Close())
+		s.Equal(tc.status, response.StatusCode, name)
+	}
+}
+
 // Defect: the router builds the trunk call provider but never starts it, so no node it stops
 // beside hands it calls, and a drain started with this one's claims unrenewed.
 func (s *RouterStartSuite) TestARunningRouterSaysItTakesTrunkCallsOverUntilItStops() {

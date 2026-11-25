@@ -29,6 +29,8 @@ final readonly class CustomConnectorRequest
         // The scopes a consent asks for, each an RFC 6749 scope token.
         /** @var list<string>|null */
         public ?array $scopes = null,
+        // The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a...
+        public ?string $syncHash = null,
     ) {
     }
 
@@ -46,6 +48,7 @@ final readonly class CustomConnectorRequest
             client: array_key_exists('client', $data) && $data['client'] !== null ? ConnectorClient::fromArray(Json::object($data, 'client')) : null,
             description: array_key_exists('description', $data) && $data['description'] !== null ? Json::string($data, 'description') : null,
             scopes: array_key_exists('scopes', $data) && $data['scopes'] !== null ? Json::strings($data, 'scopes') : null,
+            syncHash: array_key_exists('sync_hash', $data) && $data['sync_hash'] !== null ? Json::string($data, 'sync_hash') : null,
         );
     }
 
@@ -72,6 +75,9 @@ final readonly class CustomConnectorRequest
         }
         if ($this->scopes !== null) {
             $out['scopes'] = $this->scopes;
+        }
+        if ($this->syncHash !== null) {
+            $out['sync_hash'] = $this->syncHash;
         }
         return $out;
     }
