@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 
@@ -26,6 +27,13 @@ type PostureSuite struct {
 
 func TestPostureSuite(t *testing.T) {
 	runSuite(t, new(PostureSuite))
+}
+
+func (s *PostureSuite) SetupSuite() {
+	s.RouterSuite.SetupSuite()
+	// Room to keep the connection of each caller that calls at once (answersOf). The default
+	// keeps two, and every other call of the walk would leave a closed one behind.
+	s.server.Client().Transport.(*http.Transport).MaxIdleConnsPerHost = 16
 }
 
 func (s *PostureSuite) SetupTest() {
@@ -54,7 +62,7 @@ func (s *PostureSuite) TestEveryOperationTheSpecDoesNotOpenIsRefusedToEveryDevic
 		}
 		refused++
 
-		for name, status := range answersOf(operation, devices) {
+		for name, status := range s.answersOf(operation, devices) {
 			s.Equal(http.StatusForbidden, status, "%s %s by %s", operation.method, operation.path, name)
 		}
 	}
@@ -71,7 +79,7 @@ func (s *PostureSuite) TestEveryOperationTheSpecOpensIsReachableByEveryDevice() 
 		}
 		opened++
 
-		for name, status := range answersOf(operation, devices) {
+		for name, status := range s.answersOf(operation, devices) {
 			s.NotContains([]int{http.StatusUnauthorized, http.StatusForbidden}, status,
 				"%s %s by %s", operation.method, operation.path, name)
 		}
@@ -93,7 +101,7 @@ func (s *PostureSuite) TestEveryOperationTellsACallerWithoutBothCredentialsToAut
 		}
 		asked++
 
-		for name, status := range answersOf(operation, callers) {
+		for name, status := range s.answersOf(operation, callers) {
 			s.Equal(http.StatusUnauthorized, status, "%s %s by %s", operation.method, operation.path, name)
 		}
 	}
@@ -197,19 +205,34 @@ func (s *PostureSuite) devices() map[string]*testClient {
 
 // answersOf is the status each caller is answered by one operation. They call at once: the
 // session socket waits seconds for a session still starting before it says there is none.
-func answersOf(operation operationSummary, callers map[string]*testClient) map[string]int {
+func (s *PostureSuite) answersOf(operation operationSummary, callers map[string]*testClient) map[string]int {
 	var mu sync.Mutex
 	var calls sync.WaitGroup
 	statuses := map[string]int{}
+	failed := map[string]error{}
 	for name, caller := range callers {
+		request, err := http.NewRequest(operation.method, caller.base()+fill(operation.path), strings.NewReader("{}"))
+		s.Require().NoError(err)
+		request.Header = caller.header.Clone()
+		request.Header.Set("Content-Type", "application/json")
 		calls.Go(func() {
-			status, _ := caller.call(operation.method, fill(operation.path), empty)
+			response, err := s.server.Client().Do(request)
+			if err == nil {
+				// Read to the end, so the connection is used again.
+				_, err = readAll(response)
+				_ = response.Body.Close()
+			}
 			mu.Lock()
 			defer mu.Unlock()
-			statuses[name] = status
+			if err != nil {
+				failed[name] = err
+				return
+			}
+			statuses[name] = response.StatusCode
 		})
 	}
 	calls.Wait()
+	s.Require().Empty(failed, "%s %s", operation.method, operation.path)
 	return statuses
 }
 

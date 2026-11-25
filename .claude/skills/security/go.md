@@ -48,7 +48,9 @@ Every operation not marked `x-client-accessible` answers a client-side caller 40
   `TestEveryOperationTheSpecDoesNotOpenIsRefusedToEveryDevice`.
 - The test calls with each client kind (`devices` in `posture_test.go`): an authenticated
   user, a guest, an anonymous caller, and a server token presented with
-  `Stream-Auth-Type: jwt`, `anonymous` or no header at all. A new client kind is added there.
+  `Stream-Auth-Type: jwt`, `anonymous` or no header at all, and with the `server` header a
+  user's token and a user's token that also says `server: true`. A new client kind is added
+  there.
 - `Stream-Auth-Type: server` with a user token, and a server token in a socket's query
   string, are both client-side. Tested by `TestAPIKey` and
   `TestAServerTokenInASocketsQueryStringIsNotABackend`.
@@ -73,9 +75,8 @@ token signed with that key's secret, or with neither and a 401.
   `exp`, `alg: none`, and an algorithm other than HS256 are all a 401, and the same 401 body
   (`assertRefusedAlike`), so a caller cannot learn which keys exist.
 - Tested in `internal/auth/auth_test.go` (`TestAPIKey`) for the authenticator and in
-  `PostureSuite` for the wire. `PostureSuite` asks every
-  operation but the public ones, sockets included, with no credential, a key alone and a
-  token alone.
+  `PostureSuite` for the wire. `PostureSuite` asks every operation but the public ones, sockets
+  included, with no credential, a key alone and a token alone.
 - Sockets take `api_key` and `token` as query parameters. Check that the socket
   authenticates before upgrading and that a failed check never upgrades.
 - `noauth` and `proxy` trust headers. Check that nothing makes them the default and that a
