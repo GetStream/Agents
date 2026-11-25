@@ -192,9 +192,11 @@ class AgentConfigRequest:
             ui false. Empty teaches none. Left out on an update, the stored ones stay.
         routing_policy (RoutingPolicy | Unset): Which regions work may be placed in. closest is the region nearest the
             person: where a request landed, the called number's country, or the region that last served the user. us_east is
-            the region holding the configs, for everything. us_only, eu_only and canada_only keep all of the work and its
-            data in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its
-            regions is up. Empty is the app's own on an agent config, and closest on the app.
+            the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions,
+            calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable)
+            rather than place it anywhere else when none of its regions is up. Some data is still stored in the region
+            holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task
+            instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
     """
 
     name: str

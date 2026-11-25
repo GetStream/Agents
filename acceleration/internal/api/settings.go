@@ -33,8 +33,11 @@ func (RoutingPolicy) Schema(registry huma.Registry) *huma.Schema {
 	ref := namedEnum(registry, "RoutingPolicy", "Which regions work may be placed in. closest is the region "+
 		"nearest the person: where a request landed, the called number's country, or the region that last "+
 		"served the user. us_east is the region holding the configs, for everything. us_only, eu_only and "+
-		"canada_only keep all of the work and its data in that geography, and fail it (503 shard_unavailable) "+
-		"rather than place it anywhere else when none of its regions is up. Empty is the app's own on an agent "+
+		"canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that "+
+		"geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its "+
+		"regions is up. Some data is still stored in the region holding the configs whatever the policy: "+
+		"configs, the global index of sessions, inbound message bodies, task instructions, knowledge and "+
+		"contacts. Empty is the app's own on an agent "+
 		"config, and closest on the app.", "", string(shardmap.PolicyClosest), string(shardmap.PolicyUSEast),
 		string(shardmap.PolicyUSOnly), string(shardmap.PolicyEUOnly), string(shardmap.PolicyCanadaOnly))
 	// Named, so the Go SDK's constants are not a bare Empty and Closest.
@@ -129,7 +132,9 @@ func (s *Server) registerSettings(api huma.API) {
 		Path:        "/v1/settings/app",
 		Summary:     "Change the calling app's settings",
 		Description: "Writes only the fields sent, and answers with the app's settings as they now are. " +
-			"Work already placed stays where it is.\n\nServer-side only: it needs a server-side token, so " +
+			"Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch " +
+			"worker already connected outside the geography is not reached by the app's sessions until it " +
+			"reconnects, when it is placed in the geography.\n\nServer-side only: it needs a server-side token, so " +
 			"it cannot be reached from an end user's device.",
 		Responses: map[string]*huma.Response{"200": {Description: "The app's settings"}},
 		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,

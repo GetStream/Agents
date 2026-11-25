@@ -98,7 +98,9 @@ def sync_detailed(
     """Change the calling app's settings
 
      Writes only the fields sent, and answers with the app's settings as they now are. Work already
-    placed stays where it is.
+    placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker
+    already connected outside the geography is not reached by the app's sessions until it reconnects,
+    when it is placed in the geography.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
@@ -132,7 +134,9 @@ def sync(
     """Change the calling app's settings
 
      Writes only the fields sent, and answers with the app's settings as they now are. Work already
-    placed stays where it is.
+    placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker
+    already connected outside the geography is not reached by the app's sessions until it reconnects,
+    when it is placed in the geography.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
@@ -161,7 +165,9 @@ async def asyncio_detailed(
     """Change the calling app's settings
 
      Writes only the fields sent, and answers with the app's settings as they now are. Work already
-    placed stays where it is.
+    placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker
+    already connected outside the geography is not reached by the app's sessions until it reconnects,
+    when it is placed in the geography.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
@@ -193,7 +199,9 @@ async def asyncio(
     """Change the calling app's settings
 
      Writes only the fields sent, and answers with the app's settings as they now are. Work already
-    placed stays where it is.
+    placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker
+    already connected outside the geography is not reached by the app's sessions until it reconnects,
+    when it is placed in the geography.
 
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 

@@ -4175,7 +4175,7 @@ export type paths = {
         readonly head?: never;
         /**
          * Change the calling app's settings
-         * @description Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is.
+         * @description Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
          *
          *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
          */
@@ -9663,7 +9663,7 @@ export type components = {
             readonly tts?: components["schemas"]["TtsOptions"];
         };
         /**
-         * @description Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only keep all of the work and its data in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Empty is the app's own on an agent config, and closest on the app.
+         * @description Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
          * @enum {string}
          */
         readonly RoutingPolicy: "" | "closest" | "us_east" | "us_only" | "eu_only" | "canada_only";
