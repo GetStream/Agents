@@ -1,9 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -237,9 +240,9 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 // readWorker applies what the worker sends back, which is how it is doing and whether it
 // took the call.
 //
-// A message of a type it does not know is reported and skipped rather than closing the
-// socket: dropping a worker over one bad message would take the calls it is already in with
-// it. A frame that is not JSON at all returns errUnreadableFrame, and a read that failed
+// A message of a type it does not know, or over maxSocketMessage, is reported and skipped rather
+// than closing the socket: dropping a worker over one bad message would take the calls it is
+// already in with it, and the Rust, PHP and Ruby workers do not reconnect. A frame that is not JSON at all returns errUnreadableFrame, and a read that failed
 // returns the read's own error.
 func (s *Server) readWorker(ctx context.Context, connection *websocket.Conn, worker *dispatch.Worker, pongs chan<- float64, replies chan<- frame, writerDone <-chan struct{}) error {
 	connection.SetReadDeadline(time.Now().Add(pongWait))
@@ -283,7 +286,7 @@ func (s *Server) readWorker(ctx context.Context, connection *websocket.Conn, wor
 			Verbatim bool           `json:"verbatim"`
 			Custom   map[string]any `json:"custom"`
 		}
-		_, payload, err := connection.ReadMessage()
+		payload, whole, err := readWorkerFrame(connection)
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				s.logger.Debug("dispatch socket read failed", "worker", worker.ID, "error", err)
@@ -291,6 +294,20 @@ func (s *Server) readWorker(ctx context.Context, connection *websocket.Conn, wor
 			return stack.Wrap(err)
 		}
 		connection.SetReadDeadline(time.Now().Add(pongWait))
+		if !whole {
+			id := toolAnswered(payload)
+			s.logger.Warn("a worker sent a frame over the limit", "worker", worker.ID, "id", id)
+			worker.Resolve(id, dispatch.ToolResult{Failure: "the tool's output is too large: " + errLargeFrame.Message})
+			select {
+			case replies <- frame{
+				"type": "error", "error": errLargeFrame.Message,
+				"code": errLargeFrame.Code, "error_type": errLargeFrame.Type,
+			}:
+			case <-writerDone:
+				return nil
+			}
+			continue
+		}
 		if json.Unmarshal(payload, &report) != nil {
 			return errUnreadableFrame
 		}
@@ -379,6 +396,51 @@ func (s *Server) readWorker(ctx context.Context, connection *websocket.Conn, wor
 				"worker", worker.ID, "type", report.Type)
 		}
 	}
+}
+
+// errLargeFrame answers a frame a worker sends that is over maxSocketMessage.
+var errLargeFrame = payloadTooLarge(fmt.Sprintf("a frame on this socket is at most %d MiB", maxSocketMessage>>20))
+
+// readWorkerFrame reads one frame, or the first maxSocketMessage bytes of a longer one, whose rest
+// is read and dropped, and whether that is the whole of it. The read limit the other sockets set
+// ends the socket on such a frame, and with it every call the worker is in.
+func readWorkerFrame(connection *websocket.Conn) (payload []byte, whole bool, err error) {
+	_, reader, err := connection.NextReader()
+	if err != nil {
+		return nil, false, err
+	}
+	if payload, err = io.ReadAll(io.LimitReader(reader, maxSocketMessage)); err != nil {
+		return nil, false, err
+	}
+	dropped, err := io.Copy(io.Discard, reader)
+	return payload, dropped == 0, err
+}
+
+// toolAnswered is the hosted call a frame cut short answers, or "" when it answers none or names it
+// past the cut: the SDKs write the id before the output.
+func toolAnswered(cut []byte) string {
+	decoder := json.NewDecoder(bytes.NewReader(cut))
+	if opening, err := decoder.Token(); err != nil || opening != json.Delim('{') {
+		return ""
+	}
+	id, kind := "", "tool_result"
+	for {
+		name, err := decoder.Token()
+		var value json.RawMessage
+		if err != nil || decoder.Decode(&value) != nil {
+			break
+		}
+		switch name {
+		case "type":
+			_ = json.Unmarshal(value, &kind) // one that is no string is no tool_result's
+		case "id", "tool_call_id":
+			_ = json.Unmarshal(value, &id) // one that is no string names no call
+		}
+	}
+	if kind != "tool_result" {
+		return ""
+	}
+	return id
 }
 
 // hostedTool is one tool as a worker declares it.
