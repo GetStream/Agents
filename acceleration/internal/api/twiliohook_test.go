@@ -7,13 +7,17 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/redis/rueidis"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -318,6 +322,150 @@ func (s *TwilioHookSuite) TestABodyThatIsNoFormOrTooLargeIsRefused() {
 	}
 }
 
+// A copy of a signed call, Twilio's own or a replay, gets no second Dial once the first was
+// answered: the signature has no time in it, so the copy would get the password again.
+func (s *TwilioHookSuite) TestACallAnsweredOnceIsHungUpWithoutItsPasswordWhenSentAgain() {
+	s.line.attach(s.e164, "sip:"+s.e164+"@trunk.sip.example.test", "trunk-user", "replayed-password")
+	form := s.line.call(s.e164)
+	signature := s.line.sign(form)
+	_, _, first := s.line.deliver(form, signature)
+	s.Require().Contains(first, `password="replayed-password"`)
+
+	status, _, again := s.line.deliver(form, signature)
+
+	s.Equal(http.StatusOK, status)
+	s.Contains(again, "<Response><Hangup/></Response>")
+	s.NotContains(again, "replayed-password")
+	s.True(s.loggedLine("hung up a twilio call that was answered already", "call_sid="+form.Get("CallSid")))
+	remembered, err := s.router.twilioCallSids.Do(context.Background(),
+		s.router.twilioCallSids.B().Ttl().Key("phone:twilio:call:"+form.Get("CallSid")).Build()).AsInt64()
+	s.Require().NoError(err)
+	s.InDelta(7*24*60*60, remembered, 60, "a copy is refused for a week, written out so a changed TTL cannot pass")
+}
+
+// Twilio sends a call again when its answer never reached Twilio
+// (https://www.twilio.com/docs/usage/webhooks/webhooks-connection-overrides), and that copy is
+// answered; the one after it is not.
+func (s *TwilioHookSuite) TestACallWhoseAnswerDidNotReachTwilioIsAnsweredWhenSentAgain() {
+	s.line.attach(s.e164, "sip:"+s.e164+"@trunk.sip.example.test", "trunk-user", "retried-password")
+	for name, lost := range map[string]func(cancel context.CancelFunc) *lostAnswer{
+		"the answer could not be sent": func(context.CancelFunc) *lostAnswer {
+			return &lostAnswer{ResponseRecorder: httptest.NewRecorder(), flush: errors.New("broken pipe")}
+		},
+		"Twilio hung up while it was written": func(cancel context.CancelFunc) *lostAnswer {
+			return &lostAnswer{ResponseRecorder: httptest.NewRecorder(), onWrite: cancel}
+		},
+	} {
+		form := s.line.call(s.e164)
+		signature := s.line.sign(form)
+		ctx, cancel := context.WithCancel(context.Background())
+		answer := lost(cancel)
+		s.router.receiveTwilioCall(answer, s.line.request(ctx, form, signature))
+		cancel()
+		s.Require().Contains(answer.Body.String(), `password="retried-password"`, name)
+
+		_, _, retried := s.line.deliver(form, signature)
+		_, _, replayed := s.line.deliver(form, signature)
+
+		s.Contains(retried, `password="retried-password"`, name)
+		s.Contains(replayed, "<Response><Hangup/></Response>", name)
+		s.NotContains(replayed, "retried-password", name)
+		s.True(s.loggedLine("level=WARN", "did not reach Twilio; its retry is answered", "call_sid="+form.Get("CallSid")), name)
+	}
+}
+
+// A Redis that fails to forget a lost answer leaves the call marked: its retry is hung up, and
+// the failure says so.
+func (s *TwilioHookSuite) TestACallWhoseLostAnswerCannotBeForgottenIsHungUpWhenSentAgain() {
+	s.line.attach(s.e164, "sip:"+s.e164+"@trunk.sip.example.test", "trunk-user", "kept-password")
+	marks, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{s.redisAddr}, DisableCache: true})
+	s.Require().NoError(err)
+	sids := s.router.twilioCallSids
+	s.T().Cleanup(func() { s.router.twilioCallSids = sids })
+	s.router.twilioCallSids = marks
+	form := s.line.call(s.e164)
+	signature := s.line.sign(form)
+	answer := &lostAnswer{ResponseRecorder: httptest.NewRecorder(), flush: errors.New("broken pipe"), onFlush: marks.Close}
+
+	s.router.receiveTwilioCall(answer, s.line.request(context.Background(), form, signature))
+	s.router.twilioCallSids = sids
+	_, _, retried := s.line.deliver(form, signature)
+
+	s.Require().Contains(answer.Body.String(), `password="kept-password"`)
+	s.Contains(retried, "<Response><Hangup/></Response>")
+	s.NotContains(retried, "kept-password")
+	s.True(s.loggedLine("level=WARN", "could not forget a twilio call", "call_sid="+form.Get("CallSid"), "error="))
+}
+
+// Without a place to mark a call answered, or with one that fails, no call is answered: each
+// copy would get the password.
+func (s *TwilioHookSuite) TestWithoutAWorkingRedisNoCallIsAnswered() {
+	s.line.attach(s.e164, "sip:"+s.e164+"@trunk.sip.example.test", "trunk-user", "unmarked-password")
+	closed, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{s.redisAddr}, DisableCache: true})
+	s.Require().NoError(err)
+	closed.Close()
+	sids := s.router.twilioCallSids
+	s.T().Cleanup(func() { s.router.twilioCallSids = sids })
+
+	for logged, client := range map[string]rueidis.Client{
+		"there is no Redis to answer each call once": nil,
+		"could not mark it answered":                 closed,
+	} {
+		s.router.twilioCallSids = client
+		form := s.line.call(s.e164)
+
+		status, _, body := s.line.deliver(form, s.line.sign(form))
+
+		s.Equal(http.StatusOK, status, logged)
+		s.Contains(body, "<Response><Hangup/></Response>", logged)
+		s.NotContains(body, "unmarked-password", logged)
+		s.True(s.loggedLine("level=WARN", "hung up a twilio call", logged), logged)
+	}
+}
+
+// A call is marked by its CallSid, so one without a CallSid that can be marked is not answered.
+func (s *TwilioHookSuite) TestACallWithNoCallSidOrOneTooLongIsHungUp() {
+	s.line.attach(s.e164, "sip:"+s.e164+"@trunk.sip.example.test", "trunk-user", "trunk-password")
+	for name, sid := range map[string]string{
+		"no CallSid": "",
+		// 65 bytes, one past the 64 marked, written out so a changed limit cannot pass.
+		"too long": "CA" + strings.Repeat("0", 63),
+	} {
+		form := s.line.call(s.e164)
+		form.Set("CallSid", sid)
+
+		status, _, body := s.line.deliver(form, s.line.sign(form))
+
+		s.Equal(http.StatusOK, status, name)
+		s.Contains(body, "<Response><Hangup/></Response>", name)
+		s.NotContains(body, "trunk-password", name)
+		s.True(s.loggedLine("hung up a twilio call that names no CallSid, or one too long to mark"), name)
+	}
+}
+
+// lostAnswer is a response that never reaches Twilio: its flush fails, or writing it calls
+// onWrite, as Twilio hanging up ends the request's context.
+type lostAnswer struct {
+	*httptest.ResponseRecorder
+	flush   error
+	onWrite context.CancelFunc
+	onFlush func()
+}
+
+func (a *lostAnswer) Write(body []byte) (int, error) {
+	if a.onWrite != nil {
+		a.onWrite()
+	}
+	return a.ResponseRecorder.Write(body)
+}
+
+func (a *lostAnswer) FlushError() error {
+	if a.onFlush != nil {
+		a.onFlush()
+	}
+	return a.flush
+}
+
 // loggedLine reports whether one line the current test logged holds every part.
 func (s *TwilioHookSuite) loggedLine(parts ...string) bool {
 	for _, line := range strings.Split(s.logged.String()[s.since:], "\n") {
@@ -372,16 +520,22 @@ func (l twilioRinger) sign(form url.Values) string {
 	return twiliosig.Sign(l.token, l.signedURL(twilioCallHookPath), form)
 }
 
-// deliver posts the form as Twilio does, with signature unless it is empty, and answers with
-// what came back.
-func (l twilioRinger) deliver(form url.Values, signature string) (int, string, string) {
-	request, err := http.NewRequest(http.MethodPost, l.suite.server.URL+twilioCallHookPath, strings.NewReader(form.Encode()))
+// request is the form posted as Twilio does, with signature unless it is empty.
+func (l twilioRinger) request(ctx context.Context, form url.Values, signature string) *http.Request {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, l.suite.server.URL+twilioCallHookPath,
+		strings.NewReader(form.Encode()))
 	l.suite.Require().NoError(err)
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if signature != "" {
 		request.Header.Set(twiliosig.SignatureHeader, signature)
 	}
-	response, err := http.DefaultClient.Do(request)
+	return request
+}
+
+// deliver posts the form as Twilio does, with signature unless it is empty, and answers with
+// what came back.
+func (l twilioRinger) deliver(form url.Values, signature string) (int, string, string) {
+	response, err := http.DefaultClient.Do(l.request(context.Background(), form, signature))
 	l.suite.Require().NoError(err)
 	defer response.Body.Close()
 	answered, err := io.ReadAll(response.Body)
