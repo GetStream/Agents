@@ -134,7 +134,7 @@ func (s *StoreSuite) staleRun(taskID, runID string) ClaimedScheduledTask {
 		Where("customer_id = ?", "acme").
 		Where("id = ?", taskID).Exec(s.ctx)
 	s.Require().NoError(err)
-	reclaimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	reclaimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(reclaimed, 1)
 	s.Require().Equal(runID, reclaimed[0].Run.ID, "taken over under the same run")
@@ -146,7 +146,7 @@ func (s *StoreSuite) TestAnAttemptsReasonIsReadByTheWorkerTakingTheRunOver() {
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
 	s.task("two", func(task *ScheduledTask) { task.NextRunAt = &due })
 	s.task("one", func(task *ScheduledTask) { task.CustomerID, task.NextRunAt = "globex", &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 3)
 	claims := map[string]ClaimedScheduledTask{}
@@ -176,7 +176,7 @@ func (s *StoreSuite) TestAnAttemptsReasonIsReadByTheWorkerTakingTheRunOver() {
 func (s *StoreSuite) TestAnAttemptsReasonLeavesTheReasonAPlacedCallEndedUnder() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	run := claimed[0].Run
@@ -198,7 +198,7 @@ func (s *StoreSuite) TestAnAttemptsReasonLeavesTheReasonAPlacedCallEndedUnder() 
 func (s *StoreSuite) callTakenAfterAnAttemptFailed() ClaimedScheduledTask {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	s.Require().NoError(s.store.ScheduledTaskRuns.SetAttemptReason(s.ctx, "acme", claimed[0].Run.ID, claimed[0].LeasedBy, "tier_limit_reached"))
@@ -234,7 +234,7 @@ func (s *StoreSuite) TestARunTakenOverMidCallAfterAFailedAttemptEndsAsAlreadyCal
 		Where("id = ?", "one").Exec(s.ctx)
 	s.Require().NoError(err)
 
-	_, err = s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	_, err = s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 
 	run := s.run(claimed.Run.ID)
@@ -246,7 +246,7 @@ func (s *StoreSuite) TestARunTakenOverMidCallAfterAFailedAttemptEndsAsAlreadyCal
 func (s *StoreSuite) TestAFinishedRunTakesNoAttemptsReason() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	run := claimed[0].Run

@@ -989,7 +989,7 @@ func (s *StoreSuite) retryingRuns() map[string]ScheduledTaskRun {
 	due := s.base.Add(-time.Minute)
 	s.task("failed", func(task *ScheduledTask) { task.NextRunAt = &due })
 	s.task("called", func(task *ScheduledTask) { task.NextRunAt = &due })
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 2)
 	runs := map[string]ScheduledTaskRun{}
