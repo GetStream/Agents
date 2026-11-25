@@ -114,9 +114,16 @@ func (s *Store) detachedWrite(ctx context.Context, write func(context.Context, b
 func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Context, bun.Tx) error, keys func() []string) (told bool, err error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.writeTimeout)
 	defer cancel()
+	return s.cachedWrite(ctx, s.global, write, keys)
+}
+
+// cachedWrite is detachedWriteTold on ctx itself, for a write too long for the write timeout. ctx
+// ending before the COMMIT is sent rolls the transaction back. db may be another than the shared
+// database only for a write whose keys name nothing: a lost commit is asked about there (ended).
+func (s *Store) cachedWrite(ctx context.Context, db *bun.DB, write func(context.Context, bun.Tx) error, keys func() []string) (told bool, err error) {
 	var committing bool
 	var xid sql.NullInt64
-	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	err = db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := write(ctx, tx); err != nil {
 			return err
 		}

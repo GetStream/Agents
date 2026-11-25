@@ -790,12 +790,15 @@ func (t dataTable) selectRows(customerID string, secrets []string) (string, []an
 func (s *Store) ImportRow(ctx context.Context, customerID, table string, row json.RawMessage) error {
 	spec, _ := dataTableByName(table)
 	var stale []string
-	if err := s.importRow(ctx, s.sideOf(spec), customerID, table, row, &stale); err != nil {
-		return err
+	// Most rows of an export have no keys to drop and pay for no transaction.
+	if !readCached(table) {
+		return s.importRow(ctx, s.sideOf(spec), customerID, table, row, &stale)
 	}
-	s.forget(ctx, stale...)
+	err := s.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return s.importRow(ctx, tx, customerID, table, row, &stale)
+	}, func() []string { return stale })
 	s.Users.forgetKeys(stale)
-	return nil
+	return err
 }
 
 // sideOf is the database a table's rows are written to here: this shard's or the shared one.
@@ -1174,6 +1177,12 @@ func cachedByID(table string) bool {
 	return slices.Contains([]string{"agent_configs", "router_configs", "skills", "voices"}, table)
 }
 
+// readCached is whether a moved table's rows are read through a cache (cachedKeys). Every such
+// table is in the shared database.
+func readCached(table string) bool {
+	return cachedByID(table) || table == "policies" || table == "users"
+}
+
 // cachedRow is a row of a cachedByID table, as relation names it in a write, in the form cachedKeys
 // reads. A voice's carries the providers of its bindings, whose ids are cached under the voice
 // (VoiceBindings.GetReady) and read only while it is not deleted.
@@ -1190,10 +1199,13 @@ func cachedRow(table, relation string) string {
 // policy is cached by its app alone, so any row of it names the same values. A user is held by
 // every replica that saw them (Users.Forget).
 func cachedKeys(customerID, table string, row []byte) []string {
+	if !readCached(table) {
+		return nil
+	}
 	if table == "policies" {
 		return policyKeys(ScopeApp, customerID)
 	}
-	if (!cachedByID(table) && table != "users") || len(row) == 0 {
+	if len(row) == 0 {
 		return nil
 	}
 	// The columns are text, which jsonb_populate_record also fills from a number, so a value is
@@ -2166,7 +2178,7 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 		return nil
 	}
 	var stale []string
-	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	_, err := s.cachedWrite(ctx, db, func(ctx context.Context, tx bun.Tx) error {
 		for _, change := range changes {
 			if change.Skipped() {
 				continue
@@ -2183,13 +2195,9 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 			}
 		}
 		return nil
-	})
-	if err != nil {
-		return err
-	}
-	s.forget(ctx, stale...)
+	}, func() []string { return stale })
 	s.Users.forgetKeys(stale)
-	return nil
+	return err
 }
 
 // Skipped is whether ApplyChanges leaves the change out: one to a policy of another scope than an
