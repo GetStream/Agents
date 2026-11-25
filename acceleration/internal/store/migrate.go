@@ -51,6 +51,11 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.migrate(ctx, s.shardDSN, shardSet); err != nil {
 		return fmt.Errorf("store: shard: %w", err)
 	}
+	if s.Sharded() {
+		if err := s.rangeLogIDs(ctx); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

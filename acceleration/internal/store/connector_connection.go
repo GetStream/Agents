@@ -510,8 +510,24 @@ func (r *ConnectorConnections) DeleteUser(ctx context.Context, customerID, userI
 			ids = append(ids, row.ID)
 			deleted = append(deleted, DeletedConnection{ID: row.ID, ConnectorID: row.ConnectorID, OwnerType: row.OwnerType, HadGrant: row.HadGrant})
 		}
-		// Attempts reference their connection with no cascade, so they go first. Invocations
-		// cascade.
+		// Invocations in the shards' databases name their connection with no foreign key, so
+		// they go before it, and a failure leaves both for a retry. Those in the shared
+		// database go by its cascade.
+		if r.store.HasShards() {
+			_, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (struct{}, error) {
+				_, err := db.NewDelete().Model((*ConnectorInvocation)(nil)).
+					Where("ci.customer_id = ?", customerID).
+					Where("ci.connection_id IN (?)", bun.In(ids)).Exec(ctx)
+				if absentTable(err) {
+					return struct{}{}, nil
+				}
+				return struct{}{}, err
+			})
+			if err != nil {
+				return fmt.Errorf("store: delete a user's connector invocations: %w", err)
+			}
+		}
+		// Attempts reference their connection with no cascade, so they go first.
 		if _, err := tx.NewDelete().Model((*ConnectorAuthorizationAttempt)(nil)).
 			Where("caa.connection_id IN (?)", bun.In(ids)).Exec(ctx); err != nil {
 			return fmt.Errorf("store: delete a user's authorization attempts: %w", err)

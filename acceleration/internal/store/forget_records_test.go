@@ -192,7 +192,7 @@ func (s *StoreSuite) TestForgettingAUserDeletesTheLogsNamingThemAndEmptiesTheirC
 	log("acme-app", "anya", "said hello")
 	log("acme-app", "anya", "said goodbye")
 	gone := log("acme-app", "anya", "said hello before")
-	_, err := s.store.global.ExecContext(s.ctx, "DELETE FROM agent_logs WHERE id = ?", gone.ID)
+	_, err := s.store.shard.ExecContext(s.ctx, "DELETE FROM agent_logs WHERE id = ?", gone.ID)
 	s.Require().NoError(err)
 	log("acme-app", "grace", "said hello")
 	s.Require().NoError(s.store.Campaigns.Insert(s.ctx, &Campaign{CustomerID: "acme-app", Name: "Renewals", ConfigID: "config-1",
@@ -202,15 +202,22 @@ func (s *StoreSuite) TestForgettingAUserDeletesTheLogsNamingThemAndEmptiesTheirC
 
 	s.Require().NoError(err)
 	s.EqualValues(2, deleted, "two batches of one")
-	s.Zero(s.countOf("agent_logs WHERE customer_id = 'acme-app' AND user_id = 'anya'"))
-	s.Equal(1, s.countOf("agent_logs WHERE customer_id = 'acme-app' AND user_id = 'grace'"))
-	s.Equal(1, s.countOf("agent_logs WHERE customer_id = 'other-app' AND user_id = 'anya'"))
-	s.Empty(slices.DeleteFunc(s.payloadsNaming("acme-app", "anya"), func(change DataChange) bool { return change.Table != "agent_logs" }),
-		"the changes of every log of theirs, the one deleted before included")
-	s.Len(s.payloadsNaming("acme-app", "anya"), 1, "another table's change is another step's")
-	s.Len(s.recordedOf("acme-app", "agent_logs"), 7, "each change keeps its number: four inserts, three deletes")
-	s.NotEmpty(s.payloadsNaming("acme-app", "grace"), "another user's changes stay")
-	s.NotEmpty(s.payloadsNaming("other-app", "anya"), "the same user id of another app is another user")
+	countLogs := func(where string) int {
+		var count int
+		s.Require().NoError(s.store.shard.QueryRowContext(s.ctx, "SELECT count(*) FROM agent_logs WHERE "+where).Scan(&count))
+		return count
+	}
+	s.Zero(countLogs("customer_id = 'acme-app' AND user_id = 'anya'"))
+	s.Equal(1, countLogs("customer_id = 'acme-app' AND user_id = 'grace'"))
+	s.Equal(1, countLogs("customer_id = 'other-app' AND user_id = 'anya'"))
+	if !s.store.Sharded() {
+		s.Empty(slices.DeleteFunc(s.payloadsNaming("acme-app", "anya"), func(change DataChange) bool { return change.Table != "agent_logs" }),
+			"the changes of every log of theirs, the one deleted before included")
+		s.Len(s.payloadsNaming("acme-app", "anya"), 1, "another table's change is another step's")
+		s.Len(s.recordedOf("acme-app", "agent_logs"), 7, "each change keeps its number: four inserts, three deletes")
+		s.NotEmpty(s.payloadsNaming("acme-app", "grace"), "another user's changes stay")
+		s.NotEmpty(s.payloadsNaming("other-app", "anya"), "the same user id of another app is another user")
+	}
 	left, err := s.store.AgentLogs.CountUser(s.ctx, "acme-app", "anya")
 	s.Require().NoError(err)
 	s.Zero(left)

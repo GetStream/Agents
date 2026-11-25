@@ -3,8 +3,11 @@
 package store
 
 import (
+	"context"
 	"strconv"
 	"time"
+
+	"github.com/uptrace/bun"
 )
 
 func (s *StoreSuite) TestAgentLogsPageFilterAndResume() {
@@ -19,16 +22,16 @@ func (s *StoreSuite) TestAgentLogsPageFilterAndResume() {
 	s.Require().NoError(s.store.AgentLogs.Insert(s.ctx, &other))
 	high, err := s.store.AgentLogs.HighWater(s.ctx, "log-test")
 	s.Require().NoError(err)
-	f := AgentLogFilter{Limit: 250, Before: high + 1}
+	f := AgentLogFilter{Limit: 250, Before: high.Above()}
 	first, err := s.store.AgentLogs.Select(s.ctx, "log-test", f)
 	s.Require().NoError(err)
 	s.Require().Len(first, 250)
-	f.Before = first[len(first)-1].ID
+	f.Before = first[len(first)-1].Mark
 	second, err := s.store.AgentLogs.Select(s.ctx, "log-test", f)
 	s.Require().NoError(err)
 	s.Require().Len(second, 250)
 	s.Less(second[0].ID, first[len(first)-1].ID)
-	f.Before = second[len(second)-1].ID
+	f.Before = second[len(second)-1].Mark
 	third, err := s.store.AgentLogs.Select(s.ctx, "log-test", f)
 	s.Require().NoError(err)
 	s.Len(third, 20)
@@ -116,12 +119,13 @@ func (s *StoreSuite) TestAgentLogQueryBudgets() {
 
 	// The transaction, the customer's lock and the insert.
 	s.Equal(4, s.countQueries(func() { s.Require().NoError(s.store.AgentLogs.Insert(s.ctx, last)) }))
-	s.Equal(1, s.countQueries(func() {
+	holders := len(s.store.holders())
+	s.Equal(holders, s.countQueries(func() {
 		high, err := s.store.AgentLogs.HighWater(s.ctx, "acme")
 		s.Require().NoError(err)
-		s.Equal(last.ID, high)
+		s.Equal(last.ID, high[logRange(last.ID)])
 	}))
-	s.Equal(1, s.countQueries(func() {
+	s.Equal(holders, s.countQueries(func() {
 		listed, err := s.store.AgentLogs.Select(s.ctx, "acme", AgentLogFilter{SessionID: "session", Limit: 3})
 		s.Require().NoError(err)
 		s.Len(listed, 3)
@@ -131,4 +135,137 @@ func (s *StoreSuite) TestAgentLogQueryBudgets() {
 		s.Require().NoError(err)
 		s.Equal("said hello", found.Message)
 	}))
+}
+
+// logsIn is how many log rows of customer db holds.
+func (s *StoreSuite) logsIn(db bun.IDB, customer string) int {
+	count, err := db.NewSelect().Model((*AgentLog)(nil)).Where("customer_id = ?", customer).Count(s.ctx)
+	s.Require().NoError(err)
+	return count
+}
+
+// legacyLog writes a log row where a router from before the logs moved to the shards wrote it:
+// in the shared database.
+func (s *StoreSuite) legacyLog(customer, message string) AgentLog {
+	entry := &AgentLog{CustomerID: customer, Source: "agent", Severity: "info", EventType: "turn", Message: message,
+		OccurredAt: s.base, IngestedAt: s.base}
+	_, err := s.store.global.NewInsert().Model(entry).Exec(s.ctx)
+	s.Require().NoError(err)
+	return *entry
+}
+
+// logged writes a log row of customer through into's store.
+func (s *StoreSuite) logged(into *Store, customer, message string) AgentLog {
+	entry := &AgentLog{CustomerID: customer, Source: "agent", Severity: "info", EventType: "turn", Message: message}
+	s.Require().NoError(into.AgentLogs.Insert(s.ctx, entry))
+	return *entry
+}
+
+func logMessages(rows []AgentLog) []string {
+	messages := make([]string, len(rows))
+	for i, row := range rows {
+		messages[i] = row.Message
+	}
+	return messages
+}
+
+func (s *StoreSuite) TestARequestAndItsLogAreWrittenTogetherOrNotAtAll() {
+	s.onShard("ALTER TABLE agent_logs ADD CONSTRAINT refuses_requests CHECK (event_type <> 'provider_request') NOT VALID")
+	s.T().Cleanup(func() { s.onShard("ALTER TABLE agent_logs DROP CONSTRAINT refuses_requests") })
+
+	_, err := s.store.Requests.InsertMany(s.ctx, []Request{{Modality: "llm", CustomerID: "atomic", AgentID: "agent",
+		Provider: "openai", Model: "gpt", StartedAt: s.base, Success: true}})
+
+	s.Require().Error(err, "the log row was refused")
+	var requests int
+	s.Require().NoError(s.store.shard.NewSelect().Model((*Request)(nil)).ColumnExpr("count(*)").
+		Where("customer_id = 'atomic'").Scan(s.ctx, &requests))
+	s.Zero(requests, "the request went with the log row it could not write")
+}
+
+func (s *ShardedStoreSuite) TestALogIsWrittenInThisShardAndNotTheSharedDatabase() {
+	s.logged(s.store, "app", "said hello")
+
+	s.Equal(1, s.logsIn(s.store.shard, "app"))
+	s.Zero(s.logsIn(s.store.global, "app"))
+}
+
+func (s *ShardedStoreSuite) TestLogsOfTheSharedDatabaseAndEveryShardAreListedAndFoundOnceEach() {
+	written := []AgentLog{s.legacyLog("app", "before the move"), s.logged(s.store, "app", "here"), s.logged(s.other, "app", "there")}
+	ranges := map[int64]bool{}
+	for _, row := range written {
+		ranges[logRange(row.ID)] = true
+	}
+	s.Len(ranges, 3, "each database draws ids of its own range")
+
+	all, err := s.store.AgentLogs.Select(s.ctx, "app", AgentLogFilter{Limit: 10})
+	s.Require().NoError(err)
+	s.Equal([]string{"there", "here", "before the move"}, logMessages(all), "newest first, whichever database holds it")
+
+	high, err := s.store.AgentLogs.HighWater(s.ctx, "app")
+	s.Require().NoError(err)
+	var paged []AgentLog
+	filter := AgentLogFilter{Limit: 1, Before: high.Above()}
+	for range 5 {
+		page, err := s.store.AgentLogs.Select(s.ctx, "app", filter)
+		s.Require().NoError(err)
+		if len(page) == 0 {
+			break
+		}
+		paged = append(paged, page...)
+		filter.Before, err = ParseAgentLogCursor(page[0].Cursor)
+		s.Require().NoError(err)
+	}
+	s.Equal(logMessages(all), logMessages(paged), "one to a page, each once")
+
+	for _, row := range written {
+		found, err := s.store.AgentLogs.Get(s.ctx, "app", row.ID)
+		s.Require().NoError(err, row.Message)
+		s.Equal(row.Message, found.Message)
+	}
+}
+
+func (s *ShardedStoreSuite) TestReadingOnFromAMarkMissesNoRowOfADatabaseNumberingBelowAnother() {
+	s.logged(s.other, "app", "read before")
+	high, err := s.store.AgentLogs.HighWater(s.ctx, "app")
+	s.Require().NoError(err)
+
+	s.logged(s.other, "app", "there")
+	s.logged(s.store, "app", "here")
+	s.legacyLog("app", "late in the shared database")
+
+	rows, err := s.store.AgentLogs.Select(s.ctx, "app", AgentLogFilter{After: high, Forward: true, Limit: 10})
+	s.Require().NoError(err)
+	s.ElementsMatch([]string{"there", "here", "late in the shared database"}, logMessages(rows))
+}
+
+func (s *ShardedStoreSuite) TestAPeerWithoutTheLogTableYetHoldsNoneOfTheLogs() {
+	_, err := s.other.shard.ExecContext(s.ctx, "ALTER TABLE agent_logs RENAME TO agent_logs_unmigrated")
+	s.Require().NoError(err)
+	s.T().Cleanup(func() {
+		_, err := s.other.shard.ExecContext(context.WithoutCancel(s.ctx), "ALTER TABLE agent_logs_unmigrated RENAME TO agent_logs")
+		s.NoError(err)
+	})
+	here := s.logged(s.store, "app", "here")
+	s.legacyLog("app", "before the move")
+
+	high, err := s.store.AgentLogs.HighWater(s.ctx, "app")
+	s.Require().NoError(err)
+	s.Equal(here.ID, high[logRange(here.ID)])
+	rows, err := s.store.AgentLogs.Select(s.ctx, "app", AgentLogFilter{Limit: 10})
+	s.Require().NoError(err)
+	s.Equal([]string{"here", "before the move"}, logMessages(rows))
+	_, err = s.store.AgentLogs.Get(s.ctx, "app", here.ID+1)
+	s.ErrorIs(err, ErrNoAgentLog)
+}
+
+func (s *ShardedStoreSuite) TestMigratingAgainKeepsDrawingLogIdsWhereTheShardLeftOff() {
+	// Numbered again: SetupTest empties shard_numbers.
+	s.Require().NoError(s.store.Migrate(s.ctx))
+	first := s.logged(s.store, "app", "first")
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	second := s.logged(s.store, "app", "second")
+	s.Greater(second.ID, first.ID)
+	s.Equal(logRange(first.ID), logRange(second.ID))
 }

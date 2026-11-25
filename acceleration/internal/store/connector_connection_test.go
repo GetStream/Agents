@@ -676,7 +676,7 @@ func (s *StoreSuite) TestDeletingAUsersConnectionsRemovesEveryOneOfThemAndNothin
 		"SELECT count(*) FROM connector_connections WHERE customer_id = 'acme-app' AND owner_id = 'alice'").Scan(&left))
 	s.Zero(left, "the soft deleted row, which still held the owner and account ids, is gone too")
 	var invocations, attempts int
-	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.store.ShardDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM connector_invocations WHERE connection_id = ?", live.ID).Scan(&invocations))
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", pending.ID).Scan(&attempts))
@@ -685,6 +685,29 @@ func (s *StoreSuite) TestDeletingAUsersConnectionsRemovesEveryOneOfThemAndNothin
 	for _, kept := range []ConnectorConnection{bob, app, elsewhere} {
 		_, err := s.store.ConnectorConnections.Get(s.ctx, kept.CustomerID, kept.ID)
 		s.NoError(err, "another user's, the app's and another customer's stay")
+	}
+}
+
+func (s *ShardedStoreSuite) TestDeletingAUsersConnectionsDeletesTheirInvocationsInEveryDatabase() {
+	alices := s.connection("acme-app", userOwned("alice"))
+	bobs := s.connection("acme-app", userOwned("bob"))
+	for _, connection := range []ConnectorConnection{alices, bobs} {
+		s.invocation(connection, time.Second, "")
+		s.Require().NoError(s.other.ConnectorInvocations.Insert(s.ctx, &ConnectorInvocation{CustomerID: "acme-app",
+			ConnectionID: connection.ID, ConnectorID: "acme", Tool: "search", StartedAt: s.base}))
+		s.legacyInvocation(connection, 0)
+	}
+
+	_, err := s.store.ConnectorConnections.DeleteUser(s.ctx, "acme-app", "alice")
+
+	s.Require().NoError(err)
+	for _, db := range s.store.holders() {
+		alice, err := db.NewSelect().Model((*ConnectorInvocation)(nil)).Where("connection_id = ?", alices.ID).Count(s.ctx)
+		s.Require().NoError(err)
+		bob, err := db.NewSelect().Model((*ConnectorInvocation)(nil)).Where("connection_id = ?", bobs.ID).Count(s.ctx)
+		s.Require().NoError(err)
+		s.Zero(alice, "none of the deleted user's calls stays in any database")
+		s.Equal(1, bob, "another user's stay")
 	}
 }
 
@@ -1109,8 +1132,12 @@ func (s *StoreSuite) TestConnectorConnectionQueryBudgets() {
 	s.Equal(5, s.countQueries(func() {
 		s.Require().NoError(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connections[2].ID))
 	}), "DeleteUnbound")
-	s.Equal(7, s.countQueries(func() {
+	shards := 0
+	if s.store.HasShards() {
+		shards = len(s.store.shards())
+	}
+	s.Equal(7+shards, s.countQueries(func() {
 		_, err := s.store.ConnectorConnections.DeleteUser(s.ctx, "acme-app", "alice")
 		s.Require().NoError(err)
-	}), "DeleteUser")
+	}), "DeleteUser, with a delete of its invocations in each shard")
 }
