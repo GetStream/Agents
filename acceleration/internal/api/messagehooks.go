@@ -188,7 +188,8 @@ func (e messageEvent) dispatchedPhotos() []dispatch.Image {
 // Like the call hook it carries no customer header, because Stream is not a customer, and is
 // authenticated by signature instead. Every outcome short of something that did not come
 // from Stream is a 200: Stream retries a non-2xx, and a message nobody can answer is not
-// answerable on the second delivery either.
+// answerable on the second delivery either. A message kept in a geography no shard of which
+// took it is answered 503 instead: by the next delivery, a shard may be back.
 func (s *Server) receiveMessageEvent(w http.ResponseWriter, r *http.Request) {
 	if !s.hooksConfigured() {
 		// Refusing is the only safe answer: without the secret there is no way to tell
@@ -231,7 +232,14 @@ func (s *Server) receiveMessageEvent(w http.ResponseWriter, r *http.Request) {
 		}
 		if written && s.acting(r.Context(), origin, eventType, payload) {
 			origin.handOver = s.replayed(r, payload)
-			s.routeArrivingMessage(r.Context(), origin, event)
+			var refusal APIError
+			origin.refusal = &refusal
+			// A message whose work is done nowhere is forgotten, so Stream's next delivery is placed.
+			if !s.routeArrivingMessage(r.Context(), origin, event) && refusal.Code != "" {
+				s.unrecord(r.Context(), origin, eventType, payload)
+				writeError(w, refusal)
+				return
+			}
 		}
 	} else {
 		s.logger.DebugContext(r.Context(), "ignoring a message event", "type", eventType)
@@ -427,11 +435,15 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 
 	// Nothing runs the conversation yet, so it starts in the shard nearest the person writing,
 	// unless its routing policy places it in another.
-	place, _, refused := s.placed(ctx, customerID, configID, s.configShard(ctx, customerID, configID, event.Message.User.ID))
+	place, failure, refused := s.placed(ctx, customerID, configID, s.configShard(ctx, customerID, configID, event.Message.User.ID))
 	if refused {
+		origin.refuse(failure)
 		return false
 	}
-	if elsewhere, taken, _ := s.handedToShard(ctx, origin.handOver, place, shardWorkMessage); elsewhere {
+	if elsewhere, taken, down := s.handedToShard(ctx, origin.handOver, place, shardWorkMessage); elsewhere {
+		if down {
+			origin.refuse(errResidencyDown)
+		}
 		return taken
 	}
 	if elsewhere, taken := s.forwardedToWorkers(ctx, origin.handOver, customerID, dispatch.Messages); elsewhere {

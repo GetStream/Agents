@@ -345,8 +345,9 @@ func (s *RoutingPolicyShardDownSuite) TestACallPlacedForAnAppKeptInTheEUIsRefuse
 		PlaceCallRequest{From: s.utils.number(), To: s.utils.number()}))
 }
 
-func (s *RoutingPolicyShardDownSuite) TestAMessageKeptInTheEUIsNotAnsweredHere() {
-	s.Require().Equal(http.StatusOK, s.signedly("/v1/chat/hooks/stream",
+// Stream delivers a 503 again, by when the EU may be back.
+func (s *RoutingPolicyShardDownSuite) TestAMessageKeptInTheEUIsAnswered503AndNotAnsweredHere() {
+	s.Require().Equal(http.StatusServiceUnavailable, s.signedly("/v1/chat/hooks/stream",
 		arrivingMessage("chat-"+s.utils.uuid(), s.agent(shardmap.PolicyEUOnly))))
 
 	s.idle(s.here, "a message kept in the EU was answered outside it")
@@ -422,16 +423,60 @@ func (s *RoutingPolicyAppSuite) TestACallRefusedWhileItsGeographyIsDownIsAnswere
 	case <-time.After(dropped):
 	}
 
-	workers := dispatch.NewPool()
-	s.otherNodeDispatching(workers)
-	there, release := workers.Register(s.customerID(), dispatch.Registration{Capacity: 1})
-	s.T().Cleanup(release)
+	there := s.euComesUp()
 	s.Require().Equal(http.StatusOK, s.rings(body))
 
 	select {
 	case <-there.Calls():
 	case <-time.After(settleFor):
 		s.FailNow("the call delivered again once the EU was up never reached its worker there")
+	}
+}
+
+// euComesUp starts a node in shard there, the EU, with a worker of the test's app waiting on it.
+func (s *RoutingPolicyAppSuite) euComesUp() *dispatch.Worker {
+	workers := dispatch.NewPool()
+	s.otherNodeDispatching(workers)
+	there, release := workers.Register(s.customerID(), dispatch.Registration{Capacity: 1})
+	s.T().Cleanup(release)
+	return there
+}
+
+// writes delivers a message.new from the app, and answers with the status.
+func (s *RoutingPolicyAppSuite) writes(body string) int {
+	request := s.request("/v1/chat/hooks/stream/"+strconv.FormatInt(s.appID(), 10), body, sign(body, ownAppSecret))
+	vouched(request, s.appID(), s.apiKey)
+	response, err := s.server.Client().Do(request)
+	s.Require().NoError(err)
+	s.Require().NoError(response.Body.Close())
+	return response.StatusCode
+}
+
+// As a call: had the refusal recorded the delivery, the one made once the EU is back would be
+// dropped as a duplicate.
+func (s *RoutingPolicyAppSuite) TestAMessageRefusedWhileItsGeographyIsDownIsAnsweredWhenDeliveredAgain() {
+	ctx := context.Background()
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(), Mode: store.AgentModeText,
+		Models: store.AgentModels{LLM: "en-low-latency"}, RoutingPolicy: string(shardmap.PolicyEUOnly)}
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &config))
+	here, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
+	s.T().Cleanup(release)
+	body := arrivingMessage("chat-"+s.utils.uuid(), config)
+
+	s.Require().Equal(http.StatusServiceUnavailable, s.writes(body))
+	select {
+	case answered := <-here.Messages():
+		s.FailNowf("a message kept in the EU was answered outside it", "channel %s", answered.ChannelID)
+	case <-time.After(dropped):
+	}
+
+	there := s.euComesUp()
+	s.Require().Equal(http.StatusOK, s.writes(body))
+
+	select {
+	case <-there.Messages():
+	case <-time.After(settleFor):
+		s.FailNow("the message delivered again once the EU was up never reached its worker there")
 	}
 }
 

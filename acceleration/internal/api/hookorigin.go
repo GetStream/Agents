@@ -49,6 +49,16 @@ type hookOrigin struct {
 	// heard is what a queued delivery's voice recording said, kept on its row by a try before
 	// (heardText). Nil until it was heard, and for a hook.
 	heard *string
+	// refusal, given for a hook, is set to what to answer it with when its work is done nowhere,
+	// such as work kept in a geography no shard of which took it, for Stream to deliver it again.
+	refusal *APIError
+}
+
+// refuse answers the work with failure rather than doing it, where refusal is given.
+func (o hookOrigin) refuse(failure APIError) {
+	if o.refusal != nil {
+		*o.refusal = failure
+	}
 }
 
 // answer runs an answer: in line for a queued delivery, and off the request for a hook,
