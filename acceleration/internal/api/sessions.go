@@ -155,8 +155,11 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 		if err := currentConfig(); err != nil {
 			return nil, err
 		}
-		if err := s.readProjectTag(ctx, parent.Stored); err != nil {
-			return nil, err
+		// A backend naming the fork's project names its tag (Spec.NameProject), whatever the parent's.
+		if body.ProjectId == nil || KindFrom(ctx) != auth.KindServer {
+			if err := s.readProjectTag(ctx, parent.Stored); err != nil {
+				return nil, err
+			}
 		}
 	}
 	spec, err := forkSpec(parent, body, config, current, thread)
@@ -762,7 +765,10 @@ var errProjectTagUnread = unavailable("what the session's usage is tagged with c
 func (s *Server) readProjectTag(ctx context.Context, row *store.AgentSession) error {
 	err := s.store.Sessions.ReadProjectTag(ctx, row)
 	if errors.Is(err, store.ErrProjectTagUnread) {
-		s.logger.Error("could not read a session's project tag", "session", row.ID, "error", err)
+		// A caller that hung up cuts the read off, which says nothing of a shard.
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			s.logger.Error("could not read a session's project tag", "session", row.ID, "error", err)
+		}
 		return errProjectTagUnread
 	}
 	return err

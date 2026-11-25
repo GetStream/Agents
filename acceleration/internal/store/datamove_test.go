@@ -2726,6 +2726,13 @@ func (s *DataMoveSuite) TestASessionsProjectTagMovesWithIt() {
 	}
 	s.assertProjectTags(s.source)
 
+	s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "acme", Project: "alpha", ProjectTag: new("alpha")}))
+	s.Require().NoError(s.destination.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "acme", ProjectTag: new("")}))
+	s.move("acme", "acme")
+	moved, err := s.destination.Sessions.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Equal(new("alpha"), moved.ProjectTag, "the tag that arrives stands over the one here")
+
 	older := s.export("acme").of("agent_sessions")[0]
 	delete(older, "project_tag")
 	older["id"], older["caller_kind"] = "older", "server"

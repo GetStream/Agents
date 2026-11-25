@@ -680,8 +680,8 @@ func (r *Sessions) Get(ctx context.Context, customerID, id string) (AgentSession
 // ReadProjectTag gives a row that does not say its project tag the one it has: what another run's
 // row says, or, when no row does, what TaggedProject derives from the row of the run that opened
 // it. A router of the release before writes such a row as it carries the session on in another
-// shard, with the kind of caller that carried it on, so every shard is asked, this one again, for
-// peerReadTimeout at most. A shard that does not answer may be the one that says it, so with no
+// shard, with the kind of caller that carried it on, so every shard is asked, this one again and
+// each other for peerReadTimeout at most. A shard that does not answer may be the one that says it, so with no
 // row found it is an error: usage is not tagged with a guess.
 func (r *Sessions) ReadProjectTag(ctx context.Context, session *AgentSession) error {
 	if session.ProjectTag != nil {
@@ -699,7 +699,7 @@ func (r *Sessions) ReadProjectTag(ctx context.Context, session *AgentSession) er
 					// When the session was first run in the shard: opened_at moves as it is carried
 					// on there again, its first response's time does not. NULL is from before
 					// opened_at was kept, and reads as first.
-					ColumnExpr("LEAST(opened_at, (SELECT min(created_at) FROM agent_responses WHERE session_id = ?TableAlias.id)) AS opened_at").
+					ColumnExpr("LEAST(opened_at, (SELECT min(created_at) FROM agent_responses WHERE session_id = ?TableAlias.id AND customer_id = ?)) AS opened_at", session.CustomerID).
 					Where("id = ?", session.ID).
 					Where("customer_id = ?", session.CustomerID).
 					Scan(ctx, &rows)

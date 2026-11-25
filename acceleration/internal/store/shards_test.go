@@ -266,6 +266,11 @@ func (s *ShardedStoreSuite) TestASessionFromBeforeCarriedOnElsewhereIsTaggedByWh
 					row.ForkedFrom = "parent"
 				}
 				s.Require().NoError(ran.at.Sessions.Upsert(s.ctx, &row))
+				// Another customer's response under its id is none of its own.
+				if at > 0 {
+					s.Require().NoError(ran.at.Responses.Insert(s.ctx, &AgentResponse{ID: name + " globex", SessionID: name,
+						CustomerID: "globex", CreatedAt: s.base.Add(-time.Hour)}))
+				}
 				if ran.answered == 0 {
 					continue
 				}

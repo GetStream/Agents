@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"log/slog"
@@ -171,6 +172,7 @@ func (s *ProjectTagSuite) TestAForkIsTaggedWithTheProjectABackendNamedLast() {
 
 				forked := s.fork(as[tried.forker], parent.Id, request)
 
+				s.Equal(map[string]string{"-": "alpha", "beta": "beta", "": ""}[tried.project], value(forked.ProjectId))
 				s.Equal([]string{tried.want}, s.answered(as[tried.forker], forked.Id))
 				s.Equal([]string{tried.want}, s.reopened(owner, forked.Id))
 				s.Equal([]string{tried.want}, s.reopenedElsewhere(owner, forked.Id))
@@ -344,12 +346,7 @@ func (s *ProjectTagSuite) TestARowFromBeforeIsNotCarriedOnOrForkedWhileAShardIsD
 	unread, known := s.open(backend, "alpha"), s.open(backend, "alpha")
 	s.fromBefore(unread.Id)
 	s.stop(known.Id)
-	options := s.storeOptions
-	options.ShardDSN = cmp.Or(options.ShardDSN, options.DSN)
-	options.Shards = map[string]string{"own": options.ShardDSN, "down": "postgres://postgres:postgres@127.0.0.1:1/down?sslmode=disable"}
-	served, err := store.OpenShards(options)
-	s.Require().NoError(err)
-	s.T().Cleanup(func() { s.NoError(served.Close()) })
+	served := s.storeWithAShardDown()
 	other, _, _ := s.otherNodeServingFrom(served, nil, s.sealer, slog.New(slog.DiscardHandler))
 	asking := backend.on(other)
 
@@ -363,9 +360,41 @@ func (s *ProjectTagSuite) TestARowFromBeforeIsNotCarriedOnOrForkedWhileAShardIsD
 		s.Contains(message, "try again shortly", path)
 	}
 
-	status, _ := asking.call(http.MethodGet, "/v1/agents/sessions/"+unread.Id, nil)
+	device := ForkSessionRequest{ProjectId: pointerTo("beta"), Messages: pointerTo(false)}
+	status, _ := owner.on(other).failure(http.MethodPost, "/v1/agents/sessions/"+unread.Id+"/fork", device)
+	s.Equal(http.StatusServiceUnavailable, status, "a device names no tag")
+	named := s.fork(asking, unread.Id, device)
+	s.Equal([]string{"beta"}, s.answered(asking, named.Id), "a backend naming the fork's project needs no other")
+
+	status, _ = asking.call(http.MethodGet, "/v1/agents/sessions/"+unread.Id, nil)
 	s.NotEqual(http.StatusServiceUnavailable, status)
 	s.Equal([]string{"alpha"}, s.answered(asking, s.fork(asking, known.Id, ForkSessionRequest{}).Id))
+}
+
+// A shard that did not answer is logged, and a caller that hung up is not one.
+func (s *ProjectTagSuite) TestAnUnreadProjectTagIsLoggedUnlessTheCallerLeft() {
+	var logged bytes.Buffer
+	_, server, _ := s.otherNodeServingFrom(s.storeWithAShardDown(), nil, s.sealer, slog.New(slog.DiscardHandler))
+	server.logger = slog.New(slog.NewTextHandler(&logged, nil))
+	row := store.AgentSession{ID: "one", CustomerID: s.customerID(), Project: "alpha"}
+
+	left, leave := context.WithCancel(context.Background())
+	leave()
+	s.Error(server.readProjectTag(left, &row))
+	s.Empty(logged.String())
+
+	s.Error(server.readProjectTag(context.Background(), &row))
+	s.Contains(logged.String(), "level=ERROR")
+}
+
+func (s *ProjectTagSuite) storeWithAShardDown() *store.Store {
+	options := s.storeOptions
+	options.ShardDSN = cmp.Or(options.ShardDSN, options.DSN)
+	options.Shards = map[string]string{"own": options.ShardDSN, "down": "postgres://postgres:postgres@127.0.0.1:1/down?sslmode=disable"}
+	served, err := store.OpenShards(options)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(served.Close()) })
+	return served
 }
 
 func (s *ProjectTagSuite) TestAForksRowFromBeforeIsNotTagged() {
