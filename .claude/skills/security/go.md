@@ -162,15 +162,34 @@ resolver, so never quote the egress error (`createEventDestination`, AI-3575).
   schema, and never in a list or get response afterwards.
 - Never logged: check new `slog`/log lines and error messages for tokens, keys, `Authorization`
   headers, query strings carrying `token=`, and request bodies.
-- A 500 says only "something went wrong" (`apierror.go`). No answer of any status, socket
-  frame or field stored for a later read carries the text of a store, vendor, network or DNS
-  error: it names hosts, ports, SQL, constraint names, URLs, bodies and the cluster's DNS
-  server. Flag `invalidRequest(err.Error())`, `"...: " + err.Error()`,
-  `fmt.Sprintf("...: %v", err)` and a stored `err.Error()`. The one exception is an error
-  whose whole text this code wrote for the caller to correct (`*oauth2code.ManifestError`): no
-  wrapped cause (`fmt.Errorf("%w: %w", ErrInvalid, err)` still carries the store's text), and
-  nothing only the operator sets, such as environment variable names. The rules are in
-  [errors.md «HTTP»](../go/errors.md#http).
+- A 500 says only "something went wrong" (`apierror.go`).
+- Error text that a caller gets (the message of any status, a socket frame, a stored field
+  that a caller reads later) is for the caller that sent the request: the end user's device
+  or the customer's backend. Three levels set what a request uses:
+  - **Request:** what the caller sends: the request body and the socket frames.
+  - **Customer settings:** what the customer's backend writes: agent configs
+    (`sandbox_options`, connector bindings, `floor_control`), the app's settings and the
+    app's own Stream keys.
+  - **Deployment settings:** what the operator sets: the router's config and environment
+    (`ROUTER_*`, `STREAM_API_*`, `code_sandbox.*`), and what they control: which components
+    the deployment has, and the rules that egress, limits and the sandbox network apply.
+- The text shows only what the caller itself set. A device sees no customer settings and no
+  deployment settings. A backend sees no deployment settings.
+- When the caller can correct the error in what it sent, the text tells it what to change.
+  This code wrote the full text (`*oauth2code.ManifestError`), with no wrapped cause:
+  `fmt.Errorf("%w: %w", ErrInvalid, err)` still contains the store's text.
+- When only a level above the caller can correct the error, the text tells which level in
+  fixed words ("the agent config of this app", "this deployment"), with the error `code`. The
+  caller sends the `code` and the `X-Request-Id` to that level. The router logs the full
+  cause with `request_id` where it makes the error.
+- The text never contains the text of a store, vendor, network or DNS error (it shows hosts,
+  ports, SQL, constraint names, URLs, bodies and the cluster's DNS server), the rule of a
+  security control that refused the request (rule 6 for refused URLs), or internal
+  components and hosts.
+- Flag `invalidRequest(err.Error())`, `"...: " + err.Error()`, `fmt.Sprintf("...: %v", err)`,
+  a stored `err.Error()`, and a session error (`session.ErrInvalid`,
+  `session.ErrNotConfigured`) that shows customer settings to a device. How to translate an
+  error is in [errors.md «HTTP»](../go/errors.md#http).
 - Refused outbound URLs: see rule 6.
 - The ops key (`X-Ops-Key`) is compared in constant time and turns the paths off when empty.
 - The activity key (`X-Activity-Key`, `ROUTER_AUTH_ACTIVITY_KEY` and `_PREVIOUS`) is compared in
