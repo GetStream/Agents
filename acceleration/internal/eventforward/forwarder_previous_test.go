@@ -4,6 +4,8 @@ package eventforward
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
@@ -99,34 +101,97 @@ func (s *ForwarderSuite) TestAForwardWhosePreviousSecretDoesNotOpenIsSignedWithT
 			s.Equal(1, logs.about(destination, previousWarning), "the warning is written once a lease for the destination")
 			s.NotContains(logs.String(), destination.current, "and never a secret")
 			s.NotContains(logs.String(), destination.previous)
+			s.holdsNoCiphertext(logs, destination.sealed...)
 		})
 	}
 }
 
 // The warning is once a lease for each destination: a second forward of one destination inside
 // the lease writes none, another destination's has a line of its own, and the first one's is
-// written again once the lease has run out.
+// written again once the lease has run out. The lease is the default minute, so a slow machine
+// cannot end it inside the test; the test ages the mark the throttle holds to end it.
 func (s *ForwarderSuite) TestThePreviousSecretWarningIsOnceALeasePerDestination() {
 	target, arrived := s.receiver()
 	logs := &logLines{}
-	router := s.routerOn(s.sealer, target, logs, Options{Lease: time.Second})
+	router := s.routerOn(s.sealer, target, logs, Options{})
 	routerTwo, err := auth.NewSealerWithKeyring(2, map[int]string{1: "test key one", 2: "test key two"})
 	s.Require().NoError(err)
 	one := s.rotated(target.URL, s.under(routerTwo), s.under(s.sealer), time.Now().Add(time.Hour))
 	other := s.rotated(target.URL, s.under(routerTwo), s.under(s.sealer), time.Now().Add(time.Hour))
 
-	for _, destination := range []rotatedDestination{one, one, other} {
-		s.Require().NoError(s.send(router, destination, `{"n":`+uuid.NewString()+`}`))
-		s.arrival(arrived)
+	markOf := func(destination rotatedDestination) time.Time {
+		router.mu.Lock()
+		defer router.mu.Unlock()
+		return router.unopenedAt["previous/"+destination.id]
 	}
+	var written time.Time
+	for i, destination := range []rotatedDestination{one, one, other} {
+		s.Require().NoError(s.send(router, destination, `{"n":"`+uuid.NewString()+`"}`))
+		s.arrival(arrived)
+		if i == 0 {
+			written = markOf(one)
+		}
+	}
+	s.False(written.IsZero(), "the line marks the destination")
+	s.Equal(written, markOf(one), "a forward inside the lease leaves the mark where it was: the lease does not slide")
 	s.Equal(1, logs.about(one, previousWarning), "one line for a destination inside its lease")
 	s.Equal(1, logs.about(other, previousWarning), "and one for another")
 
-	s.Require().Eventually(func() bool {
-		s.NoError(s.send(router, one, `{"n":`+uuid.NewString()+`}`))
+	router.mu.Lock()
+	router.unopenedAt["previous/"+one.id] = time.Now().Add(-router.lease)
+	router.mu.Unlock()
+	s.Require().NoError(s.send(router, one, `{"n":"`+uuid.NewString()+`"}`))
+	s.arrival(arrived)
+	s.Equal(2, logs.about(one, previousWarning), "written again a lease later")
+	s.Equal(1, logs.about(other, previousWarning), "and the other destination's mark is its own")
+}
+
+// The unopened line and the previous-secret warning are one destination's two lines, and neither
+// hides the other: a customer whose current secret did not open and who then rotates, and one
+// whose previous secret did not open and who rotates onto a key this router lacks, get both lines.
+func (s *ForwarderSuite) TestTheUnopenedLineAndThePreviousSecretWarningDoNotHideEachOther() {
+	routerTwo, err := auth.NewSealerWithKeyring(2, map[int]string{1: "test key one", 2: "test key two"})
+	s.Require().NoError(err)
+	const unopened = "cannot open an event destination's signing secret"
+	rotate := func(destination rotatedDestination, to seal) {
+		secret, err := webhook.NewSecret()
+		s.Require().NoError(err)
+		sealed, version := to(secret, secretAAD(destination.customer, "slack_bot", destination.id))
+		_, err = s.store.EventDestinations.RotateSecret(s.ctx, destination.customer, "slack_bot", destination.id, sealed, version, time.Now().Add(time.Hour))
+		s.Require().NoError(err)
+	}
+	s.Run("an unopened line, then a rotation: the previous-secret warning is written", func() {
+		target, arrived := s.receiver()
+		logs := &logLines{}
+		router := s.routerOn(s.sealer, target, logs, Options{Retries: []time.Duration{time.Minute}})
+		destination := s.rotated(target.URL, s.under(s.sealer), s.under(routerTwo), time.Now().Add(-time.Minute))
+		s.Require().NoError(s.send(router, destination, `{"n":"before"}`))
+		s.Require().Eventually(func() bool { return logs.about(destination, unopened) == 1 }, 5*time.Second, 10*time.Millisecond)
+
+		rotate(destination, s.under(s.sealer))
+		// The rotation moved the unopenable secret to previous.
+		s.Require().NoError(s.send(router, destination, `{"n":"after"}`))
+
 		s.arrival(arrived)
-		return logs.about(one, previousWarning) == 2
-	}, 10*time.Second, 200*time.Millisecond, "written again a lease later")
+		s.Equal(1, logs.about(destination, previousWarning), "the previous-secret warning after an unopened line")
+		s.Equal(1, logs.about(destination, unopened), "the unopened line stays one")
+	})
+	s.Run("a previous-secret warning, then a rotation onto a key this router lacks: the unopened line is written", func() {
+		target, arrived := s.receiver()
+		logs := &logLines{}
+		router := s.routerOn(s.sealer, target, logs, Options{Retries: []time.Duration{time.Minute}})
+		destination := s.rotated(target.URL, s.under(routerTwo), s.under(s.sealer), time.Now().Add(time.Hour))
+		s.Require().NoError(s.send(router, destination, `{"n":"before"}`))
+		s.arrival(arrived)
+		s.Require().Equal(1, logs.about(destination, previousWarning))
+
+		rotate(destination, s.under(routerTwo))
+		s.Require().NoError(s.send(router, destination, `{"n":"after"}`))
+
+		s.Require().Eventually(func() bool { return logs.about(destination, unopened) == 1 }, 5*time.Second, 10*time.Millisecond,
+			"the unopened line after a previous-secret warning")
+		s.Empty(arrived)
+	})
 }
 
 // Controls: what is as it was. Both secrets open within PreviousUntil: both sign. Past it: the
@@ -224,6 +289,8 @@ func (s *ForwarderSuite) TestACurrentSecretThatDoesNotOpenIsLeftToAnotherRouterT
 type rotatedDestination struct {
 	id, customer      string
 	current, previous string
+	// sealed is the previous secret's blob, then the current one's, as the database holds them.
+	sealed [][]byte
 }
 
 // rotated stores a destination that is sealed with previous, then rotated to a secret sealed
@@ -240,11 +307,25 @@ func (s *ForwarderSuite) rotated(url string, previous, current seal, until time.
 	made.current, err = webhook.NewSecret()
 	s.Require().NoError(err)
 	destination.SecretSealed, destination.KEKVersion = previous(made.previous, aad)
+	made.sealed = append(made.sealed, destination.SecretSealed)
 	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))
 	sealed, version := current(made.current, aad)
+	made.sealed = append(made.sealed, sealed)
 	_, err = s.store.EventDestinations.RotateSecret(s.ctx, destination.CustomerID, destination.ConnectorID, destination.ID, sealed, version, until)
 	s.Require().NoError(err)
 	return made
+}
+
+// holdsNoCiphertext asserts the log holds none of the sealed blobs, in the forms a log line
+// writes bytes in: quoted and escaped, hex, and base64 both ways.
+func (s *ForwarderSuite) holdsNoCiphertext(logs *logLines, blobs ...[]byte) {
+	for _, sealed := range blobs {
+		quoted := strconv.Quote(string(sealed))
+		for _, form := range []string{quoted[1 : len(quoted)-1], hex.EncodeToString(sealed),
+			base64.StdEncoding.EncodeToString(sealed), base64.RawURLEncoding.EncodeToString(sealed)} {
+			s.NotContains(logs.String(), form, "a sealed secret is never logged")
+		}
+	}
 }
 
 // send queues a forward of body to the destination.

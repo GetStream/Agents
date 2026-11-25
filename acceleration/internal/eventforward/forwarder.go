@@ -158,7 +158,7 @@ type Forwarder struct {
 	mu      sync.Mutex
 	sending map[string]int
 	// unopenedAt is when this router last logged that it cannot open a destination's signing
-	// secret, or its previous one, by destination id (unopened, openSecrets).
+	// secret, or its previous one, by line and destination id (unopened, openSecrets).
 	unopenedAt map[string]time.Time
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -569,21 +569,21 @@ func (f *Forwarder) unsignedWait() time.Duration {
 // unopened logs that this router cannot open a destination's signing secret, once a lease for
 // each destination: a destination's whole backlog fails alike, and one line says it.
 func (f *Forwarder) unopened(log *slog.Logger, destinationID string, err error) {
-	if !f.dueOnce(destinationID) {
+	if !f.dueOnce("unopened/" + destinationID) {
 		return
 	}
 	log.Error("this router cannot open an event destination's signing secret; its forwards are left to another", "error", err)
 }
 
-// dueOnce says whether a line about a destination's signing secrets is due, and marks it
-// written when it is: at most once a lease for each destination.
-func (f *Forwarder) dueOnce(destinationID string) bool {
+// dueOnce says whether a line is due, and marks it written when it is: at most once a lease
+// for each key. A key names the line and the destination, so one line does not hide another.
+func (f *Forwarder) dueOnce(key string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	last, seen := f.unopenedAt[destinationID]
+	last, seen := f.unopenedAt[key]
 	due := !seen || time.Since(last) >= f.lease
 	if due {
-		f.unopenedAt[destinationID] = time.Now()
+		f.unopenedAt[key] = time.Now()
 	}
 	return due
 }
@@ -699,7 +699,7 @@ func (f *Forwarder) openSecrets(delivery store.ClaimedEventDelivery) ([]string, 
 	if len(delivery.PreviousSecretSealed) > 0 && delivery.PreviousUntil != nil && time.Now().Before(*delivery.PreviousUntil) {
 		previous, err := f.secrets.OpenWithAADVersion(delivery.PreviousSecretSealed, aad, delivery.PreviousKEKVersion)
 		if err != nil {
-			if f.dueOnce(delivery.DestinationID) {
+			if f.dueOnce("previous/" + delivery.DestinationID) {
 				f.logger.Warn("this router cannot open an event destination's previous signing secret; its forwards are signed with the current one alone",
 					"connector", delivery.ConnectorID, "customer", delivery.CustomerID, "destination", delivery.DestinationID, "error", err)
 			}
