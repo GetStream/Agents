@@ -16,7 +16,9 @@ export interface RouterOptions {
  *
  * Search is the one routed modality a device may reach: a question and its answer are one round
  * trip, and the answer is for whoever asked rather than for the app. Everything the named config
- * holds is a default that a call's own options override.
+ * holds is a default that a call's own options override. How a search is run is the backend's to
+ * decide: a device may name the config, but its own options are refused with a 403. Each search
+ * counts as one message on the caller's daily quota.
  *
  * ```ts
  * const router = api.router({ config: "healthcare" });
@@ -44,7 +46,10 @@ export class Router {
     return this.client.get("/v1/{modality}/routes", { path: { modality } });
   }
 
-  /** Answers one question out of what is true now. */
+  /**
+   * Answers one question out of what is true now. `options` are server side only: a device
+   * sending them is refused with a 403.
+   */
   search(query: string, options?: Schemas["SearchOptions"]): Promise<Schemas["SearchAnswer"]> {
     const { config, tags } = this.options;
     return this.client.post("/v1/search", {

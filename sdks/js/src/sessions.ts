@@ -11,6 +11,9 @@ import { Session, type ForkOptions, type ResumeOptions, type SessionOptions } fr
  * the models this one conversation overrules, and `incognito` for one that is not to be
  * found again at all. The names are the wire's names, with the two-word ones spelled the
  * way the rest of the SDK spells them.
+ *
+ * The phone line, the models and limits, `greeting` and `tags` are the backend's to choose: a
+ * page or an app sending any of them is refused with a 403, so it names an agent config instead.
  */
 export interface SessionSpec
   extends Omit<
@@ -23,7 +26,10 @@ export interface SessionSpec
    * the wire's `return_url`, which this wins over when both are given.
    */
   returnUrl?: string;
-  /** What to change about the models for this conversation alone. */
+  /**
+   * What to change about the models for this conversation alone. Server side only: a device
+   * sending it is refused with a 403.
+   */
   modelOverwrites?: Schemas["ModelOverwrites"];
   /**
    * The person's IANA zone, such as `Europe/Lisbon`. The agent tells the date and the hour in
