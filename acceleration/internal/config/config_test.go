@@ -1560,11 +1560,8 @@ func (s *ConfigSuite) TestNoMigrateDSNIsSetByDefault() {
 func (s *ConfigSuite) TestTheMigrateDSNsAreReadFromAFileAndExported() {
 	path := filepath.Join(s.T().TempDir(), "router.yaml")
 	s.Require().NoError(os.WriteFile(path, []byte(`
-shard: us-west1
 postgres:
   dsn: postgres://global/router
-  shards:
-    us-west1: postgres://usw/router
   migrate_dsn: postgres://owner@global/router
   shard_dsn: postgres://usw/router
   shard_migrate_dsn: postgres://owner@usw/router
@@ -1580,8 +1577,6 @@ postgres:
 }
 
 func (s *ConfigSuite) TestTheMigrateDSNsAreReadFromTheEnvironment() {
-	s.T().Setenv("ROUTER_SHARD", "us-west1")
-	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-west1=postgres://usw/router")
 	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
 	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
 	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@usw/router")
@@ -1594,16 +1589,14 @@ func (s *ConfigSuite) TestTheMigrateDSNsAreReadFromTheEnvironment() {
 }
 
 func (s *ConfigSuite) TestADeploymentOfOneDatabaseNeedsNoShardMigrateDSN() {
-	s.T().Setenv("ROUTER_POSTGRES_DSN", "postgres://global/router")
-	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
-	_, _, err := Load("")
-	s.NoError(err)
+	for _, shard := range []string{"", "postgres://global/router"} {
+		s.T().Setenv("ROUTER_POSTGRES_DSN", "postgres://global/router")
+		s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", shard)
+		s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
 
-	s.T().Setenv("ROUTER_SHARD", "us-west1")
-	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://global/router")
-	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-west1=postgres://global/router")
-	_, _, err = Load("")
-	s.NoError(err)
+		_, _, err := Load("")
+		s.NoError(err)
+	}
 }
 
 func (s *ConfigSuite) TestAMigrateDSNWithoutTheDatabaseItMigratesIsRefused() {
