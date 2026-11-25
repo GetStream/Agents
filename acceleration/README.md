@@ -2148,6 +2148,7 @@ rather than a time to respond and its status is the `101` of the upgrade. A sock
 | `client_gone` | The connection broke with no close frame, or a write to the caller failed |
 | `timeout` | The caller answered no ping in time, or sent no start frame in time on `/v1/agents/socket` and `/v1/{modality}/stream` |
 | `session_ended` | The session ended for another reason. `end_reason` says which. Session sockets only |
+| `relay_ended` | A socket relayed from another node lost the watcher the node running the session held for it, such as one given back for a socket it had not heard from in time, while the session went on (`1011`). A resumable socket's caller reconnects to go on watching (the Go SDK does, for a text session); the other clients see their socket fail with that code; the session still runs. Events socket only |
 | `refused` | The router refused the caller: a start frame it would not take, a session it would not open, a frame it could not read (`1008`) or one past the size limit (`1009`). A stream socket closes a refused start frame with the code it always has (`1011`, or `1008` for an unknown target, a setting the model cannot take or a refusal about money), and a frame it cannot read after the start (`tts`, `llm`) with `1000` |
 | `server_error` | A failure that is not the caller's: `/v1/agents/socket` could not open the session for a failure of the router's own, such as a database read (`1008`), or a stream socket could not read the config it names or start a provider (`1011`) |
 | `shutdown` | The router stopped a resumable socket's session on its way down (`1012`), or sent a dispatch worker to reconnect elsewhere (`1001`) |
@@ -2429,6 +2430,8 @@ arriving late warns (other producers ship late by design and are not measured), 
 a batch sent without the ingest token (`batch_unauthorized`, a 401): a misconfigured
 producer, or no producer at all. `usage_batches_refused_total{status}` counts both kinds of
 refusal.
+Each alert's Sentry message follows its name with a plain-words line of what it means and what to
+check first; the line is not in the fingerprint, so rewording it keeps the alert's Sentry issue.
 
 Each alerts loop, the router's two and the service's, adds to the counter
 `router_alert_holds_total{alert,level}` on its process's `/metrics` at every check (every 15 s),
