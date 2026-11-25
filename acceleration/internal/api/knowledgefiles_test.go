@@ -719,14 +719,15 @@ func (s *KnowledgeFilesSuite) TestTwoPostsOfASourceAtOnceAreEachWrittenOnce() {
 // The shorter post's delete of the tail took what the longer one had written, so the longer is
 // written, and billed, once more.
 func (s *KnowledgeFilesSuite) TestAPostWhosePassagesAShorterOneTookIsWrittenAgainOnce() {
-	for _, base := range []int{0, 6} {
-		source := "base" + strconv.Itoa(base) + ".md"
+	for _, posts := range []struct{ base, shorter int }{{0, 2}, {6, 2}, {0, 5}} {
+		base := posts.base
+		source := "base" + strconv.Itoa(base) + "-" + strconv.Itoa(posts.shorter) + ".md"
 		if base > 0 {
 			s.Require().Equal(http.StatusOK, s.post(source, base))
 		}
 		since := time.Now().UTC()
 		finish, posted := s.postTextWritten(source, strings.ReplaceAll(sections(6), "says", "says at length"))
-		s.Require().Equal(http.StatusOK, s.post(source, 2))
+		s.Require().Equal(http.StatusOK, s.post(source, posts.shorter))
 		finish()
 
 		s.Equal(http.StatusOK, s.answer(posted))
