@@ -18,7 +18,7 @@ import (
 type Chats interface {
 	// For is the client and pin a new conversation for a customer is kept with.
 	For(ctx context.Context, customer string) (*getstream.Stream, int64, error)
-	// Placed is the pin For answers, read without acting for the customer.
+	// Placed is the app new work for a customer goes to, read without acting for it (Clients.Placed).
 	Placed(ctx context.Context, customer string) (int64, error)
 	// ForApp is the client a conversation already pinned to an app is reached with.
 	ForApp(ctx context.Context, customer string, app int64) (*getstream.Stream, error)
