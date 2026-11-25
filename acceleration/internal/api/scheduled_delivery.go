@@ -1178,6 +1178,7 @@ func (s *Server) placeCall(ctx context.Context, delivery scheduledDelivery, foun
 		From:      from,
 		To:        to,
 		SessionID: sessionID,
+		MintedID:  true,
 	})
 	if err != nil {
 		return session.Spec{}, unpaid(overTier(err))
@@ -1190,7 +1191,7 @@ func (s *Server) placeCall(ctx context.Context, delivery scheduledDelivery, foun
 // The task is not in its instructions: it is the call's first turn.
 func callSpec(config store.AgentConfig, delivery scheduledDelivery, agentID string, placed phone.Placed, from, to string) session.Spec {
 	spec := session.FromConfig(config)
-	spec.ID = placed.SessionID
+	spec.ID, spec.MintedID = placed.SessionID, true
 	// A call is given an agent id of its own unless told one, and the
 	// conversation refuses a session written as another agent.
 	spec.AgentID = agentID

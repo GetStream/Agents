@@ -80,6 +80,8 @@ type Directory struct {
 	// held maps a session this node is running to the agent it writes as and the
 	// conversation it answers in, each empty for a session without one.
 	held map[heldSession]claim
+	// onCalls counts the sessions running here by the call each is on.
+	onCalls map[heldCall]int
 	// waiting counts the dispatch workers connected here, by customer.
 	waiting map[string]int
 	// offered is what the workers here host, by customer and agent.
@@ -92,9 +94,15 @@ type offerKey struct{ customerID, agentID string }
 // one id.
 type heldSession struct{ customerID, sessionID string }
 
-// claim is what a session this node holds is found by besides its own id. call is the key its
-// call, agent:<id>, is held under, empty until it is (HoldCall).
-type claim struct{ agentID, conversationID, call string }
+// heldCall is a customer's session's call, agent:<id>, in a Stream app: 0 for the deployment's own.
+type heldCall struct {
+	customerID string
+	app        int64
+	id         string
+}
+
+// claim is what a session this node holds is found by besides its own id.
+type claim struct{ agentID, conversationID string }
 
 // offerEntry is one node's offer as Redis holds it. A hash cannot expire its fields one at
 // a time, so each says when it lapses.
@@ -138,6 +146,7 @@ func NewDirectory(options DirectoryOptions) (*Directory, error) {
 		logger:      logger,
 		cancel:      cancel,
 		held:        map[heldSession]claim{},
+		onCalls:     map[heldCall]int{},
 		waiting:     map[string]int{},
 		offered:     map[offerKey][]byte{},
 	}
@@ -191,37 +200,109 @@ func (d *Directory) shardCommands() []rueidis.Completed {
 func (d *Directory) Hold(ctx context.Context, customerID, sessionID, agentID, conversationID string) {
 	key := heldSession{customerID, sessionID}
 	d.mu.Lock()
-	d.held[key] = claim{agentID: agentID, conversationID: conversationID}
+	d.held[key] = claim{agentID, conversationID}
 	d.mu.Unlock()
 
-	d.write(ctx, key, claim{agentID: agentID, conversationID: conversationID})
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	d.write(ctx, key, claim{agentID, conversationID})
 }
 
-// HoldCall says whose the call of a session this node holds is: agent:<session id>, in a Stream
-// app, 0 for the deployment's own. It goes on saying so until Release.
-func (d *Directory) HoldCall(ctx context.Context, customerID, sessionID string, app int64) {
-	key := heldSession{customerID, sessionID}
+// callTimeout bounds saying a session is here, and asking or saying whose its call is: a session
+// waits for each to open.
+const callTimeout = time.Second
+
+// holdCallScript says a call is a customer's on a node, for a while, unless another customer's
+// says so already. A renewal, whose third argument is empty, leaves the customer's own on another
+// node too.
+const holdCallScript = `
+local said = redis.call('GET', KEYS[1])
+if said and said ~= ARGV[1] and (ARGV[3] == '' or string.sub(said, 1, #ARGV[3]) ~= ARGV[3]) then return said end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+return ARGV[1]`
+
+// releaseCallScript takes back what this node said of a call, and nothing said since.
+const releaseCallScript = `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0`
+
+// errCallHeld is a call another customer's session holds.
+var errCallHeld = errors.New("node: the call is another customer's")
+
+// HoldCall says a customer's session is on the call agent:<id> in a Stream app, 0 for the
+// deployment's own, and goes on saying so until ReleaseCall, which every HoldCall is followed by.
+// A call another customer's session holds stays its own, which is an error.
+func (d *Directory) HoldCall(ctx context.Context, customerID string, app int64, id string) error {
+	call := heldCall{customerID, app, id}
 	d.mu.Lock()
-	held, holding := d.held[key]
-	held.call = d.callKey(app, sessionID)
-	if holding {
-		d.held[key] = held
+	d.onCalls[call]++
+	d.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	said, err := d.redis.Do(ctx, d.holdCall(call, customerOf(d.onCall(call)))).ToString()
+	if err != nil {
+		return err
+	}
+	if customerOf(said) != customerOf(d.onCall(call)) {
+		return errCallHeld
+	}
+	return nil
+}
+
+// ReleaseCall says a session HoldCall said was on a call is not any more.
+func (d *Directory) ReleaseCall(ctx context.Context, customerID string, app int64, id string) {
+	call := heldCall{customerID, app, id}
+	d.mu.Lock()
+	d.onCalls[call]--
+	last := d.onCalls[call] <= 0
+	if last {
+		delete(d.onCalls, call)
 	}
 	d.mu.Unlock()
-	if holding {
-		d.write(ctx, key, held)
+	if !last {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	release := d.redis.B().Eval().Script(releaseCallScript).Numkeys(1).Key(d.callKey(app, id)).Arg(d.onCall(call)).Build()
+	if err := d.redis.Do(ctx, release).Error(); err != nil {
+		d.logger.Warn("could not take back this node's claim on a call", "customer", customerID, "call", id, "error", err)
 	}
 }
 
-// CallHolder is the customer whose session some node runs on the call agent:<id> in the Stream
-// app, 0 for the deployment's own, and empty when no node says it does.
+// CallHolder is the customer whose session some node runs on the call agent:<id> in a Stream app,
+// 0 for the deployment's own, and empty when no node says it does.
 func (d *Directory) CallHolder(ctx context.Context, app int64, id string) (string, error) {
-	return d.lookup(ctx, d.callKey(app, id))
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	said, err := d.lookup(ctx, d.callKey(app, id))
+	if err != nil || said == "" {
+		return "", err
+	}
+	return url.QueryUnescape(customerOf(said))
 }
 
 // callKey is where a call is held: node:call:<app>:<id>.
 func (d *Directory) callKey(app int64, id string) string {
 	return d.calls + strconv.FormatInt(app, 10) + ":" + id
+}
+
+// onCall is what this node says of a call: its customer, escaped so that it holds no space, and
+// the node's address.
+func (d *Directory) onCall(call heldCall) string {
+	return url.QueryEscape(call.customerID) + " " + d.address
+}
+
+// customerOf is the escaped customer of what a node says of a call.
+func customerOf(said string) string {
+	customer, _, _ := strings.Cut(said, " ")
+	return customer
+}
+
+func (d *Directory) holdCall(call heldCall, over string) rueidis.Completed {
+	if over != "" {
+		over += " "
+	}
+	return d.redis.B().Eval().Script(holdCallScript).Numkeys(1).Key(d.callKey(call.app, call.id)).
+		Arg(d.onCall(call), strconv.FormatInt(holdFor.Milliseconds(), 10), over).Build()
 }
 
 // Release says this node is not running a customer's session any more.
@@ -233,18 +314,14 @@ func (d *Directory) callKey(app int64, id string) string {
 func (d *Directory) Release(ctx context.Context, customerID, sessionID string) {
 	key := heldSession{customerID, sessionID}
 	d.mu.Lock()
-	released, held := d.held[key]
+	_, held := d.held[key]
 	delete(d.held, key)
 	d.mu.Unlock()
 	if !held {
 		return
 	}
 
-	gone := []string{d.sessionKey(key), d.sessions + sessionID}
-	if released.call != "" {
-		gone = append(gone, released.call)
-	}
-	if err := d.redis.Do(ctx, d.redis.B().Del().Key(gone...).Build()).Error(); err != nil {
+	if err := d.redis.Do(ctx, d.redis.B().Del().Key(d.sessionKey(key), d.sessions+sessionID).Build()).Error(); err != nil {
 		d.logger.Warn("could not take back this node's claim on a session",
 			"customer", customerID, "session", sessionID, "error", err)
 	}
@@ -485,9 +562,6 @@ func (d *Directory) writeCommands(key heldSession, held claim) []rueidis.Complet
 		d.redis.B().Set().Key(d.sessionKey(key)).Value(d.address).Ex(holdFor).Build(),
 		d.redis.B().Set().Key(d.sessions + key.sessionID).Value(d.address).Ex(holdFor).Build(),
 	}
-	if held.call != "" {
-		commands = append(commands, d.redis.B().Set().Key(held.call).Value(key.customerID).Ex(holdFor).Build())
-	}
 	if held.agentID != "" {
 		writers := d.writingAs + held.agentID
 		until := strconv.FormatInt(time.Now().Add(holdFor).UnixMilli(), 10)
@@ -586,6 +660,7 @@ func (d *Directory) renew(ctx context.Context) {
 func (d *Directory) renewAll(ctx context.Context) {
 	d.mu.Lock()
 	held := maps.Clone(d.held)
+	onCalls := maps.Clone(d.onCalls)
 	waiting := maps.Clone(d.waiting)
 	offered := maps.Clone(d.offered)
 	d.mu.Unlock()
@@ -593,6 +668,9 @@ func (d *Directory) renewAll(ctx context.Context) {
 	commands := d.shardCommands()
 	for key, claimed := range held {
 		commands = append(commands, d.writeCommands(key, claimed)...)
+	}
+	for call := range onCalls {
+		commands = append(commands, d.holdCall(call, ""))
 	}
 	for customerID := range waiting {
 		commands = append(commands, d.advertiseCommands(customerID)...)

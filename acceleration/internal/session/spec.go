@@ -49,7 +49,10 @@ type Recall struct {
 type Spec struct {
 	// ID is the id the session is held by. Empty is generated as a UUIDv7; one the caller
 	// chose has to be a UUID.
-	ID                  string
+	ID string
+	// MintedID is an ID the router made, or Stream for a caller of a number, which names no
+	// other customer's call.
+	MintedID            bool
 	PersistConversation bool
 	ConversationID      string
 	// Thread holds ConversationID on a thread channel (internal/channelbridge), which only

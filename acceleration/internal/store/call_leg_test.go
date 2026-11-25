@@ -396,11 +396,6 @@ func (s *StoreSuite) TestCallLegQueryBudgets() {
 		s.Require().NoError(err)
 		s.True(ringing)
 	}), "Ringing")
-	s.Equal(shards, s.countQueries(func() {
-		owner, err := s.store.CallLegs.Owner(s.ctx, scope, "default", "call-1")
-		s.Require().NoError(err)
-		s.NotEmpty(owner)
-	}), "Owner")
 	s.Equal(shards+1, s.countQueries(func() {
 		_, connection, err := s.store.CallLegs.Connect(s.ctx, scope, "default", "call-1", "session", "phone-1", "+15125550101", s.base, nil)
 		s.Require().NoError(err)
@@ -695,6 +690,25 @@ func (s *StoreSuite) TestADialNamingNoOrganizationKeepsTheOneTheCallWasPlacedUnd
 	s.Equal("org", dialed.OrganizationID, "still counted among the organization's calls")
 }
 
+// ownerOf is the customer the call is, read as Claim reads it.
+func (s *StoreSuite) ownerOf(scope AppScope, callID string) string {
+	owner, err := callOwner(s.ctx, s.store.shards(), scope, "agent", callID)
+	s.Require().NoError(err)
+	return owner
+}
+
+// claims says a customer's session is on the call, or how that is refused.
+func (s *StoreSuite) claims(customer, callID string, on NamedCall) error {
+	return s.store.CallLegs.Claim(s.ctx, customer, "agent", callID, on, func(context.Context) error { return nil })
+}
+
+// places keeps a leg of a call a customer is about to dial, unless it is another's.
+func (s *StoreSuite) places(customer, callID string, on NamedCall, atOnce *CallsAtOnce) error {
+	placed := time.Now()
+	return s.store.CallLegs.PlaceOn(s.ctx, &CallLeg{Token: newID(), CustomerID: customer, OrganizationID: "org", CallType: "agent", CallID: callID,
+		Vendor: "telnyx", Direction: Outbound, LocalNumber: "+15125550150", RemoteNumber: "+15125550151", PlacedAt: &placed}, on, atOnce)
+}
+
 // onCall opens a leg of customer's on the call in app, dialled at.
 func (s *StoreSuite) onCall(customer, callID string, app int64, at time.Time) CallLeg {
 	leg := CallLeg{CustomerID: customer, StreamAppPK: app, CallType: "agent", CallID: callID, Vendor: "telnyx",
@@ -703,30 +717,6 @@ func (s *StoreSuite) onCall(customer, callID string, app int64, at time.Time) Ca
 	s.Require().NoError(err)
 	s.Require().True(opened)
 	return leg
-}
-
-func (s *StoreSuite) ownerOf(scope AppScope, callID string) string {
-	owner, err := s.store.CallLegs.Owner(s.ctx, scope, "agent", callID)
-	s.Require().NoError(err)
-	return owner
-}
-
-func (s *StoreSuite) TestACallIsTheCustomersWhoseLegWasOnItFirst() {
-	s.onCall("later", "call", 0, s.base.Add(time.Second))
-	s.onCall("first", "call", 0, s.base)
-
-	s.Equal("first", s.ownerOf(AppScope{Unpinned: true}, "call"))
-	s.Empty(s.ownerOf(AppScope{Unpinned: true}, "another call"))
-	other, err := s.store.CallLegs.Owner(s.ctx, AppScope{Unpinned: true}, "default", "call")
-	s.Require().NoError(err)
-	s.Empty(other, "a call of another type")
-}
-
-func (s *StoreSuite) TestACallIsTheCustomersWhoPlacedItBeforeItIsDialled() {
-	s.placedLeg("placing", func(leg *CallLeg) { leg.CallType = "agent" })
-	s.onCall("later", "call", 0, s.base.Add(time.Second))
-
-	s.Equal("app", s.ownerOf(AppScope{Unpinned: true}, "call"))
 }
 
 func (s *StoreSuite) TestACallIsOwnedInItsOwnStreamApp() {
@@ -758,59 +748,146 @@ func (s *StoreSuite) TestACallSomebodyWasOnStaysTheirsAndOneNobodyAnsweredDoesNo
 	s.Empty(s.ownerOf(scope, "rang"))
 }
 
-func (s *StoreSuite) TestAPhoneIsNotGivenALegThatCameToAnotherCustomersCall() {
-	scope := AppScope{Unpinned: true}
-	mine := s.onCall("first", "call", 0, s.base)
+func (s *StoreSuite) TestACallIsTheCustomersWhoseLegWasDialledOnItFirst() {
 	s.onCall("later", "call", 0, s.base.Add(time.Second))
+	s.onCall("first", "call", 0, s.base)
+	// Of two dialled at once, the first by id, whichever row came first.
+	s.onCall("b", "tied", 0, s.base)
+	s.onCall("a", "tied", 0, s.base)
 
-	given, connection, err := s.store.CallLegs.Connect(s.ctx, scope, "agent", "call", "session", "phone-1", "", s.base.Add(time.Minute), nil)
+	s.Equal("first", s.ownerOf(AppScope{Unpinned: true}, "call"))
+	s.Equal("a", s.ownerOf(AppScope{Unpinned: true}, "tied"))
+	s.Empty(s.ownerOf(AppScope{Unpinned: true}, "another call"))
+	other, err := callOwner(s.ctx, s.store.shards(), AppScope{Unpinned: true}, "default", "call")
 	s.Require().NoError(err)
-	s.Require().Equal(LegConnected, connection)
-	s.Equal(mine.ID, given.ID)
-
-	_, connection, err = s.store.CallLegs.Connect(s.ctx, scope, "agent", "call", "session", "phone-2", "+15125550151", s.base.Add(time.Minute), nil)
-	s.Require().NoError(err)
-	s.Equal(NothingWaiting, connection, "the second phone is given the other customer's leg")
-	_, err = s.store.CallLegs.EndCall(s.ctx, scope, "agent", "call", s.base.Add(2*time.Minute))
-	s.Require().NoError(err)
-	_, connection, err = s.store.CallLegs.Connect(s.ctx, scope, "agent", "call", "session", "phone-2", "+15125550151", s.base.Add(time.Minute), nil)
-	s.Require().NoError(err)
-	s.Equal(NothingWaiting, connection, "nor is it revived")
+	s.Empty(other, "a call of another type")
 }
 
-// Another call, another app's call of the same name, another type's and a call nobody answered keep no
-// phone from its leg, nor does a second leg of the customer's own.
-func (s *StoreSuite) TestAPhoneIsGivenItsLegWhateverElseIsOfTheCallsName() {
-	scope := AppScope{Unpinned: true}
-	s.onCall("theirs", "call", 7, s.base)
-	s.placedLeg("another type", nil)
-	s.onCall("theirs", "another call", 0, s.base)
-	s.onCall("gone", "call", 0, s.base)
-	_, err := s.store.CallLegs.EndCall(s.ctx, scope, "agent", "call", s.base.Add(time.Second))
-	s.Require().NoError(err)
-	first := s.onCall("mine", "call", 0, s.base.Add(time.Minute))
-	second := s.onCall("mine", "call", 0, s.base.Add(2*time.Minute))
+func (s *StoreSuite) TestALegPlacedAndNeverDialledIsOnItsCallForTenMinutes() {
+	on := NamedCall{Scope: AppScope{Unpinned: true}}
+	s.Require().NoError(s.places("app", "call", on, nil))
+	s.ErrorIs(s.places("other", "call", on, nil), ErrCallTaken)
+	s.ErrorIs(s.claims("other", "call", on), ErrCallTaken)
+	s.Require().NoError(s.places("app", "call", on, nil), "the customer's own")
 
-	for i, want := range []CallLeg{first, second} {
-		given, connection, err := s.store.CallLegs.Connect(s.ctx, scope, "agent", "call", "session", fmt.Sprintf("phone-%d", i), "+15125550151", s.base.Add(time.Hour), nil)
-		s.Require().NoError(err)
-		s.Require().Equal(LegConnected, connection)
-		s.Equal(want.ID, given.ID)
+	_, err := s.store.shard.NewUpdate().Model((*CallLeg)(nil)).Set("placed_at = now() - interval '11 minutes'").Where("call_id = 'call'").Exec(s.ctx)
+	s.Require().NoError(err)
+	s.NoError(s.places("other", "call", on, nil))
+}
+
+func (s *StoreSuite) TestARefusedPlacementKeepsNoLeg() {
+	on := NamedCall{Scope: AppScope{Unpinned: true}}
+	s.onCall("theirs", "call", 0, s.base)
+
+	s.ErrorIs(s.places("mine", "call", on, &CallsAtOnce{Limit: 9, Ringing: time.Hour}), ErrCallTaken)
+
+	kept, err := s.store.CallLegs.SelectPlaced(s.ctx, "mine", []string{"call"})
+	s.Require().NoError(err)
+	s.Empty(kept)
+	s.ErrorIs(s.places("mine", "free", on, &CallsAtOnce{Limit: 0, Ringing: time.Hour}), ErrCallsAtOnce)
+}
+
+func (s *StoreSuite) TestACallARunningSessionHoldsIsItsCustomers() {
+	holder, failing := "theirs", error(nil)
+	on := NamedCall{Scope: AppScope{Unpinned: true}, Holder: func(context.Context) (string, error) { return holder, failing }}
+
+	s.ErrorIs(s.places("mine", "call", on, nil), ErrCallTaken)
+	s.ErrorIs(s.claims("mine", "call", on), ErrCallTaken)
+	s.NoError(s.claims("theirs", "call", on))
+	holder = ""
+	s.NoError(s.claims("mine", "call", on))
+	failing = errors.New("redis is down")
+	s.ErrorIs(s.claims("mine", "call", on), ErrCallUnchecked)
+	s.ErrorIs(s.places("mine", "call", on, nil), ErrCallUnchecked)
+	failing = nil
+	s.ErrorIs(s.store.CallLegs.Claim(s.ctx, "mine", "agent", "call", on, func(context.Context) error { return errors.New("redis is down") }),
+		ErrCallUnchecked)
+}
+
+// Whoever claims first is let in and the other refused, however long the first takes to keep
+// what it claimed with.
+func (s *StoreSuite) TestOfTwoCustomersClaimingACallAtOnceOneIsLetIn() {
+	on := NamedCall{Scope: AppScope{Unpinned: true}}
+	for i := range 10 {
+		call := fmt.Sprintf("call-%d", i)
+		var held atomic.Pointer[string]
+		holding := on
+		holding.Holder = func(context.Context) (string, error) {
+			if customer := held.Load(); customer != nil {
+				return *customer, nil
+			}
+			return "", nil
+		}
+		hold := func(customer string) func(context.Context) error {
+			return func(context.Context) error {
+				time.Sleep(20 * time.Millisecond)
+				held.Store(&customer)
+				return nil
+			}
+		}
+		errs := make([]error, 3)
+		var wg sync.WaitGroup
+		wg.Go(func() { errs[0] = s.store.CallLegs.Claim(s.ctx, "a", "agent", call, holding, hold("a")) })
+		wg.Go(func() { errs[1] = s.store.CallLegs.Claim(s.ctx, "b", "agent", call, holding, hold("b")) })
+		wg.Go(func() { errs[2] = s.places("c", call, holding, nil) })
+		wg.Wait()
+
+		in := 0
+		for _, err := range errs {
+			if err == nil {
+				in++
+				continue
+			}
+			s.ErrorIs(err, ErrCallTaken)
+		}
+		s.Equal(1, in, "%v", errs)
 	}
 }
 
-// A placed leg is on its call from when it was placed, however long its dial took.
-func (s *StoreSuite) TestAPhoneIsGivenTheLegPlacedBeforeAnotherCustomersWasDialled() {
-	placed := s.base
-	mine := CallLeg{CustomerID: "mine", CallType: "agent", CallID: "call", Vendor: "telnyx", Direction: Outbound,
-		LocalNumber: "+15125550150", RemoteNumber: "+15125550152", PlacedAt: &placed, DialedAt: s.base.Add(time.Minute)}
-	opened, err := s.store.CallLegs.Open(s.ctx, &mine)
-	s.Require().NoError(err)
-	s.Require().True(opened)
-	s.onCall("theirs", "call", 0, s.base.Add(time.Second))
+// The deployment's app is one app, pinned to its id or to none, and another app's call of the
+// name is claimed beside it.
+func (s *StoreSuite) TestACallIsClaimedInItsOwnStreamApp() {
+	s.Require().NoError(s.places("theirs", "call", NamedCall{Scope: AppOf(0, 1)}, nil))
 
-	given, connection, err := s.store.CallLegs.Connect(s.ctx, AppScope{Unpinned: true}, "agent", "call", "session", "phone", "", s.base.Add(time.Hour), nil)
-	s.Require().NoError(err)
-	s.Require().Equal(LegConnected, connection)
-	s.Equal(mine.ID, given.ID)
+	s.ErrorIs(s.claims("mine", "call", NamedCall{Scope: AppOf(1, 1)}), ErrCallTaken)
+	s.NoError(s.claims("mine", "call", NamedCall{Scope: AppOf(7, 1)}))
+}
+
+// A customer's leg kept in another shard is on the call too.
+func (s *ShardedStoreSuite) TestACallIsClaimedAcrossShards() {
+	on := NamedCall{Scope: AppScope{Unpinned: true}}
+	place := func(store *Store, customer string) error {
+		placed := time.Now()
+		return store.CallLegs.PlaceOn(s.ctx, &CallLeg{Token: newID(), CustomerID: customer, CallType: "agent", CallID: "call", Vendor: "telnyx",
+			Direction: Outbound, LocalNumber: "+15125550150", RemoteNumber: "+15125550151", PlacedAt: &placed}, on, nil)
+	}
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	wg.Go(func() { errs[0] = place(s.store, "a") })
+	wg.Go(func() { errs[1] = place(s.other, "b") })
+	wg.Wait()
+
+	s.True(errors.Is(errs[0], ErrCallTaken) != errors.Is(errs[1], ErrCallTaken), "%v", errs)
+}
+
+// Of legs two shards hold, the first dialled is the call's owner, and of two dialled at once the
+// first by id, whichever shard asks.
+func (s *ShardedStoreSuite) TestACallsOwnerIsTheSameOnEveryShard() {
+	open := func(store *Store, customer, call string, at time.Time) {
+		leg := CallLeg{CustomerID: customer, CallType: "agent", CallID: call, Vendor: "telnyx", VendorCallID: customer, Direction: Outbound,
+			LocalNumber: "+15125550150", RemoteNumber: "+15125550151", DialedAt: at}
+		_, err := store.CallLegs.Open(s.ctx, &leg)
+		s.Require().NoError(err)
+	}
+	open(s.store, "a-later", "call", s.base.Add(time.Second))
+	open(s.other, "first", "call", s.base)
+	open(s.store, "b", "tied", s.base)
+	open(s.other, "a", "tied", s.base)
+	for _, store := range []*Store{s.store, s.other} {
+		for call, want := range map[string]string{"call": "first", "tied": "a"} {
+			owner, err := callOwner(s.ctx, store.shards(), AppScope{Unpinned: true}, "agent", call)
+			s.Require().NoError(err)
+			s.Equal(want, owner)
+		}
+	}
 }

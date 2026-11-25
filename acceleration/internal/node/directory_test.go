@@ -55,6 +55,7 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	for _, session := range []string{"s1", "s2", "s3"} {
 		directory.Hold(s.ctx, "acme", session, "agent-"+session, "messaging:"+session)
 	}
+	s.Require().NoError(directory.HoldCall(s.ctx, "acme", 0, "s1"))
 	directory.Wait(s.ctx, "acme")
 	directory.Wait(s.ctx, "globex")
 	directory.Offer(s.ctx, "acme", "agent-s1", []byte(`{"tools":[]}`))
@@ -62,8 +63,8 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	keys, err := s.client.Do(s.ctx, s.client.B().Keys().Pattern(s.prefix+":*").Build()).AsStrSlice()
 	s.Require().NoError(err)
 	// Each session: itself, its agent and its conversation, each under its customer and under
-	// its id alone.
-	s.Require().Len(keys, 3*6+2+2+1)
+	// its id alone. And the call of one.
+	s.Require().Len(keys, 3*6+1+2+2+1)
 	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Del().Key(keys...).Build()).Error())
 
 	before := s.roundTrips.sent.Load()
@@ -219,44 +220,77 @@ func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhere() {
 	s.Zero(exists, "a router of the release before would still forward to it")
 }
 
-// A session's call is found by its id and Stream app until the session is released, and a
-// renewal says it again.
-func (s *DirectorySuite) TestASessionsCallIsFoundByItsAppUntilItIsReleased() {
-	directory := s.directoryAt("node-a:1")
-	directory.Hold(s.ctx, "acme", "order-42", "", "")
-	directory.HoldCall(s.ctx, "acme", "order-42", 7)
-	peer := s.directoryAt("node-b:1")
-	holder := func(app int64, id string) string {
-		customer, err := peer.CallHolder(s.ctx, app, id)
-		s.Require().NoError(err)
-		return customer
-	}
-
-	s.Equal("acme", holder(7, "order-42"))
-	s.Empty(holder(0, "order-42"), "another app's call of the name")
-	s.Empty(holder(7, "order-43"))
-
-	key := s.prefix + ":call:7:order-42"
-	ttl, err := s.client.Do(s.ctx, s.client.B().Pttl().Key(key).Build()).AsInt64()
+func (s *DirectorySuite) holder(app int64, id string) string {
+	customer, err := s.directoryAt("node-x:1").CallHolder(s.ctx, app, id)
 	s.Require().NoError(err)
-	s.InDelta(30000, ttl, 5000, "it lapses with the node")
-	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Del().Key(key).Build()).Error())
-	directory.renewAll(s.ctx)
-	s.Equal("acme", holder(7, "order-42"))
-
-	directory.Release(s.ctx, "acme", "order-42")
-	s.Empty(holder(7, "order-42"))
+	return customer
 }
 
-func (s *DirectorySuite) TestACallOfASessionNotHeldHereIsNotHeld() {
+// lapsed drops what a node said of a call, as its expiry does.
+func (s *DirectorySuite) lapsed() {
+	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Del().Key(s.prefix+":call:7:order-42").Build()).Error())
+}
+
+func (s *DirectorySuite) TestASessionsCallIsFoundByItsAppUntilItIsReleased() {
 	directory := s.directoryAt("node-a:1")
+	s.Require().NoError(directory.HoldCall(s.ctx, "a customer:1", 7, "order-42"))
 
-	directory.HoldCall(s.ctx, "acme", "order-42", 7)
-	directory.renewAll(s.ctx)
-
-	holder, err := directory.CallHolder(s.ctx, 7, "order-42")
+	s.Equal("a customer:1", s.holder(7, "order-42"))
+	s.Empty(s.holder(0, "order-42"), "another app's call of the name")
+	s.Empty(s.holder(7, "order-43"))
+	ttl, err := s.client.Do(s.ctx, s.client.B().Pttl().Key(s.prefix+":call:7:order-42").Build()).AsInt64()
 	s.Require().NoError(err)
-	s.Empty(holder)
+	s.InDelta(30000, ttl, 5000, "it lapses with the node")
+	s.lapsed()
+	directory.renewAll(s.ctx)
+	s.Equal("a customer:1", s.holder(7, "order-42"))
+
+	directory.ReleaseCall(s.ctx, "a customer:1", 7, "order-42")
+	s.Empty(s.holder(7, "order-42"))
+	directory.renewAll(s.ctx)
+	s.Empty(s.holder(7, "order-42"))
+}
+
+func (s *DirectorySuite) TestACallAnotherCustomerHoldsStaysItsOwn() {
+	first, second := s.directoryAt("node-a:1"), s.directoryAt("node-b:1")
+	s.Require().NoError(first.HoldCall(s.ctx, "acme", 7, "order-42"))
+
+	s.Error(second.HoldCall(s.ctx, "acm", 7, "order-42"))
+	s.Equal("acme", s.holder(7, "order-42"))
+	second.renewAll(s.ctx)
+	s.Equal("acme", s.holder(7, "order-42"))
+	second.ReleaseCall(s.ctx, "acm", 7, "order-42")
+	s.Equal("acme", s.holder(7, "order-42"))
+
+	// A claim that lapsed and was taken is not renewed over.
+	s.lapsed()
+	s.Require().NoError(second.HoldCall(s.ctx, "globex", 7, "order-42"))
+	first.renewAll(s.ctx)
+	s.Equal("globex", s.holder(7, "order-42"))
+}
+
+// A customer's session moving to another node holds its call there, and the node it left takes
+// back nothing.
+func (s *DirectorySuite) TestACallIsHeldByTheNodeItsSessionMovedTo() {
+	first, second := s.directoryAt("node-a:1"), s.directoryAt("node-b:1")
+	s.Require().NoError(first.HoldCall(s.ctx, "acme", 7, "order-42"))
+	s.Require().NoError(second.HoldCall(s.ctx, "acme", 7, "order-42"))
+	first.renewAll(s.ctx)
+
+	first.ReleaseCall(s.ctx, "acme", 7, "order-42")
+
+	s.Equal("acme", s.holder(7, "order-42"))
+}
+
+func (s *DirectorySuite) TestACallTwoSessionsHereAreOnIsHeldUntilBothAreGone() {
+	directory := s.directoryAt("node-a:1")
+	s.Require().NoError(directory.HoldCall(s.ctx, "acme", 7, "order-42"))
+	s.Require().NoError(directory.HoldCall(s.ctx, "acme", 7, "order-42"))
+
+	directory.ReleaseCall(s.ctx, "acme", 7, "order-42")
+	s.Equal("acme", s.holder(7, "order-42"))
+	directory.ReleaseCall(s.ctx, "acme", 7, "order-42")
+	s.Empty(s.holder(7, "order-42"))
 }
 
 // directoryAt is a node's directory at address, renewing nothing for the test's length.

@@ -410,6 +410,9 @@ func (s *Server) placePhoneCall(ctx context.Context, request *placePhoneCallRequ
 			return nil, errSessionTaken
 		}
 		call.SessionID = held
+		if s.directory != nil {
+			call.Holder = s.directory.CallHolder
+		}
 	}
 	if request.Body.RingTimeoutSeconds != nil {
 		if *request.Body.RingTimeoutSeconds < 0 {
@@ -435,8 +438,11 @@ func (s *Server) placePhoneCall(ctx context.Context, request *placePhoneCallRequ
 	if failure, over := tierLimitReached(err); over {
 		return nil, failure
 	}
-	if errors.Is(err, phone.ErrSessionTaken) {
+	if errors.Is(err, store.ErrCallTaken) {
 		return nil, errSessionTaken
+	}
+	if errors.Is(err, store.ErrCallUnchecked) {
+		return nil, errCallUnchecked
 	}
 	if errors.Is(err, dlc.ErrRefused) || errors.Is(err, phone.ErrDestinationRefused) {
 		return nil, forbidden(err.Error())
@@ -1008,6 +1014,9 @@ func phoneTags(tags *map[string]string) routing.Tags {
 
 var errSessionTaken = conflict("session_id is taken")
 
+// errCallUnchecked refuses a session id whose call the router could not tell the customer of.
+var errCallUnchecked = unavailable("could not tell whose call that session id is, try again")
+
 var errNoTelephony = notConfigured("phone numbers are not available: no telephony configured")
 
 // callApp is the Stream app a live call is in, which a human transferred into it has to be
@@ -1041,26 +1050,11 @@ func (s *Server) anotherCustomersSession(ctx context.Context, customerID, id str
 		return false, nil
 	}
 	taken, err := s.store.Sessions.Exists(ctx, id)
-	if err != nil {
+	if err != nil || !taken {
 		return false, err
 	}
-	if taken {
-		_, err = s.store.Sessions.Get(ctx, customerID, id)
-		return err != nil, nil
-	}
-	// A session another node runs may have no row yet, and an incognito one never has.
-	if s.directory == nil || s.stream == nil {
-		return false, nil
-	}
-	app, err := s.stream.Pin(ctx, customerID)
-	if err != nil {
-		return false, phoneFailure(s.logger, err)
-	}
-	if app == s.stream.DeploymentApp() {
-		app = 0
-	}
-	holder, err := s.directory.CallHolder(ctx, app, id)
-	return holder != "" && holder != customerID, err
+	_, err = s.store.Sessions.Get(ctx, customerID, id)
+	return err != nil, nil
 }
 
 // callPinApp is the Stream app a call no session is running in is in: the app its lines were

@@ -2911,7 +2911,7 @@ func (s *AppsSuite) refusedTaken(sessionID string) {
 	trunks := len(s.deployment.Trunks())
 	s.vendor.dialed = Outbound{}
 
-	s.ErrorIs(s.dialInto(sessionID, "+15550001111", map[string]string{"k": "v"}), ErrSessionTaken)
+	s.ErrorIs(s.dialInto(sessionID, "+15550001111", map[string]string{"k": "v"}), store.ErrCallTaken)
 
 	s.Empty(s.vendor.dialed.To)
 	s.Len(s.deployment.Trunks(), trunks)
@@ -2983,7 +2983,7 @@ func (s *AppsSuite) TestTwoCustomersPlacingIntoOneSessionAtOnceAreNotBothOnItsCa
 		}
 		wg.Wait()
 
-		s.True(errors.Is(errs[0], ErrSessionTaken) != errors.Is(errs[1], ErrSessionTaken), "%v", errs)
+		s.True(errors.Is(errs[0], store.ErrCallTaken) != errors.Is(errs[1], store.ErrCallTaken), "%v", errs)
 	}
 }
 
@@ -2994,4 +2994,87 @@ func (s *AppsSuite) TestACampaignDoesNotTryACallIntoATakenSessionAgain() {
 	s.arrived(theirs, call, 0)
 
 	s.NotErrorIs(s.dialInto(call, "+15550001111", nil), ErrNotDialed)
+}
+
+func (s *AppsSuite) TestACallIntoASessionNobodyCanTellTheCustomerOfIsNotDialled() {
+	s.sealed()
+	holder := func(context.Context, int64, string) (string, error) { return "", errors.New("redis is down") }
+	request := CallRequest{Owner: routing.Owner{CustomerID: s.customer}, From: s.e164, To: "+15550001111", SessionID: uuid.NewString(), Holder: holder}
+
+	_, err := s.service.Call(s.ctx, request)
+	s.ErrorIs(err, store.ErrCallUnchecked)
+	s.ErrorIs(err, ErrNotDialed, "worth trying again")
+	s.Empty(s.vendor.dialed.To)
+
+	request.MintedID = true
+	_, err = s.service.Call(s.ctx, request)
+	s.NoError(err, "an id the router made is nobody else's to ask about")
+}
+
+func (s *AppsSuite) TestACallIntoAMintedSessionAsksNothingOfTheCallsLegs() {
+	s.sealed()
+	theirs, _ := s.another()
+	call := uuid.NewString()
+	s.arrived(theirs, call, 0)
+
+	_, err := s.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: s.customer}, From: s.e164, To: "+15550001111", SessionID: call, MintedID: true})
+
+	s.NoError(err)
+}
+
+// A call is let in or refused by whichever was kept first, not by when each was asked for.
+func (s *AppsSuite) TestOfTwoCustomersCallsTheOneKeptFirstIsOnTheCallHoweverLateTheOtherIsKept() {
+	s.sealed()
+	theirs, e164 := s.another()
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "CREATE OR REPLACE FUNCTION slow_leg() RETURNS trigger AS $$ BEGIN IF NEW.customer_id = '"+theirs+
+		"' THEN PERFORM pg_sleep(1); END IF; RETURN NEW; END $$ LANGUAGE plpgsql")
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "CREATE OR REPLACE TRIGGER slow_leg BEFORE INSERT ON call_legs FOR EACH ROW EXECUTE FUNCTION slow_leg()")
+	s.Require().NoError(err)
+	defer func() {
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, "DROP TRIGGER slow_leg ON call_legs; DROP FUNCTION slow_leg()")
+		s.Require().NoError(err)
+	}()
+	session := uuid.NewString()
+	began, late := make(chan struct{}), make(chan error, 1)
+	go func() {
+		close(began)
+		_, err := s.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: theirs}, From: e164, To: "+15550002222", SessionID: session})
+		late <- err
+	}()
+	<-began
+	s.Require().Eventually(func() bool {
+		var asleep bool
+		s.Require().NoError(s.store.GlobalDB().NewSelect().ColumnExpr("EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND datname = current_database())").Scan(s.ctx, &asleep))
+		return asleep
+	}, 5*time.Second, 5*time.Millisecond)
+
+	mine := s.dialInto(session, "+15550001111", nil)
+
+	s.NoError(<-late)
+	s.ErrorIs(mine, store.ErrCallTaken)
+}
+
+// Who is on a call is asked of the Stream app the call is placed in, the deployment's being one
+// whether a customer is pinned to its id or to none.
+func (s *AppsSuite) TestWhoIsOnACallIsAskedOfItsApp() {
+	s.sealed()
+	call := uuid.NewString()
+	asked := func() int64 {
+		in := int64(-1)
+		_, err := s.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: s.customer}, From: s.e164, To: "+15550001111", SessionID: call,
+			Holder: func(_ context.Context, app int64, id string) (string, error) {
+				s.Equal(call, id)
+				in = app
+				return "another-customer", nil
+			}})
+		s.ErrorIs(err, store.ErrCallTaken)
+		return in
+	}
+
+	s.Zero(asked(), "unpinned")
+	s.apps.give(s.customer, 1, s.deployment)
+	s.Zero(asked(), "pinned to the deployment's app")
+	s.ownApp()
+	s.EqualValues(4242, asked())
 }

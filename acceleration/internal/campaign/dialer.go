@@ -70,7 +70,7 @@ func (d *phoneDialer) Dial(ctx context.Context, dial Dial) (Dialed, error) {
 	}
 
 	request := placing(dial.Campaign, dial.Contact, dial.Step)
-	request.SessionID = dial.SessionID
+	request.SessionID, request.MintedID = dial.SessionID, true
 	placed, err := d.phone.Call(ctx, request)
 	if err != nil {
 		dialed := resultOf(err)

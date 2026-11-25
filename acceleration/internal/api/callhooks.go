@@ -338,7 +338,7 @@ func (s *Server) answerWithAgent(ctx context.Context, sessions *session.Manager,
 	}
 	spec := session.FromConfig(config)
 	// The number names each caller's call for the session answering it, as dispatch does.
-	spec.ID = callID
+	spec.ID, spec.MintedID = callID, true
 	spec.CallType, spec.CallID = callType, callID
 	spec.Text = false
 	spec.PersistConversation = true

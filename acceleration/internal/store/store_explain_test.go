@@ -415,8 +415,8 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, err := store.CallLegs.Ringing(ctx, AppScope{App: 3}, "default", "stream-101")
 			return err
 		}},
-		{name: "CallLegs.Owner", index: "call_legs_call_idx", run: func(ctx context.Context, store *Store) error {
-			_, err := store.CallLegs.Owner(ctx, AppScope{App: 3}, "default", "stream-101")
+		{name: "CallLegs.Claim", index: "call_legs_call_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := callOwner(ctx, store.shards(), AppScope{App: 3}, "default", "stream-101")
 			return err
 		}},
 		{name: "CallLegs.HasParticipant", index: "call_legs_participant_idx", run: func(ctx context.Context, store *Store) error {

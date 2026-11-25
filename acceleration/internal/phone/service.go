@@ -228,15 +228,6 @@ func (s *Service) streamFor(ctx context.Context, customer string) (*Stream, int6
 	return s.stream, 0, nil
 }
 
-// scopeOf is the rows of the Stream app a pin names.
-func (s *Service) scopeOf(pin int64) store.AppScope {
-	var deployment int64
-	if s.apps != nil {
-		deployment = s.apps.DeploymentApp()
-	}
-	return store.AppOf(pin, deployment)
-}
-
 // streamForApp is the app a line already made is in.
 func (s *Service) streamForApp(ctx context.Context, customer string, app int64) (*Stream, error) {
 	if s.apps != nil {
@@ -1166,6 +1157,11 @@ type CallRequest struct {
 	// call, agent:<session id>. Empty chooses one, because two calls from the same number
 	// are two conversations and must not land in the same place.
 	SessionID string
+	// MintedID is a SessionID the router made, which names no other customer's call.
+	MintedID bool
+	// Holder, when set, is the customer whose running session is on the call agent:<id> in a
+	// Stream app, 0 for the deployment's own, or empty. A SessionID not minted is checked with it.
+	Holder func(ctx context.Context, app int64, id string) (string, error)
 	// RingTimeout is how long to ring before giving up. Zero leaves the vendor's default.
 	RingTimeout time.Duration
 	// InitialDigits are pressed once the person answers, for reaching an extension behind
@@ -1205,9 +1201,6 @@ type Placed struct {
 	StreamApp int64
 }
 
-// ErrSessionTaken is a call into a session whose call is another customer's.
-var ErrSessionTaken = errors.New("phone: the session id is taken")
-
 // Call places an outbound call and bridges it into a Stream call.
 //
 // Stream's SIP is inbound only, so the vendor originates the call and connects it to a
@@ -1236,7 +1229,7 @@ func lasting(err error) bool {
 	return errors.Is(err, ErrInvalid) || errors.Is(err, store.ErrNoNumber) || errors.Is(err, store.ErrNoSIPTrunk) ||
 		errors.Is(err, ErrNoStream) || errors.Is(err, ErrNoSealerToCall) ||
 		errors.Is(err, ErrNotConfigured) || errors.Is(err, ErrSIPTrunksDisabled) ||
-		errors.Is(err, errLasting) || errors.Is(err, ErrSessionTaken) || (err != nil && streamapp.Settled(err))
+		errors.Is(err, errLasting) || errors.Is(err, store.ErrCallTaken) || (err != nil && streamapp.Settled(err))
 }
 
 // errLasting marks a failure that has no kind of its own and that a second try meets again: a
@@ -1332,6 +1325,23 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 	// a customer's own trunk is told by the router's own bridge.
 	_, reader := provider.(StatusReader)
 	reports := reader && s.publicURL != ""
+	// The answered leg is routed into the call, so a session id somebody chose has to be a call of
+	// the customer's.
+	var on *store.NamedCall
+	if request.SessionID != "" && !request.MintedID {
+		var deployment int64
+		if s.apps != nil {
+			deployment = s.apps.DeploymentApp()
+		}
+		on = &store.NamedCall{Scope: store.AppOf(pin, deployment)}
+		if request.Holder != nil {
+			app := pin
+			if on.Scope.Unpinned {
+				app = 0
+			}
+			on.Holder = func(ctx context.Context) (string, error) { return request.Holder(ctx, app, callID) }
+		}
+	}
 	token, err := s.outcomes.PlacedWithin(ctx, outcome.Call{
 		Key: outcome.Key{
 			CustomerID: request.Owner.CustomerID, StreamAppPK: pin, CallType: callType, CallID: callID,
@@ -1339,9 +1349,12 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 		},
 		Vendor:  held.Vendor,
 		Reports: reports || trunk != nil,
-	}, room.OrganizationID, room.AtOnce)
+	}, room.OrganizationID, room.AtOnce, on)
 	if errors.Is(err, store.ErrCallsAtOnce) {
 		return Placed{}, room.Refusal(err)
+	}
+	if errors.Is(err, store.ErrCallTaken) || errors.Is(err, store.ErrCallUnchecked) {
+		return Placed{}, err
 	}
 	if err != nil {
 		return Placed{}, notPlaced(ctx, err)
@@ -1354,18 +1367,6 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 			s.forgetOutcome(ctx, token, callID)
 		}
 	}()
-	// A leg is routed into agent:<session id>, so a session id somebody named has to be a call of
-	// the customer's. Asked once its own leg is kept, so of two customers placing into one id at
-	// once each sees the other's.
-	if request.SessionID != "" {
-		owner, err := s.store.CallLegs.Owner(ctx, s.scopeOf(pin), callType, callID)
-		if err != nil {
-			return Placed{}, err
-		}
-		if owner != "" && owner != request.Owner.CustomerID {
-			return Placed{}, stack.Wrap(ErrSessionTaken)
-		}
-	}
 	// Its leg counts against the organization it was placed under once it is dialled too.
 	if room.OrganizationID != "" {
 		request.Owner.OrganizationID = room.OrganizationID

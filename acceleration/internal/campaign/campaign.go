@@ -787,7 +787,7 @@ func scheduledBy(campaign store.Campaign) routing.Attribution {
 // meet opens the session under the id the call was placed for, so the agent is in the call
 // the person was routed into.
 func meet(spec *session.Spec, placed phone.Placed) {
-	spec.ID = placed.SessionID
+	spec.ID, spec.MintedID = placed.SessionID, true
 	spec.Text = false
 }
 
