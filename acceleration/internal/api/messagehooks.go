@@ -581,21 +581,11 @@ func (s *Server) liveSessionOn(ctx context.Context, origin hookOrigin, event mes
 		if !running {
 			return nil, false, nil
 		}
-		known := false
-		if s.store != nil {
-			previous, held, err := s.lastCallOn(ctx, origin, event.ChannelID)
-			if err != nil {
-				return nil, false, err
-			}
-			owner, known = previous.CustomerID, held
-			if !held {
-				config, named, err := s.declaredConfigOf(ctx, origin, event)
-				if err != nil {
-					return nil, false, err
-				}
-				owner, known = config.CustomerID, named
-			}
+		stored, known, err := s.storedOwnerOf(ctx, origin, event)
+		if err != nil {
+			return nil, false, err
 		}
+		owner = stored
 		if !known {
 			theirs := found.Spec().CustomerID
 			if _, another := s.sessions.ByAgentWhere(event.ChannelID, func(customer string, app int64) bool {
@@ -610,6 +600,20 @@ func (s *Server) liveSessionOn(ctx context.Context, origin hookOrigin, event mes
 		return customer == owner && origin.owns(customer, app)
 	})
 	return found, running, nil
+}
+
+// storedOwnerOf is the customer the store says a channel in the hook's app is: its last call's,
+// else the one holding the config it names. known is false when it says neither.
+func (s *Server) storedOwnerOf(ctx context.Context, origin hookOrigin, event messageEvent) (owner string, known bool, err error) {
+	if s.store == nil {
+		return "", false, nil
+	}
+	previous, held, err := s.lastCallOn(ctx, origin, event.ChannelID)
+	if err != nil || held {
+		return previous.CustomerID, held, err
+	}
+	config, named, err := s.declaredConfigOf(ctx, origin, event)
+	return config.CustomerID, named, err
 }
 
 // ConfigField is the custom field on an agent channel naming the agent config that answers

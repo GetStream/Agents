@@ -112,7 +112,7 @@ func (s *MeteringSuite) TestEachSessionLogsWhatTheRowsItStoredCost() {
 			provider.capabilities, _ = capabilitiesFor(config.Provider, config.Model)
 			recorder := routing.NewRecorder(routing.STS, s.store, s.live, s.prices, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			owner := routing.Owner{CustomerID: customer, AgentID: agentID, Attribution: attributed, Spent: socket}
-			session := newSession(context.Background(), provider, config, owner, recorder, recorder.For(routing.LLM))
+			session := newSession(context.Background(), provider, config, owner, recorder, recorder.For(routing.LLM), nil)
 
 			tc.script(session, provider)
 			s.closed(session, recorder)
@@ -149,7 +149,7 @@ func (s *MeteringSuite) TestASessionOnASocketWithNoSpentLogsItsRowsCost() {
 	provider.capabilities, _ = capabilitiesFor(config.Provider, config.Model)
 	recorder := routing.NewRecorder(routing.STS, s.store, s.live, s.prices, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	session := newSession(context.Background(), provider, config, routing.Owner{CustomerID: customer, AgentID: agentID, Attribution: attributed},
-		recorder, recorder.For(routing.LLM))
+		recorder, recorder.For(routing.LLM), nil)
 	provider.emitter.Send(sts.ResponseStarted{ResponseID: "r1", Generation: 1, At: time.Now()})
 	provider.emitter.Send(sts.ResponseComplete{ResponseID: "r1", Generation: 1, TimeToFirstByteMs: 380,
 		Usage: sts.Usage{InputTokens: 120, InputAudioTokens: 100, InputTextTokens: 20, OutputTokens: 60, OutputAudioTokens: 60}})

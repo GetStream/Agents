@@ -157,9 +157,12 @@ type Forwarder struct {
 	// sending is how many sends to each destination are running, by destination id.
 	mu      sync.Mutex
 	sending map[string]int
-	ctx     context.Context
-	cancel  context.CancelFunc
-	working sync.WaitGroup
+	// unopenedAt is when this router last logged that it cannot open a destination's signing
+	// secret, by destination id (unopened).
+	unopenedAt map[string]time.Time
+	ctx        context.Context
+	cancel     context.CancelFunc
+	working    sync.WaitGroup
 }
 
 // Event is one verified provider delivery of one customer's provider app.
@@ -224,20 +227,21 @@ func New(options Options) (*Forwarder, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Forwarder{
-		store:     options.Store,
-		secrets:   options.Secrets,
-		http:      &unredirected,
-		publicURL: publicURL,
-		retries:   retries,
-		poll:      poll,
-		lease:     leaseFor,
-		activity:  options.Activity,
-		logger:    logger,
-		kick:      make(chan struct{}, 1),
-		slots:     make(chan struct{}, inFlight),
-		sending:   map[string]int{},
-		ctx:       ctx,
-		cancel:    cancel,
+		store:      options.Store,
+		secrets:    options.Secrets,
+		http:       &unredirected,
+		publicURL:  publicURL,
+		retries:    retries,
+		poll:       poll,
+		lease:      leaseFor,
+		activity:   options.Activity,
+		logger:     logger,
+		kick:       make(chan struct{}, 1),
+		slots:      make(chan struct{}, inFlight),
+		sending:    map[string]int{},
+		unopenedAt: map[string]time.Time{},
+		ctx:        ctx,
+		cancel:     cancel,
 	}, nil
 }
 
@@ -267,8 +271,9 @@ func (f *Forwarder) Start() {
 	}()
 }
 
-// Close stops the worker and cancels the sends in flight. A send cut short is not counted as
-// an attempt: its lease runs out and a router sends it again.
+// Close stops the worker and cancels the sends in flight. A send cut short keeps the attempt
+// its claim counted, as a router that died mid-send does, since the destination may have had
+// it: its lease runs out and a router sends it again while attempts remain.
 func (f *Forwarder) Close() {
 	f.cancel()
 	f.working.Wait()
@@ -452,11 +457,10 @@ func (f *Forwarder) sendDue() (wait time.Duration, again bool) {
 		if free == 0 {
 			return 0, false
 		}
-		now := time.Now()
 		f.mu.Lock()
 		sending := maps.Clone(f.sending)
 		f.mu.Unlock()
-		claimed, err := f.store.EventDeliveries.Claim(f.ctx, now, free, perDestination, sending, now.Add(f.lease))
+		claimed, err := f.store.EventDeliveries.Claim(f.ctx, free, perDestination, sending, f.lease)
 		if err != nil {
 			if f.ctx.Err() == nil {
 				f.logger.Error("could not take the event forwards due", "error", err)
@@ -504,11 +508,16 @@ func (f *Forwarder) sendDue() (wait time.Duration, again bool) {
 // it or refused it for good, else due again after the next wait, or gone when the waits ran
 // out.
 func (f *Forwarder) attempt(delivery store.ClaimedEventDelivery) {
+	if delivery.Attempts > len(f.retries)+1 {
+		f.giveUpUnsent(delivery)
+		return
+	}
 	ctx, cancel := context.WithTimeout(f.ctx, attemptTimeout)
 	err := f.send(ctx, delivery)
 	cancel()
 	if f.ctx.Err() != nil {
-		// Close cut it short: the lease runs out and a router sends it again.
+		// Close cut it short: the attempt its claim counted stays, the lease runs out and a
+		// router sends it again.
 		return
 	}
 	writing, done := context.WithTimeout(context.WithoutCancel(f.ctx), attemptTimeout)
@@ -516,20 +525,74 @@ func (f *Forwarder) attempt(delivery store.ClaimedEventDelivery) {
 	log := f.logger.With("connector", delivery.ConnectorID, "customer", delivery.CustomerID,
 		"destination", delivery.DestinationID, "webhook_id", delivery.ID)
 	var again retryable
-	attempts := delivery.Attempts + 1
+	// The claim counted this attempt.
+	attempts := delivery.Attempts
 	switch {
+	case errors.Is(err, auth.ErrKeyVersionUnavailable) && time.Since(delivery.CreatedAt) > f.unsignedWait():
+		// No router opened it for longer than its retries would have run: none holds the key.
+		log.Warn("gave up an event forward no router could sign", "error", err)
+		f.count(delivery, codeNotSent)
+		err = f.store.EventDeliveries.Finish(writing, delivery.DestinationID, delivery.ID)
+	case errors.Is(err, auth.ErrKeyVersionUnavailable):
+		// Another router may hold the key version the secret was sealed with: this one sent
+		// nothing, so the delivery goes back to the queue with no attempt counted. It is due
+		// again a lease later, as if its claim had run out, not at once: this router, woken by
+		// its own finished send, would take the destination's backlog straight back every poll.
+		f.unopened(log, delivery.DestinationID, err)
+		err = f.store.EventDeliveries.Release(writing, delivery, f.lease)
 	case err == nil:
 		f.count(delivery, "")
 		err = f.store.EventDeliveries.Finish(writing, delivery.DestinationID, delivery.ID)
 	case errors.As(err, &again) && attempts <= len(f.retries):
 		log.Info("an event forward failed and is sent again", "attempts", attempts, "error", err)
-		err = f.store.EventDeliveries.Retry(writing, delivery.DestinationID, delivery.ID, attempts, time.Now().Add(f.retries[attempts-1]))
+		err = f.store.EventDeliveries.Retry(writing, delivery.DestinationID, delivery.ID, time.Now().Add(f.retries[attempts-1]))
 	default:
 		log.Warn("gave up an event forward", "attempts", attempts, "error", err)
 		f.count(delivery, givenUpCode(err))
 		err = f.store.EventDeliveries.Finish(writing, delivery.DestinationID, delivery.ID)
 	}
 	if err != nil {
+		log.Error("could not record an event forward's attempt", "error", err)
+	}
+}
+
+// unsignedWait is how long a forward no router can sign is left for one that can: its whole
+// retry schedule, and a lease for the release that ends it.
+func (f *Forwarder) unsignedWait() time.Duration {
+	wait := f.lease
+	for _, retry := range f.retries {
+		wait += retry
+	}
+	return wait
+}
+
+// unopened logs that this router cannot open a destination's signing secret, once a lease for
+// each destination: a destination's whole backlog fails alike, and one line says it.
+func (f *Forwarder) unopened(log *slog.Logger, destinationID string, err error) {
+	f.mu.Lock()
+	last, seen := f.unopenedAt[destinationID]
+	due := !seen || time.Since(last) >= f.lease
+	if due {
+		f.unopenedAt[destinationID] = time.Now()
+	}
+	f.mu.Unlock()
+	if !due {
+		return
+	}
+	log.Error("this router cannot open an event destination's signing secret; its forwards are left to another", "error", err)
+}
+
+// giveUpUnsent drops a delivery claimed more times than it may be tried: each claim before
+// this one counted its attempt, and a forwarder that died between its claim and its send, every
+// time, recorded nothing else.
+func (f *Forwarder) giveUpUnsent(delivery store.ClaimedEventDelivery) {
+	writing, done := context.WithTimeout(context.WithoutCancel(f.ctx), attemptTimeout)
+	defer done()
+	log := f.logger.With("connector", delivery.ConnectorID, "customer", delivery.CustomerID,
+		"destination", delivery.DestinationID, "webhook_id", delivery.ID)
+	log.Warn("gave up an event forward its earlier claims never finished", "attempts", delivery.Attempts)
+	f.count(delivery, codeNotSent)
+	if err := f.store.EventDeliveries.Finish(writing, delivery.DestinationID, delivery.ID); err != nil {
 		log.Error("could not record an event forward's attempt", "error", err)
 	}
 }

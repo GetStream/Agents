@@ -163,12 +163,8 @@ type UpcomingPriceEntry struct {
 	Reason string
 }
 
-// Upcoming is every entry of a change not cancelled that takes effect after after,
-// soonest first.
-func (r *PriceEntries) Upcoming(ctx context.Context, after time.Time) ([]UpcomingPriceEntry, error) {
-	return upcomingPriceEntries(ctx, r.store.global, after)
-}
-
+// upcomingPriceEntries is every entry of a change not cancelled that takes effect after
+// after, soonest first.
 func upcomingPriceEntries(ctx context.Context, db bun.IDB, after time.Time) ([]UpcomingPriceEntry, error) {
 	var changes []PriceChange
 	err := db.NewSelect().Model(&changes).
@@ -314,7 +310,7 @@ func (l PriceListAt) Assign(writes []PriceEntryWrite) ([]PriceEntryWrite, error)
 func priceListAt(ctx context.Context, db bun.IDB, asked *time.Time) (PriceListAt, error) {
 	var list PriceListAt
 	var err error
-	if list.Now, err = databaseNow(ctx, db); err != nil {
+	if list.Now, err = transactionStart(ctx, db); err != nil {
 		return PriceListAt{}, err
 	}
 	if list.At, err = effectiveAt(list.Now, asked); err != nil {

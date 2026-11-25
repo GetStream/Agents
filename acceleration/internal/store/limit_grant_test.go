@@ -44,7 +44,7 @@ func (s *StoreSuite) TestAGrantNamesOneSubject() {
 
 func (s *StoreSuite) TestLiveGrantsLeaveOutRevokedAndExpired() {
 	// An hour ahead, so a slow insert is still before it (limit_grants_expiry_check), and
-	// LiveGrants is asked at instants pinned to it: how long the setup takes does not matter.
+	// LimitGrants.SelectLive is asked at instants pinned to it: how long the setup takes does not matter.
 	// Microseconds, as Postgres keeps them.
 	expires := time.Now().Add(time.Hour).Truncate(time.Microsecond)
 	live := s.grant(LimitGrant{})

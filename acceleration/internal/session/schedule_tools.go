@@ -29,7 +29,14 @@ const (
 	taskChanged           = "task_changed"
 	serverSideOnly        = "server_side_only"
 	unknownConfig         = "unknown_config"
+	scheduledTurnCode     = "scheduled_turn"
 )
+
+// armedByTask is what a call asked for in a turn a scheduled task fired is told when it
+// would set a run going. That turn is the customer's spend, never the user's, so a task
+// that could arm another would run on, uncounted, without the user ever asking again.
+const armedByTask = "a scheduled task you are carrying out cannot schedule a task, nor reschedule, " +
+	"snooze or resume one; the user can ask for that in a message of their own"
 
 // scheduleTools are the scheduling tools a session may offer. The four names
 // are the router's own: a caller that declared one of them keeps it, and the
@@ -41,8 +48,9 @@ func scheduleTools() []harness.Tool {
 			Description: "Schedule something for you to do for the user later: a reminder, a check-in, " +
 				"or a task to carry out once or on a repeating schedule. When it is due, you are woken in " +
 				"this conversation with the instructions and act on them. Give the time with at, or the " +
-				"span with in. Agree the day and time with the user first, in their own zone unless they " +
-				"name another, then read back the schedule this returns.",
+				"span with in; the first run is 15 minutes from now at the soonest. Agree the day and " +
+				"time with the user first, in their own zone unless they name another, then read back " +
+				"the schedule this returns.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -202,6 +210,9 @@ type scheduleArgs struct {
 }
 
 func (r *scheduleRunner) schedule(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart, error) {
+	if agent.ScheduledCall(ctx) {
+		return refusal(scheduledTurnCode, armedByTask), nil
+	}
 	var args scheduleArgs
 	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
 		return refusal(scheduling.CodeInvalidSchedule, "the arguments are not JSON I can read"), nil
@@ -229,6 +240,10 @@ func (r *scheduleRunner) schedule(ctx context.Context, call llm.ToolCall) ([]llm
 	next, ok := parsed.FromNow(now)
 	if !ok {
 		return refusal(scheduling.CodeScheduleInPast, "that schedule has no occurrence left; its last one has passed"), nil
+	}
+	if err := scheduling.CheckFirst(next, now); err != nil {
+		parts, _ := refusalOf(err)
+		return parts, nil
 	}
 	// A task made in a thread is delivered on that thread's channel.
 	deliverTo := store.ScheduledTaskDeliveredConversation
@@ -277,7 +292,7 @@ func (r *scheduleRunner) schedule(ctx context.Context, call llm.ToolCall) ([]llm
 		if r.kind == auth.KindGuest {
 			kind = store.UserKindGuest
 		}
-		if err := r.db.SetUserTimezone(ctx, r.spec.CustomerID, r.user, kind, parsed.Timezone); err != nil {
+		if err := r.db.Users.SetTimezone(ctx, r.spec.CustomerID, r.user, kind, parsed.Timezone); err != nil {
 			r.logger.Error("could not store the user's timezone", "user", r.user, "error", err)
 		}
 	}
@@ -367,6 +382,10 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 	var args updateArgs
 	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
 		return refusal(scheduling.CodeInvalidSchedule, "the arguments are not JSON I can read"), nil
+	}
+	// A pause or a skip sets no run going, so a task may still do either.
+	if agent.ScheduledCall(ctx) && (args.Action == "reschedule" || args.Action == "snooze" || args.Action == "resume") {
+		return refusal(scheduledTurnCode, armedByTask), nil
 	}
 	task, parts, err := r.ownTask(ctx, args.ID)
 	if parts != nil || err != nil {
@@ -561,8 +580,10 @@ func (r *scheduleRunner) rescheduled(task *store.ScheduledTask, args updateArgs,
 	// passed goes to the next occurrence, its COUNT counted from there, as a
 	// create does. One that does not, or names the stored start again,
 	// re-parses it, a change of title, instructions or repeat, and keeps
-	// counting from it.
-	moved := args.At != nil || args.In != nil
+	// counting from it. A new zone, repeat or until can still bring the run
+	// sooner, so it is held to the floor as a new time is; a change of title or
+	// instructions alone leaves the run where it is.
+	moved := args.At != nil || args.In != nil || args.Timezone != nil || args.Repeat != nil || args.Until != nil
 	next, ok := parsed.Next(now)
 	if parsed.MovesStartFrom(task.StartLocal) {
 		next, ok = parsed.FromNow(now)
@@ -619,7 +640,7 @@ func (r *scheduleRunner) snoozeTarget(task store.ScheduledTask, args updateArgs,
 // zone picks the zone for a new task: what was named for it, the session's,
 // the user's stored one, then the config's default.
 func (r *scheduleRunner) zone(ctx context.Context, argument string) (string, error) {
-	stored, err := r.db.UserTimezone(ctx, r.spec.CustomerID, r.user)
+	stored, err := r.db.Users.GetTimezone(ctx, r.spec.CustomerID, r.user)
 	if err != nil {
 		return "", err
 	}

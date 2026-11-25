@@ -20,7 +20,7 @@ import (
 const channelWaitingKeep = 10 * time.Minute
 
 // waitingMessage is a customer's message on an external thread no thread channel is linked to
-// yet (20261011220000_channel_thread_waiting.sql).
+// yet.
 type waitingMessage struct {
 	bun.BaseModel `bun:"table:channel_thread_waiting,alias:ctw"`
 

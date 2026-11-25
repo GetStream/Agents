@@ -5,8 +5,10 @@ package campaign
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
@@ -33,6 +36,8 @@ type RunnerSuite struct {
 	classifier  *stubClassifier
 	runner      *Runner
 	customerID  string
+	// failing fails the next reads of the phone's call record.
+	failing *failingCallReads
 }
 
 func TestRunnerSuite(t *testing.T) {
@@ -49,6 +54,8 @@ func (s *RunnerSuite) SetupSuite() {
 	s.Require().NoError(err)
 	s.Require().NoError(opened.Migrate(s.ctx))
 	s.store = opened
+	s.failing = &failingCallReads{}
+	opened.GlobalDB().AddQueryHook(s.failing)
 	s.T().Cleanup(func() { s.Require().NoError(opened.Close()) })
 }
 
@@ -64,6 +71,7 @@ func (s *RunnerSuite) SetupTest() {
 	s.classifier = &stubClassifier{outcome: OutcomeSuccess}
 	s.customerID = uuid.NewString()
 	s.runner = s.newRunner("router-a")
+	s.failing.left.Store(0)
 }
 
 func (s *RunnerSuite) newRunner(owner string) *Runner {
@@ -109,6 +117,13 @@ func (s *RunnerSuite) tick(runner *Runner) {
 	runner.tick(s.ctx)
 	runner.dialing.Wait()
 	runner.reading.Wait()
+}
+
+// leasesPass moves the lease of each contact back by d. For the runner, which compares leases
+// with Postgres's clock, this is the same as when the time d passes.
+func (s *RunnerSuite) leasesPass(d time.Duration) {
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE campaign_contacts SET lease_until = lease_until - make_interval(secs => ?)", d.Seconds())
+	s.Require().NoError(err)
 }
 
 func (s *RunnerSuite) contact(campaign store.Campaign, number string) (store.Contact, []store.CampaignAttempt) {
@@ -280,7 +295,7 @@ func (s *RunnerSuite) TestARouterThatDiedMidCallIsTakenOver() {
 			PlacedAt: &died, Outcome: outcomes[one.Contact.ToNumber]}))
 	}
 	s.transcripts.write(callIDs["+15550000001"], talked())
-	s.clock.advance(lease + time.Minute)
+	s.leasesPass(lease + time.Minute)
 
 	s.tick(s.runner)
 
@@ -297,11 +312,92 @@ func (s *RunnerSuite) TestARouterThatDiedMidCallIsTakenOver() {
 	s.Equal("no_answer", attempts[0].CallOutcome)
 }
 
+// A double dial whose first call's outcome cannot be read, however often it is read again,
+// does not ring again as if nobody answered: the person may just have hung up. The contact
+// stays leased, and the router that takes it over reads the outcome and settles from it
+// without dialing.
+func (s *RunnerSuite) TestADialWhoseOutcomeCannotBeReadIsNotDialedAgainUntilItIsRead() {
+	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	s.dialer.results["+15550000001"] = []Dialed{{}}
+	s.failing.left.Store(int32(1 + len(outcomeRetries)))
+
+	s.tick(s.runner)
+
+	s.Len(s.dialer.dialed(), 1)
+	held, attempts := s.contact(campaign, "+15550000001")
+	s.Equal(store.InProgress, held.Stage, "the contact keeps its lease")
+	s.Require().Len(attempts, 1)
+	s.Nil(attempts[0].EndedAt, "the dial is not ended with an outcome nobody read")
+
+	placed := s.clock.now()
+	s.Require().NoError(s.store.CallLegs.Place(s.ctx, &store.CallLeg{Token: uuid.NewString(), CustomerID: s.customerID, Direction: store.Outbound,
+		CallType: "default", CallID: attempts[0].CallID, Vendor: "twilio", LocalNumber: campaign.FromNumber, RemoteNumber: "+15550000001",
+		PlacedAt: &placed, Outcome: string(outcome.Busy)}))
+	s.leasesPass(lease + time.Minute)
+
+	s.tick(s.runner)
+
+	s.Len(s.dialer.dialed(), 1, "the outcome read is busy, which is not dialed again at once")
+	settled, attempts := s.contact(campaign, "+15550000001")
+	s.Equal(store.Enrolled, settled.Stage)
+	s.Equal(2, settled.Attempt)
+	s.Require().Len(attempts, 1)
+	s.Equal(string(outcome.Busy), attempts[0].CallOutcome)
+}
+
+// An outcome read that fails once, as a database blip would, is read again at once and the
+// contact settles in the same tick. Catches a single read that leaves the contact leased for
+// the lease's twenty minutes.
+func (s *RunnerSuite) TestAnOutcomeReadThatFailsOnceIsReadAgainAtOnce() {
+	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	s.dialer.results["+15550000001"] = []Dialed{{}}
+	s.dialer.onDial = func(dial Dial) {
+		placed := s.clock.now()
+		s.Require().NoError(s.store.CallLegs.Place(s.ctx, &store.CallLeg{Token: uuid.NewString(), CustomerID: s.customerID, Direction: store.Outbound,
+			CallType: "default", CallID: dial.SessionID, Vendor: "twilio", LocalNumber: campaign.FromNumber, RemoteNumber: dial.Contact.ToNumber,
+			PlacedAt: &placed, Outcome: string(outcome.Busy)}))
+	}
+	s.failing.left.Store(1)
+
+	s.tick(s.runner)
+
+	s.Len(s.dialer.dialed(), 1)
+	settled, attempts := s.contact(campaign, "+15550000001")
+	s.Equal(store.Enrolled, settled.Stage)
+	s.Equal(2, settled.Attempt)
+	s.Require().Len(attempts, 1)
+	s.Equal(string(outcome.Busy), attempts[0].CallOutcome)
+}
+
+// A dial that keeps failing before anything rang is tried again five minutes later without
+// using the attempt, but only so often: the maxDialFailures-th uses it, as a failure that
+// never passes would otherwise retry for ever. Catches an uncapped retry.
+func (s *RunnerSuite) TestADialThatKeepsFailingBeforeItRingsUsesTheAttemptInTheEnd() {
+	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
+	s.dialer.fails = errors.New("phone: stream api: connection reset")
+	s.dialer.failWith = Dialed{Result: DialFailed, Reason: codeDialFailed}
+
+	for range maxDialFailures - 1 {
+		s.tick(s.runner)
+		waiting, _ := s.contact(campaign, "+15550000001")
+		s.Require().Equal(store.Enrolled, waiting.Stage)
+		s.Require().LessOrEqual(waiting.Attempt, 1, "the attempt is not used yet")
+		s.clock.advance(concurrentRetry)
+	}
+	s.tick(s.runner)
+
+	s.Len(s.dialer.dialed(), maxDialFailures, "one dial a tick: a failure before ringing is not dialed twice")
+	spent, attempts := s.contact(campaign, "+15550000001")
+	s.Equal(store.Enrolled, spent.Stage)
+	s.Equal(2, spent.Attempt, "the attempt is used")
+	s.Len(attempts, maxDialFailures)
+}
+
 func (s *RunnerSuite) TestAContactClaimedBeforeItWasEverDialedGoesBackUnused() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
 	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", s.clock.now(), lease, 10)
 	s.Require().NoError(err)
-	s.clock.advance(lease + time.Minute)
+	s.leasesPass(lease + time.Minute)
 
 	s.runner.takeOver(s.ctx)
 
@@ -318,7 +414,7 @@ func (s *RunnerSuite) TestATakeOverOfAnAttemptNeverDialedLeavesItUnused() {
 	s.clock.advance(3 * 24 * time.Hour)
 	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", s.clock.now(), lease, 10)
 	s.Require().NoError(err)
-	s.clock.advance(lease + time.Minute)
+	s.leasesPass(lease + time.Minute)
 
 	s.runner.takeOver(s.ctx)
 
@@ -895,6 +991,11 @@ func (c *clock) advance(by time.Duration) {
 type stubDialer struct {
 	mu      sync.Mutex
 	results map[string][]Dialed
+	// fails, set, fails every dial with failWith.
+	fails    error
+	failWith Dialed
+	// onDial runs as each dial is placed.
+	onDial  func(Dial)
 	hold    chan struct{}
 	dials   []Dial
 	now     int
@@ -916,8 +1017,17 @@ func (d *stubDialer) Dial(ctx context.Context, dial Dial) (Dialed, error) {
 	if queued := d.results[dial.Contact.ToNumber]; len(queued) > 0 {
 		dialed, d.results[dial.Contact.ToNumber] = queued[0], queued[1:]
 	}
-	hold := d.hold
+	hold, fails, failWith, onDial := d.hold, d.fails, d.failWith, d.onDial
 	d.mu.Unlock()
+	if fails != nil {
+		d.mu.Lock()
+		d.now--
+		d.mu.Unlock()
+		return failWith, fails
+	}
+	if onDial != nil {
+		onDial(dial)
+	}
 
 	if hold != nil {
 		<-hold
@@ -1058,7 +1168,7 @@ func (s *RunnerSuite) TestATakeOverKeepsHowThePhoneSaysTheCallEnded() {
 	s.Require().NoError(s.store.CallLegs.Place(s.ctx, &store.CallLeg{Token: uuid.NewString(), CustomerID: s.customerID, Direction: store.Outbound,
 		CallType: "default", CallID: callID, Vendor: "twilio", LocalNumber: campaign.FromNumber, RemoteNumber: "+15550000001",
 		PlacedAt: &died, Outcome: "busy"}))
-	s.clock.advance(lease + time.Minute)
+	s.leasesPass(lease + time.Minute)
 
 	s.tick(s.runner)
 
@@ -1097,3 +1207,18 @@ func (s *RunnerSuite) TestACallsOutcomeIsReadFromThePhone() {
 	s.Require().NoError(err)
 	s.Equal(outcome.Unknown, never, "a call the phone kept no row for")
 }
+
+// failingCallReads fails the next left reads of the phone's call record, as a database blip
+// would, by handing them a context that has already ended.
+type failingCallReads struct{ left atomic.Int32 }
+
+func (f *failingCallReads) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !strings.HasPrefix(event.Query, "SELECT") || !strings.Contains(event.Query, `FROM "call_legs"`) || f.left.Add(-1) < 0 {
+		return ctx
+	}
+	ended, cancel := context.WithDeadline(ctx, time.Time{})
+	cancel()
+	return ended
+}
+
+func (*failingCallReads) AfterQuery(context.Context, *bun.QueryEvent) {}

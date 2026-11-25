@@ -311,7 +311,7 @@ func (s *CloserSuite) TestAFailedSummaryLeavesSummaryFailedAndTheThreadIntact() 
 func (s *CloserSuite) TestACardIsSummarizedAsItsAuthorAfterTheNumberWasUnlinked() {
 	s.chat.KnownAuthors()
 	user := "anya-" + uuid.NewString()
-	// A Stream user of the deployment's own app, as a link names one (store.LinkUserPhone).
+	// A Stream user of the deployment's own app, as a link names one (store.UserPhones.Link).
 	chatting, err := s.cards.Open(s.ctx, Episode{
 		CustomerID: s.customerID, AgentConfigID: s.config.ID, AgentName: s.config.Name,
 		Person: Person{Kind: store.ContactStreamUser, Address: store.StreamUserAddress(0, user)},
@@ -474,7 +474,7 @@ func (s *CloserSuite) TestTwoRoutersSweepingAtOnceSummarizeEachEpisodeOnce() {
 func (s *CloserSuite) TestAnEpisodeAStoppedRouterLeftEndedIsSummarizedByTheNextSweep() {
 	opened, _ := s.idleThread("where is my order 12?")
 	now := time.Now()
-	_, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, now.Add(-time.Second), "closer")
+	_, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, -time.Second, "closer")
 	s.Require().NoError(err)
 	s.Equal(store.EpisodeEnded, s.status(opened))
 

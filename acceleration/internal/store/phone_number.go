@@ -162,9 +162,7 @@ func insertNumber(ctx context.Context, db bun.IDB, number *PhoneNumber) error {
 	}
 	// A vendor that says nothing about what a number carries is not the same as a null
 	// column, and the array is not nullable.
-	if number.Capabilities == nil {
-		number.Capabilities = []string{}
-	}
+	number.Capabilities = orEmpty(number.Capabilities)
 
 	if _, err := db.NewInsert().Model(number).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: record number: %w", err))
@@ -203,17 +201,6 @@ func (r *PhoneNumbers) InsertOnSIPTrunk(ctx context.Context, number *PhoneNumber
 	return err
 }
 
-// Release marks a number as given back. The row stays, because what it cost while it was
-// held is still part of that month's bill.
-func (r *PhoneNumbers) Release(ctx context.Context, customerID, e164 string, at time.Time) error {
-	if customerID == "" || e164 == "" {
-		return stack.Wrap(errors.New("store: a customer and a number are required"))
-	}
-	return r.store.numberWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
-		return releaseNumber(ctx, tx, customerID, e164, at)
-	})
-}
-
 // Attach records which SIP trunk calls to a number arrive on and which Stream call they
 // land in.
 //
@@ -248,7 +235,8 @@ func attachNumber(ctx context.Context, db bun.IDB, customerID, e164 string, atta
 	}
 	update := db.NewUpdate().Model((*PhoneNumber)(nil))
 	if attached.ConfigID != "" {
-		update.Set("config_id = ?", attached.ConfigID)
+		// The agent the number had, unless its config was deleted since it was read.
+		update.Set("config_id = (?)", liveConfig(db, customerID, attached.ConfigID))
 	}
 	result, err := update.
 		Set("stream_trunk_id = ?", attached.TrunkID).
@@ -318,7 +306,7 @@ func (r *PhoneNumbers) AttachedBridge(ctx context.Context, vendor, e164 string) 
 // Select returns the numbers a customer holds, newest first.
 func (r *PhoneNumbers) Select(ctx context.Context, customerID string, filter PhoneNumberFilter) ([]PhoneNumber, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	query := r.store.global.NewSelect().Model((*PhoneNumber)(nil)).
@@ -349,14 +337,15 @@ func (r *PhoneNumbers) SetAgent(ctx context.Context, customerID, e164, configID 
 		return stack.Wrap(errors.New("store: a customer, a number and a config are required"))
 	}
 	return r.store.numberWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
-		// Only an attached number has an agent, and a detach can land between the caller's
-		// read and this write.
+		// Only an attached number has an agent, and only a live config is one, and a detach or
+		// the config's delete can land between the caller's read and this write.
 		result, err := tx.NewUpdate().Model((*PhoneNumber)(nil)).
 			Set("config_id = ?", configID).
 			Where("customer_id = ?", customerID).
 			Where("e164 = ?", e164).
 			Where("released_at IS NULL").
 			Where("attached_at IS NOT NULL").
+			Where("EXISTS (?)", liveConfig(tx, customerID, configID)).
 			Exec(ctx)
 		if err != nil {
 			return stack.Wrap(fmt.Errorf("store: set number agent: %w", err))
@@ -365,11 +354,35 @@ func (r *PhoneNumbers) SetAgent(ctx context.Context, customerID, e164, configID 
 		if err != nil {
 			return stack.Wrap(fmt.Errorf("store: set number agent: %w", err))
 		}
-		if affected == 0 {
-			return stack.Wrap(numberNotHeld{fmt.Sprintf("store: %s is not a number %s holds attached", e164, customerID)})
+		if affected > 0 {
+			return nil
 		}
-		return nil
+		// The number or the config is not there: the caller is told which.
+		live, err := tx.NewSelect().Model((*AgentConfig)(nil)).
+			Where("id = ?", configID).
+			Where("customer_id = ?", customerID).
+			Where("deleted_at IS NULL").
+			Exists(ctx)
+		if err != nil {
+			return stack.Wrap(fmt.Errorf("store: set number agent: %w", err))
+		}
+		if !live {
+			return unknownAgentConfig(configID)
+		}
+		return stack.Wrap(numberNotHeld{fmt.Sprintf("store: %s is not a number %s holds attached", e164, customerID)})
 	})
+}
+
+// liveConfig selects the id of a customer's config while it is live, share-locking its row
+// until the transaction ends. AgentConfigs.Delete holds that row while it reads the numbers the
+// config answers, so a number is pointed at a config either before that read sees it, or after
+// the delete, when the config is no longer there to point at.
+func liveConfig(db bun.IDB, customerID, configID string) *bun.SelectQuery {
+	return db.NewSelect().Model((*AgentConfig)(nil)).Column("id").
+		Where("id = ?", configID).
+		Where("customer_id = ?", customerID).
+		Where("deleted_at IS NULL").
+		For("SHARE")
 }
 
 // ClearAgent sends a number's calls back to dispatch. A number with no agent is left as it
@@ -404,8 +417,23 @@ func (r *PhoneNumbers) AnsweredBy(ctx context.Context, customerID, configID stri
 	if customerID == "" || configID == "" {
 		return nil, stack.Wrap(errors.New("store: a customer and a config are required"))
 	}
+	return answeredBy(ctx, r.store.global, customerID, configID)
+}
+
+// ConfigAnswersNumbersError is a config that cannot be deleted while numbers answer with it.
+type ConfigAnswersNumbersError struct {
+	// Numbers are the numbers it answers, sorted.
+	Numbers []string
+}
+
+func (e *ConfigAnswersNumbersError) Error() string {
+	return fmt.Sprintf("store: the agent config answers %d numbers", len(e.Numbers))
+}
+
+// answeredBy is AnsweredBy read in db.
+func answeredBy(ctx context.Context, db bun.IDB, customerID, configID string) ([]string, error) {
 	var numbers []string
-	err := r.store.global.NewSelect().Model((*PhoneNumber)(nil)).
+	err := db.NewSelect().Model((*PhoneNumber)(nil)).
 		Column("e164").
 		Where("customer_id = ?", customerID).
 		Where("config_id = ?", configID).
@@ -436,7 +464,8 @@ func (r *PhoneNumbers) HeldSince(ctx context.Context, since time.Time) ([]PhoneN
 	return held, nil
 }
 
-// releaseNumber marks a number as given back, in db.
+// releaseNumber marks a number as given back, in db. The row stays, because what it cost
+// while it was held is still part of that month's bill.
 func releaseNumber(ctx context.Context, db bun.IDB, customerID, e164 string, at time.Time) error {
 	if at.IsZero() {
 		at = time.Now().UTC()

@@ -42,6 +42,13 @@ import (
 // reader some detail and nobody on the call anything.
 const watcherBuffer = 256
 
+// DefaultUserID and DefaultUserName are who the agent joins a call and writes Chat as when
+// nobody names it: the only identity an end user's device may ask for by name.
+const (
+	DefaultUserID   = defaultUserID
+	DefaultUserName = defaultUserName
+)
+
 // Defaults a caller can leave out. They are the same ones cmd/agent's flags carry, so a
 // session started with an almost empty spec behaves like the demo.
 const (
@@ -383,6 +390,9 @@ type Session struct {
 	// handedOver is set on a session that must not hang up its call: another session serves
 	// it, or the router turned the session away as it shut down.
 	handedOver atomic.Bool
+	// idTaken is set once the store refused the session's row because another customer's
+	// session has its id (Manager.idTaken).
+	idTaken atomic.Bool
 	// active is set while router_sessions_active counts the session: from the manager
 	// holding it until it has closed. agentLeft is set once its agent left the call by itself
 	// (consume). modelErred and replied are whether its model failed a turn and whether
