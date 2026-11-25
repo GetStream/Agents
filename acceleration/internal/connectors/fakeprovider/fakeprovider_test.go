@@ -1175,6 +1175,7 @@ func (s *FakeProviderSuite) slack(srv *fakeprovider.Server, method, token string
 // and echoes the credential in /echo-credential's 403, or in its 200 with ?status=200.
 func (s *FakeProviderSuite) TestTheHTTPAPITakesItsKeyRecordsEachRequestAndAnswersByPath() {
 	srv := fakeprovider.New(s.T())
+	var contentType string
 	send := func(method, path, key string) (int, string) {
 		request, err := http.NewRequest(method, srv.URL+fakeprovider.PathAPI+path, strings.NewReader("sent"))
 		s.Require().NoError(err)
@@ -1184,6 +1185,7 @@ func (s *FakeProviderSuite) TestTheHTTPAPITakesItsKeyRecordsEachRequestAndAnswer
 		defer response.Body.Close()
 		body, err := io.ReadAll(response.Body)
 		s.Require().NoError(err)
+		contentType = response.Header.Get("Content-Type")
 		return response.StatusCode, string(body)
 	}
 
@@ -1205,9 +1207,11 @@ func (s *FakeProviderSuite) TestTheHTTPAPITakesItsKeyRecordsEachRequestAndAnswer
 	status, body = send(http.MethodPost, "/echo-credential", srv.APIKey)
 	s.Equal(http.StatusForbidden, status)
 	s.Contains(body, srv.APIKey)
+	s.Equal("application/json", contentType, "the echoed request is not sniffed as HTML")
 	status, body = send(http.MethodGet, "/echo-credential?status=200", srv.APIKey)
 	s.Equal(http.StatusOK, status)
 	s.Contains(body, srv.APIKey)
+	s.Equal("application/json", contentType)
 
 	requests := srv.APIRequests()
 	s.Require().Len(requests, 10, "the refused ones too")
