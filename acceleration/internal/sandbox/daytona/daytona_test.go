@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -369,6 +370,35 @@ func (c *counted) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// tallied is a transport that counts the bytes read from the bodies of the answers to requests
+// whose path ends in suffix. It sits under the router's bound, so it counts what the router took
+// off the connection: unlike the bytes the server wrote, it does not depend on how much the
+// kernel's socket buffers held, which is the host's setting.
+type tallied struct {
+	next   http.RoundTripper
+	suffix string
+	read   atomic.Int64
+}
+
+func (t *tallied) RoundTrip(r *http.Request) (*http.Response, error) {
+	answer, err := t.next.RoundTrip(r)
+	if err == nil && strings.HasSuffix(r.URL.Path, t.suffix) {
+		answer.Body = tally{ReadCloser: answer.Body, read: &t.read}
+	}
+	return answer, err
+}
+
+type tally struct {
+	io.ReadCloser
+	read *atomic.Int64
+}
+
+func (t tally) Read(p []byte) (int, error) {
+	n, err := t.ReadCloser.Read(p)
+	t.read.Add(int64(n))
+	return n, err
+}
+
 // secret serves Daytona's secret API: create, update and delete. The caller holds mu.
 func (p *platform) secret(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -528,6 +558,22 @@ func (s *DaytonaSuite) SetupTest() {
 	s.Require().NoError(err)
 	s.box = box
 	s.T().Cleanup(func() { _ = box.Close() })
+}
+
+// tallyingBox is a sandbox on the platform that counts what it reads of the answers to requests
+// whose path ends in suffix.
+func (s *DaytonaSuite) tallyingBox(suffix string) (*Sandbox, *tallied) {
+	answers := &tallied{next: http.DefaultTransport, suffix: suffix}
+	box, err := New(Options{
+		APIKey:     "key-1",
+		APIURL:     s.platform.server.URL + "/api",
+		ProxyURL:   s.platform.server.URL + "/toolbox",
+		HTTPClient: &http.Client{Transport: answers},
+		Logger:     slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = box.Close() })
+	return box, answers
 }
 
 func (s *DaytonaSuite) TestAKeyIsRequired() {
@@ -833,58 +879,46 @@ func (s *DaytonaSuite) TestAFileComesBackOnlyIfItIsNeitherEmptyNorTooLarge() {
 
 func (s *DaytonaSuite) TestAFileFarTooLargeIsRefusedWithoutBeingReadWhole() {
 	s.platform.holdsSized("/tmp/dump.bin", 10*sandbox.MaxFileBytes)
+	box, answers := s.tallyingBox("/files/bulk-download")
 
-	result, err := s.box.Run(s.ctx, "dump()", []string{"/tmp/dump.bin"})
+	result, err := box.Run(s.ctx, "dump()", []string{"/tmp/dump.bin"})
 
 	s.Require().NoError(err)
 	s.Empty(result.Files)
 	s.Equal([]string{"/tmp/dump.bin"}, result.Missing)
-	var sent int64
-	platform := s.platform
-	s.Eventually(func() bool {
-		var ended bool
-		sent, ended = platform.sent("/tmp/dump.bin")
-		return ended
-	}, 10*time.Second, 10*time.Millisecond)
-	// What passed the limit is only what the connection's buffers took before the router
-	// stopped reading: a few MiB at most, well short of another MaxFileBytes.
-	s.Less(sent, int64(2*sandbox.MaxFileBytes), "the router read on past the limit")
+	s.requireReadUpToTheLimit(answers)
 }
 
 func (s *DaytonaSuite) TestADownloadsErrorFarTooLargeIsNotReadWhole() {
 	s.platform.failing["/tmp/dump.bin"] = 10 * sandbox.MaxFileBytes
+	box, answers := s.tallyingBox("/files/bulk-download")
 
-	result, err := s.box.Run(s.ctx, "dump()", []string{"/tmp/dump.bin"})
+	result, err := box.Run(s.ctx, "dump()", []string{"/tmp/dump.bin"})
 
 	s.Require().NoError(err)
 	s.Equal([]string{"/tmp/dump.bin"}, result.Missing)
-	var sent int64
-	platform := s.platform
-	s.Eventually(func() bool {
-		var ended bool
-		sent, ended = platform.sent("/tmp/dump.bin")
-		return ended
-	}, 10*time.Second, 10*time.Millisecond)
 	// The SDK reads an error part whole; past its bound the router stops reading it.
-	s.Less(sent, int64(2*sandbox.MaxFileBytes), "the router read on past the limit")
+	s.requireReadUpToTheLimit(answers)
 }
 
 func (s *DaytonaSuite) TestAnUploadsRefusalFarTooLargeIsNotReadWhole() {
 	s.platform.refuseUpload = true
 	s.platform.refusal = 10 * sandbox.MaxFileBytes
+	box, answers := s.tallyingBox("/files/upload-v2")
 
-	err := s.box.Write(s.ctx, "notes.txt", []byte("hello"))
+	err := box.Write(s.ctx, "notes.txt", []byte("hello"))
 
 	s.Require().Error(err)
-	var sent int64
-	platform := s.platform
-	s.Eventually(func() bool {
-		var ended bool
-		sent, ended = platform.sent("upload")
-		return ended
-	}, 10*time.Second, 10*time.Millisecond)
 	// The SDK reads a refused upload's answer whole; past its bound the router stops reading it.
-	s.Less(sent, int64(2*sandbox.MaxFileBytes), "the router read on past the limit")
+	s.requireReadUpToTheLimit(answers)
+}
+
+// requireReadUpToTheLimit checks that the router read the answer up to the limit and no further:
+// well short of another MaxFileBytes. A count of nothing would pass a counter that sees no answer.
+func (s *DaytonaSuite) requireReadUpToTheLimit(answers *tallied) {
+	read := answers.read.Load()
+	s.Greater(read, int64(sandbox.MaxFileBytes), "the answer was not read as far as the limit")
+	s.Less(read, int64(2*sandbox.MaxFileBytes), "the router read on past the limit")
 }
 
 func (s *DaytonaSuite) TestACommandsOutputFarOverTheBoundIsCutInItsError() {
