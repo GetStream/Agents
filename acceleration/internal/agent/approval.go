@@ -313,6 +313,12 @@ func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.C
 	}
 	a.mu.Lock()
 	waiting, lapsed := a.approvalLocked(answer.ToolCallID)
+	if waiting == nil && lapsed == "" && !answer.Allowed && len(a.approvals) == 1 {
+		// Declining is always safe, so a no that names the wrong call declines the only one waiting.
+		for _, only := range a.approvals {
+			waiting = only
+		}
+	}
 	var unanswered string
 	if waiting != nil && answer.Allowed {
 		unanswered = a.unansweredLocked(waiting)

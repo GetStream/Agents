@@ -419,6 +419,38 @@ func (s *AgentSuite) TestAYesThatIsNotTheCallersOwnTurnRunsNothing() {
 	}
 }
 
+// A no names no id the model need get right: it declines the only call waiting.
+func (s *AgentSuite) TestANoUnderAnotherIDDeclinesTheOnlyCallWaiting() {
+	for _, id := range []string{"", "call-9"} {
+		s.Run(strconv.Quote(id), func() {
+			s.onFakeClock(func() {
+				s.askedToApprove()
+				s.confirms(`{"tool_call_id":"` + id + `","allowed":false}`)
+
+				s.says(stt.Participant{ID: "alice"}, "no thanks")
+
+				s.confirmationSays("call-2", "The caller declined")
+				decided, _ := firstOf[ToolApprovalDecided](s.reported())
+				s.Equal("call-1", decided.ID)
+				s.False(decided.Allowed)
+				s.Empty(s.runner.asked())
+			})
+		})
+	}
+}
+
+// With two calls waiting a no that names neither cannot tell which the caller declined.
+func (s *AgentSuite) TestANoUnderAnotherIDDeclinesNothingWhenTwoCallsWait() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-9","allowed":false}`}})
+
+		s.confirmationSays("call-2", "no question waiting")
+		s.Zero(countOf[ToolApprovalDecided](s.reported()))
+	})
+}
+
 // A question asked later takes nothing from one asked before: the caller cutting off the second
 // leaves their yes to the first standing.
 func (s *AgentSuite) TestCuttingOffASecondQuestionLeavesTheFirstStanding() {
