@@ -25,7 +25,7 @@ off the network, before any jitter buffer, so a handset would add its own on top
 ## Running it
 
 Credentials come from the environment: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
-`TELNYX_API_KEY`, `TELNYX_CONNECTION_ID` and `TELNYX_CALL_CONTROL_ID`. Optionally `IPINFO_TOKEN`
+`TWILIO_WEBHOOK_AUTH_TOKEN` (the account's Auth Token, which signs Twilio's webhooks), `TELNYX_API_KEY`, `TELNYX_CONNECTION_ID` and `TELNYX_CALL_CONTROL_ID`. Optionally `IPINFO_TOKEN`
 for the report's address lookups.
 
 ```bash
@@ -33,7 +33,7 @@ cd acceleration
 go run ./evals/telephony-latency provision            # buys 2 numbers per vendor per city: 40 numbers
 ```
 
-Then on a VM in each GCP region, with UDP 5060 and 20000-20999 open to the carriers:
+Then on a VM in each GCP region, with UDP 5060 and 20000-20999 and TCP 8080 open to the carriers:
 
 ```bash
 go run ./evals/telephony-latency run -host <vm public ip> -region us-east1
@@ -53,7 +53,9 @@ for a smoke test, `-scope all` to call between cities as well, `-parallel` for c
 
 ### Carrier setup
 
-- **Twilio** needs nothing: the bench sets each number's voice URL to TwiML that dials it.
+- **Twilio** needs nothing more: the bench points each number's voice URL at the call webhook it
+  serves on `-hook-listen` (`http://<host>:8080/v1/phone/hooks/twilio`), which answers each signed
+  call with TwiML that dials the bench.
 - **Telnyx** routes inbound calls through `TELNYX_CONNECTION_ID`. Make it an FQDN/IP connection
   pointing at the bench's address, with the destination number in E.164. Each region's bench
   needs its own connection, or the connection repointed before each run.
