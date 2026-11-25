@@ -174,6 +174,10 @@ func (s *AgentSuite) TestANativeYesAfterOnlyTheReplyThatMadeTheCallSpokeRunsNoth
 	s.nativeFrame(peer, "conversation.item.create")
 	s.nativeSend(peer, `{"type":"response.done","response":{"id":"r1","status":"completed"}}`)
 	s.nativeReplied("r1")
+	s.nativeFrame(peer, "response.create")
+	s.nativeSend(peer, `{"type":"response.created","response":{"id":"r2"}}`)
+	s.nativeSend(peer, `{"type":"response.done","response":{"id":"r2","status":"completed"}}`)
+	s.nativeReplied("r2")
 	s.nativeCallerSpoke(peer)
 
 	s.nativeConfirms(peer, "r3")

@@ -811,8 +811,8 @@ func (s *AgentSuite) TestTypedYesAfterATickWhileTheQuestionIsOnTheEdgeRunsNothin
 	})
 }
 
-// a no naming a call whose wait passed, with another call waiting, declines nothing.
-func (s *AgentSuite) TestNoToALapsedCallLeavesTheOtherWaiting() {
+// A no naming a call whose wait passed, with another call waiting, declines nothing.
+func (s *AgentSuite) TestADeclineNamingALapsedCallLeavesTheOtherWaiting() {
 	s.onFakeClock(func() {
 		s.askedToApprove()
 		time.Sleep(2 * time.Minute) // call-1's wait passes
