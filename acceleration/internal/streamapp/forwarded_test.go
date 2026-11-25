@@ -331,6 +331,20 @@ func (s *StoredSuite) TestAUserTokenForAForwardedAppIsSignedAtTheGateway() {
 	s.Equal(forwardedKey, key)
 }
 
+func (s *StoredSuite) TestTheGatewayMintsNoTokenThatSaysARole() {
+	mint := s.gateway()
+	forwarded := s.forwarded(mint)
+	_, err := forwarded.Keep(s.ctx, s.customer, forwardedKey, s.serverToken(24*time.Hour))
+	s.Require().NoError(err)
+	clients := NewClients(s.forwardedSource(forwarded), ClientsOptions{Now: s.clock.Now})
+	bound, err := clients.For(s.ctx, s.customer)
+	s.Require().NoError(err)
+
+	_, _, err = clients.MintUserTokenAs(s.ctx, bound, "", "guest-1", "guest", time.Hour)
+
+	s.ErrorIs(err, ErrCannotMint)
+}
+
 func (s *StoredSuite) TestAUserTokenIsMintedForTheKeyOfTheRequestBeingServed() {
 	// The app is called with two keys and the token held is the other key's.
 	mint := s.gateway()

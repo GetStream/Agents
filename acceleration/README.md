@@ -102,6 +102,7 @@ the other commands that read them there.
 | `ROUTER_ENV`            | `local` (default), `staging` or `testing`. Loads `internal/config/<env>.yaml` when no file of your own is named. The integration suites always use `testing`, which has its own `model_router_test` database and is the one file that wins over the environment |
 | `ROUTER_ADDR`           | HTTP listen address, defaults to `:8080`                   |
 | `ROUTER_POSTGRES_DSN`   | Postgres DSN. Without it, nothing is recorded              |
+| `ROUTER_POSTGRES_MIGRATE_DSN` | The same database as the role that owns its schema, which `router migrate` alone connects with; `ROUTER_POSTGRES_SHARD_MIGRATE_DSN` is the shard's. Set, a start checks the schema and never changes it. Unset, every start migrates with `ROUTER_POSTGRES_DSN`. See [A serving role that owns no table](#a-serving-role-that-owns-no-table) |
 | `ROUTER_REDIS_ADDR`     | Redis `host:port`. Without it, routing ignores health, and a session is only reachable on the node running it |
 | `ROUTER_NODE_ADVERTISE` | `host:port` this node's peers reach it at. Unset works it out from this host's own address and `ROUTER_ADDR`'s port, which is right wherever a pod is reachable from its peers. See [More than one node](#more-than-one-node) |
 | `ROUTER_NODE_LISTEN`    | A second listen address, for this node's peers only. Unset means they use `ROUTER_ADDR`. Set it when two routers share one `ROUTER_ADDR`, so a request for a draining router's session still reaches it |
@@ -147,6 +148,7 @@ the other commands that read them there.
 | `ROUTER_MOCK_PROVIDERS` | `true` adds `mock/mock-stt`, `mock/mock-tts` and `mock/mock-llm`, which answer from nothing, reach no vendor and bill nothing, for load testing the router itself (see `performance_benchmark/`). No capability alias routes to one, so a session only gets a mock by naming it. Off by default |
 | `ROUTER_TRUSTED_PROXIES` | CIDR ranges your own proxies sit in, comma separated, e.g. `10.0.0.0/8`. Decides how much of `X-Forwarded-For` is believed. Unset means none of it is, and the connection's address is used |
 | `ROUTER_DATA_MOVE_RETENTION` | How long recorded changes are kept while a customer moves between deployments, defaults to `168h`. See [Moving a customer](#moving-a-customer) |
+| `ROUTER_SHARD_ROUTING_DEFAULT`, `ROUTER_SHARD_ROUTING_COUNTRIES`, `ROUTER_SHARD_ROUTING_REGIONS` | Which shard a hook's work is done in (`shard_routing`): the shard for a country not listed, a dialled number's country to its shard (`DE=europe-west4,US=us-east4`), and an agent region other than `us` to its shard (`eu=europe-west4`). Every router of a deployment holds the same. Unset: every hook is done where it lands. See [Shards](#shards) |
 | `ROUTER_LOG_LEVEL`      | `debug`, `info` (default), `warn` or `error`               |
 | `HARNESS_SKILLS`        | Path to a skill set; defaults to the built-in one          |
 | `MEM0_API_KEY`          | mem0 credentials. Without it the agent remembers nothing   |
@@ -155,10 +157,10 @@ the other commands that read them there.
 | `EXA_API_KEY`           | Exa credentials. Also what reads a URL into a knowledge base |
 | `PERPLEXITY_API_KEY`    | Perplexity credentials, for the ranked index and for Sonar |
 | `DAYTONA_API_KEY`       | Daytona credentials. Without it a session cannot ask for a sandbox |
-| `TWILIO_ACCOUNT_SID`    | Twilio credentials, for buying and operating numbers       |
+| `TWILIO_ACCOUNT_SID`    | Twilio credentials, for buying and operating numbers. A call to `/v1/phone/hooks/twilio` that names another account is hung up |
 | `TWILIO_AUTH_TOKEN`     | Twilio credentials. With `TWILIO_API_KEY_SID` set, that key's secret |
 | `TWILIO_API_KEY_SID`    | Optional Twilio API key (SK...). Requests are signed with it instead of the account SID |
-| `TWILIO_WEBHOOK_AUTH_TOKEN` | Auth Token of the Twilio account whose webhooks the router checks (`X-Twilio-Signature`). It only checks signatures: those of the Monitor alerts and usage-trigger callbacks sent to `/v1/phone/hooks/twilio/events`, signed over `ROUTER_PUBLIC_URL` and the path. Without it, or without `ROUTER_PUBLIC_URL`, that route answers 404. A token with whitespace in it stops the router at start |
+| `TWILIO_WEBHOOK_AUTH_TOKEN` | Auth Token of the Twilio account whose webhooks the router checks (`X-Twilio-Signature`). It only checks signatures: those of the Monitor alerts and usage-trigger callbacks sent to `/v1/phone/hooks/twilio/events`, and the calls sent to `/v1/phone/hooks/twilio`, each signed over `ROUTER_PUBLIC_URL` and the path. Without it, or without `ROUTER_PUBLIC_URL`, both routes answer 404. A call is answered once per `CallSid`, marked in Redis for a week: a copy of it is hung up, unless the first answer did not reach Twilio, and without Redis every call is hung up. A token with whitespace in it stops the router at start |
 | `TELNYX_API_KEY`        | Telnyx credentials                                         |
 | `TELNYX_CONNECTION_ID`  | The Telnyx TeXML application numbers and calls are on. Calls to the webhook from any other application are hung up |
 | `TELNYX_PUBLIC_KEY`     | Telnyx's public key (base64), to check the calls it sends to `/v1/phone/hooks/telnyx` and the account events it sends to `/v1/phone/hooks/telnyx/events`. Without it Telnyx numbers are not answered and the events route answers 404. Telnyx numbers also need a key encryption keyring (`ROUTER_DEV_KEK` locally, `ROUTER_AUTH_KEK_V<n>_WRAPPED` hosted): without one they cannot be attached |
@@ -392,7 +394,16 @@ opening the conversation and handing over the id is the ordinary shape of an int
 Anonymous is left out of that, since an anonymous name is a claim nobody checked and
 allowing it would make guessing whose a session was enough to read it.
 
-`internal/session` enforces all of this rather than the handlers, so `getSession`,
+A persistent conversation is matched the same way. Its channel records whose it is and which
+sort of caller that was (`support_owner_id`, `support_owner_kind`), and opening it or reading it
+back needs the user id to match and the kind to reach it as above; a backend names the user.
+Another member of a shared conversation has to be a verified user. A channel made before
+`support_owner_kind` keeps the access its owner had, until `router conversations
+backfill-owner-kinds --write` records the one verified kind its owner's sessions on it agree on,
+when it is the kind that owner's next token says (left alone otherwise). `internal/conversation`
+enforces this.
+
+`internal/session` enforces whose a session is rather than the handlers, so `getSession`,
 `stopSession`, `deleteSession`, the events socket, the call token and the session actions cannot each be
 wrong in their own way.
 
@@ -534,7 +545,10 @@ window ends; the usage records are untouched. An origin (`hook:chat` and the res
 limit counts, and a user id the usage records leave off is no user.
 
 They are written through `/v1/spend/limits`, server-side only: one server-side credential of
-any app manages every limit of its organization (an app seen in no organization is its own).
+any app manages every limit of its organization (an app seen in no organization is its own). An
+app in no organization whose id is also an organization's, one another app was last seen under or
+is registered under, gets a 403 `forbidden` from every operation on limits, usage, grants and
+teams: staff manage its limits.
 
 | Operation | Path | What it does |
 | --------- | ---- | ------------ |
@@ -1703,10 +1717,31 @@ global one and `migrations/shard` on each shard's, both on the one database of a
 held in another shard is proxied to the node holding it, since that shard's relay is not this
 one's. Empty shard settings fall back to the global ones, which is the single-node setup.
 
+`shard_dsn` without `shards` is refused. The routers sharing a global Redis keep the shard names
+they agree on there (`node:shards`), and a router naming others refuses to start with
+`postgres.shards differs from the running routers'`. A changed list starts 30 seconds after the
+last router with the old one stopped, so roll a change out by stopping every router first.
+
 Percentiles merged from several shards' rollups are approximate: they are weighted by request
 count rather than recomputed. A router with shards cannot be a move's source: its shards'
 tables record no changes after an export, so `GET /v1/data/export` and `GET /v1/data/changes`
 answer 400 `not_configured` there (see [Moving a customer](#moving-a-customer)). It can be a move's target.
+
+Stream sends a hook to whichever router its load balancer picks, so with `shard_routing` set a
+router hands it to a node of the shard where its work belongs. A call follows the dialled
+number's country. A message follows the agent's region when that is not the default, and
+otherwise the shard that last served its writer's own client, which each router keeps in
+`users.shard` (a backend's request and a forwarded one keep nothing). A conversation already
+running stays on its node, and a hook a peer handed over is never handed on to another shard.
+With no node of that shard up, the work is done where it landed and counted in
+`router_shard_handover_fallbacks_total`, which an alert should watch.
+
+Work a router claims from the global database is claimed the same way. A scheduled task goes
+to its agent's region's shard, or else its user's `users.shard`; a campaign's dials and their
+take-overs go to the shard of the country of the number it rings from. Work meant for no shard
+the deployment has (`shard_routing` or `postgres.shards`), such as a user no client of theirs
+has reached yet, is claimed anywhere, and so is work left unclaimed five minutes past when it
+could have been, so a shard that is down holds up nothing for longer.
 
 ## Agents that are configured rather than spelled out
 
@@ -1981,6 +2016,9 @@ dimension: a request tagged `{project, environment}` is unrolled into both break
 what drives spend with `GET /v1/{modality}/stats/tags?key=project`, or narrow the ordinary
 stats with a repeatable `tag=project:support`. Filtering reads the raw request rows, since a
 rollup bucket has already forgotten which labels its requests carried.
+
+A session's `project_id` is also its `project` tag when a backend sent it. An end user's device
+may send one too, which groups and filters its sessions and is no tag.
 
 **A turn is not a request.** A request row measures one provider call. A turn measures what
 the caller felt: the gap between finishing a sentence and hearing the answer start, which
@@ -2782,13 +2820,74 @@ go run ./cmd/phone list
 go run ./cmd/phone release -number +1719XXXXXXX
 ```
 
-`cmd/router` applies migrations on startup: the global set and the shard set, each with its own
+`cmd/router` applies migrations on startup, unless `router migrate` does
+([below](#a-serving-role-that-owns-no-table)): the global set and the shard set, each with its own
 goose version table (`goose_global_version`, `goose_shard_version`). After changing a migration,
 regenerate the schema description from `acceleration/`; a test fails while it is out of date:
 
 ```bash
 go run ./cmd/schema
 ```
+
+### A serving role that owns no table
+
+By default every start migrates, so the role in `postgres.dsn` owns the schema. To serve with a
+role that cannot change it, give `router migrate` a DSN of the owner's:
+
+```yaml
+postgres:
+  dsn: postgres://router_serving@global/router
+  migrate_dsn: postgres://router_owner@global/router
+  shard_dsn: postgres://router_serving@usw1/router # a hosted deployment's only
+  shard_migrate_dsn: postgres://router_owner@usw1/router
+```
+
+`router migrate` brings both databases up to date as the owner, then checks them as the serving
+role. With `migrate_dsn` set, `serve` and every other command that migrates on start only check:
+they change nothing, and refuse to start when a migration or an index of this release is missing,
+when the serving role is not granted a table or sequence, or when a table a move carries has no
+change trigger, or one that would record a secret column. They do not compare a trigger's other
+arguments, so a `router migrate` left to do nothing but change those is not noticed. They never
+connect with `migrate_dsn`, so only `router migrate` needs its password. Each shard's migrate runs
+with that shard's settings, and opens the Redis they name as a router does. `cmd/agent`,
+`cmd/chat`, `cmd/phone` and `cmd/say` read none of this and migrate with `ROUTER_POSTGRES_DSN`:
+run them as the owner.
+
+On each database, before the first `router migrate` as `router_owner`:
+
+```sql
+GRANT USAGE, CREATE ON SCHEMA public TO router_owner;
+GRANT USAGE ON SCHEMA public TO router_serving;
+ALTER DEFAULT PRIVILEGES FOR ROLE router_owner IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO router_serving;
+ALTER DEFAULT PRIVILEGES FOR ROLE router_owner IN SCHEMA public
+  GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO router_serving;
+```
+
+A database already migrated keeps its role as `router_owner`, and needs the same on what exists:
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO router_serving;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO router_serving;
+```
+
+A database made before Postgres 15 also lets every role create tables in `public`, the serving
+one too:
+
+```sql
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+```
+
+`router prices reload`, for a development database only, also needs `TRUNCATE` on
+`price_list_entries` and `price_changes`.
+
+To roll out a release, run its `router migrate` first and then its routers: one that starts before
+it has finished refuses and starts once it has. Routers of the release before go on serving and
+restarting on the newer schema as long as its migrations only expand it: a start is refused once
+an index or trigger it needs is gone, and nothing checks for a column. To roll back, run the older
+release's `router migrate` and then its routers. A release from before this setting migrates at
+start, so it needs the owner in `postgres.dsn`. A `router migrate` that cannot lock a table within
+3 seconds to attach its trigger fails, and is run again.
 
 ## Moving a customer
 
@@ -2953,6 +3052,16 @@ A row refused because another tenant here holds its key stops the move, and the 
 row by table and primary key, as `agent_configs:{"id":"config-1"}`. `router replicate` prints why.
 `POST /v1/data/import` answers 400 and says only that the row cannot be written here: pass the row
 to the operator of this deployment.
+
+A custom connector definition arrives only if the API would store it: it is held to the same id
+pattern, lengths, scope tokens and client rules, and a row that breaks one stops the move with a
+400 naming its id. Its endpoint is not resolved on the way in: a connection to it still dials only a public address.
+One rule is not a refusal: a definition with `oauth2_client_credentials`, which a custom connector
+could have before it lost that scheme, is left out and the move goes on, since no connection could
+use it. `POST /v1/data/import` names each one in `skipped`, as
+`connector_definitions:{"id":"custom_crm","revision":1}`, and `router replicate` logs it. `skipped` names the first 100, and `skipped_more` counts the rest. A row is named only if its id
+is a custom id and its revision a positive number; any other such row is refused as above. Recreate
+such a connector with another scheme where it arrives.
 
 Key rows, sealed secrets, OAuth access and refresh tokens, organizations and apps are not
 exported. A moved deployment mints its own keys and re-authorizes its plugin connections.

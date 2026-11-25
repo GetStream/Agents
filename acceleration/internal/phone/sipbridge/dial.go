@@ -30,9 +30,11 @@ func Dial(ctx context.Context, cfg Config) (*Call, error) {
 	// Checked before Stream is called, so a trunk at a private address places no
 	// call at all. Every request to the customer is checked again where it is sent.
 	guard := cfg.guard.withDefaults()
-	if _, err := guard.addrs(ctx, cfg.CustomerTrunk.Host); err != nil {
+	trunkIPs, err := guard.addrs(ctx, cfg.CustomerTrunk.Host)
+	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("sipbridge: customer trunk: %w", err))
 	}
+	cfg.trunkAddr = preferIPv4(trunkIPs).Unmap()
 
 	ua, customerClient, client, srvs, err := newUA(guard)
 	if err != nil {
@@ -46,6 +48,7 @@ func Dial(ctx context.Context, cfg Config) (*Call, error) {
 
 	call := newCall(ctx, customer, stream, log)
 	call.onChange = cfg.OnChange
+	call.trunkAddr = cfg.trunkAddr
 	for _, srv := range srvs {
 		handle(srv, reg, call)
 	}

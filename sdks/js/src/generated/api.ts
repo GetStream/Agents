@@ -1486,6 +1486,7 @@ export type paths = {
          * Fill a knowledge base with what the business wrote down
          * @description The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
          *     Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+         *     A document that is removed again and again while it is written is refused with a 409: post it again.
          *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
          */
         readonly post: operations["ingestKnowledge"];
@@ -1536,7 +1537,7 @@ export type paths = {
         readonly post?: never;
         /**
          * Take a document out of a knowledge base
-         * @description The passages it was cut into are removed too, so the agent stops answering out of it.
+         * @description The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, so it can be deleted again.
          *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
          */
         readonly delete: operations["deleteKnowledgeDocument"];
@@ -3475,6 +3476,26 @@ export type paths = {
          * @description Where the Telnyx account's notification channel sends account events, such as a port-out or a number order. Unauthenticated because Telnyx is not a customer: each event is checked against the account's Ed25519 signature, then logged and counted in vendor_account_events_total by its type and level. A deployment with no Telnyx key answers 404, so nobody else can raise the count.
          */
         readonly post: operations["receiveTelnyxEvent"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/v1/phone/hooks/twilio": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Receive a Twilio call
+         * @description Where Twilio asks what to do with a call to one of this router's Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number's own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.
+         */
+        readonly post: operations["receiveTwilioCall"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -7120,7 +7141,7 @@ export type components = {
             readonly navigating?: boolean;
             /** @description Server-side only: a device sending it is refused with a 403. */
             readonly phone?: components["schemas"]["SessionPhone"];
-            /** @description What the conversation belongs to. Also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins. */
+            /** @description What the conversation belongs to. Sent server-side it is also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in tags, or the agent config's, wins. A device's groups the session and is no cost tag. */
             readonly project_id?: string;
             /** @description How a conversation this session carries on is handed back to the model, over the agent config's and the app's and organization's policy, field by field: a field given here wins, one left out keeps the next level's. The session keeps what it was opened with, so reopening it after it ended reads the conversation the same way. Server-side only: a device sending it is refused with a 403, because what the model is sent is billed to the app. */
             readonly resume_history?: components["schemas"]["ResumeHistory"];
@@ -7347,6 +7368,13 @@ export type components = {
              * @description How many rows were written.
              */
             readonly rows: number;
+            /** @description The rows left out rather than written, by table and primary key, as connector_definitions:{"id":"custom_crm","revision":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set. */
+            readonly skipped?: readonly string[];
+            /**
+             * Format: int64
+             * @description How many more rows were left out than skipped names, which holds the first 100.
+             */
+            readonly skipped_more?: number;
             /** @description How many of them went into each table. */
             readonly tables?: {
                 readonly [key: string]: number;
@@ -7622,6 +7650,7 @@ export type components = {
             readonly messages?: boolean;
             /** @description Server-side only: a device sending it is refused with a 403. */
             readonly model_overwrites?: components["schemas"]["ModelOverwrites"];
+            /** @description What the fork belongs to. Omitted, the parent's is kept. Sent server-side it is also the "project" cost tag, as on createSession; a device's groups the fork, whose cost tag stays the project a backend named for its parent. A tag spelled out in a running parent's tags, or the agent config's, wins. */
             readonly project_id?: string;
             /** @description Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false. */
             readonly response_id?: string;
@@ -7880,13 +7909,13 @@ export type components = {
             readonly content_type: string;
             /** Format: date-time */
             readonly created_at: string;
-            /** @description Why the uploaded file could not be read, or why the passages of posted text could not all be written, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good. */
+            /** @description Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good. */
             readonly error?: string;
             readonly id: string;
             readonly namespace: string;
             /** @description How many pages the uploaded file has. 0 for text, and for a file without pages, such as a spreadsheet. */
             readonly pages: number;
-            /** @description How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote. */
+            /** @description How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote. An indexed one whose file was still being read when newer text or a newer file replaced it can count more than it was cut into, for the same reason, until it is written again. */
             readonly passages: number;
             /**
              * @description What the document was posted as, and what its passages are keyed by.
@@ -7982,7 +8011,7 @@ export type components = {
             readonly text: string;
         };
         /**
-         * @description Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, or posted text whose write stopped part way, and error says why: the passages written before the failure can still be looked up, and posting the document again or deleting it fixes it.
+         * @description Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
          * @enum {string}
          */
         readonly KnowledgeDocumentState: "pending" | "indexed" | "failed";
@@ -12442,7 +12471,7 @@ export interface operations {
     readonly getCallEvents: {
         readonly parameters: {
             readonly query?: {
-                /** @description How many to return, oldest first. */
+                /** @description How many to return, oldest first. Up to the 10000 a call keeps. */
                 readonly limit?: number;
             };
             readonly header?: never;
@@ -13534,7 +13563,7 @@ export interface operations {
                     readonly "text/plain": string;
                 };
             };
-            /** @description That is not this line's verify token */
+            /** @description The query is not this line's check: another mode or verify token, a challenge that is not digits, or a line that is not WhatsApp's */
             readonly 403: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -15699,6 +15728,15 @@ export interface operations {
             readonly 401: components["responses"]["Unauthorized"];
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
+            /** @description Conflict */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             readonly 500: components["responses"]["InternalError"];
             readonly 503: components["responses"]["Unavailable"];
         };
@@ -15839,6 +15877,15 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
+            /** @description Conflict */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             readonly 500: components["responses"]["InternalError"];
             readonly 503: components["responses"]["Unavailable"];
         };
@@ -17091,7 +17138,7 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
-            /** @description A session with that id already exists, or the call placed for this phone session ended without an answer (call_unanswered) */
+            /** @description A session with that id already exists, another session holds the conversation it names open, or the call placed for this phone session ended without an answer (call_unanswered) */
             readonly 409: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -18224,6 +18271,7 @@ export interface operations {
     readonly listSimulationRuns: {
         readonly parameters: {
             readonly query?: {
+                /** @description Up to 500. Omitted is 50. */
                 readonly limit?: number;
                 readonly simulation_id?: string;
                 readonly state?: "running" | "passed" | "failed" | "cancelled" | "errored";
@@ -20231,6 +20279,55 @@ export interface operations {
                 content?: never;
             };
             /** @description The event is over 64 KiB */
+            readonly 413: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            readonly 500: components["responses"]["InternalError"];
+        };
+    };
+    readonly receiveTwilioCall: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description TwiML dialling the number's trunk, rejecting the call, or hanging up */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/xml": string;
+                };
+            };
+            /** @description The body is not a form */
+            readonly 400: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The call is not signed by Twilio */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Twilio calls are not configured */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The call is over 64 KiB */
             readonly 413: {
                 headers: {
                     readonly [name: string]: unknown;
