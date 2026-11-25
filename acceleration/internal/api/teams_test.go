@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"runtime/pprof"
 	"strconv"
 	"strings"
@@ -828,6 +829,35 @@ func (s *AgentTeamsSuite) TestASlowTeamsReadHoldsUpNoOtherSocketOnTheNode() {
 	s.Equal(http.StatusSwitchingProtocols, status, "the backend's attach waited for anya's teams")
 }
 
+// A node running a chat that cannot read a relayed watcher's teams says so, and the socket is
+// told to try again, rather than taken for a chat no node runs and opened a second time on the
+// node it came to, whose own teams of Anya would let her through.
+func (s *AgentTeamsSuite) TestAWatcherFromAnotherNodeWhoseTeamsCannotBeReadIsToldToTryAgain() {
+	other, anya, opened := s.chatAnyasTeamsAreHeldForOnAnotherNode()
+	s.teamsChat.Fail(http.MethodGet, "/users")
+	s.T().Cleanup(func() { s.teamsChat.Heal(http.MethodGet, "/users") })
+
+	status, message := anya.on(other).refusal("/v1/agents/sessions/" + opened + "/events")
+
+	s.Equal(http.StatusServiceUnavailable, status, message)
+	s.Equal(errTeamsUnreadable.Message, message)
+	s.running(opened)
+}
+
+// The same holds for a read that takes longer than the socket waits: the node running the chat
+// stops asking in time to say so.
+func (s *AgentTeamsSuite) TestAWatcherFromAnotherNodeWhoseTeamsAreReadTooSlowlyIsToldToTryAgain() {
+	other, anya, opened := s.chatAnyasTeamsAreHeldForOnAnotherNode()
+	asking, _ := s.teamsChat.Hold("/users")
+
+	status, message := anya.on(other).refusal("/v1/agents/sessions/" + opened + "/events")
+
+	s.closedWithin(asking, "the node running the chat never asked Stream")
+	s.Equal(http.StatusServiceUnavailable, status, message)
+	s.Equal(errTeamsUnreadable.Message, message)
+	s.running(opened)
+}
+
 // A backend forks and carries on any session of another team or a deleted config, without
 // asking Stream, as it opens any config.
 func (s *AgentTeamsSuite) TestABackendForksAndCarriesOnASessionOfAnyTeamWithoutAskingStream() {
@@ -909,6 +939,19 @@ func (s *AgentTeamsSuite) runningChatAnyaLeft() (*testClient, string) {
 	s.teamsLapse(s.router)
 	s.running(opened.Id)
 	return anya, opened.Id
+}
+
+// chatAnyasTeamsAreHeldForOnAnotherNode is another node, Anya in team red, and the id of a red
+// chat of hers kept and running on the suite's node. The other node holds her teams, read by a
+// chat she opened there; the suite's node holds none of hers any more.
+func (s *AgentTeamsSuite) chatAnyasTeamsAreHeldForOnAnotherNode() (*httptest.Server, *testClient, string) {
+	other, _ := s.otherRouter(nil)
+	anya := s.inTeams("red")
+	config := s.configOf("red")
+	anya.on(other).createSession(s.naming(config))
+	opened := anya.createSession(s.recorded(config))
+	s.teamsLapse(s.router)
+	return other, anya, opened.Id
 }
 
 // running requires the session to be running on the suite's node, so that what a test asks

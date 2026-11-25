@@ -23,6 +23,10 @@ import (
 // Nothing answering means no node has it, which is a session that does not exist.
 const attachWait = 2 * time.Second
 
+// teamCheckWait bounds the holder's check of a relayed watcher's teams. It is short of
+// attachWait, so that a check that runs out is answered while the asker still waits.
+const teamCheckWait = attachWait * 3 / 4
+
 // remoteFrames is how many frames a relayed socket may fall behind by. It matches the
 // buffer a local watcher gets, for the same reason: a control channel whose reader has
 // stopped reading costs that reader some detail and nobody on the call anything. The other
@@ -65,9 +69,12 @@ type remoteSocket struct {
 	// attached carries the holder's answer, and is what the handler waits on before it
 	// upgrades: a socket opened before the answer would be one nothing is watching.
 	attached chan string
-	frames   chan json.RawMessage
-	closed   chan struct{}
-	once     sync.Once
+	// unavailable carries the holder's answer that it could not tell whether the caller may
+	// watch, which the handler answers as try again.
+	unavailable chan struct{}
+	frames      chan json.RawMessage
+	closed      chan struct{}
+	once        sync.Once
 	// halted is set before closed when the holder's router stopped the session.
 	halted atomic.Bool
 	// byCommand is set before closed when a close command this socket carried ended the
@@ -130,7 +137,9 @@ func (s *Server) newRelayed(ctx context.Context, bus *relay.Bus) (*relayed, erro
 
 // watchRemoteSession serves a watcher whose session is running on another node, reporting
 // whether it answered the request. It answers nothing when no node let this caller watch, so
-// the caller can be answered as for a session nobody is running.
+// the caller can be answered as for a session nobody is running. A node that has the session
+// but could not check the caller is answered as teams that could not be read: carrying the
+// session on here would open it a second time.
 //
 // Who may watch is decided by the node holding the session rather than here: it has the
 // session's own spec, where this node has at best a row written behind it. A node is not
@@ -141,9 +150,10 @@ func (s *Server) watchRemoteSession(w http.ResponseWriter, r *http.Request, id s
 	asked := resumingOf(r)
 	watcher := uuid.NewString()
 	socket := &remoteSocket{
-		attached: make(chan string, 1),
-		frames:   make(chan json.RawMessage, remoteFrames),
-		closed:   make(chan struct{}),
+		attached:    make(chan string, 1),
+		unavailable: make(chan struct{}, 1),
+		frames:      make(chan json.RawMessage, remoteFrames),
+		closed:      make(chan struct{}),
 	}
 
 	state.mu.Lock()
@@ -181,6 +191,9 @@ func (s *Server) watchRemoteSession(w http.ResponseWriter, r *http.Request, id s
 	select {
 	case <-socket.attached:
 		attached = true
+	case <-socket.unavailable:
+		writeError(w, errTeamsUnreadable)
+		return true
 	case <-time.After(attachWait):
 		// No node has it, or the node that has it will not let this caller watch. Both
 		// are answered the way a session that never existed is answered: a refusal would
@@ -372,19 +385,30 @@ func (s *Server) attachProxy(ctx context.Context, state *relayed, request relay.
 	state.expect(request.Watcher)
 	// And the one carryOn asks: an end user watches only while still in the team of the
 	// session's config. Stream is asked off the bus's one subscription, which every node's
-	// requests come in on, and for no longer than the asker waits for the answer.
+	// requests come in on, and for less time than the asker waits for the answer.
 	if owner.Kind != auth.KindServer && spec.ConfigID != "" {
 		go func() {
 			defer state.unexpect(request.Watcher)
-			asking, cancel := context.WithTimeout(ctx, attachWait)
+			asking, cancel := context.WithTimeout(ctx, teamCheckWait)
 			defer cancel()
-			if err := s.refuseOwnerOutsideTeam(asking, owner, spec.ConfigID); err != nil {
+			err := s.refuseOwnerOutsideTeam(asking, owner, spec.ConfigID)
+			switch {
+			case err == nil:
+				s.holdProxyFor(ctx, state, request, found, owner)
+			case errors.Is(err, errUnknownConfig):
+				// Out of the team is answered as no node running the session is.
+			default:
+				// A check that could not be made is said, or the asker would take the session for
+				// one no node runs and carry it on a second time.
 				if _, refused := errors.AsType[APIError](err); !refused {
 					s.logger.Error("could not check a relayed watcher's team", "session", request.Session, "error", err)
 				}
-				return
+				if err := state.bus.Publish(ctx, state.bus.Events(), relay.Response{
+					Type: relay.Unavailable, Node: state.bus.Node(), Watcher: request.Watcher,
+				}); err != nil {
+					s.logger.Error("could not answer an attach", "session", request.Session, "error", err)
+				}
 			}
-			s.holdProxyFor(ctx, state, request, found, owner)
 		}()
 		return
 	}
@@ -560,6 +584,11 @@ func (r *relayed) deliver(payload []byte) {
 		r.attach(response.Watcher, response.Owner)
 		return
 	}
+	// Nor can the answer that the holder could not decide, which is the other one an attach gets.
+	if response.Type == relay.Unavailable {
+		r.unavailable(response.Watcher)
+		return
+	}
 	if !r.filter.Has(response.Owner) {
 		return
 	}
@@ -606,6 +635,21 @@ func (r *relayed) attach(watcher, owner string) {
 
 	select {
 	case socket.attached <- owner:
+	default:
+	}
+}
+
+// unavailable hands the socket the holder's answer that it could not decide its attach.
+func (r *relayed) unavailable(watcher string) {
+	r.mu.Lock()
+	socket := r.sockets[watcher]
+	r.mu.Unlock()
+	if socket == nil {
+		return
+	}
+
+	select {
+	case socket.unavailable <- struct{}{}:
 	default:
 	}
 }
