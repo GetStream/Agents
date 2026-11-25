@@ -80,7 +80,8 @@ func (s *Service) BackfillOwnerKinds(ctx context.Context, held *store.Store, mod
 //   - a guest's, unless the id is still a guest no router minted, and the mode is not proxy: a
 //     minted guest's refreshed token, and any behind a proxy, says no role, and an id that is an
 //     account's now went on as a signed-in user. One an import brought as minted is left out
-//     wherever its customer acts: the deployment's app may be its own without this knowing it;
+//     wherever its customer acts: that may be the deployment's app, and its own without this knowing
+//     it, where they are refreshed to no role;
 //   - a signed-in user's of an id a guest whose token said the role held a session under
 //     (Sessions.HeldAsGuest), or that is still a guest not known as minted, here or, for a
 //     customer acting in its own Stream app, where an import brought it from: their token says
@@ -131,13 +132,15 @@ func (s *Service) backfillOwnerKind(ctx context.Context, held *store.Store, mode
 			return OwnerKindFailed, err
 		}
 		minted := guest.Minted
-		if guest.MintedElsewhere && !minted {
-			// Their token is refreshed in the app their customer acts in, wherever this is kept.
-			_, acting, err := s.chats.For(ctx, customer)
-			if err != nil {
+		if kind == auth.KindAuthenticated && mode != auth.Proxy && guest.MintedElsewhere && !minted {
+			// Their token is refreshed in the app their customer acts in, wherever this is kept. A
+			// customer that acts in none, or in none it may write to, acts in none of its own.
+			acting, err := s.chats.Placed(ctx, customer)
+			refused := errors.Is(err, streamapp.ErrNoIdentity) || parked(err)
+			if err != nil && !refused {
 				return OwnerKindFailed, stack.Wrap(err)
 			}
-			minted = streamapp.Own(customer, acting, s.chats.DeploymentApp())
+			minted = !refused && streamapp.Own(customer, acting, s.chats.DeploymentApp())
 		}
 		keepsTheRole := err == nil && !minted && mode != auth.Proxy
 		if kind == auth.KindGuest && (!keepsTheRole || guest.MintedElsewhere) {

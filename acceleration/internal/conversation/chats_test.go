@@ -78,6 +78,11 @@ func (a *twoApps) ForAppReading(ctx context.Context, customer string, app int64)
 	return a.ForApp(ctx, customer, app)
 }
 
+func (a *twoApps) Placed(ctx context.Context, customer string) (int64, error) {
+	_, app, err := a.For(ctx, customer)
+	return app, err
+}
+
 func (a *twoApps) DeploymentApp() int64 { return a.pk }
 
 // replied opens a conversation in an app, writes one exchange into it and waits for it to

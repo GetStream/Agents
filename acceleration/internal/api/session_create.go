@@ -356,8 +356,7 @@ func (s *Server) refuseCallOutside(ctx context.Context, customerID string, call 
 	return nil
 }
 
-// ownApp reports whether app is the customer's own Stream app, as ownKey in the session
-// manager tells it (streamapp.Own).
+// ownApp reports whether app is the customer's own Stream app (streamapp.Own).
 func (s *Server) ownApp(customerID string, app int64) bool {
 	var deployment int64
 	if s.stream != nil {

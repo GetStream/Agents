@@ -18,6 +18,8 @@ import (
 type Chats interface {
 	// For is the client and pin a new conversation for a customer is kept with.
 	For(ctx context.Context, customer string) (*getstream.Stream, int64, error)
+	// Placed is the pin For answers, read without acting for the customer.
+	Placed(ctx context.Context, customer string) (int64, error)
 	// ForApp is the client a conversation already pinned to an app is reached with.
 	ForApp(ctx context.Context, customer string, app int64) (*getstream.Stream, error)
 	// DeploymentApp is the deployment's own app id, zero while it is not known.
@@ -38,6 +40,8 @@ type oneChat struct {
 func (o oneChat) For(context.Context, string) (*getstream.Stream, int64, error) {
 	return o.client, 0, nil
 }
+
+func (o oneChat) Placed(context.Context, string) (int64, error) { return 0, nil }
 
 func (o oneChat) ForApp(context.Context, string, int64) (*getstream.Stream, error) {
 	return o.client, nil
@@ -83,6 +87,10 @@ func (a streamApps) DeploymentApp() int64 { return a.clients.DeploymentApp() }
 // readingChats is Chats that can read back a conversation it would no longer write to.
 type readingChats interface {
 	ForAppReading(ctx context.Context, customer string, app int64) (*getstream.Stream, error)
+}
+
+func (a streamApps) Placed(ctx context.Context, customer string) (int64, error) {
+	return a.clients.Placed(ctx, customer)
 }
 
 // parked reports whether an error means the conversation's app cannot be reached from here
