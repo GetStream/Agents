@@ -168,16 +168,17 @@ type ConnectorPage struct {
 // for an agent (Agentrc.Hash in GetStream/cli internal/agentrc/agentrc.go), and printable
 // ASCII without a space, so it holds no NUL, which a Postgres text column refuses.
 type CustomConnectorRequest struct {
-	ID           string           `json:"id" pattern:"^custom_[a-z][a-z0-9_]{0,56}$" patternDescription:"custom_ then a lowercase letter, then up to 56 lowercase letters, digits or underscores" doc:"Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same."`
-	Name         string           `json:"name" minLength:"1" maxLength:"120"`
-	Category     string           `json:"category,omitempty" maxLength:"80"`
-	Description  string           `json:"description,omitempty" maxLength:"1000"`
-	Endpoint     string           `json:"endpoint" maxLength:"2048" doc:"The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused."`
-	Schemes      []string         `json:"schemes" minItems:"1" doc:"How a connection may authenticate. Each must be a scheme this deployment has, except oauth2_client_credentials, which a custom connector cannot use: it needs a token endpoint a custom connector cannot set."`
-	Scopes       []string         `json:"scopes,omitempty" maxItems:"100" uniqueItems:"true" pattern:"^[!#-\\[\\]-~]+$" patternDescription:"an RFC 6749 scope token" doc:"The scopes a consent asks for, each an RFC 6749 scope token."`
-	Client       *ConnectorClient `json:"client,omitempty"`
-	SyncHash     string           `json:"sync_hash,omitempty" maxLength:"128" pattern:"^[!-~]*$" patternDescription:"printable ASCII without a space" doc:"The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one."`
-	CheckChanges bool             `json:"check_changes,omitempty" doc:"Refuse the create, with unsynced_changes (409), when the newest revision of the id carries no sync_hash, because no sync wrote it, and says something else than this definition: a sync would write over an edit made outside it, in the dashboard, say. The same definition is not refused. Omitted, the create stores the next revision, as a sync that means to write over the edit wants."`
+	ID          string           `json:"id" pattern:"^custom_[a-z][a-z0-9_]{0,56}$" patternDescription:"custom_ then a lowercase letter, then up to 56 lowercase letters, digits or underscores" doc:"Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same."`
+	Name        string           `json:"name" minLength:"1" maxLength:"120"`
+	Category    string           `json:"category,omitempty" maxLength:"80"`
+	Description string           `json:"description,omitempty" maxLength:"1000"`
+	Endpoint    string           `json:"endpoint" maxLength:"2048" doc:"The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused."`
+	Schemes     []string         `json:"schemes" minItems:"1" doc:"How a connection may authenticate. Each must be a scheme this deployment has, except oauth2_client_credentials, which a custom connector cannot use: it needs a token endpoint a custom connector cannot set."`
+	Scopes      []string         `json:"scopes,omitempty" maxItems:"100" uniqueItems:"true" pattern:"^[!#-\\[\\]-~]+$" patternDescription:"an RFC 6749 scope token" doc:"The scopes a consent asks for, each an RFC 6749 scope token."`
+	Client      *ConnectorClient `json:"client,omitempty"`
+	SyncHash    string           `json:"sync_hash,omitempty" maxLength:"128" pattern:"^[!-~]*$" patternDescription:"printable ASCII without a space" doc:"The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one."`
+
+	CheckChanges bool `json:"check_changes,omitempty" doc:"Refuse the create, with unsynced_changes (409), when the newest revision of the id carries no sync_hash, because no sync wrote it, and says something else than this definition: a sync would write over an edit made outside it, in the dashboard, say. The same definition is not refused. Omitted, the create stores the next revision, as a sync that means to write over the edit wants."`
 }
 
 func (*CustomConnectorRequest) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
