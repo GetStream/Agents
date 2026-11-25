@@ -7344,6 +7344,12 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<string>? Skipped { get; set; } = default!;
 
         /// <summary>
+        /// How many more rows were left out than skipped names, which holds the first 100.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("skipped_more")]
+        public long? SkippedMore { get; set; } = default!;
+
+        /// <summary>
         /// How many of them went into each table.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("tables")]

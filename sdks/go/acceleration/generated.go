@@ -6638,6 +6638,9 @@ type DataImport struct {
 	// Skipped The rows left out rather than written, by table and primary key, as connector_definitions:{"id":"custom_crm","revision":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set.
 	Skipped *[]string `json:"skipped,omitempty"`
 
+	// SkippedMore How many more rows were left out than skipped names, which holds the first 100.
+	SkippedMore *int64 `json:"skipped_more,omitempty"`
+
 	// Tables How many of them went into each table.
 	Tables *map[string]int64 `json:"tables,omitempty"`
 }

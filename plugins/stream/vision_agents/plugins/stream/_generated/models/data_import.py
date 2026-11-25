@@ -27,12 +27,14 @@ class DataImport:
             connector_definitions:{"id":"custom_crm","revision":1}. Such a row is a custom connector definition with
             oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector
             cannot set.
+        skipped_more (int | Unset): How many more rows were left out than skipped names, which holds the first 100.
     """
 
     rows: int
     cursor: int | Unset = UNSET
     tables: DataImportTables | Unset = UNSET
     skipped: list[str] | Unset = UNSET
+    skipped_more: int | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -48,6 +50,8 @@ class DataImport:
         if not isinstance(self.skipped, Unset):
             skipped = self.skipped
 
+        skipped_more = self.skipped_more
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -61,6 +65,8 @@ class DataImport:
             field_dict["tables"] = tables
         if skipped is not UNSET:
             field_dict["skipped"] = skipped
+        if skipped_more is not UNSET:
+            field_dict["skipped_more"] = skipped_more
 
         return field_dict
 
@@ -82,11 +88,14 @@ class DataImport:
 
         skipped = cast(list[str], d.pop("skipped", UNSET))
 
+        skipped_more = d.pop("skipped_more", UNSET)
+
         data_import = cls(
             rows=rows,
             cursor=cursor,
             tables=tables,
             skipped=skipped,
+            skipped_more=skipped_more,
         )
 
         data_import.additional_properties = d

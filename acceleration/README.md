@@ -2937,7 +2937,8 @@ pattern, lengths, scope tokens and client rules, and a row that breaks one stops
 One rule is not a refusal: a definition with `oauth2_client_credentials`, which a custom connector
 could have before it lost that scheme, is left out and the move goes on, since no connection could
 use it. `POST /v1/data/import` names each one in `skipped`, as
-`connector_definitions:{"id":"custom_crm","revision":1}`, and `router replicate` logs it. Recreate
+`connector_definitions:{"id":"custom_crm","revision":1}`, and `router replicate` logs it. `skipped` names the first 100, and `skipped_more` counts the rest. A row is named only if its id
+is a custom id and its revision a positive number; any other such row is refused as above. Recreate
 such a connector with another scheme where it arrives.
 
 Key rows, sealed secrets, OAuth access and refresh tokens, organizations and apps are not
