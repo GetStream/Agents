@@ -48,6 +48,9 @@ const (
 
 	// Attached answers an attach, and is what the socket waits for before it upgrades.
 	Attached = "attached"
+	// Unavailable answers an attach the holder could not decide, its check of the caller having
+	// failed: the socket is told to try again, rather than taken for one no node is running.
+	Unavailable = "unavailable"
 	// Frame is one of the session's events, already rendered.
 	Frame = "frame"
 	// Closed says the session ended or the proxy watcher was dropped.
@@ -98,7 +101,7 @@ type Request struct {
 
 // Response is one message from the node holding a session to the node holding the socket.
 type Response struct {
-	// Type is Attached, Frame or Closed.
+	// Type is Attached, Unavailable, Frame or Closed.
 	Type string `json:"type"`
 	Node string `json:"node"`
 	// Owner is the session's owner, which is the key the receiving node filters on before

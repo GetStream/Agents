@@ -363,7 +363,7 @@ func (s *LifecycleSuite) TestATimerDueWhileTheGateIsHeldFiresOnceItIsLetGo() {
 		require.NoError(t, err)
 		box.box = &sdk.Sandbox{ID: "sandbox-1"}
 		box.gate <- struct{}{}
-		box.done()
+		box.done(t.Context())
 		// Work takes the gate and holds it past the idle stop, as the delete closeLater makes
 		// after a run can, so the timer the run armed fires and finds the gate held. The work
 		// then arms the timer again, due at once, before it lets the gate go.

@@ -2419,6 +2419,11 @@ func (c *testClient) refusal(path string) (int, string) {
 
 // dial opens a socket with the client's credentials, the way watch describes.
 func (c *testClient) dial(path string) (*websocket.Conn, *http.Response, error) {
+	return c.dialWith(websocket.DefaultDialer, path)
+}
+
+// dialWith is dial through dialer.
+func (c *testClient) dialWith(dialer *websocket.Dialer, path string) (*websocket.Conn, *http.Response, error) {
 	address := "ws" + strings.TrimPrefix(c.base(), "http") + path
 	query := url.Values{}
 	if key := c.header.Get(auth.APIKeyHeader); key != "" {
@@ -2436,7 +2441,37 @@ func (c *testClient) dial(path string) (*websocket.Conn, *http.Response, error) 
 		}
 	}
 
-	return websocket.DefaultDialer.Dial(address, c.header.Clone())
+	return dialer.Dial(address, c.header.Clone())
+}
+
+// handshaking starts opening the socket at path and returns what gives it up: its connection is
+// closed before the router answers, as a client that stops waiting does.
+func (c *testClient) handshaking(path string) (giveUp func()) {
+	connected := make(chan net.Conn, 1)
+	dialer := &websocket.Dialer{NetDialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		connection, err := (&net.Dialer{}).DialContext(ctx, network, address)
+		if err == nil {
+			connected <- connection
+		}
+		return connection, err
+	}}
+	answered := make(chan struct{})
+	go func() {
+		defer close(answered)
+		if connection, _, err := c.dialWith(dialer, path); err == nil {
+			_ = connection.Close()
+		}
+	}()
+	var connection net.Conn
+	select {
+	case connection = <-connected:
+	case <-answered:
+		c.suite.Require().FailNow("the socket " + path + " never connected")
+	}
+	return func() {
+		_ = connection.Close()
+		<-answered
+	}
 }
 
 // opens a socket the handshake must accept.

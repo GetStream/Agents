@@ -793,10 +793,17 @@ func (s *SessionConnectorsSuite) binding(alias, connector, selection, connection
 // config is a new agent config of the suite's app, on the connecting model, binding
 // bindings through the config endpoint (T20).
 func (s *SessionConnectorsSuite) config(bindings ...map[string]any) string {
+	return s.configTagged(nil, bindings...)
+}
+
+// configTagged is config with tags, none for nil.
+func (s *SessionConnectorsSuite) configTagged(tags map[string]string, bindings ...map[string]any) string {
+	request := map[string]any{"name": "connectors-" + s.utils.uuid(), "llm": "connecting/connector-model", "connectors": bindings}
+	if tags != nil {
+		request["tags"] = tags
+	}
 	var created AgentConfig
-	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", map[string]any{
-		"name": "connectors-" + s.utils.uuid(), "llm": "connecting/connector-model", "connectors": bindings,
-	}, &created))
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", request, &created))
 	return created.Id
 }
 

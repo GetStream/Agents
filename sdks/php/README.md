@@ -56,8 +56,8 @@ $client = new Client();
 Every argument falls back to the environment: `STREAM_ACCELERATION_URL`,
 `STREAM_ACCELERATION_CUSTOMER_ID`, `STREAM_API_KEY`, `STREAM_API_SECRET`,
 `STREAM_ACCELERATION_AUTHENTICATE`, so `new Client()` is usually enough. With no URL the client
-goes to Stream's hosted router in us-east4, through its authenticating proxy; `region: 'europe-west4'`
-or `STREAM_ACCELERATION_REGION` sends it to the hosted router in another region. Pass the client to
+goes to Stream's hosted router in the nearest healthy region, through its authenticating proxy; `region: 'europe-west4'`
+or `STREAM_ACCELERATION_REGION` pins it to one region. Pass the client to
 anything that talks to the router: `new Agent(..., client: $client)`.
 
 ## Conversations, responses, rewind and fork

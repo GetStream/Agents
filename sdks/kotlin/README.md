@@ -55,7 +55,7 @@ voice.join()
 agents.disconnect()
 ```
 
-`StreamAgents(apiKey = ...)` reaches Stream's hosted router in us-east4; pass `url` for another router. For another
+`StreamAgents(apiKey = ...)` reaches Stream's hosted router in the nearest healthy region; pass `url` for another router. To pin one
 region, pass `url = Backend.regionUrl("europe-west4")`. A router
 running locally with nothing in front of it is reached by customer id instead:
 `StreamAgents(url = "http://localhost:8080", customerId = "acme")`. Pass `apiKey` beside it and
