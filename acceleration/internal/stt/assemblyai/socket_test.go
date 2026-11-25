@@ -115,7 +115,7 @@ func (s *AssemblyAISocketSuite) startAgainst(greeting string, options Options) e
 	provider, err := New(options)
 	s.Require().NoError(err)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "stt", "universal"), 5*time.Second)
 	defer cancel()
 	return provider.Start(ctx)
 }
@@ -212,9 +212,9 @@ func (s *AssemblyAISocketSuite) refusedOn(greeting string) float64 {
 // countedUnder is how many refusals ASSEMBLYAI_API_KEY's pool counted under status while a
 // provider started against a server that greets it with this frame.
 func (s *AssemblyAISocketSuite) countedUnder(status, greeting string) float64 {
-	before := keypooltest.Refused(s.T(), apiKeyEnvVar, status)
+	before := keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/"+status]
 	s.Require().Error(s.startAgainst(greeting, Options{}))
-	return keypooltest.Refused(s.T(), apiKeyEnvVar, status) - before
+	return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/"+status] - before
 }
 
 func (s *AssemblyAISocketSuite) TestAnInvalidKeyFrameIsCountedAsAnInvalidKey() {

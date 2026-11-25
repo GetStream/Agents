@@ -100,6 +100,10 @@ type ElevenLabsSuite struct {
 }
 
 // refusals is how many refusals of status the pool of ELEVENLABS_API_KEY has counted.
+func callerRefusals(t *testing.T, status string) float64 {
+	return keypooltest.Series(t, "router_keypool_refused_attempts_total", "ELEVENLABS_API_KEY")["/customer/tts/"+status]
+}
+
 func refusals(t *testing.T, status string) float64 {
 	return keypooltest.Refused(t, "ELEVENLABS_API_KEY", status)
 }
@@ -127,7 +131,7 @@ func (s *ElevenLabsSuite) connect(fake *fakeElevenLabs, options Options) (*TTS, 
 	}
 	provider := s.newTTS(options)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "tts", "eleven"), 5*time.Second)
 	s.T().Cleanup(cancel)
 	s.Require().NoError(provider.Start(ctx))
 
@@ -1090,7 +1094,7 @@ func (s *ElevenLabsSuite) refusedBy(frames ...string) float64 {
 	defer fake.close()
 	provider, conn := s.connect(fake, Options{APIKey: "sk_" + rand.Text()})
 	defer provider.Close()
-	before := refusals(s.T(), "invalid_key")
+	before := callerRefusals(s.T(), "invalid_key")
 
 	for _, frame := range frames {
 		s.Require().NoError(conn.WriteMessage(websocket.TextMessage, []byte(frame)))
@@ -1102,7 +1106,7 @@ func (s *ElevenLabsSuite) refusedBy(frames ...string) float64 {
 		}
 		return failures == len(frames)
 	})
-	return refusals(s.T(), "invalid_key") - before
+	return callerRefusals(s.T(), "invalid_key") - before
 }
 
 func (s *ElevenLabsSuite) TestAnInvalidKeyFrameIsCountedOncePerConnection() {
