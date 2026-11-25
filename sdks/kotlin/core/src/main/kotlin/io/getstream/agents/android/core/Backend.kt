@@ -90,6 +90,9 @@ public class Backend(
         /** This SDK and its release, as the router reads it: any client named stream-agents- is an SDK. */
         internal const val CLIENT: String = "stream-agents-kotlin-v" + BuildConfig.SDK_VERSION
 
+        /** This SDK and its release, for the router's request log, in place of OkHttp's own. */
+        internal const val USER_AGENT: String = "stream-agents-kotlin/" + BuildConfig.SDK_VERSION
+
         /**
          * Stream's hosted router held to one [region], such as us-east4: requests to it are
          * served there and nowhere else, even when that region is full or down.
@@ -247,10 +250,14 @@ public class Backend(
      * read it.
      *
      * `X-Stream-Client` names this SDK and its release, which the router counts its requests
-     * under.
+     * under, and `User-Agent` names them again for its request log.
      */
     internal suspend fun headers(): Map<String, String> {
-        val headers = linkedMapOf("Stream-Auth-Type" to "jwt", CLIENT_HEADER to CLIENT)
+        val headers = linkedMapOf(
+            "Stream-Auth-Type" to "jwt",
+            CLIENT_HEADER to CLIENT,
+            "User-Agent" to USER_AGENT,
+        )
         val who = identity
         if (customerId.isNotEmpty()) {
             headers["X-Customer-Id"] = customerId

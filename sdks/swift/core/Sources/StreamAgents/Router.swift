@@ -11,8 +11,7 @@ import Foundation
 /// It comes from `StreamAgents.router(config:tags:)`, which is where the URL and credentials
 /// were settled. Transcription, a voice and a model are not here. Those run over the
 /// per-modality socket, which the router refuses to a device, so a pipeline of your own
-/// belongs to a backend and has the Go or the Python SDK. Everything the named config holds is
-/// a default that a per-call option overrides.
+/// belongs to a backend and has the Go or the Python SDK.
 public struct Router: Sendable {
     public let backend: Backend
 
@@ -29,12 +28,11 @@ public struct Router: Sendable {
         self.tags = tags
     }
 
-    /// Answers one question out of what is true now.
-    public func search(
-        _ query: String,
-        options: SearchOptions = SearchOptions()
-    ) async throws -> SearchAnswer {
-        let body = SearchRequest(configId: named(), options: options.schema, query: query, tags: labels())
+    /// Answers one question out of what is true now, run as `config` says, or as the app's
+    /// default does. How a search is run, and so what it costs, is the app's backend's to choose.
+    /// Each search counts as one message on the device's daily quota.
+    public func search(_ query: String) async throws -> SearchAnswer {
+        let body = SearchRequest(configId: named(), query: query, tags: labels())
         return SearchAnswer(try await call { try await $0.search(searchRequest: body) })
     }
 
