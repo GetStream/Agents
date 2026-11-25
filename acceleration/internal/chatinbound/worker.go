@@ -37,7 +37,7 @@ const inFlight = 64
 var defaultRetries = []time.Duration{2 * time.Second, 10 * time.Second, 30 * time.Second, 2 * time.Minute, 10 * time.Minute}
 
 // pruneEvery is how often a worker deletes the rows past their keep: a day for an answered
-// message, 30 days for a given-up one (store.PruneChatInbound), so an hour late is nothing.
+// message, 30 days for a given-up one (store.ChatInbounds.Prune), so an hour late is nothing.
 // A choice, the channel bridge's.
 const pruneEvery = time.Hour
 
@@ -178,8 +178,7 @@ func (w *Worker) answerDue(ctx context.Context) (wait time.Duration, again bool)
 	if free == 0 {
 		return 0, false
 	}
-	now := time.Now()
-	claimed, err := w.store.ChatInbounds.Claim(ctx, now, free, now.Add(w.lease))
+	claimed, err := w.store.ChatInbounds.Claim(ctx, free, w.lease)
 	if err != nil {
 		if ctx.Err() == nil {
 			w.logger.Error("could not take the chat inbound messages due", "error", err)

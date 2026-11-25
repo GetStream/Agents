@@ -3,14 +3,26 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"runtime/pprof"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/relay"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -77,14 +89,136 @@ func (s *AgentTeamsSuite) inDeploymentApp(app int64, key, secret, url string) st
 	}
 }
 
-func (s *AgentTeamsSuite) TestAUserOpensAConfigOfTheirTeamAskingStreamEachTime() {
+// A user's teams are asked of Stream once for teamsFor: two messages to a running chat within it
+// ask nothing more, and one after it asks again.
+func (s *AgentTeamsSuite) TestAUsersTeamsAreAskedOfStreamOnceForAsLongAsTheyAreHeld() {
 	anya := s.inTeams("red")
-	config := s.configOf("red")
 	asked := s.teamReads()
+	opened := anya.createSession(s.naming(s.configOf("red")))
+	s.Require().Equal(asked+1, s.teamReads(), "opening the chat asked")
+
+	s.Equal(http.StatusAccepted, s.status(anya.call(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/responses", s.asking())))
+	s.Equal(http.StatusAccepted, s.status(anya.call(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/responses", s.asking())))
+	s.Equal(asked+1, s.teamReads(), "two messages within teamsFor asked nothing more")
+
+	s.teamsLapse(s.router)
+	s.Equal(http.StatusAccepted, s.status(anya.call(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/responses", s.asking())))
+	s.Equal(asked+2, s.teamReads(), "a message after teamsFor asked again")
+}
+
+// However many users ask, a router holds the teams of at most maxHeldTeams of them.
+func (s *AgentTeamsSuite) TestARouterHoldsTheTeamsOfAtMostMaxHeldTeamsUsers() {
+	held := newHeldTeams()
+
+	for user := range maxHeldTeams + 1 {
+		held.keep(strconv.Itoa(user), []string{"red"})
+	}
+
+	s.LessOrEqual(len(held.read), maxHeldTeams)
+}
+
+// The teams a router holds are one user's in one app: the same user id in another app is asked
+// of that app's Stream.
+func (s *AgentTeamsSuite) TestTheTeamsHeldForAUserAreNotLentToTheSameIdInAnotherApp() {
+	anya := s.inTeams("red")
+	s.Require().Equal(http.StatusCreated, anya.do(http.MethodPost, "/v1/agents/sessions", s.naming(s.configOf("red")), nil))
+
+	s.useTeamsApp(store.AppSettings{AgentTeams: new(true)})
+	namesake := s.data.signedInAs(anya.userID)
+	s.teamsChat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+
+	s.Equal(http.StatusNotFound, namesake.do(http.MethodPost, "/v1/agents/sessions", s.naming(s.configOf("red")), nil))
+}
+
+// Teams held that refuse are asked of Stream again before the refusal stands, so a user added to
+// a team right after being refused its agent is let in on the next ask, not once teamsFor passed.
+func (s *AgentTeamsSuite) TestAUserAddedToATeamRightAfterARefusalIsLetInOnTheNextAsk() {
+	anya := s.inTeams("blue")
+	config := s.configOf("red")
+	s.Require().Equal(http.StatusNotFound, anya.do(http.MethodPost, "/v1/agents/sessions", s.naming(config), nil))
+	s.teamsChat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue", "red"}})
 
 	s.Equal(http.StatusCreated, anya.do(http.MethodPost, "/v1/agents/sessions", s.naming(config), nil))
-	s.Equal(http.StatusCreated, anya.do(http.MethodPost, "/v1/agents/sessions", s.naming(config), nil))
-	s.Equal(asked+2, s.teamReads(), "no teams are kept between sessions")
+}
+
+// A user taken out of a team who goes on writing to its agent is refused each time, and costs
+// Stream one more read of their teams each teamsRecheck, not one a message.
+func (s *AgentTeamsSuite) TestAUserRefusedOverAndOverAsksStreamOnceEachTeamsRecheck() {
+	anya, opened := s.runningChatAnyaLeft()
+	s.teamsStill(s.router)
+	asked := s.teamReads()
+	writes := func() {
+		for range 5 {
+			s.Equal(http.StatusNotFound, s.status(anya.call(http.MethodPost, "/v1/agents/sessions/"+opened+"/responses", s.asking())))
+		}
+	}
+
+	writes()
+	s.Equal(asked+2, s.teamReads(), "read once the held teams lapsed, then asked again once")
+	s.teamsAge(s.router, teamsRecheck)
+	writes()
+	s.Equal(asked+3, s.teamReads(), "asked again once more after teamsRecheck")
+}
+
+// While Stream cannot be asked again, the held teams' refusal stands rather than turning into
+// a 503, or into the no teams a failed read told, and each refusal does not try Stream again. A
+// config of no team is the one no teams would open.
+func (s *AgentTeamsSuite) TestARefusalOfHeldTeamsStandsWhileStreamCannotBeAskedAgain() {
+	anya := s.inTeams("blue")
+	config := s.configOf("")
+	s.teamsStill(s.router)
+	s.Require().Equal(http.StatusNotFound, anya.do(http.MethodPost, "/v1/agents/sessions", s.naming(config), nil))
+	s.teamsChat.Fail(http.MethodGet, "/users")
+	s.T().Cleanup(func() { s.teamsChat.Heal(http.MethodGet, "/users") })
+	asked := s.teamReads()
+
+	for range 3 {
+		status, message := anya.failure(http.MethodPost, "/v1/agents/sessions", s.naming(config))
+		s.Equal(http.StatusNotFound, status, message)
+		s.Equal(errUnknownConfig.Message, message)
+	}
+	s.Equal(asked+1, s.teamReads(), "a failed read counts as the one ask of teamsRecheck")
+}
+
+// A gate whose held teams are gone by the time Stream would be asked again keeps its refusal: no
+// teams to go by is not a user in no team, whom a config of no team would let in.
+func (s *AgentTeamsSuite) TestARefusalWhoseHeldTeamsAreGoneStands() {
+	gate := teamsGate{checked: true, teams: []string{"blue"}, again: func(context.Context) ([]string, bool) {
+		return nil, false
+	}}
+
+	s.True(gate.refuses(s.T().Context(), store.AgentConfig{}))
+}
+
+// Refusals of one user's held teams made while Stream is asked again wait for that one read and
+// take what it told, rather than asking it each or standing on the teams held before.
+func (s *AgentTeamsSuite) TestRefusalsWhileStreamIsAskedAgainWaitForItsOneAnswer() {
+	synctest.Test(s.T(), func(t *testing.T) {
+		held := newHeldTeams()
+		held.keep("anya", nil)
+		var reads atomic.Int32
+		told := make(chan struct{})
+		read := func(context.Context) ([]string, error) {
+			reads.Add(1)
+			<-told
+			return []string{"red"}, nil
+		}
+		answers := make(chan []string, 3)
+		for range 3 {
+			go func() {
+				teams, _, _ := held.again(t.Context(), "anya", read)
+				answers <- teams
+			}()
+		}
+
+		synctest.Wait()
+		asked := reads.Load()
+		close(told)
+		require.Equal(t, int32(1), asked, "each refusal asked Stream")
+		for range 3 {
+			require.Equal(t, []string{"red"}, <-answers, "a refusal took the teams held before the read")
+		}
+	})
 }
 
 func (s *AgentTeamsSuite) TestAConfigOfAnotherTeamIsAnsweredAsAnUnknownOne() {
@@ -162,6 +296,15 @@ func (s *AgentTeamsSuite) TestACallerWithNoTokenIsInNoTeamWhoeverItClaimsToBe() 
 	s.Equal(http.StatusNotFound, claiming.do(http.MethodPost, "/v1/agents/sessions", s.naming(s.configOf("red")), nil))
 	s.Equal(http.StatusCreated, claiming.do(http.MethodPost, "/v1/agents/sessions", s.naming(s.configOf("")), nil))
 	s.Equal(asked, s.teamReads(), "Stream is not asked about the user it claims to be")
+}
+
+// Nor does it borrow the teams the router holds for that user from a request of their own.
+func (s *AgentTeamsSuite) TestACallerWithNoTokenDoesNotBorrowTheTeamsHeldForTheUserItClaimsToBe() {
+	anya := s.inTeams("red")
+	s.Require().Equal(http.StatusCreated, anya.do(http.MethodPost, "/v1/agents/sessions", s.naming(s.configOf("red")), nil))
+	claiming := s.data.claiming(anya.userID)
+
+	s.Equal(http.StatusNotFound, claiming.do(http.MethodPost, "/v1/agents/sessions", s.naming(s.configOf("red")), nil))
 }
 
 func (s *AgentTeamsSuite) TestAFailedTeamsReadOpensNothing() {
@@ -263,7 +406,7 @@ func (s *AgentTeamsSuite) TestTheDeploymentAppsOwnCustomerReadsItsUsersTeamsTher
 	s.Equal(missing, refused, "the same answer as a config that does not exist")
 	s.Equal(http.StatusCreated, dana.do(http.MethodPost, "/v1/agents/sessions", s.naming(s.configOf("")), nil))
 	s.Equal(http.StatusNotFound, dana.do(http.MethodPost, "/v1/agents/sessions", s.naming(s.configOf("red")), nil))
-	s.Equal(asked+5, s.teamReads(), "each session asks the deployment's app")
+	s.Equal(asked+4, s.teamReads(), "each user's teams are asked of the deployment's app, and again for their refusal")
 }
 
 // In deployment tenancy the customer of the deployment's app has no app of its own: it acts in
@@ -299,7 +442,7 @@ func (s *AgentTeamsSuite) TestTheDeploymentAppsOwnCustomerWithNoPinReadsItsUsers
 	s.Equal(missing, refused, "the same answer as a config that does not exist")
 	s.Equal(http.StatusCreated, dana.do(http.MethodPost, "/v1/agents/sessions", s.naming(s.configOf("")), nil))
 	s.Equal(http.StatusNotFound, dana.do(http.MethodPost, "/v1/agents/sessions", s.naming(s.configOf("red")), nil))
-	s.Equal(asked+5, s.teamReadsOn(suiteStreamKey), "each session asks the deployment's app")
+	s.Equal(asked+4, s.teamReadsOn(suiteStreamKey), "each user's teams are asked of the deployment's app, and again for their refusal")
 }
 
 func (s *AgentTeamsSuite) TestTheDeploymentAppsOwnCustomersForkIsCheckedAgainstItsUsersTeams() {
@@ -410,6 +553,7 @@ func (s *AgentTeamsSuite) TestAChatCarriedOnFromItsRowIsCheckedAgainstTheUsersTe
 	s.Require().NoError(failure)
 
 	s.teamsChat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+	s.teamsLapse(other)
 	_, failure = other.reopenedFromRow(ctx, opened.Id)
 	s.Equal(errUnknownConfig, failure)
 }
@@ -426,6 +570,7 @@ func (s *AgentTeamsSuite) TestAForkOfASessionWhoseConfigIsOfAnotherTeamNowIsRefu
 			anya.stopSession(parent.Id)
 		}
 		s.teamsChat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+		s.teamsLapse(s.router)
 
 		status, message := anya.failure(http.MethodPost, s.forking(parent.Id), s.offRecord())
 
@@ -459,6 +604,7 @@ func (s *AgentTeamsSuite) TestAFailedTeamsReadAnswersAForkAlikeWhetherItsConfigE
 	s.deleteConfig(value(deleted.ConfigId))
 	s.teamsChat.Fail(http.MethodGet, "/users")
 	s.T().Cleanup(func() { s.teamsChat.Heal(http.MethodGet, "/users") })
+	s.teamsLapse(s.router)
 
 	keptStatus, keptMessage := anya.failure(http.MethodPost, s.forking(kept.Id), s.offRecord())
 	deletedStatus, deletedMessage := anya.failure(http.MethodPost, s.forking(deleted.Id), s.offRecord())
@@ -489,6 +635,7 @@ func (s *AgentTeamsSuite) TestAChatThatEndedHereIsCarriedOnOnlyForAUserStillInIt
 			"%s: still in its team", path)
 		s.endHere(opened.Id)
 		s.teamsChat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+		s.teamsLapse(s.router)
 
 		status, message := anya.failure(http.MethodPost, "/v1/agents/sessions/"+opened.Id+path, body)
 
@@ -518,6 +665,7 @@ func (s *AgentTeamsSuite) TestAFailedTeamsReadAnswersAReopenAlikeWhetherItsConfi
 	s.deleteConfig(value(deleted.ConfigId))
 	s.teamsChat.Fail(http.MethodGet, "/users")
 	s.T().Cleanup(func() { s.teamsChat.Heal(http.MethodGet, "/users") })
+	s.teamsLapse(s.router)
 
 	keptStatus, keptMessage := anya.failure(http.MethodPost, "/v1/agents/sessions/"+kept.Id+"/responses", s.asking())
 	deletedStatus, deletedMessage := anya.failure(http.MethodPost, "/v1/agents/sessions/"+deleted.Id+"/responses", s.asking())
@@ -570,6 +718,7 @@ func (s *AgentTeamsSuite) TestASocketReopenOfAChatThatEndedHereIsCheckedAgainstT
 	s.Equal(http.StatusSwitchingProtocols, status, "still in its team")
 	s.endHere(opened.Id)
 	s.teamsChat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+	s.teamsLapse(s.router)
 
 	status, message := anya.refusal("/v1/agents/sessions/" + opened.Id + "/events")
 
@@ -586,6 +735,7 @@ func (s *AgentTeamsSuite) TestAFailedTeamsReadAnswersASocketReopenAlikeWhetherIt
 	s.deleteConfig(value(deleted.ConfigId))
 	s.teamsChat.Fail(http.MethodGet, "/users")
 	s.T().Cleanup(func() { s.teamsChat.Heal(http.MethodGet, "/users") })
+	s.teamsLapse(s.router)
 
 	keptStatus, keptMessage := anya.refusal("/v1/agents/sessions/" + kept.Id + "/events")
 	deletedStatus, deletedMessage := anya.refusal("/v1/agents/sessions/" + deleted.Id + "/events")
@@ -623,6 +773,197 @@ func (s *AgentTeamsSuite) TestWithTheSettingOffASocketReopenIsNotCheckedAndStrea
 	_, status = anya.watch("/v1/agents/sessions/" + gone.Id + "/events")
 	s.Equal(http.StatusSwitchingProtocols, status)
 	s.Equal(asked, s.teamReads())
+}
+
+// A chat still running is carried on only for a user still in its config's team, as one that
+// ended is: Anya left team red while her red chat ran.
+func (s *AgentTeamsSuite) TestAMessageToAChatStillRunningIsRefusedToAUserWhoLeftItsConfigsTeam() {
+	anya, opened := s.runningChatAnyaLeft()
+
+	status, message := anya.failure(http.MethodPost, "/v1/agents/sessions/"+opened+"/responses", s.asking())
+
+	s.Equal(http.StatusNotFound, status, message)
+	s.Equal(errUnknownConfig.Message, message)
+}
+
+func (s *AgentTeamsSuite) TestAResumeOfAChatStillRunningIsRefusedToAUserWhoLeftItsConfigsTeam() {
+	anya, opened := s.runningChatAnyaLeft()
+
+	status, message := anya.failure(http.MethodPost, "/v1/agents/sessions/"+opened+"/resume", nil)
+
+	s.Equal(http.StatusNotFound, status, message)
+	s.Equal(errUnknownConfig.Message, message)
+}
+
+// The events socket of a chat still running is opened only for a user still in its config's
+// team, as one onto a chat that ended is.
+func (s *AgentTeamsSuite) TestAChatStillRunningIsWatchedOnlyByAUserStillInItsConfigsTeam() {
+	anya := s.inTeams("red")
+	opened := anya.createSession(s.recorded(s.configOf("red")))
+	_, status := anya.watch("/v1/agents/sessions/" + opened.Id + "/events")
+	s.Equal(http.StatusSwitchingProtocols, status, "still in its team")
+	s.teamsChat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+	s.teamsLapse(s.router)
+	s.running(opened.Id)
+
+	status, message := anya.refusal("/v1/agents/sessions/" + opened.Id + "/events")
+
+	s.Equal(http.StatusNotFound, status, message)
+	s.Equal(errUnknownConfig.Message, message)
+}
+
+// The node running a chat asks the same of a socket on another node, which is then answered as
+// for a session no node is running.
+func (s *AgentTeamsSuite) TestAChatRunningOnAnotherNodeIsWatchedOnlyByAUserStillInItsConfigsTeam() {
+	other, _ := s.otherRouter(nil)
+	anya := s.inTeams("red")
+	opened := anya.createSession(s.naming(s.configOf("red")))
+	_, status := anya.on(other).watch("/v1/agents/sessions/" + opened.Id + "/events")
+	s.Equal(http.StatusSwitchingProtocols, status, "still in its team")
+	s.teamsChat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+	s.teamsLapse(s.router)
+	s.running(opened.Id)
+
+	_, status = anya.on(other).watch("/v1/agents/sessions/" + opened.Id + "/events")
+
+	s.Equal(http.StatusNotFound, status)
+}
+
+// The node running a chat takes a caller with no token for nobody in particular, as a node
+// taking its request would: the user it claims to be does not lend it their teams.
+func (s *AgentTeamsSuite) TestACallerWithNoTokenWatchingFromAnotherNodeIsInNoTeamWhoeverItClaimsToBe() {
+	other, _ := s.otherRouter(nil)
+	claiming := s.data.claiming(s.inTeams("red").userID)
+	opened := claiming.createSession(s.naming(s.configOf("")))
+	asked := s.teamReads()
+
+	_, status := claiming.on(other).watch("/v1/agents/sessions/" + opened.Id + "/events")
+
+	s.Equal(http.StatusSwitchingProtocols, status)
+	s.Equal(asked, s.teamReads(), "Stream is not asked about the user it claims to be")
+}
+
+// A guest's token is signed as a user's is, so the node running a chat takes a guest watching
+// from another node for the Stream user they are, in that user's teams.
+func (s *AgentTeamsSuite) TestASignedGuestInTheTeamWatchesAChatRunningOnAnotherNode() {
+	other, _ := s.otherRouter(nil)
+	guest := s.data.createGuest()
+	s.teamsChat.PutUser(map[string]any{"id": guest.userID, "teams": []any{"red"}})
+	opened := guest.createSession(s.naming(s.configOf("red")))
+
+	_, status := guest.on(other).watch("/v1/agents/sessions/" + opened.Id + "/events")
+
+	s.Equal(http.StatusSwitchingProtocols, status)
+}
+
+// A backend is not limited by teams on whichever node it watches from, and a watcher relayed
+// for it asks Stream nothing.
+func (s *AgentTeamsSuite) TestABackendWatchesAChatOfAnyTeamRunningOnAnotherNodeWithoutAskingStream() {
+	other, _ := s.otherRouter(nil)
+	backend := s.serverClient.actingFor(s.inTeams("blue"))
+	opened := backend.createSession(s.naming(s.configOf("red")))
+	asked := s.teamReads()
+
+	_, status := backend.on(other).watch("/v1/agents/sessions/" + opened.Id + "/events")
+
+	s.Equal(http.StatusSwitchingProtocols, status)
+	s.Equal(asked, s.teamReads())
+}
+
+// A socket on another node that gives up while the node running the chat asks Stream about its
+// user leaves no watcher held there for it: its Detach overtakes the check, and the attach the
+// check then lets through finds it gone, rather than standing until pongWait.
+func (s *AgentTeamsSuite) TestASocketThatGivesUpDuringItsTeamCheckLeavesNoWatcherHeld() {
+	other, _ := s.otherRouter(nil)
+	anya := s.inTeams("red")
+	opened := anya.createSession(s.naming(s.configOf("red")))
+	backends := s.serverClient.createSession(s.naming(s.configOf("")))
+	detached := s.detachOf(opened.Id)
+	s.teamsLapse(s.router)
+	asking, release := s.teamsChat.Hold("/users")
+
+	giveUp := anya.on(other).handshaking("/v1/agents/sessions/" + opened.Id + "/events")
+	s.closedWithin(asking, "the node running the chat never asked Stream")
+	giveUp()
+	s.closedWithin(detached, "the other node sent no Detach")
+	// Taken after that Detach on the one subscription every node's requests come in on.
+	s.serverClient.on(other).opens("/v1/agents/sessions/" + backends.Id + "/events")
+	release()
+
+	s.Require().Eventually(func() bool { return s.proxyHeldFor(anya.userID) || s.teamChecksRunning() == 0 },
+		settleFor, 10*time.Millisecond, "the team check never ended")
+	s.False(s.proxyHeldFor(anya.userID), "a watcher is held for a socket that gave up")
+}
+
+// An attach the node running the chat refuses leaves nothing of it there, though the node that
+// asked may be gone before it says it gave up.
+func (s *AgentTeamsSuite) TestARefusedRelayedAttachLeavesNothingPending() {
+	anya := s.inTeams("red")
+	opened := anya.createSession(s.naming(s.configOf("red")))
+	s.teamsChat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+	s.teamsLapse(s.router)
+	asked, watcher, bus := s.teamReads(), s.utils.uuid(), s.router.relayed.bus
+
+	s.Require().NoError(bus.Publish(s.T().Context(), bus.Commands(), relay.Request{
+		Type: relay.Attach, Node: "gone-" + s.utils.uuid(), Session: opened.Id, Watcher: watcher,
+		Owner: relay.Owner{CustomerID: s.customerID(), UserID: anya.userID, Kind: string(auth.KindAuthenticated)},
+	}))
+
+	s.Require().Eventually(func() bool {
+		s.router.relayed.mu.Lock()
+		_, pending := s.router.relayed.pending[watcher]
+		s.router.relayed.mu.Unlock()
+		return s.teamReads() > asked && !pending
+	}, settleFor, 10*time.Millisecond, "the refused attach is still pending")
+	s.False(s.proxyHeldFor(anya.userID))
+}
+
+// The node running a chat asks Stream about a relayed watcher's user off the subscription every
+// node's requests come in on, so a slow answer holds up no other socket's attach.
+func (s *AgentTeamsSuite) TestASlowTeamsReadHoldsUpNoOtherSocketOnTheNode() {
+	other, _ := s.otherRouter(nil)
+	anya := s.inTeams("red")
+	opened := anya.createSession(s.naming(s.configOf("red")))
+	backends := s.serverClient.createSession(s.naming(s.configOf("")))
+	s.teamsLapse(s.router)
+	asking, release := s.teamsChat.Hold("/users")
+	giveUp := anya.on(other).handshaking("/v1/agents/sessions/" + opened.Id + "/events")
+	defer giveUp()
+	defer release()
+	s.closedWithin(asking, "the node running the chat never asked Stream")
+
+	_, status := s.serverClient.on(other).watch("/v1/agents/sessions/" + backends.Id + "/events")
+
+	s.Equal(http.StatusSwitchingProtocols, status, "the backend's attach waited for anya's teams")
+}
+
+// A node running a chat that cannot read a relayed watcher's teams says so, and the socket is
+// told to try again, rather than taken for a chat no node runs and opened a second time on the
+// node it came to, whose own teams of Anya would let her through.
+func (s *AgentTeamsSuite) TestAWatcherFromAnotherNodeWhoseTeamsCannotBeReadIsToldToTryAgain() {
+	other, anya, opened := s.chatAnyasTeamsAreHeldForOnAnotherNode()
+	s.teamsChat.Fail(http.MethodGet, "/users")
+	s.T().Cleanup(func() { s.teamsChat.Heal(http.MethodGet, "/users") })
+
+	status, message := anya.on(other).refusal("/v1/agents/sessions/" + opened + "/events")
+
+	s.Equal(http.StatusServiceUnavailable, status, message)
+	s.Equal(errTeamsUnreadable.Message, message)
+	s.running(opened)
+}
+
+// The same holds for a read that takes longer than the socket waits: the node running the chat
+// stops asking in time to say so.
+func (s *AgentTeamsSuite) TestAWatcherFromAnotherNodeWhoseTeamsAreReadTooSlowlyIsToldToTryAgain() {
+	other, anya, opened := s.chatAnyasTeamsAreHeldForOnAnotherNode()
+	asking, _ := s.teamsChat.Hold("/users")
+
+	status, message := anya.on(other).refusal("/v1/agents/sessions/" + opened + "/events")
+
+	s.closedWithin(asking, "the node running the chat never asked Stream")
+	s.Equal(http.StatusServiceUnavailable, status, message)
+	s.Equal(errTeamsUnreadable.Message, message)
+	s.running(opened)
 }
 
 // A backend forks and carries on any session of another team or a deleted config, without
@@ -673,15 +1014,6 @@ func (s *AgentTeamsSuite) TestWithTheSettingOffForksAndReopensAreNotCheckedAndSt
 	}
 }
 
-// endHere ends a session in this node the way one nobody watches ends, which leaves it held
-// under its id, ended, with the spec it ran on.
-func (s *AgentTeamsSuite) endHere(id string) {
-	held, ok := s.manager.Get(id, session.Owner{CustomerID: s.customerID(), Kind: auth.KindServer})
-	s.Require().True(ok, "session %s is held here", id)
-	s.Require().NoError(held.Close())
-	s.Require().Equal(session.Ended, held.State())
-}
-
 // deleteConfig deletes an agent config of the app, as its backend does.
 func (s *AgentTeamsSuite) deleteConfig(id string) {
 	s.Require().Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/configs/"+id, nil, nil))
@@ -702,6 +1034,126 @@ func (s *AgentTeamsSuite) asking() CreateResponseRequest {
 // forking is the path that forks the session id.
 func (s *AgentTeamsSuite) forking(id string) string {
 	return "/v1/agents/sessions/" + id + "/fork"
+}
+
+// runningChatAnyaLeft is Anya and the id of a red chat she opened and wrote in while in team red,
+// still running here once she moved to team blue.
+func (s *AgentTeamsSuite) runningChatAnyaLeft() (*testClient, string) {
+	anya := s.inTeams("red")
+	opened := anya.createSession(s.recorded(s.configOf("red")))
+	s.Require().Equal(http.StatusAccepted, s.status(anya.call(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/responses", s.asking())),
+		"still in its team")
+	s.teamsChat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+	s.teamsLapse(s.router)
+	s.running(opened.Id)
+	return anya, opened.Id
+}
+
+// chatAnyasTeamsAreHeldForOnAnotherNode is another node, Anya in team red, and the id of a red
+// chat of hers kept and running on the suite's node. The other node holds her teams, read by a
+// chat she opened there; the suite's node holds none of hers any more.
+func (s *AgentTeamsSuite) chatAnyasTeamsAreHeldForOnAnotherNode() (*httptest.Server, *testClient, string) {
+	other, _ := s.otherRouter(nil)
+	anya := s.inTeams("red")
+	config := s.configOf("red")
+	anya.on(other).createSession(s.naming(config))
+	opened := anya.createSession(s.recorded(config))
+	s.teamsLapse(s.router)
+	return other, anya, opened.Id
+}
+
+// running requires the session to be running on the suite's node, so that what a test asks
+// next is asked of a running session rather than of one carried on.
+func (s *AgentTeamsSuite) running(id string) {
+	held, ok := s.manager.Get(id, session.Owner{CustomerID: s.customerID(), Kind: auth.KindServer})
+	s.Require().True(ok && held.State() != session.Ended, "session %s is running here", id)
+}
+
+// teamsLapse has node take every user's teams it holds as read teamsFor ago, as they are once that
+// long has passed: what a test changed of a user's teams in Stream is read from then on.
+func (s *RouterSuite) teamsLapse(node *Server) {
+	s.teamsAge(node, teamsFor)
+}
+
+// teamsStill stops the clock node tells its held teams' age by, until the test ends, so that
+// what a test asks runs within one teamsRecheck however slowly it runs. teamsAge still moves it.
+func (s *RouterSuite) teamsStill(node *Server) {
+	held := node.teams
+	held.mu.Lock()
+	defer held.mu.Unlock()
+	clock, still := held.now, held.now()
+	held.now = func() time.Time { return still }
+	s.T().Cleanup(func() {
+		held.mu.Lock()
+		defer held.mu.Unlock()
+		held.now = clock
+	})
+}
+
+// teamsAge has node take every user's teams it holds, and every time it asked Stream again, as
+// by older than they are.
+func (s *RouterSuite) teamsAge(node *Server, by time.Duration) {
+	held := node.teams
+	held.mu.Lock()
+	defer held.mu.Unlock()
+	clock := held.now
+	held.now = func() time.Time { return clock().Add(by) }
+}
+
+// detachOf is closed once a node has said on the relay that a watcher of the session id is no
+// longer wanted.
+func (s *AgentTeamsSuite) detachOf(id string) <-chan struct{} {
+	detached := make(chan struct{})
+	var once sync.Once
+	bus := s.router.relayed.bus
+	_, err := bus.Subscribe(s.T().Context(), bus.Commands(), func(payload []byte) {
+		var request relay.Request
+		if json.Unmarshal(payload, &request) == nil && request.Type == relay.Detach && request.Session == id {
+			once.Do(func() { close(detached) })
+		}
+	})
+	s.Require().NoError(err)
+	return detached
+}
+
+// closedWithin waits for done to close, failing the test as why when it does not within settleFor.
+func (s *AgentTeamsSuite) closedWithin(done <-chan struct{}, why string) {
+	select {
+	case <-done:
+	case <-time.After(settleFor):
+		s.Require().FailNow(why)
+	}
+}
+
+// proxyHeldFor is whether the suite's node holds a watcher for a socket of user's on another node.
+func (s *AgentTeamsSuite) proxyHeldFor(user string) bool {
+	state := s.router.relayed
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	for _, proxy := range state.proxies {
+		if proxy.owner.UserID == user {
+			return true
+		}
+	}
+	return false
+}
+
+// teamChecksRunning is how many relayed watchers' team checks are running, on any node of the
+// process: each ends within teamCheckWait.
+func (s *AgentTeamsSuite) teamChecksRunning() int {
+	var dump bytes.Buffer
+	s.Require().NoError(pprof.Lookup("goroutine").WriteTo(&dump, 1))
+	total := 0
+	for _, stack := range strings.Split(dump.String(), "\n\n") {
+		if !strings.Contains(stack, "internal/api.(*Server).attachProxy.func") {
+			continue
+		}
+		var count int
+		_, err := fmt.Sscanf(stack, "%d @", &count)
+		s.Require().NoError(err)
+		total += count
+	}
+	return total
 }
 
 // status is the status of a call, for an assertion that reads only that.

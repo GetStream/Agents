@@ -98,6 +98,8 @@ type Options struct {
 	Now func() time.Time
 	// KeptBodies replaces maxKeptBodies when set, for tests.
 	KeptBodies int64
+	// MaxTunnels replaces maxTunnels when set, for tests.
+	MaxTunnels int
 }
 
 // Proxy is an HTTP proxy that takes CONNECT only.
@@ -120,6 +122,8 @@ type Proxy struct {
 	// leaves holds each host's certificate until it is half of leafValidity old, so a handshake
 	// costs no CA signature (P-256 about 66 us, RSA-4096 about 4.5 ms) once a host has one.
 	leaves leaves
+	// tunnels are each sandbox's open tunnels, up to maxTunnels.
+	tunnels sandboxTunnels
 }
 
 type leaves struct {
@@ -166,7 +170,8 @@ func New(options Options) (*Proxy, error) {
 		transport: outbound{next: transport, headerTimeout: cmp.Or(options.HeaderTimeout, headerTimeout)}, dial: dial, logger: options.Logger,
 		handshakeTimeout: cmp.Or(options.HandshakeTimeout, handshakeTimeout),
 		keepAliveTimeout: cmp.Or(options.KeepAliveTimeout, keepAliveTimeout),
-		dryRunTimeout:    cmp.Or(options.DryRunTimeout, dryRunTimeout), now: now, keptBudget: cmp.Or(options.KeptBodies, maxKeptBodies), leaves: leaves{byHost: map[string]keptLeaf{}}}, nil
+		dryRunTimeout:    cmp.Or(options.DryRunTimeout, dryRunTimeout), now: now, keptBudget: cmp.Or(options.KeptBodies, maxKeptBodies), leaves: leaves{byHost: map[string]keptLeaf{}},
+		tunnels: sandboxTunnels{max: cmp.Or(options.MaxTunnels, maxTunnels), open: map[string]int{}}}, nil
 }
 
 // ServeHTTP opens a tunnel to port 443 of a host the sandbox's grants or allowed domains cover,
@@ -213,15 +218,26 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		refuse(w, label, r.Method, decisionDeniedHost, http.StatusForbidden, "egress: only port 443 is proxied")
 		return
 	}
-	if !granted {
-		p.passthrough(w, r, record.Session, host)
+	// Every sandbox on the router shares its file descriptors, so each holds at most max tunnels:
+	// a CONNECT past it is refused before anything is dialed or taken over.
+	if !p.tunnels.hold(credential) {
+		p.logger.Warn("the sandbox egress proxy refused a tunnel past the sandbox's limit", "session", record.Session,
+			"host", host, "limit", p.tunnels.max)
+		refuse(w, label, r.Method, decisionDeniedTunnels, http.StatusTooManyRequests,
+			fmt.Sprintf("egress: too many open tunnels: the sandbox holds %d, the most it may; close one and try again", p.tunnels.max))
 		return
 	}
-	conn, buffered, err := http.NewResponseController(w).Hijack()
+	if !granted {
+		p.passthrough(w, r, credential, record.Session, host)
+		return
+	}
+	hijacked, buffered, err := http.NewResponseController(w).Hijack()
 	if err != nil {
+		p.tunnels.release(credential)
 		refuse(w, label, r.Method, decisionError, http.StatusInternalServerError, "egress: the connection cannot be taken over")
 		return
 	}
+	conn := p.tunnels.held(hijacked, credential)
 	if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
 		_ = conn.Close()
 		return
@@ -232,21 +248,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // passthrough tunnels the sandbox's bytes to port 443 of host, an allowed domain, as they are:
 // no certificate of the router's, no token, nothing read or logged. A host that resolves to a
-// non-public address is not dialed (502).
-func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, session, host string) {
+// non-public address is not dialed (502). The tunnel is one of credential's, which ServeHTTP held.
+func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, credential, session, host string) {
 	upstream, err := p.dial(r.Context(), "tcp", net.JoinHostPort(host, httpsPort))
 	if err != nil {
+		p.tunnels.release(credential)
 		// A dial's error holds no byte the host sent.
 		p.logger.Warn("the sandbox egress proxy could not reach an allowed host", "session", session, "host", host, "error", err)
 		refuse(w, otherHost, http.MethodConnect, decisionBlind, http.StatusBadGateway, "egress: the host cannot be reached")
 		return
 	}
-	conn, buffered, err := http.NewResponseController(w).Hijack()
+	hijacked, buffered, err := http.NewResponseController(w).Hijack()
 	if err != nil {
+		p.tunnels.release(credential)
 		_ = upstream.Close()
 		refuse(w, otherHost, http.MethodConnect, decisionError, http.StatusInternalServerError, "egress: the connection cannot be taken over")
 		return
 	}
+	conn := p.tunnels.held(hijacked, credential)
 	if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
 		_ = conn.Close()
 		_ = upstream.Close()

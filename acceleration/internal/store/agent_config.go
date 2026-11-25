@@ -35,14 +35,14 @@ type AgentConfig struct {
 	Name       string `bun:"name,notnull"`
 	// Role is what the config is for in the app around it, beyond answering people:
 	// RoleAgentModerator, or empty for an ordinary agent. One live config per customer holds a
-	// role, test copies aside (20261103120000_agent_config_role.sql).
+	// role, test copies aside (agent_configs_role_idx).
 	Role string `bun:"role,notnull"`
 	// Mode is whether the agent is spoken to or written to: AgentModeVoice or
 	// AgentModeText. A text agent uses neither speech target and joins no call.
 	Mode string `bun:"mode,notnull"`
 	// Region is where the agent's work is done, such as pricing.RegionEU: every model its
 	// sessions run, its knowledge base and its sandbox are there, and nothing of it is done
-	// elsewhere (20261202135000_agent_region.sql). Empty is stored as pricing.DefaultRegion.
+	// elsewhere. Empty is stored as pricing.DefaultRegion.
 	Region string `bun:"region,notnull"`
 	// Models are what the agent's sessions run on, one column each.
 	Models AgentModels `bun:"embed:"`
@@ -103,16 +103,14 @@ type AgentConfig struct {
 	// episode_cards_ columns.
 	EpisodeCards AgentEpisodeCards `bun:"embed:episode_cards_"`
 	// ToolGroups are the functions an SDK provides that the config's sessions may offer, and
-	// how each group is loaded (20270103090000_agent_config_tool_groups.sql). A function no
-	// group names is not offered.
+	// how each group is loaded. A function no group names is not offered.
 	ToolGroups []ToolGroup `bun:"tool_groups,type:jsonb"`
 	// ResumeHistory is how the config's sessions are handed back a conversation they
 	// carry on. The zero value is the router's default.
 	ResumeHistory ResumeHistory `bun:"resume_history,type:jsonb,notnull"`
 	// FloorControl is the model that controls the floor in the config's sessions, and how
-	// long a caller may wait once they stop, as the config chose
-	// (20261221090000_floor_control_max_wait.sql). The zero value, NULL, is no choice: the
-	// router's default rules (session.FloorControlOf).
+	// long a caller may wait once they stop, as the config chose. The zero value, NULL, is no
+	// choice: the router's default rules (session.FloorControlOf).
 	FloorControl FloorControl `bun:"floor_control,type:jsonb,nullzero"`
 	// SyncHash is a fingerprint of the last directory written onto this config. Empty
 	// if it was never synced from a directory.
@@ -165,14 +163,12 @@ type AgentDispatch struct {
 
 // AgentEpisodeCards is how an agent's conversations use the person's episode cards.
 type AgentEpisodeCards struct {
-	// On has each session under the config start with the person's other episode cards
-	// (20261007042200_agent_config_episode_cards.sql), and the config write them as Record
-	// does. Off unless a config turns it on.
+	// On has each session under the config start with the person's other episode cards, and
+	// the config write them as Record does. Off unless a config turns it on.
 	On bool `bun:"on,notnull"`
 	// Record has each call, app chat and channel thread under the config write its episode
-	// card and summary into the person's omni-channel while no session reads them
-	// (20261217090000_agent_config_episode_cards_record.sql). Read only beside On off;
-	// WritesCards is the two together.
+	// card and summary into the person's omni-channel while no session reads them. Read only
+	// beside On off; WritesCards is the two together.
 	Record bool `bun:"record,notnull"`
 }
 
@@ -182,8 +178,7 @@ type AgentAnswersIn struct {
 	// number to text, an iMessage line.
 	Lines AgentChannels `bun:"lines,type:jsonb,notnull"`
 	// Chat are the Stream Chat channel types of the customer's own app it answers in, such as
-	// a team's group channels (20261222120000_agent_config_chat_channels.sql). Empty, as every
-	// config starts, answers in agent channels alone.
+	// a team's group channels. Empty, as every config starts, answers in agent channels alone.
 	Chat []ChatChannel `bun:"chat,type:jsonb"`
 }
 
@@ -351,6 +346,9 @@ func (r *AgentConfigs) Insert(ctx context.Context, config *AgentConfig) error {
 		if err := refuseSecondChannelAgent(ctx, tx, config, nil, false); err != nil {
 			return err
 		}
+		if err := refuseSecondLineAgent(ctx, tx, config); err != nil {
+			return err
+		}
 		if _, err := tx.NewInsert().Model(config).Exec(ctx); err != nil {
 			switch constraint(err) {
 			case "agent_configs_name_idx":
@@ -458,6 +456,9 @@ func (r *AgentConfigs) save(ctx context.Context, config *AgentConfig, read, unmo
 		if err := refuseSecondChannelAgent(ctx, tx, config, stored.Connectors, stored.TestCopy()); err != nil {
 			return err
 		}
+		if err := refuseSecondLineAgent(ctx, tx, config); err != nil {
+			return err
+		}
 		_, err = tx.NewUpdate().Model(config).
 			Column(configColumns...).
 			Where("ac.id = ?", config.ID).
@@ -500,13 +501,28 @@ func (r *AgentConfigs) Delete(ctx context.Context, customerID, id string) error 
 
 	var name string
 	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
-		return tx.NewUpdate().Model((*AgentConfig)(nil)).
+		err := tx.NewUpdate().Model((*AgentConfig)(nil)).
 			Set("deleted_at = ?", time.Now().UTC()).
 			Where("id = ?", id).
 			Where("customer_id = ?", customerID).
 			Where("deleted_at IS NULL").
 			Returning("name").
 			Scan(ctx, &name)
+		if err != nil {
+			return err
+		}
+		// Read under the row's lock, which a number given this config waits on (liveConfig):
+		// no number can be pointed at it between this read and the commit.
+		answering, err := answeredBy(ctx, tx, customerID, id)
+		if err != nil {
+			return err
+		}
+		if len(answering) > 0 {
+			// Refused and rolled back: the cached config is still the live one.
+			name = ""
+			return &ConfigAnswersNumbersError{Numbers: answering}
+		}
+		return nil
 	}, func() []string {
 		// Named once the write answered: a commit that fails can still have landed.
 		if name == "" {
@@ -516,6 +532,9 @@ func (r *AgentConfigs) Delete(ctx context.Context, customerID, id string) error 
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return unknownAgentConfig(id)
+	}
+	if _, answers := errors.AsType[*ConfigAnswersNumbersError](err); answers {
+		return stack.Wrap(err)
 	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: delete agent config: %w", err))
@@ -610,7 +629,7 @@ func (r *AgentConfigs) GetByRole(ctx context.Context, customerID, role string) (
 }
 
 // GetByChatChannel returns the customer's live agent config that answers in Stream Chat
-// channels of the type channelType (AgentConfig.ChatChannels): the oldest, when more than one
+// channels of the type channelType (AgentConfig.Channels.Chat): the oldest, when more than one
 // names it, as the oldest config binding a line answers on it. A test copy (DraftOfTag)
 // answers in none. It is ErrNoAgentConfig when no config names the type.
 func (r *AgentConfigs) GetByChatChannel(ctx context.Context, customerID, channelType string) (AgentConfig, error) {
@@ -664,7 +683,7 @@ func (r *AgentConfigs) NameCalling(ctx context.Context, customerID, child, excep
 // customer holds few, and the API lists them all.
 func (r *AgentConfigs) Select(ctx context.Context, customerID string) ([]AgentConfig, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var configs []AgentConfig
@@ -698,7 +717,7 @@ func (r *AgentConfigs) where(ctx context.Context, customerID, column, value stri
 
 // lockBoundConnections locks each live connection of the config's customer that the config
 // binds as fixed until the transaction ends, and returns the ids it binds that are not live.
-// It makes a bind and an unforced delete (DeleteUnboundConnectorConnection, which locks the
+// It makes a bind and an unforced delete (ConnectorConnections.DeleteUnbound, which locks the
 // connection FOR UPDATE first) wait for each other, so one of them always sees the other:
 //
 //   - A delete that locked the connection first is waited for. Under READ COMMITTED the
@@ -761,7 +780,7 @@ func boundConnectors(bindings []ConnectorBinding) []string {
 
 // refuseUndefined refuses a binding to a custom connector the customer has no definition of,
 // unless kept, the bindings stored before this write, names it already: a forced connector
-// delete leaves its bindings behind on purpose (DeleteConnectorDefinition), and a save that
+// delete leaves its bindings behind on purpose (ConnectorDefinitions.Delete), and a save that
 // keeps one is not a new bind, as refuseUnbindable keeps a forced connection delete's.
 func refuseUndefined(undefined []string, kept []ConnectorBinding) error {
 	for _, id := range undefined {
@@ -787,27 +806,13 @@ func normalizeConfig(config *AgentConfig) {
 	if config.GreetingMode == "" {
 		config.GreetingMode = GreetingExact
 	}
-	if config.Skills == nil {
-		config.Skills = []string{}
-	}
-	if config.Connectors == nil {
-		config.Connectors = []ConnectorBinding{}
-	}
-	if config.LeftOutConnectors == nil {
-		config.LeftOutConnectors = []LeftOutConnector{}
-	}
-	if config.Keyterms == nil {
-		config.Keyterms = []string{}
-	}
-	if config.VisibleTools == nil {
-		config.VisibleTools = []string{}
-	}
-	if config.Channels.Chat == nil {
-		config.Channels.Chat = []ChatChannel{}
-	}
-	if config.Tags == nil {
-		config.Tags = map[string]string{}
-	}
+	config.Skills = orEmpty(config.Skills)
+	config.Connectors = orEmpty(config.Connectors)
+	config.LeftOutConnectors = orEmpty(config.LeftOutConnectors)
+	config.Keyterms = orEmpty(config.Keyterms)
+	config.VisibleTools = orEmpty(config.VisibleTools)
+	config.Channels.Chat = orEmpty(config.Channels.Chat)
+	config.Tags = orEmptyMap(config.Tags)
 }
 
 func unknownAgentConfig(id string) error {

@@ -81,6 +81,7 @@ TABLE agent_logs
     CREATE INDEX agent_logs_config_order ON public.agent_logs USING btree (customer_id, config_id, id DESC)
     CREATE INDEX agent_logs_customer_order ON public.agent_logs USING btree (customer_id, id DESC)
     CREATE INDEX agent_logs_error_order ON public.agent_logs USING btree (customer_id, severity, id DESC)
+    CREATE INDEX agent_logs_session_order ON public.agent_logs USING btree (customer_id, session_id, id DESC)
     CREATE UNIQUE INDEX agent_logs_source_idx ON public.agent_logs USING btree (customer_id, source_id) WHERE (source_id IS NOT NULL)
 
 TABLE api_keys
@@ -190,6 +191,7 @@ TABLE campaign_attempts
     CONSTRAINT campaign_attempts_campaign_id_fkey FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
     CONSTRAINT campaign_attempts_contact_id_fkey FOREIGN KEY (contact_id) REFERENCES campaign_contacts(id) ON DELETE CASCADE
     CONSTRAINT campaign_attempts_pkey PRIMARY KEY (id)
+    CREATE INDEX campaign_attempts_campaign_idx ON public.campaign_attempts USING btree (campaign_id)
     CREATE INDEX campaign_attempts_classify_idx ON public.campaign_attempts USING btree (classify_after) WHERE (classify_state = 'pending'::text)
     CREATE INDEX campaign_attempts_contact_idx ON public.campaign_attempts USING btree (contact_id, started_at)
 
@@ -536,6 +538,7 @@ TABLE connector_definitions
     manifest jsonb NOT NULL
     name text NOT NULL
     revision integer NOT NULL
+    sync_hash text NOT NULL DEFAULT ''::text
     CONSTRAINT connector_definitions_custom_prefix CHECK (((customer_id = ''::text) <> starts_with(id, 'custom_'::text)))
     CONSTRAINT connector_definitions_pkey PRIMARY KEY (customer_id, id, revision)
     CONSTRAINT connector_definitions_revision_check CHECK ((revision >= 1))
@@ -703,6 +706,7 @@ TABLE data_changes
     CONSTRAINT data_changes_pkey PRIMARY KEY (seq)
     CREATE INDEX data_changes_at_idx ON public.data_changes USING btree (at)
     CREATE INDEX data_changes_customer_idx ON public.data_changes USING btree (customer_id, seq)
+    CREATE INDEX data_changes_tasks_idx ON public.data_changes USING btree (customer_id, COALESCE((payload ->> 'task_id'::text), (payload ->> 'id'::text)), ((payload ->> 'id'::text))) WHERE ((table_name = ANY (ARRAY['scheduled_tasks'::text, 'scheduled_task_runs'::text])) AND (op <> 'delete'::text))
 
 TABLE data_move_cursors
     cursor bigint
@@ -1031,6 +1035,7 @@ TABLE phone_numbers
     CONSTRAINT phone_numbers_pkey PRIMARY KEY (id)
     CREATE INDEX phone_numbers_call_idx ON public.phone_numbers USING btree (stream_call_type, stream_call_id) WHERE (released_at IS NULL)
     CREATE INDEX phone_numbers_customer_idx ON public.phone_numbers USING btree (customer_id, purchased_at DESC)
+    CREATE INDEX phone_numbers_e164_held_idx ON public.phone_numbers USING btree (e164) WHERE (released_at IS NULL)
     CREATE UNIQUE INDEX phone_numbers_held_idx ON public.phone_numbers USING btree (vendor, e164) WHERE ((released_at IS NULL) AND (vendor <> 'sip_trunk'::text))
     CREATE INDEX phone_numbers_tags_idx ON public.phone_numbers USING gin (tags)
     CREATE UNIQUE INDEX phone_numbers_trunk_held_idx ON public.phone_numbers USING btree (customer_id, e164) WHERE ((released_at IS NULL) AND (vendor = 'sip_trunk'::text))
@@ -1113,6 +1118,7 @@ TABLE router_configs
     search jsonb NOT NULL DEFAULT '{}'::jsonb
     sts jsonb NOT NULL DEFAULT '{}'::jsonb
     stt jsonb NOT NULL DEFAULT '{}'::jsonb
+    sync_hash text NOT NULL DEFAULT ''::text
     tts jsonb NOT NULL DEFAULT '{}'::jsonb
     updated_at timestamp with time zone NOT NULL DEFAULT now()
     CONSTRAINT router_configs_pkey PRIMARY KEY (id)
@@ -1378,6 +1384,7 @@ TABLE users
     minted boolean NOT NULL DEFAULT false
     name text NOT NULL DEFAULT ''::text
     refresh_secret_hash bytea
+    shard text
     timezone text
     CONSTRAINT users_pkey PRIMARY KEY (customer_id, id)
     CREATE INDEX users_claimed_idx ON public.users USING btree (customer_id, claimed_by) WHERE (claimed_by IS NOT NULL)

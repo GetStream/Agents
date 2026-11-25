@@ -32,7 +32,8 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
-// maxConns is how many Postgres connections one router holds at most.
+// maxConns is how many Postgres connections one router's serving pool holds at most: every
+// query but those on the connection a credential or provider app lock is held on (lockConns).
 const maxConns = 40
 
 // Store reads and writes router statistics.
@@ -44,8 +45,13 @@ type Store struct {
 	global *bun.DB
 	shard  *bun.DB
 	peers  []*bun.DB
-	// globalDSN and shardDSN are what global and shard were opened with, for the pool a
-	// migration runs on.
+	// locks is the shared database again, in a pool of its own that credential and provider
+	// app locks are held on (tryCredentialLock).
+	locks *bun.DB
+	// lockSlots caps how many of locks' connections one customer's locks hold.
+	lockSlots lockSlots
+	// globalDSN and shardDSN are what a migration of global and shard connects with: the
+	// migrate DSNs, or what they were opened with.
 	globalDSN, shardDSN string
 	// cache is the shared Redis, holding copies of rows read on every request, and redis the
 	// shard's, holding the state of its running calls. Both are nil without Redis.
@@ -54,6 +60,8 @@ type Store struct {
 	// shardNames names each of shards(), as Options.Shards does, for what is kept per shard
 	// in the shared database.
 	shardNames []string
+	// shardsDown is when each shard that did not answer was last logged (settledWithout).
+	shardsDown shardWarnings
 	// globalIsShard says the shared database is also some shard's own, so its calls are not
 	// strays to drop.
 	globalIsShard bool
@@ -63,10 +71,14 @@ type Store struct {
 	shapes tableShapes
 	// pins says how Stream app pins cross between deployments, once the router has said.
 	pins pinsHolder
-	// retries holds a slot for each deletion forgetLater is trying again. stop ends them
+	// retries holds a slot for each deletion forgetLater is trying again, and lost one for each
+	// lost commit it is waiting on, which it can do for longer; polls bounds how many of those
+	// ask Postgres at once. stop ends them
 	// when the store closes, and retrying is what Close waits on. retryMu guards closed, so no
 	// retry starts once Close is waiting.
 	retries  chan struct{}
+	lost     chan struct{}
+	polls    chan struct{}
 	closing  context.Context
 	stop     context.CancelFunc
 	retrying sync.WaitGroup
@@ -90,7 +102,8 @@ const writeTimeout = 10 * time.Second
 // keys is read once write has run, and names nothing when write found no row.
 //
 // A COMMIT whose answer was lost may land after the deletion, so its keys are dropped again
-// shortly after it (forgetLater).
+// on each of the next few attempts, which Close lets run, and once more when Postgres says the
+// transaction has ended, which Close does not wait for (forgetLater).
 func (s *Store) detachedWrite(ctx context.Context, write func(context.Context, bun.Tx) error, keys func() []string) error {
 	_, err := s.detachedWriteTold(ctx, write, keys)
 	return err
@@ -101,10 +114,28 @@ func (s *Store) detachedWrite(ctx context.Context, write func(context.Context, b
 func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Context, bun.Tx) error, keys func() []string) (told bool, err error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.writeTimeout)
 	defer cancel()
+	return s.cachedWrite(ctx, s.global, write, keys, func() bool { return true })
+}
+
+// cachedWrite is detachedWriteTold on ctx itself, for a write too long for the write timeout. ctx
+// ending before the COMMIT is sent rolls the transaction back. cached is asked in the transaction
+// whether there is a key to drop, which keys may take a query of its own to say (Policies.keys). db
+// may be another than the shared database only for a write that has none: a lost commit is asked
+// about there (ended).
+func (s *Store) cachedWrite(ctx context.Context, db *bun.DB, write func(context.Context, bun.Tx) error, keys func() []string, cached func() bool) (told bool, err error) {
 	var committing bool
-	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	var xid sql.NullInt64
+	err = db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := write(ctx, tx); err != nil {
 			return err
+		}
+		// The transaction's id, for asking Postgres later whether a COMMIT whose answer was
+		// lost has landed. Without a cache there is nothing to drop again, and a write that
+		// changed nothing has no id, so nothing to wait for either.
+		if s.cache != nil && cached() {
+			if err := tx.NewSelect().ColumnExpr("pg_current_xact_id_if_assigned()").Scan(ctx, &xid); err != nil {
+				return err
+			}
 		}
 		committing = true
 		return nil
@@ -112,8 +143,8 @@ func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Contex
 	names := keys()
 	told = s.forget(ctx, names...)
 	var answered pgdriver.Error
-	if err != nil && committing && !errors.As(err, &answered) && s.cache != nil && len(names) > 0 {
-		s.forgetLater(names, err)
+	if err != nil && committing && !errors.As(err, &answered) && xid.Valid && len(names) > 0 {
+		s.forgetLater(names, err, xid.Int64)
 	}
 	return told, err
 }
@@ -186,8 +217,8 @@ func deleteInBatches(ctx context.Context, db bun.IDB, table, where string, args 
 	}
 }
 
-// connect opens a pool of at most conns connections.
-func connect(dsn string, conns int) (_ *bun.DB, err error) {
+// connectorFor is pgdriver's connector of a DSN.
+func connectorFor(dsn string, opts ...pgdriver.Option) (_ *pgdriver.Connector, err error) {
 	// pgdriver panics on a DSN it cannot parse, and the panic holds the whole DSN, password
 	// included, which would reach the logs past their redaction.
 	defer func() {
@@ -195,7 +226,16 @@ func connect(dsn string, conns int) (_ *bun.DB, err error) {
 			err = stack.Wrap(errors.New("store: the database DSN does not parse"))
 		}
 	}()
-	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn), sessionDefaults))
+	return pgdriver.NewConnector(append([]pgdriver.Option{pgdriver.WithDSN(dsn)}, opts...)...), nil
+}
+
+// connect opens a pool of at most conns connections.
+func connect(dsn string, conns int) (*bun.DB, error) {
+	connector, err := connectorFor(dsn, sessionDefaults)
+	if err != nil {
+		return nil, err
+	}
+	sqldb := sql.OpenDB(primaryOnly{connector})
 	// database/sql keeps two idle connections by default, so every burst of writes past two
 	// dials Postgres and shakes hands over TLS again, and under load those handshakes are
 	// what times out. The pool is kept instead, and bounded so that two pods, each running
@@ -223,15 +263,25 @@ func (s *Store) Server(ctx context.Context) (database, address string, err error
 	return database, server.String, nil
 }
 
-// Close releases the connection pools.
+// Close releases the connection pools, once the deletions forgetLater holds have run, or
+// forgetGrace has passed and the rest have stopped.
 func (s *Store) Close() error {
 	s.retryMu.Lock()
 	s.closed = true
 	s.retryMu.Unlock()
+	retried := make(chan struct{})
+	go func() {
+		s.retrying.Wait()
+		close(retried)
+	}()
+	select {
+	case <-retried:
+	case <-time.After(forgetGrace):
+	}
 	s.stop()
 	s.retrying.Wait()
 	s.closeRedis()
-	return errors.Join(s.closeShards(), s.global.Close())
+	return errors.Join(s.closeShards(), s.locks.Close(), s.global.Close())
 }
 
 // Ping verifies the shared database and this shard's are usable. Another shard being down
@@ -259,7 +309,7 @@ func (s *Store) CustomerActivity(
 		return nil, stack.Wrap(fmt.Errorf("store: unknown activity granularity %q", granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	unit := granularity.truncateUnit()
@@ -268,7 +318,7 @@ func (s *Store) CustomerActivity(
 	// rows that carry it on count nothing, and what was said in them is counted as messages.
 	originOnly := ""
 	if len(s.peers) > 0 {
-		originOnly = " AND NOT " + carriedIn("sess.id")
+		originOnly = " AND NOT " + carriedIn("sess.id", "sess.customer_id")
 	}
 	// Who was seen is read apart from the counts: a person is one person however many shards
 	// they talked to in a bucket, and a guest who signed up is the account they became, which
@@ -415,21 +465,21 @@ LEFT JOIN call_counts AS c ON c.bucket = b.bucket`, unit, originOnly)
 	return buckets, nil
 }
 
-// answersAfterAnotherShard is the SQL condition, on a session id column, that the session has a
+// answersAfterAnotherShard is the SQL condition, on a session id and its customer's, that the session has a
 // response here answered after one this shard does not hold: it was carried on here from
 // another shard, whose newest response a reopened session answers after (Responses.ActiveLeaf).
-func answersAfterAnotherShard(id string) string {
+func answersAfterAnotherShard(id, customer string) string {
 	return fmt.Sprintf(`EXISTS (SELECT 1 FROM agent_responses AS carried
-    WHERE carried.session_id = %[1]s AND carried.parent_response_id IS NOT NULL
-        AND NOT EXISTS (SELECT 1 FROM agent_responses AS parent WHERE parent.id = carried.parent_response_id))`, id)
+    WHERE carried.session_id = %[1]s AND carried.customer_id = %[2]s AND carried.parent_response_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM agent_responses AS parent WHERE parent.id = carried.parent_response_id AND parent.customer_id = carried.customer_id))`, id, customer)
 }
 
-// carriedIn is the SQL condition, on a session id column, that this shard's row only carries
+// carriedIn is the SQL condition, on a session id and its customer's, that this shard's row only carries
 // the session on: its first turn, a response with no parent, is elsewhere. A carried row with
 // no response yet cannot be told from the one it began in.
-func carriedIn(id string) string {
-	return fmt.Sprintf(`(%[2]s AND NOT EXISTS (SELECT 1 FROM agent_responses AS began
-    WHERE began.session_id = %[1]s AND began.parent_response_id IS NULL))`, id, answersAfterAnotherShard(id))
+func carriedIn(id, customer string) string {
+	return fmt.Sprintf(`(%[3]s AND NOT EXISTS (SELECT 1 FROM agent_responses AS began
+    WHERE began.session_id = %[1]s AND began.customer_id = %[2]s AND began.parent_response_id IS NULL))`, id, customer, answersAfterAnotherShard(id, customer))
 }
 
 // CustomerConcurrencyPeak returns the most sessions one customer had open at the same time
@@ -438,7 +488,7 @@ func carriedIn(id string) string {
 // and is one session while both are open.
 func (s *Store) CustomerConcurrencyPeak(ctx context.Context, customerID string, from, to time.Time) (ConcurrencyPeak, error) {
 	if customerID == "" {
-		return ConcurrencyPeak{}, stack.Wrap(errors.New("store: customer id is required"))
+		return ConcurrencyPeak{}, stack.Wrap(errCustomerRequired)
 	}
 
 	const spans = `
@@ -543,7 +593,7 @@ func (s *Store) peakAcrossShards(ctx context.Context, spans, customerID string, 
 // response when it comes back while the turn is open, and as a turn of its own after.
 func (s *Store) CustomerToolUsage(ctx context.Context, customerID, configID string, from, to time.Time) (ToolUsage, []ToolUsage, error) {
 	if customerID == "" {
-		return ToolUsage{}, nil, stack.Wrap(errors.New("store: customer id is required"))
+		return ToolUsage{}, nil, stack.Wrap(errCustomerRequired)
 	}
 
 	type usageRow struct {
@@ -588,7 +638,7 @@ func (s *Store) CustomerToolUsage(ctx context.Context, customerID, configID stri
     array_agg(CASE WHEN c.session_id IS NULL THEN '' ELSE u.session_id END ORDER BY u.session_id) AS first_carriers`
 		carriers = `
 carriers AS (
-    SELECT DISTINCT session_id FROM first_use WHERE ` + answersAfterAnotherShard("first_use.session_id") + `
+    SELECT DISTINCT session_id FROM first_use WHERE ` + answersAfterAnotherShard("first_use.session_id", "?3") + `
 ),`
 		carriedJoin = "\n    LEFT JOIN carriers AS c ON c.session_id = u.session_id"
 	}
@@ -878,7 +928,7 @@ GROUP BY x.session_id, x.turn_id`,
 // A configID keeps to the sessions of that agent config, and empty is every one.
 func (s *Store) CustomerTurns(ctx context.Context, customerID, configID string, from, to time.Time) (SessionTurns, error) {
 	if customerID == "" {
-		return SessionTurns{}, stack.Wrap(errors.New("store: customer id is required"))
+		return SessionTurns{}, stack.Wrap(errCustomerRequired)
 	}
 	type shardTurns struct {
 		SessionTurns
@@ -946,8 +996,10 @@ func lockUntilCommit(ctx context.Context, tx bun.IDB, key string, seed int64) er
 	return err
 }
 
-// databaseNow is the database's clock, which routers whose clocks disagree still share.
-func databaseNow(ctx context.Context, db bun.IDB) (time.Time, error) {
+// transactionStart is when db's transaction started, by the database's clock, which routers
+// whose clocks disagree still share. It is not when it is asked: every call in one transaction
+// gets the same answer, and outside a transaction it is when the statement started.
+func transactionStart(ctx context.Context, db bun.IDB) (time.Time, error) {
 	var now time.Time
 	err := db.QueryRowContext(ctx, "SELECT now()").Scan(&now)
 	return now, err

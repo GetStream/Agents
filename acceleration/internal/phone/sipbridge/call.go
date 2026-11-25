@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 
@@ -32,6 +33,9 @@ type Call struct {
 	media MediaAddrs
 	// onChange is told when a passed-on re-INVITE changed what either leg last sent.
 	onChange func()
+	// trunkAddr is Config.trunkAddr, where Stream is sent RTP when a customer re-INVITE names no
+	// public address.
+	trunkAddr netip.Addr
 
 	established atomic.Bool
 	ending      atomic.Bool
@@ -132,13 +136,29 @@ func (c *Call) onReinvite(ctx context.Context, from side, offer []byte) ([]byte,
 		return nil, stack.Wrap(errNotEstablished)
 	}
 	c.log.Info("re-INVITE received, passing it on", media(from, offer)...)
-	answer, err := c.other(from).Reinvite(ctx, offer)
+	sent, err := c.passOn(from, offer)
+	if err != nil {
+		return nil, err
+	}
+	answer, err := c.other(from).Reinvite(ctx, sent)
 	if err != nil {
 		return nil, err
 	}
 	c.log.Info("re-INVITE answered", media(1-from, answer)...)
+	if answer, err = c.passOn(1-from, answer); err != nil {
+		return nil, err
+	}
 	c.changed()
-	return answer, nil
+	return answerFor(offer, answer), nil
+}
+
+// passOn is what the other leg gets of an SDP body from side s. Stream gets the customer's body rebuilt
+// by toStream, never its bytes; an empty body (a re-INVITE that asks for an offer) carries nothing.
+func (c *Call) passOn(s side, body []byte) ([]byte, error) {
+	if s == streamSide || len(body) == 0 {
+		return body, nil
+	}
+	return toStream(body, c.trunkAddr)
 }
 
 func (c *Call) onInfo(ctx context.Context, from side, contentType string, body []byte) error {

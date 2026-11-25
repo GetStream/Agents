@@ -36,7 +36,7 @@ type SessionOptions struct {
 	// searched.
 	Title       string
 	Description string
-	// ProjectID groups conversations, and is carried as a cost label too.
+	// ProjectID groups conversations, and is a cost label too when a backend names it.
 	ProjectID string
 	// Custom is the caller's own labels.
 	Custom map[string]any

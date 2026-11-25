@@ -34,10 +34,6 @@ enum Assistant {
     /// The agent `go run ./configure` stored, by the name in `agent.yaml`.
     static let agentName = "swift_assistant"
 
-    /// The model a written conversation runs on. Grok reads photos and streams its reasoning,
-    /// which is what fills a reply's thinking panel. A call keeps the agent's faster model.
-    static let chatModel = "xai/grok-4.7"
-
     /// Who this phone is. Every conversation listed is theirs.
     static let user = User(id: "juno-owner", name: "Alex")
 

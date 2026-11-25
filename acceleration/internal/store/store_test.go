@@ -43,6 +43,18 @@ type StoreSuite struct {
 	seededDSN string
 }
 
+// insertRequest writes one request as the writer does, through InsertMany, giving it a usage
+// id when it has none, and leaves on request what the write set.
+func insertRequest(ctx context.Context, db *Store, request *Request) error {
+	if request.UsageID == uuid.Nil {
+		request.UsageID = uuid.Must(uuid.NewV7())
+	}
+	rows := []Request{*request}
+	_, err := db.Requests.InsertMany(ctx, rows)
+	*request = rows[0]
+	return err
+}
+
 func TestStoreSuite(t *testing.T) {
 	suite.Run(t, new(StoreSuite))
 }
@@ -189,29 +201,29 @@ func (s *StoreSuite) TestOpenRequiresADSN() {
 }
 
 func (s *StoreSuite) TestACallReportsTheModelsThatServedIt() {
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "stt", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "deepgram", Model: "flux-general-en",
 		StartedAt: s.base.Add(time.Second), Success: true,
 	}))
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "gemini", Model: "gemini-3.5-flash-lite",
 		StartedAt: s.base.Add(2 * time.Second), Success: true,
 	}))
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "openai", Model: "gpt-5.6-sol",
 		StartedAt: s.base.Add(3 * time.Second), Success: true,
 	}))
 	// A failed start is not what served the call.
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "tts", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "cartesia", Model: "sonic-preview",
 		StartedAt: s.base.Add(4 * time.Second), Success: false, ErrorCode: "start_failed",
 	}))
 	// Another agent is not this call.
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "stt", CustomerID: "acme", AgentID: "agent-2",
 		Provider: "grok", Model: "grok-stt",
 		StartedAt: s.base.Add(2 * time.Second), Success: true,
@@ -227,21 +239,21 @@ func (s *StoreSuite) TestACallReportsTheModelsThatServedIt() {
 }
 
 func (s *StoreSuite) TestACallAddsUpWhatEveryOneOfItsRequestsSpent() {
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base.Add(time.Second),
 		InputTokens: 800, CachedInputTokens: 500, OutputTokens: 120,
 		CostMicros: 1400, Success: true,
 	}))
 	// A turn the model read and then failed on is still billed for the reading.
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base.Add(2 * time.Second),
 		InputTokens: 200, OutputTokens: 0, CostMicros: 100,
 		Success: false, ErrorCode: "overloaded",
 	}))
 	// Another agent's spend is not this call's.
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-2",
 		Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base.Add(time.Second),
 		InputTokens: 9000, OutputTokens: 9000, CostMicros: 90000, Success: true,
@@ -264,7 +276,7 @@ func (s *StoreSuite) TestACallsRuntimeIsItsOwnSessionsAndNoRequest() {
 		{Modality: RuntimeModality, SessionID: "session-2", Provider: "stream", Model: "voice", CostMicros: 900},
 	} {
 		row.CustomerID, row.AgentID, row.StartedAt, row.Success = "acme", "agent-1", s.base.Add(time.Second), true
-		s.Require().NoError(s.store.Requests.Insert(s.ctx, &row))
+		s.Require().NoError(insertRequest(s.ctx, s.store, &row))
 	}
 
 	spent, err := s.store.Calls.Usage(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
@@ -293,7 +305,7 @@ func (s *StoreSuite) TestACallDoesNotCountAnotherSessionOfItsAgent() {
 		{Modality: "llm", Provider: "anthropic", Model: "claude-opus-5-5", InputTokens: 7, CostMicros: 3},
 	} {
 		row.CustomerID, row.AgentID, row.StartedAt, row.Success = "acme", "agent-1", s.base.Add(time.Second), true
-		s.Require().NoError(s.store.Requests.Insert(s.ctx, &row))
+		s.Require().NoError(insertRequest(s.ctx, s.store, &row))
 	}
 
 	spent, err := s.store.Calls.Usage(s.ctx, "acme", "agent-1", "session-1", s.base, nil)
@@ -317,12 +329,12 @@ func (s *StoreSuite) TestACallThatMadeNoRequestsSpentNothing() {
 
 func (s *StoreSuite) TestWhatWasSpentAfterACallEndedIsNotTheCallsToPayFor() {
 	ended := s.base.Add(10 * time.Second)
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base.Add(time.Second),
 		InputTokens: 300, CostMicros: 400, Success: true,
 	}))
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", AgentID: "agent-1",
 		Provider: "openai", Model: "gpt-5.6-sol", StartedAt: ended.Add(time.Minute),
 		InputTokens: 7000, CostMicros: 8000, Success: true,
@@ -395,6 +407,26 @@ func (s *StoreSuite) TestANumberAttachedBeforeItsCallWasRecordedIsStillFound() {
 	s.Equal("acme", number.CustomerID)
 }
 
+// Another customer's row for the number on its own trunk, lined in the same app to place calls
+// from it, as one added before a number was held by one customer at a time can be.
+func (s *StoreSuite) TestANumberOnAnotherCustomersOwnTrunkDoesNotMakeACallNamedForTheNumberNobodys() {
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15125551234", Vendor: "twilio", Country: "US",
+		CustomerID: "acme", PurchasedAt: s.base,
+	}))
+	_, err := s.store.global.NewUpdate().Model((*PhoneNumber)(nil)).
+		Set("stream_trunk_id = ?", "trunk-7").
+		Where("e164 = ?", "+15125551234").
+		Exec(s.ctx)
+	s.Require().NoError(err)
+	s.lined(TrunkGroup{CustomerID: "globex", Vendor: sipTrunkVendor}, "+15125551234", "trunk-9")
+
+	number, err := s.store.NumberByCallInApp(s.ctx, AppScope{Unpinned: true}, "default", "phone-+15125551234")
+
+	s.Require().NoError(err)
+	s.Equal("acme", number.CustomerID)
+}
+
 func (s *StoreSuite) TestACallNoNumberReachesIsNotAttributedToAnybody() {
 	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15125551234", Vendor: "twilio", Country: "US",
@@ -414,7 +446,7 @@ func (s *StoreSuite) TestAReleasedNumbersCallIsNotAttributedToItsFormerHolder() 
 	}))
 	s.Require().NoError(s.store.PhoneNumbers.Attach(
 		s.ctx, "acme", "+15125551234", NumberAttachment{TrunkID: "trunk-7", CallType: "default", CallID: "phone-+15125551234"}))
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15125551234", s.base.Add(time.Hour)))
+	s.Require().NoError(giveBack(s.ctx, s.store, "acme", "+15125551234", s.base.Add(time.Hour)))
 
 	_, err := s.store.NumberByCallInApp(s.ctx, AppScope{Unpinned: true}, "default", "phone-+15125551234")
 
@@ -512,6 +544,88 @@ func (s *StoreSuite) TestMigrateRebuildsTheContactIndexLeftInvalid() {
 	read := func() {
 		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 			"SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('contact_map_conversation')").Scan(&valid))
+	}
+	read()
+	s.Require().False(valid)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	read()
+	s.True(valid, "dropped and built again")
+}
+
+func (s *StoreSuite) TestMigrateRebuildsTheSessionLogIndexLeftInvalid() {
+	// As a CONCURRENTLY build that failed leaves it: the migration's IF NOT EXISTS skips it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('agent_logs_session_order')")
+	s.Require().NoError(err)
+	var valid bool
+	read := func() {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+			"SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('agent_logs_session_order')").Scan(&valid))
+	}
+	read()
+	s.Require().False(valid)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	read()
+	s.True(valid, "dropped and built again")
+	var definition string
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT pg_get_indexdef(to_regclass('agent_logs_session_order'))").Scan(&definition))
+	s.Equal("CREATE INDEX agent_logs_session_order ON public.agent_logs USING btree (customer_id, session_id, id DESC)", definition)
+}
+
+func (s *StoreSuite) TestMigrateRebuildsTheTaskChangesIndexLeftInvalid() {
+	built := func() (valid bool, definition string) {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT indisvalid, pg_get_indexdef(indexrelid) FROM pg_index "+
+			"WHERE indexrelid = to_regclass('data_changes_tasks_idx')").Scan(&valid, &definition))
+		return valid, definition
+	}
+	const want = "CREATE INDEX data_changes_tasks_idx ON public.data_changes USING btree (customer_id, " +
+		"COALESCE((payload ->> 'task_id'::text), (payload ->> 'id'::text)), ((payload ->> 'id'::text))) " +
+		"WHERE ((table_name = ANY (ARRAY['scheduled_tasks'::text, 'scheduled_task_runs'::text])) AND (op <> 'delete'::text))"
+	_, definition := built()
+	s.Equal(want, definition, "as the migration builds it")
+	// As a CONCURRENTLY build that failed leaves it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('data_changes_tasks_idx')")
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	valid, definition := built()
+	s.True(valid, "dropped and built again")
+	s.Equal(want, definition, "built again as the migration builds it")
+}
+
+func (s *StoreSuite) TestMigrateRebuildsTheHeldNumberIndexLeftInvalid() {
+	built := func() (valid bool, definition string) {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT indisvalid, pg_get_indexdef(indexrelid) FROM pg_index "+
+			"WHERE indexrelid = to_regclass('phone_numbers_e164_held_idx')").Scan(&valid, &definition))
+		return valid, definition
+	}
+	const want = "CREATE INDEX phone_numbers_e164_held_idx ON public.phone_numbers USING btree (e164) WHERE (released_at IS NULL)"
+	_, definition := built()
+	s.Equal(want, definition, "as the migration builds it")
+	// As a CONCURRENTLY build that failed leaves it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('phone_numbers_e164_held_idx')")
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	valid, definition := built()
+	s.True(valid, "dropped and built again")
+	s.Equal(want, definition, "built again as the migration builds it")
+}
+
+func (s *StoreSuite) TestMigrateRebuildsTheCampaignAttemptIndexLeftInvalid() {
+	// As a CONCURRENTLY build that failed leaves it: the migration's IF NOT EXISTS skips it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('campaign_attempts_campaign_idx')")
+	s.Require().NoError(err)
+	var valid bool
+	read := func() {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+			"SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('campaign_attempts_campaign_idx')").Scan(&valid))
 	}
 	read()
 	s.Require().False(valid)

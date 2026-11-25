@@ -11,8 +11,12 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
+	"net/http/httptrace"
+	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -30,6 +34,8 @@ import (
 // changes since it, and writing either of them into a deployment.
 type DataMoveSuite struct {
 	RouterSuite
+	// logged is what the router logged.
+	logged *lockedLog
 }
 
 // TestDataMoveSuite runs on its own rather than beside the other suites: the change feed waits
@@ -44,12 +50,20 @@ func TestDataMoveSuite(t *testing.T) {
 // as soon as the export has.
 const letGoWithin = 30 * time.Second
 
+func (s *DataMoveSuite) SetupSuite() {
+	s.logged = &lockedLog{}
+	s.logs = s.logged
+	s.RouterSuite.SetupSuite()
+}
+
 func (s *DataMoveSuite) SetupTest() {
 	// Last of the test's cleanups: the router's places for exports are shared by the tests
 	// after it, so the exports a test left unread have ended before the next one starts.
 	s.T().Cleanup(func() {
 		s.Eventually(func() bool { return len(s.router.exports) == 0 }, letGoWithin, 10*time.Millisecond,
 			"an export of this test is still running")
+		s.Eventually(func() bool { return len(s.router.imports) == 0 }, letGoWithin, 10*time.Millisecond,
+			"an import of this test is still running")
 	})
 	s.useApp(s.data.createApp())
 }
@@ -193,7 +207,7 @@ func (s *DataMoveSuite) TestImportingAnExportWritesTheRowsItCarried() {
 // a custom connector, an import refuses too, so the operator's client is never sent to a token
 // endpoint the file names. A connector the API would create imports as it is.
 func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientIsRefused() {
-	refused, taken := "custom_"+store.NewID(), "custom_"+store.NewID()
+	refused, taken := "custom_a"+store.NewID(), "custom_a"+store.NewID()
 
 	// full=true, so the first line's refusal is all that differs between the two imports: the
 	// second would otherwise be a 409 for an app that holds data here.
@@ -213,7 +227,7 @@ func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientIsRefused
 
 // The operator rule reads the whole registration list, not its first entry.
 func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientAfterAnotherIsRefused() {
-	refused := "custom_" + store.NewID()
+	refused := "custom_a" + store.NewID()
 
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
 		s.importedConnector(refused, `"client": {"registration": ["customer", "operator"], "env": "GOOGLE"}, "schemes": ["oauth2_code"],
@@ -224,9 +238,113 @@ func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientAfterAnot
 	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+refused, nil, nil))
 }
 
+// A definition with oauth2_client_credentials, from before custom connectors lost it, is left out
+// and named, an export row and a change alike; every other line is written.
+func (s *DataMoveSuite) TestAnImportNamesTheClientCredentialsDefinitionsItLeftOut() {
+	skipped, changed, taken := "custom_a"+store.NewID(), "custom_a"+store.NewID(), "custom_a"+store.NewID()
+	change := s.importedConnector(changed, `"schemes": ["oauth2_client_credentials"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`)
+
+	var written struct {
+		Rows    int64            `json:"rows"`
+		Tables  map[string]int64 `json:"tables"`
+		Skipped []string         `json:"skipped"`
+	}
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
+		s.importedConnector(skipped, `"schemes": ["oauth2_client_credentials"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`),
+		s.importedConnector(taken, `"schemes": ["bearer"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`),
+		{Change: &store.DataChange{Table: change.Table, Op: store.ChangeInsert, Payload: change.Row}},
+	}), &written))
+
+	s.Equal([]string{`connector_definitions:{"id":"` + skipped + `","revision":1}`, `connector_definitions:{"id":"` + changed + `","revision":1}`},
+		written.Skipped)
+	s.Equal(int64(1), written.Rows)
+	s.Equal(map[string]int64{"connector_definitions": 1}, written.Tables)
+	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+skipped, nil, nil))
+	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+changed, nil, nil))
+	s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+taken, nil, nil))
+}
+
+// A client-credentials definition is left out only when it is a row the API could have stored:
+// one with a built-in id, or an id past its pattern, is refused as before, and an oversized id
+// is not kept for an answer.
+func (s *DataMoveSuite) TestAClientCredentialsDefinitionWithAnIDTheAPIRefusesIsRefused() {
+	cc := `"schemes": ["oauth2_client_credentials"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`
+	for _, id := range []string{"github", "custom_", "custom_A" + store.NewID()} {
+		status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{s.importedConnector(id, cc)}))
+		s.Equal(http.StatusBadRequest, status, id)
+	}
+
+	big := "custom_a" + strings.Repeat("x", 1<<20)
+	lines := []dataLine{}
+	for range 8 {
+		lines = append(lines, s.importedConnector(big, cc))
+	}
+	status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson(lines))
+	s.Equal(http.StatusBadRequest, status, "not a 200 holding every id")
+}
+
+// A refused id comes back once in the answer, not once for the check and again for the row it
+// names, so a refused 1 MiB id does not double the body.
+func (s *DataMoveSuite) TestARefusedImportedIDIsInTheAnswerAtMostOnce() {
+	big := "custom_a" + strings.Repeat("x", 1<<20)
+	line := s.importedConnector(big, `"schemes": ["oauth2_code"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`)
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{line}))
+	s.Equal(http.StatusBadRequest, status)
+	s.LessOrEqual(strings.Count(failure, big), 1)
+}
+
+// The answer names the first 100 rows an import left out and counts the rest, so it does not
+// grow with the body.
+func (s *DataMoveSuite) TestAnImportNamesAtMostAHundredOfTheRowsItLeftOut() {
+	lines := []dataLine{}
+	for range 103 {
+		lines = append(lines, s.importedConnector("custom_a"+store.NewID(), `"schemes": ["oauth2_client_credentials"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`))
+	}
+	var written struct {
+		Rows        int64    `json:"rows"`
+		Skipped     []string `json:"skipped"`
+		SkippedMore int64    `json:"skipped_more"`
+	}
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import?full=true", ndjson(lines), &written))
+
+	s.Len(written.Skipped, 100)
+	s.Equal(int64(3), written.SkippedMore)
+	s.Zero(written.Rows)
+}
+
+// A delete removes a row whatever its payload holds, so it left nothing out.
+func (s *DataMoveSuite) TestADeleteThatCarriesAClientCredentialsDefinitionLeftNothingOut() {
+	id := "custom_a" + store.NewID()
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
+		s.importedConnector(id, `"schemes": ["bearer"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`),
+	}), nil))
+	cc := s.importedConnector(id, `"schemes": ["oauth2_client_credentials"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`)
+	var written struct {
+		Skipped []string `json:"skipped"`
+	}
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
+		{Change: &store.DataChange{Table: cc.Table, Op: store.ChangeDelete,
+			Key: json.RawMessage(`{"id":"` + id + `","revision":1}`), Payload: cc.Row}},
+	}), &written))
+
+	s.Empty(written.Skipped)
+	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+id, nil, nil))
+}
+
+// An import that leaves nothing out says so with an empty list.
+func (s *DataMoveSuite) TestAnImportThatLeftNothingOutNamesNone() {
+	var written map[string]any
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
+		s.importedConnector("custom_a"+store.NewID(), `"schemes": ["bearer"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`),
+	}), &written))
+
+	s.Equal([]any{}, written["skipped"])
+}
+
 // A database that fails is the router's failure, and its text names the database's address.
 func (s *DataMoveSuite) TestAnImportTheDatabaseCannotWriteIsAFailureWithNoDatabaseText() {
-	id := "custom_" + store.NewID()
+	id := "custom_a" + store.NewID()
 	s.failQueries(id)
 
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
@@ -255,6 +373,29 @@ func (s *DataMoveSuite) TestAnImportedAgentNamedLikeOneHereIsRefusedWithoutTheIn
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, "another row here already holds")
 	s.NotContains(failure, "agent_configs_name_idx")
+}
+
+// A row whose key another app holds here is refused by name, and the answer says nothing of who holds it.
+func (s *DataMoveSuite) TestAnImportedRowWhoseKeyAnotherAppHoldsIsRefusedNamingIt() {
+	theirs := s.data.createAgentConfig()
+	var exported dataLine
+	for _, line := range s.export() {
+		if line.Table == "agent_configs" && strings.Contains(string(line.Row), theirs.Id) {
+			exported = line
+		}
+	}
+	s.Require().NotEmpty(exported.Table)
+	s.useApp(s.data.createApp())
+
+	change := dataLine{Change: &store.DataChange{Table: "agent_configs", Op: store.ChangeUpdate,
+		Key: json.RawMessage(`{"id":"` + theirs.Id + `"}`), Payload: exported.Row}}
+
+	for _, line := range []dataLine{exported, change} {
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", ndjson([]dataLine{line}))
+
+		s.Equal(http.StatusBadRequest, status)
+		s.Equal(`store: import agent_configs:{"id":"`+theirs.Id+`"}: this row cannot be written here`, failure)
+	}
 }
 
 // importedConnector is an export's line of a custom definition id whose manifest has fields,
@@ -367,6 +508,53 @@ func (s *DataMoveSuite) TestChangesAreAppliedToAnAppThatHoldsData() {
 	s.Equal("edited at the source", s.instructionsOf(agent.Id))
 }
 
+// A row that names a row the app does not hold is the export's to correct, and the answer names it.
+func (s *DataMoveSuite) TestAnImportedRowThatNamesARowTheAppDoesNotHoldIsRefusedNamingIt() {
+	theirs, nobodys, turn := s.utils.uuid(), s.utils.uuid(), s.utils.uuid()
+	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{ID: theirs, CustomerID: s.utils.uuid(),
+		AgentName: "docs", UserID: "sam", CallerKind: "user", CreatedAt: time.Now()}))
+
+	for _, session := range []string{theirs, nobodys} {
+		row := json.RawMessage(`{"id": "` + turn + `", "session_id": "` + session + `", "said": "hello", "status": "completed",
+			"error": "", "created_at": "2026-01-01T00:00:00Z"}`)
+		for _, line := range []dataLine{{Table: "agent_responses", Row: row},
+			{Change: &store.DataChange{Seq: 1, Table: "agent_responses", Op: store.ChangeInsert, At: time.Now(), Payload: row}}} {
+			status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{line}))
+
+			s.Equal(http.StatusBadRequest, status)
+			s.Equal(`store: import agent_responses:{"id":"`+turn+`"}: this row cannot be written here`, failure, "whoever holds the session")
+		}
+	}
+}
+
+func (s *DataMoveSuite) TestAnImportedRunOfATaskTheAppDoesNotHoldIsRefusedTheSame() {
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{{Table: "scheduled_task_runs",
+		Row: json.RawMessage(`{"id": "run", "task_id": "not-here", "state": "delivered", "trigger": "schedule", "attempts": 0, "prompt": "",
+			"delivered_to": "", "session_id": "", "texted": [], "scheduled_for": "2026-01-01T00:00:00Z", "created_at": "2026-01-01T00:00:00Z"}`)}}))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal(`store: import scheduled_task_runs:{"id":"run"}: this row cannot be written here`, failure)
+}
+
+// A change to a policy of another scope is skipped, so the answer counts no row for it.
+func (s *DataMoveSuite) TestAChangeToAnotherScopesPolicyIsNotCountedAsWritten() {
+	key := `{"scope": "organization", "scope_id": ` + strconv.Quote(s.customerID()) + `}`
+	lines := []dataLine{{Change: &store.DataChange{
+		Seq: 1, Table: "policies", Op: store.ChangeUpdate, At: time.Now(), Key: json.RawMessage(key),
+		Payload: json.RawMessage(`{"scope": "organization", "scope_id": ` + strconv.Quote(s.customerID()) +
+			`, "document": {"prompt_injection": true}, "updated_at": "2026-01-01T00:00:00Z"}`),
+	}}}
+	var answer struct {
+		Rows   int64            `json:"rows"`
+		Tables map[string]int64 `json:"tables"`
+	}
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import", ndjson(lines), &answer))
+
+	s.Equal(int64(0), answer.Rows)
+	s.Empty(answer.Tables)
+}
+
 func (s *DataMoveSuite) TestAnImportedBoughtNumberIsNotStored() {
 	ctx := context.Background()
 	other, e164 := s.utils.uuid(), s.utils.number()
@@ -395,6 +583,51 @@ func (s *DataMoveSuite) TestAnImportedBoughtNumberIsNotStored() {
 	held, err := s.store.PhoneNumbers.Select(ctx, other, store.PhoneNumberFilter{})
 	s.Require().NoError(err)
 	s.Len(held, 1, "the number stays with the app that holds it")
+}
+
+// The other app holds the numbers bought; the import carries on past them, as a row of an
+// export and as a change, and counts only what it wrote.
+func (s *DataMoveSuite) TestAnImportedNumberOnItsOwnTrunkAnotherAppHoldsIsLeftOutAndNotCounted() {
+	ctx := context.Background()
+	other := s.utils.uuid()
+	held, free := []string{s.utils.number(), s.utils.number()}, []string{s.utils.number(), s.utils.number()}
+	for _, e164 := range held {
+		s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
+			E164: e164, Vendor: "plivo", Country: "US", CustomerID: other,
+		}))
+	}
+	onTrunk := func(e164 string) json.RawMessage {
+		row, err := json.Marshal(map[string]any{
+			"id": rand.Int64N(1 << 50), "e164": e164, "vendor": "sip_trunk", "country": "US",
+			"capabilities": []string{"voice"}, "monthly_cost_micros": 0,
+			"tags": map[string]string{}, "purchased_at": time.Now().UTC(),
+		})
+		s.Require().NoError(err)
+		return row
+	}
+	lines := []dataLine{
+		{Table: "phone_numbers", Row: onTrunk(held[0])},
+		{Table: "phone_numbers", Row: onTrunk(free[0])},
+		{Change: &store.DataChange{Seq: 1, Table: "phone_numbers", Op: store.ChangeInsert, At: time.Now(), Payload: onTrunk(held[1])}},
+		{Change: &store.DataChange{Seq: 2, Table: "phone_numbers", Op: store.ChangeInsert, At: time.Now(), Payload: onTrunk(free[1])}},
+	}
+	var answer struct {
+		Rows   int64            `json:"rows"`
+		Tables map[string]int64 `json:"tables"`
+	}
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import", ndjson(lines), &answer))
+
+	s.Equal(int64(2), answer.Rows)
+	s.Equal(map[string]int64{"phone_numbers": 2}, answer.Tables)
+	s.Regexp(`customer=`+regexp.QuoteMeta(s.customerID())+` rows=2 numbers_left_out=2`, s.logged.String(), "the router logs how many it left out")
+	imported, err := s.store.PhoneNumbers.Select(ctx, s.customerID(), store.PhoneNumberFilter{IncludeReleased: true})
+	s.Require().NoError(err)
+	var numbers []string
+	for _, number := range imported {
+		numbers = append(numbers, number.E164)
+	}
+	s.ElementsMatch(free, numbers)
 }
 
 func (s *DataMoveSuite) TestAnImportedNumberOnItsOwnTrunkInAnotherFormIsRefused() {
@@ -454,6 +687,384 @@ func (s *DataMoveSuite) lineOf(fields map[string]any) string {
 	encoded, err := json.Marshal(dataLine{Table: "agent_configs", Row: row})
 	s.Require().NoError(err)
 	return string(encoded)
+}
+
+func (s *DataMoveSuite) TestASecondImportOfAnAppIsRefusedWhileOneIsRunning() {
+	s.heldImport()
+
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/data/import", emptyImport)
+
+	s.Require().Equal(http.StatusConflict, status)
+	var failure ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &failure))
+	s.Equal("import_running", failure.Error.Code, "told apart from an app that already holds data here")
+	s.Contains(failure.Error.Message, "an import of this app is already running")
+}
+
+func (s *DataMoveSuite) TestABadFullIsRefusedWhileAnImportOfTheAppRuns() {
+	s.heldImport()
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=maybe", emptyImport)
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "full is true or false")
+}
+
+func (s *DataMoveSuite) TestAnImportRefusedAtTheRoutersCapLeavesItsAppFree() {
+	var hangUps []context.CancelFunc
+	for range maxImports {
+		s.useApp(s.data.createApp())
+		hangUps = append(hangUps, s.heldImport())
+	}
+	s.useApp(s.data.createApp())
+	status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+	s.Require().Equal(http.StatusServiceUnavailable, status)
+
+	hangUps[0]()
+
+	s.Eventually(func() bool {
+		status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+		return status == http.StatusOK
+	}, letGoWithin, 10*time.Millisecond, "the app refused at the cap still counts as importing")
+}
+
+func (s *DataMoveSuite) TestAnImportWhoseBodyStallsLetsGoOfItsPlace() {
+	s.withImportLineWait(2 * time.Second)
+	// A declared length is longer than what is sent, and small enough that net/http reads the
+	// rest of it before answering, so the answer needs the stalled read to stay bounded.
+	const chunked, declared = -1, 100
+	for _, stall := range []struct {
+		name   string
+		sent   string
+		length int64
+	}{
+		{"after a line, chunked", "{\"cursor\":1}\n", chunked},
+		{"after a line, declared length", "{\"cursor\":1}\n", declared},
+		{"after a blank line, chunked", "{\"cursor\":1}\n\n", chunked},
+		{"after a blank line, declared length", "{\"cursor\":1}\n\n", declared},
+		{"inside a line, chunked", "{\"cursor\":1}\n{\"cur", chunked},
+		{"inside a line, declared length", "{\"cursor\":1}\n{\"cur", declared},
+		{"inside the first line, chunked", "{\"cur", chunked},
+		{"inside the first line, declared length", "{\"cur", declared},
+		{"before a line's end, declared length", "{\"table\":\"nope\",\"row\":{}}", declared},
+	} {
+		s.Run(stall.name, func() {
+			status, payload, took, _ := s.stalledImport(stall.sent, stall.length)
+
+			s.Less(took, 4*time.Second, "answered after one wait for the line, not two")
+			s.Require().Equal(http.StatusGatewayTimeout, status, payload)
+			var failure ErrorResponse
+			s.Require().NoError(json.Unmarshal([]byte(payload), &failure))
+			s.Equal(ErrorType("timeout"), failure.Error.Type)
+			s.Equal("timeout", failure.Error.Code)
+			s.Equal("the import's next line did not arrive in time: send the body without pausing", failure.Error.Message)
+			s.Eventually(func() bool {
+				status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+				return status == http.StatusOK
+			}, letGoWithin, 10*time.Millisecond, "the import whose body stalled still holds its places")
+			s.Zero(len(s.router.imports))
+		})
+	}
+}
+
+// A body that breaks for another reason than the wait is the caller's to correct, whether what
+// broke it is its length, its framing or a line cut short.
+func (s *DataMoveSuite) TestAnImportWhoseBodyBreaksIsRefusedAsNotAnExport() {
+	for _, broken := range []struct{ name, head, body, says string }{
+		{"cut short after a line", "Content-Length: 100", "{\"cursor\":1}\n", "unexpected EOF"},
+		{"cut short inside a line", "Content-Length: 100", "{\"cursor\":1}\n{\"cur", "unexpected EOF"},
+		{"a chunk of no size", "Transfer-Encoding: chunked", "zz\r\n", "invalid byte in chunk length"},
+	} {
+		s.Run(broken.name, func() {
+			base, err := url.Parse(s.serverClient.base())
+			s.Require().NoError(err)
+			conn, err := net.Dial("tcp", base.Host)
+			s.Require().NoError(err)
+			defer conn.Close()
+			s.Require().NoError(conn.SetDeadline(time.Now().Add(10 * time.Second)))
+			var head strings.Builder
+			s.Require().NoError(s.serverClient.header.Write(&head))
+			_, err = io.WriteString(conn, "POST /v1/data/import HTTP/1.1\r\nHost: "+base.Host+"\r\n"+head.String()+broken.head+"\r\n\r\n"+broken.body)
+			s.Require().NoError(err)
+			s.Require().NoError(conn.(*net.TCPConn).CloseWrite())
+
+			response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+
+			s.Require().NoError(err)
+			defer response.Body.Close()
+			payload, err := io.ReadAll(response.Body)
+			s.Require().NoError(err)
+			s.Require().Equal(http.StatusBadRequest, response.StatusCode, string(payload))
+			var failure ErrorResponse
+			s.Require().NoError(json.Unmarshal(payload, &failure))
+			s.Equal("invalid_request", failure.Error.Code)
+			s.Equal("this is not an export: "+broken.says, failure.Error.Message)
+		})
+	}
+}
+
+// net/http reads the rest of a body before the first of the answer is sent, which is inside the
+// handler for an answer over its buffer of 2 KiB and after it for a shorter one.
+func (s *DataMoveSuite) TestAnImportRefusedAtALineLetsGoOfItsConnectionWhenTheBodyStalls() {
+	s.withImportLineWait(500 * time.Millisecond)
+	long := strings.Repeat("1", 3000)
+	for _, refused := range []struct {
+		name   string
+		sent   string
+		length int64
+	}{
+		{"a short answer, declared length", "{\"cursor\":1}\nnot an export\n", 200},
+		{"a short answer, chunked", "{\"cursor\":1}\nnot an export\n", -1},
+		{"a long number, declared length", "{\"cursor\":" + long + "}\n", 100000},
+		{"a long number, chunked", "{\"cursor\":" + long + "}\n", -1},
+		{"a long table name, declared length", "{\"change\":{\"table\":\"" + long + "\",\"op\":\"insert\",\"id\":1,\"row\":{}}}\n", 100000},
+		{"a long table name, chunked", "{\"change\":{\"table\":\"" + long + "\",\"op\":\"insert\",\"id\":1,\"row\":{}}}\n", -1},
+	} {
+		s.Run(refused.name, func() {
+			status, payload, took, closed := s.stalledImport(refused.sent, refused.length)
+
+			s.Equal(http.StatusBadRequest, status, payload)
+			s.Contains(payload, "invalid_request")
+			s.True(closed, "the connection is kept, with the rest of its body unread")
+			s.Less(took, 5*time.Second, "answered only once the client gave up")
+			s.Eventually(func() bool {
+				status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+				return status == http.StatusOK
+			}, settleFor, 10*time.Millisecond, "the refused import still holds its places")
+			s.Zero(len(s.router.imports))
+		})
+	}
+}
+
+func (s *DataMoveSuite) TestAnImportWhoseLinesKeepArrivingOutlastsTheLineWait() {
+	s.withImportLineWait(time.Second)
+	body, writer := io.Pipe()
+	go func() {
+		// Blank lines count: three in a row outlast the wait the line before them began.
+		for _, line := range []string{"{\"cursor\":1}\n", "{\"cursor\":1}\n", "\n", "\n", "\n", "{\"cursor\":1}\n"} {
+			time.Sleep(400 * time.Millisecond)
+			_, _ = writer.Write([]byte(line))
+		}
+		_ = writer.Close()
+	}()
+	request, err := http.NewRequest(http.MethodPost, s.serverClient.base()+"/v1/data/import", body)
+	s.Require().NoError(err)
+	request.Header = s.serverClient.header.Clone()
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+
+	response, err := (&http.Client{Transport: transport}).Do(request)
+
+	s.Require().NoError(err)
+	defer response.Body.Close()
+	payload, _ := io.ReadAll(response.Body)
+	s.Equal(http.StatusOK, response.StatusCode, "each line arrived inside the wait: %s", payload)
+}
+
+// A body read whole before its rows are written: the wait for a line is not a wait for a
+// row's write, nor for the request after it on the same connection.
+func (s *DataMoveSuite) TestARowWrittenPastTheLineWaitKeepsItsConnection() {
+	s.skipOnARouterWithShards()
+	id := s.data.createAgentConfig().Id
+	exported := s.export()
+	lines := []dataLine{exported[len(exported)-1]}
+	for _, line := range exported {
+		if line.Table == "agent_configs" {
+			lines = append(lines, line, line)
+		}
+	}
+	s.withImportLineWait(500 * time.Millisecond)
+	tx, err := s.store.GlobalDB().BeginTx(context.Background(), nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(context.Background(), "SELECT 1 FROM agent_configs WHERE id = ? FOR UPDATE", id)
+	s.Require().NoError(err)
+	timer := time.AfterFunc(2*time.Second, func() { _ = tx.Rollback() })
+	defer timer.Stop()
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+	send := func(body string, reused *bool) (int, string) {
+		ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) { *reused = info.Reused },
+		})
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverClient.base()+"/v1/data/import?full=true", strings.NewReader(body))
+		s.Require().NoError(err)
+		request.Header = s.serverClient.header.Clone()
+		response, err := client.Do(request)
+		s.Require().NoError(err)
+		defer response.Body.Close()
+		payload, err := io.ReadAll(response.Body)
+		s.Require().NoError(err)
+		return response.StatusCode, string(payload)
+	}
+
+	var first, second bool
+	status, payload := send(ndjson(lines), &first)
+	s.Equal(http.StatusOK, status, "the import whose row waited on a lock: %s", payload)
+	status, payload = send(ndjson(lines), &second)
+
+	s.Equal(http.StatusOK, status, "the request after it on the same connection: %s", payload)
+	s.True(second, "the second request went on a new connection")
+}
+
+func (s *DataMoveSuite) TestAFifthImportIsRefusedAndAFourthIsNot() {
+	for range 4 {
+		s.useApp(s.data.createApp())
+		s.heldImport()
+	}
+	s.useApp(s.data.createApp())
+
+	status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+
+	s.Equal(http.StatusServiceUnavailable, status)
+}
+
+func (s *DataMoveSuite) TestALineIsWaitedForAMinute() {
+	s.Equal(time.Minute, s.router.importLineWait)
+}
+
+func (s *DataMoveSuite) TestASecondImportOfAnAppIsToldSoAtTheRoutersCap() {
+	for range 4 {
+		s.useApp(s.data.createApp())
+		s.heldImport()
+	}
+
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/data/import", emptyImport)
+
+	s.Require().Equal(http.StatusConflict, status, string(payload))
+	s.Contains(string(payload), "import_running")
+}
+
+func (s *DataMoveSuite) TestAnImportIsServedWhileItsAppsExportRuns() {
+	s.skipOnARouterWithShards()
+	s.seedRowsTooBigToBuffer()
+	s.Require().Equal(http.StatusOK, s.stalledExport().StatusCode)
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+
+	s.Equal(http.StatusOK, status, failure)
+	status, failure = s.serverClient.failure(http.MethodGet, "/v1/data/export", nil)
+	s.Equal(http.StatusConflict, status, "the export still holds its app's place")
+	s.Contains(failure, "an export of this app is already running")
+}
+
+func (s *DataMoveSuite) TestAnImportOverTheRoutersCapIsRefused() {
+	for range maxImports {
+		s.useApp(s.data.createApp())
+		s.heldImport()
+	}
+	s.useApp(s.data.createApp())
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+
+	s.Require().Equal(http.StatusServiceUnavailable, status)
+	s.Contains(failure, "as many imports as it takes at once")
+}
+
+func (s *DataMoveSuite) TestAnImportThatFailsLetsGoOfItsPlace() {
+	for range maxImports + 1 {
+		status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", "not an export at all")
+		s.Require().Equal(http.StatusBadRequest, status)
+	}
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+
+	s.Equal(http.StatusOK, status, failure)
+}
+
+func (s *DataMoveSuite) TestAnImportHungUpOnLetsGoOfItsPlace() {
+	var hangUps []context.CancelFunc
+	for range maxImports {
+		s.useApp(s.data.createApp())
+		hangUps = append(hangUps, s.heldImport())
+	}
+	for _, hangUp := range hangUps {
+		hangUp()
+	}
+
+	// The last app hung up on its own import, so a new one of it needs both its own place and
+	// one of the router's back.
+	s.Eventually(func() bool {
+		status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+		return status == http.StatusOK
+	}, letGoWithin, 10*time.Millisecond, "the imports hung up on still hold their places")
+}
+
+func (s *DataMoveSuite) TestAnImportIsServedWhileTheRoutersExportsRun() {
+	s.skipOnARouterWithShards()
+	for range maxExports {
+		s.useApp(s.data.createApp())
+		s.seedRowsTooBigToBuffer()
+		s.Require().Equal(http.StatusOK, s.stalledExport().StatusCode)
+	}
+	s.useApp(s.data.createApp())
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+
+	s.Equal(http.StatusOK, status, failure)
+}
+
+// withImportLineWait bounds how long this test's imports wait for a line.
+func (s *DataMoveSuite) withImportLineWait(wait time.Duration) {
+	s.Equal(importLineWait, s.router.importLineWait, "the default bound")
+	s.router.importLineWait = wait
+	s.T().Cleanup(func() { s.router.importLineWait = importLineWait })
+}
+
+// emptyImport is an import with no rows, which is written at once.
+const emptyImport = `{"cursor":1}`
+
+// stalledImport sends the start of an import's body and no more of it, and returns the answer,
+// how long it took, and whether the router closes the connection.
+func (s *DataMoveSuite) stalledImport(sent string, length int64) (int, string, time.Duration, bool) {
+	body, writer := io.Pipe()
+	defer writer.Close()
+	go func() { _, _ = writer.Write([]byte(sent)) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// The client's send waits on the body, which only closing it ends.
+	context.AfterFunc(ctx, func() { _ = writer.Close() })
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverClient.base()+"/v1/data/import", body)
+	s.Require().NoError(err)
+	request.Header = s.serverClient.header.Clone()
+	request.ContentLength = length
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+	began := time.Now()
+	response, err := (&http.Client{Transport: transport}).Do(request)
+	s.Require().NoError(err, "the stalled import was never answered")
+	took := time.Since(began)
+	defer response.Body.Close()
+	payload, err := io.ReadAll(response.Body)
+	s.Require().NoError(err)
+	return response.StatusCode, string(payload), took, response.Close
+}
+
+// heldImport starts an import of the app whose body never ends, waits until it holds one of
+// the router's places, and returns what hangs up on it.
+func (s *DataMoveSuite) heldImport() context.CancelFunc {
+	held := len(s.router.imports)
+	body, writer := io.Pipe()
+	ctx, hangUp := context.WithCancel(context.Background())
+	s.T().Cleanup(func() {
+		hangUp()
+		_ = writer.Close()
+	})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverClient.base()+"/v1/data/import", body)
+	s.Require().NoError(err)
+	request.Header = s.serverClient.header.Clone()
+	transport := &http.Transport{}
+	s.T().Cleanup(transport.CloseIdleConnections)
+	go func() {
+		response, err := (&http.Client{Transport: transport}).Do(request)
+		if err == nil {
+			_ = response.Body.Close()
+		}
+	}()
+	s.Require().Eventually(func() bool { return len(s.router.imports) == held+1 }, settleFor, 10*time.Millisecond,
+		"the import never started")
+	return hangUp
 }
 
 // An export holds a connection of the router's pool until its client has read it all.
@@ -594,6 +1205,48 @@ func (s *DataMoveSuite) TestAnImportWithBlankLinesIsRead() {
 
 	s.Require().Equal(http.StatusOK, status)
 	s.Equal(int64(rows), imported.Rows)
+}
+
+func (s *DataMoveSuite) TestAnImportWithAnObjectOverSeveralLinesIsToldToWriteOnePerLine() {
+	s.data.createAgentConfig()
+	var lines []string
+	for _, line := range s.export() {
+		encoded, err := json.MarshalIndent(line, "", "  ")
+		s.Require().NoError(err)
+		lines = append(lines, string(encoded))
+	}
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", strings.Join(lines, "\n"))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "one JSON object per line")
+}
+
+func (s *DataMoveSuite) TestAnImportWithTwoObjectsOnALineIsToldToWriteOnePerLine() {
+	s.data.createAgentConfig()
+	var objects []string
+	for _, line := range s.export() {
+		encoded, err := json.Marshal(line)
+		s.Require().NoError(err)
+		objects = append(objects, string(encoded))
+	}
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", strings.Join(objects, ""))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "one JSON object per line")
+}
+
+func (s *DataMoveSuite) TestAnImportStopsAtTheLineItRefuses() {
+	agent := s.data.createAgentConfig()
+	exported := s.export()
+	s.instruct(agent.Id, "edited here")
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", "{\n"+ndjson(exported))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "one JSON object per line")
+	s.Equal("edited here", s.instructionsOf(agent.Id), "no line after the refused one is written")
 }
 
 func (s *DataMoveSuite) TestAnExportWhoseClientStopsReadingIsLetGo() {

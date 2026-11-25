@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
@@ -26,6 +27,16 @@ func isViolation(err error, code string) bool {
 	return errors.As(err, &refused) && refused.Field('C') == code
 }
 
+// constraint is the name of the unique constraint an error violated, empty for anything
+// else.
+func constraint(err error) string {
+	var failure pgdriver.Error
+	if errors.As(err, &failure) && failure.Field('C') == uniqueViolation {
+		return failure.Field('n')
+	}
+	return ""
+}
+
 // IsForeignKeyViolation reports whether err is Postgres refusing a row whose parent row is
 // missing.
 func IsForeignKeyViolation(err error) bool {
@@ -44,7 +55,7 @@ func Transient(err error) bool {
 		switch code := refused.Field('C'); code {
 		// 57014 is a statement that statement_timeout or an operator's pg_cancel_backend stopped.
 		// The driver sends no cancel of its own: a context that ran out is a net timeout.
-		case "25006", "40001", "40P01", "53300", "57014", "57P01", "57P02", "57P03":
+		case readOnlyTransaction, "40001", "40P01", "53300", "57014", "57P01", "57P02", "57P03":
 			return true
 		default:
 			return strings.HasPrefix(code, "08")
@@ -56,6 +67,46 @@ func Transient(err error) bool {
 	var network net.Error
 	return errors.As(err, &op) || errors.As(err, &network) && network.Timeout() ||
 		errors.Is(err, driver.ErrBadConn) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// readOnlyTransaction is the code of a write refused as read-only, which a primary a failover
+// demoted answers every write with.
+const readOnlyTransaction = "25006"
+
+// primaryOnly is a connector whose connections close once a write on one is refused as
+// read-only. pgdriver keeps a connection after an ERROR, so a retry of the write would reach
+// the demoted backend again, and so would every write after it; a fresh connection reaches
+// the new primary.
+type primaryOnly struct{ *pgdriver.Connector }
+
+func (c primaryOnly) Connect(ctx context.Context) (driver.Conn, error) {
+	conn, err := c.Connector.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return primaryConn{conn.(*pgdriver.Conn)}, nil
+}
+
+// primaryConn is a connection of primaryOnly's. A transaction's statements go through it too.
+type primaryConn struct{ *pgdriver.Conn }
+
+func (c primaryConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	result, err := c.Conn.ExecContext(ctx, query, args)
+	return result, c.closeIfReadOnly(err)
+}
+
+func (c primaryConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	rows, err := c.Conn.QueryContext(ctx, query, args)
+	return rows, c.closeIfReadOnly(err)
+}
+
+// closeIfReadOnly closes the connection if err is a write refused as read-only, so the pool
+// drops it, as the driver closes one it finds broken. It returns err as it is.
+func (c primaryConn) closeIfReadOnly(err error) error {
+	if isViolation(err, readOnlyTransaction) {
+		_ = c.Close()
+	}
+	return err
 }
 
 // oneRow turns an update or delete that matched nothing into missing.
@@ -77,6 +128,23 @@ func nullable(text string) any {
 		return nil
 	}
 	return text
+}
+
+// orEmpty is list, or an empty one when it is nil, for a column or a JSON value that holds
+// an empty list and never NULL.
+func orEmpty[S ~[]E, E any](list S) S {
+	if list == nil {
+		return S{}
+	}
+	return list
+}
+
+// orEmptyMap is orEmpty for a map.
+func orEmptyMap[M ~map[K]V, K comparable, V any](values M) M {
+	if values == nil {
+		return M{}
+	}
+	return values
 }
 
 // likeEscaper makes typed text match as itself rather than as a pattern: backslash is LIKE's

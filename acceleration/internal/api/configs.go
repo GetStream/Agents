@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sensitive"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/guardrail"
@@ -410,13 +411,6 @@ func (s *Server) deleteAgentConfig(ctx context.Context, request *deleteAgentConf
 	if err != nil {
 		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
-	answering, err := s.store.PhoneNumbers.AnsweredBy(ctx, customerID, request.Id)
-	if err != nil {
-		return nil, err
-	}
-	if len(answering) > 0 {
-		return nil, configAnswersNumbers(answering)
-	}
 	// Children are named by name, so one deleted would leave its parent calling whichever
 	// config takes the name next.
 	if parent, err := s.parentOf(ctx, customerID, existing.Name, existing.ID); err != nil {
@@ -425,6 +419,9 @@ func (s *Server) deleteAgentConfig(ctx context.Context, request *deleteAgentConf
 		return nil, conflict(fmt.Sprintf("%q hands work to this agent: take it out of %q's agents first", parent, parent))
 	}
 	if err := s.store.AgentConfigs.Delete(ctx, customerID, request.Id); err != nil {
+		if answering, ok := errors.AsType[*store.ConfigAnswersNumbersError](err); ok {
+			return nil, configAnswersNumbers(answering.Numbers)
+		}
 		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	// A deleted config's tasks have no agent left to run on: paused, they stop failing
@@ -691,6 +688,10 @@ func channelConnectionTaken(taken *store.ChannelConnectionTakenError) APIError {
 func storeFailure(err error, taken APIError) error {
 	if owned, ok := errors.AsType[*store.ChannelConnectionTakenError](err); ok {
 		return channelConnectionTaken(owned)
+	}
+	// What channelsWarnings answers, for a config saved at the same time that passed it too.
+	if line, ok := errors.AsType[*store.ChannelLineTakenError](err); ok {
+		return invalidRequest("channels." + line.Kind + ": " + line.Number + " already answers as " + line.OwnerName)
 	}
 	switch {
 	case errors.Is(err, store.ErrNameTaken):
@@ -1046,111 +1047,9 @@ func sandboxOfConfig(config store.AgentConfig) *savedSandbox {
 		Granted: slices.ContainsFunc(config.Connectors, func(binding store.ConnectorBinding) bool { return binding.Sandbox })}}
 }
 
-// sensitiveBindingsComplaint refuses a config that binds a sensitive connector, one whose
-// manifest says its tools read private data, together with a tool that sends data out: a
-// model that reads untrusted text could be steered into sending out what it read («Nessy as
-// a connector» on AI-1538, change 13). These send data out:
-//   - a binding whose connector has a source that does not say outbound: false, as one of its
-//     tools may write, unless each tool it grants is in the source's read_only_tools or its
-//     require_approval, which holds every call for a person to allow, and a binding with
-//     sandbox set, whose code calls the connector's whole API;
-//   - a sandbox that may reach the network.
-//
-// Only a binding's require_approval asks a person before a call is sent; the others ask
-// nobody. It reads the config as it is about to be stored.
-func SensitiveBindingsComplaint(ctx context.Context, definitions store.Definitions, customerID string, config store.AgentConfig) (string, bool, error) {
-	var sensitive *store.ConnectorBinding
-	var outbound, unheld []string
-	for i, binding := range config.Connectors {
-		definition, err := definitions.Latest(ctx, customerID, binding.ConnectorID)
-		// A forced connector delete leaves its bindings behind (store.refuseUndefined), and
-		// a binding to a connector with no definition opens nothing.
-		if errors.Is(err, store.ErrNoConnectorDefinition) {
-			continue
-		}
-		if err != nil {
-			return "", false, err
-		}
-		if definition.Manifest.Sensitive {
-			sensitive = &config.Connectors[i]
-		}
-		if tools, sends := bindingSendsOut(binding, definition.Manifest); sends {
-			outbound = append(outbound, fmt.Sprintf("connector binding %q", binding.Name))
-			if len(tools) > 0 {
-				unheld = append(unheld, fmt.Sprintf("%q %s", binding.Name, strings.Join(tools, ", ")))
-			}
-		}
-	}
-	if sensitive == nil {
-		return "", true, nil
-	}
-	if config.Sandbox.Provider != "" && !config.Sandbox.Options.Isolated() {
-		outbound = append(outbound, "the sandbox's network access")
-	}
-	if len(outbound) == 0 {
-		return "", true, nil
-	}
-	message := fmt.Sprintf("connector binding %q binds %q, whose tools read private data, and %s can send data out "+
-		"with no person's approval: take them out of this config", sensitive.Name, sensitive.ConnectorID,
-		strings.Join(outbound, ", "))
-	if len(unheld) > 0 {
-		message += ", or add to each binding's require_approval its tools that do not only read: " +
-			strings.Join(unheld, "; ")
-	}
-	return message, false, nil
-}
-
-// sensitiveBindingsComplaint is SensitiveBindingsComplaint over the server's store.
+// sensitiveBindingsComplaint is sensitive.ConfigComplaint over the server's store.
 func (s *Server) sensitiveBindingsComplaint(ctx context.Context, customerID string, config store.AgentConfig) (string, bool, error) {
-	return SensitiveBindingsComplaint(ctx, s.store.ConnectorDefinitions, customerID, config)
-}
-
-// bindingSendsOut reports whether a binding offers a tool that may send data out with nobody
-// asked, and the names or patterns it grants such tools by: one of a source that does not say
-// outbound: false, unless the binding grants it by name and the source lists it in
-// read_only_tools, or its require_approval holds it, or the connector's API to sandbox code,
-// which names none. A tool pattern matches tools only a session lists, so it sends out if any
-// source may and its require_approval does not hold all it matches. A binding does not say
-// which source a granted name comes from, so it sends out if any source may send it. A
-// connector with no source offers no tool, and neither does a binding that grants none.
-func bindingSendsOut(binding store.ConnectorBinding, manifest core.Manifest) ([]string, bool) {
-	if binding.Sandbox {
-		return nil, true
-	}
-	var unheld []string
-	if binding.ToolPatterns != nil {
-		if !slices.ContainsFunc(manifest.Sources, core.SourceRule.SendsOut) {
-			return nil, false
-		}
-		for _, pattern := range *binding.ToolPatterns {
-			if !holdsPattern(binding, pattern) {
-				unheld = append(unheld, pattern)
-			}
-		}
-		return unheld, len(unheld) > 0
-	}
-	for _, tool := range binding.Tools {
-		if manifest.SendsOutTool(tool.Name) && !binding.RequiresApproval(tool.Name) {
-			unheld = append(unheld, tool.Name)
-		}
-	}
-	return unheld, len(unheld) > 0
-}
-
-// holdsPattern reports whether the binding's require_approval holds every tool a tool pattern
-// matches: an entry does when it matches the pattern as written and has no wildcard or escape
-// but *, such as * or create_* for create_*, as each * then also matches what the pattern's
-// wildcards stand for. An entry's ? or class matches one character where the pattern's * may
-// stand for several, an escaped \* only the pattern's own *, and the pattern's class may stand
-// for a / that no * matches, so none of them is taken to hold the pattern.
-func holdsPattern(binding store.ConnectorBinding, pattern string) bool {
-	if strings.Contains(pattern, "[") {
-		return false
-	}
-	return slices.ContainsFunc(binding.RequireApproval, func(entry string) bool {
-		matched, _ := path.Match(entry, pattern)
-		return matched && !strings.ContainsAny(entry, `?[\`)
-	})
+	return sensitive.ConfigComplaint(ctx, s.store.ConnectorDefinitions, customerID, config)
 }
 
 // storedBindings turns the bindings a caller sent into what a config stores, as written.

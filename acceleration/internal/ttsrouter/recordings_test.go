@@ -331,14 +331,14 @@ func (s *RecordingsSuite) TestARecordingWithAVoiceOnlyForCartesiaIsSpokenByCarte
 	_, served, err := s.newRecordings().Record(s.ctx, Recording{
 		CustomerID: "acme",
 		Options: options.TTS{Target: "tts-quality", Overwrites: map[string]json.RawMessage{
-			"cartesia": json.RawMessage(`{"voice_id":"db6b0ed5-cartesia"}`),
+			"cartesia": json.RawMessage(`{"voice_id":"db6b0ed5-d5d3-463d-ae85-518a07d3c2b4"}`),
 		}},
 		Text: "hello",
 	})
 
 	s.Require().NoError(err)
 	s.Equal("cartesia/sonic-preview", served.Name())
-	s.Equal("db6b0ed5-cartesia", s.spokenIn())
+	s.Equal("db6b0ed5-d5d3-463d-ae85-518a07d3c2b4", s.spokenIn())
 }
 
 // recordOn checks a recording and then records it, as RecordSpeech does, and says which

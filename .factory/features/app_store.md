@@ -31,10 +31,6 @@ The authenticator, `policy.Enforcer`, `api.Server`, `session.Manager` and the vo
 resolver and service all read through it. A deployment with no Redis address, or one whose
 Redis is unreachable, reads Postgres and nothing fails.
 
-`TouchAPIKey` is throttled per process as well. The store already refused to write
-`last_used_at` more than once a minute, but it took a query to find that out, which on a
-busy key was a second round trip per request for a column nothing reads in anger.
-
 ## Tracing, which is how it was measured
 
 [internal/tracing](../../acceleration/internal/tracing) is `go.opentelemetry.io/otel` with

@@ -42,6 +42,13 @@ import (
 // reader some detail and nobody on the call anything.
 const watcherBuffer = 256
 
+// DefaultUserID and DefaultUserName are who the agent joins a call and writes Chat as when
+// nobody names it: the only identity an end user's device may ask for by name.
+const (
+	DefaultUserID   = defaultUserID
+	DefaultUserName = defaultUserName
+)
+
 // Defaults a caller can leave out. They are the same ones cmd/agent's flags carry, so a
 // session started with an almost empty spec behaves like the demo.
 const (
@@ -322,6 +329,9 @@ type Session struct {
 	// addedTools are the caller's tools added while the session ran (AddTools), which a
 	// watcher that named the tools it runs is asked to run as well. Guarded by labelMu.
 	addedTools map[string]bool
+	// declaredEver are the names of every tool the caller has declared, at open or since
+	// (AddTools), kept after one is removed: what it returned is still in the conversation.
+	declaredEver map[string]bool
 	// labelMu guards title and description, which are what naming last called the
 	// conversation, over the spec's own. It also guards the spec's fields a running session
 	// changes: its labels (Describe), connector selections (chose), models and voice
@@ -383,6 +393,9 @@ type Session struct {
 	// handedOver is set on a session that must not hang up its call: another session serves
 	// it, or the router turned the session away as it shut down.
 	handedOver atomic.Bool
+	// idTaken is set once the store refused the session's row because another customer's
+	// session has its id (Manager.idTaken).
+	idTaken atomic.Bool
 	// active is set while router_sessions_active counts the session: from the manager
 	// holding it until it has closed. agentLeft is set once its agent left the call by itself
 	// (consume). modelErred and replied are whether its model failed a turn and whether

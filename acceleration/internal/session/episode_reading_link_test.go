@@ -15,14 +15,14 @@ import (
 
 // A card in progress read for its lines (AI-2716): a thread channel holds every episode of its
 // thread, one after another, so a number's SMS thread holds what it texted before a link set
-// those episodes aside (store.LinkUserPhone), and an app chat's channel holds each run of the
+// those episodes aside (store.UserPhones.Link), and an app chat's channel holds each run of the
 // person's messages.
 
 // inProgress is the status of a card whose episode is still open.
 const inProgress = "in_progress"
 
 // cardsConfig stores the suite's agent config with episode_cards on, as a link sets the
-// number's history aside only for such a config (store.LinkUserPhone, retireHistory).
+// number's history aside only for such a config (store.UserPhones.Link, retireHistory).
 func (s *EpisodeReadingSuite) cardsConfig() {
 	config := store.AgentConfig{CustomerID: s.customerID, Name: "cards-" + uuid.NewString(), Mode: store.AgentModeText,
 		EpisodeCards: store.AgentEpisodeCards{On: true}}
@@ -140,7 +140,7 @@ func (s *EpisodeReadingSuite) TestAChatCardInProgressHasOnlyItsOwnEpisodesLines(
 	s.Equal([]string{"my dog is Pepper"}, cardLines(handed[1]), "the run in progress, from its start")
 }
 
-// linkAt links user to number as the customer's backend does (store.LinkUserPhone), dated
+// linkAt links user to number as the customer's backend does (store.UserPhones.Link), dated
 // seconds after the test's start, where the test's story puts it: the suite dates what is said
 // before now.
 func (s *EpisodeReadingSuite) linkAt(user, number string, seconds int) {

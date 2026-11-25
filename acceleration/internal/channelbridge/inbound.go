@@ -30,12 +30,12 @@ const inboundLease = time.Minute
 const defaultInboundPoll = time.Second
 
 // inboundInFlight is how many queued messages one router writes at once. A thread's messages
-// are written one at a time whatever it is (store.ClaimChannelInbound). eventforward's inFlight,
+// are written one at a time whatever it is (store.ChannelInbounds.Claim). eventforward's inFlight,
 // a choice, not a measurement.
 const inboundInFlight = 16
 
 // pruneEvery is how often a worker deletes the rows past their keep: a day for a written
-// message, 30 days for a given-up one (store.PruneChannelInbound), so an hour late is nothing.
+// message, 30 days for a given-up one (store.ChannelInbounds.Prune), so an hour late is nothing.
 // A choice.
 const pruneEvery = time.Hour
 
@@ -125,8 +125,7 @@ func (b *Bridge) writeDue(ctx context.Context) (wait time.Duration, again bool) 
 		if free == 0 {
 			return 0, false
 		}
-		now := time.Now()
-		claimed, err := b.store.ChannelInbounds.Claim(ctx, now, free, now.Add(inboundLease))
+		claimed, err := b.store.ChannelInbounds.Claim(ctx, free, inboundLease)
 		if err != nil {
 			if ctx.Err() == nil {
 				b.logger.Error("could not take the inbound messages due", "error", err)
@@ -333,7 +332,7 @@ func (b *Bridge) writeQueued(ctx context.Context, message store.ChannelInbound) 
 }
 
 // forwardUnanswered hands a given-up message's delivery to the customer's event destinations of
-// unhandled events (Options.Unanswered), for store.FailChannelInbound to call: only the first
+// unhandled events (Options.Unanswered), for store.ChannelInbounds.Fail to call: only the first
 // given-up message of a delivery whose forward is queued does, so two of them are one forward.
 // Nil without Options.Unanswered.
 func (b *Bridge) forwardUnanswered(message store.ChannelInbound) func(context.Context) error {

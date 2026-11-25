@@ -286,7 +286,15 @@ func (s *Server) answerChatInboundForPeer(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.logger.Info("answering a queued chat inbound message another node handed over", "seq", queued.Seq, "stream_app", queued.StreamApp)
-	if !s.routeArrivingMessage(r.Context(), queued.origin(), event.messageEvent) {
+	origin := queued.origin()
+	// Handed to this node's shard rather than to what runs here, so it may still go on to a
+	// worker or the node running its conversation (node.HandedToShard).
+	if node.HandedToShard(r.Context()) {
+		origin.handOver = func(ctx context.Context, address string) (*node.ForwardResponse, error) {
+			return s.handChatInboundToPeer(ctx, address, queued)
+		}
+	}
+	if !s.routeArrivingMessage(r.Context(), origin, event.messageEvent) {
 		writeError(w, unavailable("nothing took the queued delivery"))
 		return
 	}
@@ -294,7 +302,7 @@ func (s *Server) answerChatInboundForPeer(w http.ResponseWriter, r *http.Request
 }
 
 // answerOnce settles a queued delivery's row as its answer starts, so a try of it after that, on
-// this router or another, answers nothing (store.StartChatInboundAnswer). answer is false when
+// this router or another, answers nothing (store.ChatInbounds.StartAnswer). answer is false when
 // the message is not to be answered now, and settled then says whether that holds: its answer
 // already started, or the row could not be written and a later try may. A hook is never tried
 // again, so it settles nothing. A router that stops mid-answer leaves the message answered at

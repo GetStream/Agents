@@ -3,7 +3,6 @@ package store
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -153,7 +152,7 @@ func (r *TurnBuckets) Select(ctx context.Context, customerID string, f TurnBucke
 		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	bucket := fmt.Sprintf("date_trunc('%s', bucket, 'UTC')", granularity.truncateUnit())
 

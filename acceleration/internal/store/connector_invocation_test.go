@@ -76,9 +76,8 @@ func (s *StoreSuite) TestAnInvocationKeepsItsProviderStatusAndErrorMessage() {
 	s.Equal("the server refused the request with 403 Forbidden", rows[1].ErrorMessage)
 }
 
-// baseInvocation is ConnectorInvocation as the router before
-// 20261031130000_connector_invocation_failures.sql has it (11fae4b1), without the provider's
-// status and the error message.
+// baseInvocation is ConnectorInvocation as the router that predates its provider_status and
+// error_message columns has it (11fae4b1), without them.
 type baseInvocation struct {
 	bun.BaseModel `bun:"table:connector_invocations,alias:ci"`
 
@@ -144,6 +143,22 @@ func (s *StoreSuite) TestAnInvocationWithAnUnknownErrorTypeIsRefused() {
 	s.Empty(rows, "nothing was stored")
 }
 
+func (s *StoreSuite) TestInvocationsInsertedTogetherAreAllStoredOrNone() {
+	connection := s.connection("acme-app", nil)
+	row := ConnectorInvocation{CustomerID: "acme-app", ConnectionID: connection.ID, Tool: "search", StartedAt: s.base}
+	refused := row
+	refused.ErrorType = "timeout"
+
+	s.Require().NoError(s.store.ConnectorInvocations.InsertMany(s.ctx, []ConnectorInvocation{row, row, row}))
+	err := s.store.ConnectorInvocations.InsertMany(s.ctx, []ConnectorInvocation{row, refused})
+
+	var invalid *ValidationError
+	s.Require().ErrorAs(err, &invalid)
+	rows, err := s.store.ConnectorInvocations.Select(s.ctx, "acme-app", InvocationFilter{ConnectionID: connection.ID})
+	s.Require().NoError(err)
+	s.Len(rows, 3, "each row of the first batch has an id of its own, and the refused batch left none")
+}
+
 func (s *StoreSuite) TestConnectorInvocationQueryBudgets() {
 	connection := s.connection("acme-app", nil)
 	for i := range 30 {
@@ -151,6 +166,13 @@ func (s *StoreSuite) TestConnectorInvocationQueryBudgets() {
 	}
 
 	s.Equal(1, s.countQueries(func() { s.invocation(connection, time.Minute, "") }), "Insert")
+	s.Equal(1, s.countQueries(func() {
+		rows := make([]ConnectorInvocation, 50)
+		for i := range rows {
+			rows[i] = ConnectorInvocation{CustomerID: "acme-app", ConnectionID: connection.ID, Tool: "search", StartedAt: s.base}
+		}
+		s.Require().NoError(s.store.ConnectorInvocations.InsertMany(s.ctx, rows))
+	}), "InsertMany")
 	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.ConnectorInvocations.Insert(s.ctx, &ConnectorInvocation{CustomerID: "acme-app",
 			ConnectionID: connection.ID, Tool: "search", StartedAt: s.base, Arguments: []ArgumentShape{{Name: "q", Type: "string"}}}))

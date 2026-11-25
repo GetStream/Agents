@@ -141,7 +141,7 @@ func (s *Scheme) checkEndpoint(ctx context.Context, endpoint string) error {
 	bare := *u
 	bare.RawQuery, bare.ForceQuery = "", false
 	if err := s.cfg.PublicEndpoint(ctx, bare.String()); err != nil {
-		return fmt.Errorf("oauth2code: endpoint %q: %w", endpoint, err)
+		return fmt.Errorf("oauth2code: %w", &core.EndpointError{Endpoint: endpoint, Err: err})
 	}
 	return nil
 }

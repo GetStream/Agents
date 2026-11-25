@@ -160,7 +160,9 @@ func (s *Secrets) Prepare(ctx context.Context, grants []sandbox.Grant) (sandbox.
 	return mount, nil
 }
 
-func (s *Secrets) BeforeRun(ctx context.Context) error {
+// BeforeRun gives the run no env of its own: Daytona keeps the secrets with the sandbox, and a
+// secret's name reaches nothing outside it.
+func (s *Secrets) BeforeRun(ctx context.Context) (map[string]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, held := range s.held {
@@ -184,7 +186,7 @@ func (s *Secrets) BeforeRun(ctx context.Context) error {
 			// The secret stays, holding no credential, until Close deletes it.
 			value := withdrawn
 			if _, err := s.client.Secret.Update(ctx, held.id, &types.UpdateSecretParams{Value: &value}); err != nil {
-				return fmt.Errorf("daytona: withdraw secret %s: %w", held.name, err)
+				return nil, fmt.Errorf("daytona: withdraw secret %s: %w", held.name, err)
 			}
 			held.withdrawn = true
 			s.options.Logger.Warn("a connector's credential is withdrawn from the sandbox", "connector", held.grant.Binding,
@@ -197,12 +199,15 @@ func (s *Secrets) BeforeRun(ctx context.Context) error {
 		// Daytona applies an update to every sandbox that uses the secret within 15 seconds
 		// (secrets.md above).
 		if _, err := s.client.Secret.Update(ctx, held.id, &types.UpdateSecretParams{Value: &token.Value}); err != nil {
-			return fmt.Errorf("daytona: refresh secret %s: %w", held.name, err)
+			return nil, fmt.Errorf("daytona: refresh secret %s: %w", held.name, err)
 		}
 		held.revision, held.unbound = token.Revision, false
 	}
-	return nil
+	return nil, nil
 }
+
+// AfterRun has nothing to end: the secrets last as long as the sandbox.
+func (s *Secrets) AfterRun(context.Context) error { return nil }
 
 // abandon is release for a Prepare that failed, which may have failed because ctx ran out: on
 // ctx itself every delete would fail too, and the live token of a secret made before would stay

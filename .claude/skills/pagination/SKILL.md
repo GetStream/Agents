@@ -35,7 +35,7 @@ type SessionPosition struct {
 }
 ```
 
-Store, in `QuerySessions`:
+Store, in `Sessions.Select`:
 
 ```go
 if after := filter.Cursor; after != nil {
@@ -60,3 +60,5 @@ Go SDK: list methods return the page and take a cursor; `Items.Unwind` follows i
 ## Lists without a cursor yet
 
 `listCalls`, `listSimulationRuns` and `getCallEvents` take a `limit` and no way to continue.
+`listSimulationRuns` refuses a limit over 500, and `getCallEvents` one over the 10,000 decisions
+a call keeps. `listCalls` answers 500 at most.

@@ -50,7 +50,7 @@ var errOutOfTime = errors.New("the occurrence ran out of time")
 // or claimed elsewhere, so another router's claims are not chased in a loop.
 const poll = time.Second
 
-// deliveryWindow is how late each kind of occurrence may be: a task that runs
+// How late each kind of occurrence may be: a task that runs
 // once is still worth delivering a day late, told that it is late; a repeating
 // one is only run at its latest due occurrence, the older ones written missed.
 const (
@@ -134,6 +134,9 @@ const (
 	ReasonConnectionRemoved = "connection_removed"
 	// ReasonTierLimit is a call or a text its organization's tier limits refuse.
 	ReasonTierLimit = "tier_limit_reached"
+	// ReasonNotInTeam is a task its end user made on an agent config of a team they are no
+	// longer in, in an app that keeps each team's configs to its own users.
+	ReasonNotInTeam = "not_in_team"
 	// ReasonPaused is not a failure: it is on the missed run of a one-shot
 	// whose time came while the task was paused, and of an occurrence the
 	// cut-over of a move skipped whose run the source had started.
@@ -197,6 +200,8 @@ type Scheduler struct {
 	logger  *slog.Logger
 	// activity counts each occurrence settled under its task's app. Nil counts none.
 	activity *activity.Recorder
+	// shard is whose tasks the worker claims. The zero ShardClaim claims every shard's.
+	shard store.ShardClaim
 
 	now           func() time.Time
 	lease         time.Duration
@@ -253,6 +258,12 @@ func (s *Scheduler) SetFinishRetries(waits []time.Duration) {
 // it before Start.
 func (s *Scheduler) SetActivity(record *activity.Recorder) {
 	s.activity = record
+}
+
+// SetShard has the worker claim only shard's tasks, and any left unclaimed where they are meant
+// for. Call it before Start.
+func (s *Scheduler) SetShard(shard store.ShardClaim) {
+	s.shard = shard
 }
 
 // Start runs the worker until ctx ends or Close: it looks at start, when Kick
@@ -320,7 +331,7 @@ func (s *Scheduler) runDue(ctx context.Context) (time.Duration, bool) {
 		if free == 0 {
 			return 0, false
 		}
-		claimed, err := s.store.ScheduledTasks.Claim(ctx, free, s.lease)
+		claimed, err := s.store.ScheduledTasks.Claim(ctx, free, s.lease, s.shard)
 		if err != nil {
 			if ctx.Err() == nil {
 				s.logger.Error("could not claim the scheduled tasks due", "error", err)

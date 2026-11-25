@@ -145,6 +145,10 @@ func (l *sipLeg) Invite(ctx context.Context, body []byte) ([]byte, error) {
 			// so the retry already carries the address the other side can reach us on.
 			if res.StatusCode == sip.StatusUnauthorized || res.StatusCode == sip.StatusProxyAuthRequired {
 				natContact(dlg.InviteRequest.Contact(), res)
+				// The resend adds this challenge's Record-Route as Route, on top of any an
+				// earlier resend added.
+				for dlg.InviteRequest.RemoveHeader("Route") {
+				}
 			}
 			return nil
 		},
@@ -309,8 +313,8 @@ func (l *sipLeg) Bye(ctx context.Context) error {
 		}
 		return nil
 	}
-	// WriteBye rather than Bye: Bye copies Route from the initial INVITE, which carries
-	// the route set when a 401 with Record-Route was retried, and WriteBye adds it again.
+	// A BYE built like the other in-dialog requests, with no Route: WriteBye adds the
+	// dialog's route set.
 	return stack.Wrap(l.dlg.WriteBye(ctx, l.inDialog(sip.BYE, "", nil)))
 }
 

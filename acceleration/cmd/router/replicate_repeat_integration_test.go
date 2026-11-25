@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,6 +42,8 @@ type ReplicateRepeatSuite struct {
 	changesDown bool
 	// pageSize is how many changes the source answers in a page.
 	pageSize int
+	// logged is what the runs logged.
+	logged *bytes.Buffer
 }
 
 func TestReplicateRepeatSuite(t *testing.T) {
@@ -50,6 +53,7 @@ func TestReplicateRepeatSuite(t *testing.T) {
 func (s *ReplicateRepeatSuite) SetupTest() {
 	s.ctx = context.Background()
 	s.exports, s.truncated, s.changesDown, s.pageSize = 0, false, false, 500
+	s.logged = &bytes.Buffer{}
 	s.source = s.emptyStore("repeat_source")
 	s.target = s.emptyStore("repeat_target")
 	s.server = httptest.NewServer(http.HandlerFunc(s.serveSource))
@@ -130,7 +134,7 @@ func (s *ReplicateRepeatSuite) onceWithin(as string, full bool, retention time.D
 	reservation, err := s.target.ReserveImportedIDs(s.ctx)
 	s.Require().NoError(err)
 	settings := config.Config{DataMove: config.DataMove{Retention: retention}}
-	return options.copyAndFollow(s.ctx, settings, s.target, reservation, slog.New(slog.DiscardHandler))
+	return options.copyAndFollow(s.ctx, settings, s.target, reservation, slog.New(slog.NewTextHandler(s.logged, nil)))
 }
 
 func (s *ReplicateRepeatSuite) once(as string, full bool) error {
@@ -211,6 +215,27 @@ func (s *ReplicateRepeatSuite) TestAFirstCopyBringsEverythingAndSavesTheCursor()
 	s.WithinDuration(time.Now(), saved.ReadAt, time.Minute)
 }
 
+// A page of changes and a full copy each stop at a row that names another app's row here.
+func (s *ReplicateRepeatSuite) TestARunStopsAtARowThatNamesAnotherAppsRowNamingIt() {
+	for _, in := range []*store.Store{s.source, s.target} {
+		_, err := in.GlobalDB().ExecContext(s.ctx, "INSERT INTO agent_sessions (id, customer_id, state) VALUES ('theirs', 'resident', '')")
+		s.Require().NoError(err)
+	}
+	s.recorded(1)
+	s.Require().NoError(s.once("acme", false))
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "INSERT INTO agent_responses (id, session_id, customer_id) VALUES ('turn', 'theirs', 'acme')")
+	s.Require().NoError(err)
+	for _, full := range []bool{false, true} {
+		err = s.once("acme", full)
+
+		s.Require().ErrorIs(err, store.ErrInvalidImport)
+		s.ErrorContains(err, `agent_responses:{"id":"turn"}`)
+		turns, err := s.target.Responses.Select(s.ctx, "acme", "theirs", store.ResponseFilter{})
+		s.Require().NoError(err)
+		s.Empty(turns)
+	}
+}
+
 func (s *ReplicateRepeatSuite) TestARepeatOnceBringsOnlyTheChangesSinceItsCursor() {
 	s.recorded(1)
 	s.recorded(2)
@@ -225,6 +250,44 @@ func (s *ReplicateRepeatSuite) TestARepeatOnceBringsOnlyTheChangesSinceItsCursor
 	s.Equal("", s.label(3), "a number recorded at the source since the first copy arrives")
 	s.Equal("edited here", s.label(2), "a row the source left alone keeps what was done to it here")
 	s.Equal(1, s.exports, "a repeat run with --as asks for no export")
+}
+
+// heldHere gives another app a number of acme's here, bought, as it holds it before acme moves.
+func (s *ReplicateRepeatSuite) heldHere(digits int) {
+	s.Require().NoError(s.target.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
+		E164: e164(digits), Vendor: "plivo", Country: "US", CustomerID: "globex",
+	}))
+}
+
+func (s *ReplicateRepeatSuite) TestACopyLeavesOutANumberAnotherAppHoldsHereAndCarriesOn() {
+	s.recorded(1)
+	s.recorded(2)
+	s.heldHere(1)
+
+	s.Require().NoError(s.once("", false))
+
+	s.Equal("missing", s.label(1))
+	s.Equal("", s.label(2), "the rows after it are copied")
+	s.NotNil(s.saved().Cursor, "the copy finished")
+	s.Contains(s.logged.String(), "numbers=1", "the run says how many it left out")
+}
+
+// The source sends the number with every change to its row, so a follow stopped at it would stop
+// at it again on every run after.
+func (s *ReplicateRepeatSuite) TestAFollowLeavesOutANumberAnotherAppHoldsHereAndMovesItsCursor() {
+	s.recorded(1)
+	s.Require().NoError(s.once("", false))
+	copied := *s.saved().Cursor
+	s.heldHere(3)
+	s.recorded(3)
+	s.recorded(4)
+
+	s.Require().NoError(s.once("acme", false))
+
+	s.Equal("missing", s.label(3))
+	s.Equal("", s.label(4), "the change after it arrives")
+	s.Greater(*s.saved().Cursor, copied, "the cursor moved past it")
+	s.Contains(s.logged.String(), "numbers=1", "the run says how many it left out")
 }
 
 func (s *ReplicateRepeatSuite) TestARepeatOnceWithoutAsWritesNoRowOfTheExport() {

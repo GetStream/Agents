@@ -137,12 +137,27 @@ func (s *LogHandlerSuite) TestALoggerThatAlreadyNamesTheKeyIsNotGivenASecondOne(
 type lockedLog struct {
 	mu      sync.Mutex
 	written bytes.Buffer
+	// onWrite, when set, runs on the writing goroutine after each line is written, so a test can
+	// hold the router at a line until it has changed something.
+	onWrite func(line string)
 }
 
 func (l *lockedLog) Write(p []byte) (int, error) {
 	l.mu.Lock()
+	n, err := l.written.Write(p)
+	onWrite := l.onWrite
+	l.mu.Unlock()
+	if onWrite != nil {
+		onWrite(string(p))
+	}
+	return n, err
+}
+
+// whenWritten sets the function Write runs after each line; nil clears it.
+func (l *lockedLog) whenWritten(onWrite func(line string)) {
+	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.written.Write(p)
+	l.onWrite = onWrite
 }
 
 func (l *lockedLog) String() string {

@@ -206,7 +206,7 @@ func (c *callCards) Close() {
 // party is the number of the person on a call session, for its card. A phone session whose
 // caller is not on the call yet waits for the session to hear them join: the caller can join
 // after the agent, as the call hook is not told who is calling until they have (an inbound
-// leg can open without its caller, store.ConnectCallLeg). It waits as long as the session
+// leg can open without its caller, store.CallLegs.Connect). It waits as long as the session
 // waits for anybody, its start timeout, past which a phone session nobody joined ends, or until
 // the session closes, whichever is first.
 func (c *callCards) party(created *Session, spec Spec, stream streamapp.Bound) (string, error) {
@@ -284,7 +284,7 @@ func (c *callCards) calledParty(ctx context.Context, spec Spec, stream streamapp
 // rung is who the router rang on the session's call, for a session the customer's backend
 // opened on a call placed through POST /v1/phone/calls, which names no PhoneSpec.To: the
 // phone that joins such a call is the vendor's leg, under the line's own number
-// (store.ConnectCallLeg matches it by local_number). Only for a phone session (PhoneSpec set)
+// (store.CallLegs.Connect matches it by local_number). Only for a phone session (PhoneSpec set)
 // on the call placed: its call type and Stream app, and its vendor's call id when the session
 // names one (the SDKs send it). Not for an end user's device, nor a session with no phone,
 // either of which may name the session id of a call it was never meant to be on. Empty for a

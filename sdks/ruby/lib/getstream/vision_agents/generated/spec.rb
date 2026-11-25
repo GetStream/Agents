@@ -1442,6 +1442,12 @@ module GetStream
           body: nil, body_required: false,
           socket: false, client_accessible: false
         }.freeze,
+        "receiveTwilioCall" => {
+          method: :post, path: "/v1/phone/hooks/twilio",
+          path_params: [].freeze, query: [].freeze,
+          body: nil, body_required: false,
+          socket: false, client_accessible: false
+        }.freeze,
         "receiveTwilioEvent" => {
           method: :post, path: "/v1/phone/hooks/twilio/events",
           path_params: [].freeze, query: [].freeze,
@@ -2288,7 +2294,7 @@ module GetStream
           required: [].freeze, open: false
         }.freeze,
         "Connector" => {
-          properties: %w[category channel client created_at custom description id inputs name redirect_uri revision sandbox schemes scopes setup].freeze,
+          properties: %w[category channel client created_at custom description id inputs name redirect_uri revision sandbox schemes scopes setup sync_hash].freeze,
           required: %w[id revision name custom schemes inputs scopes client channel created_at].freeze, open: false
         }.freeze,
         "ConnectorAuditCredential" => {
@@ -2432,7 +2438,7 @@ module GetStream
           required: %w[items has_more].freeze, open: false
         }.freeze,
         "CustomConnectorRequest" => {
-          properties: %w[category client description endpoint id name schemes scopes].freeze,
+          properties: %w[category client description endpoint id name schemes scopes sync_hash].freeze,
           required: %w[id name endpoint schemes].freeze, open: false
         }.freeze,
         "CustomModel" => {
@@ -2456,7 +2462,7 @@ module GetStream
           required: %w[changes cursor].freeze, open: false
         }.freeze,
         "DataImport" => {
-          properties: %w[cursor rows tables].freeze,
+          properties: %w[cursor rows skipped skipped_more tables].freeze,
           required: %w[rows].freeze, open: false
         }.freeze,
         "DataPolicy" => {
@@ -2764,7 +2770,7 @@ module GetStream
           required: %w[organization_id since furthest_step steps areas meters shards sessions latency].freeze, open: false
         }.freeze,
         "OrganizationProgress" => {
-          properties: %w[furthest_step organization_id steps].freeze,
+          properties: %w[funded furthest_step organization_id steps].freeze,
           required: %w[organization_id furthest_step steps].freeze, open: false
         }.freeze,
         "PhoneNumber" => {
@@ -2980,11 +2986,11 @@ module GetStream
           required: %w[candidates description id title].freeze, open: false
         }.freeze,
         "RouterConfig" => {
-          properties: %w[created_at id llm name search sts stt tts updated_at].freeze,
+          properties: %w[created_at id llm name search sts stt sync_hash tts updated_at].freeze,
           required: %w[created_at id name updated_at].freeze, open: false
         }.freeze,
         "RouterConfigRequest" => {
-          properties: %w[llm name search sts stt tts].freeze,
+          properties: %w[llm name search sts stt sync_hash tts].freeze,
           required: %w[name].freeze, open: false
         }.freeze,
         "Run" => {
@@ -3168,7 +3174,7 @@ module GetStream
           required: %w[text].freeze, open: false
         }.freeze,
         "SpendBucket" => {
-          properties: %w[bucket cost_micros_total request_count value].freeze,
+          properties: %w[bucket cost_micros_total other request_count value].freeze,
           required: %w[bucket cost_micros_total request_count value].freeze, open: false
         }.freeze,
         "SpendHardLimit" => {

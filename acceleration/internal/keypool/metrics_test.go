@@ -223,6 +223,62 @@ func (s *RefusedAttemptsSuite) TestEveryRefusedAttemptIsCountedWhenNoKeyIsLeft()
 	s.Equal(map[string]float64{"429": 2}, s.counted(p.keyVars[0]))
 }
 
+// Anthropic's spend cap answers 429, but no wait ends it: it is counted under its own status, so
+// a monitor that leaves a rate limit's 429 out still sees it.
+func (s *RefusedAttemptsSuite) TestASpendCapIsCountedUnderItsOwnStatusNotAs429() {
+	p := s.pool("capped")
+	s.answerWith(http.StatusTooManyRequests, anthropicSpendCapBody, p.keys...)
+
+	s.Equal(http.StatusTooManyRequests, s.post(p.Pool))
+
+	s.Equal(p.keys, s.keysSeen())
+	s.Equal(map[string]float64{"spend_limit": 2}, s.counted(p.keyVars[0]))
+}
+
+func (s *RefusedAttemptsSuite) TestASpendCapHandshakeIsCountedUnderItsOwnStatusNotAs429() {
+	p := s.pool("cappeddial")
+	s.answerWith(http.StatusTooManyRequests, anthropicSpendCapBody, p.keys[0])
+
+	response, key, err := s.dial(p.Pool)
+
+	s.Require().NoError(err)
+	s.Equal(http.StatusSwitchingProtocols, response.StatusCode)
+	s.Equal(p.keys[1], key)
+	s.Equal(map[string]float64{"spend_limit": 1}, s.counted(p.keyVars[0]))
+}
+
+// The control: a rate limit, with or without a body that names one, stays under 429 as it is on
+// the base, and a spend cap beside it is counted apart.
+func (s *RefusedAttemptsSuite) TestARateLimitStaysUnder429BesideASpendCap() {
+	p := s.pool("mixed")
+	s.answerWith(http.StatusTooManyRequests, anthropicSpendCapBody, p.keys[0])
+	s.answerWith(http.StatusTooManyRequests, anthropicRateLimitBody, p.keys[1])
+
+	s.Equal(http.StatusTooManyRequests, s.post(p.Pool))
+
+	s.Equal(map[string]float64{"spend_limit": 1, "429": 1}, s.counted(p.keyVars[0]))
+}
+
+// Only a 429 is a spend cap: the same words on another status keep that status's own count.
+func (s *RefusedAttemptsSuite) TestTheSpendCapMarkerOnAnotherStatusIsNotASpendCap() {
+	for _, tc := range []struct {
+		status int
+		want   map[string]float64
+	}{
+		{http.StatusUnauthorized, map[string]float64{"401": 1}},
+		{http.StatusInternalServerError, nil},
+	} {
+		s.Run(http.StatusText(tc.status), func() {
+			p := s.pool("marker")
+			s.answerWith(tc.status, anthropicSpendCapBody, p.keys[0])
+
+			s.post(p.Pool)
+
+			s.Equal(tc.want, s.counted(p.keyVars[0]))
+		})
+	}
+}
+
 func (s *RefusedAttemptsSuite) TestAnAnsweredRequestCountsNoRefusal() {
 	p := s.pool("answered")
 
@@ -574,7 +630,7 @@ func (s *RefusedAttemptsSuite) TestEveryRefusalStatusAlertsWithItsReason() {
 			s.post(p.Pool)
 		}},
 		{"429", "429", "rate limited or spend cap reached, wait, add keys or raise the cap", func(p pooled) { s.answer(http.StatusTooManyRequests, p.keys[0]); s.post(p.Pool) }},
-		{"429 spend cap", "429", "rate limited or spend cap reached, wait, add keys or raise the cap", func(p pooled) {
+		{"429 spend cap", "spend_limit", "spend cap reached, raise the cap or wait for it to reset", func(p pooled) {
 			s.answerWith(http.StatusTooManyRequests, anthropicSpendCapBody, p.keys[0])
 			s.post(p.Pool)
 		}},

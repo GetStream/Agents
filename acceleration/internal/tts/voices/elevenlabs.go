@@ -16,6 +16,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/elevenlabs"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // elevenLabsBaseURL is the production endpoint. The streaming provider's is a WebSocket
@@ -117,7 +118,10 @@ func (e *ElevenLabs) SpeechModel() string { return elevenlabs.DefaultModel }
 
 // Speak says a line in the voice with the model a call would use.
 func (e *ElevenLabs) Speak(ctx context.Context, externalID, text string) (Speech, error) {
-	url := strings.TrimSuffix(e.options.BaseURL, "/") + "/v1/text-to-speech/" + externalID +
+	if err := voiceid.ElevenLabs(externalID); err != nil {
+		return Speech{}, err
+	}
+	url := strings.TrimSuffix(e.options.BaseURL, "/") + "/v1/text-to-speech/" + url.PathEscape(externalID) +
 		"?output_format=" + elevenlabs.DefaultRecordingFormat
 	header := http.Header{}
 	header.Set("xi-api-key", e.options.APIKey)
@@ -187,7 +191,10 @@ func (e *ElevenLabs) List(ctx context.Context) ([]Library, error) {
 // Preview fetches the sample ElevenLabs already published for the voice, which is why it
 // costs nothing to hear. Voices without one are refused rather than synthesised.
 func (e *ElevenLabs) Preview(ctx context.Context, id string) (Speech, error) {
-	url := strings.TrimSuffix(e.options.BaseURL, "/") + "/v1/voices/" + id
+	if err := voiceid.ElevenLabs(id); err != nil {
+		return Speech{}, err
+	}
+	url := strings.TrimSuffix(e.options.BaseURL, "/") + "/v1/voices/" + url.PathEscape(id)
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return Speech{}, stack.Wrap(err)
@@ -243,6 +250,9 @@ func elevenLabsPreviewRefused(response *http.Response) error {
 // live on 2026-10-16: GET /v1/voices/cVOjvbxC2c4mOyGcx3AH answered voice_not_found and
 // /v1/shared-voices?search= of the same id returned it.
 func (e *ElevenLabs) Exists(ctx context.Context, id string) (bool, error) {
+	if voiceid.ElevenLabs(id) != nil {
+		return false, stack.Wrap(errNotAVoiceID)
+	}
 	base := strings.TrimSuffix(e.options.BaseURL, "/")
 	response, err := e.get(ctx, base+"/v1/voices/"+url.PathEscape(id))
 	if err != nil {
@@ -321,8 +331,11 @@ func (e *ElevenLabs) Delete(ctx context.Context, externalID string) error {
 	if externalID == "" {
 		return nil
 	}
+	if err := voiceid.ElevenLabs(externalID); err != nil {
+		return err
+	}
 
-	url := strings.TrimSuffix(e.options.BaseURL, "/") + "/v1/voices/" + externalID
+	url := strings.TrimSuffix(e.options.BaseURL, "/") + "/v1/voices/" + url.PathEscape(externalID)
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return stack.Wrap(err)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -275,10 +276,49 @@ func (s *Service) AddTrunkNumber(ctx context.Context, request TrunkNumber) (stor
 		SIPTrunkID:   request.TrunkID,
 		PurchasedAt:  time.Now().UTC(),
 	}
-	if err := s.store.PhoneNumbers.InsertOnSIPTrunk(ctx, &number); err != nil {
+	apart, err := s.heldApart(ctx, number.CustomerID, number.E164)
+	if err != nil {
+		return store.PhoneNumber{}, err
+	}
+	if err := s.store.PhoneNumbers.InsertOnSIPTrunk(ctx, &number, apart); err != nil {
 		return store.PhoneNumber{}, err
 	}
 	return number, nil
+}
+
+// heldApart are the customers holding a number whose lines are made in another Stream app than
+// the customer's. Stream lists a number on one trunk per app, so on the customer's own trunk the
+// number can only block a holder whose lines are made where the customer's are. A holder whose
+// app, or the customer's, is known to be unreadable (disconnected, no identity) is taken to share
+// it; a read that failed is returned as it is, so the add is tried again rather than refused.
+func (s *Service) heldApart(ctx context.Context, customer, e164 string) ([]string, error) {
+	held, err := s.store.PhoneNumbers.Holders(ctx, e164)
+	if err != nil {
+		return nil, err
+	}
+	others := slices.DeleteFunc(held, func(holder string) bool { return holder == customer })
+	if len(others) == 0 {
+		return nil, nil
+	}
+	mine, err := s.placed(ctx, customer)
+	if !settled(err) {
+		return nil, err
+	}
+	if err != nil {
+		// Every holder shares an app nobody can name.
+		return nil, nil
+	}
+	var apart []string
+	for _, holder := range others {
+		theirs, err := s.placed(ctx, holder)
+		if !settled(err) {
+			return nil, err
+		}
+		if err == nil && theirs != mine {
+			apart = append(apart, holder)
+		}
+	}
+	return apart, nil
 }
 
 // applySIPTrunk copies settings onto a trunk row, sealing a new password when one was given.
@@ -313,7 +353,7 @@ func (s *Service) openSIPTrunk(ctx context.Context, customerID, id string) (*SIP
 	}
 	password, err := s.sealer.OpenWithAADVersion(trunk.PasswordSealed, sipTrunkAAD(customerID, id), trunk.PasswordKEKVersion)
 	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("phone: open sip trunk password: %w", err))
+		return nil, stack.Wrap(lastingError{fmt.Errorf("phone: open sip trunk password: %w", err)})
 	}
 	return &SIPTrunk{
 		Host: trunk.Host, Port: trunk.Port, Transport: trunk.Transport, Username: trunk.Username,

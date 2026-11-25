@@ -140,7 +140,8 @@ func (s *Server) deliverOnThread(ctx context.Context, delivery scheduledDelivery
 
 // taskThreadSession is the session a task's occurrence is carried out in on its thread: one a
 // caller opened on the channel and keeps, or one opened for the turn on the task's config,
-// answering the task's user as the thread's person, so the turn may schedule for them again.
+// answering the task's user as the thread's person, so the turn reaches their tasks (it sets
+// no run going: session.armedByTask).
 // opened says the delivery opened it, and so closes it.
 func (s *Server) taskThreadSession(ctx context.Context, delivery scheduledDelivery, thread store.ChannelThread) (*session.Session, bool, error) {
 	cid := chatlog.ChannelType + ":" + thread.ChannelID
