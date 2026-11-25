@@ -36,6 +36,12 @@ func NewKeeper(st *store.Store, now func() time.Time, vendors []string, logger *
 // Placed keeps a call about to be dialled, as its leg, and returns its token, for the vendor's
 // status URL. The leg is dialled when it opens with the token.
 func (k *Keeper) Placed(ctx context.Context, call Call) (string, error) {
+	return k.PlacedWithin(ctx, call, "", nil)
+}
+
+// PlacedWithin is Placed for a call whose leg counts among organization's calls, refused with
+// store.ErrCallsAtOnce when atOnce, if set, leaves no room for it (store.CallLegs.PlaceWithin).
+func (k *Keeper) PlacedWithin(ctx context.Context, call Call, organization string, atOnce *store.CallsAtOnce) (string, error) {
 	placed := k.now()
 	row := store.CallLeg{
 		Token:        uuid.NewString(),
@@ -49,8 +55,16 @@ func (k *Keeper) Placed(ctx context.Context, call Call) (string, error) {
 		RemoteNumber: call.Remote,
 		Reports:      call.Reports,
 		PlacedAt:     &placed,
+		// Counted among the organization's calls up from now, not only once it is dialled.
+		OrganizationID: organization,
 	}
-	if err := k.store.CallLegs.Place(ctx, &row); err != nil {
+	place := k.store.CallLegs.Place
+	if atOnce != nil {
+		place = func(ctx context.Context, leg *store.CallLeg) error {
+			return k.store.CallLegs.PlaceWithin(ctx, leg, *atOnce)
+		}
+	}
+	if err := place(ctx, &row); err != nil {
 		return "", err
 	}
 	return row.Token, nil

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channelbridge"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
@@ -113,7 +114,7 @@ func (s *TelnyxUnpaidSuite) settledByTheWorkerAfter(task store.ScheduledTask, be
 		return s.router.DeliverScheduledTask(ctx, claimed)
 	}
 	logger := slog.New(slog.NewTextHandler(s.logged, nil))
-	worker := scheduling.NewScheduler(s.store, deliver, logger)
+	worker := s.newScheduler(deliver, logger)
 	worker.Start(context.Background())
 	defer worker.Close()
 	past := time.Now().Add(-time.Minute)
@@ -167,7 +168,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadTaskWhoseMoneyCannotBeCheckedIsRetried() 
 	s.Equal(store.ScheduledTaskRunFailed, run.State)
 	s.Require().NotNil(run.Error)
 	s.Equal(codeSpendCheckUnavailable, *run.Error)
-	s.Equal(int32(1+len(scheduling.DeliveryRetries)), attempts, "tried again after each wait")
+	s.Equal(int32(1+len(s.retries)), attempts, "tried again after each wait")
 }
 
 // A reply the agent finished in a thread of a suspended organization is not sent, and is no
@@ -374,7 +375,7 @@ func (s *TelnyxUnpaidSuite) TestATaskWhoseSessionCannotOpenWhileMoneyCannotBeChe
 	s.Equal(store.ScheduledTaskRunFailed, run.State)
 	s.Require().NotNil(run.Error)
 	s.Equal(codeSpendCheckUnavailable, *run.Error)
-	s.Equal(int32(1+len(scheduling.DeliveryRetries)), attempts, "tried again after each wait")
+	s.Equal(int32(1+len(s.retries)), attempts, "tried again after each wait")
 }
 
 // reservationRefused is an SMS the router refuses at its reservation, before Telnyx is asked, as
@@ -615,7 +616,7 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedAgainOnItsRerunFailsTheR
 	s.Empty(run.DeliveredTo)
 	s.Require().NotNil(run.Error)
 	s.Equal(codeSpendCheckUnavailable, *run.Error)
-	s.Equal(int32(1+len(scheduling.DeliveryRetries)), attempts, "tried again after each wait")
+	s.Equal(int32(1+len(s.retries)), attempts, "tried again after each wait")
 	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
 	s.Require().True(running)
 	rerun, _, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID + rerunSuffix)
@@ -778,7 +779,7 @@ func (s *TelnyxUnpaidSuite) TestATextTurnFailedNotForMoneyIsNotRunAgainOnItsRetr
 	s.Equal(store.ScheduledTaskRunFailed, run.State)
 	s.Require().NotNil(run.Error)
 	s.Equal(scheduling.ReasonReplyFailed, *run.Error)
-	s.Equal(int32(1+len(scheduling.DeliveryRetries)), attempts)
+	s.Equal(int32(1+len(s.retries)), attempts)
 	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
 	s.Require().True(running)
 	state, _, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID)
@@ -889,9 +890,9 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnIsWaitedOutToItsEnd() {
 // A conversation turn still running when the reply window ends is delivered: the reply is the
 // conversation's, and comes when it comes.
 func (s *TelnyxUnpaidSuite) TestAConversationTurnStillRunningAtTheWindowIsDelivered() {
-	window := scheduledReplyWindow
-	scheduledReplyWindow = time.Second
-	s.T().Cleanup(func() { scheduledReplyWindow = window })
+	window := s.router.replyWindow
+	s.router.replyWindow = time.Second
+	s.T().Cleanup(func() { s.router.replyWindow = window })
 	_, done := s.heldConversationTurn(context.Background())
 
 	select {
@@ -1095,7 +1096,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadTaskWhoseSessionEndsMidTurnSettles() {
 	defer model.answers()
 
 	s.retryAtOnce()
-	worker := scheduling.NewScheduler(s.store, s.router.DeliverScheduledTask, slog.New(slog.NewTextHandler(s.logged, nil)))
+	worker := s.newScheduler(s.router.DeliverScheduledTask, slog.New(slog.NewTextHandler(s.logged, nil)))
 	worker.Start(context.Background())
 	defer func() {
 		// A delivery that never returns would hold Close: the test fails on its own deadline.
@@ -1165,4 +1166,365 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnTheUserStopsIsDelivered() {
 	case <-time.After(deliveryWait):
 		s.Fail("the delivery never settled once the turn was stopped")
 	}
+}
+
+// ringing is a phone task's call as deliverByPhone holds it once the vendor placed it: the
+// delivery, taken on a run of its own, and the session the call is held in, open on an edge the
+// test picks up, in the conversation of a session the user opened while the organization had
+// credit. writer is the number the user is rung on, line the one rung from, agentID the agent the
+// conversation is written as, done what carrying the task out came to.
+type ringing struct {
+	task     store.ScheduledTask
+	run      store.ScheduledTaskRun
+	delivery scheduledDelivery
+	spec     session.Spec
+	edge     *ringingEdge
+	writer   string
+	line     string
+	agentID  string
+	done     <-chan callOutcome
+	// answered is closed once the agent answers on the call.
+	answered <-chan struct{}
+}
+
+// ringingOn is ringing, on model, with the call's session opened and nobody picked up yet.
+func (s *TelnyxUnpaidSuite) ringingOn(model string) ringing {
+	return s.ring(s.dial(s.callOn(model)))
+}
+
+// callOn is ringing, on model, with the call taken on its run and not placed yet.
+func (s *TelnyxUnpaidSuite) callOn(model string) ringing {
+	window, longest := s.router.phoneWindow, s.router.callLimit
+	// The limit is longer than the test waits for the call to be let go: a call let go is one
+	// the agent hung up, or the test ended.
+	s.router.phoneWindow, s.router.callLimit = deliveryWait, 2*deliveryWait
+	s.T().Cleanup(func() { s.router.phoneWindow, s.router.callLimit = window, longest })
+	number, writer := "+1555"+digits(s.utils.uuid()), "+1347"+digits(s.utils.uuid())
+	s.seedSMSLine(number)
+	s.config.Channels.Lines = store.AgentChannels{SMS: &store.ChannelLine{Number: number}}
+	s.config.Models.LLM = model
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
+	user := s.data.createUser()
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
+		CustomerID: s.customerID(), ConfigID: s.config.ID, Kind: string(channels.SMS), Address: writer, UserID: user.userID,
+	}))
+	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, 10_000_000)
+	s.Require().Eventually(func() bool {
+		return s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, writer) == nil
+	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
+	opened := user.createSession(CreateSessionRequest{ConfigId: &s.config.ID})
+	task := s.userTask(user, opened.Id, "phone")
+	now := time.Now()
+	run := store.ScheduledTaskRun{TaskID: task.ID, CustomerID: task.CustomerID, ScheduledFor: now,
+		Trigger: store.ScheduledTaskTriggerManual, Prompt: task.Instructions, State: store.ScheduledTaskRunRunning,
+		Attempts: 1, StartedAt: &now}
+	s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &run))
+	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
+	s.Require().True(running)
+	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: user.userID,
+		CallerKind: "authenticated", TaskID: task.ID, RunID: run.ID, SessionID: opened.Id,
+		ConversationID: found.Spec().ConversationID, CommandID: "st_" + run.ID, Text: "stretch", Due: now,
+		APIKey: task.APIKey, Channels: task.Channels}
+	return s.takeCall(ringing{task: task, run: run, delivery: delivery, writer: writer, line: number, agentID: found.Spec().AgentID})
+}
+
+// takeCall is call with a call of its own taken on its run, as deliverByPhone takes one before
+// it rings: the run must have none taken.
+func (s *TelnyxUnpaidSuite) takeCall(call ringing) ringing {
+	call.spec = callSpec(s.config, call.delivery, call.agentID, phone.Placed{SessionID: s.utils.uuid()}, call.line, call.writer)
+	took, _, err := s.store.ScheduledTaskRuns.TakeCall(context.Background(), call.task.CustomerID, call.run.ID, call.spec.ID)
+	s.Require().NoError(err)
+	s.Require().True(took, "the call is taken on the run before it is placed")
+	call.edge = newRingingEdge()
+	call.spec.Edge = call.edge
+	// The suite's sessions have no telephony to press digits or transfer with, which is all the
+	// number is for once the call is placed.
+	call.spec.Phone = nil
+	return call
+}
+
+// dial has the router carry the task out on call, as deliverByPhone does once the vendor placed it.
+func (s *TelnyxUnpaidSuite) dial(call ringing) ringing {
+	done := make(chan callOutcome, 1)
+	call.done = done
+	go func() {
+		deliveredTo, sessionID, err := s.router.carryOutOnCall(scheduledOwnerContext(context.Background(), call.delivery), call.delivery, call.spec)
+		done <- callOutcome{deliveredTo: deliveredTo, sessionID: sessionID, err: err}
+	}()
+	return call
+}
+
+// ring waits for the session of a dialled call to open, and watches it for the agent answering.
+func (s *TelnyxUnpaidSuite) ring(call ringing) ringing {
+	s.Require().Eventually(func() bool {
+		_, live := s.router.sessions.Get(call.spec.ID, session.OwnerOf(call.spec))
+		return live
+	}, deliveryWait, 20*time.Millisecond, "the call's session never opened")
+	held, _ := s.router.sessions.Get(call.spec.ID, session.OwnerOf(call.spec))
+	events, detach := held.Watch()
+	s.T().Cleanup(detach)
+	answered := make(chan struct{})
+	go func() {
+		said := false
+		for event := range events {
+			if _, ok := event.(agent.Responded); ok && !said {
+				said = true
+				close(answered)
+			}
+		}
+	}()
+	call.answered = answered
+	return call
+}
+
+// letGo is what carrying the task out on call came to, once the call is let go.
+func (s *TelnyxUnpaidSuite) letGo(call ringing) callOutcome {
+	select {
+	case outcome := <-call.done:
+		return outcome
+	case <-time.After(deliveryWait):
+		s.FailNow("the call was never let go")
+		return callOutcome{}
+	}
+}
+
+// callTurn is how the task's turn on call stands, as the call's session holds it.
+func (s *TelnyxUnpaidSuite) callTurn(call ringing) string {
+	return s.callTurnUnder(call, call.delivery.CommandID+"_call")
+}
+
+// callTurnUnder is how the turn under id on call stands, as the call's session holds it.
+func (s *TelnyxUnpaidSuite) callTurnUnder(call ringing, id string) string {
+	held, live := s.router.sessions.Get(call.spec.ID, session.OwnerOf(call.spec))
+	if !live {
+		return ""
+	}
+	state, _, _ := held.FollowUpReply(id)
+	return state
+}
+
+// hangUp has the user hang up on call.
+func (s *TelnyxUnpaidSuite) hangUp(call ringing) {
+	_, err := s.router.sessions.Close(call.spec.ID, session.OwnerOf(call.spec))
+	s.Require().NoError(err)
+}
+
+// A phone task whose call was answered, and whose turn on it the model refuses because the credit
+// ran out after the call was placed, said nothing to the user: the agent hangs up, the attempt
+// fails under the refusal's code and is not tried again, and the run keeps that code for a worker
+// that takes it over (AI-3597).
+func (s *TelnyxUnpaidSuite) TestACallWhoseTurnIsRefusedForMoneyFailsUnderTheMoney() {
+	call := s.ringingOn("noted/noted-model")
+	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, -10_000_000)
+	s.refusedForMoney(call.writer)
+
+	call.edge.pickUp(call.writer)
+	outcome := s.letGo(call)
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(outcome.err, &failure)
+	s.Equal(codeInsufficientCredits, failure.Reason)
+	s.True(failure.Final, "spent credit outlasts every retry of the run")
+	s.True(refusedTurn(outcome.err), "the walk over the channels ends at the call")
+	s.Empty(outcome.deliveredTo)
+	_, live := s.router.sessions.Get(call.spec.ID, session.OwnerOf(call.spec))
+	s.False(live, "the agent hung up")
+	kept, err := s.store.ScheduledTaskRuns.Get(context.Background(), s.customerID(), call.task.ID, call.run.ID)
+	s.Require().NoError(err)
+	s.Require().NotNil(kept.Error)
+	s.Equal(codeInsufficientCredits, *kept.Error, "a worker taking the run over finds how the call went")
+	s.Equal(call.spec.ID, kept.SessionID, "the user is rung once")
+}
+
+// A phone task whose answered call's turn is refused because the money cannot be checked is
+// not tried again: the check would pass again on its own, but a retry would ring the user a second
+// time. The attempt fails final under the same code, after one ring, and the call stays taken on
+// the run (AI-3597).
+func (s *TelnyxUnpaidSuite) TestACallWhoseTurnIsRefusedWhileMoneyCannotBeCheckedFailsFinalAfterOneRing() {
+	call := s.ringingOn("noted/noted-model")
+	s.uncheckable(call.writer)
+
+	call.edge.pickUp(call.writer)
+	outcome := s.letGo(call)
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(outcome.err, &failure)
+	s.Equal(codeSpendCheckUnavailable, failure.Reason)
+	s.True(failure.Final, "a second ring is not worth a check that passes again")
+	s.True(refusedTurn(outcome.err), "the walk over the channels ends at the call")
+	s.Empty(outcome.deliveredTo)
+	s.False(s.rungAgain(call), "the user is rung once")
+	kept, err := s.store.ScheduledTaskRuns.Get(context.Background(), s.customerID(), call.task.ID, call.run.ID)
+	s.Require().NoError(err)
+	s.Equal(call.spec.ID, kept.SessionID, "the call is not given back")
+	s.Require().NotNil(kept.Error)
+	s.Equal(codeSpendCheckUnavailable, *kept.Error, "a worker taking the run over finds how the call went")
+}
+
+// A phone task whose call's turn is refused for money is rung once whatever reason the attempts
+// before it failed under: an attempt that failed before it rang, such as the user being on a call,
+// leaves the next attempt's earlier reason something else than money (AI-3597 R2.1).
+func (s *TelnyxUnpaidSuite) TestACallWhoseTurnIsRefusedIsRungOnceWhateverTheAttemptsBetweenFailedUnder() {
+	call := s.callOn("noted/noted-model")
+	call.delivery.Earlier = "on_a_call"
+	call = s.ring(s.dial(call))
+	s.uncheckable(call.writer)
+
+	call.edge.pickUp(call.writer)
+	outcome := s.letGo(call)
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(outcome.err, &failure)
+	s.Equal(codeSpendCheckUnavailable, failure.Reason)
+	s.True(failure.Final, "a retry would ring the user again")
+	s.True(refusedTurn(outcome.err))
+	s.False(s.rungAgain(call), "the user is rung once")
+}
+
+// A phone task on the channels text, then call, whose text failed first for another reason than
+// money, has that reason as the earlier one of every attempt (deliverChain records the first
+// channel's). The call refused for money while it cannot be checked is rung once all the same
+// (AI-3597 R2.1).
+func (s *TelnyxUnpaidSuite) TestACallWhoseSessionCannotOpenIsRungOnceWhateverTheFirstChannelFailedUnder() {
+	call := s.callOn("noted/noted-model")
+	s.uncheckable(call.writer)
+	call.delivery.Earlier = "unreachable"
+
+	outcome := s.letGo(s.dial(call))
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(outcome.err, &failure)
+	s.Equal(codeSpendCheckUnavailable, failure.Reason)
+	s.True(failure.Final)
+	s.False(s.rungAgain(call), "the user is rung once")
+}
+
+// rungAgain is whether the run lets another attempt take a call after call failed: the store hands
+// one out only when the run has none taken.
+func (s *TelnyxUnpaidSuite) rungAgain(call ringing) bool {
+	took, _, err := s.store.ScheduledTaskRuns.TakeCall(context.Background(), call.task.CustomerID, call.run.ID, s.utils.uuid())
+	s.Require().NoError(err)
+	return took
+}
+
+// uncheckable takes down the Redis the router shares its holds through, and waits until the gate
+// refuses a text to person because the money cannot be checked.
+func (s *TelnyxUnpaidSuite) uncheckable(person string) {
+	s.sharing.stop()
+	s.Require().Eventually(func() bool {
+		s.serverClient.call(http.MethodPost, "/v1/search", SearchRequest{Query: "again"})
+		return policy.Transient(s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, person))
+	}, 10*time.Second, 20*time.Millisecond, "refused once a hold waited unshared")
+}
+
+// A phone task whose call's session cannot open, the credit being spent after the call was placed,
+// fails under the refusal's code, final, and the run keeps that code for a worker that takes it
+// over (AI-3597).
+func (s *TelnyxUnpaidSuite) TestACallWhoseSessionCannotOpenForMoneyFailsUnderTheMoney() {
+	call := s.callOn("noted/noted-model")
+	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, -10_000_000)
+	s.refusedForMoney(call.writer)
+
+	outcome := s.letGo(s.dial(call))
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(outcome.err, &failure)
+	s.Equal(codeInsufficientCredits, failure.Reason)
+	s.True(failure.Final, "spent credit outlasts every retry of the run")
+	kept, err := s.store.ScheduledTaskRuns.Get(context.Background(), s.customerID(), call.task.ID, call.run.ID)
+	s.Require().NoError(err)
+	s.Equal(call.spec.ID, kept.SessionID, "the user is rung once")
+	s.Require().NotNil(kept.Error)
+	s.Equal(codeInsufficientCredits, *kept.Error, "a worker taking the run over finds how the call went")
+}
+
+// A phone task whose call's session cannot open because the money cannot be checked fails under
+// the same code, final, with the call kept on the run: the user was rung, and is rung once
+// (AI-3597).
+func (s *TelnyxUnpaidSuite) TestACallWhoseSessionCannotOpenWhileMoneyCannotBeCheckedFailsFinal() {
+	call := s.callOn("noted/noted-model")
+	s.uncheckable(call.writer)
+
+	outcome := s.letGo(s.dial(call))
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(outcome.err, &failure)
+	s.Equal(codeSpendCheckUnavailable, failure.Reason)
+	s.True(failure.Final, "a retry would ring the user again")
+	kept, err := s.store.ScheduledTaskRuns.Get(context.Background(), s.customerID(), call.task.ID, call.run.ID)
+	s.Require().NoError(err)
+	s.Equal(call.spec.ID, kept.SessionID, "the call is not given back")
+	s.Require().NotNil(kept.Error)
+	s.Equal(codeSpendCheckUnavailable, *kept.Error, "a worker taking the run over finds how the call went")
+}
+
+// A phone task whose call's turn the model answers is delivered by phone once the user hangs up,
+// as it always was (control: the same on the base).
+func (s *TelnyxUnpaidSuite) TestACallWhoseTurnIsAnsweredIsDelivered() {
+	call := s.ringingOn("noted/noted-model")
+
+	call.edge.pickUp(call.writer)
+	s.answeredOn(call)
+	s.held(call)
+	s.hangUp(call)
+	outcome := s.letGo(call)
+
+	s.Require().NoError(outcome.err)
+	s.Equal(store.ScheduledTaskDeliveredPhone, outcome.deliveredTo)
+}
+
+// A phone task whose call's turn fails for a reason that is not money, such as the model's
+// provider being down, holds the call until the user hangs up and is delivered by phone, as it
+// always was (control: the same on the base). Only a refusal for money fails the run.
+func (s *TelnyxUnpaidSuite) TestACallWhoseTurnFailsNotForMoneyIsDelivered() {
+	call := s.ringingOn("failing/failing-model")
+
+	call.edge.pickUp(call.writer)
+	s.Require().Eventually(func() bool { return s.callTurn(call) == "failed" },
+		deliveryWait, 20*time.Millisecond, "the task's turn never failed")
+	s.held(call)
+	s.hangUp(call)
+	outcome := s.letGo(call)
+
+	s.Require().NoError(outcome.err)
+	s.Equal(store.ScheduledTaskDeliveredPhone, outcome.deliveredTo)
+}
+
+// A phone task whose call's turn the model answers, and whose later turn on the call the model
+// refuses because the credit ran out meanwhile, said the task: the call is held until the user
+// hangs up and is delivered by phone. Only a refusal before the agent answered fails the run.
+func (s *TelnyxUnpaidSuite) TestACallWhoseLaterTurnIsRefusedForMoneyIsDelivered() {
+	call := s.ringingOn("noted/noted-model")
+	call.edge.pickUp(call.writer)
+	s.answeredOn(call)
+	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, -10_000_000)
+	s.refusedForMoney(call.writer)
+	refusal := s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, call.writer)
+	s.Require().NotNil(turnRefusal(agent.Error{Context: "llm", Err: refusal}), "the gate's refusal is one for money: %v", refusal)
+	held, live := s.router.sessions.Get(call.spec.ID, session.OwnerOf(call.spec))
+	s.Require().True(live)
+
+	// The task's turn still holds the call's reply, so the later turn's refused model call is
+	// reported as the agent reports one (agent.Agent.fail), with the refusal the spent credit gives.
+	held.Report(refusal, "llm")
+	s.held(call)
+	s.hangUp(call)
+	outcome := s.letGo(call)
+
+	s.Require().NoError(outcome.err)
+	s.Equal(store.ScheduledTaskDeliveredPhone, outcome.deliveredTo)
+}
+
+// answeredOn waits for the agent to answer on call.
+func (s *TelnyxUnpaidSuite) answeredOn(call ringing) {
+	select {
+	case <-call.answered:
+	case <-time.After(deliveryWait):
+		s.FailNow("the agent never answered on the call")
+	}
+}
+
+// held checks that call is still held, not let go, for settleFor.
+func (s *TelnyxUnpaidSuite) held(call ringing) {
+	s.Never(func() bool { return len(call.done) > 0 }, settleFor, 20*time.Millisecond, "the call was let go before the user hung up")
 }

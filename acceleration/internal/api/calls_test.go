@@ -109,6 +109,35 @@ func (s *CallsSuite) TestAJoinTokenIsMintedForTheUserTheCallerAsksFor() {
 	s.Equal("thierry", claimed["user_id"])
 }
 
+// A user id Stream keeps for itself is never signed for, even in the customer's own app.
+func (s *CallsSuite) TestAJoinTokenIsNotMintedForAReservedUserID() {
+	id := streamAppID()
+	s.useApp(s.numberedApp(id))
+	s.giveApp(s.customerID(), id, "key-"+s.customerID())
+	call := s.started(store.Call{StreamAppPK: id})
+
+	status, failure := s.serverClient.failure(http.MethodPost,
+		"/v1/agents/calls/"+call.ID+"/token", map[string]any{"user_id": "!anon"})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "user_id may not start with !")
+}
+
+// Neither the reader nor the agent a chat token is for may be a user id Stream keeps for itself.
+func (s *CallsSuite) TestAChatTokenIsNotMintedForAReservedUserID() {
+	for field, sent := range map[string]map[string]any{
+		"user_id":  {"agent_id": "agent-" + s.utils.uuid(), "user_id": "!anon"},
+		"agent_id": {"agent_id": "!anon"},
+	} {
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/chat-token", sent)
+
+		s.Equal(http.StatusBadRequest, status, field)
+		s.Contains(failure, field+" may not start with !", field)
+		_, made := s.chat.User("!anon")
+		s.False(made, "no reserved user is made")
+	}
+}
+
 func (s *CallsSuite) TestAJoinTokenInASharedAppIsMintedOnlyForAUserTheCustomerHolds() {
 	// A Stream token is good for everything its user may do in the app, not for one call,
 	// and in the deployment's app every customer's users are side by side.
@@ -202,7 +231,7 @@ func (s *CallsSuite) TestAGuestImportedAsMintedIsNoGuestTheRouterMinted() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import",
 		`{"table":"users","row":`+row+"}\n", &written))
 	s.Require().Equal(int64(1), written.Tables["users"])
-	held, err := s.store.Guest(context.Background(), s.customerID(), imported)
+	held, err := s.store.Users.GetGuest(context.Background(), s.customerID(), imported)
 	s.Require().NoError(err, "the guest is imported")
 	s.False(held.Minted)
 
@@ -317,7 +346,7 @@ func (s *CallsSuite) TestATextSessionsDecisionsAreAnEmptyListNotAnError() {
 func (s *CallsSuite) TestAFinishedNativeCallNamesTheConversationAndSubagentModels() {
 	call := s.started(store.Call{STS: "stub/stub-sts", Subagent: "stub/stub-llm"})
 	for modality, model := range map[string]string{"sts": "stub-sts", "llm": "stub-llm"} {
-		s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+		s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 			CustomerID: s.customerID(), AgentID: call.AgentID,
 			Modality: modality, Provider: "stub", Model: model,
 			StartedAt: s.base.Add(time.Second), Success: true,
@@ -338,7 +367,7 @@ func (s *CallsSuite) TestAFinishedNativeCallNamesTheConversationAndSubagentModel
 func (s *CallsSuite) TestAFinishedCallReportsWhatItSpentAndTheSessionItWasPartOf() {
 	call := s.heldCall(store.Call{ID: s.utils.uuid(), CustomerID: s.customerID(), CallID: s.utils.callID(),
 		AgentID: "agent-" + s.utils.uuid(), StartedAt: s.base}, "", "")
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		CustomerID: s.customerID(), AgentID: call.AgentID,
 		Modality: "llm", Provider: "stub", Model: "stub-llm",
 		StartedAt:   s.base.Add(time.Second),
@@ -361,7 +390,7 @@ func (s *CallsSuite) TestAFinishedCallReportsWhatItSpentAndTheSessionItWasPartOf
 
 func (s *CallsSuite) TestACallStillRunningIsNotToldWhatItHasSpentSoFar() {
 	call := s.started(store.Call{})
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		CustomerID: s.customerID(), AgentID: call.AgentID,
 		Modality: "llm", Provider: "stub", Model: "stub-llm",
 		StartedAt: s.base.Add(time.Second), InputTokens: 900, Success: true,
@@ -386,7 +415,7 @@ func (s *CallsSuite) TestACallsTokensAreReadWhileItRunsByModelAndByWhatThePrompt
 	} {
 		request.CustomerID, request.AgentID = s.customerID(), call.AgentID
 		request.StartedAt, request.Success = s.base.Add(time.Second), true
-		s.Require().NoError(s.store.Requests.Insert(context.Background(), &request))
+		s.Require().NoError(insertRequest(context.Background(), s.store, &request))
 	}
 
 	var spent CallTokens
@@ -413,7 +442,7 @@ func (s *CallsSuite) TestACallsCostIsSplitByWhereItCameFrom() {
 	} {
 		request.CustomerID, request.AgentID = s.customerID(), call.AgentID
 		request.StartedAt, request.Success = s.base.Add(time.Second), true
-		s.Require().NoError(s.store.Requests.Insert(context.Background(), &request))
+		s.Require().NoError(insertRequest(context.Background(), s.store, &request))
 	}
 
 	var spent CallTokens
@@ -434,7 +463,7 @@ func (s *CallsSuite) TestTokensAreStillReadUnderTheCallsPathTheyMovedFrom() {
 	call := s.inSession("", store.Call{})
 	request := store.Request{Modality: "llm", Provider: "stub", Model: "stub-llm", InputTokens: 700, OutputTokens: 30,
 		CustomerID: s.customerID(), AgentID: call.AgentID, StartedAt: s.base.Add(time.Second), Success: true}
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &request))
+	s.Require().NoError(insertRequest(context.Background(), s.store, &request))
 
 	var moved, kept CallTokens
 	s.Require().Equal(http.StatusOK,

@@ -129,3 +129,56 @@ func TestANewLogMaskMasksEveryLineWithNoChangeToTheCall(t *testing.T) {
 	logMasks = original
 	require.Contains(t, logged(t, true, "wrote to ali@example.com", "contact", "ali@example.com"), "ali@example.com")
 }
+
+func TestRedactLogAttrMasksAnEndUserIDThatIsAnEmailOrANumber(t *testing.T) {
+	for _, key := range []string{"user", "user_id", "participant", "bound", "id"} {
+		for id, want := range map[string]string{
+			"ali@example.com":                 "•••@example.com",
+			"ali@acme":                        "•••@acme",
+			"ali@exämple.de":                  "•••@exämple.de",
+			"ali.khan@example.":               "•••@example.",
+			"ali@":                            "•••@",
+			"Ali.Khan@Example.COM":            "•••@Example.COM",
+			"ali+agents@mail.co.uk":           "•••@mail.co.uk",
+			"phone:+15550001101":              "phone:+1•••01",
+			"phone:15550001101":               "phone:•••01",
+			"phone:1555000":                   "phone:•••00",
+			"phone:1 555 000 1101":            "phone:•••01",
+			"email:ali@example.com":           "email:•••@example.com",
+			"ali khan@example.com":            "•••@example.com",
+			"Ali Khan <ali@example.com>":      "•••@example.com>",
+			"ali@example.com bob@example.com": "•••@•••@example.com",
+			"user:app-1/ali@example.com":      "user:•••@example.com",
+		} {
+			line := logged(t, true, "x", key, id)
+			require.Contains(t, line, key+"="+want, id)
+			for _, leaked := range []string{"ali", "Ali", "Khan", "bob", "0001101", "1555"} {
+				require.NotContains(t, line, leaked, id)
+			}
+		}
+	}
+	for _, line := range []string{
+		logged(t, true, "texted phone:15550001101"),
+		logged(t, true, "x", "error", errors.New("no thread for phone:15550001101")),
+	} {
+		require.Contains(t, line, "phone:•••01")
+		require.NotContains(t, line, "0001101")
+	}
+	line := loggedJSON(t, true, "x", "user", "Ali.Khan@Example.COM")
+	require.Contains(t, line, `"user":"•••@Example.COM"`)
+	require.NotContains(t, line, "Khan")
+}
+
+func TestRedactLogAttrKeepsAnOpaqueEndUserID(t *testing.T) {
+	for _, key := range []string{"user", "user_id", "participant", "bound", "id"} {
+		for _, id := range []string{"user-42", "6f1c2a9e-4b7d-4a8e-9c3f-0d2e1b5a7c44", "1732479", "15550001101", "phone-router", "agent-1"} {
+			require.Equal(t, logged(t, false, "x", key, id), logged(t, true, "x", key, id), id)
+		}
+	}
+	for _, args := range [][]any{
+		{"to", "sip:alice@trunk.example"},
+		{"contact", "ali@example.com"},
+	} {
+		require.Equal(t, logged(t, false, "x", args...), logged(t, true, "x", args...), args)
+	}
+}

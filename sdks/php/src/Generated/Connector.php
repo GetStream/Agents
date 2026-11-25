@@ -45,6 +45,8 @@ final readonly class Connector
         public ?ConnectorSandbox $sandbox = null,
         // What a person does at the provider before the first consent, such as registering an OAuth client. Absent wh...
         public ?ConnectorSetup $setup = null,
+        // The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connect...
+        public ?string $syncHash = null,
     ) {
     }
 
@@ -69,6 +71,7 @@ final readonly class Connector
             redirectUri: array_key_exists('redirect_uri', $data) && $data['redirect_uri'] !== null ? Json::string($data, 'redirect_uri') : null,
             sandbox: array_key_exists('sandbox', $data) && $data['sandbox'] !== null ? ConnectorSandbox::fromArray(Json::object($data, 'sandbox')) : null,
             setup: array_key_exists('setup', $data) && $data['setup'] !== null ? ConnectorSetup::fromArray(Json::object($data, 'setup')) : null,
+            syncHash: array_key_exists('sync_hash', $data) && $data['sync_hash'] !== null ? Json::string($data, 'sync_hash') : null,
         );
     }
 
@@ -104,6 +107,9 @@ final readonly class Connector
         }
         if ($this->setup !== null) {
             $out['setup'] = $this->setup->toArray();
+        }
+        if ($this->syncHash !== null) {
+            $out['sync_hash'] = $this->syncHash;
         }
         return $out;
     }

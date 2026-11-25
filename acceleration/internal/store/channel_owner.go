@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/uptrace/bun"
@@ -32,7 +33,7 @@ func (c AgentConfig) TestCopy() bool {
 const notTestCopy = "coalesce(tags->>'" + DraftOfTag + "', '') = ''"
 
 // channelOwnerLockSeed is the second argument to hashtextextended for the lock a channel
-// connection's owner is decided under. Any value other than the 731 RecordAgentLog uses and
+// connection's owner is decided under. Any value other than the 731 AgentLogs.Insert uses and
 // definitionLockSeed (833) would do; 1049 is this rule's issue, AI-1049.
 const channelOwnerLockSeed = 1049
 
@@ -123,8 +124,9 @@ func refuseSecondChannelAgent(ctx context.Context, tx bun.Tx, config *AgentConfi
 
 // lockChannelOwner takes the lock a channel connection's owner is decided under
 // (refuseSecondChannelAgent) when the live connection id is a channel connection, and returns
-// its connector and whether it is one. A write that also locks the config's row takes this
-// lock first, as UpdateAgentConfig does, or the two would wait on each other in a cycle.
+// its connector and whether it is one. A write of a stored config locks the config's row
+// before this lock (AgentConfigs.save), and Insert locks no stored row, so two writes never
+// wait on each other in a cycle.
 func lockChannelOwner(ctx context.Context, tx bun.Tx, customerID, id string) (string, bool, error) {
 	var connection ConnectorConnection
 	err := tx.NewSelect().Model(&connection).Column("id", "connector_id", "definition_revision").
@@ -221,6 +223,70 @@ func (s *Store) AgentConfigsBindingConnection(ctx context.Context, customerID, c
 		return nil, stack.Wrap(fmt.Errorf("store: agent configs binding connection: %w", err))
 	}
 	return configs, nil
+}
+
+// ChannelLineTakenError is a write of a live config naming a channel line, such as an SMS
+// number, another live config already names (refuseSecondLineAgent).
+type ChannelLineTakenError struct {
+	Kind   string
+	Number string
+	// OwnerID and OwnerName are the live config already on the line.
+	OwnerID   string
+	OwnerName string
+}
+
+func (e *ChannelLineTakenError) Error() string {
+	return fmt.Sprintf("store: the %s line %s is named by agent config %s already", e.Kind, e.Number, e.OwnerID)
+}
+
+// channelLineLockSeed is the second argument to hashtextextended for the lock a channel line's
+// agent is decided under, apart from channelOwnerLockSeed's connections.
+const channelLineLockSeed = 3512
+
+// refuseSecondLineAgent refuses a write of a config naming a channel line another live config
+// names, matched as ConfigOnChannel matches it: two agents on one number would both answer
+// every message. The API checks this before the write too, but two configs saved at once both
+// pass that check, so the decision is taken again here under a transaction-scoped lock on the
+// customer and line, in kind order, as refuseSecondChannelAgent takes its.
+func refuseSecondLineAgent(ctx context.Context, tx bun.Tx, config *AgentConfig) error {
+	named := config.Channels.Lines.Lines()
+	for _, kind := range slices.Sorted(maps.Keys(named)) {
+		number := named[kind]
+		if err := lockUntilCommit(ctx, tx, config.CustomerID+"/"+kind+"/"+number, channelLineLockSeed); err != nil {
+			return fmt.Errorf("store: lock channel line: %w", err)
+		}
+		// A line the stored config named already is not a new claim, so a config that shared a
+		// line before this rule can still be saved, as refuseSecondChannelAgent keeps a binding.
+		kept, err := tx.NewSelect().Model((*AgentConfig)(nil)).
+			Where("id = ?", config.ID).
+			Where("customer_id = ?", config.CustomerID).
+			Where("deleted_at IS NULL").
+			Where("channels_lines -> ? ->> 'number' = ?", kind, number).
+			Exists(ctx)
+		if err != nil {
+			return fmt.Errorf("store: channel line owner: %w", err)
+		}
+		if kept {
+			continue
+		}
+		var owner AgentConfig
+		err = tx.NewSelect().Model(&owner).Column("id", "name").
+			Where("customer_id = ?", config.CustomerID).
+			Where("id != ?", config.ID).
+			Where("channels_lines -> ? ->> 'number' = ?", kind, number).
+			Where("deleted_at IS NULL").
+			Order("created_at", "id").
+			Limit(1).
+			Scan(ctx)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("store: channel line owner: %w", err)
+		}
+		return &ChannelLineTakenError{Kind: kind, Number: number, OwnerID: owner.ID, OwnerName: owner.Name}
+	}
+	return nil
 }
 
 // ConfigOnChannel is the agent reachable on a number, and false when none is.

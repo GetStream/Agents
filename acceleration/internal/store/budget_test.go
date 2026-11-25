@@ -17,6 +17,9 @@ import (
 // redisAddressVar is where the tests look for a Redis to run against.
 const redisAddressVar = "ROUTER_REDIS_ADDR"
 
+// redisFamilies are the prefixes of every key the store keeps in Redis.
+var redisFamilies = []string{"appcfg:", "turns:", "call_events:", "floor_checks:", refusedPrefix, usersPrefix}
+
 // redis is the Redis the suite's store caches in, or none when the tests have none.
 func (s *StoreSuite) redis() Redis {
 	return Redis{Address: os.Getenv(redisAddressVar)}
@@ -57,6 +60,18 @@ func (s *StoreSuite) countQueries(run func()) int {
 	return int(s.queries.sent.Load() - before)
 }
 
+// countSettledReads is countQueries for a read one shard's answer settles (answeringShards).
+// The reads that answer cut off are not waited for and finish after run returns, so it waits,
+// up to a deadline, until every shard's statement is in before it counts.
+func (s *StoreSuite) countSettledReads(run func()) int {
+	before := s.queries.sent.Load()
+	run()
+	shards := int64(len(s.store.shards()))
+	s.Eventually(func() bool { return s.queries.sent.Load()-before >= shards }, 5*time.Second, time.Millisecond,
+		"a statement from every shard")
+	return int(s.queries.sent.Load() - before)
+}
+
 // countEveryQuery hooks the suite's counter into every database the store holds.
 func (s *StoreSuite) countEveryQuery() {
 	databases := append([]*bun.DB{s.store.global}, s.store.peers...)
@@ -66,6 +81,40 @@ func (s *StoreSuite) countEveryQuery() {
 	for _, db := range databases {
 		db.AddQueryHook(&s.queries)
 	}
+}
+
+// statementsOf counts the statements starting with prefix sent while it is active.
+type statementsOf struct {
+	prefix string
+	active atomic.Bool
+	sent   atomic.Int64
+}
+
+func (c *statementsOf) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (c *statementsOf) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if c.active.Load() && strings.HasPrefix(event.Query, c.prefix) {
+		c.sent.Add(1)
+	}
+}
+
+// statementsLike is how many statements starting with prefix run sends, on every database the
+// store holds: how many batches a batched write took.
+func (s *StoreSuite) statementsLike(prefix string, run func()) int {
+	counter := &statementsOf{prefix: prefix}
+	databases := append([]*bun.DB{s.store.global}, s.store.peers...)
+	if s.store.Sharded() {
+		databases = append(databases, s.store.shard)
+	}
+	for _, db := range databases {
+		db.AddQueryHook(counter)
+	}
+	counter.active.Store(true)
+	run()
+	counter.active.Store(false)
+	return int(counter.sent.Load())
 }
 
 // roundTrips counts what the store sends Redis: a command, or a pipeline of them, is one.

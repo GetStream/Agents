@@ -12,7 +12,7 @@ func (s *StoreSuite) TestABridgeIsClaimedOnceFromAnyShardAndSweptOnceExpired() {
 
 	var claimed CallBridge
 	var err error
-	s.Equal(len(s.store.shards()), s.countQueries(func() {
+	s.Equal(len(s.store.shards()), s.countSettledReads(func() {
 		claimed, err = s.store.CallBridges.Claim(s.ctx, waiting.Token)
 	}), "Claim asks every shard once")
 	s.Require().NoError(err)

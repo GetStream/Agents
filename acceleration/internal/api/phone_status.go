@@ -55,7 +55,7 @@ func (s *Server) endUnansweredNow(ctx context.Context, customerID, sessionID str
 	if s.sessions.EndUnanswered(customerID, sessionID) || s.directory == nil || s.forwarder == nil {
 		return
 	}
-	address, err := s.directory.Node(ctx, sessionID)
+	address, err := s.directory.Node(ctx, customerID, sessionID)
 	if err != nil {
 		s.logger.Warn("could not find the node holding an unanswered call's session",
 			"session", sessionID, "error", err)

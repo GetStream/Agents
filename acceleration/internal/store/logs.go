@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/getsentry/sentry-go"
 )
@@ -160,14 +161,37 @@ var encodedBearer = regexp.MustCompile(`(?i)bearer(?:%(?:25)*20|\+)+[^\s"\x27&#\
 func SafeLogText(text string) string {
 	text = RedactLogText(text)
 	if len(text) > 8192 {
-		text = string([]rune(text)[:min(len([]rune(text)), 2048)]) + "… [truncated]"
+		text = string([]rune(text)[:min(len([]rune(text)), 2048)]) + truncatedMarker
 	}
 	return text
 }
 
+// truncatedMarker ends a text that was cut.
+const truncatedMarker = "… [truncated]"
+
+// maxTurnText is the most of one turn's text that is kept: what was asked, thought or answered.
+// The session socket takes a message of 5 MiB and the text is stored twice, on the response and
+// on its item, while a real turn is a few KiB: a ceiling far above that never cuts one.
+const maxTurnText = 256 << 10
+
+// turnText is what a conversation said as it is stored: RedactLogText, cut past maxTurnText at a
+// rune boundary with the marker SafeLogText adds.
+func turnText(text string) string {
+	text = RedactLogText(text)
+	if len(text) <= maxTurnText {
+		return text
+	}
+	cut := maxTurnText
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + truncatedMarker
+}
+
 // RedactLogText is text with every credential shape taken out, at whatever length. A caller
 // that must send the whole text, such as a refusal naming what the caller sent, or a log line,
-// which has no cap (RedactLogAttr), uses this; everything stored uses SafeLogText.
+// which has no cap (RedactLogAttr), uses this. What a conversation said, read back to the model,
+// is stored with turnText; everything else stored uses SafeLogText.
 func RedactLogText(text string) string {
 	if !mayHoldCredential(text) {
 		return text

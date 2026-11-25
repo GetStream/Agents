@@ -293,6 +293,27 @@ func (s *StoreSuite) TestQuietHoursRoundTrip() {
 	s.Equal("07:00", found.QuietHours.End)
 }
 
+func (s *StoreSuite) TestARenewalAfterAHoldDoesNotCutItShort() {
+	due := s.base.Add(-time.Minute)
+	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 1)
+	until := time.Now().Add(2 * time.Hour)
+	held, err := s.store.ScheduledTasks.Postpone(s.ctx, "acme", "one", claimed[0].Run.ID, claimed[0].LeasedBy, until)
+	s.Require().NoError(err)
+	s.Require().True(held)
+
+	held, err = s.store.ScheduledTasks.Renew(s.ctx, "acme", "one", claimed[0].LeasedBy, time.Minute)
+	s.Require().NoError(err)
+	s.True(held, "the claim is still the worker's")
+
+	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Require().NotNil(task.LeaseUntil)
+	s.WithinDuration(until, *task.LeaseUntil, time.Second, "the hold outlasts the renewal's minute")
+}
+
 func (s *StoreSuite) TestAPostponedTaskIsHeldUnderItsClaimUntilTheHoldEnds() {
 	due := s.base.Add(-time.Minute)
 	s.task("one", func(task *ScheduledTask) { task.NextRunAt = &due })
@@ -364,14 +385,14 @@ func (s *StoreSuite) TestAPostponeUnderAStolenClaimHoldsNothing() {
 }
 
 func (s *StoreSuite) TestAUserTimezoneIsStoredAndMoved() {
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
-	zone, err := s.store.UserTimezone(s.ctx, "acme", "sam")
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
+	zone, err := s.store.Users.GetTimezone(s.ctx, "acme", "sam")
 	s.Require().NoError(err)
 	s.Equal("Europe/Amsterdam", zone)
 
 	// The latest explicit zone wins, and the row's kind is left alone.
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "guest", "Asia/Tokyo"))
-	zone, err = s.store.UserTimezone(s.ctx, "acme", "sam")
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "guest", "Asia/Tokyo"))
+	zone, err = s.store.Users.GetTimezone(s.ctx, "acme", "sam")
 	s.Require().NoError(err)
 	s.Equal("Asia/Tokyo", zone)
 
@@ -1163,6 +1184,53 @@ func (s *StoreSuite) TestResumesAtOnceStopAtTheConfigsActiveLimit() {
 	s.Equal(5, active)
 }
 
+func (s *StoreSuite) TestACreateAndAResumeAtOnceStopAtTheActiveLimit() {
+	for round := range 40 {
+		config := s.limitedConfig(1)
+		user := fmt.Sprintf("user-%d", round)
+		paused := s.task(fmt.Sprintf("paused-%d", round), func(task *ScheduledTask) {
+			task.ConfigID, task.UserID, task.State = config.ID, user, ScheduledTaskPaused
+		})
+		resumed := *paused
+		resumed.State = ScheduledTaskActive
+		created := &ScheduledTask{ID: fmt.Sprintf("new-%d", round), CustomerID: "acme", ConfigID: config.ID, UserID: user,
+			CallerKind: "authenticated", Title: "Stretch", Instructions: "Remind Sam to stretch.",
+			StartLocal: s.base, Timezone: "UTC"}
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		wg.Go(func() { <-start; errs <- s.store.ScheduledTasks.Insert(s.ctx, created, 1) })
+		wg.Go(func() { <-start; errs <- s.store.ScheduledTasks.Update(s.ctx, &resumed) })
+		close(start)
+		wg.Wait()
+		close(errs)
+		won, refused := 0, 0
+		for err := range errs {
+			switch {
+			case err == nil:
+				won++
+			case errors.Is(err, ErrTooManyScheduledTasks):
+				refused++
+			default:
+				s.Require().NoError(err, "round %d", round)
+			}
+		}
+		s.Require().Equal(1, won, "round %d", round)
+		s.Require().Equal(1, refused, "round %d", round)
+		active, err := s.store.ScheduledTasks.CountActive(s.ctx, "acme", user, config.ID)
+		s.Require().NoError(err)
+		s.Require().Equal(1, active, "round %d", round)
+	}
+}
+
+func (s *StoreSuite) TestAFailedTaskResumedAtTheLimitIsRefused() {
+	config := s.limitedConfig(1)
+	s.task("one", func(task *ScheduledTask) { task.ConfigID = config.ID })
+	failed := s.task("two", func(task *ScheduledTask) { task.ConfigID, task.State = config.ID, ScheduledTaskFailed })
+	failed.State = ScheduledTaskActive
+	s.ErrorIs(s.store.ScheduledTasks.Update(s.ctx, failed), ErrTooManyScheduledTasks)
+}
+
 func (s *StoreSuite) TestAnEditOfAnActiveTaskAtTheLimitIsSaved() {
 	config := s.limitedConfig(1)
 	task := s.task("one", func(task *ScheduledTask) { task.ConfigID = config.ID })
@@ -1360,15 +1428,15 @@ func (s *StoreSuite) TestAConfigDeleteWhileATaskIsPausedByHandStillPausesTheTask
 }
 
 func (s *StoreSuite) TestAnUnchangedUserTimezoneIsNotWrittenAgain() {
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
 	written := s.userRowVersion("sam")
 
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
 	s.Equal(written, s.userRowVersion("sam"), "the same zone again leaves the row alone")
 
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "authenticated", "Asia/Tokyo"))
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "authenticated", "Asia/Tokyo"))
 	s.NotEqual(written, s.userRowVersion("sam"))
-	zone, err := s.store.UserTimezone(s.ctx, "acme", "sam")
+	zone, err := s.store.Users.GetTimezone(s.ctx, "acme", "sam")
 	s.Require().NoError(err)
 	s.Equal("Asia/Tokyo", zone)
 }
@@ -1388,9 +1456,9 @@ func (s *StoreSuite) TestAUserWithNoZoneYetIsGivenOne() {
 		"INSERT INTO users (customer_id, id, kind, name, timezone) VALUES ('acme', 'sam', 'authenticated', '', NULL)")
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.store.SetUserTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
+	s.Require().NoError(s.store.Users.SetTimezone(s.ctx, "acme", "sam", "authenticated", "Europe/Amsterdam"))
 
-	zone, err := s.store.UserTimezone(s.ctx, "acme", "sam")
+	zone, err := s.store.Users.GetTimezone(s.ctx, "acme", "sam")
 	s.Require().NoError(err)
 	s.Equal("Europe/Amsterdam", zone)
 }
@@ -1465,9 +1533,14 @@ func (s *StoreSuite) TestScheduledTaskQueryBudgets() {
 	s.Equal(4, s.countQueries(func() {
 		s.Require().NoError(s.store.ScheduledTasks.PauseForConfig(s.ctx, "acme", "config-1"))
 	}), "PauseForConfig")
-	s.Equal(1, s.countQueries(func() {
+	// The transaction, the tasks and their runs locked, and the delete with its changes redacted.
+	s.Equal(5, s.countQueries(func() {
 		s.Require().NoError(s.store.ScheduledTasks.DeleteForSession(s.ctx, "acme", "session-1"))
 	}), "DeleteForSession")
+	// The transaction and the lock, which finds none.
+	s.Equal(3, s.countQueries(func() {
+		s.Require().NoError(s.store.ScheduledTasks.DeleteForSession(s.ctx, "acme", "session-none"))
+	}), "DeleteForSession of a session with no tasks")
 	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.ScheduledTasks.Delete(s.ctx, "acme", "st-new")) }), "Delete")
 	// The lost runs by hand settled, then one batch of runs and one of tasks, with nothing to prune.
 	s.Equal(3, s.countQueries(func() {

@@ -173,6 +173,9 @@ resolver, so never quote the egress error (`createEventDestination`, AI-3575).
   [errors.md «HTTP»](../go/errors.md#http).
 - Refused outbound URLs: see rule 6.
 - The ops key (`X-Ops-Key`) is compared in constant time and turns the paths off when empty.
+- The activity key (`X-Activity-Key`, `ROUTER_AUTH_ACTIVITY_KEY` and `_PREVIOUS`) is compared in
+  constant time, reaches only the operations under `activitySecurity` (`listActivity`,
+  `getOrganizationActivity`), is off when empty, and is never the ops or the manage key.
 - The manage key (`X-Manage-Key`) is compared in constant time, makes every `/v1/manage/*`
   path a 404 `not_configured` when empty, is never the ops key, and every call with it must
   name its actor in `X-Stream-Actor-Id` (`requireStaffKey`, `ManageSuite`).

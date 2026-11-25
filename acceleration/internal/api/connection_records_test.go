@@ -155,7 +155,7 @@ func (s *ConnectionRecordsSuite) TestACursorTheLogDidNotHandOutIsRefused() {
 		"/v1/agents/connections/"+id+"/invocations?cursor=not-a-cursor", nil, nil))
 }
 
-// TestStoringACredentialLeavesOneGrantCreatedRowNamingTheRequest: the credentials write, then
+// TestStoringACredentialAndDeletingTheConnectionEachLeaveOneRow: the credentials write, then
 // the delete, each once, and the deleted connection's rows still listed.
 func (s *ConnectionRecordsSuite) TestStoringACredentialAndDeletingTheConnectionEachLeaveOneRow() {
 	connector := s.connector()

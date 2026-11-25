@@ -567,11 +567,9 @@ must have a limit to be granted (404 `no_limit`), and an organization has at mos
 grants, a used-up one not counted (409 `too_many_grants`). `getLimitUsage` lists the subject's live grants and says, per window, when
 its work runs on one.
 
-The organization and app budgets that policies held moved into this table with the migration
-`20261112120000_limits`: each became the organization's or the app's own limit on its interval,
-an app's under the organization it was last seen in, or under itself when it was seen in none.
-The migration stops while an hourly budget exists, since limits have no hourly interval. Coming
-down puts one budget back into each policy from its scope's own limits.
+The organization and app budgets that policies held moved into this table: each became the
+organization's or the app's own limit on its interval, an app's under the organization it was
+last seen in, or under itself when it was seen in none.
 
 ### The account, its credit and its teams
 
@@ -993,8 +991,8 @@ An agent's work is done in one region, `us` or `eu` for now, and never in anothe
 its sessions route to, its knowledge base and its sandbox. The region is the agent's own.
 `agent.yaml` names it as `region` (the sync's `region`), as a config written with the API does
 (`AgentConfigRequest.region`, `AgentConfigPatch.region`), and it is stored in
-`agent_configs.region` (migration `20261202135000_agent_region`, which puts every agent before it
-in `us`). An agent that names none is in `us` (`pricing.DefaultRegion`), and a sync, an update or a
+`agent_configs.region` (an agent stored before the column existed is in `us`). An agent that
+names none is in `us` (`pricing.DefaultRegion`), and a sync, an update or a
 patch that leaves it out keeps the stored one. A region is a letter and up to 31 of a-z, 0-9 and
 hyphens (`pricing.ValidRegion`).
 
@@ -1080,8 +1078,8 @@ Knowledge and sandboxes are not routed, so they are done in the work's region
 
 - **Knowledge.** One turbopuffer backend per region `knowledge.regions` maps
   (`ROUTER_KNOWLEDGE_REGIONS`), `us` always among them as before. A knowledge base stays in the
-  region of its first write through the router, recorded in `knowledge_namespaces` (migration
-  `20261202125000_knowledge_region`, which records every existing base as `us`). Work naming a
+  region of its first write through the router, recorded in `knowledge_namespaces` (a base from
+  before regions is recorded as `us`). Work naming a
   region, an agent's, reads and writes a base kept there, makes one nothing was written to
   there, and is refused one kept in another rather than having it moved. Work naming none, as
   the knowledge API's (`/v1/agents/knowledge`) and a page's read, goes where the base is kept,
@@ -1111,7 +1109,7 @@ vendor the deployment routes whose factory builds with an instance's own key
 and for `daytona`; any other is a 400 `provider_takes_no_key` naming the ones that are. Only a key
 is taken, never an endpoint: the deployment's own is used.
 
-Keys are kept in `provider_keys` (migration `20261202130000_provider_keys`), sealed with the
+Keys are kept in `provider_keys`, sealed with the
 deployment's keyring (`auth.Sealer`, as the other customer secrets are) and bound to the customer,
 the vendor and the region, so a sealed key copied to another row does not open. A key is never
 returned, logged or put in an error: the API lists its last four characters (`key_hint`, empty for a
@@ -2136,23 +2134,23 @@ is left out when the request has none:
 | `request_size` | The request's `Content-Length`. None for a chunked body |
 | `user_id` | The end user of a request from a user's device, cut to 256 bytes. None for a backend's request, even one that names a user |
 | `build_version` | The release the router was built from. None in a local build |
-| `close_reason` | Why a session socket closed: the events socket (`/v1/agents/sessions/{id}/events`) and `/v1/agents/socket`. None for any other request or socket. The values are below |
+| `close_reason` | Why a socket closed: the events socket (`/v1/agents/sessions/{id}/events`), `/v1/agents/socket`, `/v1/dispatch` and `/v1/{modality}/stream`. None for any other request or socket. The values are below |
 | `close_code` | The code of the close frame the caller sent, or of the one the router sent. None for `client_gone` and `timeout` |
-| `end_reason` | Why the session ended, as its row keeps it (`closed`, `agent_hangup` and the rest), with `session_ended` only. None on a socket relayed from another node: the node running the session keeps it |
+| `end_reason` | Why the session ended, as its row keeps it (`closed`, `agent_hangup` and the rest), with `session_ended` only. None on a socket relayed from another node: the node running the session keeps it. None on `/v1/dispatch` and `/v1/{modality}/stream`, which hold no session |
 
 A socket is logged once, when it closes, so its `duration` is how long the connection lived
-rather than a time to respond and its status is the `101` of the upgrade. A session socket's
+rather than a time to respond and its status is the `101` of the upgrade. A socket's
 `close_reason` is one of these:
 
 | `close_reason` | When |
 | --- | --- |
 | `client_closed` | The caller sent a close frame, or a `close` command (a `stop` on `/v1/agents/socket`) that ended the session. A command sent once the session had ended is not counted: the line says `session_ended` |
 | `client_gone` | The connection broke with no close frame, or a write to the caller failed |
-| `timeout` | The caller answered no ping in time, or sent no start frame in time on `/v1/agents/socket` |
-| `session_ended` | The session ended for another reason. `end_reason` says which |
-| `refused` | The router refused the caller: a start frame it would not take, a session it would not open, a frame it could not read (`1008`) or one past the size limit (`1009`) |
-| `server_error` | `/v1/agents/socket` could not open the session for a failure of the router's own, such as a database read. The caller is sent `1008` |
-| `shutdown` | The router stopped a resumable socket's session on its way down (`1012`) |
+| `timeout` | The caller answered no ping in time, or sent no start frame in time on `/v1/agents/socket` and `/v1/{modality}/stream` |
+| `session_ended` | The session ended for another reason. `end_reason` says which. Session sockets only |
+| `refused` | The router refused the caller: a start frame it would not take, a session it would not open, a frame it could not read (`1008`) or one past the size limit (`1009`). A stream socket closes a refused start frame with the code it always has (`1011`, or `1008` for an unknown target, a setting the model cannot take or a refusal about money), and a frame it cannot read after the start (`tts`, `llm`) with `1000` |
+| `server_error` | A failure that is not the caller's: `/v1/agents/socket` could not open the session for a failure of the router's own, such as a database read (`1008`), or a stream socket could not read the config it names or start a provider (`1011`) |
+| `shutdown` | The router stopped a resumable socket's session on its way down (`1012`), or sent a dispatch worker to reconnect elsewhere (`1001`) |
 
 A `5xx` is logged
 at error instead, because an access log at a busy deployment is the one stream nobody reads
@@ -2165,6 +2163,14 @@ string is never logged: a socket names its customer there and a telephony vendor
 The routes under `/v1/ops` are Stream staff's: they take the ops key (`ROUTER_AUTH_OPS_KEY`) in
 `X-Ops-Key` and no app's credentials. An app's key, even its backend's, is answered 401, and so
 is every call on a deployment with no ops key. They are tagged `Staff` in the spec.
+
+The two activity routes also take the activity key (`ROUTER_AUTH_ACTIVITY_KEY`) in
+`X-Activity-Key`, for a job that reads activity every day. It reaches those two routes and no
+other: on any other route it is answered 401. To rotate it, set the new key in
+`ROUTER_AUTH_ACTIVITY_KEY` and the old one in `ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS`; both work until
+you unset the old one. Unset, there is no activity key and the ops key still reads both routes. The
+router does not start when either activity key is under 32 bytes, has a space at either end, or is
+the ops key or the manage key. `openssl rand -hex 32` prints a key it takes.
 
 | Route | What it is for |
 | ----- | -------------- |
@@ -2188,12 +2194,15 @@ Every organization's activity is a list by cursor of `customer_activity`'s rows 
 also tells `furthest_step` (from `from` to `to`) and `steps` (every day) for the organizations
 on it. `org_id` and `app_id` narrow the items to one organization, one app or both; with
 `app_id`, `furthest_step` and `steps` are still the organization's, of all its apps. A cursor is
-refused with other `from`, `to`, `org_id` or `app_id` than its page's. Its description holds the
+refused with other `from`, `to`, `org_id` or `app_id` than its page's. Each organization also tells `funded`: whether it has credit that is not trial
+credit, read live from the usage service when the page is read. It is absent on every organization of the page when
+the deployment has no usage service or it did not answer. Its description holds the
 definitions of tried, API calls, production and churned:
 
 ```bash
 printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-01"
 printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-07&org_id=$ORG_ID"
+printf 'X-Activity-Key: %s\n' "$ROUTER_AUTH_ACTIVITY_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-01"
 ```
 
 `areas` is one item per area and client, `meters` one per modality (requests, tokens, audio,
@@ -2227,7 +2236,7 @@ from the hour `since` falls in, one item per leg with `turns` and the `p50_ms`, 
 The endpoint sums the rows of the organization's current apps, including rows the sweeper has
 not processed yet, while the cost-anomaly check sums `requests.organization_id` over swept
 billable rows, so the two can disagree for two reasons. One is an app that moved organization
-within the window. The other is rows the sweeper has not yet given an organization: `MeterUses`
+within the window. The other is rows the sweeper has not yet given an organization: `Spend.Meters`
 reads an org's apps with no organization filter, while the cost-anomaly check skips rows with an
 empty `organization_id`.
 
@@ -2246,7 +2255,7 @@ What each organization did with Agents lives in three places:
 | ----- | ---- | ---- |
 | `customer_activity` (Postgres) | One row per app, area, client and UTC day: requests, refusals, the last refusal's code | 400 days |
 | `GET /v1/ops/orgs/{org_id}/activity` | One organization: areas, `furthest_step`, `steps`, meters, sessions, latency | What the table keeps |
-| `GET /v1/ops/activity` | Every organization: one item per app, area, client and day from `from` to `to`, with each organization's `furthest_step` and `steps`, by cursor | What the table keeps |
+| `GET /v1/ops/activity` | Every organization: one item per app, area, client and day from `from` to `to`, with each organization's `furthest_step`, `steps` and `funded` (read live from the usage service), by cursor | What the table keeps |
 | The activity digest (Slack, `ROUTER_LIMITS_SLACK_CHANNEL`) | Every organization, the UTC day before; `activity_digests` holds the days posted | 400 days |
 
 The router keeps activity for 400 days (`ActivityKeepDays` in `internal/store/activity.go`).
@@ -2375,8 +2384,11 @@ router's `getAccount`, `listCredits`, `listTeams` and `listUsageEvents` read the
 **Replaying lost rows.** The `lost` alert means rows were logged as `usage row lost` and not
 written. `router usage replay --from <log>` writes them from the log, once each. Each line
 holds its row's JSON hex-encoded as `row_hex`, which the log's redaction leaves alone, so each
-text in the row is redacted and masked first. A user id that changes is left off, and the row
-bills to its app without that user. A line from before that holds the row as `row=` JSON the
+text in the row is redacted and masked first. A user id that changes is logged masked after
+`masked:`; replay gives the row back the user of its own app's session when that user masks
+alike, and otherwise the row bills to its app without a user. Replay before forgetting a user:
+the session still holds the id, so a replay after `forget-user` writes it back, and
+`forget-user` must then be run again for that user. A line from before that holds the row as `row=` JSON the
 redaction rewrote, and cannot be recovered: replay counts it as could not be read.
 
 **Forgetting an end user.** A user id is often an email, so an erasure request for one of a
@@ -2384,21 +2396,31 @@ customer's users reaches the usage records. `router usage forget-user --app <app
 --actor <who>` replaces the id with `forgotten:` and 32 random hex characters (random, since a
 hash of an email can be recomputed from it), in order, once their scheduled tasks are deleted
 with their runs, so none runs again, and the changes recorded of them made deletes: the
-requests of every shard; the usage
+requests and call legs of every shard, and the agent logs naming them, deleted with the changes
+recorded of them made deletes; the usage
 service's events and the user's windows (`POST /v1/manage/users/forget`, one transaction, a
 window the replacement already has taking the forgotten one's spend), and again after
 `--settle` (2 minutes) for a batch a shipper read before the shards were rewritten; the user's
 `usage:` counter, `hold:` key and `quota:` buckets in Redis, deleted by name; and in the shared
 database their own policy and user-level limits, deleted, so the app's defaults apply, and the
-id on their resets, grants and campaigns. Usage and cost stay under the app. It writes one
+id on their resets, grants and campaigns; their phone links (as `PUT /v1/agents/users/{user_id}`
+unlinks one), channel link codes and profile (`users`), deleted, its recorded changes made
+deletes (the profile's own delete keeps the id in its key, which a following deployment deletes
+its copy by, until `data_move.retention` drops it); their contact map rows, unlinked; and the id on the guests they claimed. Usage and cost stay under the app. It writes one
 `end_user` audit row naming the replacement and the actor, never the id, and the service one
-`forget_user` row per organization. `--dry-run` prints the counts and changes nothing. Every
+`forget_user` row per organization. `--dry-run` prints the counts and changes nothing. Once the
+last step, the shared database's, has started, it completes even if the command is interrupted,
+and the command drops the user's cached policy and profile from every router before it exits. Every
 step only touches what still names the id, so it is safe to repeat: to finish a run that
 stopped, pass the replacement it printed as `--replacement`, and the rest is rewritten under
-that one replacement, with the run's own audit row. Sessions, conversation history and
-`agent_logs` stay as they are, and work recorded for the id afterwards carries it again;
-`keptUserTables` in `internal/store/forget.go` says why for each table with a `user_id` column
-that forgetting leaves alone.
+that one replacement, with the run's own audit row. Sessions, with their conversation history
+and documents, stay as they are, and work recorded for the id afterwards carries it again;
+`keptUserColumns` in `internal/store/forget_user_test.go` says why for each column naming an end
+user that forgetting leaves alone. It cannot reach logs, so the logger masks the ids it can tell
+apart: `phone:` and a number anywhere in a line, everything before an email's `@` under `user`,
+`user_id`, `participant`, `bound` and `id` (`logMasks`, `internal/store/logmask.go`), and in the
+logged path a route's `{user_id}` segment and the `{id}` of a customer's policy. Any other id, a bare number or an email logged under
+another name among them, stays until log retention ends.
 
 The service checks its own alerts, sends them to Sentry (`usage_alert:<name>`) and logs them.
 A rejected event, a batch refused whole for what it holds (`batch_refused`: a 400, 413 or 422,
@@ -2517,26 +2539,12 @@ a vendor quotes outright, such as a number's monthly rental, is charged at that 
 same factor, which no entry stores; its `base_cost_micros` is the vendor's amount, or 0 with the
 fee charged for a BYOK item.
 
-Migration `20261118120000_price_entry_prices` stored every existing entry's price as what it
-was charged: its rates times its own markup, else the list's in force when it is (or was), and
-gave every item its SKU. Migration `20261130120000_drop_price_markup` then drops the
-`markup_bps` those markups were kept in, on `price_changes` and `price_entries`, which nothing
-had read since.
-
-Migration `20261202120000_price_entry_region` renames `price_entries` to `price_list_entries`
-and adds `region` and `byok`: every existing entry is `us` and not BYOK, and `region` keeps no
-default, so every later insert names one. It ends every existing SKU in `-us`
-(`llm-openai-a` becomes `llm-openai-a-us`, `llm-openai-gpt-4-1-2` becomes
-`llm-openai-gpt-4-1-2-us`), and indexes items by region and BYOK state as well. `requests.sku`
-and the usage ledger are not rewritten: a row keeps the SKU it was billed under, so a row priced
-before the migration names its item's SKU without the region. The rename is what keeps a router
-built before it from reading a BYOK entry as its item's newest price: that router's reads and
-writes of the price list fail, and it keeps pricing with the list it holds in memory, reading
-again every 30 seconds, until it is replaced. The first start after the migration writes one
-`release` change holding only the BYOK twins the files now have, at the fee; every US item keeps
-its price and its SKU. Down takes the region off the SKUs, drops the columns and renames the
-table back, and refuses a list that holds a BYOK or non-US entry, which a router built before
-it would read as a US price.
+An entry from before prices were stored holds what it was charged: its rates times its own
+markup, else the list's in force then. An entry from before regions is `us` and not BYOK, and
+its SKU ends in `-us` (`llm-openai-a` became `llm-openai-a-us`). `region` has no default, so
+every insert names one. `requests.sku` and the usage ledger were not rewritten: a row keeps the
+SKU it was billed under, so a row priced before regions names its item's SKU without the
+region.
 
 | Command | What it does |
 | --- | --- |
@@ -2793,6 +2801,11 @@ including one that was in progress when the export started. A transaction still 
 export answer 503: run it again. A repeatable read or serializable transaction whose snapshot is older than the
 start of recording is refused with a serialization failure when it next writes, so its retry is recorded.
 
+An app runs one export at a time on a router: a second one is answered 409 until the first ends. A router runs
+at most four exports at once, and one more is answered 503. An export ends after an hour, or when one line has
+taken a minute to write; an export that ends early has no cursor line, so run it again. An import is one JSON
+object per line, as an export writes it, and a line over 64 MiB is answered 413.
+
 The source must be a router without shards. A shard's tables (calls, call bridges, recordings,
 sessions, responses, requests and their stats) record no changes, so a router with a shard database
 of its own, or with other shards' databases listed in `postgres.shards`, answers the export and the
@@ -2825,6 +2838,8 @@ and then saves the cursor.
 
 `POST /v1/data/import` refuses an export the same way: an app this deployment already holds gets a 409 before
 any of the export's rows is written, unless the request asks `?full=true`; a batch of changes is always applied. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
+An app runs one import at a time on a router: a second one is answered 409 `import_running` until the first ends. A router runs
+at most four imports at once, and one more is answered 503. An import ends when a line has taken a minute to arrive.
 
 The default `--source-auth jwt` is for a source behind Stream's gateway, such as the hosted router.
 `--source-auth server` is for a source router reached directly.
@@ -2907,6 +2922,11 @@ first `usage_id` as `source_usage_id`, so the row is written once wherever it mo
 row taken back where it was first recorded is the row it was copied from. A delete of it in a
 change batch is found by the `usage_id` made from the one the change names, and never removes
 a request this deployment recorded itself.
+
+A row refused because another tenant here holds its key stops the move, and the error names the
+row by table and primary key, as `agent_configs:{"id":"config-1"}`. `router replicate` prints why.
+`POST /v1/data/import` answers 400 and says only that the row cannot be written here: pass the row
+to the operator of this deployment.
 
 Key rows, sealed secrets, OAuth access and refresh tokens, organizations and apps are not
 exported. A moved deployment mints its own keys and re-authorizes its plugin connections.
@@ -3096,8 +3116,9 @@ contract.
 ## Persistent text conversations
 
 Every text session is kept in a Stream Chat `agent:support-<uuid>` channel unless it is
-`incognito`; pass `conversation_id` to bind to an existing one. The configured agent ID is
-preserved; the backend verifies the channel's customer and agent ownership on
+`incognito`; pass `conversation_id` to bind to an existing one. A `conversation_id` from
+an anonymous caller is refused with a 403: such a caller carries its conversation on by session
+id. The configured agent ID is preserved; the backend verifies the channel's customer and agent ownership on
 resume and on `GET /v1/agents/conversations/{cid}/messages?agent_id=...&before=...`.
 This endpoint returns up to 100 messages and a `before` cursor. Completed ordinary
 user/assistant messages restore model context, capped at 100 messages and 60,000

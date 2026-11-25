@@ -12,12 +12,14 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
@@ -68,6 +70,13 @@ func (s *SocketEndSuite) TestARequestThatOpenedNoSocketLogsNoCloseReason() {
 // brokenSocket is the router's side of a real socket whose connection is closed under it in
 // both directions, so the next write to it fails.
 func (s *SocketEndSuite) brokenSocket() *websocket.Conn {
+	routerSide, client := s.connected()
+	s.breaks(routerSide, client)
+	return routerSide
+}
+
+// connected is the router's side of a real socket and the caller's.
+func (s *SocketEndSuite) connected() (*websocket.Conn, *websocket.Conn) {
 	upgraded := make(chan *websocket.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		connection, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
@@ -78,10 +87,13 @@ func (s *SocketEndSuite) brokenSocket() *websocket.Conn {
 	s.T().Cleanup(server.Close)
 	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	s.Require().NoError(err)
-	routerSide := <-upgraded
+	return <-upgraded, client
+}
+
+// breaks closes a socket's connection under both its sides.
+func (s *SocketEndSuite) breaks(routerSide, client *websocket.Conn) {
 	s.Require().NoError(client.UnderlyingConn().Close())
 	s.Require().NoError(routerSide.UnderlyingConn().Close())
-	return routerSide
 }
 
 func (s *SocketEndSuite) TestAnEventTheCallerCannotBeSentIsClientGone() {
@@ -100,7 +112,7 @@ func (s *SocketEndSuite) TestARelayedFrameTheCallerCannotBeSentIsClientGone() {
 	socket.frames <- json.RawMessage(`{"type":"said"}`)
 	server := &Server{logger: slog.New(slog.DiscardHandler)}
 
-	ended := server.writeRelayedEvents(s.brokenSocket(), nil, socket, "a-watcher", "a-session", wanted{}, make(chan error),
+	ended := server.writeRelayedEvents(s.T().Context(), s.brokenSocket(), nil, socket, "a-watcher", "a-session", wanted{}, make(chan error),
 		endingOf(resuming{}, func() bool { return false }))
 
 	s.Equal(socketEnd{cause: clientGone}, ended)
@@ -131,4 +143,64 @@ func (s *SocketEndSuite) TestAFramePastTheReadLimitIsRefusedWith1009() {
 func (s *SocketEndSuite) TestARouterRestartingIsAShutdownAndAnyOtherEndTheSessions() {
 	s.Equal(socketEnd{cause: routerShutdown, code: websocket.CloseServiceRestart}, sessionEnd(websocket.CloseServiceRestart))
 	s.Equal(socketEnd{cause: sessionEnded, code: websocket.CloseNormalClosure}, sessionEnd(websocket.CloseNormalClosure))
+}
+
+func (s *SocketEndSuite) TestADispatchWorkerThatCannotBeSentItsReadyFrameIsClientGone() {
+	pool := dispatch.NewPool()
+	worker, release := pool.Register("a-customer", dispatch.Registration{Capacity: 1})
+	defer release()
+	server := &Server{logger: slog.New(slog.DiscardHandler), draining: make(chan struct{})}
+
+	ended := server.writeCalls(s.brokenSocket(), worker, make(chan error), nil, nil, func() {})
+
+	s.Equal(socketEnd{cause: clientGone}, ended)
+}
+
+func (s *SocketEndSuite) TestWorkADispatchWorkerCannotBeSentIsClientGone() {
+	// Catches a failed write to a worker left with no reason, for each kind of frame it is sent.
+	hosted := []dispatch.Tool{{Name: "a-tool", Description: "does a thing"}}
+	for name, send := range map[string]func(*dispatch.Pool, *dispatch.Worker, chan<- float64, chan<- frame){
+		"pong": func(_ *dispatch.Pool, _ *dispatch.Worker, pongs chan<- float64, _ chan<- frame) { pongs <- 1 },
+		"reply": func(_ *dispatch.Pool, _ *dispatch.Worker, _ chan<- float64, replies chan<- frame) {
+			replies <- frame{"type": "hosting"}
+		},
+		"call": func(pool *dispatch.Pool, _ *dispatch.Worker, _ chan<- float64, _ chan<- frame) {
+			_, err := pool.Assign("a-customer", dispatch.Call{CallID: "a-call"})
+			s.Require().NoError(err)
+		},
+		"message": func(pool *dispatch.Pool, _ *dispatch.Worker, _ chan<- float64, _ chan<- frame) {
+			_, err := pool.AssignMessage("a-customer", dispatch.Message{ChannelID: "a-channel"})
+			s.Require().NoError(err)
+		},
+		"tool call": func(pool *dispatch.Pool, worker *dispatch.Worker, _ chan<- float64, _ chan<- frame) {
+			s.Require().NoError(pool.Host(worker, "an-agent", hosted, time.Second))
+			go func() {
+				_, _ = pool.RunHosted(s.T().Context(), "a-customer", "an-agent", dispatch.ToolCall{ID: "a-call", Name: "a-tool"})
+			}()
+		},
+	} {
+		s.Run(name, func() {
+			pool := dispatch.NewPool()
+			worker, release := pool.Register("a-customer", dispatch.Registration{Capacity: 1})
+			defer release()
+			server := &Server{logger: slog.New(slog.DiscardHandler), draining: make(chan struct{})}
+			routerSide, client := s.connected()
+			pongs, replies := make(chan float64), make(chan frame)
+			ended := make(chan socketEnd, 1)
+			go func() { ended <- server.writeCalls(routerSide, worker, make(chan error), pongs, replies, func() {}) }()
+			var ready frame
+			s.Require().NoError(client.ReadJSON(&ready))
+			s.Require().Equal("ready", ready["type"])
+			s.breaks(routerSide, client)
+
+			send(pool, worker, pongs, replies)
+
+			select {
+			case got := <-ended:
+				s.Equal(socketEnd{cause: clientGone}, got)
+			case <-time.After(5 * time.Second):
+				s.Fail("the writer did not stop on a failed write")
+			}
+		})
+	}
 }

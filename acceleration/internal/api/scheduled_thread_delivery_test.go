@@ -103,7 +103,7 @@ func (s *RouterSuite) scheduledTurnTools() []string {
 
 // deliveredByTheWorker makes task due, has a worker deliver it, and returns its settled run.
 func (s *RouterSuite) deliveredByTheWorker(task store.ScheduledTask) store.ScheduledTaskRun {
-	worker := scheduling.NewScheduler(s.store, s.router.DeliverScheduledTask, slog.New(slog.DiscardHandler))
+	worker := s.newScheduler(s.router.DeliverScheduledTask, slog.New(slog.DiscardHandler))
 	worker.Start(context.Background())
 	defer worker.Close()
 	past := time.Now().Add(-time.Minute)
@@ -180,7 +180,7 @@ func (s *TelnyxChannelSuite) TestATaskMadeInAnSMSThreadIsTextedBackOnTheThread()
 	texted := s.took(sent + 1)[sent]
 	s.Equal(telnyxMessage{from: s.line, to: person, text: "Done."}, texted.withoutAuthorization())
 	s.Equal(1, s.scheduledTurns())
-	s.Contains(s.scheduledTurnTools(), "schedule_task", "the turn answers the person, who may schedule again")
+	s.Contains(s.scheduledTurnTools(), "schedule_task", "the turn answers the person, with their tools")
 	s.Equal(replies+1, s.repliesIn(channel), "the reply is kept in the thread")
 	s.Eventually(func() bool { return !s.threadOpen(channel) }, settleFor, 10*time.Millisecond, "the session was left open")
 }
@@ -656,20 +656,19 @@ func (s *TelnyxChannelSuite) TestAThreadTaskSaysItIsDeliveredOnTheThreadsChannel
 	s.Equal([]string{"sms"}, task.Channels)
 }
 
-// A task the agent schedules in a delivered task's turn keeps the thread and its channel too.
-func (s *TelnyxChannelSuite) TestATaskScheduledInATasksTurnIsDeliveredOnTheThreadToo() {
-	task, channel := s.scheduledInThread("+13125550001")
+// A task's turn on a thread is as much the customer's spend as one in a conversation, so it
+// cannot make a task either.
+func (s *TelnyxChannelSuite) TestATasksTurnOnAThreadCannotScheduleATask() {
+	task, _ := s.scheduledInThread("+13125550001")
 	s.planTool("schedule_task", stretchInTwoHours)
 
 	_, _, err := s.deliverTask(task)
 
 	s.Require().NoError(err)
-	tasks := s.customersTasks(2)
-	s.Require().Len(tasks, 2)
-	for _, made := range tasks {
-		s.Equal(channel, made.ChannelThread)
-		s.Equal([]string{"sms"}, made.Channels)
-	}
+	s.toldTheModel(`"error":"scheduled_turn"`)
+	tasks, err := s.store.ScheduledTasks.Select(context.Background(), s.customerID(), store.ScheduledTaskFilter{Limit: 25})
+	s.Require().NoError(err)
+	s.Len(tasks, 1, "the task's turn made no task")
 }
 
 // A thread task is delivered on its thread, so its deliver_to cannot be changed; its other

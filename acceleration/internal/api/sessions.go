@@ -118,6 +118,9 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 	if request.Body != nil {
 		body = *request.Body
 	}
+	if failure, refused := refuseDeviceModels(ctx, body.ModelOverwrites != nil); refused {
+		return nil, failure
+	}
 
 	// A named agent on the fork replaces the parent's config wholesale, which is the point:
 	// asking the same question of a different agent is the reason to fork.
@@ -188,6 +191,12 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 	// A voice fork is keyed under the call it joins, which the request names.
 	ctx = s.threadConversation(ctx, customerID, &spec)
 	spec.Caller = CallerFrom(ctx)
+	// The parent's tools go to the fork only for the kind of caller that declared them, as
+	// they do for a conversation carried on (rowTools): a backend's tool on its end user's
+	// fork would be the device's to answer (Session.seatRuns).
+	if spec.CallerKind != KindFrom(ctx) {
+		spec.Tools = nil
+	}
 	spec.CallerKind = KindFrom(ctx)
 	if body.Messages == nil || *body.Messages {
 		spec.Documents = s.forkedDocuments(ctx, parent, value(body.ResponseId), spec.Caller.UserID)
@@ -201,6 +210,7 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 		return nil, err
 	}
 	if err != nil {
+		s.logUnkept(customerID, err)
 		return nil, refusedRequest(err)
 	}
 	return &forkSessionResponse{Body: sessionOf(ctx, created)}, nil
@@ -675,6 +685,13 @@ func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) erro
 		}
 		spec.Phone, spec.Edge = nil, nil
 		spec.Reopened = found.CreatedAt()
+		// Its spec has the tools and timeout of whoever carried it on last. Another kind of
+		// caller takes the ones its row keeps for that kind.
+		if spec.CallerKind != KindFrom(ctx) {
+			if failure = s.toolsFromRow(ctx, &spec); failure != nil {
+				return nil, nil, failure
+			}
+		}
 	case errors.Is(failure, errUnknownSession):
 		if spec, failure = s.reopenedFromRow(ctx, id); failure != nil {
 			return nil, nil, failure
@@ -709,6 +726,39 @@ func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) erro
 	}
 	events, detach := reopened.Watch()
 	return reopened, func() { go holdUntilAnswered(reopened, events, detach) }, nil
+}
+
+// toolsFromRow gives spec, ended here and last carried on by another kind of caller, the tools
+// and timeout its row keeps. The row keeps them for the kind of caller that opened it
+// (Sessions.Upsert), so a device carrying on its backend's conversation leaves the backend
+// its tools. With no row it has no tools.
+func (s *Server) toolsFromRow(ctx context.Context, spec *session.Spec) error {
+	spec.Tools = nil
+	if s.store == nil {
+		return nil
+	}
+	// As for reopenedFromRow: a failed flush reads the row as it is.
+	_ = s.sessions.FlushRecords(ctx)
+	row, err := s.store.Sessions.Get(ctx, spec.CustomerID, spec.ID)
+	if errors.Is(err, store.ErrNoSession) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	rowTools(ctx, spec, row)
+	return nil
+}
+
+// rowTools gives spec the caller's tools and how long they are waited for, as row keeps them.
+// The tools go only to the kind of caller that declared them: a backend's tool carried on by
+// its end user's device would be the device's to answer (Session.seatRuns).
+func rowTools(ctx context.Context, spec *session.Spec, row store.AgentSession) {
+	spec.ToolTimeoutMs = row.ToolTimeoutMs
+	spec.Tools = nil
+	if row.CallerKind == string(KindFrom(ctx)) {
+		spec.Tools = session.DeclaredTools(row.CallerTools)
+	}
 }
 
 // reopenRaceWait bounds how long a request that lost a reopen waits for the winner to be held.
@@ -774,12 +824,7 @@ func (s *Server) reopenedFromRow(ctx context.Context, id string) (session.Spec, 
 	spec.ForkedFrom = row.ForkedFrom
 	// The caller's tools and how long they are waited for go on with the chat, as they do
 	// for one carried on in the process that held it (Spec.Written).
-	spec.ToolTimeoutMs = row.ToolTimeoutMs
-	// Tools only for the kind of caller that declared them: a backend's tool carried on by its
-	// end user's device would be the device's to answer (Session.seatRuns).
-	if row.CallerKind == string(KindFrom(ctx)) {
-		spec.Tools = session.DeclaredTools(row.CallerTools)
-	}
+	rowTools(ctx, &spec, *row)
 	// The caller's connections go on with the chat; the session checks each against the
 	// config as it is now and the caller asking, as it did when the chat opened.
 	spec.ConnectorSelections = selectionsOf(*row)
@@ -1515,7 +1560,8 @@ func (s *Server) registerSessions(api huma.API) {
 		Description: "Opens a session from another's spec, carrying its history across by default, and " +
 			"records where it came from. The usual reason is to ask the same question of a different " +
 			"model without losing the original answer, which is why anything in the request is " +
-			"written over what the parent was opened with.\n" +
+			"written over what the parent was opened with. Models are the backend's to change: a device " +
+			"sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.\n" +
 			"The parent is untouched and keeps running if it was running. Forking an incognito " +
 			"session is refused rather than answered with an empty conversation: there is nothing " +
 			"recorded to fork from, and pretending otherwise would hand back a session that quietly " +
@@ -1524,6 +1570,7 @@ func (s *Server) registerSessions(api huma.API) {
 		DefaultStatus: http.StatusCreated,
 		Responses: map[string]*huma.Response{
 			"201": {Description: "The fork is running"},
+			"403": errorResponse("`model_overwrites` sent by an end user's device, or an agent config the caller may not use"),
 		},
 		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 	}, s.forkSession)
@@ -1757,7 +1804,7 @@ type ForkSessionRequest struct {
 	Incognito       *bool                   `json:"incognito,omitempty" doc:"Hold the fork off the record. The parent still exists; this conversation onwards is simply not kept."`
 	ToolTimeoutMs   *int                    `json:"tool_timeout_ms,omitempty" doc:"How long the fork's model waits for the result of a tool the caller or a worker runs, in milliseconds, as on createSession. Omitted keeps a running parent's; a fork of a conversation that ended has 30 seconds. Zero is 30 seconds, as on createSession."`
 	Messages        *bool                   `json:"messages,omitempty" doc:"Carry the parent's history into the fork, so the new conversation continues from what was already said. False starts the same configuration over from nothing, which is what comparing two answers to the same opening question wants." default:"true"`
-	ModelOverwrites *ModelOverwrites        `json:"model_overwrites,omitempty"`
+	ModelOverwrites *ModelOverwrites        `json:"model_overwrites,omitempty" doc:"Server-side only: a device sending it is refused with a 403."`
 	ProjectId       *string                 `json:"project_id,omitempty"`
 	ResponseId      *string                 `json:"response_id,omitempty" doc:"Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false."`
 	Title           *string                 `json:"title,omitempty"`

@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/providers"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -16,7 +19,27 @@ import (
 
 type SyncSuite struct {
 	RouterSuite
+	// between runs a test's step in the middle of a sync, before a query of its choosing.
+	between *beforeQuery
 }
+
+// beforeQuery runs a test's step once, just before the first query that holds its marker, as
+// another writer's save landing in the middle of a request.
+type beforeQuery struct{ step atomic.Pointer[queryStep] }
+
+type queryStep struct {
+	marker string
+	run    func()
+}
+
+func (b *beforeQuery) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if step := b.step.Load(); step != nil && strings.Contains(event.Query, step.marker) && b.step.CompareAndSwap(step, nil) {
+		step.run()
+	}
+	return ctx
+}
+
+func (*beforeQuery) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 func TestSyncSuite(t *testing.T) {
 	runSuite(t, new(SyncSuite))
@@ -28,6 +51,8 @@ func (s *SyncSuite) SetupSuite() {
 	s.speechToSpeech = true
 	s.RouterSuite.SetupSuite()
 	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
+	s.between = &beforeQuery{}
+	s.store.GlobalDB().AddQueryHook(s.between)
 }
 
 // SetupTest gives every test an app of its own, because a sync is named by what the agent
@@ -339,6 +364,90 @@ func (s *SyncSuite) TestASyncWhosePageCannotBeStoredIsAnInternalError() {
 	s.Contains(string(body), `"code":"internal_error"`)
 	s.NotContains(string(body), "store:")
 	s.NotContains(string(body), "deadline")
+}
+
+// The hash was stored with the config, before the skills: a sync whose skills then failed was
+// found unchanged when sent again, and its skills were never written.
+func (s *SyncSuite) TestASyncWhoseSkillsFailedOnceWritesThemWhenSentAgain() {
+	declaration := map[string]any{"name": "support", "hash": "v1", "skills": []map[string]string{
+		{"config_id": "", "name": "refund", "description": "work out a refund", "instructions": "Read the policy."},
+	}}
+	s.failQueries(`INSERT INTO "skills"`)
+	status, _ := s.serverClient.call(http.MethodPost, "/v1/agents/sync", declaration)
+	s.Require().Equal(http.StatusInternalServerError, status)
+	s.failing.value.Store(nil)
+
+	again := s.sync(declaration)
+
+	s.False(again.Unchanged, "the first sync did not finish, so this one has work to do")
+	s.Equal("Read the policy.", s.skillNamed(again.Config.Id, "refund").Instructions)
+	s.Equal("v1", value(again.Config.SyncHash))
+}
+
+// A sync wrote every setting from the copy of the config it read, which can come from the
+// cache, so a model saved since that the directory does not declare went back to what the copy
+// held. The update below goes past the store, as a save the cache has not heard of yet.
+func (s *SyncSuite) TestASyncKeepsAModelSavedSinceItReadTheConfigThatItsDirectoryDoesNotDeclare() {
+	declaration := map[string]any{"name": "support", "hash": "v1", "instructions": "Be brief.", "llm": "llm-flow"}
+	synced := s.sync(declaration)
+	s.Require().True(s.sync(declaration).Unchanged, "read, and so cached, by name")
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+		Set("llm = ?", "llm-thinking").Set("updated_at = now()").
+		Where("id = ?", synced.Config.Id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	result := s.sync(map[string]any{"name": "support", "hash": "v2", "instructions": "Be briefer."})
+
+	s.Equal("Be briefer.", value(result.Config.Instructions))
+	s.Equal("llm-thinking", value(result.Config.Llm), "the directory says nothing of the model")
+}
+
+// A sync whose copy of the config, read through the cache, missed a dashboard save kept the
+// dashboard's wording of a setting its directory declares, and still wrote its hash: every later
+// sync of the directory found nothing changed. The save goes past the store, as one the cache has
+// not heard of yet.
+func (s *SyncSuite) TestASyncWritesWhatItsDirectoryDeclaresOverASaveItsCachedCopyMissed() {
+	declaration := map[string]any{"name": "support", "hash": "v1", "instructions": "Be brief."}
+	synced := s.sync(declaration)
+	s.Require().True(s.sync(declaration).Unchanged, "read, and so cached, by name")
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+		Set("instructions = ?", "Dashboard wording.").Set("sync_hash = ''").Set("updated_at = now()").
+		Where("id = ?", synced.Config.Id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	result := s.sync(map[string]any{"name": "support", "hash": "v2", "instructions": "Be brief."})
+
+	s.Equal("Be brief.", value(result.Config.Instructions))
+	s.Equal("v2", value(result.Config.SyncHash))
+	s.Equal("Be brief.", value(s.configsNamed("support")[0].Instructions))
+}
+
+// The hash said the config held the directory although a save landed between the sync's write
+// of the config and of its hash, so every later sync of the directory found nothing changed and
+// never wrote it again. The save goes past the store, as one the cache has not heard of yet.
+func (s *SyncSuite) TestASyncLeavesItsHashOffAConfigSavedWhileItWroteItsSkills() {
+	declaration := map[string]any{"name": "support", "hash": "v1", "instructions": "Be brief.",
+		"skills": []map[string]string{
+			{"config_id": "", "name": "refund", "description": "work out a refund", "instructions": "Read the policy."},
+		}}
+	saved := make(chan error, 1)
+	s.between.step.Store(&queryStep{marker: `INSERT INTO "skills"`, run: func() {
+		_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+			Set("instructions = ?", "Dashboard wording.").Set("sync_hash = ''").Set("updated_at = now()").
+			Where("customer_id = ?", s.customerID()).Where("name = ?", "support").Exec(context.Background())
+		saved <- err
+	}})
+	s.T().Cleanup(func() { s.between.step.Store(nil) })
+
+	s.sync(declaration)
+	s.Require().Len(saved, 1, "the save landed in the middle of the sync")
+	s.Require().NoError(<-saved)
+	s.Empty(value(s.configsNamed("support")[0].SyncHash), "the config no longer holds the directory")
+
+	again := s.sync(declaration)
+
+	s.False(again.Unchanged)
+	s.Equal("Be brief.", value(again.Config.Instructions))
 }
 
 func (s *SyncSuite) TestASyncDeclaringAPageThatIsNotAFetchablePageIsRefusedInItsWords() {

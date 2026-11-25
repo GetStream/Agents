@@ -10,7 +10,7 @@ import (
 )
 
 // channelThreadMember is a person a thread channel's chat reaches, by the recipient their
-// opt-outs name (20261117110000_channel_thread_members.sql).
+// opt-outs name.
 type channelThreadMember struct {
 	bun.BaseModel `bun:"table:channel_thread_members,alias:ctm"`
 
@@ -31,9 +31,10 @@ type ChannelThreadMembers struct {
 	store *Store
 }
 
-// Insert records member as a person a thread channel's chat reaches. One already recorded is
-// left as it is.
+// Insert records member as a person a thread channel's chat reaches, under the recipient an
+// opt-out of theirs is kept as (optOutRecipient). One already recorded is left as it is.
 func (r *ChannelThreadMembers) Insert(ctx context.Context, channelID, member string) error {
+	member, _ = optOutRecipient(member, "")
 	row := &channelThreadMember{ChannelID: channelID, Member: member}
 	if err := row.Validate(); err != nil {
 		return stack.Wrap(err)

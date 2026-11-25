@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -38,6 +39,8 @@ type Session struct {
 	// cancel ends the context reopen starts the next candidate under. Nil when there is no
 	// such context.
 	cancel context.CancelFunc
+	// call is the context of the call. The goroutines of the session start under it.
+	call context.Context
 
 	events chan stt.Event
 	// failed is set once the provider reports a fatal error. The caller has been told, and
@@ -74,6 +77,7 @@ type streamedAudio struct {
 }
 
 func newSession(
+	ctx context.Context,
 	provider stt.STT,
 	config routing.ProviderConfig,
 	owner routing.Owner,
@@ -82,6 +86,7 @@ func newSession(
 	cancel context.CancelFunc,
 ) *Session {
 	session := &Session{
+		call:     ctx,
 		provider: provider,
 		config:   config,
 		owner:    owner,
@@ -96,7 +101,8 @@ func newSession(
 		lease:     routing.StartLease(recorder, config, owner, "stt", uuid.NewString(), leaseMinute),
 	}
 	// Stamped here, as audio may reach the provider before forward runs.
-	go session.forward(time.Now())
+	started := time.Now()
+	goroutine.Go(ctx, func() { session.forward(started) })
 	return session
 }
 
@@ -249,10 +255,10 @@ func (s *Session) reopenAnswering(refused []string) (stt.STT, routing.ProviderCo
 		err      error
 	}
 	result := make(chan opened, 1)
-	go func() {
+	goroutine.Go(s.call, func() {
 		next, config, err := s.reopen(refused)
 		result <- opened{provider: next, config: config, err: err}
-	}()
+	})
 	for {
 		select {
 		case opened := <-result:
@@ -351,7 +357,7 @@ func (s *Session) swap(refusing, next stt.STT, config routing.ProviderConfig) bo
 
 	// Off this goroutine, since closing may wait on the vendor for the last words of the
 	// call: ElevenLabs's Close flushes for up to FlushTimeout (elevenlabs.go, flush).
-	go func() { _ = refusing.Close() }()
+	goroutine.Go(s.call, func() { _ = refusing.Close() })
 	return true
 }
 

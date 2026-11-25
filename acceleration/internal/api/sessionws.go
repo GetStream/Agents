@@ -179,7 +179,7 @@ func (s *Server) watchSession(w http.ResponseWriter, r *http.Request) {
 	gone := make(chan error, 1)
 	var closing atomic.Bool
 	go func() {
-		gone <- s.readCommands(connection, found, seat, CallerFrom(r.Context()), &closing)
+		gone <- s.readCommands(r.Context(), connection, found, seat, CallerFrom(r.Context()), &closing)
 	}()
 	ended := s.writeEvents(connection, events, watching(r), gone, endingOf(resuming, found.Halted))
 	// A close command ends the session before the reader stops, so the writer sees the end first.
@@ -331,13 +331,13 @@ func (s *Server) writeEvents(connection *websocket.Conn, events <-chan session.E
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteJSON(encoded); err != nil {
 				s.logger.Debug("session socket write failed", "error", err)
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 
 		case <-ping.C:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 		}
 	}
@@ -390,7 +390,8 @@ type watcherCommand struct {
 // a command, and the read's own error when the connection ended. closing is set before a close
 // command that ends the session is applied (closesSession).
 func (s *Server) readCommands(
-	connection *websocket.Conn, found *session.Session, seat session.Seat, sender routing.Caller, closing *atomic.Bool,
+	ctx context.Context, connection *websocket.Conn, found *session.Session, seat session.Seat, sender routing.Caller,
+	closing *atomic.Bool,
 ) error {
 	connection.SetReadDeadline(time.Now().Add(pongWait))
 	connection.SetPongHandler(func(string) error {
@@ -414,7 +415,7 @@ func (s *Server) readCommands(
 			closing.Store(s.closesSession(found, seat.Owner))
 		}
 
-		if !s.applyCommand(found, seat, sender, command) {
+		if !s.applyCommand(ctx, found, seat, sender, command) {
 			return nil
 		}
 	}
@@ -485,8 +486,9 @@ func refuseUnreadable(connection *websocket.Conn) {
 // here on the bus, and a watcher on either node must be able to do the same things.
 //
 // seat is who the socket's caller is and what it runs; sender is the same caller, whose day
-// a turn it sends is counted on.
-func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender routing.Caller, command watcherCommand) bool {
+// a turn it sends is counted on. What a command starts outlives the socket that sent it.
+func (s *Server) applyCommand(ctx context.Context, found *session.Session, seat session.Seat, sender routing.Caller, command watcherCommand) bool {
+	ctx = context.WithoutCancel(ctx)
 	owner := seat.Owner
 	if command.CommandID == "" {
 		command.CommandID = command.LegacyCommandID
@@ -566,7 +568,7 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 		found.IgnoreApproval(command.ToolCallID, command.CommandID, command.TurnID, errNoApprovalWaits)
 
 	case "say":
-		if err := found.Say(context.Background(), command.Text); err != nil {
+		if err := found.Say(ctx, command.Text); err != nil {
 			s.logger.Debug("could not say it", "session", found.ID(), "error", err)
 		}
 
@@ -576,7 +578,7 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 				found.Report(errors.New("this agent hands what is written to its server, which takes text only"), "dispatch")
 				return true
 			}
-			if _, err := s.dispatchText(context.Background(), found, dispatch.Message{
+			if _, err := s.dispatchText(ctx, found, dispatch.Message{
 				Text: command.Text, CommandID: command.CommandID, UserID: owner.UserID,
 			}, ""); err != nil {
 				found.Report(err, "dispatch")
@@ -589,12 +591,12 @@ func (s *Server) applyCommand(found *session.Session, seat session.Seat, sender 
 			return true
 		}
 		if command.CommandID != "" && found.Durable() {
-			if _, _, err := found.RespondCommand(routing.WithCaller(context.Background(), sender), command.CommandID, command.Text, "", images, options.LLM{}); err != nil {
+			if _, _, err := found.RespondCommand(routing.WithCaller(ctx, sender), command.CommandID, command.Text, "", images, options.LLM{}); err != nil {
 				found.Report(err, "llm")
 			}
 			return true
 		}
-		if _, err := found.Respond(routing.WithCaller(context.Background(), sender), command.Text, images, options.LLM{}, images...); err != nil {
+		if _, err := found.Respond(routing.WithCaller(ctx, sender), command.Text, images, options.LLM{}, images...); err != nil {
 			found.Report(err, "llm")
 		}
 

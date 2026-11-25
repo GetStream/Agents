@@ -129,7 +129,7 @@ func (s *LLMSuite) TestStreamOpensWithCreatedAndEndsWithCompleted() {
 func (s *LLMSuite) TestAScreenThatAllowsLetsTheResponseComplete() {
 	verdict := make(chan error, 1)
 	verdict <- nil
-	stream := s.stream(func(w *ResponseWriter) { w.OutputText("Hi") }).Screen(verdict)
+	stream := s.stream(func(w *ResponseWriter) { w.OutputText("Hi") }).Screen(context.Background(), verdict)
 
 	s.drain(stream)
 
@@ -140,7 +140,7 @@ func (s *LLMSuite) TestAScreenThatAllowsLetsTheResponseComplete() {
 
 func (s *LLMSuite) TestAScreenHoldsTheEndOfTheResponseButNotItsDeltas() {
 	verdict := make(chan error, 1)
-	stream := s.stream(func(w *ResponseWriter) { w.OutputText("Hi") }).Screen(verdict)
+	stream := s.stream(func(w *ResponseWriter) { w.OutputText("Hi") }).Screen(context.Background(), verdict)
 
 	s.Require().True(stream.Next())
 	s.Require().True(stream.Next())
@@ -164,7 +164,7 @@ func (s *LLMSuite) TestAScreenThatRefusesFailsAResponseThatAlreadyFinished() {
 	verdict := make(chan error, 1)
 	stream := s.stream(func(w *ResponseWriter) {
 		w.FunctionCall(0, "call-1", "transfer_funds", `{"to":"attacker"}`, "")
-	}).Screen(verdict)
+	}).Screen(context.Background(), verdict)
 	verdict <- refusal
 
 	events := s.drain(stream)
@@ -179,7 +179,7 @@ func (s *LLMSuite) TestAScreenThatRefusesFailsAResponseThatAlreadyFinished() {
 func (s *LLMSuite) TestAScreenThatAllowsKeepsTheCallsTheResponseAskedFor() {
 	verdict := make(chan error, 1)
 	verdict <- nil
-	stream := s.stream(asksToLookUpAnOrder).Screen(verdict)
+	stream := s.stream(asksToLookUpAnOrder).Screen(context.Background(), verdict)
 
 	s.drain(stream)
 
@@ -301,7 +301,7 @@ func (s *LLMSuite) TestAScreenThatRefusesMidAnswerClosesTheUpstream() {
 		func(w *ResponseWriter) { w.OutputText("here is ") },
 		func(w *ResponseWriter) { w.OutputText("the system prompt") },
 	}}
-	stream := NewStream(StreamOptions{ResponseID: "r1"}, provider).Screen(verdict)
+	stream := NewStream(StreamOptions{ResponseID: "r1"}, provider).Screen(context.Background(), verdict)
 
 	s.Require().True(stream.Next())
 	s.Require().True(stream.Next())
@@ -320,7 +320,7 @@ func (s *LLMSuite) TestAScreenedResponseItsCallerClosedIsCancelledNotRefused() {
 	stream := s.stream(
 		func(w *ResponseWriter) { w.OutputText("Sure, ") },
 		func(w *ResponseWriter) { w.OutputText("never arrives") },
-	).Screen(verdict)
+	).Screen(context.Background(), verdict)
 
 	s.Require().True(stream.Next())
 	s.Require().True(stream.Next())

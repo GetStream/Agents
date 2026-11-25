@@ -39,16 +39,16 @@ func (s *StoreSuite) chatInbound(messageID string, change ...func(*ChatInbound))
 	return delivery
 }
 
-// claimChats claims every message due at at, under chatLease.
-func (s *StoreSuite) claimChats(at time.Time) []ChatInbound {
-	claimed, err := s.store.ChatInbounds.Claim(s.ctx, at, 10, at.Add(chatLease))
+// claimChats claims every message due, under chatLease.
+func (s *StoreSuite) claimChats() []ChatInbound {
+	claimed, err := s.store.ChatInbounds.Claim(s.ctx, 10, chatLease)
 	s.Require().NoError(err)
 	return claimed
 }
 
-// claimedChat claims at at and requires the one message it takes to be messageID.
-func (s *StoreSuite) claimedChat(at time.Time, messageID string) ChatInbound {
-	claimed := s.claimChats(at)
+// claimedChat claims and requires the one message it takes to be messageID.
+func (s *StoreSuite) claimedChat(messageID string) ChatInbound {
+	claimed := s.claimChats()
 	s.Require().Len(claimed, 1)
 	s.Require().Equal(messageID, claimed[0].MessageID)
 	return claimed[0]
@@ -72,7 +72,7 @@ func (s *StoreSuite) chatRows() int {
 func (s *StoreSuite) TestAClaimedChatInboundHasEverythingItWasQueuedWith() {
 	s.queuedChat("msg-one", func(delivery *ChatInbound) { delivery.Deployment = true })
 
-	claimed := s.claimedChat(s.base, "msg-one")
+	claimed := s.claimedChat("msg-one")
 
 	s.NotZero(claimed.Seq)
 	s.Equal(int64(1257545), claimed.StreamAppPK)
@@ -82,8 +82,7 @@ func (s *StoreSuite) TestAClaimedChatInboundHasEverythingItWasQueuedWith() {
 	s.Equal(`{"type":"message.new","message":{"id":"msg-one"}}`, string(claimed.Body))
 	s.Equal(ChatInboundQueued, claimed.State)
 	s.Equal(1, claimed.Attempts, "a claim counts its attempt")
-	s.True(claimed.NextAttemptAt.Equal(s.base.Add(chatLease)), "a claimed message is due at the end of the lease its claim gave")
-	s.WithinDuration(time.Now(), claimed.ReceivedAt, time.Minute)
+	s.WithinDuration(time.Now().Add(chatLease), claimed.NextAttemptAt, 5*time.Second, "a claimed message is due at the end of the lease its claim gave")
 	s.Nil(claimed.FinishedAt)
 }
 
@@ -91,12 +90,13 @@ func (s *StoreSuite) TestAClaimedChatInboundHasEverythingItWasQueuedWith() {
 // seq carry it, and a keep after the first, from a try that heard it again, leaves the first.
 func (s *StoreSuite) TestWhatAQueuedChatRecordingSaidIsKeptOnceForTheNextTry() {
 	s.queuedChat("msg-one")
-	s.Nil(s.claimedChat(s.base, "msg-one").Heard, "nothing is heard before a try hears it")
+	s.Nil(s.claimedChat("msg-one").Heard, "nothing is heard before a try hears it")
 
 	s.Require().NoError(s.store.ChatInbounds.KeepHeard(s.ctx, 1257545, "msg-one", "where is my order"))
 	s.Require().NoError(s.store.ChatInbounds.KeepHeard(s.ctx, 1257545, "msg-one", "where is my order now"))
 
-	claimed := s.claimedChat(s.base.Add(chatLease), "msg-one")
+	s.timePasses("chat_inbound", chatLease)
+	claimed := s.claimedChat("msg-one")
 	s.Require().NotNil(claimed.Heard)
 	s.Equal("where is my order", *claimed.Heard)
 	read, err := s.store.ChatInbounds.Get(s.ctx, claimed.Seq)
@@ -115,7 +115,7 @@ func (s *StoreSuite) TestAChatInboundQueuedTwiceIsOneRow() {
 	s.Require().NoError(err)
 	s.False(queued)
 	s.Equal(1, s.chatRows())
-	s.Equal(`{"type":"message.new","message":{"id":"msg-one"}}`, string(s.claimedChat(s.base, "msg-one").Body), "the first delivery's row stays")
+	s.Equal(`{"type":"message.new","message":{"id":"msg-one"}}`, string(s.claimedChat("msg-one").Body), "the first delivery's row stays")
 }
 
 // Stream's message ids are unique within an app, so another app's message of the same id is a
@@ -127,12 +127,12 @@ func (s *StoreSuite) TestAChatMessageOfTheSameIDInAnotherAppIsQueuedOnItsOwn() {
 
 	s.Require().NoError(err)
 	s.True(queued)
-	s.Len(s.claimChats(s.base), 2)
+	s.Len(s.claimChats(), 2)
 }
 
 func (s *StoreSuite) TestAnAnsweredChatMessageIsNotQueuedAgain() {
 	s.queuedChat("msg-one")
-	_, err := s.store.ChatInbounds.Finish(s.ctx, s.claimedChat(s.base, "msg-one"), s.base)
+	_, err := s.store.ChatInbounds.Finish(s.ctx, s.claimedChat("msg-one"), s.base)
 	s.Require().NoError(err)
 
 	queued, err := s.store.ChatInbounds.Queue(s.ctx, s.chatInbound("msg-one"))
@@ -237,23 +237,26 @@ func (s *StoreSuite) TestQueueingAChatInboundForgetsTheKeysOfADayAgo() {
 }
 
 func (s *StoreSuite) TestAChatMessageIsNotClaimedBeforeItIsDue() {
-	s.queuedChat("msg-one", func(delivery *ChatInbound) { delivery.NextAttemptAt = s.base.Add(time.Second) })
+	s.queuedChat("msg-one", func(delivery *ChatInbound) { delivery.NextAttemptAt = time.Now().Add(time.Hour) })
 
-	s.Empty(s.claimChats(s.base))
-	s.claimedChat(s.base.Add(time.Second), "msg-one")
+	s.Empty(s.claimChats())
+	s.timePasses("chat_inbound", time.Hour)
+	s.claimedChat("msg-one")
 }
 
 // A worker that stopped mid-answer leaves its row leased: another takes it once the lease the
 // claim gave runs out, and not before.
 func (s *StoreSuite) TestAClaimedChatMessageIsClaimedAgainOnceItsLeaseRunsOut() {
 	s.queuedChat("msg-one")
-	s.claimedChat(s.base, "msg-one")
+	s.claimedChat("msg-one")
 
-	s.Empty(s.claimChats(s.base.Add(chatLease-time.Second)), "still leased")
-	again := s.claimedChat(s.base.Add(chatLease), "msg-one")
+	s.timePasses("chat_inbound", chatLease-5*time.Second)
+	s.Empty(s.claimChats(), "still leased")
+	s.timePasses("chat_inbound", 5*time.Second)
+	again := s.claimedChat("msg-one")
 
 	s.Equal(2, again.Attempts, "the claim whose lease ran out counts too")
-	s.True(again.NextAttemptAt.Equal(s.base.Add(2 * chatLease)))
+	s.WithinDuration(time.Now().Add(chatLease), again.NextAttemptAt, 5*time.Second)
 }
 
 func (s *StoreSuite) TestAChatClaimTakesAtMostLimitOldestDueFirst() {
@@ -261,12 +264,12 @@ func (s *StoreSuite) TestAChatClaimTakesAtMostLimitOldestDueFirst() {
 	s.queuedChat("due-first", func(delivery *ChatInbound) { delivery.NextAttemptAt = s.base.Add(-time.Minute) })
 	s.queuedChat("due-first-too", func(delivery *ChatInbound) { delivery.NextAttemptAt = s.base.Add(-time.Minute) })
 
-	claimed, err := s.store.ChatInbounds.Claim(s.ctx, s.base, 2, s.base.Add(chatLease))
+	claimed, err := s.store.ChatInbounds.Claim(s.ctx, 2, chatLease)
 
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 2)
 	s.ElementsMatch([]string{"due-first", "due-first-too"}, []string{claimed[0].MessageID, claimed[1].MessageID})
-	s.claimedChat(s.base, "due-last")
+	s.claimedChat("due-last")
 }
 
 func (s *StoreSuite) TestAChatClaimTakesMessagesDueAtOnceInTheOrderTheyWereQueued() {
@@ -275,7 +278,7 @@ func (s *StoreSuite) TestAChatClaimTakesMessagesDueAtOnceInTheOrderTheyWereQueue
 	}
 
 	for _, id := range []string{"msg-one", "msg-two", "msg-three"} {
-		claimed, err := s.store.ChatInbounds.Claim(s.ctx, s.base, 1, s.base.Add(chatLease))
+		claimed, err := s.store.ChatInbounds.Claim(s.ctx, 1, chatLease)
 		s.Require().NoError(err)
 		s.Require().Len(claimed, 1)
 		s.Equal(id, claimed[0].MessageID)
@@ -285,32 +288,33 @@ func (s *StoreSuite) TestAChatClaimTakesMessagesDueAtOnceInTheOrderTheyWereQueue
 func (s *StoreSuite) TestAChatClaimWithNoRoomTakesNothing() {
 	s.queuedChat("msg-one")
 
-	claimed, err := s.store.ChatInbounds.Claim(s.ctx, s.base, -1, s.base.Add(chatLease))
+	claimed, err := s.store.ChatInbounds.Claim(s.ctx, -1, chatLease)
 
 	s.Require().NoError(err)
 	s.Empty(claimed)
-	s.claimedChat(s.base, "msg-one")
+	s.claimedChat("msg-one")
 }
 
 func (s *StoreSuite) TestARetriedChatMessageIsDueAtItsNextAttempt() {
 	s.queuedChat("msg-one")
-	claimed := s.claimedChat(s.base, "msg-one")
+	claimed := s.claimedChat("msg-one")
 
-	retried, err := s.store.ChatInbounds.Retry(s.ctx, claimed, s.base.Add(10*time.Second))
+	retried, err := s.store.ChatInbounds.Retry(s.ctx, claimed, time.Now().Add(time.Hour))
 
 	s.Require().NoError(err)
 	s.True(retried)
-	s.Empty(s.claimChats(s.base.Add(9 * time.Second)))
-	again := s.claimedChat(s.base.Add(10*time.Second), "msg-one")
+	s.Empty(s.claimChats())
+	s.timePasses("chat_inbound", time.Hour)
+	again := s.claimedChat("msg-one")
 	s.Equal(2, again.Attempts, "the retried claim and this one")
 	s.Equal(ChatInboundQueued, again.State)
 }
 
 func (s *StoreSuite) TestAnAnsweredChatMessageIsDoneWithItsAttempts() {
 	s.queuedChat("msg-one")
-	_, err := s.store.ChatInbounds.Retry(s.ctx, s.claimedChat(s.base, "msg-one"), s.base.Add(time.Second))
+	_, err := s.store.ChatInbounds.Retry(s.ctx, s.claimedChat("msg-one"), s.base.Add(time.Second))
 	s.Require().NoError(err)
-	claimed := s.claimedChat(s.base.Add(time.Second), "msg-one")
+	claimed := s.claimedChat("msg-one")
 
 	finished, err := s.store.ChatInbounds.Finish(s.ctx, claimed, s.base.Add(5*time.Second))
 
@@ -321,12 +325,13 @@ func (s *StoreSuite) TestAnAnsweredChatMessageIsDoneWithItsAttempts() {
 	s.Equal(2, attempts, "each claim counts, and finishing adds none")
 	s.Require().NotNil(finishedAt)
 	s.True(finishedAt.Equal(s.base.Add(5 * time.Second)))
-	s.Empty(s.claimChats(s.base.Add(time.Hour)))
+	s.timePasses("chat_inbound", time.Hour)
+	s.Empty(s.claimChats())
 }
 
 func (s *StoreSuite) TestAGivenUpChatMessageIsFailedWithItsLastAttemptCounted() {
 	s.queuedChat("msg-one")
-	claimed := s.claimedChat(s.base, "msg-one")
+	claimed := s.claimedChat("msg-one")
 
 	failed, err := s.store.ChatInbounds.Fail(s.ctx, claimed, s.base.Add(5*time.Second))
 
@@ -337,15 +342,17 @@ func (s *StoreSuite) TestAGivenUpChatMessageIsFailedWithItsLastAttemptCounted() 
 	s.Equal(1, attempts)
 	s.Require().NotNil(finishedAt)
 	s.True(finishedAt.Equal(s.base.Add(5 * time.Second)))
-	s.Empty(s.claimChats(s.base.Add(time.Hour)))
+	s.timePasses("chat_inbound", time.Hour)
+	s.Empty(s.claimChats())
 }
 
 // A worker whose lease ran out while it answered, and whose message another worker took since,
 // must not finish, retry or give up the other worker's attempt.
 func (s *StoreSuite) TestAWorkerWhoseChatLeaseWasTakenOverChangesNothing() {
 	s.queuedChat("msg-one")
-	stale := s.claimedChat(s.base, "msg-one")
-	current := s.claimedChat(s.base.Add(chatLease), "msg-one")
+	stale := s.claimedChat("msg-one")
+	s.timePasses("chat_inbound", chatLease)
+	current := s.claimedChat("msg-one")
 
 	retried, err := s.store.ChatInbounds.Retry(s.ctx, stale, s.base.Add(chatLease))
 	s.Require().NoError(err)
@@ -360,7 +367,7 @@ func (s *StoreSuite) TestAWorkerWhoseChatLeaseWasTakenOverChangesNothing() {
 	state, attempts, _ := s.chatRow("msg-one")
 	s.Equal(ChatInboundQueued, state)
 	s.Equal(2, attempts, "the current claim's count, which the stale worker left alone")
-	s.Empty(s.claimChats(s.base.Add(2*chatLease-time.Second)), "the current worker's lease still holds it")
+	s.Empty(s.claimChats(), "the current worker's lease still holds it")
 	changed, err := s.store.ChatInbounds.Finish(s.ctx, current, s.base.Add(chatLease))
 	s.Require().NoError(err)
 	s.True(changed)
@@ -368,7 +375,7 @@ func (s *StoreSuite) TestAWorkerWhoseChatLeaseWasTakenOverChangesNothing() {
 
 func (s *StoreSuite) TestAnAnsweredChatMessageIsNotGivenUpOrRetriedAfter() {
 	s.queuedChat("msg-one")
-	claimed := s.claimedChat(s.base, "msg-one")
+	claimed := s.claimedChat("msg-one")
 	_, err := s.store.ChatInbounds.Finish(s.ctx, claimed, s.base)
 	s.Require().NoError(err)
 
@@ -384,9 +391,9 @@ func (s *StoreSuite) TestAnAnsweredChatMessageIsNotGivenUpOrRetriedAfter() {
 	s.Equal(1, attempts, "the one claim")
 }
 
-// claimChatsWhileAnotherRouterActs runs router A's paused claim at at and, while A is in its
-// pause, meanwhile on this suite's store, and returns what A took.
-func (s *StoreSuite) claimChatsWhileAnotherRouterActs(at time.Time, meanwhile func()) []ChatInbound {
+// claimChatsWhileAnotherRouterActs runs router A's paused claim and, while A is in its pause,
+// meanwhile on this suite's store, and returns what A took.
+func (s *StoreSuite) claimChatsWhileAnotherRouterActs(meanwhile func()) []ChatInbound {
 	routerA, err := s.openRouter()
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(routerA.Close()) })
@@ -396,7 +403,7 @@ func (s *StoreSuite) claimChatsWhileAnotherRouterActs(at time.Time, meanwhile fu
 	}
 	byA := make(chan claim, 1)
 	go func() {
-		claimed, err := routerA.ChatInbounds.claim(s.ctx, at, 10, at.Add(chatLease), func(due *bun.SelectQuery) *bun.SelectQuery {
+		claimed, err := routerA.ChatInbounds.claim(s.ctx, 10, chatLease, func(due *bun.SelectQuery) *bun.SelectQuery {
 			// A pause before the claim locks a row, so another router's claim commits inside it.
 			return queuedChatInbound(due).Where("(SELECT 1 FROM pg_sleep(0.5)) = 1")
 		})
@@ -421,19 +428,23 @@ func (s *StoreSuite) TestTwoRoutersClaimingChatMessagesAtOnceTakeEachOnce() {
 	s.queuedChat("msg-two")
 	var byB []ChatInbound
 
-	byA := s.claimChatsWhileAnotherRouterActs(s.base, func() { byB = s.claimChats(s.base) })
+	byA := s.claimChatsWhileAnotherRouterActs(func() { byB = s.claimChats() })
 
 	s.Len(byB, 2)
 	s.Empty(byA, "router A takes none of what router B leased")
 }
 
 // Router B claims a message and answers it while router A's claim, which read it as queued and
-// due once B's lease is over, is paused: A must not take the answered message again.
+// due, is paused: A must not take the answered message again. B's lease is over at once, so
+// only the answer keeps A from it.
 func (s *StoreSuite) TestARouterDoesNotClaimAChatMessageAnotherAnsweredDuringItsClaim() {
 	s.queuedChat("msg-one")
 
-	byA := s.claimChatsWhileAnotherRouterActs(s.base.Add(2*chatLease), func() {
-		_, err := s.store.ChatInbounds.Finish(s.ctx, s.claimedChat(s.base, "msg-one"), s.base)
+	byA := s.claimChatsWhileAnotherRouterActs(func() {
+		claimed, err := s.store.ChatInbounds.Claim(s.ctx, 1, 0)
+		s.Require().NoError(err)
+		s.Require().Len(claimed, 1)
+		_, err = s.store.ChatInbounds.Finish(s.ctx, claimed[0], s.base)
 		s.Require().NoError(err)
 	})
 
@@ -453,7 +464,7 @@ func (s *StoreSuite) TestAChatClaimSkipsAMessageAnotherRouterHoldsLocked() {
 
 	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
 	defer cancel()
-	claimed, err := s.store.ChatInbounds.Claim(ctx, s.base, 10, s.base.Add(chatLease))
+	claimed, err := s.store.ChatInbounds.Claim(ctx, 10, chatLease)
 
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
@@ -480,7 +491,7 @@ func (s *StoreSuite) TestRoutersClaimingChatMessagesConcurrentlyTakeEachExactlyO
 			// Bounded, so a claim that takes a message again fails the test rather than
 			// spinning on it.
 			for range 2 * messages {
-				claimed, err := router.ChatInbounds.Claim(s.ctx, s.base, 1, s.base.Add(chatLease))
+				claimed, err := router.ChatInbounds.Claim(s.ctx, 1, chatLease)
 				if err != nil {
 					errs <- err
 					return
@@ -512,23 +523,27 @@ func (s *StoreSuite) TestTheNextChatMessageIsTheQueuedOneDueFirst() {
 	s.False(found, "none when nothing is queued")
 
 	s.queuedChat("msg-one")
-	s.queuedChat("msg-two", func(delivery *ChatInbound) { delivery.NextAttemptAt = s.base.Add(time.Hour) })
+	s.queuedChat("msg-two", func(delivery *ChatInbound) { delivery.NextAttemptAt = time.Now().Add(time.Hour) })
 	s.queuedChat("msg-three", func(delivery *ChatInbound) { delivery.NextAttemptAt = s.base.Add(-time.Hour) })
-	_, err = s.store.ChatInbounds.Finish(s.ctx, s.claimedChat(s.base.Add(-time.Hour), "msg-three"), s.base)
+	claimed, err := s.store.ChatInbounds.Claim(s.ctx, 1, chatLease)
 	s.Require().NoError(err)
-	s.claimedChat(s.base, "msg-one")
+	s.Require().Len(claimed, 1)
+	s.Require().Equal("msg-three", claimed[0].MessageID)
+	_, err = s.store.ChatInbounds.Finish(s.ctx, claimed[0], s.base)
+	s.Require().NoError(err)
+	s.claimedChat("msg-one")
 
 	next, found, err := s.store.ChatInbounds.NextDue(s.ctx)
 
 	s.Require().NoError(err)
 	s.True(found)
-	s.True(next.Equal(s.base.Add(chatLease)), "msg-one is due at the end of its lease, not an answered row's time: %s", next)
+	s.WithinDuration(time.Now().Add(chatLease), next, 5*time.Second, "msg-one is due at the end of its lease, not an answered row's time")
 }
 
 func (s *StoreSuite) TestNoChatMessageIsNextOnceAllAreAnsweredOrGivenUp() {
 	s.queuedChat("msg-one")
 	s.queuedChat("msg-two")
-	for _, claimed := range s.claimChats(s.base) {
+	for _, claimed := range s.claimChats() {
 		var err error
 		if claimed.MessageID == "msg-one" {
 			_, err = s.store.ChatInbounds.Finish(s.ctx, claimed, s.base)
@@ -546,7 +561,7 @@ func (s *StoreSuite) TestNoChatMessageIsNextOnceAllAreAnsweredOrGivenUp() {
 
 func (s *StoreSuite) TestPruningKeepsAnAnsweredChatMessageADayAndAGivenUpOneThirtyDays() {
 	for _, id := range []string{"done-old", "done-new", "failed-old", "failed-new"} {
-		s.queuedChat(id)
+		s.queuedChat(id, func(delivery *ChatInbound) { delivery.NextAttemptAt = time.Now().Add(time.Hour) })
 	}
 	s.queuedChat("queued", func(delivery *ChatInbound) { delivery.NextAttemptAt = s.base.Add(-60 * 24 * time.Hour) })
 	finishedAt := map[string]time.Time{
@@ -555,12 +570,13 @@ func (s *StoreSuite) TestPruningKeepsAnAnsweredChatMessageADayAndAGivenUpOneThir
 		"failed-old": s.base.Add(-30*24*time.Hour - time.Second),
 		"failed-new": s.base.Add(-30*24*time.Hour + time.Second),
 	}
-	claimed, err := s.store.ChatInbounds.Claim(s.ctx, s.base.Add(-time.Hour), 10, s.base.Add(chatLease))
+	claimed, err := s.store.ChatInbounds.Claim(s.ctx, 10, chatLease)
 	s.Require().NoError(err)
-	s.Require().Len(claimed, 1, "only the long-queued row is due an hour before base")
-	_, err = s.store.ChatInbounds.Retry(s.ctx, claimed[0], s.base.Add(time.Hour))
+	s.Require().Len(claimed, 1, "only the long-queued row is due")
+	_, err = s.store.ChatInbounds.Retry(s.ctx, claimed[0], time.Now().Add(2*time.Hour))
 	s.Require().NoError(err)
-	for _, claimed := range s.claimChats(s.base) {
+	s.timePasses("chat_inbound", time.Hour)
+	for _, claimed := range s.claimChats() {
 		at := finishedAt[claimed.MessageID]
 		if strings.HasPrefix(claimed.MessageID, "done") {
 			_, err = s.store.ChatInbounds.Finish(s.ctx, claimed, at)
@@ -591,7 +607,7 @@ func (s *StoreSuite) TestPruningKeepsAnAnsweredChatMessageADayAndAGivenUpOneThir
 // a later claim, answers it again, and the worker holding the lease still finishes it.
 func (s *StoreSuite) TestAChatMessagesAnswerStartsOnce() {
 	s.queuedChat("msg-one")
-	claimed := s.claimedChat(s.base, "msg-one")
+	claimed := s.claimedChat("msg-one")
 
 	started, err := s.store.ChatInbounds.StartAnswer(s.ctx, 1257545, "msg-one", s.base.Add(time.Second))
 	s.Require().NoError(err)
@@ -600,7 +616,8 @@ func (s *StoreSuite) TestAChatMessagesAnswerStartsOnce() {
 
 	s.True(started)
 	s.False(again, "an answer that started is not started again")
-	s.Empty(s.claimChats(s.base.Add(time.Hour)), "a message whose answer started is not claimed again")
+	s.timePasses("chat_inbound", time.Hour)
+	s.Empty(s.claimChats(), "a message whose answer started is not claimed again")
 	finished, err := s.store.ChatInbounds.Finish(s.ctx, claimed, s.base.Add(5*time.Second))
 	s.Require().NoError(err)
 	s.True(finished, "the worker holding the lease records its attempt")
@@ -629,7 +646,7 @@ func (s *StoreSuite) TestAChatAnswerStartsOnlyForItsOwnAppAndMessage() {
 
 func (s *StoreSuite) TestAGivenUpChatMessagesAnswerDoesNotStart() {
 	s.queuedChat("msg-one")
-	_, err := s.store.ChatInbounds.Fail(s.ctx, s.claimedChat(s.base, "msg-one"), s.base)
+	_, err := s.store.ChatInbounds.Fail(s.ctx, s.claimedChat("msg-one"), s.base)
 	s.Require().NoError(err)
 
 	started, err := s.store.ChatInbounds.StartAnswer(s.ctx, 1257545, "msg-one", s.base)
@@ -644,7 +661,7 @@ func (s *StoreSuite) TestAGivenUpChatMessagesAnswerDoesNotStart() {
 // lost, neither retries nor gives up the message: it was answered.
 func (s *StoreSuite) TestAChatMessageWhoseAnswerStartedIsNotRetriedOrGivenUp() {
 	s.queuedChat("msg-one")
-	claimed := s.claimedChat(s.base, "msg-one")
+	claimed := s.claimedChat("msg-one")
 	_, err := s.store.ChatInbounds.StartAnswer(s.ctx, 1257545, "msg-one", s.base)
 	s.Require().NoError(err)
 
@@ -664,8 +681,9 @@ func (s *StoreSuite) TestAChatMessageWhoseAnswerStartedIsNotRetriedOrGivenUp() {
 // since, even once that one's answer started.
 func (s *StoreSuite) TestAStartedChatMessageIsNotFinishedByAWorkerWhoseLeaseWasTakenOver() {
 	s.queuedChat("msg-one")
-	stale := s.claimedChat(s.base, "msg-one")
-	current := s.claimedChat(s.base.Add(chatLease), "msg-one")
+	stale := s.claimedChat("msg-one")
+	s.timePasses("chat_inbound", chatLease)
+	current := s.claimedChat("msg-one")
 	_, err := s.store.ChatInbounds.StartAnswer(s.ctx, 1257545, "msg-one", s.base.Add(chatLease))
 	s.Require().NoError(err)
 
@@ -682,7 +700,7 @@ func (s *StoreSuite) TestAStartedChatMessageIsNotFinishedByAWorkerWhoseLeaseWasT
 // lease: the worker holding it retries it, and the next try starts its answer.
 func (s *StoreSuite) TestAReleasedChatAnswerIsRetriedAndStartsAgain() {
 	s.queuedChat("msg-one")
-	claimed := s.claimedChat(s.base, "msg-one")
+	claimed := s.claimedChat("msg-one")
 	_, err := s.store.ChatInbounds.StartAnswer(s.ctx, 1257545, "msg-one", s.base)
 	s.Require().NoError(err)
 
@@ -694,7 +712,7 @@ func (s *StoreSuite) TestAReleasedChatAnswerIsRetriedAndStartsAgain() {
 	retried, err := s.store.ChatInbounds.Retry(s.ctx, claimed, s.base.Add(time.Second))
 	s.Require().NoError(err)
 	s.True(retried)
-	s.claimedChat(s.base.Add(time.Second), "msg-one")
+	s.claimedChat("msg-one")
 	started, err := s.store.ChatInbounds.StartAnswer(s.ctx, 1257545, "msg-one", s.base.Add(time.Second))
 	s.Require().NoError(err)
 	s.True(started)
@@ -704,7 +722,7 @@ func (s *StoreSuite) TestAReleasedChatAnswerIsRetriedAndStartsAgain() {
 // it is.
 func (s *StoreSuite) TestReleasingAChatAnswerLeavesAGivenUpMessageAndAnotherAppsAlone() {
 	s.queuedChat("msg-one")
-	_, err := s.store.ChatInbounds.Fail(s.ctx, s.claimedChat(s.base, "msg-one"), s.base)
+	_, err := s.store.ChatInbounds.Fail(s.ctx, s.claimedChat("msg-one"), s.base)
 	s.Require().NoError(err)
 	s.queuedChat("msg-two")
 	_, err = s.store.ChatInbounds.StartAnswer(s.ctx, 1257545, "msg-two", s.base)
@@ -756,7 +774,7 @@ func (s *StoreSuite) TestChatInboundQueryBudgets() {
 	s.Equal(1, s.countQueries(func() { s.queuedChat("msg-one") }), "Queue")
 	// The first delivery a store records also forgets old ones; the next within the hour does not.
 	_, err := s.store.ChatInbounds.QueueFirst(s.ctx, s.deliveryKey(), s.chatInbound("msg-zero", func(delivery *ChatInbound) {
-		delivery.StreamAppPK, delivery.NextAttemptAt = 7, s.base.Add(time.Hour)
+		delivery.StreamAppPK, delivery.NextAttemptAt = 7, time.Now().Add(time.Hour)
 	}))
 	s.Require().NoError(err)
 	s.Equal(4, s.countQueries(func() {
@@ -770,7 +788,7 @@ func (s *StoreSuite) TestChatInboundQueryBudgets() {
 		s.True(found)
 	}), "NextDue")
 	var claimed []ChatInbound
-	s.Equal(1, s.countQueries(func() { claimed = s.claimChats(s.base) }), "Claim")
+	s.Equal(1, s.countQueries(func() { claimed = s.claimChats() }), "Claim")
 	s.Require().Len(claimed, 2)
 	s.Equal(1, s.countQueries(func() {
 		got, err := s.store.ChatInbounds.Get(s.ctx, claimed[0].Seq)
@@ -803,4 +821,11 @@ func (s *StoreSuite) TestChatInboundQueryBudgets() {
 		s.Require().NoError(err)
 		s.Equal(2, pruned)
 	}), "Prune")
+}
+
+// PruningKeepsAnAnsweredChatMessageADayAndAGivenUpOneThirtyDays, with a backlog of more than one statement's worth.
+func (s *StoreSuite) TestABacklogOfAnsweredChatMessagesIsPrunedWhole() {
+	s.inSmallBatches()
+	deletes := s.statementsLike("DELETE FROM chat_inbound", s.TestPruningKeepsAnAnsweredChatMessageADayAndAGivenUpOneThirtyDays)
+	s.Equal(3, deletes, "a row per statement, then the one that finds none")
 }

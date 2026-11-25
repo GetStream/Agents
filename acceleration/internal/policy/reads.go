@@ -59,7 +59,7 @@ func (e *Enforcer) SubjectsSpend(ctx context.Context, refs []usage.SubjectRef, b
 	for i, ref := range refs {
 		for _, interval := range usage.Intervals {
 			start, end := usage.Window(interval, now)
-			micros, err := db.Spend.Subject(ctx, ref, start)
+			micros, err := db.Spend.Subject(ctx, ref, start, billed)
 			if err != nil {
 				return nil, err
 			}
@@ -159,6 +159,32 @@ func (e *Enforcer) Standing(ctx context.Context, organizationID string) (usage.S
 		}
 	}
 	return usage.Standing{}, false, nil
+}
+
+// Funded is, for each of the organizations, whether it has credit that is not trial credit now:
+// the standing's Funded, read in the batches Standings makes. It reads nothing, and says ok false,
+// with no enforcer or no usage service. An organization the service has no account for is not
+// funded.
+func (e *Enforcer) Funded(ctx context.Context, organizations []string) (map[string]bool, bool, error) {
+	if e == nil || e.settings.Usage == nil {
+		return nil, false, nil
+	}
+	query := usage.StandingQuery{Organizations: make([]usage.StandingOrganization, 0, len(organizations))}
+	for _, organization := range organizations {
+		// Funded does not read the tier, so none is named: the service answers on its default.
+		query.Organizations = append(query.Organizations, usage.StandingOrganization{OrganizationID: organization})
+	}
+	read, cancel := context.WithTimeout(ctx, readTimeout)
+	standings, err := e.settings.Usage.Standings(read, query)
+	cancel()
+	if err != nil {
+		return nil, false, err
+	}
+	funded := make(map[string]bool, len(standings))
+	for _, standing := range standings {
+		funded[standing.OrganizationID] = standing.Funded
+	}
+	return funded, true, nil
 }
 
 // LimitsChanged reads an organization's limits and resets again now, after this process wrote

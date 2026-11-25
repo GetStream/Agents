@@ -129,7 +129,7 @@ func (s *StoreSuite) TestRouterConfigQueryBudgets() {
 	}
 	config := RouterConfig{CustomerID: "acme-app", Name: "fast"}
 
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Insert(s.ctx, &config)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Insert(s.ctx, &config)) }), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 	s.Equal(1, s.countQueries(func() {
 		listed, err := s.store.RouterConfigs.Select(s.ctx, "acme-app")
 		s.Require().NoError(err)
@@ -140,7 +140,7 @@ func (s *StoreSuite) TestRouterConfigQueryBudgets() {
 		s.Require().NoError(err)
 	}))
 	config.Name = "cheap"
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Update(s.ctx, &config)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Update(s.ctx, &config)) }), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 	if s.store.cache != nil {
 		for range 2 {
 			_, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
@@ -157,5 +157,5 @@ func (s *StoreSuite) TestRouterConfigQueryBudgets() {
 		s.Equal(1, s.countRedis(func() { s.Require().NoError(s.store.RouterConfigs.Delete(s.ctx, "acme-app", config.ID)) }))
 		return
 	}
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Delete(s.ctx, "acme-app", config.ID)) }), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.RouterConfigs.Delete(s.ctx, "acme-app", config.ID)) }), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 }

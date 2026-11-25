@@ -9,16 +9,22 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 func TestAPeerIsGivenLongEnoughToRingAndHoldATasksCall(t *testing.T) {
+	server, err := NewServer(Options{Routers: map[routing.Modality]routing.Inspector{routing.LLM: idleInspector{}}})
+	require.NoError(t, err)
 	// The ring, the task sent while a reply is waited out, and the call held
 	// to its limit: 90 s + 10 min + 10 min.
-	require.Equal(t, 21*time.Minute+30*time.Second, scheduledPeerWindow())
-	require.Greater(t, scheduledPeerWindow(), scheduledPhoneWindow+scheduledCallLimit+time.Minute,
+	require.Equal(t, 21*time.Minute+30*time.Second, server.scheduledPeerWindow())
+	require.Greater(t, server.scheduledPeerWindow(), server.phoneWindow+server.callLimit+time.Minute,
 		"a call answered at the last ring and held to its limit is not cut by the asker")
+	require.Equal(t, 3*time.Minute, server.replyWindow, "a router reads a channel's answer for 3 min")
+	require.Equal(t, 90*time.Second, server.phoneWindow, "a router waits out a ring for 90 s")
+	require.Equal(t, 10*time.Minute, server.callLimit, "a call a task placed lasts 10 min at most")
 }
 
 // A peer handed an occurrence rebuilds its delivery with taskDelivery from the task's row, so

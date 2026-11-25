@@ -1327,7 +1327,8 @@ func TestRedactSentryEventReturnsFromAContextThatHoldsItselfTwice(t *testing.T) 
 		if got := event.Contexts["usage_alert"]["loop"].(map[string]any)["error"]; got != reason {
 			t.Fatalf("a context that holds itself twice kept the key or lost the reason: %v", got)
 		}
-	case <-time.After(time.Second):
+	// The race detector makes the walk about 20 times slower.
+	case <-time.After(10 * time.Second):
 		t.Fatal("a context that holds itself twice did not return")
 	}
 }
