@@ -128,6 +128,14 @@ var graphWrites = []graphWrite{
 		writer := s.agentWith("echo/echo-model", map[string]any{"connectors": []map[string]any{held}})
 		return map[string]any{"connectors": []map[string]any{sessionNessy("customers")}, "agents": []ChildAgent{{Config: writer.Name, Tool: "ask"}}}, nil
 	}},
+	// Taking out what breaks the rule is how a set stored before it held is mended: the config's
+	// stored copy is not weighed beside what is about to replace it.
+	{name: "a child taking out its tool that sends out under a sensitive parent", before: map[string]any{
+		"connectors": []map[string]any{sessionGitHubGranting("code", "create_issue")},
+	}, around: func(s *ChildAgentsSuite, written string) (map[string]any, []string) {
+		s.calls(s.agentWith("fanning/fanning-model", map[string]any{"connectors": []map[string]any{sessionNessy("customers")}}), written)
+		return map[string]any{"connectors": []map[string]any{}}, nil
+	}},
 	// The controls: on the base, 4a6dd1132, each of the four writes answered these the same
 	// (author-1.md, «Base probe»).
 	{name: "a child gaining a tool that sends out with nothing sensitive in the set", around: func(s *ChildAgentsSuite, written string) (map[string]any, []string) {
@@ -184,6 +192,19 @@ func (s *ChildAgentsSuite) TestARenameIntoTheNameASensitiveParentCallsIsRefused(
 		s.Equal(http.StatusBadRequest, status, answered)
 		s.Contains(s.failureMessage(answered), `of the agent `+strconv.Quote(slot)+" can send data out")
 	}
+}
+
+// A child with two parents names the older one when it is refused for having one.
+func (s *ChildAgentsSuite) TestAChildWithTwoParentsNamesTheOlderOne() {
+	child := s.textConfig("echo/echo-model")
+	older, newer := s.agentWith("fanning/fanning-model", nil), s.agentWith("fanning/fanning-model", nil)
+	s.calls(older, child.Name)
+	s.calls(newer, child.Name)
+
+	status, payload := s.serverClient.call(http.MethodDelete, "/v1/agents/configs/"+child.Id, nil)
+
+	s.Equal(http.StatusConflict, status, string(payload))
+	s.Contains(s.failureMessage(string(payload)), strconv.Quote(older.Name)+" hands work to this agent")
 }
 
 // calls makes parent hand work to each of children by name, past the API's checks, as a set
