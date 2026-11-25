@@ -484,6 +484,9 @@ type User struct {
 	// Email is the address the app's backend last said this user signs in with
 	// (auth.EmailHeader), empty while it has said none. Only a server-side caller can say it.
 	Email string `bun:"email,nullzero"`
+	// Shard is the shard that last served a request the user's own client sent (Users.Served),
+	// empty while none has.
+	Shard string `bun:"shard,nullzero"`
 	// ClaimedBy is the real user this guest turned out to be, empty while they are still a
 	// guest. A guest is claimed once: a second claim naming somebody else would move one
 	// person's conversations onto another's account.
