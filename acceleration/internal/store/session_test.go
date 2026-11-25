@@ -530,43 +530,60 @@ func (s *StoreSuite) TestACarriedOnRowFromBeforeIsGivenItsProjectTag() {
 	s.Equal("alpha", *found.ProjectTag)
 }
 
-// Only a row carried on before the project tag was kept asks the other shards, no longer than
-// one that never answers may take, and until it is carried on again.
+// A read of a session asks no other shard for its project tag, whenever the row was written: a
+// router writes when it opened a few microseconds after when it was created.
 func (s *StoreSuite) TestASilentShardDoesNotHoldASessionsRead() {
 	if s.store.Sharded() {
 		s.T().Skip("the silent shard stands beside a deployment of one database")
 	}
 	down := s.withAShardThatNeverAnswers()
-	asks := &AgentSession{ID: "asks", CustomerID: "app", Project: "alpha", CallerKind: "server", CreatedAt: s.base, OpenedAt: s.base.Add(time.Hour)}
-	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, asks))
-	none := &AgentSession{ID: "none", CustomerID: "app", CallerKind: "server", CreatedAt: s.base, OpenedAt: s.base.Add(time.Hour)}
-	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, none))
-	once := &AgentSession{ID: "once", CustomerID: "app", Project: "alpha", CallerKind: "server", CreatedAt: s.base, OpenedAt: s.base}
-	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, once))
-	took := func(id string) (AgentSession, time.Duration) {
-		began := time.Now()
-		found, err := down.Sessions.Get(s.ctx, "app", id)
-		s.Require().NoError(err)
-		s.Equal("alpha", found.TaggedProject())
-		return found, time.Since(began)
-	}
+	for id, opened := range map[string]time.Duration{"once": 3 * time.Microsecond, "carried": time.Hour} {
+		s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: id, CustomerID: "app", Project: "alpha",
+			CallerKind: "server", CreatedAt: s.base, OpenedAt: s.base.Add(opened)}))
 
-	found, held := took("asks")
-	s.Less(held, 3*time.Second)
-	s.True(found.ProjectTagUnsure)
-	found, held = took("once")
-	s.Less(held, time.Second)
-	s.False(found.ProjectTagUnsure)
+		began := time.Now()
+		_, err := down.Sessions.Get(s.ctx, "app", id)
+
+		s.Require().NoError(err)
+		s.Less(time.Since(began), time.Second, id)
+	}
+}
+
+// Asked for its tag, a row that does not say it waits out a silent shard no longer than its
+// bound, and is given none: that shard may say another. One with no project has none to ask for.
+func (s *StoreSuite) TestASilentShardLeavesAProjectTagUnreadWithinItsBound() {
+	if s.store.Sharded() {
+		s.T().Skip("the silent shard stands beside a deployment of one database")
+	}
+	down := s.withAShardThatNeverAnswers()
+	row := AgentSession{ID: "one", CustomerID: "app", Project: "alpha", CallerKind: "server"}
 
 	began := time.Now()
-	_, err := down.Sessions.Get(s.ctx, "app", "none")
-	s.Require().NoError(err)
-	s.Less(time.Since(began), time.Second, "a session with no project has no tag to ask for")
+	s.ErrorIs(down.Sessions.ReadProjectTag(s.ctx, &row), ErrProjectTagUnread)
+	s.Less(time.Since(began), 3*time.Second)
+	s.Nil(row.ProjectTag)
 
-	asks.ProjectTag = new("alpha")
-	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, asks))
-	_, held = took("asks")
-	s.Less(held, time.Second, "it says its tag now")
+	began = time.Now()
+	for _, known := range []AgentSession{{Project: "alpha", ProjectTag: new("beta")}, {ID: "none", CustomerID: "app", CallerKind: "server"}} {
+		s.Require().NoError(down.Sessions.ReadProjectTag(s.ctx, &known))
+	}
+	s.Less(time.Since(began), time.Second)
+}
+
+func (s *StoreSuite) TestAProjectTagIsFoundWithoutWaitingOnASilentShard() {
+	if s.store.Sharded() {
+		s.T().Skip("the silent shard stands beside a deployment of one database")
+	}
+	down := s.withAShardThatNeverAnswers()
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.ProjectTag = new("beta") })
+	// As read before the row said its tag.
+	row := AgentSession{ID: "one", CustomerID: "app", Project: "alpha"}
+
+	began := time.Now()
+	s.Require().NoError(down.Sessions.ReadProjectTag(s.ctx, &row))
+
+	s.Equal("beta", row.TaggedProject())
+	s.Less(time.Since(began), time.Second)
 }
 
 // A router of the release before opens a session without saying its project tag, so the kind of

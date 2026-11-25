@@ -155,6 +155,9 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 		if err := currentConfig(); err != nil {
 			return nil, err
 		}
+		if err := s.readProjectTag(ctx, parent.Stored); err != nil {
+			return nil, err
+		}
 	}
 	spec, err := forkSpec(parent, body, config, current, thread)
 	if err != nil {
@@ -751,6 +754,20 @@ func (s *Server) toolsFromRow(ctx context.Context, spec *session.Spec) error {
 	return nil
 }
 
+// errProjectTagUnread refuses to carry on or fork a session whose project tag a shard that did
+// not answer may say.
+var errProjectTagUnread = unavailable("what the session's usage is tagged with could not be read; try again shortly")
+
+// readProjectTag gives row the project tag its usage has (store.Sessions.ReadProjectTag).
+func (s *Server) readProjectTag(ctx context.Context, row *store.AgentSession) error {
+	err := s.store.Sessions.ReadProjectTag(ctx, row)
+	if errors.Is(err, store.ErrProjectTagUnread) {
+		s.logger.Error("could not read a session's project tag", "session", row.ID, "error", err)
+		return errProjectTagUnread
+	}
+	return err
+}
+
 // rowTools gives spec the caller's tools and how long they are waited for, as row keeps them.
 // The tools go only to the kind of caller that declared them: a backend's tool carried on by
 // its end user's device would be the device's to answer (Session.seatRuns).
@@ -814,6 +831,9 @@ func (s *Server) reopenedFromRow(ctx context.Context, id string) (session.Spec, 
 	spec.PersistConversation = true
 	spec.ConversationID = row.ConversationID
 	spec.Title, spec.Description = row.Title, row.Description
+	if err := s.readProjectTag(ctx, row); err != nil {
+		return session.Spec{}, err
+	}
 	spec.KeepProject(*row)
 	spec.Custom = row.Custom
 	spec.ModelOverwrites = row.ModelOverwrites

@@ -3,7 +3,9 @@
 package api
 
 import (
+	"cmp"
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -332,6 +334,38 @@ func (s *ProjectTagSuite) TestACarriedOnRowFromBeforeSaysItsProjectTag() {
 		s.Require().NotNil(row.ProjectTag)
 		s.Equal(want, *row.ProjectTag)
 	}
+}
+
+// While a shard that may say its tag is down, a row from before is neither carried on nor forked:
+// its usage would be tagged with a guess. It is read all the same.
+func (s *ProjectTagSuite) TestARowFromBeforeIsNotCarriedOnOrForkedWhileAShardIsDown() {
+	owner := s.data.createUser()
+	backend := s.serverClient.actingFor(owner)
+	unread, known := s.open(backend, "alpha"), s.open(backend, "alpha")
+	s.fromBefore(unread.Id)
+	s.stop(known.Id)
+	options := s.storeOptions
+	options.ShardDSN = cmp.Or(options.ShardDSN, options.DSN)
+	options.Shards = map[string]string{"own": options.ShardDSN, "down": "postgres://postgres:postgres@127.0.0.1:1/down?sslmode=disable"}
+	served, err := store.OpenShards(options)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(served.Close()) })
+	other, _, _ := s.otherNodeServingFrom(served, nil, s.sealer, slog.New(slog.DiscardHandler))
+	asking := backend.on(other)
+
+	for path, body := range map[string]any{
+		"/fork":      ForkSessionRequest{Messages: pointerTo(false)},
+		"/resume":    ResumeSessionRequest{},
+		"/responses": CreateResponseRequest{Text: "hello"},
+	} {
+		status, message := asking.failure(http.MethodPost, "/v1/agents/sessions/"+unread.Id+path, body)
+		s.Equal(http.StatusServiceUnavailable, status, path)
+		s.Contains(message, "try again shortly", path)
+	}
+
+	status, _ := asking.call(http.MethodGet, "/v1/agents/sessions/"+unread.Id, nil)
+	s.NotEqual(http.StatusServiceUnavailable, status)
+	s.Equal([]string{"alpha"}, s.answered(asking, s.fork(asking, known.Id, ForkSessionRequest{}).Id))
 }
 
 func (s *ProjectTagSuite) TestAForksRowFromBeforeIsNotTagged() {
