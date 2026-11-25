@@ -104,6 +104,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/ttsrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/twiliosig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage/usagetest"
 	"github.com/GetStream/Vision-Agents/acceleration/prices"
@@ -1724,6 +1725,8 @@ func (s *RouterSuite) forgetPhoneVendors() {
 			s.Require().NoError(os.Unsetenv(name))
 		}
 	}
+	// The Twilio provider reads it too, to point numbers at the call webhook.
+	s.Require().NoError(os.Unsetenv(twiliosig.AuthTokenEnvVar))
 }
 
 // telephony serves the phone paths against the real vendor registry with no credentials

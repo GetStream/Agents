@@ -124,7 +124,8 @@ func (s *AppsSuite) config() Config {
 	s.Require().NoError(err)
 	// The suite's stub vendor is named twilio but dials the trunk it is given, as Twilio did
 	// before its numbers asked the router where each call goes, so what the service does with
-	// no keyring is still exercised. TestATwilioNumberIs... use Twilio as declared.
+	// no keyring is still exercised. Twilio as declared is attached in the api package's
+	// TwilioHookSuite.
 	for i, vendor := range config.Vendors {
 		if vendor.Vendor == "twilio" {
 			config.Vendors[i].AsksForTrunk = false
