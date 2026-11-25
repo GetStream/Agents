@@ -631,6 +631,71 @@ func (s *AgentSuite) TestWorkANativeModelHandsOverInAReplyWithNoIDIsAskedAsSched
 	s.Equal([]bool{true}, s.subagent.askedScheduled())
 }
 
+// joinNativeReportingScheduledCalls joins a native model offered remind_later, whose runs
+// say on the channel returned whether each was asked for in a turn a scheduled task fired.
+func (s *AgentSuite) joinNativeReportingScheduledCalls() (*nativePeer, <-chan bool) {
+	ran := make(chan bool, 1)
+	peer := s.joinNativeWith(func(options *Options) {
+		options.Tools = harness.Tools{Tools: []harness.Tool{{Name: "remind_later", Description: "remind the caller later"}}}
+		options.ToolRunner = &stubToolRunner{run: func(ctx context.Context, _ llm.ToolCall) ([]llm.ContentPart, error) {
+			ran <- ScheduledCall(ctx)
+			return llm.TextParts("{}"), nil
+		}}
+	})
+	return peer, ran
+}
+
+// ranScheduled is whether the one run on ran was a scheduled task's call.
+func (s *AgentSuite) ranScheduled(ran <-chan bool) bool {
+	select {
+	case scheduled := <-ran:
+		return scheduled
+	case <-time.After(settleFor):
+		s.FailNow("the tool never ran")
+		return false
+	}
+}
+
+func (s *AgentSuite) TestAToolAskedInAScheduledNativeTurnRunsAsTheTasksCall() {
+	peer, ran := s.joinNativeReportingScheduledCalls()
+	_, err := s.agent.RespondTo(routing.WithScheduledTurn(s.ctx), "Remind me of my booking", nil, options.LLM{})
+	s.Require().NoError(err)
+	s.nativeFrame(peer, "response.create")
+	s.nativeSend(peer, `{"type":"response.created","response":{"id":"r1"}}`)
+	s.nativeSend(peer, `{"type":"response.function_call_arguments.done","response_id":"r1","call_id":"call1","name":"remind_later","arguments":"{}"}`)
+
+	s.True(s.ranScheduled(ran), "the scheduled task's reply asked for it")
+}
+
+// The caller cutting in does not make a call the task's reply already asked for theirs.
+func (s *AgentSuite) TestAToolTheTasksNativeReplyAsksForAfterTheCallerCutsInIsStillTheTasksCall() {
+	peer, ran := s.joinNativeReportingScheduledCalls()
+	_, err := s.agent.RespondTo(routing.WithScheduledTurn(s.ctx), "Remind me of my booking", nil, options.LLM{})
+	s.Require().NoError(err)
+	s.nativeFrame(peer, "response.create")
+	s.nativeSend(peer, `{"type":"response.created","response":{"id":"r1"}}`)
+	s.nativeSend(peer, `{"type":"input_audio_buffer.speech_started"}`)
+	s.heardSpeechStart()
+	s.nativeSend(peer, `{"type":"response.function_call_arguments.done","response_id":"r1","call_id":"call1","name":"remind_later","arguments":"{}"}`)
+
+	s.True(s.ranScheduled(ran), "the scheduled task's reply asked for it")
+}
+
+func (s *AgentSuite) TestAToolAskedInTheCallersOwnNativeReplyIsNotTheTasksCall() {
+	peer, ran := s.joinNativeReportingScheduledCalls()
+	_, err := s.agent.RespondTo(routing.WithScheduledTurn(s.ctx), "Remind me of my booking", nil, options.LLM{})
+	s.Require().NoError(err)
+	s.nativeFrame(peer, "response.create")
+	s.nativeSend(peer, `{"type":"response.created","response":{"id":"r1"}}`)
+	s.nativeSend(peer, `{"type":"response.done","response":{"id":"r1","status":"completed"}}`)
+	s.nativeSend(peer, `{"type":"input_audio_buffer.speech_started"}`)
+	s.heardSpeechStart()
+	s.nativeSend(peer, `{"type":"response.created","response":{"id":"r2"}}`)
+	s.nativeSend(peer, `{"type":"response.function_call_arguments.done","response_id":"r2","call_id":"call2","name":"remind_later","arguments":"{}"}`)
+
+	s.False(s.ranScheduled(ran), "the caller asked for it")
+}
+
 func (s *AgentSuite) TestAToolsPictureInAScheduledNativeTurnIsLookedAtAsScheduledWhenTheCallerCutsInWhileItRuns() {
 	running := make(chan struct{}, 1)
 	release := make(chan struct{})

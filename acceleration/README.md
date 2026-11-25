@@ -2140,23 +2140,23 @@ is left out when the request has none:
 | `request_size` | The request's `Content-Length`. None for a chunked body |
 | `user_id` | The end user of a request from a user's device, cut to 256 bytes. None for a backend's request, even one that names a user |
 | `build_version` | The release the router was built from. None in a local build |
-| `close_reason` | Why a session socket closed: the events socket (`/v1/agents/sessions/{id}/events`) and `/v1/agents/socket`. None for any other request or socket. The values are below |
+| `close_reason` | Why a socket closed: the events socket (`/v1/agents/sessions/{id}/events`), `/v1/agents/socket`, `/v1/dispatch` and `/v1/{modality}/stream`. None for any other request or socket. The values are below |
 | `close_code` | The code of the close frame the caller sent, or of the one the router sent. None for `client_gone` and `timeout` |
-| `end_reason` | Why the session ended, as its row keeps it (`closed`, `agent_hangup` and the rest), with `session_ended` only. None on a socket relayed from another node: the node running the session keeps it |
+| `end_reason` | Why the session ended, as its row keeps it (`closed`, `agent_hangup` and the rest), with `session_ended` only. None on a socket relayed from another node: the node running the session keeps it. None on `/v1/dispatch` and `/v1/{modality}/stream`, which hold no session |
 
 A socket is logged once, when it closes, so its `duration` is how long the connection lived
-rather than a time to respond and its status is the `101` of the upgrade. A session socket's
+rather than a time to respond and its status is the `101` of the upgrade. A socket's
 `close_reason` is one of these:
 
 | `close_reason` | When |
 | --- | --- |
 | `client_closed` | The caller sent a close frame, or a `close` command (a `stop` on `/v1/agents/socket`) that ended the session. A command sent once the session had ended is not counted: the line says `session_ended` |
 | `client_gone` | The connection broke with no close frame, or a write to the caller failed |
-| `timeout` | The caller answered no ping in time, or sent no start frame in time on `/v1/agents/socket` |
-| `session_ended` | The session ended for another reason. `end_reason` says which |
-| `refused` | The router refused the caller: a start frame it would not take, a session it would not open, a frame it could not read (`1008`) or one past the size limit (`1009`) |
-| `server_error` | `/v1/agents/socket` could not open the session for a failure of the router's own, such as a database read. The caller is sent `1008` |
-| `shutdown` | The router stopped a resumable socket's session on its way down (`1012`) |
+| `timeout` | The caller answered no ping in time, or sent no start frame in time on `/v1/agents/socket` and `/v1/{modality}/stream` |
+| `session_ended` | The session ended for another reason. `end_reason` says which. Session sockets only |
+| `refused` | The router refused the caller: a start frame it would not take, a session it would not open, a frame it could not read (`1008`) or one past the size limit (`1009`). A stream socket closes a refused start frame with the code it always has (`1011`, or `1008` for an unknown target, a setting the model cannot take or a refusal about money), and a frame it cannot read after the start (`tts`, `llm`) with `1000` |
+| `server_error` | A failure that is not the caller's: `/v1/agents/socket` could not open the session for a failure of the router's own, such as a database read (`1008`), or a stream socket could not read the config it names or start a provider (`1011`) |
+| `shutdown` | The router stopped a resumable socket's session on its way down (`1012`), or sent a dispatch worker to reconnect elsewhere (`1001`) |
 
 A `5xx` is logged
 at error instead, because an access log at a busy deployment is the one stream nobody reads
@@ -2169,6 +2169,14 @@ string is never logged: a socket names its customer there and a telephony vendor
 The routes under `/v1/ops` are Stream staff's: they take the ops key (`ROUTER_AUTH_OPS_KEY`) in
 `X-Ops-Key` and no app's credentials. An app's key, even its backend's, is answered 401, and so
 is every call on a deployment with no ops key. They are tagged `Staff` in the spec.
+
+The two activity routes also take the activity key (`ROUTER_AUTH_ACTIVITY_KEY`) in
+`X-Activity-Key`, for a job that reads activity every day. It reaches those two routes and no
+other: on any other route it is answered 401. To rotate it, set the new key in
+`ROUTER_AUTH_ACTIVITY_KEY` and the old one in `ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS`; both work until
+you unset the old one. Unset, there is no activity key and the ops key still reads both routes. The
+router does not start when either activity key is under 32 bytes, has a space at either end, or is
+the ops key or the manage key. `openssl rand -hex 32` prints a key it takes.
 
 | Route | What it is for |
 | ----- | -------------- |
@@ -2192,12 +2200,15 @@ Every organization's activity is a list by cursor of `customer_activity`'s rows 
 also tells `furthest_step` (from `from` to `to`) and `steps` (every day) for the organizations
 on it. `org_id` and `app_id` narrow the items to one organization, one app or both; with
 `app_id`, `furthest_step` and `steps` are still the organization's, of all its apps. A cursor is
-refused with other `from`, `to`, `org_id` or `app_id` than its page's. Its description holds the
+refused with other `from`, `to`, `org_id` or `app_id` than its page's. Each organization also tells `funded`: whether it has credit that is not trial
+credit, read live from the usage service when the page is read. It is absent on every organization of the page when
+the deployment has no usage service or it did not answer. Its description holds the
 definitions of tried, API calls, production and churned:
 
 ```bash
 printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-01"
 printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-07&org_id=$ORG_ID"
+printf 'X-Activity-Key: %s\n' "$ROUTER_AUTH_ACTIVITY_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-01"
 ```
 
 `areas` is one item per area and client, `meters` one per modality (requests, tokens, audio,
@@ -2250,7 +2261,7 @@ What each organization did with Agents lives in three places:
 | ----- | ---- | ---- |
 | `customer_activity` (Postgres) | One row per app, area, client and UTC day: requests, refusals, the last refusal's code | 400 days |
 | `GET /v1/ops/orgs/{org_id}/activity` | One organization: areas, `furthest_step`, `steps`, meters, sessions, latency | What the table keeps |
-| `GET /v1/ops/activity` | Every organization: one item per app, area, client and day from `from` to `to`, with each organization's `furthest_step` and `steps`, by cursor | What the table keeps |
+| `GET /v1/ops/activity` | Every organization: one item per app, area, client and day from `from` to `to`, with each organization's `furthest_step`, `steps` and `funded` (read live from the usage service), by cursor | What the table keeps |
 | The activity digest (Slack, `ROUTER_LIMITS_SLACK_CHANNEL`) | Every organization, the UTC day before; `activity_digests` holds the days posted | 400 days |
 
 The router keeps activity for 400 days (`ActivityKeepDays` in `internal/store/activity.go`).
@@ -2917,6 +2928,11 @@ first `usage_id` as `source_usage_id`, so the row is written once wherever it mo
 row taken back where it was first recorded is the row it was copied from. A delete of it in a
 change batch is found by the `usage_id` made from the one the change names, and never removes
 a request this deployment recorded itself.
+
+A row refused because another tenant here holds its key stops the move, and the error names the
+row by table and primary key, as `agent_configs:{"id":"config-1"}`. `router replicate` prints why.
+`POST /v1/data/import` answers 400 and says only that the row cannot be written here: pass the row
+to the operator of this deployment.
 
 Key rows, sealed secrets, OAuth access and refresh tokens, organizations and apps are not
 exported. A moved deployment mints its own keys and re-authorizes its plugin connections.

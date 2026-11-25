@@ -302,6 +302,13 @@ type Auth struct {
 	// limits. Empty turns those endpoints off. It decides what customers pay, so it is never
 	// the ops key.
 	ManageKey string `koanf:"manage_key"`
+	// ActivityKey is what a job reading every organization's activity sends as
+	// X-Activity-Key. It reads the two activity paths and nothing else, so it is never the ops
+	// or the manage key. Empty turns it off; the ops key still reads them.
+	ActivityKey string `koanf:"activity_key"`
+	// ActivityKeyPrevious is the activity key being rotated out, still taken until the job
+	// sends the new one. Empty takes only ActivityKey.
+	ActivityKeyPrevious string `koanf:"activity_key_previous"`
 }
 
 // RateLimit caps what one of a customer's end users may spend in a day, for a customer
@@ -594,25 +601,27 @@ var variables = map[string]string{
 	"redis.username":       "ROUTER_REDIS_USERNAME",
 	"redis.password":       "ROUTER_REDIS_PASSWORD",
 
-	"redis.shard.addr":     "ROUTER_REDIS_SHARD_ADDR",
-	"redis.shard.username": "ROUTER_REDIS_SHARD_USERNAME",
-	"redis.shard.password": "ROUTER_REDIS_SHARD_PASSWORD",
-	"node.advertise":       "ROUTER_NODE_ADVERTISE",
-	"node.listen":          "ROUTER_NODE_LISTEN",
-	"listen_fd":            "ROUTER_LISTEN_FD",
-	"shutdown.drain":       "ROUTER_SHUTDOWN_DRAIN",
-	"auth.mode":            "ROUTER_AUTH_MODE",
-	"auth.kms_key":         "ROUTER_AUTH_KMS_KEY",
-	"auth.ops_key":         "ROUTER_AUTH_OPS_KEY",
-	"auth.manage_key":      "ROUTER_AUTH_MANAGE_KEY",
-	"data_move.retention":  "ROUTER_DATA_MOVE_RETENTION",
-	"stream.api_key":       "STREAM_API_KEY",
-	"stream.api_secret":    "STREAM_API_SECRET",
-	"stream.base_url":      "STREAM_BASE_URL",
-	"stream.user_token":    "STREAM_USER_TOKEN",
-	"stream.tenancy":       "ROUTER_STREAM_TENANCY",
-	"stream.fallback":      "ROUTER_STREAM_FALLBACK",
-	"stream.app_id":        "ROUTER_STREAM_APP_ID",
+	"redis.shard.addr":           "ROUTER_REDIS_SHARD_ADDR",
+	"redis.shard.username":       "ROUTER_REDIS_SHARD_USERNAME",
+	"redis.shard.password":       "ROUTER_REDIS_SHARD_PASSWORD",
+	"node.advertise":             "ROUTER_NODE_ADVERTISE",
+	"node.listen":                "ROUTER_NODE_LISTEN",
+	"listen_fd":                  "ROUTER_LISTEN_FD",
+	"shutdown.drain":             "ROUTER_SHUTDOWN_DRAIN",
+	"auth.mode":                  "ROUTER_AUTH_MODE",
+	"auth.kms_key":               "ROUTER_AUTH_KMS_KEY",
+	"auth.ops_key":               "ROUTER_AUTH_OPS_KEY",
+	"auth.manage_key":            "ROUTER_AUTH_MANAGE_KEY",
+	"auth.activity_key":          "ROUTER_AUTH_ACTIVITY_KEY",
+	"auth.activity_key_previous": "ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS",
+	"data_move.retention":        "ROUTER_DATA_MOVE_RETENTION",
+	"stream.api_key":             "STREAM_API_KEY",
+	"stream.api_secret":          "STREAM_API_SECRET",
+	"stream.base_url":            "STREAM_BASE_URL",
+	"stream.user_token":          "STREAM_USER_TOKEN",
+	"stream.tenancy":             "ROUTER_STREAM_TENANCY",
+	"stream.fallback":            "ROUTER_STREAM_FALLBACK",
+	"stream.app_id":              "ROUTER_STREAM_APP_ID",
 
 	"stream.mint_url":   "ROUTER_STREAM_MINT_URL",
 	"stream.mint_token": "ROUTER_STREAM_MINT_TOKEN",
@@ -1000,6 +1009,9 @@ func (c Config) validate() error {
 		return errors.New("config: auth.manage_key (ROUTER_AUTH_MANAGE_KEY) is the same as auth.ops_key " +
 			"(ROUTER_AUTH_OPS_KEY): give the management API a key of its own")
 	}
+	if err := c.Auth.validateActivityKeys(); err != nil {
+		return err
+	}
 	if err := c.validateUsage(); err != nil {
 		return err
 	}
@@ -1028,6 +1040,39 @@ func (c Config) validate() error {
 			LimitsEnforce, LimitsShadow, LimitsOff, c.Limits.Mode)
 	}
 	return c.validateShard()
+}
+
+// minActivityKey is the shortest activity key taken, in bytes: the job holding it is another
+// team's, so the key is at least 128 random bits in hex, as `openssl rand -hex 16` prints.
+const minActivityKey = 32
+
+// validateActivityKeys refuses an activity key shorter than minActivityKey, one with a space at
+// either end, and one that is also the ops or the manage key: a job holding it would then reach
+// every path that key does. net/http trims a header's value, so a key that is the ops key and a
+// space is the ops key. The error names the settings, never a key.
+func (a Auth) validateActivityKeys() error {
+	for _, activity := range []struct{ setting, key string }{
+		{"auth.activity_key (ROUTER_AUTH_ACTIVITY_KEY)", a.ActivityKey},
+		{"auth.activity_key_previous (ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS)", a.ActivityKeyPrevious},
+	} {
+		if activity.key == "" {
+			continue
+		}
+		if len(activity.key) < minActivityKey || strings.TrimSpace(activity.key) != activity.key {
+			return fmt.Errorf("config: %s is at least %d bytes with no space at either end, such as "+
+				"`openssl rand -hex 32` prints", activity.setting, minActivityKey)
+		}
+		for _, staff := range []struct{ setting, key string }{
+			{"auth.ops_key (ROUTER_AUTH_OPS_KEY)", a.OpsKey},
+			{"auth.manage_key (ROUTER_AUTH_MANAGE_KEY)", a.ManageKey},
+		} {
+			if activity.key == staff.key {
+				return fmt.Errorf("config: %s is the same as %s: the activity key reads activity only, so it "+
+					"is a key of its own", activity.setting, staff.setting)
+			}
+		}
+	}
+	return nil
 }
 
 // validateUsage refuses a usage service the router could not ship to. A token without a URL is
@@ -1196,6 +1241,8 @@ func (c Config) export() error {
 		"auth.kms_key":                  c.Auth.KMSKey,
 		"auth.ops_key":                  c.Auth.OpsKey,
 		"auth.manage_key":               c.Auth.ManageKey,
+		"auth.activity_key":             c.Auth.ActivityKey,
+		"auth.activity_key_previous":    c.Auth.ActivityKeyPrevious,
 		"auth.proxy_declares_kind":      fmt.Sprint(c.Auth.ProxyDeclaresKind),
 		"stream.api_key":                c.Stream.APIKey,
 		"stream.api_secret":             c.Stream.APISecret,

@@ -33,6 +33,9 @@ class CustomConnectorRequest:
             authenticates at the token endpoint.
         description (str | Unset):
         scopes (list[str] | None | Unset): The scopes a consent asks for, each an RFC 6749 scope token.
+        sync_hash (str | Unset): The fingerprint of the file this definition was synced from, which the connector then
+            carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest
+            revision already says with another hash stores no new revision and records the hash on that one.
     """
 
     endpoint: str
@@ -43,6 +46,7 @@ class CustomConnectorRequest:
     client: ConnectorClient | Unset = UNSET
     description: str | Unset = UNSET
     scopes: list[str] | None | Unset = UNSET
+    sync_hash: str | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         endpoint = self.endpoint
@@ -75,6 +79,8 @@ class CustomConnectorRequest:
         else:
             scopes = self.scopes
 
+        sync_hash = self.sync_hash
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -93,6 +99,8 @@ class CustomConnectorRequest:
             field_dict["description"] = description
         if scopes is not UNSET:
             field_dict["scopes"] = scopes
+        if sync_hash is not UNSET:
+            field_dict["sync_hash"] = sync_hash
 
         return field_dict
 
@@ -150,6 +158,8 @@ class CustomConnectorRequest:
 
         scopes = _parse_scopes(d.pop("scopes", UNSET))
 
+        sync_hash = d.pop("sync_hash", UNSET)
+
         custom_connector_request = cls(
             endpoint=endpoint,
             id=id,
@@ -159,6 +169,7 @@ class CustomConnectorRequest:
             client=client,
             description=description,
             scopes=scopes,
+            sync_hash=sync_hash,
         )
 
         return custom_connector_request

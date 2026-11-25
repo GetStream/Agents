@@ -314,7 +314,7 @@ class DetectionProcessor(VideoProcessorPublisher):
                 what a detector finding specks looks like.
             embeddings: Ask for a vector on every box, for ``identify``.
             overwrites: Settings for one provider the options have no word for, keyed by
-                provider, such as a Roboflow Workflow.
+                provider. No detection provider takes any today.
             identify: Names whoever an embedding belongs to, or returns an empty string.
                 Asked for every track with an embedding until it answers.
             name: The processor's name in ``get_video_state`` and its video source.

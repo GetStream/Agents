@@ -261,7 +261,7 @@ func (s *SessionEventsSuite) TestASessionNobodyOpenedHasNothingToWatch() {
 // with an events socket: nothing is recorded and no agent is holding a line open.
 func (s *SessionEventsSuite) inWriting(request CreateSessionRequest) Session {
 	request.Incognito = pointerTo(true)
-	if request.Llm == nil {
+	if request.Llm == nil && request.ConfigId == nil {
 		request.Llm = pointerTo("llm-flow")
 	}
 	return s.serverClient.createSession(request)
@@ -286,7 +286,7 @@ func (s *SessionEventsSuite) callWithATool() CreateSessionRequest {
 
 func (s *SessionEventsSuite) askingForATool() CreateSessionRequest {
 	return CreateSessionRequest{
-		Llm: pointerTo("tooling/tool-model"),
+		ConfigId: pointerTo(s.orderConfig(s.serverClient)),
 		Tools: &[]SessionTool{{
 			Name: lookupOrder, Description: "find an order by its number",
 			Parameters: &map[string]any{"type": "object"},

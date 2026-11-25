@@ -683,13 +683,42 @@ func (s *DataMoveSuite) TestAnImportCannotOverwriteAnotherCustomersRow() {
 	row, err := json.Marshal(s.export("acme").of("agent_configs")[0])
 	s.Require().NoError(err)
 
-	s.ErrorIs(s.destination.ImportRow(s.ctx, "intruder", "agent_configs", row), ErrAnotherCustomersRow)
+	err = s.destination.ImportRow(s.ctx, "intruder", "agent_configs", row)
 
+	s.ErrorIs(err, ErrAnotherCustomersRow)
+	s.ErrorIs(err, ErrInvalidImport, "the export's to correct, not the router's failure")
+	s.EqualError(err, `store: import agent_configs:{"id":"`+id+`"}: a row with this key belongs to another customer here`)
 	var name, owner string
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT name, customer_id FROM agent_configs WHERE id = ?", id).Scan(&name, &owner))
 	s.Equal("theirs", name)
 	s.Equal("resident", owner)
+}
+
+func (s *DataMoveSuite) TestARefusedRowIsNamedByEveryColumnOfItsKey() {
+	session := AgentSession{ID: "session-1", CustomerID: "acme", State: SessionClosed}
+	s.Require().NoError(session.Validate())
+	s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &session))
+	s.Require().NoError(s.source.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{{
+		SessionID: "session-1", OriginalMessageID: "message-1", CustomerID: "acme", SwitchID: "switch-1"}}))
+	refused := 0
+	for _, row := range s.export("acme").rows {
+		encoded, err := json.Marshal(row.row)
+		s.Require().NoError(err)
+		if row.table != "agent_branch_messages" {
+			s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", row.table, encoded))
+			continue
+		}
+		s.Require().NoError(s.destination.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{{
+			SessionID: "session-1", OriginalMessageID: "message-1", CustomerID: "resident", SwitchID: "theirs"}}))
+
+		err = s.destination.ImportRow(s.ctx, "moved", row.table, encoded)
+
+		s.Require().ErrorIs(err, ErrAnotherCustomersRow)
+		s.ErrorContains(err, `agent_branch_messages:{"original_message_id":"message-1","session_id":"session-1"}`)
+		refused++
+	}
+	s.Equal(1, refused)
 }
 
 func (s *DataMoveSuite) TestAReplayedChangeCannotDeleteAnotherCustomersRow() {
@@ -705,7 +734,9 @@ func (s *DataMoveSuite) TestAReplayedChangeCannotDeleteAnotherCustomersRow() {
 		id, "resident", "theirs", "be brief")
 	s.Require().NoError(err)
 
-	s.ErrorIs(s.destination.ApplyChanges(s.ctx, "intruder", changes), ErrAnotherCustomersRow, "the insert is refused")
+	err = s.destination.ApplyChanges(s.ctx, "intruder", changes)
+	s.ErrorIs(err, ErrAnotherCustomersRow, "the insert is refused")
+	s.ErrorContains(err, `agent_configs:{"id":"`+id+`"}`)
 	deletes := slices.DeleteFunc(changes, func(change DataChange) bool { return change.Op != ChangeDelete })
 	s.Require().NotEmpty(deletes)
 	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "intruder", deletes))
@@ -2143,6 +2174,25 @@ func (s *DataMoveSuite) TestAReplayedRouterConfigChangeIsServedRightAfterIt() {
 	s.Equal("slow", config.Name)
 }
 
+// TestARouterConfigFromAReleaseBeforeSyncHashesImportsWithNone: an export from before
+// sync_hash has no such key, and its row written over one synced here leaves no hash a sync
+// did not write.
+func (s *DataMoveSuite) TestARouterConfigFromAReleaseBeforeSyncHashesImportsWithNone() {
+	id := newID()
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO router_configs (id, customer_id, name, sync_hash) VALUES (?, 'moved', ?, 'hash-one')", id, "synced-"+id[:8])
+	s.Require().NoError(err)
+	row := `{"id": "` + id + `", "customer_id": "moved", "name": "old-` + id[:8] + `", "stt": {}, "tts": {}, "llm": {}, "sts": {}, "search": {},
+	  "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z"}`
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", "router_configs", json.RawMessage(row)))
+
+	config, err := s.destination.RouterConfigs.Get(s.ctx, "moved", id)
+	s.Require().NoError(err)
+	s.Equal("old-"+id[:8], config.Name)
+	s.Empty(config.SyncHash)
+}
+
 func (s *DataMoveSuite) TestASkillMovedByAReplayLeavesItsOldConfig() {
 	destination := s.cachedDestination()
 	app := "moved-" + newID()
@@ -2277,6 +2327,96 @@ func (s *DataMoveSuite) TestAnImportForgetsTheNameARenameWhileItWaitedGaveTheVoi
 	s.ErrorIs(err, ErrNoVoice)
 }
 
+// A binding being added to a voice locks the voice only against a change of its key, which an
+// import does not make, so the import does not wait for the binding's transaction to end.
+func (s *DataMoveSuite) TestAnImportOfAVoiceDoesNotWaitForABindingBeingAddedToIt() {
+	id := s.seedVoice(s.source, "acme", "narrator")
+	s.move("acme", "moved")
+	row, err := json.Marshal(s.export("acme").of("voices")[0])
+	s.Require().NoError(err)
+	binding, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = binding.Rollback() }()
+	_, err = binding.ExecContext(s.ctx, "INSERT INTO voice_bindings (id, voice_id, provider, external_id, state) VALUES (?, ?, 'elevenlabs', 'x', 'ready')", newID(), id)
+	s.Require().NoError(err)
+
+	began := time.Now()
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", "voices", row))
+
+	s.Less(time.Since(began), time.Second)
+}
+
+// Imports of one voice at once wait for each other in turn.
+func (s *DataMoveSuite) TestImportsOfOneVoiceAtOnceAllLand() {
+	id := s.seedVoice(s.source, "acme", "narrator")
+	s.move("acme", "moved")
+	row, err := json.Marshal(s.export("acme").of("voices")[0])
+	s.Require().NoError(err)
+	holding, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = holding.Rollback() }()
+	_, err = holding.ExecContext(s.ctx, "SELECT 1 FROM voices WHERE id = ? FOR UPDATE", id)
+	s.Require().NoError(err)
+
+	imported := make(chan error, 4)
+	for range 4 {
+		go func() { imported <- s.destination.ImportRow(s.ctx, "moved", "voices", row) }()
+	}
+	s.Require().Eventually(func() bool { return s.waitingHere() == 4 }, 2*time.Second, 10*time.Millisecond)
+	s.Require().NoError(holding.Commit())
+
+	for range 4 {
+		s.NoError(<-imported)
+	}
+}
+
+// An import naming a voice another customer holds here is refused without waiting on that
+// customer's row, which a binding being added to it holds.
+func (s *DataMoveSuite) TestAnImportOfAnotherCustomersVoiceIsRefusedWithoutWaitingForABindingBeingAddedToIt() {
+	id := s.seedVoice(s.source, "acme", "narrator")
+	s.move("acme", "moved")
+	row, err := json.Marshal(s.export("acme").of("voices")[0])
+	s.Require().NoError(err)
+	binding, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = binding.Rollback() }()
+	_, err = binding.ExecContext(s.ctx, "INSERT INTO voice_bindings (id, voice_id, provider, external_id, state) VALUES (?, ?, 'elevenlabs', 'x', 'ready')", newID(), id)
+	s.Require().NoError(err)
+
+	began := time.Now()
+	err = s.destination.ImportRow(s.ctx, "somebody-else", "voices", row)
+
+	s.ErrorIs(err, ErrAnotherCustomersRow)
+	s.Less(time.Since(began), time.Second)
+}
+
+// A delete whose key its column cannot take is refused as an invalid import.
+func (s *DataMoveSuite) TestADeleteWhoseKeyItsColumnCannotTakeIsRefused() {
+	for _, key := range []string{
+		`{"modality": "llm", "customer_id": "acme", "provider": "openai", "model": "gpt-4o", "bucket": "yesterday at noon"}`,
+		`"llm"`,
+	} {
+		err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Seq: 1, Table: "stats_hourly", Op: ChangeDelete, At: time.Now(), Key: json.RawMessage(key)}})
+		s.ErrorIs(err, ErrInvalidImport, key)
+	}
+}
+
+// A day and a number are keys too.
+func (s *DataMoveSuite) TestARowKeyedByADayAndANumberIsDeletedByTheReplay() {
+	s.capture("acme")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, `INSERT INTO turn_latency_hourly (customer_id, agent_id, bucket, leg, bin, count)
+		VALUES ('acme', 'agent', '2026-01-01 05:00:00+00', 'stt', 3, 2)`)
+	s.Require().NoError(err)
+	cursor := s.move("acme", "moved")
+	s.Require().Len(s.exportFrom(s.destination, "moved").of("turn_latency_hourly"), 1)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM turn_latency_hourly WHERE customer_id = 'acme'")
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "moved", cursor)
+
+	s.Empty(s.exportFrom(s.destination, "moved").of("turn_latency_hourly"))
+}
+
 // waitingOnALock waits for a statement holding text to wait on a lock.
 func (s *DataMoveSuite) waitingOnALock(db *bun.DB, text string) {
 	s.Require().Eventually(func() bool {
@@ -2371,6 +2511,29 @@ func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainByARouterWithRed
 
 	s.Require().NoError(other.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
 	s.Equal(1, s.usersHeld(destination, app, "alice"))
+}
+
+// A replica that wrote the user itself, rather than read them from Redis, forgets them too.
+func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainByTheReplicaThatWroteThem() {
+	destination, other := s.cachedDestination(), s.cachedDestination()
+	app := "moved-" + newID()
+	s.capture("acme")
+	s.Require().NoError(s.source.Users.RecordAccount(s.ctx, "acme", "alice"))
+	cursor := s.moveTo(destination, "acme", app)
+	_, err := destination.GlobalDB().ExecContext(s.ctx, "DELETE FROM users WHERE customer_id = ? AND id = 'alice'", app)
+	s.Require().NoError(err)
+	s.Require().NoError(other.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
+	s.Require().Equal(1, s.usersHeld(destination, app, "alice"))
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM users WHERE customer_id = 'acme' AND id = 'alice'")
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+	s.Require().Zero(s.usersHeld(destination, app, "alice"))
+
+	s.Eventually(func() bool {
+		s.Require().NoError(other.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
+		return s.usersHeld(destination, app, "alice") == 1
+	}, settleFor, 10*time.Millisecond, "the replica that wrote alice is still answering from a stale cache")
 }
 
 // A user recorded here from their own token, then imported as the guest the source still had them
@@ -2806,6 +2969,18 @@ func (s *DataMoveSuite) TestAChangeCarryingADefinitionTheAPIWouldRefuseIsRefused
 
 	s.ErrorIs(err, ErrNotACustomConnector)
 	s.Zero(s.definitionsNamed(id))
+}
+
+// A change recorded by a release before sync hashes carries no sync_hash key.
+func (s *DataMoveSuite) TestADefinitionChangeFromAReleaseBeforeSyncHashesApplies() {
+	id := "custom_" + newID()
+	manifest := strings.Replace(customAcme, "custom_acme", id, 1)
+
+	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: "connector_definitions", Op: ChangeInsert,
+		Payload: json.RawMessage(`{"id": "` + id + `", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + manifest + `}`)}})
+
+	s.Require().NoError(err)
+	s.Equal(1, s.definitionsNamed(id))
 }
 
 // customAcme is a manifest the API stores for a custom connector custom_acme: an MCP server
