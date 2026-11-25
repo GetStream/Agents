@@ -11,6 +11,7 @@ from ..models.agent_mode import AgentMode
 from ..models.agent_role import AgentRole
 from ..models.episode_cards_mode import EpisodeCardsMode
 from ..models.harness import Harness
+from ..models.routing_policy import RoutingPolicy
 from ..models.sandbox import Sandbox
 from ..types import UNSET, Unset
 
@@ -189,6 +190,11 @@ class AgentConfigRequest:
         ui_instructions (str | Unset): What teaches the agent's model to answer with UI, such as the section the SDK
             compiles from agent.yaml's ui key. Every session is told them after the instructions, unless it was opened with
             ui false. Empty teaches none. Left out on an update, the stored ones stay.
+        routing_policy (RoutingPolicy | Unset): Which regions work may be placed in. closest is the region nearest the
+            person: where a request landed, the called number's country, or the region that last served the user. us_east is
+            the region holding the configs, for everything. us_only, eu_only and canada_only keep all of the work and its
+            data in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its
+            regions is up. Empty is the app's own on an agent config, and closest on the app.
     """
 
     name: str
@@ -232,6 +238,7 @@ class AgentConfigRequest:
     agents: list[ChildAgent] | Unset = UNSET
     image: str | Unset = UNSET
     ui_instructions: str | Unset = UNSET
+    routing_policy: RoutingPolicy | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -400,6 +407,10 @@ class AgentConfigRequest:
 
         ui_instructions = self.ui_instructions
 
+        routing_policy: str | Unset = UNSET
+        if not isinstance(self.routing_policy, Unset):
+            routing_policy = self.routing_policy.value
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -487,6 +498,8 @@ class AgentConfigRequest:
             field_dict["image"] = image
         if ui_instructions is not UNSET:
             field_dict["ui_instructions"] = ui_instructions
+        if routing_policy is not UNSET:
+            field_dict["routing_policy"] = routing_policy
 
         return field_dict
 
@@ -749,6 +762,13 @@ class AgentConfigRequest:
 
         ui_instructions = d.pop("ui_instructions", UNSET)
 
+        _routing_policy = d.pop("routing_policy", UNSET)
+        routing_policy: RoutingPolicy | Unset
+        if isinstance(_routing_policy, Unset):
+            routing_policy = UNSET
+        else:
+            routing_policy = RoutingPolicy._decode(_routing_policy)
+
         agent_config_request = cls(
             name=name,
             calls=calls,
@@ -791,6 +811,7 @@ class AgentConfigRequest:
             agents=agents,
             image=image,
             ui_instructions=ui_instructions,
+            routing_policy=routing_policy,
         )
 
         agent_config_request.additional_properties = d

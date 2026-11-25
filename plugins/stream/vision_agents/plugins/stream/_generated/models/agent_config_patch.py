@@ -11,6 +11,7 @@ from ..models.agent_mode import AgentMode
 from ..models.agent_role import AgentRole
 from ..models.episode_cards_mode import EpisodeCardsMode
 from ..models.harness import Harness
+from ..models.routing_policy import RoutingPolicy
 from ..models.sandbox import Sandbox
 from ..types import UNSET, Unset
 
@@ -142,6 +143,11 @@ class AgentConfigPatch:
                 is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not
                 write over a newer one: read the config again and make the change on that. Left out, the change is made on the
                 config as it now is, and every field it does not send keeps what is stored.
+            routing_policy (RoutingPolicy | Unset): Which regions work may be placed in. closest is the region nearest the
+                person: where a request landed, the called number's country, or the region that last served the user. us_east is
+                the region holding the configs, for everything. us_only, eu_only and canada_only keep all of the work and its
+                data in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its
+                regions is up. Empty is the app's own on an agent config, and closest on the app.
     """
 
     calls: AgentCalls | Unset = UNSET
@@ -186,6 +192,7 @@ class AgentConfigPatch:
     image: str | Unset = UNSET
     ui_instructions: str | Unset = UNSET
     updated_at: datetime.datetime | Unset = UNSET
+    routing_policy: RoutingPolicy | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.agent_config_patch_plugins_item_type_1 import (
@@ -357,6 +364,10 @@ class AgentConfigPatch:
         if not isinstance(self.updated_at, Unset):
             updated_at = self.updated_at.isoformat()
 
+        routing_policy: str | Unset = UNSET
+        if not isinstance(self.routing_policy, Unset):
+            routing_policy = self.routing_policy.value
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update({})
@@ -444,6 +455,8 @@ class AgentConfigPatch:
             field_dict["ui_instructions"] = ui_instructions
         if updated_at is not UNSET:
             field_dict["updated_at"] = updated_at
+        if routing_policy is not UNSET:
+            field_dict["routing_policy"] = routing_policy
 
         return field_dict
 
@@ -713,6 +726,13 @@ class AgentConfigPatch:
         else:
             updated_at = datetime.datetime.fromisoformat(_updated_at)
 
+        _routing_policy = d.pop("routing_policy", UNSET)
+        routing_policy: RoutingPolicy | Unset
+        if isinstance(_routing_policy, Unset):
+            routing_policy = UNSET
+        else:
+            routing_policy = RoutingPolicy._decode(_routing_policy)
+
         agent_config_patch = cls(
             calls=calls,
             channels=channels,
@@ -756,6 +776,7 @@ class AgentConfigPatch:
             image=image,
             ui_instructions=ui_instructions,
             updated_at=updated_at,
+            routing_policy=routing_policy,
         )
 
         return agent_config_patch
