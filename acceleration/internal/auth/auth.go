@@ -164,10 +164,13 @@ const (
 	KindServer Kind = "server"
 	// KindAuthenticated is an end user whose token was verified.
 	KindAuthenticated Kind = "authenticated"
-	// KindGuest is an end user whose token was verified and who Stream issued as a guest:
-	// a real user with a temporary account rather than one the customer knows. It is
-	// treated exactly as KindAuthenticated is, and kept apart from it only so a caller
-	// can be told which it was.
+	// KindGuest is an end user whose verified token says the role guest: a real user with a
+	// temporary account rather than one the customer knows. The app signs such a token itself.
+	// One Stream issues, or this router mints for a new guest (POST /v1/agents/guests), says no
+	// role, so its holder is KindAuthenticated, and a guest the router minted is known by its
+	// row (routing.Caller.Guest). What is theirs is kept apart from a KindAuthenticated user's of
+	// the same id, an app may turn them away (Levels), and neither scheduling nor the
+	// connectors a user owns are offered to them.
 	KindGuest Kind = "guest"
 	// KindAnonymous is an end user who presented no token. Whatever name such a caller
 	// goes by is a claim nobody checked, which is why the kind travels with it.
@@ -216,6 +219,9 @@ type Principal struct {
 	// OrganizationTier is the organization's tier as the proxy named it. Empty in every other
 	// mode, where the organization's last known tier applies.
 	OrganizationTier string
+	// Levels is which sorts of end user the app its key resolved to turns away. Zero in every
+	// other mode, where no app is resolved.
+	Levels Levels
 	// UsageCategories are what the customer counts the request's usage under, sorted, each
 	// once, the user's team among them as team:<name>. Nil names none.
 	UsageCategories []string
@@ -455,6 +461,7 @@ func (k keyed) Authenticate(ctx context.Context, r *http.Request) (Principal, er
 		Kind:           KindAuthenticated,
 		ServerSide:     serverSide,
 		APIKey:         key,
+		Levels:         app.Levels,
 	}
 	// The categories a token was signed with are the app's own word for them, as the proxy
 	// reads them. A backend may name them in the header instead, since it could sign any.
@@ -535,10 +542,8 @@ func userClaim(claims jwt.MapClaims) string {
 	return strings.TrimSpace(named)
 }
 
-// guestToken reads whether the user this token names is one Stream issued as a guest. It
-// is the role claim a guest token carries. A guest is a verified user with a temporary
-// account and reaches exactly what a permanent one does; the kind is kept apart so a
-// caller can be told which it was talking to, and so an app can decline to take them.
+// guestToken reads whether a token says the role guest, which the app that signs it decides. A
+// token of Stream's own says none, nor does the one this router mints a new guest (KindGuest).
 func guestToken(claims jwt.MapClaims) bool {
 	role, _ := claims["role"].(string)
 	return strings.EqualFold(strings.TrimSpace(role), string(KindGuest))

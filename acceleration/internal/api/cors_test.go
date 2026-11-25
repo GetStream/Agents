@@ -87,6 +87,18 @@ func TestACustomersWebsiteMayReadTheQuotaOfAnAnswer(t *testing.T) {
 	}
 }
 
+func TestACustomersWebsiteMayReadWhichShardAnswered(t *testing.T) {
+	for _, mode := range []auth.Mode{auth.APIKey, auth.Proxy} {
+		handler := withCORS(mode, http.NotFoundHandler())
+		request := httptest.NewRequest(http.MethodGet, "/v1/agents/logs", nil)
+		request.Header.Set("Origin", customerSite)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+
+		require.Contains(t, response.Header().Get("Access-Control-Expose-Headers"), "X-Shard", mode)
+	}
+}
+
 func TestACustomersWebsiteMayOpenASessionSocket(t *testing.T) {
 	for _, mode := range []auth.Mode{auth.APIKey, auth.Proxy} {
 		_, err := dialSession(t, mode, customerSite)

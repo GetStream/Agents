@@ -214,9 +214,10 @@ func openPriceStore(settings config.Config) (*store.Store, error) {
 		return nil, errors.New("this needs a database: set postgres.dsn")
 	}
 	return store.OpenShards(store.Options{
+		Shard:    settings.Shard,
 		DSN:      settings.Postgres.DSN,
 		ShardDSN: settings.Postgres.ShardDSN,
-		Shards:   settings.Postgres.Shards,
+		Shards:   settings.Shards,
 	})
 }
 

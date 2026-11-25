@@ -423,6 +423,11 @@ func scopedTasks(query *bun.SelectQuery, scope ScheduledTaskScope) *bun.SelectQu
 	return query
 }
 
+// missedRunError is the error a running run keeps when a pause or an edit settles it missed: the
+// reason a placed call ended under stays, and a failed attempt's (ScheduledTaskRuns.SetAttemptReason)
+// goes, since nothing failed the occurrence.
+const missedRunError = "error = CASE WHEN session_id = '' THEN NULL ELSE error END"
+
 // Update replaces a task's editable fields and clears any claim, so
 // a worker finishing an older claim cannot advance what this save changed.
 // An occurrence still running (held by quiet hours, or cut short when its
@@ -505,6 +510,7 @@ func (r *ScheduledTasks) update(ctx context.Context, task *ScheduledTask, missed
 		settle := tx.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 			Set("state = ?", ScheduledTaskRunMissed).
 			Set("finished_at = now()").
+			Set(missedRunError).
 			Where("customer_id = ?", task.CustomerID).
 			Where("task_id = ?", task.ID).
 			Where("trigger = ?", ScheduledTaskTriggerSchedule).
@@ -687,6 +693,9 @@ func (r *ScheduledTasks) Claim(ctx context.Context, limit int, lease time.Durati
 			Where("state = ?", ScheduledTaskActive).
 			Where("next_run_at <= now()").
 			Where("(lease_until IS NULL OR lease_until < now())")
+		if shard.Shard != "" {
+			due = due.Where(scheduledTaskHomedHere, shard.Shard)
+		}
 		if shard.filtered() {
 			claimable, args := shard.scheduledTaskClaimable()
 			due = due.Where(claimable, args...)
@@ -1206,6 +1215,7 @@ func (r *ScheduledTasks) PauseForConfig(ctx context.Context, customerID, configI
 		if _, err := tx.NewUpdate().Model((*ScheduledTaskRun)(nil)).
 			Set("state = ?", ScheduledTaskRunMissed).
 			Set("finished_at = now()").
+			Set(missedRunError).
 			Where("customer_id = ?", customerID).
 			Where("task_id IN (?)", bun.In(paused)).
 			Where("trigger = ?", ScheduledTaskTriggerSchedule).

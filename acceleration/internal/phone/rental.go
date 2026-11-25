@@ -134,13 +134,13 @@ func (r Rentals) Bill(ctx context.Context, from, now time.Time) (Rented, error) 
 			ids = append(ids, numberMonth(number, month).UsageID)
 		}
 	}
-	recorded, err := r.Store.RecordedUsage(ctx, ids)
+	unbilled, err := r.Store.UsageToBill(ctx, ids)
 	if err != nil {
 		return Rented{}, err
 	}
 	var rented Rented
 	for i, each := range months {
-		if recorded[ids[i]] {
+		if !unbilled[ids[i]] {
 			continue
 		}
 		billMonth(r.Recorder, r.Logger, each.number, routing.Owner{

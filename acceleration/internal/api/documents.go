@@ -253,8 +253,8 @@ func (s *Server) fetchDocument(ctx context.Context, source FileSource) ([]byte, 
 		return nil, "", invalidRequest(fmt.Sprintf("the file could not be used: %v", err))
 	}
 	fallback := "document"
-	if parsed, err := url.Parse(source.Url); err == nil && path.Base(parsed.Path) != "/" && path.Base(parsed.Path) != "." {
-		fallback = path.Base(parsed.Path)
+	if parsed, err := url.Parse(source.Url); err == nil {
+		fallback = documentName(parsed.Path, fallback)
 	}
 	return data, documentName(name, fallback), nil
 }
@@ -266,7 +266,7 @@ const maxDocumentName = 255
 // than a name sent in the request may be, since one taken from a URL is the URL's.
 func documentName(name, fallback string) string {
 	name = path.Base(strings.ReplaceAll(strings.TrimSpace(name), "\\", "/"))
-	if name == "" || name == "." || name == "/" {
+	if name == "" || name == "." || name == ".." || name == "/" {
 		name = fallback
 	}
 	if runes := []rune(name); len(runes) > maxDocumentName {

@@ -46,26 +46,15 @@ func (u UserSettings) Changes() []AuditChange {
 // user's (splitStreamUserAddress): what follows the first colon.
 const streamUserAddressee = "substr(cm.address, strpos(cm.address, ':') + 1)"
 
-// UserOrganizations are the organizations an app's end user may have counters and holds under:
-// those of the requests on every shard, and of the limits, resets and grants, naming any of
-// userIDs, and the app's own. A run finishing one that stopped names the replacement too, since
-// the rows it already rewrote no longer name the user.
+// UserOrganizations are the organizations an app's end user may have counters and holds under
+// that the shared database names: those of the limits, resets and grants naming any of userIDs,
+// and the app's own. Each shard names those of its requests (UserShards.Organizations). A run
+// finishing one that stopped names the replacement too, since the rows it already rewrote no
+// longer name the user.
 func (s *Store) UserOrganizations(ctx context.Context, appID string, userIDs ...string) ([]string, error) {
-	shards, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]string, error) {
-		var found []string
-		err := db.NewSelect().Model((*Request)(nil)).
-			Distinct().
-			Column("r.organization_id").
-			Where("r.customer_id = ? AND r.user_id IN (?)", appID, bun.In(userIDs)).
-			Scan(ctx, &found)
-		return found, err
-	})
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: user organizations: %w", err))
-	}
 	var shared []string
 	users := bun.In(userIDs)
-	err = s.global.NewSelect().Model((*AppOrganization)(nil)).Column("organization_id").Where("app_id = ?", appID).
+	err := s.global.NewSelect().Model((*AppOrganization)(nil)).Column("organization_id").Where("app_id = ?", appID).
 		Union(s.global.NewSelect().Model((*App)(nil)).Column("organization_id").Where("id = ?", appID)).
 		Union(s.global.NewSelect().Model((*Limit)(nil)).Column("organization_id").
 			Where("level = ? AND app_id = ? AND user_id IN (?)", LevelUser, appID, users)).
@@ -76,14 +65,97 @@ func (s *Store) UserOrganizations(ctx context.Context, appID string, userIDs ...
 		return nil, stack.Wrap(fmt.Errorf("store: user organizations: %w", err))
 	}
 	organizations := map[string]bool{}
-	for _, found := range append(shards, shared) {
-		for _, organization := range found {
-			if organization != "" {
-				organizations[organization] = true
-			}
+	for _, organization := range shared {
+		if organization != "" {
+			organizations[organization] = true
 		}
 	}
 	return slices.Sorted(maps.Keys(organizations)), nil
+}
+
+// UserShards are what forgetting an app's end user does, or would do, on the shards: the
+// requests and call legs it gives the replacement, the hidden branch messages of their sessions
+// and the agent logs naming them it deletes, and the organizations of their requests, under the
+// user's id or the replacement's.
+type UserShards struct {
+	Requests       int64    `json:"requests"`
+	CallLegs       int64    `json:"call_legs"`
+	BranchMessages int64    `json:"branch_messages"`
+	AgentLogs      int64    `json:"agent_logs"`
+	Organizations  []string `json:"organizations"`
+}
+
+// forgetUserArgs are a ShardJobForgetUser job's.
+type forgetUserArgs struct {
+	UserID      string `json:"user_id"`
+	Replacement string `json:"replacement"`
+	DryRun      bool   `json:"dry_run"`
+}
+
+// ForgetUserOnShards has every shard of the deployment forget an app's end user on its own rows,
+// or with dryRun count what it would, and waits until each did or ctx ends; then it answers their
+// sums. This shard's part runs here unless one of its routers has it. A wait that ends first
+// fails with ErrShardJobPending, and the shards behind still run their part when they can.
+func (s *Store) ForgetUserOnShards(ctx context.Context, appID, userID, replacement string, dryRun bool) (UserShards, error) {
+	job, err := s.ShardJobs.queue(ctx, s.global, ShardJobForgetUser, appID, forgetUserArgs{UserID: userID, Replacement: replacement, DryRun: dryRun})
+	if err != nil {
+		return UserShards{}, err
+	}
+	shards, err := everywhere[UserShards](ctx, s, job)
+	if err != nil {
+		return UserShards{}, err
+	}
+	var sum UserShards
+	for _, shard := range shards {
+		sum.Requests += shard.Requests
+		sum.CallLegs += shard.CallLegs
+		sum.BranchMessages += shard.BranchMessages
+		sum.AgentLogs += shard.AgentLogs
+		sum.Organizations = append(sum.Organizations, shard.Organizations...)
+	}
+	slices.Sort(sum.Organizations)
+	sum.Organizations = slices.Compact(sum.Organizations)
+	return sum, nil
+}
+
+// forgetUserHere is this shard's part of forgetting an app's end user: the organizations of
+// their requests first, read under the replacement too for a run finishing one that stopped,
+// then the rewrites and deletes, or with DryRun their counts.
+func (s *Store) forgetUserHere(ctx context.Context, appID string, args forgetUserArgs) (UserShards, error) {
+	var counts UserShards
+	err := s.shard.NewSelect().Model((*Request)(nil)).
+		Distinct().
+		Column("r.organization_id").
+		Where("r.customer_id = ? AND r.user_id IN (?)", appID, bun.In([]string{args.UserID, args.Replacement})).
+		Where("r.organization_id <> ''").
+		Scan(ctx, &counts.Organizations)
+	if err != nil {
+		return UserShards{}, stack.Wrap(fmt.Errorf("store: user organizations: %w", err))
+	}
+	if args.DryRun {
+		if counts.Requests, err = s.Requests.CountByUser(ctx, appID, args.UserID); err != nil {
+			return UserShards{}, err
+		}
+		if counts.CallLegs, err = s.CallLegs.CountUser(ctx, appID, args.UserID); err != nil {
+			return UserShards{}, err
+		}
+		if counts.BranchMessages, err = s.BranchMessages.CountUser(ctx, appID, args.UserID); err != nil {
+			return UserShards{}, err
+		}
+		counts.AgentLogs, err = s.AgentLogs.CountUser(ctx, appID, args.UserID)
+		return counts, err
+	}
+	if counts.Requests, err = s.Requests.RenameUser(ctx, appID, args.UserID, args.Replacement); err != nil {
+		return UserShards{}, err
+	}
+	if counts.CallLegs, err = s.CallLegs.RenameUser(ctx, appID, args.UserID, args.Replacement); err != nil {
+		return UserShards{}, err
+	}
+	if counts.BranchMessages, err = s.BranchMessages.deleteUserHere(ctx, appID, args.UserID); err != nil {
+		return UserShards{}, err
+	}
+	counts.AgentLogs, err = s.AgentLogs.DeleteUser(ctx, appID, args.UserID)
+	return counts, err
 }
 
 // CountUserSettings counts the shared database's rows that name an app's end user.
@@ -150,6 +222,10 @@ func forgottenChanges(db bun.IDB, customerID string, tables ...string) *bun.Upda
 // key, all but its deletes, which a follower needs to delete its copy; those of the guests name
 // the replacement.
 //
+// It also gives the replacement the hourly spend and people the shards shipped of the user. It
+// runs after every shard renamed its requests (ForgetUserOnShards), so a ship from then on
+// carries the replacement.
+//
 // It outlives ctx, its statements sharing the store's write timeout, and drops the user's cached
 // policy and profile whatever the commit answered, and again after a COMMIT whose answer was
 // lost (detachedWrite).
@@ -212,6 +288,16 @@ func (s *Store) ForgetUserSettings(ctx context.Context, appID, userID, replaceme
 				return err
 			}
 		}
+		renamedDims := slices.Clone(spendDims)
+		renamedDims[slices.Index(renamedDims, "user_id")] = "?"
+		if _, err := tx.NewUpdate().Table(shippedSpend.name).Set("user_id = ?", replacement).Set("dims = "+spendKey(renamedDims), replacement).
+			Where("customer_id = ? AND user_id = ?", appID, userID).Exec(ctx); err != nil {
+			return err
+		}
+		if _, err := tx.NewUpdate().Table(shippedPeople.name).Set("user_id = ?", replacement).
+			Where("customer_id = ? AND user_id = ?", appID, userID).Exec(ctx); err != nil {
+			return err
+		}
 		// After the profile's delete, which records a change of its own that a follower deletes
 		// its copy by. The rest are deletes of a row by the replacement's id, which no follower
 		// holds.
@@ -222,8 +308,9 @@ func (s *Store) ForgetUserSettings(ctx context.Context, appID, userID, replaceme
 		entry.Changes = append(entry.Changes, counts.Changes()...)
 		return recordAuditEntry(ctx, tx, entry)
 	}, func() []string {
-		return append(s.Policies.keys(ctx, ScopeUser, UserScopeID(appID, userID)), userKey(appID, userID))
+		return append(s.Policies.keys(ctx, ScopeUser, UserScopeID(appID, userID)), userKey(appID, userID), mintedKey(appID, userID))
 	})
+	s.Users.minted.Remove(appID, userID)
 	if err != nil {
 		return UserSettings{}, stack.Wrap(fmt.Errorf("store: forget user settings: %w", err))
 	}

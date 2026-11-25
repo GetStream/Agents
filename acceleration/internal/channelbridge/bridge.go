@@ -446,7 +446,7 @@ func inboundRow(thread store.ChannelThread, config store.AgentConfig, message co
 		ChannelID: thread.ChannelID, ProviderMessageID: message.ProviderMessageID, CustomerID: thread.CustomerID,
 		ConnectorID: message.ConnectorID, ProviderUnitID: message.ProviderUnitID, ThreadKey: message.ThreadKey,
 		ConfigID: config.ID, ConfigName: config.Name, AuthorID: message.AuthorID, Text: message.Text,
-		Media: message.Media, Raw: message.Raw, Forward: forward, NextAttemptAt: time.Now(),
+		Media: message.Media, Raw: message.Raw, Forward: forward,
 	}
 }
 
