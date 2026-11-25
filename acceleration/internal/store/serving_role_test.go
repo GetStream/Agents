@@ -396,6 +396,21 @@ func (s *ServingRoleSuite) TestATableTheServingRoleIsNotGrantedIsRefused() {
 	}
 }
 
+// The versions are read and never written.
+func (s *ServingRoleSuite) TestAVersionTableTheServingRoleMayNotReadIsRefused() {
+	serving := bun.Ident(s.serving.Username())
+	for table, db := range map[string]*bun.DB{"goose_global_version": s.admin.store.global, "goose_shard_version": s.admin.store.shard} {
+		s.exec(db, "REVOKE INSERT, UPDATE, DELETE ON ? FROM ?", bun.Ident(table), serving)
+		s.NoError(s.paths.store.CheckMigrated(s.ctx))
+
+		s.exec(db, "REVOKE SELECT ON ? FROM ?", bun.Ident(table), serving)
+		s.ErrorContains(s.paths.store.CheckMigrated(s.ctx), "the serving role lacks SELECT on table "+table)
+
+		s.exec(db, "GRANT SELECT, INSERT, UPDATE, DELETE ON ? TO ?", bun.Ident(table), serving)
+		s.NoError(s.paths.store.CheckMigrated(s.ctx))
+	}
+}
+
 func (s *ServingRoleSuite) TestASchemaTheServingRoleMayNotUseIsRefused() {
 	serving := bun.Ident(s.serving.Username())
 	for _, db := range []*bun.DB{s.admin.store.global, s.admin.store.shard} {

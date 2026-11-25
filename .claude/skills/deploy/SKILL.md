@@ -173,8 +173,9 @@ A release is a tagged build, published once, then deployed per shard:
   checkout of its `master` branch). Without either, it stops with "could not locate infra/ directory"
   before it takes the lock, so nothing moves.
 - Migrations run on start and take an advisory lock, so shards starting together are safe.
-  A deployment that sets `postgres.migrate_dsn` runs `router migrate` per shard first instead,
-  and its routers refuse to start until it has (`acceleration/README.md`, «A serving role that
+  A deployment that sets `postgres.migrate_dsn` migrates in a step of its own instead, before
+  `launch deploy`: run the release's binary as `router migrate` with that shard's settings, for
+  each shard. No tool runs it yet, and its routers refuse to start until it has run (`acceleration/README.md`, «A serving role that
   owns no table»).
   A migration has to be right for both databases: the global tables and the shard tables
   share one migration set.
