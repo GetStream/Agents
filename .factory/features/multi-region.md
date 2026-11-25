@@ -1,5 +1,64 @@
 # Multi-region
 
+## Multi Region Spec
+
+For voice AI in particular it matters to be close to the user. 
+The extra 100-200ms latency for text use cases often doesn't matter.
+
+### Routing
+
+New messages, new sessions, incoming calls should all connect to the closest region.
+Tool calling requests should connect to the closest region.
+Agents or perhaps apps should have a routing policy (Closest or US-east)
+
+### Why a US-east routing policy can make sense
+
+A voice agent can require:
+- Tools
+- Knowledge
+- Memory
+- Conversational LLM, Thinking LLM
+- STT
+- TTS
+
+A good part of this pipeline runs in parallel. But not everything.
+So assume you have an agent that mostly gets traffic from EU. 
+But all the above are hosted and only available in US-east.
+It's typically faster to forward the EU request to US-east. 
+This is a moving target
+
+### Why a closest routing policy can make sense
+
+In this next example assume we run VAD, conversational AI locally in EU. 
+Human response time is typically 200-300ms on a conversation. 
+So adding 150ms of latency in some cases is not good.
+When local services are available, it's better to run in EU and route to closest.
+This is a moving target since GPU capacity will change provider's routing behaviour.
+
+### Running single shard
+
+It should be possible to self host a single shard. And not have to deal with multi region support.
+
+## Multi region implementation
+
+- For each session store on which region it ran
+- Logs, messages etc are all stored locally in the region
+- The main/config region stores the configs
+- For each/app/region you can configure the routing policy
+- By default we route to closest region
+- We track at the user level what their last used region was (so outbound campaigns etc can run in the right spot)
+- Regions can forward requests to other regions
+- Regions/shards cannot directly access DB or redis on other regions
+- Tools available in dispatch always register in US-east. Other shards forward to US-east for tool handling (we can change to a nicer http layer when a customer cares)
+
+### Multi Region routing policies
+
+- US-east only: everything goes to us-east
+- Latency/closets region: pick the closest region
+- US-only: for HIPAA, keep all data in US
+- EU only: keep all data in EU
+- Canada only: keep all data in Canada. Route traffic to Canada always
+
 ## Asked for
 
 Run the router in several regions at once (us-east4, europe-west4, more later), each region
