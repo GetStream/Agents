@@ -426,17 +426,17 @@ func FromConfig(config store.AgentConfig) Spec {
 		// A text agent holds its conversation in writing, so a session created from one
 		// joins no call unless the request asks for a voice session explicitly.
 		Text:           config.Mode == store.AgentModeText,
-		STTTarget:      config.STT,
-		TTSTarget:      config.TTS,
-		STSTarget:      config.STS,
-		Voice:          config.Voice,
-		LLMTarget:      config.LLM,
-		LLMFallbacks:   config.LLMFallbacks,
+		STTTarget:      config.Models.STT,
+		TTSTarget:      config.Models.TTS,
+		STSTarget:      config.Models.STS,
+		Voice:          config.Models.Voice,
+		LLMTarget:      config.Models.LLM,
+		LLMFallbacks:   config.Models.LLMFallbacks,
 		Agents:         config.Agents,
-		SubagentTarget: config.Subagent,
-		VideoSource:    config.VideoSource, VideoMaxFrames: config.VideoMaxFrames,
-		SearchTarget:       config.Search,
-		ImageTarget:        config.Image,
+		SubagentTarget: config.Models.Subagent,
+		VideoSource:    config.Video.Source, VideoMaxFrames: config.Video.MaxFrames,
+		SearchTarget:       config.Models.Search,
+		ImageTarget:        config.Models.Image,
 		Instructions:       config.Instructions,
 		Greeting:           config.Greeting,
 		VaryGreeting:       config.GreetingMode == store.GreetingVariation,
@@ -448,12 +448,12 @@ func FromConfig(config store.AgentConfig) Spec {
 		Keyterms:           config.Keyterms,
 		VisibleTools:       config.VisibleTools,
 		KnowledgeNamespace: config.KnowledgeNamespace,
-		Sandbox:            config.Sandbox,
-		SandboxOptions:     config.SandboxOptions,
+		Sandbox:            config.Sandbox.Provider,
+		SandboxOptions:     config.Sandbox.Options,
 		Harness:            config.Harness,
-		DispatchText:       config.DispatchText,
-		EpisodeCards:       config.EpisodeCards,
-		EpisodeCardsRecord: config.EpisodeCardsRecord,
+		DispatchText:       config.Dispatch.Text,
+		EpisodeCards:       config.EpisodeCards.On,
+		EpisodeCardsRecord: config.EpisodeCards.Record,
 		ToolGroups:         config.ToolGroups,
 		ResumeHistory:      config.ResumeHistory,
 		FloorControl:       config.FloorControl,
@@ -477,6 +477,8 @@ func configTeam(tags map[string]string) string {
 }
 
 // Normalize fills in the defaults a caller left out and reports what cannot be defaulted.
+// What the caller can correct is marked routing.ErrRequest; a missing customer id is the
+// router's own mistake and is not.
 func (s *Spec) Normalize() error {
 	// The overwrites are applied before anything is defaulted, so a target the caller asked
 	// for is what gets defaulted around rather than one the config happened to name. A
@@ -488,7 +490,7 @@ func (s *Spec) Normalize() error {
 		s.Harness = harness.Default
 	}
 	if s.Harness != harness.Default {
-		return stack.Wrap(fmt.Errorf("session: there is no harness called %q", s.Harness))
+		return routing.Refused(stack.Wrap(fmt.Errorf("session: there is no harness called %q", s.Harness)))
 	}
 
 	if s.ID == "" {
@@ -500,13 +502,13 @@ func (s *Spec) Normalize() error {
 	} else if held, ok := persistent.SessionID(s.ID); ok {
 		s.ID = held
 	} else {
-		return stack.Wrap(fmt.Errorf("session: the id %q is not one a session can have: up to 64 letters, digits, - and _", s.ID))
+		return routing.Refused(stack.Wrap(fmt.Errorf("session: the id %q is not one a session can have: up to 64 letters, digits, - and _", s.ID)))
 	}
 
 	// Checked before incognito clears the conversation id, so naming both is refused
 	// whatever else the request says.
 	if err := checkHistory(s.History, s.ConversationID); err != nil {
-		return err
+		return routing.Refused(err)
 	}
 
 	// Incognito is honoured here rather than at each of the places that records something,
@@ -544,13 +546,13 @@ func (s *Spec) Normalize() error {
 	}
 	switch {
 	case !s.Reopened.IsZero() && !(s.Text && s.PersistConversation && s.ConversationID != ""):
-		return stack.Wrap(errors.New("session: only a persistent text conversation is reopened"))
+		return routing.Refused(stack.Wrap(errors.New("session: only a persistent text conversation is reopened")))
 	case s.Text && s.CallID != "":
-		return stack.Wrap(errors.New("session: a text session holds no call, so it cannot join one"))
+		return routing.Refused(stack.Wrap(errors.New("session: a text session holds no call, so it cannot join one")))
 	case s.Text && s.Native():
-		return stack.Wrap(errors.New("session: a text session has no voice, so it cannot run a speech-to-speech model"))
+		return routing.Refused(stack.Wrap(errors.New("session: a text session has no voice, so it cannot run a speech-to-speech model")))
 	case s.Native() && s.Voicemail != nil && s.Voicemail.Message != "":
-		return stack.Wrap(errors.New("session: a speech-to-speech agent cannot say a fixed voicemail message; use hang_up"))
+		return routing.Refused(stack.Wrap(errors.New("session: a speech-to-speech agent cannot say a fixed voicemail message; use hang_up")))
 	}
 	if s.CustomerID == "" {
 		return stack.Wrap(errors.New("session: a customer id is required"))
@@ -603,21 +605,24 @@ func (s *Spec) Normalize() error {
 
 	s.Keyterms = stt.CleanKeyterms(s.Keyterms)
 	if len(s.Keyterms) > stt.MaxKeyterms {
-		return stack.Wrap(fmt.Errorf("session: at most %d keyterms may be named, and this asks for %d",
-			stt.MaxKeyterms, len(s.Keyterms)))
+		return routing.Refused(stack.Wrap(fmt.Errorf("session: at most %d keyterms may be named, and this asks for %d",
+			stt.MaxKeyterms, len(s.Keyterms))))
 	}
 
 	if s.VideoMaxFrames == 0 {
 		s.VideoMaxFrames = 1
 	}
 	if s.VideoMaxFrames < 1 || s.VideoMaxFrames > 8 {
-		return stack.Wrap(fmt.Errorf("session: video.max_frames must be between 1 and 8"))
+		return routing.Refused(stack.Wrap(fmt.Errorf("session: video.max_frames must be between 1 and 8")))
 	}
 
 	if err := s.Tags.Validate(); err != nil {
-		return err
+		return routing.Refused(err)
 	}
-	return harness.Tools{Tools: s.Tools}.Validate()
+	if err := (harness.Tools{Tools: s.Tools}).Validate(); err != nil {
+		return routing.Refused(err)
+	}
+	return nil
 }
 
 // checkHistory refuses history from the caller that the model would not be handed whole.

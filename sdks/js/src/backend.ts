@@ -12,6 +12,15 @@ export const API_KEY_ENV = "STREAM_API_KEY";
 export const API_SECRET_ENV = "STREAM_API_SECRET";
 export const AUTHENTICATE_ENV = "STREAM_ACCELERATION_AUTHENTICATE";
 
+/**
+ * Written in by the build, `vite.config.ts`, from package.json. Undefined where the source runs
+ * without it, as in the tests.
+ */
+declare const __SDK_VERSION__: string | undefined;
+
+/** This SDK's release, the version npm published. */
+export const VERSION: string = typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-development";
+
 /** How long a token minted here lasts. */
 const TOKEN_VALIDITY_SECONDS = 60 * 60;
 
@@ -631,6 +640,11 @@ export class Backend {
    * guest asked for by nobody yet.
    */
   async headers(anonymously = false): Promise<Record<string, string>> {
+    return { ...clientHeaders(), ...(await this.credentials(anonymously)) };
+  }
+
+  /** Who is calling, as `headers` sends it. */
+  private async credentials(anonymously: boolean): Promise<Record<string, string>> {
     if (anonymously) {
       return this.authenticate
         ? { api_key: this.apiKey, "stream-auth-type": "anonymous" }
@@ -783,12 +797,20 @@ export class Backend {
         "there is no WebSocket here; pass one as the webSocket option or run on Node 22 or newer",
       );
     }
-    if (!headers) {
-      return new (this.webSocketImpl as WebSocketConstructor)(url);
+    // A backend holding the secret has the credential to send as headers, and it runs where the
+    // WebSocket takes them: see the `webSocket` option. The SDK's own headers go with it, so the
+    // router counts the socket as the SDK's. Without a credential, only Node's own WebSocket is
+    // given headers: a browser's takes protocols as its second argument, and a socket passed in
+    // as the `webSocket` option is the app's to configure.
+    if (headers) {
+      return new (this.webSocketImpl as HeaderWebSocketConstructor)(url, {
+        headers: { ...clientHeaders(), ...headers },
+      });
     }
-    // Only a backend holding the secret has headers to send, and it runs where the WebSocket
-    // takes them: see the `webSocket` option.
-    return new (this.webSocketImpl as HeaderWebSocketConstructor)(url, { headers });
+    if (this.webSocketImpl === globalWebSocket() && runsOnNode()) {
+      return new (this.webSocketImpl as HeaderWebSocketConstructor)(url, { headers: clientHeaders() });
+    }
+    return new (this.webSocketImpl as WebSocketConstructor)(url);
   }
 
   /**
@@ -1044,6 +1066,26 @@ function base64urlBytes(bytes: Uint8Array): string {
     binary += String.fromCharCode(byte);
   }
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function runsOnNode(): boolean {
+  return Boolean((globalThis as { process?: { versions?: { node?: string } } }).process?.versions?.node);
+}
+
+/**
+ * What every request says this SDK is: `X-Stream-Client` names the SDK, its release and where it
+ * runs, in the shape stream-chat-js sends (`stream-chat-js-v<version>-<node|browser>`). The router
+ * counts a client starting `stream-agents-` as the SDK's rather than the API's, and logs both
+ * headers with the release that made the call.
+ *
+ * A browser sends `X-Stream-Client` alone. It names its own User-Agent, and both the router's
+ * and the proxy's CORS lists allow `X-Stream-Client` and not `User-Agent`, so a page that set
+ * one would have its requests refused at the preflight.
+ */
+function clientHeaders(): Record<string, string> {
+  return runsOnNode()
+    ? { "X-Stream-Client": `stream-agents-js-v${VERSION}-node`, "User-Agent": `stream-agents-js/${VERSION}` }
+    : { "X-Stream-Client": `stream-agents-js-v${VERSION}-browser` };
 }
 
 /**

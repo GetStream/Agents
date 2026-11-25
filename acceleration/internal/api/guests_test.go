@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -397,6 +398,39 @@ func (s *GuestsSuite) TestTheSameClaimArrivingTwiceIsNotAConflict() {
 	s.Equal(0, again.SessionsMoved, "the conversations moved the first time")
 }
 
+// A claim that stopped once the guest was marked, before the account joined the channels of
+// the conversations it moved, was answered as done when sent again, and the account never
+// could read them. The store's half is all the first claim got through.
+func (s *GuestsSuite) TestAClaimThatStoppedAfterMovingTheRowsJoinsTheChannelsWhenSentAgain() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	talked := s.talked(guest)
+	_, err := s.store.Users.ClaimGuest(context.Background(), s.customerID(), guest, account.userID)
+	s.Require().NoError(err)
+	s.Require().NotContains(s.chat.Members(s.transcriptOf(talked)), account.userID)
+
+	s.claim(guest, account.userID)
+
+	s.Contains(s.chat.Members(s.transcriptOf(talked)), account.userID, "the account reads what the guest said")
+}
+
+// A claim sent again once every step of it ran did them all again: a backend that claims at
+// every sign-in put the account back into the channel of a conversation it had left, with two
+// Stream calls for each of the account's conversations every time.
+func (s *GuestsSuite) TestAFinishedClaimSentAgainLeavesTheChannelsAsTheyAre() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	talked := s.talked(guest)
+	s.claim(guest, account.userID)
+	channel := s.transcriptOf(talked)
+	s.Require().Contains(s.chat.Members(channel), account.userID)
+	_, err := s.chat.Client.Chat().UpdateChannel(context.Background(), chatlog.ChannelType, channel,
+		&getstream.UpdateChannelRequest{RemoveMembers: []string{account.userID}})
+	s.Require().NoError(err)
+
+	s.claim(guest, account.userID)
+
+	s.NotContains(s.chat.Members(channel), account.userID, "the claim had nothing left to do")
+}
+
 func (s *GuestsSuite) TestAGuestSomebodyElseClaimedIsAConflict() {
 	guest := s.recordGuest()
 	s.claim(guest, s.utils.uuid())
@@ -407,12 +441,78 @@ func (s *GuestsSuite) TestAGuestSomebodyElseClaimedIsAConflict() {
 	s.Equal(http.StatusConflict, status)
 }
 
+func (s *GuestsSuite) TestAGuestIsNotClaimedByAReservedUserID() {
+	guest := s.recordGuest()
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/guests/claim",
+		ClaimGuestRequest{GuestId: guest, UserId: "!anon"})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "user_id may not start with !")
+}
+
 func (s *GuestsSuite) TestAGuestNobodyMintedCannotBeClaimed() {
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/guests/claim",
 		ClaimGuestRequest{GuestId: s.utils.uuid(), UserId: s.utils.uuid()})
 
 	s.Equal(http.StatusNotFound, status)
 	s.Contains(failure, "no such guest")
+}
+
+// TestClaimsRacingForOneGuestLoseWithAConflict: claims sent at once all read the guest
+// unclaimed, and those the store then refuses lost to the one that won, which is a 409 as a
+// claim arriving after it is, not a 500.
+func (s *GuestsSuite) TestClaimsRacingForOneGuestLoseWithAConflict() {
+	guest := s.recordGuest()
+	const claims = 20
+	statuses := make(chan int, claims)
+	var wg sync.WaitGroup
+	for range claims {
+		wg.Go(func() {
+			status, _ := s.serverClient.call(http.MethodPost, "/v1/agents/guests/claim",
+				ClaimGuestRequest{GuestId: guest, UserId: s.utils.uuid()})
+			statuses <- status
+		})
+	}
+	wg.Wait()
+	close(statuses)
+
+	won := 0
+	for status := range statuses {
+		if status == http.StatusOK {
+			won++
+			continue
+		}
+		s.Equal(http.StatusConflict, status)
+	}
+	s.Equal(1, won)
+}
+
+// TestAClaimTheDatabaseCannotMoveIsAnsweredAsInternal (AI-3575): a move the database fails is a
+// 500 that quotes none of the query, not a 400 the caller could correct.
+func (s *GuestsSuite) TestAClaimTheDatabaseCannotMoveIsAnsweredAsInternal() {
+	guest := s.recordGuest()
+	s.failQueries("caller_kind = CASE")
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/guests/claim",
+		ClaimGuestRequest{GuestId: guest, UserId: s.utils.uuid()})
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), `"code":"internal_error"`)
+	s.NotContains(string(body), "claim guest")
+	s.NotContains(string(body), "deadline")
+}
+
+// TestAGuestCannotClaimItself is the control: the one refusal the move made is still a 400
+// saying what is wrong.
+func (s *GuestsSuite) TestAGuestCannotClaimItself() {
+	guest := s.recordGuest()
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/guests/claim",
+		ClaimGuestRequest{GuestId: guest, UserId: guest})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "claimed by itself")
 }
 
 func (s *GuestsSuite) TestAClaimHasToSayWhoIsClaimingWhom() {
@@ -451,13 +551,13 @@ func (s *GuestsSuite) TestAClaimMovesTheGuestsScheduledTasks() {
 		Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second), Timezone: "UTC",
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(ctx, &task, 0))
-	s.T().Cleanup(func() { _ = s.store.DeleteScheduledTask(ctx, task.CustomerID, task.ID) })
+	s.Require().NoError(s.store.ScheduledTasks.Insert(ctx, &task, 0))
+	s.T().Cleanup(func() { _ = s.store.ScheduledTasks.Delete(ctx, task.CustomerID, task.ID) })
 	account := s.utils.uuid()
 
 	s.claim(guest, account)
 
-	moved, err := s.store.ScheduledTask(ctx, s.customerID(), task.ID)
+	moved, err := s.store.ScheduledTasks.Get(ctx, s.customerID(), task.ID)
 	s.Require().NoError(err)
 	s.Equal(account, moved.UserID, "the task follows up for the account the guest turned out to be")
 }
@@ -504,7 +604,7 @@ func (s *GuestsSuite) TestAClaimLeavesWhatAnAnonymousNamesakeSaidWhereItWas() {
 	s.Contains(s.chat.Members(s.transcriptOf(genuine)), account.userID, "the account reads what the guest said")
 	s.NotContains(s.chat.Members(s.transcriptOf(underTheGuestsName)), account.userID)
 	s.NotContains(s.chat.Members(s.transcriptOf(underTheAccountsName)), account.userID)
-	left, err := s.store.ScheduledTask(context.Background(), s.customerID(), task)
+	left, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), task)
 	s.Require().NoError(err)
 	s.Equal(guestID, left.UserID, "the namesake's task is not moved")
 }
@@ -517,7 +617,7 @@ func (s *GuestsSuite) TestAClaimDoesNotLetTheAccountIntoAnotherAppsChannel() {
 	foreign := s.transcriptOf(s.talkedAs(otherUser))
 	own := s.talkedAs(s.data.createUser())
 	var raw string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
 		Scan(context.Background(), &raw))
 	row := map[string]any{}
 	s.Require().NoError(json.Unmarshal([]byte(raw), &row))
@@ -551,7 +651,7 @@ func (s *GuestsSuite) TestAClaimStillJoinsAChannelWithNoCustomerStamp() {
 
 	own := s.talkedAs(s.data.createUser())
 	var raw string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
 		Scan(context.Background(), &raw))
 	row := map[string]any{}
 	s.Require().NoError(json.Unmarshal([]byte(raw), &row))
@@ -579,7 +679,7 @@ func (s *GuestsSuite) mint(as *testClient, request GuestUserRequest) GuestUser {
 
 // storedGuest is the guest's row as the store holds it.
 func (s *GuestsSuite) storedGuest(id string) store.User {
-	held, err := s.store.Guest(context.Background(), s.customerID(), id)
+	held, err := s.store.Users.GetGuest(context.Background(), s.customerID(), id)
 	s.Require().NoError(err)
 	return held
 }
@@ -609,7 +709,7 @@ func (s *GuestsSuite) assertStreamProfile(id, name string, custom map[string]any
 // over HTTP would reach Stream for the token.
 func (s *GuestsSuite) recordGuest() string {
 	id := guestPrefix + s.utils.uuid()
-	s.Require().NoError(s.store.RecordGuest(context.Background(), &store.User{
+	s.Require().NoError(s.store.Users.InsertGuest(context.Background(), &store.User{
 		ID: id, CustomerID: s.customerID(), Name: "Guest",
 	}))
 	return id
@@ -621,7 +721,7 @@ func (s *RouterSuite) guestSeenInAToken() string {
 	id := "visitor-" + s.utils.uuid()
 	s.signedIn(jwt.MapClaims{"user_id": id, "role": "guest"}, auth.AuthTypeJWT, guest, id).
 		do(http.MethodGet, "/v1/agents/calls", nil, nil)
-	seen, err := s.store.Guest(context.Background(), s.customerID(), id)
+	seen, err := s.store.Users.GetGuest(context.Background(), s.customerID(), id)
 	s.Require().NoError(err, "the call is what records the guest")
 	s.Require().False(seen.Minted)
 	return id
@@ -664,15 +764,15 @@ func (s *GuestsSuite) scheduledFor(userID string, kind auth.Kind) string {
 		Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second), Timezone: "UTC",
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(ctx, &task, 0))
-	s.T().Cleanup(func() { _ = s.store.DeleteScheduledTask(ctx, task.CustomerID, task.ID) })
+	s.Require().NoError(s.store.ScheduledTasks.Insert(ctx, &task, 0))
+	s.T().Cleanup(func() { _ = s.store.ScheduledTasks.Delete(ctx, task.CustomerID, task.ID) })
 	return task.ID
 }
 
 // transcriptOf is the Stream Chat channel the session's words were written to.
 func (s *GuestsSuite) transcriptOf(sessionID string) string {
 	var row store.AgentSession
-	s.Require().NoError(s.store.DB().NewSelect().Model(&row).Where("id = ?", sessionID).Scan(context.Background()))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&row).Where("id = ?", sessionID).Scan(context.Background()))
 	channel := transcriptChannel(row)
 	_, kept := s.chat.Channel(channel)
 	s.Require().True(kept, "the session wrote a transcript")
@@ -684,7 +784,7 @@ func (s *GuestsSuite) transcriptOf(sessionID string) string {
 // a name would put the name in its channel, so the row is moved under it afterwards.
 func (s *GuestsSuite) underTheName(name string) string {
 	talked := s.talkedAs(s.data.createAnonymous())
-	_, err := s.store.DB().NewUpdate().Model((*store.AgentSession)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentSession)(nil)).
 		Set("user_id = ?", name).Where("id = ?", talked).Exec(context.Background())
 	s.Require().NoError(err)
 	s.Require().NotContains(s.chat.Members(s.transcriptOf(talked)), name)

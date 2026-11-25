@@ -6,16 +6,6 @@ on:
         description: 'pytest -m expression (e.g., `not integration` or `integration`)'
         required: true
         type: string
-      pytest-params:
-        description: 'additional pytest params'
-        required: false
-        default: ""
-        type: string
-      notify-on-failure:
-        description: 'Post to Slack on test failure'
-        required: false
-        default: false
-        type: boolean
       environment:
         description: 'Environment the test job runs in, for its provider keys; empty runs it in none'
         required: false
@@ -33,7 +23,7 @@ jobs:
   # Run linters in one step to reduce checkout & dependencies setup overhead
   lint:
     name: Lint (ruff + mypy + validate pyproject.toml)
-    runs-on: ubuntu-latest
+    runs-on: { group: github-public-amd64 }
     permissions:
       contents: read
     steps:
@@ -82,7 +72,7 @@ jobs:
 
   test:
     name: Test "${{ inputs.marker }}"
-    runs-on: ubuntu-latest
+    runs-on: { group: github-public-amd64 }
     # The provider keys live in this environment, which only the branches that need them may enter.
     environment: ${{ inputs.environment }}
     env:
@@ -144,14 +134,6 @@ jobs:
       # Unit tests spread over every core; integration tests stay serial so the providers'
       # rate limits see one caller.
       - name: Run core tests
-        run: uv run --no-sync pytest -m "${{ inputs.marker }}" ${{ inputs.marker != 'integration' && '-n auto --dist worksteal' || '' }} tests/ ${{ inputs.pytest-params }}
+        run: uv run --no-sync pytest -m "${{ inputs.marker }}" ${{ inputs.marker != 'integration' && '-n auto --dist worksteal' || '' }} tests/
       - name: Run plugin tests
-        run: uv run --no-sync pytest -m "${{ inputs.marker }}" ${{ inputs.marker != 'integration' && '-n auto --dist worksteal' || '' }} plugins/*/tests/*.py ${{ inputs.pytest-params }}
-      - name: Notify Slack on failure
-        if: failure() && inputs.notify-on-failure
-        uses: ./.github/actions/notify-slack
-        with:
-          workflow-name: ${{ github.workflow }}
-          report-file: .report.json
-          summary: "${{ github.workflow }} failed"
-          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: uv run --no-sync pytest -m "${{ inputs.marker }}" ${{ inputs.marker != 'integration' && '-n auto --dist worksteal' || '' }} plugins/*/tests/*.py

@@ -195,6 +195,15 @@ func fail(reason Reason, format Format, err error) error {
 	return stack.Wrap(&Error{Reason: reason, Format: format, Err: err})
 }
 
+// unreadable is err from reading a file's content: the deadline when reading was stopped
+// by it, and otherwise a file that is corrupt.
+func unreadable(ctx context.Context, format Format, err error) error {
+	if ctx.Err() != nil {
+		return stack.Wrap(fmt.Errorf("extract: read the %s: %w", format, ctx.Err()))
+	}
+	return fail(Corrupt, format, err)
+}
+
 // DefaultMaxPages is the most pages one file is read for: more than any manual somebody
 // uploads, and few enough that a crafted file cannot keep a worker reading for an hour.
 const DefaultMaxPages = 2000
@@ -206,6 +215,9 @@ const DefaultTimeout = 2 * time.Minute
 // unpacked. Zip compresses repeated XML by a thousand times or more, so a small file can
 // unpack to more memory than the process has.
 const maxUnzipped = 64 << 20
+
+// maxMedia is the most the pictures of one Word or OpenDocument file may unpack to in all.
+const maxMedia = 4 * maxUnzipped
 
 // Options configures an Extractor.
 type Options struct {
@@ -275,15 +287,15 @@ func (e *Extractor) Extract(ctx context.Context, name string, data []byte) (Docu
 	case PDF:
 		document, err = e.readPDF(ctx, data)
 	case DOCX:
-		document, err = readDOCX(data)
+		document, err = readDOCX(ctx, data)
 	case DOC:
-		document, err = readDOC(data)
+		document, err = readDOC(ctx, data)
 	case XLSX:
-		document, err = readXLSX(data)
+		document, err = readXLSX(ctx, data)
 	case ODT:
-		document, err = readODT(data)
+		document, err = readODT(ctx, data)
 	case RTF:
-		document, err = readRTF(data)
+		document, err = readRTF(ctx, data)
 	}
 	if err != nil {
 		return Document{}, err
@@ -403,4 +415,32 @@ func zipFile(archive *zip.Reader, name string) ([]byte, error) {
 		}
 	}
 	return nil, nil
+}
+
+// media reads the pictures a document's body names, from its archive. A small body can name
+// one large part millions of times, so each part is unpacked once, and no more than
+// maxMedia is unpacked in all.
+type media struct {
+	archive *zip.Reader
+	read    map[string]bool
+	left    int
+}
+
+func newMedia(archive *zip.Reader) *media {
+	return &media{archive: archive, read: map[string]bool{}, left: maxMedia}
+}
+
+// part is the picture at name. It is nil when the archive holds none there, when it was
+// read before, which pictures.keep would pass over anyway, and once maxMedia is spent.
+func (m *media) part(name string) []byte {
+	if m.read[name] || m.left <= 0 {
+		return nil
+	}
+	m.read[name] = true
+	data, _ := zipFile(m.archive, name)
+	m.left -= len(data)
+	if m.left < 0 {
+		return nil
+	}
+	return data
 }

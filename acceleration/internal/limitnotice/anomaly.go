@@ -38,39 +38,44 @@ const (
 	anomalyTimeout = 2 * time.Minute
 )
 
-// AnomalyOptions configure Anomalies. Store and Poster are required.
+// AnomalyOptions configure Anomalies. Store is required. Without a Sender the check posts and
+// notes nothing and only deletes the activity past its keep.
 type AnomalyOptions struct {
-	Store  *store.Store
-	Poster Poster
-	// Environment is named in every message, as Notifier's are (EnvironmentTag).
-	Environment string
-	// Links are the pages a message links to; only Staff applies, an anomaly having no app.
-	Links  Links
+	Store *store.Store
+	// Sender notes and posts each anomaly, and the activity digest with Digest; only its Links'
+	// Staff applies, an anomaly and a digest having no app.
+	Sender *Sender
 	Logger *slog.Logger
 	// Every is how often the check runs; defaults to an hour.
 	Every time.Duration
 	// Now is the time the check runs at; defaults to time.Now.
 	Now func() time.Time
+	// Digest has the check also post the activity digest of the day before, once per UTC day
+	// (postDigest).
+	Digest bool
 }
 
 // Anomalies tells the operator, in the money limit notices' channel, of each organization whose
 // spend today is anomalyFactor times its median day of the anomalyDays before, once per
 // organization and day. Every router runs one, and the one holding the deployment's cost anomaly
-// lock does the check; the others try the lock again at the next tick.
+// lock does the check; the others try the lock again at the next tick. The holder also deletes
+// the activity past its keep, once a day (prune).
 type Anomalies struct {
-	store       *store.Store
-	lock        *store.ShipLock
-	poster      Poster
-	environment string
-	links       Links
-	logger      *slog.Logger
-	every       time.Duration
-	now         func() time.Time
+	store  *store.Store
+	lock   *store.ShipLock
+	sender *Sender
+	logger *slog.Logger
+	every  time.Duration
+	now    func() time.Time
+	digest bool
 
 	// baselines is each organization's median day before baselineDay, read once per day. Only
 	// the checking goroutine uses them.
 	baselines   map[string]int64
 	baselineDay time.Time
+	// prunedDay is the UTC day this router last deleted the activity past its keep. Only the
+	// checking goroutine uses it.
+	prunedDay time.Time
 
 	stop context.CancelFunc
 	done chan struct{}
@@ -91,8 +96,8 @@ func NewAnomalies(options AnomalyOptions) *Anomalies {
 		now = time.Now
 	}
 	return &Anomalies{
-		store: options.Store, lock: options.Store.CostAnomalyLock(), poster: options.Poster,
-		environment: options.Environment, links: options.Links, logger: logger, every: every, now: now,
+		store: options.Store, lock: options.Store.CostAnomalyLock(), sender: options.Sender,
+		logger: logger, every: every, now: now, digest: options.Digest,
 	}
 }
 
@@ -104,7 +109,7 @@ func (a *Anomalies) Start() {
 }
 
 // Close stops the check, waits for one under way to end, and gives the lock back. What it had
-// noted and not posted is posted by the next check, on whichever router holds the lock.
+// noted and not posted is posted by a Sender's next sweep.
 func (a *Anomalies) Close() {
 	if a.stop == nil {
 		return
@@ -128,10 +133,9 @@ func (a *Anomalies) run(ctx context.Context) {
 	}
 }
 
-// check notes and posts today's anomalies when this router holds the lock, then posts those
-// whose post failed before. A holder whose note of the spend fails lets the lock go, so that a
-// router that can check takes it at its next tick; one that only fails to read the unposted
-// keeps it, its database answering. A check that Close ends is not logged as failed.
+// check notes and posts today's anomalies when this router holds the lock. A holder whose note
+// of the spend fails lets the lock go, so that a router that can check takes it at its next
+// tick. A check that Close ends is not logged as failed.
 func (a *Anomalies) check(ctx context.Context) {
 	now := a.now().UTC()
 	checking, cancel := context.WithTimeout(ctx, anomalyTimeout)
@@ -146,6 +150,13 @@ func (a *Anomalies) check(ctx context.Context) {
 	if !held {
 		return
 	}
+	if a.digest && a.sender != nil {
+		a.postDigest(checking, now)
+	}
+	a.prune(checking, now)
+	if a.sender == nil {
+		return
+	}
 	if err := a.note(checking, now); err != nil {
 		a.lock.Release()
 		if ctx.Err() == nil {
@@ -153,15 +164,32 @@ func (a *Anomalies) check(ctx context.Context) {
 		}
 		return
 	}
-	anomalies, err := a.store.ClaimUnpostedCostAnomalies(checking, stale, sweepBatch)
+}
+
+// prune deletes the activity and the activity digests past their keep (store.Activities.Prune,
+// store.ActivityDigests.Prune) once per UTC day: the rows
+// age out a day at a time, so one delete a day keeps up. One that failed is tried again at the
+// next check. A router that takes the lock later the same day deletes again, and finds nothing.
+func (a *Anomalies) prune(ctx context.Context, now time.Time) {
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	if a.prunedDay.Equal(today) {
+		return
+	}
+	pruned, err := a.store.Activities.Prune(ctx, now)
+	if err == nil {
+		var digests int
+		digests, err = a.store.ActivityDigests.Prune(ctx, now)
+		pruned += digests
+	}
 	if err != nil {
 		if ctx.Err() == nil {
-			a.logger.Error("could not read the cost anomalies never posted", "error", err)
+			a.logger.Error("could not delete the activity past its keep, trying again", "in", a.every, "error", err)
 		}
 		return
 	}
-	for _, anomaly := range anomalies {
-		a.post(checking, anomaly)
+	a.prunedDay = today
+	if pruned > 0 {
+		a.logger.Info("deleted the activity past its keep", "rows", pruned)
 	}
 }
 
@@ -176,7 +204,7 @@ func (a *Anomalies) note(ctx context.Context, now time.Time) error {
 		}
 		a.baselines, a.baselineDay = baselines, today
 	}
-	spent, err := a.store.DailySpend(ctx, today, today.AddDate(0, 0, 1))
+	spent, err := a.store.Spend.Daily(ctx, today, today.AddDate(0, 0, 1))
 	if err != nil {
 		return err
 	}
@@ -185,15 +213,14 @@ func (a *Anomalies) note(ctx context.Context, now time.Time) error {
 		if spend.CostMicros < anomalyMinSpendMicros || baseline <= 0 || spend.CostMicros < anomalyFactor*baseline {
 			continue
 		}
-		anomaly := store.CostAnomaly{
+		notice, err := store.CostAnomaly{
 			OrganizationID: spend.OrganizationID, Day: today, SpentMicros: spend.CostMicros, BaselineMicros: baseline,
-		}
-		written, err := a.store.NoteCostAnomaly(ctx, anomaly)
+		}.Notice()
 		if err != nil {
 			return err
 		}
-		if written {
-			a.post(ctx, anomaly)
+		if _, err := a.sender.Note(ctx, notice); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -202,7 +229,7 @@ func (a *Anomalies) note(ctx context.Context, now time.Time) error {
 // baselinesBefore is each organization's median daily spend over the anomalyDays before day,
 // for the organizations that spent on any of them.
 func (a *Anomalies) baselinesBefore(ctx context.Context, day time.Time) (map[string]int64, error) {
-	spent, err := a.store.DailySpend(ctx, day.AddDate(0, 0, -anomalyDays), day)
+	spent, err := a.store.Spend.Daily(ctx, day.AddDate(0, 0, -anomalyDays), day)
 	if err != nil {
 		return nil, err
 	}
@@ -224,20 +251,6 @@ func median(costs []int64, days int) int64 {
 	copy(all, costs)
 	slices.Sort(all)
 	return all[days/2]
-}
-
-func (a *Anomalies) post(ctx context.Context, anomaly store.CostAnomaly) {
-	if err := a.poster.Post(ctx, AnomalyMessage(a.environment, a.links, anomaly)); err != nil {
-		a.logger.Error("could not post that an organization's spend jumped; it is retried",
-			"organization", anomaly.OrganizationID, "error", err)
-		return
-	}
-	if err := a.store.MarkCostAnomalyPosted(ctx, anomaly.OrganizationID, anomaly.Day); err != nil {
-		a.logger.Error("posted that an organization's spend jumped, and could not record it; it may be posted again",
-			"organization", anomaly.OrganizationID, "error", err)
-		return
-	}
-	a.logger.Info("posted that an organization's spend jumped", "organization", anomaly.OrganizationID)
 }
 
 // AnomalyMessage is the anomaly as it is posted, in Slack's mrkdwn, tagged with its environment

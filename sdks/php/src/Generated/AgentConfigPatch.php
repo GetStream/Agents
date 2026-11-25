@@ -86,6 +86,8 @@ final readonly class AgentConfigPatch
         public ?string $image = null,
         // What teaches the agent's model to answer with UI. An empty string removes them.
         public ?string $uiInstructions = null,
+        // The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict whe...
+        public ?\DateTimeImmutable $updatedAt = null,
     ) {
     }
 
@@ -136,6 +138,7 @@ final readonly class AgentConfigPatch
             agents: array_key_exists('agents', $data) && $data['agents'] !== null ? array_map(ChildAgent::fromArray(...), Json::objects($data, 'agents')) : null,
             image: array_key_exists('image', $data) && $data['image'] !== null ? Json::string($data, 'image') : null,
             uiInstructions: array_key_exists('ui_instructions', $data) && $data['ui_instructions'] !== null ? Json::string($data, 'ui_instructions') : null,
+            updatedAt: array_key_exists('updated_at', $data) && $data['updated_at'] !== null ? Json::date($data, 'updated_at') : null,
         );
     }
 
@@ -269,6 +272,9 @@ final readonly class AgentConfigPatch
         }
         if ($this->uiInstructions !== null) {
             $out['ui_instructions'] = $this->uiInstructions;
+        }
+        if ($this->updatedAt !== null) {
+            $out['updated_at'] = Json::dateValue($this->updatedAt);
         }
         return $out;
     }

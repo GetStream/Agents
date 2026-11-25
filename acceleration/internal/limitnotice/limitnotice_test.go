@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,40 +20,49 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
-// memory is a Store of its own: the first NoteLimit of an organization and kind writes.
+// memory is a Store of its own: the first Insert of an organization, kind and key writes.
 type memory struct {
 	mu      sync.Mutex
-	written map[string]store.LimitNotice
+	written map[string]store.Notice
 	posted  map[string]bool
 	fail    error
 }
 
 func newMemory() *memory {
-	return &memory{written: map[string]store.LimitNotice{}, posted: map[string]bool{}}
+	return &memory{written: map[string]store.Notice{}, posted: map[string]bool{}}
 }
 
-func (m *memory) NoteLimit(_ context.Context, notice store.LimitNotice) (bool, error) {
+func (m *memory) Insert(_ context.Context, notice *store.Notice) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.fail != nil {
 		return false, m.fail
 	}
-	key := notice.OrganizationID + "/" + notice.Kind
+	key := notice.OrganizationID + "/" + notice.Kind + notice.DedupeKey
 	if _, ok := m.written[key]; ok {
 		return false, nil
 	}
-	m.written[key] = notice
+	m.written[key] = *notice
 	return true, nil
 }
 
-func (m *memory) ClaimUnpostedLimits(context.Context, time.Duration, int) ([]store.LimitNotice, error) {
-	return nil, nil
-}
-
-func (m *memory) MarkLimitPosted(_ context.Context, organization, kind string) error {
+// Claim returns every notice written and not posted, as if each claim were stale.
+func (m *memory) Claim(context.Context, time.Duration, int) ([]store.Notice, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.posted[organization+"/"+kind] = true
+	var unposted []store.Notice
+	for key, notice := range m.written {
+		if !m.posted[key] {
+			unposted = append(unposted, notice)
+		}
+	}
+	return unposted, nil
+}
+
+func (m *memory) MarkPosted(_ context.Context, notice store.Notice) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.posted[notice.OrganizationID+"/"+notice.Kind+notice.DedupeKey] = true
 	return nil
 }
 
@@ -83,7 +93,7 @@ func (p *posts) all() []string {
 
 func TestTheFirstHitOfEachKindIsPostedOnce(t *testing.T) {
 	db, slack := newMemory(), &posts{}
-	notifier := New(db, slack, "test", Links{}, slog.New(slog.DiscardHandler))
+	notifier := New(NewSender(SenderOptions{Store: db, Poster: slack, Environment: "test", Logger: slog.New(slog.DiscardHandler)}), slog.New(slog.DiscardHandler))
 	defer notifier.Close()
 
 	hit := policy.LimitHit{OrganizationID: "org-1", AppID: "app-1", Kind: store.LimitNoCredit, Enforced: true, Message: "no credit"}
@@ -99,17 +109,46 @@ func TestTheFirstHitOfEachKindIsPostedOnce(t *testing.T) {
 	}, 2*time.Second, 5*time.Millisecond)
 	require.Len(t, slack.all(), 2, "once per kind, however many refusals")
 
-	again := New(db, slack, "test", Links{}, slog.New(slog.DiscardHandler))
+	again := New(NewSender(SenderOptions{Store: db, Poster: slack, Environment: "test", Logger: slog.New(slog.DiscardHandler)}), slog.New(slog.DiscardHandler))
 	defer again.Close()
 	again.Hit(hit)
 	time.Sleep(50 * time.Millisecond)
 	require.Len(t, slack.all(), 2, "another router finds it written")
 }
 
+func TestTheSweepPostsTheNoticesNoRouterPostedInTheirKindsMessage(t *testing.T) {
+	db, slack := newMemory(), &posts{}
+	for _, made := range []func() (store.Notice, error){
+		store.LimitNotice{OrganizationID: "org-1", Kind: store.LimitSpendHardLimit, Enforced: true, Message: "over the hard limit"}.Notice,
+		store.CostAnomaly{OrganizationID: "org-2", Day: time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC), SpentMicros: 50_000_000, BaselineMicros: 1_000_000}.Notice,
+		store.BalanceNotice{OrganizationID: "org-3", Kind: store.NoticeBalanceLow, GrantedMicros: 10}.Notice,
+	} {
+		notice, err := made()
+		require.NoError(t, err)
+		_, err = db.Insert(context.Background(), &notice)
+		require.NoError(t, err)
+	}
+	sender := NewSender(SenderOptions{Store: db, Poster: slack, Environment: "test", Logger: slog.New(slog.DiscardHandler)})
+	sender.every = 5 * time.Millisecond
+	sender.Start()
+	defer sender.Close()
+
+	require.Eventually(t, func() bool {
+		return db.isPosted("org-1/spend_hard_limit") && db.isPosted("org-2/cost_anomaly2026-03-10")
+	}, 2*time.Second, 5*time.Millisecond)
+	sender.Close()
+
+	sent := slack.all()
+	require.Len(t, sent, 2, "a balance warning is the customer's webhook, not the channel's")
+	require.False(t, db.isPosted("org-3/balance_low10"))
+	require.True(t, slices.ContainsFunc(sent, func(text string) bool { return strings.Contains(text, "over the hard limit") }), sent)
+	require.True(t, slices.ContainsFunc(sent, func(text string) bool { return strings.Contains(text, "org-2") }), sent)
+}
+
 func TestAHitThatCouldNotBeWrittenIsNotPosted(t *testing.T) {
 	db, slack := newMemory(), &posts{}
 	db.fail = errors.New("postgres is down")
-	notifier := New(db, slack, "test", Links{}, slog.New(slog.DiscardHandler))
+	notifier := New(NewSender(SenderOptions{Store: db, Poster: slack, Environment: "test", Logger: slog.New(slog.DiscardHandler)}), slog.New(slog.DiscardHandler))
 	defer notifier.Close()
 
 	notifier.Hit(policy.LimitHit{OrganizationID: "org-1", Kind: store.LimitNoCredit, Enforced: true})

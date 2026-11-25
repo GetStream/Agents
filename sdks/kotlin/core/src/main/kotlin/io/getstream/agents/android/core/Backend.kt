@@ -44,7 +44,13 @@ public data class StreamCredentials(
     val apiKey: String,
     val user: User,
     val token: String,
-)
+) {
+    /** The key and the user, never the token: a logged credential is the commonest way one leaks. */
+    override fun toString(): String = "StreamCredentials(apiKey=$apiKey, user=$user, token=$REDACTED)"
+}
+
+/** What a credential is shown as where it is held but must not be printed. */
+internal const val REDACTED: String = "[redacted]"
 
 /**
  * Where the router is and who is asking.
@@ -79,6 +85,11 @@ public class Backend(
          */
         private val REGION = Regex("[a-z]+-[a-z]+[0-9]+")
 
+        internal const val CLIENT_HEADER: String = "X-Stream-Client"
+
+        /** This SDK and its release, as the router reads it: any client named stream-agents- is an SDK. */
+        internal const val CLIENT: String = "stream-agents-kotlin-v" + BuildConfig.SDK_VERSION
+
         /**
          * Stream's hosted router held to one [region], such as us-east4: requests to it are
          * served there and nowhere else, even when that region is full or down.
@@ -106,6 +117,8 @@ public class Backend(
     }
 
     private val lock = Mutex()
+    /** What the model is told when one of the app's tools throws. See [StreamAgents.onToolError]. */
+    @Volatile internal var onToolError: ((call: AgentEvent.ToolCall, error: Throwable) -> String)? = null
     @Volatile private var identity: Identity? = null
     @Volatile private var cached: String? = null
 
@@ -232,9 +245,12 @@ public class Backend(
      * even to a router with nothing in front of it, which would otherwise take the caller for
      * a backend. The key travels in the query instead, where both Stream's proxy and the router
      * read it.
+     *
+     * `X-Stream-Client` names this SDK and its release, which the router counts its requests
+     * under.
      */
     internal suspend fun headers(): Map<String, String> {
-        val headers = linkedMapOf("Stream-Auth-Type" to "jwt")
+        val headers = linkedMapOf("Stream-Auth-Type" to "jwt", CLIENT_HEADER to CLIENT)
         val who = identity
         if (customerId.isNotEmpty()) {
             headers["X-Customer-Id"] = customerId

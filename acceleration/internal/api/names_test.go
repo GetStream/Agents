@@ -130,7 +130,7 @@ func (s *NamesSuite) TestEveryNameIndexTheStoreKnowsIsOneTheMigrationsMake() {
 		"agent_configs_name_idx", "skills_name_idx", "router_configs_name_idx", "voices_name_idx",
 	} {
 		var found bool
-		s.Require().NoError(s.store.DB().QueryRowContext(s.T().Context(),
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.T().Context(),
 			"SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = ?)", index).Scan(&found))
 		s.True(found, index)
 	}

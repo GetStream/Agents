@@ -1,11 +1,15 @@
 package api
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
-	"io"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -27,6 +31,55 @@ const (
 // meant to sit open. Postgres cannot say whose a transaction still open past that is, and
 // an export is a rare call whose caller can come back, so it is told to rather than held.
 const exportWritesWait = 30 * time.Second
+
+// exportLineWait bounds the write of one line of an export. The export reads in one
+// transaction, which holds a database connection until the last line is written, so a client
+// that stops reading lets go of it after this rather than holding it for as long as it likes.
+// A line is one row, which a client still reading takes in well under a minute.
+const exportLineWait = time.Minute
+
+// exportWait bounds a whole export. Its rows are read in one repeatable-read transaction, and
+// Postgres vacuums none of the rows that snapshot can see while it is open. An hour is a
+// choice: it reads 36 GB at 10 MB/s.
+const exportWait = time.Hour
+
+// maxExports bounds the exports running on one router at once, each holding a connection of
+// its pool: a tenth of the 40 the store opens (store.maxConns), so the rest are left to
+// requests.
+const maxExports = 4
+
+// maxImportLine bounds one line of an import, which is read into memory whole. A line is one
+// row, and the largest row the router writes is a conversation document's text, read from a
+// file of at most maxFetchedDocument (20 MiB): 64 MiB holds that with room for its JSON
+// escaping.
+const maxImportLine = 64 << 20
+
+// maxImports bounds the imports running on one router at once. Each holds a buffer of up to
+// maxImportLine, grown by doubling, and the copy of a row that decoding its line makes: 128 MiB
+// or more an import at its largest line, so four hold over half a GiB.
+const maxImports = 4
+
+// importLineWait bounds the read of one line of an import, which holds one of maxImports and
+// its app's place until it ends, so a client that stops sending lets go of them after this. A
+// line of maxImportLine arrives within it at over a megabyte a second.
+const importLineWait = time.Minute
+
+// errExportRunning refuses a second export of an app while one is running on this router. Each
+// export holds a connection of this router's pool until its client has read it all.
+var errExportRunning = conflict("an export of this app is already running: wait for it to finish")
+
+// errExportTooLong is an export whose exportWait passed before its first row was read.
+var errExportTooLong = unavailable("the export ran out of time before its first row: try again")
+
+// errExportsBusy refuses an export while maxExports are running on this router.
+var errExportsBusy = unavailable("this router is running as many exports as it takes at once: try again later")
+
+// errImportRunning refuses a second import of an app while one is running on this router.
+var errImportRunning = APIError{Type: ErrorTypeConflict, Code: codeImportRunning,
+	Message: "an import of this app is already running: wait for it to finish"}
+
+// errImportsBusy refuses an import while maxImports are running on this router.
+var errImportsBusy = unavailable("this router is running as many imports as it takes at once: try again later")
 
 // errWritesOpen is a capture start, or the export after it, that gave up on a write from before
 // the start (store.ErrWritesOpen).
@@ -66,6 +119,19 @@ func (s *Server) exportData(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errShardedSource)
 		return
 	}
+	if _, running := s.exporting.LoadOrStore(customerID, struct{}{}); running {
+		writeError(w, errExportRunning)
+		return
+	}
+	defer s.exporting.Delete(customerID)
+	select {
+	case s.exports <- struct{}{}:
+	default:
+		writeError(w, errExportsBusy)
+		return
+	}
+	defer func() { <-s.exports }()
+	ends := time.Now().Add(s.exportWait)
 
 	// Recording starts before the snapshot is read rather than after, so a write that
 	// lands while the export is being streamed is in one of the two and not in neither.
@@ -94,16 +160,29 @@ func (s *Server) exportData(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-store")
 	encoder := json.NewEncoder(w)
+	controller := http.NewResponseController(w)
+	encode := func(line dataLine) error {
+		if err := controller.SetWriteDeadline(time.Now().Add(min(s.exportLineWait, time.Until(ends)))); err != nil {
+			return fmt.Errorf("api: export write deadline: %w", err)
+		}
+		return encoder.Encode(line)
+	}
 
 	// A failure before the first line is still an error document. One after it is a
 	// truncated stream, which the missing cursor line on the end is what says.
 	written := int64(0)
-	cursor, err := s.store.ExportCustomer(r.Context(), customerID, func(table string, row json.RawMessage) error {
+	ctx, cancel := context.WithDeadline(r.Context(), ends)
+	defer cancel()
+	cursor, err := s.store.ExportCustomer(ctx, customerID, func(table string, row json.RawMessage) error {
 		written++
-		return encoder.Encode(dataLine{Table: table, Row: row})
+		return encode(dataLine{Table: table, Row: row})
 	})
 	if err != nil {
 		if written == 0 {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				writeError(w, errExportTooLong)
+				return
+			}
 			writeFailure(w, r, err)
 			return
 		}
@@ -112,7 +191,7 @@ func (s *Server) exportData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
-	if err := encoder.Encode(dataLine{Cursor: &cursor, Customer: customerID, At: &now}); err != nil {
+	if err := encode(dataLine{Cursor: &cursor, Customer: customerID, At: &now}); err != nil {
 		s.logger.Debug("export was not finished", "customer", customerID, "error", err)
 		return
 	}
@@ -136,6 +215,19 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if _, running := s.importing.LoadOrStore(customerID, struct{}{}); running {
+		writeError(w, errImportRunning)
+		return
+	}
+	defer s.importing.Delete(customerID)
+	select {
+	case s.imports <- struct{}{}:
+	default:
+		writeError(w, errImportsBusy)
+		return
+	}
+	defer func() { <-s.imports }()
+
 	// Asked at the first row rather than up front, so a batch of changes costs no lookup; once
 	// that row is written the app holds it, so the rows after it are not asked about.
 	checked := full
@@ -144,25 +236,36 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 	rows := int64(0)
 	tables := map[string]int64{}
 
-	decoder := json.NewDecoder(r.Body)
+	scanner := bufio.NewScanner(r.Body)
+	scanner.Buffer(nil, maxImportLine)
+	controller := http.NewResponseController(w)
 	for {
+		if err := controller.SetReadDeadline(time.Now().Add(s.importLineWait)); err != nil {
+			writeFailure(w, r, fmt.Errorf("api: import read deadline: %w", err))
+			return
+		}
+		if !scanner.Scan() {
+			break
+		}
+		if len(bytes.TrimSpace(scanner.Bytes())) == 0 {
+			continue
+		}
 		var line dataLine
-		if err := decoder.Decode(&line); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			writeError(w, invalidRequest("this is not an export: "+err.Error()))
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			writeError(w, invalidRequest("this is not an export: an import is one JSON object per line: "+err.Error()))
 			return
 		}
 
 		switch {
 		case line.Change != nil:
 			if err := s.store.ApplyChanges(r.Context(), customerID, []store.DataChange{*line.Change}); err != nil {
-				writeError(w, invalidRequest(err.Error()))
+				writeImportFailure(w, r, err)
 				return
 			}
-			rows++
-			tables[line.Change.Table]++
+			if !line.Change.Skipped() {
+				rows++
+				tables[line.Change.Table]++
+			}
 		case line.Table != "":
 			if !checked {
 				table, err := s.store.HoldingTable(r.Context(), customerID)
@@ -179,7 +282,7 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 				checked = true
 			}
 			if err := s.store.ImportRow(r.Context(), customerID, line.Table, line.Row); err != nil {
-				writeError(w, invalidRequest(err.Error()))
+				writeImportFailure(w, r, err)
 				return
 			}
 			rows++
@@ -188,9 +291,34 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 			cursor = line.Cursor
 		}
 	}
+	if errors.Is(scanner.Err(), bufio.ErrTooLong) {
+		writeError(w, payloadTooLarge(fmt.Sprintf("a line of an import is at most %d MiB", maxImportLine>>20)))
+		return
+	}
+	if err := scanner.Err(); err != nil {
+		writeError(w, invalidRequest("this is not an export: "+err.Error()))
+		return
+	}
 
 	s.logger.Info("imported a customer", "customer", customerID, "rows", rows)
 	writeJSON(w, map[string]any{"rows": rows, "tables": tables, "cursor": cursor})
+}
+
+// writeImportFailure answers a line the store did not write: an export the caller can correct
+// with what to change, and anything else, such as a database that failed, whose text names
+// where the database is, as a failure of ours that names nothing.
+func writeImportFailure(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, store.ErrAnotherCustomersRow) {
+		// Who holds the key is the operator's to know, so a caller is told only which row it is.
+		writeError(w, invalidRequest(strings.Replace(err.Error(), store.ErrAnotherCustomersRow.Error(), "this row cannot be written here", 1)))
+		return
+	}
+	var invalid *store.ValidationError
+	if errors.Is(err, store.ErrInvalidImport) || errors.Is(err, store.ErrNotACustomConnector) || errors.As(err, &invalid) {
+		writeError(w, invalidRequest(err.Error()))
+		return
+	}
+	writeFailure(w, r, err)
 }
 
 // listDataChanges returns what has happened to the calling app's rows since a cursor.

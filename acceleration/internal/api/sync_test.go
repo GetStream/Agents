@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/providers"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -16,7 +19,27 @@ import (
 
 type SyncSuite struct {
 	RouterSuite
+	// between runs a test's step in the middle of a sync, before a query of its choosing.
+	between *beforeQuery
 }
+
+// beforeQuery runs a test's step once, just before the first query that holds its marker, as
+// another writer's save landing in the middle of a request.
+type beforeQuery struct{ step atomic.Pointer[queryStep] }
+
+type queryStep struct {
+	marker string
+	run    func()
+}
+
+func (b *beforeQuery) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if step := b.step.Load(); step != nil && strings.Contains(event.Query, step.marker) && b.step.CompareAndSwap(step, nil) {
+		step.run()
+	}
+	return ctx
+}
+
+func (*beforeQuery) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 func TestSyncSuite(t *testing.T) {
 	runSuite(t, new(SyncSuite))
@@ -25,8 +48,11 @@ func TestSyncSuite(t *testing.T) {
 // SetupSuite seeds the built-in connectors as a router start does, so a directory can bind
 // one. Seeding is idempotent, so suites running beside this one see the same rows.
 func (s *SyncSuite) SetupSuite() {
+	s.speechToSpeech = true
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
+	s.between = &beforeQuery{}
+	s.store.GlobalDB().AddQueryHook(s.between)
 }
 
 // SetupTest gives every test an app of its own, because a sync is named by what the agent
@@ -223,8 +249,8 @@ func (s *SyncSuite) TestASyncPinningABatchTranscriberIsRefused() {
 
 func (s *SyncSuite) TestASyncLeavingAStoredBatchTranscriberAsItWasIsStored() {
 	pinned := "batch/" + batchModel
-	config := store.AgentConfig{CustomerID: s.customerID(), Name: "support", Mode: store.AgentModeVoice, STT: pinned}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "support", Mode: store.AgentModeVoice, Models: store.AgentModels{STT: pinned}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 
 	result := s.sync(map[string]any{"name": "support", "hash": "v1", "stt": pinned, "instructions": "Be brief."})
 
@@ -248,7 +274,7 @@ func (s *SyncSuite) TestASyncAllowingAnIPAddressAsADomainIsRefused() {
 				"sandbox_options": map[string]any{"allowed_domains": []string{"api.example.com", address}}})
 
 		s.Equal(http.StatusBadRequest, status, address)
-		s.Contains(failure, fmt.Sprintf("sandbox_options.allowed_domains: %q is not a domain", address), address)
+		s.Contains(failure, fmt.Sprintf("sandbox_options.allowed_domains has %q, which is not a domain", address), address)
 	}
 }
 
@@ -324,6 +350,114 @@ func (s *SyncSuite) TestASyncedDirectorysPagesAreReadIntoItsKnowledge() {
 	s.Equal("https://example.com/pricing", listed[0].Url)
 	s.Equal("What a call costs", value(listed[0].Title))
 	s.Equal(24, value(listed[0].RefreshHours))
+}
+
+func (s *SyncSuite) TestASyncWhosePageCannotBeStoredIsAnInternalError() {
+	s.failQueries("knowledge_urls")
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/sync", map[string]any{
+		"name": "librarian", "hash": "v1",
+		"knowledge_urls": []map[string]any{{"url": "https://example.com/pricing"}},
+	})
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), `"code":"internal_error"`)
+	s.NotContains(string(body), "store:")
+	s.NotContains(string(body), "deadline")
+}
+
+// The hash was stored with the config, before the skills: a sync whose skills then failed was
+// found unchanged when sent again, and its skills were never written.
+func (s *SyncSuite) TestASyncWhoseSkillsFailedOnceWritesThemWhenSentAgain() {
+	declaration := map[string]any{"name": "support", "hash": "v1", "skills": []map[string]string{
+		{"config_id": "", "name": "refund", "description": "work out a refund", "instructions": "Read the policy."},
+	}}
+	s.failQueries(`INSERT INTO "skills"`)
+	status, _ := s.serverClient.call(http.MethodPost, "/v1/agents/sync", declaration)
+	s.Require().Equal(http.StatusInternalServerError, status)
+	s.failing.value.Store(nil)
+
+	again := s.sync(declaration)
+
+	s.False(again.Unchanged, "the first sync did not finish, so this one has work to do")
+	s.Equal("Read the policy.", s.skillNamed(again.Config.Id, "refund").Instructions)
+	s.Equal("v1", value(again.Config.SyncHash))
+}
+
+// A sync wrote every setting from the copy of the config it read, which can come from the
+// cache, so a model saved since that the directory does not declare went back to what the copy
+// held. The update below goes past the store, as a save the cache has not heard of yet.
+func (s *SyncSuite) TestASyncKeepsAModelSavedSinceItReadTheConfigThatItsDirectoryDoesNotDeclare() {
+	declaration := map[string]any{"name": "support", "hash": "v1", "instructions": "Be brief.", "llm": "llm-flow"}
+	synced := s.sync(declaration)
+	s.Require().True(s.sync(declaration).Unchanged, "read, and so cached, by name")
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+		Set("llm = ?", "llm-thinking").Set("updated_at = now()").
+		Where("id = ?", synced.Config.Id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	result := s.sync(map[string]any{"name": "support", "hash": "v2", "instructions": "Be briefer."})
+
+	s.Equal("Be briefer.", value(result.Config.Instructions))
+	s.Equal("llm-thinking", value(result.Config.Llm), "the directory says nothing of the model")
+}
+
+// A sync whose copy of the config, read through the cache, missed a dashboard save kept the
+// dashboard's wording of a setting its directory declares, and still wrote its hash: every later
+// sync of the directory found nothing changed. The save goes past the store, as one the cache has
+// not heard of yet.
+func (s *SyncSuite) TestASyncWritesWhatItsDirectoryDeclaresOverASaveItsCachedCopyMissed() {
+	declaration := map[string]any{"name": "support", "hash": "v1", "instructions": "Be brief."}
+	synced := s.sync(declaration)
+	s.Require().True(s.sync(declaration).Unchanged, "read, and so cached, by name")
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+		Set("instructions = ?", "Dashboard wording.").Set("sync_hash = ''").Set("updated_at = now()").
+		Where("id = ?", synced.Config.Id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	result := s.sync(map[string]any{"name": "support", "hash": "v2", "instructions": "Be brief."})
+
+	s.Equal("Be brief.", value(result.Config.Instructions))
+	s.Equal("v2", value(result.Config.SyncHash))
+	s.Equal("Be brief.", value(s.configsNamed("support")[0].Instructions))
+}
+
+// The hash said the config held the directory although a save landed between the sync's write
+// of the config and of its hash, so every later sync of the directory found nothing changed and
+// never wrote it again. The save goes past the store, as one the cache has not heard of yet.
+func (s *SyncSuite) TestASyncLeavesItsHashOffAConfigSavedWhileItWroteItsSkills() {
+	declaration := map[string]any{"name": "support", "hash": "v1", "instructions": "Be brief.",
+		"skills": []map[string]string{
+			{"config_id": "", "name": "refund", "description": "work out a refund", "instructions": "Read the policy."},
+		}}
+	saved := make(chan error, 1)
+	s.between.step.Store(&queryStep{marker: `INSERT INTO "skills"`, run: func() {
+		_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+			Set("instructions = ?", "Dashboard wording.").Set("sync_hash = ''").Set("updated_at = now()").
+			Where("customer_id = ?", s.customerID()).Where("name = ?", "support").Exec(context.Background())
+		saved <- err
+	}})
+	s.T().Cleanup(func() { s.between.step.Store(nil) })
+
+	s.sync(declaration)
+	s.Require().Len(saved, 1, "the save landed in the middle of the sync")
+	s.Require().NoError(<-saved)
+	s.Empty(value(s.configsNamed("support")[0].SyncHash), "the config no longer holds the directory")
+
+	again := s.sync(declaration)
+
+	s.False(again.Unchanged)
+	s.Equal("Be brief.", value(again.Config.Instructions))
+}
+
+func (s *SyncSuite) TestASyncDeclaringAPageThatIsNotAFetchablePageIsRefusedInItsWords() {
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/sync", map[string]any{
+		"name": "librarian", "hash": "v1",
+		"knowledge_urls": []map[string]any{{"url": "mailto:sales@example.com"}},
+	})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "mailto:sales@example.com is not a page that can be fetched")
 }
 
 func (s *SyncSuite) TestASyncDeclaringAPageWithAUrlLongerThan2048CharactersIsRefused() {
@@ -865,10 +999,10 @@ func (s *SyncSuite) TestASessionFromAnAgentWhoseSkillRunsScriptsWithoutASandboxD
 		"name": "forms", "hash": "v1", "mode": "text", "llm": "en-low-latency",
 		"sandbox": "daytona", "skills": pdfSkill(),
 	})
-	config, err := s.configs.AgentConfig(context.Background(), s.customerID(), result.Config.Id)
+	config, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), result.Config.Id)
 	s.Require().NoError(err)
-	config.Sandbox = ""
-	s.Require().NoError(s.configs.UpdateAgentConfig(context.Background(), &config))
+	config.Sandbox.Provider = ""
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &config))
 
 	status, payload := s.serverClient.call(http.MethodPost, "/v1/agents/sessions",
 		CreateSessionRequest{ConfigId: &config.ID})
@@ -949,4 +1083,33 @@ func (s *SyncSuite) TestSyncingAnAgentStoresHowLongEachGroupKeepsToolOutput() {
 	})
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, "tools[0].output_retention")
+}
+
+func (s *SyncSuite) TestSyncingANewVoiceAgentDefaultsToSTSFast() {
+	result := s.sync(map[string]any{"name": "live-sync", "hash": "v1", "instructions": "Be brief."})
+	s.Equal(stsDefaultTarget, value(result.Config.Sts))
+}
+
+func (s *SyncSuite) TestSyncingAnExistingCascadedAgentKeepsItCascaded() {
+	created := s.sync(map[string]any{"name": "legacy-cascade", "hash": "v1", "sts": "", "instructions": "Be brief."})
+	s.Nil(created.Config.Sts)
+
+	updated := s.sync(map[string]any{"name": "legacy-cascade", "hash": "v2", "instructions": "Be briefer."})
+	s.Nil(updated.Config.Sts, "updating an existing cascaded config without naming sts must keep it cascaded")
+}
+
+func (s *SyncSuite) TestSyncingANewVoiceAgentWithEmptySTSOrCascadeSettingsStaysCascaded() {
+	explicit := s.sync(map[string]any{"name": "sync-cascade", "hash": "v1", "sts": ""})
+	s.Nil(explicit.Config.Sts)
+
+	withSTT := s.sync(map[string]any{"name": "sync-stt", "hash": "v1", "stt": "stub/stub-model"})
+	s.Nil(withSTT.Config.Sts)
+
+	withGuardrail := s.sync(map[string]any{
+		"name": "sync-guardrail", "hash": "v1", "guardrail": webhookGuardrail("https://example.com/check"),
+	})
+	s.Nil(withGuardrail.Config.Sts)
+
+	text := s.sync(map[string]any{"name": "sync-text", "hash": "v1", "mode": "text"})
+	s.Nil(text.Config.Sts)
 }

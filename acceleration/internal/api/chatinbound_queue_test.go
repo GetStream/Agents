@@ -186,7 +186,7 @@ func (s *ChatInboundQueueSuite) TestAPeerRefusesADeliveryItsRowDoesNotMatch() {
 func (s *ChatInboundQueueSuite) TestAPeerRefusesADeliveryWhoseRowIsGone() {
 	other, worker, logged := s.otherNodeWithAWorkerLogging()
 	row := s.row(s.queue(s.message(suiteStreamApp, deliveredConfig(&s.RouterSuite, s.customerID()), "")))
-	_, err := s.store.DB().NewDelete().Model((*store.ChatInbound)(nil)).Where("seq = ?", row.Seq).Exec(context.Background())
+	_, err := s.store.GlobalDB().NewDelete().Model((*store.ChatInbound)(nil)).Where("seq = ?", row.Seq).Exec(context.Background())
 	s.Require().NoError(err)
 
 	answer, err := s.router.handChatInboundToPeer(context.Background(), other.Listener.Addr().String(), queuedFrom(row))
@@ -252,8 +252,8 @@ func (s *ChatInboundQueueSuite) TestAPeerAnswersADeliveryHandedOverAsItsRowIsSto
 // for that customer, and one handed over naming the deployment instead is refused.
 func (s *ChatInboundQueueSuite) TestAPeerAnswersAPerAppDeliveryHandedOverAsItsRowIsStored() {
 	id := "queued-" + s.utils.uuid()
-	queued, err := s.store.QueueChatInbound(context.Background(), store.ChatInbound{
-		StreamApp: suiteStreamApp, MessageID: id, CustomerID: s.customerID(), Body: []byte(s.message(suiteStreamApp,
+	queued, err := s.store.ChatInbounds.Queue(context.Background(), store.ChatInbound{
+		StreamAppPK: suiteStreamApp, MessageID: id, CustomerID: s.customerID(), Body: []byte(s.message(suiteStreamApp,
 			deliveredConfig(&s.RouterSuite, s.customerID()), "")), NextAttemptAt: time.Now(),
 	})
 	s.Require().NoError(err)
@@ -438,7 +438,7 @@ func (s *ChatInboundQueueSuite) TestAPeerThatCouldNotPlaceAQueuedVoiceRecordingA
 func (s *ChatInboundQueueSuite) TestAQueuedVoiceRecordingWhoseAnswerStartedIsNotHeard() {
 	since := time.Now().UTC()
 	queued := s.queue(s.recorded(s.recordingSaying("where is my order")))
-	started, err := s.store.StartChatInboundAnswer(context.Background(), suiteStreamApp, queued, time.Now())
+	started, err := s.store.ChatInbounds.StartAnswer(context.Background(), suiteStreamApp, queued, time.Now())
 	s.Require().NoError(err)
 	s.Require().True(started)
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
@@ -483,6 +483,21 @@ func (s *ChatInboundQueueSuite) TestADeliveryForANodeThatCannotBeReachedIsTriedA
 	s.False(s.reachesWorker(worker.Messages()), "a worker here answered in the conversation the other node holds")
 }
 
+// A channel naming no customer, which two customers' sessions write in on other nodes, is
+// answered by neither, and that is the delivery's answer: unlike a node that cannot be reached,
+// it is not tried again.
+func (s *ChatInboundQueueSuite) TestADeliveryOnAChannelTwoCustomersWriteInIsSettledForNeither() {
+	s.heldWhereNothingAnswers(s.customerID(), s.utils.uuid(), s.channelID, "")
+	s.heldWhereNothingAnswers("someone-"+s.utils.uuid(), s.utils.uuid(), s.channelID, "")
+	queued := s.queue(s.message(suiteStreamApp, "", ""))
+
+	s.answering()
+
+	s.Eventually(func() bool { return s.row(queued).State == store.ChatInboundDone }, settleFor, 20*time.Millisecond,
+		"the delivery was left queued to be tried again")
+	s.Equal(1, s.row(queued).Attempts)
+}
+
 // A peer that took a delivery answers it itself: handing it on to a third node's worker could
 // pass it back and forth between nodes that each believe the other answers.
 func (s *ChatInboundQueueSuite) TestADeliveryAPeerHandedOverIsNotHandedOnAgain() {
@@ -499,7 +514,7 @@ func (s *ChatInboundQueueSuite) TestADeliveryAPeerHandedOverIsNotHandedOnAgain()
 
 // A row that is not a delivery is no answer, and says why, rather than read as nothing to do.
 func (s *ChatInboundQueueSuite) TestARowThatIsNotADeliveryIsAnError() {
-	err := s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamApp: suiteStreamApp, Deployment: true, Body: []byte("not a delivery")})
+	err := s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamAppPK: suiteStreamApp, Deployment: true, Body: []byte("not a delivery")})
 
 	s.Error(err)
 	s.NotErrorIs(err, errChatInboundUnsettled)
@@ -507,7 +522,7 @@ func (s *ChatInboundQueueSuite) TestARowThatIsNotADeliveryIsAnError() {
 
 // A channel no agent in the app answers in is settled, not tried again: no later try finds one.
 func (s *ChatInboundQueueSuite) TestADeliveryNoAgentAnswersIsSettled() {
-	s.NoError(s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamApp: suiteStreamApp, Deployment: true,
+	s.NoError(s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamAppPK: suiteStreamApp, Deployment: true,
 		Body: []byte(s.message(suiteStreamApp, "no-such-config", ""))}))
 }
 
@@ -517,7 +532,7 @@ func (s *ChatInboundQueueSuite) TestADeliveryWhoseChannelsLastCallCouldNotBeRead
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := s.router.AnswerChatInbound(cancelled, store.ChatInbound{StreamApp: suiteStreamApp, Deployment: true,
+	err := s.router.AnswerChatInbound(cancelled, store.ChatInbound{StreamAppPK: suiteStreamApp, Deployment: true,
 		Body: []byte(s.message(suiteStreamApp, "", ""))})
 
 	s.ErrorIs(err, errChatInboundUnsettled)
@@ -529,13 +544,13 @@ func (s *ChatInboundQueueSuite) TestADeliveryOnAChannelTwoCustomersCalledOnIsAns
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	defer release()
 	for _, customer := range []string{"someone-" + s.utils.uuid(), "someone-" + s.utils.uuid()} {
-		s.Require().NoError(s.store.StartCall(context.Background(), &store.Call{
+		s.heldCall(store.Call{
 			ID: s.utils.uuid(), CustomerID: customer, CallID: s.utils.callID(), AgentID: s.channelID,
-			ConfigID: deliveredConfig(&s.RouterSuite, customer), StartedAt: time.Now().UTC(),
-		}))
+			StartedAt: time.Now().UTC(),
+		}, deliveredConfig(&s.RouterSuite, customer), "")
 	}
 
-	err := s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamApp: suiteStreamApp, Deployment: true,
+	err := s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamAppPK: suiteStreamApp, Deployment: true,
 		Body: []byte(s.message(suiteStreamApp, deliveredConfig(&s.RouterSuite, s.customerID()), ""))})
 
 	s.NoError(err)
@@ -549,7 +564,7 @@ func (s *ChatInboundQueueSuite) TestADeliveryOnAChannelTwoCustomersSessionsRunOn
 	s.useApp(s.data.createApp())
 	other := s.dispatchingOn()
 
-	err := s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamApp: suiteStreamApp, Deployment: true,
+	err := s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamAppPK: suiteStreamApp, Deployment: true,
 		Body: []byte(s.message(suiteStreamApp, "", ""))})
 
 	s.NoError(err)
@@ -561,8 +576,8 @@ func (s *ChatInboundQueueSuite) TestADeliveryOnAChannelTwoCustomersSessionsRunOn
 // leaves text to the customer's dispatch worker, and returns what that worker is handed.
 func (s *ChatInboundQueueSuite) dispatchingOn() <-chan dispatch.Message {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
-		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.serverClient.createSession(CreateSessionRequest{AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true)})
 	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
 	s.T().Cleanup(release)
@@ -575,7 +590,7 @@ func (s *ChatInboundQueueSuite) TestADeliveryForACustomerWhoseAppIsNotKnownYetIs
 	customer := s.inAppMode()
 	s.setApps(customer, func(apps *suiteApps) { apps.waiting[customer] = true })
 
-	err := s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamApp: suiteStreamApp, Deployment: true,
+	err := s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamAppPK: suiteStreamApp, Deployment: true,
 		Body: []byte(s.message(suiteStreamApp, deliveredConfig(&s.RouterSuite, customer), ""))})
 
 	s.ErrorIs(err, errChatInboundUnsettled)
@@ -586,7 +601,7 @@ func (s *ChatInboundQueueSuite) TestADeliveryForACustomerNoLongerWritingThereIsS
 	customer := s.inAppMode()
 	s.setApps(customer, func(apps *suiteApps) { apps.readOnly[customer] = true })
 
-	s.NoError(s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamApp: suiteStreamApp, Deployment: true,
+	s.NoError(s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamAppPK: suiteStreamApp, Deployment: true,
 		Body: []byte(s.message(suiteStreamApp, deliveredConfig(&s.RouterSuite, customer), ""))}))
 }
 
@@ -596,7 +611,7 @@ func (s *ChatInboundQueueSuite) TestADeliveryOnAThreadChannelThatCouldNotBeReadI
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := s.router.AnswerChatInbound(cancelled, store.ChatInbound{StreamApp: suiteStreamApp, Deployment: true,
+	err := s.router.AnswerChatInbound(cancelled, store.ChatInbound{StreamAppPK: suiteStreamApp, Deployment: true,
 		Body: []byte(s.message(suiteStreamApp, "", ""))})
 
 	s.ErrorIs(err, errChatInboundUnsettled)
@@ -606,11 +621,11 @@ func (s *ChatInboundQueueSuite) TestADeliveryOnAThreadChannelThatCouldNotBeReadI
 // take the message: tried again for a worker to connect.
 func (s *ChatInboundQueueSuite) TestADeliveryForADispatchingSessionNoWorkerTookIsTriedAgain() {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
-		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.serverClient.createSession(CreateSessionRequest{AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true)})
 
-	err := s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamApp: suiteStreamApp, Deployment: true,
+	err := s.router.AnswerChatInbound(context.Background(), store.ChatInbound{StreamAppPK: suiteStreamApp, Deployment: true,
 		Body: []byte(s.message(suiteStreamApp, "", ""))})
 
 	s.ErrorIs(err, errChatInboundUnsettled)
@@ -714,8 +729,8 @@ func (s *ChatInboundQueueSuite) TestTriesOfOneQueuedDeliveryAtOnceAnswerItOnce()
 // worker's next try to answer.
 func (s *ChatInboundQueueSuite) TestAQueuedDeliveryForADispatchingSessionNoWorkerTookIsQueuedAgain() {
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
-		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.serverClient.createSession(CreateSessionRequest{AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true)})
 	queued := s.row(s.queue(s.message(suiteStreamApp, "", "")))
 
@@ -783,7 +798,7 @@ func (s *ChatInboundQueueSuite) TestAQueuedDeliveryWhoseRowCouldNotBeSettledIsTr
 // row stays the worker's to record.
 func (s *ChatInboundQueueSuite) TestAQueuedDeliveryOnAThreadChannelLeavesItsRowToTheWorker() {
 	s.channelID = conversation.ThreadChannelPrefix + s.utils.uuid()
-	_, err := s.store.LinkChannelThread(context.Background(), &store.ChannelThread{
+	_, err := s.store.ChannelThreads.Link(context.Background(), &store.ChannelThread{
 		ChannelID: s.channelID, CustomerID: s.customerID(), ConnectorID: "slack", ProviderUnitID: "T1",
 		ThreadKey: "C1:" + s.utils.uuid(), ConnectionID: "connection-" + s.utils.uuid(), ThreadParts: map[string]string{},
 	})
@@ -807,8 +822,8 @@ func (s *ChatInboundQueueSuite) dispatchingBesideAWorkerElsewhere() (*websocket.
 	here, router, _ := s.otherNodeHolding(dispatch.NewPool(), s.sealer, logger)
 	router.workers = s.deafWorkers(logger)
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
-		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.serverClient.on(here).createSession(CreateSessionRequest{AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true)})
 	return worker, router, s.row(s.queue(s.message(suiteStreamApp, "", "")))
 }
@@ -862,8 +877,8 @@ func (s *ChatInboundQueueSuite) inAppMode() string {
 // queue queues body as the endpoint would, from the deployment's own app, due now.
 func (s *ChatInboundQueueSuite) queue(body string) string {
 	id := "queued-" + s.utils.uuid()
-	queued, err := s.store.QueueChatInbound(context.Background(), store.ChatInbound{
-		StreamApp: suiteStreamApp, MessageID: id, Deployment: true, Body: []byte(body), NextAttemptAt: time.Now(),
+	queued, err := s.store.ChatInbounds.Queue(context.Background(), store.ChatInbound{
+		StreamAppPK: suiteStreamApp, MessageID: id, Deployment: true, Body: []byte(body), NextAttemptAt: time.Now(),
 	})
 	s.Require().NoError(err)
 	s.Require().True(queued)
@@ -910,7 +925,7 @@ func (s *ChatInboundQueueSuite) receives(connection *websocket.Conn, wanted stri
 
 func (s *ChatInboundQueueSuite) row(messageID string) store.ChatInbound {
 	var row store.ChatInbound
-	s.Require().NoError(s.store.DB().NewSelect().Model(&row).Where("message_id = ?", messageID).Scan(context.Background()))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&row).Where("message_id = ?", messageID).Scan(context.Background()))
 	return row
 }
 

@@ -89,6 +89,7 @@ class VisionAgentsTest {
         assertEquals("acme", arrived.header("X-Customer-Id"))
         assertNull(arrived.header("Authorization"))
         assertNull(arrived.header("X-Stream-User-Id"))
+        assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", arrived.header("X-Stream-Client"))
     }
 
     @Test
@@ -132,6 +133,7 @@ class VisionAgentsTest {
         assertEquals(listOf("key-1"), router.requests.first().query["api_key"])
         assertNull(router.requests.first().header("X-Api-Key"))
         assertEquals("jwt", router.requests.first().header("Stream-Auth-Type"))
+        assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", router.requests.first().header("X-Stream-Client"))
         assertNull(router.requests.first().header("X-Customer-Id"))
         keyed.close()
     }
@@ -762,6 +764,16 @@ class VisionAgentsTest {
     }
 
     @Test
+    fun `a guest printed shows who they are, never their token`() = runTest {
+        router.answer = { Reply(201, """{"id":"guest-1","token":"tok-guest-secret","name":"Ada","expires_at":"2999-01-01T00:00:00Z"}""") }
+
+        val printed = agents.guestUser(GuestOptions(name = "Ada")).toString()
+
+        assertFalse("tok-guest-secret" in printed, printed)
+        assertTrue("guest-1" in printed && "Ada" in printed && "[redacted]" in printed, printed)
+    }
+
+    @Test
     fun `a minted guest has its refresh secret remembered`() = runTest {
         val store = FileGuestStore(File(Files.createTempDirectory("guest").toFile(), "guest.json"))
         router.answer = { Reply(201, """{"id":"guest-1","token":"tok","refresh_secret":"s1"}""") }
@@ -822,6 +834,7 @@ class VisionAgentsTest {
         assertEquals("guest-1", guest.id)
         val arrived = router.requests.single()
         assertEquals("anonymous", arrived.header("Stream-Auth-Type"))
+        assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", arrived.header("X-Stream-Client"))
         assertNull(arrived.header("Authorization"))
         assertEquals(listOf("key"), arrived.query["api_key"])
     }

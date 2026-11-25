@@ -161,6 +161,12 @@ type Provider interface {
 	Send(ctx context.Context, account Account, thread string, reply Reply) (Sent, error)
 }
 
+// Estimator is a provider that can say what a reply will bill before it is sent, so the
+// reservation holds what Send will bill. A provider without it is held for one message.
+type Estimator interface {
+	Estimate(reply Reply) Sent
+}
+
 // Sent is what a provider sent for one reply, in the units it bills: the messages, and for a
 // text message the segments its words took and the messages that carried a file.
 type Sent struct {

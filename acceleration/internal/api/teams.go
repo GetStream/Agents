@@ -33,7 +33,7 @@ func (s *Server) teamsGateFor(ctx context.Context, customerID string) (teamsGate
 	if ServerSideFrom(ctx) {
 		return teamsGate{}, nil
 	}
-	settings, err := s.configs.AppSettings(ctx, customerID)
+	settings, err := s.configs.Apps.GetSettings(ctx, customerID)
 	if err != nil {
 		return teamsGate{}, err
 	}
@@ -58,7 +58,7 @@ func (g teamsGate) refuses(config store.AgentConfig) bool {
 // config of another team is unknown, as configFor answers, and so is a deleted one, which
 // leaves no team to check.
 func (s *Server) configOpenedWith(ctx context.Context, customerID, id string, teams teamsGate) (*store.AgentConfig, error) {
-	read, err := s.store.AgentConfig(ctx, customerID, id)
+	read, err := s.store.AgentConfigs.Get(ctx, customerID, id)
 	switch {
 	case errors.Is(err, store.ErrNoAgentConfig) && !teams.checked:
 		return nil, nil

@@ -47,7 +47,7 @@ func (s *SandboxGrantsSuite) askingSandbox(spec Spec, owner string, begun Consen
 		seen.begun = append(seen.begun, request)
 		if !seen.stored[begun.AuthorizationID] && time.Now().Before(begun.ExpiresAt) {
 			seen.stored[begun.AuthorizationID] = true
-			s.Require().NoError(s.store.CreateConnectorAuthorizationAttempt(ctx, &store.ConnectorAuthorizationAttempt{
+			s.Require().NoError(s.store.ConnectorAuthorizationAttempts.Insert(ctx, &store.ConnectorAuthorizationAttempt{
 				ID: begun.AuthorizationID, CustomerID: s.customerID, ConnectionID: begun.ConnectionID, Kind: store.AttemptConsent,
 				StateHash: store.AuthorizationStateHash(begun.AuthorizationID), AttemptSealed: []byte("sealed"), KEKVersion: 1,
 				ExpiresAt: begun.ExpiresAt,
@@ -207,7 +207,7 @@ func (s *SandboxGrantsSuite) TestAConsentEndedOnAnotherRouterShowsNoNewOne() {
 	_, err := box.Run(s.ctx, "print(1)", nil)
 	s.Require().NoError(err)
 
-	_, err = s.store.ConsumeConnectorAuthorizationAttempt(s.ctx, attemptOn(mine))
+	_, err = s.store.ConnectorAuthorizationAttempts.Consume(s.ctx, attemptOn(mine))
 	s.Require().NoError(err)
 	time.Sleep(time.Until(expiring(mine).ExpiresAt)) // past the watch's first read, and the consent's expiry
 	afterExpiry, err := box.Run(s.ctx, "print(1)", nil)
@@ -229,7 +229,7 @@ func (s *SandboxGrantsSuite) TestAConsentConnectedAfterItsAttemptWasUsedUpCarrie
 	_, err := box.Run(s.ctx, "print(1)", nil)
 	s.Require().NoError(err)
 
-	_, err = s.store.ConsumeConnectorAuthorizationAttempt(s.ctx, attemptOn(mine))
+	_, err = s.store.ConnectorAuthorizationAttempts.Consume(s.ctx, attemptOn(mine))
 	s.Require().NoError(err)
 	time.Sleep(loginPoll + loginPoll/2) // a poll inside the token exchange
 	s.Require().Zero(s.carriedOn())
@@ -287,7 +287,7 @@ func (s *SandboxGrantsSuite) TestARunShowsNoConsentWhereNobodyCanAnswerIt() {
 		"in bob's conversation": {text: true, owner: "bob"},
 		"with a rejected token": {text: true, owner: "alice", spoil: func(d *dispatcher) { d.logins.byAlias["crm"].rejected = true }},
 		"after the config dropped it": {text: true, owner: "alice", spoil: func(d *dispatcher) {
-			config, err := s.store.AgentConfig(s.ctx, s.customerID, d.spec.ConfigID)
+			config, err := s.store.AgentConfigs.Get(s.ctx, s.customerID, d.spec.ConfigID)
 			s.Require().NoError(err)
 			s.rebind(config, sandboxed(s.chosen("other", "whoami")))
 		}},
@@ -325,10 +325,10 @@ func (s *SandboxGrantsSuite) held(d *dispatcher) {
 	s.manager.mu.Lock()
 	defer s.manager.mu.Unlock()
 	if s.handedBack == nil {
-		s.handedBack, s.manager.sessions = &lockedBuffer{}, map[string]*Session{}
+		s.handedBack, s.manager.sessions = &lockedBuffer{}, map[Key]*Session{}
 		s.manager.logger = slog.New(slog.NewTextHandler(s.handedBack, nil))
 	}
-	s.manager.sessions[d.spec.ID] = &Session{id: d.spec.ID, spec: d.spec, connectors: d}
+	s.manager.sessions[Key{d.spec.CustomerID, d.spec.ID}] = &Session{id: d.spec.ID, spec: d.spec, connectors: d}
 }
 
 // carriedOn is how many times the session was told to carry on after a login.

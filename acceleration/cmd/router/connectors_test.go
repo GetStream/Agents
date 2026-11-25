@@ -139,6 +139,7 @@ func (s *ConnectorRegistrySuite) begin(srv *fakeprovider.Server, cfg oauth2code.
 	return scheme.Begin(context.Background(), core.BeginInput{
 		Ref: core.ConnectionRef{CustomerID: "acme", ConnectionID: "conn-1"},
 		Manifest: core.ResolvedManifest{
+			Builtin:   true,
 			Scheme:    oauth2code.Name,
 			Endpoints: map[string]string{"mcp": srv.URL + fakeprovider.PathMCP},
 			Client:    client,

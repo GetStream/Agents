@@ -109,7 +109,10 @@ the client says, 0 for no limit) is given up on the same way, as a request that 
 answer; once the answer has begun it is not timed, so an event stream runs on. To ask again yourself after a failure that may have reached the router,
 pass the same `requestId` to `responses.create`. When the router took the question and only its
 answer was lost, it answers the retry with no id, and `responses.create` looks up the turn by
-what was asked, so the response it returns still names that turn.
+what was asked, so the response it returns still names that turn. A turn left with no id (an
+incognito session, a speech-to-speech session, or a retry whose turn was not found) has no
+items of its own: its `items` reject with `UnnamedTurnError`, so follow it on
+`session.events()`, or read the whole session with `session.responses.items`.
 
 A connection lost while reading a response body follows the same retry policy. Invalid JSON
 is reported with the operation and request id and is not retried. Text responses remain
@@ -1059,4 +1062,11 @@ git tag sdk-js-v0.2.0 && git push origin sdk-js-v0.2.0
 then on npmjs.com, under the package's settings, add GitHub Actions as a trusted publisher:
 `GetStream/Agents`, workflow `release-sdk-js.yml`. From then on the version in
 `package.json` is not maintained: semantic-release writes the next one into the package it
-publishes and nothing is committed back.
+publishes and nothing is committed back, so the committed one is the placeholder
+`0.0.0-development`. The release is the newest `sdk-js-v*` tag, and npm.
+
+`prepublishOnly` runs `npm run build`: Vite (`vite.config.ts`) builds `dist/`, one module per
+source file, and `tsc` writes the declarations beside them. The build writes the version in
+`package.json`, which semantic-release has just set, into `VERSION`, the release every request
+from Node names in its `User-Agent`. The source names it `__SDK_VERSION__`; run through `tsc`
+alone, as the tests and examples are, `VERSION` is `0.0.0-development`.

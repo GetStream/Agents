@@ -211,6 +211,10 @@ public data class Guest(
     /** When the token stops working, or null when the router did not say. */
     val expiresAt: Instant?,
 ) {
+    /** Who the guest is, never their token. */
+    override fun toString(): String =
+        "Guest(id=$id, token=$REDACTED, name=$name, custom=$custom, expiresAt=$expiresAt)"
+
     internal companion object {
         fun of(schema: GuestSchema): Guest = Guest(
             id = schema.id,

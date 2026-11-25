@@ -118,7 +118,7 @@ func (s *ForwardedTokensSuite) TestTheServerTokenTheGatewayForwardsIsKeptForTheC
 
 	s.send(s.router(true), http.MethodGet, "/v1/agents/sessions", "", s.forwardedBy(token))
 
-	held, err := s.store.StreamAppToken(s.ctx, s.app)
+	held, err := s.store.StreamAppTokens.Get(s.ctx, s.app)
 	s.Require().NoError(err)
 	s.Equal("forwarded-key", held.APIKey)
 	s.Equal(s.customer, held.CustomerID)
@@ -128,7 +128,7 @@ func (s *ForwardedTokensSuite) TestTheServerTokenTheGatewayForwardsIsKeptForTheC
 func (s *ForwardedTokensSuite) TestAProxyThatDeclaresNoKindsCannotHandTheRouterAToken() {
 	s.send(s.router(false), http.MethodGet, "/v1/agents/sessions", "", s.forwardedBy(s.serverToken()))
 
-	_, err := s.store.StreamAppToken(s.ctx, s.app)
+	_, err := s.store.StreamAppTokens.Get(s.ctx, s.app)
 	s.ErrorIs(err, store.ErrNoStreamAppToken)
 }
 
@@ -145,7 +145,7 @@ func (s *ForwardedTokensSuite) TestAHookTheGatewayVouchedForIsTakenWithoutTheApp
 	status := s.send(s.router(true), http.MethodPost, "/v1/chat/hooks/stream/"+s.customer, s.hook(), headers)
 
 	s.Equal(http.StatusOK, status)
-	_, err := s.store.StreamAppToken(s.ctx, s.app)
+	_, err := s.store.StreamAppTokens.Get(s.ctx, s.app)
 	s.NoError(err, "the token forwarded with the hook is kept for its work")
 }
 

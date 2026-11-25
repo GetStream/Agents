@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // defaultCapacity is how many calls a worker that did not say is assumed to take at once.
@@ -35,7 +36,7 @@ const maxCapacity = 1024
 //
 // Server-side only, and this is the clearest case of why: a worker is offered other
 // people's callers, so anything that can open this socket can answer for the whole app.
-// socketRoutes already refuses a client-side caller in the middleware; the same question
+// withServerSide already refuses a client-side caller in the middleware; the same question
 // is asked again here because this is the socket where being wrong is worst, and a second
 // check costs one comparison.
 func (s *Server) dispatchCalls(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +98,7 @@ func (s *Server) dispatchCalls(w http.ResponseWriter, r *http.Request) {
 	stopTaking := sync.OnceFunc(func() { close(writerDone) })
 	defer stopTaking()
 	go func() {
-		gone <- s.readWorker(connection, worker, pongs, replies, writerDone)
+		gone <- s.readWorker(r.Context(), connection, worker, pongs, replies, writerDone)
 	}()
 	s.writeCalls(connection, worker, gone, pongs, replies, stopTaking)
 
@@ -236,7 +237,7 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 // A message of a type it does not know is reported and skipped rather than closing the
 // socket: dropping a worker over one bad message would take the calls it is already in with
 // it. A frame that is not JSON at all returns errUnreadableFrame.
-func (s *Server) readWorker(connection *websocket.Conn, worker *dispatch.Worker, pongs chan<- float64, replies chan<- frame, writerDone <-chan struct{}) error {
+func (s *Server) readWorker(ctx context.Context, connection *websocket.Conn, worker *dispatch.Worker, pongs chan<- float64, replies chan<- frame, writerDone <-chan struct{}) error {
 	connection.SetReadDeadline(time.Now().Add(pongWait))
 	connection.SetPongHandler(func(string) error {
 		return connection.SetReadDeadline(time.Now().Add(pongWait))
@@ -310,7 +311,7 @@ func (s *Server) readWorker(connection *websocket.Conn, worker *dispatch.Worker,
 			}
 
 		case "host_tools":
-			reply := s.hostTools(worker, report.AgentID, report.EveryAgent, report.Tools, report.TimeoutMs)
+			reply := s.hostTools(ctx, worker, report.AgentID, report.EveryAgent, report.Tools, report.TimeoutMs)
 			select {
 			case replies <- reply:
 			case <-writerDone:
@@ -402,7 +403,7 @@ type hostedApproval struct {
 // is trusted with its customer's conversations already, and naming an agent is not a way
 // into anybody else's. The agent is named as its config is, since that is the name sessions
 // are opened by, and a name no config has is refused.
-func (s *Server) hostTools(worker *dispatch.Worker, agentID string, everyAgent bool, declared []hostedTool, timeoutMs int) frame {
+func (s *Server) hostTools(ctx context.Context, worker *dispatch.Worker, agentID string, everyAgent bool, declared []hostedTool, timeoutMs int) frame {
 	refuse := func(reason string) frame {
 		s.logger.Warn("refused a worker's hosted tools", "worker", worker.ID, "agent", agentID, "reason", reason)
 		return frame{"type": "hosting_refused", "agent_id": agentID, "every_agent": everyAgent, "reason": reason}
@@ -436,14 +437,14 @@ func (s *Server) hostTools(worker *dispatch.Worker, agentID string, everyAgent b
 		tools = append(tools, hosted)
 		names = append(names, tool.Name)
 	}
-	if reason := s.unknownHostedAgent(worker.CustomerID, agentID); reason != "" {
+	if reason := s.unknownHostedAgent(ctx, worker.CustomerID, agentID); reason != "" {
 		return refuse(reason)
 	}
 	if err := s.dispatch.Host(worker, agentID, tools, time.Duration(timeoutMs)*time.Millisecond); err != nil {
 		return refuse(err.Error())
 	}
 	if s.workers != nil {
-		s.workers.Offer(context.Background(), worker.CustomerID, agentID)
+		s.workers.Offer(ctx, worker.CustomerID, agentID)
 	}
 	s.logger.Info("a worker hosts tools", "worker", worker.ID, "agent", agentID, "every_agent", everyAgent, "tools", names)
 	return frame{"type": "hosting", "agent_id": agentID, "every_agent": everyAgent, "tools": names}
@@ -453,18 +454,18 @@ func (s *Server) hostTools(worker *dispatch.Worker, agentID string, everyAgent b
 // for are refused, or nothing when there is one. Sessions are only opened by an existing
 // config's name, so a misspelled name would host tools nothing ever calls while the worker
 // looks healthy. A router without configs, or one that cannot read them now, takes the offer.
-func (s *Server) unknownHostedAgent(customerID, agentID string) string {
+func (s *Server) unknownHostedAgent(ctx context.Context, customerID, agentID string) string {
 	if s.configs == nil || agentID == "" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hostedAgentLookup)
+	ctx, cancel := context.WithTimeout(ctx, hostedAgentLookup)
 	defer cancel()
-	_, exists, err := s.configs.AgentConfigByName(ctx, customerID, agentID)
-	if err != nil {
-		s.logger.Warn("could not check the agent a worker hosts tools for", "agent", agentID, "error", err)
+	_, err := s.store.AgentConfigs.GetByName(ctx, customerID, agentID)
+	if err == nil {
 		return ""
 	}
-	if exists {
+	if !errors.Is(err, store.ErrNoAgentConfig) {
+		s.logger.Warn("could not check the agent a worker hosts tools for", "agent", agentID, "error", err)
 		return ""
 	}
 	return "there is no agent called " + agentID + "; check the name, or sync the agent before starting the worker"

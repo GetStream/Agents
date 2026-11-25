@@ -4,9 +4,9 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/emit"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
 
@@ -337,13 +337,13 @@ type Turn struct {
 	Interrupted    bool
 	// FloorChecks are the chorus-asr model's checks on the floor about the turn by the time it
 	// is reported, the latest floorChecksKept of them by when they were asked, oldest first: the
-	// live account of them. The call's record (Options.Live) can also have checks made after
+	// live account of them. The call's record (Options.Store) can also have checks made after
 	// it, within what the recorder keeps up with and keeps. None for an agent without
 	// chorus-asr floor control.
-	FloorChecks []live.FloorCheck
+	FloorChecks []store.FloorCheck
 	// Guardrail is the guardrail's check of the turn, allowed or refused. Nil for a turn
 	// nothing screened: no policy, or a reply that carries no new words of the caller's.
-	Guardrail *live.GuardrailCheck
+	Guardrail *store.GuardrailCheck
 }
 
 func (Turn) isAgentEvent() {}

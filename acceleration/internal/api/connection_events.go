@@ -20,7 +20,7 @@ func (s *Server) receiveConnectionEvent(w http.ResponseWriter, r *http.Request) 
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, mcpevents.MaxEventBytes+1))
 	if err != nil {
-		writeError(w, invalidRequest(err.Error()))
+		writeError(w, invalidRequest("the body could not be read"))
 		return
 	}
 	if len(body) > mcpevents.MaxEventBytes {
@@ -28,6 +28,7 @@ func (s *Server) receiveConnectionEvent(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	reply := s.mcpEvents.Receive(r.Context(), r.PathValue("token"), r.Header, body)
+	noteAnswered(w, reply.Status)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(reply.Status)
 	_ = json.NewEncoder(w).Encode(reply.Body)

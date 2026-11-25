@@ -20,6 +20,7 @@ export {
   REGION_ENV,
   URL_ENV,
   USAGE_CATEGORIES_HEADER,
+  VERSION,
   regionUrl,
   signToken,
   type BackendOptions,
@@ -120,8 +121,10 @@ export {
 export {
   ConfigurationError,
   HostingRefusedError,
+  NoCallError,
   RouterError,
   SocketClosedError,
+  UnnamedTurnError,
   type RouterErrorType,
 } from "./errors.js";
 

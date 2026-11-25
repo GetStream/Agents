@@ -186,7 +186,7 @@ func (s *SpecSuite) TestASessionNamedLikeAThreadChannelIsNoThread() {
 func (s *SpecSuite) TestAConfigsSandboxBecomesTheSessions() {
 	spec := FromConfig(store.AgentConfig{
 		CustomerID: "acme",
-		Sandbox:    daytonaProvider,
+		Sandbox:    store.AgentSandbox{Provider: daytonaProvider},
 	})
 
 	s.Equal(daytonaProvider, spec.Sandbox)
@@ -195,7 +195,7 @@ func (s *SpecSuite) TestAConfigsSandboxBecomesTheSessions() {
 func (s *SpecSuite) TestHowAConfigsSandboxIsBuiltBecomesTheSessions() {
 	options := sandbox.Config{Setup: []string{"pip install bpy==5.2.2"}, TimeoutMs: 300_000, MemoryGB: 4}
 
-	spec := FromConfig(store.AgentConfig{CustomerID: "acme", Sandbox: daytonaProvider, SandboxOptions: options})
+	spec := FromConfig(store.AgentConfig{CustomerID: "acme", Sandbox: store.AgentSandbox{Provider: daytonaProvider, Options: options}})
 
 	s.Equal(options, spec.SandboxOptions)
 }
@@ -260,7 +260,7 @@ func (s *SpecSuite) TestAConfigsNameIsCarriedOnTheSession() {
 }
 
 func (s *SpecSuite) TestModelOverwritesBeatTheConfigsRoutes() {
-	spec := FromConfig(store.AgentConfig{CustomerID: "acme", LLM: "llm-flow", STT: "stt-fast"})
+	spec := FromConfig(store.AgentConfig{CustomerID: "acme", Models: store.AgentModels{LLM: "llm-flow", STT: "stt-fast"}})
 	spec.CallID = "call-1"
 	spec.ModelOverwrites = store.ModelOverwrites{LLM: "llm-thinking"}
 
@@ -273,7 +273,7 @@ func (s *SpecSuite) TestModelOverwritesBeatTheConfigsRoutes() {
 func (s *SpecSuite) TestAConversationOnAMockDecidesOnTheMockToo() {
 	// What a load test measures is the router. A real flow controller would spend money
 	// and add a provider's wait to every turn of it.
-	spec := FromConfig(store.AgentConfig{CustomerID: "acme", LLM: "mock/mock-llm"})
+	spec := FromConfig(store.AgentConfig{CustomerID: "acme", Models: store.AgentModels{LLM: "mock/mock-llm"}})
 	spec.CallID = "call-1"
 
 	s.Require().NoError(spec.Normalize())
@@ -282,7 +282,7 @@ func (s *SpecSuite) TestAConversationOnAMockDecidesOnTheMockToo() {
 }
 
 func (s *SpecSuite) TestAConversationOnARealModelDecidesOnTheFlowModel() {
-	spec := FromConfig(store.AgentConfig{CustomerID: "acme", LLM: "llm-fast"})
+	spec := FromConfig(store.AgentConfig{CustomerID: "acme", Models: store.AgentModels{LLM: "llm-fast"}})
 	spec.CallID = "call-1"
 
 	s.Require().NoError(spec.Normalize())

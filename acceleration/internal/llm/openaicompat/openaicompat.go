@@ -13,6 +13,7 @@
 package openaicompat
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -21,7 +22,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
+	"mime"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -112,6 +114,28 @@ type Options struct {
 	// as a user message, for a server whose chat template refuses a system turn anywhere but
 	// first, or lifts it into the system prompt, which would change the prefix every turn.
 	SystemTurnsAsUser bool
+	// StrictRoles shapes the conversation for a server that renders the weights' own chat
+	// template as it stands, such as vLLM or llama.cpp serving whatever a customer trained:
+	// there is one system message, first, with any others before the conversation joined into
+	// it and any after it sent as the user's (SystemTurnsAsUser); user turns that would follow
+	// one another are joined into one; and a turn that called tools always carries content,
+	// empty when the model said nothing. Mistral's templates refuse the conversation otherwise:
+	// Mistral 7B v0.3's raises on a system message after the first and on two user turns in a
+	// row, and Mistral Small 3.2's reads the content of every assistant turn.
+	StrictRoles bool
+	// Keyless lets APIKey be empty, for an endpoint that takes no key. Nothing is sent in the
+	// Authorization header then, not even the OPENAI_API_KEY the SDK would otherwise read from
+	// the router's own environment.
+	Keyless bool
+	// DefaultMaxTokens is the cap sent as max_tokens on a request whose caller set none, zero
+	// for none, for a server that otherwise generates until its context is full. A server that
+	// refuses it as too long for the context is asked again, once, without it: a cap the caller
+	// never asked for must not fail a turn that would have been answered without one.
+	DefaultMaxTokens func(llm.ResponseParams) int
+	// FirstTokenTimeout bounds the wait for the first token, from the moment the request is
+	// sent: headers, prompt processing and all. A server that hangs then fails the turn there,
+	// rather than after the whole Timeout in silence. Zero is no bound but Timeout.
+	FirstTokenTimeout time.Duration
 	// ResultsFollowCalls is set for a server that refuses a conversation in which anything
 	// comes between a tool call and its results, as MiniMax's does with a 400: what the
 	// caller said while a tool ran is moved after the results (StrictToolOrder).
@@ -153,7 +177,7 @@ func New(options Options) (*LLM, error) {
 		return nil, stack.Wrap(errors.New("openaicompat: model is required"))
 	}
 	keys := keypool.FromEnv(options.APIKey)
-	if keys.Len() == 0 {
+	if keys.Len() == 0 && !options.Keyless {
 		return nil, stack.Wrap(fmt.Errorf("openaicompat: %s: api key is required", options.Provider))
 	}
 	options.APIKey = keys.Peek()
@@ -165,6 +189,9 @@ func New(options Options) (*LLM, error) {
 	}
 	if options.Timeout == 0 {
 		options.Timeout = defaultTimeout
+	}
+	if options.StrictRoles {
+		options.SystemTurnsAsUser = true
 	}
 	if options.Logger == nil {
 		options.Logger = slog.Default()
@@ -194,13 +221,7 @@ func New(options Options) (*LLM, error) {
 // Host is the host requests go to, without the scheme, path or any credentials, so a log
 // line can name where a model is served: Gemma's host is GEMMA_BASE_URL, which says whether
 // it runs on Baseten or Nebius. Empty when the base URL does not parse.
-func (l *LLM) Host() string {
-	parsed, err := url.Parse(l.options.BaseURL)
-	if err != nil {
-		return ""
-	}
-	return parsed.Host
-}
+func (l *LLM) Host() string { return llm.HostOf(l.options.BaseURL) }
 
 // Client exposes the underlying SDK client, so anything this package does not standardise
 // -- embeddings, moderation, the responses endpoint itself -- is still one call away.
@@ -221,30 +242,188 @@ func (l *LLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.Strea
 		return nil, stack.Wrap(fmt.Errorf("openaicompat: %s: provider is closed", l.options.Provider))
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, l.options.Timeout)
+	requestCtx, firstToken, cancel := l.firstTokenDeadline(requestCtx, cancel)
 	id := l.nextID.Add(1)
 	l.inFlight[id] = cancel
 	l.mu.Unlock()
 
-	upstream := l.client.Chat.Completions.NewStreaming(
-		requestCtx, l.params(params), l.requestOptions(params)...,
-	)
-	if err := upstream.Err(); err != nil {
-		_ = upstream.Close()
+	// The caller has been waiting since the request was sent, not since its headers came
+	// back: llama.cpp and Ollama send none before the first token.
+	sentAt := time.Now()
+	capped := l.defaultCap(params) > 0
+	upstream, err := l.open(requestCtx, params, capped)
+	if err != nil && capped && lengthRefused(err) {
+		l.logger.Warn("the endpoint refused the default reply cap as too long for its context, asking again without it",
+			"turn", params.ID, "error", err)
+		upstream, err = l.open(requestCtx, params, false)
+	}
+	if err != nil {
 		cancel()
 		l.forget(id)
-		return nil, stack.Wrap(withBody(err))
+		if late := context.Cause(requestCtx); errors.Is(late, errNoFirstToken) {
+			err = late
+		}
+		return nil, stack.Wrap(err)
 	}
 	return llm.NewStream(
 		llm.StreamOptions{
 			ResponseID: params.ID,
 			Provider:   l.options.Provider,
 			Model:      l.options.StatsModel,
+			StartedAt:  sentAt,
 		},
 		&puller{
-			llm: l, id: id, turn: params.ID, upstream: upstream, cancel: cancel,
-			channel: l.channelSplitter(), toolText: l.toolCallSplitter(params),
+			llm: l, id: id, turn: params.ID, upstream: upstream, cancel: cancel, ctx: requestCtx,
+			firstToken: firstToken,
+			channel:    l.channelSplitter(), toolText: l.toolCallSplitter(params),
 		},
 	), nil
+}
+
+// imagesFrom labels the images a tool result returned, which follow the results as a user turn
+// of their own, with the id of the call they answer.
+const imagesFrom = "Images from tool result "
+
+// errNoFirstToken is the cause a request is cancelled with when FirstTokenTimeout passes
+// before its first token. It is a deadline, so it reads as a timeout and as transient.
+var errNoFirstToken = fmt.Errorf("openaicompat: no first token in time: %w", context.DeadlineExceeded)
+
+// firstTokenDeadline arms FirstTokenTimeout on a request's context. The timer it returns is
+// stopped once the first token arrives, and the cancel it returns releases everything.
+func (l *LLM) firstTokenDeadline(ctx context.Context, cancel context.CancelFunc) (context.Context, *time.Timer, context.CancelFunc) {
+	if l.options.FirstTokenTimeout <= 0 {
+		return ctx, nil, cancel
+	}
+	ctx, cancelCause := context.WithCancelCause(ctx)
+	timer := time.AfterFunc(l.options.FirstTokenTimeout, func() { cancelCause(errNoFirstToken) })
+	return ctx, timer, func() {
+		timer.Stop()
+		cancelCause(context.Canceled)
+		cancel()
+	}
+}
+
+// open sends the request, with the default reply cap or without it, and returns its stream
+// once the headers are in.
+func (l *LLM) open(ctx context.Context, params llm.ResponseParams, capped bool) (*ssestream.Stream[openai.ChatCompletionChunk], error) {
+	var refused error
+	options := append(l.requestOptions(params, capped), option.WithMiddleware(l.sniff(&refused)))
+	upstream := l.client.Chat.Completions.NewStreaming(ctx, l.params(params), options...)
+	err := upstream.Err()
+	if err == nil {
+		err = refused
+	}
+	if err != nil {
+		_ = upstream.Close()
+		return nil, withBody(err)
+	}
+	return upstream, nil
+}
+
+// defaultCap is the cap DefaultMaxTokens puts on a request the caller left uncapped, zero
+// for none.
+func (l *LLM) defaultCap(params llm.ResponseParams) int {
+	if params.MaxOutputTokens > 0 || l.options.DefaultMaxTokens == nil {
+		return 0
+	}
+	return max(0, l.options.DefaultMaxTokens(params))
+}
+
+// lengthRefused reports whether a server refused a request because the reply it may write
+// does not fit beside the prompt, which vLLM answers with a 400 when the prompt and max_tokens
+// together exceed the model's length. Only that refusal goes away without the cap: one about
+// the prompt alone, such as llama.cpp's "exceeds the available context size", is the same
+// without it. Servers share no code that tells the two apart (OpenAI's context_length_exceeded
+// covers both), so the message is read for the reply's budget: vLLM names max_tokens or "in
+// the completion", as OpenAI's own message does.
+func lengthRefused(err error) bool {
+	apiError, ok := errors.AsType[*openai.Error](err)
+	if !ok || apiError.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	said := strings.ToLower(err.Error())
+	for _, words := range []string{"max_tokens", "max_completion_tokens", "in the completion"} {
+		if strings.Contains(said, words) {
+			return true
+		}
+	}
+	return false
+}
+
+// sniff refuses a 2xx whose body is not an event stream, such as a proxy's HTML page or a
+// server that ignored stream:true and answered with JSON. The SDK finds no events in either
+// and ends the stream cleanly, which would settle the turn as an empty answer. The type is
+// trusted when it says text/event-stream. Any other type, or none, is not proof either way:
+// some servers send a stream as text/plain, application/octet-stream or application/x-ndjson,
+// so the body's first bytes decide. They are put back for the stream to read.
+func (l *LLM) sniff(refused *error) option.Middleware {
+	return func(request *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+		response, err := next(request)
+		if err != nil || response.StatusCode/100 != 2 || response.Body == nil {
+			return response, err
+		}
+		contentType := response.Header.Get("Content-Type")
+		if eventStream(contentType) {
+			return response, nil
+		}
+		body := bufio.NewReader(response.Body)
+		stream, head := opensLikeEvents(body)
+		response.Body = struct {
+			io.Reader
+			io.Closer
+		}{body, response.Body}
+		// A body with nothing in it is a stream that ended before anything was sent, which the
+		// stream reports as such, as it does under text/event-stream.
+		if !stream && len(bytes.TrimSpace(head)) > 0 {
+			*refused = &llm.ProviderFailure{Err: fmt.Errorf("openaicompat: %s: answered a streaming request with %q rather than an event stream: %s",
+				l.options.Provider, contentType, bytes.TrimSpace(head[:min(len(head), 256)]))}
+		}
+		return response, nil
+	}
+}
+
+// eventStream reports whether a Content-Type names an event stream. A parameter Go cannot
+// parse, as in "text/event-stream; charset", does not make it something else.
+func eventStream(contentType string) bool {
+	media, _, err := mime.ParseMediaType(contentType)
+	return media == "text/event-stream" && (err == nil || errors.Is(err, mime.ErrInvalidMediaParameter))
+}
+
+// sseFields are what a line of an event stream opens with, the comment's bare colon included.
+var sseFields = []string{"data:", "event:", "id:", "retry:", ":"}
+
+// opensLikeEvents reads as little of a body as decides whether it opens as an event stream,
+// without consuming it: what has already arrived, and more only while that is not enough. It
+// returns what it read.
+func opensLikeEvents(body *bufio.Reader) (bool, []byte) {
+	const most = 512
+	n := 1
+	for {
+		head, err := body.Peek(n)
+		if arrived, _ := body.Peek(min(body.Buffered(), most)); len(arrived) > len(head) {
+			head = arrived
+		}
+		decided, stream := sseOpening(bytes.TrimLeft(head, " \t\r\n\ufeff"))
+		if decided || err != nil || len(head) >= most {
+			return decided && stream, head
+		}
+		n = len(head) + 1
+	}
+}
+
+// sseOpening says whether start opens an event stream, and whether that is decided yet: a
+// start that could still grow into a field name is not.
+func sseOpening(start []byte) (decided, stream bool) {
+	undecided := len(start) == 0
+	for _, field := range sseFields {
+		if bytes.HasPrefix(start, []byte(field)) {
+			return true, true
+		}
+		if bytes.HasPrefix([]byte(field), start) {
+			undecided = true
+		}
+	}
+	return !undecided, false
 }
 
 // named keeps what a provider said about a failure it sent inside a stream, as an `error`
@@ -363,6 +542,13 @@ type puller struct {
 	turn     string
 	upstream *ssestream.Stream[openai.ChatCompletionChunk]
 	cancel   context.CancelFunc
+	// ctx is the request's, whose cause says whether FirstTokenTimeout ended it, and
+	// firstToken the timer that would, nil when there is none.
+	ctx        context.Context
+	firstToken *time.Timer
+	// chunks counts what the upstream streamed, so a stream that ended without a single chunk
+	// is a failure rather than an empty answer.
+	chunks int
 	// channel takes the thought channel out of the answer, when the model writes one.
 	channel *channelSplitter
 	// toolText takes tool calls written as text out of the answer, and textCalls counts them.
@@ -391,6 +577,10 @@ func (p *puller) Advance(w *llm.ResponseWriter) bool {
 	}
 
 	chunk := p.upstream.Current()
+	p.chunks++
+	if p.firstToken != nil && said(chunk) {
+		p.firstToken.Stop()
+	}
 	if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
 		// Some providers repeat a cumulative usage frame on every chunk rather than
 		// sending one at the end, so the writer keeps the last one it is told.
@@ -498,6 +688,18 @@ func (p *puller) slot(index int64, id string) int64 {
 	return slot
 }
 
+// said reports whether a chunk carries any of the answer: text, thinking or a tool call. A
+// chunk with only the assistant role, which vLLM sends before the prompt is processed, does
+// not.
+func said(chunk openai.ChatCompletionChunk) bool {
+	for _, choice := range chunk.Choices {
+		if choice.Delta.Content != "" || len(choice.Delta.ToolCalls) > 0 || reasoning(choice.Delta.JSON.ExtraFields) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // Err is the provider failure that ended the stream, if there was one.
 func (p *puller) Err() error { return stack.Wrap(p.err) }
 
@@ -528,7 +730,19 @@ func (p *puller) finish(w *llm.ResponseWriter) {
 		}
 	}
 
-	switch err := p.upstream.Err(); {
+	err := p.upstream.Err()
+	if late := context.Cause(p.ctx); err != nil && errors.Is(late, errNoFirstToken) {
+		err = late
+	}
+	switch {
+	case err == nil && p.chunks == 0:
+		// The server closed the stream without a single chunk. A real answer of nothing still
+		// sends one, with its finish reason or its usage, so a stream of none, or of comments
+		// and a bare [DONE], is a dropped connection or a broken server rather than a reply.
+		p.err = &llm.ProviderFailure{
+			Err:       fmt.Errorf("openaicompat: %s: the stream ended before anything was sent", p.llm.options.Provider),
+			Transient: true,
+		}
 	case err == nil:
 	case errors.Is(err, context.Canceled):
 		// A cancelled stream is barge-in or shutdown, not a provider failure.
@@ -582,7 +796,7 @@ func (l *LLM) params(request llm.ResponseParams) openai.ChatCompletionNewParams 
 		case llm.ToolResult:
 			messages = append(messages, openai.ToolMessage(messageText(message), message.ToolCallID))
 			if message.HasImage() {
-				pendingImages = append(pendingImages, openai.TextContentPart("Images from tool result "+message.ToolCallID))
+				pendingImages = append(pendingImages, openai.TextContentPart(imagesFrom+message.ToolCallID))
 				pendingImages = append(pendingImages, chatImages(message.Parts)...)
 			}
 		default:
@@ -592,6 +806,10 @@ func (l *LLM) params(request llm.ResponseParams) openai.ChatCompletionNewParams 
 
 	if len(pendingImages) > 0 {
 		messages = append(messages, openai.UserMessage(pendingImages))
+	}
+	if l.options.StrictRoles {
+		messages = strictRoles(messages)
+		shortCallIDs(messages)
 	}
 	if prefill := l.prefill(request); prefill != "" {
 		messages = append(messages, openai.AssistantMessage(prefill))
@@ -752,11 +970,20 @@ func (l *LLM) prefill(request llm.ResponseParams) string {
 	return l.options.Prefill(request)
 }
 
-// requestOptions applies the request fields outside the OpenAI schema.
-func (l *LLM) requestOptions(request llm.ResponseParams) []option.RequestOption {
+// requestOptions applies the request fields outside the OpenAI schema, with the default reply
+// cap when capped.
+func (l *LLM) requestOptions(request llm.ResponseParams, capped bool) []option.RequestOption {
 	fields := map[string]any{}
 	if l.options.RequestFields != nil {
 		fields = l.options.RequestFields(request, l.options.Capabilities.Effort(request))
+	}
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	if capped {
+		if limit := l.defaultCap(request); limit > 0 {
+			fields["max_tokens"] = limit
+		}
 	}
 	if l.prefill(request) != "" {
 		fields["continue_final_message"] = true

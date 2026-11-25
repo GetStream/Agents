@@ -256,6 +256,25 @@ func TestAMoveLandsNoSoonerThanMinMoveUnlessItKeepsTheCurrentRun(t *testing.T) {
 	}
 }
 
+func TestAFirstRunLandsNoSoonerThanMinMove(t *testing.T) {
+	// A clock read mid-second, as a request's is: in PT15M still passes.
+	now := monday.Add(500 * time.Millisecond)
+	firstIn := func(in string) time.Time {
+		schedule, err := Parse(Input{In: in, Timezone: "UTC"}, now)
+		require.NoError(t, err, in)
+		first, ok := schedule.First()
+		require.True(t, ok, in)
+		return first
+	}
+
+	for _, in := range []string{"PT1S", "PT14M59S"} {
+		var failure *Error
+		require.ErrorAs(t, CheckFirst(firstIn(in), now), &failure, in)
+		require.Equal(t, CodeIntervalTooShort, failure.Code, in)
+	}
+	require.NoError(t, CheckFirst(firstIn("PT15M"), now))
+}
+
 // Europe/Berlin falls back on Sun 25 Oct 2026 at 01:00 UTC: 03:00 CEST becomes
 // 02:00 CET, so 02:00 to 03:00 reads twice, first at +02:00, then at +01:00.
 

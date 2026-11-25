@@ -52,6 +52,11 @@ session and its request builders are coroutine-native; bare OkHttp is callbacks.
   the protocol has no cursor to resume from. The socket reports `SocketClosed` and the caller
   decides. Adding reconnection means adding resume semantics to the router first.
 - Credentials go in handshake headers, never the query string, where they end up in logs.
+- A tool that throws is answered with `error`, never dropped. What it says is `toolFailure`:
+  `StreamAgents.onToolError` (held on `Backend`, so every session of the client reads it when
+  the call fails), else the error's message, cut to 1,024 characters with an ellipsis either way,
+  as JavaScript's `Tools.failure`. A hook that throws is answered with only "`<name>` failed".
+  The camera's "nothing recent" is the SDK's own words and goes out as the output, not as a failure.
 - `interrupt` is a socket command. The REST `interruptSession` is not client-accessible.
 
 ## State
@@ -140,6 +145,9 @@ for the router, Stream Chat and Stream Video. There is no call token and no cred
   One the app built without handing it over is adopted if it is connected as the same user and
   refused with `Configuration` otherwise. `Chat.kt` and `VoiceSession.kt` each remember the
   last client they built, so they can tell their own instance from the app's.
+- A hand-written type that holds a token (`StreamCredentials`, `Guest`) overrides `toString()` to
+  show it as `[redacted]` (`REDACTED`), since a data class prints every field. The generated
+  models are internal and cannot be masked by the generator: never log one.
 - A token provider that asks `backend.streamCredentials(refresh = true)` again, never one fixed
   token: a token expires an hour in, and two clients refreshing at once fetch one.
 - Camera direction and state are set before joining, so no front-facing frame is published.

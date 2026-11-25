@@ -17,8 +17,10 @@ import (
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/bearer"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
 )
@@ -455,6 +457,71 @@ func (s *CallLogSuite) TestEachHeaderIsCutToAKiB() {
 	s.True(strings.HasSuffix(line, " retry_after="+wait[:providerMessageBytes]), "the line ends with the cut Retry-After")
 }
 
+// The agent's own line for a call ("a tool call came back") names the connector and how the
+// call failed from what the dispatcher reports (agent.ReportTool): a call that answered
+// reports its connector alone.
+func (s *CallLogSuite) TestACallThatAnswersIsReportedWithItsConnector() {
+	app := s.connection("", "primary")
+	d, _ := s.logging(s.spec(s.config(s.fixed("crm", app, "whoami")), "", nil))
+
+	said, report, err := s.reported(d, "crm__whoami")
+
+	s.Require().NoError(err)
+	s.Equal("primary", said)
+	s.Equal(agent.ToolReport{Connector: s.connectorID}, report)
+}
+
+// A call cut off at its binding's timeout returns no error: the report is what says it failed.
+func (s *CallLogSuite) TestATimedOutCallIsReportedAsAnUnknownOutcome() {
+	s.provider.streamFirst()
+	app := s.connection("", "primary")
+	binding := s.fixed("crm", app, "slow")
+	binding.TimeoutMs = 200
+	d, _ := s.logging(s.spec(s.config(binding), "", nil))
+
+	_, report, err := s.reported(d, "crm__slow")
+
+	s.Require().NoError(err)
+	s.Equal(agent.ToolReport{Connector: s.connectorID, ErrorCode: store.InvocationOutcomeUnknown}, report)
+}
+
+func (s *CallLogSuite) TestARefusedCallIsReportedWithTheReason() {
+	app := s.connection("", "primary")
+	config := s.config(s.fixed("crm", app, "whoami"))
+	d, _ := s.logging(s.spec(config, "", nil))
+	s.rebind(config, s.fixed("crm", app))
+
+	_, report, err := s.reported(d, "crm__whoami")
+
+	s.Require().Error(err)
+	s.Equal(agent.ToolReport{Connector: s.connectorID, ErrorCode: store.InvocationDenied,
+		Error: `session: connector "crm": the tool is no longer granted, so crm__whoami was not called`}, report)
+}
+
+// A failure is reported in the words the row keeps, with what the call's Exchange redacts
+// taken out: the token the provider echoed is not in them.
+func (s *CallLogSuite) TestAFailureIsReportedWithoutTheTokenTheProviderEchoes() {
+	app := s.connection("", "primary")
+	d, _ := s.logging(s.spec(s.config(s.fixed("crm", app, "whoami")), "", nil))
+	s.provider.answer("primary", http.StatusBadRequest, http.Header{"Content-Type": {"text/plain"}},
+		"invalid token "+tokenOf("primary"))
+
+	_, report, err := s.reported(d, "crm__whoami")
+
+	s.Require().Error(err)
+	s.Equal(agent.ToolReport{Connector: s.connectorID, ErrorCode: store.InvocationExternalServer,
+		Error: "invalid token [redacted]"}, report)
+	s.Equal(report.Error, s.row(app).ErrorMessage, "the report says what the row keeps")
+}
+
+// reported runs the tool name on d with no arguments under a context the agent reads a report
+// from, and returns what the model reads, the report and the error.
+func (s *CallLogSuite) reported(d *dispatcher, name string) (string, agent.ToolReport, error) {
+	ctx, report := agent.WithToolReport(s.ctx)
+	parts, err := d.Run(ctx, llm.ToolCall{ID: uuid.NewString(), Name: name, Arguments: "{}"})
+	return llm.TextOf(parts), *report, err
+}
+
 // providerHost is the host and port the suite's provider listens on.
 func (s *CallLogSuite) providerHost() string {
 	return strings.TrimPrefix(s.provider.URL, "https://")
@@ -523,7 +590,7 @@ func (s *CallLogSuite) row(connection string) store.ConnectorInvocation {
 	var rows []store.ConnectorInvocation
 	s.Require().Eventually(func() bool {
 		var err error
-		rows, err = s.store.ConnectorInvocations(s.ctx, s.customerID, connection, 0, nil)
+		rows, err = s.store.ConnectorInvocations.Select(s.ctx, s.customerID, store.InvocationFilter{ConnectionID: connection, Limit: 0, After: nil})
 		return err == nil && len(rows) == 1
 	}, 5*time.Second, 20*time.Millisecond)
 	return rows[0]
@@ -565,7 +632,7 @@ sources:
     endpoint: mcp
 `, s.connectorID, s.provider.URL)))
 	s.Require().NoError(err)
-	definition, err := s.store.CreateConnectorDefinition(s.ctx, s.customerID, manifest)
+	definition, err := s.store.ConnectorDefinitions.Revise(s.ctx, s.customerID, manifest)
 	s.Require().NoError(err)
 	s.revision = definition.Revision
 }

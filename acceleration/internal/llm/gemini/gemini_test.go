@@ -159,6 +159,13 @@ func (s *GeminiSuite) TestXhighIsRefusedOnArgonBeforeItIsSent() {
 	s.ErrorContains(err, `reasoning effort "xhigh" is not one of low, medium, high`)
 }
 
+func (s *GeminiSuite) TestXhighIsRefusedOnCarbonBeforeItIsSent() {
+	// Carbon came after Hydrogen and Neon but takes only Argon's three levels.
+	_, err := New(Options{APIKey: "k", Model: "gemini-4-carbon", ReasoningEffort: "xhigh"})
+
+	s.ErrorContains(err, `reasoning effort "xhigh" is not one of low, medium, high`)
+}
+
 func (s *GeminiSuite) TestHydrogenAcceptsImages() {
 	provider, err := New(Options{APIKey: "k", Model: "gemini-4-hydrogen"})
 	s.Require().NoError(err)

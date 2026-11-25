@@ -85,11 +85,12 @@ func (s *Server) exportConnectionToken(ctx context.Context, request *connectionR
 		}
 	}
 	// No export leaves without its row.
-	err = s.store.RecordConnectorAudit(ctx, &store.ConnectorAuditEvent{
+	err = s.store.ConnectorAuditEvents.Insert(ctx, &store.ConnectorAuditEvent{
 		CustomerID: connection.CustomerID, ConnectionID: connection.ID, ConnectorID: connection.ConnectorID,
 		OwnerType: connection.OwnerType, Action: store.AuditTokenExport, Revision: credential.Revision,
 		RequestID: core.CorrelationOf(ctx).RequestID,
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +109,7 @@ func (s *Server) customersOwnClient(ctx context.Context, connection store.Connec
 	if issuedTo != core.ClientCustomer {
 		return errNotCustomersApp
 	}
-	record, err := s.store.ConnectorOAuthClient(ctx, connection.CustomerID, connection.ConnectorID)
+	record, err := s.store.ConnectorOAuthClients.Get(ctx, connection.CustomerID, connection.ConnectorID)
 	if errors.Is(err, store.ErrNoConnectorOAuthClient) {
 		return errNotCustomersApp
 	}

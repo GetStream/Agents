@@ -123,6 +123,9 @@ type Endpoint struct {
 	Model string
 	// APIKey is empty for an endpoint that takes none.
 	APIKey string
+	// ContextWindow is how many tokens the endpoint serves the model with, zero when not
+	// known.
+	ContextWindow int64
 	// Client is how requests reach it. On a router tenants share it dials public addresses
 	// only, because the endpoint is whatever a tenant wrote.
 	Client *http.Client
@@ -623,7 +626,7 @@ func (r *Router[P]) Resolve(ctx context.Context, target string, languageHints []
 	}
 
 	if len(matching) == 0 {
-		return nil, stack.Wrap(fmt.Errorf("routing: no provider satisfies %q for languages %s", target, strings.Join(languageHints, ",")))
+		return nil, stack.Wrap(Refused(fmt.Errorf("routing: no provider satisfies %q for languages %s", target, strings.Join(languageHints, ","))))
 	}
 
 	candidates := r.candidates(ctx, matching)
@@ -1047,6 +1050,13 @@ func (r *Router[P]) startCandidate(ctx context.Context, request Request, candida
 	voice, err := r.voice(voiceCtx, request, candidate.Config.Provider)
 	if err != nil {
 		return zero, err
+	}
+	// The voice overwrites name is handed to the provider as written, and is no more any
+	// customer's to speak in than the request's voice is.
+	if overwritten != "" && r.voices != nil {
+		if _, err := r.voices.ResolveVoice(voiceCtx, request.CustomerID, candidate.Config.Provider, overwritten); err != nil {
+			return zero, err
+		}
 	}
 	// With no top-level voice, a TTS overwrite is the voice spoken: a factory that reads no
 	// overwrites, as Cartesia's does not, would otherwise speak its own default. A top-level

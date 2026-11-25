@@ -95,7 +95,7 @@ func (s *Server) listKnowledgeDocuments(ctx context.Context, request *listKnowle
 		namespace = strings.TrimSpace(*request.Namespace.ptr())
 	}
 
-	stored, err := s.store.CustomerKnowledgeDocuments(ctx, customerID, namespace)
+	stored, err := s.store.KnowledgeDocuments.Select(ctx, customerID, store.KnowledgeDocumentFilter{Namespace: namespace})
 	if err != nil {
 		return nil, err
 	}
@@ -117,9 +117,9 @@ func (s *Server) getKnowledgeDocument(ctx context.Context, request *getKnowledge
 		return nil, errNoKnowledgeDocuments
 	}
 
-	document, err := s.store.KnowledgeDocument(ctx, customerID, request.Id)
+	document, err := s.store.KnowledgeDocuments.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownKnowledgeDocument
+		return nil, unknownOr(err, store.ErrNoKnowledgeDocument, errUnknownKnowledgeDocument)
 	}
 	read := indexedKnowledgeDocumentOf(document)
 	read.Text = &document.Text
@@ -136,9 +136,9 @@ func (s *Server) deleteKnowledgeDocument(ctx context.Context, request *deleteKno
 		return nil, errNoKnowledgeDocuments
 	}
 
-	document, err := s.store.KnowledgeDocument(ctx, customerID, request.Id)
+	document, err := s.store.KnowledgeDocuments.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownKnowledgeDocument
+		return nil, unknownOr(err, store.ErrNoKnowledgeDocument, errUnknownKnowledgeDocument)
 	}
 	if err := s.removeKnowledgeDocument(ctx, document); err != nil {
 		return nil, err
@@ -162,7 +162,7 @@ func (s *Server) deleteKnowledge(ctx context.Context, request *deleteKnowledgeRe
 		return nil, invalidRequest("a namespace is required")
 	}
 
-	configs, err := s.store.CustomerAgentConfigs(ctx, customerID)
+	configs, err := s.store.AgentConfigs.Select(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +187,7 @@ func (s *Server) deleteKnowledge(ctx context.Context, request *deleteKnowledgeRe
 	if err != nil {
 		return nil, err
 	}
-	documents, pages, err := s.store.DeleteKnowledgeBase(ctx, customerID, namespace)
+	documents, pages, err := s.store.KnowledgeDocuments.DeleteBase(ctx, customerID, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -214,9 +214,9 @@ func (s *Server) listKnowledgeDocumentPassages(ctx context.Context, request *lis
 		return nil, errNoKnowledgeDocuments
 	}
 
-	document, err := s.store.KnowledgeDocument(ctx, customerID, request.Id)
+	document, err := s.store.KnowledgeDocuments.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownKnowledgeDocument
+		return nil, unknownOr(err, store.ErrNoKnowledgeDocument, errUnknownKnowledgeDocument)
 	}
 	passages, err := s.knowledgePassages(ctx, customerID, document.Namespace, document.Source, document.Passages)
 	if err != nil {
@@ -262,7 +262,7 @@ func (s *Server) fillKnowledge(
 	// and what the entry below reports as having moved.
 	before := map[string]store.KnowledgeDocument{}
 	if s.store != nil {
-		stored, err := s.store.CustomerKnowledgeDocumentsWithText(ctx, customerID, namespace)
+		stored, err := s.store.KnowledgeDocuments.Select(ctx, customerID, store.KnowledgeDocumentFilter{Namespace: namespace, WithText: true})
 		if err != nil {
 			return 0, 0, err
 		}
@@ -335,7 +335,7 @@ func (s *Server) fillKnowledge(
 	for _, document := range written {
 		document.Passages = max(document.Passages, before[document.Source].Passages)
 		document.State = store.KnowledgeDocumentPending
-		if err = s.store.SaveKnowledgeDocument(ctx, &document); err != nil {
+		if err = s.store.KnowledgeDocuments.Upsert(ctx, &document); err != nil {
 			return 0, 0, err
 		}
 	}
@@ -352,7 +352,7 @@ func (s *Server) fillKnowledge(
 			return 0, 0, err
 		}
 		document.State = store.KnowledgeDocumentIndexed
-		if err = s.store.SaveKnowledgeDocument(ctx, document); err != nil {
+		if err = s.store.KnowledgeDocuments.Upsert(ctx, document); err != nil {
 			return 0, 0, err
 		}
 		indexed++
@@ -384,7 +384,7 @@ func (s *Server) failKnowledge(ctx context.Context, documents []store.KnowledgeD
 	for _, document := range documents {
 		document.Passages = max(document.Passages, before[document.Source].Passages)
 		document.State, document.Error = store.KnowledgeDocumentFailed, knowledgeWriteFailed
-		if err := s.store.SaveKnowledgeDocument(ctx, &document); err != nil {
+		if err := s.store.KnowledgeDocuments.Upsert(ctx, &document); err != nil {
 			s.logger.Warn("could not mark a knowledge document failed", "source", document.Source, "error", err)
 			return
 		}
@@ -410,8 +410,8 @@ func (s *Server) agentOfKnowledge(ctx context.Context, customerID, namespace str
 	if s.configs == nil || namespace == "" {
 		return ""
 	}
-	config, found, err := s.configs.AgentConfigByName(ctx, customerID, namespace)
-	if err != nil || !found {
+	config, err := s.store.AgentConfigs.GetByName(ctx, customerID, namespace)
+	if err != nil {
 		return ""
 	}
 	return config.ID
@@ -429,7 +429,7 @@ func (s *Server) forgetKnowledge(
 		}
 	}
 
-	stored, err := s.store.CustomerKnowledgeDocuments(ctx, customerID, namespace)
+	stored, err := s.store.KnowledgeDocuments.Select(ctx, customerID, store.KnowledgeDocumentFilter{Namespace: namespace})
 	if err != nil {
 		return err
 	}
@@ -452,7 +452,7 @@ func (s *Server) removeKnowledgeDocument(ctx context.Context, document store.Kno
 	if err := s.knowledgeFor(ctx, document.CustomerID, "").Delete(ctx, document.Namespace, ids); err != nil {
 		return err
 	}
-	if err := s.store.DeleteKnowledgeDocument(ctx, document.CustomerID, document.ID); err != nil {
+	if err := s.store.KnowledgeDocuments.Delete(ctx, document.CustomerID, document.ID); err != nil {
 		return err
 	}
 	if s.knowledgeFiles != nil {

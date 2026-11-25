@@ -192,7 +192,7 @@ func (s *Service) CreateSIPTrunk(ctx context.Context, customerID string, setting
 	if err := s.applySIPTrunk(&trunk, settings); err != nil {
 		return store.SIPTrunk{}, err
 	}
-	if err := s.store.CreateSIPTrunk(ctx, &trunk); err != nil {
+	if err := s.store.SIPTrunks.Insert(ctx, &trunk); err != nil {
 		return store.SIPTrunk{}, err
 	}
 	return trunk, nil
@@ -203,7 +203,7 @@ func (s *Service) SIPTrunks(ctx context.Context, customerID string) ([]store.SIP
 	if err := s.sipTrunksReady(); err != nil {
 		return nil, err
 	}
-	return s.store.SIPTrunks(ctx, customerID)
+	return s.store.SIPTrunks.Select(ctx, customerID)
 }
 
 // SIPTrunk returns one of a customer's trunks.
@@ -211,7 +211,7 @@ func (s *Service) SIPTrunk(ctx context.Context, customerID, id string) (store.SI
 	if err := s.sipTrunksReady(); err != nil {
 		return store.SIPTrunk{}, err
 	}
-	return s.store.SIPTrunk(ctx, customerID, id)
+	return s.store.SIPTrunks.Get(ctx, customerID, id)
 }
 
 // UpdateSIPTrunk replaces what a trunk says. A nil password keeps the stored one.
@@ -219,7 +219,7 @@ func (s *Service) UpdateSIPTrunk(ctx context.Context, customerID, id string, set
 	if err := s.sipTrunksReady(); err != nil {
 		return store.SIPTrunk{}, err
 	}
-	trunk, err := s.store.SIPTrunk(ctx, customerID, id)
+	trunk, err := s.store.SIPTrunks.Get(ctx, customerID, id)
 	if err != nil {
 		return store.SIPTrunk{}, err
 	}
@@ -230,7 +230,7 @@ func (s *Service) UpdateSIPTrunk(ctx context.Context, customerID, id string, set
 	if err := s.applySIPTrunk(&trunk, settings); err != nil {
 		return store.SIPTrunk{}, err
 	}
-	if err := s.store.UpdateSIPTrunk(ctx, &trunk); err != nil {
+	if err := s.store.SIPTrunks.Update(ctx, &trunk); err != nil {
 		return store.SIPTrunk{}, err
 	}
 	return trunk, nil
@@ -241,7 +241,7 @@ func (s *Service) DeleteSIPTrunk(ctx context.Context, customerID, id string) err
 	if err := s.sipTrunksReady(); err != nil {
 		return err
 	}
-	return s.store.DeleteSIPTrunk(ctx, customerID, id)
+	return s.store.SIPTrunks.Delete(ctx, customerID, id)
 }
 
 // AddTrunkNumber records a number on one of the customer's trunks. Nothing is bought and
@@ -275,7 +275,7 @@ func (s *Service) AddTrunkNumber(ctx context.Context, request TrunkNumber) (stor
 		SIPTrunkID:   request.TrunkID,
 		PurchasedAt:  time.Now().UTC(),
 	}
-	if err := s.store.AddTrunkNumber(ctx, &number); err != nil {
+	if err := s.store.PhoneNumbers.InsertOnSIPTrunk(ctx, &number); err != nil {
 		return store.PhoneNumber{}, err
 	}
 	return number, nil
@@ -304,7 +304,7 @@ func (s *Service) applySIPTrunk(trunk *store.SIPTrunk, settings SIPTrunkSettings
 
 // openSIPTrunk is a trunk as a call is dialled through it.
 func (s *Service) openSIPTrunk(ctx context.Context, customerID, id string) (*SIPTrunk, error) {
-	trunk, err := s.store.SIPTrunk(ctx, customerID, id)
+	trunk, err := s.store.SIPTrunks.Get(ctx, customerID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +313,7 @@ func (s *Service) openSIPTrunk(ctx context.Context, customerID, id string) (*SIP
 	}
 	password, err := s.sealer.OpenWithAADVersion(trunk.PasswordSealed, sipTrunkAAD(customerID, id), trunk.PasswordKEKVersion)
 	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("phone: open sip trunk password: %w", err))
+		return nil, stack.Wrap(lastingError{fmt.Errorf("phone: open sip trunk password: %w", err)})
 	}
 	return &SIPTrunk{
 		Host: trunk.Host, Port: trunk.Port, Transport: trunk.Transport, Username: trunk.Username,
@@ -337,7 +337,7 @@ func (s *Service) ResumeTrunkCall(ctx context.Context, ref TrunkCallRef) (Resume
 	if err != nil {
 		return ResumedTrunkCall{}, err
 	}
-	shared, err := s.store.StreamTrunk(ctx, ref.CustomerID, ref.StreamTrunkID)
+	shared, err := s.store.StreamTrunks.Get(ctx, ref.CustomerID, ref.StreamTrunkID)
 	if err != nil {
 		return ResumedTrunkCall{}, err
 	}

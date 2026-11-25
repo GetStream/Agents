@@ -83,6 +83,8 @@ type pendingTool struct {
 type toolResult struct {
 	parts   []llm.ContentPart
 	failure string
+	// ended marks the router's own answer to a call that ended, not the caller's.
+	ended bool
 }
 
 func newBridge(timeout time.Duration, tools []harness.Tool, ask func(ToolCall) error) *bridge {
@@ -164,6 +166,9 @@ func (b *bridge) Run(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart,
 	select {
 	case result := <-answer:
 		if result.failure != "" {
+			if !result.ended {
+				agent.ReportTool(ctx, agent.ToolReport{Client: true})
+			}
 			return nil, errors.New(result.failure)
 		}
 		return result.parts, nil
@@ -277,7 +282,7 @@ func (b *bridge) Close() {
 	b.closed = true
 	for _, pending := range b.pending {
 		select {
-		case pending.answer <- toolResult{failure: "the call ended before it finished"}:
+		case pending.answer <- toolResult{failure: "the call ended before it finished", ended: true}:
 		default:
 		}
 	}

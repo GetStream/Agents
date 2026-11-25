@@ -279,6 +279,82 @@ namespace GetStream.VisionAgents.Models
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class ActivityDay
+    {
+
+        /// <summary>
+        /// The app.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("app_id")]
+        public string AppId { get; set; } = default!;
+
+        /// <summary>
+        /// The area of the API, such as agent_setup or conversations.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("area")]
+        public string Area { get; set; } = default!;
+
+        /// <summary>
+        /// The client the requests named themselves as: dashboard, cli, sdk or api.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("client")]
+        public string Client { get; set; } = default!;
+
+        /// <summary>
+        /// The UTC day, YYYY-MM-DD.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("day")]
+        [System.Text.Json.Serialization.JsonConverter(typeof(DateFormatConverter))]
+        public System.DateTimeOffset Day { get; set; } = default!;
+
+        /// <summary>
+        /// When the first request arrived.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("first_at")]
+        public System.DateTimeOffset FirstAt { get; set; } = default!;
+
+        /// <summary>
+        /// When the last request arrived.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("last_at")]
+        public System.DateTimeOffset LastAt { get; set; } = default!;
+
+        /// <summary>
+        /// The error code of the latest refusal, empty when there was none.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("last_refusal_code")]
+        public string LastRefusalCode { get; set; } = default!;
+
+        /// <summary>
+        /// The organization the app was in when the row was last written.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("organization_id")]
+        public string OrganizationId { get; set; } = default!;
+
+        /// <summary>
+        /// How many were answered with a status of 400 or more.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("refused")]
+        public long Refused { get; set; } = default!;
+
+        /// <summary>
+        /// How many requests arrived, refused ones included.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("requests")]
+        public long Requests { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class ActivityEnding
     {
 
@@ -414,6 +490,42 @@ namespace GetStream.VisionAgents.Models
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class ActivityPage
+    {
+
+        [System.Text.Json.Serialization.JsonPropertyName("has_more")]
+        public bool HasMore { get; set; } = default!;
+
+        /// <summary>
+        /// One item per organization, day, app, area and client, sorted in that order.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("items")]
+        public System.Collections.Generic.List<ActivityDay> Items { get; set; } = new System.Collections.Generic.List<ActivityDay>();
+
+        /// <summary>
+        /// Pass as cursor for the next page, with the same from, to, org_id and app_id. Absent on the last.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("next_cursor")]
+        public string? NextCursor { get; set; } = default!;
+
+        /// <summary>
+        /// Every organization items names, by id. An organization whose items span two pages is on both, the same, unless a row was written between the two reads.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("organizations")]
+        public System.Collections.Generic.List<OrganizationProgress> Organizations { get; set; } = new System.Collections.Generic.List<OrganizationProgress>();
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class ActivitySession
     {
 
@@ -497,6 +609,36 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("running")]
         public long Running { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class ActivityStepDay
+    {
+
+        /// <summary>
+        /// The UTC day, YYYY-MM-DD, of the first request answered in the step's area, over every day recorded, not only from since on.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("first_answered")]
+        [System.Text.Json.Serialization.JsonConverter(typeof(DateFormatConverter))]
+        public System.DateTimeOffset FirstAnswered { get; set; } = default!;
+
+        /// <summary>
+        /// The step, one of furthest_step's but none and steady_use.
+        /// <br/>
+        /// <br/>One of `dashboard_reads`, `agent_setup`, `workers`, `conversations`, `voice_video`, `phone_sms`.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("step")]
+        public string Step { get; set; } = default!;
 
         private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
 
@@ -868,7 +1010,7 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<string>? Skills { get; set; } = default!;
 
         /// <summary>
-        /// A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+        /// A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. New voice configs default to sts-fast unless created with sts set to an empty string or with cascade settings; absent means the cascade.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("sts")]
         public string? Sts { get; set; } = default!;
@@ -1101,6 +1243,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("ui_instructions")]
         public string? UiInstructions { get; set; } = default!;
 
+        /// <summary>
+        /// The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not write over a newer one: read the config again and make the change on that. Left out, the change is made on the config as it now is, and every field it does not send keeps what is stored.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("updated_at")]
+        public System.DateTimeOffset? UpdatedAt { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("video")]
         public SessionVideo? Video { get; set; } = default!;
 
@@ -1288,7 +1436,7 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<string>? Skills { get; set; } = default!;
 
         /// <summary>
-        /// A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+        /// A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted on a new voice config with no cascade settings (stt, tts, llm, llm_fallbacks, keyterms, floor_control, guardrail), it defaults to sts-fast where available. An empty string explicitly selects the cascade.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("sts")]
         public string? Sts { get; set; } = default!;
@@ -1824,7 +1972,7 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
-        /// Turns a session took in the window, on average. A turn is a reply to the person, not a rewound one or a delegated task's. Null when no session took one.
+        /// Turns a session took in the window, on average. A turn is a reply that was not rewound, delegated work that came back after its turn ended included. Null when no session took one.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("avg_turns")]
         public double? AvgTurns { get; set; } = default!;
@@ -2804,9 +2952,6 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("campaign_id")]
         public string? CampaignId { get; set; } = default!;
 
-        [System.Text.Json.Serialization.JsonPropertyName("config_id")]
-        public string? ConfigId { get; set; } = default!;
-
         [System.Text.Json.Serialization.JsonPropertyName("contact_id")]
         public string? ContactId { get; set; } = default!;
 
@@ -2825,9 +2970,6 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("from_number")]
         public string? FromNumber { get; set; } = default!;
 
-        /// <summary>
-        /// The session that ran the call, which is what it is held by.
-        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("id")]
         public string Id { get; set; } = default!;
 
@@ -2860,6 +3002,12 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("review_score")]
         public int? ReviewScore { get; set; } = default!;
+
+        /// <summary>
+        /// The session the call was part of. A session starts a new call each time voice is started or stopped on it. Absent once the session is deleted.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("session_id")]
+        public string? SessionId { get; set; } = default!;
 
         /// <summary>
         /// What the fast model could hand to the subagent. The instructions behind each name are in the skill registry.
@@ -2932,12 +3080,6 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("usage")]
         public CallUsage? Usage { get; set; } = default!;
-
-        /// <summary>
-        /// Who the agent spoke to, as the client's own token named them. Empty for a call the customer's backend opened, and for telephony, where the number is the name.
-        /// </summary>
-        [System.Text.Json.Serialization.JsonPropertyName("user_id")]
-        public string? UserId { get; set; } = default!;
 
         /// <summary>
         /// The voice the call asked for, in the provider's own terms. Empty means the provider's default.
@@ -3303,7 +3445,7 @@ namespace GetStream.VisionAgents.Models
         public string Name { get; set; } = default!;
 
         /// <summary>
-        /// Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it.
+        /// Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, stream_app_disconnected or stream_app_moved when the app's Stream app was disconnected or moved, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("paused_reason")]
         public string? PausedReason { get; set; } = default!;
@@ -3408,7 +3550,7 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
-        /// Minutes after the previous attempt started, pushed into the calling hours.
+        /// Minutes after the previous attempt started, pushed into the calling hours. At most 43200 (30 days).
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("delay_minutes")]
         public long DelayMinutes { get; set; } = default!;
@@ -6025,7 +6167,7 @@ namespace GetStream.VisionAgents.Models
         public string? Outcome { get; set; } = default!;
 
         /// <summary>
-        /// Why the dial placed no call: invalid_number, refused, deferred, paused or not_placed (the router stopped before the call went out). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says.
+        /// Why the dial placed no call: invalid_number, refused, deferred, paused, not_placed (the router stopped before the call went out) or dial_failed (it failed before anything rang, and is tried again shortly). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("result")]
         public string Result { get; set; } = default!;
@@ -6159,6 +6301,45 @@ namespace GetStream.VisionAgents.Models
     }
 
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class ContactUpdateRequest
+    {
+
+        /// <summary>
+        /// What to say to this person. Empty clears it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("instructions")]
+        public string? Instructions { get; set; } = default!;
+
+        /// <summary>
+        /// An IANA zone. Empty clears it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("time_zone")]
+        public string? TimeZone { get; set; } = default!;
+
+        /// <summary>
+        /// With or without a country code.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("to_number")]
+        public string? ToNumber { get; set; } = default!;
+
+        /// <summary>
+        /// Replace all of the contact's variables. Same rules as on add.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("variables")]
+        public System.Collections.Generic.Dictionary<string, string>? Variables { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class ContentPart
     {
 
@@ -6220,7 +6401,7 @@ namespace GetStream.VisionAgents.Models
         public string Channel { get; set; } = default!;
 
         /// <summary>
-        /// The number, in E.164.
+        /// The number in E.164, or an iMessage handle's email address, for channel imessage or all.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("recipient")]
         public string Recipient { get; set; } = default!;
@@ -6276,7 +6457,7 @@ namespace GetStream.VisionAgents.Models
         public string? ReasoningEffort { get; set; } = default!;
 
         /// <summary>
-        /// An earlier response of a conversation kept in Stream Chat to regenerate or edit. With no text its question is answered again; with text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action.
+        /// An earlier response of a conversation kept in Stream Chat to regenerate or edit. With text sent empty, as "", its question is answered again: text is required, so it is sent even then. With text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("replaces")]
         public string? Replaces { get; set; } = default!;
@@ -6288,7 +6469,7 @@ namespace GetStream.VisionAgents.Models
         public string? RequestId { get; set; } = default!;
 
         /// <summary>
-        /// What to answer, as though it had been said. May be empty when images or audio carry the question. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id.
+        /// What to answer, as though it had been said. May be empty when images or audio carry the question, or with replaces to answer the replaced response's question again. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("text")]
         public string Text { get; set; } = default!;
@@ -6507,7 +6688,7 @@ namespace GetStream.VisionAgents.Models
         public FloorControl? FloorControl { get; set; } = default!;
 
         /// <summary>
-        /// What the agent opens the call with, over what the config says.
+        /// What the agent opens the call with, over what the config says. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("greeting")]
         public Greeting? Greeting { get; set; } = default!;
@@ -6549,16 +6730,19 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<string>? Languages { get; set; } = default!;
 
         /// <summary>
-        /// A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured.
+        /// A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("llm")]
         public string? Llm { get; set; } = default!;
 
+        /// <summary>
+        /// Server-side only: a device sending it is refused with a 403.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("max_tokens")]
         public int? MaxTokens { get; set; } = default!;
 
         /// <summary>
-        /// The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups.
+        /// The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("max_tool_rounds")]
         public int? MaxToolRounds { get; set; } = default!;
@@ -6572,6 +6756,9 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("min_confidence")]
         public double? MinConfidence { get; set; } = default!;
 
+        /// <summary>
+        /// Server-side only: a device sending it is refused with a 403.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("model_overwrites")]
         public ModelOverwrites? ModelOverwrites { get; set; } = default!;
 
@@ -6581,6 +6768,9 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("navigating")]
         public bool? Navigating { get; set; } = default!;
 
+        /// <summary>
+        /// Server-side only: a device sending it is refused with a 403.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("phone")]
         public SessionPhone? Phone { get; set; } = default!;
 
@@ -6603,7 +6793,7 @@ namespace GetStream.VisionAgents.Models
         public string? ReturnUrl { get; set; } = default!;
 
         /// <summary>
-        /// Omit it and the config decides, or search-fast when there is no config.
+        /// Omit it and the config decides, or search-fast when there is no config. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("search")]
         public string? Search { get; set; } = default!;
@@ -6615,19 +6805,19 @@ namespace GetStream.VisionAgents.Models
         public bool? StartVoice { get; set; } = default!;
 
         /// <summary>
-        /// A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides.
+        /// A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("sts")]
         public string? Sts { get; set; } = default!;
 
         /// <summary>
-        /// Omit it and the config decides, or en-low-latency when there is no config.
+        /// Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("stt")]
         public string? Stt { get; set; } = default!;
 
         /// <summary>
-        /// Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins.
+        /// Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("tags")]
         public System.Collections.Generic.Dictionary<string, string>? Tags { get; set; } = default!;
@@ -6660,7 +6850,7 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<SessionTool>? Tools { get; set; } = default!;
 
         /// <summary>
-        /// Omit it and the config decides, or en-low-latency when there is no config.
+        /// Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("tts")]
         public string? Tts { get; set; } = default!;
@@ -6684,7 +6874,7 @@ namespace GetStream.VisionAgents.Models
         public SessionVideo? Video { get; set; } = default!;
 
         /// <summary>
-        /// The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI.
+        /// The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("voice")]
         public string? Voice { get; set; } = default!;
@@ -6978,7 +7168,7 @@ namespace GetStream.VisionAgents.Models
         public string BaseUrl { get; set; } = default!;
 
         /// <summary>
-        /// Tokens the model accepts, so the router can refuse a conversation that would not fit. Omitted is unknown.
+        /// Tokens the model accepts, so the router can refuse a conversation that would not fit and keep its default reply cap within it. Omitted is unknown.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("context_window")]
         public long? ContextWindow { get; set; } = default!;
@@ -7277,7 +7467,7 @@ namespace GetStream.VisionAgents.Models
         public double? MinConfidence { get; set; } = default!;
 
         /// <summary>
-        /// Settings for one provider that the options above have no word for, keyed by provider. roboflow takes workspace and workflow_id, or specification, for the roboflow/workflow model. An overwrite for a provider that is not a candidate is refused.
+        /// Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it and the next candidate is asked without it. One naming a provider that is not a candidate is refused.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("overwrites")]
         public System.Collections.Generic.Dictionary<string, object>? Overwrites { get; set; } = default!;
@@ -7507,7 +7697,7 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
-        /// What went wrong, for a program to branch on. Every type has a code of its own name (invalid_request, unauthenticated, forbidden, payment_required, not_found, method_not_allowed, not_acceptable, conflict, gone, payload_too_large, unsupported_media_type, rate_limited, internal_error, unavailable, timeout) that a failure has when nothing names it better. The others are validation_failed, missing_customer, missing_organization, server_side_only, not_configured (this deployment does not offer the feature), modality_not_routed, unsynced_changes (a sync asked to check would write over somebody's edits), name_taken (a 409: another agent config, router config or voice, or another skill of the same agent config, already has the name, so another name will do), channel_connection_taken (a 409: another live agent config binds the channel connection as fixed, and one agent answers a channel connection's messages, so the message names that config), call_unanswered (a 409: the call placed for a phone session ended with nobody answering, and the message names how: busy, no_answer, failed or canceled. Opening the session is refused, or, when the status came while the agent was joining the call, the session is ended at once and kept as ended), no_oauth_client (a 400: a consent found no OAuth client for the connector, and the message names each way the connector lets the app give it one), invalid_config (a 400: an agent config a run names does not start a session), tool_not_configured (a 400: a session under an agent config was declared or given a function that none of the config's tool groups names, and the message names it), insufficient_credits (a 402: the organization's credit is spent, so work that costs money is refused until credit is added; a model that costs nothing is still served), system_limit_reached (a 402: the organization's spend hard limit for the day or the month is reached, whatever its credit, and the message names the interval, the amount and when it resets), spend_limit_reached (a 402: one of the organization's own spend limits is spent, on the organization, an app, a key, a usage category or a team, and the message says which and when it resets, so retrying before then is refused again), user_limit_reached (a 429: a spend limit on the one end user the request is for is spent, which stops that user and no one else, and Retry-After says when its window ends), spend_check_unavailable (a 503: the router could not share what the organization is spending with the other routers for a while, so work that costs money is refused until it can; a model that costs nothing is still served, and Retry-After says to try again in a few seconds), budget_moved (a 400: a policy sent a budget, which spend limits replaced), limit_above_parent (a 400: a spend limit is above a limit of its parent in the same interval, and the message names the parent's limit), limit_exists (a 409: the subject already has a limit at that level and interval, and the message names its id), no_limit (a 404: the subject has no spend limit to reset or grant past), use_team (a 400: a category starting team: was sent, where the team field names a team), invalid_expiry (a 400: a grant's expires_at is not in the future, or is more than 366 days away), too_many_grants (a 409: the organization has 20 live grants, as many as it may), tier_limit_reached (the organization's tier limits refuse the work, and limit says which: a 403 for a call or a transfer, to a country the tier does not reach, past its minutes or recipients of the day, or past its calls at once; a 400 for an agent config whose sandbox is bigger or more open than the organization's sandbox limits allow. The message names the tier and the limit), account_suspended (a 403: the organization is suspended, and every request is refused, one for a model that costs nothing included, until it is restored; the message says to contact support), concurrency_limited (a 429: the app has as many runs in flight as it may, and Retry-After says when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input does not fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG, WebP or GIF, which retrying the same image does not fix), document_too_large (a 413: a file sent with a response has more pages or text than one may, alone or with the files the conversation already holds, and the message names the limit), document_unreadable (a 400: a file sent with a response could not be read, such as one with a password, one that is damaged or one with no text in it, which retrying the same file does not fix), invalid_usage_categories (a 400: the usage categories the request names, in the token's usage_categories and team claims or in X-Stream-Usage-Categories, are more than 10, one is not 1 to 64 characters of A-Z, a-z, 0-9, _ . : -, more than one names a team, or the team is over 59 characters), memory_unavailable (a 503: the memory store could not delete what was asked, so nothing that waits on it was deleted either, and the same request later can succeed), billing_not_enabled (a 404: this deployment bills nobody, or the caller's app is in no organization it bills, so there is no account to read), provider_takes_no_key (a 400: a key was put for a provider whose work is never routed on a customer's own key here, and the message names the ones that are), campaign_locked (a 409: the campaign's state does not allow the change, such as a launched campaign's sequence, or resuming one that is running), campaign_not_ready (a 400: a launch found the campaign missing what it needs to ring anybody, and the message says what), consent_required (a 400: a launch did not say the people on the campaign agreed to be called), branch_limit_reached (a 409: the conversation has as many edit and regenerate points as Stream Chat keeps for it, 100, so a regenerate or an edit is refused and the conversation is continued in a new chat; asking and reading are unaffected), branch_too_long (a 409: the branch an activation would bring back is more than 100 messages to send again, so it is continued in a new chat), branch_unavailable (a 410: the copies of a hidden branch were deleted, as a memory truncate deletes them, so it can be neither read nor brought back), switch_unfinished (a 409: a regenerate, an edit or an activation of the session failed after Stream Chat may have rewound, and finishing it still fails because Stream Chat does not answer, so the session's questions, regenerates, edits and activations are refused meanwhile; try again: each one tries to finish it first, so it clears once Stream Chat answers), and &lt;resource&gt;_not_found for agent_config, call, campaign, channel_account, command, connection, grant, knowledge_document, knowledge_url, limit, provider_key, router_config, scheduled_task, session, simulation, simulation_run, skill and voice. A scheduled task also has invalid_schedule (a schedule that does not read: at and in both or neither, a date, time or duration that does not parse, or until without repeat), schedule_in_past, schedule_too_far (a one-shot, or an in, more than a year ahead), invalid_timezone, timezone_unknown (no zone was given and neither the user nor the config has one), invalid_repeat, interval_too_short (a run moved to less than 15 minutes from now and earlier than the run it replaces) and too_many_tasks (a 409: the user is at their active-task limit). More may be added, so a client should expect one it does not know.
+        /// What went wrong, for a program to branch on. Every type has a code of its own name (invalid_request, unauthenticated, forbidden, payment_required, not_found, method_not_allowed, not_acceptable, conflict, gone, payload_too_large, unsupported_media_type, rate_limited, internal_error, unavailable, timeout) that a failure has when nothing names it better. The others are validation_failed, missing_customer, missing_organization, server_side_only, not_configured (this deployment does not offer the feature), modality_not_routed, unsynced_changes (a sync asked to check would write over somebody's edits), name_taken (a 409: another agent config, router config or voice, or another skill of the same agent config, already has the name, so another name will do), import_running (a 409: an import of the app is already running on this router, which runs one at a time, so the same import once it ends can succeed), channel_connection_taken (a 409: another live agent config binds the channel connection as fixed, and one agent answers a channel connection's messages, so the message names that config), call_unanswered (a 409: the call placed for a phone session ended with nobody answering, and the message names how: busy, no_answer, failed or canceled. Opening the session is refused, or, when the status came while the agent was joining the call, the session is ended at once and kept as ended), no_oauth_client (a 400: a consent found no OAuth client for the connector, and the message names each way the connector lets the app give it one), invalid_config (a 400: an agent config a run names does not start a session), tool_not_configured (a 400: a session under an agent config was declared or given a function that none of the config's tool groups names, and the message names it), insufficient_credits (a 402: the organization's credit is spent, so work that costs money is refused until credit is added; a model that costs nothing is still served), system_limit_reached (a 402: the organization's spend hard limit for the day or the month is reached, whatever its credit, and the message names the interval, the amount and when it resets), spend_limit_reached (a 402: one of the organization's own spend limits is spent, on the organization, an app, a key, a usage category or a team, and the message says which and when it resets, so retrying before then is refused again), user_limit_reached (a 429: a spend limit on the one end user the request is for is spent, which stops that user and no one else, and Retry-After says when its window ends), spend_check_unavailable (a 503: the router could not share what the organization is spending with the other routers for a while, so work that costs money is refused until it can; a model that costs nothing is still served, and Retry-After says to try again in a few seconds), budget_moved (a 400: a policy sent a budget, which spend limits replaced), limit_above_parent (a 400: a spend limit is above a limit of its parent in the same interval, and the message names the parent's limit), limit_exists (a 409: the subject already has a limit at that level and interval, and the message names its id), no_limit (a 404: the subject has no spend limit to reset or grant past), use_team (a 400: a category starting team: was sent, where the team field names a team), invalid_expiry (a 400: a grant's expires_at is not in the future, or is more than 366 days away), too_many_grants (a 409: the organization has 20 live grants, as many as it may), tier_limit_reached (the organization's tier limits refuse the work, and limit says which: a 403 for a call or a transfer, to a country the tier does not reach, past its minutes or recipients of the day, or past its calls at once; a 400 for an agent config whose sandbox is bigger or more open than the organization's sandbox limits allow. The message names the tier and the limit), account_suspended (a 403: the organization is suspended, and every request is refused, one for a model that costs nothing included, until it is restored; the message says to contact support), concurrency_limited (a 429: the app has as many runs in flight as it may, and Retry-After says when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input does not fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG, WebP or GIF, which retrying the same image does not fix), document_too_large (a 413: a file sent with a response has more pages or text than one may, alone or with the files the conversation already holds, and the message names the limit), document_unreadable (a 400: a file sent with a response could not be read, such as one with a password, one that is damaged or one with no text in it, which retrying the same file does not fix), invalid_usage_categories (a 400: the usage categories the request names, in the token's usage_categories and team claims or in X-Stream-Usage-Categories, are more than 10, one is not 1 to 64 characters of A-Z, a-z, 0-9, _ . : -, more than one names a team, or the team is over 59 characters), memory_unavailable (a 503: the memory store could not delete what was asked, so nothing that waits on it was deleted either, and the same request later can succeed), billing_not_enabled (a 404: this deployment bills nobody, or the caller's app is in no organization it bills, so there is no account to read), provider_takes_no_key (a 400: a key was put for a provider whose work is never routed on a customer's own key here, and the message names the ones that are), campaign_locked (a 409: the campaign's state does not allow the change, such as a launched campaign's sequence, or resuming one that is running), campaign_not_ready (a 400: a launch found the campaign missing what it needs to ring anybody, and the message says what), consent_required (a 400: a launch did not say the people on the campaign agreed to be called), branch_limit_reached (a 409: the conversation has as many edit and regenerate points as Stream Chat keeps for it, 100, so a regenerate or an edit is refused and the conversation is continued in a new chat; asking and reading are unaffected), branch_too_long (a 409: the branch an activation would bring back is more than 100 messages to send again, so it is continued in a new chat), branch_unavailable (a 410: the copies of a hidden branch were deleted, as a memory truncate deletes them, so it can be neither read nor brought back), switch_unfinished (a 409: a regenerate, an edit or an activation of the session failed after Stream Chat may have rewound, and finishing it still fails because Stream Chat does not answer, so the session's questions, regenerates, edits and activations are refused meanwhile; try again: each one tries to finish it first, so it clears once Stream Chat answers), and &lt;resource&gt;_not_found for agent_config, call, campaign, channel_account, command, connection, grant, knowledge_document, knowledge_url, limit, provider_key, router_config, scheduled_task, session, simulation, simulation_run, skill and voice. A scheduled task also has invalid_schedule (a schedule that does not read: at and in both or neither, a date, time or duration that does not parse, or until without repeat), schedule_in_past, schedule_too_far (a one-shot, or an in, more than a year ahead), invalid_timezone, timezone_unknown (no zone was given and neither the user nor the config has one), invalid_repeat, interval_too_short (a run moved to less than 15 minutes from now and earlier than the run it replaces), too_many_tasks (a 409: the user is at their active-task limit) and task_changed (a 409: the task changed between the request's read and its save, by another edit or pause or by a delivery; nothing was saved, and reading it again and retrying can succeed). More may be added, so a client should expect one it does not know.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("code")]
         public string Code { get; set; } = default!;
@@ -7764,6 +7954,9 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("messages")]
         public bool? Messages { get; set; } = default!;
 
+        /// <summary>
+        /// Server-side only: a device sending it is refused with a 403.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("model_overwrites")]
         public ModelOverwrites? ModelOverwrites { get; set; } = default!;
 
@@ -9942,6 +10135,54 @@ namespace GetStream.VisionAgents.Models
 
     }
 
+    /// <summary>
+    /// A built-in voice a native speech model accepts by id.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class ModelVoice
+    {
+
+        /// <summary>
+        /// True when this is the model's default voice.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("default")]
+        public bool? Default { get; set; } = default!;
+
+        /// <summary>
+        /// Short description of the voice's tone, style or accent.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("description")]
+        public string? Description { get; set; } = default!;
+
+        /// <summary>
+        /// Voice presentation, such as female, male or neutral.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("gender")]
+        public string? Gender { get; set; } = default!;
+
+        /// <summary>
+        /// The voice identifier the provider accepts in its voice field.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("id")]
+        public string Id { get; set; } = default!;
+
+        /// <summary>
+        /// Display name for the voice.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("name")]
+        public string Name { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class NumberSearchResult
     {
@@ -10192,7 +10433,7 @@ namespace GetStream.VisionAgents.Models
         public string Id { get; set; } = default!;
 
         /// <summary>
-        /// The number, in E.164.
+        /// The number in E.164, or an iMessage handle's email address.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("recipient")]
         public string Recipient { get; set; } = default!;
@@ -10301,6 +10542,45 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("since")]
         public System.DateTimeOffset Since { get; set; } = default!;
+
+        /// <summary>
+        /// Every step the organization's apps ever had a request answered in, whenever, not only from since on, in furthest_step's order, with the day of the first. A step skipped, such as voice_video by an organization that only texts, is absent, and so is one whose every request was refused.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("steps")]
+        public System.Collections.Generic.List<ActivityStepDay>? Steps { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class OrganizationProgress
+    {
+
+        /// <summary>
+        /// The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("furthest_step")]
+        public string FurthestStep { get; set; } = default!;
+
+        /// <summary>
+        /// The organization.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("organization_id")]
+        public string OrganizationId { get; set; } = default!;
+
+        /// <summary>
+        /// Every step the organization's apps ever had a request answered in, whenever, not only from from to to, of all its apps even when app_id is set, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("steps")]
+        public System.Collections.Generic.List<ActivityStepDay> Steps { get; set; } = new System.Collections.Generic.List<ActivityStepDay>();
 
         private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
 
@@ -11646,6 +11926,12 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("usage_share")]
         public double? UsageShare { get; set; } = default!;
+
+        /// <summary>
+        /// The built-in voices this native speech model accepts by id. Left out for models whose voices come from a voice library or that do not speak.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("voices")]
+        public System.Collections.Generic.List<ModelVoice>? Voices { get; set; } = default!;
 
         private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
 
@@ -14911,11 +15197,17 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("cost_micros_total")]
         public long CostMicrosTotal { get; set; } = default!;
 
+        /// <summary>
+        /// True on the row that is everything outside the biggest few, summed. Its value is "other", which a label can also have: a label of that value is a row of its own, without other.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("other")]
+        public bool? Other { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("request_count")]
         public long RequestCount { get; set; } = default!;
 
         /// <summary>
-        /// The modality or label value this row is for. "other" is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
+        /// The modality or label value this row is for. "other" with other true is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("value")]
         public string Value { get; set; } = default!;
@@ -15742,7 +16034,7 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<SkillRequest>? Skills { get; set; } = default!;
 
         /// <summary>
-        /// A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+        /// A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted when creating a new voice config with no cascade settings, it defaults to sts-fast where available; on an existing config, omitting it keeps what is stored. An empty string explicitly selects the cascade.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("sts")]
         public string? Sts { get; set; } = default!;

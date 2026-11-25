@@ -45,6 +45,14 @@ class StreamClientsTest {
     }
 
     @Test
+    fun `credentials printed show the key and the user, never the token`() = runTest {
+        val printed = Backend(apiKey = "key").apply { setUser(User("john", "John"), "tok-john-secret") }.streamCredentials().toString()
+
+        assertTrue("tok-john-secret" !in printed, printed)
+        assertTrue("key" in printed && "john" in printed && "[redacted]" in printed, printed)
+    }
+
+    @Test
     fun `two clients refreshing at once fetch one token`() = runTest {
         val asked = AtomicInteger()
         val backend = Backend(apiKey = "key")

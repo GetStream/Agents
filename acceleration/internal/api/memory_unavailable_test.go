@@ -136,7 +136,9 @@ func (s *MemoryUnavailableSuite) TestTruncatingWhileTheMemoryStoreRefusesIsUnava
 	answer := answered(s.T(), body)
 	s.Equal("memory_unavailable", answer.Code)
 	s.Equal("What was remembered could not be removed right now. Try again later.", answer.Message)
-	s.Contains(s.servedLine(http.MethodDelete, "/v1/agents/users/"+user+"/memories"), "quota exhausted")
+	line := s.servedLine(http.MethodDelete, "/v1/agents/users/{user_id}/memories")
+	s.Contains(line, "quota exhausted")
+	s.NotContains(line, user, "the access line names no end user")
 }
 
 func (s *MemoryUnavailableSuite) TestForgettingASessionWhileTheMemoryStoreRefusesIsUnavailable() {
@@ -192,7 +194,7 @@ func (s *MemoryUnavailableSuite) TestASessionFromBeforeRowsSaidIsStillForgotten(
 	// A row written before rows said whether the session remembered. The row is written
 	// behind the request, so it is made old once it is there.
 	s.Require().Eventually(func() bool {
-		made, err := s.store.DB().ExecContext(s.T().Context(),
+		made, err := s.store.GlobalDB().ExecContext(s.T().Context(),
 			"UPDATE agent_sessions SET remembers = NULL WHERE id = ?", opened.Id)
 		if err != nil {
 			return false

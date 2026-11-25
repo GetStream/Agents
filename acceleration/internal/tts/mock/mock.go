@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 )
 
@@ -161,11 +162,11 @@ func (t *TTS) Synthesize(request tts.Request) error {
 	t.mu.Unlock()
 
 	t.speaking.Add(1)
-	go func() {
+	goroutine.Go(ctx, func() {
 		defer t.speaking.Done()
 		defer interrupt()
 		t.speak(ctx, request.ID, said)
-	}()
+	})
 	return nil
 }
 

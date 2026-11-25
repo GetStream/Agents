@@ -118,9 +118,9 @@ func (s *DispatchTextSuite) TestAWorkerIsHandedTextOnlySoAnImageIsRefused() {
 func (s *DispatchTextSuite) openedByEndUser() Session {
 	config := store.AgentConfig{
 		CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
-		Mode: store.AgentModeText, LLM: "en-low-latency", DispatchText: true,
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	return s.client.createSession(CreateSessionRequest{Agent: &config.Name})
 }
 

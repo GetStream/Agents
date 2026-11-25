@@ -657,7 +657,7 @@ func (m *money) release(key string, acct *account, now time.Time) {
 				acct.letGoGrants(held)
 			case held.countedAt.IsZero() && !held.writtenAt.IsZero() && now.Sub(held.writtenAt) > uncountable:
 				// The reconcile misses a row written past its overlap after it started, and
-				// AddGrantUses refuses one naming a grant long ended: neither ever counts.
+				// store.LimitGrantUses.InsertMany refuses one naming a grant long ended: neither ever counts.
 				stranded += held.micros
 				strandedGrants = append(strandedGrants, held.grants...)
 				acct.letGoGrants(held)
@@ -886,7 +886,7 @@ func (m *money) shipped(ctx context.Context) {
 	if m.settings.Usage == nil {
 		return
 	}
-	db := m.enforcer.config.DB()
+	db := m.enforcer.config
 	if db == nil {
 		return
 	}
@@ -915,7 +915,7 @@ func (m *money) shipped(ctx context.Context) {
 			ids[i] = each.id
 		}
 		call, cancel := context.WithTimeout(ctx, readTimeout)
-		found, err := db.Shipped(call, ids)
+		found, err := db.Requests.Shipped(call, ids)
 		cancel()
 		if err != nil {
 			m.failedRead("could not ask the shard which held rows it has shipped, so their timers start again", err, "rows", len(asked))
@@ -980,7 +980,7 @@ func (m *money) countedByReconcile(ctx context.Context, db *store.Store) {
 		for i, each := range part {
 			ids[i] = each.id
 		}
-		found, err := db.GrantUsesCounted(call, ids)
+		found, err := db.LimitGrantUses.Count(call, ids)
 		if err != nil {
 			m.failedRead("could not ask which rows held against their grants count toward them, so they are kept", err, "rows", len(asked))
 			return

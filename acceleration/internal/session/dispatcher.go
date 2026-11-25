@@ -142,23 +142,23 @@ func (d *dispatcher) checkedCall(ctx context.Context, r route, call llm.ToolCall
 	started := time.Now()
 	current, err := d.recheck(ctx, r)
 	if err != nil {
-		d.record(r, call, started, failure{kind: store.InvocationDenied}, err)
+		d.record(ctx, r, call, started, failure{kind: store.InvocationDenied}, err)
 		return nil, err
 	}
 	if r.binding.RequiresApproval(r.tool) || current.RequiresApproval(r.tool) {
 		allowed, parts, how, err := d.holdForApproval(ctx, r, call)
 		if !allowed {
-			d.record(r, call, started, how, err)
+			d.record(ctx, r, call, started, how, err)
 			return parts, err
 		}
 		started = time.Now()
 		if _, err := d.recheck(ctx, r); err != nil {
-			d.record(r, call, started, failure{kind: store.InvocationDenied}, err)
+			d.record(ctx, r, call, started, failure{kind: store.InvocationDenied}, err)
 			return nil, err
 		}
 	}
 	parts, how, err := d.call(ctx, r, call)
-	d.record(r, call, started, how, err)
+	d.record(ctx, r, call, started, how, err)
 	return parts, err
 }
 
@@ -214,8 +214,10 @@ func answerOf(exchange *core.Exchange) failure {
 // nothing the line does not (AI-1244). Example: a 403 whose body says why keeps that body; an
 // MCP isError, which comes in a 200, keeps the tool's words.
 //
-// Every call is also counted, by its connector and how it ended, and timed (metrics.go).
-func (d *dispatcher) record(r route, call llm.ToolCall, started time.Time, how failure, err error) {
+// Every call is also counted, by its connector and how it ended, and timed (metrics.go), and
+// reported to the agent for its own line (agent.ReportTool): the connector, the kind and the
+// row's error_message, the only words of the failure that line logs.
+func (d *dispatcher) record(ctx context.Context, r route, call llm.ToolCall, started time.Time, how failure, err error) {
 	sessionID := d.spec.ID
 	var arguments []store.ArgumentShape
 	if d.spec.Incognito {
@@ -245,6 +247,7 @@ func (d *dispatcher) record(r route, call llm.ToolCall, started time.Time, how f
 		row.ProviderStatus = &how.status
 	}
 	d.invocations.Record(row)
+	agent.ReportTool(ctx, agent.ToolReport{Connector: row.ConnectorID, ErrorCode: how.kind, Error: row.ErrorMessage})
 	if how.kind == "" {
 		return
 	}
@@ -434,12 +437,17 @@ func (d *dispatcher) admit(ctx context.Context, deadline time.Time, r route, cal
 	}
 	waiting, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	release, err := d.slots.take(waiting, r.connection.ID, r.maxInFlight)
+	release, waited, err := d.slots.take(waiting, r.connection.ID, r.maxInFlight)
 	if err != nil {
 		if ctx.Err() == nil {
 			return nil, llm.TextParts(busy(call.Name, r.maxInFlight)), failure{kind: store.InvocationDenied, message: heldByTheCap(r.maxInFlight)}, nil
 		}
 		return nil, nil, failure{kind: store.InvocationClientTimeout}, stack.Wrap(fmt.Errorf("session: %s was not sent: %w", call.Name, err))
+	}
+	// Only a call that waited for its slot reads the hold again: the call it waited behind may
+	// have been answered 429 meanwhile.
+	if !waited {
+		return release, nil, failure{}, nil
 	}
 	if wait := d.limiter.Wait(ctx, r.limit); wait > 0 {
 		release()
@@ -577,7 +585,7 @@ func (d *dispatcher) recheck(ctx context.Context, r route) (store.ConnectorBindi
 		return store.ConnectorBinding{}, stack.Wrap(fmt.Errorf("session: connector %q: %s, so %s was not called",
 			r.binding.Name, why, r.binding.Name+mcp.Separator+r.tool))
 	}
-	config, err := d.store.AgentConfig(ctx, d.spec.CustomerID, d.spec.ConfigID)
+	config, err := d.store.AgentConfigs.Get(ctx, d.spec.CustomerID, d.spec.ConfigID)
 	if err != nil {
 		return refuse("the agent config could not be read")
 	}
@@ -596,7 +604,7 @@ func (d *dispatcher) recheck(ctx context.Context, r route) (store.ConnectorBindi
 	case !slices.Contains(current.Tools, store.ToolGrant{Name: r.tool, SchemaDigest: r.digest}):
 		return refuse("the tool is no longer granted")
 	}
-	connection, err := d.store.ConnectorConnection(ctx, d.spec.CustomerID, r.connection.ID)
+	connection, err := d.store.ConnectorConnections.Get(ctx, d.spec.CustomerID, r.connection.ID)
 	switch {
 	case errors.Is(err, store.ErrNoConnectorConnection):
 		return refuse("the connection is gone")

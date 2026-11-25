@@ -3,6 +3,7 @@ package sttrouter
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -11,8 +12,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
 
@@ -36,6 +39,8 @@ type Session struct {
 	// cancel ends the context reopen starts the next candidate under. Nil when there is no
 	// such context.
 	cancel context.CancelFunc
+	// call is the context of the call. The goroutines of the session start under it.
+	call context.Context
 
 	events chan stt.Event
 	// failed is set once the provider reports a fatal error. The caller has been told, and
@@ -62,13 +67,17 @@ type Session struct {
 // leaseMinute is what a minute of streaming is held at.
 var leaseMinute = pricing.Quantities{pricing.AudioMs: 60_000}
 
-// streamedAudio is audio a provider took and no row has billed yet.
+// streamedAudio is audio a provider took and no row has billed yet, and what its timing line
+// says it took in all, from when.
 type streamedAudio struct {
-	config routing.ProviderConfig
-	ms     float64
+	config  routing.ProviderConfig
+	ms      float64
+	total   float64
+	firstAt time.Time
 }
 
 func newSession(
+	ctx context.Context,
 	provider stt.STT,
 	config routing.ProviderConfig,
 	owner routing.Owner,
@@ -77,6 +86,7 @@ func newSession(
 	cancel context.CancelFunc,
 ) *Session {
 	session := &Session{
+		call:     ctx,
 		provider: provider,
 		config:   config,
 		owner:    owner,
@@ -90,7 +100,9 @@ func newSession(
 		streamed:  map[stt.STT]*streamedAudio{},
 		lease:     routing.StartLease(recorder, config, owner, "stt", uuid.NewString(), leaseMinute),
 	}
-	go session.forward()
+	// Stamped here, as audio may reach the provider before forward runs.
+	started := time.Now()
+	goroutine.Go(ctx, func() { session.forward(started) })
 	return session
 }
 
@@ -201,17 +213,18 @@ func (s *Session) Close() error {
 // forward relays provider events and records statistics as they pass. A refusal the next
 // candidate takes over from is not passed on: the caller hears of the Failover instead.
 // When no candidate takes over, the caller hears the refusal, as if none had been asked.
-func (s *Session) forward() {
+func (s *Session) forward(startedAt time.Time) {
 	defer close(s.done)
 	defer close(s.events)
 
-	current := &relay{provider: s.provider, config: s.config}
+	current := &relay{provider: s.provider, config: s.config, startedAt: startedAt}
 	var refused []string
 	for {
 		event, open := s.next(current)
 		if !open {
 			// Before the events close, so whoever waits on them waits for the last row.
-			s.billUnsettled(nil)
+			s.billUnsettled(nil, current)
+			s.logTiming(current)
 			return
 		}
 		if failure, ok := event.(stt.Error); ok && failure.Fatal && !transportDrop(failure) && s.reopen != nil {
@@ -219,9 +232,10 @@ func (s *Session) forward() {
 			refused = append(refused, from)
 			if next, nextConfig, err := s.reopenAnswering(refused); err == nil && s.swap(current.provider, next, nextConfig) {
 				routing.CountHandover(routing.STT, current.config, failure.Err)
-				s.billUnsettled(current.provider)
+				s.billUnsettled(current.provider, current)
+				s.logTiming(current)
 				// Before the Failover is passed on: a write that fails meanwhile went to next.
-				current = &relay{provider: next, config: nextConfig}
+				current = &relay{provider: next, config: nextConfig, startedAt: time.Now()}
 				s.pass(current, stt.Failover{Provider: nextConfig.Provider, Model: nextConfig.Model, From: from, Err: failure.Err})
 				continue
 			}
@@ -241,10 +255,10 @@ func (s *Session) reopenAnswering(refused []string) (stt.STT, routing.ProviderCo
 		err      error
 	}
 	result := make(chan opened, 1)
-	go func() {
+	goroutine.Go(s.call, func() {
 		next, config, err := s.reopen(refused)
 		result <- opened{provider: next, config: config, err: err}
-	}()
+	})
 	for {
 		select {
 		case opened := <-result:
@@ -262,6 +276,15 @@ type relay struct {
 	// ahead is what was read to answer a failed write and not passed on yet. It stops at a
 	// fatal error, so nothing the provider sends after one is read.
 	ahead []stt.Event
+
+	// What the provider's timing line says, kept by forward alone: when it started serving,
+	// when its first transcript was read, what its turns and its unsettled audio cost (a failed
+	// row bills no audio), and the fatal error that ended it.
+	startedAt         time.Time
+	firstTranscriptAt time.Time
+	costMicros        int64
+	errorCode         string
+	errorMessage      string
 }
 
 // next returns the provider's next event, observed, and reads ahead for a failed write
@@ -334,13 +357,16 @@ func (s *Session) swap(refusing, next stt.STT, config routing.ProviderConfig) bo
 
 	// Off this goroutine, since closing may wait on the vendor for the last words of the
 	// call: ElevenLabs's Close flushes for up to FlushTimeout (elevenlabs.go, flush).
-	go func() { _ = refusing.Close() }()
+	goroutine.Go(s.call, func() { _ = refusing.Close() })
 	return true
 }
 
 func (s *Session) observe(current *relay, event stt.Event) {
 	switch typed := event.(type) {
 	case stt.Transcript:
+		if current.firstTranscriptAt.IsZero() {
+			current.firstTranscriptAt = time.Now()
+		}
 		// Only settled transcripts are billable work; interim ones are revisions of a
 		// turn that has not finished yet.
 		if !typed.Final() {
@@ -367,6 +393,7 @@ func (s *Session) observe(current *relay, event stt.Event) {
 			stat.Estimated()
 		}
 		s.recorder.Record(current.config, stat)
+		current.costMicros += s.recorder.QuoteStat(current.config, stat).CostMicros
 
 	case stt.Error:
 		stat := routing.Stat{
@@ -386,10 +413,41 @@ func (s *Session) observe(current *relay, event stt.Event) {
 			// socket that dropped as a fatal error with the context read or write, and the
 			// next session can still reach the model.
 			stat.Fatal = !transportDrop(typed)
+			// The first is what ended the provider's part of the session.
+			if current.errorCode == "" {
+				current.errorCode, current.errorMessage = stat.ErrorCode, stat.ErrorMessage
+			}
 		}
 		s.recorder.Record(current.config, stat)
 	}
 }
+
+// logTiming writes the "speech transcription timing" line for what one provider served of
+// the session: all of it, or what it served until it refused the session and the next
+// candidate took over, which then has a line of its own. Time to first byte runs from the
+// first audio the provider took to the first transcript read from it, interim ones included.
+func (s *Session) logTiming(current *relay) {
+	var audioMs float64
+	var firstAudioAt time.Time
+	s.mu.Lock()
+	if streamed := s.streamed[current.provider]; streamed != nil {
+		audioMs, firstAudioAt = streamed.total, streamed.firstAt
+	}
+	s.mu.Unlock()
+	logged := append(routing.LoggedCall(s.owner.CallID, s.owner, current.config), "audio_ms", int64(audioMs))
+	// No transcript, or one read before any audio was taken, answers none of it.
+	if !firstAudioAt.IsZero() && !current.firstTranscriptAt.Before(firstAudioAt) {
+		logged = append(logged, "ttfb_ms", milliseconds(current.firstTranscriptAt.Sub(firstAudioAt)))
+	}
+	logged = append(logged, "duration_ms", milliseconds(time.Since(current.startedAt)),
+		"cost_micros", current.costMicros, "success", current.errorCode == "", "error_code", current.errorCode)
+	if current.errorMessage != "" {
+		logged = append(logged, "error", store.SafeLogText(current.errorMessage))
+	}
+	slog.Info("speech transcription timing", logged...)
+}
+
+func milliseconds(elapsed time.Duration) float64 { return float64(elapsed.Microseconds()) / 1000 }
 
 // took counts audio a provider accepted, against the config it was routed under.
 func (s *Session) took(provider stt.STT, config routing.ProviderConfig, ms float64) {
@@ -397,10 +455,11 @@ func (s *Session) took(provider stt.STT, config routing.ProviderConfig, ms float
 	defer s.mu.Unlock()
 	streamed := s.streamed[provider]
 	if streamed == nil {
-		streamed = &streamedAudio{config: config}
+		streamed = &streamedAudio{config: config, firstAt: time.Now()}
 		s.streamed[provider] = streamed
 	}
 	streamed.ms += ms
+	streamed.total += ms
 }
 
 // claim is the whole milliseconds of audio the provider took since it was last billed, which
@@ -422,8 +481,9 @@ func (s *Session) claim(provider stt.STT) int64 {
 // billed: what such a vendor heard after its last turn, when it refuses the session or the
 // session ends, which it bills every second of. Nil bills every provider's. A vendor that
 // measures itself reports what it bills on its turns, so what it took after them is not
-// billed. The row is the router's own measure and times nothing the provider did.
-func (s *Session) billUnsettled(only stt.STT) {
+// billed. The row is the router's own measure and times nothing the provider did. What a row
+// of current's provider costs is added to current's.
+func (s *Session) billUnsettled(only stt.STT, current *relay) {
 	s.mu.Lock()
 	var providers []stt.STT
 	for provider := range s.streamed {
@@ -446,6 +506,9 @@ func (s *Session) billUnsettled(only stt.STT) {
 		stat := routing.Stat{Owner: s.owner, StartedAt: time.Now().UTC(), Usage: routing.Usage{AudioMs: ms}, Success: true, Unmeasured: true}
 		stat.MeasuredByRouter()
 		s.recorder.Record(config, stat)
+		if provider == current.provider {
+			current.costMicros += s.recorder.QuoteStat(config, stat).CostMicros
+		}
 	}
 }
 

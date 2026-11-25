@@ -165,7 +165,7 @@ func (s *RuntimeSuite) runtime(sessionID string) []store.Request {
 // written is the session's runtime rows written so far, oldest first.
 func (s *RuntimeSuite) written(sessionID string) []store.Request {
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).
 		Where("customer_id = ?", s.customer).
 		Where("session_id = ?", sessionID).
 		Where("modality = ?", string(routing.Runtime)).
@@ -270,7 +270,7 @@ func (s *RuntimeSuite) TestASessionThatFailsToOpenIsNotBilled() {
 	s.Require().Error(err)
 
 	s.Empty(s.runtime(id), "the time spent failing to join is not the customer's")
-	kept, err := s.store.SessionExists(s.ctx, id)
+	kept, err := s.store.Sessions.Exists(s.ctx, id)
 	s.Require().NoError(err)
 	s.False(kept, "a session that never opened is not one to list or count")
 }
@@ -355,12 +355,12 @@ func (s *RuntimeSuite) TestTheGreetingIsTheSessionsFirstRecordedTurn() {
 	// Eventually runs its condition off the test goroutine, where a failed Require cannot stop the test.
 	s.Require().EventuallyWithT(func(c *assert.CollectT) {
 		require.NoError(c, created.FlushRecords(s.ctx))
-		turns, err = s.store.SessionResponses(s.ctx, s.customer, created.ID(), 10, nil)
+		turns, err = s.store.Responses.Select(s.ctx, s.customer, created.ID(), store.ResponseFilter{Limit: 10})
 		require.NoError(c, err)
 		require.NotEmpty(c, turns)
 		require.Equal(c, store.ResponseCompleted, turns[0].Status)
 	}, settleFor, 10*time.Millisecond, "the greeting was never written down")
-	items, err := s.store.SessionItems(s.ctx, s.customer, created.ID(), turns[0].ID, 10, nil)
+	items, err := s.store.ResponseItems.Select(s.ctx, s.customer, created.ID(), store.ItemFilter{ResponseID: turns[0].ID, Limit: 10})
 	s.Require().NoError(err)
 	said := slices.IndexFunc(items, func(item store.AgentResponseItem) bool {
 		return item.Kind == store.ItemAnswer && item.Text == "Hi, I'm listening."

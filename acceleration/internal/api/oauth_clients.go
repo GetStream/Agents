@@ -222,7 +222,7 @@ func (s *Server) setConnectorOAuthClient(ctx context.Context, request *oauthClie
 	if s.connectorSecrets == nil {
 		return nil, notConfigured("OAuth clients cannot be stored: connectors are not enabled on this deployment, so there is no key to seal the secret with")
 	}
-	definition, err := s.store.LatestConnectorDefinition(ctx, customerID, request.ID)
+	definition, err := s.store.ConnectorDefinitions.Latest(ctx, customerID, request.ID)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		return nil, notFound("no such connector")
 	}
@@ -243,7 +243,7 @@ func (s *Server) setConnectorOAuthClient(ctx context.Context, request *oauthClie
 		ProviderAppID: sent.ProviderAppID,
 	}
 	// The app the customer acts in now is the record's pin when this put creates it; a put
-	// that replaces the record keeps the pin it has (store.PutConnectorOAuthClient).
+	// that replaces the record keeps the pin it has (store.ConnectorOAuthClients.Upsert).
 	if s.stream != nil {
 		record.StreamAppPK, err = s.stream.Pin(ctx, customerID)
 		if err != nil {
@@ -266,8 +266,8 @@ func (s *Server) setConnectorOAuthClient(ctx context.Context, request *oauthClie
 		}
 		record.SigningKEKVersion = s.connectorSecrets.CurrentVersion()
 	}
-	created, err := s.store.PutConnectorOAuthClient(ctx, record)
-	// Deleted since it was read above (DeleteConnectorDefinition), so answered as one never made.
+	created, err := s.store.ConnectorOAuthClients.Upsert(ctx, record)
+	// Deleted since it was read above (store.ConnectorDefinitions.Delete), so answered as one never made.
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		return nil, notFound("no such connector")
 	}
@@ -300,7 +300,7 @@ func (s *Server) getConnectorOAuthClient(ctx context.Context, request *getOAuthC
 	if s.store == nil {
 		return nil, errNoConnectors
 	}
-	record, err := s.store.ConnectorOAuthClient(ctx, customerID, request.ID)
+	record, err := s.store.ConnectorOAuthClients.Get(ctx, customerID, request.ID)
 	if errors.Is(err, store.ErrNoConnectorOAuthClient) {
 		return nil, notFound(noStoredOAuthClient)
 	}
@@ -332,7 +332,7 @@ func (s *Server) deleteConnectorOAuthClient(ctx context.Context, request *delete
 	if err := s.revokeClientGrants(ctx, customerID, request.ID); err != nil {
 		return nil, err
 	}
-	err := s.store.DeleteConnectorOAuthClient(ctx, customerID, request.ID, core.ClientCustomer)
+	err := s.store.ConnectorOAuthClients.Delete(ctx, customerID, request.ID, core.ClientCustomer)
 	if errors.Is(err, store.ErrNoConnectorOAuthClient) {
 		return nil, notFound(noOAuthClient)
 	}
@@ -350,7 +350,7 @@ func (s *Server) deleteConnectorOAuthClient(ctx context.Context, request *delete
 // refused refresh would mark it later, so its export and its use answer the reconnect error, not
 // the access token the provider just revoked.
 func (s *Server) revokeClientGrants(ctx context.Context, customerID, connectorID string) error {
-	record, err := s.store.ConnectorOAuthClient(ctx, customerID, connectorID)
+	record, err := s.store.ConnectorOAuthClients.Get(ctx, customerID, connectorID)
 	if errors.Is(err, store.ErrNoConnectorOAuthClient) {
 		return nil
 	}
@@ -361,7 +361,7 @@ func (s *Server) revokeClientGrants(ctx context.Context, customerID, connectorID
 	if record.ClientID == "" {
 		return nil
 	}
-	granted, err := s.store.GrantedConnectorConnectionsOfClient(ctx, customerID, connectorID, core.ClientCustomer, record.ClientID)
+	granted, err := s.store.ConnectorConnections.SelectGrantedOfClient(ctx, customerID, connectorID, core.ClientCustomer, record.ClientID)
 	if err != nil {
 		return err
 	}
@@ -417,7 +417,7 @@ func checkOAuthClient(manifest core.Manifest, sent ConnectorOAuthClientRequest) 
 			"set auth_method to none, client_secret_basic or client_secret_post", method))
 	}
 	// RFC 3986 section 3.3: a dot segment would be removed from the events URL it is in. The
-	// store refuses it too (store.checkOAuthClient); checked here so it is a 400.
+	// store refuses it too (store.ConnectorOAuthClient.Validate); checked here so it is a 400.
 	if sent.ProviderAppID == "." || sent.ProviderAppID == ".." {
 		return stack.Wrap(errors.New("provider_app_id is a dot segment, which an events URL cannot carry (RFC 3986 section 3.3)"))
 	}
@@ -443,11 +443,18 @@ func checkOAuthClient(manifest core.Manifest, sent ConnectorOAuthClientRequest) 
 // _SECRET (oauth2code.EnvClients). It is called at every exchange, refresh and revocation, so
 // a secret put again is the one the next refresh sends. Without a store or a keyring no record
 // is read.
+//
+// The operator's client, record or environment, is only a built-in's (m.Builtin): a custom
+// definition's manifest is its customer's, whose client.env could name any of the operator's
+// clients and whose endpoints the client would be sent to.
 func ConnectorClients(records *store.Store, secrets *auth.Sealer, getenv func(string) string) oauth2code.ClientLookup {
 	environment := oauth2code.EnvClients(getenv)
 	return func(ctx context.Context, ref core.ConnectionRef, m core.ResolvedManifest, registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
+		if registration == core.ClientOperator && !m.Builtin {
+			return oauth2code.Client{}, false, nil
+		}
 		if records != nil && secrets != nil {
-			record, err := records.ConnectorOAuthClient(ctx, ref.CustomerID, m.ConnectorID)
+			record, err := records.ConnectorOAuthClients.Get(ctx, ref.CustomerID, m.ConnectorID)
 			if err != nil && !errors.Is(err, store.ErrNoConnectorOAuthClient) {
 				return oauth2code.Client{}, false, err
 			}
@@ -480,7 +487,7 @@ func openOAuthClient(ctx context.Context, records *store.Store, secrets *auth.Se
 	if record.KEKVersion != secrets.CurrentVersion() {
 		rewrapOAuthClient(ctx, record, "client secret", secret, oauthClientAAD(record.CustomerID, record.ConnectorID), secrets,
 			func(sealed []byte, version int) (bool, error) {
-				return records.RewrapConnectorOAuthClientSecret(ctx, record.CustomerID, record.ConnectorID, record.SecretSealed, sealed, version)
+				return records.ConnectorOAuthClients.RewrapSecret(ctx, record.CustomerID, record.ConnectorID, record.SecretSealed, sealed, version)
 			})
 	}
 	return client, true, nil
@@ -495,7 +502,7 @@ func openOAuthClient(ctx context.Context, records *store.Store, secrets *auth.Se
 // store.ErrNoConnectorOAuthClient, as a missing one is: an HMAC under an empty key is one
 // anybody can compute.
 func ProviderApp(ctx context.Context, records *store.Store, secrets *auth.Sealer, connectorID, providerAppID string) (store.ConnectorOAuthClient, string, error) {
-	record, err := records.ConnectorOAuthClientByProviderApp(ctx, connectorID, providerAppID)
+	record, err := records.ConnectorOAuthClients.GetByProviderApp(ctx, connectorID, providerAppID)
 	if err != nil {
 		return store.ConnectorOAuthClient{}, "", err
 	}
@@ -512,7 +519,7 @@ func ProviderApp(ctx context.Context, records *store.Store, secrets *auth.Sealer
 	if record.SigningKEKVersion != secrets.CurrentVersion() {
 		rewrapOAuthClient(ctx, record, "signing secret", secret, providerAppAAD(record.CustomerID, record.ConnectorID, record.ProviderAppID), secrets,
 			func(sealed []byte, version int) (bool, error) {
-				return records.RewrapConnectorOAuthClientSigningSecret(ctx, record.CustomerID, record.ConnectorID, record.SigningSecretSealed, sealed, version)
+				return records.ConnectorOAuthClients.RewrapSigningSecret(ctx, record.CustomerID, record.ConnectorID, record.SigningSecretSealed, sealed, version)
 			})
 	}
 	return record, secret, nil

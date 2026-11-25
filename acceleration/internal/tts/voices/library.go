@@ -290,7 +290,10 @@ func (c *Catalogue) Check(ctx context.Context, provider, id string) error {
 	}
 
 	message := fmt.Errorf("voices: %s has no voice %q", provider, id)
-	if nearest, ok := closest(library, id); ok {
+	// A provider lists its account's clones, every customer's, as its own: only its published
+	// voices are anybody's to be pointed at.
+	published := slices.DeleteFunc(slices.Clone(library), func(voice Library) bool { return voice.Own })
+	if nearest, ok := closest(published, id); ok {
 		message = fmt.Errorf("voices: %s has no voice %q; the closest in its library is %q (%s)",
 			provider, id, nearest.Name, nearest.ID)
 	}

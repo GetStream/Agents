@@ -11,9 +11,12 @@ import (
 	"net/http/httptest"
 	"time"
 
+	"github.com/redis/rueidis"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
 )
 
 // beforeItsLook is how long a delivery that waits scheduledPoll = an hour is watched for answering
@@ -48,13 +51,13 @@ func (s *ScheduledTasksSuite) refusingPeer(sessionID string) (asked <-chan struc
 	peer.Start()
 	s.T().Cleanup(peer.Close)
 	agent := rand.Text()
-	directory.Hold(context.Background(), sessionID, agent, "")
-	s.T().Cleanup(func() { directory.Release(context.Background(), sessionID) })
+	directory.Hold(context.Background(), s.customerID(), sessionID, agent, "")
+	s.T().Cleanup(func() { directory.Release(context.Background(), s.customerID(), sessionID) })
 	return got, func(here bool) {
-		directory.Release(context.Background(), sessionID)
+		directory.Release(context.Background(), s.customerID(), sessionID)
 		if here {
-			s.router.directory.Hold(context.Background(), sessionID, agent, "")
-			s.T().Cleanup(func() { s.router.directory.Release(context.Background(), sessionID) })
+			s.router.directory.Hold(context.Background(), s.customerID(), sessionID, agent, "")
+			s.T().Cleanup(func() { s.router.directory.Release(context.Background(), s.customerID(), sessionID) })
 		}
 	}
 }
@@ -156,6 +159,102 @@ func (s *ScheduledTasksSuite) TestADeliveryGivesUpOnAPeerThatKeepsTheSessionAfte
 		s.False(answered.handed)
 	case <-time.After(10 * time.Second):
 		s.FailNow("the delivery never gave up on the peer")
+	}
+}
+
+// unreadableEntry makes the directory's entry for sessionID answer a Redis error reply, as a node
+// that is loading or read-only does: the key holds a list, so the GET is refused with WRONGTYPE. The
+// reply's text comes back as the value along with the error, so a caller that looks only at the
+// value sees an address. The key is deleted when the test ends.
+func (s *ScheduledTasksSuite) unreadableEntry(sessionID string) {
+	redis := s.live.Redis()
+	list := s.relayPrefix + ":probe:" + sessionID
+	entry := s.relayPrefix + ":session:" + sessionID
+	s.Require().NoError(redis.Do(context.Background(), redis.B().Rpush().Key(list).Element("x").Build()).Error())
+	s.Require().NoError(redis.Do(context.Background(), redis.B().Rename().Key(list).Newkey(entry).Build()).Error())
+	s.T().Cleanup(func() { redis.Do(context.Background(), redis.B().Del().Key(entry).Build()) })
+}
+
+// A delivery that cannot read the directory when it looks at the session for the first time goes on
+// here, as one that finds no entry does, rather than handing the session to the error's text.
+// The look is an hour away: a delivery that does not go on at once is held by the error's wait.
+func (s *ScheduledTasksSuite) TestADeliveryThatCannotReadTheDirectoryGoesOnHere() {
+	s.looksEvery(time.Hour)
+	sessionID := rand.Text()
+	s.unreadableEntry(sessionID)
+
+	select {
+	case answered := <-s.handingOff(context.Background(), sessionID):
+		s.NoError(answered.err)
+		s.False(answered.handed, "nothing was handed over")
+	case <-time.After(beforeItsLook):
+		s.FailNow("the delivery did not go on when the directory could not be read")
+	}
+}
+
+// A delivery whose peer did not take it, and that cannot read the directory when it looks again,
+// goes on here, as it does when the first look fails, rather than waiting out a peer it cannot see.
+func (s *ScheduledTasksSuite) TestADeliveryThatCannotReadTheDirectoryWhileWaitingForAPeerGoesOnHere() {
+	s.looksEvery(10 * time.Millisecond)
+	s.Require().Equal(30*time.Second, s.router.scheduledPeerWait, "the peer wait's default")
+	wait := s.router.scheduledPeerWait
+	s.router.scheduledPeerWait = 5 * time.Second
+	s.T().Cleanup(func() { s.router.scheduledPeerWait = wait })
+	sessionID := rand.Text()
+	asked, _ := s.refusingPeer(sessionID)
+	done := s.handingOff(context.Background(), sessionID)
+	s.Require().Eventually(func() bool { return len(asked) > 0 }, deliveryWait, 10*time.Millisecond,
+		"the peer was never asked")
+
+	s.unreadableEntry(sessionID)
+
+	select {
+	case answered := <-done:
+		s.NoError(answered.err)
+		s.False(answered.handed, "the peer took nothing")
+	case <-time.After(beforeItsLook):
+		s.FailNow("the delivery kept waiting for a peer whose entry it cannot read")
+	}
+}
+
+// A delivery whose peer did not take it, and whose directory cannot be reached when it looks again,
+// goes on here rather than waiting out a peer it cannot see. The directory reads through a Redis
+// client of its own, closed once the peer has refused: the first look is answered and the next is a
+// transport error with no reply, which is waited out, not returned.
+func (s *ScheduledTasksSuite) TestADeliveryThatCannotReachTheDirectoryWhileWaitingForAPeerGoesOnHere() {
+	s.looksEvery(10 * time.Millisecond)
+	s.Require().Equal(30*time.Second, s.router.scheduledPeerWait, "the peer wait's default")
+	wait := s.router.scheduledPeerWait
+	s.router.scheduledPeerWait = 5 * time.Second
+	s.T().Cleanup(func() { s.router.scheduledPeerWait = wait })
+	sessionID := rand.Text()
+	asked, _ := s.refusingPeer(sessionID)
+	redis, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{s.shardRedisAddr}, DisableCache: true})
+	s.Require().NoError(err)
+	s.T().Cleanup(redis.Close)
+	here := httptest.NewUnstartedServer(nil)
+	s.T().Cleanup(here.Close)
+	directory, err := node.NewDirectory(node.DirectoryOptions{
+		Redis: redis, Address: here.Listener.Addr().String(), Prefix: s.relayPrefix, Shard: s.shard,
+		Logger: slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(directory.Close)
+	held := s.router.directory
+	s.router.directory = directory
+	s.T().Cleanup(func() { s.router.directory = held })
+	done := s.handingOff(context.Background(), sessionID)
+	s.Require().Eventually(func() bool { return len(asked) > 0 }, deliveryWait, 10*time.Millisecond,
+		"the peer was never asked")
+
+	redis.Close()
+
+	select {
+	case answered := <-done:
+		s.NoError(answered.err)
+		s.False(answered.handed, "the peer took nothing")
+	case <-time.After(beforeItsLook):
+		s.FailNow("the delivery kept waiting for a peer whose directory it cannot reach")
 	}
 }
 

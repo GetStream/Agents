@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"slices"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/none"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -31,6 +33,9 @@ var errConnectionToolsOff = notConfigured("connections cannot be validated: conn
 // connection has moved past. 409: the request conflicts with the state of the resource, which
 // the caller can read again and retry (RFC 9110 section 15.5.10).
 var errStaleRevision = conflict("the connection's credentials changed since expected_revision: read it again and retry")
+
+// providerUnreachable is a validate's error when the provider did not answer.
+const providerUnreachable = "the provider could not be reached; validate again later"
 
 // ConnectionCredentials is what a credentials write sends. Values never come back: no
 // response carries them.
@@ -263,7 +268,7 @@ func (s *Server) putConnectionCredentials(ctx context.Context, request *putConne
 	var manifest core.ResolvedManifest
 	moved := false
 	if savedAgain {
-		latest, err := s.store.LatestConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID)
+		latest, err := s.store.ConnectorDefinitions.Latest(ctx, connection.CustomerID, connection.ConnectorID)
 		if err != nil {
 			return nil, err
 		}
@@ -274,7 +279,7 @@ func (s *Server) putConnectionCredentials(ctx context.Context, request *putConne
 		if unfit == nil {
 			revision, manifest, moved = latest.Revision, latestManifest, true
 		} else {
-			reason, broken, err := s.store.BrokenConnectorRevision(ctx, connection.ConnectorID, connection.DefinitionRevision)
+			reason, broken, err := s.store.ConnectorBrokenRevisions.Get(ctx, connection.ConnectorID, connection.DefinitionRevision)
 			if err != nil {
 				return nil, err
 			}
@@ -298,6 +303,11 @@ func (s *Server) putConnectionCredentials(ctx context.Context, request *putConne
 	}
 	ref := core.ConnectionRef{CustomerID: connection.CustomerID, ConnectionID: connection.ID}
 	credentials, account, err := scheme.Complete(ctx, core.CompleteInput{Ref: ref, Manifest: manifest, Supplied: values})
+	// A token endpoint the router could not reach is no refusal, and its error names hosts and
+	// addresses.
+	if _, unreached := errors.AsType[net.Error](err); unreached {
+		return nil, err
+	}
 	if err != nil {
 		// A scheme's error names what is wrong, never the value (core AGENTS.md, «Secrets never
 		// print»; contracttest's TestAnErrorAboutAnUnusableValueDoesNotQuoteIt).
@@ -315,6 +325,11 @@ func (s *Server) putConnectionCredentials(ctx context.Context, request *putConne
 		// The credential store leaves the revision it committed here (core.CredentialStore).
 		committed = state
 		change.Previous = core.FingerprintsOf(s.connectors.Schemes, state.Credentials)
+		// A write that connects a connection that was not connected begins a grant, as a
+		// consent does (authorizations.go); one that replaces a connected one's keeps it.
+		if state.Status != store.ConnectionConnected {
+			state.ConnectedAt = time.Now().UTC()
+		}
 		state.Credentials = credentials
 		state.Status = store.ConnectionConnected
 		state.LastError = ""
@@ -383,7 +398,7 @@ func (s *Server) validateConnection(ctx context.Context, request *validateConnec
 			// the stored credentials, so a revision that did not move means every request carried
 			// credential; one that moved keeps no provider text.
 			var current store.ConnectorConnection
-			current, err = s.store.ConnectorConnection(ctx, connection.CustomerID, connection.ID)
+			current, err = s.store.ConnectorConnections.Get(ctx, connection.CustomerID, connection.ID)
 			moved = current.Revision != revision
 		}
 	}
@@ -391,7 +406,7 @@ func (s *Server) validateConnection(ctx context.Context, request *validateConnec
 		return nil, err
 	}
 	validation := response.Body
-	record := &store.ConnectorConnectionValidation{ConnectionID: connection.ID, Revision: revision, Status: string(validation.Status),
+	record := store.ConnectorConnectionValidation{Revision: revision, Status: string(validation.Status),
 		Code: validation.Code, CheckedAt: time.Now().UTC().Truncate(time.Microsecond)}
 	if !moved {
 		record.Error = storedError(validation.Error, s.connectors.Schemes[connection.AuthScheme], credential)
@@ -405,7 +420,7 @@ func (s *Server) validateConnection(ctx context.Context, request *validateConnec
 	if status := answered.status(); record.Code == "" && status >= http.StatusBadRequest {
 		record.Code = strconv.Itoa(status)
 	}
-	if err := s.store.PutConnectorConnectionValidation(ctx, record); err != nil {
+	if err := s.store.ConnectorConnections.PutValidation(ctx, connection.CustomerID, connection.ID, record); err != nil {
 		return nil, err
 	}
 	return response, nil
@@ -482,7 +497,7 @@ func (s *Server) checkConnection(ctx context.Context, connection store.Connector
 		return nil, err
 	}
 	listedAt := time.Now().UTC().Truncate(time.Microsecond)
-	err = s.store.SetConnectorConnectionTools(ctx, connection.CustomerID, connection.ID, tools, digest, listedAt)
+	err = s.store.ConnectorConnections.SetTools(ctx, connection.CustomerID, connection.ID, tools, digest, listedAt)
 	if errors.Is(err, store.ErrNoConnectorConnection) {
 		return nil, errNoSuchConnection
 	}
@@ -492,7 +507,7 @@ func (s *Server) checkConnection(ctx context.Context, connection store.Connector
 	// The connection is read again, after Resolve took the credential lock: the copy read
 	// before it can be another router's renewal in flight, which Reconcile leaves alone, or
 	// predate a consent that began the grant whose pins a session reads now.
-	resolved, err := s.store.ConnectorConnection(ctx, connection.CustomerID, connection.ID)
+	resolved, err := s.store.ConnectorConnections.Get(ctx, connection.CustomerID, connection.ID)
 	if errors.Is(err, store.ErrNoConnectorConnection) {
 		return nil, errNoSuchConnection
 	}
@@ -508,7 +523,7 @@ func (s *Server) checkConnection(ctx context.Context, connection store.Connector
 	}
 	// Read only: a session pins a tool (session.pinGrants), a validate never does, so a tool
 	// whose schema moved stays left out until it is approved again.
-	pins, err := s.store.ConnectorToolPins(ctx, connection.ID, resolved.ConnectedAt)
+	pins, err := s.store.ConnectorToolPins.Select(ctx, connection.ID, resolved.ConnectedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -691,7 +706,7 @@ func refusedStatic(schemes map[string]core.Scheme, scheme string, status int) bo
 // connection's status when the failure moved it off connected (a refused credential, which
 // the transport invalidated), and failed with why otherwise.
 func (s *Server) validationAfter(ctx context.Context, connection store.ConnectorConnection, cause error) (*validationResponse, error) {
-	now, err := s.store.ConnectorConnection(ctx, connection.CustomerID, connection.ID)
+	now, err := s.store.ConnectorConnections.Get(ctx, connection.CustomerID, connection.ID)
 	if errors.Is(err, store.ErrNoConnectorConnection) {
 		return nil, errNoSuchConnection
 	}
@@ -703,7 +718,7 @@ func (s *Server) validationAfter(ctx context.Context, connection store.Connector
 	// never by a consent, so the validate says that, with the code of a rejected one: the
 	// remedy a program branches on is the same (AI-1002). An OAuth connection fails as before.
 	if now.Status == store.ConnectionConnected && none.SavedAgain(s.connectors.Schemes, now.AuthScheme) {
-		reason, broken, err := s.store.BrokenConnectorRevision(ctx, now.ConnectorID, now.DefinitionRevision)
+		reason, broken, err := s.store.ConnectorBrokenRevisions.Get(ctx, now.ConnectorID, now.DefinitionRevision)
 		if err != nil {
 			return nil, err
 		}
@@ -725,6 +740,12 @@ func (s *Server) validationAfter(ctx context.Context, connection store.Connector
 		}
 		return &validationResponse{Body: validation}, nil
 	}
+	// A provider the router could not reach is kept as a fixed reason, since the error names
+	// hosts and addresses, the router's own among them; the request log has it.
+	if _, unreached := errors.AsType[net.Error](cause); unreached {
+		recordFailure(ctx, cause, stack.Trace(cause))
+		return failed(now, providerUnreachable), nil
+	}
 	// The error says what failed and where, never a credential: the transport applies those
 	// below everything that writes an error (core AGENTS.md, «Secrets never print»).
 	return failed(now, cause.Error()), nil
@@ -740,7 +761,7 @@ func (s *Server) listConnectionTools(ctx context.Context, request *connectionReq
 	// binding beside a sensitive connector against (SensitiveBindingsComplaint).
 	// A connector the app can no longer see has no definition: a save skips such a binding, so
 	// no tool of it is a read (read_only false) and the tools are still listed.
-	definition, err := s.store.LatestConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID)
+	definition, err := s.store.ConnectorDefinitions.Latest(ctx, connection.CustomerID, connection.ConnectorID)
 	if err != nil && !errors.Is(err, store.ErrNoConnectorDefinition) {
 		return nil, err
 	}

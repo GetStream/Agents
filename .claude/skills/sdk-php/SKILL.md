@@ -32,8 +32,9 @@ tests/Unit tests/Live tests/Support tests/server/router.php
 ## Why these choices
 
 - **Name.** `getstream/vision-agents` sits beside `getstream/getstream-php` on Packagist.
-  Packagist needs `composer.json` at a repository root, so publishing is a splitsh/lite
-  subtree split of `sdks/php` into its own repo from CI. Do not publish from the monorepo.
+  Packagist needs `composer.json` at a repository root, so publishing is a `git subtree split`
+  of `sdks/php` into its own repo from CI: `.github/workflows/release-sdk-php.yml` (see the
+  `release-sdks` skill). Do not publish from the monorepo.
 - **PHP 8.4.** 8.3 left active support at the end of 2025; 8.4 gives `new Foo()->bar()`, property
   hooks if ever wanted, and is what the official images ship. Readonly classes and typed
   class constants need 8.3+ anyway.
@@ -150,8 +151,8 @@ Docker VM disk was full; do not prune shared images or volumes to make room.
 1. `php bin/generate.php ../../acceleration/api/openapi.yaml` and review the diff.
 2. Hand-written resources only change for a new behaviour, not a new field.
 3. Unit tests, PHPStan, then the live suite once.
-4. Write the git blob ids of `acceleration/api/openapi.yaml` and `.claude/skills/sdk/SKILL.md`
-   to `sdks/php/.sdk_update_log`, as the sdk skill's SDK updates section says, so the next
+4. Write the git ids of `acceleration/api/openapi.yaml`, `.claude/skills/sdk/SKILL.md` and
+   `.claude/skills/sdk/notes` to `sdks/php/.sdk_update_log`, as the sdk skill's SDK updates section says, so the next
    update can diff what changed since.
 
 ## Review checklist

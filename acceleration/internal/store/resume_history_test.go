@@ -8,15 +8,15 @@ import (
 
 // replied records one response with the items given, numbered in order.
 func (s *StoreSuite) replied(sessionID, responseID, said string, at time.Time, items ...AgentResponseItem) {
-	s.Require().NoError(s.store.StartResponse(s.ctx, &AgentResponse{
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{
 		ID: responseID, SessionID: sessionID, CustomerID: "app", Said: said, CreatedAt: at,
 	}))
 	for i := range items {
 		items[i].ResponseID, items[i].Ordinal, items[i].SessionID = responseID, i, sessionID
 		items[i].At = at.Add(time.Duration(i) * time.Second)
 	}
-	s.Require().NoError(s.store.AppendResponseItems(s.ctx, items))
-	s.Require().NoError(s.store.FinishResponse(s.ctx, responseID, ResponseCompleted, "", at.Add(time.Minute)))
+	s.Require().NoError(s.store.ResponseItems.InsertMany(s.ctx, items))
+	s.Require().NoError(s.store.Responses.Finish(s.ctx, "app", responseID, ResponseCompleted, "", at.Add(time.Minute)))
 }
 
 func answer(turn, text string) AgentResponseItem {
@@ -37,7 +37,7 @@ func (s *StoreSuite) TestAReplyIsFoundByTheTurnItsTranscriptWasWrittenUnder() {
 		answer("turn-2", "It is 42."),
 	)
 
-	replies, err := s.store.ReplyItems(s.ctx, "app", "agent:chat", []string{"turn-2", "turn-unknown"})
+	replies, err := s.store.Responses.Replies(s.ctx, "app", "agent:chat", []string{"turn-2", "turn-unknown"})
 
 	s.Require().NoError(err)
 	s.Require().Len(replies, 1)
@@ -53,7 +53,7 @@ func (s *StoreSuite) TestAnotherConversationsTurnFindsNothing() {
 	s.replied("one", "first", "secret", s.base, result("call-1", "private"), answer("turn-1", "done"))
 	s.opened("two", "app", s.base, func(session *AgentSession) { session.ConversationID = "agent:mine" })
 
-	replies, err := s.store.ReplyItems(s.ctx, "app", "agent:mine", []string{"turn-1"})
+	replies, err := s.store.Responses.Replies(s.ctx, "app", "agent:mine", []string{"turn-1"})
 
 	s.Require().NoError(err)
 	s.Empty(replies)
@@ -63,9 +63,9 @@ func (s *StoreSuite) TestARewoundReplyFindsNothing() {
 	s.opened("one", "app", s.base, func(session *AgentSession) { session.ConversationID = "agent:chat" })
 	s.replied("one", "first", "a", s.base, answer("turn-1", "one"))
 	s.replied("one", "second", "b", s.base.Add(time.Hour), result("call-1", "x"), answer("turn-2", "two"))
-	s.Require().NoError(s.store.RewindResponses(s.ctx, "app", "one", "first", s.base.Add(2*time.Hour)))
+	s.Require().NoError(s.store.Responses.Rewind(s.ctx, "app", "one", "first", s.base.Add(2*time.Hour)))
 
-	replies, err := s.store.ReplyItems(s.ctx, "app", "agent:chat", []string{"turn-1", "turn-2"})
+	replies, err := s.store.Responses.Replies(s.ctx, "app", "agent:chat", []string{"turn-1", "turn-2"})
 
 	s.Require().NoError(err)
 	s.Len(replies, 1)
@@ -78,7 +78,7 @@ func (s *StoreSuite) TestTheOpeningIsTheFirstThingSaidAcrossTheConversationsSess
 	s.replied("later", "r2", "and then", s.base.Add(time.Hour), answer("turn-2", "ok"))
 	s.replied("first", "r1", "the task", s.base, answer("turn-1", "ok"))
 
-	opening, err := s.store.Opening(s.ctx, "app", "agent:chat")
+	opening, err := s.store.Responses.Opening(s.ctx, "app", "agent:chat")
 
 	s.Require().NoError(err)
 	s.Equal("the task", opening.Said)
@@ -89,11 +89,11 @@ func (s *StoreSuite) TestAConfigKeepsItsResumeHistory() {
 	yes := true
 	config := &AgentConfig{CustomerID: "app", Name: "resume", Mode: AgentModeText,
 		ResumeHistory: ResumeHistory{IncludeTools: &yes, MaxCharacters: 120000}}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, config))
 	config.ResumeHistory.MaxMessages = 50
-	s.Require().NoError(s.store.UpdateAgentConfig(s.ctx, config))
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, config))
 
-	stored, err := s.store.AgentConfig(s.ctx, "app", config.ID)
+	stored, err := s.store.AgentConfigs.Get(s.ctx, "app", config.ID)
 
 	s.Require().NoError(err)
 	s.Equal(ResumeHistory{IncludeTools: &yes, MaxMessages: 50, MaxCharacters: 120000}, stored.ResumeHistory)

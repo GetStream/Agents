@@ -77,6 +77,8 @@ type fixture struct {
 	clientRemoved atomic.Bool
 	// logs is what every router's resolver logged.
 	logs *lockedBuffer
+	// saves, when set, is the seam every router made after it saves through (failingSaves).
+	saves *failingSaves
 }
 
 // database is the resolver's own test database, emptied and migrated, as the store suite
@@ -92,9 +94,9 @@ func database(tb testing.TB) (string, *store.Store) {
 	require.NoError(tb, err)
 	require.NoError(tb, db.Ping(ctx))
 	var name string
-	require.NoError(tb, db.DB().QueryRowContext(ctx, "SELECT current_database()").Scan(&name))
+	require.NoError(tb, db.GlobalDB().QueryRowContext(ctx, "SELECT current_database()").Scan(&name))
 	require.True(tb, strings.HasSuffix(name, "_test"), "refusing to drop the schema of %s, which is not a test database", name)
-	_, err = db.DB().ExecContext(ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = db.GlobalDB().ExecContext(ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	require.NoError(tb, err)
 	require.NoError(tb, db.Migrate(ctx))
 	return dsn, db
@@ -103,14 +105,14 @@ func database(tb testing.TB) (string, *store.Store) {
 // newFixture empties the connector tables of db and points a definition at a new fake provider.
 func newFixture(tb testing.TB, dsn string, db *store.Store) *fixture {
 	ctx := context.Background()
-	_, err := db.DB().ExecContext(ctx, "TRUNCATE connector_connections, connector_authorization_attempts, connector_definitions, connector_broken_revisions CASCADE")
+	_, err := db.GlobalDB().ExecContext(ctx, "TRUNCATE connector_connections, connector_authorization_attempts, connector_definitions, connector_broken_revisions CASCADE")
 	require.NoError(tb, err)
 	sealer, err := auth.NewSealerWithKeyring(1, map[int]string{1: "resolver test key"})
 	require.NoError(tb, err)
 	srv := fakeprovider.New(tb)
 	parsed, err := core.ParseManifest([]byte(fmt.Sprintf(manifest, srv.URL)))
 	require.NoError(tb, err)
-	definition, err := db.CreateConnectorDefinition(ctx, customer, parsed)
+	definition, err := db.ConnectorDefinitions.Revise(ctx, customer, parsed)
 	require.NoError(tb, err)
 	return &fixture{tb: tb, ctx: ctx, dsn: dsn, db: db, sealer: sealer, srv: srv,
 		clock: &clock{now: time.Now()}, connector: definition.ID, revision: definition.Revision, logs: &lockedBuffer{}}
@@ -128,8 +130,13 @@ func (f *fixture) routerLogging(client *http.Client, logger *slog.Logger) *resol
 	require.NoError(f.tb, err)
 	f.tb.Cleanup(func() { _ = db.Close() })
 	require.NoError(f.tb, db.Ping(f.ctx))
-	credentials, err := pgsealed.New(db, f.sealer)
+	sealed, err := pgsealed.New(db, f.sealer)
 	require.NoError(f.tb, err)
+	var credentials core.CredentialStore = sealed
+	if f.saves != nil {
+		f.saves.CredentialStore = sealed
+		credentials = f.saves
+	}
 	r, err := resolver.New(resolver.Config{Store: db, Credentials: credentials,
 		Schemes: map[string]core.Scheme{oauth2code.Name: f.scheme(client), oauth2cc.Name: f.clientCredentials(client)}, Now: f.clock.Now,
 		Logger: logger})
@@ -168,7 +175,7 @@ func (f *fixture) pending() core.ConnectionRef {
 		OwnerType: store.OwnerApp, AuthScheme: oauth2code.Name,
 	}
 	registry := core.Registry{Schemes: map[string]core.Scheme{oauth2code.Name: f.scheme(f.srv.Client())}}
-	require.NoError(f.tb, f.db.CreateConnectorConnection(f.ctx, registry, connection))
+	require.NoError(f.tb, f.db.ConnectorConnections.Insert(f.ctx, registry, connection))
 	return core.ConnectionRef{CustomerID: customer, ConnectionID: connection.ID}
 }
 
@@ -178,7 +185,7 @@ func (f *fixture) pending() core.ConnectionRef {
 func (f *fixture) builtin(revision int, extra string) {
 	raw := strings.Replace(strings.Replace(fmt.Sprintf(manifest, f.srv.URL), "id: custom_acme", "id: acme", 1),
 		"revision: 1", fmt.Sprintf("revision: %d", revision), 1) + extra
-	require.NoError(f.tb, f.db.SeedConnectorDefinitions(f.ctx, fstest.MapFS{"acme.yaml": {Data: []byte(raw)}}))
+	require.NoError(f.tb, f.db.ConnectorDefinitions.Seed(f.ctx, fstest.MapFS{"acme.yaml": {Data: []byte(raw)}}))
 	f.connector = "acme"
 }
 
@@ -195,7 +202,7 @@ func (f *fixture) connected() core.ConnectionRef {
 func (f *fixture) consent(ref core.ConnectionRef) {
 	scheme := f.scheme(f.srv.Client())
 	connection := f.stored(ref)
-	definition, err := f.db.ConnectorDefinition(f.ctx, ref.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
+	definition, err := f.db.ConnectorDefinitions.Get(f.ctx, ref.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
 	require.NoError(f.tb, err)
 	resolved, err := definition.Manifest.Resolve(oauth2code.Name, connection.Inputs, connection.Metadata)
 	require.NoError(f.tb, err)
@@ -275,7 +282,7 @@ func (f *fixture) tokens(ref core.ConnectionRef) (access, refresh string) {
 }
 
 func (f *fixture) stored(ref core.ConnectionRef) store.ConnectorConnection {
-	connection, err := f.db.ConnectorConnection(f.ctx, ref.CustomerID, ref.ConnectionID)
+	connection, err := f.db.ConnectorConnections.Get(f.ctx, ref.CustomerID, ref.ConnectionID)
 	require.NoError(f.tb, err)
 	return connection
 }

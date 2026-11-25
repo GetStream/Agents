@@ -124,7 +124,7 @@ func (s *Store) importPin(ctx context.Context, customerID, table string, row jso
 func readPin(row json.RawMessage) (map[string]json.RawMessage, *int64, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
-		return nil, nil, fmt.Errorf("store: read a row's pin: %w", err)
+		return nil, nil, invalidImport(fmt.Errorf("store: read a row's pin: %w", err))
 	}
 	raw, ok := fields[pinColumn]
 	if !ok || string(raw) == "null" {
@@ -132,7 +132,7 @@ func readPin(row json.RawMessage) (map[string]json.RawMessage, *int64, error) {
 	}
 	var pin int64
 	if err := json.Unmarshal(raw, &pin); err != nil {
-		return nil, nil, fmt.Errorf("store: read a row's pin: %w", err)
+		return nil, nil, invalidImport(fmt.Errorf("store: read a row's pin: %w", err))
 	}
 	return fields, &pin, nil
 }
@@ -166,18 +166,23 @@ func (s *Store) BackfillStreamPins(ctx context.Context, deployment int64) (map[s
 	for _, table := range []string{"agent_sessions", "calls", "phone_numbers", "stream_trunks", "call_resources"} {
 		db := s.shard
 		if table == "phone_numbers" || table == "stream_trunks" {
-			db = s.db
+			db = s.global
 		}
 		for {
+			// By id, which a row keeps when another writer changes it mid-statement, where its
+			// ctid would be new and the row skipped. The second IS NULL leaves a row that writer
+			// pinned as it is.
 			result, err := db.ExecContext(ctx, fmt.Sprintf(
-				"UPDATE %[1]s SET %[2]s = ? WHERE ctid IN (SELECT ctid FROM %[1]s WHERE %[2]s IS NULL LIMIT ?)",
+				"UPDATE %[1]s SET %[2]s = ? WHERE id IN (SELECT id FROM %[1]s WHERE %[2]s IS NULL LIMIT ?) AND %[2]s IS NULL",
 				table, pinColumn), deployment, backfillBatch)
 			if err != nil {
 				return pinned, fmt.Errorf("store: backfill %s: %w", table, err)
 			}
 			written, _ := result.RowsAffected()
 			pinned[table] += written
-			if written < backfillBatch {
+			// A batch is short when another writer pinned some of its rows meanwhile, so only
+			// an empty one is the last.
+			if written == 0 {
 				break
 			}
 		}
@@ -214,7 +219,7 @@ func (s *Store) LegacyStreamPins(ctx context.Context, deployment int64) ([]Legac
 		var err error
 		if table == "phone_numbers" {
 			var rows []LegacyCount
-			rows, err = count(ctx, s.db)
+			rows, err = count(ctx, s.global)
 			lists = [][]LegacyCount{rows}
 		} else {
 			lists, err = everyShard(ctx, s, count)

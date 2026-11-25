@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -60,7 +61,7 @@ func (s *AnomalySuite) SetupSuite() {
 }
 
 func (s *AnomalySuite) SetupTest() {
-	_, err := s.db.DB().ExecContext(s.ctx, "TRUNCATE requests, cost_anomaly_notices")
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "TRUNCATE requests, notices")
 	s.Require().NoError(err)
 	s.slack = newSlackServer()
 	s.T().Cleanup(s.slack.Close)
@@ -102,13 +103,23 @@ func (s *slackServer) posts() []string {
 	return append([]string(nil), s.sent...)
 }
 
+// sender posts db's notices to the suite's Slack, sweeping every few milliseconds, closed when
+// the test ends.
+func (s *AnomalySuite) sender(db *store.Store) *Sender {
+	slack := NewSlack("xoxb-test", "C123")
+	slack.baseURL = s.slack.URL
+	sender := NewSender(SenderOptions{Store: db.Notices, Poster: slack, Environment: "prod", Logger: slog.New(slog.DiscardHandler)})
+	sender.every = 20 * time.Millisecond
+	sender.Start()
+	s.T().Cleanup(sender.Close)
+	return sender
+}
+
 // anomalies is a check over the suite's store posting to its Slack every few milliseconds, with
 // every threshold at its default, closed when the test ends.
 func (s *AnomalySuite) anomalies() *Anomalies {
-	slack := NewSlack("xoxb-test", "C123")
-	slack.baseURL = s.slack.URL
 	anomalies := NewAnomalies(AnomalyOptions{
-		Store: s.db, Poster: slack, Environment: "prod", Logger: slog.New(slog.DiscardHandler),
+		Store: s.db, Sender: s.sender(s.db), Logger: slog.New(slog.DiscardHandler),
 		Every: 20 * time.Millisecond,
 		Now: func() time.Time {
 			s.reads.Add(1)
@@ -133,10 +144,11 @@ func organization() string {
 // spent writes organization's spend on the day daysAgo days before today, at noon.
 func (s *AnomalySuite) spent(organization string, daysAgo int, cost int64) {
 	day := time.Date(today.Year(), today.Month(), today.Day(), 12, 0, 0, 0, time.UTC).AddDate(0, 0, -daysAgo)
-	s.Require().NoError(s.db.RecordRequest(s.ctx, &store.Request{
-		Modality: "llm", CustomerID: "app-" + organization, OrganizationID: organization, Provider: "openai", Model: "m",
-		StartedAt: day, CostMicros: cost, Billable: true, Success: true,
-	}))
+	_, err := s.db.Requests.InsertMany(s.ctx, []store.Request{{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app-" + organization, OrganizationID: organization,
+		Provider: "openai", Model: "m", StartedAt: day, CostMicros: cost, Billable: true, Success: true,
+	}})
+	s.Require().NoError(err)
 }
 
 // steady gives organization the same spend on each of the baseline's days.
@@ -297,7 +309,7 @@ func (s *AnomalySuite) TestAPostThatFailedIsPostedByALaterCheck() {
 	s.slack.fail.Store(false)
 	s.checked(s.reads.Load())
 	s.Empty(s.noticed(spike), "its writer's claim stands for a while")
-	_, err := s.db.DB().ExecContext(s.ctx, "UPDATE cost_anomaly_notices SET claimed_at = now() - interval '1 hour'")
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE notices SET claimed_at = now() - interval '1 hour'")
 	s.Require().NoError(err)
 	s.Require().Eventually(func() bool { return len(s.noticed(spike)) == 1 }, settleFor, time.Millisecond)
 	s.checked(s.reads.Load())
@@ -305,11 +317,11 @@ func (s *AnomalySuite) TestAPostThatFailedIsPostedByALaterCheck() {
 }
 
 func (s *AnomalySuite) TestTheCheckRunsHourlyUnlessToldOtherwise() {
-	s.Equal(time.Hour, NewAnomalies(AnomalyOptions{Store: s.db, Poster: NewSlack("xoxb-test", "C123")}).every)
+	s.Equal(time.Hour, NewAnomalies(AnomalyOptions{Store: s.db, Sender: NewSender(SenderOptions{Store: s.db.Notices, Poster: NewSlack("xoxb-test", "C123")})}).every)
 }
 
 func (s *AnomalySuite) TestCloseStopsTheCheckAndGivesTheLockBack() {
-	NewAnomalies(AnomalyOptions{Store: s.db, Poster: NewSlack("xoxb-test", "C123")}).Close()
+	NewAnomalies(AnomalyOptions{Store: s.db, Sender: NewSender(SenderOptions{Store: s.db.Notices, Poster: NewSlack("xoxb-test", "C123")})}).Close()
 
 	anomalies := s.anomalies()
 	anomalies.Start()
@@ -341,10 +353,8 @@ func (s *AnomalySuite) TestACheckThatFailsGivesTheLockBack() {
 	}})
 	s.Require().NoError(err)
 	defer broken.Close()
-	slack := NewSlack("xoxb-test", "C123")
-	slack.baseURL = s.slack.URL
 	failing := NewAnomalies(AnomalyOptions{
-		Store: broken, Poster: slack, Logger: slog.New(slog.DiscardHandler), Every: 20 * time.Millisecond,
+		Store: broken, Sender: s.sender(broken), Logger: slog.New(slog.DiscardHandler), Every: 20 * time.Millisecond,
 		Now: func() time.Time {
 			s.reads.Add(1)
 			return *s.clock.Load()

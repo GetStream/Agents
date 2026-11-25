@@ -15,8 +15,8 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // The server's answers, every option's probability in the prompt's order: at a pause the
@@ -62,7 +62,7 @@ func checkServer(t *testing.T, answer string) *httptest.Server {
 // recorded is a check as the call's record was handed it.
 type recorded struct {
 	turn  string
-	check live.FloorCheck
+	check store.FloorCheck
 }
 
 // watched is an acting audio floor whose checks are kept for the call by record.
@@ -75,7 +75,7 @@ type watched struct {
 func watchedFloor(t *testing.T, answer string) *watched {
 	client := audiofloor.New(checkServer(t, answer).URL, audiofloor.Opus, nil)
 	w := &watched{audioFloor: newAudioFloor(client, audiofloor.Act, audiofloor.EndOfTurn{}, quietLogger())}
-	w.watch(func(turn string, check live.FloorCheck) {
+	w.watch(func(turn string, check store.FloorCheck) {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		w.kept = append(w.kept, recorded{turn: turn, check: check})
@@ -117,26 +117,26 @@ func TestAPauseCheckAndACheckOverTheAgentAreKeptWithTheirTurn(t *testing.T) {
 	require.Len(t, kept, 2)
 	pause, over := kept[0], kept[1]
 	require.Equal(t, "turn-1", pause.turn)
-	require.Equal(t, live.FloorCheckPause, pause.check.Kind)
+	require.Equal(t, store.FloorCheckPause, pause.check.Kind)
 	require.Equal(t, 600.0, *pause.check.PausedMs)
-	require.Equal(t, []live.FloorOption{{Option: "respond", Probability: 0.91}, {Option: "wait", Probability: 0.001},
+	require.Equal(t, []store.FloorOption{{Option: "respond", Probability: 0.91}, {Option: "wait", Probability: 0.001},
 		{Option: "clarify", Probability: 0.000001}, {Option: "ignore", Probability: 0.065}, {Option: "get_weather", Probability: 0.02}},
 		pause.check.Options, "the four answers whatever their probability; cannot, under 1%, left out")
-	require.Equal(t, live.FloorRuling{Disposition: "respond", Floor: "continue", Tool: "get_weather"}, pause.check.Ruling)
+	require.Equal(t, store.FloorRuling{Disposition: "respond", Floor: "continue", Tool: "get_weather"}, pause.check.Ruling)
 	require.True(t, pause.check.Acted)
 	require.Equal(t, "preset:safe", pause.check.Point, "the server's default preset")
 	require.Positive(t, pause.check.LatencyMs)
 
 	require.Equal(t, "turn-1", over.turn, "the reply it was asked over, not the words' own ID")
-	require.Equal(t, live.FloorCheckOverAgent, over.check.Kind)
+	require.Equal(t, store.FloorCheckOverAgent, over.check.Kind)
 	require.Nil(t, over.check.PausedMs)
-	require.Equal(t, []live.FloorOption{{Option: "stop", Probability: 0.7}, {Option: "shorten", Probability: 0.2},
+	require.Equal(t, []store.FloorOption{{Option: "stop", Probability: 0.7}, {Option: "shorten", Probability: 0.2},
 		{Option: "continue", Probability: 0.1}, {Option: "ignore", Probability: 0}}, over.check.Options)
-	require.Equal(t, live.FloorRuling{Disposition: "respond", Floor: "stop", Cannot: true}, over.check.Ruling)
+	require.Equal(t, store.FloorRuling{Disposition: "respond", Floor: "stop", Cannot: true}, over.check.Ruling)
 	require.True(t, over.check.Acted, "a stop is handed to the agent")
 	require.Empty(t, over.check.Point)
 
-	require.Equal(t, []live.FloorCheck{pause.check, over.check}, w.take("turn-1"), "the turn carries both")
+	require.Equal(t, []store.FloorCheck{pause.check, over.check}, w.take("turn-1"), "the turn carries both")
 	require.Nil(t, w.take("turn-1"), "a turn's checks are carried once")
 }
 
@@ -149,7 +149,7 @@ func TestARulingToGoOnOverTheAgentIsNotActedOn(t *testing.T) {
 		Speaking: true, Paused: 200 * time.Millisecond}, true)
 	kept := w.record()
 	require.Len(t, kept, 1)
-	require.Equal(t, live.FloorCheckOverAgent, kept[0].check.Kind)
+	require.Equal(t, store.FloorCheckOverAgent, kept[0].check.Kind)
 	require.False(t, kept[0].check.Acted)
 }
 
@@ -189,7 +189,7 @@ func TestSettledWordsAskedAboutWhileTheAgentTalksAreACheckOverTheAgent(t *testin
 	kept := w.record()
 	require.Len(t, kept, 1)
 	require.Equal(t, "turn-1", kept[0].turn)
-	require.Equal(t, live.FloorCheckOverAgent, kept[0].check.Kind)
+	require.Equal(t, store.FloorCheckOverAgent, kept[0].check.Kind)
 	require.Equal(t, 200.0, *kept[0].check.PausedMs)
 	require.Equal(t, "stop", kept[0].check.Options[0].Option)
 }
@@ -198,10 +198,10 @@ func TestSettledWordsAskedAboutWhileTheAgentTalksAreACheckOverTheAgent(t *testin
 // go of rather than taking the router down.
 func TestAFloorCheckAfterTheRecorderClosedIsLetGo(t *testing.T) {
 	r := buildDecisionRecorder(nil, routing.Owner{CustomerID: "c", AgentID: "a", CallID: "call-1"}, quietLogger())
-	r.send = func(context.Context, []live.CallEvent) error { return nil }
+	r.send = func(context.Context, []store.CallEvent) error { return nil }
 	r.start().Close()
 	require.NotPanics(t, func() {
-		r.RecordFloorCheck("turn-1", live.FloorCheck{At: time.Now()})
+		r.RecordFloorCheck("turn-1", store.FloorCheck{At: time.Now()})
 		r.Record(Decided{Kind: "wait"})
 	})
 }
@@ -381,7 +381,7 @@ func TestFloorChecksAreKeptFromManyGoroutinesAtOnce(t *testing.T) {
 // waits on a writer that has fallen behind.
 func TestAFloorCheckIsRecordedForTheCallWithoutWaiting(t *testing.T) {
 	r := buildDecisionRecorder(nil, routing.Owner{CustomerID: "c", AgentID: "a", CallID: "call-1"}, quietLogger())
-	check := live.FloorCheck{At: time.Now().UTC(), Kind: live.FloorCheckOverAgent, Acted: true}
+	check := store.FloorCheck{At: time.Now().UTC(), Kind: store.FloorCheckOverAgent, Acted: true}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -423,7 +423,7 @@ func TestAFloorCheckIsRecordedForTheCallWithoutWaiting(t *testing.T) {
 // An agent without chorus-asr floor control makes no checks, and its turns carry none.
 func TestAnAgentWithoutChorusASRFloorControlHasNoFloorChecks(t *testing.T) {
 	var none *audioFloor
-	none.watch(func(string, live.FloorCheck) { t.Fatal("nothing to keep") })
+	none.watch(func(string, store.FloorCheck) { t.Fatal("nothing to keep") })
 	require.Nil(t, none.take("turn-1"))
 	require.Nil(t, newAudioFloor(audiofloor.New(checkServer(t, "").URL, audiofloor.Opus, nil), audiofloor.Off,
 		audiofloor.EndOfTurn{}, quietLogger()))

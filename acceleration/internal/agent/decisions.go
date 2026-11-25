@@ -7,8 +7,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // How the decision writer behaves under load. A call makes several judgements a second,
@@ -36,15 +37,14 @@ const (
 // is worth less than the call: Redis having a bad minute must cost somebody some detail in
 // a dashboard and nobody a conversation.
 type decisionRecorder struct {
-	live   *live.Client
 	owner  routing.Owner
 	logger *slog.Logger
 
-	queue chan live.CallEvent
+	queue chan store.CallEvent
 	done  chan struct{}
 
 	// send stores one batch; it is Redis unless a test says otherwise.
-	send func(ctx context.Context, batch []live.CallEvent) error
+	send func(ctx context.Context, batch []store.CallEvent) error
 
 	// ctx is the writer's, cancelled when Close gives up on what is still queued.
 	ctx          context.Context
@@ -63,28 +63,27 @@ type decisionRecorder struct {
 	dropped   atomic.Int64
 }
 
-func newDecisionRecorder(liveClient *live.Client, owner routing.Owner, logger *slog.Logger) *decisionRecorder {
-	return buildDecisionRecorder(liveClient, owner, logger).start()
+func newDecisionRecorder(events *store.CallEvents, owner routing.Owner, logger *slog.Logger) *decisionRecorder {
+	return buildDecisionRecorder(events, owner, logger).start()
 }
 
 // buildDecisionRecorder is a recorder that has not started writing, so a test can swap how.
-func buildDecisionRecorder(liveClient *live.Client, owner routing.Owner, logger *slog.Logger) *decisionRecorder {
+func buildDecisionRecorder(events *store.CallEvents, owner routing.Owner, logger *slog.Logger) *decisionRecorder {
 	r := &decisionRecorder{
-		live:   liveClient,
 		owner:  owner,
 		logger: logger,
-		queue:  make(chan live.CallEvent, decisionQueueSize),
+		queue:  make(chan store.CallEvent, decisionQueueSize),
 		done:   make(chan struct{}),
 
 		drainTimeout: decisionDrainTimeout,
 	}
-	r.send = liveClient.RecordCallEvents
+	r.send = events.InsertMany
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	return r
 }
 
 func (r *decisionRecorder) start() *decisionRecorder {
-	go r.run()
+	goroutine.Go(r.ctx, r.run)
 	return r
 }
 
@@ -95,7 +94,7 @@ func (r *decisionRecorder) Record(decided Decided) {
 		at = time.Now()
 	}
 
-	row := live.CallEvent{
+	row := store.CallEvent{
 		CustomerID:  r.owner.CustomerID,
 		CallID:      r.owner.CallID,
 		AgentID:     r.owner.AgentID,
@@ -112,7 +111,7 @@ func (r *decisionRecorder) Record(decided Decided) {
 
 // enqueue queues a row, dropping it if the writer is too far behind, and letting it go if the
 // recorder has been closed.
-func (r *decisionRecorder) enqueue(row live.CallEvent) {
+func (r *decisionRecorder) enqueue(row store.CallEvent) {
 	r.closing.RLock()
 	defer r.closing.RUnlock()
 	if r.closed {
@@ -128,8 +127,8 @@ func (r *decisionRecorder) enqueue(row live.CallEvent) {
 // RecordFloorCheck queues one of the chorus-asr model's checks on the floor, about turn when
 // that was known as it was asked, dropping it if the writer is too far behind. It never
 // waits: a check may be reported on the flow controller's goroutine.
-func (r *decisionRecorder) RecordFloorCheck(turn string, check live.FloorCheck) {
-	row := live.CallEvent{
+func (r *decisionRecorder) RecordFloorCheck(turn string, check store.FloorCheck) {
+	row := store.CallEvent{
 		CustomerID: r.owner.CustomerID,
 		CallID:     r.owner.CallID,
 		AgentID:    r.owner.AgentID,
@@ -170,7 +169,7 @@ func (r *decisionRecorder) run() {
 	ticker := time.NewTicker(decisionFlushEvery)
 	defer ticker.Stop()
 
-	batch := make([]live.CallEvent, 0, decisionBatchSize)
+	batch := make([]store.CallEvent, 0, decisionBatchSize)
 	for {
 		select {
 		case row, open := <-r.queue:
@@ -193,7 +192,7 @@ func (r *decisionRecorder) run() {
 	}
 }
 
-func (r *decisionRecorder) write(batch []live.CallEvent) {
+func (r *decisionRecorder) write(batch []store.CallEvent) {
 	if len(batch) == 0 {
 		return
 	}

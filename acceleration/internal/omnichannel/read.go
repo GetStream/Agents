@@ -125,7 +125,7 @@ func (c *Cards) Context(ctx context.Context, reading Reading) ([]llm.Message, er
 	if err != nil {
 		return nil, err
 	}
-	cards, err := c.store.EpisodeCards(ctx, store.CardsQuery{
+	cards, err := c.store.Episodes.Cards(ctx, store.CardsQuery{
 		CustomerID: reading.CustomerID, AgentConfigID: reading.AgentConfigID, ConversationID: contact.ConversationID,
 		ExceptThread: cmp.Or(reading.Thread, reading.Chat, reading.Own), ExceptSession: reading.SessionID, Limit: maxCards,
 	})
@@ -154,9 +154,9 @@ func (c *Cards) whose(ctx context.Context, reading Reading) (store.ContactMapEnt
 		return c.deviceContact(ctx, reading)
 	}
 	if reading.Thread == "" {
-		return c.store.Contact(ctx, reading.CustomerID, reading.AgentConfigID, reading.Person.Kind, reading.Person.Address)
+		return c.store.ContactMapEntries.GetByAddress(ctx, reading.CustomerID, reading.AgentConfigID, reading.Person.Kind, reading.Person.Address)
 	}
-	contact, err := c.store.ThreadContact(ctx, reading.CustomerID, reading.AgentConfigID, reading.Thread)
+	contact, err := c.store.ContactMapEntries.GetByThread(ctx, reading.CustomerID, reading.AgentConfigID, reading.Thread)
 	if err != nil {
 		return store.ContactMapEntry{}, err
 	}
@@ -172,7 +172,7 @@ func (c *Cards) whose(ctx context.Context, reading Reading) (store.ContactMapEnt
 
 // alone reports whether every person's message the session reads in its thread channel is
 // by the one who started the thread. The channel bridge makes the channel as the author of
-// the thread's first message, the one the thread's episode is with (store.OpenEpisode). A
+// the thread's first message, the one the thread's episode is with (store.Episodes.Open). A
 // Slack thread somebody else replied in is not alone: Alice's cards are never read for Bob.
 func (c *Cards) alone(ctx context.Context, reading Reading) (bool, error) {
 	window, err := c.window(ctx, reading, reading.Thread)
@@ -278,7 +278,7 @@ func (c *Cards) streamUser(reading Reading, user string) (Person, error) {
 // pinnedContact is the contact map row of a Stream user, unless it was made in another Stream
 // app of the customer than the session's, where the same user id is somebody else (samePin).
 func (c *Cards) pinnedContact(ctx context.Context, reading Reading, person Person) (store.ContactMapEntry, error) {
-	contact, err := c.store.Contact(ctx, reading.CustomerID, reading.AgentConfigID, person.Kind, person.Address)
+	contact, err := c.store.ContactMapEntries.GetByAddress(ctx, reading.CustomerID, reading.AgentConfigID, person.Kind, person.Address)
 	if err != nil {
 		return store.ContactMapEntry{}, err
 	}
@@ -373,7 +373,7 @@ func summaryOf(ctx context.Context, bound streamapp.Bound, card store.EpisodeCar
 
 // writtenAsCard reports whether a message is in an omni-channel, by the channel's own agent
 // user, as Write writes a card. Not only in the reader's omni-channel: once a link joins a
-// Stream user's and a number's rows (store.LinkUserPhone), the cards written before stay in the
+// Stream user's and a number's rows (store.UserPhones.Link), the cards written before stay in the
 // omni-channel their row pointed at then, and are still the person's.
 func writtenAsCard(message getstream.MessageWithChannelResponse) bool {
 	channelID, ok := strings.CutPrefix(message.Cid, chatlog.ChannelType+":")
@@ -384,7 +384,7 @@ func writtenAsCard(message getstream.MessageWithChannelResponse) bool {
 // episode: before Until and not before it started, for a session reading the card as for its
 // summary (Closer). A call channel can hold other callers' calls, and a thread channel holds
 // every episode of its thread, one after another: a number's SMS thread holds what it texted
-// before a link set those episodes aside (store.LinkUserPhone), so the card of its next
+// before a link set those episodes aside (store.UserPhones.Link), so the card of its next
 // episode, in progress, never hands them to the linked user.
 // A channel that is not the customer's has none, and so has a call card whose window holds a
 // person's line by anybody but the card's caller: two callers on one call id at once, or a
@@ -495,7 +495,7 @@ func theirs(custom map[string]any, card store.EpisodeCard) bool {
 	if stamped, ok := custom[conversation.CustomerField]; ok {
 		return stamped == card.CustomerID
 	}
-	return card.Source == store.EpisodeChat && card.AgentConfigID != "" && custom[configField] == card.AgentConfigID
+	return card.Source == store.EpisodeChat && card.ConfigID != "" && custom[configField] == card.ConfigID
 }
 
 // lineOf is who a thread channel's message is from: the person for one a person wrote (no

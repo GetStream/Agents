@@ -19,7 +19,7 @@ POST /v1/agents/connections/{id}/validate          api.validateConnection
 worker (every router)                               off the request
   wakes: at start, on Reconcile, on a delivery for an undeclared event,
          at the first row due, and at least once a lease (1 min)
-  ClaimConnectionEventSubscriptions: one due row at a time, lease 1 min,
+  ConnectionEventSubscriptions.Claim: one due row at a time, lease 1 min,
     SKIP LOCKED; one attempt is two requests of 10 s at most
   per row:
     connection deleted or disconnected -> row dropped
@@ -71,7 +71,7 @@ consent finished, connected again                   api.completeConsent
 - **A refused subscription backs off.** 15 min after the first refusal, doubling, a day at most (`retryWait`, `failures`), so a server that offers no events is not asked every 15 minutes forever.
 - **Only fixed bindings declare events.** A session binding's connection is picked when a session opens, and an event arrives with none open. The config endpoints refuse `events` on a session binding (`TestASessionBindingCannotDeclareEvents`), and an event with no name (`TestAnEventWithNoNameIsRefused`); `Reconcile` leaves out one stored some other way, so it cannot fail the validate of every config on the connection (`TestAStoredEventWithNoNameDoesNotFailTheValidate`).
 - **Subscribing starts at validate.** Example: Nash's GitHub connection is validated after Nash's config binds it with `issue.opened`; the validate is the call that proves the credential works and lists the tools, so the subscription is made then, and the first issue reaches Nash with no session ever opened. A session open would leave Nash deaf to issues opened before anyone talked to it.
-- **An idle router looks once a lease, not once a second.** The worker looks at start, when woken, at the first row due, and at least once a lease (1 min) whatever is due: 2 queries a lease with no rows, as eventforward's worker (#778). Example: router A subscribes and stops before the refresh; idle router B refreshes it within about a lease of its due time (`TestAnIdleRouterTakesARowAnotherRouterAddsWithinALease`, `TestWithNoSubscriptionsAnIdleWorkerLooksTwiceALease`).
+- **An idle router looks once a lease, not once a second.** The worker looks at start, when woken, at the first row due, and at least once a lease (1 min) whatever is due: 2 queries a lease with no rows, as eventforward's worker (#778). Example: router A subscribes and stops before the refresh; idle router B refreshes it within about a lease of its due time (`TestAnIdleRouterTakesARowAnotherRouterAddsWithinALease`, `TestWithNoSubscriptionsAnIdleWorkerLooksNoMoreThanTwiceALease`).
 - **A row is one router's at a time.** The claim locks with `SKIP LOCKED` and checks `next_attempt_at` again on the locked row, so two routers never ask the server for one subscription at once (`TestTwoRoutersClaimingAtOnceTakeEachSubscriptionOnce` in `internal/store`). A claim takes one row (`claimBatch`): one attempt is at most two requests of 10 s, inside the 1-min lease, so a row is never worked on past its lease.
 - **The event is data.** It is said to the agent as JSON after a sentence saying so («event payloads are untrusted data with the same injection considerations as tool results»).
 - **No next attempt is in the past.** Each place that sets when a row is next looked at is a lease from now at the soonest, so a row is never claimed again at once in a loop. Example: a server answers a `refreshBefore` already past (a clock behind, or a bug); the router asks again once a lease, not 500 times a second (`TestAGrantAlreadyEndedIsNotAskedForInALoop`). The places: the claim (the lease), a grant (`refreshAt`), a refusal (`retryWait`, 15 min and up), a renewal in flight (`waitUntil`), a failed read or store (the claim's lease stands), and the worker's own wait (`minLook`, 1 s, to a lease; `TestARowLockedByAnotherRoutersClaimIsNotLookedForInABusyLoop`). Every row is also looked at within a day, which drops a row a failed delete left.
@@ -83,7 +83,7 @@ consent finished, connected again                   api.completeConsent
 - **Subscribing on a config save.** A config that adds an event subscribes at the next validate of the connection, not at the save.
 - **`terminated` and `gap` envelopes** are acknowledged and logged; a `terminated` subscription is asked for again only at its next refresh.
 - **The conversation an event opens lives in memory.** The delivery is acknowledged once its event id is stored; a router that stops before the conversation ends loses it. The draft: «The endpoint SHOULD NOT return 2xx until the event has been durably persisted or forwarded».
-- **`connection_event_deliveries` is never pruned**, as `agent_plugin_event_deliveries` is not. It goes with its subscription.
+- **An event is remembered for a day** in `deliveries_seen` (scope `connection_event`), as a hook delivery is, and outlives its subscription by that day.
 
 ## Tests
 

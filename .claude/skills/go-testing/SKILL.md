@@ -24,3 +24,17 @@ Read the file for what you are testing:
 - [controllers.md](controllers.md): HTTP operations in `internal/api`, run against the whole router with `RouterSuite`. Who may call an endpoint, whose a resource is, fixtures, parallel suites.
 - [store.md](store.md): the models and queries in `internal/store`, run against Postgres with `StoreSuite`.
 - [ai-routing.md](ai-routing.md): STT, TTS, STS, LLM, search and the other AI providers and their routers. One shared suite per kind of AI that every provider embeds.
+
+## Before you push
+
+Checks a reviewer runs and an author often skips:
+
+- Mutate every rule you added, at every call site, in a scratch copy: delete the clause, make the condition `true`, empty a migration's Down. A mutant no test fails is a missing test.
+- Run the touched suites on the merge with current `origin/main`. CI's green is from the `main` it ran on.
+- An entry added to a shared list (`dataTables`, `importedModels`, `usageIndexes`) changes every reader of that list: read each one.
+- Round-trip an id that moves, is derived or is replayed: A to B to A, and a second run, each end as one row.
+- A shipped migration never runs again: change it in a new one.
+- A new migration is expand-only: it drops or renames nothing the release before still reads or writes.
+- A migration's lock timeout is in the `go` skill's `store.md` ("Which database"). Its version slot is in the `parallel-agents` skill ("Migration versions").
+- Work moved onto `context.WithoutCancel` takes its follow-on calls (billing, the cache drop) with it.
+- A fix covers every path to the same data: each writer, and each copy of it (a cache, `data_changes`).

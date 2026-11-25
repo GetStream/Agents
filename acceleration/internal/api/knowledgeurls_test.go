@@ -105,6 +105,18 @@ func (s *KnowledgeUrlsSuite) TestSomethingThatIsNotAFetchablePageIsRefused() {
 	s.Contains(failure, "mailto:sales@example.com")
 }
 
+func (s *KnowledgeUrlsSuite) TestAPageThatCannotBeStoredIsAnInternalError() {
+	s.failQueries("knowledge_urls")
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/knowledge/urls",
+		map[string]any{"namespace": "docs", "url": "https://example.com/pricing"})
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), `"code":"internal_error"`)
+	s.NotContains(string(body), "store:")
+	s.NotContains(string(body), "deadline")
+}
+
 func (s *KnowledgeUrlsSuite) TestAUrlLongerThan2048CharactersIsRefused() {
 	page := "https://example.com/"
 	page += strings.Repeat("a", 2049-len(page))

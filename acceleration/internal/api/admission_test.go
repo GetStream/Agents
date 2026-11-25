@@ -21,7 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/campaign"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channelbridge"
@@ -65,10 +65,15 @@ func (s *AdmissionSuite) SetupSuite() {
 	s.telnyxPublicKey, s.telnyxConnectionID = public, "1234567890"
 	s.logged = &lockedLog{}
 	s.logs = s.logged
+	// A voice the deployment runs itself, reached by name only, so a voiced session on a free
+	// model has its flow controller as the only thing it opens that costs money.
+	s.ttsConfig = routableConfig()
+	s.ttsConfig.Providers = append(s.ttsConfig.Providers,
+		routing.ProviderConfig{Provider: "plain", Model: "local-voice", Languages: []string{"la"}, Local: true})
 	s.RouterSuite.SetupSuite()
 	s.line = telnyxRinger{suite: &s.RouterSuite, private: private}
 	// A run cut short leaves its campaigns ringing, and this run's dialer would ring them.
-	_, err = s.store.DB().ExecContext(context.Background(), "UPDATE campaigns SET state = ? WHERE state IN (?, ?, ?)",
+	_, err = s.store.GlobalDB().ExecContext(context.Background(), "UPDATE campaigns SET state = ? WHERE state IN (?, ?, ?)",
 		store.Stopped, store.Scheduled, store.Running, store.Paused)
 	s.Require().NoError(err)
 }
@@ -184,12 +189,23 @@ func (s *AdmissionSuite) TestAFreeModelAnswersWithNoCredit() {
 	s.answersOnTheFreeModel()
 }
 
-func (s *AdmissionSuite) TestAnAgentWhoseFlowControllerCostsMoneyIsRefused() {
+func (s *AdmissionSuite) TestAVoicedAgentWhoseFlowControllerCostsMoneyIsRefused() {
 	status, failure := s.refused(http.MethodPost, "/v1/agents/sessions",
-		CreateSessionRequest{ConfigId: pointerTo(s.config("echo/local-model"))})
+		CreateSessionRequest{ConfigId: pointerTo(s.config("echo/local-model")), Tts: pointerTo("plain/local-voice"), StartVoice: pointerTo(true)})
 
 	s.Equal(http.StatusPaymentRequired, status, "every model a session opens is admitted, and its flow controller is priced")
 	s.Equal(codeInsufficientCredits, failure.Code)
+}
+
+// A conversation held in writing opens no flow controller, so on a model that costs nothing it
+// spends nothing and is admitted with no credit.
+func (s *AdmissionSuite) TestAWrittenSessionOnAFreeModelOpensWithNoCredit() {
+	// Warm the organization's money first, as refused does: a router that has read nothing
+	// yet admits anything, which would let this pass without the session being free.
+	s.refused(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"})
+
+	opened := s.serverClient.createSession(CreateSessionRequest{ConfigId: pointerTo(s.config("echo/local-model")), Incognito: pointerTo(true)})
+	s.T().Cleanup(func() { s.serverClient.stopSession(opened.Id) })
 }
 
 func (s *AdmissionSuite) TestASuspendedAccountIsForbidden() {
@@ -255,7 +271,7 @@ func (s *AdmissionSuite) TestAUsersSpentLimitIsTooManyRequestsWithRetryAfter() {
 		Subject: usage.SubjectUser, Level: store.LevelApp, OrganizationID: s.organization(), AppID: s.customerID(),
 		Interval: usage.Daily, LimitMicros: 1, UpdatedBy: "test",
 	}
-	s.Require().NoError(s.store.CreateLimit(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.Limits.Insert(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
 	spender := s.utils.uuid()
 	s.usage.Spend(s.T(), s.organization(), 1_000, func(event *usage.Event) { event.AppID, event.UserID = s.customerID(), spender })
 	asUser := s.signedIn(jwt.MapClaims{"user_id": spender}, auth.AuthTypeJWT, user, spender)
@@ -293,7 +309,7 @@ func (s *AdmissionSuite) TestAUserSpentForTheDayAndTheMonthRetriesAfterTheMonth(
 			Subject: usage.SubjectUser, Level: store.LevelApp, OrganizationID: s.organization(), AppID: s.customerID(),
 			Interval: interval, LimitMicros: 1, UpdatedBy: "test",
 		}
-		s.Require().NoError(s.store.CreateLimit(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
+		s.Require().NoError(s.store.Limits.Insert(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
 	}
 	spender := s.utils.uuid()
 	s.usage.Spend(s.T(), s.organization(), 1_000, func(event *usage.Event) { event.AppID, event.UserID = s.customerID(), spender })
@@ -390,8 +406,7 @@ func (s *AdmissionSuite) TestSpendCheckUnavailableIsA503() {
 // otherRouter is a second router's enforcer over the same usage service and the same Redis,
 // as another replica of the deployment.
 func (s *AdmissionSuite) otherRouter() *policy.Enforcer {
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	client, err := usage.NewClient(usage.ClientOptions{URL: s.usage.URL, Token: s.usage.Token})
 	s.Require().NoError(err)
 	_, holds := newRedisProxy(s.T())
@@ -409,7 +424,7 @@ func (s *AdmissionSuite) TestTwoRoutersStopAnLLMSessionTogether() {
 	// One response of the counted model costs 1,000 micros.
 	s.usage.Credit(s.T(), s.organization(), 1_000_000)
 	other := s.otherRouter()
-	other.Join(s.customerID(), s.organization(), usage.DefaultTier)
+	other.Join(s.T().Context(), s.customerID(), s.organization(), usage.DefaultTier)
 	answering := s.serverClient.opens("/v1/llm/stream")
 	s.Require().NoError(answering.WriteJSON(frame{"type": "start", "target": "counted/counted-model"}))
 	s.Equal("started", s.await(answering, "started")["type"])
@@ -558,10 +573,10 @@ func (s *AdmissionSuite) TestACallArrivingOverStreamForAnOrganizationThatMayNotP
 			s.SetupTest()
 			e164, callID := s.utils.number(), "phone-"+s.utils.uuid()
 			ctx := context.Background()
-			s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+			s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 				E164: e164, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 			}))
-			s.Require().NoError(s.store.AttachNumber(ctx, s.customerID(), e164,
+			s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), e164,
 				store.NumberAttachment{TrunkID: "trunk-" + s.utils.uuid(), CallType: "default", CallID: callID}))
 			if refused == codeAccountSuspended {
 				s.usage.Credit(s.T(), s.organization(), 10_000_000)
@@ -634,7 +649,7 @@ func (s *AdmissionSuite) pausedMidway(refused string, concurrency int) {
 		s.usage.Credit(s.T(), s.organization(), -10_000_000)
 		s.refused(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"})
 	default:
-		s.Require().NoError(s.store.SuspendTelephony(ctx, &store.TelephonySuspension{
+		s.Require().NoError(s.store.TelephonySuspensions.Upsert(ctx, &store.TelephonySuspension{
 			CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@getstream.io",
 		}))
 	}
@@ -649,7 +664,7 @@ func (s *AdmissionSuite) pausedMidway(refused string, concurrency int) {
 	s.Never(func() bool { state, reason := read(); return state != CampaignStatePaused || reason != refused },
 		500*time.Millisecond, 20*time.Millisecond, "and it stays paused, with why, whatever its other slots were doing")
 	dialer.Close()
-	contacts, err := s.store.QueryContacts(ctx, created.Id, store.ContactFilter{})
+	contacts, err := s.store.CampaignContacts.Select(ctx, created.Id, store.ContactFilter{})
 	s.Require().NoError(err)
 	s.Require().Len(contacts, 1)
 	s.Equal(store.Enrolled, contacts[0].Stage,
@@ -662,7 +677,7 @@ func (s *AdmissionSuite) pausedMidway(refused string, concurrency int) {
 	case codeInsufficientCredits:
 		s.usage.Credit(s.T(), s.organization(), 10_000_000)
 	default:
-		s.Require().NoError(s.store.LiftTelephonySuspension(ctx, s.customerID()))
+		s.Require().NoError(s.store.TelephonySuspensions.Delete(ctx, s.customerID()))
 	}
 	s.Require().Eventually(func() bool {
 		return s.serverClient.do(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"}, nil) == http.StatusOK
@@ -701,7 +716,7 @@ func (noOutcome) Classify(context.Context, store.Campaign, string, campaign.Step
 // from one of the app's numbers.
 func (s *AdmissionSuite) campaign(concurrency int) Campaign {
 	from := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(context.Background(), &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &store.PhoneNumber{
 		E164: from, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	always := []CallingWindow{{Start: "00:00", End: "24:00"}}
@@ -886,7 +901,7 @@ func (s *AdmissionSuite) TestAMoneyRefusalIsTheCodeNotTheText() {
 	_, ok = moneyError(nil)
 	s.False(ok)
 	var answer APIError
-	s.Require().True(errors.As(refusedRequest(errors.New("routing: unknown target")), &answer))
+	s.Require().True(errors.As(refusedRequest(routing.Refused(errors.New("routing: unknown target"))), &answer))
 	s.True(strings.HasPrefix(answer.Code, "invalid_request"))
 }
 
@@ -960,7 +975,7 @@ func (s *AdmissionSuite) TestACallOverTheTiersCallsAtOnceIsATierLimitReached() {
 }
 
 func (s *AdmissionSuite) TestACallToSomebodyWhoOptedOutIsStillForbidden() {
-	s.Require().NoError(s.store.OptOut(context.Background(), &store.OptOut{
+	s.Require().NoError(s.store.OptOuts.Insert(context.Background(), &store.OptOut{
 		CustomerID: s.customerID(), Recipient: "+15550001111", Channel: dlc.Voice, Source: "keyword",
 	}))
 
@@ -1002,4 +1017,56 @@ func (s *AdmissionSuite) finalFailure(err error) bool {
 	var failure *scheduling.Failure
 	s.Require().ErrorAs(err, &failure)
 	return failure.Final
+}
+
+// Defect: a socket session refused for money, in a frame after the 101, counted as answered, or
+// without the code it was refused with.
+func (s *AdmissionSuite) TestASocketSessionRefusedForASpentLimitIsCountedAsRefused() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	s.limitApp(usage.Daily, 10_000)
+	s.refused(http.MethodPost, "/v1/search", SearchRequest{Query: "spends the limit"})
+
+	connection := s.serverClient.with(clientHeader, store.AuditSourceSDK).opens("/v1/agents/socket")
+	s.Require().NoError(connection.WriteJSON(frame{"type": "start",
+		"session": frame{"config_id": s.config("echo/local-model")}}))
+	s.Equal(codeSpendLimitReached, s.await(connection, "error")["code"])
+
+	row := s.countedOnce(activity.AreaConversations, store.AuditSourceSDK)
+	s.Equal(int64(1), row.refused)
+	s.Equal(codeSpendLimitReached, row.code)
+}
+
+// Defect: a call Telnyx signed to a number of an organization that may not pay, rejected in a
+// 200 plan, counted as answered or without the code it was refused with.
+func (s *AdmissionSuite) TestATelnyxCallRefusedForMoneyIsCountedRefused() {
+	e164 := s.utils.number()
+	s.line.attach(e164, "sip:"+e164+"@trunk.sip.example.test", "trunk-user", "trunk-password")
+	s.refused(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"})
+
+	status, _, body := s.line.deliver(s.line.call(e164), true)
+	s.Require().Equal(http.StatusOK, status)
+	s.Require().Contains(body, "<Reject")
+
+	row := s.countedOnce(activity.AreaPhoneSMS, store.AuditSourceAPI)
+	s.Equal(int64(1), row.refused)
+	s.Equal(codeInsufficientCredits, row.code)
+}
+
+// Defect: a call Stream signed to a number of an organization that may not pay, refused and
+// ended but answered 200, counted as answered or without the code it was refused with.
+func (s *AdmissionSuite) TestAStreamCallRefusedForMoneyIsCountedRefused() {
+	e164, callID := s.utils.number(), "phone-"+s.utils.uuid()
+	ctx := context.Background()
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
+		E164: e164, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
+	}))
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), e164,
+		store.NumberAttachment{TrunkID: "trunk-" + s.utils.uuid(), CallType: "default", CallID: callID}))
+	s.refused(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"})
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/phone/hooks/stream", arrivingCall("default:"+callID)))
+
+	row := s.countedOnce(activity.AreaHooksIn, store.AuditSourceAPI)
+	s.Equal(int64(1), row.refused)
+	s.Equal(codeInsufficientCredits, row.code)
 }

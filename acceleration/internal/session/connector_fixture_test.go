@@ -118,7 +118,7 @@ func (s *connectorFixture) SetupTest() {
 	s.connectorID = "custom_crm"
 	manifest, err := core.ParseManifest([]byte(s.crmManifest(s.connectorID, 1)))
 	s.Require().NoError(err)
-	definition, err := s.store.CreateConnectorDefinition(s.ctx, s.customerID, manifest)
+	definition, err := s.store.ConnectorDefinitions.Revise(s.ctx, s.customerID, manifest)
 	s.Require().NoError(err)
 	s.revision = definition.Revision
 }
@@ -151,7 +151,7 @@ func (s *connectorFixture) connection(user, account string) string {
 	if user != "" {
 		connection.OwnerType, connection.OwnerID = store.OwnerUser, user
 	}
-	s.Require().NoError(s.store.CreateConnectorConnection(s.ctx, s.registry, connection))
+	s.Require().NoError(s.store.ConnectorConnections.Insert(s.ctx, s.registry, connection))
 	stored, _, err := bearer.New().Complete(s.ctx, core.CompleteInput{Supplied: map[string]string{bearer.SuppliedToken: tokenOf(account)}})
 	s.Require().NoError(err)
 	s.setState(connection.ID, func(state *core.CredentialState) {
@@ -174,14 +174,14 @@ func (s *connectorFixture) setState(id string, change func(state *core.Credentia
 // config stores an agent config of the test's tenant with bindings.
 func (s *connectorFixture) config(bindings ...store.ConnectorBinding) store.AgentConfig {
 	config := store.AgentConfig{CustomerID: s.customerID, Name: "agent-" + uuid.NewString(), Connectors: bindings}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 	return config
 }
 
 // rebind stores the config with bindings in place of its own.
 func (s *connectorFixture) rebind(config store.AgentConfig, bindings ...store.ConnectorBinding) {
 	config.Connectors = bindings
-	s.Require().NoError(s.store.UpdateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &config))
 }
 
 // fixed and chosen are bindings of the test's connector under alias that grant tools: one

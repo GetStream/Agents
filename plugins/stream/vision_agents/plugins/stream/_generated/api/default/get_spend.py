@@ -170,8 +170,9 @@ def sync_detailed(
     grouped by "who:user" the value is then <app_id>/<user_id>, since a user id is only unique within
     its app.
     Only the biggest values keep a series of their own, because a label such as customer_id has as many
-    values as the customer has customers. The rest are summed into "other", and spend carrying no such
-    label at all into the empty value, so the rows still add up to the total.
+    values as the customer has customers. The rest are summed into a row marked other, whose value is
+    "other", and spend carrying no such label at all into the empty value, so the rows still add up to
+    the total.
     Reads the request rows rather than the rollups, so today's spend is there without a rollup having
     run.
 
@@ -251,8 +252,9 @@ def sync(
     grouped by "who:user" the value is then <app_id>/<user_id>, since a user id is only unique within
     its app.
     Only the biggest values keep a series of their own, because a label such as customer_id has as many
-    values as the customer has customers. The rest are summed into "other", and spend carrying no such
-    label at all into the empty value, so the rows still add up to the total.
+    values as the customer has customers. The rest are summed into a row marked other, whose value is
+    "other", and spend carrying no such label at all into the empty value, so the rows still add up to
+    the total.
     Reads the request rows rather than the rollups, so today's spend is there without a rollup having
     run.
 
@@ -327,8 +329,9 @@ async def asyncio_detailed(
     grouped by "who:user" the value is then <app_id>/<user_id>, since a user id is only unique within
     its app.
     Only the biggest values keep a series of their own, because a label such as customer_id has as many
-    values as the customer has customers. The rest are summed into "other", and spend carrying no such
-    label at all into the empty value, so the rows still add up to the total.
+    values as the customer has customers. The rest are summed into a row marked other, whose value is
+    "other", and spend carrying no such label at all into the empty value, so the rows still add up to
+    the total.
     Reads the request rows rather than the rollups, so today's spend is there without a rollup having
     run.
 
@@ -406,8 +409,9 @@ async def asyncio(
     grouped by "who:user" the value is then <app_id>/<user_id>, since a user id is only unique within
     its app.
     Only the biggest values keep a series of their own, because a label such as customer_id has as many
-    values as the customer has customers. The rest are summed into "other", and spend carrying no such
-    label at all into the empty value, so the rows still add up to the total.
+    values as the customer has customers. The rest are summed into a row marked other, whose value is
+    "other", and spend carrying no such label at all into the empty value, so the rows still add up to
+    the total.
     Reads the request rows rather than the rollups, so today's spend is there without a rollup having
     run.
 

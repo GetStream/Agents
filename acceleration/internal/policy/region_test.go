@@ -7,7 +7,6 @@ import (
 	"os"
 	"sync"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionmodel"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -65,8 +64,7 @@ func (s *PolicySuite) TestAPolicyReadThatFailsChangesNothingAboutWhereWorkIsDone
 	closed, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
 	s.Require().NoError(err)
 	s.Require().NoError(closed.Close())
-	configs, err := appconfig.New(appconfig.Options{Store: closed})
-	s.Require().NoError(err)
+	configs := closed
 	built := &builtIn{}
 	router := s.regionalRouter(s.newEnforcer(configs, slog.New(slog.DiscardHandler)), built)
 
@@ -76,7 +74,7 @@ func (s *PolicySuite) TestAPolicyReadThatFailsChangesNothingAboutWhereWorkIsDone
 
 func (s *PolicySuite) TestAPolicyWrittenWithARegionKeepsNoWorkInIt() {
 	// As a policy saved before regions left policies, which a document read now ignores.
-	_, err := s.store.DB().ExecContext(s.ctx, `INSERT INTO policies (scope, scope_id, document, updated_at) VALUES (?, ?, ?::jsonb, now())`,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, `INSERT INTO policies (scope, scope_id, document, updated_at) VALUES (?, ?, ?::jsonb, now())`,
 		store.ScopeOrganization, s.org, `{"data_policy":{"region":"eu","retention":"30d"}}`)
 	s.Require().NoError(err)
 	built := &builtIn{}

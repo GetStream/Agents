@@ -3,19 +3,25 @@
 package activity
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
 	"errors"
+	"io"
 	"log/slog"
 	"math"
+	"net"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/suite"
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	_ "github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
@@ -74,7 +80,7 @@ func request(app string) Request {
 // refusal's code, and whether there is a row at all.
 func (s *ActivitySuite) row(app string) (requests, refused int64, code string, found bool) {
 	var last sql.NullString
-	err := s.db.DB().QueryRowContext(s.ctx, `
+	err := s.db.GlobalDB().QueryRowContext(s.ctx, `
 SELECT requests, refused, last_refusal_code FROM customer_activity
 WHERE app_id = ? AND area = ? AND client = ? AND day = ?::date`,
 		app, AreaAgentSetup, store.AuditSourceCLI, day.Format(time.DateOnly)).Scan(&requests, &refused, &last)
@@ -152,7 +158,7 @@ func (s *ActivitySuite) TestARequestNamingNoAppIsNotCounted() {
 	recorder.Close()
 
 	var rows int
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT count(*) FROM customer_activity WHERE area = ?", nobody.Area).Scan(&rows))
 	s.Equal(0, rows)
 }
@@ -209,7 +215,7 @@ func (s *ActivitySuite) TestARecorderAtCapacityWritesAtOnce() {
 func (s *ActivitySuite) TestAFailedWriteIsWrittenByTheNextOne() {
 	stuck, other := s.app(), s.app()
 	// One more request than a BIGINT holds is refused by Postgres, and the whole write with it.
-	s.Require().NoError(s.db.RecordActivity(s.ctx, []store.ActivityDelta{{
+	s.Require().NoError(s.db.Activities.Add(s.ctx, []store.ActivityDelta{{
 		OrganizationID: "org", AppID: stuck, Area: AreaAgentSetup, Client: store.AuditSourceCLI,
 		Day: day, Requests: math.MaxInt64, FirstAt: day, LastAt: day,
 	}}))
@@ -220,11 +226,170 @@ func (s *ActivitySuite) TestAFailedWriteIsWrittenByTheNextOne() {
 	s.Never(func() bool { return s.requests(other) > 0 }, 200*time.Millisecond, 20*time.Millisecond,
 		"a write holding the row that overflows succeeded")
 
-	_, err := s.db.DB().ExecContext(s.ctx, "UPDATE customer_activity SET requests = 0 WHERE app_id = ?", stuck)
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE customer_activity SET requests = 0 WHERE app_id = ?", stuck)
 	s.Require().NoError(err)
 
 	s.Require().Eventually(func() bool { return s.requests(other) == 1 && s.requests(stuck) == 1 },
 		settleFor, 10*time.Millisecond, "what the failed write held was not written again")
+}
+
+// Defect: a write whose commit landed but whose answer was lost written again by the next one,
+// which counts its rows twice.
+func (s *ActivitySuite) TestAWriteWhoseCommitAnswerWasLostIsNotWrittenAgain() {
+	cut := newCommitCutter(s.T())
+	db, err := store.Open(cut.dsn(os.Getenv("ROUTER_POSTGRES_DSN")))
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.Require().NoError(db.Close()) })
+	recorder, err := New(Options{Store: db, Interval: time.Hour, Logger: slog.New(slog.DiscardHandler)})
+	s.Require().NoError(err)
+	s.T().Cleanup(recorder.Close)
+	landed, other := s.app(), s.app()
+
+	cut.arm()
+	recorder.Record(request(landed))
+	s.True(recorder.write(), "a write that may have landed is dropped, and nothing is held back")
+	s.Require().True(cut.fired(), "the connection was cut after COMMIT was sent")
+	recorder.Record(request(other))
+	s.Require().True(recorder.write())
+
+	s.EqualValues(1, s.requests(landed), "the commit landed once and was not written again")
+	s.EqualValues(1, s.requests(other))
+}
+
+// Defect: a write whose context ended before its commit was sent read as one that may have
+// landed and dropped, though nothing of it was written.
+func (s *ActivitySuite) TestAWriteWhoseContextEndedBeforeItsCommitIsWrittenAgain() {
+	db, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.Require().NoError(db.Close()) })
+	ctx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+	// Ends the write's context once its upsert has run, before the commit.
+	db.GlobalDB().AddQueryHook(cancelAfter{prefix: `INSERT INTO "customer_activity"`, cancel: cancel})
+	app := s.app()
+	delta := store.ActivityDelta{OrganizationID: "org", AppID: app, Area: AreaAgentSetup, Client: store.AuditSourceCLI,
+		Day: day, Requests: 1, FirstAt: day, LastAt: day}
+
+	err = db.Activities.Add(ctx, []store.ActivityDelta{delta})
+	s.Require().Error(err)
+	s.NotErrorIs(err, store.ErrActivityUnsure)
+	s.Zero(s.requests(app), "nothing was committed")
+
+	s.Require().NoError(s.db.Activities.Add(s.ctx, []store.ActivityDelta{delta}))
+	s.EqualValues(1, s.requests(app))
+}
+
+// Defect: a commit the database refused read as one that may have landed and dropped.
+func (s *ActivitySuite) TestACommitTheDatabaseRefusedIsNotUnsure() {
+	refused := s.app()
+	// A deferred constraint refusing the app's row fails the write in its commit, with an answer.
+	trigger := "refuse_" + strings.ToLower(rand.Text())
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, `CREATE FUNCTION `+trigger+`() RETURNS trigger LANGUAGE plpgsql AS
+$$ BEGIN RAISE EXCEPTION 'refused at commit'; END $$`)
+	s.Require().NoError(err)
+	_, err = s.db.GlobalDB().ExecContext(s.ctx, `CREATE CONSTRAINT TRIGGER `+trigger+` AFTER INSERT OR UPDATE ON customer_activity
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.app_id = '`+refused+`') EXECUTE FUNCTION `+trigger+`()`)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() {
+		_, err := s.db.GlobalDB().ExecContext(s.ctx, "DROP TRIGGER "+trigger+" ON customer_activity; DROP FUNCTION "+trigger+"()")
+		s.Require().NoError(err)
+	})
+
+	err = s.db.Activities.Add(s.ctx, []store.ActivityDelta{{
+		OrganizationID: "org", AppID: refused, Area: AreaAgentSetup, Client: store.AuditSourceCLI, Day: day, Requests: 1, FirstAt: day, LastAt: day,
+	}})
+
+	s.Require().ErrorContains(err, "refused at commit")
+	s.NotErrorIs(err, store.ErrActivityUnsure)
+}
+
+// cancelAfter is a query hook that calls cancel once a query starting with prefix has run.
+type cancelAfter struct {
+	prefix string
+	cancel context.CancelFunc
+}
+
+func (h cancelAfter) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context { return ctx }
+
+func (h cancelAfter) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if strings.HasPrefix(event.Query, h.prefix) {
+		h.cancel()
+	}
+}
+
+// commitCutter is a TCP proxy to the suite's Postgres that, once armed, passes the next COMMIT
+// on and then cuts the client's connection before the answer comes back: a commit that landed
+// with its answer lost.
+type commitCutter struct {
+	listener net.Listener
+	upstream string
+	armed    atomic.Bool
+	cut      atomic.Bool
+}
+
+func newCommitCutter(t *testing.T) *commitCutter {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &commitCutter{listener: listener}
+	t.Cleanup(func() { _ = listener.Close() }) // closing ends serve
+	go c.serve()
+	return c
+}
+
+// dsn is dsn reached through the proxy, which forwards to dsn's own host.
+func (c *commitCutter) dsn(dsn string) string {
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		panic(err)
+	}
+	c.upstream = parsed.Host
+	parsed.Host = c.listener.Addr().String()
+	return parsed.String()
+}
+
+func (c *commitCutter) arm()        { c.armed.Store(true) }
+func (c *commitCutter) fired() bool { return c.cut.Load() }
+
+func (c *commitCutter) serve() {
+	for {
+		client, err := c.listener.Accept()
+		if err != nil {
+			return
+		}
+		server, err := net.Dial("tcp", c.upstream)
+		if err != nil {
+			_ = client.Close() // the client sees the refusal as a closed connection
+			continue
+		}
+		go func() {
+			defer client.Close()
+			_, _ = io.Copy(client, server) // ends when either side closes
+		}()
+		go func() {
+			defer server.Close()
+			buffer := make([]byte, 32*1024)
+			for {
+				n, err := client.Read(buffer)
+				if n > 0 {
+					if _, werr := server.Write(buffer[:n]); werr != nil {
+						return
+					}
+					if c.armed.Load() && bytes.Contains(buffer[:n], []byte("COMMIT")) && c.armed.CompareAndSwap(true, false) {
+						c.cut.Store(true)
+						_ = client.Close() // the answer to COMMIT never reaches the client
+						// Postgres finishes a COMMIT it has read before it notices the client is gone.
+						time.Sleep(200 * time.Millisecond)
+						return
+					}
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	}
 }
 
 // Defect: a day cut from the request's own zone, not UTC: 23:30 in UTC-8 on 1 March is counted
@@ -238,7 +403,7 @@ func (s *ActivitySuite) TestARequestIsCountedOnItsUTCDay() {
 	recorder.Close()
 
 	var counted string
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx,
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT day::text FROM customer_activity WHERE app_id = ?", app).Scan(&counted))
 	s.Equal("2026-03-02", counted)
 }
@@ -260,7 +425,7 @@ func (h errorCounter) WithGroup(string) slog.Handler      { return h }
 // tick: every request is then a failed statement and an error log while the database is down.
 func (s *ActivitySuite) TestAFailedWriteOfAFullRecordIsNotRetriedBeforeTheNextTick() {
 	stuck, other := s.app(), s.app()
-	s.Require().NoError(s.db.RecordActivity(s.ctx, []store.ActivityDelta{{
+	s.Require().NoError(s.db.Activities.Add(s.ctx, []store.ActivityDelta{{
 		OrganizationID: "org", AppID: stuck, Area: AreaAgentSetup, Client: store.AuditSourceCLI,
 		Day: day, Requests: math.MaxInt64, FirstAt: day, LastAt: day,
 	}}))
@@ -279,7 +444,7 @@ func (s *ActivitySuite) TestAFailedWriteOfAFullRecordIsNotRetriedBeforeTheNextTi
 	}
 	s.Equal(int64(1), failed.Load(), "writes failed in 300ms with an hour between ticks")
 
-	_, err = s.db.DB().ExecContext(s.ctx, "UPDATE customer_activity SET requests = 0 WHERE app_id = ?", stuck)
+	_, err = s.db.GlobalDB().ExecContext(s.ctx, "UPDATE customer_activity SET requests = 0 WHERE app_id = ?", stuck)
 	s.Require().NoError(err)
 	recorder.Close()
 	s.Positive(s.requests(other), "what the failed writes held was lost")

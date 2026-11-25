@@ -4,8 +4,11 @@ package phone
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"math/rand/v2"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -16,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/suite"
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
@@ -25,6 +29,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 	"github.com/GetStream/Vision-Agents/acceleration/prices"
 )
 
@@ -47,6 +52,10 @@ type MeteringSuite struct {
 	deployment *chattest.Server
 	customer   string
 	e164       string
+	// registry is where the service opens s.vendor.
+	registry *Registry
+	// failing fails the queries a test asks it to.
+	failing *failingQueries
 }
 
 func TestMeteringSuite(t *testing.T) { suite.Run(t, new(MeteringSuite)) }
@@ -62,12 +71,15 @@ func (s *MeteringSuite) SetupSuite() {
 	s.Require().NoError(opened.Migrate(s.ctx))
 	s.store = opened
 	s.T().Cleanup(func() { s.Require().NoError(opened.Close()) })
+	s.failing = &failingQueries{}
+	opened.ShardDB().AddQueryHook(s.failing)
 	s.redis, err = redisready.NewClient(rueidis.ClientOption{InitAddress: []string{address}, DisableCache: true})
 	s.Require().NoError(err)
 	s.T().Cleanup(s.redis.Close)
 }
 
 func (s *MeteringSuite) SetupTest() {
+	s.failing.fail("", 0)
 	s.withSandbox(dlc.Sandbox{})
 }
 
@@ -87,6 +99,7 @@ func (s *MeteringSuite) withSandbox(sandbox dlc.Sandbox) {
 	s.Require().NoError(err)
 	registry := NewRegistry(config)
 	registry.Register(s.vendor.vendor, func() (Provider, error) { return s.vendor, nil })
+	s.registry = registry
 	declared, _ := config.Lookup(s.vendor.vendor)
 	for _, name := range declared.Credentials {
 		s.T().Setenv(name, "set")
@@ -101,7 +114,7 @@ func (s *MeteringSuite) withSandbox(sandbox dlc.Sandbox) {
 		Logger: slog.New(slog.NewTextHandler(s.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: s.e164, Vendor: s.vendor.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: s.clock.now(),
 	}))
 }
@@ -156,14 +169,14 @@ func (s *MeteringSuite) transfer(callID, human string) {
 func (s *MeteringSuite) TestTheCustomerWhoTransferredCanPressDigitsOnTheTransferLeg() {
 	s.transfer("call-"+uuid.NewString(), "+15125550124")
 
-	s.Require().NoError(s.service.SendDigits(s.ctx, s.customer, s.vendor.vendor, s.vendor.vendor+"-call", "12"))
-	s.Equal([]string{s.vendor.vendor + "-call:12"}, s.vendor.pressed)
+	s.Require().NoError(s.service.SendDigits(s.ctx, s.customer, s.vendor.vendor, s.vendor.called, "12"))
+	s.Equal([]string{s.vendor.called + ":12"}, s.vendor.pressed)
 }
 
 func (s *MeteringSuite) TestAnotherCustomerCannotPressDigitsOnATransferLeg() {
 	s.transfer("call-"+uuid.NewString(), "+15125550124")
 
-	err := s.service.SendDigits(s.ctx, "customer-"+uuid.NewString(), s.vendor.vendor, s.vendor.vendor+"-call", "12")
+	err := s.service.SendDigits(s.ctx, "customer-"+uuid.NewString(), s.vendor.vendor, s.vendor.called, "12")
 	s.ErrorIs(err, ErrCallNotFound)
 	s.Empty(s.vendor.pressed)
 }
@@ -302,6 +315,35 @@ func (s *MeteringSuite) TestACallersJoinBeforeSessionStartedIsTakenByTheInboundL
 	s.Zero(s.kept(callID))
 }
 
+// A caller's join made after the call arrived but delivered before it bills the caller from the
+// arrival, as the same join delivered after it does.
+func (s *MeteringSuite) TestACallerIsBilledFromTheArrivalWhicheverEventIsDeliveredFirst() {
+	arrival := s.clock.now()
+	s.clock.advance(2 * time.Second)
+	joined := func(callID string) {
+		s.Require().NoError(s.service.Connect(s.ctx, everyApp, defaultCallType, callID, "session-1", "caller-1", "15125550199",
+			arrival.Add(time.Second)))
+	}
+	arrived := func(callID string) {
+		s.service.OpenLeg(s.ctx, routing.Owner{CustomerID: s.customer, Attribution: routing.Attribution{APIKey: routing.OriginPhoneInbound}},
+			store.CallLeg{CallType: defaultCallType, CallID: callID, StreamSessionID: "session-1", Vendor: s.vendor.vendor,
+				Direction: store.Inbound, LocalNumber: s.e164, Country: "US", DialedAt: arrival}, true)
+	}
+	joinFirst, arrivalFirst := "call-"+uuid.NewString(), "call-"+uuid.NewString()
+	joined(joinFirst)
+	arrived(joinFirst)
+	arrived(arrivalFirst)
+	joined(arrivalFirst)
+	s.clock.set(arrival.Add(time.Minute))
+
+	s.left(defaultCallType, joinFirst, "caller-1")
+	s.left(defaultCallType, arrivalFirst, "caller-1")
+
+	minutes := s.rowsWhen(ModelCallMinutes, 2)
+	s.Equal(pricing.Quantities{pricing.CallSeconds: 60}, minutes[0].Meters, "from the arrival")
+	s.Equal(minutes[0].Meters, minutes[1].Meters)
+}
+
 // A leave kept between Connect reading the phone's leaves and connecting its leg ends the leg
 // at it, rather than being forgotten with the leg left open, and billed, until the call ends.
 func (s *MeteringSuite) TestALeaveRacingItsJoinEndsTheLeg() {
@@ -401,7 +443,7 @@ func (s *MeteringSuite) TestAKeptJoinDoesNotMoveTheStartOfALegAnotherPhoneHas() 
 	s.joined(defaultCallType, callID, "human-1", "+15125550124")
 	started := s.legsOf(callID)[store.Outbound].StartedAt.UTC()
 	joined := s.clock.now().Add(-time.Minute)
-	s.Require().NoError(s.store.RecordParticipant(s.ctx, everyApp, store.CallParticipant{
+	s.Require().NoError(s.store.CallParticipants.Record(s.ctx, everyApp, store.CallParticipant{
 		CallType: defaultCallType, CallID: callID, ParticipantSession: "human-2", Number: "+15125550124",
 		JoinedAt: &joined,
 	}, s.clock.now()))
@@ -664,7 +706,7 @@ func (s *MeteringSuite) TestRecordingAnEndedLegAgainBillsNothing() {
 	placed := s.place()
 	s.answered(placed.CallType, placed.CallID, "phone-1")
 	s.clock.advance(time.Minute)
-	ended, err := s.store.EndCallLegs(s.ctx, everyApp, placed.CallType, placed.CallID, s.clock.now())
+	ended, err := s.store.CallLegs.EndCall(s.ctx, everyApp, placed.CallType, placed.CallID, s.clock.now())
 	s.Require().NoError(err)
 	s.Require().Len(ended, 1)
 
@@ -682,7 +724,7 @@ func (s *MeteringSuite) TestALegWhoseRowWasLostIsRecordedAgainByTheSweep() {
 	placed := s.place()
 	s.answered(placed.CallType, placed.CallID, "phone-1")
 	s.clock.advance(90 * time.Second)
-	_, err := s.store.EndCallLegs(s.ctx, everyApp, placed.CallType, placed.CallID, s.clock.now())
+	_, err := s.store.CallLegs.EndCall(s.ctx, everyApp, placed.CallType, placed.CallID, s.clock.now())
 	s.Require().NoError(err)
 	s.clock.advance(10 * time.Minute)
 
@@ -696,6 +738,94 @@ func (s *MeteringSuite) TestALegWhoseRowWasLostIsRecordedAgainByTheSweep() {
 	s.Require().NoError(err)
 	time.Sleep(300 * time.Millisecond)
 	s.Len(s.rows(ModelCallMinutes), 1)
+}
+
+// A leg whose row a dropped connection fails to write is written again at once, and its call
+// billed.
+func (s *MeteringSuite) TestALegWhoseFirstWriteFailsIsBilled() {
+	callID := "call-" + uuid.NewString()
+	s.failing.fail(`INSERT INTO "call_legs"`, 1)
+	s.arrived(callID)
+	s.clock.advance(2 * time.Minute)
+
+	s.ended(defaultCallType, callID)
+
+	minutes := s.row(ModelCallMinutes)
+	s.Equal(pricing.Quantities{pricing.CallSeconds: 120}, minutes.Meters)
+	s.True(minutes.Billable)
+}
+
+// A leg whose row cannot be written while its call is up is written by the leg sweep, which
+// bills it from the join and the leave its phone had meanwhile.
+func (s *MeteringSuite) TestALegThatCouldNotBeWrittenIsWrittenAndBilledByTheSweep() {
+	callID := "call-" + uuid.NewString()
+	s.failing.fail(`INSERT INTO "call_legs"`, openAttempts)
+	s.arrived(callID)
+	s.Empty(s.openLegs())
+	s.joined(defaultCallType, callID, "caller-1", "15125550199")
+	s.clock.advance(90 * time.Second)
+	s.left(defaultCallType, callID, "caller-1")
+	s.ended(defaultCallType, callID)
+
+	_, err := s.service.SweepLegs(s.ctx)
+	s.Require().NoError(err)
+
+	minutes := s.row(ModelCallMinutes)
+	s.Equal(pricing.Quantities{pricing.CallSeconds: 90}, minutes.Meters)
+	s.True(minutes.Billable)
+	s.Zero(s.kept(callID), "the join and the leave went to the leg")
+	_, err = s.service.SweepLegs(s.ctx)
+	s.Require().NoError(err)
+	s.Never(func() bool { return len(s.rows(ModelCallMinutes)) > 1 }, time.Second, 50*time.Millisecond,
+		"the next sweep writes it no more")
+}
+
+// A leg written by the sweep after its call ended, its phone's leave never heard, ends when the
+// call did: it is billed to then, and no longer counts against the organization's calls.
+func (s *MeteringSuite) TestALegWrittenAfterItsCallEndedEndsWithTheCall() {
+	callID := "call-" + uuid.NewString()
+	s.failing.fail(`INSERT INTO "call_legs"`, openAttempts)
+	s.arrived(callID)
+	s.clock.advance(90 * time.Second)
+	s.ended(defaultCallType, callID)
+	s.clock.advance(10 * time.Minute)
+
+	_, err := s.service.SweepLegs(s.ctx)
+
+	s.Require().NoError(err)
+	s.Empty(s.openLegs())
+	minutes := s.row(ModelCallMinutes)
+	s.Equal(pricing.Quantities{pricing.CallSeconds: 90}, minutes.Meters)
+	s.True(minutes.Billable)
+}
+
+// The legs the sweep still holds when the router stops get a last write, once the database is
+// back, and are billed as the sweep would have.
+func (s *MeteringSuite) TestALegKeptWhenTheRouterStopsIsWrittenOnceMore() {
+	callID := "call-" + uuid.NewString()
+	s.failing.fail(`INSERT INTO "call_legs"`, openAttempts)
+	s.arrived(callID)
+	s.Require().Empty(s.openLegs())
+
+	s.service.StopLegSweep(s.ctx)
+
+	s.Len(s.openLegs(), 1)
+	s.Zero(s.logs.count("ERROR", "could not record a call leg"))
+}
+
+// A leg that cannot be written once the sweep has stopped is logged at ERROR, not kept for a
+// sweep that will never write it.
+func (s *MeteringSuite) TestALegThatCannotBeWrittenAfterTheSweepStoppedIsLogged() {
+	s.service.StopLegSweep(s.ctx)
+	callID := "call-" + uuid.NewString()
+	s.failing.fail(`INSERT INTO "call_legs"`, openAttempts)
+
+	s.arrived(callID)
+
+	s.Equal(1, s.logs.count("ERROR", "could not record a call leg; its minutes are not billed"))
+	_, err := s.service.SweepLegs(s.ctx)
+	s.Require().NoError(err)
+	s.Empty(s.openLegs(), "nothing was kept to write")
 }
 
 func (s *MeteringSuite) TestEveryLegOfAnEndedCallCountsTowardTheSandboxsMinutes() {
@@ -739,7 +869,7 @@ func (s *MeteringSuite) TestALegTheSweepEndedDoesNotCountTowardTheSandboxsMinute
 
 func (s *MeteringSuite) TestALegCarriesItsAppsOrganization() {
 	organization := "org-" + uuid.NewString()
-	_, err := s.store.DB().NewInsert().Model(&store.AppOrganization{
+	_, err := s.store.GlobalDB().NewInsert().Model(&store.AppOrganization{
 		AppID: s.customer, OrganizationID: organization, SeenAt: time.Now().UTC(),
 	}).Exec(s.ctx)
 	s.Require().NoError(err)
@@ -761,6 +891,213 @@ func (s *MeteringSuite) TestABoughtNumberIsBilledItsFirstMonth() {
 	s.True(month.Billable)
 	s.Equal("key-a", month.APIKey, "the month it was bought in is the buyer's")
 	s.Equal(bought.PurchasedAt, month.StartedAt.UTC())
+}
+
+// A number bought whose row could not be written is recorded by the sweep, from the vendor's
+// account, as of when it was bought, and its first month is billed once.
+func (s *MeteringSuite) TestANumberBoughtWithoutItsRowIsRecordedByTheSweep() {
+	e164 := aNumber()
+	s.vendor.offers = []Available{{E164: e164, MonthlyCostMicros: 1_000_000}}
+	s.failing.fail(`INSERT INTO "phone_numbers"`, 1)
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: s.owner()})
+	s.Require().ErrorContains(err, "was not recorded")
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
+	s.Require().ErrorIs(err, store.ErrNoNumber)
+	month := s.row(ModelNumber)
+	s.ordersSettle()
+
+	_, err = s.service.SweepOrders(s.ctx)
+
+	s.Require().NoError(err)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
+	s.Require().NoError(err)
+	s.Equal(month.StartedAt.UTC(), held.PurchasedAt.UTC(), "bought when the purchase billed its first month")
+	s.Equal(int64(1_000_000), held.MonthlyCostMicros)
+	s.Never(func() bool { return len(s.rows(ModelNumber)) > 1 }, time.Second, 50*time.Millisecond,
+		"the first month is billed once")
+	s.Zero(s.orders(), "nothing is left to settle")
+}
+
+// A number given back at the vendor whose release could not be written is released by the
+// sweep, as of when it was given back, rather than billed every month.
+func (s *MeteringSuite) TestANumberGivenBackWithoutItsReleaseIsReleasedByTheSweep() {
+	s.failing.fail(`SET released_at = `, 1)
+	s.Require().Error(s.service.Release(s.ctx, s.customer, s.e164))
+	returned := time.Now()
+	_, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, s.e164)
+	s.Require().NoError(err, "the vendor has it back, and the row still holds it")
+	s.ordersSettle()
+
+	_, err = s.service.SweepOrders(s.ctx)
+
+	s.Require().NoError(err)
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, s.e164)
+	s.ErrorIs(err, store.ErrNoNumber)
+	s.Zero(s.orders())
+	numbers, err := s.store.PhoneNumbers.Select(s.ctx, s.customer, store.PhoneNumberFilter{IncludeReleased: true})
+	s.Require().NoError(err)
+	s.Require().Len(numbers, 1)
+	s.Require().NotNil(numbers[0].ReleasedAt)
+	s.False(numbers[0].ReleasedAt.After(returned), "released as of when the vendor took it back, not when the sweep ran")
+}
+
+// A number the vendor bought, whose answer was lost to a timeout, is recorded by the sweep and
+// its first month billed.
+func (s *MeteringSuite) TestANumberBoughtWhoseAnswerWasLostIsRecordedByTheSweep() {
+	e164 := aNumber()
+	s.vendor.offers = []Available{{E164: e164, MonthlyCostMicros: 1_000_000}}
+	s.vendor.doneErr = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/number_orders", Message: "no answer", Cause: context.DeadlineExceeded}
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: s.owner()})
+	s.Require().Error(err)
+	s.ordersSettle()
+
+	_, err = s.service.SweepOrders(s.ctx)
+
+	s.Require().NoError(err)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
+	s.Require().NoError(err, "the vendor holds it, so the customer does")
+	s.Equal(int64(1_000_000), held.MonthlyCostMicros)
+	var months []store.Request
+	for _, row := range s.rowsWhen(ModelNumber, 2) {
+		if row.Success {
+			months = append(months, row)
+		}
+	}
+	s.Require().Len(months, 1, "its first month, beside the purchase's failure")
+	s.Equal(held.PurchasedAt.UTC(), months[0].StartedAt.UTC())
+	s.Zero(s.orders())
+}
+
+// A number the vendor took back, whose answer was a 5xx, is released by the sweep rather than
+// billed every month.
+func (s *MeteringSuite) TestANumberGivenBackWhoseAnswerWasAFailureIsReleasedByTheSweep() {
+	s.vendor.holds = map[string]bool{s.e164: true}
+	s.vendor.doneErr = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/phone_numbers", Status: http.StatusBadGateway}
+	s.Require().Error(s.service.Release(s.ctx, s.customer, s.e164))
+	s.ordersSettle()
+
+	_, err := s.service.SweepOrders(s.ctx)
+
+	s.Require().NoError(err)
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, s.e164)
+	s.ErrorIs(err, store.ErrNoNumber)
+	s.Zero(s.orders())
+}
+
+// A release that failed at a vendor still holding the number leaves the customer holding it:
+// the sweep releases only what the vendor no longer has.
+func (s *MeteringSuite) TestANumberTheVendorStillHoldsAfterAFailedReleaseStaysHeld() {
+	s.vendor.holds = map[string]bool{s.e164: true}
+	s.vendor.releaseErr = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/phone_numbers", Status: http.StatusServiceUnavailable}
+	s.Require().Error(s.service.Release(s.ctx, s.customer, s.e164))
+	s.Require().Equal(1, s.orders())
+	s.ordersSettle()
+
+	_, err := s.service.SweepOrders(s.ctx)
+
+	s.Require().NoError(err)
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, s.e164)
+	s.Require().NoError(err)
+	s.Nil(held.ReleasedAt)
+	s.Zero(s.orders())
+}
+
+// An order at a vendor that cannot say what it holds records nothing and is kept for an
+// operator, and the sweeps that follow do not ask about it again until it is due once more.
+func (s *MeteringSuite) TestAnOrderAVendorCannotSettleIsKeptAndNotAskedAboutEverySweep() {
+	e164 := aNumber()
+	s.vendor.offers = []Available{{E164: e164, MonthlyCostMicros: 1_000_000}}
+	s.vendor.doneErr = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/number_orders", Status: http.StatusGatewayTimeout}
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: s.owner()})
+	s.Require().Error(err)
+	// The vendor as one that has no NumberFinder.
+	s.registry.Register(s.vendor.vendor, func() (Provider, error) { return struct{ Provider }{s.vendor}, nil })
+	s.ordersSettle()
+
+	_, err = s.service.SweepOrders(s.ctx)
+	s.Require().NoError(err)
+	_, err = s.service.SweepOrders(s.ctx)
+	s.Require().NoError(err)
+
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
+	s.ErrorIs(err, store.ErrNoNumber, "nothing is recorded that the vendor did not confirm")
+	s.Equal(1, s.orders(), "kept for an operator")
+	// Other tests' orders are in the same tables, so only this customer's lines are counted.
+	s.Equal(1, s.logs.count("ERROR", "customer="+s.customer), "asked about once, not every sweep")
+	s.Contains(s.logs.String(), "could not settle a number's purchase or release")
+}
+
+// A purchase the vendor refused, whose order could not be forgotten, leaves no number.
+func (s *MeteringSuite) TestAnOrderTheVendorDoesNotHoldIsForgottenWithoutANumber() {
+	e164 := aNumber()
+	s.failing.fail(`DELETE FROM "phone_number_orders"`, 1)
+	s.vendor.err = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/number_orders", Status: http.StatusUnprocessableEntity}
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: s.owner()})
+	s.Require().Error(err)
+	s.vendor.err = nil
+	s.Require().Equal(1, s.orders())
+	s.ordersSettle()
+
+	_, err = s.service.SweepOrders(s.ctx)
+
+	s.Require().NoError(err)
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
+	s.ErrorIs(err, store.ErrNoNumber)
+	s.Zero(s.orders())
+}
+
+// A purchase from a vendor not implemented, which no vendor was asked about and none can settle,
+// leaves no order for the sweep to log every hour.
+func (s *MeteringSuite) TestAPurchaseFromAVendorNotImplementedLeavesNoOrder() {
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: "bics", E164: aNumber(), Owner: s.owner()})
+	s.Require().ErrorIs(err, ErrNotImplemented)
+	s.ordersSettle()
+
+	_, err = s.service.SweepOrders(s.ctx)
+
+	s.Require().NoError(err)
+	s.Zero(s.orders())
+	s.Zero(s.logs.count("ERROR", "customer="+s.customer))
+}
+
+// A purchase refused before the vendor was asked, for a setting the deployment lacks, leaves
+// no order.
+func (s *MeteringSuite) TestAPurchaseFromAVendorMissingASettingLeavesNoOrder() {
+	s.vendor.err = NotConfigured(errors.New("telnyx: a setting is required to order a number"))
+
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: aNumber(), Owner: s.owner()})
+
+	s.Require().ErrorIs(err, ErrNotConfigured)
+	s.Zero(s.orders())
+}
+
+// A purchase refused before the vendor was asked, as one it cannot take, leaves no order.
+func (s *MeteringSuite) TestAPurchaseTheVendorCannotTakeAsAskedLeavesNoOrder() {
+	s.vendor.err = Invalid(errors.New("telnyx: buying a number needs the country it is sold in"))
+
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: aNumber(), Owner: s.owner()})
+
+	s.Require().ErrorIs(err, ErrInvalid)
+	s.Zero(s.orders())
+}
+
+// ordersSettle lets this customer's orders get old enough to settle: on the suite's clock, which
+// stamps them, and on Postgres's, which a sweep's claim judges them by.
+func (s *MeteringSuite) ordersSettle() {
+	settled := orderSettles + time.Minute
+	s.clock.advance(settled)
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.PhoneNumberOrder)(nil)).
+		Set("next_attempt_at = next_attempt_at - make_interval(secs => ?)", settled.Seconds()).
+		Where("customer_id = ?", s.customer).Exec(s.ctx)
+	s.Require().NoError(err)
+}
+
+// orders counts the customer's orders still to settle.
+func (s *MeteringSuite) orders() int {
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.PhoneNumberOrder)(nil)).
+		Where("customer_id = ?", s.customer).Count(s.ctx)
+	s.Require().NoError(err)
+	return count
 }
 
 func (s *MeteringSuite) TestANumberWhosePriceIsOnlyInItsOfferIsBilledTheOffer() {
@@ -786,9 +1123,18 @@ func (s *MeteringSuite) TestANumberWithNoPriceIsBillableWorkWithNoPrice() {
 	s.Zero(month.CostMicros)
 }
 
+// release gives one of the suite's customer's numbers back at at, as Service.Release does: in
+// its trunk group's transaction.
+func (s *MeteringSuite) release(e164 string, at time.Time) error {
+	group := store.TrunkGroup{CustomerID: s.customer, Vendor: s.vendor.vendor}
+	return s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		return tx.ReleaseNumber(e164, at)
+	})
+}
+
 func (s *MeteringSuite) TestANumberIsBilledEachMonthAfterTheOneItWasBoughtIn() {
 	// The suite's own number, which has no price, is not the one under test.
-	s.Require().NoError(s.store.ReleaseNumber(s.ctx, s.customer, s.e164, s.clock.now()))
+	s.Require().NoError(s.release(s.e164, s.clock.now()))
 	bought, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: aNumber(), Owner: s.owner()})
 	s.Require().NoError(err)
 	s.row(ModelNumber)
@@ -812,17 +1158,69 @@ func (s *MeteringSuite) TestANumberIsBilledEachMonthAfterTheOneItWasBoughtIn() {
 	s.Equal(OriginNumberRental, months[1].APIKey)
 	s.Equal(next, months[1].StartedAt.UTC())
 
-	s.Require().NoError(s.store.ReleaseNumber(s.ctx, s.customer, bought.E164, next.Add(2*time.Hour)))
+	s.Require().NoError(s.release(bought.E164, next.Add(2*time.Hour)))
 	_, err = rentals.Bill(s.ctx, from, monthAfter(bought.PurchasedAt, 2).Add(time.Hour))
 	s.Require().NoError(err)
 	time.Sleep(300 * time.Millisecond)
 	s.Len(s.rows(ModelNumber), 2, "a number released is not billed again")
 }
 
+func (s *MeteringSuite) TestAnImportedRequestNamingANumbersComingMonthDoesNotStopItBeingBilled() {
+	s.Require().NoError(s.release(s.e164, s.clock.now()))
+	bought, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: aNumber(), Owner: s.owner()})
+	s.Require().NoError(err)
+	s.row(ModelNumber)
+	next := monthAfter(bought.PurchasedAt, 1)
+	month := routing.UsageID("number", bought.Vendor, bought.E164,
+		strconv.FormatInt(bought.PurchasedAt.UTC().UnixMicro(), 10), next.Format("2006-01"))
+
+	// A request row as an export carries it, sent with the usage id of the number's next month.
+	other := "customer-" + uuid.NewString()
+	_, err = s.store.Requests.InsertMany(s.ctx, []store.Request{{UsageID: uuid.Must(uuid.NewV7()), CustomerID: other,
+		Modality: string(routing.Phone), Provider: s.vendor.vendor, Model: ModelNumber, StartedAt: next, Success: true}})
+	s.Require().NoError(err)
+	var row map[string]any
+	_, err = s.store.ExportCustomer(s.ctx, other, func(table string, encoded json.RawMessage) error {
+		if table == "requests" {
+			return json.Unmarshal(encoded, &row)
+		}
+		return nil
+	})
+	s.Require().NoError(err)
+	s.Require().NotNil(row)
+	row["usage_id"] = month.String()
+	encoded, err := json.Marshal(row)
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.ImportRow(s.ctx, s.customer, "requests", encoded))
+	s.Require().NoError(s.store.ImportRow(s.ctx, s.customer, "requests", encoded))
+
+	// Rows written to ship to a usage service that is not there, so they stay to be shipped.
+	client, err := usage.NewClient(usage.ClientOptions{URL: "http://127.0.0.1:1", Token: "token"})
+	s.Require().NoError(err)
+	writer := routing.NewWriter(routing.WriterOptions{Store: s.store, Usage: client, Logger: slog.New(slog.DiscardHandler)})
+	s.T().Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		writer.Close(ctx)
+	})
+	recorder := routing.NewRecorderOn(routing.Phone, writer, s.prices, slog.New(slog.DiscardHandler))
+	_, err = Rentals{Store: s.store, Recorder: recorder, Logger: slog.New(slog.DiscardHandler)}.
+		Bill(s.ctx, bought.PurchasedAt.Add(-time.Hour), next.Add(time.Hour))
+	s.Require().NoError(err)
+
+	s.Require().Eventually(func() bool {
+		var billed []store.Request
+		s.Require().NoError(s.store.ShardDB().NewSelect().Model(&billed).
+			Where("customer_id = ?", s.customer).Where("usage_id = ?", month).Scan(s.ctx))
+		return len(billed) == 1 && billed[0].Billable && billed[0].ToShip && billed[0].APIKey == OriginNumberRental
+	}, 5*time.Second, 25*time.Millisecond, "the number's next month is billed")
+	s.Len(s.rows(ModelNumber), 3, "the month it was bought in, the next one, and the imported row once")
+}
+
 func (s *MeteringSuite) TestAMonthThatBeganBeforeFromIsNeverBilled() {
 	now := time.Now().UTC().Truncate(time.Second)
 	e164 := aNumber()
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: e164, Vendor: s.vendor.vendor, Country: "US", CustomerID: s.customer,
 		MonthlyCostMicros: 1_000_000, PurchasedAt: now.AddDate(0, -1, -10),
 	}))
@@ -833,6 +1231,26 @@ func (s *MeteringSuite) TestAMonthThatBeganBeforeFromIsNeverBilled() {
 
 	s.Never(func() bool { return len(s.rows(ModelNumber)) > 0 }, time.Second, 50*time.Millisecond,
 		"the month that began ten days ago began before the job was switched on")
+}
+
+func (s *MeteringSuite) TestAMovedCustomersBoughtNumberIsNotBilledAgainHere() {
+	s.Require().NoError(s.release(s.e164, s.clock.now()))
+	now := time.Now().UTC().Truncate(time.Second)
+	// The month that began three days ago is the source's to bill, which held the number then.
+	row, err := json.Marshal(map[string]any{
+		"id": rand.Int64N(1 << 50), "e164": aNumber(), "vendor": s.vendor.vendor, "country": "US",
+		"capabilities": []string{"voice"}, "monthly_cost_micros": 1_000_000, "customer_id": s.customer,
+		"tags": map[string]string{}, "purchased_at": now.AddDate(0, -1, -3),
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.ImportRow(s.ctx, s.customer, "phone_numbers", row))
+	rentals := Rentals{Store: s.store, Recorder: s.recorder, Logger: slog.New(slog.DiscardHandler)}
+
+	_, err = rentals.Bill(s.ctx, now.AddDate(0, 0, -30), time.Now().UTC())
+	s.Require().NoError(err)
+
+	s.Never(func() bool { return len(s.rows(ModelNumber)) > 0 }, time.Second, 50*time.Millisecond,
+		"the destination bills no month of a number it does not hold")
 }
 
 // row waits for the customer's one row of a model and reads it.
@@ -897,6 +1315,38 @@ func (l *meteringLogs) count(level, message string) int {
 	}
 	return lines
 }
+
+// failingQueries fails the next queries holding a text, as a database that does not answer in
+// time does.
+type failingQueries struct {
+	mu    sync.Mutex
+	query string
+	left  int
+}
+
+// fail fails the next times queries holding query.
+func (f *failingQueries) fail(query string, times int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.query, f.left = query, times
+}
+
+func (f *failingQueries) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	f.mu.Lock()
+	failing := f.left > 0 && strings.Contains(event.Query, f.query)
+	if failing {
+		f.left--
+	}
+	f.mu.Unlock()
+	if !failing {
+		return ctx
+	}
+	expired, cancel := context.WithDeadline(ctx, time.Time{})
+	cancel()
+	return expired
+}
+
+func (*failingQueries) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 // meteringClock is the service's clock, moved by the test.
 type meteringClock struct {

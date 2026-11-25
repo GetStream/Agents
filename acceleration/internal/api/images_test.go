@@ -74,7 +74,8 @@ func (s *ImagesSuite) TestAPictureASafetyFilterRefusedIsAFailedGenerationRatherT
 
 	s.Equal(ImageGenerationStatusFailed, generation.Status)
 	s.Equal(ImageErrorCodeContentFiltered, *generation.ErrorCode)
-	s.Contains(*generation.Error, "safety checker")
+	s.Equal("the provider's safety filter refused the prompt or the picture", *generation.Error)
+	s.NotContains(*generation.Error, "safety checker", "the vendor's words are left for the log")
 	s.Equal("quick", *generation.Provider, "the response says who refused")
 	s.Zero(generation.CostMicros)
 }

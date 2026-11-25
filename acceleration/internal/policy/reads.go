@@ -52,14 +52,14 @@ func (e *Enforcer) SubjectsSpend(ctx context.Context, refs []usage.SubjectRef, b
 		}
 		return spent, nil
 	}
-	db := e.config.DB()
+	db := e.config
 	if db == nil {
 		return nil, errors.New("policy: no database to sum spend from")
 	}
 	for i, ref := range refs {
 		for _, interval := range usage.Intervals {
 			start, end := usage.Window(interval, now)
-			micros, err := db.SubjectSpendSince(ctx, ref, start)
+			micros, err := db.Spend.Subject(ctx, ref, start, billed)
 			if err != nil {
 				return nil, err
 			}
@@ -168,18 +168,18 @@ func (e *Enforcer) LimitsChanged(ctx context.Context, organization string) {
 	if e == nil || e.money.off() {
 		return
 	}
-	db := e.config.DB()
+	db := e.config
 	if db == nil {
 		return
 	}
 	m := &e.money
 	m.readGrants(ctx, db, []string{organization, appAccount(organization)})
-	limits, err := db.LimitsFor(ctx, []string{organization})
+	limits, err := db.Limits.SelectOf(ctx, []string{organization})
 	if err != nil {
 		m.failedRead("could not read a customer's spend limits again after a write", err, "organization", organization)
 		return
 	}
-	resets, err := db.Resets(ctx, []string{organization}, earliestWindow(m.settings.Now()))
+	resets, err := db.UsageResets.Select(ctx, []string{organization}, earliestWindow(m.settings.Now()))
 	if err != nil {
 		m.failedRead("could not read a customer's usage resets again after a write", err, "organization", organization)
 		return

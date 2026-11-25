@@ -219,7 +219,7 @@ func (s *ChatLoginsSuite) storedWithoutReturnURL(id string) bool {
 func (s *ChatLoginsSuite) launchedFor(connector string) string {
 	var attempt string
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
 			`SELECT a.id FROM connector_authorization_attempts a JOIN connector_connections c ON c.id = a.connection_id
 			WHERE c.connector_id = ? AND c.owner_id = ?`, connector, s.client.userID).Scan(&attempt) == nil
 	}, settleFor, 20*time.Millisecond, "the chat begins a consent")

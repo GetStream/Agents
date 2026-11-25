@@ -67,7 +67,7 @@ const (
 	// unavailableConnection: no live connection by that id that the binding may use. One code
 	// for a missing connection and for another person's, so it says nothing of whose an id is.
 	// A custom connector deleted while the session opens gets it too: a forced delete deletes
-	// its connections with it (store.DeleteConnectorDefinition).
+	// its connections with it (store.ConnectorDefinitions.Delete).
 	unavailableConnection = "connection_unavailable"
 	// unavailableProvider: the connection is to another connector than the binding names.
 	unavailableProvider = "provider_mismatch"
@@ -176,12 +176,12 @@ func (m *Manager) attachConnectors(ctx context.Context, spec *Spec) (*dispatcher
 		// A required binding is used without a tool whose schema changed, as an optional one is.
 		if binding.Required && (reason != unavailableTool || !d.onlyLeftOut(binding)) {
 			d.Close()
-			return nil, nil, nil, stack.Wrap(fmt.Errorf("session: required connector %q cannot be used: %s: %s",
-				binding.Name, reason, unavailableWhy[reason]))
+			return nil, nil, nil, stack.Wrap(invalid(fmt.Errorf("session: required connector %q cannot be used: %s: %s",
+				binding.Name, reason, unavailableWhy[reason])))
 		}
 		m.logger.Warn("opening the session without a connector", "connector", binding.Name, "reason", reason)
 		unavailable = append(unavailable, ConnectorUnavailable{Name: binding.Name, ConnectorID: binding.ConnectorID, Reason: reason})
-		if !m.offerLogin(*spec, binding, reason, selection, d) {
+		if !m.offerLogin(ctx, *spec, binding, reason, selection, d) {
 			continue
 		}
 		if err := m.lateGrant(opening, *spec, binding, d); err != nil {
@@ -216,10 +216,11 @@ func (m *Manager) impliedSelection(ctx context.Context, spec Spec, binding store
 		return "", nil
 	}
 	// Limit 1 lists at most two, enough to tell one from more than one.
-	connected, err := m.options.Store.ConnectorConnectionsByOwner(ctx, spec.CustomerID, store.ConnectionFilter{
+	connected, err := m.options.Store.ConnectorConnections.Select(ctx, spec.CustomerID, store.ConnectionFilter{
 		OwnerType: store.OwnerUser, OwnerID: spec.Caller.UserID, ConnectorID: binding.ConnectorID,
 		Status: store.ConnectionConnected, Limit: 1,
 	})
+
 	if err != nil || len(connected) != 1 {
 		return "", err
 	}
@@ -236,10 +237,10 @@ func selections(spec Spec) (map[string]string, []ConnectorUnavailable, error) {
 	var dropped []ConnectorUnavailable
 	for _, selection := range spec.ConnectorSelections {
 		if selection.Name == "" || selection.ConnectionID == "" {
-			return nil, nil, stack.Wrap(errors.New("session: a connector binding needs a name and a connection_id"))
+			return nil, nil, stack.Wrap(invalid(errors.New("session: a connector binding needs a name and a connection_id")))
 		}
 		if _, twice := selected[selection.Name]; twice {
-			return nil, nil, stack.Wrap(fmt.Errorf("session: connector %q is chosen twice", selection.Name))
+			return nil, nil, stack.Wrap(invalid(fmt.Errorf("session: connector %q is chosen twice", selection.Name)))
 		}
 		index := slices.IndexFunc(spec.ConnectorBindings, func(b store.ConnectorBinding) bool { return b.Name == selection.Name })
 		if index >= 0 && spec.ConnectorBindings[index].Connection.Type == selectionSession {
@@ -254,9 +255,9 @@ func selections(spec Spec) (map[string]string, []ConnectorUnavailable, error) {
 			}
 			dropped = append(dropped, ConnectorUnavailable{Name: selection.Name, ConnectorID: connectorID, Reason: unavailableDropped})
 		case index >= 0:
-			return nil, nil, stack.Wrap(fmt.Errorf("session: connector %q has the agent config's fixed connection, which a session cannot replace", selection.Name))
+			return nil, nil, stack.Wrap(invalid(fmt.Errorf("session: connector %q has the agent config's fixed connection, which a session cannot replace", selection.Name)))
 		default:
-			return nil, nil, stack.Wrap(fmt.Errorf("session: the agent config has no connector binding %q to choose a connection for", selection.Name))
+			return nil, nil, stack.Wrap(invalid(fmt.Errorf("session: the agent config has no connector binding %q to choose a connection for", selection.Name)))
 		}
 	}
 	return selected, dropped, nil
@@ -282,7 +283,7 @@ func (m *Manager) openBinding(ctx context.Context, spec Spec, binding store.Conn
 		m.logger.Warn("a connector binding cannot be opened: connectors are off on this deployment", "connector", binding.Name)
 		return unavailableOpenFailed, nil
 	}
-	connection, err := m.options.Store.ConnectorConnection(ctx, spec.CustomerID, id)
+	connection, err := m.options.Store.ConnectorConnections.Get(ctx, spec.CustomerID, id)
 	if errors.Is(err, store.ErrNoConnectorConnection) {
 		return unavailableConnection, nil
 	}
@@ -310,7 +311,7 @@ func (m *Manager) openBinding(ctx context.Context, spec Spec, binding store.Conn
 		m.logger.Warn("a connector binding cannot be opened: no such scheme", "connector", binding.Name, "scheme", connection.AuthScheme)
 		return unavailableOpenFailed, nil
 	}
-	definition, err := m.options.Store.ConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
+	definition, err := m.options.Store.ConnectorDefinitions.Get(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		return unavailableConnection, nil
 	}
@@ -321,7 +322,7 @@ func (m *Manager) openBinding(ctx context.Context, spec Spec, binding store.Conn
 	// one that needs a reconnect: a binding of the caller's own waits for their login, whose
 	// consent runs on the latest revision. A token or key has no consent: saving it again
 	// moves it (AI-1002), so it is left out as a rejected one is.
-	_, broken, err := m.options.Store.BrokenConnectorRevision(ctx, connection.ConnectorID, connection.DefinitionRevision)
+	_, broken, err := m.options.Store.ConnectorBrokenRevisions.Get(ctx, connection.ConnectorID, connection.DefinitionRevision)
 	if err != nil {
 		return "", err
 	}
@@ -331,7 +332,7 @@ func (m *Manager) openBinding(ctx context.Context, spec Spec, binding store.Conn
 		}
 		return unavailableReauthorize, nil
 	}
-	manifest, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
+	manifest, err := definition.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	if err != nil {
 		m.logger.Warn("a connector binding cannot be opened", "connector", binding.Name, "error", err)
 		return unavailableOpenFailed, nil
@@ -552,7 +553,7 @@ func (m *Manager) patternGrants(ctx context.Context, binding store.ConnectorBind
 			"connector", binding.Name, "connection", connection.ID, "matched", len(matched))
 		matched = matched[:patternToolCap]
 	}
-	pins, err := m.options.Store.ConnectorToolPins(ctx, connection.ID, connection.ConnectedAt)
+	pins, err := m.options.Store.ConnectorToolPins.Select(ctx, connection.ID, connection.ConnectedAt)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -563,7 +564,7 @@ func (m *Manager) patternGrants(ctx context.Context, binding store.ConnectorBind
 		}
 	}
 	if len(first) > 0 {
-		pins, err = m.options.Store.PinConnectorTools(ctx, connection.ID, connection.ConnectedAt, first)
+		pins, err = m.options.Store.ConnectorToolPins.Pin(ctx, connection.ID, connection.ConnectedAt, first)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -607,7 +608,7 @@ func (m *Manager) pinGrants(ctx context.Context, alias string, connection store.
 	if len(named) == 0 {
 		return "", nil
 	}
-	pins, err := m.options.Store.ConnectorToolPins(ctx, connection.ID, connection.ConnectedAt)
+	pins, err := m.options.Store.ConnectorToolPins.Select(ctx, connection.ID, connection.ConnectedAt)
 	if err != nil {
 		return "", err
 	}
@@ -638,7 +639,7 @@ func (m *Manager) pinGrants(ctx context.Context, alias string, connection store.
 				first[name] = digest
 			}
 		}
-		pins, err = m.options.Store.PinConnectorTools(ctx, connection.ID, connection.ConnectedAt, first)
+		pins, err = m.options.Store.ConnectorToolPins.Pin(ctx, connection.ID, connection.ConnectedAt, first)
 		if err != nil {
 			return "", err
 		}
@@ -676,7 +677,7 @@ func verifiedCaller(spec Spec) bool {
 func connectorCollision(connectors, others []harness.Tool) error {
 	for _, tool := range connectors {
 		if slices.ContainsFunc(others, func(other harness.Tool) bool { return other.Name == tool.Name }) {
-			return stack.Wrap(fmt.Errorf("session: the tool %q is both a connector's and another of the session's", tool.Name))
+			return stack.Wrap(invalid(fmt.Errorf("session: the tool %q is both a connector's and another of the session's", tool.Name)))
 		}
 	}
 	return nil

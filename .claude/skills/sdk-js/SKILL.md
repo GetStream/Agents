@@ -339,6 +339,10 @@ Only a commit scoped `sdk-js` releases this package: `feat(sdk-js):` a minor, `f
 scope (`feat(router):`, `AI-1234: …`) is in the next release but never causes one, so scope it
 `sdk-js` if it should ship. The rules are in `sdks/js/release.config.mjs`; the workflow is
 `.github/workflows/release-sdk-js.yml`, dispatched by hand. See "Releasing" in the README.
+`VERSION` in `src/backend.ts` is the release every request names in its `X-Stream-Client`
+(`stream-agents-js-vX.Y.Z-node` or `-browser`), and from Node in its `User-Agent` too
+(`stream-agents-js/X.Y.Z`): a version bump sets it to `package.json`'s version, and `npm test`
+fails while the two differ.
 
 ## Production hardening follow-up
 
@@ -356,3 +360,6 @@ has not started answering within `timeoutMs` (60 s); a non-envelope error body i
 `Backend` and `Edge` print no secret or token through `toJSON` or Node's inspect; folder sync
 leaves hidden entries and `node_modules` out of skills and knowledge and refuses a symlink out of
 the agent directory; and a tool's failure reaches the model through an `onError` hook on `Tools`.
+
+Kotlin has since caught up on two of them: a tool's failure goes through `StreamAgents.onToolError`
+and is cut to 1,024 characters, and `StreamCredentials` and `Guest` print no token.

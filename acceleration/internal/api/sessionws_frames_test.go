@@ -15,7 +15,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
@@ -128,7 +127,7 @@ func TestATurnFrameCarriesWhenTheFirstFrameWasQueuedAndHeard(t *testing.T) {
 
 func TestATimelineEntryCarriesWhenTheFirstFrameWasQueuedAndHeard(t *testing.T) {
 	queued, audible, speechEnd, roundtrip := 880.0, 940.0, 1060.0, 1400.0
-	turns := []live.Turn{
+	turns := []store.Turn{
 		{TurnID: "turn-1", RoundtripMs: &roundtrip, FirstFrameQueuedMs: &queued,
 			FirstAudibleFrameMs: &audible, SpeechEndToAudibleMs: &speechEnd},
 		{TurnID: "turn-2", RoundtripMs: &roundtrip},
@@ -147,7 +146,7 @@ func TestATimelineEntryCarriesWhenTheFirstFrameWasQueuedAndHeard(t *testing.T) {
 
 func TestATimelineEntryDoesNotTakeAReplyTalkedOverAsSaid(t *testing.T) {
 	start := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
-	turns := []live.Turn{{TurnID: "turn-1", StartedAt: start}}
+	turns := []store.Turn{{TurnID: "turn-1", StartedAt: start}}
 	said := []chatlog.Spoken{
 		{Speaker: "alice", Text: "Is it raining?", At: start.Add(-time.Second)},
 		{Speaker: "agent", Agent: true, Text: "It is, and it will be all week.", At: start.Add(time.Second), Interrupted: true},
@@ -262,7 +261,7 @@ func timelineCall(t *testing.T, request store.Request) []byte {
 	request.StartedAt = time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 	request.Provider, request.Model, request.LatencyMs = "stub", "fast", &latency
 	request.InputTokens, request.OutputTokens = 10, 2
-	timeline := timelineOf([]live.Turn{{TurnID: "turn-1"}}, nil, []store.Request{request}, nil)
+	timeline := timelineOf([]store.Turn{{TurnID: "turn-1"}}, nil, []store.Request{request}, nil)
 	require.Len(t, timeline, 1)
 	require.NotNil(t, timeline[0].ModelCalls)
 	raw, err := json.Marshal(*timeline[0].ModelCalls)
@@ -532,42 +531,42 @@ func TestAUIPatchAndVersionAreIncludedWhenPresent(t *testing.T) {
 // pauseFloorCheck and overAgentFloorCheck are chorus-asr checks as a call keeps them: one at a
 // pause that ended the turn, with the tool the caller wants, and one over the agent, which has
 // no pause and no point.
-func pauseFloorCheck(at time.Time) live.FloorCheck {
+func pauseFloorCheck(at time.Time) store.FloorCheck {
 	paused := 600.0
-	return live.FloorCheck{
-		At: at, Kind: live.FloorCheckPause, PausedMs: &paused,
-		Options: []live.FloorOption{{Option: "respond", Probability: 0.91}, {Option: "wait", Probability: 0.07},
+	return store.FloorCheck{
+		At: at, Kind: store.FloorCheckPause, PausedMs: &paused,
+		Options: []store.FloorOption{{Option: "respond", Probability: 0.91}, {Option: "wait", Probability: 0.07},
 			{Option: "clarify", Probability: 0.000001}, {Option: "ignore", Probability: 0.02}},
-		Ruling: live.FloorRuling{Disposition: "respond", Floor: "continue", Tool: "get_weather"},
+		Ruling: store.FloorRuling{Disposition: "respond", Floor: "continue", Tool: "get_weather"},
 		Acted:  true, LatencyMs: 38.2, Point: "preset:balanced",
 	}
 }
 
-func overAgentFloorCheck(at time.Time) live.FloorCheck {
-	return live.FloorCheck{
-		At: at, Kind: live.FloorCheckOverAgent,
-		Options: []live.FloorOption{{Option: "stop", Probability: 0.7}, {Option: "shorten", Probability: 0.2},
+func overAgentFloorCheck(at time.Time) store.FloorCheck {
+	return store.FloorCheck{
+		At: at, Kind: store.FloorCheckOverAgent,
+		Options: []store.FloorOption{{Option: "stop", Probability: 0.7}, {Option: "shorten", Probability: 0.2},
 			{Option: "continue", Probability: 0.1}, {Option: "ignore", Probability: 0}},
-		Ruling: live.FloorRuling{Disposition: "respond", Floor: "stop", Cannot: true},
+		Ruling: store.FloorRuling{Disposition: "respond", Floor: "stop", Cannot: true},
 		Acted:  false, LatencyMs: 44,
 	}
 }
 
 // floorChecked is a check as call-1's record keeps it, about turn.
-func floorChecked(turn string, check live.FloorCheck) live.CallEvent {
-	return live.CallEvent{CallID: "call-1", At: check.At, Kind: "floor_check", TurnID: turn, FloorCheck: &check}
+func floorChecked(turn string, check store.FloorCheck) store.CallEvent {
+	return store.CallEvent{CallID: "call-1", At: check.At, Kind: "floor_check", TurnID: turn, FloorCheck: &check}
 }
 
 // A call's checks join the turn each names, a reply's late checks included, and a check that
 // names none, or a turn with no entry, joins the first turn that began after it.
 func TestATimelineEntryCarriesTheFloorChecksOfItsTurn(t *testing.T) {
 	start := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
-	turns := []live.Turn{
+	turns := []store.Turn{
 		{TurnID: "turn-1", StartedAt: start.Add(time.Second)},
 		{TurnID: "turn-2", StartedAt: start.Add(5 * time.Second)},
 		{TurnID: "turn-3", StartedAt: start.Add(8 * time.Second)},
 	}
-	checks := []live.CallEvent{
+	checks := []store.CallEvent{
 		floorChecked("", pauseFloorCheck(start.Add(500*time.Millisecond))),
 		floorChecked("superseded", pauseFloorCheck(start.Add(4*time.Second))),
 		floorChecked("turn-1", overAgentFloorCheck(start.Add(6*time.Second))),
@@ -601,13 +600,13 @@ func TestATimelineEntryCarriesTheFloorChecksOfItsTurn(t *testing.T) {
 // it are read with them; and a check while the agent talked joins only the reply it names.
 func TestATimelineJoinsOnlyItsOwnCallsFloorChecks(t *testing.T) {
 	start := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
-	turns := []live.Turn{
+	turns := []store.Turn{
 		{TurnID: "other-1", CallID: "call-2", StartedAt: start.Add(time.Second)},
 		{TurnID: "turn-1", CallID: "call-1", StartedAt: start.Add(2 * time.Second)},
 	}
 	other := floorChecked("other-1", overAgentFloorCheck(start))
 	other.CallID = "call-2"
-	checks := []live.CallEvent{
+	checks := []store.CallEvent{
 		floorChecked("", pauseFloorCheck(start.Add(500*time.Millisecond))),
 		floorChecked("other-1", overAgentFloorCheck(start.Add(600*time.Millisecond))),
 		floorChecked("", overAgentFloorCheck(start.Add(700*time.Millisecond))),
@@ -619,19 +618,19 @@ func TestATimelineJoinsOnlyItsOwnCallsFloorChecks(t *testing.T) {
 	require.Len(t, *timeline[1].FloorChecks, 1, "the pause, not the check over a reply it does not name")
 	require.Equal(t, FloorCheckKindPause, (*timeline[1].FloorChecks)[0].Kind)
 
-	timeline = timelineOf(turns, nil, nil, []live.CallEvent{other})
+	timeline = timelineOf(turns, nil, nil, []store.CallEvent{other})
 	require.Len(t, *timeline[0].FloorChecks, 1, "call-2's own")
 }
 
 // A turn carries its latest 40 checks, oldest first.
 func TestATimelineEntryCarriesItsLatestFortyFloorChecks(t *testing.T) {
 	start := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
-	var checks []live.CallEvent
+	var checks []store.CallEvent
 	for i := range 45 {
 		checks = append(checks, floorChecked("turn-1", overAgentFloorCheck(start.Add(time.Duration(44-i)*time.Second))))
 	}
 
-	timeline := timelineOf([]live.Turn{{TurnID: "turn-1", StartedAt: start}}, nil, nil, checks)
+	timeline := timelineOf([]store.Turn{{TurnID: "turn-1", StartedAt: start}}, nil, nil, checks)
 
 	kept := *timeline[0].FloorChecks
 	require.Len(t, kept, 40)
@@ -644,7 +643,7 @@ func TestATimelineEntryCarriesItsLatestFortyFloorChecks(t *testing.T) {
 // agent without chorus-asr floor control sends the frame it always did.
 func TestATurnFrameCarriesItsFloorChecksAsTheTimelineDoes(t *testing.T) {
 	at := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
-	sent, ok := frameOf(agent.Turn{TurnID: "turn-1", FloorChecks: []live.FloorCheck{overAgentFloorCheck(at)}})
+	sent, ok := frameOf(agent.Turn{TurnID: "turn-1", FloorChecks: []store.FloorCheck{overAgentFloorCheck(at)}})
 
 	require.True(t, ok)
 	raw, err := json.Marshal(sent)
@@ -664,7 +663,7 @@ func TestATurnFrameCarriesItsFloorChecksAsTheTimelineDoes(t *testing.T) {
 // timeline entry; what a check did not produce is absent, not zero.
 func TestATurnCarriesItsGuardrailCheckOnItsFrameAndItsTimelineEntry(t *testing.T) {
 	probability, threshold := 0.07, 0.6
-	check := live.GuardrailCheck{
+	check := store.GuardrailCheck{
 		Kind: "decision_model", Model: "typesafe/jev-latest", Probability: &probability, Threshold: &threshold,
 		Allowed: true, LatencyMs: 142.5, HeldMs: 12, Mode: "parallel",
 	}
@@ -677,13 +676,13 @@ func TestATurnCarriesItsGuardrailCheckOnItsFrameAndItsTimelineEntry(t *testing.T
 	require.NoError(t, err)
 	require.JSONEq(t, wire, string(mustField(t, raw, "guardrail")))
 
-	stored, err := json.Marshal(live.Turn{TurnID: "turn-1", Guardrail: &check})
+	stored, err := json.Marshal(store.Turn{TurnID: "turn-1", Guardrail: &check})
 	require.NoError(t, err)
 	require.JSONEq(t, wire, string(mustField(t, stored, "guardrail")))
-	var row live.Turn
+	var row store.Turn
 	require.NoError(t, json.Unmarshal(stored, &row))
 
-	raw, err = json.Marshal(timelineOf([]live.Turn{row}, nil, nil, nil)[0])
+	raw, err = json.Marshal(timelineOf([]store.Turn{row}, nil, nil, nil)[0])
 	require.NoError(t, err)
 	require.JSONEq(t, wire, string(mustField(t, raw, "guardrail")))
 }
@@ -692,13 +691,13 @@ func TestATurnCarriesItsGuardrailCheckOnItsFrameAndItsTimelineEntry(t *testing.T
 // sent as zero, either would read as a model sure the turn was harmless.
 func TestAGuardrailCheckLeavesOutWhatItDidNotProduce(t *testing.T) {
 	threshold := 0.6
-	failed, err := json.Marshal(guardrailCheckOf(live.GuardrailCheck{
+	failed, err := json.Marshal(guardrailCheckOf(store.GuardrailCheck{
 		Kind: "decision_model", Threshold: &threshold, Allowed: true, LatencyMs: 2000, Mode: "blocking", Failed: true,
 	}))
 	require.NoError(t, err)
 	require.JSONEq(t, `{"kind":"decision_model","threshold":0.6,"allowed":true,"latency_ms":2000,"mode":"blocking","failed":true}`, string(failed))
 
-	webhook, err := json.Marshal(guardrailCheckOf(live.GuardrailCheck{Kind: "webhook", Allowed: false, LatencyMs: 80, Mode: "parallel"}))
+	webhook, err := json.Marshal(guardrailCheckOf(store.GuardrailCheck{Kind: "webhook", Allowed: false, LatencyMs: 80, Mode: "parallel"}))
 	require.NoError(t, err)
 	require.JSONEq(t, `{"kind":"webhook","allowed":false,"latency_ms":80,"mode":"parallel"}`, string(webhook))
 

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
@@ -34,6 +35,15 @@ const settleGap = 2 * time.Second
 
 // LinkValidFor is how long a code to claim a number is good for.
 const LinkValidFor = 15 * time.Minute
+
+// maxLinkFailures is the most messages claiming no code that one number may text a line in a
+// window of LinkValidFor, and maxLineLinkFailures the most from every number together. Past
+// either, no code is claimed there until the next window: a code is six digits, so without
+// them it could be guessed from one number or from many.
+const (
+	maxLinkFailures     = 5
+	maxLineLinkFailures = 20
+)
 
 // Options configures a Service. Store, Sessions and Secrets are required.
 type Options struct {
@@ -124,7 +134,7 @@ func (s *Service) Close() {
 func (s *Service) Challenge(ctx context.Context, token string, query url.Values) Answer {
 	line, _, err := s.line(ctx, token)
 	if err != nil {
-		return Answer{Status: http.StatusGone, Body: failure(err.Error())}
+		return s.unread(err)
 	}
 	if query.Get("hub.mode") != "subscribe" || query.Get("hub.verify_token") != line.Challenge {
 		return Answer{Status: http.StatusForbidden, Body: failure("that is not this line's verify token")}
@@ -138,7 +148,7 @@ func (s *Service) Challenge(ctx context.Context, token string, query url.Values)
 func (s *Service) Receive(ctx context.Context, token string, header http.Header, body []byte) Answer {
 	line, account, err := s.line(ctx, token)
 	if err != nil {
-		return Answer{Status: http.StatusGone, Body: failure(err.Error())}
+		return s.unread(err)
 	}
 	provider, ok := For(line.Kind, s.transport)
 	if !ok {
@@ -147,22 +157,23 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 	if err := provider.Verify(line, header, body, time.Now()); err != nil {
 		return Answer{Status: http.StatusUnauthorized, Body: failure(err.Error())}
 	}
+	activity.NoteCustomer(ctx, account.CustomerID, activity.AreaPhoneSMS)
 
 	delivered, err := provider.Parse(body)
 	if err != nil {
 		return Answer{Status: http.StatusBadRequest, Body: failure(err.Error())}
 	}
 	for _, message := range delivered {
-		fresh, err := s.store.ClaimChannelMessage(ctx, account.ID, message.ID, message.From)
+		fresh, err := s.claim(ctx, account, message)
 		if err != nil {
-			return Answer{Status: http.StatusInternalServerError, Body: failure(err.Error())}
+			s.logger.Error("could not claim a channel delivery", "customer", account.CustomerID, "error", err)
+			return Answer{Status: http.StatusInternalServerError, Body: failure(somethingWentWrong)}
 		}
 		// A provider that did not hear back in time sends the same message again. Answering
 		// it twice is the agent talking over itself, so a message already taken is dropped.
 		if !fresh {
 			continue
 		}
-		s.received(ctx, account, message)
 		// Files with no words are billed, and there is nothing in them for the agent to answer.
 		if message.Text == "" {
 			continue
@@ -179,18 +190,13 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 // Link mints a code somebody signed in may text from their phone to claim it. It is how an
 // agent that keeps something personal learns which end user a number belongs to.
 func (s *Service) Link(ctx context.Context, customerID, configID, userID string) (store.ChannelLink, error) {
-	code, err := linkCode()
-	if err != nil {
-		return store.ChannelLink{}, err
-	}
 	link := store.ChannelLink{
-		Code:       code,
 		CustomerID: customerID,
 		ConfigID:   configID,
 		UserID:     userID,
 		ExpiresAt:  time.Now().UTC().Add(LinkValidFor),
 	}
-	if err := s.store.SaveChannelLink(ctx, &link); err != nil {
+	if err := s.store.ChannelLinks.Insert(ctx, &link, linkCode); err != nil {
 		return store.ChannelLink{}, err
 	}
 	return link, nil
@@ -272,23 +278,23 @@ func (s *Service) reach(ctx context.Context, notice Notice) (Account, string, st
 	if !notice.Kind.Valid() {
 		return Account{}, "", "", nil, stack.Wrap(fmt.Errorf("channels: no channel called %s", notice.Kind))
 	}
-	identity, err := s.store.ChannelIdentityByUser(ctx, notice.CustomerID, notice.ConfigID,
+	identity, err := s.store.ContactMapEntries.GetByUser(ctx, notice.CustomerID, notice.ConfigID,
 		string(notice.Kind), notice.UserID)
-	if errors.Is(err, store.ErrUnknownChannelIdentity) {
-		return Account{}, "", "", nil, stack.Wrap(fmt.Errorf("%w: %s has never written on %s", ErrUnreachable, notice.UserID, notice.Kind))
+	if errors.Is(err, store.ErrNoContact) {
+		return Account{}, "", "", nil, stack.Wrap(fmt.Errorf("%w: the user has never written on %s", ErrUnreachable, notice.Kind))
 	}
 	if err != nil {
 		return Account{}, "", "", nil, stack.Wrap(err)
 	}
-	config, err := s.store.AgentConfig(ctx, notice.CustomerID, notice.ConfigID)
+	config, err := s.store.AgentConfigs.Get(ctx, notice.CustomerID, notice.ConfigID)
 	if err != nil {
 		return Account{}, "", "", nil, stack.Wrap(err)
 	}
-	number := config.Channels.Lines()[string(notice.Kind)]
+	number := config.Channels.Lines.Lines()[string(notice.Kind)]
 	if number == "" {
 		return Account{}, "", "", nil, stack.Wrap(fmt.Errorf("%w: the agent answers on no %s line", ErrUnreachable, notice.Kind))
 	}
-	account, err := s.store.ChannelAccount(ctx, notice.CustomerID, string(notice.Kind), number)
+	account, err := s.store.ChannelAccounts.GetByNumber(ctx, notice.CustomerID, string(notice.Kind), number)
 	if errors.Is(err, store.ErrUnknownChannelAccount) {
 		return Account{}, "", "", nil, stack.Wrap(fmt.Errorf("%w: the %s line %s is not connected", ErrUnreachable, notice.Kind, number))
 	}
@@ -306,7 +312,7 @@ func (s *Service) reach(ctx context.Context, notice Notice) (Account, string, st
 		return Account{}, "", "", nil, err
 	}
 	if notice.Kind == WhatsApp {
-		last, err := s.store.LastChannelMessageAt(ctx, account.ID, identity.Address)
+		last, err := s.store.ChannelDeliveries.LastAt(ctx, account.ID, identity.Address)
 		if err != nil {
 			return Account{}, "", "", nil, stack.Wrap(err)
 		}
@@ -361,33 +367,57 @@ func Open(secrets *auth.Sealer, stored store.ChannelAccount) (Account, error) {
 
 // line opens the credentials of the account a delivery is addressed to.
 func (s *Service) line(ctx context.Context, token string) (Account, store.ChannelAccount, error) {
-	account, err := s.store.ChannelAccountByToken(ctx, token)
+	account, err := s.store.ChannelAccounts.GetByToken(ctx, token)
+	if errors.Is(err, store.ErrUnknownChannelAccount) {
+		return Account{}, store.ChannelAccount{}, errNoLine
+	}
 	if err != nil {
-		return Account{}, store.ChannelAccount{}, errors.New("no line is connected at this address")
+		return Account{}, store.ChannelAccount{}, err
 	}
 	line, err := Open(s.secrets, account)
 	if err != nil {
-		return Account{}, account, errors.New("this line's credentials cannot be opened: connect it again")
+		s.logger.Error("could not open a channel line's credentials", "customer", account.CustomerID,
+			"channel", account.Kind, "error", err)
+		return Account{}, account, errUnopened
 	}
 	return line, account, nil
+}
+
+// somethingWentWrong is what a provider is told of a failure of ours, which it retries.
+const somethingWentWrong = "something went wrong"
+
+var (
+	errNoLine   = errors.New("no line is connected at this address")
+	errUnopened = errors.New("this line's credentials cannot be opened: connect it again")
+)
+
+// unread answers a delivery whose line could not be read. A line that is gone is a 410, which
+// stops the provider delivering; a database failure is a 500 it tries again.
+func (s *Service) unread(err error) Answer {
+	if errors.Is(err, errNoLine) || errors.Is(err, errUnopened) {
+		return Answer{Status: http.StatusGone, Body: failure(err.Error())}
+	}
+	s.logger.Error("could not read the line a delivery is for", "error", err)
+	return Answer{Status: http.StatusInternalServerError, Body: failure(somethingWentWrong)}
 }
 
 // answer has the agent on a line take one message and writes back what it says.
 func (s *Service) answer(account store.ChannelAccount, line Account, provider Provider, message Message) {
 	ctx, cancel := context.WithTimeout(s.ctx, runTimeout)
 	defer cancel()
+	logger := s.logger.With("customer", account.CustomerID)
 
 	if s.keyword(ctx, account, line, provider, message) {
 		return
 	}
 	config, found, err := s.store.ConfigOnChannel(ctx, account.CustomerID, account.Kind, account.E164)
 	if err != nil {
-		s.logger.Error("could not find the agent on a channel", "channel", account.Kind,
+		logger.Error("could not find the agent on a channel", "channel", account.Kind,
 			"number", account.E164, "error", err)
 		return
 	}
 	if !found {
-		s.logger.Warn("a message arrived on a line no agent answers on", "channel", account.Kind,
+		logger.Warn("a message arrived on a line no agent answers on", "channel", account.Kind,
 			"number", account.E164, "hint", "name it under channels in the agent's config")
 		return
 	}
@@ -427,8 +457,11 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 	spec.Custom["channel_from"] = message.From
 
 	created, err := s.sessions.Create(ctx, spec)
+	if err == nil && identity.ConversationID == "" {
+		created, err = s.recordConversation(ctx, created, spec, &identity, logger)
+	}
 	if err != nil {
-		s.logger.Error("could not open a conversation for a channel message", "channel", account.Kind,
+		logger.Error("could not open a conversation for a channel message", "channel", account.Kind,
 			"agent", config.Name, "error", err)
 		return
 	}
@@ -436,21 +469,11 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 	// the next message reopens it by its id rather than starting over.
 	defer func() {
 		if _, err := s.sessions.Close(created.ID(), session.OwnerOf(created.Spec())); err != nil {
-			s.logger.Debug("could not close a channel conversation", "session", created.ID(), "error", err)
+			logger.Debug("could not close a channel conversation", "session", created.ID(), "error", err)
 		}
 	}()
 	events, detach := created.Watch()
 	defer detach()
-
-	// The conversation a session opened is the one the next message carries on, so it is
-	// recorded before the turn rather than after: a turn that fails halfway still leaves the
-	// person's history where they can see it.
-	if identity.ConversationID == "" {
-		identity.ConversationID = created.Spec().ConversationID
-		if err := s.store.SaveChannelIdentity(ctx, &identity); err != nil {
-			s.logger.Error("could not record a channel conversation", "agent", config.Name, "error", err)
-		}
-	}
 
 	sending := make(chan struct{})
 	go func() {
@@ -460,9 +483,40 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 	// The provider's own message id is the command id, so the durable conversation refuses a
 	// repeat for the same reason the delivery table does.
 	if _, _, err := created.RespondCommand(ctx, message.ID, message.Text, "", nil, options.LLM{}); err != nil {
-		s.logger.Error("the agent could not take a channel message", "session", created.ID(), "error", err)
+		logger.Error("the agent could not take a channel message", "session", created.ID(), "error", err)
 	}
 	<-sending
+}
+
+// recordConversation records the conversation a person's first message opened, and returns
+// the session the message goes on in. It is recorded before the turn rather than after: a turn
+// that fails halfway still leaves the person's history where they can see it.
+func (s *Service) recordConversation(ctx context.Context, created *session.Session, spec session.Spec,
+	identity *store.ContactMapEntry, logger *slog.Logger) (*session.Session, error) {
+	opened := created.Spec().ConversationID
+	identity.ConversationID = opened
+	if err := s.store.ContactMapEntries.Upsert(ctx, identity); err != nil {
+		logger.Error("could not record a channel conversation", "agent", spec.AgentName, "error", err)
+		return created, nil
+	}
+	if identity.ConversationID == opened {
+		return created, nil
+	}
+	// Another router opened one for this person's first message at the same time and recorded
+	// it first: this message goes on in that one, which is what continues. The one opened here
+	// is left empty, and closed only once the kept one is open: if that fails, the message is
+	// still answered here rather than dropped.
+	spec.ConversationID = identity.ConversationID
+	kept, err := s.sessions.Create(ctx, spec)
+	if err != nil {
+		logger.Error("could not open the conversation another router recorded first, answering in this one",
+			"agent", spec.AgentName, "kept", spec.ConversationID, "opened", opened, "error", err)
+		return created, nil
+	}
+	if _, err := s.sessions.Close(created.ID(), session.OwnerOf(created.Spec())); err != nil {
+		logger.Debug("could not close a channel conversation", "session", created.ID(), "error", err)
+	}
+	return kept, nil
 }
 
 // identify is who the number writing belongs to, and false when nobody is to be answered.
@@ -472,25 +526,25 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 // until somebody signed in has tied it to themselves with a code, which is what an agent
 // that reads a person's own calendar or orders needs before it says a word.
 func (s *Service) identify(ctx context.Context, config store.AgentConfig, account store.ChannelAccount,
-	line Account, provider Provider, message Message) (store.ChannelIdentity, bool) {
-	identity, err := s.store.ChannelIdentity(ctx, account.CustomerID, config.ID, account.Kind, message.From)
+	line Account, provider Provider, message Message) (store.ContactMapEntry, bool) {
+	identity, err := s.store.ContactMapEntries.GetByAddress(ctx, account.CustomerID, config.ID, account.Kind, message.From)
 	if err == nil {
 		// Where a reply reaches this person moves with the chat they wrote in,
 		// which a proactive message later needs: it is kept as it changes.
 		if message.Thread != "" && identity.Thread != message.Thread {
 			identity.Thread = message.Thread
-			if err := s.store.SaveChannelIdentity(ctx, &identity); err != nil {
+			if err := s.store.ContactMapEntries.Upsert(ctx, &identity); err != nil {
 				s.logger.Error("could not record where a channel reply goes", "channel", account.Kind, "error", err)
 			}
 		}
 		return identity, true
 	}
-	if !errors.Is(err, store.ErrUnknownChannelIdentity) {
+	if !errors.Is(err, store.ErrNoContact) {
 		s.logger.Error("could not tell who is writing", "channel", account.Kind, "error", err)
-		return store.ChannelIdentity{}, false
+		return store.ContactMapEntry{}, false
 	}
 
-	identity = store.ChannelIdentity{
+	identity = store.ContactMapEntry{
 		CustomerID: account.CustomerID,
 		ConfigID:   config.ID,
 		Kind:       account.Kind,
@@ -498,26 +552,37 @@ func (s *Service) identify(ctx context.Context, config store.AgentConfig, accoun
 		Thread:     message.Thread,
 		UserID:     "phone:" + message.From,
 	}
-	if config.Channels.Identity == store.ChannelIdentityLink {
-		link, err := s.store.ClaimChannelLink(ctx, account.CustomerID, strings.TrimSpace(message.Text))
+	if config.Channels.Lines.Identity == store.ChannelIdentityLink {
+		window := time.Now().UTC().Truncate(LinkValidFor)
+		onLine, fromSender, err := s.store.ChannelLinkFailures.Count(ctx, account.ID, message.From, window)
 		if err != nil {
+			s.logger.Error("could not count the codes texted to a line", "channel", account.Kind, "error", err)
+			return store.ContactMapEntry{}, false
+		}
+		if fromSender >= maxLinkFailures || onLine >= maxLineLinkFailures {
+			s.say(ctx, line, provider, message, Reply{Text: "Too many codes did not match. Try again in a few minutes."},
+				answering(account.CustomerID, ""))
+			return store.ContactMapEntry{}, false
+		}
+		link, err := s.store.ChannelLinks.Claim(ctx, account.CustomerID, config.ID, strings.TrimSpace(message.Text))
+		if err != nil {
+			if errors.Is(err, store.ErrUnknownChannelLink) {
+				if err := s.store.ChannelLinkFailures.Record(ctx, account.ID, message.From, window, window.Add(-LinkValidFor)); err != nil {
+					s.logger.Error("could not count a code texted to a line", "channel", account.Kind, "error", err)
+				}
+			}
 			s.say(ctx, line, provider, message, Reply{Text: "Send me the code from your account to " +
 				"get started. It ties this number to you, so I can answer about what is yours."},
 				answering(account.CustomerID, ""))
-			return store.ChannelIdentity{}, false
-		}
-		if link.ConfigID != config.ID {
-			s.say(ctx, line, provider, message, Reply{Text: "That code is for another agent."},
-				answering(account.CustomerID, ""))
-			return store.ChannelIdentity{}, false
+			return store.ContactMapEntry{}, false
 		}
 		identity.UserID = link.UserID
 	}
-	if err := s.store.SaveChannelIdentity(ctx, &identity); err != nil {
+	if err := s.store.ContactMapEntries.Upsert(ctx, &identity); err != nil {
 		s.logger.Error("could not record who is writing", "channel", account.Kind, "error", err)
-		return store.ChannelIdentity{}, false
+		return store.ContactMapEntry{}, false
 	}
-	if config.Channels.Identity == store.ChannelIdentityLink {
+	if config.Channels.Lines.Identity == store.ChannelIdentityLink {
 		s.say(ctx, line, provider, message, Reply{Text: "This number is yours now. What can I do for you?"},
 			answering(account.CustomerID, identity.UserID))
 		return identity, false

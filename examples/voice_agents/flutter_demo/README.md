@@ -12,7 +12,8 @@ lib/           the phone half: chat, voice, and tools that run on the device
 ## Run it
 
 Start the router and store the agent as [swift_demo's README](../swift_demo/README.md) says:
-`docker compose up --build` from the repo root with `ROUTER_AUTH_MODE=proxy`, then
+`docker compose up --build` from the repo root with `ROUTER_AUTH_MODE=proxy` in the repo
+`.env` (that README says when it also needs `ROUTER_DEV_KEK`), then
 `go run ./configure` and
 `STREAM_API_SECRET=<the router's STREAM_API_SECRET> go run ./backend` in
 `examples/voice_agents/swift_demo`. The backend signs the phone's Stream token with that secret,
@@ -41,8 +42,8 @@ dependency_overrides:
     path: ../../../../stream-chat-flutter-ai/packages/stream_chat_flutter_ai
 ```
 
-The Chat tab asks for `xai/grok-4.7`, a model that streams its reasoning, so the router needs
-`XAI_API_KEY`; a call keeps the agent's faster model.
+The Chat tab runs on the agent's own model, as a call does: which model a session runs on is the
+backend's to choose, and the router refuses a device that names one.
 
 ## What the app shows
 

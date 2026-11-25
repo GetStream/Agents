@@ -158,7 +158,7 @@ func (s *ChannelTypeTurnSuite) TestASessionNotOpenedForTheMessageIsNotExpiredWit
 	cid := "callouts:" + channel
 	asked := "can you check the crm for my shift?"
 	written := s.writes("callouts", channel, anya, asked)
-	config, err := s.store.AgentConfig(s.T().Context(), s.customerID(), configID)
+	config, err := s.store.AgentConfigs.Get(s.T().Context(), s.customerID(), configID)
 	s.Require().NoError(err)
 	opened, err := s.router.chatChannelSession(s.T().Context(), hookOrigin{customer: s.customerID(), app: s.appID()},
 		config, cid, messageEvent{ChannelType: "callouts", ChannelID: channel})

@@ -20,7 +20,7 @@ final readonly class AgentStats
         // One row per tool, most called first.
         /** @var list<ToolStats> */
         public array $tools,
-        // Turns a session took in the window, on average. A turn is a reply to the person, not a rewound one or a del...
+        // Turns a session took in the window, on average. A turn is a reply that was not rewound, delegated work that...
         public float $avgTurns,
         // Sessions that took a turn in the window: what a tool's session_share is out of.
         public int $sessions,

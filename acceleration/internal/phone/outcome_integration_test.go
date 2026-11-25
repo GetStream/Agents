@@ -18,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/suite"
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
@@ -38,6 +39,8 @@ type OutcomeSuite struct {
 	ctx   context.Context
 	store *store.Store
 	redis rueidis.Client
+	// dsn is the suite's database.
+	dsn string
 	// redisAddress is where the suite's Redis listens.
 	redisAddress string
 	service      *Service
@@ -58,7 +61,8 @@ func (s *OutcomeSuite) SetupSuite() {
 	}
 	s.ctx = context.Background()
 	s.redisAddress = address
-	opened, err := store.Open(testenv.Database(dsn, "phone_outcome"))
+	s.dsn = testenv.Database(dsn, "phone_outcome")
+	opened, err := store.Open(s.dsn)
 	s.Require().NoError(err)
 	s.Require().NoError(opened.Migrate(s.ctx))
 	s.store = opened
@@ -77,6 +81,11 @@ func (s *OutcomeSuite) SetupTest() {
 // build builds the service over a fresh customer whose number is at vendor, reachable at
 // publicURL.
 func (s *OutcomeSuite) build(vendor Provider, publicURL string) {
+	s.buildGated(vendor, publicURL, dlc.NewGate(s.store, s.redis, dlc.Sandbox{}, nil))
+}
+
+// buildGated is build with calls let through by gate.
+func (s *OutcomeSuite) buildGated(vendor Provider, publicURL string, gate *dlc.Gate) {
 	list, err := pricing.NewList("vendor", pricing.AllAtCost(prices.Vendor().Entries), slog.New(slog.DiscardHandler))
 	s.Require().NoError(err)
 	recorder := routing.NewRecorder(routing.Phone, s.store, nil, list, slog.New(slog.DiscardHandler))
@@ -95,7 +104,7 @@ func (s *OutcomeSuite) build(vendor Provider, publicURL string) {
 	s.service, err = NewService(ServiceOptions{
 		Registry: registry, Store: s.store, Recorder: recorder, PublicURL: publicURL, Now: s.clock.now,
 		Apps:   &testApps{deployment: deployment, own: map[string]*chattest.Server{}, pins: map[string]int64{}, blocked: map[string]bool{}},
-		Gate:   dlc.NewGate(s.store, s.redis, dlc.Sandbox{}, nil),
+		Gate:   gate,
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	s.Require().NoError(err)
@@ -103,7 +112,7 @@ func (s *OutcomeSuite) build(vendor Provider, publicURL string) {
 	s.service.OnUnanswered(func(_ context.Context, customerID, sessionID string) {
 		s.asked = append(s.asked, [2]string{customerID, sessionID})
 	})
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: s.e164, Vendor: "telnyx", Country: "US", CustomerID: s.customer, PurchasedAt: s.clock.now(),
 	}))
 }
@@ -300,6 +309,56 @@ func (s *OutcomeSuite) TestACallCancelledBeforeItWasSentWasNeverPlaced() {
 
 	s.ErrorIs(err, ErrNotPlaced)
 	s.Empty(s.vendor.dialed.To, "the vendor was never asked")
+}
+
+// A call that fails before the vendor is asked, on a database blip, rang nobody, which a
+// campaign needs to know to try the person again without using an attempt.
+func (s *OutcomeSuite) TestACallThatFailedBeforeItWasSentWasNeverDialed() {
+	blip := &failingNumberRead{}
+	blip.left.Store(1)
+	s.store.GlobalDB().AddQueryHook(blip)
+
+	_, err := s.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: s.customer}, From: s.e164, To: "+15125550123"})
+
+	s.Require().Error(err)
+	s.ErrorIs(err, ErrNotDialed)
+	s.NotErrorIs(err, ErrNotPlaced, "nothing was cancelled")
+	s.Empty(s.vendor.dialed.To, "the vendor was never asked")
+}
+
+// A failure that placing the call again would meet again is not marked: a campaign would
+// otherwise try a number the app no longer holds for ever.
+func (s *OutcomeSuite) TestACallFromANumberNotHeldIsNotMarkedNeverDialed() {
+	_, err := s.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: s.customer}, From: "+15125550199", To: "+15125550123"})
+
+	s.Require().Error(err)
+	s.ErrorIs(err, store.ErrNoNumber)
+	s.NotErrorIs(err, ErrNotDialed)
+}
+
+// failingNumberRead fails the next left reads of phone_numbers, as a database blip would, by
+// handing them a context that has already ended.
+type failingNumberRead struct{ left atomic.Int32 }
+
+func (f *failingNumberRead) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !strings.HasPrefix(event.Query, "SELECT") || !strings.Contains(event.Query, `FROM "phone_numbers"`) || f.left.Add(-1) < 0 {
+		return ctx
+	}
+	ended, cancel := context.WithDeadline(ctx, time.Time{})
+	cancel()
+	return ended
+}
+
+func (*failingNumberRead) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+// A vendor that fails the dial had the request, so the phone may be ringing.
+func (s *OutcomeSuite) TestACallTheVendorFailedMayHaveRung() {
+	s.vendor.err = errors.New("telnyx is having a day")
+
+	_, err := s.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: s.customer}, From: s.e164, To: "+15125550123"})
+
+	s.Require().Error(err)
+	s.NotErrorIs(err, ErrNotDialed)
 }
 
 func (s *OutcomeSuite) TestACallCancelledWhileTheVendorWasDialingMayHaveRung() {
@@ -895,10 +954,10 @@ func (s *OutcomeSuite) TestAnArrivingCallItsAgentLeftOnTheLineIsCountedDropped()
 	before := s.callsCounted()
 	callID := "call-" + uuid.NewString()
 	s.arrived(callID)
-	s.Require().NoError(s.store.SaveSession(s.ctx, &store.AgentSession{
-		ID: callID, CustomerID: s.customer, CallType: defaultCallType, CallID: callID,
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &store.AgentSession{
+		ID: callID, CustomerID: s.customer,
 	}))
-	s.Require().NoError(s.store.CloseSession(s.ctx, callID, s.clock.now(), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, s.customer, callID, s.clock.now(), s.clock.now(), ""))
 	s.clock.advance(time.Minute)
 
 	s.ended(defaultCallType, callID)
@@ -924,7 +983,12 @@ func (s *OutcomeSuite) TestACallOnACustomersTrunkIsCountedUnderTheTrunk() {
 // to be kept, and the call was counted nowhere, where it is documented as completed.
 func (s *OutcomeSuite) TestAnArrivingCallIsCountedCompletedWhenRedisHangs() {
 	hang := &atomic.Bool{}
-	s.service.redis = s.redisThatHangs(hang)
+	hanging, err := store.OpenShards(store.Options{DSN: s.dsn, Redis: store.Redis{Address: s.redisThatHangs(hang)}})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.Require().NoError(hanging.Close()) })
+	// Before the store closes: a close waits on the connection the proxy holds.
+	s.T().Cleanup(func() { hang.Store(false) })
+	s.service.store = hanging
 	before := s.callsCounted()
 	callID := "call-" + uuid.NewString()
 	s.arrived(callID)
@@ -938,9 +1002,9 @@ func (s *OutcomeSuite) TestAnArrivingCallIsCountedCompletedWhenRedisHangs() {
 	s.Equal(map[[2]string]float64{{"inbound", "completed"}: 1}, s.countedSince(before))
 }
 
-// redisThatHangs is a client of the suite's Redis through a proxy that, while hang is set,
+// redisThatHangs is the address of a proxy to the suite's Redis that, while hang is set,
 // passes nothing on in either direction: a Redis that is up and answers nothing.
-func (s *OutcomeSuite) redisThatHangs(hang *atomic.Bool) rueidis.Client {
+func (s *OutcomeSuite) redisThatHangs(hang *atomic.Bool) string {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { listener.Close() })
@@ -978,10 +1042,5 @@ func (s *OutcomeSuite) redisThatHangs(hang *atomic.Bool) rueidis.Client {
 			go pass(conn, upstream)
 		}
 	}()
-	client, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{listener.Addr().String()}, DisableCache: true})
-	s.Require().NoError(err)
-	s.T().Cleanup(client.Close)
-	// Before the client closes: a close waits on the connection the proxy holds.
-	s.T().Cleanup(func() { hang.Store(false) })
-	return client
+	return listener.Addr().String()
 }

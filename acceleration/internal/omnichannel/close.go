@@ -11,6 +11,7 @@ import (
 	"time"
 
 	getstream "github.com/GetStream/getstream-go/v5"
+	"github.com/google/uuid"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
@@ -92,7 +93,7 @@ type CloserOptions struct {
 // message.updated «when a message is updated» and message.new only «when a new message is
 // added on a channel» (https://getstream.io/chat/docs/go-golang/event_object/); the message
 // hook and Chat delivery carry message.new only, so no update of a card reaches it. Several routers close and summarize each episode once: the store closes each
-// in one transaction that one of them wins (store.CloseIdleEpisodes, store.EndCallEpisodes),
+// in one transaction that one of them wins (store.Episodes.CloseIdle, store.Episodes.EndCall),
 // and leases its summary to the winner.
 type Closer struct {
 	store  *store.Store
@@ -101,6 +102,8 @@ type Closer struct {
 	idle   time.Duration
 	every  time.Duration
 	lease  time.Duration
+	// holder is this closer, which the episodes it leases name.
+	holder string
 	// timeout bounds one summary.
 	timeout time.Duration
 	logger  *slog.Logger
@@ -135,7 +138,7 @@ func NewCloser(options CloserOptions) (*Closer, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Closer{
 		store: options.Store, stream: options.Stream, llm: options.LLM, idle: options.IdleAfter,
-		every: every, lease: lease, timeout: timeout, logger: logger, ctx: ctx, cancel: cancel,
+		every: every, lease: lease, holder: uuid.NewString(), timeout: timeout, logger: logger, ctx: ctx, cancel: cancel,
 	}, nil
 }
 
@@ -173,11 +176,11 @@ func (c *Closer) Sweep(ctx context.Context) error {
 	// What a sweep summarizes, no key and no hook started.
 	ctx = routing.WithAttribution(ctx, routing.Attribution{APIKey: routing.JobOrigin("episode_summary")})
 	now := time.Now()
-	closed, err := c.store.CloseIdleEpisodes(ctx, now.Add(-c.idle), now, sweepBatch, now.Add(c.lease))
+	closed, err := c.store.Episodes.CloseIdle(ctx, now.Add(-c.idle), now, sweepBatch, c.lease, c.holder)
 	if err != nil {
 		return err
 	}
-	left, err := c.store.ClaimEpisodeSummaries(ctx, now, sweepBatch, now.Add(c.lease))
+	left, err := c.store.Episodes.ClaimSummaries(ctx, sweepBatch, c.lease, c.holder)
 	if err != nil {
 		return err
 	}
@@ -191,7 +194,7 @@ func (c *Closer) Sweep(ctx context.Context) error {
 // agent config without episode_cards is, changes nothing and reaches no Stream.
 func (c *Closer) EndCall(ctx context.Context, scope store.AppScope, callID string) error {
 	now := time.Now()
-	closed, err := c.store.EndCallEpisodes(ctx, scope, callID, now, now.Add(c.lease))
+	closed, err := c.store.Episodes.EndCall(ctx, scope, callID, now, c.lease, c.holder)
 	if err != nil || len(closed) == 0 {
 		return err
 	}
@@ -220,7 +223,7 @@ func (c *Closer) finish(ctx context.Context, closed, left []store.ClosedEpisode)
 					return
 				}
 				c.logger.Error("could not read an episode's card", "episode", episode.ID, "error", err)
-				if err := c.store.FinishEpisodeSummary(ctx, episode.CustomerID, episode.ID, store.EpisodeSummaryFailed); err != nil {
+				if err := c.store.Episodes.FinishSummary(ctx, episode.CustomerID, episode.ID, store.EpisodeSummaryFailed); err != nil {
 					c.logger.Error("could not record an episode's summary", "episode", episode.ID, "error", err)
 				}
 				return
@@ -255,7 +258,7 @@ func (c *Closer) summarize(parent context.Context, episode store.ClosedEpisode, 
 			c.logger.Error("could not set an episode's card summary_failed", "episode", episode.ID, "error", err)
 		}
 	}
-	if err := c.store.FinishEpisodeSummary(parent, episode.CustomerID, episode.ID, status); err != nil {
+	if err := c.store.Episodes.FinishSummary(parent, episode.CustomerID, episode.ID, status); err != nil {
 		c.logger.Error("could not record an episode's summary", "episode", episode.ID, "error", err)
 	}
 }
@@ -263,7 +266,7 @@ func (c *Closer) summarize(parent context.Context, episode store.ClosedEpisode, 
 // write asks the agent config's own LLM for the summary of the episode's lines and writes it
 // into the card as its text, with the status summarized, as author.
 func (c *Closer) write(ctx context.Context, episode store.ClosedEpisode, author string) error {
-	config, err := c.store.AgentConfig(ctx, episode.CustomerID, episode.AgentConfigID)
+	config, err := c.store.AgentConfigs.Get(ctx, episode.CustomerID, episode.ConfigID)
 	if err != nil {
 		return err
 	}
@@ -273,7 +276,7 @@ func (c *Closer) write(ctx context.Context, episode store.ClosedEpisode, author 
 	}
 	card := store.EpisodeCard{
 		Episode: episode.Episode, Until: episode.EndedAt,
-		ContactKind: episode.ContactKind, ContactAddress: episode.ContactAddress, AgentConfigID: episode.AgentConfigID,
+		ContactKind: episode.ContactKind, ContactAddress: episode.ContactAddress, ConfigID: episode.ConfigID,
 	}
 	lines, err := linesOf(ctx, bound, card, conversation.MaxHistoryMessages)
 	if err != nil {
@@ -292,7 +295,7 @@ func (c *Closer) write(ctx context.Context, episode store.ClosedEpisode, author 
 
 // ask is the summary of the episode's lines, from the agent config's own LLM in its region.
 func (c *Closer) ask(ctx context.Context, config store.AgentConfig, episode store.ClosedEpisode, said told) (string, error) {
-	target := config.LLM
+	target := config.Models.LLM
 	if target == "" {
 		target = defaultSummaryTarget
 	}
@@ -328,7 +331,7 @@ func (c *Closer) ask(ctx context.Context, config store.AgentConfig, episode stor
 // authorOf is who an episode's card is updated as: its author, the agent user of the
 // omni-channel it was written in (Write). A message that is not a card as Write writes it has
 // no such author, as one that cannot be read has none: it is never updated as whoever wrote it. Not the omni-channel the person's row points at now:
-// an unlink gives the number's row a new one (store.UnlinkUserPhone), whose agent user is made
+// an unlink gives the number's row a new one (store.UserPhones.Unlink), whose agent user is made
 // only with its first card, and Stream refuses an update by a user it does not have («the user
 // omni-… does not exist», staging, AI-2771).
 func (c *Closer) authorOf(ctx context.Context, episode store.ClosedEpisode) (string, error) {

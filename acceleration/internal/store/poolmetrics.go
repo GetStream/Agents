@@ -46,7 +46,7 @@ type poolCollector struct {
 // Collector serves the saturation of every Postgres pool the store opened: the shared one,
 // this shard's when it is a database of its own, and each other shard's.
 func (s *Store) Collector() prometheus.Collector {
-	pools := []pool{{name: "shared", db: s.db.DB}}
+	pools := []pool{{name: "shared", db: s.global.DB}}
 	if s.Sharded() {
 		pools = append(pools, pool{name: "shard", shard: s.shardNames[0], db: s.shard.DB})
 	}

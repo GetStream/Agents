@@ -11,27 +11,25 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
-	"database/sql/driver"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"slices"
-	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/pressly/goose/v3"
+	"github.com/redis/rueidis"
+	"github.com/redis/rueidis/rueidisaside"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/driver/pgdriver"
 	"github.com/uptrace/bun/extra/bunotel"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
-	"github.com/GetStream/Vision-Agents/acceleration/migrations"
 )
 
 // maxConns is how many Postgres connections one router holds at most.
@@ -39,22 +37,101 @@ const maxConns = 40
 
 // Store reads and writes router statistics.
 type Store struct {
-	// db is the database every shard shares, and shard this one's, which is db for a
+	// repos are the repositories, one per model, each holding the handle its table lives in.
+	repos
+	// global is the database every shard shares, and shard this one's, which is global for a
 	// deployment of one shard. peers are the other shards' (see shards.go).
-	db    *bun.DB
-	shard *bun.DB
-	peers []*bun.DB
+	global *bun.DB
+	shard  *bun.DB
+	peers  []*bun.DB
+	// globalDSN and shardDSN are what global and shard were opened with, for the pool a
+	// migration runs on.
+	globalDSN, shardDSN string
+	// cache is the shared Redis, holding copies of rows read on every request, and redis the
+	// shard's, holding the state of its running calls. Both are nil without Redis.
+	cache rueidisaside.CacheAsideClient
+	redis rueidis.Client
 	// shardNames names each of shards(), as Options.Shards does, for what is kept per shard
 	// in the shared database.
 	shardNames []string
-	LogDrops   atomic.Int64
+	// shardsDown is when each shard that did not answer was last logged (settledWithout).
+	shardsDown shardWarnings
+	// globalIsShard says the shared database is also some shard's own, so its calls are not
+	// strays to drop.
+	globalIsShard bool
+	LogDrops      atomic.Int64
 	// shapes is what each table an export carries looks like, read from the catalogue
 	// once rather than kept in a list here that a migration could leave behind.
 	shapes tableShapes
 	// pins says how Stream app pins cross between deployments, once the router has said.
 	pins pinsHolder
-	// deliveriesPruned is when hook deliveries were last forgotten, in Unix nanoseconds.
-	deliveriesPruned atomic.Int64
+	// retries holds a slot for each deletion forgetLater is trying again, and lost one for each
+	// lost commit it is waiting on, which it can do for longer; polls bounds how many of those
+	// ask Postgres at once. stop ends them
+	// when the store closes, and retrying is what Close waits on. retryMu guards closed, so no
+	// retry starts once Close is waiting.
+	retries  chan struct{}
+	lost     chan struct{}
+	polls    chan struct{}
+	closing  context.Context
+	stop     context.CancelFunc
+	retrying sync.WaitGroup
+	retryMu  sync.Mutex
+	closed   bool
+	// writeTimeout bounds detachedWrite.
+	writeTimeout time.Duration
+}
+
+// writeTimeout is how long the statements of a write of a cached row may take when Options
+// does not say. Its COMMIT is bounded by the DSN's read_timeout instead (detachedWrite).
+const writeTimeout = 10 * time.Second
+
+// detachedWrite runs write in a transaction of the shared database that outlives ctx's
+// cancellation, its statements within the store's write timeout. pgdriver sends the COMMIT on
+// context.Background(), so only the DSN's read_timeout bounds that, and a write can take the
+// write timeout plus the read timeout. It then drops from the cache the keys that
+// keys names, whatever the commit answered. A request that gives up therefore leaves no
+// statement for Postgres to commit after a read has cached the old row again: the transaction
+// is rolled back when its connection goes, since Postgres commits nothing without the COMMIT.
+// keys is read once write has run, and names nothing when write found no row.
+//
+// A COMMIT whose answer was lost may land after the deletion, so its keys are dropped again
+// on each of the next few attempts, which Close lets run, and once more when Postgres says the
+// transaction has ended, which Close does not wait for (forgetLater).
+func (s *Store) detachedWrite(ctx context.Context, write func(context.Context, bun.Tx) error, keys func() []string) error {
+	_, err := s.detachedWriteTold(ctx, write, keys)
+	return err
+}
+
+// detachedWriteTold is detachedWrite, and says whether every replica was told, the keys'
+// deletion having landed in Redis.
+func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Context, bun.Tx) error, keys func() []string) (told bool, err error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.writeTimeout)
+	defer cancel()
+	var committing bool
+	var xid sql.NullInt64
+	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := write(ctx, tx); err != nil {
+			return err
+		}
+		// The transaction's id, for asking Postgres later whether a COMMIT whose answer was
+		// lost has landed. Without a cache there is nothing to drop again, and a write that
+		// changed nothing has no id, so nothing to wait for either.
+		if s.cache != nil {
+			if err := tx.NewSelect().ColumnExpr("pg_current_xact_id_if_assigned()").Scan(ctx, &xid); err != nil {
+				return err
+			}
+		}
+		committing = true
+		return nil
+	})
+	names := keys()
+	told = s.forget(ctx, names...)
+	var answered pgdriver.Error
+	if err != nil && committing && !errors.As(err, &answered) && xid.Valid && len(names) > 0 {
+		s.forgetLater(names, err, xid.Int64)
+	}
+	return told, err
 }
 
 // Open connects to Postgres using a pgdriver DSN, for example
@@ -63,9 +140,78 @@ func Open(dsn string) (*Store, error) {
 	return OpenShards(Options{DSN: dsn})
 }
 
+// The server's own limits on what a serving connection runs. pgdriver gives up on a read
+// after 10 s and drops the socket, but the server runs the statement to its end and commits
+// it, so a write the caller was told failed would still land. statementTimeout ends the
+// statement on the server first, and stays below the driver's read timeout for that.
+// lockTimeout bounds a wait on another session's lock, and idleInTransactionTimeout how long
+// a transaction whose router went quiet keeps its locks. Work that legitimately takes longer
+// raises them for its own transaction (boundTransaction).
+const (
+	statementTimeout         = 8 * time.Second
+	lockTimeout              = 3 * time.Second
+	idleInTransactionTimeout = 30 * time.Second
+)
+
+// sessionDefaults sets the limits above, and UTC as the time zone days and hours are cut in,
+// on every connection, leaving any of them the DSN sets itself.
+func sessionDefaults(conf *pgdriver.Config) {
+	defaults := map[string]any{
+		"statement_timeout":                   fmt.Sprintf("%dms", statementTimeout.Milliseconds()),
+		"lock_timeout":                        fmt.Sprintf("%dms", lockTimeout.Milliseconds()),
+		"idle_in_transaction_session_timeout": fmt.Sprintf("%dms", idleInTransactionTimeout.Milliseconds()),
+		"timezone":                            "UTC",
+	}
+	// Postgres reads a parameter's name in any case, so a DSN's TimeZone is timezone here.
+	for name, value := range conf.ConnParams {
+		defaults[strings.ToLower(name)] = value
+	}
+	conf.ConnParams = defaults
+}
+
+// boundTransaction gives the rest of tx statement, lock and idle limits of its own, for work
+// known to take longer than the serving defaults allow.
+func boundTransaction(ctx context.Context, tx bun.Tx, statement, lock, idle time.Duration) error {
+	_, err := tx.ExecContext(ctx, "SELECT set_config('statement_timeout', ?, true), set_config('lock_timeout', ?, true), "+
+		"set_config('idle_in_transaction_session_timeout', ?, true)",
+		fmt.Sprintf("%dms", statement.Milliseconds()), fmt.Sprintf("%dms", lock.Milliseconds()), fmt.Sprintf("%dms", idle.Milliseconds()))
+	return err
+}
+
+// writeBatch is how many rows one statement of a prune or a rename touches. A backlog is
+// worked through in statements of this many, each well inside the statement limit: one
+// statement over all of it would run out of time and roll back, every time, while the backlog
+// grew.
+var writeBatch = 5000
+
+// deleteInBatches deletes the rows of table that where matches, writeBatch of them per
+// statement, and returns how many it deleted.
+func deleteInBatches(ctx context.Context, db bun.IDB, table, where string, args ...any) (int64, error) {
+	var deleted int64
+	for {
+		batch := db.NewSelect().TableExpr(table).Column("ctid").Where(where, args...).Limit(writeBatch)
+		result, err := db.NewDelete().TableExpr(table).Where("ctid IN (?)", batch).Exec(ctx)
+		if err != nil {
+			return deleted, err
+		}
+		n, err := result.RowsAffected()
+		deleted += n
+		if err != nil || n < int64(writeBatch) {
+			return deleted, err
+		}
+	}
+}
+
 // connect opens a pool of at most conns connections.
-func connect(dsn string, conns int) *bun.DB {
-	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn)))
+func connect(dsn string, conns int) (_ *bun.DB, err error) {
+	// pgdriver panics on a DSN it cannot parse, and the panic holds the whole DSN, password
+	// included, which would reach the logs past their redaction.
+	defer func() {
+		if recover() != nil {
+			err = stack.Wrap(errors.New("store: the database DSN does not parse"))
+		}
+	}()
+	sqldb := sql.OpenDB(primaryOnly{pgdriver.NewConnector(pgdriver.WithDSN(dsn), sessionDefaults)})
 	// database/sql keeps two idle connections by default, so every burst of writes past two
 	// dials Postgres and shakes hands over TLS again, and under load those handshakes are
 	// what times out. The pool is kept instead, and bounded so that two pods, each running
@@ -73,1125 +219,62 @@ func connect(dsn string, conns int) *bun.DB {
 	sqldb.SetMaxOpenConns(conns)
 	sqldb.SetMaxIdleConns(conns)
 	sqldb.SetConnMaxIdleTime(5 * time.Minute)
-	db := bun.NewDB(sqldb, pgdialect.New())
+	// A release rolled back past a migration that added a column still reads the row.
+	db := bun.NewDB(sqldb, pgdialect.New(), bun.WithDiscardUnknownColumns())
 	// A span per query, so a request's trace says which reads it waited on. Queries are
 	// recorded unformatted: the arguments of these are customer ids and api keys.
 	db.AddQueryHook(bunotel.NewQueryHook(bunotel.WithDBName("router")))
-	return db
+	return db, nil
 }
 
-// DB exposes the shared database's bun handle so callers can run queries this store does
-// not wrap.
-func (s *Store) DB() *bun.DB { return s.db }
+// Server names the shared database and the address its server answers on, as it sees itself.
+// The address is empty over a unix socket.
+func (s *Store) Server(ctx context.Context) (database, address string, err error) {
+	var server sql.NullString
+	err = s.global.QueryRowContext(ctx,
+		"SELECT current_database(), host(inet_server_addr()) || ':' || inet_server_port()").Scan(&database, &server)
+	if err != nil {
+		return "", "", stack.Wrap(fmt.Errorf("store: server: %w", err))
+	}
+	return database, server.String, nil
+}
 
-// ShardDB is this shard's bun handle, where its calls, sessions and requests are. It is
-// DB when the deployment has one database.
-func (s *Store) ShardDB() *bun.DB { return s.shard }
-
-// Close releases the connection pools.
+// Close releases the connection pools, once the deletions forgetLater holds have run, or
+// forgetGrace has passed and the rest have stopped.
 func (s *Store) Close() error {
-	return errors.Join(s.closeShards(), s.db.Close())
+	s.retryMu.Lock()
+	s.closed = true
+	s.retryMu.Unlock()
+	retried := make(chan struct{})
+	go func() {
+		s.retrying.Wait()
+		close(retried)
+	}()
+	select {
+	case <-retried:
+	case <-time.After(forgetGrace):
+	}
+	s.stop()
+	s.retrying.Wait()
+	s.closeRedis()
+	return errors.Join(s.closeShards(), s.global.Close())
 }
 
 // Ping verifies the shared database and this shard's are usable. Another shard being down
 // is not this router failing: it only leaves that shard's calls off a page.
 func (s *Store) Ping(ctx context.Context) error {
-	if err := s.db.PingContext(ctx); err != nil {
+	if err := s.global.PingContext(ctx); err != nil {
 		return stack.Wrap(err)
 	}
 	return stack.Wrap(s.shard.PingContext(ctx))
-}
-
-// Migrate applies every pending migration, to the shared database and to this shard's.
-func (s *Store) Migrate(ctx context.Context) error {
-	if err := s.migrate(ctx, s.db); err != nil {
-		return err
-	}
-	return s.migrateShard(ctx)
-}
-
-func (s *Store) migrate(ctx context.Context, db *bun.DB) error {
-	// Every shard's routers start against the shared database at once in a rollout, and
-	// two goose runs on one database collide, so one migrates while the others wait.
-	conn, err := db.DB.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("store: migrate: %w", err)
-	}
-	locked := false
-	defer func() {
-		if !locked {
-			_ = conn.Close()
-			return
-		}
-		// Released by hand: closing hands the connection back to the pool, session and lock
-		// intact. A failed unlock ends the session instead, which releases it.
-		if _, err := conn.ExecContext(context.WithoutCancel(ctx), "SELECT pg_advisory_unlock(hashtextextended('router.migrate', 0))"); err != nil {
-			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
-		}
-		_ = conn.Close()
-	}()
-	if err := lockMigrations(ctx, conn); err != nil {
-		return err
-	}
-	locked = true
-
-	goose.SetBaseFS(migrations.FS)
-	if err := goose.SetDialect("postgres"); err != nil {
-		return fmt.Errorf("store: set dialect: %w", err)
-	}
-	if err := goose.UpContext(ctx, db.DB, "."); err != nil {
-		return fmt.Errorf("store: migrate: %w", err)
-	}
-	if err := ensureUsageIndexes(ctx, conn); err != nil {
-		return err
-	}
-	// Attached here rather than in a migration of their own, so that a table added later
-	// is covered by the deployment reaching it rather than by somebody remembering.
-	return s.watchDataChanges(ctx, db)
-}
-
-// migrateLockFirst and migrateLockMost are the pause between two tries at the migrate lock:
-// the first, doubled after each miss up to the most, which bounds how long a router idles
-// after the one migrating is done.
-const (
-	migrateLockFirst = 20 * time.Millisecond
-	migrateLockMost  = 500 * time.Millisecond
-)
-
-// lockMigrations takes the migrate lock on conn, trying it until it is free. A router waiting
-// in a blocking pg_advisory_lock holds a snapshot all the while, and CREATE INDEX CONCURRENTLY
-// in the migration the holder runs waits for every older snapshot to end, so the two would
-// wait on each other forever. Between two tries the waiter holds none.
-func lockMigrations(ctx context.Context, conn *sql.Conn) error {
-	pause := migrateLockFirst
-	for {
-		var locked bool
-		if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock(hashtextextended('router.migrate', 0))").Scan(&locked); err != nil {
-			// The lock may have been granted with the answer lost; dropping the connection
-			// ends the session, which releases it.
-			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
-			return fmt.Errorf("store: migrate: lock: %w", err)
-		}
-		if locked {
-			return nil
-		}
-		timer := time.NewTimer(pause)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return fmt.Errorf("store: migrate: wait for lock: %w", context.Cause(ctx))
-		case <-timer.C:
-		}
-		pause = min(2*pause, migrateLockMost)
-	}
-}
-
-// usageIndexes are built CONCURRENTLY, so building them stops no write. A build that fails
-// leaves an invalid index behind, which the migration's IF NOT EXISTS then skips once goose
-// has recorded it, and one dropped by hand is never built again by the migration. Writing
-// usage needs requests_usage_id_idx: ON CONFLICT (usage_id) fails without it.
-var usageIndexes = []struct{ name, create string }{
-	{"requests_usage_id_idx", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS requests_usage_id_idx ON requests (usage_id)"},
-	{"requests_to_ship_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS requests_to_ship_idx ON requests (started_at) WHERE to_ship"},
-	// What a subject spent, summed with no usage service (20261112120000_limits.sql).
-	{"requests_key_spend_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS requests_key_spend_idx ON requests (customer_id, api_key, started_at) " +
-		"INCLUDE (cost_micros) WHERE billable"},
-	{"requests_user_spend_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS requests_user_spend_idx ON requests (customer_id, user_id, started_at) " +
-		"INCLUDE (cost_micros) WHERE billable AND user_id <> ''"},
-	{"requests_category_spend_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS requests_category_spend_idx ON requests (customer_id, started_at) " +
-		"INCLUDE (cost_micros, usage_categories) WHERE billable AND usage_categories <> '{}'"},
-	// The rows naming a grant, which a reconcile counts again (20261112121000_requests_limit_grants.sql).
-	{"requests_limit_grants_started_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS requests_limit_grants_started_idx ON requests (started_at, id) " +
-		"WHERE limit_grants <> '{}'"},
-	// What a copied agent log is known by: an import resolves its conflicts on it
-	// (20261206120000_agent_logs_source_id.sql).
-	{"agent_logs_source_idx", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS agent_logs_source_idx ON agent_logs (customer_id, source_id) " +
-		"WHERE source_id IS NOT NULL"},
-	// What a link's join finds one omni-channel's rows of an agent by (20261212100000_user_phones.sql).
-	{"contact_map_conversation", "CREATE INDEX CONCURRENTLY IF NOT EXISTS contact_map_conversation ON contact_map (customer_id, agent_config_id, conversation_id)"},
-	// The rows a link set aside, by their number (20261217110000_user_phone_history.sql).
-	{"contact_map_retired", "CREATE INDEX CONCURRENTLY IF NOT EXISTS contact_map_retired ON contact_map " +
-		"(customer_id, (regexp_replace(address, '^retired:[^:]*:', ''))) WHERE address LIKE 'retired:%'"},
-	// The leg digits are pressed on (20261215120000_call_legs_vendor_call_id.sql).
-	{"call_legs_vendor_call_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_vendor_call_idx ON call_legs (vendor_call_id) " +
-		"WHERE vendor_call_id IS NOT NULL"},
-	// A response's alternatives, the responses sharing its parent (20261227100000_response_branches.sql).
-	{"agent_responses_parent_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_responses_parent_idx ON agent_responses (session_id, parent_response_id)"},
-}
-
-// ensureUsageIndexes builds each usage index that is missing, dropping one a failed build left
-// invalid first. A build that fails again fails Migrate, so the router does not start and fail
-// every write; its next start tries again.
-func ensureUsageIndexes(ctx context.Context, conn *sql.Conn) error {
-	for _, index := range usageIndexes {
-		valid, found, err := indexState(ctx, conn, index.name)
-		if err != nil {
-			return err
-		}
-		if found && valid {
-			continue
-		}
-		if found {
-			if _, err := conn.ExecContext(ctx, "DROP INDEX CONCURRENTLY IF EXISTS "+index.name); err != nil {
-				return fmt.Errorf("store: migrate: drop invalid %s: %w", index.name, err)
-			}
-		}
-		if _, err := conn.ExecContext(ctx, index.create); err != nil {
-			return fmt.Errorf("store: migrate: build %s: %w", index.name, err)
-		}
-		if valid, found, err = indexState(ctx, conn, index.name); err != nil {
-			return err
-		}
-		if !found || !valid {
-			return fmt.Errorf("store: migrate: %s did not build", index.name)
-		}
-	}
-	return nil
-}
-
-// indexState reports whether the index named is on the search path, and if it is, whether
-// it is valid.
-func indexState(ctx context.Context, conn *sql.Conn, name string) (valid, found bool, err error) {
-	var state sql.NullBool
-	err = conn.QueryRowContext(ctx, "SELECT (SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1))", name).Scan(&state)
-	if err != nil {
-		return false, false, fmt.Errorf("store: migrate: check %s: %w", name, err)
-	}
-	return state.Bool, state.Valid, nil
-}
-
-// ErrInvalidRequest is a request that can never be written as it is, because it lacks
-// something every row names.
-var ErrInvalidRequest = errors.New("store: invalid request")
-
-// ErrRequestLogsMissing is RecordRequests writing its rows and failing to write the agent log
-// rows of some of them: the usage is recorded, and a timeline has a gap.
-var ErrRequestLogsMissing = errors.New("store: request log rows missing")
-
-// RecordRequest stores one request, giving it a usage id when it has none. Latency is
-// optional because a request that failed before reaching the provider has none.
-func (s *Store) RecordRequest(ctx context.Context, request *Request) error {
-	if request.UsageID == uuid.Nil {
-		request.UsageID = uuid.Must(uuid.NewV7())
-	}
-	requests := []Request{*request}
-	_, err := s.RecordRequests(ctx, requests)
-	*request = requests[0]
-	return err
-}
-
-// RecordRequests writes rows that are not written yet, in one transaction in this shard's
-// database, and returns the usage ids it wrote. A row whose usage id is already there is
-// skipped, so writing a batch again after a failure whose commit did land writes nothing twice.
-// A row RecordRequests wrote has its ID set. With one database each row it wrote counts toward
-// the grants it names in the same transaction (AddGrantUses); with shards that is the caller's
-// to do, apart, since the grants are in the shared database.
-func (s *Store) RecordRequests(ctx context.Context, requests []Request) ([]uuid.UUID, error) {
-	for i := range requests {
-		if err := prepareRequest(&requests[i]); err != nil {
-			return nil, err
-		}
-	}
-	if len(requests) == 0 {
-		return nil, nil
-	}
-	// The agent log trigger takes a lock per customer for each row it logs, so two routers
-	// writing batches that name the same customers in another order would deadlock. Written in
-	// customer order, every batch takes them in one order.
-	sorted := slices.Clone(requests)
-	slices.SortStableFunc(sorted, func(a, b Request) int { return strings.Compare(a.CustomerID, b.CustomerID) })
-
-	var written []writtenRequest
-	err := s.shard.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if s.Sharded() {
-			if _, err := tx.ExecContext(ctx, "SELECT set_config('router.request_logged', 'on', true)"); err != nil {
-				return err
-			}
-		}
-		// Scanned apart from the models: a row skipped by the conflict returns nothing, so the
-		// rows that come back do not line up with the ones sent.
-		_, err := tx.NewInsert().Model(&sorted).
-			On("CONFLICT (usage_id) DO NOTHING").
-			Returning("id, usage_id").
-			Exec(ctx, &written)
-		if err != nil || s.Sharded() {
-			return err
-		}
-		// One database: the rows count toward their grants in the transaction that writes them.
-		_, err = addGrantUses(ctx, tx, GrantUsesOf(sorted, usageIDsOf(written)))
-		return err
-	})
-	if err != nil {
-		if IDTaken(err) {
-			if advanced := s.advanceRequestIDs(ctx); advanced != nil {
-				err = errors.Join(err, advanced)
-			}
-		}
-		return nil, stack.Wrap(fmt.Errorf("store: record requests: %w", err))
-	}
-
-	ids := usageIDsOf(written)
-	byUsage := make(map[uuid.UUID]int64, len(written))
-	for _, row := range written {
-		byUsage[row.UsageID] = row.ID
-	}
-	var missing error
-	var logged []*Request
-	for i := range requests {
-		id, ok := byUsage[requests[i].UsageID]
-		if !ok {
-			continue
-		}
-		// Only the first of two rows sent with one usage id was written.
-		delete(byUsage, requests[i].UsageID)
-		requests[i].ID = id
-		if s.Sharded() && requests[i].AgentID != "" {
-			logged = append(logged, &requests[i])
-		}
-	}
-	if err := s.logShardRequests(ctx, logged); err != nil {
-		missing = errors.Join(missing, fmt.Errorf("%w: %w", ErrRequestLogsMissing, err))
-	}
-	if missing != nil {
-		return ids, stack.Wrap(missing)
-	}
-	return ids, nil
-}
-
-func usageIDsOf(written []writtenRequest) []uuid.UUID {
-	ids := make([]uuid.UUID, len(written))
-	for i, row := range written {
-		ids[i] = row.UsageID
-	}
-	return ids
-}
-
-// advanceRequestIDs moves the requests id sequence past the highest id written: a row carried
-// in with its own id, as a data move from before usage ids did, leaves the sequence behind it,
-// and every id it would still hand out is taken. It never sets the sequence below where the
-// statement read it, but under a race it can still move it back: a writer drawing ids between
-// that read and the setval may draw past the highest id read, and the ids after it are then
-// handed out again. That costs whoever draws one another try, one of the writer's immediate
-// retries, never a row.
-func (s *Store) advanceRequestIDs(ctx context.Context) error {
-	_, err := s.shard.ExecContext(ctx, `
-SELECT setval(pg_get_serial_sequence('requests', 'id'), written)
-FROM (SELECT max(id) AS written FROM requests) AS highest
-WHERE written > COALESCE(pg_sequence_last_value(pg_get_serial_sequence('requests', 'id')::regclass), 0)`)
-	if err != nil {
-		return fmt.Errorf("store: advance request ids: %w", err)
-	}
-	return nil
-}
-
-// writtenRequest is what RecordRequests reads back of a row it wrote.
-type writtenRequest struct {
-	ID      int64     `bun:"id"`
-	UsageID uuid.UUID `bun:"usage_id"`
-}
-
-// prepareRequest checks a request before it is written and fills what defaults.
-func prepareRequest(request *Request) error {
-	request.ErrorMessage = SafeLogText(request.ErrorMessage)
-	if request.CustomerID == "" {
-		return stack.Wrap(fmt.Errorf("%w: customer id is required", ErrInvalidRequest))
-	}
-	if request.Modality == "" {
-		return stack.Wrap(fmt.Errorf("%w: modality is required", ErrInvalidRequest))
-	}
-	if request.UsageID == uuid.Nil {
-		return stack.Wrap(fmt.Errorf("%w: usage id is required", ErrInvalidRequest))
-	}
-	if request.StartedAt.IsZero() {
-		request.StartedAt = time.Now().UTC()
-	}
-	return nil
-}
-
-// requestsPrimaryKey is named for the table's first name: 20260815090000_multi_modality.sql
-// renamed the table and not its key.
-const requestsPrimaryKey = "stt_requests_pkey"
-
-// Unwritable reports whether writing the same rows again can only fail the same way: a row
-// is invalid, or Postgres refused its data, a constraint or its size. Anything else, a
-// timeout, a lost connection, a lock, may pass on a later try. So may an id already taken
-// (IDTaken): the next try draws new ids.
-func Unwritable(err error) bool {
-	if errors.Is(err, ErrInvalidRequest) {
-		return true
-	}
-	var refused pgdriver.Error
-	if !errors.As(err, &refused) {
-		return false
-	}
-	if IDTaken(err) {
-		return false
-	}
-	code := refused.Field('C')
-	return strings.HasPrefix(code, "22") || strings.HasPrefix(code, "23") || strings.HasPrefix(code, "54")
-}
-
-// IDTaken reports whether RecordRequests failed on a request id another row already has,
-// which a row carried in with its own id leaves behind. RecordRequests has moved the sequence
-// past it by then, so trying again at once writes the rows.
-func IDTaken(err error) bool {
-	var refused pgdriver.Error
-	return errors.As(err, &refused) && refused.Field('C') == "23505" && refused.Field('n') == requestsPrimaryKey
-}
-
-// logShardRequests writes written requests' log rows, which a trigger writes beside a request
-// in one database, to the shared one with the rest of the logs: the calls they happened in read
-// in one query, and the rows written in one statement under every customer's agent log lock,
-// taken in customer order as every batch takes them. The two writes are not one transaction:
-// a log row missing is a gap in a timeline, where holding the shared database's lock for the
-// shard's insert would slow every request of the customer.
-func (s *Store) logShardRequests(ctx context.Context, requests []*Request) error {
-	if len(requests) == 0 {
-		return nil
-	}
-	calls, err := s.callsOf(ctx, requests)
-	if err != nil {
-		return err
-	}
-
-	entries := make([]AgentLog, len(requests))
-	customers := make([]string, 0, len(requests))
-	for i, request := range requests {
-		outcome, severity := "completed", "info"
-		switch {
-		case request.ErrorCode == ErrorCancelled:
-			// A caller closing its own request is routine, a superseded flow decision or a
-			// barge-in, and no failure, as the rollups count it.
-			outcome = "cancelled"
-		case !request.Success:
-			outcome, severity = "failed", "error"
-		}
-		entries[i] = AgentLog{
-			CustomerID: request.CustomerID, ConfigID: calls[i].ConfigID, AgentID: request.AgentID, SessionID: calls[i].ID,
-			Source: "system", Severity: severity, EventType: "provider_request",
-			Message:    request.Modality + " request " + outcome,
-			OccurredAt: request.StartedAt, IngestedAt: time.Now().UTC(),
-			Details: map[string]any{
-				"provider": request.Provider, "model": request.Model, "request_id": strconv.FormatInt(request.ID, 10),
-				"duration_ms": request.LatencyMs, "input_tokens": request.InputTokens, "output_tokens": request.OutputTokens,
-				"cost_micros": request.CostMicros, "error_code": nullIfEmpty(request.ErrorCode),
-				"error_message": nullIfEmpty(request.ErrorMessage),
-			},
-		}
-		customers = append(customers, request.CustomerID)
-	}
-	slices.Sort(customers)
-	customers = slices.Compact(customers)
-	return s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		// unnest reads the array in order, so the locks are taken in it.
-		if _, err := tx.ExecContext(ctx,
-			"SELECT pg_advisory_xact_lock(hashtextextended(customer, ?)) FROM unnest(?::text[]) AS customer",
-			agentLogLockSeed, pgdialect.Array(customers)); err != nil {
-			return err
-		}
-		_, err := tx.NewInsert().Model(&entries).Exec(ctx)
-		return err
-	})
-}
-
-// callsOf is the call each request happened in, in their order, as the agent log trigger
-// finds it: the agent's latest call of the customer started by the request, the one it names
-// when it names one. A request in no call has an empty one.
-func (s *Store) callsOf(ctx context.Context, requests []*Request) ([]Call, error) {
-	customers := make([]string, len(requests))
-	agents := make([]string, len(requests))
-	callIDs := make([]string, len(requests))
-	started := make([]string, len(requests))
-	for i, request := range requests {
-		customers[i], agents[i], callIDs[i] = request.CustomerID, request.AgentID, request.CallID
-		started[i] = request.StartedAt.UTC().Format(time.RFC3339Nano)
-	}
-	var found []struct {
-		Ordinal  int    `bun:"ordinal"`
-		ConfigID string `bun:"config_id"`
-		ID       string `bun:"id"`
-	}
-	err := s.shard.NewRaw(`
-SELECT r.ordinal, c.config_id, c.id
-FROM unnest(?::text[], ?::text[], ?::text[], ?::timestamptz[]) WITH ORDINALITY
-    AS r (customer_id, agent_id, call_id, started_at, ordinal)
-CROSS JOIN LATERAL (
-    SELECT config_id, id FROM calls
-    WHERE calls.customer_id = r.customer_id AND calls.agent_id = r.agent_id
-        AND calls.started_at <= r.started_at AND (r.call_id = '' OR calls.call_id = r.call_id)
-    ORDER BY calls.started_at DESC
-    LIMIT 1) AS c`,
-		pgdialect.Array(customers), pgdialect.Array(agents), pgdialect.Array(callIDs), pgdialect.Array(started),
-	).Scan(ctx, &found)
-	if err != nil {
-		return nil, err
-	}
-	calls := make([]Call, len(requests))
-	for _, call := range found {
-		calls[call.Ordinal-1] = Call{ConfigID: call.ConfigID, ID: call.ID}
-	}
-	return calls, nil
-}
-
-func nullIfEmpty(text string) *string {
-	if text == "" {
-		return nil
-	}
-	return &text
-}
-
-// ErrorCancelled is the error code of a request its caller gave up on, whether before the
-// provider answered or by closing the stream it had opened. It is not a success, but it is no
-// failure either, so the rollups count it as a request and for what it cost and leave it out
-// of errors, uptime and latency.
-const ErrorCancelled = "cancelled"
-
-// ErrorRefused is the error code of a response the router's prompt injection screen refused.
-// The provider answered as asked, so like a cancelled request it is no failure of the
-// provider's, and the rollups leave it out of errors, uptime and latency.
-const ErrorRefused = "refused"
-
-// measured is the SQL condition that a request says something about its provider, neither
-// cancelled nor refused, on the request row the prefix names.
-func measured(prefix string) string {
-	return "COALESCE(" + prefix + "error_code, '') NOT IN ('" + ErrorCancelled + "', '" + ErrorRefused + "')"
-}
-
-// Rollup aggregates the requests in [from, to) into the rollup tables for the given
-// granularity, both the provider breakdown and the cost-tag breakdown, and returns how
-// many buckets were written across the two. The window is widened to whole buckets, from
-// the start of the one holding from to the end of the one holding the last instant before
-// to, because a bucket is written whole: summed over part of it, it would replace the
-// totals of the rest. It is idempotent: re-running it recomputes the buckets it touches,
-// so a missed run is fixed by running it again over the same window.
-func (s *Store) Rollup(ctx context.Context, granularity Granularity, from, to time.Time) (int64, error) {
-	if !granularity.Valid() {
-		return 0, stack.Wrap(fmt.Errorf("store: unknown granularity %q", granularity))
-	}
-	if !to.After(from) {
-		return 0, stack.Wrap(fmt.Errorf("store: rollup window must be non-empty, got %s to %s", from, to))
-	}
-
-	providers, err := s.rollupProviders(ctx, granularity, from, to)
-	if err != nil {
-		return 0, err
-	}
-	tags, err := s.rollupTags(ctx, granularity, from, to)
-	if err != nil {
-		return 0, err
-	}
-	return providers + tags, nil
-}
-
-// wholeBuckets is a rollup's WHERE on column: the whole buckets [from, to) touches, taking
-// from and to as its two parameters. Postgres keeps timestamps to the microsecond, so to
-// less one is the window's last instant.
-func wholeBuckets(granularity Granularity, column string) string {
-	return fmt.Sprintf("%[1]s >= date_trunc('%[2]s', ?::timestamptz) AND %[1]s < "+
-		"date_trunc('%[2]s', ?::timestamptz - interval '1 microsecond') + interval '1 %[2]s'",
-		column, granularity.truncateUnit())
-}
-
-func (s *Store) rollupProviders(ctx context.Context, granularity Granularity, from, to time.Time) (int64, error) {
-	query := fmt.Sprintf(`
-INSERT INTO %[1]s (
-    modality, customer_id, provider, model, bucket,
-    audio_ms_total, characters_total,
-    input_tokens_total, cached_input_tokens_total, output_tokens_total,
-    images_total,
-    cost_micros_total,
-    request_count, error_count,
-    latency_p50_ms, latency_p95_ms
-)
-SELECT
-    modality,
-    customer_id,
-    provider,
-    model,
-    date_trunc('%[2]s', started_at) AS bucket,
-    COALESCE(SUM(audio_ms), 0),
-    COALESCE(SUM(characters), 0),
-    COALESCE(SUM(input_tokens), 0),
-    COALESCE(SUM(cached_input_tokens), 0),
-    COALESCE(SUM(output_tokens), 0),
-    COALESCE(SUM(images), 0),
-    COALESCE(SUM(cost_micros), 0),
-    COUNT(*),
-    COUNT(*) FILTER (WHERE NOT success AND %[3]s),
-    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE %[3]s),
-    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE %[3]s)
-FROM requests
-WHERE %[4]s
-GROUP BY modality, customer_id, provider, model, bucket
-ON CONFLICT (modality, customer_id, provider, model, bucket) DO UPDATE SET
-    audio_ms_total = EXCLUDED.audio_ms_total,
-    characters_total = EXCLUDED.characters_total,
-    input_tokens_total = EXCLUDED.input_tokens_total,
-    cached_input_tokens_total = EXCLUDED.cached_input_tokens_total,
-    output_tokens_total = EXCLUDED.output_tokens_total,
-    images_total = EXCLUDED.images_total,
-    cost_micros_total = EXCLUDED.cost_micros_total,
-    request_count = EXCLUDED.request_count,
-    error_count = EXCLUDED.error_count,
-    latency_p50_ms = EXCLUDED.latency_p50_ms,
-    latency_p95_ms = EXCLUDED.latency_p95_ms`,
-		granularity.table(), granularity.truncateUnit(), measured(""), wholeBuckets(granularity, "started_at"))
-
-	// Each shard rolls up the requests it recorded, into its own rollups.
-	result, err := s.shard.ExecContext(ctx, query, from, to)
-	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: rollup %s: %w", granularity, err))
-	}
-
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: rollup %s: %w", granularity, err))
-	}
-	return affected, nil
-}
-
-// rollupTags aggregates the same window by cost tag. Each request is unrolled into one
-// row per label it carries, so a request tagged with a project and an environment counts
-// towards both breakdowns.
-func (s *Store) rollupTags(ctx context.Context, granularity Granularity, from, to time.Time) (int64, error) {
-	query := fmt.Sprintf(`
-INSERT INTO %[1]s (
-    modality, customer_id, tag_key, tag_value, bucket,
-    audio_ms_total, characters_total,
-    input_tokens_total, cached_input_tokens_total, output_tokens_total,
-    images_total,
-    cost_micros_total,
-    request_count, error_count,
-    latency_p50_ms, latency_p95_ms
-)
-SELECT
-    r.modality,
-    r.customer_id,
-    tag.key,
-    tag.value,
-    date_trunc('%[2]s', r.started_at) AS bucket,
-    COALESCE(SUM(r.audio_ms), 0),
-    COALESCE(SUM(r.characters), 0),
-    COALESCE(SUM(r.input_tokens), 0),
-    COALESCE(SUM(r.cached_input_tokens), 0),
-    COALESCE(SUM(r.output_tokens), 0),
-    COALESCE(SUM(r.images), 0),
-    COALESCE(SUM(r.cost_micros), 0),
-    COUNT(*),
-    COUNT(*) FILTER (WHERE NOT r.success AND %[3]s),
-    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY r.latency_ms) FILTER (WHERE %[3]s),
-    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY r.latency_ms) FILTER (WHERE %[3]s)
-FROM requests AS r
-CROSS JOIN LATERAL jsonb_each_text(r.tags) AS tag(key, value)
-WHERE %[4]s
-GROUP BY r.modality, r.customer_id, tag.key, tag.value, bucket
-ON CONFLICT (modality, customer_id, tag_key, tag_value, bucket) DO UPDATE SET
-    audio_ms_total = EXCLUDED.audio_ms_total,
-    characters_total = EXCLUDED.characters_total,
-    input_tokens_total = EXCLUDED.input_tokens_total,
-    cached_input_tokens_total = EXCLUDED.cached_input_tokens_total,
-    output_tokens_total = EXCLUDED.output_tokens_total,
-    images_total = EXCLUDED.images_total,
-    cost_micros_total = EXCLUDED.cost_micros_total,
-    request_count = EXCLUDED.request_count,
-    error_count = EXCLUDED.error_count,
-    latency_p50_ms = EXCLUDED.latency_p50_ms,
-    latency_p95_ms = EXCLUDED.latency_p95_ms`,
-		granularity.tagTable(), granularity.truncateUnit(), measured("r."), wholeBuckets(granularity, "r.started_at"))
-
-	result, err := s.shard.ExecContext(ctx, query, from, to)
-	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: rollup %s tags: %w", granularity, err))
-	}
-
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: rollup %s tags: %w", granularity, err))
-	}
-	return affected, nil
-}
-
-// CustomerStats returns the buckets for one customer and modality in [from, to), oldest
-// first.
-//
-// Reads recorded requests directly so recent activity is visible before rollups run.
-func (s *Store) CustomerStats(
-	ctx context.Context,
-	modality, customerID string,
-	granularity Granularity,
-	from, to time.Time,
-	tags map[string]string,
-) ([]Bucket, error) {
-	if !granularity.Valid() {
-		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", granularity))
-	}
-	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
-	}
-	if modality == "" {
-		return nil, stack.Wrap(errors.New("store: modality is required"))
-	}
-
-	if tags == nil {
-		tags = map[string]string{}
-	}
-	return s.taggedStats(ctx, modality, customerID, granularity, from, to, tags)
-}
-
-// taggedStats aggregates raw request rows carrying every one of the given labels.
-func (s *Store) taggedStats(
-	ctx context.Context,
-	modality, customerID string,
-	granularity Granularity,
-	from, to time.Time,
-	tags map[string]string,
-) ([]Bucket, error) {
-	filter, err := json.Marshal(tags)
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: customer stats: encode tag filter: %w", err))
-	}
-
-	query := fmt.Sprintf(`
-SELECT
-    modality,
-    customer_id,
-    provider,
-    model,
-    date_trunc('%[1]s', started_at) AS bucket,
-    COALESCE(SUM(audio_ms), 0) AS audio_ms_total,
-    COALESCE(SUM(characters), 0) AS characters_total,
-    COALESCE(SUM(input_tokens), 0) AS input_tokens_total,
-    COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens_total,
-    COALESCE(SUM(output_tokens), 0) AS output_tokens_total,
-    COALESCE(SUM(images), 0) AS images_total,
-    COALESCE(SUM(cost_micros), 0) AS cost_micros_total,
-    COUNT(*) AS request_count,
-    COUNT(*) FILTER (WHERE NOT success AND %[2]s) AS error_count,
-    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE %[2]s) AS latency_p50_ms,
-    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE %[2]s) AS latency_p95_ms,
-    (COUNT(*) - COUNT(*) FILTER (WHERE NOT success AND %[2]s))::double precision
-        / NULLIF(COUNT(*), 0) AS uptime
-FROM requests
-WHERE modality = ? AND customer_id = ?
-  AND started_at >= ? AND started_at < ?
-  AND tags @> ?::jsonb
-GROUP BY modality, customer_id, provider, model, bucket
-ORDER BY bucket ASC, provider ASC, model ASC`, granularity.truncateUnit(), measured(""))
-
-	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]Bucket, error) {
-		var buckets []Bucket
-		err := db.NewRaw(query, modality, customerID, from, to, string(filter)).Scan(ctx, &buckets)
-		return buckets, err
-	})
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: customer stats by tag: %w", err))
-	}
-	return mergeBuckets(lists), nil
-}
-
-// CustomerTagStats returns what each value of one tag key cost, oldest bucket first. It
-// is the "what drives our spend" query: group by project, or by environment, or by
-// whichever label the customer bills on.
-func (s *Store) CustomerTagStats(
-	ctx context.Context,
-	modality, customerID, tagKey string,
-	granularity Granularity,
-	from, to time.Time,
-) ([]TagBucket, error) {
-	if !granularity.Valid() {
-		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", granularity))
-	}
-	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
-	}
-	if modality == "" {
-		return nil, stack.Wrap(errors.New("store: modality is required"))
-	}
-	if tagKey == "" {
-		return nil, stack.Wrap(errors.New("store: tag key is required"))
-	}
-
-	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]TagBucket, error) {
-		var buckets []TagBucket
-		err := db.NewSelect().
-			Table(granularity.tagTable()).
-			Where("modality = ?", modality).
-			Where("customer_id = ?", customerID).
-			Where("tag_key = ?", tagKey).
-			Where("bucket >= ?", from).
-			Where("bucket < ?", to).
-			Order("bucket ASC", "tag_value ASC").
-			Scan(ctx, &buckets)
-		return buckets, err
-	})
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: customer tag stats: %w", err))
-	}
-	return mergeTagBuckets(lists), nil
-}
-
-// spendGroupByModality is the group_by that means "where the money went" rather than
-// "what it was spent on".
-const spendGroupByModality = "modality"
-
-// The group_by values that are who asked rather than a cost label key, from the columns every
-// row carries. A label key never holds a ':', so none of them shadows a label of the same name.
-const (
-	SpendGroupByApp      = "who:app"
-	SpendGroupByOrigin   = "who:origin"
-	SpendGroupByUser     = "who:user"
-	SpendGroupByTeam     = "who:team"
-	SpendGroupByCategory = "who:category"
-)
-
-// spendGroups is the value each group_by that is not a cost label groups by, and the join it
-// needs. A user is only unique within its app, so across apps it is <app>/<user>; a team is
-// the name in a row's team: category; a category leaves the team out, and a row counts in each
-// of its others.
-func spendGroups(groupBy string, acrossApps bool) (value, join string, ok bool) {
-	switch groupBy {
-	case spendGroupByModality:
-		return "modality", "", true
-	case SpendGroupByApp:
-		return "customer_id", "", true
-	case SpendGroupByOrigin:
-		return "api_key", "", true
-	case SpendGroupByUser:
-		if acrossApps {
-			return "CASE WHEN user_id = '' THEN '' ELSE customer_id || '/' || user_id END", "", true
-		}
-		return "user_id", "", true
-	case SpendGroupByTeam:
-		return "COALESCE((SELECT substr(c, 6) FROM unnest(usage_categories) AS c WHERE c ILIKE 'team:%' LIMIT 1), '')", "", true
-	case SpendGroupByCategory:
-		return "COALESCE(spend_category.name, '')",
-			"\nLEFT JOIN LATERAL unnest(usage_categories) AS spend_category(name) ON spend_category.name NOT ILIKE 'team:%'", true
-	}
-	return "", "", false
-}
-
-// OrganizationApps is every app of an organization: those requests last named it for, those
-// registered under it that no request named another for, and the app whose id is the
-// organization's, for an app that is its own.
-func (s *Store) OrganizationApps(ctx context.Context, organizationID string) ([]string, error) {
-	// One statement, so an app a request records under the organization meanwhile is in one
-	// half or the other.
-	namedOther := s.db.NewSelect().Model((*AppOrganization)(nil)).
-		ColumnExpr("1").
-		Where("ao.app_id = ap.id AND ao.organization_id <> ?", organizationID)
-	named := s.db.NewSelect().Model((*AppOrganization)(nil)).Column("app_id").Where("organization_id = ?", organizationID).
-		Union(s.db.NewSelect().Model((*App)(nil)).
-			Column("id").
-			Where("ap.organization_id = ?", organizationID).
-			Where("NOT EXISTS (?)", namedOther))
-	var members []string
-	err := s.db.NewSelect().TableExpr("(?) AS member", named).Column("member.app_id").OrderExpr("1").Scan(ctx, &members)
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: organization apps: %w", err))
-	}
-	apps := []string{organizationID}
-	for _, app := range members {
-		if app != organizationID {
-			apps = append(apps, app)
-		}
-	}
-	return apps, nil
-}
-
-// OrganizationActivityApps is OrganizationApps for a read of what an organization did: the
-// app whose id is the organization's counts only when the organization is the one the latest
-// request named it for, or, when none did, the one it is registered under, so an app of
-// another organization with that id is not told as this one's.
-func (s *Store) OrganizationActivityApps(ctx context.Context, organizationID string) ([]string, error) {
-	apps, err := s.OrganizationApps(ctx, organizationID)
-	if err != nil {
-		return nil, err
-	}
-	var own bool
-	err = s.db.NewRaw(`SELECT EXISTS (SELECT 1 FROM app_organizations WHERE app_id = ?0 AND organization_id = ?0)
-  OR (NOT EXISTS (SELECT 1 FROM app_organizations WHERE app_id = ?0)
-      AND NOT EXISTS (SELECT 1 FROM apps WHERE id = ?0 AND organization_id <> ?0))`, organizationID).Scan(ctx, &own)
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: organization activity apps: %w", err))
-	}
-	if !own {
-		// OrganizationApps puts the organization's own id first.
-		return apps[1:], nil
-	}
-	return apps, nil
-}
-
-// spendOther is the value every group outside the biggest few is summed into.
-const spendOther = "other"
-
-// CustomerSpend returns what one customer spent per bucket and group, oldest bucket first.
-// It is the whole bill rather than one modality's share of it, which is what a spend trend
-// is read as.
-//
-// groupBy is "modality", who asked (SpendGroupByApp and the rest), or a cost label key. Only
-// the limit biggest values over the whole window keep a group of their own: a label such as
-// customer_id has as many values as the customer has customers, and a chart of all of them
-// says nothing. The rest are summed into "other", and requests carrying no such label into
-// the empty value, so the rows still add up to the total; grouped by category, a row counts
-// once in each of its categories.
-//
-// Reads the request rows rather than the rollups, so today's spend is there before a
-// rollup has run.
-func (s *Store) CustomerSpend(
-	ctx context.Context,
-	customerID, groupBy string,
-	granularity Granularity,
-	from, to time.Time,
-	limit int,
-	tags map[string]string,
-	who UsageFilter,
-) ([]SpendBucket, error) {
-	if !granularity.Valid() {
-		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", granularity))
-	}
-	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
-	}
-	if limit < 1 {
-		return nil, stack.Wrap(errors.New("store: limit must be at least 1"))
-	}
-	if tags == nil {
-		tags = map[string]string{}
-	}
-	filter, err := json.Marshal(tags)
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: customer spend: encode tag filter: %w", err))
-	}
-
-	acrossApps := who.OrganizationID != ""
-	valueExpr, join, known := spendGroups(groupBy, acrossApps)
-	args := []any{}
-	if !known {
-		valueExpr = "COALESCE(tags->>?, '')"
-		args = append(args, groupBy)
-	}
-	scope := "customer_id = ?"
-	args = append(args, customerID)
-	if acrossApps {
-		scope = "customer_id IN (?) AND organization_id = ?"
-		args[len(args)-1] = bun.In(append([]string{customerID}, who.Apps...))
-		args = append(args, who.OrganizationID)
-	}
-	args = append(args, from, to, string(filter))
-	narrowed, narrowing := who.where()
-	args = append(args, narrowing...)
-
-	// Each shard's groups unfolded, and the biggest picked over all of them: a group too small
-	// to keep in one shard may be the biggest once the others are added.
-	query := fmt.Sprintf(`
-SELECT
-    date_trunc('%s', started_at) AS bucket,
-    %s AS value,
-    COALESCE(SUM(cost_micros), 0) AS cost_micros_total,
-    %s AS request_count
-FROM requests%s
-WHERE %s
-  AND started_at >= ? AND started_at < ?
-  AND tags @> ?::jsonb%s
-GROUP BY 1, 2`, granularity.truncateUnit(), valueExpr, requestCount, join, scope, narrowed)
-
-	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]spendRow, error) {
-		var rows []spendRow
-		err := db.NewRaw(query, args...).Scan(ctx, &rows)
-		return rows, err
-	})
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: customer spend: %w", err))
-	}
-	return foldSpend(lists, limit), nil
-}
-
-// UsageFilter narrows usage to who asked for it: the key or origin it was started with, the end
-// user it was for, and categories every row carries, a team among them as team:<name>. The zero
-// filter narrows nothing.
-//
-// OrganizationID widens it instead, from the customer's own app to the rows of every app in
-// Apps that bill that organization; empty keeps it to the customer.
-type UsageFilter struct {
-	APIKey         string
-	UserID         string
-	Categories     []string
-	OrganizationID string
-	Apps           []string
-}
-
-// where is the filter as conditions on requests, each opening with AND, and their arguments.
-func (f UsageFilter) where() (string, []any) {
-	var conditions strings.Builder
-	var args []any
-	if f.APIKey != "" {
-		conditions.WriteString("\n  AND api_key = ?")
-		args = append(args, f.APIKey)
-	}
-	if f.UserID != "" {
-		conditions.WriteString("\n  AND user_id = ?")
-		args = append(args, f.UserID)
-	}
-	if len(f.Categories) > 0 {
-		conditions.WriteString("\n  AND usage_categories @> ?")
-		args = append(args, pgdialect.Array(f.Categories))
-	}
-	return conditions.String(), args
-}
-
-// tagValueRow is what one value of one cost label key was spent on.
-type tagValueRow struct {
-	Key             string `bun:"key"`
-	Value           string `bun:"value"`
-	CostMicrosTotal int64  `bun:"cost_micros_total"`
-	RequestCount    int64  `bun:"request_count"`
-}
-
-// topTagValues is how many values of a key come back with it. Enough to see what drives the
-// key's spend, few enough that a key naming an end customer does not return a database.
-const topTagValues = 10
-
-// CustomerTagKeys returns which cost label keys one customer's spend carries, biggest spend
-// first, each with its ten largest values.
-//
-// Cost labels are the customer's own, so nothing here knows in advance whether spend is
-// broken down by product, by environment or by the end customer it was incurred for. What
-// tells them apart is how many values a key was used with and how much of the traffic
-// carries it, which is what this reports.
-func (s *Store) CustomerTagKeys(
-	ctx context.Context,
-	customerID string,
-	from, to time.Time,
-	tags map[string]string,
-) ([]TagKeySummary, error) {
-	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
-	}
-	if tags == nil {
-		tags = map[string]string{}
-	}
-	filter, err := json.Marshal(tags)
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: customer tag keys: encode tag filter: %w", err))
-	}
-
-	// Coverage is measured against every request in the window, labelled or not, because a
-	// key on half the traffic breaks down half the bill and reading it as the whole of it
-	// is the mistake this number exists to prevent. Runtime is spend and not requests.
-	type shardTags struct {
-		rows, total int64
-		values      []tagValueRow
-	}
-	answers, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) (shardTags, error) {
-		var read shardTags
-		err := db.NewSelect().
-			Table("requests").
-			ColumnExpr("COUNT(*)").
-			ColumnExpr(requestCount).
-			Where("customer_id = ?", customerID).
-			Where("started_at >= ?", from).
-			Where("started_at < ?", to).
-			Where("tags @> ?::jsonb", string(filter)).
-			Scan(ctx, &read.rows, &read.total)
-		if err != nil || read.rows == 0 {
-			return read, err
-		}
-		err = db.NewSelect().Model((*Request)(nil)).
-			ColumnExpr("tag.key AS key, tag.value AS value").
-			ColumnExpr("SUM(r.cost_micros) AS cost_micros_total").
-			ColumnExpr(requestCount+" AS request_count").
-			Join("CROSS JOIN LATERAL jsonb_each_text(r.tags) AS tag(key, value)").
-			Where("r.customer_id = ?", customerID).
-			Where("r.started_at >= ? AND r.started_at < ?", from, to).
-			Where("r.tags @> ?::jsonb", string(filter)).
-			Group("tag.key", "tag.value").
-			Scan(ctx, &read.values)
-		return read, err
-	})
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: customer tag keys: %w", err))
-	}
-
-	var rows, total int64
-	type valueKey struct{ key, value string }
-	var order []valueKey
-	values := map[valueKey]*tagValueRow{}
-	for _, answer := range answers {
-		rows += answer.rows
-		total += answer.total
-		for _, row := range answer.values {
-			k := valueKey{row.Key, row.Value}
-			if values[k] == nil {
-				values[k] = &tagValueRow{Key: row.Key, Value: row.Value}
-				order = append(order, k)
-			}
-			values[k].CostMicrosTotal += row.CostMicrosTotal
-			values[k].RequestCount += row.RequestCount
-		}
-	}
-	if rows == 0 {
-		return nil, nil
-	}
-
-	byKey := map[string]*TagKeySummary{}
-	ranked := map[string][]tagValueRow{}
-	var keys []string
-	for _, k := range order {
-		row := *values[k]
-		summary := byKey[row.Key]
-		if summary == nil {
-			summary = &TagKeySummary{Key: row.Key}
-			byKey[row.Key] = summary
-			keys = append(keys, row.Key)
-		}
-		summary.ValueCount++
-		summary.CostMicrosTotal += row.CostMicrosTotal
-		summary.RequestCount += row.RequestCount
-		ranked[row.Key] = append(ranked[row.Key], row)
-	}
-	slices.SortFunc(keys, func(a, b string) int {
-		return cmp.Or(cmp.Compare(byKey[b].CostMicrosTotal, byKey[a].CostMicrosTotal),
-			cmp.Compare(byKey[b].RequestCount, byKey[a].RequestCount), strings.Compare(a, b))
-	})
-
-	var summaries []TagKeySummary
-	for _, name := range keys {
-		key := byKey[name]
-		if total > 0 {
-			key.Coverage = float64(key.RequestCount) / float64(total)
-		}
-		rows := ranked[name]
-		slices.SortFunc(rows, func(a, b tagValueRow) int {
-			return cmp.Or(cmp.Compare(b.CostMicrosTotal, a.CostMicrosTotal),
-				cmp.Compare(b.RequestCount, a.RequestCount), strings.Compare(a.Value, b.Value))
-		})
-		for _, row := range rows[:min(topTagValues, len(rows))] {
-			// A deployment with no prices configured records every row at zero, so a share of
-			// spend would be a division by nothing. Requests are what is left to rank by.
-			var share float64
-			switch {
-			case key.CostMicrosTotal > 0:
-				share = float64(row.CostMicrosTotal) / float64(key.CostMicrosTotal)
-			case key.RequestCount > 0:
-				share = float64(row.RequestCount) / float64(key.RequestCount)
-			}
-			key.TopValues = append(key.TopValues, TagValueSummary{
-				Value:           row.Value,
-				CostMicrosTotal: row.CostMicrosTotal,
-				RequestCount:    row.RequestCount,
-				Share:           share,
-			})
-		}
-		summaries = append(summaries, *key)
-	}
-	return summaries, nil
 }
 
 // CustomerActivity returns how much one customer's agents were used per bucket, oldest
 // first, and by how many distinct people.
 //
 // A bucket with nothing in it is left out rather than returned as zeroes, the same way the
-// stats paths leave out a bucket nobody used.
+// stats paths leave out a bucket nobody used. Calls and voice minutes count only the calls
+// rows of a call: a text session writes one per stretch too, with no call id.
 func (s *Store) CustomerActivity(
 	ctx context.Context,
 	customerID string,
@@ -1202,41 +285,48 @@ func (s *Store) CustomerActivity(
 		return nil, stack.Wrap(fmt.Errorf("store: unknown activity granularity %q", granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	unit := granularity.truncateUnit()
+	// A session carried on in another shard has a row in each. With several shards it is
+	// counted, and its person seen, by the row it began in, wherever the window starts: the
+	// rows that carry it on count nothing, and what was said in them is counted as messages.
+	originOnly := ""
+	if len(s.peers) > 0 {
+		originOnly = " AND NOT " + carriedIn("sess.id")
+	}
 	// Who was seen is read apart from the counts: a person is one person however many shards
 	// they talked to in a bucket, and a guest who signed up is the account they became, which
 	// the shared database knows rather than the shard.
 	people := fmt.Sprintf(`
 SELECT DISTINCT bucket, user_id FROM (
-    SELECT date_trunc('%[1]s', s.created_at) AS bucket, s.user_id, s.caller_kind
-    FROM agent_sessions AS s
-    WHERE s.customer_id = ? AND s.created_at >= ? AND s.created_at < ?
+    SELECT date_trunc('%[1]s', sess.created_at, 'UTC') AS bucket, sess.user_id, sess.caller_kind
+    FROM agent_sessions AS sess
+    WHERE sess.customer_id = ? AND sess.created_at >= ? AND sess.created_at < ?%[2]s
     UNION ALL
-    SELECT date_trunc('%[1]s', a.created_at) AS bucket, s.user_id, s.caller_kind
+    SELECT date_trunc('%[1]s', a.created_at, 'UTC') AS bucket, s.user_id, s.caller_kind
     FROM agent_responses AS a
-    JOIN agent_sessions AS s ON s.id = a.session_id
+    JOIN agent_sessions AS s ON s.customer_id = a.customer_id AND s.id = a.session_id
     WHERE a.customer_id = ? AND a.created_at >= ? AND a.created_at < ?
 ) AS seen
-WHERE user_id <> '' AND caller_kind <> 'anonymous'`, unit)
+WHERE user_id <> '' AND caller_kind <> 'anonymous'`, unit, originOnly)
 	query := fmt.Sprintf(`
 WITH session_counts AS (
-    SELECT date_trunc('%[1]s', created_at) AS bucket, COUNT(*) AS n
-    FROM agent_sessions
-    WHERE customer_id = ? AND created_at >= ? AND created_at < ?
+    SELECT date_trunc('%[1]s', created_at, 'UTC') AS bucket, COUNT(*) AS n
+    FROM agent_sessions AS sess
+    WHERE customer_id = ? AND created_at >= ? AND created_at < ?%[2]s
     GROUP BY bucket
 ),
 message_counts AS (
-    SELECT date_trunc('%[1]s', created_at) AS bucket, COUNT(*) AS n
+    SELECT date_trunc('%[1]s', created_at, 'UTC') AS bucket, COUNT(*) AS n
     FROM agent_responses
     WHERE customer_id = ? AND created_at >= ? AND created_at < ?
     GROUP BY bucket
 ),
 call_counts AS (
     SELECT
-        date_trunc('%[1]s', started_at) AS bucket,
+        date_trunc('%[1]s', started_at, 'UTC') AS bucket,
         COUNT(*) AS n,
         SUM(EXTRACT(EPOCH FROM (COALESCE(ended_at, now()) - started_at)))::double precision / 60
             AS voice_minutes,
@@ -1244,7 +334,7 @@ call_counts AS (
             FILTER (WHERE from_number IS NOT NULL OR to_number IS NOT NULL), 0)::double precision / 60
             AS phone_minutes
     FROM calls
-    WHERE customer_id = ? AND started_at >= ? AND started_at < ?
+    WHERE customer_id = ? AND started_at >= ? AND started_at < ? AND call_id <> ''
     GROUP BY bucket
 ),
 buckets AS (
@@ -1262,7 +352,7 @@ SELECT
 FROM buckets AS b
 LEFT JOIN session_counts AS s ON s.bucket = b.bucket
 LEFT JOIN message_counts AS m ON m.bucket = b.bucket
-LEFT JOIN call_counts AS c ON c.bucket = b.bucket`, unit)
+LEFT JOIN call_counts AS c ON c.bucket = b.bucket`, unit, originOnly)
 
 	type seenUser struct {
 		Bucket time.Time `bun:"bucket"`
@@ -1299,7 +389,7 @@ LEFT JOIN call_counts AS c ON c.bucket = b.bucket`, unit)
 	claimed := map[string]string{}
 	if len(ids) > 0 {
 		var guests []User
-		err := s.db.NewSelect().Model(&guests).Column("id", "claimed_by").
+		err := s.global.NewSelect().Model(&guests).Column("id", "claimed_by").
 			Where("customer_id = ?", customerID).
 			Where("kind = ?", UserKindGuest).
 			Where("claimed_by IS NOT NULL AND claimed_by <> ''").
@@ -1351,16 +441,34 @@ LEFT JOIN call_counts AS c ON c.bucket = b.bucket`, unit)
 	return buckets, nil
 }
 
+// answersAfterAnotherShard is the SQL condition, on a session id column, that the session has a
+// response here answered after one this shard does not hold: it was carried on here from
+// another shard, whose newest response a reopened session answers after (Responses.ActiveLeaf).
+func answersAfterAnotherShard(id string) string {
+	return fmt.Sprintf(`EXISTS (SELECT 1 FROM agent_responses AS carried
+    WHERE carried.session_id = %[1]s AND carried.parent_response_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM agent_responses AS parent WHERE parent.id = carried.parent_response_id))`, id)
+}
+
+// carriedIn is the SQL condition, on a session id column, that this shard's row only carries
+// the session on: its first turn, a response with no parent, is elsewhere. A carried row with
+// no response yet cannot be told from the one it began in.
+func carriedIn(id string) string {
+	return fmt.Sprintf(`(%[2]s AND NOT EXISTS (SELECT 1 FROM agent_responses AS began
+    WHERE began.session_id = %[1]s AND began.parent_response_id IS NULL))`, id, answersAfterAnotherShard(id))
+}
+
 // CustomerConcurrencyPeak returns the most sessions one customer had open at the same time
 // in a window. A session still open counts up to now, and one that closed at the instant
-// another opened did not overlap it.
+// another opened did not overlap it. A session carried on in another shard has a row in each,
+// and is one session while both are open.
 func (s *Store) CustomerConcurrencyPeak(ctx context.Context, customerID string, from, to time.Time) (ConcurrencyPeak, error) {
 	if customerID == "" {
-		return ConcurrencyPeak{}, stack.Wrap(errors.New("store: customer id is required"))
+		return ConcurrencyPeak{}, stack.Wrap(errCustomerRequired)
 	}
 
 	const spans = `
-SELECT GREATEST(created_at, ?0) AS opened, LEAST(COALESCE(closed_at, now()), ?1) AS closed
+SELECT id, GREATEST(created_at, ?0) AS opened, LEAST(COALESCE(closed_at, now()), ?1) AS closed
 FROM agent_sessions
 WHERE customer_id = ?2 AND created_at < ?1 AND (closed_at IS NULL OR closed_at > ?0)`
 	if len(s.peers) > 0 {
@@ -1393,10 +501,11 @@ SELECT sessions, at FROM running ORDER BY sessions DESC, at ASC LIMIT 1`,
 }
 
 // peakAcrossShards is CustomerConcurrencyPeak over sessions open in several shards at once,
-// which no one shard's query can see: it reads every shard's spans and walks their edges here,
-// in the order the query does.
+// which no one shard's query can see: it reads every shard's spans, joins the overlapping
+// spans of one session, and walks their edges here, in the order the query does.
 func (s *Store) peakAcrossShards(ctx context.Context, spans, customerID string, from, to time.Time) (ConcurrencyPeak, error) {
 	type span struct {
+		ID     string    `bun:"id"`
 		Opened time.Time `bun:"opened"`
 		Closed time.Time `bun:"closed"`
 	}
@@ -1412,13 +521,29 @@ func (s *Store) peakAcrossShards(ctx context.Context, spans, customerID string, 
 		at    time.Time
 		delta int64
 	}
-	var edges []edge
+	bySession := map[string][]span{}
 	for _, list := range lists {
 		for _, open := range list {
 			if open.Closed.After(open.Opened) {
-				edges = append(edges, edge{open.Opened, 1}, edge{open.Closed, -1})
+				bySession[open.ID] = append(bySession[open.ID], open)
 			}
 		}
+	}
+	var edges []edge
+	for _, sessionSpans := range bySession {
+		slices.SortFunc(sessionSpans, func(a, b span) int { return a.Opened.Compare(b.Opened) })
+		joined := sessionSpans[0]
+		for _, next := range sessionSpans[1:] {
+			if next.Opened.After(joined.Closed) {
+				edges = append(edges, edge{joined.Opened, 1}, edge{joined.Closed, -1})
+				joined = next
+				continue
+			}
+			if next.Closed.After(joined.Closed) {
+				joined.Closed = next.Closed
+			}
+		}
+		edges = append(edges, edge{joined.Opened, 1}, edge{joined.Closed, -1})
 	}
 	slices.SortFunc(edges, func(a, b edge) int {
 		return cmp.Or(a.at.Compare(b.at), cmp.Compare(a.delta, b.delta))
@@ -1440,11 +565,11 @@ func (s *Store) peakAcrossShards(ctx context.Context, spans, customerID string, 
 // sessions of that agent config, and empty is every one. A web search the agent made has no
 // result item, so it is not a tool call here.
 //
-// A turn is a top-level response that was not rewound, and a call made in a delegated task
-// belongs to the turn that delegated it.
+// A turn is a response that was not rewound. Work a turn delegated is recorded on that turn's
+// response when it comes back while the turn is open, and as a turn of its own after.
 func (s *Store) CustomerToolUsage(ctx context.Context, customerID, configID string, from, to time.Time) (ToolUsage, []ToolUsage, error) {
 	if customerID == "" {
-		return ToolUsage{}, nil, stack.Wrap(errors.New("store: customer id is required"))
+		return ToolUsage{}, nil, stack.Wrap(errCustomerRequired)
 	}
 
 	type usageRow struct {
@@ -1462,24 +587,58 @@ func (s *Store) CustomerToolUsage(ctx context.Context, customerID, configID stri
 		Loading           string     `bun:"loading"`
 		DefinitionTokens  *int64     `bun:"definition_tokens"`
 		SummaryTokens     *int64     `bun:"summary_tokens"`
+		SessionHashes     []int64    `bun:"session_hashes,array"`
+		// The sessions' first uses of the tool, one entry per session in each, with several
+		// shards (firstUse).
+		FirstHashes   []int64     `bun:"first_hashes,array"`
+		FirstBefores  []int64     `bun:"first_befores,array"`
+		FirstAts      []time.Time `bun:"first_ats,array"`
+		FirstTurns    []string    `bun:"first_turns,array"`
+		FirstCarriers []string    `bun:"first_carriers,array"`
+	}
+	// A session carried on in another shard has turns in each. With several shards its sessions
+	// are counted from a hash of their ids once every shard has answered, and each session's
+	// first use of a tool comes back on its own to be numbered across shards
+	// (turnsBeforeFirstUse).
+	sharded := len(s.peers) > 0
+	sessionHashes, firstUses, carriers, carriedJoin := "NULL::bigint[]", `
+    NULL::bigint[] AS first_hashes, NULL::bigint[] AS first_befores,
+    NULL::timestamptz[] AS first_ats, NULL::text[] AS first_turns, NULL::text[] AS first_carriers`, "", ""
+	if sharded {
+		sessionHashes = "array_agg(DISTINCT hashtextextended(ran.session_id, 0))"
+		firstUses = `
+    array_agg(hashtextextended(u.session_id, 0) ORDER BY u.session_id) AS first_hashes,
+    array_agg(u.before ORDER BY u.session_id) AS first_befores,
+    array_agg(u.turn_at ORDER BY u.session_id) AS first_ats,
+    array_agg(u.turn_id ORDER BY u.session_id) AS first_turns,
+    array_agg(CASE WHEN c.session_id IS NULL THEN '' ELSE u.session_id END ORDER BY u.session_id) AS first_carriers`
+		carriers = `
+carriers AS (
+    SELECT DISTINCT session_id FROM first_use WHERE ` + answersAfterAnotherShard("first_use.session_id") + `
+),`
+		carriedJoin = "\n    LEFT JOIN carriers AS c ON c.session_id = u.session_id"
 	}
 	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]usageRow, error) {
 		var rows []usageRow
+		// Turns are ordered by id as bytes after their time, as Go compares them across shards.
 		err := db.NewRaw(`
 WITH turns AS (
     SELECT
         a.id,
-        ROW_NUMBER() OVER (PARTITION BY a.session_id ORDER BY a.created_at, a.id) - 1 AS before
+        a.created_at,
+        ROW_NUMBER() OVER (PARTITION BY a.session_id ORDER BY a.created_at, a.id COLLATE "C") - 1 AS before
     FROM agent_responses AS a
-    JOIN agent_sessions AS s ON s.id = a.session_id
+    JOIN agent_sessions AS s ON s.customer_id = a.customer_id AND s.id = a.session_id
     WHERE a.customer_id = ?3 AND (?6 = '' OR s.config_id = ?6) AND a.created_at < ?5
-        AND a.parent_response_id IS NULL AND a.rewound_at IS NULL
+        AND a.rewound_at IS NULL
 ),
 ran AS (
     SELECT
         r.tool_name AS tool,
         a.session_id,
         t.before,
+        t.created_at AS turn_at,
+        t.id AS turn_id,
         r.at,
         r.payload->>'error' IS NOT NULL AS failed,
         COALESCE((r.payload->>'tokens')::double precision,
@@ -1490,9 +649,9 @@ ran AS (
         (started.payload->>'definition_tokens')::bigint AS definition_tokens,
         (started.payload->>'summary_tokens')::bigint AS summary_tokens
     FROM agent_responses AS a
-    JOIN agent_sessions AS s ON s.id = a.session_id
+    JOIN agent_sessions AS s ON s.customer_id = a.customer_id AND s.id = a.session_id
     JOIN agent_response_items AS r ON r.response_id = a.id AND r.kind = ?1
-    LEFT JOIN turns AS t ON t.id = COALESCE(a.parent_response_id, a.id)
+    LEFT JOIN turns AS t ON t.id = a.id
     LEFT JOIN LATERAL (
         SELECT c.at, c.payload FROM agent_response_items AS c
         WHERE c.response_id = r.response_id AND c.kind = ?2 AND c.tool_name = r.tool_name
@@ -1503,10 +662,18 @@ ran AS (
     WHERE a.customer_id = ?3 AND (?6 = '' OR s.config_id = ?6) AND a.created_at < ?5
         AND r.at >= ?4 AND r.at < ?5
 ),
+first_use AS (
+    SELECT DISTINCT ON (tool, session_id) tool, session_id, before, turn_at, turn_id
+    FROM ran WHERE before IS NOT NULL
+    ORDER BY tool, session_id, before
+),`+carriers+`
 firsts AS (
-    SELECT tool, COUNT(*) AS firsts, AVG(before)::double precision AS avg_turns_before_use
-    FROM (SELECT tool, MIN(before) AS before FROM ran WHERE before IS NOT NULL GROUP BY tool, session_id) AS first
-    GROUP BY tool
+    SELECT
+        u.tool,
+        COUNT(*) AS firsts,
+        AVG(u.before)::double precision AS avg_turns_before_use,`+firstUses+`
+    FROM first_use AS u`+carriedJoin+`
+    GROUP BY u.tool
 ),
 offered AS (
     SELECT DISTINCT ON (tool) tool, at, loading, definition_tokens, summary_tokens
@@ -1519,8 +686,10 @@ SELECT
     COUNT(*) AS calls,
     COUNT(*) FILTER (WHERE failed) AS failed,
     COUNT(DISTINCT ran.session_id) AS sessions,
+    `+sessionHashes+` AS session_hashes,
     COALESCE(f.firsts, 0) AS firsts,
     f.avg_turns_before_use,
+    f.first_hashes, f.first_befores, f.first_ats, f.first_turns, f.first_carriers,
     COALESCE(AVG(tokens), 0)::double precision AS avg_tokens,
     AVG(ms)::double precision AS avg_ms,
     percentile_cont(0.99) WITHIN GROUP (ORDER BY ms) AS p99_ms,
@@ -1532,7 +701,9 @@ FROM ran
 LEFT JOIN firsts AS f ON f.tool = ran.tool
 LEFT JOIN offered AS o ON o.tool = ran.tool
 GROUP BY GROUPING SETS (
-    (ran.tool, f.firsts, f.avg_turns_before_use, o.at, o.loading, o.definition_tokens, o.summary_tokens),
+    (ran.tool, f.firsts, f.avg_turns_before_use,
+        f.first_hashes, f.first_befores, f.first_ats, f.first_turns, f.first_carriers,
+        o.at, o.loading, o.definition_tokens, o.summary_tokens),
     ())
 ORDER BY overall DESC, calls DESC, tool ASC`,
 			charsPerToken, ItemToolResult, ItemToolCall, customerID, from, to, configID,
@@ -1541,6 +712,21 @@ ORDER BY overall DESC, calls DESC, tool ASC`,
 	})
 	if err != nil {
 		return ToolUsage{}, nil, stack.Wrap(fmt.Errorf("store: tool usage: %w", err))
+	}
+	var crossShardBefore map[string]*float64
+	if sharded {
+		var uses []firstUse
+		for _, rows := range lists {
+			for _, row := range rows {
+				for i, hash := range row.FirstHashes {
+					uses = append(uses, firstUse{Tool: row.Tool, Session: hash, Before: row.FirstBefores[i],
+						At: row.FirstAts[i], Turn: row.FirstTurns[i], Carrier: row.FirstCarriers[i]})
+				}
+			}
+		}
+		if crossShardBefore, err = s.turnsBeforeFirstUse(ctx, customerID, uses); err != nil {
+			return ToolUsage{}, nil, err
+		}
 	}
 
 	// Averages and the 99th percentile of several shards are each weighted by the calls behind
@@ -1553,6 +739,7 @@ ORDER BY overall DESC, calls DESC, tool ASC`,
 	sums := map[usageKey]*ToolUsage{}
 	tokens, ms, p99s, calls := map[usageKey][]*float64{}, map[usageKey][]*float64{}, map[usageKey][]*float64{}, map[usageKey][]int64{}
 	befores, firsts := map[usageKey][]*float64{}, map[usageKey][]int64{}
+	sessions := map[usageKey]map[int64]bool{}
 	// The definition is the latest call's on any shard: a tool's description can change.
 	offeredAt := map[usageKey]time.Time{}
 	for _, rows := range lists {
@@ -1564,7 +751,17 @@ ORDER BY overall DESC, calls DESC, tool ASC`,
 			}
 			sums[k].Calls += row.Calls
 			sums[k].Failed += row.Failed
-			sums[k].Sessions += row.Sessions
+			if sharded {
+				if sessions[k] == nil {
+					sessions[k] = map[int64]bool{}
+				}
+				for _, hash := range row.SessionHashes {
+					sessions[k][hash] = true
+				}
+				sums[k].Sessions = int64(len(sessions[k]))
+			} else {
+				sums[k].Sessions += row.Sessions
+			}
 			avgTokens := row.AvgTokens
 			tokens[k] = append(tokens[k], &avgTokens)
 			ms[k] = append(ms[k], row.AvgMs)
@@ -1586,7 +783,14 @@ ORDER BY overall DESC, calls DESC, tool ASC`,
 			usage.AvgTokens = *avg
 		}
 		usage.AvgMs, usage.P99Ms = weighted(ms[k], calls[k]), weighted(p99s[k], calls[k])
-		usage.AvgTurnsBeforeUse = weighted(befores[k], firsts[k])
+		switch {
+		case !sharded:
+			usage.AvgTurnsBeforeUse = weighted(befores[k], firsts[k])
+		case !k.overall:
+			usage.AvgTurnsBeforeUse = crossShardBefore[k.tool]
+		default:
+			usage.AvgTurnsBeforeUse = nil
+		}
 		if len(lists) == 1 {
 			usage.AvgMs, usage.P99Ms = ms[k][0], p99s[k][0]
 		}
@@ -1602,21 +806,125 @@ ORDER BY overall DESC, calls DESC, tool ASC`,
 	return overall, tools, nil
 }
 
+// firstUse is the turn in which one session first used one tool, as one shard saw it: its
+// session's hash, the turns before it on that shard, and the turn's time and id. Carrier is the
+// session's id when the session was carried on to that shard from another, whose turns this
+// shard cannot count, and empty otherwise.
+type firstUse struct {
+	Tool    string
+	Session int64
+	Before  int64
+	At      time.Time
+	Turn    string
+	Carrier string
+}
+
+// earlierTurn orders turns as the tool usage query does: by time, then by id as bytes.
+func earlierTurn(a, b firstUse) bool {
+	return a.At.Before(b.At) || (a.At.Equal(b.At) && a.Turn < b.Turn)
+}
+
+// turnsBeforeFirstUse averages, per tool, how many turns each session took before it first
+// used the tool, across every shard. A session's first use is the earliest any shard saw. Where
+// that shard holds all the session's turns before it, its own count is the answer; where the
+// session was carried on to it, every shard counts that session's turns before the use, which
+// keeps what is sent to the shards to the carried sessions.
+//
+// A turn in another shard counts whatever the window's agent config: it is the same session's.
+func (s *Store) turnsBeforeFirstUse(ctx context.Context, customerID string, uses []firstUse) (map[string]*float64, error) {
+	type toolSession struct {
+		tool    string
+		session int64
+	}
+	earliest := map[toolSession]firstUse{}
+	for _, use := range uses {
+		key := toolSession{use.Tool, use.Session}
+		if held, seen := earliest[key]; !seen || earlierTurn(use, held) {
+			earliest[key] = use
+		}
+	}
+	type turn struct{ session, id string }
+	var sessionIDs, turnIDs []string
+	var ats []time.Time
+	asked := map[turn]bool{}
+	for _, use := range earliest {
+		if t := (turn{use.Carrier, use.Turn}); use.Carrier != "" && !asked[t] {
+			asked[t] = true
+			sessionIDs, turnIDs, ats = append(sessionIDs, t.session), append(turnIDs, t.id), append(ats, use.At)
+		}
+	}
+	before := map[turn]int64{}
+	if len(asked) > 0 {
+		type earlier struct {
+			SessionID string `bun:"session_id"`
+			TurnID    string `bun:"turn_id"`
+			Before    int64  `bun:"before"`
+		}
+		counts, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]earlier, error) {
+			var read []earlier
+			err := db.NewRaw(`
+SELECT x.session_id, x.turn_id, COUNT(*) AS before
+FROM unnest(?::text[], ?::text[], ?::timestamptz[]) AS x(session_id, turn_id, at)
+JOIN agent_responses AS a ON a.session_id = x.session_id AND a.customer_id = ?
+    AND a.rewound_at IS NULL
+    AND (a.created_at < x.at OR (a.created_at = x.at AND a.id COLLATE "C" < x.turn_id COLLATE "C"))
+GROUP BY x.session_id, x.turn_id`,
+				pgdialect.Array(sessionIDs), pgdialect.Array(turnIDs), pgdialect.Array(ats), customerID,
+			).Scan(ctx, &read)
+			return read, err
+		})
+		if err != nil {
+			return nil, stack.Wrap(fmt.Errorf("store: tool usage: turns before first use: %w", err))
+		}
+		for _, list := range counts {
+			for _, row := range list {
+				before[turn{row.SessionID, row.TurnID}] += row.Before
+			}
+		}
+	}
+	sums, sessions := map[string]int64{}, map[string]int64{}
+	for key, use := range earliest {
+		if use.Carrier != "" {
+			sums[key.tool] += before[turn{use.Carrier, use.Turn}]
+		} else {
+			sums[key.tool] += use.Before
+		}
+		sessions[key.tool]++
+	}
+	averages := make(map[string]*float64, len(sums))
+	for tool, n := range sessions {
+		avg := float64(sums[tool]) / float64(n)
+		averages[tool] = &avg
+	}
+	return averages, nil
+}
+
 // CustomerTurns counts the sessions one customer's agents took a turn in during a window,
-// and those turns, as CustomerToolUsage counts a turn. A configID keeps to the sessions of
-// that agent config, and empty is every one.
+// and those turns: every response that was not rewound, as CustomerToolUsage counts a turn.
+// A configID keeps to the sessions of that agent config, and empty is every one.
 func (s *Store) CustomerTurns(ctx context.Context, customerID, configID string, from, to time.Time) (SessionTurns, error) {
 	if customerID == "" {
-		return SessionTurns{}, stack.Wrap(errors.New("store: customer id is required"))
+		return SessionTurns{}, stack.Wrap(errCustomerRequired)
 	}
-	counts, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) (SessionTurns, error) {
-		var counts SessionTurns
+	type shardTurns struct {
+		SessionTurns
+		SessionHashes []int64 `bun:"session_hashes,array"`
+	}
+	// A session carried on in another shard has turns in each, so with several shards the
+	// sessions are counted from a hash of their ids once every shard has answered.
+	sessionHashes := "NULL::bigint[]"
+	if len(s.peers) > 0 {
+		sessionHashes = "array_agg(DISTINCT hashtextextended(ars.session_id, 0))"
+	}
+	counts, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) (shardTurns, error) {
+		var counts shardTurns
 		q := db.NewSelect().Model((*AgentResponse)(nil)).
 			ColumnExpr("COUNT(DISTINCT ars.session_id) AS sessions, COUNT(*) AS turns").
-			Join("JOIN agent_sessions AS asn ON asn.id = ars.session_id").
+			ColumnExpr(sessionHashes+" AS session_hashes").
+			Join("JOIN agent_sessions AS asn ON asn.customer_id = ars.customer_id AND asn.id = ars.session_id").
 			Where("ars.customer_id = ?", customerID).
 			Where("ars.created_at >= ? AND ars.created_at < ?", from, to).
-			Where("ars.parent_response_id IS NULL AND ars.rewound_at IS NULL")
+			Where("ars.rewound_at IS NULL")
 		if configID != "" {
 			q.Where("asn.config_id = ?", configID)
 		}
@@ -1627,380 +935,22 @@ func (s *Store) CustomerTurns(ctx context.Context, customerID, configID string, 
 		return SessionTurns{}, stack.Wrap(fmt.Errorf("store: turns: %w", err))
 	}
 	var total SessionTurns
+	sessions := map[int64]bool{}
 	for _, shard := range counts {
 		total.Sessions += shard.Sessions
 		total.Turns += shard.Turns
+		for _, hash := range shard.SessionHashes {
+			sessions[hash] = true
+		}
+	}
+	if len(s.peers) > 0 {
+		total.Sessions = int64(len(sessions))
 	}
 	return total, nil
 }
 
 // charsPerToken is the rule of thumb llm.Compose estimates tool use with.
 const charsPerToken = 4
-
-// ModelRequests returns how many requests each "provider/model" served for a modality
-// since a time, across every customer. It is what makes a model popular, so it counts
-// calls rather than spend, and is read from the raw requests so it needs no rollup.
-func (s *Store) ModelRequests(ctx context.Context, modality string, since time.Time) (map[string]int64, error) {
-	if modality == "" {
-		return nil, stack.Wrap(errors.New("store: modality is required"))
-	}
-
-	type modelRow struct {
-		Provider string `bun:"provider"`
-		Model    string `bun:"model"`
-		Requests int64  `bun:"requests"`
-	}
-	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]modelRow, error) {
-		var rows []modelRow
-		err := db.NewSelect().
-			Table("requests").
-			Column("provider", "model").
-			ColumnExpr("COUNT(*) AS requests").
-			Where("modality = ?", modality).
-			Where("started_at >= ?", since).
-			Group("provider", "model").
-			Scan(ctx, &rows)
-		return rows, err
-	})
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: model requests: %w", err))
-	}
-
-	counts := map[string]int64{}
-	for _, rows := range lists {
-		for _, row := range rows {
-			counts[row.Provider+"/"+row.Model] += row.Requests
-		}
-	}
-	return counts, nil
-}
-
-// RecordNumber stores a number a customer now holds.
-func (s *Store) RecordNumber(ctx context.Context, number *PhoneNumber) error {
-	if !IsE164(number.E164) {
-		return stack.Wrap(fmt.Errorf("%w: %q", ErrNotE164, number.E164))
-	}
-	if number.Vendor == "" {
-		return stack.Wrap(errors.New("store: vendor is required"))
-	}
-	if number.CustomerID == "" {
-		return stack.Wrap(errors.New("store: customer id is required"))
-	}
-	if number.PurchasedAt.IsZero() {
-		number.PurchasedAt = time.Now().UTC()
-	}
-	// A vendor that says nothing about what a number carries is not the same as a null
-	// column, and the array is not nullable.
-	if number.Capabilities == nil {
-		number.Capabilities = []string{}
-	}
-
-	if _, err := s.db.NewInsert().Model(number).Exec(ctx); err != nil {
-		return stack.Wrap(fmt.Errorf("store: record number: %w", err))
-	}
-	return nil
-}
-
-// ReleaseNumber marks a number as given back. The row stays, because what it cost while
-// it was held is still part of that month's bill.
-func (s *Store) ReleaseNumber(ctx context.Context, customerID, e164 string, at time.Time) error {
-	if customerID == "" || e164 == "" {
-		return stack.Wrap(errors.New("store: a customer and a number are required"))
-	}
-	return releaseNumber(ctx, s.db, customerID, e164, at)
-}
-
-// releaseNumber marks a number as given back, in db.
-func releaseNumber(ctx context.Context, db bun.IDB, customerID, e164 string, at time.Time) error {
-	if at.IsZero() {
-		at = time.Now().UTC()
-	}
-
-	result, err := db.NewUpdate().Model((*PhoneNumber)(nil)).
-		Set("released_at = ?", at).
-		Set("attached_at = NULL").
-		Set("config_id = NULL").
-		Set("sip_trunk_id = NULL").
-		Set("bridge_uri = NULL").
-		Set("bridge_username = NULL").
-		Set("bridge_password_sealed = NULL").
-		Set("bridge_password_kek_version = NULL").
-		Where("customer_id = ?", customerID).
-		Where("e164 = ?", e164).
-		Where("released_at IS NULL").
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: release number: %w", err))
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: release number: %w", err))
-	}
-	if affected == 0 {
-		return stack.Wrap(fmt.Errorf("store: %s is not a number %s holds", e164, customerID))
-	}
-	return nil
-}
-
-// AttachNumber records which SIP trunk calls to a number arrive on and which Stream call
-// they land in.
-//
-// The call is recorded as well as the trunk because an inbound call arrives over a webhook
-// that names the call, so without it there is nothing to attribute the call to.
-func (s *Store) AttachNumber(ctx context.Context, customerID, e164 string, attached NumberAttachment) error {
-	if customerID == "" || e164 == "" {
-		return stack.Wrap(errors.New("store: a customer and a number are required"))
-	}
-	if attached.TrunkID == "" {
-		return stack.Wrap(errors.New("store: a trunk id is required"))
-	}
-
-	update := s.db.NewUpdate().Model((*PhoneNumber)(nil))
-	if attached.ConfigID != "" {
-		update.Set("config_id = ?", attached.ConfigID)
-	}
-	result, err := update.
-		Set("stream_trunk_id = ?", attached.TrunkID).
-		Set("stream_route_id = ?", nullable(attached.RouteID)).
-		Set("stream_app_pk = ?", nullablePin(attached.StreamAppPK)).
-		Set("stream_call_id = ?", attached.CallID).
-		Set("stream_call_type = ?", attached.CallType).
-		Set("bridge_uri = ?", nullable(attached.BridgeURI)).
-		Set("bridge_username = ?", nullable(attached.BridgeUsername)).
-		Set("bridge_password_sealed = ?", nullableBytes(attached.BridgePasswordSealed)).
-		Set("bridge_password_kek_version = ?", nullableVersion(attached.BridgePasswordKEKVersion)).
-		Set("attached_at = now()").
-		Where("customer_id = ?", customerID).
-		Where("e164 = ?", e164).
-		Where("released_at IS NULL").
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: attach number: %w", err))
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: attach number: %w", err))
-	}
-	if affected == 0 {
-		return stack.Wrap(fmt.Errorf("store: %s is not a number %s holds", e164, customerID))
-	}
-	return nil
-}
-
-// NumberAttachment is what attaching a number made in Stream, and where its calls go.
-type NumberAttachment struct {
-	TrunkID string
-	RouteID string
-	// StreamAppPK is the app the trunk and route were made in, zero for the deployment's.
-	StreamAppPK int64
-	CallType    string
-	CallID      string
-	// ConfigID is the agent the number keeps answering with. Empty leaves its agent as it is.
-	ConfigID string
-	// BridgeURI and BridgeUsername are the trunk's address, kept whenever a number is attached.
-	// The sealed password is empty for a service with no key to seal it under.
-	BridgeURI                string
-	BridgeUsername           string
-	BridgePasswordSealed     []byte
-	BridgePasswordKEKVersion int
-}
-
-// AttachedBridge is the Stream trunk an attached number's calls go to, with its password
-// still sealed.
-type AttachedBridge struct {
-	CustomerID     string
-	URI            string
-	Username       string
-	PasswordSealed []byte
-	KEKVersion     int
-}
-
-// ErrNoStoredBridge is AttachedBridge's error for a number that is attached but whose trunk
-// credentials were not kept: it was attached before they were, or arrived by a data move,
-// which leaves the password behind. Attaching it again keeps them.
-var ErrNoStoredBridge = errors.New("store: the number's trunk credentials were not kept")
-
-// AttachedBridge returns the trunk calls to a number of the vendor go to. It matches
-// ErrNoNumber when nobody holds the number at that vendor or it is not attached, and
-// ErrNoStoredBridge when it was attached without its credentials kept.
-func (s *Store) AttachedBridge(ctx context.Context, vendor, e164 string) (AttachedBridge, error) {
-	if vendor == "" || e164 == "" {
-		return AttachedBridge{}, stack.Wrap(errors.New("store: a vendor and a number are required"))
-	}
-
-	var number PhoneNumber
-	err := s.db.NewSelect().Model(&number).
-		Where("vendor = ?", vendor).
-		Where("e164 = ?", e164).
-		Where("released_at IS NULL").
-		Where("attached_at IS NOT NULL").
-		Limit(1).
-		Scan(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
-		return AttachedBridge{}, stack.Wrap(numberNotHeld{fmt.Sprintf("store: %s is not an attached %s number", e164, vendor)})
-	}
-	if err != nil {
-		return AttachedBridge{}, stack.Wrap(fmt.Errorf("store: attached bridge: %w", err))
-	}
-	if number.BridgeURI == "" || len(number.BridgePasswordSealed) == 0 {
-		return AttachedBridge{}, stack.Wrap(fmt.Errorf("%w: %s", ErrNoStoredBridge, e164))
-	}
-	return AttachedBridge{
-		CustomerID:     number.CustomerID,
-		URI:            number.BridgeURI,
-		Username:       number.BridgeUsername,
-		PasswordSealed: number.BridgePasswordSealed,
-		KEKVersion:     number.BridgePasswordKEKVersion,
-	}, nil
-}
-
-func nullableBytes(value []byte) any {
-	if len(value) == 0 {
-		return nil
-	}
-	return value
-}
-
-func nullableVersion(version int) any {
-	if version == 0 {
-		return nil
-	}
-	return version
-}
-
-// nullablePin stores the deployment's own app as NULL, as every pin written before apps
-// had identities reads.
-func nullablePin(app int64) any {
-	if app == 0 {
-		return nil
-	}
-	return app
-}
-
-// CustomerNumbers returns the numbers a customer holds, newest first. Released numbers
-// are left out unless asked for, since what is normally wanted is what can be called.
-func (s *Store) CustomerNumbers(ctx context.Context, customerID string, includeReleased bool) ([]PhoneNumber, error) {
-	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
-	}
-
-	query := s.db.NewSelect().Model((*PhoneNumber)(nil)).
-		Where("customer_id = ?", customerID).
-		Order("purchased_at DESC")
-	if !includeReleased {
-		query = query.Where("released_at IS NULL")
-	}
-
-	var numbers []PhoneNumber
-	if err := query.Scan(ctx, &numbers); err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: customer numbers: %w", err))
-	}
-	return numbers, nil
-}
-
-// Number returns one number a customer holds.
-func (s *Store) Number(ctx context.Context, customerID, e164 string) (PhoneNumber, error) {
-	if customerID == "" || e164 == "" {
-		return PhoneNumber{}, stack.Wrap(errors.New("store: a customer and a number are required"))
-	}
-	return heldNumber(ctx, s.db.NewSelect(), customerID, e164)
-}
-
-// SetNumberAgent makes a config answer an attached number's calls, replacing any it had.
-func (s *Store) SetNumberAgent(ctx context.Context, customerID, e164, configID string) error {
-	if customerID == "" || e164 == "" || configID == "" {
-		return stack.Wrap(errors.New("store: a customer, a number and a config are required"))
-	}
-	// Only an attached number has an agent, and a detach can land between the caller's
-	// read and this write.
-	result, err := s.db.NewUpdate().Model((*PhoneNumber)(nil)).
-		Set("config_id = ?", configID).
-		Where("customer_id = ?", customerID).
-		Where("e164 = ?", e164).
-		Where("released_at IS NULL").
-		Where("attached_at IS NOT NULL").
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: set number agent: %w", err))
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: set number agent: %w", err))
-	}
-	if affected == 0 {
-		return stack.Wrap(numberNotHeld{fmt.Sprintf("store: %s is not a number %s holds attached", e164, customerID)})
-	}
-	return nil
-}
-
-// ClearNumberAgent sends a number's calls back to dispatch. A number with no agent is left
-// as it is.
-func (s *Store) ClearNumberAgent(ctx context.Context, customerID, e164 string) error {
-	if customerID == "" || e164 == "" {
-		return stack.Wrap(errors.New("store: a customer and a number are required"))
-	}
-	result, err := s.db.NewUpdate().Model((*PhoneNumber)(nil)).
-		Set("config_id = NULL").
-		Where("customer_id = ?", customerID).
-		Where("e164 = ?", e164).
-		Where("released_at IS NULL").
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: clear number agent: %w", err))
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: clear number agent: %w", err))
-	}
-	if affected == 0 {
-		return stack.Wrap(numberNotHeld{fmt.Sprintf("store: %s is not a number %s holds", e164, customerID)})
-	}
-	return nil
-}
-
-// NumbersAnsweredBy returns the numbers a config answers, sorted.
-func (s *Store) NumbersAnsweredBy(ctx context.Context, customerID, configID string) ([]string, error) {
-	if customerID == "" || configID == "" {
-		return nil, stack.Wrap(errors.New("store: a customer and a config are required"))
-	}
-	var numbers []string
-	err := s.db.NewSelect().Model((*PhoneNumber)(nil)).
-		Column("e164").
-		Where("customer_id = ?", customerID).
-		Where("config_id = ?", configID).
-		Where("released_at IS NULL").
-		// A router from before agents on numbers detaches without clearing the agent.
-		Where("attached_at IS NOT NULL").
-		Order("e164").
-		Scan(ctx, &numbers)
-	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: numbers answered by: %w", err))
-	}
-	return numbers, nil
-}
-
-// heldNumber is one number a customer holds, read by query.
-func heldNumber(ctx context.Context, query *bun.SelectQuery, customerID, e164 string) (PhoneNumber, error) {
-	// Nobody holds a number written another way, and the vendor may read it as one somebody
-	// else holds.
-	if !IsE164(e164) {
-		return PhoneNumber{}, stack.Wrap(numberNotHeld{fmt.Sprintf("store: %s is not a number %s holds", e164, customerID)})
-	}
-	var number PhoneNumber
-	err := query.Model(&number).
-		Where("customer_id = ?", customerID).
-		Where("e164 = ?", e164).
-		Where("released_at IS NULL").
-		Limit(1).
-		Scan(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
-		return PhoneNumber{}, stack.Wrap(numberNotHeld{fmt.Sprintf("store: %s is not a number %s holds", e164, customerID)})
-	}
-	if err != nil {
-		return PhoneNumber{}, stack.Wrap(fmt.Errorf("store: number: %w", err))
-	}
-	return number, nil
-}
 
 // newID is the handle a caller holds a row by. It is random rather than sequential because
 // it is the only thing standing between two customers who both guessed at an id.
@@ -2022,9 +972,32 @@ func lockUntilCommit(ctx context.Context, tx bun.IDB, key string, seed int64) er
 	return err
 }
 
-// databaseNow is the database's clock, which routers whose clocks disagree still share.
-func databaseNow(ctx context.Context, db bun.IDB) (time.Time, error) {
+// transactionStart is when db's transaction started, by the database's clock, which routers
+// whose clocks disagree still share. It is not when it is asked: every call in one transaction
+// gets the same answer, and outside a transaction it is when the statement started.
+func transactionStart(ctx context.Context, db bun.IDB) (time.Time, error) {
 	var now time.Time
 	err := db.QueryRowContext(ctx, "SELECT now()").Scan(&now)
 	return now, err
+}
+
+// RecordedUsage is which of the usage ids any shard holds a row for: work billed before, which
+// is not billed again.
+func (s *Store) RecordedUsage(ctx context.Context, usageIDs []uuid.UUID) (map[uuid.UUID]bool, error) {
+	recorded := make(map[uuid.UUID]bool, len(usageIDs))
+	for batch := range slices.Chunk(usageIDs, 1000) {
+		lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]uuid.UUID, error) {
+			var found []uuid.UUID
+			err := db.NewSelect().Model((*Request)(nil)).Column("usage_id").
+				Where("usage_id IN (?)", bun.In(batch)).Scan(ctx, &found)
+			return found, err
+		})
+		if err != nil {
+			return nil, stack.Wrap(fmt.Errorf("store: recorded usage: %w", err))
+		}
+		for _, id := range slices.Concat(lists...) {
+			recorded[id] = true
+		}
+	}
+	return recorded, nil
 }

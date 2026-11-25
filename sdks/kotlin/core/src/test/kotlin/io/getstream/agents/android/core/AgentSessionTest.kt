@@ -90,6 +90,7 @@ class AgentSessionTest {
         assertEquals("jwt", handshake.header("Stream-Auth-Type"))
         assertEquals("acme", handshake.header("X-Customer-Id"))
         assertEquals("jlahey", handshake.header("X-Stream-User-Id"))
+        assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", handshake.header("X-Stream-Client"))
         assertEquals(mapOf("decisions" to listOf("false")), handshake.query)
         assertTrue(chat.isConnected.value)
         chat.close()
@@ -244,6 +245,51 @@ class AgentSessionTest {
         val answer = Json.parseToJsonElement(router.nextSent()).jsonObject
         assertEquals(JsonPrimitive("the orders database is down"), answer["error"])
         assertEquals(JsonPrimitive(""), answer["output"])
+        chat.close()
+    }
+
+    @Test
+    fun `a tool's long failure is cut to 1 KiB before the model is told it`() = runBlocking {
+        val broken = AgentTool("lookup_order", "Look up an order.") { error("x".repeat(5000)) }
+        val chat = agents.chat(SessionOptions(tools = listOf(broken)))
+
+        router.script.send(Script.Send("""{"type":"tool_call","id":"c1","name":"lookup_order","arguments":"","request_id":"","turn_id":""}"""))
+
+        val answer = Json.parseToJsonElement(router.nextSent()).jsonObject
+        assertEquals(JsonPrimitive("x".repeat(1024) + "…"), answer["error"])
+        chat.close()
+    }
+
+    @Test
+    fun `the app's onToolError says what the model is told of a failure`() = runBlocking {
+        class ToolError(message: String) : Exception(message)
+        val seen = CopyOnWriteArrayList<String>()
+        agents.onToolError = { call, error ->
+            seen += "${call.id} ${call.name}"
+            if (error is ToolError) error.message.orEmpty() else "${call.name} failed"
+        }
+        val leaky = AgentTool("lookup_order", "Look up an order.") { error("postgres://admin:hunter2@db.internal/orders refused") }
+        val polite = AgentTool("cancel_order", "Cancel an order.") { throw ToolError("That order has already shipped.") }
+        val chat = agents.chat(SessionOptions(tools = listOf(leaky, polite)))
+
+        router.script.send(Script.Send("""{"type":"tool_call","id":"c1","name":"lookup_order","arguments":"","request_id":"","turn_id":""}"""))
+        assertEquals(JsonPrimitive("lookup_order failed"), Json.parseToJsonElement(router.nextSent()).jsonObject["error"])
+        router.script.send(Script.Send("""{"type":"tool_call","id":"c2","name":"cancel_order","arguments":"","request_id":"","turn_id":""}"""))
+        assertEquals(JsonPrimitive("That order has already shipped."), Json.parseToJsonElement(router.nextSent()).jsonObject["error"])
+        assertEquals(listOf("c1 lookup_order", "c2 cancel_order"), seen)
+        chat.close()
+    }
+
+    @Test
+    fun `an onToolError that throws tells the model only that the tool failed`() = runBlocking {
+        agents.onToolError = { _, error -> throw IllegalStateException("hook broke on ${error.message}") }
+        val broken = AgentTool("lookup_order", "Look up an order.") { error("the orders database at db.internal is down") }
+        val chat = agents.chat(SessionOptions(tools = listOf(broken)))
+
+        router.script.send(Script.Send("""{"type":"tool_call","id":"c1","name":"lookup_order","arguments":"","request_id":"","turn_id":""}"""))
+
+        val answer = Json.parseToJsonElement(router.nextSent()).jsonObject
+        assertEquals(JsonPrimitive("lookup_order failed"), answer["error"])
         chat.close()
     }
 

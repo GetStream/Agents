@@ -163,7 +163,7 @@ func (s *Sweeper) sweep(ctx context.Context) (bool, error) {
 func (s *Sweeper) count(ctx context.Context) error {
 	counting, cancel := context.WithTimeout(ctx, countTimeout)
 	defer cancel()
-	rows, oldest, err := s.store.Unshipped(counting)
+	rows, oldest, err := s.store.Requests.Unshipped(counting)
 	if err != nil {
 		return err
 	}
@@ -182,7 +182,7 @@ func (s *Sweeper) ship(ctx context.Context) (int, error) {
 	var after *store.Request
 	marked := 0
 	for {
-		rows, err := s.store.RequestsToShip(ctx, s.settle, after, sweepPage)
+		rows, err := s.store.Requests.ToShip(ctx, s.settle, after, sweepPage)
 		if err != nil {
 			return marked, err
 		}
@@ -215,10 +215,11 @@ func (s *Sweeper) owned(ctx context.Context, rows []store.Request, organizations
 		if row.OrganizationID == "" {
 			organization, known := organizations[row.CustomerID]
 			if !known {
-				var err error
-				if organization, err = s.store.OrganizationOf(ctx, row.CustomerID); err != nil {
+				membership, err := s.store.AppOrganizations.Get(ctx, row.CustomerID)
+				if err != nil {
 					return nil, err
 				}
+				organization = membership.OrganizationID
 				organizations[row.CustomerID] = organization
 			}
 			if organization == "" {
@@ -232,7 +233,7 @@ func (s *Sweeper) owned(ctx context.Context, rows []store.Request, organizations
 		owned = append(owned, row)
 	}
 	for organization, ids := range found {
-		if err := s.store.SetRequestsOrganization(ctx, ids, organization); err != nil {
+		if err := s.store.Requests.SetOrganization(ctx, ids, organization); err != nil {
 			return nil, err
 		}
 	}

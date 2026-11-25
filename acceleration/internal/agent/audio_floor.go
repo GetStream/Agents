@@ -10,8 +10,8 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sttrouter"
 )
@@ -44,7 +44,7 @@ type audioFloor struct {
 	// a turn (findRuled). record keeps each check for the call once its turn is known (watch).
 	recent []turnCheck
 	held   map[string][]turnCheck
-	record func(turn string, check live.FloorCheck)
+	record func(turn string, check store.FloorCheck)
 }
 
 // turnCheck is a check on the floor and the turn it is about, or the utterance it was of and
@@ -53,7 +53,7 @@ type turnCheck struct {
 	turn      string
 	source    uint64
 	utterance int64
-	check     live.FloorCheck
+	check     store.FloorCheck
 }
 
 // floorChecksKept is the most checks a turn carries, and a participant's utterance holds, the
@@ -109,7 +109,7 @@ func newAudioFloor(client *audiofloor.Client, mode audiofloor.Mode, endOfTurn au
 // transcriber's own with the floor free about the turn its utterance's words are put to the
 // flow controller as. Those of an utterance whose words never are, as one that came back
 // blank, are let go of. Without it no check is kept.
-func (v *audioFloor) watch(record func(turn string, check live.FloorCheck)) {
+func (v *audioFloor) watch(record func(turn string, check store.FloorCheck)) {
 	if v == nil {
 		return
 	}
@@ -143,7 +143,7 @@ func (v *audioFloor) floorChecked(c audiofloor.Checked) {
 }
 
 // keepLocked keeps a check about turn for it to carry.
-func (v *audioFloor) keepLocked(turn string, check live.FloorCheck) {
+func (v *audioFloor) keepLocked(turn string, check store.FloorCheck) {
 	if turn != "" {
 		v.recent = latestByAsked(append(v.recent, turnCheck{turn: turn, check: check}), recentChecks)
 	}
@@ -152,8 +152,8 @@ func (v *audioFloor) keepLocked(turn string, check live.FloorCheck) {
 // claimLocked has the checks held for participant's utterance join turn, its words' turn, and
 // lets go of those of the participant's earlier utterances, whose words were never put to the
 // flow controller. It returns them, for the call's record.
-func (v *audioFloor) claimLocked(participant string, utterance int64, turn string) []live.FloorCheck {
-	var claimed []live.FloorCheck
+func (v *audioFloor) claimLocked(participant string, utterance int64, turn string) []store.FloorCheck {
+	var claimed []store.FloorCheck
 	v.held[participant] = slices.DeleteFunc(v.held[participant], func(held turnCheck) bool {
 		if held.utterance == utterance {
 			claimed = append(claimed, held.check)
@@ -167,7 +167,7 @@ func (v *audioFloor) claimLocked(participant string, utterance int64, turn strin
 // take lets go of the checks a turn reported now carries, the latest floorChecksKept of them
 // by when they were asked, oldest first. A check about it made later still reaches the call's
 // record.
-func (v *audioFloor) take(turn string) []live.FloorCheck {
+func (v *audioFloor) take(turn string) []store.FloorCheck {
 	if v == nil {
 		return nil
 	}
@@ -184,7 +184,7 @@ func (v *audioFloor) take(turn string) []live.FloorCheck {
 	if len(checks) == 0 {
 		return nil
 	}
-	out := make([]live.FloorCheck, 0, floorChecksKept)
+	out := make([]store.FloorCheck, 0, floorChecksKept)
 	for _, kept := range latestByAsked(checks, floorChecksKept) {
 		out = append(out, kept.check)
 	}
@@ -208,16 +208,16 @@ func durationMs(d time.Duration) float64 { return float64(d.Microseconds()) / 10
 // floorCheckOf is a check as the call keeps it: every probability as the server gave it of
 // the answers the model rules the floor by, and of the others (cannot, a tool) those of at
 // least floorOptionKept (floorStatesOffered).
-func floorCheckOf(c audiofloor.Checked) live.FloorCheck {
-	check := live.FloorCheck{
+func floorCheckOf(c audiofloor.Checked) store.FloorCheck {
+	check := store.FloorCheck{
 		At:        c.At.UTC(),
-		Kind:      live.FloorCheckPause,
+		Kind:      store.FloorCheckPause,
 		Acted:     c.Acted,
 		LatencyMs: durationMs(c.Latency),
 		Point:     c.Point,
 	}
 	if c.OverAgent {
-		check.Kind = live.FloorCheckOverAgent
+		check.Kind = store.FloorCheckOverAgent
 	}
 	if c.Paused > 0 {
 		paused := durationMs(c.Paused)
@@ -225,11 +225,11 @@ func floorCheckOf(c audiofloor.Checked) live.FloorCheck {
 	}
 	for i, option := range c.Answer.Options {
 		if i < floorStatesOffered || option.P >= floorOptionKept {
-			check.Options = append(check.Options, live.FloorOption{Option: option.Name, Probability: option.P})
+			check.Options = append(check.Options, store.FloorOption{Option: option.Name, Probability: option.P})
 		}
 	}
 	if r := c.Answer.Ruling; r != nil {
-		check.Ruling = live.FloorRuling{Disposition: r.Disposition, Floor: r.Floor, Tool: r.Tool, Cannot: r.Cannot}
+		check.Ruling = store.FloorRuling{Disposition: r.Disposition, Floor: r.Floor, Tool: r.Tool, Cannot: r.Cannot}
 	}
 	return check
 }
@@ -305,7 +305,7 @@ func (v *audioFloor) claimWords(participant string, utterance int64, turn *harne
 		return
 	}
 	v.mu.Lock()
-	var claimed []live.FloorCheck
+	var claimed []store.FloorCheck
 	if v.floors[participant] == nil {
 		claimed = v.claimLocked(participant, utterance, turn.ID)
 	}
@@ -320,7 +320,7 @@ func (v *audioFloor) claimWords(participant string, utterance int64, turn *harne
 
 // findRuledLocked finds the ruling for findRuled, and returns the checks of the utterance it
 // ruled on, which have joined the turn.
-func (v *audioFloor) findRuledLocked(said, participant string, speaking bool, turnID string) []live.FloorCheck {
+func (v *audioFloor) findRuledLocked(said, participant string, speaking bool, turnID string) []store.FloorCheck {
 	said = strings.ToLower(words(said))
 	for i, r := range v.checked {
 		if r.participant != participant || (speaking && !r.ruled.Speaking) || time.Since(r.at) > ruledFor {
@@ -368,9 +368,9 @@ func (v *audioFloor) heard(inbound InboundAudio) {
 // writes them (Agent.consumeSTT), and asks it for its final when it ends an utterance, where
 // it can be told. Nil is one that could not be opened, whose turns that transcriber ends as
 // it would with no floor.
-func (v *audioFloor) rules(participant stt.Participant, session *sttrouter.Session, languages []string, asker audiofloor.Asker) *audiofloor.Transcriber {
+func (v *audioFloor) rules(ctx context.Context, participant stt.Participant, session *sttrouter.Session, languages []string, asker audiofloor.Asker) *audiofloor.Transcriber {
 	floor := audiofloor.NewFloor(v.client, languages, session.Finalize, v.logger.With("participant", participant.ID))
-	if err := floor.Start(context.Background()); err != nil {
+	if err := floor.Start(ctx); err != nil {
 		v.logger.Warn("chorus-asr will not rule on a participant's floor", "participant", participant.ID, "error", err)
 		return nil
 	}

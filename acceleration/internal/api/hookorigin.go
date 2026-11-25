@@ -11,6 +11,7 @@ import (
 
 	getstream "github.com/GetStream/getstream-go/v5"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -95,6 +96,7 @@ func (s *Server) verifyHook(w http.ResponseWriter, r *http.Request, payload []by
 	if named := r.PathValue("app"); named != "" {
 		app, ok := streamapp.ParseAppID(named)
 		if !ok {
+			noteAnswered(w, http.StatusNotFound)
 			http.NotFound(w, r)
 			return hookOrigin{}, false
 		}
@@ -131,6 +133,15 @@ func (s *Server) verifyHook(w http.ResponseWriter, r *http.Request, payload []by
 	return hookOrigin{}, false
 }
 
+// noteHook counts a hook Stream signed under the app it came from, once verifyHook or
+// chatInboundOrigin has checked it. A hook signed with the deployment's own secret in
+// deployment mode is no one customer's until what it names is read.
+func (s *Server) noteHook(ctx context.Context, origin hookOrigin) {
+	if customer, scoped := s.configOwnerOf(origin); scoped {
+		activity.NoteCustomer(ctx, customer, activity.AreaHooksIn)
+	}
+}
+
 // vouchedHook is a hook the proxy checked the signature of with its app's secret, which the
 // router acting with forwarded tokens holds none of. The token the proxy forwarded beside it
 // is kept, so the hook's work is done with it. The deployment's own app is still checked
@@ -159,6 +170,7 @@ func (s *Server) verifyDeploymentHook(w http.ResponseWriter, r *http.Request, pa
 		own = s.stream.DeploymentApp()
 	}
 	if pathApp != 0 && pathApp != own {
+		noteAnswered(w, http.StatusNotFound)
 		http.NotFound(w, r)
 		return hookOrigin{}, false
 	}
@@ -225,7 +237,7 @@ func (s *Server) firstDelivery(ctx context.Context, origin hookOrigin, eventType
 	if s.store == nil || key == "" {
 		return true
 	}
-	first, err := s.store.FirstDelivery(ctx, key)
+	first, err := s.store.DeliveriesSeen.First(ctx, store.DeliveryScopeHook, key)
 	if err != nil {
 		// Answering twice is the lesser harm than answering never.
 		s.logger.Warn("could not record a hook delivery", "error", err)
@@ -234,7 +246,7 @@ func (s *Server) firstDelivery(ctx context.Context, origin hookOrigin, eventType
 	return first
 }
 
-// deliveryKey is what a delivery is recorded under (store.FirstDelivery): one key for every
+// deliveryKey is what a delivery is recorded under (store.DeliveriesSeen.First): one key for every
 // delivery of the same event in the same app, whether the webhook or Stream Chat's endpoint
 // (receiveChatInbound) brought it. Empty for an event no key tells apart.
 func deliveryKey(origin hookOrigin, eventType string, stamp hookStamp) string {

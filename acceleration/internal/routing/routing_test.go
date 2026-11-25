@@ -1378,6 +1378,35 @@ func (s *RoutingSuite) TestAProviderWhoseOverwriteNamesAVoiceIsNotAskedAboutTheR
 	s.Equal([]string{"lush"}, asked)
 }
 
+// An overwrite is handed to the provider as written, so it is no back door to a voice the
+// resolver would refuse as the request's.
+func (s *RoutingSuite) TestAVoiceOnlyAnOverwriteNamesIsRefusedAsTheRequestsWouldBe() {
+	var built []string
+	router := s.newRouterResolving(refusing("theirs"), func(spec Spec) (*stubProvider, error) {
+		built = append(built, spec.Model)
+		return &stubProvider{model: spec.Model}, nil
+	})
+
+	_, _, err := router.Select(s.ctx, Request{
+		CustomerID: "acme", Providers: []string{"quick/en"},
+		TTS: options.TTS{Overwrites: map[string]json.RawMessage{"quick": json.RawMessage(`{"voice_id":"theirs"}`)}},
+	})
+
+	s.Require().ErrorIs(err, ErrRequest)
+	s.Contains(err.Error(), `"theirs" is not one of this customer's voices`)
+	s.Empty(built)
+}
+
+// refusing is a resolver that refuses one voice as another customer's.
+type refusing string
+
+func (r refusing) ResolveVoice(_ context.Context, _, _, voice string) (string, error) {
+	if voice == string(r) {
+		return "", Refused(fmt.Errorf("%q is not one of this customer's voices", voice))
+	}
+	return voice, nil
+}
+
 func (s *RoutingSuite) TestARequestWithNoVoiceIsNotVetted() {
 	var asked []string
 	router := s.newRouterResolving(vetting{unvouched: []string{"quick"}, asked: &asked},
@@ -1791,4 +1820,77 @@ func (s *RoutingSuite) TestAWalkNeverServesAnOverwriteOnAnotherVendorAfterItsOwn
 	s.Equal(ProviderConfig{}, config, "nobody served it")
 	s.Equal([]string{"quick/multi"}, asked)
 	s.Equal([]string{"quick/en", "quick/multi"}, built, "lush is handed its own block, so it would drop quick's")
+}
+
+func (s *RoutingSuite) TestDefaultConfigDeclaresVoicesForEverySTSModel() {
+	config, err := DefaultConfig()
+	s.Require().NoError(err)
+
+	byName := map[string][]ModelVoice{}
+	for _, provider := range config[STS].Providers {
+		s.NotEmpty(provider.Voices, "%s must list its built-in voices", provider.Name())
+		byName[provider.Name()] = provider.Voices
+	}
+
+	voiceIDs := func(name string) []string {
+		ids := make([]string, 0, len(byName[name]))
+		for _, v := range byName[name] {
+			ids = append(ids, v.ID)
+		}
+		return ids
+	}
+	defaultVoice := func(name string) string {
+		for _, v := range byName[name] {
+			if v.Default {
+				return v.ID
+			}
+		}
+		return ""
+	}
+
+	s.Contains(voiceIDs("gemini/gemini-3.8-live"), "Kore")
+	s.Contains(voiceIDs("gemini/gemini-3.8-live"), "Zephyr")
+	s.Equal("", defaultVoice("gemini/gemini-3.8-live"), "Gemini Live leaves default unspecified")
+
+	s.Contains(voiceIDs("openai/gpt-realtime-2.1"), "marin")
+	s.NotContains(voiceIDs("openai/gpt-realtime-2.1"), "quartz", "GPT-Live voices do not belong on GPT-Realtime")
+	s.Equal("alloy", defaultVoice("openai/gpt-realtime-2.1"))
+	s.Equal("alloy", defaultVoice("openai/gpt-realtime-2"))
+
+	s.Contains(voiceIDs("openai/gpt-live-1"), "quartz")
+	s.Contains(voiceIDs("openai/gpt-live-1"), "gleam")
+	s.Equal("marin", defaultVoice("openai/gpt-live-1"))
+
+	s.Equal([]string{"eve", "ara", "rex", "sal", "leo"}, voiceIDs("xai/grok-voice-3.0"))
+	s.Equal("eve", defaultVoice("xai/grok-voice-3.0"))
+	s.Equal("eve", defaultVoice("xai/grok-voice-think-fast-2.0"))
+
+	s.Contains(voiceIDs("qwen/qwen3.5-omni-plus-realtime"), "Tina")
+	s.NotContains(voiceIDs("qwen/qwen3.5-omni-plus-realtime"), "Cherry", "Cherry is Qwen3-Omni only")
+	s.Equal("Tina", defaultVoice("qwen/qwen3.5-omni-plus-realtime"))
+
+	s.Contains(voiceIDs("qwen/qwen-audio-3.1-realtime-plus"), "longanqian_v3.1")
+	s.Contains(voiceIDs("qwen/qwen-audio-3.1-realtime-plus"), "beth_v3.1")
+	s.Equal("longanqian_v3.1", defaultVoice("qwen/qwen-audio-3.1-realtime-plus"))
+}
+
+func (s *RoutingSuite) TestModalityConfigRejectsInvalidVoiceDeclarations() {
+	base := func(voices []ModelVoice) ModalityConfig {
+		return ModalityConfig{
+			Providers: []ProviderConfig{{
+				Provider: "stub", Model: "m", Languages: []string{"en"}, Realtime: true, Voices: voices,
+			}},
+		}
+	}
+
+	s.ErrorContains(base([]ModelVoice{{ID: "", Name: "Nameless"}}).validate(), "without both id and name")
+	s.ErrorContains(base([]ModelVoice{{ID: "alpha", Name: ""}}).validate(), "without both id and name")
+	s.ErrorContains(base([]ModelVoice{
+		{ID: "alpha", Name: "Alpha"},
+		{ID: "alpha", Name: "Alpha 2"},
+	}).validate(), `declares voice "alpha" twice`)
+	s.ErrorContains(base([]ModelVoice{
+		{ID: "alpha", Name: "Alpha", Default: true},
+		{ID: "beta", Name: "Beta", Default: true},
+	}).validate(), "at most one is allowed")
 }

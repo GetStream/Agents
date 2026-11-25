@@ -42,7 +42,7 @@ jobs:
   integration:
     if: github.event.pull_request.draft != true
     name: integration (${{ matrix.group }})
-    runs-on: ubuntu-latest
+    runs-on: { group: github-public-amd64 }
     # MEM0_API_KEY lives in this environment, which a pull request's code never enters.
     environment: ${{ github.event_name == 'push' && matrix.mem0 && 'integration' || '' }}
     timeout-minutes: 40
@@ -58,7 +58,7 @@ jobs:
           - group: store
             packages: >-
               ./internal/store ./internal/concurrency ./internal/connectors/core ./internal/usage
-              ./internal/live ./internal/users ./internal/streamapp
+              ./internal/live ./internal/streamapp ./internal/redisscript
           # AI-2003, and claiming a guest does not move its memories yet. Both levels of a
           # skip are alternations, so it also names pairs that do not exist.
           - group: api
@@ -77,7 +77,7 @@ jobs:
               ./internal/channelbridge ./internal/tts/voices ./internal/llmrouter ./internal/policy
               ./internal/stsrouter ./internal/sandbox/egress ./internal/knowledge/urls
               ./internal/metered ./internal/quota ./internal/scheduling ./internal/limitnotice
-              ./internal/appconfig ./internal/decisionrouter ./internal/eventforward
+              ./internal/decisionrouter ./internal/eventforward
               ./internal/chatinbound ./internal/connectors/resolver
               ./internal/connectors/credentialstores/pgsealed ./internal/usage/ledger
               ./internal/usage/server
@@ -89,13 +89,13 @@ jobs:
     # and on disk each TRUNCATE waits on fsync.
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:19-alpine
         env:
           POSTGRES_PASSWORD: postgres
         ports:
           - 5432
         options: >-
-          --tmpfs /var/lib/postgresql/data
+          --tmpfs /var/lib/postgresql
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s
           --health-timeout 3s
