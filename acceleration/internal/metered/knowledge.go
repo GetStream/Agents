@@ -30,10 +30,6 @@ const (
 // KnowledgeStorageKind names an hour of storage in its usage id.
 const KnowledgeStorageKind = "knowledge_storage"
 
-// lookupMinimum is the fewest bytes turbopuffer bills a query for, 1.28 GB, and what a lookup
-// reserves for each query it makes. What it is billed past that is known once it has answered.
-const lookupMinimum = 1_280_000_000
-
 // knowledgeFailed is the error code of a knowledge call that failed.
 const knowledgeFailed = "knowledge_failed"
 
@@ -191,11 +187,12 @@ func (k *Knowledge) meter(owner routing.Owner, backend knowledge.Backend, place 
 }
 
 // lookup is the meter of a read made in that many queries, which sets aside the least they are
-// billed: nothing in the customer's own account, where their vendor bills them.
+// billed, as what they are billed past that is known once they have answered: nothing in the
+// customer's own account, where their vendor bills them.
 func (k *Knowledge) lookup(owner routing.Owner, backend knowledge.Backend, place store.KnowledgePlace, queries int) routing.Meter {
 	meter := k.meter(owner, backend, place, KnowledgeLookup)
 	if !meter.Config.BYOK {
-		meter.Estimate[pricing.BytesQueried] = lookupMinimum * int64(queries)
+		meter.Estimate[pricing.BytesQueried] = backend.MinimumQueried() * int64(queries)
 	}
 	return meter
 }
