@@ -149,20 +149,22 @@ func (s *ChildAgentsSuite) TestADelegationJudgesAnHTTPToolReadOnlyOnlyAtTheDiges
 		nessy := store.ConnectorBinding{Name: "customers", ConnectorID: "nessy", Connection: store.ConnectionBinding{Type: "session"},
 			Tools: []store.ToolGrant{{Name: "org_lookup"}}}
 		for layout, bindings := range map[string][2]store.ConnectorBinding{"sensitive parent": {nessy, api}, "sensitive child": {api, nessy}} {
-			parent := s.agentWith("fanning/fanning-model", nil)
-			child := s.agentWith("echo/echo-model", nil)
-			s.delegate(parent, map[string]AgentConfig{"ask_a": child})
-			s.change(parent.Id, func(config *store.AgentConfig) { config.Connectors = []store.ConnectorBinding{bindings[0]} })
-			s.change(child.Id, func(config *store.AgentConfig) { config.Connectors = []store.ConnectorBinding{bindings[1]} })
+			s.Run(name+", "+layout, func() {
+				parent := s.agentWith("fanning/fanning-model", nil)
+				child := s.agentWith("echo/echo-model", nil)
+				s.delegate(parent, map[string]AgentConfig{"ask_a": child})
+				s.change(parent.Id, func(config *store.AgentConfig) { config.Connectors = []store.ConnectorBinding{bindings[0]} })
+				s.change(child.Id, func(config *store.AgentConfig) { config.Connectors = []store.ConnectorBinding{bindings[1]} })
 
-			run := s.run(CreateRunRequest{ConfigId: parent.Id, Input: "review this"})
+				run := s.run(CreateRunRequest{ConfigId: parent.Id, Input: "review this"})
 
-			if c.refused {
-				s.refusedAll(run)
-			} else {
-				s.NotContains(run.FinalText, "was not run", name+", "+layout)
-				s.Contains(run.FinalText, "tool: be brief", name+", "+layout)
-			}
+				if c.refused {
+					s.refusedAll(run)
+				} else {
+					s.NotContains(run.FinalText, "was not run")
+					s.Contains(run.FinalText, "tool: be brief")
+				}
+			})
 		}
 	}
 }
