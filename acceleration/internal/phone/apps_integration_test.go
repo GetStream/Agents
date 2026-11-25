@@ -2146,6 +2146,27 @@ func (s *AppsSuite) TestACallsTrunkGoesWithEveryRuleOnIt() {
 	}
 }
 
+// The trunk's row has moved to another group, its pin filled in, since the join that failed: the
+// numbers on it are not this group's to know, and keep their rules.
+func (s *AppsSuite) TestAFailedLineLeavesTheRulesOfATrunkWhoseRowMoved() {
+	_, squatter, trunk, line := s.squatted()
+	other, joiner := aNumber(), aNumber()
+	s.Require().NoError(s.addOnATrunk(trunk, squatter, other))
+	_, err := trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: other, To: "+15550001111"})
+	s.Require().NoError(err)
+	second, err := s.store.PhoneNumbers.GetByE164(s.ctx, squatter, other)
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE stream_trunks SET stream_app_pk = 777 WHERE id = ?", line.StreamTrunkID)
+	s.Require().NoError(err)
+
+	trunk.service.leave(s.ctx, NewStreamFromClient(s.deployment.Client), store.TrunkGroup{CustomerID: squatter, Vendor: SIPTrunkVendor},
+		&joining{e164: joiner, trunkID: line.StreamTrunkID})
+
+	s.NotNil(s.deployment.Rule(line.StreamRouteID))
+	s.NotNil(s.deployment.Rule(second.StreamRouteID))
+	s.ElementsMatch([]string{line.E164, other}, s.deployment.TrunkNumbers(line.StreamTrunkID))
+}
+
 // The rule a failed line made would not go at first.
 func (s *AppsSuite) TestAnUndoneTrunkGoesWithItsRule() {
 	s.sealed()
@@ -2156,7 +2177,7 @@ func (s *AppsSuite) TestAnUndoneTrunkGoesWithItsRule() {
 	s.Require().NoError(err)
 	group := store.TrunkGroup{CustomerID: s.customer, Vendor: held.Vendor}
 
-	s.service.leave(s.ctx, NewStreamFromClient(s.deployment.Client), group, &joining{trunkID: held.StreamTrunkID})
+	s.service.leave(s.ctx, NewStreamFromClient(s.deployment.Client), group, &joining{e164: s.e164, trunkID: held.StreamTrunkID})
 
 	s.Empty(s.deployment.Trunks())
 }

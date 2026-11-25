@@ -80,7 +80,7 @@ func (s *Service) lineOnce(ctx context.Context, stream *Stream, pin int64, held 
 		if err != nil {
 			return err
 		}
-		joined = &joining{}
+		joined = &joining{e164: held.E164}
 		if held.StreamTrunkID != "" {
 			i := slices.IndexFunc(trunks, func(t store.StreamTrunk) bool { return t.ID == held.StreamTrunkID })
 			if i < 0 {
@@ -126,8 +126,9 @@ func (s *Service) lineOnce(ctx context.Context, stream *Stream, pin int64, held 
 	return line, nil
 }
 
-// joining is what join changed at Stream, for leave to undo.
+// joining is what join changed at Stream for a number, for leave to undo.
 type joining struct {
+	e164    string
 	trunkID string
 	routeID string
 }
@@ -262,7 +263,7 @@ func (s *Service) leave(ctx context.Context, stream *Stream, group store.TrunkGr
 		}
 		i := slices.IndexFunc(trunks, func(t store.StreamTrunk) bool { return t.ID == joined.trunkID })
 		if i < 0 {
-			return stream.deleteTrunkWithRules(ctx, joined.trunkID, "")
+			return stream.deleteTrunkWithRules(ctx, joined.trunkID, joined.e164)
 		}
 		allowedIPs, err := s.allowlistFor(group.Vendor)
 		if err != nil {

@@ -1092,7 +1092,7 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		// Roll back what this attach created but did not finish wiring up, so a failed
 		// attach does not leave a billable Stream trunk behind. Best-effort: a cleanup
 		// error is logged, never returned, so it cannot mask the real failure.
-		s.deleteLines(ctx, stream, routeID, trunkID, "", "rolling back a failed attach")
+		s.deleteLines(ctx, stream, routeID, trunkID, attachment.E164, "rolling back a failed attach")
 	}()
 
 	// Every caller is a conversation of their own, so each lands in a call named for the
@@ -1452,7 +1452,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 			// Roll back what this call created but never placed, so a call that did not
 			// start does not leave a billable Stream trunk behind. Best-effort: a cleanup
 			// error is logged, never returned, so it cannot mask the real failure.
-			s.deleteLines(ctx, stream, routeID, trunkID, "", "rolling back a call that did not place")
+			s.deleteLines(ctx, stream, routeID, trunkID, request.From, "rolling back a call that did not place")
 		}()
 
 		routeID, err = stream.CreateRoute(ctx, Route{
@@ -2419,7 +2419,7 @@ func (s *Service) Transfer(ctx context.Context, request TransferRequest) (Dialed
 			// Roll back what this transfer created but never placed, so a transfer that did
 			// not start does not leave a billable Stream trunk behind. Best-effort: a cleanup
 			// error is logged, never returned, so it cannot mask the real failure.
-			s.deleteLines(ctx, stream, routeID, trunkID, "", "rolling back a transfer that did not place")
+			s.deleteLines(ctx, stream, routeID, trunkID, request.From, "rolling back a transfer that did not place")
 		}()
 
 		routeID, err = stream.CreateRoute(ctx, Route{
