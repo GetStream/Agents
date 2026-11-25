@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 )
@@ -129,7 +130,7 @@ func (s *InworldSocketSuite) connect(fake *fakeInworld, options Options) (*TTS, 
 	options.BaseURL = fake.baseURL()
 	provider := s.newTTS(options)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "tts", "inworld-tts-1"), 5*time.Second)
 	s.T().Cleanup(cancel)
 	s.Require().NoError(provider.Start(ctx))
 
@@ -528,7 +529,7 @@ func (s *InworldSocketSuite) refusedBy(frames ...string) float64 {
 	defer fake.close()
 	provider, conn := s.connect(fake, Options{APIKey: rand.Text()})
 	defer provider.Close()
-	before := keypooltest.Refused(s.T(), "INWORLD_API_KEY", "invalid_key")
+	before := keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", "INWORLD_API_KEY")["/customer/tts/invalid_key"]
 
 	for _, frame := range frames {
 		s.Require().NoError(conn.WriteMessage(websocket.TextMessage, []byte(frame)))
@@ -540,7 +541,7 @@ func (s *InworldSocketSuite) refusedBy(frames ...string) float64 {
 		}
 		return failures == len(frames)
 	})
-	return keypooltest.Refused(s.T(), "INWORLD_API_KEY", "invalid_key") - before
+	return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", "INWORLD_API_KEY")["/customer/tts/invalid_key"] - before
 }
 
 func (s *InworldSocketSuite) TestAnInvalidKeyFrameIsCountedOncePerConnection() {

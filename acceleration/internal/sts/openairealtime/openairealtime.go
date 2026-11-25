@@ -658,7 +658,7 @@ func (s *STS) Start(ctx context.Context) error {
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 
-	if err := s.handshake(); err != nil {
+	if err := s.handshake(ctx); err != nil {
 		conn.Close()
 		return err
 	}
@@ -958,13 +958,13 @@ func (s *STS) ready() error {
 // handshake waits for the server to open the session, configures it, and waits for the
 // server to say the configuration took. Audio sent before that would be heard by a session
 // configured some other way.
-func (s *STS) handshake() error {
+func (s *STS) handshake(ctx context.Context) error {
 	if err := s.conn.SetReadDeadline(time.Now().Add(s.options.HandshakeTimeout)); err != nil {
 		return stack.Wrap(fmt.Errorf("%s: read handshake: %w", s.options.Vendor.Provider, err))
 	}
 	defer s.conn.SetReadDeadline(time.Time{})
 
-	created, err := s.next()
+	created, err := s.next(ctx)
 	if err != nil {
 		return stack.Wrap(err)
 	}
@@ -979,7 +979,7 @@ func (s *STS) handshake() error {
 		return stack.Wrap(fmt.Errorf("%s: send session: %w", s.options.Vendor.Provider, err))
 	}
 	for {
-		event, err := s.next()
+		event, err := s.next(ctx)
 		if err != nil {
 			return stack.Wrap(err)
 		}
@@ -993,7 +993,7 @@ func (s *STS) handshake() error {
 }
 
 // next reads one server frame during the handshake.
-func (s *STS) next() (serverEvent, error) {
+func (s *STS) next(ctx context.Context) (serverEvent, error) {
 	_, raw, err := s.conn.ReadMessage()
 	if err != nil {
 		return serverEvent{}, stack.Wrap(fmt.Errorf("%s: read handshake: %w", s.options.Vendor.Provider, err))
@@ -1006,7 +1006,7 @@ func (s *STS) next() (serverEvent, error) {
 		event.Error = &apiError{Message: strings.TrimSpace(string(raw))}
 	}
 	if event.Type == eventError && event.Error.Code == codeInvalidAPIKey {
-		s.keys.InvalidKey()
+		s.keys.InvalidKey(ctx)
 	}
 	return event, nil
 }

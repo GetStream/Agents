@@ -496,11 +496,11 @@ func (d *Dialogue) readLoop(conn *websocket.Conn, key string) {
 			continue
 		}
 		if message.Error == quotaExceeded {
-			d.keys.QuotaExceeded(key)
+			d.keys.QuotaExceeded(d.call, key)
 		}
 		if message.Error == invalidAPIKey && !refused {
 			refused = true
-			d.keys.InvalidKey()
+			d.keys.InvalidKey(d.call)
 		}
 		if d.current(conn) {
 			d.handleMessage(message)
