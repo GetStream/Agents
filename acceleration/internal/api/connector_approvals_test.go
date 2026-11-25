@@ -245,6 +245,29 @@ func (s *SessionConnectorsSuite) TestAUserWhoLeftTheConfigsTeamCannotAllowItsHel
 	s.Equal("cancelled", settled["status"], "the call waited for an answer from the socket opened before")
 }
 
+// Teams Stream cannot tell let no answer through: the user is told to try again, and the call goes
+// on waiting.
+func (s *SessionConnectorsSuite) TestAnAnswerWhileTheUsersTeamsCannotBeReadIsRefused() {
+	chat := s.teamsApp()
+	anya := s.inTeam(chat, "red")
+	held := s.heldCallOn(anya, map[string]string{session.TeamTag: "red"})
+	step := s.awaitingApprovalOn(held.events)
+	chat.Fail(http.MethodGet, "/users")
+	s.T().Cleanup(func() { chat.Heal(http.MethodGet, "/users") })
+	s.teamsLapse(s.router)
+
+	status, message := anya.failure(http.MethodPost, "/v1/agents/conversations/agent:"+held.id+"/tool_approvals",
+		map[string]any{"tool_call_id": step["id"], "request_id": held.request, "allowed": true})
+
+	s.Equal(http.StatusServiceUnavailable, status, message)
+	s.Equal(errTeamsUnreadable.Message, message)
+	s.Equal(held.before, s.provider.Hits(fakeprovider.PathMCP), "nothing reached the provider")
+	s.Require().NoError(held.events.WriteJSON(map[string]any{"type": "tool_approval", "tool_call_id": step["id"],
+		"request_id": held.request, "allowed": false}))
+	_, settled := s.settledOn(held.events, step["id"].(string))
+	s.Equal("cancelled", settled["status"], "the call waited for an answer from the socket opened before")
+}
+
 // A held call is answered once: a second answer reaches nothing, and its sender is told so.
 func (s *SessionConnectorsSuite) TestASecondAnswerToAHeldCallIsAnswered() {
 	held := s.heldCall(s.client)

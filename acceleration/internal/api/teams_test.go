@@ -800,12 +800,12 @@ func (s *AgentTeamsSuite) TestARefusedRelayedAttachLeavesNothingPending() {
 		Owner: relay.Owner{CustomerID: s.customerID(), UserID: anya.userID, Kind: string(auth.KindAuthenticated)},
 	}))
 
-	s.Require().Eventually(func() bool { return s.teamReads() > asked && s.teamChecksRunning() == 0 },
-		settleFor, 10*time.Millisecond, "the team check never ran or never ended")
-	s.router.relayed.mu.Lock()
-	_, pending := s.router.relayed.pending[watcher]
-	s.router.relayed.mu.Unlock()
-	s.False(pending, "the refused attach is still pending")
+	s.Require().Eventually(func() bool {
+		s.router.relayed.mu.Lock()
+		_, pending := s.router.relayed.pending[watcher]
+		s.router.relayed.mu.Unlock()
+		return s.teamReads() > asked && !pending
+	}, settleFor, 10*time.Millisecond, "the refused attach is still pending")
 	s.False(s.proxyHeldFor(anya.userID))
 }
 
