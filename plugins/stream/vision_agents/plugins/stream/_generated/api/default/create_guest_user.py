@@ -108,7 +108,8 @@ def sync_detailed(
     Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor
     costs a round trip through the customer's own servers, which is exactly the integration this is
     meant to remove. An app that has turned guests off refuses it, and so does a suspended organization.
-    One address may mint 60 new guests of an app an hour; the app's backend is not counted.
+    One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's
+    backend is not counted.
 
     Args:
         body (GuestUserRequest | Unset):
@@ -149,7 +150,8 @@ def sync(
     Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor
     costs a round trip through the customer's own servers, which is exactly the integration this is
     meant to remove. An app that has turned guests off refuses it, and so does a suspended organization.
-    One address may mint 60 new guests of an app an hour; the app's backend is not counted.
+    One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's
+    backend is not counted.
 
     Args:
         body (GuestUserRequest | Unset):
@@ -185,7 +187,8 @@ async def asyncio_detailed(
     Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor
     costs a round trip through the customer's own servers, which is exactly the integration this is
     meant to remove. An app that has turned guests off refuses it, and so does a suspended organization.
-    One address may mint 60 new guests of an app an hour; the app's backend is not counted.
+    One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's
+    backend is not counted.
 
     Args:
         body (GuestUserRequest | Unset):
@@ -224,7 +227,8 @@ async def asyncio(
     Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor
     costs a round trip through the customer's own servers, which is exactly the integration this is
     meant to remove. An app that has turned guests off refuses it, and so does a suspended organization.
-    One address may mint 60 new guests of an app an hour; the app's backend is not counted.
+    One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's
+    backend is not counted.
 
     Args:
         body (GuestUserRequest | Unset):

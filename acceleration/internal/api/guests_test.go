@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"slices"
@@ -705,16 +706,54 @@ func (s *GuestsSuite) TestAnAddressPastItsGuestsIsToldToWaitForTheHoursEnd() {
 }
 
 func (s *GuestsSuite) TestAnotherAddressStillMintsGuests() {
-	was := s.router.trusted
-	s.router.trusted = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
-	defer func() { s.router.trusted = was }()
+	s.trustThisHost()
 	s.mintSixtyGuests()
-	other := s.data.createAnonymous()
-	other.header.Set(ForwardedHeader, "203.0.113.9")
 
-	minted := s.mint(other, GuestUserRequest{})
+	minted := s.mint(s.from("203.0.113.9"), GuestUserRequest{})
 
 	s.Contains(minted.Id, guestPrefix)
+}
+
+func (s *GuestsSuite) TestTheAddressesOfOneIPv6NetworkMintTheHoursGuestsTogether() {
+	s.trustThisHost()
+	awayFromTheHour()
+	for i := range 60 {
+		s.mint(s.from(fmt.Sprintf("2001:db8:0:1:%x::%x", i, i+1)), GuestUserRequest{})
+	}
+
+	status, payload := s.from("2001:db8:0:1:ffff:ffff:ffff:ffff").call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Equal(http.StatusTooManyRequests, status, string(payload))
+	minted := s.mint(s.from("2001:db8:0:2::1"), GuestUserRequest{})
+	s.Contains(minted.Id, "guest-", "the next /64 has a count of its own")
+}
+
+func (s *GuestsSuite) TestNeighbouringIPv4AddressesMintGuestsApart() {
+	s.trustThisHost()
+	awayFromTheHour()
+	for range 60 {
+		s.mint(s.from("203.0.113.8"), GuestUserRequest{})
+	}
+
+	status, _ := s.from("::ffff:203.0.113.8").call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Equal(http.StatusTooManyRequests, status, "an IPv4-mapped address is the IPv4 address it carries")
+	minted := s.mint(s.from("::ffff:203.0.113.9"), GuestUserRequest{})
+	s.Contains(minted.Id, guestPrefix)
+}
+
+// trustThisHost believes the X-Forwarded-For of this host for the rest of the test.
+func (s *GuestsSuite) trustThisHost() {
+	was := s.router.trusted
+	s.router.trusted = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+	s.T().Cleanup(func() { s.router.trusted = was })
+}
+
+// from is an anonymous caller of the app from address, once trustThisHost.
+func (s *GuestsSuite) from(address string) *testClient {
+	client := s.data.createAnonymous()
+	client.header.Set(ForwardedHeader, address)
+	return client
 }
 
 func (s *GuestsSuite) TestTheBackendStillMintsGuestsOnceAnAddressHasMintedItsHour() {

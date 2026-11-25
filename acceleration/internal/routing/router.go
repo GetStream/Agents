@@ -22,6 +22,7 @@ import (
 	"maps"
 	"math"
 	"net/http"
+	"net/netip"
 	"slices"
 	"sort"
 	"strings"
@@ -311,6 +312,23 @@ type Caller struct {
 	// or a delivery the app's channel or plugin signed. An anonymous caller's name is not,
 	// so it is never held to that user's own quota nor spends their day.
 	Verified bool
+}
+
+// CountedAddress is what a count by address is keyed by: an IPv4 address itself, an IPv4-mapped
+// IPv6 one as the IPv4 address it carries, and any other IPv6 address as its /64, since one
+// device holds a whole /64 and may call from any address of it. An IP that is not an address
+// is counted as it is written.
+func (c Caller) CountedAddress() string {
+	address, err := netip.ParseAddr(c.IP)
+	if err != nil {
+		return c.IP
+	}
+	if address = address.Unmap(); address.Is4() {
+		return address.String()
+	}
+	// No error: every IPv6 address has 64 bits. The prefix carries no zone.
+	network, _ := address.Prefix(64)
+	return network.String()
 }
 
 // IsZero says nobody was named: a turn that was heard, not typed.

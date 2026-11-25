@@ -457,7 +457,8 @@ token is counted on their day. In a session the user opened, every turn is count
 
 Each is counted against two buckets: the `user_id` the caller's token names, scoped
 to the customer who minted it, and the address the request came from, scoped to the
-customer too, since each has its own limit. Both matter.
+customer too, since each has its own limit. Both matter. An IPv6 address is counted by its
+/64, which one device may hold whole, and an IPv4-mapped one by the IPv4 address it carries.
 A user id is the honest answer to who is asking, and the address is the answer that
 still holds when a backend mints a fresh user id per request.
 

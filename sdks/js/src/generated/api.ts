@@ -1442,7 +1442,7 @@ export type paths = {
         /**
          * Mint a guest so somebody can talk to an agent before signing up
          * @description Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-         *     Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour; the app's backend is not counted.
+         *     Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
          */
         readonly post: operations["createGuestUser"];
         readonly delete?: never;
@@ -9364,7 +9364,7 @@ export type components = {
              */
             readonly per_million_output_tokens?: number;
         };
-        /** @description What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset. */
+        /** @description What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset. */
         readonly Quota: {
             /**
              * Format: int64
@@ -15611,7 +15611,7 @@ export interface operations {
                     readonly "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description This address has minted as many guests of this app as it may this hour: retry after Retry-After */
+            /** @description This address, or its IPv6 /64, has minted as many guests of this app as it may this hour: retry after Retry-After */
             readonly 429: {
                 headers: {
                     readonly [name: string]: unknown;

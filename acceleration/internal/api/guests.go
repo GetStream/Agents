@@ -38,6 +38,7 @@ const guestPrefix = "guest-"
 const guestRole = "guest"
 
 // guestsPerAddress is how many new guests one address may mint in one app in guestWindow.
+// An IPv6 address is counted by its /64 (routing.Caller.CountedAddress).
 //
 // A device keeps the guest it was minted and comes back as them with its refresh_secret, so a
 // person mints a guest once per browser, not once per visit. Every new guest is a user written
@@ -118,11 +119,11 @@ func (s *Server) newGuest(ctx context.Context, customerID string, bound streamap
 	// Counted before the guest is written, so a refused one is in neither Chat nor the store.
 	// A caller with no address counts against nobody, as in the daily quota.
 	if caller := CallerFrom(ctx); !caller.ServerSide && caller.IP != "" {
-		key := newGuestsPrefix + url.QueryEscape(customerID) + ":" + caller.IP
+		key := newGuestsPrefix + url.QueryEscape(customerID) + ":" + caller.CountedAddress()
 		if _, over := s.newGuests.Admit(ctx, "", key, guestsPerAddress, guestWindow); over > 0 {
 			wait := waitSeconds(over)
 			return nil, huma.ErrorWithHeaders(rateLimited(fmt.Sprintf(
-				"this address has minted %d guests of this app this hour: try again in %ss", guestsPerAddress, wait)),
+				"this address, or its IPv6 /64, has minted %d guests of this app this hour: try again in %ss", guestsPerAddress, wait)),
 				http.Header{"Retry-After": {wait}})
 		}
 	}
@@ -481,13 +482,13 @@ func (s *Server) registerGuests(api huma.API) {
 			"anonymous visitor costs a round trip through the customer's own servers, which is " +
 			"exactly the integration this is meant to remove. An app that has turned guests off " +
 			"refuses it, and so does a suspended organization. One address may mint 60 new guests " +
-			"of an app an hour; the app's backend is not counted.",
+			"of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.",
 		Extensions:    map[string]any{clientAccessibleExtension: true},
 		DefaultStatus: http.StatusCreated,
 		Responses: map[string]*huma.Response{
 			"201": {Description: "The guest and a token for them"},
 			"403": errorResponse("This app does not admit guests, or its organization is suspended"),
-			"429": errorResponse("This address has minted as many guests of this app as it may this hour: retry after Retry-After"),
+			"429": errorResponse("This address, or its IPv6 /64, has minted as many guests of this app as it may this hour: retry after Retry-After"),
 		},
 		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized},
 	}, s.createGuestUser)

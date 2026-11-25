@@ -9,7 +9,8 @@
 //
 // The deployment's default is counted in two buckets rather than one: a user id, which is the
 // honest answer to "who is this", and an address, which is the answer that still holds when a
-// backend mints a fresh user id per request. A customer's quota is counted per user, in a
+// backend mints a fresh user id per request. An IPv6 address is counted by its /64
+// (routing.Caller.CountedAddress). A customer's quota is counted per user, in a
 // bucket of its own, and never against the address, which many of its users can share.
 //
 // A day is a UTC calendar day, so a new day is a new key and nothing has to be reset.
@@ -240,7 +241,7 @@ func (l *Limiter) Allow(ctx context.Context, customerID string, caller routing.C
 		// An address answers for the deployment's limits only, the guard against a backend
 		// minting a fresh user id per request. Many people share one address (an office, a
 		// carrier's NAT), so a customer's quota on one user is counted for that user alone.
-		if key := addressKey(customerID, caller.IP, now); key != "" {
+		if key := addressKey(customerID, caller, now); key != "" {
 			if limits := held.enforced(false); len(limits) > 0 {
 				buckets = append(buckets, bucket{key: key, limits: limits})
 			}
@@ -431,7 +432,7 @@ func deviceKeys(customerID string, caller routing.Caller, now time.Time) []strin
 	if key := userKey(customerID, caller.UserID, now); key != "" {
 		keys = append(keys, key)
 	}
-	if key := addressKey(customerID, caller.IP, now); key != "" {
+	if key := addressKey(customerID, caller, now); key != "" {
 		keys = append(keys, key)
 	}
 	return keys
@@ -460,11 +461,11 @@ func UserKeys(customerID, userID string, now time.Time) []string {
 
 // addressKey is a device caller's bucket by address. It is keyed by the customer as well, since
 // each customer sets its own limit for an address.
-func addressKey(customerID, ip string, now time.Time) string {
-	if ip == "" {
+func addressKey(customerID string, caller routing.Caller, now time.Time) string {
+	if caller.IP == "" {
 		return ""
 	}
-	return "quota:" + day(now) + ":ip:" + customerID + ":" + ip
+	return "quota:" + day(now) + ":ip:" + customerID + ":" + caller.CountedAddress()
 }
 
 func day(now time.Time) string { return now.UTC().Format("20060102") }
