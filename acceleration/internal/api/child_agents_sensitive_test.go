@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -92,6 +93,24 @@ func (s *ChildAgentsSuite) TestADelegationBesideASensitiveConnectorRunsWhenEachO
 	s.NotContains(run.FinalText, "was not run")
 	s.Contains(run.FinalText, "tool: be brief", "the held child answered")
 	s.Contains(run.FinalText, "tool: That did not work: the agent "+strconv.Quote(deleted.Name)+" behind ask_c no longer exists")
+}
+
+// A child whose tool has the name of another tool is not offered, so it runs nothing a
+// sibling could read.
+func (s *ChildAgentsSuite) TestADelegationRunsBesideASensitiveChildTheParentDoesNotOffer() {
+	s.useInternalApp()
+	parent := s.agentWith("fanning/fanning-model", nil)
+	reader := s.agentWith("echo/echo-model", map[string]any{"connectors": []map[string]any{sessionNessy("customers")}})
+	writer := s.agentWith("echo/echo-model", map[string]any{"connectors": []map[string]any{sessionGitHubGranting("code", "create_issue")}})
+	s.delegate(parent, map[string]AgentConfig{"ask_a": writer})
+	s.change(parent.Id, func(config *store.AgentConfig) {
+		config.Agents = append(config.Agents, store.ChildAgent{Config: reader.Name, Tool: harness.LoadSkillTool})
+	})
+
+	run := s.run(CreateRunRequest{ConfigId: parent.Id, Input: "review this"})
+
+	s.NotContains(run.FinalText, "was not run")
+	s.Contains(run.FinalText, "tool: be brief")
 }
 
 // TestADelegationWithNoSensitiveConnectorRuns is the control: on the base, dca845c2e, the

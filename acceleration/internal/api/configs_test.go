@@ -2677,6 +2677,7 @@ func (s *ConfigsSuite) TestNessyBesideASandboxIsRefusedOnlyWhenItReachesTheNetwo
 
 		s.Equal(http.StatusBadRequest, status, name)
 		s.Contains(failure, "and the sandbox's network access can send data out", name)
+		s.NotContains(failure, "require_approval", "a sandbox has no tool a require_approval could hold")
 	}
 }
 
