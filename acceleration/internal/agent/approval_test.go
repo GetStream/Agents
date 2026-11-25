@@ -16,6 +16,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 )
@@ -348,8 +349,8 @@ func (s *AgentSuite) TestANoInTheTurnThatMadeTheCallDeclinesIt() {
 	})
 }
 
-// Once the question has played, a yes still waits for the caller to speak: one in a turn they
-// did not speak, as a typed one is, runs nothing and leaves the call waiting for theirs.
+// Once the question has played, a yes still waits for the caller to speak: text the agent was
+// handed with no caller behind it is no answer, and runs nothing and leaves the call waiting.
 func (s *AgentSuite) TestAYesBeforeTheCallerSpokeRunsNothingAndTheCallWaits() {
 	s.onFakeClock(func() {
 		s.askedToApprove()
@@ -373,6 +374,49 @@ func (s *AgentSuite) TestAYesBeforeTheCallerSpokeRunsNothingAndTheCallWaits() {
 
 		s.eventually(func() bool { return len(s.runner.asked()) == 1 }, "the caller's own yes never ran the call")
 	})
+}
+
+// What the caller types on their own device after the question played is their answer, as
+// speech is.
+func (s *AgentSuite) TestATypedYesFromTheCallerAfterTheQuestionPlayedRunsTheCallOnce() {
+	for _, typed := range []string{"yes", "go ahead, book it"} {
+		s.Run(typed, func() {
+			s.onFakeClock(func() {
+				s.askedToApprove()
+				time.Sleep(time.Second) // A tick of the fake clock: the question has finished playing.
+				s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+				_, err := s.agent.RespondTo(routing.WithCaller(s.ctx, routing.Caller{UserID: "alice"}), typed, nil, options.LLM{})
+				s.Require().NoError(err)
+
+				s.eventually(func() bool { return len(s.runner.asked()) == 1 }, "the caller's typed yes never ran the call")
+			})
+		})
+	}
+}
+
+// Text nobody at the call typed is no answer to the question: a scheduled task's turn, one a
+// customer's server wrote, or one the model wrote itself in a confirmation.
+func (s *AgentSuite) TestAYesThatIsNotTheCallersOwnTurnRunsNothing() {
+	senders := map[string]context.Context{
+		"server": routing.WithCaller(s.ctx, routing.Caller{UserID: "alice", ServerSide: true}),
+		"task":   routing.WithScheduledTurn(routing.WithCaller(s.ctx, routing.Caller{UserID: "alice"})),
+	}
+	for name, ctx := range senders {
+		s.Run(name, func() {
+			s.onFakeClock(func() {
+				s.askedToApprove()
+				time.Sleep(time.Second)
+				s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+				_, err := s.agent.RespondTo(ctx, "yes", nil, options.LLM{})
+				s.Require().NoError(err)
+
+				s.confirmationSays("call-2", "has not spoken since they were asked about lookup_order")
+				s.Empty(s.runner.asked(), "a yes nobody at the call gave ran the call")
+			})
+		})
+	}
 }
 
 // A question asked later takes nothing from one asked before: the caller cutting off the second

@@ -7,6 +7,8 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 )
 
 func (s *AgentSuite) TestANativeModelIsToldToAskBeforeACallThatNeedsApprovalRuns() {
@@ -95,6 +97,46 @@ func (s *AgentSuite) TestANativeYesBeforeTheCallerSpokeRunsNothing() {
 	s.nativeConfirms(peer, "r5")
 	s.Contains(string(s.nativeFrame(peer, "conversation.item.create")["item"]), "order 12 booked")
 	s.Len(s.runner.asked(), 1)
+}
+
+// What the caller types after the question played is their answer to it.
+func (s *AgentSuite) TestANativeTypedYesAfterTheQuestionPlayedRunsTheCallOnce() {
+	peer := s.nativeAsked(time.Minute)
+	s.nativeFrame(peer, "conversation.item.create")
+	s.nativeQuestionSaid(peer)
+	s.eventually(func() bool {
+		s.agent.mu.Lock()
+		defer s.agent.mu.Unlock()
+		return s.agent.approvals["call1"].played
+	}, "the question never finished playing")
+
+	_, err := s.agent.RespondTo(routing.WithCaller(s.ctx, routing.Caller{UserID: "alice"}), "yes, book it", nil, options.LLM{})
+	s.Require().NoError(err)
+	s.Contains(string(s.nativeFrame(peer, "conversation.item.create")["item"]), "yes, book it")
+	s.nativeConfirms(peer, "r3")
+
+	s.Contains(string(s.nativeFrame(peer, "conversation.item.create")["item"]), "order 12 booked")
+	s.Len(s.runner.asked(), 1)
+}
+
+// Text a customer's server wrote into the call is not the caller's answer.
+func (s *AgentSuite) TestANativeYesToTextAServerWroteRunsNothing() {
+	peer := s.nativeAsked(time.Minute)
+	s.nativeFrame(peer, "conversation.item.create")
+	s.nativeQuestionSaid(peer)
+	s.eventually(func() bool {
+		s.agent.mu.Lock()
+		defer s.agent.mu.Unlock()
+		return s.agent.approvals["call1"].played
+	}, "the question never finished playing")
+
+	_, err := s.agent.RespondTo(routing.WithCaller(s.ctx, routing.Caller{UserID: "alice", ServerSide: true}), "yes", nil, options.LLM{})
+	s.Require().NoError(err)
+	s.nativeFrame(peer, "conversation.item.create")
+	s.nativeConfirms(peer, "r3")
+
+	s.Contains(string(s.nativeFrame(peer, "conversation.item.create")["item"]), "has not spoken since they were asked about lookup_order")
+	s.Empty(s.runner.asked())
 }
 
 // Words the caller says while the question is still playing out are no answer to it.

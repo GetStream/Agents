@@ -10,6 +10,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 )
 
 // confirmTool is what a voice model calls with the caller's answer to a tool's approval
@@ -196,6 +197,12 @@ func (a *Agent) askApproval(call llm.ToolCall, question string) []llm.ContentPar
 func (a *Agent) heardLocked(drained bool) {
 	a.playedLocked(drained)
 	a.callerTurns++
+}
+
+// callerTyped says whether a typed turn is the caller's own, written on their device: not a
+// scheduled task's, nor one a customer's server or the agent itself wrote.
+func callerTyped(sender routing.Caller, scheduled bool) bool {
+	return !scheduled && !sender.IsZero() && !sender.ServerSide
 }
 
 // playedLocked marks each question said as played, when quiet. The caller holds the lock.

@@ -84,14 +84,20 @@ func (a *Agent) respondNative(ctx context.Context, text string, images []llm.Ima
 		return stack.Wrap(errNotJoined)
 	}
 	caller := stt.Participant{ID: "caller"}
+	sender, _ := routing.CallerFrom(ctx)
+	scheduled := routing.ScheduledTurn(ctx)
+	drained := !a.waitingForPlayout()
 	// A typed turn is not transcribed, so it is written into the history here, where a
 	// spoken one is written when the model reports having heard it.
 	a.mu.Lock()
+	if callerTyped(sender, scheduled) {
+		a.heardLocked(drained)
+	}
 	a.history = append(a.history, llm.Message{Role: llm.User, Content: harness.Defang(text)})
 	a.heardText = text
 	a.lastParticipant = caller
 	a.lastWriter = writer{}
-	a.scheduled = routing.ScheduledTurn(ctx)
+	a.scheduled = scheduled
 	a.mu.Unlock()
 	a.turns.typedTurn()
 	return session.SendText(text, caller)
