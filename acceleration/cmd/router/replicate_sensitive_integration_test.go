@@ -111,6 +111,20 @@ func (s *ReplicateRepeatSuite) TestAPageDefiningAConnectorAnEarlierPageBoundIsRe
 	s.notDefined("custom_crm")
 }
 
+// The configs binding a connector are read as the page leaves them: one it deletes runs nothing.
+func (s *ReplicateRepeatSuite) TestAPageDefiningAConnectorWhileDeletingTheAgentBindingItIsApplied() {
+	parent, _ := s.copiedParentAndChild(nil)
+	s.boundUndefinedCRM(parent)
+	s.Require().NoError(s.once("acme", false))
+	s.Require().NoError(s.source.AgentConfigs.Delete(s.ctx, "acme", parent.ID))
+	s.definedCRM()
+
+	s.Require().NoError(s.once("acme", false))
+
+	_, err := s.target.ConnectorDefinitions.Latest(s.ctx, "acme", "custom_crm")
+	s.NoError(err)
+}
+
 // A page that binds a connector and then defines it is weighed as it leaves them.
 func (s *ReplicateRepeatSuite) TestAPageBindingAConnectorBeforeDefiningItIsRefused() {
 	parent, _ := s.copiedParentAndChild(nil)
