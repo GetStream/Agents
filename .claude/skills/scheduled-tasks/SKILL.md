@@ -64,9 +64,10 @@ and cannot be changed.
 
 The REST create does not need `scheduling.enabled` (`internal/api/scheduled_tasks.go:752`).
 
-A follow-up needs a kept conversation. A router without Stream Chat credentials keeps none
-and logs `not keeping the conversation in Stream Chat` (`internal/session/manager.go:340`);
-its tasks cannot be delivered into a conversation.
+A follow-up needs a kept conversation, and a conversation is kept only in Stream Chat. A
+router without a usable Stream app refuses every session that is not incognito with 400
+`not_configured` (`session.ErrNoStreamKeys`, `ErrStreamKeysRejected` in
+`internal/session/stream_keys.go`), so it has no conversation to deliver a task into.
 
 ## Schedule one locally
 
@@ -171,7 +172,7 @@ Read the task, then its runs, then the logs, in that order.
 
 | Check | How | What it means |
 | --- | --- | --- |
-| Task `state` | `GET /v1/agents/scheduled-tasks/{id}` | `paused`: a pause, or its config was deleted (`internal/api/configs.go:308`). `failed`: five failed occurrences in a row (`maxConsecutiveFailures`), or a last occurrence that failed; resume clears it. A failed task with no occurrence left, or a paused one that did not sleep through its time, answers resume with 400 `schedule_in_past`: PATCH a new schedule first. A paused one-shot whose time passed while paused is completed with a `missed` run (`task_paused`). `completed`: a one-shot ran, or the repeat has nothing left |
+| Task `state` | `GET /v1/agents/scheduled-tasks/{id}` | `paused`: a pause, or its config was deleted (`internal/api/configs.go:308`). `failed`: five failed occurrences in a row (`maxConsecutiveFailures`), or a last occurrence that failed; resume clears it. A failed task with no occurrence left, or a paused one that did not sleep through its time, answers resume with 400 `schedule_in_past`: PATCH a new schedule first, 15 min out at the soonest. A paused one-shot whose time passed while paused is completed with a `missed` run (`task_paused`). `completed`: a one-shot ran, or the repeat has nothing left |
 | `next_run_at`, `upcoming` | same | In the task's zone. Wrong hour: the zone (below) |
 | `schedule.timezone` | same | Resolved at create from the call, the session, `users.timezone`, then `default_timezone`. A session opened with a zone moves `users.timezone` (`internal/api/session_create.go:76`) |
 | `quiet_hours` | same | An occurrence due inside them is held to their end: its run stays `running` with nothing sent. A run by hand is never held |
@@ -181,8 +182,9 @@ Read the task, then its runs, then the logs, in that order.
 | Limit | create or resume answers 409 `too_many_tasks` | The user holds `max_tasks_per_user` active tasks on this config |
 | Edit refused | update, pause or resume answers 409 `task_changed` | The task changed between the request's read and its save (another edit or pause, or a worker's claim, hold, finish or session write; a lease renewal is not a change): nothing was saved, so read it again and retry. The agent's `update_scheduled_task` is refused the same way |
 | The tools | the model never calls `schedule_task` | `scheduling.enabled` off, incognito, a guest or anonymous caller, or a `noauth` router |
+| Tool refused | `schedule_task` answers `interval_too_short` or `scheduled_turn` | The agent's first run is 15 min from now at the soonest (`scheduling.MinMove`). A turn a task fired cannot schedule a task, nor reschedule, snooze or resume one; it may list, pause, skip and cancel |
 | Old history gone | a completed or failed task 404, or old runs missing | A daily job deletes runs finished over 90 days ago, and completed or failed tasks over 90 days old (`ScheduledTasksKept`); active and paused tasks stay |
-| Session deleted | task 404 | Deleting a session deletes the tasks made in it or following up in it (`internal/api/session_delete.go:47`) |
+| Session deleted | task 404 | Deleting a session deletes the tasks made in it or following up in it, with their runs, and redacts the changes recorded of them (`DeleteForSession`) |
 | User forgotten | task 404, its runs gone | `router usage forget-user` deleted every task of that user in the app, with its runs, and redacted the changes recorded of them (`ForgetUserTasks`) |
 
 Run `error` codes (`internal/scheduling/scheduler.go:105`):
@@ -203,15 +205,15 @@ Run `error` codes (`internal/scheduling/scheduler.go:105`):
 | `no_agent_number` | The config has no SMS line to ring from | yes |
 | `not_answered` | Nobody picked up within the 90 s ring | no |
 | `already_called` | A call was placed for this occurrence already, and its end is not recorded; no channel after `phone` is tried. That call may have carried the task out, so the run leaves the failure streak as it is and the task moves on as after a run that did not fail (a one-shot is `completed`) | no |
-| `account_suspended`, `insufficient_credits`, `system_limit_reached`, `spend_limit_reached`, `user_limit_reached` | A step the organization may not pay for was refused for money (suspended, no credit left, or a spent limit): an SMS, WhatsApp or iMessage text or a thread task's reply (`dlc.ErrUnpaid`, or its reservation), the task's session opening or being carried on, a turn the model refuses, on a text channel (an `agent.Error` in `captureReply`, which ends the walk over the channels, `refusedTurn`), in the conversation (`followUpInConversation` waits for the turn to end and reads it from the session's events; a turn that ends any other way is still `delivered`) or on a thread task (`deliverOnThread` reads it from the session's events), or its call. The run records the refusal's own code (`deliveryReason`, `scheduled_delivery.go:334`), never `channel_unreachable` or `delivery_failed`, and the router warns, naming the task | no (`unpaid`, `scheduled_delivery.go:355`) |
-| `spend_check_unavailable` | The router could not check what the organization has spent, so it refused the step for now (`policy.Transient`). A turn it refused runs once more on the retry, under `st_<run>_r1`: the scheduler hands the next attempt the reason this one failed under (`deliverWithRetries`), a hand-off to the router holding the session carries it (`scheduledHandOff.Earlier`), and `replyCommand` reruns a failed reply after a money code. A conversation rerun refused as well fails the attempt under the same code (`followUpInConversation`), so the run fails once its retries are spent. A reply that failed for any other reason is read back as it was | yes (`unpaid` leaves it retryable) |
+| `account_suspended`, `insufficient_credits`, `system_limit_reached`, `spend_limit_reached`, `user_limit_reached` | A step the organization may not pay for was refused for money (suspended, no credit left, or a spent limit): an SMS, WhatsApp or iMessage text or a thread task's reply (`dlc.ErrUnpaid`, or its reservation), the task's session opening or being carried on, a turn the model refuses, on a text channel (an `agent.Error` in `captureReply`, which ends the walk over the channels, `refusedTurn`), in the conversation (`followUpInConversation` waits for the turn to end and reads it from the session's events; a turn that ends any other way is still `delivered`) or on a thread task (`deliverOnThread` reads it from the session's events), or its call, placed or not: a placed call whose session cannot open fails under the refusal's code (`carryOutOnCall`); on an answered call, a turn refused before the agent answered anything hangs up (`carryOutAnswered`), and a refusal after that is a later turn's, still `delivered`. The run records the refusal's own code (`deliveryReason`, `scheduled_delivery.go:334`), never `channel_unreachable` or `delivery_failed`, and the router warns, naming the task | no (`unpaid`, `scheduled_delivery.go:355`) |
+| `spend_check_unavailable` | The router could not check what the organization has spent, so it refused the step for now (`policy.Transient`). A turn it refused runs once more on the retry, under `st_<run>_r1`: the scheduler hands the next attempt the reason this one failed under (`deliverWithRetries`), a hand-off to the router holding the session carries it (`scheduledHandOff.Earlier`), and `replyCommand` reruns a failed reply after a money code. A conversation rerun refused as well fails the attempt under the same code (`followUpInConversation`), so the run fails once its retries are spent. A reply that failed for any other reason is read back as it was. A placed call is rung once: refused this way, its session or its answered turn fails the run under this code, final, with the call kept on the run (`callEnded`), so the user is not rung again | yes (`unpaid` leaves it retryable) |
 | `task_paused` | On a `missed` run: a one-shot whose time came while it was paused, or an occurrence the cut-over of a move skipped whose run the source had started | — |
 
 A failure is retried after 30 s, 2 min and 10 min (`deliveryRetries`) only when the failure
 is not final; with several channels, it is final only when every channel's failure is.
 
-Worker log lines, as the code writes them (`grep -i 'scheduled task'` finds all but the
-last; it also finds the job queue's `Failed to forward scheduled tasks`, which is noise):
+Worker log lines, as the code writes them (`grep -i 'scheduled task'` finds all of them;
+it also finds the job queue's `Failed to forward scheduled tasks`, which is noise):
 
 | Line | Level | Where |
 | --- | --- | --- |
@@ -239,7 +241,6 @@ last; it also finds the job queue's `Failed to forward scheduled tasks`, which i
 | `could not record a scheduled task run by hand` | error | `scheduled_tasks.go:578` |
 | `could not read when a scheduled task last ran` | error | `scheduled_tasks.go:637` |
 | `could not pause a deleted config's scheduled tasks` | error | `internal/api/configs.go:309` |
-| `not keeping the conversation in Stream Chat` | warn | `internal/session/manager.go:340` |
 
 Each line carries `task`, `run` and `customer` where it has them; the `error` field holds the
 whole story the run's code leaves out.

@@ -409,7 +409,7 @@ func (s *StoreSuite) TestARecordWithNeitherAClientIDNorASigningSecretIsRefused()
 }
 
 // The CHECK holds what the store checks for a writer that skips it, such as a later
-// migration's backfill (20261009130000_connector_oauth_clients_provider_app_only.sql).
+// migration's backfill.
 func (s *StoreSuite) TestTheTableRefusesARowWithNeitherAClientIDNorASigningSecret() {
 	_, err := s.store.GlobalDB().ExecContext(s.ctx, `INSERT INTO connector_oauth_clients
     (customer_id, connector_id, registration, client_id, provider_app_id) VALUES (?, 'acme_line', 'customer', '', ?)`,

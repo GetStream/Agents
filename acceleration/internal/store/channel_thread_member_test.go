@@ -52,3 +52,17 @@ func (s *StoreSuite) TestChannelThreadMemberQueryBudgets() {
 		s.False(optedOut)
 	}), "OptedOut")
 }
+
+// Catches a member kept as the provider wrote them while their opt-out is kept in E.164: the
+// two would never meet in the join.
+func (s *StoreSuite) TestAThreadMemberWrittenNotInE164MeetsTheirOptOut() {
+	_, err := s.store.ChannelThreads.Link(s.ctx, thread("thread-unformatted", "chat-unformatted"))
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.ChannelThreadMembers.Insert(s.ctx, "thread-unformatted", "1 (202) 555-0197"))
+	s.Require().NoError(s.store.OptOuts.Insert(s.ctx, &OptOut{CustomerID: "acme-app", Recipient: "+12025550197",
+		Channel: "imessage", Source: "keyword"}))
+
+	found, err := s.store.ChannelThreadMembers.OptedOut(s.ctx, "acme-app", "thread-unformatted", "imessage")
+	s.Require().NoError(err)
+	s.True(found)
+}

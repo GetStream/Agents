@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math/big"
@@ -97,9 +98,12 @@ func (s *DataMoveSuite) TearDownSuite() {
 }
 
 func (s *DataMoveSuite) SetupTest() {
-	tables := strings.Join(append(DataTables(), "data_changes", "data_change_capture"), ", ")
+	tables := []string{"data_changes", "data_change_capture"}
+	for _, table := range dataTables {
+		tables = append(tables, table.name)
+	}
 	for _, store := range []*Store{s.source, s.destination} {
-		_, err := store.GlobalDB().ExecContext(s.ctx, "TRUNCATE "+tables+" CASCADE")
+		_, err := store.GlobalDB().ExecContext(s.ctx, "TRUNCATE "+strings.Join(tables, ", ")+" CASCADE")
 		s.Require().NoError(err)
 		store.SetStreamPins(StreamPins{})
 	}
@@ -227,7 +231,8 @@ func (s *DataMoveSuite) TestEveryColumnNamedLikeASecretIsLeftOutOrVouchedFor() {
 		"password_kek_version":        "which key sealed the password",
 		"bridge_password_kek_version": "which key sealed the password",
 	}
-	for _, table := range DataTables() {
+	for _, data := range dataTables {
+		table := data.name
 		shape, err := s.source.shapeOf(s.ctx, table)
 		s.Require().NoError(err)
 		for _, column := range shape.columns {
@@ -243,7 +248,7 @@ func (s *DataMoveSuite) TestAGuestsRefreshSecretDoesNotLeaveWithThem() {
 	// It is what lets a guest come back as themselves; a moved guest is handed a new one.
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
-	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
 
 	users := s.export("acme").of("users")
 	s.Require().Len(users, 1)
@@ -255,10 +260,10 @@ func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
 	s.capture("acme")
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
-	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
-	s.Require().NoError(s.source.Guests.SetSecret(s.ctx, "acme", "guest-1", next))
+	s.Require().NoError(s.source.Users.SetGuestSecret(s.ctx, "acme", "guest-1", next))
 
 	changes, _, err := s.source.Changes(s.ctx, "acme", 0, 100)
 	s.Require().NoError(err)
@@ -275,7 +280,7 @@ func (s *DataMoveSuite) TestAChangeToAGuestLeavesTheirRefreshSecretBehind() {
 
 func (s *DataMoveSuite) TestAGuestsRefreshSecretInAFileIsNotImported() {
 	// A file the importer wrote could otherwise plant a secret it knows for a guest.
-	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice"}))
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice"}))
 
 	s.moveEdited("acme", "moved", "users", func(row map[string]any) {
 		row["refresh_secret_hash"] = "\\x" + hex.EncodeToString(GuestSecretHash("planted"))
@@ -290,24 +295,20 @@ func (s *DataMoveSuite) TestAGuestsRefreshSecretInAFileIsNotImported() {
 func (s *DataMoveSuite) TestAMoveKeepsWhoItsUsersAre() {
 	// What the router recorded of a user is the customer's data: an account arrives an account,
 	// and a claimed guest arrives claimed by the same account, so nobody else can claim it.
-	s.Require().NoError(s.source.RecordAccount(s.ctx, "acme", "alice"))
-	s.Require().NoError(s.source.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
-	_, err := s.source.ClaimGuest(s.ctx, "acme", "guest-1", "alice")
-	s.Require().NoError(err)
-	claimed, err := s.source.Guest(s.ctx, "acme", "guest-1")
+	s.Require().NoError(s.source.Users.RecordAccount(s.ctx, "acme", "alice"))
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
+	_, err := s.source.Users.ClaimGuest(s.ctx, "acme", "guest-1", "alice")
 	s.Require().NoError(err)
 
 	s.move("acme", "moved")
 
-	_, err = s.destination.Guest(s.ctx, "moved", "alice")
+	_, err = s.destination.Users.GetGuest(s.ctx, "moved", "alice")
 	s.Error(err, "an account is nobody's guest to claim")
-	guest, err := s.destination.Guest(s.ctx, "moved", "guest-1")
+	guest, err := s.destination.Users.GetGuest(s.ctx, "moved", "guest-1")
 	s.Require().NoError(err)
 	s.Equal("alice", guest.ClaimedBy)
-	s.Require().NotNil(guest.ClaimedAt)
-	s.True(claimed.ClaimedAt.Equal(*guest.ClaimedAt))
-	_, err = s.destination.ClaimGuest(s.ctx, "moved", "guest-1", "mallory")
-	s.ErrorContains(err, "already claimed")
+	_, err = s.destination.Users.ClaimGuest(s.ctx, "moved", "guest-1", "mallory")
+	s.ErrorIs(err, ErrGuestClaimed)
 }
 
 func (s *DataMoveSuite) TestAMovedConnectionKeepsItsOwnerAndWhatItsConsentGranted() {
@@ -519,6 +520,30 @@ func (s *DataMoveSuite) TestAnImportOverALiveOptOutLeavesIt() {
 	s.Equal("keyword", live[0].Source)
 }
 
+// Defect: a move wrote an opt-out the source stored as written as it came, and checked it
+// against the opt-outs here as it came, so it neither matched the number dialled nor met the
+// live one here for the same number.
+func (s *DataMoveSuite) TestAMoveKeepsAnOptOutStoredAsWrittenInE164() {
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, `INSERT INTO opt_outs (id, customer_id, recipient, channel, source, created_at)
+		VALUES (?, 'acme', '12025550106', 'sms', 'api', now()), (?, 'acme', '12025550107', 'sms', 'api', now())`, newID(), newID())
+	s.Require().NoError(err)
+	here := OptOut{CustomerID: "moved", Recipient: "+12025550107", Channel: "sms", Source: "keyword"}
+	s.Require().NoError(s.destination.OptOuts.Insert(s.ctx, &here))
+
+	s.move("acme", "moved")
+
+	optedOut, err := s.destination.OptOuts.OptedOut(s.ctx, "moved", "+12025550106", "sms")
+	s.Require().NoError(err)
+	s.True(optedOut)
+	live, err := s.destination.OptOuts.Select(s.ctx, "moved", 10, nil)
+	s.Require().NoError(err)
+	recipients := map[string]string{}
+	for _, optOut := range live {
+		recipients[optOut.Recipient] = optOut.ID
+	}
+	s.Equal(map[string]string{"+12025550106": recipients["+12025550106"], "+12025550107": here.ID}, recipients)
+}
+
 // Defect: a second copy read the source's new live opt-out before the revoked one it replaced,
 // so the import skipped it beside the old copy here, and the revoked row then lifted that copy.
 func (s *DataMoveSuite) TestASecondCopyAfterAStartAndAStopKeepsTheRecipientOptedOut() {
@@ -658,13 +683,42 @@ func (s *DataMoveSuite) TestAnImportCannotOverwriteAnotherCustomersRow() {
 	row, err := json.Marshal(s.export("acme").of("agent_configs")[0])
 	s.Require().NoError(err)
 
-	s.ErrorIs(s.destination.ImportRow(s.ctx, "intruder", "agent_configs", row), ErrAnotherCustomersRow)
+	err = s.destination.ImportRow(s.ctx, "intruder", "agent_configs", row)
 
+	s.ErrorIs(err, ErrAnotherCustomersRow)
+	s.ErrorIs(err, ErrInvalidImport, "the export's to correct, not the router's failure")
+	s.EqualError(err, `store: import agent_configs:{"id":"`+id+`"}: a row with this key belongs to another customer here`)
 	var name, owner string
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT name, customer_id FROM agent_configs WHERE id = ?", id).Scan(&name, &owner))
 	s.Equal("theirs", name)
 	s.Equal("resident", owner)
+}
+
+func (s *DataMoveSuite) TestARefusedRowIsNamedByEveryColumnOfItsKey() {
+	session := AgentSession{ID: "session-1", CustomerID: "acme", State: SessionClosed}
+	s.Require().NoError(session.Validate())
+	s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &session))
+	s.Require().NoError(s.source.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{{
+		SessionID: "session-1", OriginalMessageID: "message-1", CustomerID: "acme", SwitchID: "switch-1"}}))
+	refused := 0
+	for _, row := range s.export("acme").rows {
+		encoded, err := json.Marshal(row.row)
+		s.Require().NoError(err)
+		if row.table != "agent_branch_messages" {
+			s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", row.table, encoded))
+			continue
+		}
+		s.Require().NoError(s.destination.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{{
+			SessionID: "session-1", OriginalMessageID: "message-1", CustomerID: "resident", SwitchID: "theirs"}}))
+
+		err = s.destination.ImportRow(s.ctx, "moved", row.table, encoded)
+
+		s.Require().ErrorIs(err, ErrAnotherCustomersRow)
+		s.ErrorContains(err, `agent_branch_messages:{"original_message_id":"message-1","session_id":"session-1"}`)
+		refused++
+	}
+	s.Equal(1, refused)
 }
 
 func (s *DataMoveSuite) TestAReplayedChangeCannotDeleteAnotherCustomersRow() {
@@ -680,7 +734,9 @@ func (s *DataMoveSuite) TestAReplayedChangeCannotDeleteAnotherCustomersRow() {
 		id, "resident", "theirs", "be brief")
 	s.Require().NoError(err)
 
-	s.ErrorIs(s.destination.ApplyChanges(s.ctx, "intruder", changes), ErrAnotherCustomersRow, "the insert is refused")
+	err = s.destination.ApplyChanges(s.ctx, "intruder", changes)
+	s.ErrorIs(err, ErrAnotherCustomersRow, "the insert is refused")
+	s.ErrorContains(err, `agent_configs:{"id":"`+id+`"}`)
 	deletes := slices.DeleteFunc(changes, func(change DataChange) bool { return change.Op != ChangeDelete })
 	s.Require().NotEmpty(deletes)
 	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "intruder", deletes))
@@ -1703,7 +1759,7 @@ func (s *DataMoveSuite) TestAnImportedConfigOverTheSandboxLimitsIsRefused() {
 
 func (s *DataMoveSuite) TestAnImportedRequestIsNotBilledAndCountsAgainstTheAppsOwnOrganization() {
 	s.Require().NoError(s.destination.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: "acme", OrganizationID: "acme-org"}))
-	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "stt",
+	s.Require().NoError(insertRequest(s.ctx, s.source, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "stt",
 		CustomerID: "acme", OrganizationID: "another-org", Billable: true, CostMicros: -5_000_000,
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true}))
 
@@ -1719,7 +1775,7 @@ func (s *DataMoveSuite) TestAnImportedRequestOfAnAppRegisteredButUnseenHereCount
 	s.Require().NoError(s.destination.Organizations.Insert(s.ctx, &org))
 	app := App{OrganizationID: org.ID, Name: "moving"}
 	s.Require().NoError(s.destination.Apps.Insert(s.ctx, &app))
-	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "stt",
+	s.Require().NoError(insertRequest(s.ctx, s.source, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "stt",
 		CustomerID: app.ID, OrganizationID: "another-org", Provider: "deepgram", Model: "flux",
 		StartedAt: time.Now().UTC(), Success: true}))
 	exported := s.export(app.ID).of("requests")
@@ -1796,6 +1852,24 @@ func (s *DataMoveSuite) TestAPolicyChangeNamingNoScopeIsNotReplayed() {
 
 	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", []DataChange{{
 		Seq: 1, Table: "policies", Op: ChangeUpdate, At: time.Now(), Key: json.RawMessage(`{}`),
+		Payload: json.RawMessage(`{"scope": "organization", "scope_id": "acme", "document": {"prompt_injection": false}, "updated_at": "2026-11-23T00:00:00Z"}`),
+	}}))
+
+	document, err := s.destination.Policies.Get(s.ctx, ScopeApp, "acme")
+	s.Require().NoError(err)
+	s.Require().NotNil(document.PromptInjection)
+	s.True(*document.PromptInjection)
+}
+
+// A change whose key is not an object names no scope either.
+func (s *DataMoveSuite) TestAPolicyChangeWhoseKeyIsNotAnObjectIsNotReplayed() {
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO policies (scope, scope_id, document, updated_at) VALUES ('app', 'acme', ?, now())",
+		`{"prompt_injection": true}`)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", []DataChange{{
+		Seq: 1, Table: "policies", Op: ChangeUpdate, At: time.Now(), Key: json.RawMessage(`"acme"`),
 		Payload: json.RawMessage(`{"scope": "organization", "scope_id": "acme", "document": {"prompt_injection": false}, "updated_at": "2026-11-23T00:00:00Z"}`),
 	}}))
 
@@ -2100,6 +2174,25 @@ func (s *DataMoveSuite) TestAReplayedRouterConfigChangeIsServedRightAfterIt() {
 	s.Equal("slow", config.Name)
 }
 
+// TestARouterConfigFromAReleaseBeforeSyncHashesImportsWithNone: an export from before
+// sync_hash has no such key, and its row written over one synced here leaves no hash a sync
+// did not write.
+func (s *DataMoveSuite) TestARouterConfigFromAReleaseBeforeSyncHashesImportsWithNone() {
+	id := newID()
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO router_configs (id, customer_id, name, sync_hash) VALUES (?, 'moved', ?, 'hash-one')", id, "synced-"+id[:8])
+	s.Require().NoError(err)
+	row := `{"id": "` + id + `", "customer_id": "moved", "name": "old-` + id[:8] + `", "stt": {}, "tts": {}, "llm": {}, "sts": {}, "search": {},
+	  "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z"}`
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", "router_configs", json.RawMessage(row)))
+
+	config, err := s.destination.RouterConfigs.Get(s.ctx, "moved", id)
+	s.Require().NoError(err)
+	s.Equal("old-"+id[:8], config.Name)
+	s.Empty(config.SyncHash)
+}
+
 func (s *DataMoveSuite) TestASkillMovedByAReplayLeavesItsOldConfig() {
 	destination := s.cachedDestination()
 	app := "moved-" + newID()
@@ -2159,6 +2252,318 @@ func (s *DataMoveSuite) TestAReplayedVoiceChangeIsServedRightAfterIt() {
 	s.Equal("announcer", voice.Name)
 }
 
+func (s *DataMoveSuite) TestAVoiceDeletedAtTheSourceIsNoLongerSpokenInAfterTheReplay() {
+	destination, app, id, cursor := s.voiceSpokenInHere()
+
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE voices SET deleted_at = now() WHERE id = ?", id)
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+
+	_, err = destination.VoiceBindings.GetReady(s.ctx, app, id, "elevenlabs")
+	s.ErrorIs(err, ErrNoVoice)
+}
+
+func (s *DataMoveSuite) TestAVoiceRemovedAtTheSourceIsNoLongerSpokenInAfterTheReplay() {
+	destination, app, id, cursor := s.voiceSpokenInHere()
+
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM voices WHERE id = ?", id)
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+
+	_, err = destination.VoiceBindings.GetReady(s.ctx, app, id, "elevenlabs")
+	s.ErrorIs(err, ErrNoVoice)
+}
+
+func (s *DataMoveSuite) TestAVoiceImportedDeletedIsNoLongerSpokenIn() {
+	destination, app, id, _ := s.voiceSpokenInHere()
+	exported := s.export("acme").of("voices")[0]
+	exported["deleted_at"] = "2026-01-01T00:00:00Z"
+	row, err := json.Marshal(exported)
+	s.Require().NoError(err)
+
+	s.Require().NoError(destination.ImportRow(s.ctx, app, "voices", row))
+
+	_, err = destination.VoiceBindings.GetReady(s.ctx, app, id, "elevenlabs")
+	s.ErrorIs(err, ErrNoVoice)
+}
+
+// The name an import forgets is the one the row had when the import wrote it: a rename here that
+// commits while the import waits for the row is not left served.
+func (s *DataMoveSuite) TestAnImportForgetsTheNameARenameWhileItWaitedGaveTheVoice() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	id := s.seedVoice(s.source, "acme", "narrator")
+	s.moveTo(destination, "acme", app)
+	row, err := json.Marshal(s.export("acme").of("voices")[0])
+	s.Require().NoError(err)
+	db := destination.GlobalDB()
+
+	renaming, err := db.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = renaming.Rollback() }()
+	_, err = renaming.ExecContext(s.ctx, "UPDATE voices SET name = 'announcer' WHERE id = ?", id)
+	s.Require().NoError(err)
+	holding, err := db.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = holding.Rollback() }()
+	held := make(chan error, 1)
+	go func() {
+		_, err := holding.ExecContext(s.ctx, "SELECT 1 FROM voices WHERE id = ? FOR UPDATE", id)
+		held <- err
+	}()
+	s.waitingOnALock(db, "SELECT 1 FROM voices")
+	imported := make(chan error, 1)
+	go func() { imported <- destination.ImportRow(s.ctx, app, "voices", row) }()
+	s.waitingOnALock(db, "INSERT INTO voices")
+
+	s.Require().NoError(renaming.Commit())
+	s.Require().NoError(<-held)
+	_, err = destination.Voices.GetByName(s.ctx, app, "announcer")
+	s.Require().NoError(err)
+	s.Require().NoError(holding.Commit())
+	s.Require().NoError(<-imported)
+
+	_, err = destination.Voices.GetByName(s.ctx, app, "announcer")
+	s.ErrorIs(err, ErrNoVoice)
+}
+
+// A binding being added to a voice locks the voice only against a change of its key, which an
+// import does not make, so the import does not wait for the binding's transaction to end.
+func (s *DataMoveSuite) TestAnImportOfAVoiceDoesNotWaitForABindingBeingAddedToIt() {
+	id := s.seedVoice(s.source, "acme", "narrator")
+	s.move("acme", "moved")
+	row, err := json.Marshal(s.export("acme").of("voices")[0])
+	s.Require().NoError(err)
+	binding, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = binding.Rollback() }()
+	_, err = binding.ExecContext(s.ctx, "INSERT INTO voice_bindings (id, voice_id, provider, external_id, state) VALUES (?, ?, 'elevenlabs', 'x', 'ready')", newID(), id)
+	s.Require().NoError(err)
+
+	began := time.Now()
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", "voices", row))
+
+	s.Less(time.Since(began), time.Second)
+}
+
+// Imports of one voice at once wait for each other in turn.
+func (s *DataMoveSuite) TestImportsOfOneVoiceAtOnceAllLand() {
+	id := s.seedVoice(s.source, "acme", "narrator")
+	s.move("acme", "moved")
+	row, err := json.Marshal(s.export("acme").of("voices")[0])
+	s.Require().NoError(err)
+	holding, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = holding.Rollback() }()
+	_, err = holding.ExecContext(s.ctx, "SELECT 1 FROM voices WHERE id = ? FOR UPDATE", id)
+	s.Require().NoError(err)
+
+	imported := make(chan error, 4)
+	for range 4 {
+		go func() { imported <- s.destination.ImportRow(s.ctx, "moved", "voices", row) }()
+	}
+	s.Require().Eventually(func() bool { return s.waitingHere() == 4 }, 2*time.Second, 10*time.Millisecond)
+	s.Require().NoError(holding.Commit())
+
+	for range 4 {
+		s.NoError(<-imported)
+	}
+}
+
+// An import naming a voice another customer holds here is refused without waiting on that
+// customer's row, which a binding being added to it holds.
+func (s *DataMoveSuite) TestAnImportOfAnotherCustomersVoiceIsRefusedWithoutWaitingForABindingBeingAddedToIt() {
+	id := s.seedVoice(s.source, "acme", "narrator")
+	s.move("acme", "moved")
+	row, err := json.Marshal(s.export("acme").of("voices")[0])
+	s.Require().NoError(err)
+	binding, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = binding.Rollback() }()
+	_, err = binding.ExecContext(s.ctx, "INSERT INTO voice_bindings (id, voice_id, provider, external_id, state) VALUES (?, ?, 'elevenlabs', 'x', 'ready')", newID(), id)
+	s.Require().NoError(err)
+
+	began := time.Now()
+	err = s.destination.ImportRow(s.ctx, "somebody-else", "voices", row)
+
+	s.ErrorIs(err, ErrAnotherCustomersRow)
+	s.Less(time.Since(began), time.Second)
+}
+
+// A delete whose key its column cannot take is refused as an invalid import.
+func (s *DataMoveSuite) TestADeleteWhoseKeyItsColumnCannotTakeIsRefused() {
+	for _, key := range []string{
+		`{"modality": "llm", "customer_id": "acme", "provider": "openai", "model": "gpt-4o", "bucket": "yesterday at noon"}`,
+		`"llm"`,
+	} {
+		err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Seq: 1, Table: "stats_hourly", Op: ChangeDelete, At: time.Now(), Key: json.RawMessage(key)}})
+		s.ErrorIs(err, ErrInvalidImport, key)
+	}
+}
+
+// A day and a number are keys too.
+func (s *DataMoveSuite) TestARowKeyedByADayAndANumberIsDeletedByTheReplay() {
+	s.capture("acme")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, `INSERT INTO turn_latency_hourly (customer_id, agent_id, bucket, leg, bin, count)
+		VALUES ('acme', 'agent', '2026-01-01 05:00:00+00', 'stt', 3, 2)`)
+	s.Require().NoError(err)
+	cursor := s.move("acme", "moved")
+	s.Require().Len(s.exportFrom(s.destination, "moved").of("turn_latency_hourly"), 1)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM turn_latency_hourly WHERE customer_id = 'acme'")
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "moved", cursor)
+
+	s.Empty(s.exportFrom(s.destination, "moved").of("turn_latency_hourly"))
+}
+
+// waitingOnALock waits for a statement holding text to wait on a lock.
+func (s *DataMoveSuite) waitingOnALock(db *bun.DB, text string) {
+	s.Require().Eventually(func() bool {
+		var waiting bool
+		s.Require().NoError(db.QueryRowContext(s.ctx, "SELECT EXISTS (SELECT 1 FROM pg_stat_activity"+
+			" WHERE datname = current_database() AND wait_event_type = 'Lock' AND strpos(query, ?) > 0)", text).Scan(&waiting))
+		return waiting
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// voiceSpokenInHere is a voice of acme's moved to a cached destination, prepared there and spoken
+// in, so its ready binding is cached, with the cursor its changes carry on from.
+func (s *DataMoveSuite) voiceSpokenInHere() (destination *Store, app, id string, cursor int64) {
+	destination = s.cachedDestination()
+	app = "moved-" + newID()
+	s.capture("acme")
+	id = s.seedVoice(s.source, "acme", "narrator")
+	cursor = s.moveTo(destination, "acme", app)
+	s.Require().NoError(destination.VoiceBindings.Upsert(s.ctx, &VoiceBinding{
+		VoiceID: id, Provider: "elevenlabs", ExternalID: "el-narrator", State: VoiceReady,
+	}))
+	external, err := destination.VoiceBindings.GetReady(s.ctx, app, id, "elevenlabs")
+	s.Require().NoError(err)
+	s.Require().Equal("el-narrator", external)
+	return destination, app, id, cursor
+}
+
+// A rollup row is keyed by its hour, which a change carries as JSON text.
+func (s *DataMoveSuite) TestARollupRowDeletedAtTheSourceIsDeletedByTheReplay() {
+	s.capture("acme")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, `INSERT INTO stats_hourly
+		(modality, customer_id, provider, model, bucket, audio_ms_total, characters_total, cost_micros_total, error_count, request_count)
+		VALUES ('llm', 'acme', 'openai', 'gpt-4o', '2026-01-01 00:00:00+00', 0, 0, 0, 0, 3)`)
+	s.Require().NoError(err)
+	cursor := s.move("acme", "moved")
+	s.Require().Len(s.exportFrom(s.destination, "moved").of("stats_hourly"), 1)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM stats_hourly WHERE customer_id = 'acme'")
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "moved", cursor)
+
+	s.Empty(s.exportFrom(s.destination, "moved").of("stats_hourly"))
+}
+
+func (s *DataMoveSuite) TestATurnRollupRowDeletedAtTheSourceIsDeletedByTheReplay() {
+	s.capture("acme")
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		`INSERT INTO turn_stats_hourly (customer_id, agent_id, bucket, audio_out_ms_total, interrupted_count, turn_count)
+		VALUES ('acme', 'agent', '2026-01-01 05:00:00+00', 0, 0, 2)`)
+	s.Require().NoError(err)
+	cursor := s.move("acme", "moved")
+	s.Require().Len(s.exportFrom(s.destination, "moved").of("turn_stats_hourly"), 1)
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM turn_stats_hourly WHERE customer_id = 'acme'")
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "moved", cursor)
+
+	s.Empty(s.exportFrom(s.destination, "moved").of("turn_stats_hourly"))
+}
+
+// A user the destination already recorded is held in its memory; a replay that removes their row
+// drops that, so their next request records them again.
+func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainOnTheirNextRequest() {
+	s.capture("acme")
+	s.Require().NoError(s.source.Users.RecordAccount(s.ctx, "acme", "alice"))
+	cursor := s.move("acme", "moved")
+	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "alice", UserKindAuthenticated))
+
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM users WHERE customer_id = 'acme' AND id = 'alice'")
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "moved", cursor)
+	s.Require().Zero(s.usersHeld(s.destination, "moved", "alice"))
+
+	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "alice", UserKindAuthenticated))
+	s.Equal(1, s.usersHeld(s.destination, "moved", "alice"))
+}
+
+// The same through Redis, which every replica reads.
+func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainByARouterWithRedis() {
+	destination := s.cachedDestination()
+	app := "moved-" + newID()
+	s.capture("acme")
+	s.Require().NoError(s.source.Users.RecordAccount(s.ctx, "acme", "alice"))
+	cursor := s.moveTo(destination, "acme", app)
+	s.Require().NoError(destination.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
+
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM users WHERE customer_id = 'acme' AND id = 'alice'")
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+	// Another replica: its memory holds nothing, so only Redis can say alice was recorded.
+	other := s.cachedDestination()
+
+	s.Require().NoError(other.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
+	s.Equal(1, s.usersHeld(destination, app, "alice"))
+}
+
+// A replica that wrote the user itself, rather than read them from Redis, forgets them too.
+func (s *DataMoveSuite) TestAUserRemovedByAReplayIsRecordedAgainByTheReplicaThatWroteThem() {
+	destination, other := s.cachedDestination(), s.cachedDestination()
+	app := "moved-" + newID()
+	s.capture("acme")
+	s.Require().NoError(s.source.Users.RecordAccount(s.ctx, "acme", "alice"))
+	cursor := s.moveTo(destination, "acme", app)
+	_, err := destination.GlobalDB().ExecContext(s.ctx, "DELETE FROM users WHERE customer_id = ? AND id = 'alice'", app)
+	s.Require().NoError(err)
+	s.Require().NoError(other.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
+	s.Require().Equal(1, s.usersHeld(destination, app, "alice"))
+
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM users WHERE customer_id = 'acme' AND id = 'alice'")
+	s.Require().NoError(err)
+	s.replay(destination, "acme", app, cursor)
+	s.Require().Zero(s.usersHeld(destination, app, "alice"))
+
+	s.Eventually(func() bool {
+		s.Require().NoError(other.Users.Seen(s.ctx, app, "alice", UserKindAuthenticated))
+		return s.usersHeld(destination, app, "alice") == 1
+	}, settleFor, 10*time.Millisecond, "the replica that wrote alice is still answering from a stale cache")
+}
+
+// A user recorded here from their own token, then imported as the guest the source still had them
+// as, is recorded again from their next token.
+func (s *DataMoveSuite) TestAUserImportedOverOneSeenHereIsRecordedAgainOnTheirNextRequest() {
+	s.Require().NoError(s.source.Users.InsertGuest(s.ctx, &User{ID: "bob", CustomerID: "acme", Name: "Guest"}))
+	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "bob", UserKindAuthenticated))
+	row, err := json.Marshal(s.export("acme").of("users")[0])
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", "users", row))
+	s.Require().Equal("guest", s.userKind(s.destination, "moved", "bob"))
+
+	s.Require().NoError(s.destination.Users.Seen(s.ctx, "moved", "bob", UserKindAuthenticated))
+	s.Equal("authenticated", s.userKind(s.destination, "moved", "bob"))
+}
+
+func (s *DataMoveSuite) usersHeld(store *Store, customerID, id string) int {
+	var held int
+	s.Require().NoError(store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT count(*) FROM users WHERE customer_id = ? AND id = ?", customerID, id).Scan(&held))
+	return held
+}
+
+func (s *DataMoveSuite) userKind(store *Store, customerID, id string) string {
+	var kind string
+	s.Require().NoError(store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT kind FROM users WHERE customer_id = ? AND id = ?", customerID, id).Scan(&kind))
+	return kind
+}
+
 func (s *DataMoveSuite) seedAgentConfig(store *Store, customerID, name string) string {
 	id := newID()
 	_, err := store.GlobalDB().ExecContext(s.ctx,
@@ -2184,6 +2589,59 @@ func (s *DataMoveSuite) pinnedSession(customerID string, app int64) string {
 		ID: id, CustomerID: customerID, StreamAppPK: app, AgentID: "agent", UserID: "user",
 	}))
 	return id
+}
+
+// A session's tools name their customer, and two customers may each have a session of one id
+// once the tools are keyed by both: an export carries none naming another customer under the id
+// of the customer's own session.
+func (s *DataMoveSuite) TestAnExportCarriesNoToolsNamingAnotherCustomer() {
+	id := s.pinnedSession("acme", 0)
+	s.toolsNaming(s.source, id, "globex")
+
+	s.Empty(s.export("acme").of("agent_session_tools"))
+}
+
+// An exported row of a session's tools names the source's customer, and an import writes the
+// customer importing it.
+func (s *DataMoveSuite) TestImportedToolsAreTheImportersOwn() {
+	id := s.pinnedSession("acme", 0)
+	s.Require().NoError(s.source.SessionTools.Upsert(s.ctx, "acme", id, []ToolDefinition{{Name: "lookup_order"}}))
+
+	s.move("acme", "initech")
+
+	var customer string
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT customer_id FROM agent_session_tools WHERE session_id = ?", id).Scan(&customer))
+	s.Equal("initech", customer)
+	tools, err := s.destination.SessionTools.Get(s.ctx, "initech", id)
+	s.Require().NoError(err)
+	s.Equal([]ToolDefinition{{Name: "lookup_order"}}, tools)
+}
+
+// A replayed delete of a session's tools is scoped to the customer replaying it, whose session
+// of the id does not make another customer's tools under it theirs.
+func (s *DataMoveSuite) TestADeletedToolsChangeLeavesToolsNamingAnotherCustomer() {
+	id := uuid.NewString()
+	s.Require().NoError(s.destination.Sessions.Upsert(s.ctx, &AgentSession{ID: id, CustomerID: "acme", AgentID: "agent", UserID: "user"}))
+	s.toolsNaming(s.destination, id, "globex")
+
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", []DataChange{{
+		Seq: 1, Table: "agent_session_tools", Op: ChangeDelete, At: time.Now(),
+		Key: json.RawMessage(fmt.Sprintf(`{"session_id": %q}`, id)),
+	}}))
+
+	var left int
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT count(*) FROM agent_session_tools WHERE session_id = ?", id).Scan(&left))
+	s.Equal(1, left, "globex's tools are still there")
+}
+
+// toolsNaming writes tools under a session's id naming another customer than the session's.
+func (s *DataMoveSuite) toolsNaming(store *Store, session, customer string) {
+	_, err := store.GlobalDB().ExecContext(s.ctx,
+		`INSERT INTO agent_session_tools (session_id, customer_id, tools, updated_at) VALUES (?, ?, '[{"name":"refund_order"}]', now())`,
+		session, customer)
+	s.Require().NoError(err)
 }
 
 // pinOnDestination is the pin a moved session arrived with, nil for none.
@@ -2275,6 +2733,69 @@ func (s *DataMoveSuite) TestBackfillPinsTheDeploymentAppsRows() {
 	}
 	_, err = s.source.BackfillStreamPins(s.ctx, 0)
 	s.Error(err, "an unknown deployment app pins nothing")
+}
+
+func (s *DataMoveSuite) TestBackfillPinsARowAnotherWriterChangesMidway() {
+	locked, other := s.pinnedSession("acme", 0), s.pinnedSession("acme", 0)
+
+	s.backfillPast(locked, "title = 'renamed'")
+
+	s.Zero(s.unpinned(), "rows %s and %s", locked, other)
+}
+
+func (s *DataMoveSuite) TestBackfillPinsTheOnlyRowWhenAnotherWriterChangesIt() {
+	locked := s.pinnedSession("acme", 0)
+
+	s.backfillPast(locked, "title = 'renamed'")
+
+	s.Zero(s.unpinned(), "row %s", locked)
+}
+
+func (s *DataMoveSuite) TestBackfillLeavesARowAnotherWriterPinnedMidway() {
+	locked := s.pinnedSession("acme", 0)
+
+	s.backfillPast(locked, "stream_app_pk = 4242")
+
+	var pin int64
+	s.Require().NoError(s.source.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT stream_app_pk FROM agent_sessions WHERE id = ?", locked).Scan(&pin))
+	s.Equal(int64(4242), pin, "the other writer's pin is kept")
+}
+
+// backfillPast backfills the source's pins while an update setting set on session id holds its
+// row, which commits once the backfill waits on it, as a session written to mid-backfill would.
+func (s *DataMoveSuite) backfillPast(id, set string) {
+	tx, err := s.source.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer tx.Rollback() //nolint:errcheck // a no-op once committed
+	_, err = tx.ExecContext(s.ctx, "UPDATE agent_sessions SET "+set+" WHERE id = ?", id)
+	s.Require().NoError(err)
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.source.BackfillStreamPins(s.ctx, 1)
+		done <- err
+	}()
+	s.Require().Eventually(func() bool {
+		var waiting bool
+		err := s.source.GlobalDB().QueryRowContext(s.ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'UPDATE agent_sessions SET stream_app_pk%')`).Scan(&waiting)
+		return err == nil && waiting
+	}, 10*time.Second, 10*time.Millisecond, "the backfill never waited on the row")
+	s.Require().NoError(tx.Commit())
+	select {
+	case err := <-done:
+		s.Require().NoError(err)
+	case <-time.After(10 * time.Second):
+		s.FailNow("the backfill did not finish")
+	}
+}
+
+// unpinned is how many of the source's sessions have no pin.
+func (s *DataMoveSuite) unpinned() int {
+	var count int
+	s.Require().NoError(s.source.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT count(*) FROM agent_sessions WHERE stream_app_pk IS NULL").Scan(&count))
+	return count
 }
 
 func (s *DataMoveSuite) TestADeploymentThatCanNeverKnowItsAppParksAPinnedRow() {
@@ -2448,6 +2969,18 @@ func (s *DataMoveSuite) TestAChangeCarryingADefinitionTheAPIWouldRefuseIsRefused
 
 	s.ErrorIs(err, ErrNotACustomConnector)
 	s.Zero(s.definitionsNamed(id))
+}
+
+// A change recorded by a release before sync hashes carries no sync_hash key.
+func (s *DataMoveSuite) TestADefinitionChangeFromAReleaseBeforeSyncHashesApplies() {
+	id := "custom_" + newID()
+	manifest := strings.Replace(customAcme, "custom_acme", id, 1)
+
+	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: "connector_definitions", Op: ChangeInsert,
+		Payload: json.RawMessage(`{"id": "` + id + `", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + manifest + `}`)}})
+
+	s.Require().NoError(err)
+	s.Equal(1, s.definitionsNamed(id))
 }
 
 // customAcme is a manifest the API stores for a custom connector custom_acme: an MCP server
@@ -2887,6 +3420,27 @@ func (s *DataMoveSuite) TestTheCutOverResumesTheOldestTaskWhateverItsId() {
 	}
 }
 
+// The older of two tasks takes the one place, though its id sorts last and an edit here wrote
+// its row after the other's.
+func (s *DataMoveSuite) TestTheCutOverResumesTheOldestTaskWhereverItsRowLies() {
+	s.seedScheduledTask("st-b", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("st-a", "acme", ScheduledTaskActive)
+	s.move("acme", "moved")
+	s.limitHere(1)
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET title = 'Stretch more' WHERE id = 'st-b'")
+	s.Require().NoError(err)
+
+	resumed, _, overLimit, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
+
+	s.Require().NoError(err)
+	s.Equal(int64(1), resumed)
+	s.Equal(int64(1), overLimit)
+	state, _, _, _ := s.scheduledTaskOn(s.destination, "st-b")
+	s.Equal(ScheduledTaskActive, state, "st-b was made first")
+	state, _, _, _ = s.scheduledTaskOn(s.destination, "st-a")
+	s.Equal(ScheduledTaskPaused, state)
+}
+
 // The mark kept on a task left over the limit is what lets a second cut-over resume it.
 func (s *DataMoveSuite) TestTheCutOverRunAgainResumesWhatItLeftOnceTheUserHasRoom() {
 	for _, id := range []string{"st-1", "st-2", "st-3"} {
@@ -2939,6 +3493,315 @@ UPDATE scheduled_tasks SET user_id = 'kim' WHERE id = 'st-kim'`)
 	s.Zero(overLimit)
 }
 
+// waitingHere counts the destination's backends waiting for a heavyweight lock: a row's, a
+// table's or an advisory one (wait_event_type Lock,
+// https://www.postgresql.org/docs/current/monitoring-stats.html#WAIT-EVENT-TABLE).
+func (s *DataMoveSuite) waitingHere() int {
+	var count int
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'").Scan(&count))
+	return count
+}
+
+// cutOver runs ResumeMovedRows on the destination in the background.
+func (s *DataMoveSuite) cutOver() <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
+		done <- err
+	}()
+	return done
+}
+
+// A create counts the room it takes under the limit's lock and holds it until it commits. The
+// cut-over counts under the same lock, so it sees the task made meanwhile and resumes one task,
+// not two.
+func (s *DataMoveSuite) TestTheCutOverCountsTheRoomACreateInProgressTakes() {
+	s.seedScheduledTask("st-1", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("st-2", "acme", ScheduledTaskActive)
+	s.move("acme", "moved")
+	s.limitHere(2)
+	creating, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = creating.Rollback() }()
+	next := time.Date(2026, 12, 2, 9, 0, 0, 0, time.UTC)
+	made := &ScheduledTask{
+		ID: "st-here", CustomerID: "moved", ConfigID: "config-1", UserID: "sam", CallerKind: "authenticated",
+		Title: "Hydrate", Instructions: "Remind them to drink.", StartLocal: next, Timezone: "UTC",
+		State: ScheduledTaskActive, NextRunAt: &next, CreatedBy: "api", Channels: []string{ScheduledTaskDeliveredConversation},
+	}
+	s.Require().NoError(refuseOverLimit(s.ctx, creating, made, 2))
+	_, err = creating.NewInsert().Model(made).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	done := s.cutOver()
+	s.Require().Eventually(func() bool { return s.waitingHere() == 1 }, 5*time.Second, 10*time.Millisecond,
+		"the cut-over waits for the create's lock")
+	s.Require().NoError(creating.Commit())
+
+	s.Require().NoError(<-done)
+	held, err := s.destination.ScheduledTasks.CountActive(s.ctx, "moved", "sam", "config-1")
+	s.Require().NoError(err)
+	s.Equal(2, held, "the task made here and the oldest moved one")
+	state, _, _, _ := s.scheduledTaskOn(s.destination, "st-2")
+	s.Equal(ScheduledTaskPaused, state)
+	s.True(s.movePausedOn("st-2"), "still owed its resume")
+}
+
+// A resume of a moved task locks the task's row, then the limit (ScheduledTasks.Update). The
+// cut-over takes them in the same order, so it waits for the resume instead of holding the
+// limit the resume waits for, which Postgres would end by aborting one of the two (40P01). The
+// task the resume took is counted once: the room left still resumes the next.
+func (s *DataMoveSuite) TestTheCutOverWaitsForAResumeOfAMovedTaskAndCountsItOnce() {
+	s.seedScheduledTask("st-1", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("st-2", "acme", ScheduledTaskActive)
+	s.move("acme", "moved")
+	s.limitHere(2)
+	resuming, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = resuming.Rollback() }()
+	_, err = refuseDeletedConfig(s.ctx, resuming, "moved", "config-1")
+	s.Require().NoError(err)
+	stored, err := lockScheduledTask(s.ctx, resuming, "moved", "st-1")
+	s.Require().NoError(err)
+	s.Require().Equal(ScheduledTaskPaused, stored)
+
+	done := s.cutOver()
+	s.Require().Eventually(func() bool { return s.waitingHere() == 1 }, 5*time.Second, 10*time.Millisecond,
+		"the cut-over waits for the resume's row")
+	s.Require().NoError(refuseOverLimit(s.ctx, resuming,
+		&ScheduledTask{CustomerID: "moved", UserID: "sam", ConfigID: "config-1"}, 2))
+	// What ScheduledTasks.Update writes for a resume, inside the transaction held here.
+	_, err = resuming.ExecContext(s.ctx, "UPDATE scheduled_tasks SET state = 'active', move_paused = false, updated_at = now() WHERE id = 'st-1'")
+	s.Require().NoError(err)
+	s.Require().NoError(resuming.Commit())
+
+	s.Require().NoError(<-done)
+	for _, id := range []string{"st-1", "st-2"} {
+		state, _, _, _ := s.scheduledTaskOn(s.destination, id)
+		s.Equal(ScheduledTaskActive, state, id)
+	}
+}
+
+// A user's pause of a task the move paused clears its mark while the cut-over waits for the
+// task's row. The cut-over then leaves that task paused and gives its place to the next.
+func (s *DataMoveSuite) TestTheCutOverLeavesATaskPausedByTheUserWhileItWaited() {
+	s.seedScheduledTask("st-1", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("st-2", "acme", ScheduledTaskActive)
+	s.move("acme", "moved")
+	s.limitHere(1)
+	pausing, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = pausing.Rollback() }()
+	_, err = lockScheduledTask(s.ctx, pausing, "moved", "st-1")
+	s.Require().NoError(err)
+
+	done := s.cutOver()
+	s.Require().Eventually(func() bool { return s.waitingHere() == 1 }, 5*time.Second, 10*time.Millisecond,
+		"the cut-over waits for the pause's row")
+	// What ScheduledTasks.Update writes for a pause of a paused task, inside the transaction held here.
+	_, err = pausing.ExecContext(s.ctx, "UPDATE scheduled_tasks SET move_paused = false, updated_at = now() WHERE id = 'st-1'")
+	s.Require().NoError(err)
+	s.Require().NoError(pausing.Commit())
+
+	s.Require().NoError(<-done)
+	state, _, _, _ := s.scheduledTaskOn(s.destination, "st-1")
+	s.Equal(ScheduledTaskPaused, state, "the user paused it")
+	state, _, _, _ = s.scheduledTaskOn(s.destination, "st-2")
+	s.Equal(ScheduledTaskActive, state, "the one place is left to it")
+}
+
+// batchesOf sets how many users on a config one transaction of the cut-over resumes, for one test.
+func (s *DataMoveSuite) batchesOf(n int) {
+	before := movedHoldersPerTransaction
+	movedHoldersPerTransaction = n
+	s.T().Cleanup(func() { movedHoldersPerTransaction = before })
+}
+
+// The cut-over takes the limit of every user in its batch, not only the first: a create
+// holding the last user's limit is waited for and counted.
+func (s *DataMoveSuite) TestTheCutOverWaitsForACreateOfTheLastUserInItsBatch() {
+	s.seedScheduledTask("st-kim", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("st-sam", "acme", ScheduledTaskActive)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET user_id = 'kim' WHERE id = 'st-kim'")
+	s.Require().NoError(err)
+	s.move("acme", "moved")
+	s.limitHere(1)
+	creating, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = creating.Rollback() }()
+	next := time.Date(2026, 12, 2, 9, 0, 0, 0, time.UTC)
+	made := &ScheduledTask{
+		ID: "st-here", CustomerID: "moved", ConfigID: "config-1", UserID: "sam", CallerKind: "authenticated",
+		Title: "Hydrate", Instructions: "Remind them to drink.", StartLocal: next, Timezone: "UTC",
+		State: ScheduledTaskActive, NextRunAt: &next, CreatedBy: "api", Channels: []string{ScheduledTaskDeliveredConversation},
+	}
+	s.Require().NoError(refuseOverLimit(s.ctx, creating, made, 1))
+	_, err = creating.NewInsert().Model(made).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	done := s.cutOver()
+	s.Require().Eventually(func() bool { return s.waitingHere() == 1 }, 5*time.Second, 10*time.Millisecond,
+		"the cut-over waits for the create's lock")
+	s.Require().NoError(creating.Commit())
+
+	s.Require().NoError(<-done)
+	held, err := s.destination.ScheduledTasks.CountActive(s.ctx, "moved", "sam", "config-1")
+	s.Require().NoError(err)
+	s.Equal(1, held, "the task made here")
+	state, _, _, _ := s.scheduledTaskOn(s.destination, "st-sam")
+	s.Equal(ScheduledTaskPaused, state)
+	state, _, _, _ = s.scheduledTaskOn(s.destination, "st-kim")
+	s.Equal(ScheduledTaskActive, state)
+}
+
+// Another customer's marked, paused task of the same user and config ids is neither counted
+// nor resumed by this customer's cut-over.
+func (s *DataMoveSuite) TestTheCutOverLeavesAnotherCustomersMarkedTaskAlone() {
+	s.seedScheduledTask("st-1", "acme", ScheduledTaskActive)
+	s.move("acme", "moved")
+	s.limitHere(1)
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx, `
+INSERT INTO scheduled_tasks (id, customer_id, config_id, user_id, caller_kind, title, instructions, start_local,
+	timezone, state, next_run_at, created_by, created_at, updated_at, move_paused)
+VALUES ('st-theirs', 'other', 'config-1', 'sam', 'authenticated', 'Hydrate', 'Remind Sam to drink.', now(),
+	'UTC', 'paused', now() + interval '1 day', 'api', now() - interval '1 year', now(), true)`)
+	s.Require().NoError(err)
+
+	resumed, _, overLimit, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
+
+	s.Require().NoError(err)
+	s.Equal(int64(1), resumed)
+	s.Zero(overLimit)
+	state, _, _, _ := s.scheduledTaskOn(s.destination, "st-1")
+	s.Equal(ScheduledTaskActive, state)
+	state, _, _, _ = s.scheduledTaskOn(s.destination, "st-theirs")
+	s.Equal(ScheduledTaskPaused, state)
+}
+
+// Tasks left paused for want of a config in two batches are both in the total.
+func (s *DataMoveSuite) TestTheCutOverSumsTheTasksLeftWithoutAConfigAcrossBatches() {
+	s.batchesOf(1)
+	s.seedScheduledTask("st-kim", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("st-sam", "acme", ScheduledTaskActive)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "UPDATE scheduled_tasks SET user_id = 'kim' WHERE id = 'st-kim'")
+	s.Require().NoError(err)
+	s.move("acme", "moved")
+	_, err = s.destination.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = 'config-1'")
+	s.Require().NoError(err)
+
+	resumed, skipped, overLimit, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
+
+	s.Require().NoError(err)
+	s.Zero(resumed)
+	s.Equal(int64(2), skipped)
+	s.Zero(overLimit)
+}
+
+// A batch that fails part way: the batch before it stays done and is reported with the error,
+// and the next run finishes and reports the rest.
+func (s *DataMoveSuite) TestTheCutOverThatFailsPartWayReportsTheBatchesItDid() {
+	s.batchesOf(1)
+	s.seedScheduledTask("st-kim", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("st-sam", "acme", ScheduledTaskActive)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO agent_configs (id, customer_id, name, instructions) VALUES ('config-2', 'acme', 'b', 'be brief')")
+	s.Require().NoError(err)
+	_, err = s.source.GlobalDB().ExecContext(s.ctx,
+		"UPDATE scheduled_tasks SET user_id = 'kim', config_id = 'config-2' WHERE id = 'st-kim'")
+	s.Require().NoError(err)
+	s.move("acme", "moved")
+	_, err = s.destination.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET deleted_at = now() WHERE id = 'config-2'")
+	s.Require().NoError(err)
+
+	holding, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = holding.Rollback() }()
+	_, err = lockScheduledTask(s.ctx, holding, "moved", "st-sam")
+	s.Require().NoError(err)
+
+	started := time.Now()
+	resumed, skipped, overLimit, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
+	waited := time.Since(started)
+
+	s.Require().Error(err, "the second batch waited past the lock timeout")
+	s.Contains(err.Error(), "55P03")
+	s.GreaterOrEqual(waited, 2*time.Second)
+	s.Less(waited, 6*time.Second)
+	s.False(s.movePausedOn("st-kim"), "the first batch committed")
+	state, _, _, _ := s.scheduledTaskOn(s.destination, "st-sam")
+	s.Equal(ScheduledTaskPaused, state)
+	s.True(s.movePausedOn("st-sam"))
+	s.Zero(resumed)
+	s.Equal(int64(1), skipped, "the first batch left kim's task paused for want of a config")
+	s.Zero(overLimit)
+
+	s.Require().NoError(holding.Rollback())
+	resumed, skipped, overLimit, _, err = s.destination.ResumeMovedRows(s.ctx, "moved")
+	s.Require().NoError(err)
+	s.Equal(int64(1), resumed)
+	s.Zero(skipped, "the first run reported kim's task")
+	s.Zero(overLimit)
+	state, _, _, _ = s.scheduledTaskOn(s.destination, "st-sam")
+	s.Equal(ScheduledTaskActive, state)
+	state, _, _, _ = s.scheduledTaskOn(s.destination, "st-kim")
+	s.Equal(ScheduledTaskPaused, state)
+}
+
+// The cut-over and the API's resumes of the same user's tasks at once: every one either goes
+// through or is refused over the limit, none deadlocks, and the user ends with no more than
+// the limit active.
+func (s *DataMoveSuite) TestTheCutOverAndResumesAtOnceKeepTheLimit() {
+	const limit = 3
+	ids := []string{"st-1", "st-2", "st-3", "st-4", "st-5", "st-6"}
+	for _, id := range ids {
+		s.seedScheduledTask(id, "acme", ScheduledTaskActive)
+	}
+	s.move("acme", "moved")
+	s.limitHere(limit)
+	for _, id := range []string{"st-here-1", "st-here-2"} {
+		s.madeHere(id, "sam", "config-1")
+	}
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
+		"UPDATE scheduled_tasks SET state = 'paused' WHERE id IN ('st-here-1', 'st-here-2')")
+	s.Require().NoError(err)
+	resumable := append(slices.Clone(ids), "st-here-1", "st-here-2")
+
+	start := make(chan struct{})
+	errs := make(chan error, len(resumable)+1)
+	var wg sync.WaitGroup
+	for _, id := range resumable {
+		wg.Go(func() {
+			task, err := s.destination.ScheduledTasks.Get(s.ctx, "moved", id)
+			if err != nil {
+				errs <- err
+				return
+			}
+			task.State = ScheduledTaskActive
+			<-start
+			errs <- s.destination.ScheduledTasks.Update(s.ctx, &task)
+		})
+	}
+	wg.Go(func() {
+		<-start
+		_, _, _, _, err := s.destination.ResumeMovedRows(s.ctx, "moved")
+		errs <- err
+	})
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err == nil || errors.Is(err, ErrTooManyScheduledTasks) || errors.Is(err, ErrScheduledTaskChanged) {
+			continue
+		}
+		s.Failf("a resume or the cut-over failed", "%v", err)
+	}
+	held, err := s.destination.ScheduledTasks.CountActive(s.ctx, "moved", "sam", "config-1")
+	s.Require().NoError(err)
+	s.Equal(limit, held)
+}
+
 // queriesSent records the queries a pool sends while on.
 type queriesSent struct {
 	mu      sync.Mutex
@@ -2973,10 +3836,14 @@ func (q *queriesSent) matching(words ...string) int {
 	return matched
 }
 
-// Each user on each config has the room their own limit leaves them, read for all of them at
-// once: one query locks the configs and one counts what every user holds on each, however
-// many users and configs the move brought.
-func (s *DataMoveSuite) TestTheCutOverReadsEveryUsersRoomOnEveryConfigInOneQueryEach() {
+// Each user on each config has the room their own limit leaves them, read for a batch of them
+// at once: per transaction, one query locks the configs and one counts what every user in it
+// holds on each, however many users and configs the batch holds. Four users on configs, two
+// to a transaction, take two of each.
+func (s *DataMoveSuite) TestTheCutOverReadsEveryUsersRoomOnEveryConfigInOneQueryEachPerTransaction() {
+	before := movedHoldersPerTransaction
+	movedHoldersPerTransaction = 2
+	s.T().Cleanup(func() { movedHoldersPerTransaction = before })
 	tasks := map[string][2]string{
 		"st-sam-1-a": {"sam", "config-1"}, "st-sam-1-b": {"sam", "config-1"}, "st-sam-1-c": {"sam", "config-1"},
 		"st-sam-2-a": {"sam", "config-2"}, "st-sam-2-b": {"sam", "config-2"},
@@ -3026,8 +3893,8 @@ func (s *DataMoveSuite) TestTheCutOverReadsEveryUsersRoomOnEveryConfigInOneQuery
 		got, _, _, _ := s.scheduledTaskOn(s.destination, id)
 		s.Equal(state, got, id)
 	}
-	s.Equal(1, sent.matching(`"agent_configs"`, "FOR SHARE"), "one query locks every config")
-	s.Equal(1, sent.matching(`"scheduled_tasks"`, "count("), "one query counts every user on every config")
+	s.Equal(2, sent.matching(`"agent_configs"`, "FOR SHARE"), "one query per transaction locks its configs")
+	s.Equal(2, sent.matching(`"scheduled_tasks"`, "count("), "one query per transaction counts its users")
 
 	sent.mu.Lock()
 	sent.on, sent.queries = true, nil
@@ -3369,15 +4236,18 @@ func (s *DataMoveSuite) TestAContactMidCallIsSettledHereFromItsCallOnceTheMoveIs
 
 	s.move("acme", "moved")
 
-	later := time.Now().Add(time.Minute)
-	taken, err := s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", later, time.Hour, 10)
+	var left float64
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT EXTRACT(EPOCH FROM lease_until - now()) FROM campaign_contacts WHERE campaign_id = ? AND to_number = ?", campaign, "+15550000001").Scan(&left))
+	s.Less(left, -(24 * time.Hour).Seconds(), "ended on Postgres's clock, also when the clock of this router is ahead")
+	taken, err := s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", time.Hour, 10)
 	s.Require().NoError(err)
 	s.Empty(taken, "the source is still ringing it until the cut-over")
 	_, campaigns := s.resume("moved")
 	s.Require().Equal([]string{campaign}, campaigns)
 	s.Require().NoError(s.destination.Campaigns.Resume(s.ctx, "moved", campaign))
 
-	taken, err = s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", later, time.Hour, 10)
+	taken, err = s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", time.Hour, 10)
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1, "settled from its call rather than rung again at once")
 	ada := taken[0].Contact
@@ -3692,7 +4562,7 @@ func (s *DataMoveSuite) TestAMovedBoughtNumberDoesNotArrive() {
 	s.Require().NoError(s.source.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000126", Vendor: "telnyx", Country: "US", CustomerID: "acme",
 	}))
-	s.Require().NoError(s.source.PhoneNumbers.Release(s.ctx, "acme", "+15550000126", time.Time{}))
+	s.Require().NoError(giveBack(s.ctx, s.source, "acme", "+15550000126", time.Time{}))
 
 	s.move("acme", "acme")
 	s.move("acme", "acme")
@@ -3909,7 +4779,7 @@ func (s *DataMoveSuite) TestCopyingAgainBringsTheSourcesAgentToANumberOnlyOnALin
 
 func (s *DataMoveSuite) TestCopyingAgainDoesNotKeepTheLineOfANumberTheSourceGaveBack() {
 	attached := s.numberAttachedHere("+15550000135")
-	s.Require().NoError(s.source.PhoneNumbers.Release(s.ctx, "acme", "+15550000135", time.Now()))
+	s.Require().NoError(giveBack(s.ctx, s.source, "acme", "+15550000135", time.Now()))
 
 	s.move("acme", "acme")
 
@@ -4031,7 +4901,7 @@ func (s *DataMoveSuite) TestANumberOnItsOwnTrunkIsImportedWhoeverElseHoldsIt() {
 	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000115", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
-	s.Require().NoError(s.destination.PhoneNumbers.Release(s.ctx, "acme", "+15550000115", time.Time{}))
+	s.Require().NoError(giveBack(s.ctx, s.destination, "acme", "+15550000115", time.Time{}))
 	s.Require().NoError(s.destination.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: "+15550000116", Country: "US", CustomerID: "acme", SIPTrunkID: s.trunkOf(s.destination, "acme").ID,
 	}))
@@ -4138,7 +5008,7 @@ func (s *DataMoveSuite) movedRequest(old bool) map[string]any {
 }
 
 func (s *DataMoveSuite) TestARequestFromBeforeUsageIDsIsImportedWithTheSameIDEveryTime() {
-	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{Modality: "stt", CustomerID: "acme",
+	s.Require().NoError(insertRequest(s.ctx, s.source, &Request{Modality: "stt", CustomerID: "acme",
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true}))
 
 	first := s.movedRequest(true)
@@ -4151,7 +5021,7 @@ func (s *DataMoveSuite) TestARequestFromBeforeUsageIDsIsImportedWithTheSameIDEve
 func (s *DataMoveSuite) TestAnImportedRequestIsGivenAUsageIDOfItsOwnAndIsNeverShipped() {
 	usageID := uuid.Must(uuid.NewV7())
 	shippedAt := time.Now().UTC().Add(-time.Minute)
-	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{UsageID: usageID, Modality: "stt", CustomerID: "acme",
+	s.Require().NoError(insertRequest(s.ctx, s.source, &Request{UsageID: usageID, Modality: "stt", CustomerID: "acme",
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true, ToShip: true,
 		ShippedAt: &shippedAt, ShipError: "missing_api_key"}))
 
@@ -4166,7 +5036,7 @@ func (s *DataMoveSuite) TestAnImportedRequestIsGivenAUsageIDOfItsOwnAndIsNeverSh
 }
 
 func (s *DataMoveSuite) TestAnImportedRequestNamesNoGrant() {
-	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "acme",
+	s.Require().NoError(insertRequest(s.ctx, s.source, &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "acme",
 		Provider: "openai", Model: "m", StartedAt: time.Now().UTC(), Success: true, Billable: true, CostMicros: 500,
 		LimitGrants: []int64{7, 8}}))
 
@@ -4290,7 +5160,7 @@ func (s *DataMoveSuite) TestADeletedRequestIsReplayedByItsUsageID() {
 }
 
 func (s *DataMoveSuite) TestADeletedRequestFromBeforeUsageIDsIsReplayedToo() {
-	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{Modality: "stt", CustomerID: "acme",
+	s.Require().NoError(insertRequest(s.ctx, s.source, &Request{Modality: "stt", CustomerID: "acme",
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true}))
 	moved := s.movedRequest(true)
 	sourceID := int64(s.export("acme").of("requests")[0]["id"].(float64))
@@ -4438,7 +5308,7 @@ func (s *DataMoveSuite) TestAMovedRequestLeavesTheSequenceOfItsIDAlone() {
 
 	s.move("acme", "acme")
 	usageID := uuid.Must(uuid.NewV7())
-	s.Require().NoError(s.destination.Requests.Insert(s.ctx, &Request{UsageID: usageID, Modality: "stt", CustomerID: "acme",
+	s.Require().NoError(insertRequest(s.ctx, s.destination, &Request{UsageID: usageID, Modality: "stt", CustomerID: "acme",
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true}))
 
 	own := s.requestsByUsage()[usageID.String()]
@@ -4660,7 +5530,7 @@ func (s *DataMoveSuite) TestMigrateBuildsTheIndexCopiedLogsAreKnownByAgain() {
 
 func (s *DataMoveSuite) TestACopiedRequestOfAnAgentIsLoggedHereOnlyByItsCopiedLog() {
 	// With one database, the trigger on requests logs a request of an agent where it is written.
-	s.Require().NoError(s.source.Requests.Insert(s.ctx, &Request{Modality: "stt", CustomerID: "acme", AgentID: "agent",
+	s.Require().NoError(insertRequest(s.ctx, s.source, &Request{Modality: "stt", CustomerID: "acme", AgentID: "agent",
 		Provider: "deepgram", Model: "flux", StartedAt: time.Now().UTC(), Success: true}))
 	logged := s.export("acme").of("agent_logs")
 	s.Require().Len(logged, 1, "the source logged the request")
@@ -4780,15 +5650,15 @@ func (s *DataMoveSuite) TestARunFromAnOlderReleaseKeepsItsLease() {
 		ConfigID: "config", Scenario: "ask where the order is", Assertion: "it says where"}
 	s.Require().NoError(s.source.Simulations.Insert(s.ctx, &simulation))
 	run := SimulationRun{CustomerID: "acme", SimulationID: simulation.ID, Mode: SimulationText}
-	leaseUntil := time.Now().Add(time.Hour).UTC().Truncate(time.Microsecond)
-	s.Require().NoError(s.source.SimulationRuns.Start(s.ctx, &run, []SimulationCase{{Scenario: simulation.Scenario}}, leaseUntil))
+	s.Require().NoError(s.source.SimulationRuns.Start(s.ctx, &run, []SimulationCase{{Scenario: simulation.Scenario}}, time.Hour))
+	s.Require().NotNil(run.LeaseUntil)
 
 	s.importAsOlder("acme", "acme", map[string]map[string]string{"simulation_runs": {"lease_until": "held_until"}})
 
 	moved, err := s.destination.SimulationRuns.Get(s.ctx, "acme", run.ID)
 	s.Require().NoError(err)
 	s.Require().NotNil(moved.LeaseUntil)
-	s.True(leaseUntil.Equal(*moved.LeaseUntil), "held until %s, arrived held until %s", leaseUntil, moved.LeaseUntil)
+	s.True(run.LeaseUntil.Equal(*moved.LeaseUntil), "held until %s, arrived held until %s", run.LeaseUntil, moved.LeaseUntil)
 }
 
 // An export from a release before agent_configs grouped its columns names four of them as they

@@ -20,6 +20,8 @@ final readonly class RouterConfig
         public ?StsOptions $sts = null,
         public ?SttOptions $stt = null,
         public ?TtsOptions $tts = null,
+        // The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was wri...
+        public ?string $syncHash = null,
     ) {
     }
 
@@ -38,6 +40,7 @@ final readonly class RouterConfig
             sts: array_key_exists('sts', $data) && $data['sts'] !== null ? StsOptions::fromArray(Json::object($data, 'sts')) : null,
             stt: array_key_exists('stt', $data) && $data['stt'] !== null ? SttOptions::fromArray(Json::object($data, 'stt')) : null,
             tts: array_key_exists('tts', $data) && $data['tts'] !== null ? TtsOptions::fromArray(Json::object($data, 'tts')) : null,
+            syncHash: array_key_exists('sync_hash', $data) && $data['sync_hash'] !== null ? Json::string($data, 'sync_hash') : null,
         );
     }
 
@@ -67,6 +70,9 @@ final readonly class RouterConfig
         }
         if ($this->tts !== null) {
             $out['tts'] = $this->tts->toArray();
+        }
+        if ($this->syncHash !== null) {
+            $out['sync_hash'] = $this->syncHash;
         }
         return $out;
     }

@@ -48,10 +48,10 @@ type SweepOptions struct {
 	// routers of other environments in the same Daytona organization hold theirs for sessions
 	// this one cannot see.
 	Prefix string
-	// Sessions says where a session runs on any router of this deployment, empty where none
-	// does: the node directory.
+	// Sessions says where a customer's session runs on any router of this deployment, empty
+	// where none does: the node directory.
 	Sessions interface {
-		Node(ctx context.Context, session string) (string, error)
+		Node(ctx context.Context, customer, session string) (string, error)
 	}
 	// Slots holds the sweep's lease, so one router sweeps at a time.
 	Slots *concurrency.Slots
@@ -228,10 +228,12 @@ func (s *Sweeper) dead(ctx context.Context, prefix string, secrets []*types.Secr
 	return dead, failed
 }
 
-// live reports whether the session a secret named <session>_<binding>_<random>, past its
-// prefix, was made for may still run. A session id and a binding may both hold _, so each _
-// before the random part is a place the name may split, and any of those sessions being live
-// keeps the secret. A name with no such place is not one this router made, and is kept.
+// live reports whether the session a secret named <session>_<customer>_<binding>_<random>, past
+// its prefix, was made for may still run. A router of the release before named no customer:
+// <session>_<binding>_<random>. Session ids, customers and bindings may all hold _, so each _
+// before the random part is a place the name may split, and any of the sessions those places
+// name being live keeps the secret. A name with no such place is not one this router made, and
+// is kept.
 func (s *Sweeper) live(ctx context.Context, name string) (bool, error) {
 	cut := strings.LastIndexByte(name, '_')
 	if cut <= 0 {
@@ -244,9 +246,18 @@ func (s *Sweeper) live(ctx context.Context, name string) (bool, error) {
 			continue
 		}
 		ours = true
-		address, err := s.options.Sessions.Node(ctx, name[:i])
-		if err != nil || address != "" {
-			return true, err
+		// No customer is the release before's name, found by the session's id alone.
+		customers := []string{""}
+		for j := i + 2; j < len(name); j++ {
+			if name[j] == '_' {
+				customers = append(customers, name[i+1:j])
+			}
+		}
+		for _, customer := range customers {
+			address, err := s.options.Sessions.Node(ctx, customer, name[:i])
+			if err != nil || address != "" {
+				return true, err
+			}
 		}
 	}
 	return !ours, nil

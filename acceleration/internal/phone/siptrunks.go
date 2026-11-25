@@ -313,7 +313,7 @@ func (s *Service) openSIPTrunk(ctx context.Context, customerID, id string) (*SIP
 	}
 	password, err := s.sealer.OpenWithAADVersion(trunk.PasswordSealed, sipTrunkAAD(customerID, id), trunk.PasswordKEKVersion)
 	if err != nil {
-		return nil, stack.Wrap(fmt.Errorf("phone: open sip trunk password: %w", err))
+		return nil, stack.Wrap(lastingError{fmt.Errorf("phone: open sip trunk password: %w", err)})
 	}
 	return &SIPTrunk{
 		Host: trunk.Host, Port: trunk.Port, Transport: trunk.Transport, Username: trunk.Username,

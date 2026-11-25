@@ -1777,7 +1777,7 @@ func (a *Agent) listen(participant stt.Participant) (*sttrouter.Session, error) 
 
 	session, err := a.startListener(target)
 	if err != nil {
-		return nil, fmt.Errorf("agent: start stt for %s: %w", participant.ID, err)
+		return nil, fmt.Errorf("agent: start stt: %w", err)
 	}
 	// A new transcriber numbers the participant's utterances from one again: a stop ruled
 	// in one of the last one's is spent, and is forgotten before this one can rule another.
@@ -2359,14 +2359,15 @@ var requests = []string{
 	"could you", "can you", "may i have", "go ahead with your",
 }
 
-// lastStamp is the last stamp turnStamp handed out in this process.
+// lastStamp is the last turn stamp handed out.
 var lastStamp atomic.Int64
 
-// turnStamp names a turn: the time in nanoseconds, moved one past the last stamp when the
-// clock reads no later than it. The agent tells turns apart by their ids, and a clock can
-// read the same twice: a coarse one, or the fake clock of a test, which stands still until
-// every goroutine waits, so a follow-up there could take the id of the turn that handed
-// its work over and be taken for a reply already heard.
+// turnStamp names a turn: the time in nanoseconds, moved past the last stamp handed out.
+// Why: the clock alone can name two turns alike. A clock that ticks in microseconds (macOS)
+// or not at all until every goroutine waits (a test's fake clock) starts the follow-up to an
+// answer in the same instant as the reply before it. Each sentence's synthesis is named
+// after its turn, so the follow-up's would then be the earlier reply's, already finished:
+// never recorded as being said, a voice lost under it took nothing the caller was owed.
 func turnStamp() string {
 	now := time.Now().UnixNano()
 	for {

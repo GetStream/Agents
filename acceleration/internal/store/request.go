@@ -46,7 +46,7 @@ type Request struct {
 	UserID           string   `bun:"user_id,notnull"`
 	UsageCategories  []string `bun:"usage_categories,array,nullzero"`
 	// LimitGrants are the grants the work was admitted on past a spent limit, which its
-	// billable cost is drawn from (20261112121000_requests_limit_grants.sql).
+	// billable cost is drawn from.
 	LimitGrants []int64 `bun:"limit_grants,array,nullzero"`
 	// AgentID is the agent the work was done for. Empty outside a conversation.
 	AgentID string `bun:"agent_id,nullzero"`
@@ -85,7 +85,8 @@ type Request struct {
 	Meters pricing.Quantities `bun:"meters,type:jsonb,nullzero"`
 	// Attributes chose the price (a service tier, a country) or explain the row.
 	Attributes map[string]string `bun:"attributes,type:jsonb,nullzero"`
-	LatencyMs  *float64          `bun:"latency_ms"`
+	// LatencyMs is nil for a request that failed before reaching the provider: it has none.
+	LatencyMs *float64 `bun:"latency_ms"`
 	// CostMicros is millionths of a dollar: what the work is charged at its entry's prices.
 	CostMicros int64 `bun:"cost_micros,notnull"`
 	// OutputCostMicros is the part of CostMicros the generated tokens were priced at.
@@ -182,16 +183,18 @@ func measured(prefix string) string {
 	return "COALESCE(" + prefix + "error_code, '') NOT IN ('" + ErrorCancelled + "', '" + ErrorRefused + "')"
 }
 
-// requestsPrimaryKey is named for the table's first name: 20260815090000_multi_modality.sql
-// renamed the table and not its key.
+// requestsPrimaryKey is named for the table's first name: the table was renamed and its key
+// was not.
 const requestsPrimaryKey = "stt_requests_pkey"
 
 // SpendBucket is what one group cost in one bucket, across every modality. Value is a
-// modality or a cost label value; "other" is everything outside the biggest few and the
-// empty string is spend that carried no such label, so the rows still add up to the total.
+// modality or a cost label value; the row with Other is everything outside the biggest few,
+// with Value "other", and the empty string is spend that carried no such label, so the rows
+// still add up to the total. A label whose value is "other" is a row of its own, without Other.
 type SpendBucket struct {
 	Bucket          time.Time `bun:"bucket"`
 	Value           string    `bun:"value"`
+	Other           bool      `bun:"-"`
 	CostMicrosTotal int64     `bun:"cost_micros_total"`
 	RequestCount    int64     `bun:"request_count"`
 }
@@ -283,24 +286,12 @@ type Requests struct {
 	store *Store
 }
 
-// Insert stores one request, giving it a usage id when it has none. Latency is optional
-// because a request that failed before reaching the provider has none.
-func (r *Requests) Insert(ctx context.Context, request *Request) error {
-	if request.UsageID == uuid.Nil {
-		request.UsageID = uuid.Must(uuid.NewV7())
-	}
-	requests := []Request{*request}
-	_, err := r.InsertMany(ctx, requests)
-	*request = requests[0]
-	return err
-}
-
 // InsertMany writes rows that are not written yet, in one transaction in this shard's
 // database, and returns the usage ids it wrote. A row whose usage id is already there is
 // skipped, so writing a batch again after a failure whose commit did land writes nothing twice.
 // A row InsertMany wrote has its ID set, and one with an agent a provider_request agent log
 // row. With one database each row it wrote counts toward the grants it names, and is logged,
-// in the same transaction (AddGrantUses); with shards the grants are the caller's to count,
+// in the same transaction (addGrantUses); with shards the grants are the caller's to count,
 // apart, and the log rows are written to the shared database after the commit.
 func (r *Requests) InsertMany(ctx context.Context, requests []Request) ([]uuid.UUID, error) {
 	for i := range requests {
@@ -458,8 +449,7 @@ func Unwritable(err error) bool {
 // row carried in with its own id leaves behind. InsertMany has moved the sequence past it by
 // then, so trying again at once writes the rows.
 func IDTaken(err error) bool {
-	var refused pgdriver.Error
-	return errors.As(err, &refused) && refused.Field('C') == "23505" && refused.Field('n') == requestsPrimaryKey
+	return constraint(err) == requestsPrimaryKey
 }
 
 // callsOf is the call each request happened in, in their order: the agent's latest call of the
@@ -485,7 +475,7 @@ FROM unnest(?::text[], ?::text[], ?::text[], ?::timestamptz[]) WITH ORDINALITY
     AS r (customer_id, agent_id, call_id, started_at, ordinal)
 CROSS JOIN LATERAL (
     SELECT COALESCE(s.config_id, '') AS config_id, COALESCE(calls.session_id, '') AS session_id
-    FROM calls LEFT JOIN agent_sessions AS s ON s.id = calls.session_id
+    FROM calls LEFT JOIN agent_sessions AS s ON s.customer_id = calls.customer_id AND s.id = calls.session_id
     WHERE calls.customer_id = r.customer_id AND calls.agent_id = r.agent_id
         AND calls.started_at <= r.started_at AND (r.call_id = '' OR calls.call_id = r.call_id)
     ORDER BY calls.started_at DESC
@@ -793,7 +783,8 @@ func spendGroups(groupBy string, acrossApps bool) (value, join string, ok bool) 
 	return "", "", false
 }
 
-// spendOther is the value every group outside the biggest few is summed into.
+// spendOther is the value of the row every group outside the biggest few is summed into,
+// which SpendBucket.Other tells apart from a label of that value.
 const spendOther = "other"
 
 // Spend returns what one customer spent per bucket and group, oldest bucket first. It is the
@@ -802,7 +793,7 @@ const spendOther = "other"
 // groupBy is "modality", who asked (SpendGroupByApp and the rest), or a cost label key. Only
 // the limit biggest values over the whole window keep a group of their own: a label such as
 // customer_id has as many values as the customer has customers, and a chart of all of them
-// says nothing. The rest are summed into "other", and requests carrying no such label into
+// says nothing. The rest are summed into a row marked Other, and requests carrying no such label into
 // the empty value, so the rows still add up to the total; grouped by category, a row counts
 // once in each of its categories.
 //
@@ -821,14 +812,12 @@ func (r *Requests) Spend(
 		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	if limit < 1 {
 		return nil, stack.Wrap(errors.New("store: limit must be at least 1"))
 	}
-	if tags == nil {
-		tags = map[string]string{}
-	}
+	tags = orEmptyMap(tags)
 	filter, err := json.Marshal(tags)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer spend: encode tag filter: %w", err))
@@ -903,11 +892,9 @@ func (r *Requests) TagKeys(
 	tags map[string]string,
 ) ([]TagKeySummary, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
-	if tags == nil {
-		tags = map[string]string{}
-	}
+	tags = orEmptyMap(tags)
 	filter, err := json.Marshal(tags)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer tag keys: encode tag filter: %w", err))
@@ -1066,7 +1053,8 @@ func (r *Requests) CountByModel(ctx context.Context, modality string, since time
 // vendorCosts is every row since a time whose vendor reported what it charged, with the list's
 // cost at the vendor's rates: base_cost_micros once something writes it, else cost_micros,
 // which is the same figure for a row priced before either was written. A malformed figure is skipped,
-// never cast, so one bad row cannot fail the read.
+// never cast, so one bad row cannot fail the read. A row on the customer's own key is left out:
+// its vendor bills the customer, so the list puts no cost at the vendor's rates on it.
 const vendorCosts = `
 SELECT id, usage_id, modality, provider, model, started_at, vendor, base
 FROM (
@@ -1075,7 +1063,7 @@ FROM (
                 THEN (attributes->>'vendor_cost_micros')::bigint END AS vendor,
            CASE WHEN price_version = '' THEN cost_micros ELSE base_cost_micros END AS base
     FROM requests
-    WHERE started_at >= ? AND attributes->>'vendor_cost_micros' IS NOT NULL
+    WHERE started_at >= ? AND attributes->>'vendor_cost_micros' IS NOT NULL AND NOT byok
 ) AS reported
 WHERE vendor > 0`
 

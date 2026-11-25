@@ -47,20 +47,39 @@ func (s *StoreSuite) TestCopyingAMessageAgainKeepsWhatItSaysNow() {
 	s.Equal("partial and finished", found[0].Message["text"])
 }
 
-func (s *StoreSuite) TestCopiesAreDeletedForTheirSessionAlone() {
+// A save names no conflict target, so copies are kept and saved again under the key the release
+// after this one gives them, where one naming the session and message alone fails every save.
+func (s *StoreSuite) TestCopiesAreSavedAgainUnderAKeyOfCustomerSessionAndMessage() {
+	s.keyedBy("agent_branch_messages", []string{"session_id", "original_message_id"},
+		[]string{"customer_id", "session_id", "original_message_id"})
 	s.opened("one", "app", s.base, nil)
-	s.opened("two", "app", s.base, nil)
-	other := hidden("m2", "second", "switch", s.base, "kept")
-	other.SessionID = "two"
-	s.Require().NoError(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{hidden("m1", "second", "switch", s.base, "gone"), other}))
 
-	deleted, err := s.store.BranchMessages.Delete(s.ctx, "app", "one")
-	s.Require().NoError(err)
-	s.EqualValues(1, deleted)
+	s.Require().NoError(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{hidden("m1", "second", "switch", s.base, "partial")}))
+	s.Require().NoError(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{
+		hidden("m1", "second", "switch", s.base, "partial and finished"), hidden("m2", "second", "switch", s.base, "new"),
+	}))
 
-	left, err := s.store.BranchMessages.Select(s.ctx, "app", "two", nil)
+	found, err := s.store.BranchMessages.Select(s.ctx, "app", "one", nil)
 	s.Require().NoError(err)
-	s.Len(left, 1)
+	s.Require().Len(found, 2)
+	s.Equal("partial and finished", found[0].Message["text"])
+	s.Equal("new", found[1].Message["text"])
+}
+
+// Copies of another customer's are left as they are: its row of the message is not the one a
+// save of the customer's replaces.
+func (s *StoreSuite) TestSavingACopyAgainLeavesAnotherCustomersAlone() {
+	s.opened("one", "app", s.base, nil)
+	s.Require().NoError(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{hidden("m1", "second", "switch", s.base, "app's")}))
+	theirs := hidden("m1", "second", "switch", s.base, "theirs")
+	theirs.CustomerID = "somebody-else"
+
+	s.Require().NoError(s.store.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{theirs}))
+
+	found, err := s.store.BranchMessages.Select(s.ctx, "app", "one", nil)
+	s.Require().NoError(err)
+	s.Require().Len(found, 1)
+	s.Equal("app's", found[0].Message["text"])
 }
 
 func (s *StoreSuite) TestForgettingAUserDeletesTheCopiesOfTheirSessionsAlone() {
@@ -120,10 +139,6 @@ func (s *StoreSuite) TestBranchMessageQueryBudgets() {
 		{"BranchMessages.CountUser", 0, 1, func() error {
 			counted, err := s.store.BranchMessages.CountUser(s.ctx, "app", "jlahey")
 			s.EqualValues(30, counted)
-			return err
-		}},
-		{"BranchMessages.Delete", 0, 1, func() error {
-			_, err := s.store.BranchMessages.Delete(s.ctx, "app", "branched")
 			return err
 		}},
 		{"BranchMessages.DeleteUser", 0, 1, func() error {

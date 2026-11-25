@@ -35,9 +35,6 @@ func (s *StoreSuite) TestRecordingQueryBudgets() {
 	recording := &Recording{CustomerID: "app", Modality: "tts"}
 	s.withinQueryBudgets([]queryBudget{
 		{"Recordings.Insert", 1, 0, func() error { return s.store.Recordings.Insert(s.ctx, recording) }},
-		{"Recordings.Start", 1, 0, func() error {
-			return s.store.Recordings.Start(s.ctx, recording.CustomerID, recording.ID, "stub", "stub-tts")
-		}},
 		{"Recordings.Finish", 1, 0, func() error {
 			return s.store.Recordings.Finish(s.ctx, recording.CustomerID, recording.ID, "stub", "stub-tts", json.RawMessage(`{}`), "")
 		}},
@@ -47,9 +44,6 @@ func (s *StoreSuite) TestRecordingQueryBudgets() {
 
 func (s *StoreSuite) TestAnotherCustomersWriteToARecordingIdChangesNothing() {
 	writes := map[string]func(id string) error{
-		"Start": func(id string) error {
-			return s.store.Recordings.Start(s.ctx, "somebody-else", id, "their-stt", "their-model")
-		},
 		"Finish": func(id string) error {
 			return s.store.Recordings.Finish(s.ctx, "somebody-else", id, "their-stt", "their-model", json.RawMessage(`{"text":"theirs"}`), "")
 		},

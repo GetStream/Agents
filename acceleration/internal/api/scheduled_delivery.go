@@ -803,7 +803,7 @@ func scheduledPrompt(claimed store.ClaimedScheduledTask, now time.Time) string {
 }
 
 // withOccurrence gives a re-dued one-shot back the instant its start names.
-// An edit re-dues the occurrence at the edit time (store.SaveScheduledTask),
+// An edit re-dues the occurrence at the edit time (store.ScheduledTasks.Update),
 // so its next run no longer reads as the start and FromStored cannot tell
 // which pass of a fall-back hour the start is; the run the edit settled can.
 func (s *Server) withOccurrence(ctx context.Context, claimed store.ClaimedScheduledTask) store.ClaimedScheduledTask {
@@ -900,7 +900,7 @@ func (s *Server) handDeliveryToPeer(ctx context.Context, delivery scheduledDeliv
 	if s.directory == nil || s.forwarder == nil {
 		return none, false, nil
 	}
-	address, err := s.directory.Node(ctx, delivery.SessionID)
+	address, err := s.directory.Node(ctx, delivery.CustomerID, delivery.SessionID)
 	if err != nil || address == "" || address == s.directory.Address() {
 		return none, false, nil
 	}
@@ -939,7 +939,7 @@ func (s *Server) handDeliveryToPeer(ctx context.Context, delivery scheduledDeliv
 		if err := waitFor(ctx, s.scheduledPoll); err != nil {
 			return none, false, err
 		}
-		current, err := s.directory.Node(ctx, delivery.SessionID)
+		current, err := s.directory.Node(ctx, delivery.CustomerID, delivery.SessionID)
 		if err != nil || current == "" || current == s.directory.Address() {
 			return none, false, nil
 		}
@@ -1112,7 +1112,8 @@ func (s *Server) openTaskSession(ctx context.Context, delivery scheduledDelivery
 // is the one the user texts this agent from; the number rung from is the
 // agent's own text line. An occurrence rings once: the call's session is
 // taken on the run before it is placed, so neither a retry nor a worker
-// taking the run over rings the user again (callEnded). A call the
+// taking the run over rings the user again (callEnded): a placed call is rung
+// once, whatever refuses it. A call the
 // occurrence has no time left to ring and hold is missed, not placed: it
 // would be hung up mid-sentence when the occurrence runs out. The call is
 // taken before anything else is checked, so an attempt after the one that
@@ -1212,13 +1213,18 @@ func callSpec(config store.AgentConfig, delivery scheduledDelivery, agentID stri
 
 // carryOutOnCall opens the session of a call a task placed and holds the
 // call until it is over. The user has been rung by now, so a failure is
-// final: another attempt would ring them again.
+// final: another attempt would ring them again, even after a refusal because
+// the money could not be checked (callEnded).
 func (s *Server) carryOutOnCall(ctx context.Context, delivery scheduledDelivery, spec session.Spec) (string, string, error) {
 	created, err := s.sessions.Create(ctx, spec)
 	if _, unanswered := errors.AsType[*session.CallUnansweredError](err); unanswered {
 		return "", "", s.callEnded(ctx, delivery, spec.ID, undeliveredFinally(scheduling.ReasonNotAnswered, err))
 	}
 	if err != nil {
+		// A session the organization may not pay for fails under the refusal's code (unpaid).
+		if _, refused := moneyError(err); refused {
+			return "", "", s.callEnded(ctx, delivery, spec.ID, unpaid(err))
+		}
 		return "", "", s.callEnded(ctx, delivery, spec.ID, undeliveredFinally(scheduling.ReasonFailed, err))
 	}
 	if err := s.store.ScheduledTasks.SetSession(ctx, delivery.CustomerID, delivery.TaskID, created.ID()); err != nil {
@@ -1239,12 +1245,16 @@ func (s *Server) carryOutOnCall(ctx context.Context, delivery scheduledDelivery,
 
 // callEnded records on the run the reason the call callID failed under, and
 // answers that failure: a worker taking the run over after this one stopped
-// finds the call placed, and records how it went rather than that it was.
+// finds the call placed, and records how it went rather than that it was. The
+// user has been rung, so every failure is final, a refusal because the money
+// could not be checked (unpaid) included: a retry would ring nobody, and a
+// second ring is the most intrusive way to try again (AI-3597).
 func (s *Server) callEnded(ctx context.Context, delivery scheduledDelivery, callID string, err error) error {
 	var failure *scheduling.Failure
 	if !errors.As(err, &failure) {
 		return err
 	}
+	failure.Final = true
 	if err := s.store.ScheduledTaskRuns.SetCallReason(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, callID, failure.Reason); err != nil {
 		s.logger.Error("could not record how a scheduled task's call ended", "run", delivery.RunID, "error", err)
 	}
@@ -1299,7 +1309,12 @@ func (s *Server) holdCall(ctx context.Context, created *session.Session, deliver
 
 // carryOutAnswered sends the task as the first turn of a call somebody
 // picked up, and stays on it until it ends, or until scheduledCallLimit,
-// when the agent hangs up.
+// when the agent hangs up. A turn the organization may not pay for, refused
+// before the agent answered anything on the call, leaves the agent silent:
+// the attempt fails under the money (turnRefusal), final (callEnded), and the
+// agent hangs up. A refusal because the money could not be checked is final
+// too: a placed call is rung once. A refusal after the agent answered is a
+// later turn's: the task was said.
 func (s *Server) carryOutAnswered(ctx context.Context, created *session.Session, delivery scheduledDelivery, events <-chan session.Event) error {
 	// The call's turn has an id of its own: a channel tried before the call
 	// left its turn in the conversation under the run's, which would be taken
@@ -1310,13 +1325,20 @@ func (s *Server) carryOutAnswered(ctx context.Context, created *session.Session,
 	}
 	limit := time.NewTimer(s.callLimit)
 	defer limit.Stop()
+	answered := false
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case _, open := <-events:
+		case event, open := <-events:
 			if !open {
 				return nil
+			}
+			if refusal := turnRefusal(event); refusal != nil && !answered {
+				return refusal
+			}
+			if _, ok := event.(agent.Responded); ok {
+				answered = true
 			}
 		case <-limit.C:
 			return nil
