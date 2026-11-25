@@ -2487,7 +2487,7 @@ apart: `phone:` and a number anywhere in a line, everything before an email's `@
 logged path a route's `{user_id}` segment and the `{id}` of a customer's policy. Any other id, a bare number or an email logged under
 another name among them, stays until log retention ends.
 
-The service checks its own alerts, sends them to Sentry (`usage_alert:<name>`) and logs them.
+The service checks its own alerts, sends them to Sentry (`usage_alert:<env>:<name>`) and logs them.
 A rejected event, a batch refused whole for what it holds (`batch_refused`: a 400, 413 or 422,
 any 4xx but a 401), ingest failing and Redis refusing the totals page. A router's events
 arriving late warns (other producers ship late by design and are not measured), and so does
