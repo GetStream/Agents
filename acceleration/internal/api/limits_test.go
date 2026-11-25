@@ -647,11 +647,11 @@ func (s *SelfHostedLimitsSuite) backend(app, organization string) *testClient {
 	return &testClient{suite: &s.RouterSuite, header: header, kind: server}
 }
 
-// spent records a billable request of app's, costing micros, now.
-func (s *SelfHostedLimitsSuite) spent(app string, micros int64) {
+// spent records a billable request of app's, costing micros, now, carrying categories.
+func (s *SelfHostedLimitsSuite) spent(app string, micros int64, categories ...string) {
 	_, err := s.store.Requests.InsertMany(context.Background(), []store.Request{{
 		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: app, APIKey: "key_a", Provider: "stub", Model: "stub-llm",
-		StartedAt: time.Now(), CostMicros: micros, Billable: true, Success: true,
+		StartedAt: time.Now(), CostMicros: micros, Billable: true, Success: true, UsageCategories: categories,
 	}})
 	s.Require().NoError(err)
 }
@@ -734,4 +734,39 @@ func (s *SelfHostedLimitsSuite) TestAnOrganizationsSpendLeavesOutAnAppWhoseIdIsI
 	s.spent(organization, 700_000)
 
 	s.Equal(int64(300_000), s.dailySpend(backend, "subject=organization"))
+}
+
+// The teams of an app in no organization are its own work's: an app seen under an organization
+// whose id is the app's is another customer's.
+func (s *SelfHostedLimitsSuite) TestAnAppInNoOrganizationsTeamsAreItsOwnWorks() {
+	own, stranger := s.utils.uuid(), s.utils.uuid()
+	s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: stranger, OrganizationID: own}))
+	s.spent(own, 300_000, "team:finance")
+	s.spent(stranger, 700_000, "team:stranger")
+
+	var teams []Team
+	s.Require().Equal(http.StatusOK, s.backend(own, "").do(http.MethodGet, "/v1/teams", nil, &teams))
+
+	s.Require().Len(teams, 1, "%+v", teams)
+	s.Equal("finance", teams[0].Name)
+	s.Equal([]string{own}, teams[0].Apps)
+}
+
+// An organization's teams are the work of every app seen under it, the one whose id is the
+// organization's among them when it was seen there.
+func (s *SelfHostedLimitsSuite) TestAnOrganizationsTeamsAreTheWorkOfEveryAppSeenUnderIt() {
+	own, organization := s.utils.uuid(), s.utils.uuid()
+	for _, app := range []string{own, organization} {
+		s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: app, OrganizationID: organization}))
+	}
+	s.spent(own, 300_000, "team:finance")
+	s.spent(organization, 700_000, "team:finance")
+
+	var teams []Team
+	s.Require().Equal(http.StatusOK, s.backend(own, organization).do(http.MethodGet, "/v1/teams", nil, &teams))
+
+	s.Require().Len(teams, 1, "%+v", teams)
+	s.Equal("finance", teams[0].Name)
+	s.ElementsMatch([]string{own, organization}, teams[0].Apps)
+	s.Equal(int64(1_000_000), teams[0].Spent[3].SpentMicros)
 }

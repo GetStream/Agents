@@ -5,6 +5,8 @@ package node
 import (
 	"context"
 	"os"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -59,7 +61,9 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	directory.Offer(s.ctx, "globex", "agent-s2", []byte(`{"tools":[]}`))
 	keys, err := s.client.Do(s.ctx, s.client.B().Keys().Pattern(s.prefix+":*").Build()).AsStrSlice()
 	s.Require().NoError(err)
-	s.Require().Len(keys, 3*4+2+2+1)
+	// Each session: itself, its agent and its conversation, each under its customer and under
+	// its id alone.
+	s.Require().Len(keys, 3*6+2+2+1)
 	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Del().Key(keys...).Build()).Error())
 
 	before := s.roundTrips.sent.Load()
@@ -74,9 +78,12 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	peer, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: "node-b:1", Prefix: s.prefix})
 	s.Require().NoError(err)
 	peer.Close()
-	held, err := peer.NodeByConversation(s.ctx, "messaging:s3")
+	held, err := peer.NodeByConversation(s.ctx, "acme", "messaging:s3")
 	s.Require().NoError(err)
 	s.Equal("node-a:1", held)
+	writing, err := peer.NodesByAgent(s.ctx, "agent-s2")
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"acme": "node-a:1"}, writing)
 	waiting, err := peer.Waiting(s.ctx, "globex")
 	s.Require().NoError(err)
 	s.Equal([]string{"node-a:1"}, waiting)
@@ -114,6 +121,92 @@ func (s *DirectorySuite) TestASessionHeldHereIsFoundByItsIdAlone() {
 	s.Equal("node-a:1", held)
 }
 
+// Two customers may each run a session writing as one agent: each customer's is found, whichever
+// node said so last.
+func (s *DirectorySuite) TestTwoCustomersWritingAsOneAgentAreFoundApart() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "support", "")
+	s.directoryAt("node-b:1").Hold(s.ctx, "globex", "s2", "support", "")
+
+	peer := s.directoryAt("node-c:1")
+	s.Equal("node-a:1", s.writingAs(peer, "acme", "support"))
+	s.Equal("node-b:1", s.writingAs(peer, "globex", "support"))
+	writing, err := peer.NodesByAgent(s.ctx, "support")
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"acme": "node-a:1", "globex": "node-b:1"}, writing)
+}
+
+// The same for two customers answering in conversations of one cid.
+func (s *DirectorySuite) TestTwoCustomersAnsweringInOneConversationAreFoundApart() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "", "messaging:general")
+	s.directoryAt("node-b:1").Hold(s.ctx, "globex", "s2", "", "messaging:general")
+
+	peer := s.directoryAt("node-c:1")
+	s.Equal("node-a:1", s.answeringIn(peer, "acme", "messaging:general"))
+	s.Equal("node-b:1", s.answeringIn(peer, "globex", "messaging:general"))
+}
+
+// A customer id may hold a colon, as a cid does, so customer "a:b" in "c:d" and customer "a" in
+// "b:c:d" are two conversations.
+func (s *DirectorySuite) TestACustomerAndCidAreNotTakenForAnother() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "a:b", "s1", "", "c:d")
+	s.directoryAt("node-b:1").Hold(s.ctx, "a", "s2", "", "b:c:d")
+
+	peer := s.directoryAt("node-c:1")
+	s.Equal("node-a:1", s.answeringIn(peer, "a:b", "c:d"))
+	s.Equal("node-b:1", s.answeringIn(peer, "a", "b:c:d"))
+}
+
+// A node that died stops renewing its customer's claim on an agent while another customer's
+// renewals keep the agent's entry alive: that claim lapses all the same.
+func (s *DirectorySuite) TestAClaimOnAnAgentThatLapsedIsFoundNowhere() {
+	lapsed := strconv.FormatInt(time.Now().Add(-time.Second).UnixMilli(), 10)
+	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Hset().Key(s.prefix+":writing-as:support").
+		FieldValue().FieldValue("acme", lapsed+" node-a:1").Build()).Error())
+	s.directoryAt("node-b:1").Hold(s.ctx, "globex", "s2", "support", "")
+
+	peer := s.directoryAt("node-c:1")
+	s.Empty(s.writingAs(peer, "acme", "support"))
+	writing, err := peer.NodesByAgent(s.ctx, "support")
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"globex": "node-b:1"}, writing)
+}
+
+// A router of the release before holds a conversation under its cid alone, and an approval in it
+// is still carried there.
+func (s *DirectorySuite) TestAConversationHeldUnderItsCidAloneIsFound() {
+	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Set().Key(s.prefix+":channel:messaging:general").Value("node-a:1").Build()).Error())
+
+	s.Equal("node-a:1", s.answeringIn(s.directoryAt("node-c:1"), "acme", "messaging:general"))
+}
+
+// A claim on an agent lapses thirty seconds after it is made unless its node renews it, though
+// other customers' renewals keep the agent's entry alive.
+func (s *DirectorySuite) TestAClaimOnAnAgentLapsesThirtySecondsAfterItIsMade() {
+	before := time.Now()
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "support", "")
+	after := time.Now()
+
+	entry, err := s.client.Do(s.ctx, s.client.B().Hget().Key(s.prefix+":writing-as:support").Field("acme").Build()).ToString()
+	s.Require().NoError(err)
+	until, address, _ := strings.Cut(entry, " ")
+	lapses, err := strconv.ParseInt(until, 10, 64)
+	s.Require().NoError(err)
+	s.Equal("node-a:1", address)
+	s.GreaterOrEqual(lapses, before.Add(30*time.Second).UnixMilli())
+	s.LessOrEqual(lapses, after.Add(30*time.Second).UnixMilli())
+}
+
+// A router of the release before reads a session's agent and conversation by their ids alone.
+func (s *DirectorySuite) TestASessionHeldHereIsFoundByItsAgentAndConversationAlone() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "support", "messaging:general")
+
+	for _, key := range []string{s.prefix + ":agent:support", s.prefix + ":channel:messaging:general"} {
+		held, err := s.client.Do(s.ctx, s.client.B().Get().Key(key).Build()).ToString()
+		s.Require().NoError(err, key)
+		s.Equal("node-a:1", held, key)
+	}
+}
+
 func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhere() {
 	directory := s.directoryAt("node-a:1")
 	directory.Hold(s.ctx, "acme", "order-42", "", "")
@@ -137,6 +230,20 @@ func (s *DirectorySuite) directoryAt(address string) *Directory {
 // nodeOf is where directory says a customer's session runs.
 func (s *DirectorySuite) nodeOf(directory *Directory, customer, session string) string {
 	address, err := directory.Node(s.ctx, customer, session)
+	s.Require().NoError(err)
+	return address
+}
+
+// writingAs is where directory says a customer's session writing as an agent runs.
+func (s *DirectorySuite) writingAs(directory *Directory, customer, agent string) string {
+	address, err := directory.NodeByAgent(s.ctx, customer, agent)
+	s.Require().NoError(err)
+	return address
+}
+
+// answeringIn is where directory says a customer's session answering in a conversation runs.
+func (s *DirectorySuite) answeringIn(directory *Directory, customer, cid string) string {
+	address, err := directory.NodeByConversation(s.ctx, customer, cid)
 	s.Require().NoError(err)
 	return address
 }

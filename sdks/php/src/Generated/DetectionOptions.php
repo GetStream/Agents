@@ -21,7 +21,7 @@ final readonly class DetectionOptions
         public ?bool $embeddings = null,
         // Drop boxes scored below this. Only a model that scores its boxes is asked.
         public ?float $minConfidence = null,
-        // Settings for one provider that the options above have no word for, keyed by provider. roboflow takes worksp...
+        // Settings for one provider that the options above have no word for, keyed by provider. No detection provider...
         /** @var array<string, mixed>|null */
         public ?array $overwrites = null,
         // A priority list of where to try, in the order given, which wins over target when it holds anything.

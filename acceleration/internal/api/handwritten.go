@@ -280,7 +280,8 @@ func documentHandWritten(api huma.API) {
 			"`invalid_request`. `call_id` may be left out: the router makes " +
 			"one up for the records. A `text` session is refused, because the socket carries audio. " +
 			"A field that `createSession` refuses from an end user's device is refused here too: " +
-			"`history` and `call` are server-side only. A `call` is refused from a backend too, " +
+			"`history`, `instructions`, `call`, `phone`, the models and limits, `greeting` and `tags` are " +
+			"server-side only. A `call` is refused from a backend too, " +
 			"with an `error` frame carrying `code` and `error_type`: the socket carries the audio, " +
 			"so the session joins no Stream call.\n" +
 			"The server answers `session`, with the `Session` and the `sample_rate` in use. Then " +

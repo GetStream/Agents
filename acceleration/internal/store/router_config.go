@@ -38,6 +38,11 @@ type RouterConfig struct {
 	CreatedAt time.Time      `bun:"created_at,notnull"`
 	UpdatedAt time.Time      `bun:"updated_at,notnull"`
 	DeletedAt *time.Time     `bun:"deleted_at"`
+	// SyncHash is a fingerprint of the file the CLI last synced onto this config
+	// (20270201001200_connector_router_sync_hash.sql), as AgentConfig.SyncHash is for a
+	// directory. Empty if it was never synced, or was written since by anything that is not a
+	// sync.
+	SyncHash string `bun:"sync_hash,notnull"`
 }
 
 // Validate refuses a config the table would refuse.
@@ -107,7 +112,7 @@ func (r *RouterConfigs) Update(ctx context.Context, config *RouterConfig) error 
 		return tx.NewUpdate().Model(config).
 			With("was", was).
 			TableExpr("was").
-			Column("name", "stt", "tts", "llm", "sts", "search", "updated_at").
+			Column("name", "stt", "tts", "llm", "sts", "search", "sync_hash", "updated_at").
 			Where("rc.id = ?", config.ID).
 			Where("rc.customer_id = ?", config.CustomerID).
 			Returning("was.name").

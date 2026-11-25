@@ -257,7 +257,7 @@ and the advanced form is a request value, not thirty initialiser parameters:
 
 ```swift
 var options = SessionOptions(agent: "myagent")
-options.greeting = Greeting("Hello.", mode: .variation)
+options.title = "Order 1042"
 let session = try await agents.sessions.create(options)
 ```
 

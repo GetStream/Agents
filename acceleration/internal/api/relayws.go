@@ -247,13 +247,13 @@ func (s *Server) writeRelayedEvents(
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.TextMessage, payload); err != nil {
 				s.logger.Debug("relayed session socket write failed", "error", err)
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 
 		case <-ping.C:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 			if err := state.bus.Publish(ctx, state.bus.Commands(), relay.Request{
 				Type: relay.Refresh, Node: state.bus.Node(), Session: id, Watcher: watcher,
