@@ -724,7 +724,7 @@ func (s *Server) handOffConnectorLaunch(w http.ResponseWriter, r *http.Request) 
 //  2. the browser holds that attempt's cookie (RFC 6749 section 10.12, RFC 9700 section
 //     2.1: the state is bound to the user agent), so a callback in another browser is
 //     refused and the right browser can still finish;
-//  3. the attempt is used up, once (store.ConsumeConnectorAuthorizationAttempt), so a
+//  3. the attempt is used up, once (store.ConnectorAuthorizationAttempts.Consume), so a
 //     replayed callback never reaches the provider again;
 //  4. the manifest's before_complete hook sees the whole callback;
 //  5. Scheme.Complete checks state, iss (RFC 9207 section 2.4) and the provider's error
@@ -853,7 +853,7 @@ func (s *Server) completeConsent(ctx context.Context, row store.ConnectorAuthori
 	// the consent link works in any browser, so another person could finish it (AI-1543).
 	var refusal string
 	if manifest.OwnerEmail && connection.OwnerType == store.OwnerUser {
-		asserted, err := s.store.UserEmail(ctx, connection.CustomerID, connection.OwnerID)
+		asserted, err := s.store.Users.GetEmail(ctx, connection.CustomerID, connection.OwnerID)
 		if err != nil {
 			s.logger.Error("could not read the email a consent is checked against", "connection", row.ConnectionID, "error", err)
 			return consentFailed

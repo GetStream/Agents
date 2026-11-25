@@ -85,7 +85,7 @@ func (s *Server) connectChannel(ctx context.Context, request *connectChannelRequ
 	account.SecretsSealed = sealed
 	account.SecretsKEKVersion = s.secrets.CurrentVersion()
 	if err := s.store.ChannelAccounts.Upsert(ctx, &account); err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 
 	rendered := s.channelAccountOf(account)
@@ -175,6 +175,9 @@ func (s *Server) linkChannelNumber(ctx context.Context, request *linkChannelRequ
 			"so there is nothing to link: set channels.identity to link to need a code")
 	}
 
+	if failure, refused := refuseReservedUserID("user_id", request.Body.UserId); refused {
+		return nil, failure
+	}
 	link, err := s.channels.Link(ctx, customerID, config.ID, request.Body.UserId)
 	if err != nil {
 		return nil, err

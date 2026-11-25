@@ -44,7 +44,7 @@ func (r *Resolver) ResolveVoice(ctx context.Context, customerID, provider, voice
 	asked, theirs := strings.CutPrefix(voice, options.OwnVoicePrefix)
 	if r.store == nil || customerID == "" || asked == "" {
 		if theirs {
-			return "", notTheirs(asked)
+			return "", routing.Refused(notTheirs(asked))
 		}
 		return r.passThrough(ctx, customerID, provider, voice)
 	}
@@ -52,7 +52,7 @@ func (r *Resolver) ResolveVoice(ctx context.Context, customerID, provider, voice
 	own, err := r.own(ctx, customerID, asked)
 	if errors.Is(err, store.ErrNoVoice) {
 		if theirs {
-			return "", notTheirs(asked)
+			return "", routing.Refused(notTheirs(asked))
 		}
 		return r.passThrough(ctx, customerID, provider, voice)
 	}

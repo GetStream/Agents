@@ -42,7 +42,7 @@ jobs:
   integration:
     if: github.event.pull_request.draft != true
     name: integration (${{ matrix.group }})
-    runs-on: ubuntu-latest
+    runs-on: { group: github-public-amd64 }
     # MEM0_API_KEY lives in this environment, which a pull request's code never enters.
     environment: ${{ github.event_name == 'push' && matrix.mem0 && 'integration' || '' }}
     timeout-minutes: 40

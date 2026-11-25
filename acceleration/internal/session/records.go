@@ -49,6 +49,12 @@ var recordsLost = promauto.NewCounterVec(prometheus.CounterOpts{
 		"(the row stays open), and items (dropped because their session or response row was never stored)",
 }, []string{"write"})
 
+var recordsDropped = promauto.NewCounter(prometheus.CounterOpts{
+	Namespace: "router",
+	Name:      "session_records_dropped_total",
+	Help:      "Session records of every kind dropped because the writer's queue was full",
+})
+
 // The series exist from the start, so a rate over the first loss reads it.
 func init() {
 	for _, write := range []string{lostSessionEnd, lostCallEnd, lostItems} {
@@ -76,13 +82,18 @@ type recordWrite struct {
 	// customerID is whose session the write is to: an id alone may be another customer's.
 	customerID string
 	// session is a session that opened or was renamed, nil otherwise, and tools what its
-	// model is offered.
-	session *store.AgentSession
-	tools   []store.ToolDefinition
+	// model is offered. carriedOn says it was carried on from a row it had. refused is called
+	// if the store refuses its row because another customer's session has its id.
+	session   *store.AgentSession
+	tools     []store.ToolDefinition
+	carriedOn bool
+	refused   func()
 	// offered is the session whose model is now offered tools.
 	offered string
-	// closed is the session that ended, closedAt when and endReason why.
+	// closed is the session that ended, opened when the router closing it opened it, closedAt
+	// when it ended and endReason why.
 	closed    string
+	opened    time.Time
 	closedAt  time.Time
 	endReason string
 	// response is a turn that began, nil otherwise.
@@ -145,8 +156,12 @@ type recorder interface {
 // session open and close.
 type sessionRecords interface {
 	recorder
-	Opened(row store.AgentSession, tools []store.ToolDefinition)
-	Closed(customerID, id string, at time.Time, reason EndReason)
+	// Opened says a session started. refused is called, on the writer, if its id turns out to
+	// be another customer's session's.
+	Opened(row store.AgentSession, tools []store.ToolDefinition, refused func())
+	// CarriedOn says a session was carried on from a row it had; refused is as for Opened.
+	CarriedOn(row store.AgentSession, tools []store.ToolDefinition, refused func())
+	Closed(customerID, id string, opened, at time.Time, reason EndReason)
 	Close()
 }
 
@@ -182,6 +197,14 @@ type sessionRecorder struct {
 	// next that succeeds. Meanwhile each write is tried once: a database that stays down
 	// would otherwise hold every queued write, and Close behind them, for a whole budget each.
 	failing bool
+	// taken are the sessions, by customer and id, whose row the store refused because the id
+	// is another customer's: their turns and calls are not written under it. Kept by the
+	// writer alone, and each until the session closes.
+	taken map[[2]string]struct{}
+	// missing are the turns, by response id, whose items the store refused because the turn's
+	// row is not there: their later items are dropped as they arrive, rather than failing every
+	// batch they are in. Kept by the writer alone, and each until its turn ends.
+	missing map[string]struct{}
 }
 
 func newSessionRecorder(pgStore *store.Store, logger *slog.Logger) *sessionRecorder {
@@ -192,14 +215,22 @@ func newSessionRecorder(pgStore *store.Store, logger *slog.Logger) *sessionRecor
 		flushes: make(chan chan (<-chan struct{})),
 		done:    make(chan struct{}),
 		refused: map[string]struct{}{},
+		taken:   map[[2]string]struct{}{},
+		missing: map[string]struct{}{},
 	}
 	go r.run()
 	return r
 }
 
 // Opened queues the row for a session that has just started.
-func (r *sessionRecorder) Opened(row store.AgentSession, tools []store.ToolDefinition) {
-	r.queueWrite(recordWrite{session: &row, tools: tools})
+func (r *sessionRecorder) Opened(row store.AgentSession, tools []store.ToolDefinition, refused func()) {
+	r.queueWrite(recordWrite{session: &row, tools: tools, refused: refused})
+}
+
+// CarriedOn queues the row of a session carried on from a row it had, maybe in another shard,
+// which it supersedes once written.
+func (r *sessionRecorder) CarriedOn(row store.AgentSession, tools []store.ToolDefinition, refused func()) {
+	r.queueWrite(recordWrite{session: &row, tools: tools, carriedOn: true, refused: refused})
 }
 
 // Offered queues what a session's model is now offered.
@@ -207,9 +238,9 @@ func (r *sessionRecorder) Offered(customerID, id string, tools []store.ToolDefin
 	r.queueWrite(recordWrite{customerID: customerID, offered: id, tools: tools})
 }
 
-// Closed queues the time a session ended.
-func (r *sessionRecorder) Closed(customerID, id string, at time.Time, reason EndReason) {
-	r.queueWrite(recordWrite{customerID: customerID, closed: id, closedAt: at, endReason: string(reason)})
+// Closed queues the time a session this router opened at opened ended.
+func (r *sessionRecorder) Closed(customerID, id string, opened, at time.Time, reason EndReason) {
+	r.queueWrite(recordWrite{customerID: customerID, closed: id, opened: opened, closedAt: at, endReason: string(reason)})
 }
 
 // described is what a session was renamed to.
@@ -312,6 +343,7 @@ func (r *sessionRecorder) queueWrite(write recordWrite) {
 	case r.queue <- write:
 	default:
 		r.dropped.Add(1)
+		recordsDropped.Inc()
 		// An end dropped here leaves its row open, as one the store refused does.
 		switch {
 		case write.closed != "":
@@ -363,7 +395,9 @@ func (r *sessionRecorder) run() {
 			taken++
 			if len(write.items) > 0 {
 				for _, item := range write.items {
-					if _, refused := r.refused[item.ResponseID]; !refused {
+					if _, missing := r.missing[item.ResponseID]; missing {
+						recordsLost.WithLabelValues(lostItems).Inc()
+					} else if _, refused := r.refused[item.ResponseID]; !refused {
 						pending = append(pending, item)
 					}
 				}
@@ -430,9 +464,30 @@ func (w *flushWaiters) release(taken int) {
 func (r *sessionRecorder) write(write recordWrite) {
 	switch {
 	case write.session != nil:
-		if err := r.attempt(func(ctx context.Context) error { return r.store.Sessions.Upsert(ctx, write.session) }); err != nil {
+		key := [2]string{write.session.CustomerID, write.session.ID}
+		err := r.attempt(func(ctx context.Context) error { return r.store.Sessions.Upsert(ctx, write.session) })
+		if errors.Is(err, store.ErrIDTaken) {
+			r.taken[key] = struct{}{}
+			if write.refused != nil {
+				write.refused()
+			}
+			// Expected when two routers open one id at once, and handled where refused ends
+			// the session, which says so: no ERROR with a stack here.
+			return
+		}
+		if err != nil {
 			r.logger.Error("could not record the session starting", "error", err)
 			return
+		}
+		// The id is the customer's now, so it is no longer taken, even when the close of a
+		// session refused before it never reached the writer: a full queue drops a close.
+		delete(r.taken, key)
+		if write.carriedOn {
+			if err := r.attempt(func(ctx context.Context) error {
+				return r.store.Sessions.Supersede(ctx, write.session.CustomerID, write.session.ID, write.session.OpenedAt)
+			}); err != nil {
+				r.logger.Error("could not supersede the rows of a session carried on", "session", write.session.ID, "error", err)
+			}
 		}
 		if err := r.attempt(func(ctx context.Context) error {
 			return r.store.SessionTools.Upsert(ctx, write.session.CustomerID, write.session.ID, write.tools)
@@ -446,14 +501,19 @@ func (r *sessionRecorder) write(write recordWrite) {
 			r.logger.Error("could not record the session's tools", "error", err)
 		}
 	case write.closed != "":
+		delete(r.taken, [2]string{write.customerID, write.closed})
 		if err := r.attempt(func(ctx context.Context) error {
-			return r.store.Sessions.Close(ctx, write.customerID, write.closed, write.closedAt, write.endReason)
+			return r.store.Sessions.Close(ctx, write.customerID, write.closed, write.opened, write.closedAt, write.endReason)
 		}); err != nil {
 			// The row stays open, read as live and counted in every concurrency peak.
 			recordsLost.WithLabelValues(lostSessionEnd).Inc()
 			r.logger.Error("could not record the session ending", "session", write.closed, "error", err)
 		}
 	case write.response != nil:
+		if _, taken := r.taken[[2]string{write.response.CustomerID, write.response.SessionID}]; taken {
+			r.refused[write.response.ID] = struct{}{}
+			return
+		}
 		err := r.attempt(func(ctx context.Context) error { return r.store.Responses.Insert(ctx, write.response) })
 		if errors.Is(err, store.ErrIDTaken) {
 			r.refused[write.response.ID] = struct{}{}
@@ -463,6 +523,7 @@ func (r *sessionRecorder) write(write recordWrite) {
 		}
 	case write.finished != "":
 		delete(r.refused, write.finished)
+		delete(r.missing, write.finished)
 		if err := r.attempt(func(ctx context.Context) error {
 			return r.store.Responses.Finish(ctx, write.customerID, write.finished, write.status, write.failure, write.finishedAt)
 		}); err != nil {
@@ -507,6 +568,9 @@ func (r *sessionRecorder) write(write recordWrite) {
 			r.logger.Error("could not record the session's voice", "session", write.voiced, "error", err)
 		}
 	case write.callStarted != nil:
+		if _, taken := r.taken[[2]string{write.callStarted.CustomerID, write.callStarted.SessionID}]; taken {
+			return
+		}
 		if err := r.attempt(func(ctx context.Context) error { return r.store.Calls.Start(ctx, write.callStarted) }); err != nil {
 			r.logger.Error("could not record the call starting", "error", err)
 		}
@@ -557,6 +621,7 @@ func (r *sessionRecorder) writeItems(items []store.AgentResponseItem) {
 		}
 		switch {
 		case store.IsForeignKeyViolation(err):
+			r.missing[response] = struct{}{}
 			recordsLost.WithLabelValues(lostItems).Add(float64(len(own)))
 			r.logger.Warn("dropped what a turn did: its response was never recorded",
 				"session", own[0].SessionID, "response", response, "items", len(own))
@@ -625,6 +690,7 @@ func sessionRow(created *Session) store.AgentSession {
 		State:           store.SessionRunning,
 		Modality:        created.Modality(),
 		CreatedAt:       created.created.UTC(),
+		OpenedAt:        created.began.UTC().Truncate(time.Microsecond),
 	}
 	// Whose the session is comes from the credential rather than from the spec's UserID,
 	// which is who the agent joined the call as. Recording the agent's own id as the owner

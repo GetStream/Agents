@@ -316,7 +316,7 @@ func BenchmarkRequestsInsert(b *testing.B) {
 	h := newBench(b)
 	h.run(b, nil, func(int) error {
 		request := h.request()
-		return h.store.Requests.Insert(h.ctx, &request)
+		return insertRequest(h.ctx, h.store, &request)
 	})
 }
 
@@ -572,8 +572,7 @@ func BenchmarkChatInboundsClaim(b *testing.B) {
 		require.True(b, queued)
 	}
 	h.run(b, nil, func(int) error {
-		now := time.Now()
-		_, err := h.store.ChatInbounds.Claim(h.ctx, now, 10, now)
+		_, err := h.store.ChatInbounds.Claim(h.ctx, 10, 0)
 		return err
 	})
 }
@@ -596,8 +595,7 @@ func BenchmarkImageJobsClaim(b *testing.B) {
 		require.True(b, queued)
 	}
 	h.run(b, nil, func(int) error {
-		now := time.Now()
-		_, err := h.store.ImageJobs.Claim(h.ctx, now, 10, now, false)
+		_, err := h.store.ImageJobs.Claim(h.ctx, 10, 0, false)
 		return err
 	})
 }

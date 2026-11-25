@@ -217,10 +217,9 @@ func (r *ConnectionEventSubscriptions) DueConnection(ctx context.Context, custom
 	return nil
 }
 
-// Claim takes at most limit subscriptions due at now, each leased
-// until leaseUntil.
-func (r *ConnectionEventSubscriptions) Claim(ctx context.Context, now time.Time, limit int, leaseUntil time.Time) ([]ConnectionEventSubscription, error) {
-	return claim[ConnectionEventSubscription](ctx, r.store.global, connectionEventSubscriptions, now, leaseUntil, limit, nil, "ces.*")
+// Claim takes at most limit subscriptions due now, each leased for lease.
+func (r *ConnectionEventSubscriptions) Claim(ctx context.Context, limit int, lease time.Duration) ([]ConnectionEventSubscription, error) {
+	return claim[ConnectionEventSubscription](ctx, r.store.global, connectionEventSubscriptions, lease, limit, nil, "ces.*")
 }
 
 var connectionEventSubscriptions = queue{name: "connection event subscriptions", alias: "ces", key: "id"}

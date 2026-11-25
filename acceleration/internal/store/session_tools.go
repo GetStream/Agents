@@ -28,10 +28,18 @@ type ToolDefinition struct {
 type agentSessionTools struct {
 	bun.BaseModel `bun:"table:agent_session_tools"`
 
-	SessionID string           `bun:"session_id,pk"`
-	Tools     []ToolDefinition `bun:"tools,type:jsonb,notnull"`
-	UpdatedAt time.Time        `bun:"updated_at,notnull"`
+	SessionID string `bun:"session_id,pk"`
+	// CustomerID is whose session it is, since two customers may each have a session of one id.
+	// Empty, stored as NULL, on a row from before it was kept: the session's row says whose.
+	CustomerID string           `bun:"customer_id,nullzero"`
+	Tools      []ToolDefinition `bun:"tools,type:jsonb,notnull"`
+	UpdatedAt  time.Time        `bun:"updated_at,notnull"`
 }
+
+// customersTools is the condition that a row of agent_session_tools is the customer the next
+// two placeholders name's: by its own customer, or by its session's on a row that names none.
+const customersTools = "(?TableAlias.customer_id = ? OR ?TableAlias.customer_id IS NULL AND " +
+	"EXISTS (SELECT 1 FROM agent_sessions AS s WHERE s.id = ?TableAlias.session_id AND s.customer_id = ?))"
 
 // Validate refuses tools that name no session.
 func (t *agentSessionTools) Validate() error {
@@ -53,10 +61,8 @@ func (r *SessionTools) Upsert(ctx context.Context, customerID, sessionID string,
 	if customerID == "" {
 		return stack.Wrap(errors.New("store: a customer is required"))
 	}
-	if tools == nil {
-		tools = []ToolDefinition{}
-	}
-	row := &agentSessionTools{SessionID: sessionID, Tools: tools, UpdatedAt: time.Now().UTC()}
+	tools = orEmpty(tools)
+	row := &agentSessionTools{SessionID: sessionID, CustomerID: customerID, Tools: tools, UpdatedAt: time.Now().UTC()}
 	if err := row.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
@@ -64,17 +70,35 @@ func (r *SessionTools) Upsert(ctx context.Context, customerID, sessionID string,
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save session tools: %w", err))
 	}
-	// INSERT ... SELECT, which the builder cannot write: the table has no customer, so the row
-	// is written only beside a session of the customer's, on a first write as on a replace.
-	result, err := r.store.shard.NewRaw(`INSERT INTO agent_session_tools (session_id, tools, updated_at)
-SELECT ?, ?::jsonb, ? WHERE EXISTS (SELECT 1 FROM agent_sessions WHERE id = ? AND customer_id = ?)
-ON CONFLICT (session_id) DO UPDATE SET tools = EXCLUDED.tools, updated_at = EXCLUDED.updated_at`,
-		row.SessionID, string(encoded), row.UpdatedAt, row.SessionID, customerID).Exec(ctx)
+	// INSERT ... SELECT, which the builder cannot write: the row is written only beside a session
+	// of the customer's. No conflict target is named, so the insert depends on none of the
+	// table's unique indexes: what is there already is replaced below, if it is the customer's.
+	result, err := r.store.shard.NewRaw(`INSERT INTO agent_session_tools (session_id, customer_id, tools, updated_at)
+SELECT ?, ?, ?::jsonb, ? WHERE EXISTS (SELECT 1 FROM agent_sessions WHERE id = ? AND customer_id = ?)
+ON CONFLICT DO NOTHING`,
+		row.SessionID, customerID, string(encoded), row.UpdatedAt, row.SessionID, customerID).Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save session tools: %w", err))
 	}
 	written, err := result.RowsAffected()
 	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: save session tools: %w", err))
+	}
+	if written == 1 {
+		return nil
+	}
+	// A row that names no customer gets the customer whose session it is.
+	result, err = r.store.shard.NewUpdate().Model((*agentSessionTools)(nil)).
+		Set("tools = ?::jsonb", string(encoded)).
+		Set("updated_at = ?", row.UpdatedAt).
+		Set("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Where(customersTools, customerID, customerID).
+		Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: save session tools: %w", err))
+	}
+	if written, err = result.RowsAffected(); err != nil {
 		return stack.Wrap(fmt.Errorf("store: save session tools: %w", err))
 	}
 	if written == 0 {
@@ -83,12 +107,14 @@ ON CONFLICT (session_id) DO UPDATE SET tools = EXCLUDED.tools, updated_at = EXCL
 	return nil
 }
 
-// Get is what a session's model was last offered. A session that recorded none is
-// ErrNoSessionTools.
-func (r *SessionTools) Get(ctx context.Context, sessionID string) ([]ToolDefinition, error) {
+// Get is what a session of the customer's model was last offered. A session that recorded
+// none, or that the customer does not have, is ErrNoSessionTools.
+func (r *SessionTools) Get(ctx context.Context, customerID, sessionID string) ([]ToolDefinition, error) {
 	stored, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (agentSessionTools, error) {
 		var stored agentSessionTools
-		err := db.NewSelect().Model(&stored).Where("session_id = ?", sessionID).Scan(ctx)
+		err := db.NewSelect().Model(&stored).Where("session_id = ?", sessionID).
+			Where(customersTools, customerID, customerID).
+			Scan(ctx)
 		return stored, err
 	})
 	if errors.Is(err, sql.ErrNoRows) {

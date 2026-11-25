@@ -268,7 +268,7 @@ func fromNote(text string) bool {
 
 // A name field can identify a place or business, not just a person. The lexical
 // heuristics must not reject a name the caller or a successful tool already gave. A tool that
-// reads back what the agent wrote with the name in it does not give it (ownLines.readBack).
+// reads back what the agent wrote with the name in it does not give it (heldLines.readBack).
 func nameWasGiven(history []llm.Message, name string) bool {
 	words := func(text string) string {
 		return " " + strings.ToLower(strings.Join(strings.FieldsFunc(text, func(r rune) bool {

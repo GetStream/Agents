@@ -149,7 +149,9 @@ const (
 	// A hosted router keeps its keys wrapped, so this is refused beside a KMS setting.
 	devKEKEnvVar = "ROUTER_DEV_KEK"
 	// setAKeyring is what a refusal for a missing keyring tells the operator to set.
-	setAKeyring = "set " + devKEKEnvVar + " on a laptop or in CI, or " + authKEKEnvVar + "_V1" +
+	// A compose user meets it first, so it says what the key is and where compose reads it.
+	setAKeyring = "set " + devKEKEnvVar + " on a laptop or in CI (once, to any random string such as " +
+		"`openssl rand -hex 32`, kept for good; compose reads it from .env), or " + authKEKEnvVar + "_V1" +
 		authKEKWrappedSuffix + " with auth.kms_key (ROUTER_AUTH_KMS_KEY) on a hosted router"
 	shutdownGrace     = 10 * time.Second
 	readHeaderTimeout = 10 * time.Second
@@ -170,6 +172,9 @@ const (
 	// runs first, and the HTTP drain gets the rest of shutdownGrace, so both fit inside the
 	// orchestrator's termination grace period.
 	phoneHangupGrace = 5 * time.Second
+	// legFlushTimeout bounds the last write of the call legs the leg sweep still holds, once
+	// the HTTP and session drains are over: one insert a leg, of at most a few, normally.
+	legFlushTimeout = 5 * time.Second
 	// usageDrainTimeout is how long the usage writer has to write what is queued once
 	// everything that records has stopped: it starts after the HTTP drain, any session drain
 	// and sessions.Shutdown, and counts none of them. What is still queued after it is lost,
@@ -191,6 +196,7 @@ const usage = `usage: router [--config path] [command]
   replicate             copy another deployment's data here and follow its changes
   stream-apps           look after the Stream apps customers registered in app mode
   prices                read and check the price list (router prices for its commands)
+  opt-outs normalize    rewrite opt-outs stored before E.164 was enforced into E.164
   usage replay          write the usage rows a log says were lost, once each (--from path)
   usage reship          send this shard's shipped or refused rows to the usage service again (--since, --rejected)
   usage storage         record the last hour of every knowledge base's size, once each (hourly, one job per turbopuffer key)
@@ -276,6 +282,8 @@ func dispatchCommand(command string, args []string, settings config.Config, logg
 		return runStreamApps(args, settings, logger)
 	case "prices":
 		return runPrices(args, settings, logger)
+	case "opt-outs":
+		return runOptOuts(args, settings, logger)
 	case "usage":
 		return runUsage(args, settings, os.Stdout)
 	case "help", "-h", "--help":
@@ -1051,6 +1059,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 			Registry: stsrouter.DefaultRegistry(),
 			Store:    pgStore,
 			Live:     liveClient,
+			Quota:    limiter,
 			Gate:     gate,
 			Pricer:   prices,
 			Writer:   usageWriter,
@@ -1196,6 +1205,13 @@ func run(settings config.Config, logger *slog.Logger) error {
 		// leg whose row was lost is recorded again. Months of numbers and of 10DLC campaigns are
 		// billed by jobs of their own (router usage numbers, router usage dlc).
 		go telephony.RunLegSweep(ctx, legSweepEvery)
+		// Deferred here, it runs after the drain and sessions.Shutdown, so the legs a webhook or
+		// a session still kept get their last write, and before the usage writer closes.
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), legFlushTimeout)
+			defer cancel()
+			telephony.StopLegSweep(ctx)
+		}()
 		go checkCallHook(ctx, settings, logger)
 		startPhoneSweeper(ctx, telephony, logger)
 	}

@@ -80,7 +80,7 @@ func Resume(ctx context.Context, cfg ResumeConfig, state CallState) (*Call, erro
 		return nil, stack.Wrap(fmt.Errorf("sipbridge: customer trunk: %w", err))
 	}
 
-	ua, customerClient, streamClient, srv, err := newUA(guard)
+	ua, customerClient, streamClient, srvs, err := newUA(guard)
 	if err != nil {
 		return nil, err
 	}
@@ -103,10 +103,12 @@ func Resume(ctx context.Context, cfg ResumeConfig, state CallState) (*Call, erro
 	reg := newRegistry()
 	reg.add(state.Customer.CallID, customer)
 	reg.add(state.Stream.CallID, stream)
-	call := newCall(customer, stream, cfg.Logger)
+	call := newCall(ctx, customer, stream, cfg.Logger)
 	call.onChange = cfg.OnChange
 	call.media = state.Media
-	handle(srv, reg, call)
+	for _, srv := range srvs {
+		handle(srv, reg, call)
+	}
 
 	for _, l := range []*sipLeg{customer, stream} {
 		if err := l.resume(ctx); err != nil {

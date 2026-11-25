@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -431,22 +432,49 @@ func (p *Provider) priceOf(ctx context.Context, e164 string) (int64, error) {
 // idFor finds Telnyx's own identifier for a number this account owns, which is what
 // changing or releasing it needs.
 func (p *Provider) idFor(ctx context.Context, e164 string) (string, error) {
+	number, listed, err := p.listed(ctx, e164)
+	if err != nil {
+		return "", err
+	}
+	if !listed {
+		return "", stack.Wrap(fmt.Errorf("telnyx: %s is not one of this account's numbers", e164))
+	}
+	return number.ID, nil
+}
+
+// notHeld are the statuses of a number Telnyx lists that the account does not hold: one whose
+// purchase or port failed, one given back, and one ported away.
+var notHeld = []string{"purchase-failed", "port-failed", "deleted", "ported-out"}
+
+// HoldsNumber reports whether this account holds a number, its purchase still pending or done.
+// It names no purchase id: a purchase is recorded by its number order's id (BuyNumber), and the
+// numbers Telnyx lists do not name the order that bought them.
+func (p *Provider) HoldsNumber(ctx context.Context, e164 string) (string, bool, error) {
+	number, listed, err := p.listed(ctx, e164)
+	if err != nil || !listed || slices.Contains(notHeld, number.Status) {
+		return "", false, err
+	}
+	return "", true, nil
+}
+
+// listed is the number as Telnyx lists it among this account's, in whatever status.
+func (p *Provider) listed(ctx context.Context, e164 string) (ownedNumber, bool, error) {
 	if e164 == "" {
-		return "", stack.Wrap(errors.New("telnyx: a number is required"))
+		return ownedNumber{}, false, stack.Wrap(errors.New("telnyx: a number is required"))
 	}
 
 	query := url.Values{"filter[phone_number]": {e164}}
 
 	var response envelope[[]ownedNumber]
 	if err := p.do(ctx, http.MethodGet, "/v2/phone_numbers", query, nil, &response); err != nil {
-		return "", err
+		return ownedNumber{}, false, err
 	}
 	for _, number := range response.Data {
 		if number.PhoneNumber == e164 {
-			return number.ID, nil
+			return number, true, nil
 		}
 	}
-	return "", stack.Wrap(fmt.Errorf("telnyx: %s is not one of this account's numbers", e164))
+	return ownedNumber{}, false, nil
 }
 
 func (p *Provider) do(ctx context.Context, method, path string, query url.Values, body, into any) error {
@@ -604,6 +632,7 @@ type availableNumber struct {
 type ownedNumber struct {
 	ID          string `json:"id"`
 	PhoneNumber string `json:"phone_number"`
+	Status      string `json:"status"`
 }
 
 type orderedNumber struct {

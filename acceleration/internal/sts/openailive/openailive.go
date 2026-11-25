@@ -42,6 +42,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/openai"
@@ -309,6 +310,9 @@ func (e *apiError) Error() string {
 
 // STS is a GPT-Live conversation.
 type STS struct {
+	// call is the context of the call that Start got. The goroutines of the session start
+	// under it.
+	call    context.Context
 	options Options
 	keys    *keypool.Pool
 	logger  *slog.Logger
@@ -439,6 +443,7 @@ func (s *STS) Start(ctx context.Context) error {
 		return stack.Wrap(errors.New("openailive: already started"))
 	}
 	s.started = true
+	s.call = ctx
 	s.mu.Unlock()
 
 	dialer := &websocket.Dialer{HandshakeTimeout: s.options.HandshakeTimeout}
@@ -463,7 +468,7 @@ func (s *STS) Start(ctx context.Context) error {
 	s.mu.Unlock()
 
 	s.emitter.Send(sts.Connected{Provider: ProviderName, Model: s.options.Model, At: time.Now()})
-	go s.readLoop(conn)
+	goroutine.Go(ctx, func() { s.readLoop(conn) })
 	return nil
 }
 
@@ -483,7 +488,7 @@ func (s *STS) carryTheClock() {
 	s.carrying = true
 	s.mu.Unlock()
 
-	go func() {
+	goroutine.Go(s.call, func() {
 		quiet := make([]byte, SampleRate/int(time.Second/silenceFrame)*2)
 		payload := base64.StdEncoding.EncodeToString(quiet)
 		ticker := time.NewTicker(silenceFrame)
@@ -502,7 +507,7 @@ func (s *STS) carryTheClock() {
 				return
 			}
 		}
-	}()
+	})
 }
 
 // dropTheClock stops the silence, which the caller's own audio and the model's reply both do:

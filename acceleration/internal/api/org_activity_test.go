@@ -50,7 +50,7 @@ func (s *OrganizationActivitySuite) read(organizationID string, since time.Time)
 
 // spent records a model call of app's that cost micros.
 func (s *OrganizationActivitySuite) spent(appID, organizationID string, micros int64) {
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality: "llm", CustomerID: appID, OrganizationID: organizationID, Provider: "stub", Model: "stub-llm",
 		StartedAt: time.Now(), InputTokens: 10, OutputTokens: 5, CostMicros: micros, Billable: true, Success: true,
 	}))
@@ -81,7 +81,7 @@ func (s *OrganizationActivitySuite) TestAnAgentSetUpAndTalkedToIsAConversationWi
 		createSession(CreateSessionRequest{Incognito: pointerTo(true), Llm: pointerTo("llm-flow")})
 	s.spent(s.customerID(), s.app.organization.ID, 7)
 	took := 800.0
-	s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality: "tts", CustomerID: s.customerID(), OrganizationID: s.app.organization.ID, Provider: "stub",
 		Model: "stub-tts", StartedAt: time.Now(), AudioMs: 1500, Characters: 42, DurationMs: &took, CostMicros: 3,
 		Billable: true, Success: true,
@@ -469,7 +469,7 @@ func (s *OrganizationActivitySuite) openedAs(agent, appID string, at time.Time, 
 		ID: id, CustomerID: appID, AgentName: agent, Modality: store.ModalityVoice, CreatedAt: at,
 	}))
 	if !running {
-		s.Require().NoError(s.store.Sessions.Close(context.Background(), appID, id, at.Add(time.Minute), reason))
+		s.Require().NoError(s.store.Sessions.Close(context.Background(), appID, id, at, at.Add(time.Minute), reason))
 	}
 	return id
 }

@@ -793,7 +793,7 @@ func (s *AuthorizationsSuite) TestABackendSayingTheSameEmailAgainCostsNoWrite() 
 	backend := s.serverClient.actingFor(alice).withEmail("alice@fake.example")
 	s.Require().Equal(http.StatusOK, backend.do(http.MethodGet, "/v1/agents/connections?owner_type=user", nil, nil))
 	s.Require().Equal("alice@fake.example", s.userEmail(alice))
-	s.Require().NoError(s.store.SetUserEmail(context.Background(), s.customerID(), alice.userID, "behind@fake.example"))
+	s.Require().NoError(s.store.Users.SetEmail(context.Background(), s.customerID(), alice.userID, "behind@fake.example"))
 
 	for range 3 {
 		s.Require().Equal(http.StatusOK, backend.do(http.MethodGet, "/v1/agents/connections?owner_type=user", nil, nil))
@@ -1644,7 +1644,7 @@ func (s *AuthorizationsSuite) assertNothingStored(id string) {
 }
 
 func (s *AuthorizationsSuite) userEmail(user *testClient) string {
-	email, err := s.store.UserEmail(context.Background(), s.customerID(), user.userID)
+	email, err := s.store.Users.GetEmail(context.Background(), s.customerID(), user.userID)
 	s.Require().NoError(err)
 	return email
 }

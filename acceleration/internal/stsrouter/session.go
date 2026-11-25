@@ -1,6 +1,7 @@
 package stsrouter
 
 import (
+	"context"
 	"log/slog"
 	"math"
 	"strconv"
@@ -9,9 +10,11 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/quota"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -38,6 +41,11 @@ type Session struct {
 	// id names the session on its own rows, as their operation, and on the rows of work it
 	// set going, as their parent_session.
 	id string
+	// quota counts each reply on the caller's day, and ctx is what it is asked on: the
+	// context the session was opened with, without its cancellation, since a reply the caller
+	// hung up on cost as much as one they heard.
+	quota *quota.Limiter
+	ctx   context.Context
 
 	events chan sts.Event
 
@@ -70,6 +78,8 @@ type Session struct {
 	// lease holds a minute of the conversation while it runs, so the other routers count it
 	// before its replies are recorded.
 	lease *routing.Lease
+	// spent is the refusal of the caller's day, once a reply has spent it.
+	spent error
 	// timing is what the session's "speech-to-speech timing" line says of it.
 	timing timing
 
@@ -113,10 +123,12 @@ type reply struct {
 }
 
 func newSession(
+	ctx context.Context,
 	provider sts.STS,
 	config routing.ProviderConfig,
 	owner routing.Owner,
 	recorder, backend *routing.Recorder,
+	limiter *quota.Limiter,
 ) *Session {
 	// The session's rows, its side rows included, add up on a Spent of its own for its timing
 	// line, and still to what the socket that opened it spent.
@@ -128,6 +140,8 @@ func newSession(
 		recorder: recorder,
 		backend:  backend,
 		id:       uuid.NewString(),
+		quota:    limiter,
+		ctx:      context.WithoutCancel(ctx),
 		events:   make(chan sts.Event, sts.EmitterBuffer),
 		inFlight: map[string]*reply{},
 		settled:  map[string]struct{}{},
@@ -135,7 +149,7 @@ func newSession(
 		openedAt: time.Now(),
 	}
 	session.lease = routing.StartLeaseEvery(recorder, config, owner, "sts", session.id, leaseMinute, leaseRenew, 3*leaseRenew)
-	go session.forward()
+	goroutine.Go(ctx, session.forward)
 	return session
 }
 
@@ -195,13 +209,18 @@ func (s *Session) Prompt(text string) error {
 	return s.provider.Prompt(text)
 }
 
-// unpaid is why the conversation may not take its next turn: its lease was refused, and a voice
-// model replies to every turn with nothing else to stop it. Money that ran out closes the
-// session, and every turn after answers the same refusal. Money that could not be checked (holds
-// not shared, a balance unread) refuses the turn and keeps the session, which takes turns again
-// once a renewal lands.
+// unpaid is why the conversation may not take its next turn: its lease was refused, or its
+// replies spent the caller's day, and a voice model replies to every turn with nothing else to
+// stop it. Money that ran out, or a day spent, closes the session, and every turn after answers
+// the same refusal. Money that could not be checked (holds not shared, a balance unread) refuses
+// the turn and keeps the session, which takes turns again once a renewal lands.
 func (s *Session) unpaid() error {
 	err := s.lease.Err()
+	if err == nil {
+		s.mu.Lock()
+		err = s.spent
+		s.mu.Unlock()
+	}
 	if err == nil {
 		return nil
 	}
@@ -468,6 +487,7 @@ func (s *Session) observe(event sts.Event) bool {
 			stat.Estimated()
 		}
 		s.recorder.Record(s.config, stat)
+		s.count(typed.Usage)
 
 	case sts.Error:
 		s.failed(typed)
@@ -497,6 +517,17 @@ func (s *Session) observe(event sts.Event) bool {
 		return false
 	}
 	return true
+}
+
+// count charges a reply to the caller's day, the way a text model's response is, and asks
+// whether the day is spent now, so the session takes no turn the day has nothing left for.
+func (s *Session) count(usage sts.Usage) {
+	s.quota.Debit(s.ctx, s.owner.CustomerID, s.owner.Caller, usage.InputTokens+usage.OutputTokens)
+	if _, err := s.quota.Allow(s.ctx, s.owner.CustomerID, s.owner.Caller); err != nil {
+		s.mu.Lock()
+		s.spent = stack.Wrap(err)
+		s.mu.Unlock()
+	}
 }
 
 // billSeconds records the seconds the vendor says the session has been open since its last

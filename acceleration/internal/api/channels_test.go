@@ -526,6 +526,43 @@ func (s *ChannelsSuite) TestAStartTheStoreRefusedIsObeyedWhenDeliveredAgain() {
 	s.Len(s.meta.to(writer), 3, "the START is confirmed once, however often it is delivered")
 }
 
+// A HELP or an ordinary message the store could not claim fails its delivery with a 500 the
+// provider retries, saying nothing of the store, whose error goes to the log. A trigger
+// refuses the line's deliveries.
+func (s *ChannelsSuite) TestAMessageTheStoreCouldNotClaimIsA500WithoutTheStoresWords() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, "")
+	ctx := context.Background()
+	_, err := s.store.GlobalDB().ExecContext(ctx, `BEGIN;
+		CREATE FUNCTION channels_suite_refuse_delivery() RETURNS trigger AS $$
+			BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql;
+		CREATE TRIGGER channels_suite_refuse_delivery BEFORE INSERT ON channel_deliveries FOR EACH ROW
+			WHEN (NEW.account_id = '`+line.Id+`') EXECUTE FUNCTION channels_suite_refuse_delivery();
+		COMMIT`)
+	s.Require().NoError(err)
+	defer func() {
+		_, err := s.store.GlobalDB().ExecContext(ctx, `BEGIN;
+			DROP TRIGGER channels_suite_refuse_delivery ON channel_deliveries;
+			DROP FUNCTION channels_suite_refuse_delivery();
+			COMMIT`)
+		s.Require().NoError(err)
+	}()
+
+	for _, text := range []string{"HELP", "what time do you open?"} {
+		writer := s.writer()
+		body := s.delivery(writer, "msg-"+s.utils.uuid(), text)
+		status, answered := s.post(line.WebhookUrl, s.signed(body), body)
+		s.Equal(http.StatusInternalServerError, status, "%q not claimed is the provider's to deliver again", text)
+		s.Contains(string(answered), "something went wrong", text)
+		s.NotContains(string(answered), "refused by the test", text)
+		s.NotContains(string(answered), "claim channel message", text)
+		s.Empty(s.meta.to(writer), "%q not claimed is not answered", text)
+	}
+	s.Contains(s.logged.String(), `level=ERROR msg="could not claim a channel delivery" customer=`+s.customerID())
+	s.Contains(s.logged.String(), "refused by the test", "what the store said is kept in the log")
+}
+
 // A delivery of a STOP racing a slow first one waits for the first to record the opt-out, and
 // both are answered as taken: the person is opted out and confirmed once.
 func (s *ChannelsSuite) TestARedeliveryRacingASlowStopWaitsForIt() {
@@ -658,6 +695,19 @@ func (s *ChannelsSuite) TestTheNumberThatTextsACodeBecomesThatEndUser() {
 	held, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+writer)
 	s.Require().NoError(err)
 	s.Equal(owner, held.UserID)
+}
+
+// A code is never minted for a user id Stream keeps for itself.
+func (s *ChannelsSuite) TestACodeIsNotMintedForAReservedUserID() {
+	number := s.number()
+	s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: "!anon"})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "user_id may not start with !")
 }
 
 // A code somebody saw go by must not claim a second number.
@@ -833,6 +883,38 @@ func (s *ChannelsSuite) TestAnIdentityThatIsNeitherPhoneNorLinkIsRefused() {
 	}, nil)
 
 	s.Equal(http.StatusBadRequest, status)
+}
+
+// A database that fails is the router's failure, and its text names the database's address.
+func (s *ChannelsSuite) TestALineTheDatabaseCannotSaveIsAFailureWithNoDatabaseText() {
+	number := s.number()
+	s.failQueries(number)
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/channels", ConnectChannelRequest{
+		Kind:      string(channels.WhatsApp),
+		Number:    number,
+		AccountId: pointerTo(strings.TrimPrefix(number, "+")),
+		Token:     pointerTo("meta-token"),
+		Signing:   pointerTo(appSecret),
+		Challenge: pointerTo(s.challenge()),
+	})
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(body), "store:")
+}
+
+func (s *ChannelsSuite) TestACodeTheDatabaseCannotSaveIsAFailureWithNoDatabaseText() {
+	number := s.number()
+	s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+	owner := s.utils.uuid()
+	s.failQueries(owner)
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: owner})
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(body), "store:")
 }
 
 // connect hands the router a WhatsApp line's credentials and returns where it will deliver.

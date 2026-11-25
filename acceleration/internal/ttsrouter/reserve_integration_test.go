@@ -52,7 +52,7 @@ func reservingSessionOver(t *testing.T, money *policytest.Money, owner routing.O
 	config := routing.ProviderConfig{Provider: provider.Provider(), Model: provider.Model(), Price: routing.Price{PerMillionChars: 1_000_000}}
 	prices, err := routing.Prices(routing.Config{routing.TTS: {Providers: []routing.ProviderConfig{config}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
-	session := newSession(provider, config, owner, money.Recorder(routing.TTS, prices), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	session := newSession(context.Background(), provider, config, owner, money.Recorder(routing.TTS, prices), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { _ = session.Close() })
 	return session
 }

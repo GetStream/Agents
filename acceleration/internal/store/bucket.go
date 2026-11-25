@@ -65,6 +65,15 @@ func (g Granularity) truncateUnit() string {
 	return "hour"
 }
 
+// next is the start of the bucket after the one at holds, in UTC as the rollups cut them.
+func (g Granularity) next(at time.Time) time.Time {
+	if g == Daily {
+		year, month, day := at.UTC().Date()
+		return time.Date(year, month, day+1, 0, 0, 0, 0, time.UTC)
+	}
+	return at.UTC().Truncate(time.Hour).Add(time.Hour)
+}
+
 // Valid reports whether the granularity is one this store knows.
 func (g Granularity) Valid() bool {
 	return g == Hourly || g == Daily
@@ -99,15 +108,26 @@ func (r *Buckets) Rollup(ctx context.Context, granularity Granularity, from, to 
 		return 0, stack.Wrap(fmt.Errorf("store: rollup window must be non-empty, got %s to %s", from, to))
 	}
 
-	providers, err := r.rollup(ctx, granularity, from, to)
-	if err != nil {
-		return 0, err
+	// A bucket at a time, each in statements of its own: a wide window in one statement reads
+	// every request in it and runs out of the statement limit, rolling back all of it.
+	var written int64
+	for start := from; start.Before(to); {
+		end := granularity.next(start)
+		if end.After(to) {
+			end = to
+		}
+		providers, err := r.rollup(ctx, granularity, start, end)
+		if err != nil {
+			return written, err
+		}
+		tags, err := r.store.TagBuckets.rollup(ctx, granularity, start, end)
+		if err != nil {
+			return written, err
+		}
+		written += providers + tags
+		start = end
 	}
-	tags, err := r.store.TagBuckets.rollup(ctx, granularity, from, to)
-	if err != nil {
-		return 0, err
-	}
-	return providers + tags, nil
+	return written, nil
 }
 
 // wholeBuckets is a rollup's WHERE on column: the whole buckets [from, to) touches, taking
@@ -194,15 +214,12 @@ func (r *Buckets) Select(ctx context.Context, customerID string, f BucketFilter)
 		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", f.Granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	if f.Modality == "" {
 		return nil, stack.Wrap(errors.New("store: modality is required"))
 	}
-	tags := f.Tags
-	if tags == nil {
-		tags = map[string]string{}
-	}
+	tags := orEmptyMap(f.Tags)
 	filter, err := json.Marshal(tags)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer stats: encode tag filter: %w", err))

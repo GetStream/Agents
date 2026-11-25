@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
@@ -603,8 +604,10 @@ type stub struct {
 	// apart from an empty answer.
 	searched int
 	// dialed is the last call this vendor was asked to place, so a test can see what the
-	// service passed on rather than only that it passed something.
+	// service passed on rather than only that it passed something, and called the id it
+	// gave that call, a new one each dial as a vendor's is.
 	dialed Outbound
+	called string
 	// inbound is the last number this vendor was told to send to a bridge, so a test can see
 	// the address the service passed on.
 	inbound Inbound
@@ -613,11 +616,14 @@ type stub struct {
 	monthly  int64
 	vendorID string
 	// ordered counts the numbers this vendor was asked to sell, and released the numbers it
-	// was told to take back.
+	// was told to take back. holds is the numbers it sold and still holds.
 	ordered  int
 	released []string
-	// releaseErr is what a release answers, the vendor's other answers left to err.
-	releaseErr error
+	holds    map[string]bool
+	// releaseErr is what a release answers, the vendor's other answers left to err. doneErr is
+	// what a purchase or a release answers once the vendor has done it, as an answer lost to a
+	// timeout is.
+	releaseErr, doneErr error
 	// stopped are the numbers this vendor was told to stop sending callers to the trunk.
 	stopped []string
 	// leg is how this vendor's leg reaches Stream: per call unless a test says otherwise.
@@ -648,12 +654,30 @@ func (s *stub) BuyNumber(_ context.Context, order Order) (Number, error) {
 	if s.err != nil {
 		return Number{}, s.err
 	}
+	if s.holds == nil {
+		s.holds = map[string]bool{}
+	}
+	s.holds[order.E164] = true
+	if s.doneErr != nil {
+		return Number{}, s.doneErr
+	}
 	return Number{E164: order.E164, Vendor: s.vendor, VendorID: s.vendorID, Country: "US", MonthlyCostMicros: s.monthly}, nil
 }
 
 func (s *stub) ReleaseNumber(_ context.Context, e164 string) error {
 	s.released = append(s.released, e164)
-	return cmp.Or(s.releaseErr, s.err)
+	if err := cmp.Or(s.releaseErr, s.err); err != nil {
+		return err
+	}
+	delete(s.holds, e164)
+	return s.doneErr
+}
+
+func (s *stub) HoldsNumber(_ context.Context, e164 string) (string, bool, error) {
+	if s.err != nil {
+		return "", false, s.err
+	}
+	return s.vendorID, s.holds[e164], nil
 }
 
 func (s *stub) ConfigureInbound(_ context.Context, inbound Inbound) error {
@@ -666,7 +690,8 @@ func (s *stub) Dial(_ context.Context, outbound Outbound) (Dialed, error) {
 	if s.err != nil {
 		return Dialed{}, s.err
 	}
-	return Dialed{VendorCallID: s.vendor + "-call", Status: "dialing"}, nil
+	s.called = s.vendor + "-call-" + uuid.NewString()
+	return Dialed{VendorCallID: s.called, Status: "dialing"}, nil
 }
 
 func (s *stub) SendDigits(_ context.Context, vendorCallID, digits string) error {

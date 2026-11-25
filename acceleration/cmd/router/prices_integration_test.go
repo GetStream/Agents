@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
@@ -359,10 +360,11 @@ func (s *PriceSyncSuite) TestReloadPutsTheFilesPricesBack() {
 	s.changePrice(pgStore, "own_later", own, 7, &later)
 	s.Require().InDelta(fileRate*3, s.rateOf(pgStore, vendor), 1e-12)
 	s.Require().InDelta(5.0, s.rateOf(pgStore, own), 1e-12)
-	s.Require().NoError(pgStore.Requests.Insert(s.ctx, &store.Request{
-		Modality: "llm", CustomerID: "app", Provider: vendor.Provider, Model: vendor.Model, StartedAt: time.Now(),
-		CostMicros: 10, Billable: true, Success: true, PriceVersion: fixed.Name,
-	}))
+	_, err := pgStore.Requests.InsertMany(s.ctx, []store.Request{{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app", Provider: vendor.Provider, Model: vendor.Model,
+		StartedAt: time.Now(), CostMicros: 10, Billable: true, Success: true, PriceVersion: fixed.Name,
+	}})
+	s.Require().NoError(err)
 	var out bytes.Buffer
 
 	s.Require().NoError(runPricesReload(s.ctx, []string{"--development"}, s.settings, &out))
@@ -374,7 +376,7 @@ func (s *PriceSyncSuite) TestReloadPutsTheFilesPricesBack() {
 	seed := changes[0]
 	s.Equal(store.PriceChangeSeed, seed.Kind)
 	s.Equal(s.settings.PricesFile+", vendor.json, router dev", seed.Source)
-	upcoming, err := pgStore.PriceEntries.Upcoming(s.ctx, time.Now())
+	upcoming, err := pgStore.PriceEntries.Source().Upcoming(s.ctx, time.Now())
 	s.Require().NoError(err)
 	s.Empty(upcoming, "the scheduled change went with the rest")
 	active, err := pgStore.PriceEntries.Active(s.ctx, time.Now())
@@ -593,14 +595,36 @@ func (s *PriceSyncSuite) TestDriftNamesARowByItsUsageIDWhereItHasOne() {
 	s.Contains(out.String(), "(usage "+usageID+")")
 }
 
+func (s *PriceSyncSuite) TestDriftLeavesOutWorkOnTheCustomersOwnKey() {
+	pgStore := s.started()
+	s.recordWithVendorCost(pgStore, "grok-4.7", 1_000, 1_000)
+	// Priced at the BYOK fee, at no cost at the vendor's rates: the vendor bills the customer.
+	_, err := pgStore.Requests.InsertMany(s.ctx, []store.Request{{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app", Provider: "grok", Model: "grok-4.7", StartedAt: time.Now(),
+		CostMicros: 200, BaseCostMicros: 0, PriceVersion: "byok", BYOK: true, Billable: true, Success: true,
+		Attributes: map[string]string{store.VendorCostAttribute: "1000"},
+	}})
+	s.Require().NoError(err)
+	var out bytes.Buffer
+
+	s.Require().NoError(runPricesDrift(s.ctx, []string{"--json"}, s.settings, &out))
+
+	var models []driftedModel
+	s.Require().NoError(json.Unmarshal(out.Bytes(), &models))
+	s.Require().Len(models, 1)
+	s.Equal(1, models[0].Rows, "only the row on the operator's key")
+	s.Equal("ok", models[0].Status)
+}
+
 // recordWithVendorCost records an LLM row the list priced at cost, of work the vendor said
 // cost vendorCost.
 func (s *PriceSyncSuite) recordWithVendorCost(router *store.Store, model string, cost, vendorCost int64) {
-	s.Require().NoError(router.Requests.Insert(s.ctx, &store.Request{
-		Modality: "llm", CustomerID: "app", Provider: "grok", Model: model, StartedAt: time.Now(),
-		CostMicros: cost, Billable: true, Success: true,
+	_, err := router.Requests.InsertMany(s.ctx, []store.Request{{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app", Provider: "grok", Model: model,
+		StartedAt: time.Now(), CostMicros: cost, Billable: true, Success: true,
 		Attributes: map[string]string{store.VendorCostAttribute: strconv.FormatInt(vendorCost, 10)},
-	}))
+	}})
+	s.Require().NoError(err)
 }
 
 // forwarder is a TCP proxy to a database that can be shut, which is a database a router

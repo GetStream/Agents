@@ -10,15 +10,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/redis/rueidis"
+	"github.com/redis/rueidis/rueidishook"
 	"github.com/uptrace/bun"
 )
 
@@ -348,7 +353,8 @@ func (s *StoreSuite) TestACachedRowIsForgottenOnceRedisTakesTheDeletionAgain() {
 
 // pgProxy stands between a store and the suite's Postgres and does one thing to the first
 // COMMIT a client sends through it: drops every answer after it, as a network that fails then
-// does, or holds it until let, as a COMMIT slow to reach the server does.
+// does, or holds it until let, as a COMMIT slow to reach the server does. Once frozen, it passes
+// no answer on, with every connection still open.
 type pgProxy struct {
 	listener net.Listener
 	target   string
@@ -357,6 +363,7 @@ type pgProxy struct {
 	mu       sync.Mutex
 	seen     bool
 	released bool
+	frozen   atomic.Bool
 }
 
 // pgProxy starts a proxy in front of the suite's shared database, and answers it with the DSN
@@ -410,7 +417,7 @@ func (p *pgProxy) serve() {
 			buf := make([]byte, 32<<10)
 			for {
 				n, err := upstream.Read(buf)
-				if n > 0 && !dropped.Load() {
+				if n > 0 && !dropped.Load() && !p.frozen.Load() {
 					if _, err := conn.Write(buf[:n]); err != nil {
 						return
 					}
@@ -506,6 +513,368 @@ func (s *StoreSuite) TestADeleteWhoseCommitLandsAfterItGaveUpIsForgottenAgain() 
 	}, 5*time.Second, 10*time.Millisecond, "the copy cached before the COMMIT landed is dropped again")
 }
 
+func (s *StoreSuite) TestADeleteWhoseCommitLandsAfterTheLastRetryIsForgottenOnceItLands() {
+	proxy, dsn := s.pgProxy(true)
+	slow, err := OpenShards(Options{DSN: dsn, ShardDSN: s.shardDSN, Redis: s.redis(), writeTimeout: 300 * time.Millisecond})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(slow.Close()) })
+	config := s.routerConfig("acme-app", "fast")
+
+	s.Require().Error(slow.RouterConfigs.Delete(s.ctx, "acme-app", config.ID), "the COMMIT is held past the read timeout")
+	// Well past the third deletion that follows, 700 ms on, reading the config into the cache
+	// all the while.
+	for deadline := time.Now().Add(4 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		_, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
+		s.Require().NoError(err, "the config is still there while the COMMIT is held")
+	}
+	proxy.let()
+	s.Require().Eventually(func() bool {
+		deleted, err := s.store.global.NewSelect().Model((*RouterConfig)(nil)).
+			Where("id = ? AND deleted_at IS NOT NULL", config.ID).Exists(s.ctx)
+		s.Require().NoError(err)
+		return deleted
+	}, 5*time.Second, 10*time.Millisecond, "the held COMMIT lands")
+
+	s.Eventually(func() bool {
+		_, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
+		return errors.Is(err, ErrNoRouterConfig)
+	}, 5*time.Second, 10*time.Millisecond, "the copy cached before the COMMIT landed is dropped once it lands")
+}
+
+func (s *StoreSuite) TestADeletionRedisRefusedIsTriedAgainAfterTheFirstRetry() {
+	proxy := s.redisProxy()
+	behind, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: Redis{Address: proxy.listener.Addr().String()}})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(behind.Close()) })
+	redis := s.store.sharedRedis()
+	key := cacheKey("probe", newID())
+	s.Require().NoError(redis.Do(s.ctx, redis.B().Set().Key(key).Value("stale").Build()).Error())
+
+	proxy.setDown(true)
+	s.Require().False(behind.forget(s.ctx, key), "Redis is down")
+	// Down past the first retry, 100 ms on, and up before the second, at 300 ms.
+	time.Sleep(200 * time.Millisecond)
+	proxy.setDown(false)
+
+	s.Eventually(func() bool {
+		exists, err := redis.Do(s.ctx, redis.B().Exists().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		return exists == 0
+	}, 2*time.Second, 10*time.Millisecond, "a later retry drops the key")
+}
+
+func (s *StoreSuite) TestCloseLetsAPendingRetryRun() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	closing, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: s.redis()})
+	s.Require().NoError(err)
+	redis := s.store.sharedRedis()
+	key := cacheKey("probe", newID())
+	s.Require().NoError(redis.Do(s.ctx, redis.B().Set().Key(key).Value("stale").Build()).Error())
+
+	closing.forgetLater([]string{key}, errors.New("refused"), 0)
+	s.Require().NoError(closing.Close())
+
+	exists, err := redis.Do(s.ctx, redis.B().Exists().Key(key).Build()).AsInt64()
+	s.Require().NoError(err)
+	s.Zero(exists, "the retry ran before the store closed")
+}
+
+// runningTransaction is the id of a transaction that stays open until the test ends.
+func (s *StoreSuite) runningTransaction() int64 {
+	open, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = open.Rollback() })
+	var xid int64
+	s.Require().NoError(open.NewSelect().ColumnExpr("pg_current_xact_id()").Scan(s.ctx, &xid))
+	return xid
+}
+
+// logTo sends what is logged to out until the test ends. slog.SetDefault also points the log
+// package at out, and setting the first default again leaves it there.
+func (s *StoreSuite) logTo(out io.Writer) {
+	logger, output, flags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(slog.NewTextHandler(out, nil)))
+	s.T().Cleanup(func() {
+		slog.SetDefault(logger)
+		log.SetOutput(output)
+		log.SetFlags(flags)
+	})
+}
+
+// slowLog is a log that takes half a second to write to, and keeps what was written.
+type slowLog struct{ syncBuffer }
+
+func (l *slowLog) Write(line []byte) (int, error) {
+	time.Sleep(500 * time.Millisecond)
+	return l.syncBuffer.Write(line)
+}
+
+func (s *StoreSuite) TestCloseStopsWaitingOnACommitThatHasNotEndedAndOutlivesNoRetry() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	closing, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: s.redis()})
+	s.Require().NoError(err)
+	xid := s.runningTransaction()
+	// The retry logs that it was stopped, so it is still going a while after Close stops it.
+	logged := &slowLog{}
+	s.logTo(logged)
+
+	closing.forgetLater([]string{cacheKey("probe", newID())}, errors.New("no answer"), xid)
+	began := time.Now()
+	s.Require().NoError(closing.Close())
+
+	s.Less(time.Since(began), 3*time.Second, "Close does not wait for the commit")
+	s.Zero(len(closing.lost), "no retry outlives Close")
+	s.Equal(1, strings.Count(logged.String(), "level=ERROR"), logged.String())
+	s.Contains(logged.String(), "a commit whose answer was lost had not ended")
+}
+
+func (s *StoreSuite) TestCloseDoesNotWaitOnAPostgresThatStoppedAnsweringAboutACommit() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	proxy, dsn := s.pgProxy(false)
+	frozen, err := url.Parse(dsn)
+	s.Require().NoError(err)
+	query := frozen.Query()
+	query.Set("read_timeout", "10s")
+	frozen.RawQuery = query.Encode()
+	closing, err := OpenShards(Options{DSN: frozen.String(), ShardDSN: s.shardDSN, Redis: s.redis()})
+	s.Require().NoError(err)
+	s.Require().NoError(closing.Ping(s.ctx))
+	xid := s.runningTransaction()
+	proxy.frozen.Store(true)
+
+	closing.forgetLater([]string{cacheKey("probe", newID())}, errors.New("no answer"), xid)
+	s.Require().Eventually(func() bool { return closing.global.Stats().InUse == 1 }, 3*time.Second, 5*time.Millisecond, "Postgres is asked")
+	began := time.Now()
+	_ = closing.Close()
+	s.Less(time.Since(began), 1500*time.Millisecond, "Close waits its grace and no more")
+
+	s.Eventually(func() bool { return closing.global.Stats().OpenConnections == 0 }, 4*time.Second, 10*time.Millisecond,
+		"the question gives its connection up by itself")
+}
+
+func (s *StoreSuite) TestACommitPostgresCannotBeAskedAboutIsStillWaitedOn() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	waiting, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: s.redis()})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(waiting.Close()) })
+
+	// Postgres answers an id it has not given out yet with an error.
+	waiting.forgetLater([]string{cacheKey("probe", newID())}, errors.New("no answer"), s.runningTransaction()+100_000_000)
+
+	s.Never(func() bool { return len(waiting.lost) == 0 }, 1500*time.Millisecond, 10*time.Millisecond, "an error is not an answer")
+}
+
+func (s *StoreSuite) TestALostCommitThatChangedNothingIsNotWaitedOn() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	_, dsn := s.pgProxy(true)
+	slow, err := OpenShards(Options{DSN: dsn, ShardDSN: s.shardDSN, Redis: s.redis(), writeTimeout: 300 * time.Millisecond})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(slow.Close()) })
+
+	err = slow.Policies.Delete(s.ctx, ScopeApp, "app-"+newID())
+
+	s.Require().Error(err)
+	s.Require().NotErrorIs(err, ErrNoPolicy, "the COMMIT's answer is lost")
+	s.Zero(len(slow.lost)+len(slow.retries), "there is no change to wait for")
+}
+
+func (s *StoreSuite) TestAWriteWithNoCacheReadsNoTransactionID() {
+	uncached, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(uncached.Close()) })
+	uncached.global.AddQueryHook(&s.queries)
+
+	s.Equal(3, s.countQueries(func() {
+		s.Require().NoError(uncached.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: "app-" + newID(), OrganizationID: "org-1"}))
+	}), "begin, the write and commit")
+}
+
+func (s *StoreSuite) TestLostCommitsTakeNoRetryFromADeletionRedisRefused() {
+	proxy := s.redisProxy()
+	behind, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: Redis{Address: proxy.listener.Addr().String()}})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(behind.Close()) })
+	logged := &syncBuffer{}
+	s.logTo(logged)
+	xid := s.runningTransaction()
+	for range 64 {
+		behind.forgetLater([]string{cacheKey("probe", newID())}, errors.New("no answer"), xid)
+	}
+	redis := s.store.sharedRedis()
+	key := cacheKey("probe", newID())
+	s.Require().NoError(redis.Do(s.ctx, redis.B().Set().Key(key).Value("stale").Build()).Error())
+
+	proxy.setDown(true)
+	s.Require().False(behind.forget(s.ctx, key), "Redis is down")
+	proxy.setDown(false)
+	s.Eventually(func() bool {
+		exists, err := redis.Do(s.ctx, redis.B().Exists().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		return exists == 0
+	}, 3*time.Second, 10*time.Millisecond, "the refused deletion is tried again")
+
+	s.Require().NotContains(logged.String(), "no retry free")
+	behind.forgetLater([]string{cacheKey("probe", newID())}, errors.New("no answer"), xid)
+	s.Contains(logged.String(), "lost a commit's answer with no retry free to wait for it", "the 65th lost commit is refused")
+}
+
+func (s *StoreSuite) TestALostCommitsLastDeletionIsTriedUntilRedisTakesIt() {
+	proxy := s.redisProxy()
+	behind, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: Redis{Address: proxy.listener.Addr().String()}})
+	s.Require().NoError(err)
+	logged := &syncBuffer{}
+	s.logTo(logged)
+	open, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = open.Rollback() })
+	var xid int64
+	s.Require().NoError(open.NewSelect().ColumnExpr("pg_current_xact_id()").Scan(s.ctx, &xid))
+	redis := s.store.sharedRedis()
+	key := cacheKey("policy", "jlahey@example.com")
+
+	behind.forgetLater([]string{key}, errors.New("no answer"), xid)
+	s.Never(func() bool { return len(behind.lost) == 0 }, time.Second, 10*time.Millisecond, "past the third deletion")
+	s.Require().NoError(redis.Do(s.ctx, redis.B().Set().Key(key).Value("stale").Build()).Error())
+	proxy.setDown(true)
+	s.Require().NoError(open.Commit())
+	// Longer than the 700 ms a deletion Redis refused is tried for, and the second between polls.
+	s.Never(func() bool { return len(behind.lost) == 0 }, 2500*time.Millisecond, 10*time.Millisecond, "Redis is down")
+	proxy.setDown(false)
+	s.Eventually(func() bool {
+		exists, err := redis.Do(s.ctx, redis.B().Exists().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		return exists == 0 && len(behind.lost) == 0
+	}, 3*time.Second, 10*time.Millisecond, "the deletion is tried again")
+
+	proxy.setDown(true)
+	behind.forgetLater([]string{key}, errors.New("refused"), 0)
+	s.Eventually(func() bool { return strings.Contains(logged.String(), "gave up dropping cached rows") }, 5*time.Second, 10*time.Millisecond)
+	behind.forgetLater([]string{key}, errors.New("no answer"), xid)
+	s.Never(func() bool { return len(behind.lost) == 0 }, 1500*time.Millisecond, 10*time.Millisecond, "Redis is down")
+	began := time.Now()
+	s.Require().NoError(behind.Close())
+	s.Less(time.Since(began), 3*time.Second, "Close does not wait for Redis")
+	s.Contains(logged.String(), "gave up dropping a lost commit's cached rows")
+	s.NotContains(logged.String(), "jlahey", "a key names an end user")
+}
+
+func (s *StoreSuite) TestALostCommitsLinesNameTheLossAndNoKey() {
+	proxy := s.redisProxy()
+	closing, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: Redis{Address: proxy.listener.Addr().String()}})
+	s.Require().NoError(err)
+	xid := s.runningTransaction()
+	logged := &syncBuffer{}
+	s.logTo(logged)
+	key := cacheKey("policy", "jlahey@example.com")
+
+	proxy.setDown(true)
+	closing.forgetLater([]string{key}, errors.New("no answer"), xid)
+	s.Require().NoError(closing.Close())
+	closing.forgetLater([]string{key}, errors.New("no answer"), xid)
+
+	s.Contains(logged.String(), "lost a commit's answer as the store closed")
+	s.Equal(2, strings.Count(logged.String(), `error="no answer"`), "not what Redis answered: "+logged.String())
+	s.NotContains(logged.String(), "jlahey", "a key names an end user")
+}
+
+func (s *StoreSuite) TestALostCommitThatWasRolledBackIsWaitedOnNoLonger() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	waiting, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: s.redis()})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(waiting.Close()) })
+	open, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	var xid int64
+	s.Require().NoError(open.NewSelect().ColumnExpr("pg_current_xact_id()").Scan(s.ctx, &xid))
+	s.Require().NoError(open.Rollback())
+
+	waiting.forgetLater([]string{cacheKey("probe", newID())}, errors.New("no answer"), xid)
+
+	s.Eventually(func() bool { return len(waiting.lost) == 0 }, 3*time.Second, 10*time.Millisecond)
+	s.True(s.store.ended(s.ctx, 3), "an id too old to have a status has ended")
+}
+
+func (s *StoreSuite) TestALostCommitWithNothingCachedIsNotWaitedOn() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	_, dsn := s.pgProxy(true)
+	slow, err := OpenShards(Options{DSN: dsn, ShardDSN: s.shardDSN, Redis: s.redis(), writeTimeout: 300 * time.Millisecond})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(slow.Close()) })
+
+	s.Require().Error(slow.detachedWrite(s.ctx, func(ctx context.Context, tx bun.Tx) error {
+		_, err := tx.ExecContext(ctx, "SELECT pg_current_xact_id()")
+		return err
+	}, func() []string { return nil }))
+
+	s.Zero(len(slow.lost)+len(slow.retries), "there is no key to drop")
+}
+
+func (s *StoreSuite) TestLostCommitsLeaveThePoolToOthersWhilePostgresStopsAnswering() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	proxy, dsn := s.pgProxy(false)
+	waiting, err := OpenShards(Options{DSN: dsn, ShardDSN: s.shardDSN, Redis: s.redis()})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = waiting.Close() })
+	xid := s.runningTransaction()
+	for range 64 {
+		waiting.forgetLater([]string{cacheKey("probe", newID())}, errors.New("no answer"), xid)
+	}
+
+	proxy.frozen.Store(true)
+	most := 0
+	for deadline := time.Now().Add(6 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		most = max(most, waiting.global.Stats().InUse)
+	}
+	proxy.frozen.Store(false)
+	thawed := time.Now()
+	s.Require().Eventually(func() bool { return waiting.global.PingContext(s.ctx) == nil }, 15*time.Second, time.Millisecond)
+	s.T().Logf("held %d connections at most; first success %v after the thaw", most, time.Since(thawed))
+
+	s.Positive(most, "Postgres is asked")
+	s.LessOrEqual(most, 4, "and holds few of the pool's 40 connections")
+}
+
+func (s *StoreSuite) TestRetriesAskedForWhileTheStoreClosesEndWithIt() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	closing, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: s.redis()})
+	s.Require().NoError(err)
+
+	var asking sync.WaitGroup
+	for range 8 {
+		asking.Go(func() {
+			for range 50 {
+				closing.forgetLater([]string{cacheKey("probe", newID())}, errors.New("refused"), 0)
+			}
+		})
+	}
+	s.Require().NoError(closing.Close())
+	for range 100 {
+		closing.forgetLater([]string{cacheKey("probe", newID())}, errors.New("refused"), 0)
+		s.Require().Zero(len(closing.retries), "a retry asked for after Close starts")
+	}
+	asking.Wait()
+
+	s.Zero(len(closing.retries), "no retry outlives Close")
+}
+
 func (s *StoreSuite) TestForgetsBehindADownRedisAreBoundedAndEndWithTheStore() {
 	proxy := s.redisProxy()
 	before := runtime.NumGoroutine()
@@ -586,6 +955,53 @@ func (s *StoreSuite) TestEveryCachedWriteARequestGaveUpOnLeavesNoStaleCopy() {
 			s.Require().NoError(err)
 			_, err = s.store.AgentConfigs.GetByName(s.ctx, "acme-app", was)
 			s.ErrorIs(err, ErrNoAgentConfig)
+		},
+		"AppOrganizations.Upsert": func() {
+			app := "app-" + newID()
+			s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &AppOrganization{AppID: app, OrganizationID: "org-before"}))
+			err := s.readWhileWriting(s.lockingWhere("app_organizations", "app_id = ?", app), func(ctx context.Context) error {
+				return s.store.AppOrganizations.Upsert(ctx, &AppOrganization{AppID: app, OrganizationID: "org-after"})
+			}, func() {
+				seen, err := s.store.AppOrganizations.Get(s.ctx, app)
+				s.Require().NoError(err)
+				s.Require().Equal("org-before", seen.OrganizationID, "the app has not moved yet")
+				policies, err := s.store.Policies.OfApp(s.ctx, app)
+				s.Require().NoError(err)
+				s.Require().Equal("org-before", policies.OrganizationID, "the app's policies are not moved yet")
+			}, bun.Tx.Commit)
+			s.Require().NoError(err)
+			seen, err := s.store.AppOrganizations.Get(s.ctx, app)
+			s.Require().NoError(err)
+			s.Equal("org-after", seen.OrganizationID)
+			policies, err := s.store.Policies.OfApp(s.ctx, app)
+			s.Require().NoError(err)
+			s.Equal("org-after", policies.OrganizationID, "the app's policies are read under the new organization")
+		},
+		"ForgetUserSettings": func() {
+			app := "app-" + newID()
+			user := UserScopeID(app, "jlahey")
+			yes := true
+			s.Require().NoError(s.store.Policies.Upsert(s.ctx, &Policy{Scope: ScopeUser, ScopeID: user, Document: PolicyDocument{PromptInjection: &yes}}))
+			err := s.readWhileWriting(s.lockingWhere("policies", "scope = ? AND scope_id = ?", ScopeUser, user), func(ctx context.Context) error {
+				_, err := s.store.ForgetUserSettings(ctx, app, "jlahey", "forgotten", &AuditEntry{
+					CustomerID: app, ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+				})
+				return err
+			}, func() {
+				document, err := s.store.Policies.Get(s.ctx, ScopeUser, user)
+				s.Require().NoError(err)
+				s.Require().NotNil(document.PromptInjection, "the user's policy is not deleted yet")
+				has, err := s.store.Policies.HasUsers(s.ctx, app)
+				s.Require().NoError(err)
+				s.Require().True(has, "the app still has a user with a policy")
+			}, bun.Tx.Commit)
+			s.Require().NoError(err)
+			document, err := s.store.Policies.Get(s.ctx, ScopeUser, user)
+			s.Require().NoError(err)
+			s.Nil(document.PromptInjection)
+			has, err := s.store.Policies.HasUsers(s.ctx, app)
+			s.Require().NoError(err)
+			s.False(has, "the app has no user with a policy any more")
 		},
 		"Skills.Insert": func() {
 			config := s.boundConfig("acme-app")
@@ -827,4 +1243,358 @@ func (s *StoreSuite) TestEveryCachedWriteARequestGaveUpOnLeavesNoStaleCopy() {
 	} {
 		s.Run(name, site)
 	}
+}
+
+// redisLine is the suite's Redis reached through a proxy a test can break: cut closes every
+// connection and the port, as a Redis that went away does, and freeze stops answering on the
+// connections already open, as a Redis that hangs does.
+type redisLine struct {
+	cut, freeze func()
+	// slow holds back every answer from Redis by a while, as a Redis that is slow but up does.
+	slow func(time.Duration)
+	// slowInvalidations holds back an invalidation and what follows it by a while, and not the
+	// answer before it.
+	slowInvalidations func(time.Duration)
+}
+
+// storeOnRedisLine is another router's store on the suite's databases, whose Redis is reached
+// through a redisLine. Skipped without Redis.
+func (s *StoreSuite) storeOnRedisLine() (*Store, redisLine) {
+	return s.storeOnRedisLineHooked(nil)
+}
+
+// storeOnRedisLineHooked is storeOnRedisLine with hook seeing every command, given the line.
+func (s *StoreSuite) storeOnRedisLineHooked(hook func(redisLine) rueidishook.Hook) (*Store, redisLine) {
+	upstream := s.redis()
+	if upstream.Address == "" {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	var mu sync.Mutex
+	var clients, servers []net.Conn
+	closed := false
+	// delay holds back each answer from Redis by this many nanoseconds.
+	var delay, invalidationDelay atomic.Int64
+	go func() {
+		for {
+			client, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			server, err := net.Dial("tcp", upstream.Address)
+			mu.Lock()
+			if err != nil || closed {
+				mu.Unlock()
+				_ = client.Close()
+				if server != nil {
+					_ = server.Close()
+				}
+				continue
+			}
+			clients, servers = append(clients, client), append(servers, server)
+			mu.Unlock()
+			go func() { _, _ = io.Copy(server, client) }()
+			go func() {
+				buffer := make([]byte, 32<<10)
+				for {
+					n, err := server.Read(buffer)
+					if n > 0 {
+						time.Sleep(time.Duration(delay.Load()))
+						answer := buffer[:n]
+						// A RESP3 push of two, named invalidate.
+						if at := bytes.Index(answer, []byte(">2\r\n$10\r\ninvalidate")); at >= 0 && invalidationDelay.Load() > 0 {
+							if _, err := client.Write(answer[:at]); err != nil {
+								return
+							}
+							answer = answer[at:]
+							time.Sleep(time.Duration(invalidationDelay.Load()))
+						}
+						if _, err := client.Write(answer); err != nil {
+							return
+						}
+					}
+					if err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	freeze := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		closed = true
+		for _, server := range servers {
+			_ = server.Close()
+		}
+	}
+	cut := sync.OnceFunc(func() {
+		freeze()
+		mu.Lock()
+		defer mu.Unlock()
+		_ = listener.Close()
+		for _, client := range clients {
+			_ = client.Close()
+		}
+	})
+
+	line := redisLine{cut: cut, freeze: freeze,
+		slow:              func(by time.Duration) { delay.Store(int64(by)) },
+		slowInvalidations: func(by time.Duration) { invalidationDelay.Store(int64(by)) },
+	}
+	options := Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: Redis{Address: listener.Addr().String()}}
+	if hook != nil {
+		options.redisHook = hook(line)
+	}
+	store, err := OpenShards(options)
+	s.Require().NoError(err)
+	// Cut first: closing a store on a frozen Redis waits for the client to give up on it.
+	s.T().Cleanup(func() {
+		cut()
+		s.NoError(store.Close())
+	})
+	return store, line
+}
+
+func (s *StoreSuite) TestAConfigIsReadFromPostgresWhileRedisCannotBeReached() {
+	created := s.boundConfig("app")
+	cutOff, line := s.storeOnRedisLine()
+	line.cut()
+
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	found, err := cutOff.AgentConfigs.Get(ctx, "app", created.ID)
+
+	s.Require().NoError(err)
+	s.Equal(created.Name, found.Name)
+	s.Less(time.Since(started), time.Second, "the read waited on Redis rather than going to Postgres")
+}
+
+func (s *StoreSuite) TestARowSlowerToLoadThanRedisIsWaitedOnIsStillCached() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	name := cacheKey("slow", newID())
+
+	loaded, err := cached(s.ctx, s.store, name, func(ctx context.Context) (string, error) {
+		_, err := s.store.GlobalDB().ExecContext(ctx, "SELECT pg_sleep(?)", (2 * cacheWait).Seconds())
+		return "loaded", err
+	})
+	s.Require().NoError(err, "a read of Postgres is not held to Redis's wait")
+	s.Equal("loaded", loaded)
+
+	again, err := cached(s.ctx, s.store, name, func(context.Context) (string, error) {
+		return "", errors.New("read from postgres again")
+	})
+	s.Require().NoError(err)
+	s.Equal("loaded", again, "the row was cached")
+}
+
+func (s *StoreSuite) TestARowLoadedAsRedisGoesIsTheAnswer() {
+	cutOff, line := s.storeOnRedisLine()
+	loads := 0
+
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+	found, err := cached(ctx, cutOff, cacheKey("lost", newID()), func(context.Context) (string, error) {
+		loads++
+		line.cut()
+		return fmt.Sprintf("load %d", loads), nil
+	})
+
+	s.Require().NoError(err)
+	s.Equal("load 1", found, "the row Postgres answered with, not a second read of it")
+}
+
+func (s *StoreSuite) TestAUserIsWrittenDownWhileRedisHangs() {
+	hung, line := s.storeOnRedisLine()
+	line.freeze()
+	app := s.freshApp()
+
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	s.Require().NoError(hung.Users.Seen(ctx, app, "jlahey", UserKindAuthenticated))
+
+	s.Less(time.Since(started), time.Second, "the sighting waited on Redis")
+	_, found := s.userRow(app, "jlahey")
+	s.True(found)
+}
+
+func (s *StoreSuite) TestReadersOfAColdRowShareOneReadOfPostgres() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	name := cacheKey("cold", newID())
+	var loads atomic.Int32
+	answers := make(chan string, 8)
+	var readers sync.WaitGroup
+	for range 8 {
+		readers.Go(func() {
+			found, err := cached(s.ctx, s.store, name, func(ctx context.Context) (string, error) {
+				loads.Add(1)
+				_, err := s.store.GlobalDB().ExecContext(ctx, "SELECT pg_sleep(0.6)")
+				return "loaded", err
+			})
+			s.NoError(err)
+			answers <- found
+		})
+	}
+	readers.Wait()
+	close(answers)
+
+	for found := range answers {
+		s.Equal("loaded", found)
+	}
+	s.EqualValues(1, loads.Load(), "one read of Postgres for every reader of the row")
+}
+
+func (s *StoreSuite) TestAReadAfterAWriteAndItsForgetGetsTheNewRow() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	name := cacheKey("rewritten", newID())
+	loading, release := make(chan struct{}), make(chan struct{})
+	older := make(chan string, 1)
+	go func() {
+		found, err := cached(s.ctx, s.store, name, func(context.Context) (string, error) {
+			close(loading)
+			<-release
+			return "old", nil
+		})
+		s.NoError(err)
+		older <- found
+	}()
+	<-loading
+	// The write lands and forgets the key while the older read is still loading the row.
+	s.store.forget(s.ctx, name)
+	newer := make(chan string, 1)
+	go func() {
+		found, err := cached(s.ctx, s.store, name, func(context.Context) (string, error) { return "new", nil })
+		s.NoError(err)
+		newer <- found
+	}()
+	// Long enough for the newer read to be waiting on the older one's load, which nothing
+	// outside the client can see.
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+
+	s.Equal("old", <-older, "the older read began before the write")
+	s.Equal("new", <-newer)
+	again, err := cached(s.ctx, s.store, name, func(context.Context) (string, error) {
+		return "", errors.New("read from postgres again")
+	})
+	s.Require().NoError(err)
+	s.Equal("new", again, "the older read's row was not cached over the newer")
+}
+
+func (s *StoreSuite) TestAReaderWhileRedisHangsAnswersFromPostgresWithinTheWait() {
+	hung, line := s.storeOnRedisLine()
+	line.freeze()
+
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	found, err := cached(ctx, hung, cacheKey("hung", newID()), func(context.Context) (string, error) { return "loaded", nil })
+
+	s.Require().NoError(err)
+	s.Equal("loaded", found)
+	s.Less(time.Since(started), 400*time.Millisecond)
+}
+
+func (s *StoreSuite) TestReadersWaitingOnALoadWhoseWriteBackHangsAnswerWithinTheWait() {
+	hung, line := s.storeOnRedisLine()
+	name := cacheKey("hung-write-back", newID())
+	var freeze sync.Once
+	answers := make(chan string, 4)
+	var readers sync.WaitGroup
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
+	started := time.Now()
+	for range 4 {
+		readers.Go(func() {
+			found, err := cached(ctx, hung, name, func(context.Context) (string, error) {
+				// Redis hangs while the row is loaded, before it is written back.
+				freeze.Do(line.freeze)
+				return "loaded", nil
+			})
+			s.NoError(err)
+			answers <- found
+		})
+	}
+	readers.Wait()
+	close(answers)
+
+	for found := range answers {
+		s.Equal("loaded", found)
+	}
+	s.Less(time.Since(started), 2*time.Second, "the readers waited on Redis rather than its wait")
+}
+
+// freezeOnMiss freezes the line once Redis has answered a cached read that it holds no row.
+type freezeOnMiss struct{ line redisLine }
+
+func (f freezeOnMiss) Do(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+	return client.Do(ctx, cmd)
+}
+
+func (f freezeOnMiss) DoMulti(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) []rueidis.RedisResult {
+	return client.DoMulti(ctx, multi...)
+}
+
+func (f freezeOnMiss) DoCache(client rueidis.Client, ctx context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	result := client.DoCache(ctx, cmd, ttl)
+	if rueidis.IsRedisNil(result.Error()) {
+		f.line.freeze()
+	}
+	return result
+}
+
+func (f freezeOnMiss) DoMultiCache(client rueidis.Client, ctx context.Context, multi ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	return client.DoMultiCache(ctx, multi...)
+}
+
+func (f freezeOnMiss) Receive(client rueidis.Client, ctx context.Context, subscribe rueidis.Completed, fn func(rueidis.PubSubMessage)) error {
+	return client.Receive(ctx, subscribe, fn)
+}
+
+func (f freezeOnMiss) DoStream(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResultStream {
+	return client.DoStream(ctx, cmd)
+}
+
+func (f freezeOnMiss) DoMultiStream(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) rueidis.MultiRedisResultStream {
+	return client.DoMultiStream(ctx, multi...)
+}
+
+// A fresh client's first load sets the marker that says it is alive before it takes the
+// row's lock, on a context of the client's own.
+func (s *StoreSuite) TestAFreshRoutersFirstReadAnswersWithinTheWaitWhenRedisHangsAfterAMiss() {
+	fresh, _ := s.storeOnRedisLineHooked(func(line redisLine) rueidishook.Hook { return freezeOnMiss{line: line} })
+
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
+	started := time.Now()
+	found, err := cached(ctx, fresh, cacheKey("fresh", newID()), func(context.Context) (string, error) { return "loaded", nil })
+
+	s.Require().NoError(err)
+	s.Equal("loaded", found)
+	s.Less(time.Since(started), 400*time.Millisecond)
+}
+
+func (s *StoreSuite) TestAForgetWaitsOnARedisSlowerThanACachedReadWould() {
+	slowed, line := s.storeOnRedisLine()
+	name := cacheKey("slow-forget", newID())
+	client := slowed.cache.Client()
+	s.Require().NoError(client.Do(s.ctx, client.B().Set().Key(name).Value("old").Build()).Error())
+	line.slow(2 * cacheWait)
+
+	told := slowed.forget(s.ctx, name)
+
+	s.True(told, "the deletion was answered late, not given up on")
+	line.slow(0)
+	held, err := client.Do(s.ctx, client.B().Exists().Key(name).Build()).AsInt64()
+	s.Require().NoError(err)
+	s.Zero(held)
 }

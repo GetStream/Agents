@@ -106,7 +106,6 @@ const openSession: OpenAgentSession = (sessionId) =>
     : // A conversation keeps the format it starts with: one changing in Settings goes first.
       formatSaved().then(() =>
         agentSessions().create({
-          modelOverwrites: { llm: AgentConfig.chatModel },
           return_url: SIGN_IN_RETURN_URL,
           tools: deviceTools.sessionTools(),
         }),

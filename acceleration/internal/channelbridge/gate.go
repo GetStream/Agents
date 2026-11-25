@@ -136,7 +136,7 @@ func (b *Bridge) refusesReply(ctx context.Context, thread store.ChannelThread) e
 }
 
 // silenced is whether a chat thread reaches a person, one of the authors seen in it
-// (store.AddChannelThreadMember), with a live opt-out of the connector's channel (AI-2015). A
+// (store.ChannelThreadMembers.Insert), with a live opt-out of the connector's channel (AI-2015). A
 // reply to an iMessage group reaches everyone in it, and after STOP a person gets one
 // confirmation, then nothing (CTIA 5.1.3; Linq: «The block applies to that recipient across
 // every chat and every line», https://docs.linqapp.com/error/codes/2xxx/2024/).
@@ -153,9 +153,9 @@ func (b *Bridge) silenced(ctx context.Context, thread store.ChannelThread) (bool
 // one thread key part), a WhatsApp thread its digits (whatsapp.yaml's), which Read writes as
 // they are, since a number has no % or : to encode. A Linq thread is a chat, whose id names
 // nobody, so it is the person who started it: the contact map row of the thread's episode
-// (store.ThreadContact), with the agent that answers on the thread's connection (take). A chat
+// (store.ContactMapEntries.GetByThread), with the agent that answers on the thread's connection (take). A chat
 // with no episode, as under a config with episode_cards off, is the person recorded as its
-// starter (store.ChannelThreadStarter), the one its first message's episode would have named,
+// starter (store.ChannelThreads.Starter), the one its first message's episode would have named,
 // group or not. A chat with neither, such as one an email handle started, is "", which no
 // opt-out names and no sandbox lists.
 func (b *Bridge) replyTo(ctx context.Context, thread store.ChannelThread) (string, error) {

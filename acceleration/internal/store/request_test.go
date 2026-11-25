@@ -3,6 +3,7 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -27,7 +28,7 @@ func (s *StoreSuite) record(customerID string, at time.Time, audioMs int64, late
 	if !success {
 		request.ErrorCode = "upstream_error"
 	}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
 }
 
 func (s *StoreSuite) TestRecordRequestDefaultsStartedAt() {
@@ -36,7 +37,7 @@ func (s *StoreSuite) TestRecordRequestDefaultsStartedAt() {
 		Provider: "deepgram", Model: "flux-general-en", Success: true,
 	}
 
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
 
 	s.False(request.StartedAt.IsZero(), "a request with no timestamp should be stamped now")
 	s.Positive(request.ID, "the row should come back with its generated id")
@@ -46,7 +47,7 @@ func (s *StoreSuite) TestModelRequestsCountEveryCustomerSinceTheWindowOpened() {
 	s.record("acme", s.base.Add(1*time.Minute), 1000, 100, true)
 	s.record("globex", s.base.Add(2*time.Minute), 1000, 100, false)
 	s.record("acme", s.base.Add(-time.Hour), 1000, 100, true)
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base, Success: true,
 	}))
 
@@ -57,7 +58,7 @@ func (s *StoreSuite) TestModelRequestsCountEveryCustomerSinceTheWindowOpened() {
 
 func (s *StoreSuite) TestARequestItsCallerCancelledIsLoggedAsNoError() {
 	s.sessionCall(s.store, Call{ID: "call", SessionID: "session-cancel-log", CustomerID: "cancel-log", AgentID: "agent", StartedAt: s.base}, "cfg")
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{Modality: "llm", CustomerID: "cancel-log", AgentID: "agent", Provider: "openai", Model: "gpt",
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{Modality: "llm", CustomerID: "cancel-log", AgentID: "agent", Provider: "openai", Model: "gpt",
 		StartedAt: s.base.Add(time.Second), OutputTokens: 4, Success: false, ErrorCode: ErrorCancelled}))
 	logs, err := s.store.AgentLogs.Select(s.ctx, "cancel-log", AgentLogFilter{Limit: 10})
 	s.Require().NoError(err)
@@ -229,6 +230,28 @@ func (s *StoreSuite) TestABatchLogsEachRowInItsOwnCall() {
 	s.Equal(map[string]string{id(batch[1]): "other/cfg-3"}, sessions("calls-b"))
 }
 
+// A row's log names the agent config of the call it happened in, which was read off whichever
+// customer's session had the call's session id.
+func (s *StoreSuite) TestARowsLogTakesNoAgentConfigFromAnotherCustomersSession() {
+	s.opened("borrowed", "calls-b", s.base, func(session *AgentSession) { session.ConfigID = "cfg-b" })
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{ID: "call-borrowed", SessionID: "borrowed", CallID: "stream-1",
+		CustomerID: "calls-a", AgentID: "agent", StartedAt: s.base}))
+	row := s.usageRow("calls-a", func(request *Request) {
+		request.AgentID, request.CallID, request.StartedAt = "agent", "stream-1", s.base.Add(time.Minute)
+	})
+
+	_, err := s.store.Requests.InsertMany(s.ctx, []Request{row})
+	s.Require().NoError(err)
+
+	logs, err := s.store.AgentLogs.Select(s.ctx, "calls-a", AgentLogFilter{Limit: 10})
+	s.Require().NoError(err)
+	s.Require().Len(logs, 1)
+	logged, err := s.store.AgentLogs.Get(s.ctx, "calls-a", logs[0].ID)
+	s.Require().NoError(err)
+	s.Equal("borrowed", logged.SessionID)
+	s.Empty(logged.ConfigID, "calls-b's agent config is not calls-a's")
+}
+
 func (s *StoreSuite) TestBatchesNamingTheSameCustomersInAnotherOrderDoNotDeadlock() {
 	// The agent log trigger locks each customer it logs a row for until the batch commits.
 	batch := func(first, second string) []Request {
@@ -346,7 +369,7 @@ func (s *StoreSuite) TestTheIdentityAndShippingColumnsAreStored() {
 func (s *StoreSuite) TestMarkingARowAnotherSessionHoldsFailsWithinTheLockWait() {
 	request := &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "lock-" + uuid.NewString(),
 		Provider: "openai", Model: "gpt", StartedAt: time.Now().UTC(), Success: true, ToShip: true}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
 	// A router that went silent with the row locked.
 	tx, err := s.store.ShardDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
@@ -368,7 +391,7 @@ func (s *StoreSuite) TestMarkingARowAnotherSessionHoldsFailsWithinTheLockWait() 
 func (s *StoreSuite) shippable(organization string, at time.Time) uuid.UUID {
 	request := &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "acme", OrganizationID: organization,
 		Provider: "openai", Model: "gpt", StartedAt: at, Success: true, ToShip: true}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
 	return request.UsageID
 }
 
@@ -441,7 +464,7 @@ func (s *StoreSuite) spent(
 	costMicros int64,
 	tags map[string]string,
 ) {
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality:   modality,
 		CustomerID: customerID,
 		Provider:   "openai",
@@ -619,7 +642,7 @@ func (s *StoreSuite) TestRequestQueryBudgets() {
 
 	// The rows, the grants they used, their calls read, the log rows under the customers' lock, and
 	// the transactions around them: the same for one row as for a batch.
-	s.Equal(8, s.countQueries(func() { s.Require().NoError(s.store.Requests.Insert(s.ctx, &single)) }), "Insert")
+	s.Equal(8, s.countQueries(func() { s.Require().NoError(insertRequest(s.ctx, s.store, &single)) }), "InsertMany of one row")
 	s.Equal(8, s.countQueries(func() {
 		_, err := s.store.Requests.InsertMany(s.ctx, batch)
 		s.Require().NoError(err)
@@ -682,4 +705,49 @@ func (s *StoreSuite) TestRequestQueryBudgets() {
 		_, err := s.store.Requests.VendorCostGaps(s.ctx, s.base.Add(-time.Hour), 3, time.Minute)
 		s.Require().NoError(err)
 	}), "VendorCostGaps")
+}
+
+func (s *StoreSuite) TestRenamingAUserWithMoreRequestsThanOneStatementTakesRenamesThemAll() {
+	s.inSmallBatches()
+	for i := range 3 {
+		s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
+			Modality: "stt", CustomerID: "acme", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en",
+			StartedAt: s.base.Add(time.Duration(i) * time.Minute), Success: true,
+		}))
+	}
+
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
+		Modality: "stt", CustomerID: "other-app", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true,
+	}))
+
+	var renamed int64
+	var err error
+	updates := s.statementsLike(`WITH "changes" AS (UPDATE`, func() { renamed, err = s.store.Requests.RenameUser(s.ctx, "acme", "jlahey", "forgotten") })
+
+	s.Require().NoError(err)
+	s.EqualValues(3, renamed)
+	s.Equal(4+len(s.store.shards())-1, updates, "a row per statement, then the one that finds none, and one on each shard holding none")
+	theirs, err := s.store.Requests.CountByUser(s.ctx, "other-app", "jlahey")
+	s.Require().NoError(err)
+	s.EqualValues(1, theirs, "the same id under another app is another person")
+	left, err := s.store.Requests.CountByUser(s.ctx, "acme", "jlahey")
+	s.Require().NoError(err)
+	s.Zero(left)
+	moved, err := s.store.Requests.CountByUser(s.ctx, "acme", "forgotten")
+	s.Require().NoError(err)
+	s.EqualValues(3, moved)
+}
+
+func (s *StoreSuite) TestRenamingAUserToTheirOwnIdRewritesNothing() {
+	s.inSmallBatches()
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
+		Modality: "stt", CustomerID: "acme", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true,
+	}))
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+
+	renamed, err := s.store.Requests.RenameUser(ctx, "acme", "jlahey", "jlahey")
+
+	s.Require().NoError(err)
+	s.Zero(renamed)
 }

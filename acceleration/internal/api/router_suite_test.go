@@ -211,6 +211,8 @@ type RouterSuite struct {
 	configs *store.Store
 	live    *live.Client
 	sealer  *auth.Sealer
+	// storeOptions are what the suite's store was opened with, for a node on the same databases.
+	storeOptions store.Options
 	// activity is the activity record every node of the suite counts in.
 	activity *activity.Recorder
 	// manager runs the suite's sessions, for a test about what ends them from inside.
@@ -339,6 +341,11 @@ type RouterSuite struct {
 	scheduledMu      sync.Mutex
 	scheduled        []*schedulingModel
 	schedulingScript schedulingScript
+	// retries, when set, are the waits the test's scheduled-task workers retry a failed
+	// occurrence after (newScheduler), in place of the scheduler's own; finishRetries the
+	// waits before they write a failed outcome again.
+	retries       []time.Duration
+	finishRetries []time.Duration
 
 	// chat is the Stream Chat the conversations are written to and transcripts read from:
 	// the deployment's own app. apps gives a customer an app of its own instead, and
@@ -591,6 +598,7 @@ func (s *RouterSuite) SetupSuite() {
 	if shardDSN := os.Getenv("ROUTER_POSTGRES_SHARD_DSN"); shardDSN != "" {
 		options.ShardDSN = testDatabase(s.T(), shardDSN)
 	}
+	s.storeOptions = options
 	pgStore, err := store.OpenShards(options)
 	s.Require().NoError(err)
 	pgStore.GlobalDB().SetMaxOpenConns(suiteConnections)
@@ -633,7 +641,7 @@ func (s *RouterSuite) SetupSuite() {
 	s.data = testData{suite: s}
 
 	s.chat = chattest.NewServer(s.T())
-	s.apps = &suiteApps{own: map[string]streamapp.Identity{}, readOnly: map[string]bool{}, waiting: map[string]bool{}, nowhere: map[string]bool{}, deployment: streamapp.NewDeployment(streamapp.DeploymentOptions{
+	s.apps = &suiteApps{own: map[string]streamapp.Identity{}, readOnly: map[string]bool{}, waiting: map[string]bool{}, nowhere: map[string]bool{}, keyless: map[string]bool{}, deployment: streamapp.NewDeployment(streamapp.DeploymentOptions{
 		APIKey: suiteStreamKey, Secret: suiteStreamSecret, BaseURL: s.chat.URL, App: suiteStreamApp,
 	})}
 	s.stream = streamapp.NewClients(s.apps, streamapp.ClientsOptions{})
@@ -2168,6 +2176,15 @@ func (s *RouterSuite) useApp(app testApp) {
 // be the ones an endpoint reads back.
 func (s *RouterSuite) customerID() string { return s.app.app.ID }
 
+// endHere ends a session in this node the way one nobody watches ends, which leaves it held
+// under its id, ended, with the spec it ran on.
+func (s *RouterSuite) endHere(id string) {
+	held, ok := s.manager.Get(id, session.Owner{CustomerID: s.customerID(), Kind: auth.KindServer})
+	s.Require().True(ok, "session %s is held here", id)
+	s.Require().NoError(held.Close())
+	s.Require().Equal(session.Ended, held.State())
+}
+
 // heldCall records call as one of a session's, of its customer and agent, under the config
 // and in the conversation named: the session first, as its recorder writes them, since the
 // call names it.
@@ -2470,11 +2487,28 @@ func (u testUtils) callID() string {
 	return "call-" + u.uuid()
 }
 
-// number is an E.164 number nobody else holds. It is random rather than read off the clock,
-// which ticks in microseconds on some machines and so repeats every ten thousand numbers,
-// and nothing a suite holds is ever released.
+// number is an E.164 number nobody else holds in this run: the next one of a sequence that
+// starts at a random place, so that runs on a kept database start in different places. A number
+// drawn at random could be one another suite of the run holds, and a held number is unique
+// (phone_numbers_held_idx). It is not read off the clock, which ticks in microseconds on some
+// machines and so repeats every ten thousand numbers.
 func (testUtils) number() string {
-	return fmt.Sprintf("+1512%07d", rand.IntN(10_000_000))
+	return fmt.Sprintf("+1512%07d", nextNumber())
+}
+
+// numbersFrom and numbersGiven make nextNumber's numbers; numbersAvailable is how many there
+// are in the seven digits of a number's last part.
+const numbersAvailable = 10_000_000
+
+var (
+	numbersFrom  = rand.Int64N(numbersAvailable)
+	numbersGiven atomic.Int64
+)
+
+// nextNumber is a number no other call in this process gave out, as the seven digits that follow
+// a prefix.
+func nextNumber() int64 {
+	return (numbersFrom + numbersGiven.Add(1)) % numbersAvailable
 }
 
 // testData makes what a test runs against. Nothing it makes is cleaned up.
@@ -2602,10 +2636,10 @@ func (d testData) backendOfAnotherApp() *testClient {
 // pointer because the absent key means something other than the zero one.
 func pointerTo[T any](value T) *T { return &value }
 
-// textSession asks for a conversation in writing, which needs no call.
+// textSession asks for a conversation in writing, which needs no call, on the default models,
+// so a device may open it as a backend does.
 func textSession(id *string) CreateSessionRequest {
-	target := "en-low-latency"
-	return CreateSessionRequest{Id: id, Llm: &target}
+	return CreateSessionRequest{Id: id}
 }
 
 // inProject lists the sessions in one project, which is how a test sharing a fixture's app
@@ -2651,6 +2685,9 @@ type suiteApps struct {
 	waiting map[string]bool
 	// nowhere are customers with no app to act in at all.
 	nowhere map[string]bool
+	// keyless are customers of a deployment with no Stream keys, which the deployment's own app
+	// answers ErrNoIdentity for whatever it is asked, as an unconfigured Deployment does.
+	keyless map[string]bool
 	// perApp answers as app mode does, where customers act in apps of their own.
 	perApp bool
 }
@@ -2664,7 +2701,7 @@ func (a *suiteApps) PerApp() bool {
 func (a *suiteApps) For(ctx context.Context, customer string) (streamapp.Identity, error) {
 	a.mu.Lock()
 	identity, ok := a.own[customer]
-	waiting, nowhere := a.waiting[customer], a.nowhere[customer]
+	waiting, nowhere := a.waiting[customer], a.nowhere[customer] || a.keyless[customer]
 	a.mu.Unlock()
 	switch {
 	case waiting:
@@ -2690,11 +2727,13 @@ func (a *suiteApps) ForApp(ctx context.Context, customer string, app int64) (str
 func (a *suiteApps) ForAppReading(ctx context.Context, customer string, app int64) (streamapp.Identity, error) {
 	a.mu.Lock()
 	identity, ok := a.own[customer]
-	waiting := a.waiting[customer]
+	waiting, keyless := a.waiting[customer], a.keyless[customer]
 	a.mu.Unlock()
 	switch {
 	case waiting:
 		return streamapp.Identity{}, streamapp.ErrDeploymentAppUnknown
+	case keyless:
+		return streamapp.Identity{}, streamapp.ErrNoIdentity
 	case ok && identity.StreamApp == app:
 		return identity, nil
 	}

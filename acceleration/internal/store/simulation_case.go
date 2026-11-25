@@ -115,9 +115,7 @@ func (r *SimulationCases) Finish(ctx context.Context, kase SimulationCase) error
 	if kase.ID == "" {
 		return stack.Wrap(errors.New("store: a case id is required"))
 	}
-	if kase.Transcript == nil {
-		kase.Transcript = []SimulationLine{}
-	}
+	kase.Transcript = orEmpty(kase.Transcript)
 	// The error is the agent's when it stopped answering, which can be a provider's text.
 	kase.Error = SafeLogText(kase.Error)
 	kase.Transcript = redactedTranscript(kase.Transcript)

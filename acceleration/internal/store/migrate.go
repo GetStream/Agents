@@ -223,11 +223,18 @@ var usageIndexes = []struct{ set, name, create string }{
 	// The legs a join delivered after its call ended revives.
 	{"shard", "call_legs_unanswered_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_unanswered_idx ON call_legs (call_type, call_id) " +
 		"WHERE direction = 'outbound' AND end_reason = 'unanswered'"},
+	// A transfer leg, by its call and the vendor's id for it, which a write tried again hits.
+	{"shard", "call_legs_transfer_idx", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS call_legs_transfer_idx ON call_legs " +
+		"(call_type, call_id, COALESCE(stream_app_pk, 0), vendor_call_id) WHERE placed_at IS NULL AND vendor_call_id IS NOT NULL"},
 	// The placed leg a status post is about, by its token's hash, and the legs whose status
 	// url is still open.
 	{"shard", "call_legs_token_hash_key", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS call_legs_token_hash_key ON call_legs (token_hash)"},
 	{"shard", "call_legs_token_hash_placed_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_token_hash_placed_idx ON call_legs (placed_at) " +
 		"WHERE token_hash IS NOT NULL"},
+	// A session's log lines, newest first.
+	{"global", "agent_logs_session_order", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_logs_session_order ON agent_logs (customer_id, session_id, id DESC)"},
+	// A campaign's attempts.
+	{"global", "campaign_attempts_campaign_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS campaign_attempts_campaign_idx ON campaign_attempts (campaign_id)"},
 	// The queued image jobs of each kind, in the order a claim takes them.
 	{"global", "image_jobs_undecided", "CREATE INDEX CONCURRENTLY IF NOT EXISTS image_jobs_undecided ON image_jobs (next_attempt_at, id) " +
 		"WHERE state = 'queued' AND message = ''"},
@@ -242,6 +249,12 @@ var usageIndexes = []struct{ set, name, create string }{
 		"WHERE campaign_id IS NOT NULL"},
 	// A response's alternatives, the responses sharing its parent.
 	{"shard", "agent_responses_parent_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_responses_parent_idx ON agent_responses (session_id, parent_response_id)"},
+	// An app's end user's call legs, which forgetting them rewrites.
+	{"shard", "call_legs_user_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_user_idx ON call_legs (customer_id, user_id) " +
+		"WHERE user_id <> ''"},
+	// A customer's session's call episode.
+	{"global", "episodes_customer_call_session", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS episodes_customer_call_session " +
+		"ON episodes (customer_id, session_id)"},
 }
 
 // ensureUsageIndexes builds each usage index of the set that is missing, dropping one a failed

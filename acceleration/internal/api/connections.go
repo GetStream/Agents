@@ -124,7 +124,7 @@ func (ConnectionOwnerType) Schema(registry huma.Registry) *huma.Schema {
 	// AgentLogSource has user too. When two enums share a constant name oapi-codegen prefixes
 	// both with their type (enumsConflict, pkg/codegen/codegen.go:1553 in v2.8.0), which would
 	// rename the Go SDK's User, Agent, System and Tool. Naming these constants keeps the
-	// others as they were, as PhoneOperation does in api/legacy.yaml.
+	// others as they were, as PhoneOperation does.
 	registry.Map()["ConnectionOwnerType"].Extensions = map[string]any{
 		"x-enum-varnames": []string{"ConnectionOwnerTypeApp", "ConnectionOwnerTypeUser"},
 	}
@@ -351,7 +351,7 @@ func (s *Server) createConnection(ctx context.Context, request *createConnection
 		Label:              strings.TrimSpace(sent.Label),
 	}
 	err = s.store.ConnectorConnections.Insert(ctx, s.connectors, &connection)
-	// Deleted since it was read above (DeleteConnectorDefinition), so answered as one never made.
+	// Deleted since it was read above (store.ConnectorDefinitions.Delete), so answered as one never made.
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		return nil, invalidRequest(fmt.Sprintf("no such connector: %q", sent.ConnectorID))
 	}
@@ -764,8 +764,8 @@ func actingUser(ctx context.Context) string {
 // copied by name, so a column added to the row stays hidden until it is added here. Sealed
 // credentials, cached tools and last_error are left out: the first is never shown, and the
 // other two are for the operations that write them (T18, T12). uses are the bindings that
-// name it (store.ConnectorConnectionUses), definition how its revision compares with its
-// connector's (store.ConnectorDefinitionStatuses), and client the OAuth client its grant was
+// name it (store.ConnectorConnections.Uses), definition how its revision compares with its
+// connector's (store.ConnectorDefinitions.Statuses), and client the OAuth client its grant was
 // issued to, nil when none is recorded (store.ConnectorConnection.Client), and validation what
 // its last validate found, nil before the first (store.ConnectorConnection.Validation).
 func connectionOf(connection store.ConnectorConnection, uses []store.ConnectionUse, definition store.DefinitionStatus,

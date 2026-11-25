@@ -361,5 +361,12 @@ func newStreamClient(identity Identity, httpClient *http.Client) (*getstream.Str
 		secret = hex.EncodeToString(placeholder)
 		options = append(options, getstream.WithAuthToken(identity.Token.Reveal()))
 	}
-	return getstream.NewClient(identity.APIKey, secret, options...)
+	client, err := getstream.NewClient(identity.APIKey, secret, options...)
+	if err != nil {
+		return nil, err
+	}
+	// The SDK makes its video client on first use without a lock, and one client is shared by
+	// every call of its app at once: it is made here, before anything can use it.
+	client.Video()
+	return client, nil
 }

@@ -128,7 +128,7 @@ func (s *Suite) Started(ask Ask) sts.STS {
 // Start opens a provider the caller built, so a test can use options of its own and still
 // get the suite's timeout.
 func (s *Suite) Start(provider sts.STS) {
-	ctx, cancel := context.WithTimeout(context.Background(), s.Timeout)
+	ctx, cancel := context.WithTimeout(s.T().Context(), s.Timeout)
 	s.T().Cleanup(cancel)
 	s.Require().NoError(provider.Start(ctx))
 }

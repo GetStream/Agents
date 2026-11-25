@@ -547,7 +547,7 @@ func (s *Server) teamSpend(ctx context.Context, organization string, billed bool
 		since[i], _ = usage.Window(interval, now)
 	}
 	month, _ := usage.Window(usage.Monthly, now)
-	rows, err := s.store.Spend.Teams(ctx, organization, since, month)
+	rows, err := s.store.Spend.Teams(ctx, organization, since, month, billed)
 	if err != nil {
 		return nil, err
 	}

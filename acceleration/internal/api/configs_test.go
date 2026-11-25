@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -128,6 +129,140 @@ func (s *ConfigsSuite) TestPatchingAnEmptyGreetingRemovesIt() {
 		map[string]any{"greeting": map[string]any{"text": ""}}, &patched))
 
 	s.Nil(patched.Greeting)
+}
+
+// A patch wrote every column from the copy it read, so of patches at once to different fields
+// the last to write put back what the others had changed.
+func (s *ConfigsSuite) TestPatchesAtOnceToDifferentFieldsAllSurvive() {
+	created := s.createConfig(map[string]any{"name": "support"})
+	for round := range 10 {
+		patches := []map[string]any{
+			{"instructions": fmt.Sprintf("Be brief, %d.", round)},
+			{"ui_instructions": fmt.Sprintf("Answer with a card, %d.", round)},
+			{"greeting": map[string]any{"text": fmt.Sprintf("Hello, %d.", round)}},
+			{"keyterms": []string{fmt.Sprintf("Vision Agents %d", round)}},
+		}
+		statuses := make(chan int, len(patches))
+		var wg sync.WaitGroup
+		for _, patch := range patches {
+			wg.Go(func() {
+				statuses <- s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id, patch, nil)
+			})
+		}
+		wg.Wait()
+		close(statuses)
+		for status := range statuses {
+			s.Require().Equal(http.StatusOK, status)
+		}
+
+		var read AgentConfig
+		s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &read))
+		s.Equal(fmt.Sprintf("Be brief, %d.", round), value(read.Instructions), "round %d", round)
+		s.Equal(fmt.Sprintf("Answer with a card, %d.", round), value(read.UiInstructions), "round %d", round)
+		s.Require().NotNil(read.Greeting, "round %d", round)
+		s.Equal(fmt.Sprintf("Hello, %d.", round), read.Greeting.Text, "round %d", round)
+		s.Equal([]string{fmt.Sprintf("Vision Agents %d", round)}, value(read.Keyterms), "round %d", round)
+	}
+}
+
+// A patch sending the updated_at of the copy it was made from must not write over a save made
+// after that copy was read.
+func (s *ConfigsSuite) TestAPatchMadeFromACopyOlderThanTheConfigIsRefused() {
+	created := s.createConfig(map[string]any{"name": "support", "instructions": "Be brief."})
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"instructions": "Be briefer."}, nil))
+
+	status, body := s.serverClient.call(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"instructions": "Be loud.", "updated_at": created.UpdatedAt})
+
+	s.Equal(http.StatusConflict, status)
+	s.Contains(string(body), `"code":"conflict"`)
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &read))
+	s.Equal("Be briefer.", value(read.Instructions))
+}
+
+// The control: a client sending back the updated_at it was last given, by a read or by its own
+// save, made its change on the config as it is, and is not refused. The two are not as precise
+// as each other, a read's being the database's.
+func (s *ConfigsSuite) TestAPatchSendingTheUpdatedAtItWasLastGivenIsWritten() {
+	created := s.createConfig(map[string]any{"name": "support"})
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &read))
+
+	var patched AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"instructions": "Be brief.", "updated_at": read.UpdatedAt}, &patched))
+	var again AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"instructions": "Be briefer.", "updated_at": patched.UpdatedAt}, &again))
+
+	s.Equal("Be briefer.", value(again.Instructions))
+}
+
+// A patch was checked against its copy of the config, read through the cache, and written onto
+// a row another save had made a text agent of since: a text agent was stored with a subagent,
+// which none may have. The save goes past the store, as one the cache has not heard of yet.
+func (s *ConfigsSuite) TestAPatchIsCheckedAgainstTheConfigAsASaveItsCachedCopyMissedLeftIt() {
+	created := s.createConfig(map[string]any{"name": "support"})
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, nil),
+		"read, and so cached, by id")
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+		Set("mode = ?", store.AgentModeText).Set("updated_at = now()").
+		Where("id = ?", created.Id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	status, failure := s.serverClient.failure(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"subagent": "llm-thinking"})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "subagent")
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &read))
+	s.Equal(AgentModeText, read.Mode)
+	s.Nil(read.Subagent)
+}
+
+// A patch that sent the value its cached copy held kept what another save had written there
+// since, and answered 200 with that: the field it sent was never written. The save goes past
+// the store, as one the cache has not heard of yet.
+func (s *ConfigsSuite) TestAPatchWritesAFieldItSendsThatItsCachedCopyAlreadyHeld() {
+	created := s.createConfig(map[string]any{"name": "support", "instructions": "Be brief."})
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, nil),
+		"read, and so cached, by id")
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+		Set("instructions = ?", "Be loud.").Set("updated_at = now()").
+		Where("id = ?", created.Id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	var patched AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPatch, "/v1/agents/configs/"+created.Id,
+		map[string]any{"instructions": "Be brief."}, &patched))
+
+	s.Equal("Be brief.", value(patched.Instructions))
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &read))
+	s.Equal("Be brief.", value(read.Instructions))
+}
+
+// The same through a replacement, which writes the whole config it is sent.
+func (s *ConfigsSuite) TestAnUpdateWritesAFieldItSendsThatItsCachedCopyAlreadyHeld() {
+	created := s.createConfig(map[string]any{"name": "support", "instructions": "Be brief."})
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, nil),
+		"read, and so cached, by id")
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+		Set("instructions = ?", "Be loud.").Set("updated_at = now()").
+		Where("id = ?", created.Id).Exec(context.Background())
+	s.Require().NoError(err)
+
+	var updated AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/configs/"+created.Id,
+		map[string]any{"name": "support", "instructions": "Be brief."}, &updated))
+
+	s.Equal("Be brief.", value(updated.Instructions))
+	var read AgentConfig
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/configs/"+created.Id, nil, &read))
+	s.Equal("Be brief.", value(read.Instructions))
 }
 
 func (s *ConfigsSuite) TestAnImageTargetIsStoredOnCreateAndOnEveryUpdate() {
@@ -2044,7 +2179,7 @@ func (s *ConfigsSuite) TestNessyBesideSeveralOutboundToolsNamesThemAll() {
 
 // TestNessyBesideAConnectorWithOneOutboundSourceAmongSeveralIsRefused: a connector sends data
 // out if any of its sources may, not only the first. Manifest.Validate accepts several sources
-// and CreateConnectorDefinition takes any manifest, so a custom connector can put a source that
+// and store.ConnectorDefinitions.Revise takes any manifest, so a custom connector can put a source that
 // says outbound: false before one that does not.
 func (s *ConfigsSuite) TestNessyBesideAConnectorWithOneOutboundSourceAmongSeveralIsRefused() {
 	s.useInternalApp()

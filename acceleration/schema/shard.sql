@@ -66,6 +66,7 @@ TABLE agent_responses
     CREATE INDEX agent_responses_session_idx ON public.agent_responses USING btree (session_id, created_at, id)
 
 TABLE agent_session_tools
+    customer_id text
     session_id text NOT NULL
     tools jsonb NOT NULL
     updated_at timestamp with time zone NOT NULL
@@ -94,6 +95,7 @@ TABLE agent_sessions
     modality text NOT NULL DEFAULT 'voice'::text
     model_overwrites jsonb NOT NULL DEFAULT '{}'::jsonb
     no_ui boolean
+    opened_at timestamp with time zone
     pinned_at timestamp with time zone
     project text NOT NULL DEFAULT ''::text
     remembers boolean
@@ -103,6 +105,7 @@ TABLE agent_sessions
     searchable tsvector DEFAULT (((setweight(to_tsvector('english'::regconfig, COALESCE(title, ''::text)), 'A'::"char") || setweight(to_tsvector('english'::regconfig, COALESCE(description, ''::text)), 'B'::"char")) || setweight(to_tsvector('english'::regconfig, COALESCE(project, ''::text)), 'C'::"char")) || setweight(to_tsvector('english'::regconfig, COALESCE(agent_name, ''::text)), 'D'::"char"))
     state text NOT NULL
     stream_app_pk bigint
+    superseded_at timestamp with time zone
     team text NOT NULL DEFAULT ''::text
     title text NOT NULL DEFAULT ''::text
     tool_timeout_ms integer
@@ -197,7 +200,9 @@ TABLE call_legs
     CREATE UNIQUE INDEX call_legs_token_hash_key ON public.call_legs USING btree (token_hash)
     CREATE INDEX call_legs_token_hash_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token_hash IS NOT NULL)
     CREATE INDEX call_legs_token_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token IS NOT NULL)
+    CREATE UNIQUE INDEX call_legs_transfer_idx ON public.call_legs USING btree (call_type, call_id, COALESCE(stream_app_pk, (0)::bigint), vendor_call_id) WHERE ((placed_at IS NULL) AND (vendor_call_id IS NOT NULL))
     CREATE INDEX call_legs_unanswered_idx ON public.call_legs USING btree (call_type, call_id) WHERE ((direction = 'outbound'::text) AND (end_reason = 'unanswered'::text))
+    CREATE INDEX call_legs_user_idx ON public.call_legs USING btree (customer_id, user_id) WHERE (user_id <> ''::text)
     CREATE INDEX call_legs_vendor_call_idx ON public.call_legs USING btree (vendor_call_id) WHERE (vendor_call_id IS NOT NULL)
 
 TABLE call_participants
