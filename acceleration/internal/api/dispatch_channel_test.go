@@ -101,7 +101,7 @@ func (s *MessageHooksSuite) TestAnotherPersonsMessageIsAnsweredByTheWorkersSessi
 func (s *MessageHooksSuite) TestOnlyTheBackendOfTheChannelsCustomerOpensItsChannel() {
 	handed := s.handedOut()
 	owner := s.app
-	asked := CreateSessionRequest{AgentId: &handed.AgentID, Llm: pointerTo("en-low-latency")}
+	asked := CreateSessionRequest{AgentId: &handed.AgentID}
 
 	status, body := s.client.call(http.MethodPost, "/v1/agents/sessions", asked)
 	s.Equal(http.StatusForbidden, status, "end user: %s", body)
@@ -224,7 +224,7 @@ func (s *MessageHooksSuite) TestACommandToASessionOfItsOwnStillWritesThePersonsM
 		"a backend's session":   {s.serverClient, "support-operator", pointerTo("agent-" + s.utils.uuid())},
 		"an end user's session": {s.client, s.client.userID, nil},
 	} {
-		opened := opener.client.createSession(CreateSessionRequest{AgentId: opener.agentID, Llm: pointerTo("en-low-latency")})
+		opened := opener.client.createSession(CreateSessionRequest{AgentId: opener.agentID})
 		s.Require().Equal(chatlog.ChannelType+":"+opened.Id, value(opened.ConversationId), name)
 		watching := opener.client.opens("/v1/agents/sessions/" + opened.Id + "/events")
 		id := s.utils.uuid()

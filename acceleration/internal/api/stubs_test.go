@@ -28,6 +28,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/imagegen"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/imagerouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/turbopuffer"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/llmtest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/memory"
@@ -1036,10 +1037,6 @@ func (b *knowledgeBase) refuseWritesAfter(n int) {
 	b.writesLeft = &n
 }
 
-// knowledgeQueried is what the stub bills a query as having searched: the least a small
-// namespace is billed at turbopuffer.
-const knowledgeQueried = 1_280_000_000
-
 // passageBytes is a passage's logical size, as turbopuffer bills it.
 func passageBytes(document knowledge.Document) int64 {
 	return int64(len(document.ID) + len(document.Text) + len(document.Source))
@@ -1098,7 +1095,7 @@ func (b *knowledgeBase) Fetch(_ context.Context, namespace string, ids []string)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	found := knowledge.Found{Billed: knowledge.Billed{Requests: 1, BytesQueried: knowledgeQueried}}
+	found := knowledge.Found{Billed: knowledge.Billed{Requests: 1, BytesQueried: turbopuffer.MinimumQueried}}
 	for _, id := range ids {
 		if document, ok := b.passages[namespace][id]; ok {
 			found.Documents = append(found.Documents, document)
@@ -1110,7 +1107,7 @@ func (b *knowledgeBase) Fetch(_ context.Context, namespace string, ids []string)
 }
 
 func (b *knowledgeBase) Search(context.Context, knowledge.Query) (knowledge.Found, error) {
-	return knowledge.Found{Billed: knowledge.Billed{Requests: 1, BytesQueried: knowledgeQueried}}, nil
+	return knowledge.Found{Billed: knowledge.Billed{Requests: 1, BytesQueried: turbopuffer.MinimumQueried}}, nil
 }
 
 func (b *knowledgeBase) Namespaces(context.Context, string) ([]string, error) { return nil, nil }
@@ -1118,6 +1115,8 @@ func (b *knowledgeBase) Namespaces(context.Context, string) ([]string, error) { 
 func (b *knowledgeBase) Stored(context.Context, string) (knowledge.Billed, error) {
 	return knowledge.Billed{}, knowledge.ErrNoNamespace
 }
+
+func (b *knowledgeBase) MinimumQueried() int64 { return turbopuffer.MinimumQueried }
 
 func (b *knowledgeBase) Provider() string { return "kept" }
 

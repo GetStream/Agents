@@ -63,7 +63,11 @@ type ConnectorDefinition struct {
 	Category    string        `bun:"category,notnull"`
 	Description string        `bun:"description,notnull"`
 	Manifest    core.Manifest `bun:"manifest,type:jsonb,notnull"`
-	CreatedAt   time.Time     `bun:"created_at,notnull"`
+	// SyncHash is a fingerprint of the file the CLI last synced onto this revision
+	// (20270202000100_connector_router_sync_hash.sql). Empty for a built-in, and for a revision
+	// that was never synced or was written since by anything that is not a sync.
+	SyncHash  string    `bun:"sync_hash,notnull"`
+	CreatedAt time.Time `bun:"created_at,notnull"`
 }
 
 // Validate refuses a revision the table's checks refuse: a custom id is a customer's and only a
@@ -118,8 +122,15 @@ func (r *ConnectorDefinitions) Seed(ctx context.Context, fsys fs.FS) error {
 
 // Revise stores a customer's own definition as the next revision of its
 // id, or returns the latest revision when that already says the same. The manifest's own
-// revision is replaced: the store numbers revisions.
+// revision is replaced: the store numbers revisions. It is no sync, so the revision it returns
+// carries no sync hash.
 func (r *ConnectorDefinitions) Revise(ctx context.Context, customerID string, manifest core.Manifest) (ConnectorDefinition, error) {
+	return r.ReviseSynced(ctx, customerID, manifest, "")
+}
+
+// ReviseSynced is Revise for a write that carries the fingerprint of the file it came from,
+// which the revision it returns then carries: empty for a write that is not a sync.
+func (r *ConnectorDefinitions) ReviseSynced(ctx context.Context, customerID string, manifest core.Manifest, syncHash string) (ConnectorDefinition, error) {
 	if customerID == BuiltinCustomer {
 		return ConnectorDefinition{}, stack.Wrap(errCustomerRequired)
 	}
@@ -127,7 +138,7 @@ func (r *ConnectorDefinitions) Revise(ctx context.Context, customerID string, ma
 	if err := probe.Validate(); err != nil {
 		return ConnectorDefinition{}, stack.Wrap(err)
 	}
-	return r.saveRevision(ctx, customerID, manifest)
+	return r.saveRevision(ctx, customerID, manifest, syncHash)
 }
 
 // Get returns one revision of a definition the customer can see: a built-in
@@ -267,14 +278,15 @@ func (r *ConnectorDefinitions) Select(ctx context.Context, customerID string, fi
 }
 
 // saveRevision stores a custom manifest as the next revision of its id under the customer,
-// unless the latest revision already says the same, in which case that one is returned. A
-// custom definition has one writer, the customer through the API, so the store numbers it.
+// unless the latest revision already says the same, in which case that one is returned with
+// syncHash recorded on it. A custom definition has one writer, the customer through the API,
+// so the store numbers it.
 //
 // It runs under a transaction-scoped advisory lock on the customer and id, so two routers
 // starting at once, or two requests creating the same custom id, take turns: the second
 // finds the first's revision and either matches it or follows it. The primary key would
 // refuse a duplicate revision anyway; the lock is what turns that into a wait, not an error.
-func (r *ConnectorDefinitions) saveRevision(ctx context.Context, customerID string, manifest core.Manifest) (ConnectorDefinition, error) {
+func (r *ConnectorDefinitions) saveRevision(ctx context.Context, customerID string, manifest core.Manifest, syncHash string) (ConnectorDefinition, error) {
 	var saved ConnectorDefinition
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, customerID+"/"+manifest.ID, definitionLockSeed); err != nil {
@@ -294,9 +306,22 @@ func (r *ConnectorDefinitions) saveRevision(ctx context.Context, customerID stri
 			}
 			if same {
 				saved = latest
-				return nil
+				if latest.SyncHash == syncHash {
+					return nil
+				}
+				// The same manifest, from a file of another fingerprint or from a write that is no
+				// sync: no new revision, but the hash is this write's, so the CLI's next sync of
+				// that file finds it unchanged, and one after an edit elsewhere does not.
+				saved.SyncHash = syncHash
+				_, err := tx.NewUpdate().Model(&saved).Column("sync_hash").WherePK().Exec(ctx)
+				return err
 			}
 			manifest.Revision = latest.Revision + 1
+			// Another manifest under the latest's hash is no sync of the file that hash names,
+			// such as a read sent back edited, so the new revision carries none.
+			if syncHash == latest.SyncHash {
+				syncHash = ""
+			}
 		}
 
 		// Validated as it is stored, with the revision it is stored under.
@@ -311,6 +336,7 @@ func (r *ConnectorDefinitions) saveRevision(ctx context.Context, customerID stri
 			Category:    manifest.Category,
 			Description: manifest.Description,
 			Manifest:    manifest,
+			SyncHash:    syncHash,
 			CreatedAt:   time.Now().UTC(),
 		}
 		if err := saved.Validate(); err != nil {

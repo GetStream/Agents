@@ -120,29 +120,27 @@ func (s *Server) watchSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	found, ok := s.sessions.Get(id, OwnerFrom(r.Context()))
+	_, ok := s.sessions.Get(id, OwnerFrom(r.Context()))
 	// A session this node is not running may still be running on another one, and a
 	// browser reconnecting has no reason to land back where it was. The relay asks the rest
 	// of the deployment for it; without one, this node is the deployment.
 	if !ok && s.relayed != nil && s.watchRemoteSession(w, r, id, OwnerFrom(r.Context())) {
 		return
 	}
-	// A text conversation that ended is carried on under the same id, as a message to it
-	// is, so watching it again is how a client resumes it.
-	if !ok || found.State() == session.Ended {
-		reopened, sent, err := s.sessionToAnswer(r.Context(), id)
-		var failure APIError
-		if errors.As(err, &failure) {
-			writeError(w, failure)
-			return
-		}
-		if err != nil {
-			writeFailure(w, r, err)
-			return
-		}
-		sent()
-		found, ok = reopened, true
+	// Found as a message to it finds it: one running here is watched only by an end user still
+	// in its config's team, and a text conversation that ended is carried on under the same id,
+	// so watching it again is how a client resumes it.
+	found, sent, err := s.sessionToAnswer(r.Context(), id)
+	var failure APIError
+	if errors.As(err, &failure) {
+		writeError(w, failure)
+		return
 	}
+	if err != nil {
+		writeFailure(w, r, err)
+		return
+	}
+	sent()
 	if !canReadSession(r.Context(), found.Spec()) {
 		writeError(w, errUnknownSession)
 		return
@@ -331,13 +329,13 @@ func (s *Server) writeEvents(connection *websocket.Conn, events <-chan session.E
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteJSON(encoded); err != nil {
 				s.logger.Debug("session socket write failed", "error", err)
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 
 		case <-ping.C:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 		}
 	}

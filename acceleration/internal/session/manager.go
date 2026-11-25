@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -459,11 +461,23 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		// A session's channel is named after it, and a thread channel's id is taken by the
 		// external thread it holds. Compared case-folded, as threadConversation does.
 		if folded := strings.ToLower(spec.ID); !taken && strings.HasPrefix(folded, persistent.ThreadChannelPrefix) {
-			_, err := m.options.Store.ChannelThreads.Get(ctx, folded)
-			if err != nil && !errors.Is(err, store.ErrNoChannelThread) {
-				return nil, stack.Wrap(err)
+			// Why: to an end user's device every id shaped like a thread channel's is taken, so
+			// the answer does not tell it whether a thread channel has the id. Counted only
+			// where that changes the answer: an id no thread channel has.
+			probe := endUserKind(spec) && threadShaped(folded)
+			if probe && ThreadSessionIDsSwitch.On(spec.CustomerID) {
+				ThreadSessionIDsSwitch.Applies(spec.CustomerID, "CreateSession")
+				taken = true
+			} else {
+				_, err := m.options.Store.ChannelThreads.Get(ctx, folded)
+				if err != nil && !errors.Is(err, store.ErrNoChannelThread) {
+					return nil, stack.Wrap(err)
+				}
+				taken = err == nil
+				if probe && !taken {
+					ThreadSessionIDsSwitch.Applies(spec.CustomerID, "CreateSession")
+				}
 			}
-			taken = err == nil
 		}
 		if taken {
 			return nil, stack.Wrap(ErrSessionExists)
@@ -2660,17 +2674,35 @@ func (s Spec) callTools(builtin []harness.Tool, keepDialOut bool) []harness.Tool
 	return kept
 }
 
+// ThreadSessionIDsSwitch (CHA-7274) turns on answering a device's session id in the thread namespace as taken.
+// Off, such an id is treated as before, and counted (transitional.Switch).
+var ThreadSessionIDsSwitch = transitional.Switch{
+	Name: "security.cha7274.device_thread_session_ids",
+	Env:  "ROUTER_SECURITY_CHA7274_DEVICE_THREAD_SESSION_IDS",
+}
+
+// threadShaped reports whether a folded id has the shape of a thread channel's id: the thread
+// prefix and a UUID (channelbridge). Other ids in the namespace no thread channel can have.
+func threadShaped(folded string) bool {
+	rest, _ := strings.CutPrefix(folded, persistent.ThreadChannelPrefix)
+	_, err := uuid.Parse(rest)
+	return err == nil && len(rest) == 36
+}
+
+// endUserKind reports whether spec was opened by an end user's device rather than the customer's
+// backend. A spec the router opens itself names no kind.
+func endUserKind(spec Spec) bool {
+	if spec.Caller.ServerSide {
+		return false
+	}
+	kind := spec.CallerKind
+	return kind == auth.KindAuthenticated || kind == auth.KindGuest || kind == auth.KindAnonymous
+}
+
 // openedByDevice reports whether an end user's device opened the session, rather than the
 // customer's backend or the router itself, which names no caller kind.
 func (s Spec) openedByDevice() bool {
-	if s.Caller.ServerSide {
-		return false
-	}
-	switch s.CallerKind {
-	case auth.KindAuthenticated, auth.KindGuest, auth.KindAnonymous:
-		return true
-	}
-	return false
+	return endUserKind(s)
 }
 
 // keepsDialOut reports whether the session keeps the built-in transfer and press. A session a

@@ -146,6 +146,24 @@ var errDeviceFloorControl = forbidden("floor_control is sent server-side: whethe
 var errDeviceTeam = forbidden("team is sent server-side: a device's work is counted under the team its " +
 	"token was signed for, and naming another would spend that team's budget")
 
+// errDevicePhone refuses a phone line named by an end user's device.
+var errDevicePhone = forbidden("phone is sent server-side: a phone session calls, transfers and " +
+	"presses keys from the app's own numbers, which a device may not")
+
+// errDeviceModels refuses models and limits chosen by an end user's device, as updateSession
+// refuses a device changing them.
+var errDeviceModels = forbidden("llm, stt, tts, sts, search, voice, max_tokens, max_tool_rounds and " +
+	"model_overwrites are sent server-side: which models a session runs on, and how much they " +
+	"may spend, is the app's to decide, which a device may not")
+
+// errDeviceGreeting refuses a greeting sent by an end user's device.
+var errDeviceGreeting = forbidden("greeting is sent server-side: what the agent opens with is " +
+	"the agent speaking, which a device cannot vouch for")
+
+// errDeviceTags refuses cost labels sent by an end user's device.
+var errDeviceTags = forbidden("tags are sent server-side: they label whom the session's spend is " +
+	"billed to, which a device may not decide")
+
 var errDeviceResumeHistory = forbidden("resume_history is sent server-side: how much of a " +
 	"conversation the model is sent is billed to the app, which a device may not decide")
 
@@ -218,6 +236,9 @@ var errAnonymousConversation = forbidden("conversation_id needs a verified calle
 // anything is made for it. createSession and the session socket both call it, so a request one
 // of them refuses the other refuses too, with the same error.
 func refuseSessionRequest(ctx context.Context, request CreateSessionRequest) (APIError, bool) {
+	if failure, refused := refuseReservedActingFor(ctx, "CreateSession"); refused {
+		return failure, true
+	}
 	if failure, refused := refuseServerSideFields(ctx, request); refused {
 		return failure, true
 	}
@@ -248,6 +269,9 @@ func refuseSessionRequest(ctx context.Context, request CreateSessionRequest) (AP
 		if failure, refused := refuseReservedUserID(named[0], named[1]); refused {
 			return failure, true
 		}
+	}
+	if failure, refused := refuseReservedNewly(ctx, "CreateSession", "call.id", callAgentID(request)); refused {
+		return failure, true
 	}
 	// A zone nobody knows is refused where it is named, rather than at the first task
 	// that would have run in it.
@@ -323,6 +347,15 @@ func (s *Server) ownApp(customerID string, app int64) bool {
 	return app != 0 && streamapp.CustomerOf(app) == customerID
 }
 
+// refuseDeviceModels reports the failure a request is refused with when an end user's device
+// named models or limits in it. A new session and a fork are both held to it.
+func refuseDeviceModels(ctx context.Context, named bool) (APIError, bool) {
+	if named && !ServerSideFrom(ctx) {
+		return errDeviceModels, true
+	}
+	return APIError{}, false
+}
+
 // refuseServerSideFields reports the failure a new session is refused with when an end user's
 // device sent a field only the backend may send.
 //
@@ -348,6 +381,20 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 	if request.Team != nil && !ServerSideFrom(ctx) {
 		return errDeviceTeam, true
 	}
+	if request.Phone != nil && !ServerSideFrom(ctx) {
+		return errDevicePhone, true
+	}
+	if failure, refused := refuseDeviceModels(ctx, request.Llm != nil || request.Stt != nil ||
+		request.Tts != nil || request.Sts != nil || request.Search != nil || request.Voice != nil ||
+		request.MaxTokens != nil || request.MaxToolRounds != nil || request.ModelOverwrites != nil); refused {
+		return failure, true
+	}
+	if request.Greeting != nil && !ServerSideFrom(ctx) {
+		return errDeviceGreeting, true
+	}
+	if request.Tags != nil && !ServerSideFrom(ctx) {
+		return errDeviceTags, true
+	}
 	if value(request.LegacyConversationId) != "" && !KindFrom(ctx).Verified() {
 		return errAnonymousConversation, true
 	}
@@ -360,6 +407,15 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 		}
 	}
 	return APIError{}, false
+}
+
+// callAgentID is the call id a voice session is keyed under as its agent id, when it names no
+// agent id of its own (Spec.KeyedAgentID), and empty otherwise.
+func callAgentID(request CreateSessionRequest) string {
+	if request.Call == nil || value(request.AgentId) != "" {
+		return ""
+	}
+	return request.Call.Id
 }
 
 // memoryUserID is the user id a session's memory names, empty when it names none.

@@ -203,6 +203,9 @@ func (s *Service) Close() {
 // so it can be another router's renewal in flight (needs_reauthorization at the resolver's
 // checkpoint) while the stored row is connected again; a deleted or disconnected connection's
 // rows go through the worker and Receive (gone), never from here.
+//
+// A connection a delete removed while this runs is store.ErrNoConnectorConnection, from the
+// first add that comes after the delete committed.
 func (s *Service) Reconcile(ctx context.Context, connection store.ConnectorConnection) error {
 	if connection.Status != store.ConnectionConnected {
 		return nil
@@ -223,17 +226,9 @@ func (s *Service) Reconcile(ctx context.Context, connection store.ConnectorConne
 	return nil
 }
 
-// Stop drops every subscription of a connection that was deleted or disconnected. Its
-// credential is gone, so the server cannot be asked to stop: it stops when the token answers
-// 410 and the router never refreshes it, at its refreshBefore. The router never asks for a
-// subscription that does not expire («A server MUST NOT return null unless the client
-// suggested ttlMs: null»).
-func (s *Service) Stop(ctx context.Context, customerID, connectionID string) error {
-	return s.store.ConnectionEventSubscriptions.DeleteConnection(ctx, customerID, connectionID)
-}
-
 // add stores a new pending subscription for one declared event, with a token and a sealed
-// secret of its own, unless the connection already has it.
+// secret of its own, unless the connection already has it. A connection deleted since it was
+// read is store.ErrNoConnectorConnection, and nothing is stored.
 func (s *Service) add(ctx context.Context, connection store.ConnectorConnection, configID, binding string, event store.BindingEvent) error {
 	token, err := newToken()
 	if err != nil {

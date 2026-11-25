@@ -58,14 +58,20 @@ type TeamAppSpend struct {
 
 // Teams sums, across every shard, the billable cost of the rows of every app of the
 // organization that carry a team's category since each of since, per app and team, for a
-// deployment with no usage service to count it. Rows are read from the earliest moment.
-func (r *Spend) Teams(ctx context.Context, organizationID string, since []time.Time, month time.Time) ([]TeamAppSpend, error) {
+// deployment with no usage service to count it. Rows are read from the earliest moment. A
+// billed organization's apps are its Members; an app in no organization, whose id
+// organizationID is, is its own only app. Neither counts an app of another customer's whose id
+// is the same, as Subject does not.
+func (r *Spend) Teams(ctx context.Context, organizationID string, since []time.Time, month time.Time, billed bool) ([]TeamAppSpend, error) {
 	if len(since) == 0 {
 		return nil, nil
 	}
-	apps, err := r.store.AppOrganizations.Apps(ctx, organizationID)
-	if err != nil {
-		return nil, err
+	apps := []string{organizationID}
+	if billed {
+		var err error
+		if apps, err = r.store.AppOrganizations.Members(ctx, organizationID); err != nil {
+			return nil, err
+		}
 	}
 	earliest := slices.MinFunc(append(slices.Clone(since), month), func(a, b time.Time) int { return a.Compare(b) })
 	var sums strings.Builder

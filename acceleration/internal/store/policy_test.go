@@ -4,6 +4,7 @@ package store
 
 import (
 	"fmt"
+	"net/url"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,40 @@ func (s *StoreSuite) TestAScopeNobodyWroteAPolicyForHasTheEmptyOne() {
 
 	s.Require().NoError(err)
 	s.Equal(PolicyDocument{}, document)
+}
+
+func (s *StoreSuite) TestAnOrganizationsPolicyIsSavedWithinTheWriteTimeoutWhileItsAppsCannotBeListed() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	// A lock_timeout past the test's own wait, so only the store's bound ends the list.
+	dsn, err := url.Parse(s.dsn)
+	s.Require().NoError(err)
+	query := dsn.Query()
+	query.Set("lock_timeout", "60000")
+	dsn.RawQuery = query.Encode()
+	patient, err := OpenShards(Options{DSN: dsn.String(), ShardDSN: s.shardDSN, Redis: s.redis(), writeTimeout: 300 * time.Millisecond})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(patient.Close()) })
+	holder, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = holder.Rollback() })
+	_, err = holder.ExecContext(s.ctx, "LOCK TABLE app_organizations IN ACCESS EXCLUSIVE MODE")
+	s.Require().NoError(err)
+
+	yes := true
+	saved := make(chan error, 1)
+	go func() {
+		saved <- patient.Policies.Upsert(s.ctx, &Policy{Scope: ScopeOrganization, ScopeID: "org-" + newID(), Document: PolicyDocument{PromptInjection: &yes}})
+	}()
+	select {
+	case err := <-saved:
+		s.NoError(err)
+	case <-time.After(3 * time.Second):
+		s.Fail("the save waits on the list of the organization's apps")
+		s.Require().NoError(holder.Rollback())
+		<-saved
+	}
 }
 
 func (s *StoreSuite) TestSavingAPolicyReplacesWhatWasThere() {
@@ -286,10 +321,10 @@ func (s *StoreSuite) TestPolicyQueryBudgets() {
 	limit := int64(3)
 	user := Policy{Scope: ScopeUser, ScopeID: UserScopeID(app, "ann"), Document: PolicyDocument{Quota: &Quota{MessagesPerUserPerDay: &limit}}}
 
-	s.Equal(3, s.countQueries(func() {
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() {
 		s.Equal(s.redisTrips(1), s.countRedis(func() { s.Require().NoError(s.store.Policies.Upsert(s.ctx, &user)) }),
 			"the document and the app's user flag are forgotten in one round trip")
-	}), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	}), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 	s.Equal(1, s.countQueries(func() {
 		_, err := s.store.Policies.SelectUsers(s.ctx, app, "", 10)
 		s.Require().NoError(err)
@@ -310,9 +345,9 @@ func (s *StoreSuite) TestPolicyQueryBudgets() {
 			s.Equal(0, s.countQueries(func() { s.Equal(0, s.countRedis(read)) }), name+" is then answered locally")
 		}
 	}
-	s.Equal(3, s.countQueries(func() {
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() {
 		s.Equal(s.redisTrips(1), s.countRedis(func() { s.Require().NoError(s.store.Policies.Delete(s.ctx, ScopeUser, user.ScopeID)) }))
-	}), "begin, the write and commit: a write of a cached row runs detached in a transaction of its own")
+	}), "begin, the write, its transaction's id when there is a cache, and commit: a write of a cached row runs detached in a transaction of its own")
 }
 
 func (s *StoreSuite) TestAppPoliciesQueryBudgets() {
@@ -338,9 +373,9 @@ func (s *StoreSuite) TestAppPoliciesQueryBudgets() {
 		read()
 		s.Equal(0, s.countQueries(func() { s.Equal(0, s.countRedis(read)) }), "then answered locally")
 	}
-	// The write (begin, the write and commit), then the apps whose cached
-	// policies it changed, all forgotten in one round trip.
-	s.Equal(s.redisTrips(1)+3, s.countQueries(func() {
+	// The write (begin, the write and commit), then, with a cache, its transaction's id and
+	// the apps whose cached policies it changed, all forgotten in one round trip.
+	s.Equal(s.redisTrips(2)+3, s.countQueries(func() {
 		s.Equal(s.redisTrips(1), s.countRedis(func() { s.Require().NoError(s.store.Policies.Upsert(s.ctx, &organization)) }))
 	}), "an organization's save, however many apps it has")
 }

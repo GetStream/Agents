@@ -139,6 +139,11 @@ var seedStatements = []string{
 		CASE WHEN n % 100 = 0 THEN 'queued' WHEN n % 50 = 0 THEN 'failed' ELSE 'done' END,
 		CASE WHEN n % 200 = 0 THEN 'drawn' ELSE '' END, at, at, CASE WHEN n % 100 <> 0 THEN at + interval '1 minute' END
 	FROM generate_series(1, ?1) AS n, LATERAL (SELECT ?0::timestamptz - (?1 - n) * interval '77 seconds' AS at) AS t`,
+
+	// Two apps seen under org-7, whose requests the seed names it for, so a read of an
+	// organization's apps sums more than one.
+	`INSERT INTO app_organizations (app_id, organization_id, seen_at)
+	VALUES ('customer-7', 'org-7', ?0), ('customer-107', 'org-7', ?0)`,
 }
 
 // explained runs read on a store of the seeded database and answers the plan of each
@@ -690,6 +695,10 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 				"config_id": "config-7", "agent_id": "agent-7", "session_id": "seeded-session-7", "user_id": "user-7", "source": "agent", "severity": "info", "event_type": "provider_request", "message": "imported", "details": {},
 				"occurred_at": "2026-03-01T10:00:00Z", "ingested_at": "2026-03-01T10:00:00Z"}`))
 		}},
+		{name: "Store.ImportRow of a turn", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
+			return store.ImportRow(ctx, "customer-7", "agent_responses", json.RawMessage(`{"id": "imported-turn", "session_id": "seeded-session-7",
+				"said": "hello", "status": "completed", "error": "", "created_at": "2026-03-01T10:00:00Z"}`))
+		}},
 		{name: "Store.HoldingTable", index: "agent_logs_customer_order", run: func(ctx context.Context, store *Store) error {
 			_, err := store.HoldingTable(ctx, "customer-123")
 			return err
@@ -700,7 +709,12 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return err
 		}},
 		{name: "Spend.Teams", index: "requests_customer_spend_idx", run: func(ctx context.Context, store *Store) error {
-			_, err := store.Spend.Teams(ctx, "org-7", []time.Time{since}, s.base.AddDate(0, 0, -1))
+			// Of an app in no organization, as the category sum below is.
+			_, err := store.Spend.Teams(ctx, "customer-7", []time.Time{since}, s.base.AddDate(0, 0, -1), false)
+			return err
+		}},
+		{name: "Spend.Teams of an organization", index: "requests_customer_spend_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.Spend.Teams(ctx, "org-7", []time.Time{since}, s.base.AddDate(0, 0, -1), true)
 			return err
 		}},
 		{name: "Spend.Subject", index: "requests_customer_spend_idx", run: func(ctx context.Context, store *Store) error {
@@ -717,8 +731,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 				APIKey: "key-7"}, since, true)
 			return err
 		}},
-		// Of an app in no organization, customer-7: the seed records no app under an organization,
-		// so a billed one's sum names none.
+		// Of an app in no organization, customer-7.
 		{name: "Spend.Subject of a category", index: "requests_category_spend_idx", run: func(ctx context.Context, store *Store) error {
 			_, err := store.Spend.Subject(ctx, usage.SubjectRef{OrganizationID: "customer-7", Subject: usage.SubjectCategory,
 				Category: "team:team-7"}, since, false)

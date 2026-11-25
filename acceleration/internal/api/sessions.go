@@ -54,7 +54,7 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 		if err != nil {
 			return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 		}
-		if teams.refuses(found) {
+		if teams.refuses(ctx, found) {
 			return nil, errUnknownConfig
 		}
 		return &found, nil
@@ -70,7 +70,7 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 	if err != nil {
 		return nil, err
 	}
-	if teams.refuses(found) {
+	if teams.refuses(ctx, found) {
 		return nil, notFound("there is no agent called " + named)
 	}
 	return &found, nil
@@ -78,6 +78,9 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 
 // resumeSession carries a conversation on with what the caller says about its tools.
 func (s *Server) resumeSession(ctx context.Context, request *resumeSessionRequest) (*getSessionResponse, error) {
+	if failure, refused := refuseReservedActingFor(ctx, "ResumeSession"); refused {
+		return nil, failure
+	}
 	var over resumed
 	if body := request.Body; body != nil {
 		over.toolTimeoutMs = body.ToolTimeoutMs
@@ -101,6 +104,9 @@ func (s *Server) resumeSession(ctx context.Context, request *resumeSessionReques
 
 // forkSession continues a conversation as a new one.
 func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (*forkSessionResponse, error) {
+	if failure, refused := refuseReservedActingFor(ctx, "ForkSession"); refused {
+		return nil, failure
+	}
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer
@@ -117,6 +123,9 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 	body := ForkSessionRequest{}
 	if request.Body != nil {
 		body = *request.Body
+	}
+	if failure, refused := refuseDeviceModels(ctx, body.ModelOverwrites != nil); refused {
+		return nil, failure
 	}
 
 	// A named agent on the fork replaces the parent's config wholesale, which is the point:
@@ -665,6 +674,13 @@ func (r resumed) onto(ctx context.Context, running *session.Session) {
 // itself, to tell money that may not be paid from money that could not be checked (unpaid).
 func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) error, over resumed) (*session.Session, func(), error) {
 	found, failure := s.session(ctx, id)
+	// Only for an end user still in its config's team, running or ended here, as one carried on
+	// from its row is.
+	if failure == nil {
+		if failure = s.refuseOutsideTeam(ctx, found.Spec().CustomerID, found.Spec().ConfigID); failure != nil {
+			return nil, nil, failure
+		}
+	}
 	var spec session.Spec
 	switch {
 	case failure == nil && (found.State() != session.Ended || !found.Spec().PersistConversation):
@@ -676,10 +692,6 @@ func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) erro
 		// Ended here, so the spec it ran on is still at hand, tools and instructions included.
 		// It is carried on in writing, whether or not it ended on a call.
 		spec = found.Spec().Written()
-		// Only for an end user still in its config's team, as one carried on from its row is.
-		if failure = s.refuseOutsideTeam(ctx, spec.CustomerID, spec.ConfigID); failure != nil {
-			return nil, nil, failure
-		}
 		spec.Phone, spec.Edge = nil, nil
 		spec.Reopened = found.CreatedAt()
 		// Its spec has the tools and timeout of whoever carried it on last. Another kind of
@@ -1557,7 +1569,8 @@ func (s *Server) registerSessions(api huma.API) {
 		Description: "Opens a session from another's spec, carrying its history across by default, and " +
 			"records where it came from. The usual reason is to ask the same question of a different " +
 			"model without losing the original answer, which is why anything in the request is " +
-			"written over what the parent was opened with.\n" +
+			"written over what the parent was opened with. Models are the backend's to change: a device " +
+			"sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.\n" +
 			"The parent is untouched and keeps running if it was running. Forking an incognito " +
 			"session is refused rather than answered with an empty conversation: there is nothing " +
 			"recorded to fork from, and pretending otherwise would hand back a session that quietly " +
@@ -1566,6 +1579,7 @@ func (s *Server) registerSessions(api huma.API) {
 		DefaultStatus: http.StatusCreated,
 		Responses: map[string]*huma.Response{
 			"201": {Description: "The fork is running"},
+			"403": errorResponse("`model_overwrites` sent by an end user's device, or an agent config the caller may not use"),
 		},
 		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 	}, s.forkSession)
@@ -1799,7 +1813,7 @@ type ForkSessionRequest struct {
 	Incognito       *bool                   `json:"incognito,omitempty" doc:"Hold the fork off the record. The parent still exists; this conversation onwards is simply not kept."`
 	ToolTimeoutMs   *int                    `json:"tool_timeout_ms,omitempty" doc:"How long the fork's model waits for the result of a tool the caller or a worker runs, in milliseconds, as on createSession. Omitted keeps a running parent's; a fork of a conversation that ended has 30 seconds. Zero is 30 seconds, as on createSession."`
 	Messages        *bool                   `json:"messages,omitempty" doc:"Carry the parent's history into the fork, so the new conversation continues from what was already said. False starts the same configuration over from nothing, which is what comparing two answers to the same opening question wants." default:"true"`
-	ModelOverwrites *ModelOverwrites        `json:"model_overwrites,omitempty"`
+	ModelOverwrites *ModelOverwrites        `json:"model_overwrites,omitempty" doc:"Server-side only: a device sending it is refused with a 403."`
 	ProjectId       *string                 `json:"project_id,omitempty"`
 	ResponseId      *string                 `json:"response_id,omitempty" doc:"Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false."`
 	Title           *string                 `json:"title,omitempty"`

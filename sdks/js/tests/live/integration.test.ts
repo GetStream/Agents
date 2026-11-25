@@ -168,7 +168,10 @@ describe(
     const stream = new StreamClient(streamKey, streamSecret);
     const users: string[] = [];
     const opened: { api: Client; id: string }[] = [];
-    let model = "";
+    const backend = new Client({ url: localURL, customerId });
+    /** The agent a page opens its sessions under: a device names no model and no agent id. */
+    const agent = uniqueId("integration-agent");
+    let agentId = "";
 
     /** A client as a page builds it: the router by customer id, Stream as the user. */
     async function asUser(): Promise<{ api: Client; id: string }> {
@@ -180,7 +183,7 @@ describe(
     }
 
     async function open(api: Client): Promise<Session> {
-      const session = await Session.open(api, { agent_id: uniqueId("conv"), llm: model });
+      const session = await Session.open(api, { agent });
       opened.push({ api, id: session.id });
       return session;
     }
@@ -191,12 +194,19 @@ describe(
     }
 
     before(async () => {
-      model = await conversationModel(new Client({ url: localURL, customerId }));
+      const llm = await conversationModel(backend);
+      const stored = await backend.post("/v1/agents/configs", {
+        body: { name: agent, mode: "text", llm },
+      });
+      agentId = stored.id;
     });
 
     after(async () => {
       for (const { api, id } of opened) {
         await close(api, id);
+      }
+      if (agentId) {
+        await backend.delete("/v1/agents/configs/{id}", { path: { id: agentId } }).catch(() => undefined);
       }
       if (users.length > 0) {
         await stream.deleteUsers({ user_ids: users, user: "hard" }).catch(() => undefined);
