@@ -269,3 +269,25 @@ func (s *AgentSuite) nativeConfirms(peer *nativePeer, id string) {
 	s.nativeSend(peer, `{"type":"response.function_call_arguments.done","response_id":"`+id+`","call_id":"yes-`+id+`","name":"confirm_tool_call","arguments":"{\"tool_call_id\":\"call1\",\"allowed\":true}"}`)
 	s.nativeSend(peer, `{"type":"response.done","response":{"id":"`+id+`","status":"completed"}}`)
 }
+
+// native, the question's reply completed but its audio is still on the edge; the caller types yes.
+func (s *AgentSuite) TestNativeTypedYesWhileTheQuestionIsOnTheEdgeRunsNothing() {
+	peer := s.nativeAsked(time.Minute)
+	s.nativeFrame(peer, "conversation.item.create")
+	s.edge.holdSpeech(true)
+	s.nativeQuestionSaid(peer)
+	_, err := s.agent.RespondTo(routing.WithCaller(s.ctx, routing.Caller{UserID: "alice"}), "yes, book it", nil, options.LLM{})
+	s.Require().NoError(err)
+	s.nativeFrame(peer, "conversation.item.create")
+	s.edge.holdSpeech(false)
+	s.eventually(func() bool {
+		s.agent.mu.Lock()
+		defer s.agent.mu.Unlock()
+		return s.agent.approvals["call1"].played
+	}, "the question never finished playing")
+
+	s.nativeConfirms(peer, "r3")
+
+	s.Contains(string(s.nativeFrame(peer, "conversation.item.create")["item"]), "has not spoken since they were asked about lookup_order")
+	s.Empty(s.runner.asked())
+}

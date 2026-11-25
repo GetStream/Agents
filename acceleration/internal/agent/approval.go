@@ -193,9 +193,10 @@ func (a *Agent) askApproval(call llm.ToolCall, question string) []llm.ContentPar
 }
 
 // heardLocked counts a turn the caller spoke, first marking as played each question said before
-// it when drained: the edge has no speech left to play. The caller holds the lock.
+// it when drained, the edge has no speech left to play, and the agent is quiet: the edge is
+// also empty between a question handed to the voice and its first audio. The caller holds the lock.
 func (a *Agent) heardLocked(drained bool) {
-	a.playedLocked(drained)
+	a.playedLocked(drained && a.quietLocked())
 	a.callerTurns++
 }
 
@@ -203,6 +204,12 @@ func (a *Agent) heardLocked(drained bool) {
 // scheduled task's, nor one a customer's server or the agent itself wrote.
 func callerTyped(sender routing.Caller, scheduled bool) bool {
 	return !scheduled && !sender.IsZero() && !sender.ServerSide
+}
+
+// quietLocked says whether nothing is being generated or said, whatever the edge holds. The
+// caller holds the lock.
+func (a *Agent) quietLocked() bool {
+	return !a.generating && a.utterances == 0 && !a.nativeAwaiting
 }
 
 // playedLocked marks each question said as played, when quiet. The caller holds the lock.
@@ -436,7 +443,7 @@ func (a *Agent) tickApprovals() {
 		wait = approvalWait
 	}
 	a.mu.Lock()
-	quiet = quiet && !a.generating && a.utterances == 0 && !a.nativeAwaiting
+	quiet = quiet && a.quietLocked()
 	a.playedLocked(quiet)
 	var lapsed []*approval
 	for id, waiting := range a.approvals {

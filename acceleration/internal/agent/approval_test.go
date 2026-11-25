@@ -740,3 +740,126 @@ func (s *AgentSuite) TestACallersToolNamedConfirmToolCallKeepsItsError() {
 		s.Contains(line["error"], "the caller's tool failed")
 	})
 }
+
+// the question was handed to the voice but has produced no audio yet; the caller types yes.
+func (s *AgentSuite) TestTypedYesBeforeTheQuestionsAudioRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.voice.mu.Lock()
+		s.voice.silent = true
+		s.voice.mu.Unlock()
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		_, err := s.agent.RespondTo(routing.WithCaller(s.ctx, routing.Caller{UserID: "alice"}), "yes", nil, options.LLM{})
+		s.Require().NoError(err)
+
+		s.confirmationSays("call-2", "")
+		s.Empty(s.runner.asked(), "a yes to a question not yet played ran the call")
+	})
+}
+
+// the question is synthesized but still on its way out of the edge; the caller types yes.
+func (s *AgentSuite) TestTypedYesWhileTheQuestionIsOnTheEdgeRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.edge.holdSpeech(true)
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		_, err := s.agent.RespondTo(routing.WithCaller(s.ctx, routing.Caller{UserID: "alice"}), "yes", nil, options.LLM{})
+		s.Require().NoError(err)
+
+		s.confirmationSays("call-2", "has not heard the question")
+		s.Empty(s.runner.asked(), "a yes typed over the question ran the call")
+	})
+}
+
+// same, spoken, without speculation.
+func (s *AgentSuite) TestSpokenYesWhileTheQuestionIsOnTheEdgeRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.edge.holdSpeech(true)
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+
+		s.confirmationSays("call-2", "")
+		s.Empty(s.runner.asked(), "a yes spoken over the question ran the call")
+	})
+}
+
+// the question is still on its way out of the edge for longer than a tick; the caller types yes.
+func (s *AgentSuite) TestTypedYesAfterATickWhileTheQuestionIsOnTheEdgeRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.edge.holdSpeech(true)
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		time.Sleep(time.Second) // ticks pass while the edge still plays the question
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		_, err := s.agent.RespondTo(routing.WithCaller(s.ctx, routing.Caller{UserID: "alice"}), "yes", nil, options.LLM{})
+		s.Require().NoError(err)
+
+		s.confirmationSays("call-2", "has not heard the question")
+		s.Empty(s.runner.asked(), "a yes typed over the question ran the call")
+	})
+}
+
+// a no naming a call whose wait passed, with another call waiting, declines nothing.
+func (s *AgentSuite) TestNoToALapsedCallLeavesTheOtherWaiting() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		time.Sleep(2 * time.Minute) // call-1's wait passes
+		s.eventually(func() bool { return countOf[ToolApprovalDecided](s.reported()) == 1 }, "call-1 never lapsed")
+		s.agent.askApproval(llm.ToolCall{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}, "Book order 13?")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-2", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":false}`}})
+
+		s.confirmationSays("call-2", "did not say yes in time")
+		s.agent.runTool(harness.ToolRequested{TurnID: "turn-1", Call: llm.ToolCall{ID: "call-4", Name: confirmTool, Arguments: `{"tool_call_id":"call-3","allowed":false}`}})
+		s.confirmationSays("call-4", "The caller declined")
+	})
+}
+
+// same with speech instead of a typed turn.
+func (s *AgentSuite) TestSpokenTurnBeforeTheQuestionsAudioRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.voice.mu.Lock()
+		s.voice.silent = true
+		s.voice.mu.Unlock()
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "what's my balance")
+
+		s.confirmationSays("call-2", "question")
+		s.Empty(s.runner.asked(), "a yes to a question no audio of which had played ran the call")
+	})
+}
+
+// the question's audio is still queued at the edge when the caller types a turn: the
+// turn came before the question finished, so a yes in reply to it runs nothing.
+func (s *AgentSuite) TestTypedTurnWhileTheQuestionStillPlaysRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.edge.holdSpeech(true)
+		s.askFor()
+		s.eventually(func() bool { return s.spokenText("Book order 12?") }, "the question was never said")
+		s.replyWentOut()
+		time.Sleep(time.Second) // A tick of the fake clock, with the question still queued at the edge.
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		_, err := s.agent.RespondTo(routing.WithCaller(s.ctx, routing.Caller{UserID: "alice"}), "what's my balance?", nil, options.LLM{})
+		s.Require().NoError(err)
+
+		s.confirmationSays("call-2", "has not heard the question")
+		s.Empty(s.runner.asked(), "a yes to a turn typed while the question still played ran the call")
+	})
+}
