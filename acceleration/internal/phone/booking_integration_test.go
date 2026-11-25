@@ -123,7 +123,7 @@ func (s *MeteringSuite) TestANumberWithNoQuoteStillNeedsSomeCredit() {
 func (s *MeteringSuite) TestAnUnverifiedOrganizationBuysNoNumber() {
 	money, e164 := s.booking(5_000_000)
 	owner := s.owner()
-	owner.OrganizationTier = "not-verified"
+	owner.OrganizationKYC = "not-verified"
 
 	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: owner})
 
@@ -135,19 +135,31 @@ func (s *MeteringSuite) TestAnUnverifiedOrganizationBuysNoNumber() {
 func (s *MeteringSuite) TestAVerifiedOrganizationBuysANumber() {
 	_, e164 := s.booking(5_000_000)
 	owner := s.owner()
-	owner.OrganizationTier = "verified"
+	owner.OrganizationKYC = "verified"
+	owner.OrganizationTier = "not-verified"
 
 	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: owner})
 
-	s.Require().NoError(err)
+	s.Require().NoError(err, "the tier does not decide who buys a number")
 }
 
-func (s *MeteringSuite) TestAnOrganizationWithNoTierBuysANumber() {
+func (s *MeteringSuite) TestAVerifiedTierWithoutKYCBuysNoNumber() {
 	_, e164 := s.booking(5_000_000)
 	owner := s.owner()
-	owner.OrganizationTier = ""
+	owner.OrganizationTier = "verified"
+	owner.OrganizationKYC = "not-verified"
 
 	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: owner})
 
-	s.Require().NoError(err, "a router not behind stream-accelerate names no tier and is not gated")
+	s.Require().ErrorIs(err, ErrVerificationRequired)
+}
+
+func (s *MeteringSuite) TestAnOrganizationWithNoKYCBuysANumber() {
+	_, e164 := s.booking(5_000_000)
+	owner := s.owner()
+	owner.OrganizationKYC = ""
+
+	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: owner})
+
+	s.Require().NoError(err, "a router not behind stream-accelerate names no KYC and is not gated")
 }

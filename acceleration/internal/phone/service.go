@@ -449,10 +449,9 @@ func (s *Service) pointCallHook(ctx context.Context, stream *Stream, app int64) 
 	return nil
 }
 
-// unverifiedTier is the tier stream-accelerate names an organization whose
-// core_organization.agents_verified is not true (appstore.go). Tiers are otherwise opaque here;
-// an empty one, as a router not behind that proxy sees, is not refused.
-const unverifiedTier = "not-verified"
+// notVerifiedKYC is what the proxy names an organization that has not passed identity
+// verification (auth.KYCHeader).
+const notVerifiedKYC = "not-verified"
 
 // Buy buys a number and records that the customer now holds it.
 //
@@ -481,7 +480,7 @@ func (s *Service) Buy(ctx context.Context, purchase Purchase) (store.PhoneNumber
 	if err := s.Suspended(ctx, purchase.Owner.CustomerID); err != nil {
 		return store.PhoneNumber{}, err
 	}
-	if purchase.Owner.OrganizationTier == unverifiedTier {
+	if purchase.Owner.OrganizationKYC == notVerifiedKYC {
 		return store.PhoneNumber{}, stack.Wrap(ErrVerificationRequired)
 	}
 	// A number is charged every month from the day it is bought, so an organization that may
