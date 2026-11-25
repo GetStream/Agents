@@ -140,7 +140,8 @@ func (s *InboundSuite) TestARetryWritesTheCardOfTheEpisodeAnEarlierAttemptOpened
 	s.chat.RateLimit("/" + thread.ChannelID + "/message")
 	s.queue(thread, "1793125611.816139", "hello", nil)
 	s.bridge(&Options{InboundRetries: []time.Duration{50 * time.Millisecond, time.Hour}})
-	s.Require().Eventually(func() bool { return s.row(thread, "1793125611.816139").Attempts == 1 }, 5*time.Second, 10*time.Millisecond)
+	// The first write is refused before the limit is lifted; a claim alone (Attempts) is not that.
+	s.Require().Eventually(func() bool { return s.writes(thread.ChannelID) >= 1 }, 5*time.Second, 10*time.Millisecond)
 
 	s.chat.LiftRateLimit("/" + thread.ChannelID + "/message")
 
@@ -159,7 +160,8 @@ func (s *InboundSuite) TestARetryWritesTheCardWhenTheRoutersClockIsBehindPostgre
 	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE channel_thread_inbound SET created_at = created_at + interval '1 hour' WHERE channel_id = ?", thread.ChannelID)
 	s.Require().NoError(err)
 	s.bridge(&Options{InboundRetries: []time.Duration{50 * time.Millisecond, time.Hour}})
-	s.Require().Eventually(func() bool { return s.row(thread, "1793125611.816139").Attempts == 1 }, 5*time.Second, 10*time.Millisecond)
+	// The first write is refused before the limit is lifted; a claim alone (Attempts) is not that.
+	s.Require().Eventually(func() bool { return s.writes(thread.ChannelID) >= 1 }, 5*time.Second, 10*time.Millisecond)
 
 	s.chat.LiftRateLimit("/" + thread.ChannelID + "/message")
 
@@ -624,7 +626,7 @@ func (s *InboundSuite) TestAMessageAStoppedWorkerLeftIsWrittenByTheNextOne() {
 	s.chat.RateLimit("/" + thread.ChannelID + "/message")
 	s.queue(thread, "m-1", "hello", nil)
 	first := s.bridge(&Options{InboundRetries: []time.Duration{50 * time.Millisecond, 50 * time.Millisecond, time.Hour}})
-	s.Require().Eventually(func() bool { return s.row(thread, "m-1").Attempts >= 1 }, 5*time.Second, 10*time.Millisecond)
+	s.Require().Eventually(func() bool { return s.writes(thread.ChannelID) >= 1 }, 5*time.Second, 10*time.Millisecond)
 	first.Close()
 	s.chat.LiftRateLimit("/" + thread.ChannelID + "/message")
 
