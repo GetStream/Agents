@@ -11,7 +11,7 @@ import (
 
 	"github.com/redis/rueidis"
 
-	phonetwilio "github.com/GetStream/Vision-Agents/acceleration/internal/phone/twilio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/vendors"
 )
 
 // twilioCallHookPath is the voice URL a Twilio number is to be pointed at. Twilio asks it what
@@ -45,8 +45,8 @@ const twilioCallMarkTimeout = time.Second
 
 // twilioPlans are the TwiML answers to a Twilio call.
 var twilioPlans = callPlans{
-	vendor: "twilio", renderDial: phonetwilio.RenderInbound,
-	renderReject: phonetwilio.RenderReject, renderHangup: phonetwilio.RenderHangup,
+	vendor: "twilio", renderDial: vendors.TwilioCallAnswers.Dial,
+	renderReject: vendors.TwilioCallAnswers.Reject, renderHangup: vendors.TwilioCallAnswers.Hangup,
 }
 
 // receiveTwilioCall answers a call to one of the router's Twilio numbers with TwiML that dials
