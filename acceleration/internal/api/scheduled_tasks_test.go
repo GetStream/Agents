@@ -3274,6 +3274,31 @@ func utcTaskRequest(config string) CreateScheduledTaskRequest {
 	return body
 }
 
+func (s *ScheduledTasksSuite) TestARunningRunBetweenAttemptsListsNoReasonUntilItSettles() {
+	config := s.agentWithScheduling(nil)
+	user := s.data.createUser()
+	between := s.createTask(user, utcTaskRequest(config))
+	called := s.createTask(user, utcTaskRequest(config))
+	now := time.Now().UTC().Truncate(time.Second)
+	retry, ended := "spend_check_unavailable", scheduling.ReasonNoReply
+	for _, run := range []store.ScheduledTaskRun{
+		{TaskID: between.Id, State: store.ScheduledTaskRunRunning, Attempts: 1, Error: &retry},
+		{TaskID: called.Id, State: store.ScheduledTaskRunRunning, Attempts: 1, SessionID: "call-1", Error: &ended},
+	} {
+		run.CustomerID, run.ScheduledFor, run.StartedAt = s.customerID(), now, &now
+		s.Require().NoError(s.store.ScheduledTaskRuns.Insert(context.Background(), &run))
+	}
+
+	var page ScheduledTaskRunPage
+	s.Require().Equal(http.StatusOK, user.do(http.MethodGet, "/v1/agents/scheduled-tasks/"+between.Id+"/runs", nil, &page))
+	s.Require().Len(page.Items, 1)
+	s.Nil(page.Items[0].Error, "the reason an attempt failed under is kept for a takeover, not listed while the run runs")
+
+	s.Require().Equal(http.StatusOK, user.do(http.MethodGet, "/v1/agents/scheduled-tasks/"+called.Id+"/runs", nil, &page))
+	s.Require().Len(page.Items, 1)
+	s.Equal(&ended, page.Items[0].Error, "how a placed call ended is listed, as before")
+}
+
 func (s *ScheduledTasksSuite) TestRunningATaskByHandDeliversWithoutMovingTheSchedule() {
 	config := s.agentWithScheduling(nil)
 	user := s.data.createUser()
@@ -3795,7 +3820,9 @@ func (s *ScheduledTasksSuite) TestATaskTextedBySMSCarriesTheFileItsCodeMade() {
 	s.Equal("sms", run.DeliveredTo)
 	s.Require().Eventually(func() bool { return len(s.sink.mediaTo(writer)) > 0 },
 		10*time.Second, 50*time.Millisecond, "no file was texted to %s", writer)
-	s.Equal([]string{"Done."}, s.sink.to(writer))
+	// The words of both rounds, as the conversation keeps them and a thread task texts them
+	// (reportReply).
+	s.Equal([]string{"Done.\n\nDone."}, s.sink.to(writer))
 	s.Equal([]string{report}, s.sink.mediaTo(writer))
 }
 
@@ -3828,7 +3855,7 @@ func (s *ScheduledTasksSuite) TestATaskWhoseFileTheLineRefusesTextsItsWordsOnce(
 	run := s.delivered(s.tasksOf(user)[0])
 	s.Equal("sms", run.DeliveredTo)
 	s.Never(func() bool { return len(s.sink.to(writer)) > 1 }, dropped, 20*time.Millisecond, "texted once")
-	s.Equal([]string{"Done."}, s.sink.to(writer))
+	s.Equal([]string{"Done.\n\nDone."}, s.sink.to(writer), "the words of both rounds, as the conversation keeps them")
 	s.Empty(s.sink.mediaTo(writer), "the file was refused")
 }
 
@@ -4557,7 +4584,7 @@ func (s *ScheduledTasksSuite) TestATurnCancelledBeforeItsReplyRunsAgainOnTheRetr
 	task, found := s.onWhatsApp(writer, "whatsapp")
 	run := s.manualRun(task)
 	_, err := s.cutOff(s.router, task, run, found.Interrupt)
-	s.Equal(scheduling.ReasonNoReply, scheduling.ReasonOf(err), "%v", err)
+	s.Equal(scheduling.ReasonReplyFailed, scheduling.ReasonOf(err), "%v", err)
 
 	deliveredTo, err := s.deliverRun(task, run)
 
@@ -4594,7 +4621,7 @@ func (s *ScheduledTasksSuite) TestATurnWhoseProviderBrokeAsItWasCancelledRunsAga
 		}
 	})
 	_, err := s.cutOff(s.router, task, run, found.Interrupt)
-	s.Equal(scheduling.ReasonNoReply, scheduling.ReasonOf(err), "%v", err)
+	s.Equal(scheduling.ReasonReplyFailed, scheduling.ReasonOf(err), "%v", err)
 	state, _, _ := found.FollowUpReply(command)
 	s.Equal("cancelled", state)
 

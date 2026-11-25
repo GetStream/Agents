@@ -939,42 +939,41 @@ func (s *CallsSuite) TestAVoiceCallsDecisionsAreNotAnEmptyListWhenTheirReadFails
 	s.Contains(served(), "store: call events")
 }
 
-// Defect: one shard being down fails every app's call list, or the list leaves that shard's
-// calls out with nothing saying the list is short.
-func (s *CallsSuite) TestACallListWithAShardDownListsTheOthersAndNamesTheShard() {
+// Defect: a call list reads every shard, so one shard being down fails it or leaves that
+// shard's calls out; or it lists a call without the shard it is kept in.
+func (s *CallsSuite) TestACallListWithAShardDownListsItsCallsFromTheIndex() {
 	call := s.started(store.Call{})
-	client, _ := s.onAShardDown()
+	client, served := s.onAShardDown()
+	elsewhere := s.utils.uuid()
+	_, err := served.GlobalDB().ExecContext(context.Background(), `
+INSERT INTO call_index (shard, id, customer_id, call_type, call_id, agent_id, direction, started_at, changed_at)
+VALUES ('there', ?, ?, 'default', ?, 'agent', 'inbound', ?, now())`, elsewhere, s.customerID(), s.utils.uuid(), time.Now().UTC())
+	s.Require().NoError(err)
 
-	response := client.raw(http.MethodGet, "/v1/agents/calls", nil)
-	defer response.Body.Close()
-
-	s.Require().Equal(http.StatusOK, response.StatusCode)
-	s.Equal("there", response.Header.Get(unreachableShardsHeader))
 	var listed []Call
-	s.Require().NoError(json.NewDecoder(response.Body).Decode(&listed))
-	s.Require().Len(listed, 1)
-	s.Equal(call.ID, listed[0].Id)
+	s.Require().Equal(http.StatusOK, client.do(http.MethodGet, "/v1/agents/calls", nil, &listed))
 
-	healthy := s.serverClient.raw(http.MethodGet, "/v1/agents/calls", nil)
-	defer healthy.Body.Close()
-	s.Require().Equal(http.StatusOK, healthy.StatusCode)
-	s.Empty(healthy.Header.Values(unreachableShardsHeader), "every shard answered")
+	regions := map[string]string{}
+	for _, each := range listed {
+		regions[each.Id] = value(each.Region)
+	}
+	s.Equal(map[string]string{call.ID: "here", elsewhere: "there"}, regions)
 }
 
-// Defect: a call's details fail while a shard holding its usage is down, or leave its usage
-// out with nothing saying so.
-func (s *CallsSuite) TestACallReadWithAShardDownNamesTheShard() {
-	call := s.started(store.Call{})
-	client, _ := s.onAShardDown()
+// Defect: a call kept in a shard no node answers for is read here, where it is missing, and
+// answered as not found rather than as a region that could not be reached.
+func (s *CallsSuite) TestACallReadOfAShardNoNodeAnswersIsUnavailable() {
+	client, served := s.onAShardDown()
+	elsewhere := s.utils.uuid()
+	_, err := served.GlobalDB().ExecContext(context.Background(), `
+INSERT INTO call_index (shard, id, customer_id, call_type, call_id, agent_id, direction, started_at, changed_at)
+VALUES ('there', ?, ?, 'default', ?, 'agent', 'inbound', ?, now())`, elsewhere, s.customerID(), s.utils.uuid(), time.Now().UTC())
+	s.Require().NoError(err)
 
-	response := client.raw(http.MethodGet, "/v1/agents/calls/"+call.ID, nil)
-	defer response.Body.Close()
+	status, failure := client.failure(http.MethodGet, "/v1/agents/calls/"+elsewhere, nil)
 
-	s.Require().Equal(http.StatusOK, response.StatusCode)
-	s.Equal("there", response.Header.Get(unreachableShardsHeader))
-	var read Call
-	s.Require().NoError(json.NewDecoder(response.Body).Decode(&read))
-	s.Equal(call.CallID, read.CallId)
+	s.Equal(http.StatusServiceUnavailable, status)
+	s.Contains(failure, errCallShardDown.Message)
 }
 
 // callEventsOnClosedRedis has the decisions and floor checks every read of the suite's store

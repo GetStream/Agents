@@ -146,12 +146,14 @@ type ConnectorAuditPage struct {
 type listConnectionInvocationsRequest struct {
 	ID string `path:"id" doc:"The connection, as returned when it was created."`
 	// 200 and 25 are store.InvocationLimit's.
-	Limit  int    `query:"limit" minimum:"1" maximum:"200" doc:"Up to 200. Omitted is 25."`
-	Cursor string `query:"cursor" doc:"The next_cursor of the previous page. Omitted is the first page."`
+	Limit  int                   `query:"limit" minimum:"1" maximum:"200" doc:"Up to 200. Omitted is 25."`
+	Cursor string                `query:"cursor" doc:"The next_cursor of the previous page. Omitted is the first page."`
+	Region optionalParam[string] `query:"region" doc:"The region whose calls to list, as X-Shard or a session's region names it. Each region keeps the calls it ran. Omitted is the region answering."`
 }
 
 type listConnectionInvocationsResponse struct {
-	Body ConnectionInvocationPage
+	Shard string `header:"X-Shard" doc:"The region that answered. Absent on a deployment of one region."`
+	Body  ConnectionInvocationPage
 }
 
 type listConnectorAuditRequest struct {
@@ -187,7 +189,7 @@ func (s *Server) registerConnectionRecords(api huma.API) {
 			"Server-side only: it needs a server-side token, so it cannot be reached from an " +
 			"end user's device.",
 		Responses: map[string]*huma.Response{"200": {Description: "A page of tool calls"}},
-		Errors:    []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+		Errors:    []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
 	}, s.listConnectionInvocations)
 	huma.Register(api, huma.Operation{
 		OperationID: "listConnectorAudit",
@@ -263,7 +265,7 @@ func (s *Server) listConnectionInvocations(ctx context.Context, request *listCon
 		last := kept[len(kept)-1]
 		listed.NextCursor = encodeCursor(store.InvocationPosition{StartedAt: last.StartedAt, ID: last.ID})
 	}
-	return &listConnectionInvocationsResponse{Body: listed}, nil
+	return &listConnectionInvocationsResponse{Shard: s.answeringShard(), Body: listed}, nil
 }
 
 // listConnectorAudit lists the customer's audit rows, a page at a time.

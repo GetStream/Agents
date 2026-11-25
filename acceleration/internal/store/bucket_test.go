@@ -242,6 +242,7 @@ func (s *StoreSuite) TestADayIsAUTCDayWhateverTheDatabasesTimeZone() {
 	denver := s.inTimeZone("America/Denver")
 	day := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	from, to := day.Add(-24*time.Hour), day.Add(48*time.Hour)
+	s.shipStats(to)
 
 	requests, err := denver.Buckets.Select(s.ctx, "acme", BucketFilter{Modality: "stt", Granularity: Daily, From: from, To: to})
 	s.Require().NoError(err)
@@ -527,7 +528,7 @@ func (s *StoreSuite) TestBucketQueryBudgets() {
 		_, err := s.store.Buckets.Rollup(s.ctx, Hourly, s.base.Add(30*time.Minute), s.base.Add(3*time.Hour))
 		s.Require().NoError(err)
 	}))
-	s.Equal(len(s.store.shards()), s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		buckets, err := s.store.Buckets.Select(s.ctx, "acme", BucketFilter{Modality: "stt", Granularity: Hourly, From: s.base, To: s.base.Add(time.Hour)})
 		s.Require().NoError(err)
 		s.Len(buckets, 1)

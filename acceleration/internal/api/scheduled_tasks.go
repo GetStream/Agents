@@ -829,6 +829,12 @@ func scheduledTaskRunOf(task store.ScheduledTask, run store.ScheduledTaskRun) Sc
 	if err != nil {
 		loc = time.UTC
 	}
+	// A running run's error is the reason its last attempt failed under, kept for a worker that
+	// takes the run over (ScheduledTaskRuns.SetAttemptReason): not listed, as nothing has failed
+	// the run yet. A placed call's reason is (SetCallReason).
+	if run.State == store.ScheduledTaskRunRunning && run.SessionID == "" {
+		run.Error = nil
+	}
 	return ScheduledTaskRun{
 		Id: run.ID, TaskId: run.TaskID,
 		ScheduledFor: run.ScheduledFor.In(loc).Format(time.RFC3339),

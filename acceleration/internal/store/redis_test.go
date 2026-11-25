@@ -914,6 +914,24 @@ func (s *StoreSuite) logTo(out io.Writer) {
 	})
 }
 
+// syncBuffer is a log the store's other goroutines may write to at the same time.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // slowLog is a log that takes half a second to write to, and keeps what was written.
 type slowLog struct{ syncBuffer }
 
