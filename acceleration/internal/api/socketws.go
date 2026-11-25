@@ -138,8 +138,9 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 	_ = connection.SetReadDeadline(time.Time{})
 
 	// The start frame carries POST /v1/agents/sessions's body, so a request is refused here
-	// as it is refused there.
-	if failure, refused := refuseSessionRequest(ctx, start.Session, s.deviceIdentities); refused {
+	// as it is refused there. A socket session is always voice, so ROUTER_DEVICE_IDENTITY_ALLOW,
+	// which is for text sessions only, lets nothing through here (TEMPORARY, AI-3959).
+	if failure, refused := refuseSessionRequest(ctx, start.Session, nil); refused {
 		refuseWith(refusedByRouter, failure)
 		return
 	}

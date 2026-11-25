@@ -51,12 +51,13 @@ func ParseDeviceIdentityAllow(setting string) (DeviceIdentityAllow, error) {
 }
 
 // lets reports whether a device's new session names an identity an entry of its app allows.
-// It is the case only for a session that keeps its conversation, since an incognito one has
-// nothing the agent's identity could be checked against afterwards, and when every field the
-// request sends that refuseDeviceAgentIdentity would refuse equals the entry's.
+// It is the case only for a text session that keeps its conversation, since an incognito one has
+// nothing the agent's identity could be checked against afterwards and the widget the list is
+// for only writes (no start_voice), and when every field the request sends that
+// refuseDeviceAgentIdentity would refuse equals the entry's.
 func (a DeviceIdentityAllow) lets(ctx context.Context, request CreateSessionRequest) bool {
 	app, _ := CustomerFrom(ctx)
-	if value(request.Incognito) {
+	if value(request.Incognito) || value(request.StartVoice) {
 		return false
 	}
 	for _, entry := range a {

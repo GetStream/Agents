@@ -87,6 +87,8 @@ func TestAnAllowedIdentityPassesOnlyForItsAppAndEveryFieldExactly(t *testing.T) 
 		"agent of the other app":  {device, CreateSessionRequest{AgentId: new("other")}, false, errDeviceAgentID},
 		"an anonymous own id":     {deviceOf("app-1", auth.KindAnonymous, "visitor"), CreateSessionRequest{AgentId: new("docs"), UserId: new("visitor")}, false, errDeviceAgentID},
 		"incognito":               {device, with(func(r *CreateSessionRequest) { r.Incognito = new(true) }), false, errDeviceAgentID},
+		"start_voice":             {device, with(func(r *CreateSessionRequest) { r.StartVoice = new(true) }), false, errDeviceAgentID},
+		"start_voice false":       {device, with(func(r *CreateSessionRequest) { r.StartVoice = new(false) }), true, APIError{}},
 		"the same values, app 3":  {deviceOf("app-3", auth.KindAnonymous, "visitor"), exact, false, errDeviceAgentID},
 		"no app":                  {deviceAsking(auth.KindAnonymous, "visitor"), exact, false, errDeviceAgentID},
 		"entry names no user":     {deviceOf("app-2", auth.KindAnonymous, "visitor"), CreateSessionRequest{AgentId: new("other"), UserId: new("docs-user")}, false, errDeviceAgentID},

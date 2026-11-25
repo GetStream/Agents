@@ -269,9 +269,9 @@ func (s *SocketSessionSuite) allowDevices(app string, identity DeviceIdentity) {
 	s.T().Cleanup(func() { s.router.deviceIdentities = nil })
 }
 
-// TEMPORARY (AI-3959): an identity the operator listed for the device's app opens a session
-// that keeps its conversation, by createSession and by the socket's start frame, and every other
-// identity is refused as it was.
+// TEMPORARY (AI-3959): an identity the operator listed for the device's app opens a text session
+// that keeps its conversation by createSession. The socket's start frame, always voice, is
+// refused it as before.
 func (s *SocketSessionSuite) TestADeviceMayHandOverAnIdentityTheOperatorListedForItsApp() {
 	for _, device := range []*testClient{s.client, s.guestClient, s.anonymousClient} {
 		listed := DeviceIdentity{AgentID: "docs-" + s.utils.uuid(), UserID: "docs-user", UserName: "Docs: AI"}
@@ -285,9 +285,7 @@ func (s *SocketSessionSuite) TestADeviceMayHandOverAnIdentityTheOperatorListedFo
 		s.Equal(listed.AgentID, created.AgentId, string(device.kind))
 		s.Equal(listed.UserID, created.UserId, string(device.kind))
 
-		sent["id"] = "socket-" + s.utils.uuid()
-		answered := s.socketStartedWith(device, sent)
-		s.Equal(listed.AgentID, answered["agent_id"], string(device.kind))
+		s.socketRefuses(device, sent, errDeviceAgentID)
 	}
 }
 
@@ -317,6 +315,9 @@ func (s *SocketSessionSuite) TestAnIdentityNotListedForTheDeviceIsStillRefused()
 		})
 		s.Run("incognito/"+string(device.kind), func() {
 			s.assertSocketRefuses(device, exact(map[string]any{"incognito": true}), errDeviceAgentID)
+		})
+		s.Run("start_voice/"+string(device.kind), func() {
+			s.assertSocketRefuses(device, exact(map[string]any{"start_voice": true}), errDeviceAgentID)
 		})
 	}
 
@@ -412,15 +413,19 @@ func (s *SocketSessionSuite) assertSocketRefuses(device *testClient, sent map[st
 	var created ErrorResponse
 	s.Require().NoError(json.Unmarshal(body, &created))
 	s.Equal(refusal.Message, created.Error.Message)
+	s.socketRefuses(device, sent, refusal)
+}
 
+// socketRefuses asserts the socket's start frame sent is refused with refusal, and the socket closes.
+func (s *SocketSessionSuite) socketRefuses(device *testClient, sent map[string]any, refusal APIError) {
 	connection := device.opens("/v1/agents/socket")
 	s.Require().NoError(connection.WriteJSON(map[string]any{"type": "start", "session": sent}))
 	refused := s.readFrame(connection)
 
 	s.Equal("error", refused["type"])
 	s.Equal(refusal.Message, refused["error"])
-	s.Equal(created.Error.Code, refused["code"])
-	s.Equal(string(created.Error.Type), refused["error_type"])
+	s.Equal(refusal.Code, refused["code"])
+	s.Equal(string(refusal.Type), refused["error_type"])
 	_, _, err := connection.ReadMessage()
 	s.True(websocket.IsCloseError(err, websocket.ClosePolicyViolation), "the socket closes: %v", err)
 }
