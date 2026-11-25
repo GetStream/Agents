@@ -51,6 +51,10 @@ const definitionLockSeed = 833
 // caller has to tell it apart from the database being down.
 var ErrNoConnectorDefinition = errors.New("store: no such connector definition")
 
+// ErrChangedOutsideSync says a checked sync found the newest revision written by no sync, such
+// as a dashboard edit, and saying something else, so storing the sync would write over it.
+var ErrChangedOutsideSync = errors.New("store: the connector was changed outside a sync")
+
 // Get is one revision of a connector's manifest. Built-ins are stored under
 // BuiltinCustomer; a custom definition under the customer that made it.
 type ConnectorDefinition struct {
@@ -125,12 +129,14 @@ func (r *ConnectorDefinitions) Seed(ctx context.Context, fsys fs.FS) error {
 // revision is replaced: the store numbers revisions. It is no sync, so the revision it returns
 // carries no sync hash.
 func (r *ConnectorDefinitions) Revise(ctx context.Context, customerID string, manifest core.Manifest) (ConnectorDefinition, error) {
-	return r.ReviseSynced(ctx, customerID, manifest, "")
+	return r.ReviseSynced(ctx, customerID, manifest, "", false)
 }
 
 // ReviseSynced is Revise for a write that carries the fingerprint of the file it came from,
-// which the revision it returns then carries: empty for a write that is not a sync.
-func (r *ConnectorDefinitions) ReviseSynced(ctx context.Context, customerID string, manifest core.Manifest, syncHash string) (ConnectorDefinition, error) {
+// which the revision it returns then carries: empty for a write that is not a sync. With
+// checkChanges, a manifest other than the newest revision's is refused with
+// ErrChangedOutsideSync when that revision carries no hash.
+func (r *ConnectorDefinitions) ReviseSynced(ctx context.Context, customerID string, manifest core.Manifest, syncHash string, checkChanges bool) (ConnectorDefinition, error) {
 	if customerID == BuiltinCustomer {
 		return ConnectorDefinition{}, stack.Wrap(errCustomerRequired)
 	}
@@ -138,7 +144,7 @@ func (r *ConnectorDefinitions) ReviseSynced(ctx context.Context, customerID stri
 	if err := probe.Validate(); err != nil {
 		return ConnectorDefinition{}, stack.Wrap(err)
 	}
-	return r.saveRevision(ctx, customerID, manifest, syncHash)
+	return r.saveRevision(ctx, customerID, manifest, syncHash, checkChanges)
 }
 
 // Get returns one revision of a definition the customer can see: a built-in
@@ -286,7 +292,7 @@ func (r *ConnectorDefinitions) Select(ctx context.Context, customerID string, fi
 // starting at once, or two requests creating the same custom id, take turns: the second
 // finds the first's revision and either matches it or follows it. The primary key would
 // refuse a duplicate revision anyway; the lock is what turns that into a wait, not an error.
-func (r *ConnectorDefinitions) saveRevision(ctx context.Context, customerID string, manifest core.Manifest, syncHash string) (ConnectorDefinition, error) {
+func (r *ConnectorDefinitions) saveRevision(ctx context.Context, customerID string, manifest core.Manifest, syncHash string, checkChanges bool) (ConnectorDefinition, error) {
 	var saved ConnectorDefinition
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockUntilCommit(ctx, tx, customerID+"/"+manifest.ID, definitionLockSeed); err != nil {
@@ -315,6 +321,10 @@ func (r *ConnectorDefinitions) saveRevision(ctx context.Context, customerID stri
 				saved.SyncHash = syncHash
 				_, err := tx.NewUpdate().Model(&saved).Column("sync_hash").WherePK().Exec(ctx)
 				return err
+			}
+			// Asked under the lock, so an edit cannot land between the check and the write.
+			if checkChanges && latest.SyncHash == "" {
+				return ErrChangedOutsideSync
 			}
 			manifest.Revision = latest.Revision + 1
 			// Another manifest under the latest's hash is no sync of the file that hash names,

@@ -128,6 +128,11 @@ func (s *Server) updateRouterConfig(ctx context.Context, request *updateRouterCo
 		len(auditDiff(routerConfigOf(existing), routerConfigOf(config))) == 0 {
 		return &updateRouterConfigResponse{Body: routerConfigOf(existing)}, nil
 	}
+	// A checked sync over a config no sync wrote, such as a dashboard edit, would write over it.
+	if request.Body.CheckChanges && existing.SyncHash == "" &&
+		len(auditDiff(routerConfigOf(existing), routerConfigOf(config))) > 0 {
+		return nil, errChangedOutsideSync
+	}
 	// That body is no sync of the file the hash names, such as a read sent back edited, so
 	// the hash is not kept on content it does not describe.
 	if config.SyncHash == existing.SyncHash {
@@ -564,5 +569,6 @@ type RouterConfigRequest struct {
 	Stt    *SttOptions    `json:"stt,omitempty"`
 	Tts    *TtsOptions    `json:"tts,omitempty"`
 	// The limits on a sync hash are CustomConnectorRequest's.
-	SyncHash string `json:"sync_hash,omitempty" maxLength:"128" pattern:"^[!-~]*$" patternDescription:"printable ASCII without a space" doc:"The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing."`
+	SyncHash     string `json:"sync_hash,omitempty" maxLength:"128" pattern:"^[!-~]*$" patternDescription:"printable ASCII without a space" doc:"The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing."`
+	CheckChanges bool   `json:"check_changes,omitempty" doc:"Refuse a replace, with unsynced_changes (409), when the config carries no sync_hash, because no sync wrote it, and says something else than this body: a sync would write over an edit made outside it, in the dashboard, say. The same content is not refused. A create has nothing stored to write over. Omitted, the replace writes over whatever is there, as a sync that means to write over the edit wants."`
 }
