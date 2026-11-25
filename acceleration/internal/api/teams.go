@@ -5,6 +5,10 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
+	"time"
+
+	getstream "github.com/GetStream/getstream-go/v5"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
@@ -117,7 +121,8 @@ func (s *Server) refuseOwnerOutsideTeam(ctx context.Context, owner session.Owner
 // when the customer is that app's. A customer that only borrows the deployment's app reads
 // none: user ids there are not the customer's and whoever holds that app writes their teams.
 // A caller with no token is in none: the user id it goes by is a claim nobody checked,
-// and reading that user's teams would let anybody borrow them.
+// and reading that user's teams would let anybody borrow them. What Stream tells is held for
+// teamsFor (heldTeams).
 func (s *Server) callerTeams(ctx context.Context, customerID string, caller routing.Caller) ([]string, error) {
 	if !caller.Verified {
 		return nil, nil
@@ -130,13 +135,75 @@ func (s *Server) callerTeams(ctx context.Context, customerID string, caller rout
 		err = errSharedStream
 	}
 	if err == nil {
+		key := heldTeamsKey(customerID, bound.Client, caller.UserID)
+		if teams, held := s.teams.of(key); held {
+			return teams, nil
+		}
 		var teams []string
 		if teams, err = conversation.UserTeams(ctx, bound.Client, caller.UserID); err == nil {
+			s.teams.keep(key, teams)
 			return teams, nil
 		}
 	}
 	s.logger.Error("could not read a user's teams from Stream", "user", caller.UserID, "error", err)
 	return nil, errTeamsUnreadable
+}
+
+// teamsFor is how long a user's teams read from Stream are taken on trust. Every message and
+// socket of a running chat in a teams app asks, and every occurrence of a task, and Stream rate
+// limits the query per app. A user taken out of a team reaches its agents for up to this long
+// after.
+const teamsFor = 30 * time.Second
+
+// maxHeldTeams bounds the users whose teams one router holds, across every app it serves.
+const maxHeldTeams = 100_000
+
+// heldTeams are end users' teams as Stream last told them, each for teamsFor, by customer, Stream
+// app and user (heldTeamsKey). A read that failed is not held: while Stream fails, a user it told
+// nothing in the last teamsFor is refused as before.
+type heldTeams struct {
+	mu sync.Mutex
+	// now is the clock a read's age is told by, read under mu.
+	now  func() time.Time
+	read map[string]teamsRead
+}
+
+// teamsRead is one user's teams and when Stream told them.
+type teamsRead struct {
+	teams []string
+	at    time.Time
+}
+
+func newHeldTeams() *heldTeams {
+	return &heldTeams{now: time.Now, read: map[string]teamsRead{}}
+}
+
+// heldTeamsKey names a user of customer in the Stream app client acts in: a user id is the app's,
+// and the same id under two customers or two apps is held twice.
+func heldTeamsKey(customerID string, client *getstream.Stream, userID string) string {
+	return customerID + "\x00" + client.BaseUrl() + "\x00" + client.ApiKey() + "\x00" + userID
+}
+
+// of is the teams held under key, when Stream told them less than teamsFor ago.
+func (h *heldTeams) of(key string) ([]string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	held, ok := h.read[key]
+	if !ok || h.now().Sub(held.at) >= teamsFor {
+		return nil, false
+	}
+	return held.teams, true
+}
+
+// keep holds teams under key from now. A full cache is emptied rather than walked, as
+// conversation's known users are.
+func (h *heldTeams) keep(key string, teams []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.read) >= maxHeldTeams {
+		clear(h.read)
+	}
+	h.read[key] = teamsRead{teams: teams, at: h.now()}
 }
 
 // hasCommonTeam is Chat's shared-team rule for a config, which is in one team or none: a

@@ -29,7 +29,8 @@ debug it: `.claude/skills/scheduled-tasks/SKILL.md`. Paths are under `accelerati
                  v
         internal/api/scheduled_delivery.go DeliverScheduledTask
                  |   quiet hours? -> Postponed
-                 |   an end user's task, they out of its config's team? -> not_in_team, final
+                 |   a task for its end user (theirs, or the agent's off a thread),
+                 |     they out of its config's team? -> not_in_team, final
                  |   channel_thread? -> internal/api/scheduled_thread_delivery.go deliverOnThread
                  |   session live here | on a peer (POST /internal/scheduled-tasks/deliver)
                  |   | ended: reopen from its row | none yet: open one
@@ -350,19 +351,27 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
 - **Another user's task is a 404.** `TestScheduledTasksSuite/TestTheOwnerReachesATaskItsBackendMadeAndAnotherUserDoesNot`.
 - **A task is its config's team's (AgentTeams).** In an app that keeps each team's configs to its
   own users, a device is answered a task on a config of a team its user is not in now as one that
-  does not exist, by every operation it may call, delete included; the list leaves those out in its
-  query (`ScheduledTaskFilter.Configs`), and one on a deleted config. A backend is not checked. A
-  task its end user made (`caller_kind` not `server`) runs only while they are in the team: one who
-  left it fails the occurrence `not_in_team`, final, before any session is found or opened, on every
-  path (live here, on a peer, reopened, opened); a task its backend made is not checked. Teams Stream
-  could not read fail the attempt, retried.
+  does not exist, by every operation but pause and delete, which only stop it and so stay theirs;
+  the list leaves those out in its query (`ScheduledTaskFilter.Configs`), and one on a deleted
+  config. A backend is not checked. A task for its end user runs only while they are in the team:
+  one they made (`caller_kind` not `server`), and one the agent made talking with them
+  (`created_by` `agent`, stored with the kind of whoever opened that chat, their backend
+  included). One who left it fails the occurrence `not_in_team`, final, before any session is found
+  or opened, on every path (live here, on a peer, reopened, opened). A task the backend made through
+  the API is not checked, nor one the agent made on a thread, which the Router's own session
+  answers. Teams Stream could not read fail the attempt, retried. A router holds a user's teams for
+  30 s (`teamsFor`), so a removal is seen within that.
   `TestScheduledTasksSuite/TestATaskOfATeamTheUserLeftIsAnsweredAsATaskThatDoesNotExist`,
+  `TestScheduledTasksSuite/TestAUserWhoLeftATasksTeamStillPausesAndDeletesIt`,
   `TestScheduledTasksSuite/TestAUserStillInATasksTeamReachesItByEveryOperation`,
   `TestScheduledTasksSuite/TestABackendReachesATaskOfATeamItsUserLeftWithoutAskingStream`,
   `TestScheduledTasksSuite/TestTheListLeavesOutTasksOfAnotherTeamAndStillFillsEachPage`,
   `TestScheduledTasksSuite/TestATaskOfATeamIsReachedByNoUserWhileTheirTeamsCannotBeRead`,
   `TestScheduledTasksSuite/TestATaskOfAUserWhoLeftItsAgentsTeamFailsWithoutRunningTheAgent`,
   `TestScheduledTasksSuite/TestATaskOfAUserWhoLeftItsAgentsTeamIsNotFollowedUpInTheirRunningChat`,
+  `TestScheduledTasksSuite/TestATaskOfAUserWhoLeftItsAgentsTeamIsNotHandedToTheNodeHoldingTheirChat`,
+  `TestScheduledTasksSuite/TestATaskTheAgentMadeInAChatTheBackendOpenedFailsOnceItsUserLeftTheTeam`,
+  `TestScheduledTasksSuite/TestATaskTheAgentMadeOnAThreadIsNotCheckedAgainstItsPersonsTeams`,
   `TestScheduledTasksSuite/TestATaskOfAUserStillInItsAgentsTeamIsDelivered`,
   `TestScheduledTasksSuite/TestATaskItsBackendMadeForAUserOutsideTheTeamIsDelivered`,
   `TestScheduledTasksSuite/TestAnOccurrenceWhoseTeamsCannotBeReadFailsAndTheTaskGoesOn`.

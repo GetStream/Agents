@@ -74,6 +74,20 @@ func (s *Server) scheduledTasksCustomer(ctx context.Context) (string, error) {
 // checks, a task on a config of a team they are not in now is not there either, as the
 // list leaves it out: what it says and what it runs are that team's agent's.
 func (s *Server) loadScheduledTask(ctx context.Context, customerID, id string) (store.ScheduledTask, error) {
+	task, err := s.ownScheduledTask(ctx, customerID, id)
+	if err != nil {
+		return store.ScheduledTask{}, err
+	}
+	if err := s.refuseOutsideTeam(ctx, customerID, task.ConfigID); err != nil {
+		return store.ScheduledTask{}, unknownOr(err, errUnknownConfig, errUnknownScheduledTask)
+	}
+	return task, nil
+}
+
+// ownScheduledTask is loadScheduledTask without the teams check, for what only stops a task: a
+// pause or a delete runs nothing of its agent, so a user who left its team can still stop a task
+// of theirs that would otherwise go on firing for them.
+func (s *Server) ownScheduledTask(ctx context.Context, customerID, id string) (store.ScheduledTask, error) {
 	task, err := s.store.ScheduledTasks.Get(ctx, customerID, id)
 	if errors.Is(err, store.ErrNoScheduledTask) {
 		return store.ScheduledTask{}, errUnknownScheduledTask
@@ -84,9 +98,6 @@ func (s *Server) loadScheduledTask(ctx context.Context, customerID, id string) (
 	owner := session.Owner{CustomerID: task.CustomerID, UserID: task.UserID, Kind: auth.Kind(task.CallerKind)}
 	if !OwnerFrom(ctx).Reaches(owner) {
 		return store.ScheduledTask{}, errUnknownScheduledTask
-	}
-	if err := s.refuseOutsideTeam(ctx, customerID, task.ConfigID); err != nil {
-		return store.ScheduledTask{}, unknownOr(err, errUnknownConfig, errUnknownScheduledTask)
 	}
 	return task, nil
 }
@@ -548,7 +559,7 @@ func (s *Server) pauseScheduledTask(ctx context.Context, request *pauseScheduled
 	if failure != nil {
 		return nil, failure
 	}
-	task, err := s.loadScheduledTask(ctx, customerID, request.Id)
+	task, err := s.ownScheduledTask(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, err
 	}
@@ -686,7 +697,7 @@ func (s *Server) deleteScheduledTask(ctx context.Context, request *deleteSchedul
 	if failure != nil {
 		return nil, failure
 	}
-	if _, err := s.loadScheduledTask(ctx, customerID, request.Id); err != nil {
+	if _, err := s.ownScheduledTask(ctx, customerID, request.Id); err != nil {
 		return nil, err
 	}
 	if err := s.store.ScheduledTasks.Delete(ctx, customerID, request.Id); err != nil {

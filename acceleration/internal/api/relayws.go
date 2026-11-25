@@ -51,6 +51,10 @@ type relayed struct {
 	sockets map[string]*remoteSocket
 	// proxies are the watchers this node attached for a socket elsewhere, by the same id.
 	proxies map[string]*proxyWatcher
+	// pending are the watchers an attach was taken for here and not yet held, by the same id. An
+	// attach checked off the subscription is held only while it is still pending, so a Detach
+	// that overtakes the check, from a socket that gave up waiting, leaves nothing attached.
+	pending map[string]bool
 }
 
 // remoteSocket is one socket here onto a session somewhere else.
@@ -106,6 +110,7 @@ func (s *Server) newRelayed(ctx context.Context, bus *relay.Bus) (*relayed, erro
 		filter:  relay.NewFilter(),
 		sockets: map[string]*remoteSocket{},
 		proxies: map[string]*proxyWatcher{},
+		pending: map[string]bool{},
 	}
 	events, err := bus.Subscribe(ctx, bus.Events(), state.deliver)
 	if err != nil {
@@ -363,11 +368,14 @@ func (s *Server) attachProxy(ctx context.Context, state *relayed, request relay.
 	if spec.PersistConversation && spec.Caller.UserID != owner.UserID {
 		return
 	}
+	// Recorded here, on the subscription, so that a Detach the asker sends later is taken after it.
+	state.expect(request.Watcher)
 	// And the one carryOn asks: an end user watches only while still in the team of the
 	// session's config. Stream is asked off the bus's one subscription, which every node's
 	// requests come in on, and for no longer than the asker waits for the answer.
 	if owner.Kind != auth.KindServer && spec.ConfigID != "" {
 		go func() {
+			defer state.unexpect(request.Watcher)
 			asking, cancel := context.WithTimeout(ctx, attachWait)
 			defer cancel()
 			if err := s.refuseOwnerOutsideTeam(asking, owner, spec.ConfigID); err != nil {
@@ -380,6 +388,7 @@ func (s *Server) attachProxy(ctx context.Context, state *relayed, request relay.
 		}()
 		return
 	}
+	defer state.unexpect(request.Watcher)
 	s.holdProxyFor(ctx, state, request, found, owner)
 }
 
@@ -411,8 +420,9 @@ func (s *Server) holdProxyFor(ctx context.Context, state *relayed, request relay
 		seen:     time.Now(),
 	}
 	if !state.holdProxy(request.Watcher, proxy) {
-		// The socket asked twice, which a retried attach is. The watcher already
-		// attached for it stands, and this one is given back rather than left running.
+		// The socket asked twice, which a retried attach is, and the watcher already attached
+		// for it stands; or it gave up and detached while this was checked. Either way this
+		// one is given back rather than left running.
 		detach()
 		return
 	}
@@ -621,13 +631,31 @@ func (r *relayed) detach(ctx context.Context, watcher, id string) {
 	})
 }
 
+// expect records that an attach for watcher is being answered here.
+func (r *relayed) expect(watcher string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pending[watcher] = true
+}
+
+// unexpect forgets an attach for watcher that ended without being held, refused or failed: the
+// node that asked may be gone before its Detach would.
+func (r *relayed) unexpect(watcher string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.pending, watcher)
+}
+
 // holdProxy records a watcher attached for a socket elsewhere, reporting false when one
-// is already held under that id.
+// is already held under that id, or when its attach is no longer pending: the socket
+// detached while it was checked. Both are decided under the lock dropProxy takes.
 func (r *relayed) holdProxy(watcher string, proxy *proxyWatcher) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, already := r.proxies[watcher]; already {
+	pending := r.pending[watcher]
+	delete(r.pending, watcher)
+	if _, already := r.proxies[watcher]; already || !pending {
 		return false
 	}
 	r.proxies[watcher] = proxy
@@ -644,6 +672,7 @@ func (r *relayed) dropProxy(watcher string) {
 	r.mu.Lock()
 	held, found := r.proxies[watcher]
 	delete(r.proxies, watcher)
+	delete(r.pending, watcher)
 	r.mu.Unlock()
 	if !found {
 		return

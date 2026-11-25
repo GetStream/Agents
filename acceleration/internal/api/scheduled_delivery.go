@@ -192,11 +192,18 @@ func (s *Server) DeliverScheduledTask(ctx context.Context, claimed store.Claimed
 			return "", "", &scheduling.Postponed{Until: until}
 		}
 	}
-	// A task its end user made runs its agent only while they are in the team of its config,
-	// as a request of theirs would, on every way it is delivered; the peer it is handed to
-	// takes this node's word. Out of the team is final for the occurrence; teams that could
-	// not be read fail this attempt only.
-	if err := s.refuseOwnerOutsideTeam(ctx, delivery.owner(), delivery.ConfigID); err != nil {
+	// A task that speaks to its end user runs its agent only while they are in the team of its
+	// config, as a request of theirs would, on every way it is delivered; the peer it is handed
+	// to takes this node's word. That is one they made, and one the agent made talking with them,
+	// which it stores with the kind of whoever opened that session, their backend included. One
+	// the backend made through the API is the backend's, and one made on a thread the Router's
+	// own session answers. Out of the team is final for the occurrence; teams that could not be
+	// read fail this attempt only.
+	user := delivery.owner()
+	if task.CreatedBy == "agent" && task.ChannelThread == "" {
+		user.Kind = auth.KindAuthenticated
+	}
+	if err := s.refuseOwnerOutsideTeam(ctx, user, delivery.ConfigID); err != nil {
 		if errors.Is(err, errUnknownConfig) {
 			return "", "", undeliveredFinally(scheduling.ReasonNotInTeam, err)
 		}

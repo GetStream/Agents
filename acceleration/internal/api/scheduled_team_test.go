@@ -25,7 +25,7 @@ func (s *ScheduledTasksSuite) TestATaskOfATeamTheUserLeftIsAnsweredAsATaskThatDo
 	task := s.agentsTask(anya, s.agentOfTeam("red"), nil)
 	chat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
 
-	for _, operation := range s.taskOperations() {
+	for _, operation := range s.checkedTaskOperations() {
 		status, refused := s.taskFailure(anya, operation.method, "/v1/agents/scheduled-tasks/"+task.ID+operation.path, operation.body)
 		unknownStatus, unknown := s.taskFailure(anya, operation.method, "/v1/agents/scheduled-tasks/"+s.utils.uuid()+operation.path, operation.body)
 
@@ -33,9 +33,22 @@ func (s *ScheduledTasksSuite) TestATaskOfATeamTheUserLeftIsAnsweredAsATaskThatDo
 		s.Equal(unknownStatus, status, "%s %s", operation.method, operation.path)
 		s.Equal(unknown, refused, "%s %s: the same answer as a task that does not exist", operation.method, operation.path)
 	}
-	kept := s.taskReloaded(task)
-	s.Equal("Stretch", kept.Title, "the refused change was not made")
-	s.Equal(store.ScheduledTaskActive, kept.State, "the refused pause was not made")
+	s.Equal("Stretch", s.taskReloaded(task).Title, "the refused change was not made")
+}
+
+// Stopping a task runs nothing of its agent, so a user who left its team still pauses and
+// deletes a task of theirs that would otherwise go on firing for them.
+func (s *ScheduledTasksSuite) TestAUserWhoLeftATasksTeamStillPausesAndDeletesIt() {
+	chat := s.teamsApp()
+	anya := s.inTeam(chat, "red")
+	task := s.agentsTask(anya, s.agentOfTeam("red"), nil)
+	chat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+
+	s.Equal(http.StatusOK, anya.do(http.MethodPost, "/v1/agents/scheduled-tasks/"+task.ID+"/pause", nil, nil))
+	s.Equal(store.ScheduledTaskPaused, s.taskReloaded(task).State)
+	s.Equal(http.StatusNoContent, anya.do(http.MethodDelete, "/v1/agents/scheduled-tasks/"+task.ID, nil, nil))
+	_, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), task.ID)
+	s.ErrorIs(err, store.ErrNoScheduledTask)
 }
 
 func (s *ScheduledTasksSuite) TestAUserStillInATasksTeamReachesItByEveryOperation() {
@@ -143,6 +156,7 @@ func (s *ScheduledTasksSuite) TestATaskOfAUserWhoLeftItsAgentsTeamIsNotFollowedU
 		task.ConversationID = running.Spec().ConversationID
 	})
 	chat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+	s.teamsLapse(s.router)
 	s.makeDue(task)
 	s.runWorker()
 
@@ -151,6 +165,65 @@ func (s *ScheduledTasksSuite) TestATaskOfAUserWhoLeftItsAgentsTeamIsNotFollowedU
 	s.Equal(scheduling.ReasonNotInTeam, *run.Error)
 	s.Equal(session.Live, running.State(), "the occurrence was refused while the chat ran")
 	s.False(s.model().heard(task.Instructions), "the agent was not told the task")
+}
+
+// Nor is it handed to the node holding their chat, which takes this node's word for it.
+func (s *ScheduledTasksSuite) TestATaskOfAUserWhoLeftItsAgentsTeamIsNotHandedToTheNodeHoldingTheirChat() {
+	s.retryAtOnce()
+	chat := s.teamsApp()
+	other, _ := s.otherRouter(nil)
+	anya := s.inTeam(chat, "red")
+	config := s.agentOfTeam("red")
+	opened := anya.on(other).createSession(CreateSessionRequest{ConfigId: &config})
+	task := s.agentsTask(anya, config, func(task *store.ScheduledTask) {
+		task.SessionID, task.OriginSessionID = opened.Id, opened.Id
+	})
+	chat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+	s.makeDue(task)
+	s.runWorker()
+
+	run := s.failedRun(task)
+
+	s.Equal(scheduling.ReasonNotInTeam, *run.Error)
+	s.False(s.model().heard(task.Instructions), "the node holding the chat was not told the task")
+}
+
+// The agent stores a task with the kind of whoever opened the chat, so one it made for a user in
+// a chat their backend opened is the backend's by kind. It still speaks to that user for the
+// team's agent, and fails once they left the team as one they made does.
+func (s *ScheduledTasksSuite) TestATaskTheAgentMadeInAChatTheBackendOpenedFailsOnceItsUserLeftTheTeam() {
+	s.retryAtOnce()
+	chat := s.teamsApp()
+	anya := s.inTeam(chat, "red")
+	task := s.agentsTask(anya, s.agentOfTeam("red"), func(task *store.ScheduledTask) {
+		task.CallerKind = string(auth.KindServer)
+		due := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+		task.StartLocal, task.NextRunAt = due, &due
+	})
+	chat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+	s.runWorker()
+
+	run := s.failedRun(task)
+
+	s.Equal(scheduling.ReasonNotInTeam, *run.Error)
+	s.Empty(s.taskReloaded(task).SessionID, "no session was opened for the agent")
+}
+
+// A task the agent made on an SMS or WhatsApp thread is answered by the Router's own session on
+// that thread, which no team limits: its person's teams are not asked, and it goes on to its
+// thread, which this test never made.
+func (s *ScheduledTasksSuite) TestATaskTheAgentMadeOnAThreadIsNotCheckedAgainstItsPersonsTeams() {
+	chat := s.teamsApp()
+	person := s.inTeam(chat, "blue")
+	task := s.agentsTask(person, s.agentOfTeam("red"), func(task *store.ScheduledTask) {
+		task.CallerKind, task.ChannelThread = string(auth.KindServer), "thread-"+s.utils.uuid()
+	})
+	asked := s.usersRead(chat)
+
+	_, _, err := s.deliverTask(task)
+
+	s.failedAs(err, scheduling.ReasonThreadGone, true)
+	s.Equal(asked, s.usersRead(chat), "Stream was not asked about the thread's person")
 }
 
 func (s *ScheduledTasksSuite) TestATaskOfAUserStillInItsAgentsTeamIsDelivered() {
@@ -200,13 +273,13 @@ func (s *ScheduledTasksSuite) TestAnOccurrenceWhoseTeamsCannotBeReadFailsAndTheT
 
 // teamsApp moves the test to an app that keeps each team's agent configs to its own users, and
 // returns the Stream app its users' teams are read from.
-func (s *ScheduledTasksSuite) teamsApp() *chattest.Server {
+func (s *RouterSuite) teamsApp() *chattest.Server {
 	s.useApp(s.data.createAppAdmitting(store.AppSettings{AgentTeams: new(true)}))
 	return s.giveApp(s.customerID(), 4242, teamsAppKey)
 }
 
 // inTeam is a new end user of the app whose Stream user in chat is in team.
-func (s *ScheduledTasksSuite) inTeam(chat *chattest.Server, team string) *testClient {
+func (s *RouterSuite) inTeam(chat *chattest.Server, team string) *testClient {
 	user := s.data.createUser()
 	chat.PutUser(map[string]any{"id": user.userID, "teams": []any{team}})
 	return user
@@ -252,6 +325,17 @@ func (s *ScheduledTasksSuite) taskOperations() []taskOperation {
 		{http.MethodPost, "/pause", nil},
 		{http.MethodPost, "/resume", nil},
 		{http.MethodDelete, "", nil},
+	}
+}
+
+// checkedTaskOperations are the operations a device reaches a task by only while its user is in
+// the team of its config: all of them but those that only stop it.
+func (s *ScheduledTasksSuite) checkedTaskOperations() []taskOperation {
+	return []taskOperation{
+		{http.MethodGet, "", nil},
+		{http.MethodGet, "/runs", nil},
+		{http.MethodPatch, "", UpdateScheduledTaskRequest{Title: pointerTo("Walk")}},
+		{http.MethodPost, "/resume", nil},
 	}
 }
 
