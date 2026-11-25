@@ -57,6 +57,19 @@ func (s *StoreSuite) TestAGuestAnImportBroughtAsMintedIsMinted() {
 	_, err := s.store.Users.ClaimGuest(s.ctx, app, "guest-1", "alice")
 	s.Require().NoError(err)
 	s.True(s.mintedBy(s.store.Users, app, "guest-1"), "claimed")
+	var row User
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&row).Where("customer_id = ? AND id = 'guest-1'", app).Scan(s.ctx))
+	s.True(row.MintedElsewhere)
+	s.Equal("alice", row.ClaimedBy)
+
+	replica := s.replicaUsers()
+	s.True(s.mintedBy(replica, app, "guest-1"), "to another router")
+	_, err = s.store.ForgetUserSettings(s.ctx, app, "guest-1", "forgotten", &AuditEntry{
+		CustomerID: app, ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+	})
+	s.Require().NoError(err)
+	s.False(s.mintedBy(s.store.Users, app, "guest-1"), "forgotten")
+	s.Eventually(func() bool { return !s.mintedBy(replica, app, "guest-1") }, settleFor, 10*time.Millisecond)
 }
 
 // What is held of a guest goes with each import or replay of its row, in this router and, with
