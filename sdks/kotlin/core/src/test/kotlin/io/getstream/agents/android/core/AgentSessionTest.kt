@@ -91,6 +91,7 @@ class AgentSessionTest {
         assertEquals("acme", handshake.header("X-Customer-Id"))
         assertEquals("jlahey", handshake.header("X-Stream-User-Id"))
         assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", handshake.header("X-Stream-Client"))
+        assertEquals("stream-agents-kotlin/${BuildConfig.SDK_VERSION}", handshake.header("User-Agent"))
         assertEquals(mapOf("decisions" to listOf("false")), handshake.query)
         assertTrue(chat.isConnected.value)
         chat.close()

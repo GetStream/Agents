@@ -35,6 +35,21 @@ class TestBackend:
         backend = Backend(api_key="vak_live_x", token="token-for-jim")
 
         assert backend.url == DEFAULT_URL
+        assert backend.url == "https://accelerate.gcp.stream-io-api.com"
+        assert backend.authenticate is True
+
+    @pytest.mark.parametrize("url", [None, f"{DEFAULT_URL}/"])
+    def test_the_nearest_hosted_router_is_authenticated_with_a_customer_id(
+        self, url: str | None
+    ):
+        backend = Backend(
+            url=url,
+            customer_id="acme",
+            api_key="vak_live_x",
+            api_secret="secret",
+        )
+
+        assert backend.url == DEFAULT_URL
         assert backend.authenticate is True
 
     def test_leaves_the_proxy_off_for_a_router_it_was_pointed_at(self):

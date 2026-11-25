@@ -112,10 +112,15 @@ func (r *CampaignAttempts) End(ctx context.Context, customerID, id string, resul
 	return nil
 }
 
+// ofItsContactsCampaign is the condition that a dial is of the campaign its contact is of, as every
+// dial a runner places is. It names the dial by CampaignAttempt's alias.
+const ofItsContactsCampaign = "ca.campaign_id = (SELECT cc.campaign_id FROM campaign_contacts AS cc WHERE cc.id = ca.contact_id)"
+
 // CountResult counts a contact's dials of one attempt that ended with result.
 func (r *CampaignAttempts) CountResult(ctx context.Context, contactID string, attempt int, result string) (int, error) {
 	count, err := r.store.global.NewSelect().Model((*CampaignAttempt)(nil)).
 		Where("contact_id = ?", contactID).
+		Where(ofItsContactsCampaign).
 		Where("attempt = ?", attempt).
 		Where("result = ?", result).
 		Count(ctx)
@@ -130,6 +135,7 @@ func (r *CampaignAttempts) Latest(ctx context.Context, contactID string) (Campai
 	var attempt CampaignAttempt
 	err := r.store.global.NewSelect().Model(&attempt).
 		Where("contact_id = ?", contactID).
+		Where(ofItsContactsCampaign).
 		Order("started_at DESC", "dial DESC").
 		Limit(1).
 		Scan(ctx)
@@ -170,12 +176,12 @@ func (r *CampaignAttempts) ClaimClassifications(ctx context.Context, owner strin
 		var attempts []CampaignAttempt
 		err := tx.NewRaw(`WITH due AS (
 	SELECT ca.id FROM campaign_attempts ca
-	JOIN campaign_contacts cc ON cc.id = ca.contact_id
+	JOIN campaign_contacts cc ON cc.id = ca.contact_id AND cc.campaign_id = ca.campaign_id
 	WHERE ca.classify_state = ? AND ca.classify_after <= ? AND cc.stage = ?
 		AND (cc.leased_by = '' OR cc.lease_until IS NULL OR cc.lease_until < now())
 		AND NOT EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND cp.move_paused)
 		AND NOT EXISTS (SELECT 1 FROM campaign_attempts newer
-			WHERE newer.contact_id = ca.contact_id AND newer.classify_state = ca.classify_state
+			WHERE newer.contact_id = ca.contact_id AND newer.campaign_id = ca.campaign_id AND newer.classify_state = ca.classify_state
 			AND (newer.started_at, newer.dial) > (ca.started_at, ca.dial))
 	ORDER BY ca.classify_after
 	LIMIT ?
@@ -276,7 +282,7 @@ func (r *CampaignAttempts) Made(ctx context.Context, contactIDs []string) (map[s
 		Made      int
 	}
 	err := r.store.global.NewRaw(`SELECT contact_id, count(DISTINCT (step_id, attempt)) AS made
-FROM campaign_attempts WHERE contact_id IN (?) AND `+placedDial+`
+FROM campaign_attempts AS ca WHERE contact_id IN (?) AND `+ofItsContactsCampaign+` AND `+placedDial+`
 GROUP BY contact_id`, bun.In(contactIDs)).Scan(ctx, &rows)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: count attempts made: %w", err))

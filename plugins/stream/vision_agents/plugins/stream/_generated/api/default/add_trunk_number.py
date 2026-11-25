@@ -109,7 +109,10 @@ def sync_detailed(
 
      Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled
     through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide
-    when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+    when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds,
+    bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409
+    `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought
+    it.
 
     Args:
         id (str):
@@ -145,7 +148,10 @@ def sync(
 
      Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled
     through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide
-    when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+    when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds,
+    bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409
+    `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought
+    it.
 
     Args:
         id (str):
@@ -176,7 +182,10 @@ async def asyncio_detailed(
 
      Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled
     through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide
-    when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+    when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds,
+    bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409
+    `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought
+    it.
 
     Args:
         id (str):
@@ -210,7 +219,10 @@ async def asyncio(
 
      Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled
     through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide
-    when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+    when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds,
+    bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409
+    `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought
+    it.
 
     Args:
         id (str):

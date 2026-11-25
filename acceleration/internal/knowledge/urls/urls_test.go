@@ -177,6 +177,8 @@ func (b *base) Stored(context.Context, string) (knowledge.Billed, error) {
 	return knowledge.Billed{}, knowledge.ErrNoNamespace
 }
 
+func (b *base) MinimumQueried() int64 { return 0 }
+
 func (b *base) Provider() string { return "kept" }
 
 func (b *base) Close() error { return nil }
