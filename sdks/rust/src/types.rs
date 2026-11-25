@@ -5502,6 +5502,12 @@ pub struct DataImport {
     pub cursor: ::std::option::Option<i64>,
     ///How many rows were written.
     pub rows: i64,
+    ///The rows left out rather than written, by table and primary key, as connector_definitions:{"id":"custom_crm","revision":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub skipped: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
+    ///How many more rows were left out than skipped names, which holds the first 100.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub skipped_more: ::std::option::Option<i64>,
     ///How many of them went into each table.
     #[serde(
         default,
