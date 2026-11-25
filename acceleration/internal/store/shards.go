@@ -39,6 +39,10 @@ type Options struct {
 	// Shards is every shard's DSN by name, this one's included. Reads of calls, sessions and
 	// requests cover them all. Empty is this shard's alone.
 	Shards map[string]string
+	// MigrateDSN and ShardMigrateDSN are what Migrate connects with to DSN's database and to
+	// ShardDSN's, as the role that owns the schema. Empty is DSN and ShardDSN.
+	MigrateDSN      string
+	ShardMigrateDSN string
 	// Redis is where rows read on every request are cached. Empty reads Postgres every time.
 	Redis Redis
 	// ShardRedis is where this shard's running calls keep their state. Empty is Redis.
@@ -62,7 +66,8 @@ func OpenShards(options Options) (*Store, error) {
 	if err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
-	s := &Store{global: db, shard: db, locks: locks, globalDSN: options.DSN, shardDSN: options.DSN,
+	s := &Store{global: db, shard: db, locks: locks,
+		globalDSN: cmp.Or(options.MigrateDSN, options.DSN), shardDSN: cmp.Or(options.MigrateDSN, options.DSN),
 		retries: make(chan struct{}, forgetSlots), lost: make(chan struct{}, forgetSlots), polls: make(chan struct{}, pollSlots), writeTimeout: cmp.Or(options.writeTimeout, writeTimeout)}
 	s.closing, s.stop = context.WithCancel(context.Background())
 	if options.ShardDSN != "" && options.ShardDSN != options.DSN {
@@ -71,7 +76,7 @@ func OpenShards(options Options) (*Store, error) {
 			return nil, errors.Join(err, s.Close())
 		}
 		s.shard = shard
-		s.shardDSN = options.ShardDSN
+		s.shardDSN = cmp.Or(options.ShardMigrateDSN, options.ShardDSN)
 	}
 	own := cmp.Or(options.ShardDSN, options.DSN)
 	s.shardNames = []string{unnamedShard(own)}

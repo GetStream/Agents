@@ -21,6 +21,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 )
@@ -60,8 +61,9 @@ func (s *RunnerSuite) SetupSuite() {
 }
 
 func (s *RunnerSuite) SetupTest() {
-	// A claim reaches every running campaign in the database, so each test starts with none.
-	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE campaigns, campaign_contacts, campaign_attempts, opt_outs, call_legs CASCADE")
+	// A claim reaches every running campaign in the database, so each test starts with none,
+	// and with none of the numbers they ring from.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE campaigns, campaign_contacts, campaign_attempts, opt_outs, call_legs, phone_numbers CASCADE")
 	s.Require().NoError(err)
 
 	// Tuesday 10:00 UTC, inside the default weekday hours.
@@ -75,9 +77,14 @@ func (s *RunnerSuite) SetupTest() {
 }
 
 func (s *RunnerSuite) newRunner(owner string) *Runner {
+	return s.newRunnerIn(owner, store.ShardClaim{})
+}
+
+// newRunnerIn is newRunner on a router that dials shard's contacts.
+func (s *RunnerSuite) newRunnerIn(owner string, shard store.ShardClaim) *Runner {
 	runner, err := New(Options{
 		Store: s.store, Dialer: s.dialer, Transcripts: s.transcripts, Classifier: s.classifier,
-		Owner: owner, Now: s.clock.now, Logger: slog.New(slog.DiscardHandler),
+		Owner: owner, Shard: shard, Now: s.clock.now, Logger: slog.New(slog.DiscardHandler),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(runner.Close)
@@ -280,7 +287,7 @@ func (s *RunnerSuite) TestARouterThatDiedMidCallIsTakenOver() {
 	campaign := s.launched(s.single(), 2, "UTC", "+15550000001", "+15550000002")
 	// A router claimed both and died with the calls in flight; its lease has run out since.
 	died := s.clock.now()
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", died, lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", store.ShardClaim{}, died, lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 2)
 	outcomes := map[string]string{"+15550000001": "completed", "+15550000002": "no_answer"}
@@ -395,7 +402,7 @@ func (s *RunnerSuite) TestADialThatKeepsFailingBeforeItRingsUsesTheAttemptInTheE
 
 func (s *RunnerSuite) TestAContactClaimedBeforeItWasEverDialedGoesBackUnused() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
-	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", s.clock.now(), lease, 10)
+	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", store.ShardClaim{}, s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.leasesPass(lease + time.Minute)
 
@@ -409,7 +416,7 @@ func (s *RunnerSuite) TestAContactClaimedBeforeItWasEverDialedGoesBackUnused() {
 
 func (s *RunnerSuite) TestATakeOverReadsOnlyTheDialsOfTheContactsCampaign() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", store.ShardClaim{}, s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	other := store.Campaign{CustomerID: uuid.NewString(), Name: "other", ConfigID: "config-1", FromNumber: "+15550100000", Concurrency: 1}
@@ -433,7 +440,7 @@ func (s *RunnerSuite) TestATakeOverOfAnAttemptNeverDialedLeavesItUnused() {
 	s.tick(s.runner)
 	// Attempt 2 comes due, and a router claims it and dies before dialing it.
 	s.clock.advance(3 * 24 * time.Hour)
-	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", s.clock.now(), lease, 10)
+	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", store.ShardClaim{}, s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.leasesPass(lease + time.Minute)
 
@@ -483,7 +490,7 @@ func (s *RunnerSuite) TestAContactOfACampaignThatCannotBeReadFails() {
 
 func (s *RunnerSuite) TestAContactClaimedJustBeforeAPauseIsNotDialed() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-a", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-a", store.ShardClaim{}, s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	s.Require().NoError(s.store.Campaigns.Pause(s.ctx, s.customerID, campaign.ID, ""))
@@ -501,7 +508,7 @@ func (s *RunnerSuite) TestAContactClaimedJustBeforeAPauseIsNotDialed() {
 
 func (s *RunnerSuite) TestAContactStoppedJustAfterItWasClaimedIsNotDialed() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-a", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-a", store.ShardClaim{}, s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	s.Require().NoError(s.store.CampaignContacts.Stop(s.ctx, campaign.ID, claimed[0].Contact.ID))
@@ -948,7 +955,7 @@ func (s *RunnerSuite) TestAStoppingRouterRingsNoContactItAlreadyClaimed() {
 	runner := s.newRunner("router-e")
 	s.Require().NoError(runner.Start(stopped))
 	s.Require().Eventually(runner.stopping, 5*time.Second, 10*time.Millisecond)
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-e", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-e", store.ShardClaim{}, s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -968,7 +975,7 @@ func (s *RunnerSuite) TestADialRecordedAsTheRouterStopsIsNotPlaced() {
 	runner := s.newRunner("router-f")
 	s.Require().NoError(runner.Start(stopped))
 	s.Require().Eventually(runner.stopping, 5*time.Second, 10*time.Millisecond)
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-f", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-f", store.ShardClaim{}, s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 
@@ -1180,7 +1187,7 @@ func (s *RunnerSuite) TestADialKeepsHowThePhoneSaysItsCallEnded() {
 func (s *RunnerSuite) TestATakeOverKeepsHowThePhoneSaysTheCallEnded() {
 	campaign := s.launched(DefaultSequence("config-1"), 1, "UTC", "+15550000001")
 	died := s.clock.now()
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", died, lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", store.ShardClaim{}, died, lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	callID := uuid.NewString()
@@ -1243,3 +1250,40 @@ func (f *failingCallReads) BeforeQuery(ctx context.Context, event *bun.QueryEven
 }
 
 func (*failingCallReads) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+// regional is the shard routing of a deployment that rings German numbers from europe-west4.
+var regional = shardmap.Map{Default: "us-east4", Countries: map[string]string{"DE": "europe-west4"}}
+
+// fromGermany is a running campaign ringing number from a German number of the customer's.
+func (s *RunnerSuite) fromGermany(number string) store.Campaign {
+	campaign := s.launched(s.single(), 1, "Europe/Berlin", number)
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
+		E164: campaign.FromNumber, Vendor: "telnyx", Country: "DE", CustomerID: s.customerID,
+	}))
+	return campaign
+}
+
+func (s *RunnerSuite) TestACampaignRingingFromAGermanNumberIsDialledInEuropeAndNotInTheUS() {
+	s.fromGermany("+4930123456")
+
+	s.tick(s.newRunnerIn("router-us", store.ShardClaim{Shard: "us-east4", Routing: regional}))
+	s.Require().Empty(s.dialer.dialed())
+	s.tick(s.newRunnerIn("router-eu", store.ShardClaim{Shard: "europe-west4", Routing: regional}))
+
+	s.Len(s.dialer.dialed(), 1)
+}
+
+func (s *RunnerSuite) TestAGermanCampaignsRouterThatDiedIsTakenOverInEuropeAndNotInTheUS() {
+	campaign := s.fromGermany("+4930123456")
+	_, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", store.ShardClaim{}, s.clock.now(), lease, 10)
+	s.Require().NoError(err)
+	s.leasesPass(lease + time.Minute)
+
+	s.newRunnerIn("router-us", store.ShardClaim{Shard: "us-east4", Routing: regional}).takeOver(s.ctx)
+	contact, _ := s.contact(campaign, "+4930123456")
+	s.Require().Equal(store.InProgress, contact.Stage)
+	s.newRunnerIn("router-eu", store.ShardClaim{Shard: "europe-west4", Routing: regional}).takeOver(s.ctx)
+
+	contact, _ = s.contact(campaign, "+4930123456")
+	s.Equal(store.Enrolled, contact.Stage)
+}
