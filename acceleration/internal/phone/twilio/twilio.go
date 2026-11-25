@@ -340,8 +340,8 @@ func (p *Provider) ReleaseNumber(ctx context.Context, e164 string) error {
 }
 
 // ConfigureInbound points the number's voice webhook at the router's Twilio call webhook, which
-// answers each call that passes the checks before answering with TwiML dialing the number's
-// Stream trunk. The trunk's credentials are only in that answer's body, never in a URL.
+// runs the checks a call passes before it is answered and answers one that passes with TwiML
+// dialing the number's Stream trunk. The trunk's credentials are only in that answer's body.
 //
 // The URL carries no connection overrides (#rp=, #rt=): the webhook answers each CallSid once,
 // which holds because Twilio by default sends a call again only when connecting failed

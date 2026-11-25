@@ -25,7 +25,8 @@ off the network, before any jitter buffer, so a handset would add its own on top
 ## Running it
 
 Credentials come from the environment: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
-`TWILIO_WEBHOOK_AUTH_TOKEN` (the account's Auth Token, which signs Twilio's webhooks), `TELNYX_API_KEY`, `TELNYX_CONNECTION_ID` and `TELNYX_CALL_CONTROL_ID`. Optionally `IPINFO_TOKEN`
+`TWILIO_WEBHOOK_AUTH_TOKEN` (the account's Auth Token, which signs Twilio's webhooks),
+`TELNYX_API_KEY`, `TELNYX_CONNECTION_ID` and `TELNYX_CALL_CONTROL_ID`. Optionally `IPINFO_TOKEN`
 for the report's address lookups.
 
 ```bash
