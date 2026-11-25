@@ -101,17 +101,14 @@ func (s *RefusalsSuite) ends(session *Session, refusal error) {
 	session.failed.Store(false)
 	s.NoError(session.ProcessAudio(speech(20), stt.Participant{}), "and not again after a failover")
 	s.EqualValues(before, s.taken(session), "nothing more is taken")
-	session.mu.Lock()
-	lease := session.lease
-	session.lease = nil
-	session.mu.Unlock()
-	s.True(session.Unpaid(), "whatever its lease says after")
-	session.mu.Lock()
-	session.lease = lease
-	session.mu.Unlock()
 	synctest.Wait()
 	_, open := <-session.Events()
 	s.False(open, "its events end")
+	// Closed, it has let go of its lease.
+	session.mu.Lock()
+	session.lease = nil
+	session.mu.Unlock()
+	s.True(session.Unpaid(), "whatever its lease says after")
 }
 
 func (s *RefusalsSuite) TestOneRefusalChangesNothing() {

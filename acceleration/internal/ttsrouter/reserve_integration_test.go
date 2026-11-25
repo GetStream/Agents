@@ -646,6 +646,51 @@ func TestASentenceTheVoiceWouldNotEndIsLetGoByABargeIn(t *testing.T) {
 	require.NoError(t, money.Spend(t, owner), "the voice never completes it, so nothing is held for it")
 }
 
+// A voice named on a piece of an utterance is checked before its money is.
+func TestAPieceInAnotherVoiceIsRefusedForItsVoiceAndNotForCredit(t *testing.T) {
+	for name, perSentence := range voiceKinds {
+		t.Run(name, func(t *testing.T) {
+			money := policytest.Start(t, "ttsrouter_reserve")
+			session, provider, owner := reservingSession(t, money, 2_000_000, perSentence)
+			session.asked = "Ashley"
+			require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "a", Voice: "Ashley"}))
+
+			refused := session.Synthesize(tts.Request{ID: "u1", Text: "bcdefgh", Voice: "Edward", Final: true})
+			require.ErrorIs(t, refused, routing.ErrRequest)
+			require.NotErrorIs(t, refused, policy.ErrNoCredits)
+			require.NoError(t, money.Spend(t, owner), "nothing is held for it: $1 of $2 is")
+			require.Equal(t, []tts.Request{{ID: "u1", Text: "a"}}, provider.said, "and the utterance is not ended")
+
+			require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "b", Voice: "Ashley"}))
+			refused = session.Synthesize(tts.Request{ID: "u1", Text: "c", Voice: "Edward"})
+			require.ErrorIs(t, refused, routing.ErrRequest, "with no credit left too")
+			require.NotErrorIs(t, refused, policy.ErrNoCredits)
+			require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Final: true}))
+			spoken(t, session, provider, "u1", 2)
+			require.EqualValues(t, 2, rowsOf(t, money, owner, 1)[0].Characters)
+		})
+	}
+}
+
+func TestAnUtteranceNamingItsVoiceIsEndedWithNoVoiceWhenItsFinalTextIsRefusedForCredit(t *testing.T) {
+	for name, perSentence := range voiceKinds {
+		t.Run(name, func(t *testing.T) {
+			money := policytest.Start(t, "ttsrouter_reserve")
+			session, provider, owner := reservingSession(t, money, 1_000_000, perSentence)
+			session.asked = "Ashley"
+			require.NoError(t, session.Synthesize(tts.Request{ID: "u1", Text: "a", Voice: "Ashley"}))
+
+			refused := session.Synthesize(tts.Request{ID: "u1", Text: "bc", Voice: "Ashley", Final: true})
+			require.ErrorIs(t, refused, policy.ErrNoCredits)
+			require.NotErrorIs(t, refused, routing.ErrRequest)
+
+			require.Equal(t, []tts.Request{{ID: "u1", Text: "a"}, {ID: "u1", Final: true}}, provider.said)
+			spoken(t, session, provider, "u1", 1)
+			require.EqualValues(t, 1, rowsOf(t, money, owner, 1)[0].Characters)
+		})
+	}
+}
+
 func TestAnUtteranceThatWasSentNoTextIsNotEndedByARefusal(t *testing.T) {
 	money := policytest.Start(t, "ttsrouter_reserve")
 	session, provider, owner := reservingSession(t, money, 1_000_000, false)
