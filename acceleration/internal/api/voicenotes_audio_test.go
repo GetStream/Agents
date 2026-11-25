@@ -359,7 +359,7 @@ func (s *VoiceNoteAudioSuite) TestADocumentThatCannotBeFetchedIsRefusedInTheSame
 	for _, source := range s.unfetchable() {
 		_, _, err := server.fetchDocument(s.T().Context(), FileSource{Url: source})
 		s.Equal(APIError{Type: ErrorTypeInvalidRequest, Code: "invalid_request",
-			Message: "the file could not be fetched: it could not be fetched"}, err, source)
+			Message: "the file could not be used: it could not be fetched"}, err, source)
 	}
 	s.Zero(s.fetches.Load())
 }

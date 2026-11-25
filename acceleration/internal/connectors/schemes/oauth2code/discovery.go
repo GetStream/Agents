@@ -141,10 +141,7 @@ func (s *Scheme) checkEndpoint(ctx context.Context, endpoint string) error {
 	bare := *u
 	bare.RawQuery, bare.ForceQuery = "", false
 	if err := s.cfg.PublicEndpoint(ctx, bare.String()); err != nil {
-		// One answer for every refusal, as for a connector's endpoint: egress's own errors tell a
-		// name that does not resolve from one that resolves to a private address, and a caller
-		// reads this one when its credentials are refused.
-		return fmt.Errorf("oauth2code: endpoint %q is not a public https URL", endpoint)
+		return fmt.Errorf("oauth2code: %w", &core.EndpointError{Endpoint: endpoint, Err: err})
 	}
 	return nil
 }

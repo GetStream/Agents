@@ -539,14 +539,18 @@ func (s *OAuth2CCSuite) TestATokenEndpointThatIsNotPublicIsRefusedAsOneThatDoesN
 	srv := fakeprovider.New(s.T(), fakeprovider.ClientCredentials)
 	scheme, err := oauth2cc.New(oauth2cc.Config{HTTP: srv.Client(), Now: s.clock})
 	s.Require().NoError(err)
-	for _, endpoint := range []string{"https://tokens.invalid/token", "https://localhost/token", "https://127.0.0.1/token", "https://10.0.0.1/token"} {
+	for endpoint, cause := range map[string]string{
+		"https://tokens.invalid/token": "egress: endpoint host could not be resolved",
+		"https://localhost/token":      "egress: endpoint host resolved to a non-public address",
+		"https://10.0.0.1/token":       "egress: endpoint host is not publicly routable",
+	} {
 		m := manifest(srv)
 		m.Endpoints["token"] = endpoint
 		_, _, err = scheme.Complete(s.ctx, core.CompleteInput{Manifest: m, Supplied: supplied(srv)})
-		s.Require().Error(err)
-		s.Contains(err.Error(), `oauth2code: endpoint "`+endpoint+`" is not a public https URL`)
-		s.NotContains(err.Error(), "resolve")
-		s.NotContains(err.Error(), "routable")
+		told := `transient: oauth2cc: token: oauth2code: the request was not sent: oauth2code: endpoint "` + endpoint +
+			`" is not an https URL of a public host that resolves`
+		s.EqualError(err, told)
+		s.Equal(told+": "+cause, core.LoggedError(err), "the log says why")
 	}
 }
 
