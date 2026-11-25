@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -27,7 +28,7 @@ var linqKey = []byte("suite-linq-signing-key")
 func (s *ChannelsSuite) TestAMessageInAGroupChatIsNotAnsweredAndKeepsThePersonsChat() {
 	for i, isGroup := range []any{true, nil} {
 		number, writer, oneToOne, group := s.number(), "+"+s.writer(), s.utils.uuid(), s.utils.uuid()
-		line, config := s.iMessageLine(number)
+		line, config := s.iMessageLine(number, store.ChannelIdentityLink)
 		s.knownIn(config, writer, oneToOne)
 
 		s.Require().Equal(http.StatusAccepted, s.deliverLinq(line, s.linqSays(group, writer, "what is on my calendar?", isGroup)),
@@ -45,11 +46,32 @@ func (s *ChannelsSuite) TestAMessageInAGroupChatIsNotAnsweredAndKeepsThePersonsC
 	}
 }
 
+// The same under phone identity, the default: the sender has no contact row to keep, so a
+// group message must not create one with the group as its chat, open a conversation or post.
+func (s *ChannelsSuite) TestAMessageInAGroupChatUnderPhoneIdentityOpensNothing() {
+	for i, isGroup := range []any{true, nil} {
+		number, writer, group := s.number(), "+"+s.writer(), s.utils.uuid()
+		line, config := s.iMessageLine(number, "")
+
+		s.Require().Equal(http.StatusAccepted, s.deliverLinq(line, s.linqSays(group, writer, "hello there", isGroup)),
+			"is_group %v", isGroup)
+
+		s.Require().Eventually(func() bool {
+			return strings.Count(s.logged.String(), `msg="not answering a message in a group chat" customer=`+s.customerID()) == i+1 ||
+				len(s.meta.postedIn(group)) > 0
+		}, settleFor, 50*time.Millisecond, "is_group %v", isGroup)
+		_, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id,
+			string(channels.IMessage), writer)
+		s.True(errors.Is(err, store.ErrNoContact), "is_group %v: no contact row: %v", isGroup, err)
+		s.Empty(s.meta.postedIn(group), "is_group %v: nothing was posted to the group", isGroup)
+	}
+}
+
 // The control: a 1:1 chat with is_group false is answered, and becomes where the person's
 // messages go, as on the base.
 func (s *ChannelsSuite) TestAMessageInAOneToOneChatIsAnsweredAndMovesThePersonsChat() {
 	number, writer, before, now := s.number(), "+"+s.writer(), s.utils.uuid(), s.utils.uuid()
-	line, config := s.iMessageLine(number)
+	line, config := s.iMessageLine(number, store.ChannelIdentityLink)
 	s.knownIn(config, writer, before)
 
 	s.Require().Equal(http.StatusAccepted, s.deliverLinq(line, s.linqSays(now, writer, "what is on my calendar?", false)))
@@ -65,7 +87,7 @@ func (s *ChannelsSuite) TestAMessageInAOneToOneChatIsAnsweredAndMovesThePersonsC
 // as the channel bridge does (AI-2015).
 func (s *ChannelsSuite) TestAStopInAGroupChatIsRecordedAndConfirmedThere() {
 	number, writer, oneToOne, group := s.number(), "+"+s.writer(), s.utils.uuid(), s.utils.uuid()
-	line, config := s.iMessageLine(number)
+	line, config := s.iMessageLine(number, store.ChannelIdentityLink)
 	s.knownIn(config, writer, oneToOne)
 
 	s.Require().Equal(http.StatusAccepted, s.deliverLinq(line, s.linqSays(group, writer, "STOP", true)))
@@ -80,18 +102,22 @@ func (s *ChannelsSuite) TestAStopInAGroupChatIsRecordedAndConfirmedThere() {
 
 // iMessageLine is a Linq line on number and a text agent answering on it, which knows a
 // number only once its person linked it.
-func (s *ChannelsSuite) iMessageLine(number string) (ChannelAccount, AgentConfig) {
+// identity is the config's channel identity, "" for the default (phone).
+func (s *ChannelsSuite) iMessageLine(number, identity string) (ChannelAccount, AgentConfig) {
 	var line ChannelAccount
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels",
 		ConnectChannelRequest{
 			Kind: string(channels.IMessage), Number: number, Token: pointerTo("linq-key"),
 			Signing: pointerTo("whsec_" + base64.StdEncoding.EncodeToString(linqKey)),
 		}, &line))
+	channelsOf := &AgentChannels{Imessage: &ChannelLineRequest{Number: number}}
+	if identity != "" {
+		channelsOf.Identity = pointerTo(ChannelIdentity(identity))
+	}
 	var config AgentConfig
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", AgentConfigRequest{
 		Name: "channelled-" + s.utils.uuid(), Mode: pointerTo(AgentModeText), Llm: pointerTo("noted/noted-model"),
-		Channels: &AgentChannels{Imessage: &ChannelLineRequest{Number: number},
-			Identity: pointerTo(ChannelIdentity(store.ChannelIdentityLink))},
+		Channels: channelsOf,
 	}, &config))
 	return line, config
 }
