@@ -738,9 +738,9 @@ class VisionAgentsTest {
             Reply(200, """{"provider":"exa","model":"exa-fast","answer":"Yes.","results":[{"url":"https://a","title":"A","score":0.5}]}""")
         }
 
-        val found = agents.router(config = "healthcare").search("pricing", SearchOptions(depth = SearchOptions.Depth.Fast))
+        val found = agents.router(config = "healthcare").search("pricing")
 
-        assertEquals("""{"query":"pricing","config_id":"healthcare","options":{"depth":"fast"}}""", router.requests.single().body)
+        assertEquals("""{"query":"pricing","config_id":"healthcare"}""", router.requests.single().body)
         assertEquals("Yes.", found.answer)
         assertEquals(0.5, found.results.single().score)
     }

@@ -718,6 +718,10 @@ Every reply the agent abandons logs one INFO line, `the agent was interrupted`, 
 
 `AgentResponse.Items`, on the handle `Responses.Create` returns, fails with `client.ErrUnnamedTurn` when the turn has no id: the router names none for an incognito session, a speech-to-speech session or the retry of a `request_id` already taken. It used to read every turn in the session instead, passed off as this turn's; a caller that relied on that now gets the error, and reads `Session.Responses.Items` for the whole session or follows `Session.Events` (AI-3571).
 
+### The Kotlin, Swift and Dart SDKs search as the config says
+
+`Router.search` (`SearchRouter.search` in Dart) takes only the query, and `SearchOptions` is gone (Dart's `SearchDepth` with it). The router refuses search options from a device with a 403 (AI-3730), and Kotlin and Swift sent an empty `options` on every search, so a device's search was refused even when it set none. A device's search runs as the router config it names, or the app's default.
+
 ### The JavaScript SDK reads no items for a turn with no id
 
 `items` on the `AgentResponse` that `responses.create` returns rejects with `UnnamedTurnError` when the turn has no id, for the same reasons as Go's: an incognito session, a speech-to-speech session, or the retry of a `requestId` whose turn was not found. It used to read every turn in the session instead, passed off as this turn's; read `session.responses.items` for the whole session, or follow `session.events()` (AI-3571).

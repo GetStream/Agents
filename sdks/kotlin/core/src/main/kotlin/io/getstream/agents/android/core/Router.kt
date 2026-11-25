@@ -1,8 +1,6 @@
 package io.getstream.agents.android.core
 
 import io.getstream.agents.android.core.generated.SearchAnswer as AnswerSchema
-import io.getstream.agents.android.core.generated.SearchDepth
-import io.getstream.agents.android.core.generated.SearchOptions as OptionsSchema
 import io.getstream.agents.android.core.generated.SearchRequest
 import io.getstream.agents.android.core.generated.SearchResult
 
@@ -28,12 +26,14 @@ public class Router internal constructor(
     /** Cost labels carried onto everything routed here, on top of the config's own. */
     public val tags: Map<String, String> = emptyMap(),
 ) {
-    /** Answers one question out of what is true now. */
-    public suspend fun search(query: String, options: SearchOptions = SearchOptions()): SearchAnswer {
+    /**
+     * Answers one question out of what is true now, run as [config] says, or as the app's
+     * default does. How a search is run, and so what it costs, is the app's backend's to choose.
+     */
+    public suspend fun search(query: String): SearchAnswer {
         val request = SearchRequest(
             query = query,
             configId = config.ifEmpty { null },
-            options = options.schema,
             tags = tags.ifEmpty { null },
         )
         val answer = backend.post(
@@ -44,47 +44,6 @@ public class Router internal constructor(
         )
         return SearchAnswer.of(answer)
     }
-}
-
-/**
- * How to find out today's answers.
- *
- * Null means the named router config decides, and the router decides what the config does not.
- * A provider that cannot express a term refuses the request rather than dropping it.
- */
-public data class SearchOptions(
-    /** A provider/model or a capability shortcut such as `search-fast`. */
-    val target: String? = null,
-    /**
-     * How much work a search is worth: [Depth.Instant] answers from the index in a few hundred
-     * milliseconds, [Depth.Deep] reads what it finds and can take tens of seconds.
-     */
-    val depth: Depth? = null,
-    /** How many hits to return. */
-    val results: Int? = null,
-    /** Only answer from these domains. */
-    val includeDomains: List<String> = emptyList(),
-    val excludeDomains: List<String> = emptyList(),
-    /** The kind of source to prefer, for the providers that classify their index. */
-    val category: String? = null,
-    /** How stale a cached page may be. Zero forces a live crawl. */
-    val maxAgeHours: Int? = null,
-    /** Country or region to answer from. */
-    val location: String? = null,
-) {
-    public enum class Depth { Instant, Fast, Standard, Deep }
-
-    internal val schema: OptionsSchema
-        get() = OptionsSchema(
-            target = target,
-            depth = depth?.let { SearchDepth.valueOf(it.name.lowercase()) },
-            results = results,
-            includeDomains = includeDomains.ifEmpty { null },
-            excludeDomains = excludeDomains.ifEmpty { null },
-            category = category,
-            maxAgeHours = maxAgeHours,
-            location = location,
-        )
 }
 
 /** What a search found. */

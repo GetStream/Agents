@@ -1,73 +1,5 @@
 import 'generated/api.dart' as api;
 
-/// How much work a search is worth.
-enum SearchDepth {
-  /// From the index, in a few hundred milliseconds.
-  instant,
-  fast,
-  standard,
-
-  /// Reads what it finds, and can take tens of seconds.
-  deep,
-}
-
-/// How to find out today's answers.
-///
-/// Everything is optional because everything has an answer already: a named router config
-/// decides what this does not say, and the router decides what the config does not. A
-/// provider that cannot express a term refuses the request rather than dropping it.
-final class SearchOptions {
-  const SearchOptions({
-    this.target,
-    this.providers = const [],
-    this.depth,
-    this.results,
-    this.includeDomains = const [],
-    this.excludeDomains = const [],
-    this.category,
-    this.maxAgeHours,
-    this.location,
-  });
-
-  /// A provider/model or a capability shortcut such as `search-fast`.
-  final String? target;
-
-  /// Where to try, in order, which wins over [target] and [depth].
-  final List<String> providers;
-  final SearchDepth? depth;
-
-  /// How many hits to return.
-  final int? results;
-
-  /// Only answer from these domains.
-  final List<String> includeDomains;
-  final List<String> excludeDomains;
-
-  /// The kind of source to prefer, for the providers that classify their index.
-  final String? category;
-
-  /// How stale a cached page may be. Zero forces a live crawl.
-  final int? maxAgeHours;
-
-  /// Country or region to answer from.
-  final String? location;
-
-  api.SearchOptions? get _wire {
-    final wire = api.SearchOptions(
-      target: target,
-      providers: providers.isEmpty ? null : providers,
-      depth: depth?.name,
-      results: results,
-      includeDomains: includeDomains.isEmpty ? null : includeDomains,
-      excludeDomains: excludeDomains.isEmpty ? null : excludeDomains,
-      category: category,
-      maxAgeHours: maxAgeHours,
-      location: location,
-    );
-    return wire.toJson().isEmpty ? null : wire;
-  }
-}
-
 /// What a search found.
 final class SearchAnswer {
   const SearchAnswer({
@@ -115,13 +47,13 @@ final class SearchRouter {
   /// Cost labels carried onto everything routed here, on top of the config's own.
   final Map<String, String> tags;
 
-  /// Answers one question out of what is true now.
-  Future<SearchAnswer> search(String query, [SearchOptions options = const SearchOptions()]) async {
+  /// Answers one question out of what is true now, run as [config] says, or as the app's default
+  /// does. How a search is run, and so what it costs, is the app's backend's to choose.
+  Future<SearchAnswer> search(String query) async {
     final answer = await _operations.search(
       body: api.SearchRequest(
         query: query,
         configId: config.isEmpty ? null : config,
-        options: options._wire,
         tags: tags.isEmpty ? null : tags,
       ),
     );
