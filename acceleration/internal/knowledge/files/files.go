@@ -65,6 +65,8 @@ const (
 	defaultQueue = "knowledge-files"
 	// readTimeout is reading the file, then every picture in it four at a time.
 	readTimeout = 30 * time.Minute
+	// overtakenTimeout bounds what a read does with passages of a document that was removed.
+	overtakenTimeout = 30 * time.Second
 	// maxRetry is how many more times a read that failed for a reason that may pass is tried
 	// before the document is marked failed.
 	maxRetry = 3
@@ -403,7 +405,8 @@ func (s *Service) process(ctx context.Context, task *asynq.Task) error {
 	return nil
 }
 
-// waiting is the document, while it still waits for the payload's file.
+// waiting is the document, with errOvertaken when it no longer waits for the payload's file,
+// and zero when it is gone.
 func (s *Service) waiting(ctx context.Context, payload readPayload) (store.KnowledgeDocument, error) {
 	document, err := s.store.KnowledgeDocuments.Get(ctx, payload.CustomerID, payload.ID)
 	if errors.Is(err, store.ErrNoKnowledgeDocument) {
@@ -413,7 +416,7 @@ func (s *Service) waiting(ctx context.Context, payload readPayload) (store.Knowl
 		return store.KnowledgeDocument{}, err
 	}
 	if document.ObjectKey != payload.ObjectKey {
-		return store.KnowledgeDocument{}, errOvertaken
+		return document, errOvertaken
 	}
 	return document, nil
 }
@@ -462,26 +465,17 @@ func (s *Service) read(ctx context.Context, owned metered.OwnedKnowledge, payloa
 	if !covered {
 		return errOvertaken
 	}
-	if err := owned.Upsert(ctx, document.Namespace, passages); err != nil {
-		return err
-	}
+	// A write that failed may have written some of them.
+	failed := owned.Upsert(ctx, document.Namespace, passages)
 	current, err := s.waiting(ctx, payload)
 	if errors.Is(err, errOvertaken) {
-		// A removal still holding the row may have deleted the passages before this wrote
-		// them, so it is made to delete them again rather than find them left.
-		interrupted, failed := s.store.KnowledgeDocuments.Interrupt(ctx, payload.CustomerID, payload.ID)
-		if failed != nil {
-			return failed
-		}
-		if interrupted {
-			return err
-		}
-		if _, gone := s.store.KnowledgeDocuments.Get(ctx, payload.CustomerID, payload.ID); errors.Is(gone, store.ErrNoKnowledgeDocument) {
-			if taken := owned.Delete(ctx, document.Namespace, ingest.IDs(document.Source, 0, len(passages))); taken != nil {
-				return fmt.Errorf("files: take back what was read for a document removed meanwhile: %w", taken)
-			}
-		}
-		return err
+		// Its time may be what ran out, and a retry no longer knows what was written.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), overtakenTimeout)
+		defer cancel()
+		return s.overtaken(ctx, owned, payload, current, document, len(passages))
+	}
+	if failed != nil {
+		return failed
 	}
 	if err != nil {
 		return err
@@ -503,6 +497,33 @@ func (s *Service) read(ctx context.Context, owned metered.OwnedKnowledge, payloa
 		return errOvertaken
 	}
 	return nil
+}
+
+// overtaken ends a read that wrote passages and then found the row, seen as now, no longer
+// waits for its file. A removal still holding the row may have deleted the passages before they
+// were written, so it is made to delete them again. With the row gone, or a removal that could
+// not be told, they are taken back here. A newer write of the document keeps the row.
+func (s *Service) overtaken(
+	ctx context.Context, owned metered.OwnedKnowledge, payload readPayload, now store.KnowledgeDocument, read *store.KnowledgeDocument, passages int,
+) error {
+	interrupted, err := s.store.KnowledgeDocuments.Interrupt(ctx, payload.CustomerID, payload.ID, passages)
+	if interrupted {
+		return errOvertaken
+	}
+	if err == nil {
+		_, err = s.store.KnowledgeDocuments.Get(ctx, payload.CustomerID, payload.ID)
+	}
+	if err == nil {
+		return errOvertaken
+	}
+	gone := now.ID == "" || now.BeingRemoved() || errors.Is(err, store.ErrNoKnowledgeDocument)
+	if !gone {
+		return err
+	}
+	if err := owned.Delete(ctx, read.Namespace, ingest.IDs(read.Source, 0, passages)); err != nil {
+		return fmt.Errorf("files: take back what was read for a document removed meanwhile: %w", err)
+	}
+	return errOvertaken
 }
 
 // readPictures has every scanned page read for its text and figures, every page with

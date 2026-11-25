@@ -24,7 +24,7 @@ func (s *StoreSuite) TestAKnowledgeDocumentIsOnlyItsOwnCustomers() {
 	s.ErrorIs(err, ErrNoKnowledgeDocument)
 	key, _, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
 	s.Require().NoError(err)
-	interrupted, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "other-app", mine.ID)
+	interrupted, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "other-app", mine.ID, 3)
 	s.Require().NoError(err)
 	s.False(interrupted)
 	deleted, err := s.store.KnowledgeDocuments.Delete(s.ctx, "other-app", mine.ID, key)
@@ -176,11 +176,11 @@ func (s *StoreSuite) TestARemovalDeletesOnlyTheDocumentItStillHolds() {
 	untouched, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", other.ID)
 	s.Require().NoError(err)
 	s.Equal(KnowledgeDocumentIndexed, untouched.State)
-	interrupted, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", other.ID)
+	interrupted, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", other.ID, 3)
 	s.Require().NoError(err)
 	s.False(interrupted, "nothing removes it")
 
-	interrupted, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID)
+	interrupted, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, 3)
 	s.Require().NoError(err)
 	s.True(interrupted)
 	deleted, err = s.store.KnowledgeDocuments.Delete(s.ctx, "acme-app", mine.ID, key)
@@ -250,4 +250,93 @@ func (s *StoreSuite) TestOnlyTheDocumentWhoseRemovalFailedSaysSo() {
 	untouched, err = s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", other.ID)
 	s.Require().NoError(err)
 	s.Equal(KnowledgeDocumentIndexed, untouched.State)
+}
+
+// Posts of one source share its row, so the last to finish is the one kept. A removal or an
+// upload since a post began is not one of them.
+func (s *StoreSuite) TestAPostFinishesOnlyWhileNoRemovalOrUploadTookItsDocument() {
+	first, second := s.knowledgeDocument("acme-app", "docs", "faq.md"), s.knowledgeDocument("acme-app", "docs", "faq.md")
+	for _, post := range []KnowledgeDocument{second, first, second} {
+		post.Text, post.Bytes, post.ContentType = "the last text", 13, "text/plain"
+		finished, err := s.store.KnowledgeDocuments.Finish(s.ctx, &post, post.ObjectKey)
+		s.Require().NoError(err)
+		s.True(finished)
+	}
+	kept, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", first.ID)
+	s.Require().NoError(err)
+	s.Equal("the last text", kept.Text)
+	s.Equal(int64(13), kept.Bytes)
+	s.Equal("text/plain", kept.ContentType)
+
+	_, _, err = s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", first.ID)
+	s.Require().NoError(err)
+	finished, err := s.store.KnowledgeDocuments.Finish(s.ctx, &first, first.ObjectKey)
+	s.Require().NoError(err)
+	s.False(finished)
+
+	again := s.knowledgeDocument("acme-app", "docs", "faq.md")
+	s.Equal(first.ID, again.ID)
+	finished, err = s.store.KnowledgeDocuments.Finish(s.ctx, &first, first.ObjectKey)
+	s.Require().NoError(err)
+	s.False(finished, "a removal took it since, though a later post has it now")
+	finished, err = s.store.KnowledgeDocuments.Finish(s.ctx, &again, again.ObjectKey)
+	s.Require().NoError(err)
+	s.True(finished)
+
+	upload := KnowledgeDocument{CustomerID: "acme-app", Namespace: "docs", Source: "faq.md", ObjectKey: "acme-app/one/faq.md"}
+	s.Require().NoError(s.store.KnowledgeDocuments.Pend(s.ctx, &upload))
+	finished, err = s.store.KnowledgeDocuments.Finish(s.ctx, &again, again.ObjectKey)
+	s.Require().NoError(err)
+	s.False(finished)
+}
+
+func (s *StoreSuite) TestAPostOfFewerPassagesStillCountsTheOnesBefore() {
+	document := KnowledgeDocument{CustomerID: "acme-app", Namespace: "docs", Source: "faq.md", Passages: 8, State: KnowledgeDocumentIndexed}
+	s.Require().NoError(s.store.KnowledgeDocuments.Upsert(s.ctx, &document))
+	s.knowledgeDocument("acme-app", "docs", "faq.md")
+
+	_, passages, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", document.ID)
+	s.Require().NoError(err)
+	s.Equal(8, passages)
+}
+
+func (s *StoreSuite) TestAnInterruptedRemovalCountsThePassagesWritten() {
+	mine := s.knowledgeDocument("acme-app", "docs", "faq.md")
+	for _, written := range []int{8, 2} {
+		_, _, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
+		s.Require().NoError(err)
+		interrupted, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, written)
+		s.Require().NoError(err)
+		s.True(interrupted)
+	}
+
+	_, passages, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	s.Equal(8, passages)
+}
+
+func (s *StoreSuite) TestAPostDoesNotFinishOnceTheRemovalItOvertookFailed() {
+	mine := s.knowledgeDocument("acme-app", "docs", "faq.md")
+	_, _, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	post := s.knowledgeDocument("acme-app", "docs", "faq.md")
+	s.Require().NoError(s.store.KnowledgeDocuments.FailRemoval(s.ctx, "acme-app", mine.ID))
+
+	finished, err := s.store.KnowledgeDocuments.Finish(s.ctx, &post, post.ObjectKey)
+	s.Require().NoError(err)
+	s.False(finished)
+	failed, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	s.True(failed.BeingRemoved())
+}
+
+func (s *StoreSuite) TestADocumentIsBeingRemovedOnlyOnceARemovalTookIt() {
+	mine := s.knowledgeDocument("acme-app", "docs", "faq.md")
+	s.False(mine.BeingRemoved())
+	_, _, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+
+	taken, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	s.True(taken.BeingRemoved())
 }

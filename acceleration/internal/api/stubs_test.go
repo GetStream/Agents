@@ -1017,7 +1017,9 @@ type knowledgeBase struct {
 	writesLeft *int
 	// beforeWrite, beforeDelete and afterDelete each run once around the next such call,
 	// without the lock held. An error from beforeDelete fails its delete.
+	// afterWrite's write is kept whatever it answers.
 	beforeWrite  func()
+	afterWrite   func() error
 	beforeDelete func() error
 	afterDelete  func()
 }
@@ -1027,6 +1029,13 @@ func (b *knowledgeBase) onceBeforeWrite(hook func()) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.beforeWrite = hook
+}
+
+// onceAfterWrite runs hook after the next write is kept, and answers it with the hook's error.
+func (b *knowledgeBase) onceAfterWrite(hook func() error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.afterWrite = hook
 }
 
 // onceBeforeDelete runs hook before the next delete, which fails with the hook's error.
@@ -1073,12 +1082,24 @@ func passageBytes(document knowledge.Document) int64 {
 
 func (b *knowledgeBase) Upsert(_ context.Context, namespace string, documents []knowledge.Document) (knowledge.Billed, error) {
 	b.mu.Lock()
-	hook := b.beforeWrite
+	before := b.beforeWrite
 	b.beforeWrite = nil
 	b.mu.Unlock()
-	if hook != nil {
-		hook()
+	if before != nil {
+		before()
 	}
+	b.mu.Lock()
+	after := b.afterWrite
+	b.afterWrite = nil
+	b.mu.Unlock()
+	billed, err := b.keep(namespace, documents)
+	if err == nil && after != nil {
+		err = after()
+	}
+	return billed, err
+}
+
+func (b *knowledgeBase) keep(namespace string, documents []knowledge.Document) (knowledge.Billed, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -38,10 +39,12 @@ type KnowledgeDocument struct {
 	// its size.
 	ContentType string `bun:"content_type,notnull"`
 	Bytes       int64  `bun:"bytes,notnull"`
-	// ObjectKey is the uploaded file in the knowledge bucket while it waits to be read, and
-	// empty once it has been. A read that finds another key here was overtaken by a newer
-	// upload of the same source, and leaves the row to it. A removal holds the row the same
-	// way, under a key of its own (Take).
+	// ObjectKey is what holds the row: the uploaded file in the knowledge bucket while it waits
+	// to be read, posts of its text (Upsert) or its removal (Take). It is empty once a file has
+	// been read. Whoever writes or deletes the document's passages takes the row under its key
+	// first, and what it writes on the row afterwards only while the key is still there. One that
+	// finds another key was overtaken, and what it did to the passages may have met what the
+	// other did: a removal and a post do theirs again, and a read makes the removal do it.
 	ObjectKey string    `bun:"object_key,notnull"`
 	CreatedAt time.Time `bun:"created_at,notnull"`
 	UpdatedAt time.Time `bun:"updated_at,notnull"`
@@ -93,10 +96,16 @@ type KnowledgeDocuments struct {
 	store *Store
 }
 
-// Upsert records how many passages a document was cut into. A source the knowledge base
-// already has is updated in place and keeps its id, since posting it again replaced the same
-// passages rather than adding a second copy. The row takes the state and error the caller
-// sets.
+// postKey begins the ObjectKey of a document last written by a post of its text. A file's key
+// begins with its customer, so it is never one.
+const postKey = "posting:"
+
+// Upsert records text posted as a document whose passages are to be written, or may have been,
+// and holds the row under document.ObjectKey, which Finish takes. The posts of one source
+// share a key, which an upload and a removal change. A source the knowledge base already has
+// is updated in place and keeps its id, since posting it again replaced the same passages
+// rather than adding a second copy, and its count still covers the passages it had. The row
+// takes the state and error the caller sets.
 func (r *KnowledgeDocuments) Upsert(ctx context.Context, document *KnowledgeDocument) error {
 	if err := document.Validate(); err != nil {
 		return stack.Wrap(err)
@@ -106,22 +115,22 @@ func (r *KnowledgeDocuments) Upsert(ctx context.Context, document *KnowledgeDocu
 	now := time.Now().UTC()
 	document.CreatedAt = now
 	document.UpdatedAt = now
-	document.ObjectKey = ""
+	document.ObjectKey = postKey + newID()
 
 	// Text posted over a file still waiting to be read is the newer of the two, so the row
 	// lets go of the file and the read that finds it gone leaves the row alone.
 	_, err := r.store.global.NewInsert().Model(document).
 		On("CONFLICT (customer_id, namespace, source) DO UPDATE").
-		Set("passages = EXCLUDED.passages").
+		Set("passages = GREATEST(kd.passages, EXCLUDED.passages)").
 		Set("text = EXCLUDED.text").
 		Set("state = EXCLUDED.state").
 		Set("error = EXCLUDED.error").
 		Set("pages = EXCLUDED.pages").
 		Set("content_type = EXCLUDED.content_type").
 		Set("bytes = EXCLUDED.bytes").
-		Set("object_key = EXCLUDED.object_key").
+		Set("object_key = CASE WHEN kd.object_key LIKE ? THEN kd.object_key ELSE EXCLUDED.object_key END", postKey+"%").
 		Set("updated_at = EXCLUDED.updated_at").
-		Returning("id, created_at").
+		Returning("id, created_at, object_key").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save knowledge document: %w", err))
@@ -180,24 +189,28 @@ func (r *KnowledgeDocuments) Cover(ctx context.Context, customerID, id, objectKe
 	return updatedOne(result, "cover knowledge file")
 }
 
-// Finish records a file read into its passages, as long as the row still waits for that file.
-// It is false when the document was removed, or uploaded or posted again, while the file was
-// read: the row is no longer this read's to write.
+// Finish records a file read, or text posted, into its passages, as long as objectKey still
+// holds the row. It is false when the document was removed or uploaded again meanwhile, or the
+// file's was posted: the row is no longer this write's. A post leaves its key for the others it
+// shares it with.
 func (r *KnowledgeDocuments) Finish(ctx context.Context, document *KnowledgeDocument, objectKey string) (bool, error) {
 	document.UpdatedAt = time.Now().UTC()
 	document.State = KnowledgeDocumentIndexed
 	document.Error = ""
 	document.ObjectKey = ""
+	if strings.HasPrefix(objectKey, postKey) {
+		document.ObjectKey = objectKey
+	}
 	result, err := r.store.global.NewUpdate().Model(document).
-		Column("text", "passages", "pages", "state", "error", "object_key", "updated_at").
+		Column("text", "passages", "pages", "state", "error", "content_type", "bytes", "object_key", "updated_at").
 		Where("id = ?", document.ID).
 		Where("customer_id = ?", document.CustomerID).
 		Where("object_key = ?", objectKey).
 		Exec(ctx)
 	if err != nil {
-		return false, stack.Wrap(fmt.Errorf("store: finish knowledge file: %w", err))
+		return false, stack.Wrap(fmt.Errorf("store: finish knowledge document: %w", err))
 	}
-	return updatedOne(result, "finish knowledge file")
+	return updatedOne(result, "finish knowledge document")
 }
 
 // Fail records why a file could not be read, under the same condition as Finish. A last
@@ -269,6 +282,9 @@ const removalKey = "removing:"
 // removalUnfinished is the error of a document whose removal has not finished.
 const removalUnfinished = "Its removal did not finish. Delete it again."
 
+// BeingRemoved is whether a removal holds the document.
+func (k *KnowledgeDocument) BeingRemoved() bool { return strings.HasPrefix(k.ObjectKey, removalKey) }
+
 // Take begins the removal of a document, and returns the key the removal holds it under and
 // how many passages to remove. The row lets go of its file, as it does for a newer upload, so
 // a read of it finds it was overtaken. The row says failed until it is removed, so a removal
@@ -299,15 +315,17 @@ func (r *KnowledgeDocuments) Take(ctx context.Context, customerID, id string) (k
 }
 
 // FailRemoval says a document's removal did not finish, unless a file uploaded since waits to
-// be read.
+// be read. It holds the row as Take does, so a post that took the row from the removal writes
+// its passages again, as the failed removal may have deleted them.
 func (r *KnowledgeDocuments) FailRemoval(ctx context.Context, customerID, id string) error {
 	_, err := r.store.global.NewUpdate().Model((*KnowledgeDocument)(nil)).
+		Set("object_key = ?", removalKey+newID()).
 		Set("state = ?", KnowledgeDocumentFailed).
 		Set("error = ?", removalUnfinished).
 		Set("updated_at = ?", time.Now().UTC()).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
-		Where("object_key = ''").
+		Where("(object_key = '' OR object_key LIKE ?)", postKey+"%").
 		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: fail knowledge document removal: %w", err))
@@ -316,10 +334,12 @@ func (r *KnowledgeDocuments) FailRemoval(ctx context.Context, customerID, id str
 }
 
 // Interrupt makes the removal a document is under take its passages away again, for a read
-// that wrote some after the removal began. It is false when no removal holds the document.
-func (r *KnowledgeDocuments) Interrupt(ctx context.Context, customerID, id string) (bool, error) {
+// that wrote passages of them after the removal began, which the row counts if it did not. It
+// is false when no removal holds the document.
+func (r *KnowledgeDocuments) Interrupt(ctx context.Context, customerID, id string, passages int) (bool, error) {
 	result, err := r.store.global.NewUpdate().Model((*KnowledgeDocument)(nil)).
 		Set("object_key = ?", removalKey+newID()).
+		Set("passages = GREATEST(passages, ?)", passages).
 		Where("id = ?", id).
 		Where("customer_id = ?", customerID).
 		Where("object_key LIKE ?", removalKey+"%").

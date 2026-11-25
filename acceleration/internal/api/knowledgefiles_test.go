@@ -42,6 +42,7 @@ func (s *KnowledgeFilesSuite) SetupTest() {
 	s.namespace = "files-" + uuid.NewString()
 	s.T().Cleanup(func() {
 		s.knowledge.onceBeforeWrite(nil)
+		s.knowledge.onceAfterWrite(nil)
 		s.knowledge.onceBeforeDelete(nil)
 		s.knowledge.onceAfterDelete(nil)
 	})
@@ -478,6 +479,340 @@ func (s *KnowledgeFilesSuite) TestARemovalThatFailsOnALaterAttemptIsFailedOnceTh
 	s.Empty(s.listed())
 }
 
+// A removal and a post of its document each keep to the whole document: what is listed is stored.
+func (s *KnowledgeFilesSuite) TestAPostWrittenWhileItsDocumentIsRemovedIsNotListedWithoutPassages() {
+	s.Require().Equal(http.StatusOK, s.post("p.md", 6))
+	id := s.listed()[0].Id
+	atStale, release, posted := make(chan struct{}), make(chan struct{}), make(chan int, 1)
+	s.knowledge.onceAfterDelete(func() {
+		// The post's delete of [3, 6) is held once its passages are written.
+		s.knowledge.onceBeforeDelete(func() error { close(atStale); <-release; return nil })
+		go func() { posted <- s.post("p.md", 3) }()
+		s.reached(atStale, "the post never wrote")
+	})
+
+	s.Require().Equal(http.StatusNoContent, s.remove(id))
+	close(release)
+	s.Equal(http.StatusOK, <-posted)
+
+	s.indexedWith("p.md", 3)
+}
+
+// postHeld begins a post of n sections that holdWrite holds, and returns once it is there.
+func (s *KnowledgeFilesSuite) postHeld(source string, n int) (write func(), posted chan int) {
+	writing, write := s.holdWrite()
+	posted = make(chan int, 1)
+	go func() { posted <- s.post(source, n) }()
+	s.reached(writing, "the post never wrote")
+	return write, posted
+}
+
+func (s *KnowledgeFilesSuite) TestAPostThatWritesAfterItsDocumentIsGoneIsADocumentOfItsOwn() {
+	s.Require().Equal(http.StatusOK, s.post("own.md", 6))
+	id := s.listed()[0].Id
+	write, posted := s.postHeld("own.md", 3)
+
+	s.Require().Equal(http.StatusNoContent, s.remove(id))
+	s.Empty(s.listed())
+	write()
+
+	s.Equal(http.StatusOK, <-posted)
+	s.indexedWith("own.md", 3)
+}
+
+// The post is done before the removal is, so it is removed with the rest.
+func (s *KnowledgeFilesSuite) TestAPostDoneWhileItsDocumentIsRemovedIsRemoved() {
+	s.Require().Equal(http.StatusOK, s.post("done.md", 2))
+	id := s.listed()[0].Id
+	write, posted := s.postHeld("done.md", 8)
+	s.knowledge.onceAfterDelete(func() {
+		write()
+		s.Equal(http.StatusOK, <-posted)
+	})
+
+	s.Require().Equal(http.StatusNoContent, s.remove(id))
+
+	s.Empty(s.listed())
+	s.Zero(s.passagesOf("done.md"))
+}
+
+// The post finished on the row the removal holds before the removal's passages went.
+func (s *KnowledgeFilesSuite) TestAPostThatMeetsARemovalsDeleteIsRemoved() {
+	s.Require().Equal(http.StatusOK, s.post("meets.md", 2))
+	id := s.listed()[0].Id
+	s.knowledge.onceBeforeDelete(func() error {
+		s.Equal(http.StatusOK, s.post("meets.md", 8))
+		return nil
+	})
+
+	s.Require().Equal(http.StatusNoContent, s.remove(id))
+
+	s.Empty(s.listed())
+	s.Zero(s.passagesOf("meets.md"))
+}
+
+// The delete took what the post wrote and then failed, so the post writes it again.
+func (s *KnowledgeFilesSuite) TestAPostThatMeetsARemovalThatFailsIsStored() {
+	s.Require().Equal(http.StatusOK, s.post("half.md", 6))
+	id := s.listed()[0].Id
+	atStale, release, posted := make(chan struct{}), make(chan struct{}), make(chan int, 1)
+	s.knowledge.onceBeforeDelete(func() error {
+		s.knowledge.onceBeforeDelete(func() error { close(atStale); <-release; return nil })
+		go func() { posted <- s.post("half.md", 3) }()
+		s.reached(atStale, "the post never wrote")
+		s.forgetStored("half.md")
+		return errors.New("down")
+	})
+
+	s.Require().Equal(http.StatusInternalServerError, s.remove(id))
+	s.Equal(KnowledgeDocumentStateFailed, s.listed()[0].State)
+	close(release)
+
+	s.Equal(http.StatusOK, <-posted)
+	s.indexedWith("half.md", 3)
+}
+
+// The write that stops part way has written some of its passages after the removal.
+func (s *KnowledgeFilesSuite) TestAPostThatFailsOnceItsDocumentIsGoneIsListedAsFailed() {
+	s.Require().Equal(http.StatusOK, s.post("part.md", 6))
+	id := s.listed()[0].Id
+	write, posted := s.postHeld("part.md", 3)
+	s.knowledge.onceAfterWrite(func() error { return errors.New("down") })
+
+	s.Require().Equal(http.StatusNoContent, s.remove(id))
+	write()
+
+	s.Equal(http.StatusInternalServerError, <-posted)
+	s.Equal(3, s.passagesOf("part.md"))
+	listed := s.listed()
+	s.Require().Len(listed, 1)
+	s.Equal(KnowledgeDocumentStateFailed, listed[0].State)
+	s.Equal(3, listed[0].Passages)
+
+	s.Require().Equal(http.StatusNoContent, s.remove(listed[0].Id))
+	s.Zero(s.passagesOf("part.md"))
+	s.Empty(s.listed())
+}
+
+func (s *KnowledgeFilesSuite) TestOnlyTheDocumentOfAPostThatWasRemovedIsWrittenAgain() {
+	writing, write := s.holdWrite()
+	posted := make(chan int, 1)
+	go func() {
+		posted <- s.serverClient.do(http.MethodPost, "/v1/agents/knowledge", map[string]any{
+			"namespace": s.namespace, "documents": []map[string]string{
+				{"source": "first.md", "text": sections(2)}, {"source": "second.md", "text": sections(3)},
+			},
+		}, nil)
+	}()
+	s.reached(writing, "the post never wrote")
+	for _, document := range s.listed() {
+		if document.Source == "second.md" {
+			s.Require().Equal(http.StatusNoContent, s.remove(document.Id))
+		}
+	}
+	// Gone from the base, it is there again only if the second write holds it.
+	s.knowledge.onceAfterWrite(func() error {
+		s.knowledge.onceBeforeWrite(func() { s.forgetStored("first.md") })
+		return nil
+	})
+	write()
+
+	s.Equal(http.StatusOK, <-posted)
+	s.Len(s.listed(), 2)
+	s.Zero(s.passagesOf("first.md"), "it was not removed, so it is not written again")
+	s.Equal(3, s.passagesOf("second.md"))
+	for _, document := range s.listed() {
+		s.Equal(KnowledgeDocumentStateIndexed, document.State)
+	}
+	s.Equal(2, s.recorded(), "each document is recorded once")
+}
+
+// Posts of one source at once do not make each other write again: the last to finish is kept.
+func (s *KnowledgeFilesSuite) TestTwoPostsOfASourceAtOnceAreEachWrittenOnce() {
+	write, posted := s.postHeld("both.md", 6)
+	s.Require().Equal(http.StatusOK, s.post("both.md", 3))
+	writes := 0
+	s.knowledge.onceAfterWrite(func() error {
+		s.knowledge.onceBeforeWrite(func() { writes++ })
+		return nil
+	})
+	write()
+
+	s.Equal(http.StatusOK, <-posted)
+	s.Zero(writes)
+	s.indexedWith("both.md", 6)
+}
+
+func (s *KnowledgeFilesSuite) TestAPostWrittenOverAnUploadThatBeganMeanwhileIsKept() {
+	write, posted := s.postHeld("over.md", 3)
+	status, sent, _ := s.upload("over.md", extractFixture(s.T(), "encrypted.pdf"), "")
+	s.Require().Equal(http.StatusAccepted, status)
+	s.settled(sent.Id)
+	write()
+
+	s.Equal(http.StatusOK, <-posted)
+	s.everyFileRead()
+	s.indexedWith("over.md", 3)
+}
+
+// The removal gives up first: it can take the post's document no more often than the post
+// writes it.
+func (s *KnowledgeFilesSuite) TestAPostOutlastsARemovalThatKeepsMeetingIt() {
+	s.Require().Equal(http.StatusOK, s.post("outlasts.md", 2))
+	id := s.listed()[0].Id
+	writes, held := 0, make(chan func(), 1)
+	var hold func()
+	hold = func() {
+		writes++
+		released := make(chan struct{})
+		s.knowledge.onceBeforeWrite(hold)
+		held <- sync.OnceFunc(func() { close(released) })
+		<-released
+	}
+	s.knowledge.onceBeforeWrite(hold)
+	posted := make(chan int, 1)
+	go func() { posted <- s.post("outlasts.md", 8) }()
+	write := <-held
+	var meet func() error
+	meet = func() error {
+		s.knowledge.onceBeforeDelete(nil)
+		write()
+		write = <-held
+		s.knowledge.onceBeforeDelete(meet)
+		return nil
+	}
+	s.knowledge.onceBeforeDelete(meet)
+
+	s.Equal(http.StatusConflict, s.remove(id))
+	s.knowledge.onceBeforeDelete(nil)
+	write()
+	(<-held)()
+
+	s.Equal(http.StatusOK, <-posted)
+	s.Equal(7, writes)
+	s.indexedWith("outlasts.md", 8)
+}
+
+// Removals one after another keep a post from finishing: it ends, says so, and what it wrote
+// is listed to be removed.
+func (s *KnowledgeFilesSuite) TestAPostOfADocumentRemovedAgainAndAgainIsAConflict() {
+	writes := 0
+	var again func()
+	again = func() {
+		writes++
+		listed := s.listed()
+		if s.Len(listed, 1) {
+			s.Equal(http.StatusNoContent, s.remove(listed[0].Id))
+		}
+		s.knowledge.onceBeforeWrite(again)
+	}
+	s.knowledge.onceBeforeWrite(again)
+
+	s.Equal(http.StatusConflict, s.post("never.md", 3))
+	s.knowledge.onceBeforeWrite(nil)
+
+	s.Equal(7, writes)
+	listed := s.listed()
+	s.Require().Len(listed, 1)
+	s.Equal(KnowledgeDocumentStateFailed, listed[0].State)
+	s.Require().Equal(http.StatusNoContent, s.remove(listed[0].Id))
+	s.Zero(s.passagesOf("never.md"))
+	s.Empty(s.listed())
+}
+
+// The base's rows go in a commit held until the post has written to the dropped base.
+func (s *KnowledgeFilesSuite) TestAPostWrittenWhileItsBaseIsDeletedIsADocumentOfItsOwn() {
+	s.Require().Equal(http.StatusOK, s.post("base.md", 6))
+	ctx := context.Background()
+	lock, err := s.store.GlobalDB().Conn(ctx)
+	s.Require().NoError(err)
+	defer func() { s.NoError(lock.Close()) }()
+	_, err = lock.ExecContext(ctx, "SELECT pg_advisory_lock(2380)")
+	s.Require().NoError(err)
+	s.trigger("hold_base_delete", "knowledge_documents", "DELETE", "OLD.customer_id = '"+s.customerID()+"'",
+		"PERFORM pg_advisory_xact_lock(2380);")
+	write, posted := s.postHeld("base.md", 3)
+	deleted := make(chan int, 1)
+	go func() {
+		deleted <- s.serverClient.do(http.MethodDelete, "/v1/agents/knowledge?namespace="+s.namespace, nil, nil)
+	}()
+	waits := func(event string) {
+		s.Require().Eventually(func() bool {
+			var waiting int
+			err := lock.QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event = ?",
+				event).Scan(&waiting)
+			return err == nil && waiting > 0
+		}, 30*time.Second, 5*time.Millisecond)
+	}
+	waits("advisory")
+	write()
+	waits("transactionid")
+	_, err = lock.ExecContext(ctx, "SELECT pg_advisory_unlock(2380)")
+	s.Require().NoError(err)
+
+	s.Equal(http.StatusNoContent, <-deleted)
+	s.Equal(http.StatusOK, <-posted)
+	s.indexedWith("base.md", 3)
+}
+
+// refuseInterrupts fails a read's word to the removal that it wrote after it, and nothing else.
+func (s *KnowledgeFilesSuite) refuseInterrupts() {
+	s.trigger("refuse_interrupts", "knowledge_documents", "UPDATE", "OLD.customer_id = '"+s.customerID()+
+		"' AND OLD.object_key LIKE 'removing:%' AND NEW.object_key LIKE 'removing:%' AND NEW.object_key <> OLD.object_key",
+		"RAISE EXCEPTION 'refused by the test';")
+}
+
+func (s *KnowledgeFilesSuite) TestAReadThatCannotTellTheRemovalItWroteTakesItBack() {
+	s.refuseInterrupts()
+	writing, write := s.holdWrite()
+	_, sent, _ := s.upload("untold.md", []byte(sections(8)), "")
+	s.reached(writing, "the read never wrote")
+	s.knowledge.onceAfterDelete(func() {
+		write()
+		s.everyFileRead()
+	})
+
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+
+	s.Zero(s.passagesOf("untold.md"))
+	s.Empty(s.listed())
+}
+
+// What it was overtaken by is a post, whose passages are not the read's to take.
+func (s *KnowledgeFilesSuite) TestAReadOvertakenByAPostLeavesItsPassages() {
+	writing, write := s.holdWrite()
+	_, _, _ = s.upload("posted.md", []byte(sections(3)), "")
+	s.reached(writing, "the read never wrote")
+	s.Require().Equal(http.StatusOK, s.post("posted.md", 3))
+	write()
+
+	s.everyFileRead()
+	s.indexedWith("posted.md", 3)
+}
+
+// A write that answers an error may have been kept.
+func (s *KnowledgeFilesSuite) TestAReadWhoseWriteFailedAfterItsDocumentIsGoneTakesItBack() {
+	writing, write := s.holdWrite()
+	s.knowledge.onceAfterWrite(func() error { return errors.New("down") })
+	_, sent, _ := s.upload("errs.md", []byte(sections(8)), "")
+	s.reached(writing, "the read never wrote")
+
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+	write()
+
+	s.everyFileRead()
+	s.Zero(s.passagesOf("errs.md"))
+	s.Empty(s.listed())
+}
+
+func (s *KnowledgeFilesSuite) TestAReadWhoseWriteFailsIsTriedAgain() {
+	s.knowledge.onceAfterWrite(func() error { return errors.New("down") })
+	_, sent, _ := s.upload("tried.md", []byte(sections(3)), "")
+
+	s.Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	s.Equal(3, s.passagesOf("tried.md"))
+}
+
 // A source written over and over keeps its removal from finishing: it ends, and says so.
 func (s *KnowledgeFilesSuite) TestARemovalOfADocumentWrittenAgainAndAgainIsAConflict() {
 	_, sent, _ := s.upload("busy.md", []byte(sections(3)), "")
@@ -621,6 +956,44 @@ func (s *KnowledgeFilesSuite) settled(id string) IndexedKnowledgeDocument {
 
 func (s *KnowledgeFilesSuite) remove(id string) int {
 	return s.serverClient.do(http.MethodDelete, "/v1/agents/knowledge/documents/"+id, nil, nil)
+}
+
+// post sends source as text of n sections, and returns the status.
+func (s *KnowledgeFilesSuite) post(source string, n int) int {
+	return s.serverClient.do(http.MethodPost, "/v1/agents/knowledge", map[string]any{
+		"namespace": s.namespace, "documents": []map[string]string{{"source": source, "text": sections(n)}},
+	}, nil)
+}
+
+// indexedWith checks source is the one document listed, indexed with n passages that are stored.
+func (s *KnowledgeFilesSuite) indexedWith(source string, n int) {
+	listed := s.listed()
+	s.Require().Len(listed, 1)
+	s.Equal(KnowledgeDocumentStateIndexed, listed[0].State)
+	s.Equal(n, listed[0].Passages)
+	s.Equal(n, s.passagesOf(source))
+}
+
+// forgetStored takes the passages of source out of the base behind the router's back.
+func (s *KnowledgeFilesSuite) forgetStored(source string) {
+	s.knowledge.mu.Lock()
+	defer s.knowledge.mu.Unlock()
+	for _, passages := range s.knowledge.passages {
+		for id, passage := range passages {
+			if strings.HasPrefix(passage.Source, source+" > ") {
+				delete(passages, id)
+			}
+		}
+	}
+}
+
+// recorded is how many of the app's documents' writes are on its history.
+func (s *KnowledgeFilesSuite) recorded() int {
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.AuditEntry)(nil)).
+		Where("customer_id = ? AND resource_type = ? AND action = ?", s.customerID(), store.AuditKnowledge, store.AuditCreated).
+		Count(context.Background())
+	s.Require().NoError(err)
+	return count
 }
 
 // holdWrite holds the next write to the base until write is called, and closes writing once
