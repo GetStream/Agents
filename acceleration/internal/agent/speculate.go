@@ -257,7 +257,12 @@ func (a *Agent) runSpeculation(spec *speculation) {
 	if abandoned || closed {
 		stream.Close()
 	}
-	a.pump(turnID, stream)
+	a.pump(turnID, stream, func() (*llm.Stream, error) {
+		if err := spec.ctx.Err(); err != nil {
+			return nil, err
+		}
+		return spec.harness.Respond(spec.ctx, spec.turn)
+	})
 }
 
 // adoptSpeculation answers a turn with the reply already started for it, and reports
