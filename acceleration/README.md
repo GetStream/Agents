@@ -2728,6 +2728,16 @@ Only Twilio and Telnyx also `attach`, which is the inbound direction: pointing a
 trunk so calling it reaches an agent. For the other five that is a per-vendor application
 rather than a property of the number, and it is declared missing rather than half-done.
 
+A Twilio number attached before the router answered its calls itself still has its old voice URL.
+`router phone move-twilio` points those numbers at `/v1/phone/hooks/twilio`, as an attach does now;
+attaching such a number again does the same for that one number. Run it with the router's own
+config: first with no flag, which only lists each number and what it would do; then with `--apply
+--one <e164>`, and call that number; then with `--apply` for the rest (`--app <id>` keeps one Stream
+app's). A number already on the webhook is left alone, and so is one whose trunk credentials were
+not kept (`no stored bridge`): it needs a detach and an attach. It refuses before it asks Twilio
+anything when the webhook token, an https `ROUTER_PUBLIC_URL`, the Twilio account or the keyring
+is missing.
+
 A customer who already has numbers and a SIP trunk at their own carrier can call out from
 them without buying anything here. `POST /v1/phone/trunks` stores the trunk (host, port,
 transport, username, codecs, and whether it accepts an INVITE without SDP); the password is
