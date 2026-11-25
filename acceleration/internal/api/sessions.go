@@ -1381,6 +1381,12 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 		// The fork's own call is agent:<fork id>, never the call the parent was on.
 		spec = parent.Live.Spec().Written().Holding(session.Call{})
 		spec.Phone, spec.Edge = nil, nil
+		// Nor what the parent was as one conversation: the placed call it was, the hand-out it
+		// answered, and when it first opened if it was carried on.
+		spec.Voicemail, spec.Navigating = nil, false
+		spec.CampaignID, spec.ContactID = "", ""
+		spec.Dispatched, spec.HandedOutBy = false, ""
+		spec.Reopened = time.Time{}
 		parentID = parent.Live.ID()
 		if spec.Incognito {
 			return session.Spec{}, stack.Wrap(errors.New(
@@ -1465,6 +1471,10 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 	if recall != nil && (request.Messages == nil || *request.Messages) {
 		spec.PersistConversation = true
 		spec.Recall = recall
+	}
+	// Nothing said before the parent opened comes across either.
+	if request.Messages != nil && !*request.Messages {
+		spec.History = nil
 	}
 	return spec, nil
 }

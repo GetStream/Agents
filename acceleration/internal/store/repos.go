@@ -114,7 +114,7 @@ func (s *Store) wire() {
 		AgentConfigs:                   &AgentConfigs{store: s},
 		AgentLogs:                      &AgentLogs{store: s},
 		AppOrganizations:               &AppOrganizations{store: s},
-		Apps:                           &Apps{store: s},
+		Apps:                           &Apps{store: s, guests: newSeen(seenCapacity)},
 		AuditEntries:                   &AuditEntries{store: s},
 		BranchMessages:                 &BranchMessages{store: s},
 		BranchSwitches:                 &BranchSwitches{store: s},

@@ -10087,7 +10087,7 @@ type SkillRequest struct {
 	// Instructions The full prompt, which only the subagent sees.
 	Instructions string `json:"instructions"`
 
-	// Name How the config names it, which is unique among that config's own skills.
+	// Name How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox.
 	Name string `json:"name"`
 }
 

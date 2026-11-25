@@ -169,12 +169,14 @@ and the advice is the opposite one.
 
 The default is permissive in both directions. A key that is not in the document allows,
 which is what lets a setting be added without rewriting every row, and an app that resolves
-to nothing allows, which covers `noauth` and `proxy` — neither reads these tables, so
-neither has settings to read, and a `proxy` deployment's apps live in Stream's tables
-anyway. The levels are therefore only enforced in `api_key` mode, which is the only mode
-where the app is one of these rows.
+to nothing allows, which covers `noauth` and `proxy`: neither resolves a key, and a `proxy`
+deployment's apps mostly live in Stream's tables. The levels are therefore enforced in
+`api_key` mode, with one exception. A guest the router minted is known by its row in `users`,
+and `allow_guest` applies to it in `proxy` mode too, from the settings of the app's row, if
+it has one, held for a minute. A caller whose id could be such a guest's is answered 500
+while that row cannot be read, and a minted guest behind a proxy is while the settings cannot.
 
-The read costs nothing extra. It is joined into the same query that resolves the API key,
+For a key the read costs nothing extra. It is joined into the same query that resolves the API key,
 which was already happening on every authenticated request.
 
 ## Why a token and not a signed request

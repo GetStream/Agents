@@ -255,7 +255,7 @@ func (s *Service) Forget(ctx context.Context, document store.KnowledgeDocument) 
 // is a second file and the read of the first can tell it was overtaken.
 func objectKey(customerID, source string) string {
 	name := path.Base(strings.ReplaceAll(source, "\\", "/"))
-	if name == "." || name == "/" || name == "" {
+	if name == "." || name == ".." || name == "/" || name == "" {
 		name = "file"
 	}
 	return customerID + "/" + uuid.NewString() + "/" + name

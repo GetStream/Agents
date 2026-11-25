@@ -114,6 +114,9 @@ type dataTable struct {
 	order string
 	// shard is a table kept in the shards rather than the shared database.
 	shard bool
+	// moving is a shard table that was kept in the shared database, where its older rows are
+	// until they are copied over: an export reads them there too.
+	moving bool
 	// across is the column a row is known by in every deployment, for a table whose primary
 	// key each deployment draws from a sequence of its own, so the same id is two rows in
 	// two deployments. Such a row is imported without its id, and is written once: importing
@@ -224,8 +227,10 @@ var dataTables = []dataTable{
 	// they hid and the switches that hid it go with their session.
 	{name: "agent_branch_switches", customer: "customer_id", shard: true, references: ofSession},
 	{name: "agent_branch_messages", customer: "customer_id", shard: true, references: ofSession},
-	// Nothing points at a log's id, so a copied log is given one of this deployment's.
-	{name: "agent_logs", customer: "customer_id", copied: "source_id"},
+	// Nothing points at a log's id, so a copied log is given one of this deployment's
+	// (20261206120000_agent_logs_source_id.sql). Every database draws ids of its own range
+	// (logRangeBits), so the source's id names one row however many databases it read.
+	{name: "agent_logs", customer: "customer_id", copied: "source_id", shard: true, moving: true},
 	// No foreign key points at a request's id. An agent log row names it as text, and
 	// AgentLogs.Get only takes a request's error by that number from a row that carries none of
 	// its own and whose time and agent are the request's, so a moved row cannot show the error
@@ -537,6 +542,11 @@ func (s *Store) ExportCustomer(ctx context.Context, customerID string, write fun
 		}
 		for _, shardTx := range shards {
 			if err := s.exportTable(ctx, shardTx, table, customerID, write); err != nil {
+				return 0, err
+			}
+		}
+		if table.moving && s.Sharded() {
+			if err := s.exportTable(ctx, tx, table, customerID, write); err != nil {
 				return 0, err
 			}
 		}
@@ -1277,7 +1287,7 @@ func cachedKeys(customerID, table string, row []byte) []string {
 		}
 		return keys
 	case "users":
-		return []string{userKey(customerID, text("id"))}
+		return []string{userKey(customerID, text("id")), mintedKey(customerID, text("id"))}
 	}
 	return []string{skillsKey(customerID, text("config_id"))}
 }
@@ -2720,7 +2730,7 @@ func dataTableByName(name string) (dataTable, bool) {
 // an export would write over.
 func (s *Store) HoldingTable(ctx context.Context, customerID string) (string, error) {
 	for _, table := range dataTables {
-		if table.customer == "" || table.shard || table.name == "opt_outs" {
+		if table.customer == "" || (table.shard && !table.moving) || table.name == "opt_outs" {
 			continue
 		}
 		where := table.customer + " = ?"
