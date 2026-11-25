@@ -85,13 +85,20 @@ func (s *TwilioHookSuite) TestACallIsSentToTheNumbersOwnTrunkWithItsCredentialsI
 func (s *TwilioHookSuite) TestACallNotSignedWithTheAccountsTokenOverThisURLIsRefused() {
 	s.line.attach(s.e164, "sip:"+s.e164+"@trunk.sip.example.test", "trunk-user", "trunk-password")
 	form := s.line.call(s.e164)
-	for name, signature := range map[string]string{
-		"unsigned":           "",
-		"another token":      twiliosig.Sign(rand.Text(), s.line.signedURL(twilioCallHookPath), form),
-		"another path":       twiliosig.Sign(s.twilioAuthToken, s.line.signedURL(twilioEventsHookPath), form),
-		"another public URL": twiliosig.Sign(s.twilioAuthToken, "http://localhost:9090"+twilioCallHookPath, form),
+	// The signature is checked before the account: an unsigned call is not answered TwiML.
+	onAnother := s.line.call(s.e164)
+	onAnother.Set("AccountSid", twilioAccount())
+	for name, sent := range map[string]struct {
+		form      url.Values
+		signature string
+	}{
+		"unsigned":                  {form, ""},
+		"unsigned, another account": {onAnother, ""},
+		"another token":             {form, twiliosig.Sign(rand.Text(), s.line.signedURL(twilioCallHookPath), form)},
+		"another path":              {form, twiliosig.Sign(s.twilioAuthToken, s.line.signedURL(twilioEventsHookPath), form)},
+		"another public URL":        {form, twiliosig.Sign(s.twilioAuthToken, "http://localhost:9090"+twilioCallHookPath, form)},
 	} {
-		status, _, body := s.line.deliver(form, signature)
+		status, _, body := s.line.deliver(sent.form, sent.signature)
 
 		s.Equal(http.StatusUnauthorized, status, name)
 		s.NotContains(body, "trunk-password", name)
@@ -114,6 +121,20 @@ func (s *TwilioHookSuite) TestASignedCallOnAnotherAccountIsHungUp() {
 	s.True(s.loggedLine("another account than TWILIO_ACCOUNT_SID", "account_sid="+other))
 }
 
+// A signed call that names no account is not on TWILIO_ACCOUNT_SID's.
+func (s *TwilioHookSuite) TestASignedCallThatNamesNoAccountIsHungUp() {
+	s.line.attach(s.e164, "sip:"+s.e164+"@trunk.sip.example.test", "trunk-user", "trunk-password")
+	form := s.line.call(s.e164)
+	form.Del("AccountSid")
+
+	status, _, body := s.line.deliver(form, s.line.sign(form))
+
+	s.Equal(http.StatusOK, status)
+	s.Contains(body, "<Response><Hangup/></Response>")
+	s.NotContains(body, "trunk-password")
+	s.True(s.loggedLine("another account than TWILIO_ACCOUNT_SID"))
+}
+
 // With no account configured, a signed call that names none must not match "".
 func (s *TwilioHookSuite) TestWithoutAConfiguredAccountNoCallIsAnswered() {
 	s.line.attach(s.e164, "sip:"+s.e164+"@trunk.sip.example.test", "trunk-user", "trunk-password")
@@ -133,15 +154,20 @@ func (s *TwilioHookSuite) TestWithoutAConfiguredAccountNoCallIsAnswered() {
 
 func (s *TwilioHookSuite) TestASignedCallThatIsNotInboundIsHungUp() {
 	s.line.attach(s.e164, "sip:"+s.e164+"@trunk.sip.example.test", "trunk-user", "trunk-password")
-	form := s.line.call(s.e164)
-	form.Set("Direction", "outbound-api")
+	for logged, direct := range map[string]func(url.Values){
+		"direction=outbound-api": func(form url.Values) { form.Set("Direction", "outbound-api") },
+		`direction=""`:           func(form url.Values) { form.Del("Direction") },
+	} {
+		form := s.line.call(s.e164)
+		direct(form)
 
-	status, _, body := s.line.deliver(form, s.line.sign(form))
+		status, _, body := s.line.deliver(form, s.line.sign(form))
 
-	s.Equal(http.StatusOK, status)
-	s.Contains(body, "<Hangup/>")
-	s.NotContains(body, "trunk-password")
-	s.True(s.loggedLine("not inbound", "direction=outbound-api"))
+		s.Equal(http.StatusOK, status, logged)
+		s.Contains(body, "<Hangup/>", logged)
+		s.NotContains(body, "trunk-password", logged)
+		s.True(s.loggedLine("not inbound", logged), logged)
+	}
 }
 
 func (s *TwilioHookSuite) TestASignedCallThatNamesNoNumberIsHungUp() {
