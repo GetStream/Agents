@@ -58,6 +58,7 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	// for it is matched against.
 	spec.Caller = CallerFrom(ctx)
 	spec.CallerKind = KindFrom(ctx)
+	spec.NameProject(request.Body.ProjectId, spec.CallerKind)
 	created, err := s.sessions.Create(ctx, spec)
 	if errors.Is(err, session.ErrSessionExists) {
 		return nil, conflict(err.Error())
@@ -443,7 +444,7 @@ func (s *Server) registerSessionCreate(api huma.API) {
 		DefaultStatus: http.StatusCreated,
 		Responses: map[string]*huma.Response{
 			"201": {Description: "The agent is in the call"},
-			"409": errorResponse("A session with that id already exists, or the call placed for this phone session ended without an answer (call_unanswered)"),
+			"409": errorResponse("A session with that id already exists, another session holds the conversation it names open, or the call placed for this phone session ended without an answer (call_unanswered)"),
 		},
 		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 	}, s.createSession)

@@ -255,16 +255,35 @@ func (s *ChannelsSuite) TestMetasWebhookCheckIsAnsweredWithItsChallenge() {
 	line := s.connect(s.number())
 
 	status, body := s.get(line.WebhookUrl + "?hub.mode=subscribe&hub.verify_token=" +
-		url.QueryEscape(s.challenge()) + "&hub.challenge=nonce-42")
+		url.QueryEscape(s.challenge()) + "&hub.challenge=1158201444")
 
 	s.Equal(http.StatusOK, status)
-	s.Equal("nonce-42", string(body))
+	s.Equal("1158201444", string(body))
+}
+
+// Meta is the one provider that checks a URL with a GET, so a line of another kind agrees to
+// none, whatever verify token it was connected with.
+func (s *ChannelsSuite) TestAWebhookCheckOfALineThatIsNotWhatsAppsIsRefused() {
+	for _, challenge := range []string{"", s.challenge()} {
+		var line ChannelAccount
+		s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels",
+			ConnectChannelRequest{
+				Kind: string(channels.IMessage), Number: s.number(), Token: pointerTo("linq-key"),
+				Signing: pointerTo("whsec_bGlucQ=="), Challenge: pointerTo(challenge),
+			}, &line))
+
+		status, body := s.get(line.WebhookUrl + "?hub.mode=subscribe&hub.verify_token=" +
+			url.QueryEscape(challenge) + "&hub.challenge=1158201444")
+
+		s.Equal(http.StatusForbidden, status, "verify token %q", challenge)
+		s.NotContains(string(body), "1158201444", "verify token %q", challenge)
+	}
 }
 
 func (s *ChannelsSuite) TestAWebhookCheckWithTheWrongTokenIsRefused() {
 	line := s.connect(s.number())
 
-	status, _ := s.get(line.WebhookUrl + "?hub.mode=subscribe&hub.verify_token=guessed&hub.challenge=nonce")
+	status, _ := s.get(line.WebhookUrl + "?hub.mode=subscribe&hub.verify_token=guessed&hub.challenge=1158201444")
 
 	s.Equal(http.StatusForbidden, status)
 }

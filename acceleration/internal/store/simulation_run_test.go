@@ -135,6 +135,30 @@ func (s *StoreSuite) TestRunsAreSelectedBySimulationAndState() {
 	s.Equal(second.ID, limited[0].ID, "newest first")
 }
 
+func (s *StoreSuite) TestAListOfRunsHoldsFiveHundredAtMost() {
+	simulation := s.simulation("app")
+	runs := make([]SimulationRun, 501)
+	for i := range runs {
+		runs[i] = SimulationRun{
+			ID: newID(), CustomerID: "app", SimulationID: simulation.ID, State: SimulationPassed,
+			Cases: 1, Mode: SimulationText, StartedAt: time.Now().Add(-time.Duration(i) * time.Second),
+		}
+	}
+	_, err := s.store.global.NewInsert().Model(&runs).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	listed, err := s.store.SimulationRuns.Select(s.ctx, "app", SimulationRunFilter{Limit: 500})
+	s.Require().NoError(err)
+	s.Len(listed, 500)
+	listed, err = s.store.SimulationRuns.Select(s.ctx, "app", SimulationRunFilter{Limit: 1_000_000_000})
+	s.Require().NoError(err)
+	s.Require().Len(listed, 500)
+	s.Equal(runs[0].ID, listed[0].ID, "newest first")
+	listed, err = s.store.SimulationRuns.Select(s.ctx, "app", SimulationRunFilter{})
+	s.Require().NoError(err)
+	s.Len(listed, 50)
+}
+
 func (s *StoreSuite) TestARunWithoutConversationsIsNotStarted() {
 	simulation := s.simulation("app")
 	run := SimulationRun{CustomerID: "app", SimulationID: simulation.ID, Mode: SimulationText}
