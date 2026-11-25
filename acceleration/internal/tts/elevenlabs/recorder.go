@@ -78,6 +78,9 @@ func NewRecorder(options RecorderOptions) (*Recorder, error) {
 	if options.VoiceID == "" {
 		options.VoiceID = DefaultVoiceID
 	}
+	if err := checkVoice(options.VoiceID); err != nil {
+		return nil, err
+	}
 	if options.Model == "" {
 		options.Model = RecorderModel
 	}
@@ -131,6 +134,9 @@ func (r *Recorder) Record(ctx context.Context, recording tts.Recording) (tts.Rec
 	voice := recording.Voice
 	if voice == "" {
 		voice = r.options.VoiceID
+	}
+	if err := checkVoice(voice); err != nil {
+		return tts.Recorded{}, err
 	}
 	format := recording.Format
 	if format == "" {

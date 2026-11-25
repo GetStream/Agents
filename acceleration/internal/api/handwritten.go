@@ -704,7 +704,7 @@ func documentHandWritten(api huma.API) {
 		},
 		Responses: map[string]*huma.Response{
 			"200": {Description: "The challenge, echoed", Content: map[string]*huma.MediaType{"text/plain": {Schema: &huma.Schema{Type: huma.TypeString}}}},
-			"403": {Description: "That is not this line's verify token"},
+			"403": {Description: "The query is not this line's check: another mode or verify token, a challenge that is not digits, or a line that is not WhatsApp's"},
 			"410": {Description: "No line is connected at this address"},
 		},
 	})

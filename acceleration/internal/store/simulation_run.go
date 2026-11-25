@@ -70,8 +70,12 @@ type SimulationRunFilter struct {
 	Limit int
 }
 
-// defaultRunLimit is how many runs are listed when nobody said.
-const defaultRunLimit = 50
+// defaultRunLimit is how many runs are listed when nobody said, and maxRunLimit the most one
+// list holds.
+const (
+	defaultRunLimit = 50
+	maxRunLimit     = 500
+)
 
 // Validate refuses a run the table would refuse.
 func (r *SimulationRun) Validate() error {
@@ -188,10 +192,6 @@ func (r *SimulationRuns) Select(ctx context.Context, customerID string, filter S
 	if customerID == "" {
 		return nil, stack.Wrap(errCustomerRequired)
 	}
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = defaultRunLimit
-	}
 
 	var runs []SimulationRun
 	query := r.store.global.NewSelect().Model(&runs).
@@ -203,7 +203,7 @@ func (r *SimulationRuns) Select(ctx context.Context, customerID string, filter S
 		query = query.Where("state = ?", filter.State)
 	}
 
-	if err := query.Order("started_at DESC").Limit(limit).Scan(ctx); err != nil {
+	if err := query.Order("started_at DESC").Limit(ClampLimit(filter.Limit, defaultRunLimit, maxRunLimit)).Scan(ctx); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: simulation runs: %w", err))
 	}
 	return runs, nil
