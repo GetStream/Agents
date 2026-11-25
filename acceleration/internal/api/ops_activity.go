@@ -62,6 +62,7 @@ type OrganizationProgress struct {
 	OrganizationId string            `json:"organization_id" doc:"The organization."`
 	FurthestStep   ActivityStep      `json:"furthest_step" doc:"The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since."`
 	Steps          []ActivityStepDay `json:"steps" nullable:"false" doc:"Every step the organization's apps ever had a request answered in, whenever, not only from from to to, of all its apps even when app_id is set, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them."`
+	Funded         *bool             `json:"funded,omitempty" doc:"The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the credit granted minus the trial credit is above zero. Spending the credit does not lower it. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer."`
 }
 
 // ActivityPage is a page of every organization's activity.
@@ -145,6 +146,7 @@ func (s *Server) listActivity(ctx context.Context, request *listActivityRequest)
 	if answer.Organizations, err = s.organizationProgress(ctx, organizations, request.From, request.To); err != nil {
 		return nil, err
 	}
+	s.markFunded(ctx, answer.Organizations, organizations)
 	if more {
 		last := kept[len(kept)-1]
 		answer.NextCursor = encodeCursor(activityCursor{ActivityPosition: store.ActivityPosition{
@@ -183,6 +185,23 @@ func (s *Server) organizationProgress(ctx context.Context, organizations []strin
 	return progress, nil
 }
 
+// markFunded sets funded on each organization of progress, from one read of the usage service
+// for organizations, the ids progress holds. A deployment without one, or a service that did not answer, leaves it unset: how far
+// the organizations got is still worth answering.
+func (s *Server) markFunded(ctx context.Context, progress []OrganizationProgress, organizations []string) {
+	funded, ok, err := s.policies.Funded(ctx, organizations)
+	if err != nil {
+		s.logger.Error("could not read whether organizations are funded from the usage service", "organizations", len(organizations), "error", err)
+	}
+	if !ok {
+		return
+	}
+	for i := range progress {
+		value := funded[progress[i].OrganizationId]
+		progress[i].Funded = &value
+	}
+}
+
 // registerActivity declares Stream staff's read of every organization's activity, which takes
 // the ops key.
 func (s *Server) registerActivity(api huma.API) {
@@ -204,9 +223,8 @@ func (s *Server) registerActivity(api huma.API) {
 			"dashboard_reads. dashboard_reads alone is opening the dashboard's Agents tab.\n" +
 			"- API calls: answered requests, requests less refused, of every area but dashboard_reads, hooks_in " +
 			"and webhooks_out. Those are the dashboard's own reads, vendors' hooks and the router's own deliveries.\n" +
-			"- Production: funded, and conversations answered, an item of conversations with requests above " +
-			"refused, on 5 of the last 7 UTC days. Funded is credit that is not trial credit: the usage service " +
-			"holds it, and the router does not compute it, so join it from there. The 5 of 7 is a judgement, " +
+			"- Production: funded true on the organization, and conversations answered, an item of " +
+			"conversations with requests above refused, on 5 of the last 7 UTC days. The 5 of 7 is a judgement, " +
 			"not a measurement.\n" +
 			"- Churned: was in production, then had no request answered in conversations or model_api for 30 " +
 			"days.\n\n" +

@@ -2105,6 +2105,8 @@ func (s *RouterSuite) policies(logger *slog.Logger) *policy.Enforcer {
 type usageFront struct {
 	server *httptest.Server
 	down   atomic.Bool
+	// stalled, while set, takes each call and answers none until the channel is closed.
+	stalled atomic.Pointer[chan struct{}]
 }
 
 func newUsageFront(t *testing.T, service *usagetest.Service) *usageFront {
@@ -2114,6 +2116,13 @@ func newUsageFront(t *testing.T, service *usagetest.Service) *usageFront {
 	front := &usageFront{}
 	front.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if front.down.Load() {
+			panic(http.ErrAbortHandler)
+		}
+		if stalled := front.stalled.Load(); stalled != nil {
+			select {
+			case <-*stalled:
+			case <-r.Context().Done():
+			}
 			panic(http.ErrAbortHandler)
 		}
 		proxy.ServeHTTP(w, r)
