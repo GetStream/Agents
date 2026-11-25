@@ -207,6 +207,47 @@ func (s *SessionOwnershipSuite) TestAConversationBegunBeforeTheConfigNamedItsAge
 	s.Equal("support-bot", resumed.UserId, "the user the agent writes as is the config's")
 }
 
+// Defect (R1.1): a session carried on by its id after it ended, or forked from its row, is
+// rebuilt from the config, whose identity it lost: it wrote as the default user. Each takes the
+// config's user and name; the agent id stays the conversation's, and a fork's is its own.
+func (s *SessionOwnershipSuite) TestASessionCarriedOnOrForkedWritesAsTheConfigsUser() {
+	name, identity := s.identifiedConfig()
+	guest := s.data.createGuest()
+	opened := guest.createSession(CreateSessionRequest{Agent: &name})
+	var live Session
+	s.Require().Equal(http.StatusCreated, guest.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/fork", map[string]any{}, &live))
+	guest.stopSession(opened.Id)
+	var stored Session
+	s.Require().Equal(http.StatusCreated, guest.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/fork", map[string]any{}, &stored))
+	var resumed Session
+	s.Require().Equal(http.StatusOK, guest.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/resume", map[string]any{}, &resumed))
+
+	s.Equal(identity.AgentId, resumed.AgentId, "resumed")
+	for kind, carried := range map[string]Session{"resumed": resumed, "a live parent's fork": live, "a stored parent's fork": stored} {
+		s.Equal(identity.UserId, carried.UserId, kind)
+		s.Equal(identity.UserName, s.agentNameOf(carried), kind)
+	}
+	for kind, forked := range map[string]Session{"a live parent's fork": live, "a stored parent's fork": stored} {
+		s.Regexp(routerMadeAgentID, forked.AgentId, kind)
+	}
+}
+
+// Defect (R1.1): a fork naming another config runs on it, and so writes as that config's user.
+func (s *SessionOwnershipSuite) TestAForkNamingAConfigWritesAsItsUser() {
+	plain := "plain-" + s.utils.uuid()
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", map[string]any{"name": plain}, nil))
+	name, identity := s.identifiedConfig()
+	guest := s.data.createGuest()
+	opened := guest.createSession(CreateSessionRequest{Agent: &plain})
+
+	var forked Session
+	s.Require().Equal(http.StatusCreated, guest.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/fork",
+		ForkSessionRequest{Agent: &name}, &forked))
+
+	s.Equal(identity.UserId, forked.UserId)
+	s.Equal(identity.UserName, s.agentNameOf(forked))
+}
+
 // Control: what a session of a config that names no agent is, as on aa4c2d4d9. A device's
 // session is a nameless agent of the router's own making, fresh each time, writing as the
 // default user; a backend's voice session is keyed under its call.

@@ -861,6 +861,7 @@ func (s *Server) reopenedFromRow(ctx context.Context, id string) (session.Spec, 
 			return session.Spec{}, failure
 		}
 		spec = session.FromConfig(*config)
+		actAs(&spec, config.Identity)
 	}
 	spec.ID = row.ID
 	spec.Reopened = row.CreatedAt
@@ -994,14 +995,21 @@ func sessionsOf(ctx context.Context, found []session.Found, calls map[string]sto
 // agent:<agent id> to the newest session under that id that keeps none (routeArrivingMessage),
 // so one shared agent id would hand any Chat user's message to the newest visitor's session.
 func identifyAs(spec *session.Spec, identity store.AgentIdentity) {
+	actAs(spec, identity)
+	if identity.AgentID != "" && spec.AgentID == "" && spec.ConversationID == "" && !spec.Incognito {
+		spec.AgentID = identity.AgentID
+	}
+}
+
+// actAs gives a session the user its config's identity sets wherever it named none
+// (identifyAs). A session carried on from its row or forked is rebuilt from the config as it is
+// now, and its row keeps no agent user, so it takes the config's too.
+func actAs(spec *session.Spec, identity store.AgentIdentity) {
 	if identity.UserID != "" && (spec.UserID == "" || spec.UserID == session.DefaultUserID) {
 		spec.UserID = identity.UserID
 	}
 	if identity.UserName != "" && (spec.UserName == "" || spec.UserName == session.DefaultUserName) {
 		spec.UserName = identity.UserName
-	}
-	if identity.AgentID != "" && spec.AgentID == "" && spec.ConversationID == "" && !spec.Incognito {
-		spec.AgentID = identity.AgentID
 	}
 }
 
@@ -1452,6 +1460,7 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 		spec = session.Spec{AgentName: row.AgentName, ConfigID: row.ConfigID}
 		if current != nil {
 			spec = session.FromConfig(*current)
+			actAs(&spec, current.Identity)
 		}
 		spec.Text = true
 		// The conversation goes on after its history, which a greeting would interrupt:
@@ -1483,6 +1492,7 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 	// fork and a half-replaced agent would be neither one.
 	if config != nil {
 		fresh := session.FromConfig(*config)
+		actAs(&fresh, config.Identity)
 		fresh.Text = true
 		fresh.Title, fresh.Description = spec.Title, spec.Description
 		fresh.Project, fresh.ProjectTag, fresh.Custom = spec.Project, spec.ProjectTag, spec.Custom
