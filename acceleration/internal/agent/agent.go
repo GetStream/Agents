@@ -1683,7 +1683,7 @@ func (a *Agent) consumeEdge() {
 		}
 		// With no money to hear anyone, the call ends, as it does when a speech-to-speech model is
 		// refused it. Closing waits for this loop.
-		if unpaid = over && refusedMoney(err) && !a.hearsAnother(inbound.Participant.ID); unpaid {
+		if unpaid = over && refusedMoney(err) && !a.hearsAnyone(); unpaid {
 			goroutine.Go(a.ctx, func() {
 				if err := a.Close(); err != nil {
 					a.logger.Error("could not leave after the transcriber was refused", "error", err)
@@ -1731,22 +1731,18 @@ func (a *Agent) keepRefusals(participantID string, session *sttrouter.Session) {
 	since := session.RefusedSince()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if !since.IsZero() && a.listeners[participantID] == session {
+	_, gone := a.departed[participantID]
+	if !since.IsZero() && !gone && a.listeners[participantID] == session {
 		a.unheardCallers[participantID] = unheardCaller{since: since, last: a.now()}
 	}
 }
 
-// hearsAnother reports whether someone else on the call has a transcriber that is not refused.
-func (a *Agent) hearsAnother(participantID string) bool {
+// hearsAnyone reports whether anyone on the call has a transcriber that is not refused.
+func (a *Agent) hearsAnyone() bool {
 	a.mu.Lock()
-	others := make([]*sttrouter.Session, 0, len(a.listeners))
-	for id, listener := range a.listeners {
-		if id != participantID {
-			others = append(others, listener)
-		}
-	}
+	listeners := slices.Collect(maps.Values(a.listeners))
 	a.mu.Unlock()
-	return slices.ContainsFunc(others, func(other *sttrouter.Session) bool { return other.RefusedSince().IsZero() })
+	return slices.ContainsFunc(listeners, func(listener *sttrouter.Session) bool { return listener.RefusedSince().IsZero() })
 }
 
 // refusedMoney reports whether err refuses work because money ran out or the organization is
@@ -1782,7 +1778,6 @@ func (a *Agent) attend(attendance Attendance) {
 	a.mu.Lock()
 	a.departed[attendance.Participant.ID] = time.Time{}
 	listener := a.listeners[attendance.Participant.ID]
-	delete(a.listeners, attendance.Participant.ID)
 	delete(a.unheardCallers, attendance.Participant.ID)
 	a.mu.Unlock()
 	if listener != nil {
