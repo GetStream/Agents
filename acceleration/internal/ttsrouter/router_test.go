@@ -1304,6 +1304,15 @@ func (s *TTSRouterSuite) TestAVoiceThatIsNoElevenLabsIdIsNotHandedToElevenLabs()
 		s.Equal("inworld", session.Provider(), voice)
 		s.Len(built, 1, "nothing was built for ElevenLabs")
 		s.Equal(voice, built[0].Voice, "inworld is handed the voice as asked")
+
+		// With nobody else to ask, the caller hears it as their own mistake.
+		_, err = router.Start(s.ctx, Request{
+			CustomerID: "acme",
+			Voice:      voice,
+			Options:    options.TTS{Providers: []string{"elevenlabs"}},
+		})
+		s.ErrorIs(err, routing.ErrRequest, voice)
+		s.ErrorIs(err, voiceid.ErrInvalid, voice)
 	}
 }
 
