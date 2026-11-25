@@ -250,7 +250,7 @@ func (s *Server) fetchDocument(ctx context.Context, source FileSource) ([]byte, 
 	}
 	if err != nil {
 		recordFailure(ctx, withoutURL(err), "")
-		return nil, "", invalidRequest(fmt.Sprintf("the file could not be fetched: %v", err))
+		return nil, "", invalidRequest(fmt.Sprintf("the file could not be used: %v", err))
 	}
 	fallback := "document"
 	if parsed, err := url.Parse(source.Url); err == nil {
