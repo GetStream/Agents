@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"github.com/redis/rueidis"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 )
 
 // holdFor is how long a node's claim on a session lasts unrenewed. A node that crashes
@@ -241,7 +243,7 @@ func (d *Directory) Hold(ctx context.Context, customerID string, app int64, sess
 
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	_, err := inTime(ctx, func() (struct{}, error) { return struct{}{}, d.write(ctx, key, held) })
+	_, err := InTime(ctx, func() (struct{}, error) { return struct{}{}, d.write(ctx, key, held) })
 	if err != nil {
 		d.logger.Warn("could not say this node is running a session",
 			"customer", customerID, "session", sessionID, "error", err)
@@ -252,19 +254,19 @@ func (d *Directory) Hold(ctx context.Context, customerID string, app int64, sess
 // waits for each to open.
 const callTimeout = time.Second
 
-// inTime is what do answers, or ctx's error once that ends. A client redialling Redis has every
+// InTime is what do answers, or ctx's error once that ends. A client redialling Redis has every
 // caller on the connection wait for the dial of the one that began it, whatever their own context
 // says: do is left to wait on its own, and that dial ends it.
-func inTime[T any](ctx context.Context, do func() (T, error)) (T, error) {
+func InTime[T any](ctx context.Context, do func() (T, error)) (T, error) {
 	type answer struct {
 		answered T
 		err      error
 	}
 	answers := make(chan answer, 1)
-	go func() {
+	goroutine.Go(ctx, func() {
 		answered, err := do()
 		answers <- answer{answered, err}
-	}()
+	})
 	select {
 	case got := <-answers:
 		return got.answered, got.err
@@ -275,7 +277,7 @@ func inTime[T any](ctx context.Context, do func() (T, error)) (T, error) {
 }
 
 // A call is a hash, a field for each session on it, which says when it lapses, since a hash cannot
-// expire its fields one at a time, then its customer. liveCall walks the fields, passes over those
+// expire its fields one at a time, then its customer. liveCall walks the fields, drops those
 // that lapsed and runs what it is given for the customer of each other.
 const liveCall = `
 local time = redis.call('TIME')
@@ -286,7 +288,7 @@ for i = 1, #fields, 2 do
   local customer = string.sub(fields[i + 1], space + 1)
   if tonumber(string.sub(fields[i + 1], 1, space - 1)) > now then
     %s
-  end
+  else redis.call('HDEL', KEYS[1], fields[i]) end
 end
 `
 
@@ -316,7 +318,7 @@ func (d *Directory) HoldCall(ctx context.Context, customerID string, app int64, 
 	d.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	held, err := inTime(ctx, func() (int64, error) { return d.redis.Do(ctx, d.holdCall(call)).AsInt64() })
+	held, err := InTime(ctx, func() (int64, error) { return d.redis.Do(ctx, d.holdCall(call)).AsInt64() })
 	if err == nil && held == 0 {
 		d.mu.Lock()
 		delete(d.onCalls, call)
@@ -333,7 +335,7 @@ func (d *Directory) releaseCall(ctx context.Context, call heldCall) {
 	d.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	_, err := inTime(ctx, func() (int64, error) {
+	_, err := InTime(ctx, func() (int64, error) {
 		return d.redis.Do(ctx, d.redis.B().Hdel().Key(call.key).Field(call.field).Build()).AsInt64()
 	})
 	if err != nil {
@@ -346,7 +348,7 @@ func (d *Directory) releaseCall(ctx context.Context, call heldCall) {
 func (d *Directory) CallHolder(ctx context.Context, app int64, id string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	return inTime(ctx, func() (string, error) {
+	return InTime(ctx, func() (string, error) {
 		return d.redis.Do(ctx, d.redis.B().Eval().Script(callHolderScript).Numkeys(1).Key(d.callKey(app, id)).Build()).ToString()
 	})
 }

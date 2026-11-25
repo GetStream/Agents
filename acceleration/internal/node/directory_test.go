@@ -412,6 +412,68 @@ func (s *DirectorySuite) TestARenewalAnotherCustomersHoldRefusesIsLogged() {
 	s.Contains(logged.String(), s.prefix+":call:7:order-42")
 }
 
+// A node that stopped renewing leaves its sessions' fields behind: the next hold drops them.
+func (s *DirectorySuite) TestAHoldDropsWhatLapsed() {
+	s.callOf(s.directoryAt("node-a:1"), "acme")
+	s.callOf(s.directoryAt("node-b:1"), "acme")
+	s.lapsed()
+
+	s.callOf(s.directoryAt("node-c:1"), "globex")
+
+	fields, err := s.client.Do(s.ctx, s.client.B().Hkeys().Key(s.prefix+":call:7:order-42").Build()).AsStrSlice()
+	s.Require().NoError(err)
+	s.Equal([]string{"node-c:1#1"}, fields)
+}
+
+// A Redis that takes most of the time there is to answer is waited for.
+func (s *DirectorySuite) TestACallIsHeldAndFoundThoughRedisIsSlow() {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			upstream, err := net.Dial("tcp", os.Getenv("ROUTER_REDIS_ADDR"))
+			if err != nil {
+				_ = conn.Close()
+				return
+			}
+			go func() { _, _ = io.Copy(upstream, conn); _ = upstream.Close() }()
+			go func() {
+				defer conn.Close()
+				answer := make([]byte, 64<<10)
+				for {
+					n, err := upstream.Read(answer)
+					if err != nil {
+						return
+					}
+					time.Sleep(700 * time.Millisecond)
+					if _, err := conn.Write(answer[:n]); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress: []string{listener.Addr().String()}, DisableCache: true, ForceSingleClient: true, PipelineMultiplex: -1,
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(client.Close)
+	directory, err := NewDirectory(DirectoryOptions{Redis: client, Address: "node-a:1", Prefix: s.prefix})
+	s.Require().NoError(err)
+	directory.Close()
+
+	_, err = directory.HoldCall(s.ctx, "acme", 7, "order-42")
+	s.Require().NoError(err)
+	customer, err := directory.CallHolder(s.ctx, 7, "order-42")
+	s.Require().NoError(err)
+	s.Equal("acme", customer)
+}
+
 // A session Redis could not be told of is logged.
 func (s *DirectorySuite) TestASessionThatCannotBeSaidIsLogged() {
 	var logged bytes.Buffer

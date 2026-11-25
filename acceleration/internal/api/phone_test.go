@@ -1819,3 +1819,19 @@ func (s *CallStatusSuite) TestARouterStopsThoughTheDirectoryDoesNotAnswer() {
 
 	s.Less(time.Since(began), 2900*time.Millisecond)
 }
+
+// A router that stops takes back what its sessions said of their calls.
+func (s *CallStatusSuite) TestACallIsLeftWhenItsRouterStops() {
+	s.useApp(s.data.createApp())
+	var deaf atomic.Bool
+	directory, err := node.NewDirectory(node.DirectoryOptions{Redis: s.deafRedis(&deaf), Address: "node-stops:1", Prefix: s.relayPrefix})
+	s.Require().NoError(err)
+	s.T().Cleanup(directory.Close)
+	sessions, other, id := s.sessionsWith(directory), s.sessionsWith(directory), s.utils.uuid()
+	s.Require().NoError(heldOn(sessions, "customer-"+s.utils.uuid(), id))
+	s.Require().ErrorIs(heldOn(other, "customer-"+s.utils.uuid(), id), session.ErrSessionExists)
+
+	s.Require().NoError(sessions.Shutdown())
+
+	s.Eventually(func() bool { return heldOn(other, "customer-"+s.utils.uuid(), id) == nil }, 5*time.Second, 50*time.Millisecond)
+}
