@@ -454,6 +454,9 @@ type Server struct {
 	// runSlots counts each app's runs in flight against runsPerApp; nil counts none.
 	runSlots   *concurrency.Slots
 	runsPerApp int64
+	// newGuests counts the guests each address mints in an app (guestsPerAddress); nil counts
+	// none.
+	newGuests *core.Limiter
 	// imageHTTP fetches the images a run is handed by URL.
 	imageHTTP *http.Client
 	// documents reads the files sent with a question.
@@ -490,6 +493,7 @@ type Server struct {
 	serverSide *http.ServeMux
 	upgrader   websocket.Upgrader
 	popularity *popularity
+	teams      *heldTeams
 	logger     *slog.Logger
 	// release is Options.Release.
 	release string
@@ -650,6 +654,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		manageKey:          options.ManageKey,
 		activityKeys:       options.ActivityKeys,
 		popularity:         newPopularity(options.Store, logger),
+		teams:              newHeldTeams(),
 		logger:             logger,
 		release:            options.Release,
 		draining:           make(chan struct{}),
@@ -666,13 +671,23 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	server.proxyCallsPerMinute = options.ProxyCallsPerMinute
 	if options.Live != nil {
 		server.runSlots, server.runsPerApp = concurrency.New(options.Live.Redis(), nil), options.RunsPerApp
+		server.newGuests = core.NewLimiter(options.Live.Redis(), nil)
 		server.twilioAlertSids = options.Live.Redis()
 	}
 	server.imageHTTP = options.ImageHTTP
 	server.documents = options.Documents
 	if server.imageHTTP == nil {
 		// No proxy, which would dial on the client's behalf where the check cannot see.
-		server.imageHTTP = &http.Client{Transport: &http.Transport{Proxy: nil, DialContext: egress.DialPublic}}
+		// A host may take as long to begin its answer as the longest fetch may take in all. The
+		// TLS limit and the idle limits are http.DefaultTransport's.
+		server.imageHTTP = &http.Client{Transport: &http.Transport{
+			Proxy:                 nil,
+			DialContext:           egress.DialPublic,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: inlineDeadline,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+		}}
 	}
 	server.callbackHTTP = options.CallbackHTTP
 	if server.callbackHTTP == nil {

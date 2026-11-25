@@ -182,7 +182,7 @@ Beside a sensitive connector (Nessy), a binding's write tool needs `require_appr
 config is refused unless each tool it grants only reads (`read_only_tools`, or an http tool's
 `read_only` at the digest the grant pins: one granted by name or at another revision's digest
 does not) or is held, and a `tool_patterns` binding needs an entry such as `*` that matches each pattern as written
-(`api/configs.go`, `sensitiveBindingsComplaint`). In agent.yaml it is `require_approval:` on
+(`connectors/sensitive`, `ConfigComplaint`; across a parent and its child agents, `GraphComplaint`). In agent.yaml it is `require_approval:` on
 the connector entry. Tools a caller declares at createSession are not checked. The caller runs
 them, or a person's device does (`executor: client`). The router sends a client tool's
 arguments to the caller on the events socket (`api/sessionws.go`). Every channel member can

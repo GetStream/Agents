@@ -2394,7 +2394,7 @@ func (s *ConfigsSuite) TestABindingBesideNessyMayGrantExactlyTheToolsFlaggedRead
 }
 
 // read_only is read from the connector's latest revision, as a config save beside nessy reads
-// it (SensitiveBindingsComplaint), not from the revision the connection pins: a connection
+// it (sensitive.ConfigComplaint), not from the revision the connection pins: a connection
 // pinned to revision 1, which leaves search_documentation out of read_only_tools, flags it
 // read_only once revision 2 lists it, and a binding granting it sits beside nessy.
 func (s *ConfigsSuite) TestReadOnlyIsTheConnectorsLatestRevisionsAsAConfigSaveChecks() {
@@ -2739,6 +2739,7 @@ func (s *ConfigsSuite) TestNessyBesideASandboxIsRefusedOnlyWhenItReachesTheNetwo
 
 		s.Equal(http.StatusBadRequest, status, name)
 		s.Contains(failure, "and the sandbox's network access can send data out", name)
+		s.NotContains(failure, "require_approval", "a sandbox has no tool a require_approval could hold")
 	}
 }
 

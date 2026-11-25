@@ -107,6 +107,9 @@ type Message struct {
 	// Thread is where a reply is sent: the sender for WhatsApp and SMS, and the chat for
 	// iMessage, where a reply is posted to the conversation rather than to a person.
 	Thread string
+	// Group is a chat of more people than the sender and the line, where a reply reaches
+	// everyone in it: an iMessage chat whose delivery does not say it is one person's.
+	Group bool
 	// Name is what the sender calls themselves, when the provider says.
 	Name string
 	Text string

@@ -505,6 +505,22 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, _, err := store.Sessions.ConversationPin(ctx, "customer-7", "conversation-7")
 			return err
 		}},
+		{name: "Sessions.HeldConversations", index: "agent_sessions_conversation_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.Sessions.HeldConversations(ctx, "customer-7", HeldConversation{}, 500)
+			return err
+		}},
+		{name: "Sessions.HeldConversations of every customer", index: "agent_sessions_conversation_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.Sessions.HeldConversations(ctx, "", HeldConversation{CustomerID: "customer-7"}, 500)
+			return err
+		}},
+		{name: "Sessions.CallerKinds", index: "agent_sessions_user_last_message_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.Sessions.CallerKinds(ctx, "customer-7", "conversation-7", "user-7")
+			return err
+		}},
+		{name: "Sessions.HeldAsGuest", index: "agent_sessions_user_last_message_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.Sessions.HeldAsGuest(ctx, "customer-7", "user-7")
+			return err
+		}},
 		{name: "Sessions.Delete", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.Delete(ctx, "customer-199", "seeded-session-99999")
 		}},
@@ -694,6 +710,10 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return store.ImportRow(ctx, "customer-7", "agent_logs", json.RawMessage(`{"id": 7, "customer_id": "customer-7",
 				"config_id": "config-7", "agent_id": "agent-7", "session_id": "seeded-session-7", "user_id": "user-7", "source": "agent", "severity": "info", "event_type": "provider_request", "message": "imported", "details": {},
 				"occurred_at": "2026-03-01T10:00:00Z", "ingested_at": "2026-03-01T10:00:00Z"}`))
+		}},
+		{name: "Store.ImportRow of a turn", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
+			return store.ImportRow(ctx, "customer-7", "agent_responses", json.RawMessage(`{"id": "imported-turn", "session_id": "seeded-session-7",
+				"said": "hello", "status": "completed", "error": "", "created_at": "2026-03-01T10:00:00Z"}`))
 		}},
 		{name: "Store.HoldingTable", index: "agent_logs_customer_order", run: func(ctx context.Context, store *Store) error {
 			_, err := store.HoldingTable(ctx, "customer-123")

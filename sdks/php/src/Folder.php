@@ -83,11 +83,19 @@ final readonly class Folder
             throw new ConfigurationException("{$path} is not an agent directory");
         }
         $path = rtrim($path, '/');
+        // What is loaded is what the directory holds: a link out of it is refused wherever it is.
+        // realpath() answers from a cache that outlives a load, in which a path that has since
+        // become a link would still be the file it was.
+        clearstatcache(true);
+        $root = realpath($path);
+        if ($root === false) {
+            throw new ConfigurationException("{$path} is not an agent directory");
+        }
         $declarationFile = $path . '/' . self::AGENT_FILE;
-        if (!is_file($declarationFile)) {
+        if (self::inside($root, $declarationFile) === null || !is_file($declarationFile)) {
             throw new ConfigurationException("{$path} has no " . self::AGENT_FILE . ', so it is not an agent directory');
         }
-        $declaration = self::read($declarationFile);
+        $declaration = self::read($root, $declarationFile);
         try {
             $settings = Declaration::fromYaml(Yaml::parse($declaration), Yaml::parse($declaration, Yaml::PARSE_OBJECT_FOR_MAP));
         } catch (ParseException | ConfigurationException $bad) {
@@ -99,12 +107,12 @@ final readonly class Folder
             name: $settings->name !== '' ? $settings->name : basename($path),
             declaration: trim($declaration),
             settings: $settings,
-            instructions: is_file($path . '/' . self::INSTRUCTIONS_FILE) ? trim(self::read($path . '/' . self::INSTRUCTIONS_FILE)) : '',
-            guardrail: is_file($path . '/' . self::GUARDRAIL_FILE) ? trim(self::read($path . '/' . self::GUARDRAIL_FILE)) : '',
-            skills: self::loadSkills($path . '/' . self::SKILLS_DIR),
-            knowledge: self::loadKnowledge($path . '/' . self::KNOWLEDGE_DIR),
-            knowledgeUrls: self::loadKnowledgeUrls($path . '/' . self::KNOWLEDGE_DIR . '/' . self::KNOWLEDGE_URLS_FILE),
-            simulations: self::loadSimulations($path . '/' . self::SIMULATIONS_DIR),
+            instructions: trim(self::optional($root, $path . '/' . self::INSTRUCTIONS_FILE)),
+            guardrail: trim(self::optional($root, $path . '/' . self::GUARDRAIL_FILE)),
+            skills: self::loadSkills($root, $path . '/' . self::SKILLS_DIR),
+            knowledge: self::loadKnowledge($root, $path . '/' . self::KNOWLEDGE_DIR),
+            knowledgeUrls: self::loadKnowledgeUrls($root, $path . '/' . self::KNOWLEDGE_DIR . '/' . self::KNOWLEDGE_URLS_FILE),
+            simulations: self::loadSimulations($root, $path . '/' . self::SIMULATIONS_DIR),
         );
     }
 
@@ -202,16 +210,22 @@ final readonly class Folder
      *
      * @return list<Skill>
      */
-    private static function loadSkills(string $path): array
+    private static function loadSkills(string $root, string $path): array
     {
         if (!is_dir($path)) {
             return [];
         }
+        self::inside($root, $path);
         $skills = [];
         $declared = [];
         foreach (self::entries($path) as $entry) {
+            if (str_starts_with($entry, '.') || $entry === '__pycache__') {
+                continue;
+            }
             $name = $entry;
             $file = $path . '/' . $entry;
+            // Before the checks below, which take a link going round in a loop for nothing there.
+            self::inside($root, $file);
             $folder = is_dir($file);
             if ($folder) {
                 $file .= '/' . self::SKILL_FILE;
@@ -227,12 +241,13 @@ final readonly class Folder
                 throw new ConfigurationException("skill \"{$name}\" is both {$declared[$name]} and {$entry}");
             }
             $declared[$name] = $entry;
+            $content = self::read($root, $file);
             try {
-                $skill = self::parseSkill($name, self::read($file));
+                $skill = self::parseSkill($name, $content);
             } catch (ConfigurationException $bad) {
                 throw new ConfigurationException("{$file}: {$bad->getMessage()}", 0, $bad);
             }
-            $files = $folder ? self::loadSkillFiles($path . '/' . $entry, '') : [];
+            $files = $folder ? self::loadSkillFiles($root, $path . '/' . $entry, '') : [];
             $skills[] = $files === [] ? $skill : new Skill($skill->name, $skill->description, $skill->instructions, $skill->captureVideo, $skill->deadline, $files);
         }
         return $skills;
@@ -244,8 +259,9 @@ final readonly class Folder
      *
      * @return array<string, string>
      */
-    private static function loadSkillFiles(string $dir, string $prefix): array
+    private static function loadSkillFiles(string $root, string $dir, string $prefix): array
     {
+        self::inside($root, $dir);
         $files = [];
         foreach (self::entries($dir) as $entry) {
             if (str_starts_with($entry, '.') || $entry === '__pycache__') {
@@ -253,13 +269,13 @@ final readonly class Folder
             }
             $file = $dir . '/' . $entry;
             if (is_dir($file)) {
-                $files += self::loadSkillFiles($file, $prefix . $entry . '/');
+                $files += self::loadSkillFiles($root, $file, $prefix . $entry . '/');
                 continue;
             }
             if ($prefix === '' && $entry === self::SKILL_FILE) {
                 continue;
             }
-            $content = self::read($file);
+            $content = self::read($root, $file);
             if (preg_match('//u', $content) !== 1) {
                 throw new ConfigurationException("{$file} is not text, and a skill brings only text files");
             }
@@ -368,7 +384,7 @@ final readonly class Folder
     /**
      * @return list<Document>
      */
-    private static function loadKnowledge(string $path): array
+    private static function loadKnowledge(string $root, string $path): array
     {
         if (!file_exists($path)) {
             return [];
@@ -376,19 +392,24 @@ final readonly class Folder
         if (!is_dir($path)) {
             throw new ConfigurationException("{$path} is not a directory");
         }
+        self::inside($root, $path);
         $documents = [];
         $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($path, FilesystemIterator::SKIP_DOTS));
         foreach ($files as $file) {
-            if (!$file instanceof SplFileInfo || !$file->isFile() || !in_array(strtolower($file->getExtension()), self::READABLE, true)) {
+            if (!$file instanceof SplFileInfo || !in_array(strtolower($file->getExtension()), self::READABLE, true)) {
                 continue;
             }
             // The declaration of which pages to read is not itself something to look things up
             // in. Only the one at the root is; deeper, urls.yaml is a document like any other.
+            // Hidden files and folders and __pycache__ are left out, as in a skill folder.
             $source = substr($file->getPathname(), strlen($path) + 1);
-            if ($source === self::KNOWLEDGE_URLS_FILE) {
+            if ($source === self::KNOWLEDGE_URLS_FILE || preg_match('#(^|/)(\.|__pycache__/)#', $source) === 1) {
                 continue;
             }
-            $text = self::read($file->getPathname());
+            if (self::inside($root, $file->getPathname()) === null || !$file->isFile()) {
+                continue;
+            }
+            $text = self::read($root, $file->getPathname());
             if (trim($text) === '') {
                 continue;
             }
@@ -404,13 +425,11 @@ final readonly class Folder
      *
      * @return list<KnowledgeUrl>
      */
-    private static function loadKnowledgeUrls(string $path): array
+    private static function loadKnowledgeUrls(string $root, string $path): array
     {
-        if (!is_file($path)) {
-            return [];
-        }
+        $raw = self::optional($root, $path);
         try {
-            $parsed = Yaml::parse(self::read($path));
+            $parsed = Yaml::parse($raw);
             if ($parsed === null) {
                 return [];
             }
@@ -429,11 +448,12 @@ final readonly class Folder
      *
      * @return ?list<Simulation>
      */
-    private static function loadSimulations(string $path): ?array
+    private static function loadSimulations(string $root, string $path): ?array
     {
         if (!is_dir($path)) {
             return null;
         }
+        self::inside($root, $path);
         $files = glob($path . '/*');
         $files = $files === false ? [] : $files;
         sort($files, SORT_STRING);
@@ -441,11 +461,11 @@ final readonly class Folder
         $named = [];
         foreach ($files as $file) {
             $extension = strtolower(pathinfo($file, PATHINFO_EXTENSION));
-            if (!is_file($file) || ($extension !== 'yaml' && $extension !== 'yml')) {
+            if (($extension !== 'yaml' && $extension !== 'yml') || self::inside($root, $file) === null || !is_file($file)) {
                 continue;
             }
             try {
-                $parsed = Yaml::parse(self::read($file));
+                $parsed = Yaml::parse(self::read($root, $file));
                 if ($parsed === null) {
                     continue;
                 }
@@ -467,12 +487,63 @@ final readonly class Folder
         return $simulations;
     }
 
-    private static function read(string $file): string
+    /**
+     * Reads $file from where it really is, once inside() has let it through.
+     */
+    private static function read(string $root, string $file): string
     {
-        $content = @file_get_contents($file);
+        $content = @file_get_contents(self::inside($root, $file) ?? $file);
         if ($content === false) {
             throw new ConfigurationException("could not read {$file}");
         }
         return $content;
+    }
+
+    /**
+     * What $file says, or nothing when it is not there, as a link to nothing is not.
+     */
+    private static function optional(string $root, string $file): string
+    {
+        if (is_link($file) && self::dangles($file)) {
+            return '';
+        }
+        return self::inside($root, $file) !== null && is_file($file) ? self::read($root, $file) : '';
+    }
+
+    /**
+     * The real path of $path, or null when nothing is there. One outside the agent directory,
+     * whose real path is $root, is refused, as a link left pointing elsewhere on the machine
+     * would be, and so is a link that leads nowhere, to nothing or round in a loop.
+     */
+    private static function inside(string $root, string $path): ?string
+    {
+        $real = realpath($path);
+        if ($real === false && !is_link($path)) {
+            return null;
+        }
+        if ($real === false && self::dangles($path)) {
+            throw new ConfigurationException("{$path} is a link to nothing");
+        }
+        if ($real === false || ($real !== $root && !str_starts_with($real, $root . DIRECTORY_SEPARATOR))) {
+            throw new ConfigurationException("{$path} links outside the agent directory");
+        }
+        return $real;
+    }
+
+    /**
+     * Whether the link $path ends at nothing rather than going round in a loop, which realpath()
+     * fails on alike. Each link is followed from the folder it is in, as the system would.
+     */
+    private static function dangles(string $path): bool
+    {
+        // As many as Linux follows before it gives up on a path.
+        for ($links = 0; is_link($path); $links++) {
+            $target = readlink($path);
+            if ($target === false || $links === 40) {
+                return false;
+            }
+            $path = str_starts_with($target, '/') ? $target : dirname($path) . '/' . $target;
+        }
+        return !file_exists($path);
     }
 }

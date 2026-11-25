@@ -18,8 +18,9 @@ use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::crypto::aws_lc_rs;
 use tokio_rustls::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio_rustls::server::TlsStream;
-use vision_agents::{Client, ClientOptions, DEFAULT_URL, Error, REGION_ENV, URL_ENV};
+use vision_agents::{Client, ClientOptions, DEFAULT_URL, Error, REGION_ENV, URL_ENV, region_url};
 
+const DEFAULT_HOST: &str = "accelerate.gcp.stream-io-api.com";
 const REGIONAL_HOST: &str = "accelerate-us-east4.gcp.stream-io-api.com";
 
 /// The environment is the process's, and tests run side by side in it.
@@ -56,7 +57,7 @@ struct Seen {
     authorization: String,
 }
 
-/// The hosted router in us-east4, served over TLS from this process.
+/// Stream's hosted router, served over TLS from this process.
 struct Regional {
     addr: SocketAddr,
     seen: Arc<Mutex<Vec<Seen>>>,
@@ -64,7 +65,11 @@ struct Regional {
 
 impl Regional {
     async fn start() -> Regional {
-        let cert = rcgen::generate_simple_self_signed(vec![REGIONAL_HOST.to_string()]).unwrap();
+        let cert = rcgen::generate_simple_self_signed(vec![
+            DEFAULT_HOST.to_string(),
+            REGIONAL_HOST.to_string(),
+        ])
+        .unwrap();
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
         let config = ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
             .with_safe_default_protocol_versions()
@@ -87,9 +92,10 @@ impl Regional {
         Regional { addr, seen }
     }
 
-    /// An HTTP client that sends the regional URL here, trusting this server's certificate.
+    /// An HTTP client that sends the hosted router URLs here, trusting this server's certificate.
     fn http(&self) -> reqwest::Client {
         reqwest::Client::builder()
+            .resolve(DEFAULT_HOST, self.addr)
             .resolve(REGIONAL_HOST, self.addr)
             .danger_accept_invalid_certs(true)
             .build()
@@ -103,19 +109,19 @@ impl Regional {
         seen[0].clone()
     }
 
-    async fn read_settings(&self, options: ClientOptions) {
+    async fn read_settings(&self, options: ClientOptions, expected_url: &str, expected_host: &str) {
         let client = Client::new(ClientOptions {
             http: Some(self.http()),
             ..options
         })
         .unwrap();
-        assert_eq!(client.url(), DEFAULT_URL);
+        assert_eq!(client.url(), expected_url);
 
         let settings = client.get_app_settings().await.unwrap();
 
         assert_eq!(settings.stream.writes_into.to_string(), "this_app");
         let seen = self.request();
-        assert_eq!(seen.host, REGIONAL_HOST);
+        assert_eq!(seen.host, expected_host);
         assert_eq!(seen.api_key, "test-key");
         assert_eq!(seen.auth_type, "jwt");
         assert!(!seen.authorization.is_empty());
@@ -178,7 +184,9 @@ async fn the_default_client_reads_app_settings() {
     let _environment = environment(&[]).await;
     let regional = Regional::start().await;
 
-    regional.read_settings(ClientOptions::default()).await;
+    regional
+        .read_settings(ClientOptions::default(), DEFAULT_URL, DEFAULT_HOST)
+        .await;
 }
 
 #[tokio::test]
@@ -187,10 +195,14 @@ async fn an_explicit_region_reads_app_settings() {
     let regional = Regional::start().await;
 
     regional
-        .read_settings(ClientOptions {
-            region: Some("us-east4".into()),
-            ..Default::default()
-        })
+        .read_settings(
+            ClientOptions {
+                region: Some("us-east4".into()),
+                ..Default::default()
+            },
+            &region_url("us-east4").unwrap(),
+            REGIONAL_HOST,
+        )
         .await;
 }
 
@@ -199,7 +211,13 @@ async fn a_region_from_the_environment_reads_app_settings() {
     let _environment = environment(&[(REGION_ENV, "us-east4")]).await;
     let regional = Regional::start().await;
 
-    regional.read_settings(ClientOptions::default()).await;
+    regional
+        .read_settings(
+            ClientOptions::default(),
+            &region_url("us-east4").unwrap(),
+            REGIONAL_HOST,
+        )
+        .await;
 }
 
 #[tokio::test]
@@ -247,7 +265,7 @@ async fn a_regional_client_can_act_for_a_user() {
 
     let user = client.as_user("jean", "user-token").unwrap();
 
-    assert_eq!(user.url(), DEFAULT_URL);
+    assert_eq!(user.url(), region_url("us-east4").unwrap());
     user.get_app_settings().await.unwrap();
     let seen = regional.request();
     assert_eq!(seen.host, REGIONAL_HOST);

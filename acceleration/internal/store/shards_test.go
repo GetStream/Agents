@@ -196,6 +196,175 @@ func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardKeepsWhatItsRowHe
 	s.True(*found.Remembers, "deleting it still forgets what it taught the memory store")
 }
 
+// A router of the release before carries a session on in another shard into a row that says no
+// project tag: the row it left still does, whoever carried it on. One it opened itself says none.
+func (s *ShardedStoreSuite) TestASessionTheReleaseBeforeCarriedOnElsewhereKeepsItsProjectTag() {
+	opened := s.base.Add(time.Hour)
+	for id, tag := range map[string]string{"backends": "alpha", "devices": ""} {
+		row := func() *AgentSession {
+			return &AgentSession{ID: id, CustomerID: "app", UserID: "user", Project: "alpha", CreatedAt: s.base, OpenedAt: s.base}
+		}
+		left := row()
+		left.ProjectTag = &tag
+		s.Require().NoError(s.store.Sessions.Upsert(s.ctx, left))
+		// The other kind of caller carries it on: its kind alone would say the opposite.
+		carried := row()
+		carried.OpenedAt, carried.CallerKind = opened, map[string]string{"backends": "authenticated", "devices": "server"}[id]
+		s.Require().NoError(s.other.Sessions.Upsert(s.ctx, carried))
+		s.Require().NoError(s.other.Sessions.Supersede(s.ctx, "app", id, opened))
+
+		for _, store := range []*Store{s.store, s.other} {
+			found, err := store.Sessions.Get(s.ctx, "app", id)
+			s.Require().NoError(err)
+			s.Require().NoError(store.Sessions.ReadProjectTag(s.ctx, &found))
+			s.Equal(tag, found.TaggedProject(), id)
+		}
+	}
+}
+
+// No row says the tag of a session from before it was kept. The kind of caller that opened it
+// decides, not of who carried it on elsewhere, wherever it is read and wherever it ran since.
+func (s *ShardedStoreSuite) TestASessionFromBeforeCarriedOnElsewhereIsTaggedByWhoOpenedIt() {
+	type run struct {
+		at    *Store
+		opens time.Duration
+		kind  string
+		// answered is the hour it answered first, zero for a run that never did.
+		answered time.Duration
+	}
+	const before = -1
+	server, device := "server", "authenticated"
+	for name, tried := range map[string]struct {
+		runs []run
+		fork bool
+		want string
+	}{
+		"a device's carried on by a backend":       {runs: []run{{s.store, 0, device, 0}, {s.other, 1, server, 0}}},
+		"a backend's carried on by a device":       {runs: []run{{s.store, 0, server, 0}, {s.other, 1, device, 0}}, want: "alpha"},
+		"a device's from before opened_at":         {runs: []run{{s.store, before, device, 0}, {s.other, 1, server, 0}}},
+		"a backend's from before opened_at":        {runs: []run{{s.store, before, server, 0}, {s.other, 1, device, 0}}, want: "alpha"},
+		"a device's that went back":                {runs: []run{{s.store, 4, device, 1}, {s.other, 2, server, 3}}},
+		"a backend's that went back":               {runs: []run{{s.store, 4, server, 1}, {s.other, 2, device, 3}}, want: "alpha"},
+		"a device's that went back, from before":   {runs: []run{{s.store, 4, device, 1}, {s.other, before, server, 3}}},
+		"a backend's that went back, from before":  {runs: []run{{s.store, 4, server, 1}, {s.other, before, device, 3}}, want: "alpha"},
+		"a backend's carried on twice":             {runs: []run{{s.store, 2, server, 1}, {s.other, 4, device, 5}}, want: "alpha"},
+		"a device's answered only once carried on": {runs: []run{{s.store, 1, device, 0}, {s.other, 2, server, 3}}},
+		"both before opened_at, a device's first":  {runs: []run{{s.store, before, device, 1}, {s.other, before, server, 2}}},
+		"both before opened_at, a backend's first": {runs: []run{{s.store, before, server, 1}, {s.other, before, device, 2}}, want: "alpha"},
+		"run at one moment":                        {runs: []run{{s.store, 1, server, 0}, {s.other, 1, device, 0}}},
+		"run at one moment, the other way":         {runs: []run{{s.store, 1, device, 0}, {s.other, 1, server, 0}}},
+		"run at one moment by backends":            {runs: []run{{s.store, 1, server, 0}, {s.other, 1, server, 0}}, want: "alpha"},
+		"a backend's fork":                         {runs: []run{{s.store, 0, server, 0}, {s.other, 1, server, 0}}, fork: true},
+	} {
+		s.Run(name, func() {
+			for at, ran := range tried.runs {
+				row := AgentSession{ID: name, CustomerID: "app", Project: "alpha", CallerKind: ran.kind, CreatedAt: s.base}
+				if ran.opens != before {
+					row.OpenedAt = s.base.Add(ran.opens * time.Hour)
+				}
+				if tried.fork {
+					row.ForkedFrom = "parent"
+				}
+				s.Require().NoError(ran.at.Sessions.Upsert(s.ctx, &row))
+				// Another customer's response under its id is none of its own.
+				if at > 0 {
+					s.Require().NoError(ran.at.Responses.Insert(s.ctx, &AgentResponse{ID: name + " globex", SessionID: name,
+						CustomerID: "globex", CreatedAt: s.base.Add(-time.Hour)}))
+				}
+				if ran.answered == 0 {
+					continue
+				}
+				// It answered again later, after every run had opened.
+				for _, answered := range []time.Duration{ran.answered, 9} {
+					s.Require().NoError(ran.at.Responses.Insert(s.ctx, &AgentResponse{ID: fmt.Sprint(name, at, answered), SessionID: name,
+						CustomerID: "app", CreatedAt: s.base.Add(answered * time.Hour)}))
+				}
+			}
+
+			for _, store := range []*Store{s.store, s.other} {
+				found, err := store.Sessions.Get(s.ctx, "app", name)
+				s.Require().NoError(err)
+				s.Require().NoError(store.Sessions.ReadProjectTag(s.ctx, &found))
+				s.Equal(tried.want, found.TaggedProject())
+			}
+		})
+	}
+}
+
+// A row that says the tag says it for the session, also of a run after the one that opened it.
+func (s *ShardedStoreSuite) TestALaterRunsProjectTagStandsOverWhoOpenedTheSession() {
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "app", Project: "alpha",
+		CallerKind: "authenticated", CreatedAt: s.base, OpenedAt: s.base}))
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "app", Project: "alpha",
+		CallerKind: "authenticated", ProjectTag: new("beta"), CreatedAt: s.base, OpenedAt: s.base.Add(time.Hour)}))
+
+	for range 20 {
+		for _, store := range []*Store{s.store, s.other} {
+			row := AgentSession{ID: "one", CustomerID: "app", Project: "alpha"}
+			s.Require().NoError(store.Sessions.ReadProjectTag(s.ctx, &row))
+			s.Equal("beta", row.TaggedProject())
+		}
+	}
+}
+
+// A device's fork naming no project has its backend's tag all the same.
+func (s *ShardedStoreSuite) TestAForkNamingNoProjectCarriedOnElsewhereKeepsItsProjectTag() {
+	opened := s.base.Add(time.Hour)
+	left := AgentSession{ID: "fork", CustomerID: "app", ForkedFrom: "parent", ProjectTag: new("alpha"), CreatedAt: s.base, OpenedAt: s.base}
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &left))
+	carried := AgentSession{ID: "fork", CustomerID: "app", ForkedFrom: "parent", CreatedAt: s.base, OpenedAt: opened}
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &carried))
+	s.Require().NoError(s.other.Sessions.Supersede(s.ctx, "app", "fork", opened))
+
+	for _, store := range []*Store{s.store, s.other} {
+		found, err := store.Sessions.Get(s.ctx, "app", "fork")
+		s.Require().NoError(err)
+		s.Require().NoError(store.Sessions.ReadProjectTag(s.ctx, &found))
+		s.Equal("alpha", found.TaggedProject())
+	}
+}
+
+func (s *ShardedStoreSuite) TestAProjectTagIsFoundWhileAThirdShardIsDown() {
+	opened := s.base.Add(time.Hour)
+	left := AgentSession{ID: "one", CustomerID: "app", Project: "alpha", ProjectTag: new("beta"), CreatedAt: s.base, OpenedAt: s.base}
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &left))
+	carried := AgentSession{ID: "one", CustomerID: "app", Project: "alpha", CreatedAt: s.base, OpenedAt: opened}
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &carried))
+
+	row := AgentSession{ID: "one", CustomerID: "app", Project: "alpha"}
+	s.Require().NoError(s.withAShardDown(s.other.shardDSN, s.shardDSN).Sessions.ReadProjectTag(s.ctx, &row))
+
+	s.Equal("beta", row.TaggedProject())
+}
+
+func (s *ShardedStoreSuite) TestAnotherSessionsProjectTagIsNotASessionsOwn() {
+	for _, theirs := range []AgentSession{{ID: "one", CustomerID: "globex"}, {ID: "two", CustomerID: "app"}} {
+		theirs.Project, theirs.ProjectTag, theirs.CreatedAt = "alpha", new("alpha"), s.base
+		s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &theirs))
+	}
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "app", Project: "alpha",
+		CallerKind: "guest", CreatedAt: s.base, OpenedAt: s.base.Add(time.Hour)}))
+
+	found, err := s.store.Sessions.Get(s.ctx, "app", "one")
+
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.Sessions.ReadProjectTag(s.ctx, &found))
+	s.Equal(new(""), found.ProjectTag, "every shard answered")
+}
+
+// While the shard that may say it is down a session has no tag to carry on with, and is read.
+func (s *ShardedStoreSuite) TestASessionsProjectTagInAShardThatIsDownIsUnreadAndFailsNoOtherRead() {
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "here", CustomerID: "app", Project: "alpha",
+		CallerKind: "server", CreatedAt: s.base, OpenedAt: s.base.Add(time.Hour)}))
+	down := s.withAShardDown(s.shardDSN, s.other.shardDSN)
+
+	found, err := down.Sessions.Get(s.ctx, "app", "here")
+	s.Require().NoError(err)
+
+	s.ErrorIs(down.Sessions.ReadProjectTag(s.ctx, &found), ErrProjectTagUnread)
+	s.Nil(found.ProjectTag)
+}
+
 func (s *ShardedStoreSuite) TestASupersedeTriedAgainAfterAShardFailedTakesWhatTheEarlierRowSaid() {
 	s.opened("chat", "app", s.base, func(session *AgentSession) { session.Remembers = new(true) })
 	_, err := s.store.Sessions.Pin(s.ctx, "app", "chat", true, s.base)
@@ -343,6 +512,72 @@ func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsOneSessionOfIts
 	s.EqualValues(2, buckets[0].Sessions)
 	s.EqualValues(2, buckets[0].Messages)
 	s.EqualValues(1, buckets[0].ActiveUsers)
+}
+
+// The turn a carried-on session answers after is its own customer's, so another customer's of that
+// id in the shard it went on in is not taken for it.
+func (s *ShardedStoreSuite) TestASessionCarriedOnBesideAnotherCustomersTurnIsOneSession() {
+	session := s.opened("chat", "app", s.base, nil)
+	s.turned(session, "chat-1", s.base, nil)
+	theirs := &AgentSession{ID: "theirs", CustomerID: "globex", AgentName: "docs", UserID: "sam", CallerKind: "user", CreatedAt: s.base}
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, theirs))
+	s.Require().NoError(s.other.Responses.Insert(s.ctx, &AgentResponse{ID: "chat-1", SessionID: "theirs", CustomerID: "globex", CreatedAt: s.base}))
+	s.carriedOnAt("chat", s.base.Add(time.Minute))
+	s.turnedThere("chat", "chat-2", "chat-1", s.base.Add(time.Minute), nil)
+
+	buckets, err := s.store.CustomerActivity(s.ctx, "app", ActivityDaily, s.base, s.base.Add(24*time.Hour))
+
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 1)
+	s.EqualValues(1, buckets[0].Sessions)
+}
+
+// strayTurnThere records another customer's turn naming a session of "app", in the other shard.
+func (s *ShardedStoreSuite) strayTurnThere(id, parent string) {
+	_, err := s.other.shard.ExecContext(s.ctx, "INSERT INTO agent_responses (id, session_id, customer_id, parent_response_id, created_at)"+
+		" VALUES (?, 'chat', 'globex', NULLIF(?, ''), ?)", id, parent, s.base)
+	s.Require().NoError(err)
+}
+
+func (s *ShardedStoreSuite) TestASessionCarriedOnIsOneSessionBesideAnotherCustomersFirstTurn() {
+	session := s.opened("chat", "app", s.base, nil)
+	s.turned(session, "chat-1", s.base, nil)
+	s.carriedOnAt("chat", s.base.Add(time.Minute))
+	s.turnedThere("chat", "chat-2", "chat-1", s.base.Add(time.Minute), nil)
+	s.strayTurnThere("stray", "")
+
+	buckets, err := s.store.CustomerActivity(s.ctx, "app", ActivityDaily, s.base, s.base.Add(24*time.Hour))
+
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 1)
+	s.EqualValues(1, buckets[0].Sessions, "it began in the other shard")
+}
+
+func (s *ShardedStoreSuite) TestASessionBegunInOneShardIsCountedBesideAnotherCustomersTurn() {
+	s.carriedOnAt("chat", s.base)
+	s.strayTurnThere("stray", "not-here")
+
+	buckets, err := s.store.CustomerActivity(s.ctx, "app", ActivityDaily, s.base, s.base.Add(24*time.Hour))
+
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 1)
+	s.EqualValues(1, buckets[0].Sessions, "no turn of its own says it was carried on")
+}
+
+func (s *ShardedStoreSuite) TestToolUseIsNotOfACarriedSessionBesideAnotherCustomersTurn() {
+	session := s.opened("chat", "app", s.base, nil)
+	s.turned(session, "chat-1", s.base, nil)
+	s.carriedOnAt("chat", s.base)
+	s.turnedThere("chat", "chat-2", "", s.base.Add(time.Minute), nil)
+	s.calledToolThere("chat", "chat-2", "refund", s.base.Add(time.Minute))
+	s.strayTurnThere("stray", "not-here")
+
+	_, tools, err := s.store.CustomerToolUsage(s.ctx, "app", "", s.base, s.base.Add(time.Hour))
+
+	s.Require().NoError(err)
+	s.Require().Len(tools, 1)
+	s.Require().NotNil(tools[0].AvgTurnsBeforeUse)
+	s.InDelta(0.0, *tools[0].AvgTurnsBeforeUse, 0.001)
 }
 
 func (s *ShardedStoreSuite) TestASessionCarriedOnIsCountedOnTheDayItBeganWhateverTheWindow() {

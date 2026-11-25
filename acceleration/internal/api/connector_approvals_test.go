@@ -9,6 +9,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/fakeprovider"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -206,6 +207,67 @@ func (s *SessionConnectorsSuite) TestTheUserMayAnswerThroughTheirConversation() 
 	s.Equal(connectorEchoText, s.await(held.events, "tool_ran")["result"])
 }
 
+// In an app that keeps each team's agents to its own users, the user still in the team of the
+// session's config answers its held call through the conversation, as anywhere else.
+func (s *SessionConnectorsSuite) TestAUserInTheConfigsTeamAllowsItsHeldCallThroughTheConversation() {
+	chat := s.teamsApp()
+	anya := s.inTeam(chat, "red")
+	held := s.heldCallOn(anya, map[string]string{session.TeamTag: "red"})
+	step := s.awaitingApprovalOn(held.events)
+	s.teamsLapse(s.router)
+
+	status := anya.do(http.MethodPost, "/v1/agents/conversations/agent:"+held.id+"/tool_approvals",
+		map[string]any{"tool_call_id": step["id"], "request_id": held.request, "allowed": true}, nil)
+
+	s.Equal(http.StatusNoContent, status)
+	s.Equal(connectorEchoText, s.await(held.events, "tool_ran")["result"])
+}
+
+// An answer lets the agent's connector call go, so a user who left the config's team has no call
+// to answer there, as a message of theirs to the chat has no chat; the call goes on waiting.
+func (s *SessionConnectorsSuite) TestAUserWhoLeftTheConfigsTeamCannotAllowItsHeldCall() {
+	chat := s.teamsApp()
+	anya := s.inTeam(chat, "red")
+	held := s.heldCallOn(anya, map[string]string{session.TeamTag: "red"})
+	step := s.awaitingApprovalOn(held.events)
+	chat.PutUser(map[string]any{"id": anya.userID, "teams": []any{"blue"}})
+	s.teamsLapse(s.router)
+
+	status, message := anya.failure(http.MethodPost, "/v1/agents/conversations/agent:"+held.id+"/tool_approvals",
+		map[string]any{"tool_call_id": step["id"], "request_id": held.request, "allowed": true})
+
+	s.Equal(http.StatusNotFound, status, message)
+	s.Equal(errNoApprovalHeld.Message, message)
+	s.Equal(held.before, s.provider.Hits(fakeprovider.PathMCP), "nothing reached the provider")
+	s.Require().NoError(held.events.WriteJSON(map[string]any{"type": "tool_approval", "tool_call_id": step["id"],
+		"request_id": held.request, "allowed": false}))
+	_, settled := s.settledOn(held.events, step["id"].(string))
+	s.Equal("cancelled", settled["status"], "the call waited for an answer from the socket opened before")
+}
+
+// Teams Stream cannot tell let no answer through: the user is told to try again, and the call goes
+// on waiting.
+func (s *SessionConnectorsSuite) TestAnAnswerWhileTheUsersTeamsCannotBeReadIsRefused() {
+	chat := s.teamsApp()
+	anya := s.inTeam(chat, "red")
+	held := s.heldCallOn(anya, map[string]string{session.TeamTag: "red"})
+	step := s.awaitingApprovalOn(held.events)
+	chat.Fail(http.MethodGet, "/users")
+	s.T().Cleanup(func() { chat.Heal(http.MethodGet, "/users") })
+	s.teamsLapse(s.router)
+
+	status, message := anya.failure(http.MethodPost, "/v1/agents/conversations/agent:"+held.id+"/tool_approvals",
+		map[string]any{"tool_call_id": step["id"], "request_id": held.request, "allowed": true})
+
+	s.Equal(http.StatusServiceUnavailable, status, message)
+	s.Equal(errTeamsUnreadable.Message, message)
+	s.Equal(held.before, s.provider.Hits(fakeprovider.PathMCP), "nothing reached the provider")
+	s.Require().NoError(held.events.WriteJSON(map[string]any{"type": "tool_approval", "tool_call_id": step["id"],
+		"request_id": held.request, "allowed": false}))
+	_, settled := s.settledOn(held.events, step["id"].(string))
+	s.Equal("cancelled", settled["status"], "the call waited for an answer from the socket opened before")
+}
+
 // A held call is answered once: a second answer reaches nothing, and its sender is told so.
 func (s *SessionConnectorsSuite) TestASecondAnswerToAHeldCallIsAnswered() {
 	held := s.heldCall(s.client)
@@ -315,11 +377,16 @@ func (s *SessionConnectorsSuite) TestACallWithoutApprovalAsksNobody() {
 // beside, asked something by user's backend under request, so the model reaches for crm__echo,
 // with user's socket and the provider's MCP hits before the call.
 func (s *SessionConnectorsSuite) heldCall(user *testClient, beside ...map[string]any) heldConnectorCall {
+	return s.heldCallOn(user, nil, beside...)
+}
+
+// heldCallOn is heldCall on a config with tags.
+func (s *SessionConnectorsSuite) heldCallOn(user *testClient, tags map[string]string, beside ...map[string]any) heldConnectorCall {
 	connector := s.connector()
 	mine, echo := s.connection(user, connector)
 	binding := s.binding("crm", connector, "session", "", echo)
 	binding["require_approval"] = []string{"echo"}
-	opened := user.createSession(s.session(s.config(append([]map[string]any{binding}, beside...)...),
+	opened := user.createSession(s.session(s.configTagged(tags, append([]map[string]any{binding}, beside...)...),
 		map[string]string{"crm": mine}))
 	held := heldConnectorCall{id: opened.Id, events: user.opens("/v1/agents/sessions/" + opened.Id + "/events"),
 		request: s.utils.uuid(), before: s.provider.Hits(fakeprovider.PathMCP)}
@@ -533,7 +600,7 @@ func (s *SessionConnectorsSuite) TestACallBesideNessyIsHeldForApproval() {
 }
 
 // TestAPatternCallBesideNessyIsHeldByAWildcardEntry: the session holds the call through
-// store.ConnectorBinding.RequiresApproval, not the config check's holdsPattern, so "*" must hold
+// store.ConnectorBinding.RequiresApproval, not the config check's sensitive.holdsPattern, so "*" must hold
 // the ec* pattern's echo in the session too.
 func (s *SessionConnectorsSuite) TestAPatternCallBesideNessyIsHeldByAWildcardEntry() {
 	s.useApp(s.data.createAppAdmitting(store.AppSettings{InternalConnectors: new(true)}))
