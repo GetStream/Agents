@@ -477,17 +477,29 @@ func (s *BrokerSuite) TestACredentialUnavailableAtTheFirstRunIsKept() {
 	s.Equal([]string{"Bearer gho_live-token-of-the-connection"}, s.rig.host.authorizations())
 }
 
-// TestARecordLastsNoLongerThanARunMayTakeAndAMinute: each run stores its own for that long, so
-// it outlives the run, and a router that stopped during a run leaves it soon after.
-func (s *BrokerSuite) TestARecordLastsNoLongerThanARunMayTakeAndAMinute() {
+// TestARecordOfABrokerToldNoRunTimeoutLastsTheLongestRunAndTwoMinutes: each run stores its own for
+// that long, so it outlives the run and the checks before it, and a router that stopped during a
+// run leaves it soon after.
+func (s *BrokerSuite) TestARecordOfABrokerToldNoRunTimeoutLastsTheLongestRunAndTwoMinutes() {
 	for range 2 {
 		ms, err := s.rig.redis.Do(s.ctx, s.rig.redis.B().Pttl().Key(key(credentialOf(s.mount))).Build()).AsInt64()
 		s.Require().NoError(err)
-		s.Greater(time.Duration(ms)*time.Millisecond, sandbox.MaxTimeout)
-		s.LessOrEqual(time.Duration(ms)*time.Millisecond, sandbox.MaxTimeout+time.Minute)
+		s.Greater(time.Duration(ms)*time.Millisecond, sandbox.MaxTimeout+2*time.Minute-10*time.Second)
+		s.LessOrEqual(time.Duration(ms)*time.Millisecond, sandbox.MaxTimeout+2*time.Minute)
 		s.Require().NoError(s.broker.AfterRun(s.ctx))
 		s.mount = s.run(s.broker, s.prepared)
 	}
+}
+
+// TestARunTimeoutOverTheLongestRunDoesNotLengthenTheRecord: a run timeout of a day gets the record
+// of the longest run, as a broker told none does.
+func (s *BrokerSuite) TestARunTimeoutOverTheLongestRunDoesNotLengthenTheRecord() {
+	_, mount := s.timed(24 * time.Hour)
+
+	ttl := s.ttl(mount)
+
+	s.Greater(ttl, sandbox.MaxTimeout+2*time.Minute-10*time.Second)
+	s.LessOrEqual(ttl, sandbox.MaxTimeout+2*time.Minute)
 }
 
 // TestARecordLastsTheRunTimeoutItIsGivenAndTwoMinutes: with the default run timeout and with

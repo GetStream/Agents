@@ -38,13 +38,8 @@ const bundle = `for roots in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/cer
 	`if [ -s "$roots" ]; then { cat "$roots"; echo; cat ` + caPath + `; } > ` + bundlePath + ` && exit 0; exit 1; fi; done; ` +
 	`echo "no system CA bundle" >&2; exit 1`
 
-// recordTTL is how long a run's record lasts when nothing deletes it (the router stopped during
-// the run, or the store refused AfterRun's delete) and the broker is not told how long a run may
-// take: the longest any run may be given, and a minute.
-const recordTTL = sandbox.MaxTimeout + time.Minute
-
-// runMargin is how much longer than its run timeout a run's record lasts when the broker is told
-// it (BrokerOptions.RunTimeout). Daytona's provider runs the checks of Mount.EachRun after
+// runMargin is how much longer than its run timeout (BrokerOptions.RunTimeout, at most
+// sandbox.MaxTimeout) a run's record lasts. Daytona's provider runs the checks of Mount.EachRun after
 // BeforeRun and before the code, bounded at sandbox.MaxCheckTimeout together (daytona.go:
 // check); the extra minute covers what remains: the run's call waits 5 s past the run
 // timeout (daytona.go, and sdk-go v0.211.2 process.go executeTimeoutBuffer), the toolbox is
@@ -95,7 +90,7 @@ type BrokerOptions struct {
 	Bind sandbox.Bind
 	// RunTimeout is the longest one run of code in the sandbox may take, as its provider enforces
 	// it (sandbox.Config.RunTimeout). Each run's record lasts that and runMargin when nothing
-	// deletes it; zero is recordTTL.
+	// deletes it; zero, or more than sandbox.MaxTimeout, is sandbox.MaxTimeout.
 	RunTimeout time.Duration
 	Logger     *slog.Logger
 }
@@ -149,10 +144,13 @@ func NewBroker(o BrokerOptions) (*Broker, error) {
 			allowed = append(allowed, host)
 		}
 	}
-	ttl := recordTTL
+	// A run timeout the broker is not told, or one over the longest any run may be given, is that
+	// longest.
+	run := sandbox.MaxTimeout
 	if o.RunTimeout > 0 {
-		ttl = o.RunTimeout + runMargin
+		run = min(o.RunTimeout, sandbox.MaxTimeout)
 	}
+	ttl := run + runMargin
 	return &Broker{options: o, proxy: proxy, ttl: ttl, allowed: allowed}, nil
 }
 
