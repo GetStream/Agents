@@ -707,7 +707,7 @@ TABLE data_changes
     CREATE INDEX data_changes_at_idx ON public.data_changes USING btree (at)
     CREATE INDEX data_changes_customer_idx ON public.data_changes USING btree (customer_id, seq)
     CREATE INDEX data_changes_tasks_idx ON public.data_changes USING btree (customer_id, COALESCE((payload ->> 'task_id'::text), (payload ->> 'id'::text)), ((payload ->> 'id'::text))) WHERE ((table_name = ANY (ARRAY['scheduled_tasks'::text, 'scheduled_task_runs'::text])) AND (op <> 'delete'::text))
-    CREATE INDEX data_changes_user_idx ON public.data_changes USING btree (customer_id, table_name, ((payload ->> 'user_id'::text)), ((payload ->> 'id'::text))) WHERE ((payload ->> 'user_id'::text) IS NOT NULL)
+    CREATE INDEX data_changes_user_idx ON public.data_changes USING btree (customer_id, ((payload ->> 'user_id'::text)), ((payload ->> 'id'::text))) WHERE ((table_name = 'requests'::text) AND ((payload ->> 'user_id'::text) IS NOT NULL))
 
 TABLE data_move_cursors
     cursor bigint

@@ -675,8 +675,9 @@ func (s *StoreSuite) TestMigrateRebuildsTheChangesUserIndexLeftInvalid() {
 			"WHERE indexrelid = to_regclass('data_changes_user_idx')").Scan(&valid, &definition))
 		return valid, definition
 	}
-	const want = "CREATE INDEX data_changes_user_idx ON public.data_changes USING btree (customer_id, table_name, " +
-		"((payload ->> 'user_id'::text)), ((payload ->> 'id'::text))) WHERE ((payload ->> 'user_id'::text) IS NOT NULL)"
+	const want = "CREATE INDEX data_changes_user_idx ON public.data_changes USING btree (customer_id, " +
+		"((payload ->> 'user_id'::text)), ((payload ->> 'id'::text))) " +
+		"WHERE ((table_name = 'requests'::text) AND ((payload ->> 'user_id'::text) IS NOT NULL))"
 	_, definition := built()
 	s.Equal(want, definition, "as the migration builds it")
 	// As a CONCURRENTLY build that failed leaves it.
