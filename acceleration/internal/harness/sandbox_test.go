@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -550,6 +551,26 @@ func (s *HarnessSuite) TestASkillsFilesAreWrittenToTheSandboxOnceBeforeItsCodeRu
 	s.Equal("print('filled')", s.box.files["skills/pdf/scripts/fill.py"])
 	s.Len(s.box.code(), 2)
 	s.Contains(s.slow.requests()[0].Instructions, "under skills/pdf/")
+}
+
+func (s *HarnessSuite) TestASkillStoredUnderAnyNameRunsItsScriptsFromItsOwnFolder() {
+	s.box = &stubSandbox{result: sandbox.Result{Output: "filled"}}
+	s.skills = pdfSkills()
+	s.skills.Skills[0].Name = "../../tmp"
+	s.build(true)
+	s.slow.calls = runCode("call-1", "import subprocess")
+	s.slow.automatic = "Filled."
+	s.respond("turn-1", "fill in my form")
+
+	s.reply("turn-1", `<ask skill="../../tmp">fill in my form</ask>`)
+
+	s.Equal(Done, s.awaitSettled(1)[0].State)
+	s.Require().Len(s.box.writes(), 2)
+	folder := strings.TrimSuffix(s.box.writes()[1], "/scripts/fill.py")
+	s.Regexp(`^skills/[^/]+$`, folder)
+	s.NotContains(folder, "..")
+	s.Len(s.box.code(), 1)
+	s.Contains(s.slow.requests()[0].Instructions, "under "+folder+"/")
 }
 
 func (s *HarnessSuite) TestASandboxMadeAgainGetsTheSkillsFilesAgain() {

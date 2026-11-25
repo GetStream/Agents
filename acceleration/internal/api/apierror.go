@@ -118,6 +118,7 @@ const (
 	codeTelephonyNotSuspended   = "telephony_not_suspended"
 	codeNameTaken               = "name_taken"
 	codeImportRunning           = "import_running"
+	codeShardUnavailable        = "shard_unavailable"
 	codeScheduledTaskNotFound   = "scheduled_task_not_found"
 	codeInvalidTimezone         = "invalid_timezone"
 	codeTooManyTasks            = "too_many_tasks"
