@@ -2,6 +2,7 @@ package ttsrouter
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"slices"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 	"github.com/google/uuid"
@@ -28,6 +30,9 @@ type Session struct {
 	owner    routing.Owner
 	recorder *routing.Recorder
 	logger   *slog.Logger
+	// asked is the voice the session was opened with, as the caller spelled it, which is
+	// what a client naming the session's voice on each utterance sends again.
+	asked string
 
 	events chan tts.Event
 	// forwarded closes once every event the provider sent has been recorded, and stopped once
@@ -132,7 +137,19 @@ func newSession(
 // keeps what it reserved and lets it finish. Text for an id whose sentence ended or settled
 // is a new sentence, as the voice speaks it: it is reserved on its own and refused as a first
 // text is.
+//
+// A voice named for one utterance must be the session's: the one it was opened with, as asked
+// or as the provider was handed it once resolved and checked as this customer's. The provider
+// is then asked for no voice of its own, so it speaks the one it was given. Any other voice
+// was never resolved nor checked, so it is refused and nothing is sent.
 func (s *Session) Synthesize(request tts.Request) error {
+	if request.Voice != "" {
+		if request.Voice != s.asked && request.Voice != s.Voice() {
+			return routing.Refused(stack.Wrap(fmt.Errorf(
+				"tts: the session speaks in voice %q, open a new session for %q", s.Voice(), request.Voice)))
+		}
+		request.Voice = ""
+	}
 	if request.ID == "" {
 		request.ID = tts.NewSynthesisID()
 	}
