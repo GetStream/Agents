@@ -4,12 +4,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
 	"maps"
 	"math/big"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -65,11 +67,20 @@ func (s *LeavesSuite) newProxy(max int) *Proxy {
 	return proxy
 }
 
-// certificate is the DER certificate a handshake of owner's for host gets.
+// certificate is the serial of the certificate a handshake of owner's for host gets.
 func (s *LeavesSuite) certificate(proxy *Proxy, host, owner string) string {
 	certificate, err := proxy.leaf(host, owner)
 	s.Require().NoError(err)
-	return string(certificate.Certificate[0])
+	return serial(certificate)
+}
+
+// serial is certificate's serial number, or "unparsable".
+func serial(certificate tls.Certificate) string {
+	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
+	if err != nil {
+		return "unparsable"
+	}
+	return leaf.SerialNumber.String()
 }
 
 // keep has owner's handshakes keep a certificate for each of hosts, a minute apart, oldest first.
@@ -154,16 +165,34 @@ func (s *LeavesSuite) TestAnotherSandboxsHostsStayKeptWhileOneSandboxNamesNewHos
 }
 
 // TestSandboxesThatKeepAsManyTakeNoRoomFromEachOther: in a full cache, a sandbox that keeps as many
-// as the one that keeps the most gets its new host signed for the handshake alone.
+// as the one that keeps the most gets its new hosts signed for the handshake alone, whichever of
+// the two the cache's order visits first.
 func (s *LeavesSuite) TestSandboxesThatKeepAsManyTakeNoRoomFromEachOther() {
 	proxy := s.newProxy(4)
 	first := s.keep(proxy, "sandbox-a", hosts("a.test", 2)...)
 	s.keep(proxy, "sandbox-b", hosts("b.test", 2)...)
 
-	once := s.certificate(proxy, "new.b.test", "sandbox-b")
+	// Go's map order is random for each range, and a small map visits b before a about once in
+	// eight, so a hundred new hosts try both orders.
+	for _, host := range hosts("new.b.test", 100) {
+		s.certificate(proxy, host, "sandbox-b")
+	}
 
-	s.NotEqual(once, s.certificate(proxy, "new.b.test", "sandbox-b"), "b's new host is not kept")
 	s.Empty(s.changed(proxy, "sandbox-a", first))
+	s.Equal(map[string]int{"sandbox-a": 2, "sandbox-b": 2}, proxy.leaves.owned)
+}
+
+// TestARenewedCertificateCountsToTheSandboxThatRenewedIt: a host renewed for another sandbox's
+// handshake, in a cache with room, is no longer the first sandbox's.
+func (s *LeavesSuite) TestARenewedCertificateCountsToTheSandboxThatRenewedIt() {
+	proxy := s.newProxy(4)
+	s.keep(proxy, "ended-run", "api.test")
+	s.advance(halfOfLeafValidity)
+
+	s.certificate(proxy, "api.test", "next-run")
+
+	s.Equal(map[string]int{"next-run": 1}, proxy.leaves.owned)
+	s.Equal("next-run", proxy.leaves.byHost["api.test"].owner)
 }
 
 // TestCertificatesDueForRenewalMakeRoomBeforeAnyOtherIsDropped: in a full cache, a new host takes
@@ -223,14 +252,18 @@ func (s *LeavesSuite) TestConcurrentHandshakesOfTwoSandboxesKeepTheOthersCertifi
 			for _, host := range hosts(fmt.Sprintf("w%d.a.test", worker), 25) {
 				_, err := proxy.leaf(host, "sandbox-a")
 				s.NoError(err)
+				// At -cpu 1 too, the handshakes take turns.
+				runtime.Gosched()
 			}
 		})
 		wg.Go(func() {
 			for range 25 {
+				// Not s.certificate: Require stops the test's own goroutine alone.
 				certificate, err := proxy.leaf("api.b.test", "sandbox-b")
 				if s.NoError(err) {
-					served <- string(certificate.Certificate[0])
+					served <- serial(certificate)
 				}
+				runtime.Gosched()
 			}
 		})
 	}
