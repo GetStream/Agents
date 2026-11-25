@@ -366,15 +366,24 @@ A caller is one of four kinds, decided by the credential and not by the request:
 | --- | --- | --- |
 | server | `Stream-Auth-Type: server` and `server: true` | every session of its customer |
 | authenticated | a token naming a `user_id` | its own user's sessions |
-| guest | a token naming a `user_id`, minted for a guest | its own guest's sessions |
+| guest | a token naming a `user_id` with the role `guest` | its own guest's sessions |
 | anonymous | no token, a user id merely claimed | the sessions opened under that claim |
 
 The three that are not `server` are levels of end user, and an app may turn the bottom two
 away. That is a `settings` document on the app row — `allow_anonymous` and `allow_guest`,
 both defaulting to yes — read in the same query that resolves the API key. A level an app
 refuses is answered 403 at the door rather than given a narrower API, so a new endpoint
-cannot forget, and a missing key or a missing app row admits: `proxy` and `noauth` resolve
-no app row here at all, so the levels are enforced in `api_key` mode only.
+cannot forget, and a missing key or a missing app row admits. `proxy` and `noauth` resolve no
+key, so there only `allow_guest` is enforced, in `proxy`, for the guests the router minted.
+
+A guest the router mints (`POST /v1/agents/guests`) holds a token that names no role, so its
+kind is `authenticated` and its sessions are kept as such. The router knows it by its row in
+`users` instead, in `api_key` and `proxy` mode alike. `allow_guest` is asked on each of its
+requests, from a copy at most a minute old; behind a proxy, one whose app's settings cannot be
+read is answered 500. A user whose id starts `guest-` is answered 500 while their row cannot be
+read. As for a guest by role, it is offered no scheduling tools, uses no
+connection of its own (a required one fails the session, or the scheduled run), does not run in
+its stored timezone, and the sessions its own device opens read no episode cards.
 
 The kind is part of the identity and not a property of it, which is what makes an anonymous
 claim harmless: an anonymous caller saying `user_id=alice` is stored as anonymous alice and
@@ -1615,7 +1624,8 @@ one difference is who runs a skill: nobody is waiting on a voice, so the model h
 conversation loads the skills its config names itself, with `load_skill`, and keeps every
 tool while it follows one. It takes answers from a matching skill first, then the knowledge
 base (`lookup`), then the web (`search`). A text agent with a sandbox runs code itself with
-`run_code`, a loaded skill's scripts written under `skills/<name>/` before it runs, and the
+`run_code`, a loaded skill's scripts written under `skills/<name>/` before it runs (under a hash
+of the name or the file's key, which the model is told, when the sandbox cannot have it), and the
 files it hands back ride on `tool_ran` and the reply.
 
 It is driven over the session's own socket: `respond` goes in, `response_delta` and

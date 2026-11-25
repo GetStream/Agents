@@ -24,7 +24,9 @@ class SkillRequest:
             have one each, so editing either leaves the other alone.
         description (str): The one line the fast model sees.
         instructions (str): The full prompt, which only the subagent sees.
-        name (str): How the config names it, which is unique among that config's own skills.
+        name (str): How the config names it, which is unique among that config's own skills. At most 255 characters,
+            none of them / or \\ or a control character, and not starting with . or -, since it names the skill's folder in
+            the sandbox.
         capture_video (bool | Unset): Capture task-scoped visual evidence before reasoning.
         deadline_ms (int | Unset): How long the work may run before it is abandoned. Zero is the default.
         files (SkillRequestFiles | Unset): The rest of the skill's folder beside SKILL.md, each file's text by its path

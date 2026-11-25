@@ -227,6 +227,24 @@ func (s *AgentSuite) TestAWrittenConversationWithASandboxRunsItsSkillsScriptsIts
 	s.Len(s.box.writes(), 1, "and is not written again for the next run")
 }
 
+func (s *AgentSuite) TestASkillStoredUnderAnyNameRunsItsScriptsFromItsOwnFolder() {
+	s.skills = quoteSkills()
+	s.skills.Skills[0].Name = "../../tmp"
+	s.box = &codeBox{result: sandbox.Result{Output: "42\n"}}
+	s.joinText()
+	loaded := s.runsTool(llm.ToolCall{ID: "load", Name: harness.LoadSkillTool, Arguments: `{"name":"../../tmp"}`}, 1)
+	s.Require().NoError(loaded.Err)
+
+	ran := s.runsTool(runCodeCall("run-1", "import subprocess"), 2)
+
+	s.Require().NoError(ran.Err)
+	s.Require().Len(s.box.writes(), 1)
+	folder := strings.TrimSuffix(s.box.writes()[0], "/scripts/quote.py")
+	s.Regexp(`^skills/[^/]+$`, folder)
+	s.NotContains(folder, "..")
+	s.Contains(loaded.Result, "under "+folder+"/")
+}
+
 func (s *AgentSuite) TestANewSandboxGetsTheSkillsAgain() {
 	s.skills = quoteSkills()
 	s.box = &codeBox{result: sandbox.Result{Output: "42\n"}}

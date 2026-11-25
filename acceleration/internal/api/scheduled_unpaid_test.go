@@ -431,6 +431,13 @@ func (s *TelnyxUnpaidSuite) TestATextRefusedAtItsReservationWhileMoneyCannotBeCh
 	s.False(failure.Final, "the check passes again on its own")
 }
 
+// ownerContext is the context of the delivery, as its task's owner's.
+func (s *TelnyxUnpaidSuite) ownerContext(ctx context.Context, delivery scheduledDelivery) context.Context {
+	ctx, err := s.router.scheduledOwnerContext(ctx, delivery)
+	s.NoError(err)
+	return ctx
+}
+
 // refusedTurn is the follow-up of a task due in the session opened before the credit ran out,
 // captured as a text channel captures it once the gate let the send through: the money changed
 // after it did, so the turn is what the organization's money refuses.
@@ -440,7 +447,7 @@ func (s *TelnyxUnpaidSuite) refusedTurn(user *testClient, opened Session) error 
 	s.Require().True(running)
 	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: user.userID,
 		CallerKind: "authenticated", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
-	_, _, err := s.router.captureReply(scheduledOwnerContext(context.Background(), delivery), found, delivery)
+	_, _, err := s.router.captureReply(s.ownerContext(context.Background(), delivery), found, delivery)
 	return err
 }
 
@@ -503,7 +510,7 @@ func (s *TelnyxUnpaidSuite) conversationTurn(user *testClient, opened Session) e
 	s.Require().True(running)
 	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: user.userID,
 		CallerKind: "authenticated", TaskID: "task", RunID: "run", CommandID: "st_run", Text: "stretch"}
-	_, _, err := s.router.deliverOn(scheduledOwnerContext(context.Background(), delivery), delivery, found,
+	_, _, err := s.router.deliverOn(s.ownerContext(context.Background(), delivery), delivery, found,
 		store.ScheduledTaskDeliveredConversation)
 	return err
 }
@@ -675,7 +682,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadRetryAfterARefusalForMoneyRunsTheTurnAgai
 	task := s.threadTask(channel)
 	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: task.UserID,
 		CallerKind: "server", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
-	ctx := scheduledOwnerContext(context.Background(), delivery)
+	ctx := s.ownerContext(context.Background(), delivery)
 	_, _, err := s.router.deliverOnThread(ctx, delivery, channel)
 	s.Require().Error(err)
 	state, _, _ := found.FollowUpReply("st_run")
@@ -699,7 +706,7 @@ func (s *TelnyxUnpaidSuite) TestATextTurnRefusedWhileMoneyCannotBeCheckedRunsAga
 	s.Require().True(running)
 	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: user.userID,
 		CallerKind: "authenticated", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
-	ctx := scheduledOwnerContext(context.Background(), delivery)
+	ctx := s.ownerContext(context.Background(), delivery)
 	var failure *scheduling.Failure
 	_, _, err := s.router.captureReply(ctx, found, delivery)
 	s.Require().ErrorAs(err, &failure)
@@ -729,7 +736,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadTurnRefusedTwiceFailsUnderTheMoney() {
 	task := s.threadTask(channel)
 	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: task.UserID,
 		CallerKind: "server", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
-	ctx := scheduledOwnerContext(context.Background(), delivery)
+	ctx := s.ownerContext(context.Background(), delivery)
 
 	var reasons []string
 	for range 3 {
@@ -754,7 +761,7 @@ func (s *TelnyxUnpaidSuite) TestATextTurnRefusedTwiceFailsUnderTheMoney() {
 	s.Require().True(running)
 	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: user.userID,
 		CallerKind: "authenticated", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
-	ctx := scheduledOwnerContext(context.Background(), delivery)
+	ctx := s.ownerContext(context.Background(), delivery)
 
 	var reasons []string
 	for range 3 {
@@ -858,7 +865,7 @@ func (s *TelnyxUnpaidSuite) heldConversationTurn(ctx context.Context) (*session.
 	s.T().Cleanup(model.answers)
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := s.router.deliverOn(scheduledOwnerContext(ctx, delivery), delivery, found,
+		_, _, err := s.router.deliverOn(s.ownerContext(ctx, delivery), delivery, found,
 			store.ScheduledTaskDeliveredConversation)
 		done <- err
 	}()
@@ -1012,7 +1019,7 @@ func (s *TelnyxUnpaidSuite) TestATurnThatReportsAFailureNotAboutMoneyStillCarrie
 	}
 	done := make(chan result, 1)
 	go func() {
-		text, _, err := s.router.captureReply(scheduledOwnerContext(context.Background(), delivery), found, delivery)
+		text, _, err := s.router.captureReply(s.ownerContext(context.Background(), delivery), found, delivery)
 		done <- result{text, err}
 	}()
 	s.Require().Eventually(func() bool {
@@ -1231,7 +1238,9 @@ func (s *TelnyxUnpaidSuite) callOn(model string) ringing {
 // takeCall is call with a call of its own taken on its run, as deliverByPhone takes one before
 // it rings: the run must have none taken.
 func (s *TelnyxUnpaidSuite) takeCall(call ringing) ringing {
-	call.spec = callSpec(s.config, call.delivery, call.agentID, phone.Placed{SessionID: s.utils.uuid()}, call.line, call.writer)
+	caller, err := s.router.scheduledCaller(context.Background(), call.delivery)
+	s.Require().NoError(err)
+	call.spec = callSpec(s.config, call.delivery, caller, call.agentID, phone.Placed{SessionID: s.utils.uuid()}, call.line, call.writer)
 	took, _, err := s.store.ScheduledTaskRuns.TakeCall(context.Background(), call.task.CustomerID, call.run.ID, call.spec.ID)
 	s.Require().NoError(err)
 	s.Require().True(took, "the call is taken on the run before it is placed")
@@ -1248,7 +1257,7 @@ func (s *TelnyxUnpaidSuite) dial(call ringing) ringing {
 	done := make(chan callOutcome, 1)
 	call.done = done
 	go func() {
-		deliveredTo, sessionID, err := s.router.carryOutOnCall(scheduledOwnerContext(context.Background(), call.delivery), call.delivery, call.spec)
+		deliveredTo, sessionID, err := s.router.carryOutOnCall(s.ownerContext(context.Background(), call.delivery), call.delivery, call.spec)
 		done <- callOutcome{deliveredTo: deliveredTo, sessionID: sessionID, err: err}
 	}()
 	return call

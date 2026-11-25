@@ -181,6 +181,35 @@ func (s *ProjectTagSuite) TestAForkIsTaggedWithTheProjectABackendNamedLast() {
 	}
 }
 
+// A fork of a session carried on is tagged as one of a session never carried on is.
+func (s *ProjectTagSuite) TestAForkOfARunningSessionCarriedOnIsTaggedWithTheProjectABackendNamedLast() {
+	for _, tried := range []struct{ opener, forker, project, want string }{
+		{"backend", "backend", "-", "alpha"}, {"backend", "backend", "beta", "beta"}, {"backend", "backend", "", ""},
+		{"backend", "device", "-", "alpha"}, {"backend", "device", "beta", "alpha"}, {"backend", "device", "", "alpha"},
+		{"device", "backend", "-", ""}, {"device", "backend", "beta", "beta"}, {"device", "backend", "", ""},
+		{"device", "device", "-", ""}, {"device", "device", "beta", ""}, {"device", "device", "", ""},
+	} {
+		s.Run(strings.Join([]string{tried.opener, tried.forker, tried.project}, " "), func() {
+			owner := s.data.createUser()
+			as := map[string]*testClient{"device": owner, "backend": s.serverClient.actingFor(owner)}
+			parent := s.open(as[tried.opener], "alpha")
+			s.stop(parent.Id)
+			s.Require().Equal(http.StatusOK, owner.do(http.MethodPost, "/v1/agents/sessions/"+parent.Id+"/resume", ResumeSessionRequest{}, nil))
+			owner.opens("/v1/agents/sessions/" + parent.Id + "/events")
+			var request ForkSessionRequest
+			if tried.project != "-" {
+				request.ProjectId = &tried.project
+			}
+
+			forked := s.fork(as[tried.forker], parent.Id, request)
+
+			s.Equal(map[string]string{"-": "alpha", "beta": "beta", "": ""}[tried.project], value(forked.ProjectId))
+			s.Equal([]string{tried.want}, s.answered(as[tried.forker], forked.Id))
+			s.Equal([]string{tried.want}, s.reopened(owner, forked.Id))
+		})
+	}
+}
+
 // A backend naming a project on a fork of its running session leaves the session its own tag,
 // and an agent's project tag stands over both.
 func (s *ProjectTagSuite) TestABackendsForkNamingAProjectLeavesItsParentsTags() {

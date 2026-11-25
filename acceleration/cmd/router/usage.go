@@ -285,7 +285,7 @@ func sessionUsers(ctx context.Context, pgStore *store.Store, rows []store.Reques
 // batch for a row in it, naming each row it still refuses.
 func replayRows(ctx context.Context, pgStore *store.Store, rows []store.Request, out io.Writer) (written, refused int, err error) {
 	ids, err := pgStore.Requests.InsertMany(ctx, rows)
-	if err == nil || errors.Is(err, store.ErrRequestLogsMissing) {
+	if err == nil {
 		return len(ids), 0, nil
 	}
 	if !store.Unwritable(err) {

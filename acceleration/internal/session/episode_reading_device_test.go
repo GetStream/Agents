@@ -137,6 +137,7 @@ func (s *EpisodeReadingSuite) TestOnlyThePersonsOwnVerifiedTokenReadsTheirCards(
 		"a scheduled task of hers":   {routing.Caller{UserID: "anya_123", ServerSide: true}, auth.KindAuthenticated},
 		"an anonymous caller as her": {routing.Caller{UserID: "anya_123"}, auth.KindAnonymous},
 		"a guest as her":             {routing.Caller{UserID: "anya_123", Verified: true}, auth.KindGuest},
+		"a minted guest as her":      {routing.Caller{UserID: "anya_123", Verified: true, Guest: true}, auth.KindAuthenticated},
 		"a token naming nobody":      {routing.Caller{Verified: true}, auth.KindAuthenticated},
 	} {
 		text, params := s.deviceSession(by, "", true, "when is my appointment? "+uuid.NewString())
