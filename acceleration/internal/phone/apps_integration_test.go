@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -2190,6 +2191,76 @@ func (s *AppsSuite) TestALineWhoseTrunksRowMovedMeanwhileLeavesItsOtherNumbersRu
 	rules, err := NewStreamFromClient(s.deployment.Client).rulesOn(s.ctx, line.StreamTrunkID)
 	s.Require().NoError(err)
 	s.Equal(map[string]string{line.StreamRouteID: line.E164}, rules, "its own went")
+}
+
+// interrupted is a vendor that runs something, then refuses, when it is told of a number's trunk.
+type interrupted struct {
+	*stub
+	during func()
+}
+
+func (v interrupted) ConfigureInbound(context.Context, Inbound) error {
+	v.during()
+	return errors.New("refused")
+}
+
+func (v interrupted) Dial(context.Context, Outbound) (Dialed, error) {
+	v.during()
+	return Dialed{}, errors.New("refused")
+}
+
+// Stream does not delete the number's rule at first, which keeps the trunk until it does. Another
+// number's rule on the trunk is not the undone one's to delete.
+func (s *AppsSuite) TestAnUndoneTrunkOfItsOwnGoesWithItsNumbersRuleOnly() {
+	for _, what := range []string{"attach", "call", "transfer"} {
+		for _, shared := range []bool{false, true} {
+			s.Run(fmt.Sprintf("%s, another number's rule there: %t", what, shared), func() {
+				s.service.sealer = nil
+				before := s.deployment.Trunks()
+				number, other := s.anotherNumber(s.customer, s.vendor.vendor), ""
+				var made, rules []string
+				vendor := interrupted{stub: s.vendor, during: func() {
+					made = slices.DeleteFunc(s.deployment.Trunks(), func(id string) bool { return slices.Contains(before, id) })
+					s.Require().Len(made, 1)
+					rules = s.deployment.Rules()
+					if shared {
+						rule, err := NewStreamFromClient(s.deployment.Client).CreateRoute(s.ctx, Route{
+							Name: "another", TrunkIDs: made, CalledNumbers: []string{aNumber()},
+						})
+						s.Require().NoError(err)
+						other = rule
+					}
+					s.deployment.FailNextRuleDelete()
+				}}
+				s.registry.Register(s.vendor.vendor, func() (Provider, error) { return vendor, nil })
+
+				var err error
+				switch what {
+				case "attach":
+					_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: number})
+				case "call":
+					_, err = s.callFrom(number)
+				case "transfer":
+					_, err = s.service.Transfer(s.ctx, TransferRequest{
+						Owner: routing.Owner{CustomerID: s.customer}, From: number, To: "+15550002222", CallID: "call-1", CallType: "support",
+					})
+				}
+
+				s.Require().Error(err)
+				s.Require().NotEmpty(rules, "the trunk had a rule")
+				left := s.deployment.Rules()
+				if shared {
+					s.Equal([]string{other}, slices.DeleteFunc(left, func(id string) bool { return id != other }), "another number's rule stays")
+					s.Contains(s.deployment.Trunks(), made[0])
+				} else {
+					s.NotContains(s.deployment.Trunks(), made[0])
+				}
+				numbers, err := NewStreamFromClient(s.deployment.Client).rulesOn(s.ctx, made[0])
+				s.Require().NoError(err)
+				s.NotContains(slices.Collect(maps.Values(numbers)), number, "the number's own rule is gone")
+			})
+		}
+	}
 }
 
 // The rule a failed line made would not go at first.

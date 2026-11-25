@@ -47,6 +47,8 @@ type store struct {
 	// oneTrunkPerNumber refuses a trunk naming a number another trunk already has; see
 	// OneTrunkPerNumber.
 	oneTrunkPerNumber bool
+	// failRuleDelete answers the next delete of a routing rule with a 500; see FailNextRuleDelete.
+	failRuleDelete bool
 	// trunkCap is the most trunks the app holds, 0 for no limit; see CapTrunks.
 	trunkCap int
 	// keyed are apps answered for one api key, standing in for several apps at one URL.
@@ -518,6 +520,14 @@ func (s *Server) FailWith(method, suffix string, status int) {
 		s.db.failing[method] = map[string]int{}
 	}
 	s.db.failing[method][suffix] = status
+}
+
+// FailNextRuleDelete answers the next delete of a SIP routing rule, whichever it is, with a 500,
+// and serves those after it.
+func (s *Server) FailNextRuleDelete() {
+	s.db.mu.Lock()
+	defer s.db.mu.Unlock()
+	s.db.failRuleDelete = true
 }
 
 // KnownAuthors refuses a partial update of a message by a user the server does not hold, as
@@ -1025,6 +1035,11 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		delete(db.trunks, parts[len(parts)-1])
 	case strings.Contains(r.URL.Path, "/sip/inbound_routing_rules/") && r.Method == http.MethodDelete:
+		if db.failRuleDelete {
+			db.failRuleDelete = false
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		if _, ok := db.rules[parts[len(parts)-1]]; !ok {
 			gone(w, "sip inbound routing rule")
 			return
