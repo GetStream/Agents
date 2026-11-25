@@ -655,28 +655,25 @@ func (r *AgentConfigs) GetByChatChannel(ctx context.Context, customerID, channel
 	return config, nil
 }
 
-// NameCalling is the name of a live config the customer holds, other than except, whose agents
-// name the config called child, and empty when none does.
-func (r *AgentConfigs) NameCalling(ctx context.Context, customerID, child, except string) (string, error) {
+// Calling is every live config the customer holds, other than except, whose agents name the
+// config called child, oldest first, and none when none does.
+func (r *AgentConfigs) Calling(ctx context.Context, customerID, child, except string) ([]AgentConfig, error) {
 	named, err := json.Marshal([]map[string]string{{"config": child}})
 	if err != nil {
-		return "", stack.Wrap(err)
+		return nil, stack.Wrap(err)
 	}
-	var parent string
-	err = r.store.global.NewSelect().Model((*AgentConfig)(nil)).Column("name").
+	var parents []AgentConfig
+	err = r.store.global.NewSelect().Model(&parents).
 		Where("customer_id = ?", customerID).
 		Where("id <> ?", except).
 		Where("agents @> ?::jsonb", string(named)).
 		Where("deleted_at IS NULL").
-		Limit(1).
-		Scan(ctx, &parent)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
+		Order("created_at", "id").
+		Scan(ctx)
 	if err != nil {
-		return "", stack.Wrap(fmt.Errorf("store: agent config calling: %w", err))
+		return nil, stack.Wrap(fmt.Errorf("store: agent configs calling: %w", err))
 	}
-	return parent, nil
+	return parents, nil
 }
 
 // Select returns every live config a customer holds, newest first. It is not paged: a
