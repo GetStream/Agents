@@ -71,6 +71,32 @@ func (s *StoreSuite) ranHistory(name string, global, shard int64) *Store {
 	return db
 }
 
+func (s *StoreSuite) TestTheSessionLogAndCampaignAttemptIndexesStepBackAndForward() {
+	stepped := s.shardTo("stepped_indexes", math.MaxInt64)
+	defer stepped.Close()
+	versions, err := database.NewStore(database.DialectPostgres, globalSet.table)
+	s.Require().NoError(err)
+	provider, err := goose.NewProvider("", stepped.global.DB, globalSet.files, goose.WithStore(versions))
+	s.Require().NoError(err)
+	built := func() (logs, attempts bool) {
+		s.Require().NoError(stepped.global.QueryRowContext(s.ctx, `SELECT to_regclass('agent_logs_session_order') IS NOT NULL,
+			to_regclass('campaign_attempts_campaign_idx') IS NOT NULL`).Scan(&logs, &attempts))
+		return logs, attempts
+	}
+
+	_, err = provider.ApplyVersion(s.ctx, 20270202000000, false)
+	s.Require().NoError(err)
+	logs, attempts := built()
+	s.False(logs, "the session log index is gone")
+	s.False(attempts, "the campaign attempt index is gone")
+
+	_, err = provider.ApplyVersion(s.ctx, 20270202000000, true)
+	s.Require().NoError(err)
+	logs, attempts = built()
+	s.True(logs)
+	s.True(attempts)
+}
+
 // Every database deployed before the squash ran the whole history, so it holds the initial
 // migration's schema and starts as it is.
 func (s *StoreSuite) TestADatabaseThatRanTheSquashedHistoryStartsAsItIs() {
@@ -215,7 +241,7 @@ AFTER INSERT OR UPDATE OR DELETE ON provider_keys FOR EACH ROW EXECUTE FUNCTION 
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	s.Require().NoError(opened.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
+	s.Require().NoError(opened.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Alice", RefreshSecretHash: hash}))
 	_, err = opened.global.ExecContext(s.ctx, `INSERT INTO provider_keys (customer_id, provider, region, api_key_sealed, kek_version, key_hint)
 		VALUES ('acme', 'openai', 'us', 'sealed', 1, 'sk-...abcd')`)
 	s.Require().NoError(err)

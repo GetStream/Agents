@@ -345,7 +345,7 @@ func (s *Service) routeAgain(ctx context.Context, stream *Stream, tx *store.Trun
 	return routeID, nil
 }
 
-// inTrunkGroup is store.InTrunkGroup behind a lock of this process's own. A caller waiting
+// inTrunkGroup is store.StreamTrunks.InGroup behind a lock of this process's own. A caller waiting
 // on the database's lock holds a pooled connection, so a burst of calls for one group, a
 // campaign starting, would otherwise take every connection and leave none for the rest of
 // the router.

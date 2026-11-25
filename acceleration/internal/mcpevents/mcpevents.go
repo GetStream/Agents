@@ -274,8 +274,7 @@ func (s *Service) attemptDue() (wait time.Duration, again bool) {
 		if s.ctx.Err() != nil {
 			return 0, false
 		}
-		now := time.Now()
-		claimed, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, now, claimBatch, now.Add(s.lease))
+		claimed, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, claimBatch, s.lease)
 		if err != nil {
 			if s.ctx.Err() == nil {
 				s.logger.Error("could not take the MCP event subscriptions due", "error", err)

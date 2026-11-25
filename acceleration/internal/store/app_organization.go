@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -35,20 +36,24 @@ type AppOrganizations struct {
 	store *Store
 }
 
-// Upsert records that an app was seen under an organization now, and drops what every
-// replica had cached of the app's.
+// Upsert records that an app was seen under an organization now, in a write that outlives ctx
+// within the store's write timeout, and drops what every replica had cached of the app's
+// (detachedWrite).
 func (r *AppOrganizations) Upsert(ctx context.Context, membership *AppOrganization) error {
 	if err := membership.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
 	membership.SeenAt = time.Now().UTC()
-	_, err := r.store.global.NewInsert().Model(membership).
-		On("CONFLICT (app_id) DO UPDATE").
-		Set("organization_id = EXCLUDED.organization_id").
-		Set("seen_at = EXCLUDED.seen_at").
-		Exec(ctx)
-	// A write can commit and still fail to answer (a cancelled request).
-	r.store.forget(ctx, appOrganizationKey(membership.AppID), appPoliciesKey(membership.AppID))
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		_, err := tx.NewInsert().Model(membership).
+			On("CONFLICT (app_id) DO UPDATE").
+			Set("organization_id = EXCLUDED.organization_id").
+			Set("seen_at = EXCLUDED.seen_at").
+			Exec(ctx)
+		return err
+	}, func() []string {
+		return []string{appOrganizationKey(membership.AppID), appPoliciesKey(membership.AppID)}
+	})
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: join organization: %w", err))
 	}
@@ -94,21 +99,79 @@ func (r *AppOrganizations) OrganizationOf(ctx context.Context, appID string) (st
 	if seen.OrganizationID != "" {
 		return seen.OrganizationID, nil
 	}
-	var registered []string
-	err = r.store.global.NewSelect().Model((*App)(nil)).Column("organization_id").Where("id = ?", appID).Scan(ctx, &registered)
+	registered, err := r.registered(ctx, []string{appID})
 	if err != nil {
-		return "", stack.Wrap(fmt.Errorf("store: organization of app: %w", err))
+		return "", err
 	}
-	if len(registered) == 0 {
-		return "", nil
-	}
-	return registered[0], nil
+	return registered[appID], nil
 }
 
-// Apps is every app of an organization: those requests last named it for, those
-// registered under it that no request named another for, and the app whose id is the
+// OrganizationsOf is OrganizationOf of every app, read from Postgres rather than the cache, in
+// at most two statements however many there are. An app neither names is left out.
+func (r *AppOrganizations) OrganizationsOf(ctx context.Context, appIDs []string) (map[string]string, error) {
+	var seen []AppOrganization
+	err := r.store.global.NewSelect().Model(&seen).Column("app_id", "organization_id").
+		Where("app_id IN (?)", bun.In(appIDs)).Scan(ctx)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: organizations of apps: %w", err))
+	}
+	owners := make(map[string]string, len(appIDs))
+	for _, membership := range seen {
+		owners[membership.AppID] = membership.OrganizationID
+	}
+	var unseen []string
+	for _, app := range appIDs {
+		if _, ok := owners[app]; !ok {
+			unseen = append(unseen, app)
+		}
+	}
+	if len(unseen) == 0 {
+		return owners, nil
+	}
+	registered, err := r.registered(ctx, unseen)
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(owners, registered)
+	return owners, nil
+}
+
+// registered is the organization each app is registered under, leaving out an app registered
+// under none.
+func (r *AppOrganizations) registered(ctx context.Context, appIDs []string) (map[string]string, error) {
+	var apps []App
+	err := r.store.global.NewSelect().Model(&apps).Column("id", "organization_id").Where("id IN (?)", bun.In(appIDs)).Scan(ctx)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: organization of app: %w", err))
+	}
+	owners := make(map[string]string, len(apps))
+	for _, app := range apps {
+		if app.OrganizationID != "" {
+			owners[app.ID] = app.OrganizationID
+		}
+	}
+	return owners, nil
+}
+
+// Apps is every app of an organization: its Members, and the app whose id is the
 // organization's, for an app that is its own.
 func (r *AppOrganizations) Apps(ctx context.Context, organizationID string) ([]string, error) {
+	members, err := r.Members(ctx, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	apps := []string{organizationID}
+	for _, app := range members {
+		if app != organizationID {
+			apps = append(apps, app)
+		}
+	}
+	return apps, nil
+}
+
+// Members is every app of an organization, in order: those requests last named it for, and
+// those registered under it that no request named another for.
+func (r *AppOrganizations) Members(ctx context.Context, organizationID string) ([]string, error) {
 	// One statement, so an app a request records under the organization meanwhile is in one
 	// half or the other.
 	namedOther := r.store.global.NewSelect().Model((*AppOrganization)(nil)).
@@ -124,13 +187,7 @@ func (r *AppOrganizations) Apps(ctx context.Context, organizationID string) ([]s
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: organization apps: %w", err))
 	}
-	apps := []string{organizationID}
-	for _, app := range members {
-		if app != organizationID {
-			apps = append(apps, app)
-		}
-	}
-	return apps, nil
+	return members, nil
 }
 
 // ActivityApps is Apps for a read of what an organization did: the

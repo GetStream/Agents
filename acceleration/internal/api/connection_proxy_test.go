@@ -1029,7 +1029,7 @@ func (s *ConnectionProxySuite) connectedInAnotherApp(id string) (*testClient, st
 }
 
 // awayFromAMinuteBoundary waits out a minute that ends in under five seconds, so the calls a
-// test counts next fall in one of the cap's windows (core.Limiter.Take).
+// test counts next fall in one of the cap's windows (core.Limiter.Admit).
 func awayFromAMinuteBoundary() {
 	if left := time.Until(time.Now().Truncate(time.Minute).Add(time.Minute)); left < 5*time.Second {
 		time.Sleep(left)

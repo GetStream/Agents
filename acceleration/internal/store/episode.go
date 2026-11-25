@@ -12,22 +12,21 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
-// What an episode came in on, the source field of its card (20261007042100_episodes.sql).
+// What an episode came in on, the source field of its card.
 const (
 	EpisodeCall     = "call"
 	EpisodeSlack    = "slack"
 	EpisodeIMessage = "imessage"
 	EpisodeSMS      = "sms"
 	EpisodeWhatsApp = "whatsapp"
-	// EpisodeChat is a run of messages in one agent channel of the app chat
-	// (20261212090000_chat_episodes.sql).
+	// EpisodeChat is a run of messages in one agent channel of the app chat.
 	EpisodeChat = "chat"
 )
 
 // episodeInProgress is an episode not closed yet, the status its card is written with.
 const episodeInProgress = "in_progress"
 
-// The statuses that close an episode (20261007042100_episodes.sql; T55, omnichannel.Closer):
+// The statuses that close an episode (T55, omnichannel.Closer):
 // ended once it is closed, then summarized or summary_failed once its summary is written or
 // could not be.
 const (
@@ -35,12 +34,12 @@ const (
 	EpisodeSummaryFailed = "summary_failed"
 )
 
-// EpisodeSummarized is an episode whose card holds its summary (20261007042100_episodes.sql;
-// T55 sets it). A card in any other status is read by the last lines of its thread channel.
+// EpisodeSummarized is an episode whose card holds its summary (T55 sets it). A card in any
+// other status is read by the last lines of its thread channel.
 const EpisodeSummarized = "summarized"
 
 // Episode is one call, or one run of messages on one external thread, and its card in the
-// person's omni-channel (20261007042100_episodes.sql).
+// person's omni-channel.
 type Episode struct {
 	bun.BaseModel `bun:"table:episodes,alias:ep"`
 
@@ -212,16 +211,17 @@ FOR UPDATE OF ep SKIP LOCKED`
 const closeIdleEpisodesQuery = `
 WITH closed AS (
     UPDATE episodes AS ep
-    SET status = 'ended', ended_at = ?, lease_until = ?, leased_by = ?
+    SET status = 'ended', ended_at = ?, lease_until = now() + make_interval(secs => ?), leased_by = ?
     WHERE ep.id IN (?) AND ep.status = 'in_progress' AND ep.session_id IS NULL
       AND COALESCE(ep.last_message_at, ep.started_at) <= ?
     RETURNING ep.*
 )` + withContact
 
 // CloseIdle ends, at now, at most limit thread episodes of any customer with no message since
-// idleSince, each leased to holder for its summary until leaseUntil. A call's episode is never
-// idle: its call ends it (EndCall).
-func (r *Episodes) CloseIdle(ctx context.Context, idleSince, now time.Time, limit int, leaseUntil time.Time, holder string) ([]ClosedEpisode, error) {
+// idleSince, each leased to holder for its summary for the time in lease. Postgres's clock sets
+// the lease, and ClaimSummaries on each router compares the lease with the same clock. A call's
+// episode is never idle: its call ends it (EndCall).
+func (r *Episodes) CloseIdle(ctx context.Context, idleSince, now time.Time, limit int, lease time.Duration, holder string) ([]ClosedEpisode, error) {
 	closed := []ClosedEpisode{}
 	if limit < 1 {
 		return closed, nil
@@ -234,7 +234,7 @@ func (r *Episodes) CloseIdle(ctx context.Context, idleSince, now time.Time, limi
 		if len(due) == 0 {
 			return nil
 		}
-		return tx.NewRaw(closeIdleEpisodesQuery, now.UTC(), leaseUntil.UTC(), holder, bun.In(due), idleSince.UTC()).Scan(ctx, &closed)
+		return tx.NewRaw(closeIdleEpisodesQuery, now.UTC(), lease.Seconds(), holder, bun.In(due), idleSince.UTC()).Scan(ctx, &closed)
 	})
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: close idle episodes: %w", err))
@@ -246,26 +246,26 @@ func (r *Episodes) CloseIdle(ctx context.Context, idleSince, now time.Time, limi
 // leases each to the router that ended it. The
 // status is checked on the row the update locks, so the event delivered twice, to two
 // routers, ends each episode once. session_id IS NOT NULL is every call episode
-// (20261007042100_episodes.sql), named so episodes_open_call finds them.
+// (episodes_check), named so episodes_open_call finds them.
 const endCallEpisodesQuery = `
 WITH closed AS (
     UPDATE episodes
-    SET status = 'ended', ended_at = ?, lease_until = ?, leased_by = ?
+    SET status = 'ended', ended_at = ?, lease_until = now() + make_interval(secs => ?), leased_by = ?
     WHERE source = 'call' AND session_id IS NOT NULL AND call_id = ? AND status = 'in_progress' AND (?)
     RETURNING *
 )` + withContact
 
 // EndCall ends, at now, the episodes in progress of the call callID in the app scope names,
-// each leased to holder for its summary until leaseUntil. A call id is unique
-// only within its app, so the scope is the app the call event came from, as
-// ReleaseCallResourcesInApp takes it. None is no error: a call under an agent config without
+// each leased to holder for its summary for the time in lease, on Postgres's clock. A call
+// id is unique only within its app, so the scope is the app the call event came from, as
+// CallResources.Release takes it. None is no error: a call under an agent config without
 // episode cards has none.
-func (r *Episodes) EndCall(ctx context.Context, scope AppScope, callID string, now, leaseUntil time.Time, holder string) ([]ClosedEpisode, error) {
+func (r *Episodes) EndCall(ctx context.Context, scope AppScope, callID string, now time.Time, lease time.Duration, holder string) ([]ClosedEpisode, error) {
 	closed := []ClosedEpisode{}
 	if callID == "" {
 		return closed, nil
 	}
-	err := r.store.global.NewRaw(endCallEpisodesQuery, now.UTC(), leaseUntil.UTC(), holder, callID, scope.clause()).Scan(ctx, &closed)
+	err := r.store.global.NewRaw(endCallEpisodesQuery, now.UTC(), lease.Seconds(), holder, callID, scope.clause()).Scan(ctx, &closed)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: end call episodes: %w", err))
 	}
@@ -280,26 +280,28 @@ func (r *Episodes) EndCall(ctx context.Context, scope AppScope, callID string, n
 const claimEpisodeSummariesQuery = `
 WITH due AS (
     SELECT id FROM episodes
-    WHERE lease_until <= ?
+    WHERE lease_until <= now()
     ORDER BY lease_until
     LIMIT ?
     FOR UPDATE SKIP LOCKED
 ), closed AS (
     UPDATE episodes AS ep
-    SET lease_until = ?, leased_by = ?
+    SET lease_until = now() + make_interval(secs => ?), leased_by = ?
     FROM due
     WHERE ep.id = due.id
     RETURNING ep.*
 )` + withContact
 
-// ClaimSummaries takes at most limit ended episodes whose summary lease ran out at now, each
-// leased to holder until leaseUntil.
-func (r *Episodes) ClaimSummaries(ctx context.Context, now time.Time, limit int, leaseUntil time.Time, holder string) ([]ClosedEpisode, error) {
+// ClaimSummaries takes at most limit ended episodes whose summary lease ended, each leased to
+// holder for the time in lease. Postgres's clock examines the old lease and sets the new lease.
+// Thus a router with an incorrect clock does not end the lease of another router too early, and
+// does not keep its own lease too long.
+func (r *Episodes) ClaimSummaries(ctx context.Context, limit int, lease time.Duration, holder string) ([]ClosedEpisode, error) {
 	claimed := []ClosedEpisode{}
 	if limit < 1 {
 		return claimed, nil
 	}
-	err := r.store.global.NewRaw(claimEpisodeSummariesQuery, now.UTC(), limit, leaseUntil.UTC(), holder).Scan(ctx, &claimed)
+	err := r.store.global.NewRaw(claimEpisodeSummariesQuery, limit, lease.Seconds(), holder).Scan(ctx, &claimed)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: claim episode summaries: %w", err))
 	}

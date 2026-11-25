@@ -228,9 +228,9 @@ func (s *Server) registerActivity(api huma.API) {
 			"not a measurement.\n" +
 			"- Churned: was in production, then had no request answered in conversations or model_api for 30 " +
 			"days.\n\n" +
-			"Stream staff only: it needs the ops key.",
+			"Stream staff only: it needs the ops key or the activity key.",
 		Tags:      []string{staffTag},
-		Security:  opsSecurity,
+		Security:  activitySecurity,
 		Responses: map[string]*huma.Response{"200": {Description: "A page of every organization's activity"}},
 		Errors:    []int{http.StatusBadRequest, http.StatusUnauthorized},
 	}, s.listActivity)

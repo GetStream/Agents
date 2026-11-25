@@ -69,7 +69,7 @@ const (
 
 // JobOrigin is the origin of work one of the router's own jobs did, such as
 // job:episode_summary. A campaign or a scheduled task created before their scheduler was kept
-// reads back job:campaign or job:scheduled_task (20261111120000_usage_identity.sql).
+// reads back job:campaign or job:scheduled_task.
 func JobOrigin(name string) string { return "job:" + name }
 
 // CLIOrigin is the origin of work one of the router's own commands did on an operator's

@@ -4,7 +4,9 @@ package channels
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -126,4 +128,56 @@ func (s *SentSuite) TestAReplyCountsTheSenderItAnsweredAsReached() {
 	s.service.send(s.ctx, nil, s.owner, line, provider, Message{Kind: SMS, From: writer, To: line.E164, Thread: writer}, events)
 
 	s.Equal([]string{writer}, s.reached(), "the sender answered, not the line, the customer or nobody")
+}
+
+// Catches a STOP recorded under the sender as the provider wrote them, or read without the
+// line's country: one from a national number must still refuse the next text to that number
+// in E.164, and a START written another way lift it.
+func (s *SentSuite) TestAStopFromASenderNotInE164RefusesTheirNumber() {
+	account := s.smsLine()
+
+	fresh, err := s.service.claim(s.ctx, account, Message{Kind: SMS, ID: uuid.NewString(), From: "3475550103", Text: "stop"})
+	s.Require().NoError(err)
+	s.Require().True(fresh)
+	s.True(s.optedOut("+13475550103"))
+
+	_, err = s.service.claim(s.ctx, account, Message{Kind: SMS, ID: uuid.NewString(), From: "(347) 555-0103", Text: "START"})
+	s.Require().NoError(err)
+	s.False(s.optedOut("+13475550103"))
+}
+
+// Catches a START from a sender whose STOP an older router stored as they wrote it missing
+// that row before the backfill rewrites it, and a STOP then not refusing them.
+func (s *SentSuite) TestAStartBeforeTheBackfillLiftsAStopStoredAsWritten() {
+	account := s.smsLine()
+	_, err := s.money.Store.GlobalDB().ExecContext(s.ctx, `INSERT INTO opt_outs (id, customer_id, recipient, channel, source, created_at)
+		VALUES (?, ?, '13475550104', 'sms', 'keyword', now())`, uuid.NewString(), s.owner.CustomerID)
+	s.Require().NoError(err)
+
+	_, err = s.service.claim(s.ctx, account, Message{Kind: SMS, ID: uuid.NewString(), From: "13475550104", Text: "START"})
+	s.Require().NoError(err)
+	s.False(s.optedOut("13475550104"), "the row stored as written is lifted")
+
+	_, err = s.service.claim(s.ctx, account, Message{Kind: SMS, ID: uuid.NewString(), From: "13475550104", Text: "STOP"})
+	s.Require().NoError(err)
+	s.True(s.optedOut("+13475550104"))
+}
+
+// smsLine is an SMS line of the owner's, on a number in the United States.
+func (s *SentSuite) smsLine() store.ChannelAccount {
+	sealed, err := s.sealer.SealWithAAD(`{"token":"telnyx-key"}`, []byte(s.owner.CustomerID))
+	s.Require().NoError(err)
+	account := store.ChannelAccount{
+		CustomerID: s.owner.CustomerID, Kind: string(SMS), E164: fmt.Sprintf("+1202555%04d", rand.IntN(10000)),
+		Token: "line-" + uuid.NewString(), SecretsSealed: sealed, SecretsKEKVersion: s.sealer.CurrentVersion(),
+	}
+	s.Require().NoError(s.money.Store.ChannelAccounts.Upsert(s.ctx, &account))
+	return account
+}
+
+// optedOut is whether the owner's SMS opt-outs refuse recipient.
+func (s *SentSuite) optedOut(recipient string) bool {
+	blocked, err := s.money.Store.OptOuts.OptedOut(s.ctx, s.owner.CustomerID, recipient, string(SMS))
+	s.Require().NoError(err)
+	return blocked
 }

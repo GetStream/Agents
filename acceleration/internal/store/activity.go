@@ -3,11 +3,14 @@ package store
 import (
 	"cmp"
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
 
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/driver/pgdriver"
 	"github.com/uptrace/bun/schema"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -91,20 +94,44 @@ func (r *Activities) Add(ctx context.Context, deltas []ActivityDelta) error {
 			cmp.Compare(a.client, b.client), cmp.Compare(a.day, b.day))
 	})
 
-	// One transaction, so a failed write wrote nothing and the caller can keep the deltas
-	// for its next try without counting any of them twice.
+	// One transaction, so a write that failed before its commit wrote nothing and the caller can
+	// keep the deltas for its next try without counting any of them twice. One whose commit was
+	// sent and got no answer may have been written, a reply lost on the way back: that is
+	// ErrActivityUnsure (commitUnsure).
+	committing := false
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		for start := 0; start < len(order); start += activityBatch {
 			if err := writeActivity(ctx, tx, folded, order[start:min(start+activityBatch, len(order))]); err != nil {
 				return err
 			}
 		}
+		committing = true
 		return nil
 	})
+	if committing && commitUnsure(err) {
+		return stack.Wrap(fmt.Errorf("store: record activity: %w: %w", ErrActivityUnsure, err))
+	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: record activity: %w", err))
 	}
 	return nil
+}
+
+// ErrActivityUnsure is a write of activity whose commit was sent and got no answer, which may
+// have been written all the same: written again, its counts would be counted twice.
+var ErrActivityUnsure = errors.New("store: the activity may have been recorded")
+
+// commitUnsure reports whether err, a commit's failure, leaves it unknown whether the commit
+// landed. database/sql answers a context that ended before the commit with ErrTxDone or the
+// context's error and sends nothing, and pgdriver sends COMMIT on a context of its own, so
+// neither comes from a COMMIT on the wire; an error the server answered is a commit it refused.
+// Anything else, such as a connection cut after COMMIT was sent, may have landed.
+func commitUnsure(err error) bool {
+	if err == nil || errors.Is(err, sql.ErrTxDone) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var refused pgdriver.Error
+	return !errors.As(err, &refused)
 }
 
 // activityUpsert is one customer_activity row as writeActivity upserts it.

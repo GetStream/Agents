@@ -104,7 +104,7 @@ func customerDaytonaKeys(pgStore *store.Store, secrets *auth.Sealer) func(contex
 		return nil
 	}
 	return func(ctx context.Context) ([]string, error) {
-		rows, err := pgStore.ProviderKeys.SelectByProvider(ctx, providerkeys.Daytona)
+		rows, err := pgStore.ProviderKeys.SelectDaytona(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -267,10 +267,11 @@ func (j *sandboxJob) sweep(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("usage sandboxes: %w", err)
 	}
-	var sessions, ids []string
+	var sessions []store.SessionKey
+	var ids []string
 	for _, box := range listed {
 		ids = append(ids, box.ID)
-		if session := box.Labels[metered.LabelSession]; session != "" {
+		if session := sessionOf(box.Labels); session.ID != "" {
 			sessions = append(sessions, session)
 		}
 	}
@@ -290,12 +291,12 @@ func (j *sandboxJob) sweep(ctx context.Context) error {
 			continue
 		}
 		age := j.now.Sub(box.CreatedAt)
-		session := box.Labels[metered.LabelSession]
+		session := sessionOf(box.Labels)
 		switch {
 		case age < orphanAge:
 			young++
 			continue
-		case session != "" && !ends[session].Ended():
+		case session.ID != "" && !ends[session].Ended():
 			kept++
 			continue
 		}
@@ -304,14 +305,14 @@ func (j *sandboxJob) sweep(ctx context.Context) error {
 			reason = "delete_failed"
 		}
 		if err := j.fleet.Delete(ctx, box.ID); err != nil {
-			j.logger.Error("could not delete a sandbox its session no longer needs", "sandbox", box.ID, "session", session,
+			j.logger.Error("could not delete a sandbox its session no longer needs", "sandbox", box.ID, "session", session.ID,
 				"error", err)
 			failed = append(failed, box.ID)
 			continue
 		}
 		deleted++
 		sandboxOrphansDeleted.WithLabelValues(reason).Inc()
-		j.logger.Warn("deleted a sandbox its session no longer needs", "sandbox", box.ID, "session", session,
+		j.logger.Warn("deleted a sandbox its session no longer needs", "sandbox", box.ID, "session", session.ID,
 			"age", age.Round(time.Second), "reason", reason, "state", box.State)
 	}
 	if _, err := fmt.Fprintf(j.out, "%ssandboxes: %d orphans deleted, %d kept for open sessions, %d too new to judge, %d could not be deleted\n",
@@ -477,7 +478,7 @@ func (j *sandboxJob) owner(ctx context.Context, id string, recorded store.Sandbo
 // short, the day's difference on each meter in one row.
 func (j *sandboxJob) gaps(ctx context.Context, id string, owner routing.Owner, class, region string, daytonas, have tally,
 	unmetered bool, from, to time.Time) (int, error) {
-	closed := j.closedAt(ctx, owner.SessionID)
+	closed := j.closedAt(ctx, store.SessionKey{CustomerID: owner.CustomerID, ID: owner.SessionID})
 	if !unmetered {
 		short := tally{cpu: max(daytonas.cpu-have.cpu, 0), memory: max(daytonas.memory-have.memory, 0), disk: max(daytonas.disk-have.disk, 0)}
 		if short.zero() {
@@ -519,17 +520,23 @@ func (j *sandboxJob) gaps(ctx context.Context, id string, owner routing.Owner, c
 }
 
 // closedAt is when a session closed, nil while it is open or when this shard cannot say.
-func (j *sandboxJob) closedAt(ctx context.Context, session string) *time.Time {
-	if session == "" {
+func (j *sandboxJob) closedAt(ctx context.Context, session store.SessionKey) *time.Time {
+	if session.ID == "" {
 		return nil
 	}
-	ends, err := j.store.Sessions.Ends(ctx, []string{session}, j.now)
+	ends, err := j.store.Sessions.Ends(ctx, []store.SessionKey{session}, j.now)
 	if err != nil {
 		j.logger.Warn("could not read whether a sandbox's session closed, so none of its time is marked an orphan's",
-			"session", session, "error", err)
+			"session", session.ID, "error", err)
 		return nil
 	}
 	return ends[session].ClosedAt
+}
+
+// sessionOf is the session a sandbox's labels say it was made for: its id names one only within
+// the app that made it.
+func sessionOf(labels map[string]string) store.SessionKey {
+	return store.SessionKey{CustomerID: labels[metered.LabelApp], ID: labels[metered.LabelSession]}
 }
 
 // model is what time that used is billed as: running when it held vCPUs or memory, stopped

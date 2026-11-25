@@ -69,7 +69,9 @@ type Campaign struct {
 	LaunchedAt     *time.Time        `bun:"launched_at"`
 	StartedAt      *time.Time        `bun:"started_at"`
 	StoppedAt      *time.Time        `bun:"stopped_at"`
-	ConsentAt      *time.Time        `bun:"consent_at"`
+	// ConsentAt is when the customer said its contacts agreed to be called. No code reads
+	// it: it is the record for whoever is asked to show that consent.
+	ConsentAt *time.Time `bun:"consent_at"`
 	// FinishedAt is when the campaign completed.
 	FinishedAt *time.Time `bun:"finished_at"`
 	// PausedReason is the code of what refused a call when the router paused the campaign
@@ -134,9 +136,7 @@ func (r *Campaigns) Insert(ctx context.Context, campaign *Campaign) error {
 
 	campaign.ID = newID()
 	campaign.CreatedAt = time.Now().UTC()
-	if campaign.Tags == nil {
-		campaign.Tags = map[string]string{}
-	}
+	campaign.Tags = orEmptyMap(campaign.Tags)
 
 	if _, err := r.store.global.NewInsert().Model(campaign).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: create campaign: %w", err))
@@ -180,7 +180,7 @@ type CampaignFilter struct {
 // Select returns a customer's campaigns, newest first.
 func (r *Campaigns) Select(ctx context.Context, customerID string, filter CampaignFilter) ([]Campaign, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var campaigns []Campaign
@@ -191,7 +191,7 @@ func (r *Campaigns) Select(ctx context.Context, customerID string, filter Campai
 	if filter.After != nil {
 		query = query.Where("(created_at, id) < (?, ?)", filter.After.At, filter.After.ID)
 	}
-	err := query.Order("created_at DESC", "id DESC").Limit(clampLimit(filter.Limit, defaultCampaignLimit, maxCampaignLimit)).Scan(ctx)
+	err := query.Order("created_at DESC", "id DESC").Limit(ClampLimit(filter.Limit, defaultCampaignLimit, maxCampaignLimit)).Scan(ctx)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: query campaigns: %w", err))
 	}
@@ -358,7 +358,8 @@ SELECT replace(gen_random_uuid()::text, '-', ''), ?, to_number, instructions, va
 FROM campaign_contacts cc
 WHERE campaign_id = ? AND reason IS DISTINCT FROM 'duplicate'`
 		if contacts == DuplicateNotContacted {
-			query += ` AND NOT EXISTS (SELECT 1 FROM campaign_attempts ca WHERE ca.contact_id = cc.id)`
+			// An attempt that was deferred or refused rang nobody.
+			query += ` AND NOT EXISTS (SELECT 1 FROM campaign_attempts ca WHERE ca.contact_id = cc.id AND ` + placedDial + `)`
 		}
 		if _, err := tx.ExecContext(ctx, query+" ORDER BY seq", copied.ID, source.ID); err != nil {
 			return fmt.Errorf("store: duplicate contacts: %w", err)
@@ -390,10 +391,7 @@ func (r *Campaigns) Launch(ctx context.Context, customerID, id string, launch La
 		state = Scheduled
 	}
 	// The column holds an empty list, never NULL, for a request that named no categories.
-	categories := launch.UsageCategories
-	if categories == nil {
-		categories = []string{}
-	}
+	categories := orEmpty(launch.UsageCategories)
 
 	var launched Campaign
 	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {

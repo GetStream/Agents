@@ -59,7 +59,7 @@ func (e *Enforcer) SubjectsSpend(ctx context.Context, refs []usage.SubjectRef, b
 	for i, ref := range refs {
 		for _, interval := range usage.Intervals {
 			start, end := usage.Window(interval, now)
-			micros, err := db.Spend.Subject(ctx, ref, start)
+			micros, err := db.Spend.Subject(ctx, ref, start, billed)
 			if err != nil {
 				return nil, err
 			}

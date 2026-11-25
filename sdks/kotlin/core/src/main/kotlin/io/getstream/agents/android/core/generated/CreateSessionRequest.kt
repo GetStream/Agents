@@ -64,9 +64,9 @@ import kotlinx.serialization.encoding.Encoder
  * @param instructions What the agent is told to be for this session alone, in place of its config's instructions: a role given at call time, such as the brief of a customer somebody practises on, without a stored config per brief. Empty or left out, the config's instructions stand. There is no limit but the request body's, as a config's instructions have none. They are held only by the running session: a session carried on in writing after it ended in another process, a fork of a session no longer running and a fork naming a config run on the config's instructions again. Server-side only: a device sending them is refused with a 403, because what the agent is told decides who it is, and a device could make it impersonate a different agent.
  * @param keyterms Business-specific words the transcriber would otherwise get wrong. Up to 100 terms, and providers that cannot be told about vocabulary ignore them.
  * @param languages Language hints, which narrow the candidates in every modality.
- * @param llm A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured.
- * @param maxTokens 
- * @param maxToolRounds The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups.
+ * @param llm A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured. Server-side only: a device sending it is refused with a 403.
+ * @param maxTokens Server-side only: a device sending it is refused with a 403.
+ * @param maxToolRounds The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups. Server-side only: a device sending it is refused with a 403.
  * @param memory 
  * @param minConfidence How sure the transcriber must be before the agent answers rather than checks what was meant.
  * @param modelOverwrites 
@@ -75,22 +75,22 @@ import kotlinx.serialization.encoding.Encoder
  * @param projectId What the conversation belongs to. Also recorded as the \"project\" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins.
  * @param resumeHistory 
  * @param returnUrl The app's own page a login or step-up the chat asks for goes back to, as createAuthorization's return_url: the launch page takes the handoff only from a page of its origin, and the browser comes back to it with connection_id and status added to its query. The same rules as createAuthorization's return_url apply, and a URL they refuse is answered with a 400 invalid_request naming the rule (an error frame on the session socket). Absent or empty, those consents go back to the dashboard. It is kept with the session, so a chat carried on after it ended and a fork go back to it too. An end user's device may send it: a consent the chat asks for is only ever for the caller's own connection, shown to the caller alone, and bound to the first browser that hands it off, so the URL only decides where the caller's own consent lands.
- * @param search Omit it and the config decides, or search-fast when there is no config.
+ * @param search Omit it and the config decides, or search-fast when there is no config. Server-side only: a device sending it is refused with a 403.
  * @param startVoice Start voice as the session opens, as startSessionVoice does: the agent joins the call named in call, else agent:<session id>, which joining creates, and returns once it is there. Left out, the conversation is held in writing until voice is started.
- * @param sts A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides.
- * @param stt Omit it and the config decides, or en-low-latency when there is no config.
- * @param tags Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins.
+ * @param sts A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides. Server-side only: a device sending it is refused with a 403.
+ * @param stt Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.
+ * @param tags Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins. Server-side only: a device sending it is refused with a 403.
  * @param team The team the session's work is counted under, its team spend limits included, as team:<name> is among a token's usage categories: 1 to 59 letters, digits, _ . and -. Left out, the session is counted under the team the caller's token names, else the agent config's team tag. A token naming another team is refused with a 400: the team a token was signed for is not moved. Server-side only: a device sending it is refused with a 403, since its team is the one its token was signed for.
  * @param timezone The end user's IANA timezone, such as Europe/Amsterdam, which a device knows and the router does not. It sets the zone the agent reads dates in for this session and, for a user the caller may name, is remembered as theirs for the scheduled tasks and sessions that follow. An unknown zone is refused with a 400 invalid_timezone.
  * @param title What to call the conversation, for a list a person reads, until the router names a persistent one for what was said. Never shown to the model: what a conversation is called is a label on it rather than part of it.
  * @param toolTimeoutMs How long the model waits for the result of a tool the caller or a worker runs, in milliseconds. Zero or omitted is 30 seconds. A tool's own timeout_ms replaces it for that tool, which is how one slow tool, such as one that draws a picture, gets longer without every tool waiting as long.
  * @param tools 
- * @param tts Omit it and the config decides, or en-low-latency when there is no config.
+ * @param tts Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.
  * @param ui Whether the model is told its config's ui_instructions in this session. Left out or true, it is told them after the instructions; false leaves them out, for a client that shows no UI. It is no filter: instructions that teach UI themselves still do, and a UI block the model writes is still split off the reply. Reopening or forking the session keeps it. A device may send it, since it only chooses whether to use what the agent's owner wrote.
  * @param userId The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id.
  * @param userName 
  * @param video 
- * @param voice The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI.
+ * @param voice The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI. Server-side only: a device sending it is refused with a 403.
  */
 @Serializable
 
@@ -161,14 +161,15 @@ internal data class CreateSessionRequest (
     @SerialName(value = "languages")
     val languages: kotlin.collections.List<kotlin.String>? = null,
 
-    /* A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured. */
+    /* A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured. Server-side only: a device sending it is refused with a 403. */
     @SerialName(value = "llm")
     val llm: kotlin.String? = null,
 
+    /* Server-side only: a device sending it is refused with a 403. */
     @SerialName(value = "max_tokens")
     val maxTokens: kotlin.Int? = null,
 
-    /* The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups. */
+    /* The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups. Server-side only: a device sending it is refused with a 403. */
     @SerialName(value = "max_tool_rounds")
     val maxToolRounds: kotlin.Int? = null,
 
@@ -200,7 +201,7 @@ internal data class CreateSessionRequest (
     @SerialName(value = "return_url")
     val returnUrl: kotlin.String? = null,
 
-    /* Omit it and the config decides, or search-fast when there is no config. */
+    /* Omit it and the config decides, or search-fast when there is no config. Server-side only: a device sending it is refused with a 403. */
     @SerialName(value = "search")
     val search: kotlin.String? = null,
 
@@ -208,15 +209,15 @@ internal data class CreateSessionRequest (
     @SerialName(value = "start_voice")
     val startVoice: kotlin.Boolean? = null,
 
-    /* A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides. */
+    /* A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides. Server-side only: a device sending it is refused with a 403. */
     @SerialName(value = "sts")
     val sts: kotlin.String? = null,
 
-    /* Omit it and the config decides, or en-low-latency when there is no config. */
+    /* Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403. */
     @SerialName(value = "stt")
     val stt: kotlin.String? = null,
 
-    /* Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins. */
+    /* Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins. Server-side only: a device sending it is refused with a 403. */
     @SerialName(value = "tags")
     val tags: kotlin.collections.Map<kotlin.String, kotlin.String>? = null,
 
@@ -239,7 +240,7 @@ internal data class CreateSessionRequest (
     @SerialName(value = "tools")
     val tools: kotlin.collections.List<SessionTool>? = null,
 
-    /* Omit it and the config decides, or en-low-latency when there is no config. */
+    /* Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403. */
     @SerialName(value = "tts")
     val tts: kotlin.String? = null,
 
@@ -257,7 +258,7 @@ internal data class CreateSessionRequest (
     @SerialName(value = "video")
     val video: SessionVideo? = null,
 
-    /* The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI. */
+    /* The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI. Server-side only: a device sending it is refused with a 403. */
     @SerialName(value = "voice")
     val voice: kotlin.String? = null
 
