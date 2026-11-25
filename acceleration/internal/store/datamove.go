@@ -932,13 +932,14 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 			// this deployment's, so the source's copy of the row, in a copy taken again or a
 			// change applied later, does not detach it. The agent is too only once attached:
 			// a line alone never wrote it (SetLine), so the source's agent still arrives. A number
-			// the source gave back keeps nothing, as a release here clears the line first.
+			// the source gave back keeps nothing, as a release here clears the line first, and a
+			// row that is now another number's has no line for that one.
 			kept := "phone_numbers.stream_trunk_id IS NOT NULL"
 			if column == "config_id" {
 				kept = "phone_numbers.attached_at IS NOT NULL"
 			}
 			assignments = append(assignments, fmt.Sprintf(
-				"%[1]s = CASE WHEN %[2]s AND EXCLUDED.released_at IS NULL THEN phone_numbers.%[1]s ELSE EXCLUDED.%[1]s END", column, kept))
+				"%[1]s = CASE WHEN %[2]s AND EXCLUDED.released_at IS NULL AND EXCLUDED.e164 = phone_numbers.e164 THEN phone_numbers.%[1]s ELSE EXCLUDED.%[1]s END", column, kept))
 		default:
 			assignments = append(assignments, column+" = EXCLUDED."+column)
 		}

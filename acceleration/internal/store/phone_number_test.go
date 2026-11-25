@@ -332,6 +332,31 @@ func (s *StoreSuite) TestATrunkLineInTheDeploymentsAppIsFoundByItsIdOrNoPin() {
 	s.Equal([]string{"umbrella"}, customersHolding(lines))
 }
 
+func (s *StoreSuite) TestTheTrunksOfSIPTrunksAreEveryCustomersInTheApp() {
+	s.store.SetStreamPins(StreamPins{Deployment: func() int64 { return 1 }})
+	s.T().Cleanup(func() { s.store.SetStreamPins(StreamPins{}) })
+	for _, trunk := range []TrunkGroup{
+		{CustomerID: "globex", Vendor: sipTrunkVendor},
+		{CustomerID: "initech", StreamAppPK: 1, Vendor: sipTrunkVendor},
+		{CustomerID: "umbrella", StreamAppPK: 77, Vendor: sipTrunkVendor},
+		{CustomerID: "hooli", Vendor: "telnyx"},
+	} {
+		s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, trunk, func(_ context.Context, tx *TrunkGroupTx) error {
+			return tx.SaveTrunk(StreamTrunk{ID: "trunk-" + trunk.CustomerID})
+		}))
+	}
+
+	for app, want := range map[int64][]string{0: {"trunk-globex", "trunk-initech"}, 1: {"trunk-globex", "trunk-initech"}, 77: {"trunk-umbrella"}, 78: nil} {
+		trunks, err := s.store.StreamTrunks.OfSIPTrunks(s.ctx, app)
+		s.Require().NoError(err)
+		var ids []string
+		for _, trunk := range trunks {
+			ids = append(ids, trunk.ID)
+		}
+		s.Equal(want, ids, "app %d", app)
+	}
+}
+
 func customersHolding(numbers []PhoneNumber) []string {
 	customers := make([]string, 0, len(numbers))
 	for _, number := range numbers {

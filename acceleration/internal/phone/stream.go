@@ -320,6 +320,31 @@ func (s *Stream) answering(ctx context.Context, e164, trunkID string) (rules, tr
 	return rules, trunks, holds, nil
 }
 
+// lines are the trunks the app has at Stream that list a number or have a rule made for it alone,
+// by id, each with the ids of those rules.
+func (s *Stream) lines(ctx context.Context, e164 string) (map[string][]string, error) {
+	listedTrunks, err := s.client.Video().ListSIPTrunks(ctx, &getstream.ListSIPTrunksRequest{})
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("phone: list sip trunks: %w", err))
+	}
+	lines := map[string][]string{}
+	for _, trunk := range listedTrunks.Data.SipTrunks {
+		if slices.Contains(trunk.Numbers, e164) {
+			lines[trunk.ID] = nil
+		}
+	}
+	listedRules, err := s.client.Video().ListSIPInboundRoutingRule(ctx, &getstream.ListSIPInboundRoutingRuleRequest{})
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("phone: list sip routing rules: %w", err))
+	}
+	for _, rule := range listedRules.Data.SipInboundRoutingRules {
+		if len(rule.TrunkIds) == 1 && slices.Equal(rule.CalledNumbers, []string{e164}) {
+			lines[rule.TrunkIds[0]] = append(lines[rule.TrunkIds[0]], rule.ID)
+		}
+	}
+	return lines, nil
+}
+
 // notFound is Stream saying what was to be deleted or updated is not there: removed by hand
 // at Stream, or by an earlier attempt that failed after Stream took it. A delete wanted that.
 func notFound(err error) bool {

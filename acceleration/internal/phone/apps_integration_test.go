@@ -1665,6 +1665,350 @@ func (s *AppsSuite) TestALineOnATrunkWithNoRowStreamWillNotDeleteIsLeftAsItWas()
 	s.leftAsItWas(squatter, line, s.deployment)
 }
 
+// lineChanges are the changes a data move replays that leave a lined number no row with its line.
+var lineChanges = []string{"deleted", "given back", "another number's"}
+
+// moved replays a change onto the line's row.
+func (s *AppsSuite) moved(line store.PhoneNumber, change string) {
+	s.Require().NoError(s.store.ApplyChanges(s.ctx, line.CustomerID, []store.DataChange{s.lineChange(line, change)}))
+}
+
+func (s *AppsSuite) lineChange(line store.PhoneNumber, change string) store.DataChange {
+	if change == "deleted" {
+		key, err := json.Marshal(map[string]any{"id": line.ID, "customer_id": line.CustomerID})
+		s.Require().NoError(err)
+		return store.DataChange{Table: "phone_numbers", Op: store.ChangeDelete, Key: key}
+	}
+	set := map[string]any{"released_at": time.Now().UTC()}
+	if change == "another number's" {
+		set = map[string]any{"e164": aNumber()}
+	}
+	fields, err := json.Marshal(set)
+	s.Require().NoError(err)
+	var row json.RawMessage
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT to_jsonb(pn) || ?::jsonb FROM phone_numbers AS pn WHERE id = ?", string(fields), line.ID).Scan(&row))
+	return store.DataChange{Table: "phone_numbers", Op: store.ChangeUpdate, Payload: row}
+}
+
+// forgotten checks Stream has nothing left of the line, nor a trunk row here.
+func (s *AppsSuite) forgotten(line store.PhoneNumber) {
+	s.NotContains(s.deployment.Trunks(), line.StreamTrunkID)
+	s.Nil(s.deployment.Rule(line.StreamRouteID))
+	_, err := s.store.StreamTrunks.Get(s.ctx, line.CustomerID, line.StreamTrunkID)
+	s.ErrorIs(err, store.ErrNoStreamTrunk)
+}
+
+func (s *AppsSuite) TestABuyerAttachesANumberWhoseLineAMoveLeftWithoutARow() {
+	for _, change := range lineChanges {
+		s.Run(change, func() {
+			e164, _, _, line := s.squatted()
+			s.moved(line, change)
+			s.moved(line, "deleted")
+
+			_, err := s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
+			s.Require().NoError(err)
+			s.forgotten(line)
+			_, err = s.callFrom(e164)
+			s.NoError(err, "and calls from it")
+		})
+	}
+}
+
+func (s *AppsSuite) TestABuyerCallsFromANumberWhoseLineAMoveLeftWithoutARow() {
+	for _, change := range lineChanges {
+		s.Run(change, func() {
+			e164, _, _, line := s.squatted()
+			s.moved(line, change)
+
+			_, err := s.callFrom(e164)
+
+			s.Require().NoError(err)
+			s.forgotten(line)
+		})
+	}
+}
+
+// Copied in full again after the change and before the number was bought, the row is back with no
+// line.
+func (s *AppsSuite) TestABuyerAttachesANumberWhoseRowAMoveWroteAgain() {
+	for _, change := range lineChanges {
+		s.Run(change, func() {
+			e164, squatter, _, line := s.squatted()
+			bought, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
+			s.Require().NoError(err)
+			_, err = s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM phone_numbers WHERE id = ?", bought.ID)
+			s.Require().NoError(err)
+			var row json.RawMessage
+			s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+				"SELECT to_jsonb(pn) FROM phone_numbers AS pn WHERE id = ?", line.ID).Scan(&row))
+			s.moved(line, change)
+			s.Require().NoError(s.store.ImportRow(s.ctx, squatter, "phone_numbers", row))
+			again, err := s.store.PhoneNumbers.GetByE164(s.ctx, squatter, e164)
+			s.Require().NoError(err)
+			s.Require().Empty(again.StreamTrunkID)
+			s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
+				E164: e164, Vendor: s.vendor.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
+			}))
+
+			_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
+			s.Require().NoError(err)
+			s.forgotten(line)
+		})
+	}
+}
+
+func (s *AppsSuite) TestABuyerTransfersFromANumberWhoseLineAMoveLeftWithoutARow() {
+	e164, _, _, line := s.squatted()
+	s.moved(line, "deleted")
+
+	_, err := s.service.Transfer(s.ctx, TransferRequest{
+		Owner: routing.Owner{CustomerID: s.customer}, From: e164, To: "+15550002222", CallID: "call-1",
+	})
+
+	s.Require().NoError(err)
+	s.forgotten(line)
+}
+
+// The same customer adds the number again: it gets one line, not a second rule beside the first.
+func (s *AppsSuite) TestACustomerCallsAgainFromItsTrunkNumberAMoveDeleted() {
+	s.sealed()
+	s.deployment.OneTrunkPerNumber()
+	e164, customer := aNumber(), "customer-"+uuid.NewString()
+	trunk := s.onATrunk(customer, e164, StreamLegShared)
+	call := CallRequest{Owner: routing.Owner{CustomerID: customer}, From: e164, To: "+15550001111"}
+	_, err := trunk.service.Call(s.ctx, call)
+	s.Require().NoError(err)
+	line, err := s.store.PhoneNumbers.GetByE164(s.ctx, customer, e164)
+	s.Require().NoError(err)
+	s.moved(line, "deleted")
+	s.Require().NoError(s.addOnATrunk(trunk, customer, e164))
+
+	_, err = trunk.service.Call(s.ctx, call)
+
+	s.Require().NoError(err)
+	s.forgotten(line)
+	s.Len(s.deployment.Trunks(), 1)
+	s.Len(s.deployment.Rules(), 1)
+}
+
+// The number is now on another customer's trunk, which adding it here allowed: nobody held it.
+func (s *AppsSuite) TestACustomerCallsFromATrunkNumberWhoseLineAMoveLeftWithoutARow() {
+	e164, squatter, trunk, line := s.squatted()
+	s.moved(line, "deleted")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM phone_numbers WHERE e164 = ?", e164)
+	s.Require().NoError(err)
+	second := "customer-" + uuid.NewString()
+	s.Require().NotEqual(squatter, second)
+	s.Require().NoError(s.addOnATrunk(trunk, second, e164))
+
+	_, err = trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: second}, From: e164, To: "+15550001111"})
+
+	s.Require().NoError(err)
+	s.forgotten(line)
+}
+
+// Another number of its customer's is still on the trunk, so only this one is taken off it.
+func (s *AppsSuite) TestAForgottenLineLeavesTheOtherNumbersOfItsTrunk() {
+	e164, squatter, trunk, line := s.squatted()
+	other := aNumber()
+	s.Require().NoError(s.addOnATrunk(trunk, squatter, other))
+	_, err := trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: other, To: "+15550001111"})
+	s.Require().NoError(err)
+	kept, err := s.store.PhoneNumbers.GetByE164(s.ctx, squatter, other)
+	s.Require().NoError(err)
+	s.Require().Equal(line.StreamTrunkID, kept.StreamTrunkID)
+	s.moved(line, "deleted")
+
+	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
+	s.Require().NoError(err)
+	s.Equal([]string{other}, s.deployment.TrunkNumbers(line.StreamTrunkID))
+	s.Nil(s.deployment.Rule(line.StreamRouteID))
+	s.NotNil(s.deployment.Rule(kept.StreamRouteID))
+	before := s.deployment.Trunks()
+	_, err = trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: other, To: "+15550001111"})
+	s.NoError(err, "it still calls on its line")
+	s.Equal(before, s.deployment.Trunks())
+}
+
+// The trunk's next update took the number off it, and its rule stayed.
+func (s *AppsSuite) TestAForgottenLinesRuleGoesOnceItsTrunkNoLongerListsTheNumber() {
+	e164, squatter, trunk, line := s.squatted()
+	s.moved(line, "deleted")
+	other := aNumber()
+	s.Require().NoError(s.addOnATrunk(trunk, squatter, other))
+	_, err := trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: other, To: "+15550001111"})
+	s.Require().NoError(err)
+	s.Require().Equal([]string{other}, s.deployment.TrunkNumbers(line.StreamTrunkID))
+
+	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
+	s.Require().NoError(err)
+	s.Nil(s.deployment.Rule(line.StreamRouteID))
+	s.Equal([]string{other}, s.deployment.TrunkNumbers(line.StreamTrunkID))
+}
+
+func (s *AppsSuite) TestAForgottenLineStreamWillNotTakeDownIsFoundAgain() {
+	for _, refused := range []string{"rule", "trunk"} {
+		s.Run(refused, func() {
+			e164, squatter, _, line := s.squatted()
+			s.moved(line, "deleted")
+			path := "/sip/inbound_trunks/" + line.StreamTrunkID
+			if refused == "rule" {
+				path = "/sip/inbound_routing_rules/" + line.StreamRouteID
+			}
+			s.deployment.Fail(http.MethodDelete, path)
+
+			_, err := s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
+			s.Error(err)
+			_, err = s.store.StreamTrunks.Get(s.ctx, squatter, line.StreamTrunkID)
+			s.Require().NoError(err)
+			s.deployment.Heal(http.MethodDelete, path)
+			_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+			s.Require().NoError(err)
+			s.forgotten(line)
+		})
+	}
+}
+
+func (s *AppsSuite) TestAForgottenLineOnATrunkStreamWillNotTakeTheNumberOffFailsTheAttach() {
+	e164, squatter, trunk, line := s.squatted()
+	other := aNumber()
+	s.Require().NoError(s.addOnATrunk(trunk, squatter, other))
+	_, err := trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: other, To: "+15550001111"})
+	s.Require().NoError(err)
+	s.moved(line, "deleted")
+	s.deployment.Fail(http.MethodPut, "/sip/inbound_trunks/"+line.StreamTrunkID)
+
+	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
+	s.ErrorContains(err, "update sip trunk")
+	s.Contains(s.deployment.TrunkNumbers(line.StreamTrunkID), other)
+}
+
+// Stream still lists the rule of a trunk it no longer has.
+func (s *AppsSuite) TestAForgottenLineOnATrunkStreamNoLongerHasDoesNotStopTheBuyer() {
+	e164, squatter, trunk, line := s.squatted()
+	other := aNumber()
+	s.Require().NoError(s.addOnATrunk(trunk, squatter, other))
+	_, err := trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: other, To: "+15550001111"})
+	s.Require().NoError(err)
+	s.moved(line, "deleted")
+	s.Require().NoError(NewStreamFromClient(s.deployment.Client).DeleteTrunk(s.ctx, line.StreamTrunkID))
+
+	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
+	s.Require().NoError(err)
+	s.Nil(s.deployment.Rule(line.StreamRouteID))
+}
+
+// A trunk no row here names was made by hand or by another router on the app, and a rule of more
+// than the number and its trunk was not made by this one.
+func (s *AppsSuite) TestAForgottenLineLeavesWhatTheRouterDidNotMake() {
+	e164, _, _, line := s.squatted()
+	s.moved(line, "deleted")
+	stream := NewStreamFromClient(s.deployment.Client)
+	byHand, _, err := stream.CreateTrunk(s.ctx, Trunk{Name: "by hand", Numbers: []string{aNumber()}})
+	s.Require().NoError(err)
+	var rules []string
+	for _, route := range []Route{
+		{Name: "two numbers", TrunkIDs: []string{line.StreamTrunkID}, CalledNumbers: []string{e164, aNumber()}},
+		{Name: "two trunks", TrunkIDs: []string{line.StreamTrunkID, byHand}, CalledNumbers: []string{e164}},
+		{Name: "another trunk", TrunkIDs: []string{byHand}, CalledNumbers: []string{e164}},
+	} {
+		rule, err := stream.CreateRoute(s.ctx, route)
+		s.Require().NoError(err)
+		rules = append(rules, rule)
+	}
+
+	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
+	s.Require().NoError(err)
+	s.forgotten(line)
+	s.Contains(s.deployment.Trunks(), byHand)
+	for _, rule := range rules {
+		s.NotNil(s.deployment.Rule(rule))
+	}
+}
+
+func (s *AppsSuite) TestANumberOnATrunkMadeByHandIsLeftThere() {
+	s.squatted()
+	e164 := s.anotherNumber(s.customer, s.vendor.vendor)
+	byHand, _, err := NewStreamFromClient(s.deployment.Client).CreateTrunk(s.ctx, Trunk{Name: "by hand", Numbers: []string{e164}})
+	s.Require().NoError(err)
+
+	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
+	s.ErrorContains(err, "numbers already used by another SIP trunk")
+	s.Equal([]string{e164}, s.deployment.TrunkNumbers(byHand))
+}
+
+// A number that has its line asks Stream for no list, and neither does one in an app where no
+// customer's own trunk has a line.
+func (s *AppsSuite) TestOnlyANumberBeingLinedBesideTrunkLinesListsStreamsTrunks() {
+	s.sealed()
+	lists := func() int {
+		count := 0
+		for _, request := range s.deployment.Requests(s.deployment.Key) {
+			if request.Method == http.MethodGet && strings.HasSuffix(request.Path, "/sip/inbound_trunks") {
+				count++
+			}
+		}
+		return count
+	}
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM stream_trunks WHERE vendor = ?", SIPTrunkVendor)
+	s.Require().NoError(err)
+	_, err = s.callFrom(s.e164)
+	s.Require().NoError(err)
+	s.Zero(lists())
+	e164, _, _, _ := s.squatted()
+	before := lists()
+
+	_, err = s.callFrom(e164)
+	s.Require().NoError(err)
+	s.Equal(1, lists()-before)
+	_, err = s.callFrom(e164)
+	s.Require().NoError(err)
+	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+	s.Require().NoError(err)
+	s.Equal(1, lists()-before)
+}
+
+// However a replayed delete, another call from the trunk and the buyer's attach fall, a later
+// attach works and Stream lists the number once.
+func (s *AppsSuite) TestABuyerAttachesWhileAMoveDeletesTheNumbersRow() {
+	for range 5 {
+		e164, squatter, trunk, line := s.squatted()
+		deletion := s.lineChange(line, "deleted")
+		var applied error
+		var running sync.WaitGroup
+		running.Go(func() { applied = s.store.ApplyChanges(s.ctx, squatter, []store.DataChange{deletion}) })
+		running.Go(func() {
+			_, _ = trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: e164, To: "+15550001111"})
+		})
+		for range 2 {
+			running.Go(func() { _, _ = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164}) })
+		}
+		running.Wait()
+		s.Require().NoError(applied)
+
+		_, err := s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
+		s.Require().NoError(err)
+		listing := 0
+		for _, id := range s.deployment.Trunks() {
+			if slices.Contains(s.deployment.TrunkNumbers(id), e164) {
+				listing++
+			}
+		}
+		s.Equal(1, listing)
+	}
+}
+
 func (s *AppsSuite) TestANumberACustomerInTheSameAppBoughtCannotBeAddedToATrunk() {
 	err := s.addOnATrunk(s.dialsTrunks(StreamLegShared), "customer-"+uuid.NewString(), s.e164)
 
