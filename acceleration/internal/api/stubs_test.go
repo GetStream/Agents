@@ -89,8 +89,22 @@ func searchConfig() routing.ModalityConfig {
 		config.Providers = append(config.Providers, routing.ProviderConfig{
 			Provider: provider, Model: failingSearchModels[provider], Languages: []string{"la"}})
 	}
+	// A vendor that is down and takes a category, which down's other model does not.
+	config.Providers = append(config.Providers, routing.ProviderConfig{
+		Provider: "down", Model: failingSearchModels["down-news"], Languages: []string{"la"}, Terms: []options.Term{options.Category}})
 	return config
 }
+
+// fallingModel and unfitModel are the two models of the fallsToARefusal shortcut, new each run
+// for the reason refusingModel is.
+var (
+	fallingModel = "failing-" + rand.Text()
+	unfitModel   = "unfit-" + rand.Text()
+)
+
+// fallsToARefusal is the shortcut whose first model fails at its vendor and whose only other
+// model refuses the request.
+const fallsToARefusal = "falls-to-a-refusal"
 
 // failingSearchModels are the models searchConfig adds, by provider. They are new each run, for the
 // reason refusingModel is: a failure marks a model unavailable in a Redis other runs share.
@@ -100,6 +114,7 @@ var failingSearchModels = map[string]string{
 	"broke":       "broke-" + rand.Text(),
 	"slow":        "slow-" + rand.Text(),
 	"hang":        "hang-" + rand.Text(),
+	"down-news":   "down-news-" + rand.Text(),
 }
 
 // recordingConfig adds the batch half a whole recording is served by, so a job sent to the
@@ -164,7 +179,12 @@ func reasoningConfig() routing.ModalityConfig {
 		routing.ProviderConfig{Provider: "analysing", Model: "analysing-model", Languages: []string{"la"}},
 		routing.ProviderConfig{Provider: "judging", Model: "judging-model", Languages: []string{"la"}},
 		routing.ProviderConfig{Provider: "pondering", Model: "pondering-model", Languages: []string{"la"}},
+		routing.ProviderConfig{Provider: "failing", Model: fallingModel, Languages: []string{"la"}},
+		routing.ProviderConfig{Provider: "unfit", Model: unfitModel, Languages: []string{"la"}},
 	)
+	// A model that fails at its vendor, whose only fallback refuses the request.
+	config.Aliases[fallsToARefusal] = routing.Alias{Languages: []string{"la"}, Prefer: "failing/" + fallingModel,
+		Only: []string{"failing/" + fallingModel, "unfit/" + unfitModel}}
 	// Where a socket that names no target goes. It pins the stub as router.yaml pins its
 	// model: the vision model speaks English too, and left to the ranking the default would
 	// be whichever of the two ranks first on the health every suite records in Redis. The pin
@@ -636,6 +656,9 @@ func recorderRegistry() *ttsrouter.Recorders {
 	registry.Register("down", func(spec routing.Spec) (tts.Recorder, error) {
 		return &downVoice{recordedVoice{model: spec.Model}}, nil
 	})
+	registry.Register("brief", func(spec routing.Spec) (tts.Recorder, error) {
+		return &briefVoice{recordedVoice{model: spec.Model}}, nil
+	})
 	return registry
 }
 
@@ -647,6 +670,15 @@ func (*downVoice) Record(context.Context, tts.Recording) (tts.Recorded, error) {
 }
 
 func (*downVoice) Provider() string { return "down" }
+
+// briefVoice refuses every text as longer than one recording takes, as Inworld does.
+type briefVoice struct{ recordedVoice }
+
+func (*briefVoice) Record(context.Context, tts.Recording) (tts.Recorded, error) {
+	return tts.Recorded{}, routing.Refused(errors.New("brief: text is longer than one recording takes"))
+}
+
+func (*briefVoice) Provider() string { return "brief" }
 
 func (v *recordedVoice) Record(_ context.Context, recording tts.Recording) (tts.Recorded, error) {
 	format := recording.Format

@@ -499,12 +499,12 @@ func (s *StreamsSuite) TestAModelTheDeploymentHasNoKeyForIsListedUnavailable() {
 	s.Equal(true, available["echoing/echoing-model"], "a model the deployment can build stays available")
 }
 
-func (s *StreamsSuite) TestAStreamToAModelTheDeploymentHasNoKeyForIsRefusedNamingTheKey() {
+func (s *StreamsSuite) TestAStreamToAModelTheDeploymentHasNoKeyForNamesNoSetting() {
 	listening := s.start("/v1/stt/stream", frame{"target": "unconfigured/" + unconfiguredModel})
 
 	refused := s.nextFrame(listening)
 	s.Equal("error", refused["type"])
-	s.Contains(refused["error"], "unconfigured: api key is required (set UNCONFIGURED_API_KEY)")
+	s.Equal(somethingWentWrong, refused["error"])
 	s.EqualValues(1, s.unconfiguredBuilds.Load(),
 		"built once, to learn it cannot be, and never tried: a model nobody can reach is no stat against its health")
 }
@@ -999,7 +999,7 @@ func (s *StreamsSuite) refused() *websocket.Conn {
 
 	refused := s.nextFrame(listening)
 	s.Require().Equal("error", refused["type"])
-	s.Equal(termsRefusal, refused["error"])
+	s.Equal(somethingWentWrong, refused["error"], "the vendor's words are the row's, not the caller's")
 	s.Equal(true, refused["fatal"])
 	return listening
 }

@@ -223,7 +223,7 @@ func (s *Server) streamModality(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := request.Tags.Validate(); err != nil {
 		record(err)
-		out.failed(err)
+		out.failed(startRefused{err})
 		recordClose(r.Context(), out.end(startRefused{err}))
 		return
 	}
@@ -515,12 +515,12 @@ func (s *Server) streamLLM(
 		case "respond":
 			params, err := command.params(held)
 			if err != nil {
-				out.failed(err)
+				out.failed(invalidRequest(err.Error()))
 				continue
 			}
 			if llm.HasImage(params.Input) && !session.Capabilities().Accepts(llm.ModalityImage) {
-				out.failed(fmt.Errorf("llm: %s does not accept %s input",
-					session.Model(), llm.ModalityImage))
+				out.failed(invalidRequest(fmt.Sprintf("llm: %s does not accept %s input",
+					session.Model(), llm.ModalityImage)))
 				continue
 			}
 			// Responses overlap, so a backend's each add up what they cost apart.
@@ -687,7 +687,7 @@ func (s *Server) streamSTS(
 
 		var command converse
 		if err := json.Unmarshal(payload, &command); err != nil {
-			out.failed(fmt.Errorf("unreadable frame: %w", err))
+			out.failed(invalidRequest("unreadable frame: " + err.Error()))
 			continue
 		}
 		if err := command.apply(session, updates, out, speaker); err != nil {
@@ -739,18 +739,18 @@ func (c converse) apply(session *stsrouter.Session, updates *callUpdates, out *s
 	case "frame":
 		image, err := imageFromURL(c.ImageURL, "")
 		if err != nil {
-			return err
+			return invalidRequest(err.Error())
 		}
 		return session.SendFrame(image)
 	case "tool_result":
 		parts, err := parseToolOutput(c.Output)
 		if err != nil {
-			return err
+			return invalidRequest(err.Error())
 		}
 		var text string
 		for _, part := range parts {
 			if part.Image != nil {
-				return errors.New("a speech-to-speech model takes a tool's result as text, not as an image")
+				return invalidRequest("a speech-to-speech model takes a tool's result as text, not as an image")
 			}
 			text += part.Text
 		}
@@ -773,7 +773,7 @@ func (c converse) apply(session *stsrouter.Session, updates *callUpdates, out *s
 	case "interrupt":
 		return session.Interrupt(c.PlayedMs)
 	default:
-		return fmt.Errorf("unknown frame %q", c.Type)
+		return invalidRequest(fmt.Sprintf("unknown frame %q", c.Type))
 	}
 }
 
@@ -1340,11 +1340,7 @@ func (s *socket) failed(err error) {
 		s.frame(frame{"type": "error", "error": answer.Message, "code": answer.Code, "error_type": answer.Type})
 		return
 	}
-	if dependencyFailed(err) {
-		s.frame(frame{"type": "error", "error": somethingWentWrong})
-		return
-	}
-	s.frame(frame{"type": "error", "error": store.RedactLogText(err.Error())})
+	s.frame(frame{"type": "error", "error": store.RedactLogText(refusalText(err))})
 }
 
 // end sends the close frame after the last frame: 1000, or a failure code with the failure,

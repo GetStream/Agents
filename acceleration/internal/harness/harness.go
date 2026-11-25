@@ -296,6 +296,24 @@ var ErrInvalid = errors.New("harness: invalid skills or tools")
 // invalid marks err as ErrInvalid without changing its message.
 func invalid(err error) error { return marked{err, ErrInvalid} }
 
+// ErrCorrectable is a tool call's failure that the one who can correct it reads in its own
+// words: the model, for a call it got wrong, or the caller, for its own tool's failure. Any
+// other failure of a tool is the router's, told in fixed words (ToolFailure).
+var ErrCorrectable = errors.New("harness: a tool call to correct")
+
+// Correctable marks err as ErrCorrectable without changing its message.
+func Correctable(err error) error { return marked{err, ErrCorrectable} }
+
+// ToolFailure is what the model and the caller are told of a tool call that failed with err:
+// its own words when it is ErrCorrectable, otherwise only that the tool failed. Whoever ran
+// the tool logs err itself.
+func ToolFailure(err error) string {
+	if errors.Is(err, ErrCorrectable) {
+		return err.Error()
+	}
+	return "the tool failed"
+}
+
 // marked is err that is also kind, with err's own message.
 type marked struct{ err, kind error }
 
@@ -1392,10 +1410,10 @@ func identifiersAlreadyComplete(history []llm.Message) bool {
 func (h *Harness) Delegate(ctx context.Context, skillName, prompt, turnID string, parts []llm.ContentPart, history []llm.Message) (string, error) {
 	skill, ok := h.options.Skills.Lookup(skillName)
 	if !ok || h.tasks == nil {
-		return "", stack.Wrap(fmt.Errorf("harness: skill %q is not available", skillName))
+		return "", stack.Wrap(Correctable(fmt.Errorf("harness: skill %q is not available", skillName)))
 	}
 	if strings.TrimSpace(prompt) == "" {
-		return "", stack.Wrap(errors.New("harness: delegation needs a prompt"))
+		return "", stack.Wrap(Correctable(errors.New("harness: delegation needs a prompt")))
 	}
 	if history == nil {
 		h.mu.Lock()

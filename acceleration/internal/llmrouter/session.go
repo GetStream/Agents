@@ -657,7 +657,7 @@ func (s *Session) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	}
 	alternate, fallbackErr := s.fallback(ctx, params)
 	if fallbackErr != nil {
-		return nil, stack.Wrap(errors.Join(err, fallbackErr))
+		return nil, stack.Wrap(routing.Join(err, fallbackErr))
 	}
 	routing.CountHandover(routing.LLM, s.config, err)
 	return screened(ctx, alternate, verdict), nil

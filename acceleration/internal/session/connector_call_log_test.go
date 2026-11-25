@@ -511,7 +511,7 @@ func (s *CallLogSuite) TestAFailureIsReportedWithoutTheTokenTheProviderEchoes() 
 	s.Require().Error(err)
 	s.Equal(agent.ToolReport{Connector: s.connectorID, ErrorCode: store.InvocationExternalServer,
 		Error: "invalid token [redacted]"}, report)
-	s.Equal(report.Error, s.row(app).ErrorMessage, "the report says what the row keeps")
+	s.Equal("the call failed: external_server", s.row(app).ErrorMessage, "what the provider said is the log's")
 }
 
 // reported runs the tool name on d with no arguments under a context the agent reads a report

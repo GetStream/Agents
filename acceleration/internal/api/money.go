@@ -17,6 +17,8 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/sts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 )
 
 // moneyError is the answer for a refusal about money, and false for any other error. A
@@ -136,6 +138,8 @@ var callerMistakes = []error{
 	session.ErrConversationReadOnly, session.ErrConversationElsewhere, session.ErrMemoryRegion,
 	streamapp.ErrStreamAppMoved, streamapp.ErrReadOnly, agent.ErrNoVideo,
 	conversation.ErrResponseRunning, conversation.ErrCommandNotFound,
+	sts.ErrNoText, sts.ErrNoImages, sts.ErrNoTools, sts.ErrInstructionsFixed, sts.ErrToolsFixed, sts.ErrNoCallUpdates,
+	tts.ErrIDSpoken,
 }
 
 // callerMistake reports whether err is one of callerMistakes, or a conversation the caller may

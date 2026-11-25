@@ -97,7 +97,7 @@ func (r *childRunner) Run(ctx context.Context, call llm.ToolCall) ([]llm.Content
 	_ = json.Unmarshal([]byte(call.Arguments), &arguments)
 	input, _ := arguments[childInput].(string)
 	if strings.TrimSpace(input) == "" {
-		return nil, fmt.Errorf("%s was called with no %s", call.Name, childInput)
+		return nil, harness.Correctable(fmt.Errorf("%s was called with no %s", call.Name, childInput))
 	}
 
 	timeout := defaultChildTimeout

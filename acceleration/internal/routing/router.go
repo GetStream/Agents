@@ -883,7 +883,7 @@ func (r *Router[P]) Walk(ctx context.Context, request Request, use func(P, Provi
 		if len(met) == 1 {
 			return used, usedErr
 		}
-		return ProviderConfig{}, stack.Wrap(errors.Join(met...))
+		return ProviderConfig{}, stack.Wrap(Join(met...))
 	}
 	// What the caller asked for is what they can fix, so a refusal is the answer even when
 	// another candidate also failed on its own account.

@@ -5602,7 +5602,7 @@ type ConnectionInvocation struct {
 	ConnectionId string `json:"connection_id"`
 	ConnectorId  string `json:"connector_id"`
 
-	// ErrorMessage Why the call failed: the start of the provider's error body when it answered with a 4xx or a 5xx, else what the call's error said, at most 1 KiB. Every URL in it keeps only its scheme and host, and the connection's credential and the request's path are taken out. A call the router held for the provider's rate limit says rate limited by the router: retry after <seconds>s. Absent for a call that answered, and for a call recorded before the router kept it.
+	// ErrorMessage Why the call failed. A call the router held itself says why in the router's words, such as declined by the person, or rate limited by the router: retry after <seconds>s. Any other failure says the call failed: and its error_type; what the provider answered is in the router's log under the call's id. Absent for a call that answered, and for a call recorded before the router kept it.
 	ErrorMessage *string `json:"error_message,omitempty"`
 
 	// ErrorType customer_auth: the provider refused the connection's credential, or it had none; reconnect it. external_server: the provider answered with a failure or could not be reached. client_timeout: the router stopped waiting before the provider answered, and nothing says it got the call. outcome_unknown: the call was sent and cut off, by the binding's timeout or an interrupted turn, so it may have been done. denied: the router refused it before anything was sent.

@@ -194,7 +194,8 @@ func (s *HarnessSuite) TestCodeThatCouldNotBeRunIsDescribedRatherThanHidden() {
 	s.awaitSettled(1)
 	s.Require().Len(s.slow.requests(), 2)
 	last := s.slow.requests()[1].Input[len(s.slow.requests()[1].Input)-1]
-	s.Contains(last.Content, errNoSandbox.Error())
+	s.Contains(last.Content, "The code could not be run.")
+	s.NotContains(last.Content, errNoSandbox.Error(), "what failed inside is the log's")
 }
 
 func (s *HarnessSuite) TestCodeThatExitedBadlySaysSo() {
@@ -491,7 +492,8 @@ func (s *HarnessSuite) TestASearchThatFailedIsToldToTheSubagent() {
 	s.Require().Len(s.slow.requests(), 2)
 	s.NotContains(s.slow.requests()[0].Instructions, "(lookup)", "there is no order to keep with one source")
 	told := s.slow.requests()[1].Input[len(s.slow.requests()[1].Input)-1].Content
-	s.Contains(told, "search is down")
+	s.Contains(told, "That did not work: the tool failed")
+	s.NotContains(told, "search is down", "what failed inside is the log's")
 }
 
 // pdfSkills is a stored skill that came as a folder, with a reference and a script.

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -136,8 +135,9 @@ func (s *ChildAgentsSuite) TestAChildThatFailsOrRunsOutOfTimeIsAFailedToolCallAn
 
 	s.Less(time.Since(started), 30*time.Second, "the stuck child was given up on at its own timeout")
 	s.Contains(run.FinalText, "be brief", "the child that answered is read")
-	s.Contains(run.FinalText, "tool: That did not work: failing: the provider is down", "the failed child is a failed tool call")
-	s.Contains(run.FinalText, "tool: That did not work: ask_c did not finish in the time it had", "so is the one that ran out of time")
+	s.Equal(2, strings.Count(run.FinalText, "tool: That did not work: the tool failed"),
+		"the failed child is a failed tool call, and so is the one that ran out of time")
+	s.NotContains(run.FinalText, "the provider is down", "what failed inside is the log's")
 }
 
 func (s *ChildAgentsSuite) TestTheParentsDeadlineCutsItsChildrenShort() {
@@ -173,9 +173,10 @@ func (s *ChildAgentsSuite) TestAChildThatChangedSinceItsParentWasSavedIsAFailedT
 
 	run := s.run(CreateRunRequest{ConfigId: parent, Input: "review this"})
 
-	s.Contains(run.FinalText, "tool: That did not work: the agent "+strconv.Quote(voiced.Name)+" behind ask_a is no text agent")
-	s.Contains(run.FinalText, "tool: That did not work: the agent "+strconv.Quote(gained.Name)+" behind ask_b calls agents of its own")
-	s.Contains(run.FinalText, "tool: That did not work: the agent "+strconv.Quote(deleted.Name)+" behind ask_c no longer exists")
+	s.Equal(3, strings.Count(run.FinalText, "tool: That did not work: the tool failed"))
+	for _, name := range []string{voiced.Name, gained.Name, deleted.Name} {
+		s.NotContains(run.FinalText, name, "the end user reads no agent config of the app")
+	}
 }
 
 func (s *ChildAgentsSuite) TestAChildsMaxToolRoundsDecidesHowLongItIsOfferedTools() {

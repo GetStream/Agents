@@ -512,7 +512,7 @@ func (s *ChatLoginsSuite) TestAStoppedReplyEndsTheCallWaitingForTheLogin() {
 			ran = frame
 		}
 	}
-	s.Contains(ran["result"], "stopped waiting for its login")
+	s.Equal("That did not work: the tool failed. Tell the caller, in your own words.", ran["result"])
 	s.Equal(before, s.provider.Hits(fakeprovider.PathMCP), "nothing reached the provider")
 }
 

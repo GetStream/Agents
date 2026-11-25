@@ -813,7 +813,7 @@ func (m *manager) ran(running *task, call llm.ToolCall) string {
 		said, err := ask(running.ctx, running.turnID, arguments.Query)
 		if err != nil {
 			m.logger.Warn("the subagent could not look something up", "tool", call.Name, "error", err)
-			return "That did not work: " + err.Error()
+			return "That did not work: " + ToolFailure(err)
 		}
 		return said
 	}
@@ -832,13 +832,13 @@ func (m *manager) ran(running *task, call llm.ToolCall) string {
 	if err := m.writeBundle(running); err != nil {
 		m.logger.Error("could not put the skill's files in the sandbox", "skill", running.skill, "error", err)
 		m.setBroken(running, "the skill's files could not be put in the sandbox")
-		return "The skill's files could not be put in the sandbox: " + err.Error()
+		return "The skill's files could not be put in the sandbox."
 	}
 	result, err := m.box.Run(running.ctx, arguments.Code, arguments.Files)
 	if err != nil {
 		m.logger.Error("could not run code", "error", err)
 		m.setBroken(running, "the code could not be run")
-		return "The code could not be run: " + err.Error()
+		return "The code could not be run."
 	}
 	m.setBroken(running, "")
 	if result.ExitCode != 0 {

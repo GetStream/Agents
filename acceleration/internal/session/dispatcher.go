@@ -241,13 +241,19 @@ func (d *dispatcher) record(ctx context.Context, r route, call llm.ToolCall, sta
 		message = core.LoggedMessage(err, how.redact)
 	}
 	// A call that answered has no failure to say: no status, no message. The body is "" unless
-	// the last answer was a 4xx or a 5xx (core.Exchange.ErrorBody).
-	row.ErrorMessage = cmp.Or(body, message)
+	// the last answer was a 4xx or a 5xx (core.Exchange.ErrorBody). The row keeps the router's
+	// own words for a call it held, else fixed words with the error type: the provider's answer
+	// and the call's error name hosts, addresses and what the provider said, so they are the
+	// log line's below, under the invocation's id.
+	row.ErrorMessage = how.message
+	if row.ErrorMessage == "" && how.kind != "" {
+		row.ErrorMessage = "the call failed: " + how.kind
+	}
 	if how.status != 0 {
 		row.ProviderStatus = &how.status
 	}
 	d.invocations.Record(row)
-	agent.ReportTool(ctx, agent.ToolReport{Connector: row.ConnectorID, ErrorCode: how.kind, Error: row.ErrorMessage})
+	agent.ReportTool(ctx, agent.ToolReport{Connector: row.ConnectorID, ErrorCode: how.kind, Error: cmp.Or(body, message)})
 	if how.kind == "" {
 		return
 	}

@@ -104,9 +104,9 @@ func (s *ChildAgentsSuite) TestADelegationBesideASensitiveConnectorRunsWhenEachO
 
 	run := s.run(CreateRunRequest{ConfigId: parent.Id, Input: "review this"})
 
-	s.NotContains(run.FinalText, "was not run")
+	s.Empty(s.refusals(parent))
 	s.Contains(run.FinalText, "tool: be brief", "the held child answered")
-	s.Contains(run.FinalText, "tool: That did not work: the agent "+strconv.Quote(deleted.Name)+" behind ask_c no longer exists")
+	s.Contains(run.FinalText, "tool: That did not work: the tool failed", "the deleted child is a failed tool call")
 }
 
 // A child whose tool has the name of another tool is not offered, so it runs nothing a
@@ -123,7 +123,7 @@ func (s *ChildAgentsSuite) TestADelegationRunsBesideASensitiveChildTheParentDoes
 
 	run := s.run(CreateRunRequest{ConfigId: parent.Id, Input: "review this"})
 
-	s.NotContains(run.FinalText, "was not run")
+	s.Empty(s.refusals(parent))
 	s.Contains(run.FinalText, "tool: be brief")
 }
 
@@ -233,12 +233,10 @@ func (s *ChildAgentsSuite) refusals(config AgentConfig) string {
 }
 
 // refusedAll requires every delegation of the run refused, and the parent to have answered. What
-// the model and the end user read names no binding, connector or tool: the log has the complaint.
+// the model and the end user read is that the tool failed: the log has the complaint.
 func (s *ChildAgentsSuite) refusedAll(run Run) {
-	for _, tool := range fanned {
-		s.Contains(run.FinalText, "tool: That did not work: "+tool+" was not run: the agents it works with together read private data and can send data out",
-			"the graph breaks the rule whichever child is called")
-	}
+	s.Equal(len(fanned), strings.Count(run.FinalText, "tool: That did not work: the tool failed"),
+		"the graph breaks the rule whichever child is called")
 	s.NotContains(run.FinalText, "tool: be brief", "no child ran")
 	for _, name := range []string{"nessy", "customers", "create_issue", "binding", "connector", "sandbox", "require_approval"} {
 		s.NotContains(run.FinalText, name, "the tool error names nothing of a server-side config")
