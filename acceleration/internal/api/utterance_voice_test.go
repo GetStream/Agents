@@ -22,12 +22,12 @@ func (v suiteVoices) ResolveVoice(ctx context.Context, customerID, provider, voi
 }
 
 // UtteranceVoiceSuite is the text-to-speech socket with a voice named on an utterance, where
-// the app has a voice of its own, founder, and another customer has one too, each prepared
-// for the stub provider.
+// the app has a voice of its own, founder, and a voice outside the app is bound elsewhere,
+// each prepared for the stub provider.
 type UtteranceVoiceSuite struct {
 	RouterSuite
-	// own is what the stub provider knows the app's founder as, and theirs the other
-	// customer's voice.
+	// own is what the stub provider knows the app's founder as, and theirs a voice
+	// the app does not own.
 	own, theirs string
 }
 
@@ -43,9 +43,9 @@ func (s *UtteranceVoiceSuite) SetupTest() {
 	s.theirs = s.prepared("globex-" + rand.Text())
 }
 
-// The other customer's voice is refused when a socket is opened in it, so it must be
+// A voice the app does not own is refused when a socket is opened in it, so it must be
 // refused when named on one utterance of a socket opened in the app's own.
-func (s *UtteranceVoiceSuite) TestAnUtteranceInAnotherCustomersVoiceIsRefusedAndNotSpoken() {
+func (s *UtteranceVoiceSuite) TestAnUtteranceInAVoiceThatIsNotTheSessionsIsRefusedAndNotSpoken() {
 	opened := s.serverClient.opens("/v1/tts/stream")
 	s.Require().NoError(opened.WriteJSON(frame{"type": "start", "target": "en-low-latency", "voice": s.theirs}))
 	s.Contains(s.await(opened, "error")["error"], "not one of this customer's voices")
