@@ -381,7 +381,8 @@ var usageIndexes = []struct{ set, name, create string }{
 	// A customer's session's call episode.
 	{"global", "episodes_customer_call_session", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS episodes_customer_call_session " +
 		"ON episodes (customer_id, session_id)"},
-	// The recorded changes of requests naming an end user, by request, which renaming them rewrites.
+	// The recorded changes of requests naming an end user, by request, which renaming them rewrites
+	// in a deployment of one database: a shard's tables record none.
 	{"global", "data_changes_user_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS data_changes_user_idx ON data_changes " +
 		"(customer_id, (payload->>'user_id'), (payload->>'id')) WHERE table_name = 'requests' AND payload->>'user_id' IS NOT NULL"},
 	// The recorded changes of a task and of its runs, which deleting them rewrites.

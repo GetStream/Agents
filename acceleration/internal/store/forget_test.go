@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -195,6 +196,13 @@ func (s *StoreSuite) renaming() {
 	s.Require().NoError(s.store.StartDataCapture(s.ctx, "app", time.Hour, time.Second))
 }
 
+// renameJlahey renames app's jlahey, within a deadline a rename that never ends would outlast.
+func (s *StoreSuite) renameJlahey(ctx context.Context) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return s.store.Requests.RenameUser(ctx, "app", "jlahey", "forgotten")
+}
+
 // leftOf is how many of app's requests, and of the changes recorded of them, name a user.
 func (s *StoreSuite) leftOf(user string) (requests int64, changes int) {
 	requests, err := s.store.Requests.CountByUser(s.ctx, "app", user)
@@ -218,7 +226,7 @@ func (s *StoreSuite) TestRenamingAUserRewritesEachChangeOfTheirRequestsWithItsOw
 		after = append(after, inserts)
 	})
 
-	renamed, err := s.store.Requests.RenameUser(s.ctx, "app", "jlahey", "forgotten")
+	renamed, err := s.renameJlahey(s.ctx)
 
 	s.Require().NoError(err)
 	s.EqualValues(3, renamed)
@@ -238,7 +246,7 @@ func (s *StoreSuite) TestRenamingAUserRenamesTheRequestsRecordedSinceTheLastBatc
 		}
 	})
 
-	renamed, err := s.store.Requests.RenameUser(s.ctx, "app", "jlahey", "forgotten")
+	renamed, err := s.renameJlahey(s.ctx)
 
 	s.Require().NoError(err)
 	s.EqualValues(3, renamed)
@@ -269,14 +277,14 @@ func (s *StoreSuite) TestARenameCutShortLeavesEachRequestAndItsChangesNamingOneU
 			}
 		})
 
-		_, err := s.store.Requests.RenameUser(ctx, "app", "jlahey", "forgotten")
+		_, err := s.renameJlahey(ctx)
 
 		s.Require().ErrorIs(err, context.Canceled)
 		requests, changes := s.leftOf("jlahey")
 		s.EqualValues(left, requests)
 		s.Equal(left, changes, "the changes of the requests left, and no others")
 
-		renamed, err := s.store.Requests.RenameUser(s.ctx, "app", "jlahey", "forgotten")
+		renamed, err := s.renameJlahey(s.ctx)
 
 		s.Require().NoError(err)
 		s.EqualValues(left, renamed)
@@ -299,7 +307,7 @@ func (s *StoreSuite) TestRenamingAUserLeavesARequestThatIsNoLongerTheirs() {
 		}
 	})
 
-	renamed, err := s.store.Requests.RenameUser(s.ctx, "app", "jlahey", "forgotten")
+	renamed, err := s.renameJlahey(s.ctx)
 
 	s.Require().NoError(err)
 	s.Zero(renamed)
@@ -318,10 +326,8 @@ func (s *StoreSuite) TestRenamingAUserLeavesAnotherAppsRequestOfTheIdAChangeName
 SELECT app, 'requests', 'insert', '{}', jsonb_build_object('id', id, 'user_id', 'jlahey')
 FROM requests, unnest(ARRAY['other-app', 'app']) WITH ORDINALITY AS a (app, n) WHERE usage_id = ? ORDER BY n`, theirs.UsageID)
 	s.Require().NoError(err)
-	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
-	defer cancel()
 
-	renamed, err := s.store.Requests.RenameUser(ctx, "app", "jlahey", "forgotten")
+	renamed, err := s.renameJlahey(s.ctx)
 
 	s.Require().NoError(err)
 	s.Zero(renamed)
@@ -364,10 +370,15 @@ SELECT customer_id, 'requests', 'insert', jsonb_build_object('usage_id', usage_i
 	_, err := s.store.shard.ExecContext(s.ctx, fmt.Sprintf(requests, "known")+"ANALYZE requests, data_changes")
 	s.Require().NoError(err)
 
-	// By the whole key or by the user with a filter, whichever the version of Postgres picks.
 	const byID = `((payload ->> 'id'::text) = ANY ('{`
 	read := plan("known")
 	s.Contains(read, "data_changes_user_idx", "with statistics")
+	var version int
+	s.Require().NoError(s.store.global.NewRaw("SELECT current_setting('server_version_num')::int").Scan(s.ctx, &version))
+	if version >= 170000 {
+		// Before 17 each id is a descent of the index of its own, which the planner may not pay.
+		s.Regexp(`Index Cond: .*`+regexp.QuoteMeta(byID), read, "with statistics")
+	}
 	s.Contains(read, byID, "with statistics")
 
 	_, err = s.store.shard.ExecContext(s.ctx, fmt.Sprintf(requests, "new"))
@@ -387,10 +398,29 @@ func (s *StoreSuite) TestRenamingAUserRenamesThemInTheChangesOfARequestDeletedBe
 	s.Require().NoError(err)
 	s.Require().Len(s.payloadsNaming("app", "jlahey"), 2, "the requests' inserts were recorded")
 
-	renamed, err := s.store.Requests.RenameUser(s.ctx, "app", "jlahey", "forgotten")
+	renamed, err := s.renameJlahey(s.ctx)
 
 	s.Require().NoError(err)
 	s.Zero(renamed)
+	s.Empty(s.payloadsNaming("app", "jlahey"))
+}
+
+// The only change recorded of it is an update: the move began once it was there.
+func (s *StoreSuite) TestRenamingAUserRenamesThemInAnUpdateOfARequestDeletedSince() {
+	if s.store.Sharded() {
+		s.T().Skip("a shard's own tables record no changes (watchDataChanges)")
+	}
+	gone := s.requestOf("jlahey")
+	s.Require().NoError(s.store.StartDataCapture(s.ctx, "app", time.Hour, time.Second))
+	_, err := s.store.shard.ExecContext(s.ctx, "UPDATE requests SET success = false WHERE usage_id = ?", gone.UsageID)
+	s.Require().NoError(err)
+	_, err = s.store.shard.ExecContext(s.ctx, "DELETE FROM requests WHERE usage_id = ?", gone.UsageID)
+	s.Require().NoError(err)
+	s.Require().Len(s.payloadsNaming("app", "jlahey"), 1, "the request's update was recorded")
+
+	_, err = s.renameJlahey(s.ctx)
+
+	s.Require().NoError(err)
 	s.Empty(s.payloadsNaming("app", "jlahey"))
 }
 

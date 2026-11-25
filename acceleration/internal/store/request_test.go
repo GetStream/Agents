@@ -732,7 +732,9 @@ func (s *StoreSuite) TestRenamingAUserWithMoreRequestsThanOneStatementTakesRenam
 
 	var renamed int64
 	var err error
-	updates := s.statementsLike(`WITH "changes" AS (UPDATE`, func() { renamed, err = s.store.Requests.RenameUser(s.ctx, "acme", "jlahey", "forgotten") })
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
+	updates := s.statementsLike(`WITH "changes" AS (UPDATE`, func() { renamed, err = s.store.Requests.RenameUser(ctx, "acme", "jlahey", "forgotten") })
 
 	s.Require().NoError(err)
 	s.EqualValues(3, renamed)

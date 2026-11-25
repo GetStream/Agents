@@ -2,8 +2,9 @@
 -- +goose Up
 
 -- The recorded changes of requests naming an end user, by request, which renaming them
--- rewrites a batch of requests at a time. Built without stopping the writes of changes; a
--- build that fails is built again in Go (store.usageIndexes).
+-- rewrites a batch of requests at a time. Only a deployment of one database records any: a
+-- shard's tables record no changes (store.watchDataChanges). Built without stopping the
+-- writes of changes; a build that fails is built again in Go (store.usageIndexes).
 CREATE INDEX CONCURRENTLY IF NOT EXISTS data_changes_user_idx
     ON data_changes (customer_id, (payload->>'user_id'), (payload->>'id'))
     WHERE table_name = 'requests' AND payload->>'user_id' IS NOT NULL;

@@ -971,6 +971,13 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			}
 			plans := explain(func(store *Store) { s.Require().NoError(read.run(s.ctx, store)) })
 			s.usesIndex(plans, read.index)
+			if read.index == "data_changes_user_idx" {
+				for _, plan := range plans {
+					if strings.Contains(plan, "data_changes") {
+						s.Contains(plan, read.index, plan)
+					}
+				}
+			}
 			if read.inOrder {
 				s.NotContains(strings.Join(plans, "\n"), "Sort", plans)
 			}
