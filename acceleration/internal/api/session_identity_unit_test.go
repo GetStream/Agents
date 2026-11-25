@@ -117,11 +117,11 @@ func TestASessionTakesTheConfigsIdentityWhereTheRequestNamedNone(t *testing.T) {
 	}{
 		"nothing named": {
 			asked: session.Spec{},
-			want:  session.Spec{AgentID: "support", UserID: "support-bot", UserName: "Support"},
+			want:  session.Spec{AgentID: "support", AgentIDName: "Support", UserID: "support-bot", UserName: "Support"},
 		},
 		"the defaults named": {
 			asked: session.Spec{UserID: session.DefaultUserID, UserName: session.DefaultUserName},
-			want:  session.Spec{AgentID: "support", UserID: "support-bot", UserName: "Support"},
+			want:  session.Spec{AgentID: "support", AgentIDName: "Support", UserID: "support-bot", UserName: "Support"},
 		},
 		"its own named": {
 			asked: session.Spec{AgentID: "own", UserID: "alice", UserName: "Own"},
@@ -130,6 +130,10 @@ func TestASessionTakesTheConfigsIdentityWhereTheRequestNamedNone(t *testing.T) {
 		"carrying on a conversation": {
 			asked: session.Spec{ConversationID: "agent:held"},
 			want:  session.Spec{ConversationID: "agent:held", UserID: "support-bot", UserName: "Support"},
+		},
+		"incognito": {
+			asked: session.Spec{Incognito: true},
+			want:  session.Spec{Incognito: true, UserID: "support-bot", UserName: "Support"},
 		},
 	} {
 		spec := c.asked

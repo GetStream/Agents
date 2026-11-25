@@ -994,10 +994,12 @@ func sessionsOf(ctx context.Context, found []session.Found, calls map[string]sto
 // incognito session, which keeps no conversation: a message hook hands a message in
 // agent:<agent id> to the newest session under that id that keeps none (routeArrivingMessage),
 // so one shared agent id would hand any Chat user's message to the newest visitor's session.
+// The agent id's Chat user, which a text session writes as, is made with the identity's
+// user_name when a new conversation makes it.
 func identifyAs(spec *session.Spec, identity store.AgentIdentity) {
 	actAs(spec, identity)
 	if identity.AgentID != "" && spec.AgentID == "" && spec.ConversationID == "" && !spec.Incognito {
-		spec.AgentID = identity.AgentID
+		spec.AgentID, spec.AgentIDName = identity.AgentID, identity.UserName
 	}
 }
 
@@ -1519,7 +1521,7 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 	// sharing the parent's would have two sessions writing into one transcript.
 	spec.ID = ""
 	spec.ConversationID = ""
-	spec.AgentID = ""
+	spec.AgentID, spec.AgentIDName = "", ""
 
 	// History comes across by default: the usual reason to fork is to carry on from what was
 	// already said. It needs a channel at both ends -- the parent's to read and the fork's to

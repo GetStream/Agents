@@ -265,6 +265,32 @@ func (s *SessionOwnershipSuite) TestASessionCarriedOnOrForkedWritesAsTheConfigsU
 	}
 }
 
+// Defect (R1.5): a text session writes its messages as the agent id's Chat user, which the router
+// made with no name, so a chat widget showed a nameless agent whatever the config's user_name.
+// The user is made with it; a config naming no user_name, and a fork, which writes as an agent
+// id of its own, make it with none, as before.
+func (s *SessionOwnershipSuite) TestTheConfigsAgentIdWritesUnderItsUserName() {
+	name, identity := s.identifiedConfig()
+	guest := s.data.createGuest()
+	opened := guest.createSession(CreateSessionRequest{Agent: &name})
+	var forked Session
+	s.Require().Equal(http.StatusCreated, guest.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/fork", map[string]any{}, &forked))
+	unnamed := AgentIdentity{AgentId: "support-" + s.utils.uuid()}
+	plain := "support-" + s.utils.uuid()
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs",
+		map[string]any{"name": plain, "identity": unnamed}, nil))
+	s.Require().Equal(unnamed.AgentId, guest.createSession(CreateSessionRequest{Agent: &plain}).AgentId)
+
+	nameOf := func(userID string) any {
+		user, found := s.chat.User(userID)
+		s.Require().True(found, "Chat holds %s", userID)
+		return user["name"]
+	}
+	s.Equal(identity.UserName, nameOf(identity.AgentId))
+	s.Nil(nameOf(unnamed.AgentId), "a config naming no user_name")
+	s.Nil(nameOf(forked.AgentId), "a fork's agent id")
+}
+
 // Defect (R1.1): a fork naming another config runs on it, and so writes as that config's user.
 func (s *SessionOwnershipSuite) TestAForkNamingAConfigWritesAsItsUser() {
 	plain := "plain-" + s.utils.uuid()
