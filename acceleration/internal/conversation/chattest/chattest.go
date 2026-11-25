@@ -1053,10 +1053,14 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		set, _ := body["set"].(map[string]any)
 		maps.Copy(data, set)
-		// Chat reads a field set this way back among the channel's custom data, where every
-		// field a channel of the API v2 has no field of its own for is.
+		// Chat reads a field set this way back among the channel's custom data. A set of custom
+		// itself, as a test may send, is the custom data.
 		if custom, ok := data["custom"].(map[string]any); ok {
-			maps.Copy(custom, set)
+			for key, value := range set {
+				if key != "custom" {
+					custom[key] = value
+				}
+			}
 		}
 		result["channel"] = data
 	case r.Method == http.MethodPost && len(parts) >= 3 && parts[len(parts)-3] == "channels":

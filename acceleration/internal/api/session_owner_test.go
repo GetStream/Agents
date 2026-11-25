@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"slices"
@@ -345,6 +346,63 @@ func (s *SessionOwnershipSuite) TestAConversationAGuestHeldWithATokenOfNoRoleIsL
 	s.carriesOn(s.guestNamed(id), opened)
 }
 
+// A guest the router minted carries no role in its tokens, refreshed or not, so its conversation
+// is recorded as a signed-in user's, and it carries it on.
+func (s *SessionOwnershipSuite) TestAMintedGuestCarriesOnItsBackfilledConversation() {
+	minted := s.mintedGuest()
+	opened := s.withNoKindRecorded(s.ended(s.data.signedInAs(minted)), minted)
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindStamped: 1}, s.backfilled(true))
+
+	s.carriesOn(s.data.signedInAs(minted), opened)
+}
+
+// An import does not carry which guests the router minted, so a minted guest it brought reads as
+// one whose app signed its token: its refresh says the role, though its sessions say none. Its
+// conversation is left as it is, and the token it is refreshed to carries it on.
+func (s *SessionOwnershipSuite) TestAConversationOfAMintedGuestAnImportBroughtIsLeftAlone() {
+	minted := s.mintedGuest()
+	opened := s.withNoKindRecorded(s.ended(s.data.signedInAs(minted)), minted)
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.User)(nil)).Set("minted = false").
+		Where("customer_id = ?", s.customerID()).Where("id = ?", minted).Exec(s.T().Context())
+	s.Require().NoError(err)
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindLeftAlone: 1}, s.backfilled(true))
+
+	s.carriesOn(s.guestNamed(minted), opened)
+}
+
+// A guest whose id went on as a signed-in user's account is no guest the role is minted for any
+// more, so the conversation it held as a guest is left as it is.
+func (s *SessionOwnershipSuite) TestAGuestsConversationIsLeftAloneOnceTheirIdIsAnAccount() {
+	guest := s.data.createGuest()
+	opened := s.withNoKindRecorded(s.ended(guest), guest.userID)
+	s.data.signedInAs(guest.userID).querySessions(SessionQuery{})
+	s.Require().Eventually(func() bool {
+		_, err := s.store.Users.GetGuest(s.T().Context(), s.customerID(), guest.userID)
+		return errors.Is(err, store.ErrNotAGuest)
+	}, 5*time.Second, 20*time.Millisecond)
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindLeftAlone: 1}, s.backfilled(true))
+
+	s.carriesOn(s.data.signedInAs(guest.userID), opened)
+}
+
+// Behind a proxy a guest's refreshed token says no role, so a guest's conversation is left as it
+// is there.
+func (s *SessionOwnershipSuite) TestAGuestsConversationIsLeftAloneBehindAProxy() {
+	guest := s.data.createGuest()
+	opened := s.withNoKindRecorded(s.ended(guest), guest.userID)
+	service, err := s.manager.Conversations()
+	s.Require().NoError(err)
+
+	counted, err := service.BackfillOwnerKinds(s.T().Context(), s.store, auth.Proxy, s.customerID(), true)
+
+	s.Require().NoError(err)
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindLeftAlone: 1}, counted)
+	s.False(s.kindRecorded(opened))
+}
+
 // Sessions of two kinds of caller under the owner's id leave the channel as it is: nothing says
 // which of them it was made for.
 func (s *SessionOwnershipSuite) TestAConversationTwoKindsOfCallerHeldUnderItsOwnersIdIsLeftAlone() {
@@ -678,9 +736,17 @@ func (s *SessionOwnershipSuite) heldAs(opened Session, owner string, kind auth.K
 func (s *SessionOwnershipSuite) backfilled(write bool) map[conversation.OwnerKindBackfill]int {
 	service, err := s.manager.Conversations()
 	s.Require().NoError(err)
-	counted, err := service.BackfillOwnerKinds(s.T().Context(), s.store, s.customerID(), write)
+	counted, err := service.BackfillOwnerKinds(s.T().Context(), s.store, s.authMode(), s.customerID(), write)
 	s.Require().NoError(err)
 	return counted
+}
+
+// mintedGuest is the id of a guest the router minted.
+func (s *SessionOwnershipSuite) mintedGuest() string {
+	var minted GuestUser
+	s.Require().Equal(http.StatusCreated,
+		s.data.createAnonymous().do(http.MethodPost, "/v1/agents/guests", GuestUserRequest{}, &minted))
+	return minted.Id
 }
 
 // kindRecorded reports whether opened's channel records its owner's kind.

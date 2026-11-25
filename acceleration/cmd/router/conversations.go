@@ -11,16 +11,19 @@ import (
 	"os"
 	"slices"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
 const conversationsUsage = `usage: router conversations <command> [flags]
 
   backfill-owner-kinds  record the owner's kind on the channels of conversations this shard's
                         sessions held that were made before channels recorded it, where every
-                        session of the owner's id on it was of one verified kind. Says what it
-                        would do unless --write. Run it once every router records the kind.
+                        session of the owner's id on it was of one verified kind, and it is the
+                        kind that id's next token says (a guest's is left alone otherwise). Says
+                        what it would do unless --write. Run it once every router records the kind.
     --customer          only this customer's conversations
     --write             record the kinds
 `
@@ -45,6 +48,10 @@ func runBackfillOwnerKinds(ctx context.Context, args []string, settings config.C
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	mode, err := auth.ParseMode(settings.Auth.Mode)
+	if err != nil {
+		return err
+	}
 	pgStore, err := openStore(ctx, settings)
 	if err != nil {
 		return err
@@ -59,11 +66,12 @@ func runBackfillOwnerKinds(ctx context.Context, args []string, settings config.C
 		return err
 	}
 	// A conversation with no pin is kept in the deployment's own app, which app mode has to
-	// know before it can tell that app's from a customer's.
+	// know before it can tell that app's from a customer's. A deployment with no app of its own
+	// keeps none there, as replicate takes it.
 	if settings.Stream.Tenancy == config.TenancyApp {
 		learning, cancel := context.WithTimeout(ctx, learnTimeout)
 		defer cancel()
-		if _, err := clients.LearnDeploymentApp(learning); err != nil {
+		if _, err := clients.LearnDeploymentApp(learning); err != nil && !errors.Is(err, streamapp.ErrNoIdentity) {
 			return fmt.Errorf("the deployment's own Stream app id could not be read: %w", err)
 		}
 	}
@@ -71,7 +79,7 @@ func runBackfillOwnerKinds(ctx context.Context, args []string, settings config.C
 	defer service.Close()
 	service.SetPins(pgStore.Sessions.ConversationPin)
 
-	counted, err := service.BackfillOwnerKinds(ctx, pgStore, *customer, *write)
+	counted, err := service.BackfillOwnerKinds(ctx, pgStore, mode, *customer, *write)
 	for _, outcome := range slices.Sorted(maps.Keys(counted)) {
 		fmt.Fprintf(out, "%s: %d\n", outcome, counted[outcome])
 	}

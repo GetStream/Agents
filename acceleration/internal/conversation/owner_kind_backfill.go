@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	getstream "github.com/GetStream/getstream-go/v5"
@@ -35,10 +36,10 @@ const backfillPage = 500
 
 // BackfillOwnerKinds records the owner's kind on the channels of the conversations this shard's
 // sessions held that were made before channels recorded it (ownerKindField), only customer's when
-// it is not empty. Without write it only says what it would do. It says how many channels came to
-// each outcome. A channel that fails is logged and counted, and the walk goes on; the error then
-// says how many did.
-func (s *Service) BackfillOwnerKinds(ctx context.Context, held *store.Store, customer string, write bool) (map[OwnerKindBackfill]int, error) {
+// it is not empty, for a deployment authenticating callers in mode. Without write it only says
+// what it would do. It says how many channels came to each outcome. A channel that fails is
+// logged and counted, and the walk goes on; the error then says how many did.
+func (s *Service) BackfillOwnerKinds(ctx context.Context, held *store.Store, mode auth.Mode, customer string, write bool) (map[OwnerKindBackfill]int, error) {
 	counted := map[OwnerKindBackfill]int{}
 	var after store.HeldConversation
 	for {
@@ -47,7 +48,7 @@ func (s *Service) BackfillOwnerKinds(ctx context.Context, held *store.Store, cus
 			return counted, err
 		}
 		for _, conversation := range page {
-			outcome, err := s.backfillOwnerKind(ctx, held, conversation.CustomerID, conversation.ConversationID, write)
+			outcome, err := s.backfillOwnerKind(ctx, held, mode, conversation.CustomerID, conversation.ConversationID, write)
 			if err != nil {
 				s.logger.Warn("could not record the owner's kind on a conversation's channel",
 					"customer", conversation.CustomerID, "conversation", conversation.ConversationID, "error", err)
@@ -70,15 +71,22 @@ func (s *Service) BackfillOwnerKinds(ctx context.Context, held *store.Store, cus
 //
 // A channel with no kind recorded is its owner's by id alone, so a guest and a signed-in user of
 // one id each reach the other's. A recorded kind is one the owner's next token has to prove
-// (auth.Kind.Reaches), so it is recorded only when the sessions leave no doubt of it, and the
-// channel is left as it is otherwise:
+// (auth.Kind.Reaches), so it is recorded only when the sessions leave no doubt of it and it is
+// the kind a guest's token is refreshed to (api.seenAsGuest), and the channel is left as it is
+// otherwise:
 //   - sessions of more than one kind, or of none: one may be somebody else's going by the id,
 //     and a deleted session leaves its channel behind;
 //   - an anonymous caller's, whose name nobody checked;
+//   - a guest's, unless the id is still a guest the router did not mint, and the mode is not
+//     proxy: a minted guest's refreshed token, and any behind a proxy, says no role, and an id
+//     that is an account's now went on as a signed-in user;
 //   - a signed-in user's of an id a guest whose token said the role held a session under
-//     (Sessions.HeldAsGuest): before a refreshed guest token kept the role, such a guest came back
-//     from a refresh as a signed-in user, and their token says the role again now.
-func (s *Service) backfillOwnerKind(ctx context.Context, held *store.Store, customer, cid string, write bool) (OwnerKindBackfill, error) {
+//     (Sessions.HeldAsGuest), or that is still a guest the router did not mint, as one an import
+//     brought or one from before the router recorded which it minted: their token says the role.
+//
+// A guest that went on as a signed-in user and whose sessions as a guest were all deleted leaves
+// nothing that says so, and is stamped a signed-in user's.
+func (s *Service) backfillOwnerKind(ctx context.Context, held *store.Store, mode auth.Mode, customer, cid string, write bool) (OwnerKindBackfill, error) {
 	channelType, id := channelOf(cid)
 	if channelType != streamapp.AgentChannelType {
 		return OwnerKindNoOwner, nil
@@ -115,6 +123,19 @@ func (s *Service) backfillOwnerKind(ctx context.Context, held *store.Store, cust
 		return OwnerKindLeftAlone, nil
 	}
 	kind := auth.Kind(kinds[0])
+	if kind != auth.KindServer {
+		guest, err := held.Users.GetGuest(ctx, customer, owner)
+		if err != nil && !errors.Is(err, store.ErrNotAGuest) {
+			return OwnerKindFailed, err
+		}
+		keepsTheRole := err == nil && !guest.Minted && mode != auth.Proxy
+		if kind == auth.KindGuest && !keepsTheRole {
+			return OwnerKindLeftAlone, nil
+		}
+		if kind == auth.KindAuthenticated && keepsTheRole {
+			return OwnerKindLeftAlone, nil
+		}
+	}
 	if kind == auth.KindAuthenticated {
 		guest, err := held.Sessions.HeldAsGuest(ctx, customer, owner)
 		if err != nil {

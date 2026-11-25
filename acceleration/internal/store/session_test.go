@@ -1714,19 +1714,45 @@ func (s *StoreSuite) TestHeldConversationsAreWalkedAPageAtATimeEachOnce() {
 }
 
 // The kinds of caller that held a conversation under a user id are each said once, and only
-// that user's.
+// that user's on that conversation of that customer's.
 func (s *StoreSuite) TestTheKindsOfCallerThatHeldAConversationUnderAnIdAreThatIdsEachOnce() {
 	for i, kind := range []string{"authenticated", "guest", "guest"} {
 		s.opened(fmt.Sprintf("session-%d", i), "acme", time.Now(), func(row *AgentSession) {
 			row.ConversationID, row.UserID, row.CallerKind = "agent:a", "alice", kind
 		})
 	}
-	s.opened("session-bob", "acme", time.Now(), func(row *AgentSession) {
-		row.ConversationID, row.UserID, row.CallerKind = "agent:a", "bob", "server"
-	})
+	for id, row := range map[string]AgentSession{
+		"session-bob":    {CustomerID: "acme", ConversationID: "agent:a", UserID: "bob", CallerKind: "server"},
+		"session-other":  {CustomerID: "acme", ConversationID: "agent:b", UserID: "alice", CallerKind: "anonymous"},
+		"session-globex": {CustomerID: "globex", ConversationID: "agent:a", UserID: "alice", CallerKind: "server"},
+	} {
+		s.opened(id, row.CustomerID, time.Now(), func(opened *AgentSession) {
+			opened.ConversationID, opened.UserID, opened.CallerKind = row.ConversationID, row.UserID, row.CallerKind
+		})
+	}
 
 	kinds, err := s.store.Sessions.CallerKinds(s.ctx, "acme", "agent:a", "alice")
 
 	s.Require().NoError(err)
 	s.ElementsMatch([]string{"authenticated", "guest"}, kinds)
+}
+
+// A user id held a session as a guest when a guest's session of that customer's is under it, on
+// any conversation.
+func (s *StoreSuite) TestAUserIdHeldASessionAsAGuestOnlyWhenAGuestsSessionOfTheCustomersIsUnderIt() {
+	s.opened("session-alice", "acme", time.Now(), func(row *AgentSession) {
+		row.ConversationID, row.UserID, row.CallerKind = "agent:a", "alice", "guest"
+	})
+	s.opened("session-bob", "acme", time.Now(), func(row *AgentSession) {
+		row.ConversationID, row.UserID, row.CallerKind = "agent:a", "bob", "authenticated"
+	})
+	s.opened("session-carol", "globex", time.Now(), func(row *AgentSession) {
+		row.UserID, row.CallerKind = "carol", "guest"
+	})
+
+	for user, guest := range map[string]bool{"alice": true, "bob": false, "carol": false} {
+		held, err := s.store.Sessions.HeldAsGuest(s.ctx, "acme", user)
+		s.Require().NoError(err)
+		s.Equal(guest, held, user)
+	}
 }
