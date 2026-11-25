@@ -491,6 +491,8 @@ type Server struct {
 	// it is the patterns, and matching one is the answer; its handlers only name the operation
 	// (operationName).
 	serverSide *http.ServeMux
+	// operations are those of the spec by "METHOD path", for forwardedBody.
+	operations map[string]operationSummary
 	upgrader   websocket.Upgrader
 	popularity *popularity
 	logger     *slog.Logger
@@ -839,7 +841,10 @@ func (s *Server) Handler() http.Handler {
 	handle(mux, "GET "+channels.HookPath+"{token}", "VerifyChannelHook", s.receiveChannelMessage)
 	handle(mux, "POST "+channels.HookPath+"{token}", "ReceiveChannelMessage", s.receiveChannelMessage)
 	handle(mux, "POST "+dlc.HookPath, "ReceiveDLCReport", s.receiveDLCReport)
-	s.newAPI(mux)
+	s.operations = map[string]operationSummary{}
+	for _, operation := range specifiedOperations(s.newAPI(mux).OpenAPI()) {
+		s.operations[operation.method+" "+operation.path] = operation
+	}
 	s.mux = mux
 	var handler http.Handler = mux
 	// Sentry is outermost so it sees panics from every middleware below it, not

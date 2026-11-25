@@ -1,15 +1,21 @@
 package node
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/hex"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/suite"
+	"golang.org/x/net/http2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -156,4 +162,51 @@ func (s *ForwardSuite) TestTheCredentialSentTwiceIsRefused() {
 
 	err := s.call(address, "/node.Node/Other", metadata.Pairs(credentialKey, sent, credentialKey, sent))
 	s.Equal(codes.Unauthenticated, status.Code(err), "error: %v", err)
+}
+
+// The largest body an operation reads, with the most headers net/http reads beside it.
+func (s *ForwardSuite) TestTheLargestRequestANodeTakesIsCarried() {
+	address := s.node([]byte("current"))
+	request, err := http.NewRequest(http.MethodPost, "/v1/agents/sessions/id/respond", nil)
+	s.Require().NoError(err)
+	request.Header.Set("X-Padding", strings.Repeat("x", 1<<20))
+
+	answer, err := NewForwarder(nil, []byte("current")).Ask(s.ctx, address, request, make([]byte, 12<<20))
+
+	s.Require().NoError(err)
+	s.Equal(int32(http.StatusTeapot), answer.GetStatus())
+}
+
+func (s *ForwardSuite) TestAnAnswerOfAnySizeIsCarriedBack() {
+	whole := bytes.Repeat([]byte("a"), 16<<20)
+	server := httptest.NewServer(Serve(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(whole)
+	}), [][]byte{[]byte("current")}))
+	s.T().Cleanup(server.Close)
+
+	answer, err := s.ask(server.Listener.Addr().String(), []byte("current"))
+
+	s.Require().NoError(err)
+	s.True(bytes.Equal(whole, answer.GetBody()), "%d bytes came back", len(answer.GetBody()))
+}
+
+// A call with no credential is refused on its headers: this one never ends.
+func (s *ForwardSuite) TestAForwardWithNoCredentialIsRefusedUnread() {
+	address := s.node([]byte("current"))
+	client := &http2.Transport{AllowHTTP: true, DialTLSContext: func(ctx context.Context, network, _ string, _ *tls.Config) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}}
+	s.T().Cleanup(client.CloseIdleConnections)
+	body, unfinished := io.Pipe()
+	s.T().Cleanup(func() { _ = unfinished.Close() })
+	request, err := http.NewRequestWithContext(s.ctx, http.MethodPost, "http://"+address+"/node.Node/Forward", body)
+	s.Require().NoError(err)
+	request.Header.Set("Content-Type", "application/grpc")
+
+	response, err := client.RoundTrip(request)
+
+	s.Require().NoError(err)
+	defer response.Body.Close()
+	s.Equal("16", response.Header.Get("Grpc-Status"))
+	s.Zero(s.answered.Load(), "the node's handler ran")
 }
