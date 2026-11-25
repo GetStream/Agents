@@ -16,6 +16,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -358,6 +359,26 @@ func (s *PhoneMoveSuite) TestARunWhoseNumbersCannotBeReadFails() {
 	s.Empty(s.twilio.asked())
 }
 
+// Attaching an attached number again answers within a short deadline when Twilio never answers
+// the move, and the number stays attached.
+func (s *PhoneMoveSuite) TestAttachingAgainAnswersWhenTwilioNeverDoes() {
+	number := s.attachedEarlier()
+	s.twilio.hanging.Store(true)
+	var logs bytes.Buffer
+	service := s.service(s.ready().with(func(m *moverSettings) { m.logs = &logs }))
+
+	start := time.Now()
+	attached, err := service.Attach(s.ctx, phone.Attachment{CustomerID: s.customer, E164: number})
+
+	s.Require().NoError(err)
+	s.Less(time.Since(start), 15*time.Second, "the attach waited on Twilio's client timeout")
+	s.NotEmpty(attached.TrunkID)
+	s.Contains(logs.String(), "could not point an attached number at the router's call webhook")
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, number)
+	s.Require().NoError(err)
+	s.NotNil(held.AttachedAt)
+}
+
 // The command is built from the router's config: without a keyring it refuses, and with one it
 // gets as far as the public URL, which this config lacks.
 func (s *PhoneMoveSuite) TestTheCommandRunsTheChecksOnTheRoutersConfig() {
@@ -503,6 +524,8 @@ type fakeTwilio struct {
 	numbers  map[string]*fakeTwilioNumber
 	requests []string
 	forms    []url.Values
+	// hanging holds every request until its caller gives up.
+	hanging atomic.Bool
 }
 
 type fakeTwilioNumber struct {
@@ -519,6 +542,10 @@ func newFakeTwilio(t *testing.T) *fakeTwilio {
 }
 
 func (f *fakeTwilio) serve(w http.ResponseWriter, r *http.Request) {
+	if f.hanging.Load() {
+		<-r.Context().Done()
+		return
+	}
 	_ = r.ParseForm()
 	f.mu.Lock()
 	defer f.mu.Unlock()

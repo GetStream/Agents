@@ -960,6 +960,12 @@ var ErrNoSealer = errors.New("phone: no key to seal a number's trunk password: s
 // fetches on answer, so a call on that vendor cannot be placed.
 var ErrNoSealerToCall = errors.New("phone: no key to seal the trunk password the vendor fetches on answer, so the call cannot be placed: set ROUTER_DEV_KEK (local), or ROUTER_AUTH_KEK_V1_WRAPPED with ROUTER_AUTH_KMS_KEY (hosted)")
 
+// reattachMoveTimeout bounds the move of an attached number's voice URL that an attach of it
+// makes. Programs send that attach on every start, and the move is up to three vendor
+// requests. A vendor answers each in well under a second, so five seconds is a vendor that is
+// down or hung, not a slow one; the move is tried again at the next attach.
+const reattachMoveTimeout = 5 * time.Second
+
 // Attach puts a number on the trunk it shares with the customer's other numbers of its
 // vendor, with a rule of its own, and tells the vendor to send calls there. This is what
 // turns a bought number into one that reaches an agent. Without a key to seal the trunk's
@@ -1031,7 +1037,10 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		// A number attached before its vendor asked the router's webhook is pointed there now,
 		// when the router can answer it. A running line is not refused over a move that failed.
 		if hooked, ok := provider.(CallHooked); ok && hooked.CallHookReady(s.publicURL) == nil {
-			if _, err := s.moveToCallHook(ctx, provider, hooked, held, true); err != nil {
+			moveCtx, cancel := context.WithTimeout(ctx, reattachMoveTimeout)
+			_, err := s.moveToCallHook(moveCtx, provider, hooked, held, true)
+			cancel()
+			if err != nil {
 				s.logger.Error("could not point an attached number at the router's call webhook",
 					"customer", held.CustomerID, "vendor", held.Vendor, "error", err)
 			}
