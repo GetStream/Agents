@@ -55,7 +55,21 @@ final class ClientTest extends TestCase
         }
 
         self::assertSame(Backend::DEFAULT_URL, $backend->url);
+        self::assertSame('https://accelerate.gcp.stream-io-api.com', $backend->url);
         self::assertTrue($backend->authenticate);
+    }
+
+    public function testTheNearestHostedRouterIsAuthenticated(): void
+    {
+        foreach ([null, Backend::DEFAULT_URL . '/'] as $url) {
+            $backend = self::withEnv(
+                [Backend::URL_ENV => null, Backend::REGION_ENV => null],
+                fn () => new Backend(url: $url, customerId: 'examples', apiKey: 'key', apiSecret: 'secret'),
+            );
+
+            self::assertSame(Backend::DEFAULT_URL, $backend->url);
+            self::assertTrue($backend->authenticate);
+        }
     }
 
     public function testARouterNamedByUrlLeavesTheProxyOff(): void

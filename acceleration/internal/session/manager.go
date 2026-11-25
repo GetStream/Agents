@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -43,6 +45,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stsrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sttrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/transitional"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/ttsrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 )
@@ -458,11 +461,23 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		// A session's channel is named after it, and a thread channel's id is taken by the
 		// external thread it holds. Compared case-folded, as threadConversation does.
 		if folded := strings.ToLower(spec.ID); !taken && strings.HasPrefix(folded, persistent.ThreadChannelPrefix) {
-			_, err := m.options.Store.ChannelThreads.Get(ctx, folded)
-			if err != nil && !errors.Is(err, store.ErrNoChannelThread) {
-				return nil, stack.Wrap(err)
+			// Why: to an end user's device every id shaped like a thread channel's is taken, so
+			// the answer does not tell it whether a thread channel has the id. Counted only
+			// where that changes the answer: an id no thread channel has.
+			probe := endUserKind(spec) && threadShaped(folded)
+			if probe && ThreadSessionIDsSwitch.On(spec.CustomerID) {
+				ThreadSessionIDsSwitch.Applies(spec.CustomerID, "CreateSession")
+				taken = true
+			} else {
+				_, err := m.options.Store.ChannelThreads.Get(ctx, folded)
+				if err != nil && !errors.Is(err, store.ErrNoChannelThread) {
+					return nil, stack.Wrap(err)
+				}
+				taken = err == nil
+				if probe && !taken {
+					ThreadSessionIDsSwitch.Applies(spec.CustomerID, "CreateSession")
+				}
 			}
-			taken = err == nil
 		}
 		if taken {
 			return nil, stack.Wrap(ErrSessionExists)
@@ -719,7 +734,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		if err != nil {
 			return nil, stack.Wrap(err)
 		}
-		tools = append(tools, spec.callTools(builtin.Tools)...)
+		tools = append(tools, spec.callTools(builtin.Tools, spec.keepsDialOut(line != nil))...)
 	}
 	// A worker that is not connected, or an SDK that no longer defines a function, leaves
 	// the agent without it. The session still opens and does what it can.
@@ -871,6 +886,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			Ender:              m.ender(created, spec, stream),
 			EndCallWhen:        spec.endCallWhen(),
 			ToolRunner:         runner,
+			CallersTool:        created.callersTool(spec),
 			Tools:              created.offering(spec.Tools),
 			Sandbox:            box,
 			Publish:            publisher(conv),
@@ -2639,11 +2655,15 @@ func publisher(conv *persistent.Conversation) sandbox.Publisher {
 
 // callTools is the built-in tools a config's calls settings leave on. A session opened
 // from code, with no config, keeps all of them.
-func (s Spec) callTools(builtin []harness.Tool) []harness.Tool {
+func (s Spec) callTools(builtin []harness.Tool, keepDialOut bool) []harness.Tool {
 	var kept []harness.Tool
 	for _, tool := range builtin {
 		switch {
 		case tool.Name == "end_call" && !s.endsCalls():
+			continue
+		// Why: with no config, nobody chose to let the agent dial out, and a device may not
+		// decide that for the app.
+		case !keepDialOut && (tool.Name == "transfer" || tool.Name == "press"):
 			continue
 		case s.ConfigID == "":
 		case tool.Name == "transfer" && !s.Calls.TransferOn() || tool.Name == "press" && !s.Calls.PressOn():
@@ -2652,6 +2672,66 @@ func (s Spec) callTools(builtin []harness.Tool) []harness.Tool {
 		kept = append(kept, tool)
 	}
 	return kept
+}
+
+// ThreadSessionIDsSwitch (CHA-7274) turns on answering a device's session id in the thread namespace as taken.
+// Off, such an id is treated as before, and counted (transitional.Switch).
+var ThreadSessionIDsSwitch = transitional.Switch{
+	Name: "security.cha7274.device_thread_session_ids",
+	Env:  "ROUTER_SECURITY_CHA7274_DEVICE_THREAD_SESSION_IDS",
+}
+
+// threadShaped reports whether a folded id has the shape of a thread channel's id: the thread
+// prefix and a UUID (channelbridge). Other ids in the namespace no thread channel can have.
+func threadShaped(folded string) bool {
+	rest, _ := strings.CutPrefix(folded, persistent.ThreadChannelPrefix)
+	_, err := uuid.Parse(rest)
+	return err == nil && len(rest) == 36
+}
+
+// endUserKind reports whether spec was opened by an end user's device rather than the customer's
+// backend. A spec the router opens itself names no kind.
+func endUserKind(spec Spec) bool {
+	if spec.Caller.ServerSide {
+		return false
+	}
+	kind := spec.CallerKind
+	return kind == auth.KindAuthenticated || kind == auth.KindGuest || kind == auth.KindAnonymous
+}
+
+// openedByDevice reports whether an end user's device opened the session, rather than the
+// customer's backend or the router itself, which names no caller kind.
+func (s Spec) openedByDevice() bool {
+	return endUserKind(s)
+}
+
+// keepsDialOut reports whether the session keeps the built-in transfer and press. A session a
+// device opened with no config does not, once deviceToolsSwitch is on: nobody chose to let its
+// agent dial out. Counted only for a session on a phone line, the only one either can act on.
+func (s Spec) keepsDialOut(onLine bool) bool {
+	if s.ConfigID != "" || !s.openedByDevice() || !onLine {
+		return true
+	}
+	return !deviceToolsSwitch.Applies(s.CustomerID, "session tools")
+}
+
+// callersTool is agent.Options.CallersTool for a session spec opened: the device's own tools
+// when a device opened it, and none when the backend did, whose tools are its own systems.
+func (s *Session) callersTool(spec Spec) func(string) bool {
+	if !spec.openedByDevice() {
+		return nil
+	}
+	return func(name string) bool {
+		return s.devicesTool(name) && deviceToolsSwitch.Applies(spec.CustomerID, "transfer")
+	}
+}
+
+// deviceToolsSwitch turns on CHA-7261's two changes to a session a device opened: a result of
+// the device's own tool is no source of a number to transfer to, and a session with no config
+// is offered no transfer or press. Off, both are as before, and counted (transitional.Switch).
+var deviceToolsSwitch = transitional.Switch{
+	Name: "security.cha7261.device_transfer_sources",
+	Env:  "ROUTER_SECURITY_CHA7261_DEVICE_TRANSFER_SOURCES",
 }
 
 // endsCalls reports whether the config lets the agent hang up. A session with no config

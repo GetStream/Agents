@@ -73,6 +73,7 @@ func (s *BillingSuite) TestTheBillingObjectIsRead() {
 	s.Len(found.Documents, 2)
 	s.Equal(knowledge.Billed{Requests: 1, BytesQueried: 1_280_000_000, BytesReturned: 112, Results: 2, CostNanos: 1_286},
 		found.Billed, "1.28 GB at $1 a PB is 1,280 billionths of a dollar, and 112 bytes returned 6 more")
+	s.Equal(found.BytesQueried, s.store.MinimumQueried(), "the documented answer is a query billed the minimum")
 
 	fetched, err := s.store.Fetch(s.ctx, "app-1__docs", []string{"shipping.md#0", "shipping.md#1"})
 	s.Require().NoError(err)
