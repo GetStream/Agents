@@ -2470,6 +2470,9 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 			forgotten = forgotten.Where("key - ?::text = ?::jsonb - ?::text", spec.customer, string(change.Key), spec.customer)
 		}
 		if _, err := forgotten.Exec(ctx); err != nil {
+			if refused := refusedRow(change.Table, err); refused != nil {
+				return refused
+			}
 			return fmt.Errorf("store: forget the changes of %s: %w", change.Table, err)
 		}
 	}

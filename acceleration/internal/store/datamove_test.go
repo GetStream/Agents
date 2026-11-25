@@ -2438,6 +2438,14 @@ func (s *DataMoveSuite) TestADeleteWhoseKeyItsColumnCannotTakeIsRefused() {
 	}
 }
 
+// A delete of a row whose recorded changes a delete empties is refused the same way.
+func (s *DataMoveSuite) TestADeleteOfAForgottenTableWhoseKeyIsNoObjectIsRefused() {
+	for _, key := range []string{`"anya"`, ``} {
+		err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Seq: 1, Table: "users", Op: ChangeDelete, At: time.Now(), Key: json.RawMessage(key)}})
+		s.ErrorIs(err, ErrInvalidImport, key)
+	}
+}
+
 // A day and a number are keys too.
 func (s *DataMoveSuite) TestARowKeyedByADayAndANumberIsDeletedByTheReplay() {
 	s.capture("acme")
