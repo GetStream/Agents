@@ -2,6 +2,7 @@ package extract
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 
@@ -16,7 +17,7 @@ const maxWorkbook = 4 * maxUnzipped
 // values as the sheet shows them: a price formatted as money reads as money. A hidden
 // sheet is left out, since nobody reading the workbook sees it. A sheet's pictures follow
 // its table. Its charts are Excel's own drawings, which nothing here draws.
-func readXLSX(data []byte) (Document, error) {
+func readXLSX(ctx context.Context, data []byte) (Document, error) {
 	book, err := excelize.OpenReader(bytes.NewReader(data), excelize.Options{UnzipSizeLimit: maxWorkbook})
 	if err != nil {
 		if strings.Contains(err.Error(), "unzip size") {
@@ -29,6 +30,9 @@ func readXLSX(data []byte) (Document, error) {
 	var sections []string
 	var kept pictures
 	for _, sheet := range book.GetSheetList() {
+		if ctx.Err() != nil {
+			return Document{}, unreadable(ctx, XLSX, ctx.Err())
+		}
 		if visible, err := book.GetSheetVisible(sheet); err == nil && !visible {
 			continue
 		}

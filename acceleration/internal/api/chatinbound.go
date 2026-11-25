@@ -97,6 +97,7 @@ func (s *Server) receiveChatInbound(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	s.noteHook(r.Context(), origin)
 	r = loggedHook(r, origin)
 	if delivery.Type != getstream.EventTypeMessageNew {
 		s.logger.DebugContext(r.Context(), "ignoring a Stream Chat delivery", "type", delivery.Type)
@@ -128,9 +129,9 @@ func (s *Server) queueChatInbound(ctx context.Context, origin hookOrigin, delive
 	if s.store == nil {
 		return stack.Wrap(errors.New("api: no database to queue Stream Chat deliveries in"))
 	}
-	queued, err := s.store.QueueFirstChatInbound(ctx, deliveryKey(origin, delivery.Type, delivery.stamp()), store.ChatInbound{
-		StreamApp: origin.app, MessageID: delivery.Message.ID, CustomerID: origin.customer,
-		Deployment: origin.deployment, APIKey: origin.apiKey, Body: body, NextAttemptAt: time.Now(),
+	queued, err := s.store.ChatInbounds.QueueFirst(ctx, deliveryKey(origin, delivery.Type, delivery.stamp()), store.ChatInbound{
+		StreamAppPK: origin.app, MessageID: delivery.Message.ID, CustomerID: origin.customer,
+		Deployment: origin.deployment, APIKey: origin.apiKey, Body: body,
 	})
 	if err != nil {
 		return err
@@ -187,7 +188,7 @@ type queuedChatInbound struct {
 
 // queuedFrom is a queued delivery's row as one router hands it to another.
 func queuedFrom(delivery store.ChatInbound) queuedChatInbound {
-	return queuedChatInbound{Seq: delivery.Seq, StreamApp: delivery.StreamApp, MessageID: delivery.MessageID,
+	return queuedChatInbound{Seq: delivery.Seq, StreamApp: delivery.StreamAppPK, MessageID: delivery.MessageID,
 		CustomerID: delivery.CustomerID, Deployment: delivery.Deployment, APIKey: delivery.APIKey, Body: delivery.Body,
 		Heard: delivery.Heard}
 }
@@ -266,7 +267,7 @@ func (s *Server) answerChatInboundForPeer(w http.ResponseWriter, r *http.Request
 	}
 	// The asker hands over a queued row it holds a lease on, and only answered or given-up rows
 	// are pruned, so a row that is gone was not handed over by a peer.
-	row, err := s.store.ChatInboundBySeq(r.Context(), handed.Seq)
+	row, err := s.store.ChatInbounds.Get(r.Context(), handed.Seq)
 	switch {
 	case errors.Is(err, store.ErrNoChatInbound), err == nil && !handed.storedAs(queuedFrom(row)):
 		s.logger.Warn("refused a queued chat inbound message a peer handed over that its row does not match",
@@ -285,7 +286,15 @@ func (s *Server) answerChatInboundForPeer(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.logger.Info("answering a queued chat inbound message another node handed over", "seq", queued.Seq, "stream_app", queued.StreamApp)
-	if !s.routeArrivingMessage(r.Context(), queued.origin(), event.messageEvent) {
+	origin := queued.origin()
+	// Handed to this node's shard rather than to what runs here, so it may still go on to a
+	// worker or the node running its conversation (node.HandedToShard).
+	if node.HandedToShard(r.Context()) {
+		origin.handOver = func(ctx context.Context, address string) (*node.ForwardResponse, error) {
+			return s.handChatInboundToPeer(ctx, address, queued)
+		}
+	}
+	if !s.routeArrivingMessage(r.Context(), origin, event.messageEvent) {
 		writeError(w, unavailable("nothing took the queued delivery"))
 		return
 	}
@@ -293,7 +302,7 @@ func (s *Server) answerChatInboundForPeer(w http.ResponseWriter, r *http.Request
 }
 
 // answerOnce settles a queued delivery's row as its answer starts, so a try of it after that, on
-// this router or another, answers nothing (store.StartChatInboundAnswer). answer is false when
+// this router or another, answers nothing (store.ChatInbounds.StartAnswer). answer is false when
 // the message is not to be answered now, and settled then says whether that holds: its answer
 // already started, or the row could not be written and a later try may. A hook is never tried
 // again, so it settles nothing. A router that stops mid-answer leaves the message answered at
@@ -302,7 +311,7 @@ func (s *Server) answerOnce(ctx context.Context, origin hookOrigin, event messag
 	if origin.queuedMessage == "" {
 		return true, true
 	}
-	started, err := s.store.StartChatInboundAnswer(ctx, origin.app, origin.queuedMessage, time.Now())
+	started, err := s.store.ChatInbounds.StartAnswer(ctx, origin.app, origin.queuedMessage, time.Now())
 	if err != nil {
 		s.logger.Error("could not settle a queued chat inbound message before answering it",
 			"channel", event.ChannelID, "message", origin.queuedMessage, "stream_app", origin.app, "error", err)
@@ -324,7 +333,7 @@ func (s *Server) unanswered(ctx context.Context, origin hookOrigin) {
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatInboundReleaseTimeout)
 	defer cancel()
-	if err := s.store.ReleaseChatInboundAnswer(ctx, origin.app, origin.queuedMessage); err != nil {
+	if err := s.store.ChatInbounds.ReleaseAnswer(ctx, origin.app, origin.queuedMessage); err != nil {
 		s.logger.Error("a queued chat inbound message nothing took could not be queued again, and is left unanswered",
 			"message", origin.queuedMessage, "stream_app", origin.app, "error", err)
 	}

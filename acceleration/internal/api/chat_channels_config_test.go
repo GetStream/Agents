@@ -70,7 +70,7 @@ func (s *ConfigsSuite) TestChatChannelsTakesOnlyTypesACIDCanName() {
 
 // storedChatChannels checks the chat_channels a config holds in the store.
 func (s *ConfigsSuite) storedChatChannels(id string, want []store.ChatChannel) {
-	stored, err := s.store.AgentConfig(context.Background(), s.customerID(), id)
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), id)
 	s.Require().NoError(err)
-	s.Equal(want, stored.ChatChannels)
+	s.Equal(want, stored.Channels.Chat)
 }

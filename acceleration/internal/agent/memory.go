@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/memory"
 )
@@ -59,7 +60,7 @@ func newMemoryWriter(store memory.Store, scope memory.Scope, incognito bool, log
 		drainTimeout: memoryDrainTimeout,
 	}
 	w.ctx, w.cancel = context.WithCancel(context.Background())
-	go w.run()
+	goroutine.Go(w.ctx, w.run)
 	return w
 }
 

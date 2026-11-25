@@ -138,7 +138,7 @@ func (s *ConnectionTokenSuite) TestTheExportIsListedInTheConnectorAudit() {
 // TestAGrantIssuedToTheOperatorsClientIsRefused: Stream's app, from the environment, as when
 // the app has no client record for the connector.
 func (s *ConnectionTokenSuite) TestAGrantIssuedToTheOperatorsClientIsRefused() {
-	id := s.connection(appOwned(s.connector(oauth2code.Name)))
+	id := s.connection(appOwned(s.builtin(oauth2code.Name)))
 	s.importGrant(id, "the-access-token", "the-refresh-token")
 
 	status, body := s.serverClient.call(http.MethodPost, tokenPath(id), nil)
@@ -152,7 +152,7 @@ func (s *ConnectionTokenSuite) TestAGrantIssuedToTheOperatorsClientIsRefused() {
 // TestAGrantIssuedToTheOperatorsClientStaysRefusedOnceTheAppPutsItsOwn: the record says whose
 // client the connector uses now, not whose client the grant was issued to.
 func (s *ConnectionTokenSuite) TestAGrantIssuedToTheOperatorsClientStaysRefusedOnceTheAppPutsItsOwn() {
-	connector := s.connector(oauth2code.Name)
+	connector := s.builtin(oauth2code.Name)
 	id := s.connection(appOwned(connector))
 	s.importGrant(id, "the-access-token", "")
 	s.putOwnClient(connector)
@@ -195,7 +195,7 @@ func (s *ConnectionTokenSuite) TestAGrantWhoseClientTheRouterReplacedIsRefused()
 	s.putOwnClient(connector)
 	id := s.connection(appOwned(connector))
 	s.importGrant(id, "the-access-token", "")
-	s.Require().NoError(s.store.DeleteConnectorOAuthClient(context.Background(), s.customerID(), connector, core.ClientCustomer))
+	s.Require().NoError(s.store.ConnectorOAuthClients.Delete(context.Background(), s.customerID(), connector, core.ClientCustomer))
 	s.putManagedClient(connector)
 
 	status := s.serverClient.do(http.MethodPost, tokenPath(id), nil, nil)
@@ -267,14 +267,14 @@ func (s *ConnectionTokenSuite) TestAnUnknownConnectionIsNotFound() {
 func (s *ConnectionTokenSuite) TestAnExportWhoseAuditRowCannotBeWrittenIsNotHandedOver() {
 	ctx := context.Background()
 	id := s.keyConnection(appOwned(s.connector(apikey.Name)))
-	_, err := s.store.DB().ExecContext(ctx, `CREATE OR REPLACE FUNCTION refuse_token_export() RETURNS trigger AS $$
+	_, err := s.store.GlobalDB().ExecContext(ctx, `CREATE OR REPLACE FUNCTION refuse_token_export() RETURNS trigger AS $$
 		BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql`)
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(ctx, `CREATE TRIGGER refuse_token_export BEFORE INSERT ON connector_audit
+	_, err = s.store.GlobalDB().ExecContext(ctx, `CREATE TRIGGER refuse_token_export BEFORE INSERT ON connector_audit
 		FOR EACH ROW WHEN (NEW.connection_id = '`+id+`' AND NEW.action = 'token_export') EXECUTE FUNCTION refuse_token_export()`)
 	s.Require().NoError(err)
 	defer func() {
-		_, err := s.store.DB().ExecContext(ctx, "DROP TRIGGER refuse_token_export ON connector_audit")
+		_, err := s.store.GlobalDB().ExecContext(ctx, "DROP TRIGGER refuse_token_export ON connector_audit")
 		s.Require().NoError(err)
 	}()
 
@@ -308,7 +308,7 @@ sources:
     endpoint: mcp
 `))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	s.putOwnClient(id)
 	conn := s.connection(appOwned(id))
@@ -327,7 +327,26 @@ sources:
 
 func (s *ConnectionTokenSuite) connector(scheme string) string {
 	id := "custom_export" + strings.ReplaceAll(s.utils.uuid(), "-", "")
-	manifest, err := core.ParseManifest([]byte(`
+	manifest, err := core.ParseManifest([]byte(s.manifest(id, scheme)))
+	s.Require().NoError(err)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
+	s.Require().NoError(err)
+	return id
+}
+
+// builtin seeds a built-in connector at the fake taking scheme, as a router start with that
+// file does: only a built-in takes the operator's client.
+func (s *ConnectionTokenSuite) builtin(scheme string) string {
+	id := "fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(),
+		fstest.MapFS{id + ".yaml": {Data: []byte(s.manifest(id, scheme))}}))
+	return id
+}
+
+// manifest is connector id at the fake taking scheme, whose consent may use the app's own
+// client, a client the router created, or, for a built-in, the operator's in the environment.
+func (s *ConnectionTokenSuite) manifest(id, scheme string) string {
+	return `
 id: ` + id + `
 revision: 1
 name: Fake
@@ -345,11 +364,7 @@ scopes:
 sources:
   - kind: mcp
     endpoint: mcp
-`))
-	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
-	s.Require().NoError(err)
-	return id
+`
 }
 
 func (s *ConnectionTokenSuite) connection(body map[string]any) string {
@@ -389,16 +404,17 @@ func (s *ConnectionTokenSuite) putOwnClient(connector string) {
 
 // putManagedClient stores a client the router created for the app, as T54 will.
 func (s *ConnectionTokenSuite) putManagedClient(connector string) {
-	_, err := s.store.PutConnectorOAuthClient(context.Background(), &store.ConnectorOAuthClient{
+	_, err := s.store.ConnectorOAuthClients.Upsert(context.Background(), &store.ConnectorOAuthClient{
 		CustomerID: s.customerID(), ConnectorID: connector, Registration: core.ClientManaged,
 		ClientID: "the-routers-client", ProviderAppID: "A" + strings.ReplaceAll(s.utils.uuid(), "-", ""),
 	})
+
 	s.Require().NoError(err)
 }
 
 // exports are the connection's token_export audit rows.
 func (s *ConnectionTokenSuite) exports(id string) []store.ConnectorAuditEvent {
-	rows, err := s.store.ConnectorAuditEvents(context.Background(), s.customerID(), store.AuditFilter{ConnectionID: id})
+	rows, err := s.store.ConnectorAuditEvents.Select(context.Background(), s.customerID(), store.AuditFilter{ConnectionID: id})
 	s.Require().NoError(err)
 	var exports []store.ConnectorAuditEvent
 	for _, row := range rows {
@@ -432,7 +448,7 @@ func TestConnectionTokenOffSuite(t *testing.T) {
 func (s *ConnectionTokenOffSuite) SetupSuite() {
 	s.connectorsOff = true
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *ConnectionTokenOffSuite) SetupTest() {
@@ -452,11 +468,11 @@ func (s *ConnectionTokenOffSuite) TestAnUnknownConnectionIsNotFoundAsItsReadIs()
 // on. Its read answers 200. Its validate answers as cmd/router does with connectors off, where
 // there is no resolver and so no transports (main.go): errConnectionToolsOff.
 func (s *ConnectionTokenOffSuite) TestAConnectionMadeBeforeIsNotExportedAndReadsAsOnBase() {
-	definition, err := s.store.LatestConnectorDefinition(context.Background(), s.customerID(), "linear")
+	definition, err := s.store.ConnectorDefinitions.Latest(context.Background(), s.customerID(), "linear")
 	s.Require().NoError(err)
 	connection := store.ConnectorConnection{CustomerID: s.customerID(), ConnectorID: "linear",
 		DefinitionRevision: definition.Revision, OwnerType: store.OwnerApp, AuthScheme: oauth2code.Name}
-	s.Require().NoError(s.store.CreateConnectorConnection(context.Background(),
+	s.Require().NoError(s.store.ConnectorConnections.Insert(context.Background(),
 		core.Registry{Schemes: map[string]core.Scheme{oauth2code.Name: namedScheme(oauth2code.Name)}}, &connection))
 
 	status, body := s.serverClient.call(http.MethodPost, tokenPath(connection.ID), nil)
@@ -468,7 +484,7 @@ func (s *ConnectionTokenOffSuite) TestAConnectionMadeBeforeIsNotExportedAndReads
 	status, body = s.serverClient.call(http.MethodPost, "/v1/agents/connections/"+connection.ID+"/validate", nil)
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(string(body), errConnectionToolsOff.Message)
-	rows, err := s.store.ConnectorAuditEvents(context.Background(), s.customerID(), store.AuditFilter{ConnectionID: connection.ID})
+	rows, err := s.store.ConnectorAuditEvents.Select(context.Background(), s.customerID(), store.AuditFilter{ConnectionID: connection.ID})
 	s.Require().NoError(err)
 	s.Empty(rows)
 }
@@ -485,12 +501,12 @@ func (s *ConnectionTokenOffSuite) TestAConnectionOnABrokenRevisionAnswersAsOnBas
 			"\nname: Probe\nendpoints:\n  mcp: https://mcp.acme.example/mcp\nschemes: [oauth2_code]\n" +
 			"sources:\n  - kind: mcp\n    endpoint: mcp\n" + extra)}}
 	}
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), manifest("1", "")))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), manifest("1", "")))
 	connection := store.ConnectorConnection{CustomerID: s.customerID(), ConnectorID: connector,
 		DefinitionRevision: 1, OwnerType: store.OwnerApp, AuthScheme: oauth2code.Name}
-	s.Require().NoError(s.store.CreateConnectorConnection(context.Background(),
+	s.Require().NoError(s.store.ConnectorConnections.Insert(context.Background(),
 		core.Registry{Schemes: map[string]core.Scheme{oauth2code.Name: namedScheme(oauth2code.Name)}}, &connection))
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(),
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(),
 		manifest("2", "broken_revisions:\n  - revisions: [1]\n    reason: reads the wrong path\n")))
 
 	var read Connection

@@ -284,9 +284,6 @@ function screenDeps(tools: Tools, incognito: boolean): ChatScreenDeps {
     open: async (sessionId) => {
       if (!sessionId) {
         return agents.agent(Assistant.agentName).sessions.create({
-          // An overwrite rather than `llm`: the router keeps it on the session, so a conversation
-          // carried on after it ended still runs on this model rather than the agent's own.
-          modelOverwrites: { llm: Assistant.chatModel },
           returnUrl: Assistant.returnUrl,
           tools,
           ...(incognito ? { incognito } : {}),
@@ -311,6 +308,7 @@ function screenDeps(tools: Tools, incognito: boolean): ChatScreenDeps {
     },
     approver: approverFor,
     voiceOf: (session) => VoiceSession.of(session),
+    incognito,
   };
 }
 

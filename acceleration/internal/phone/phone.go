@@ -63,6 +63,9 @@ var ErrDestinationRefused = errors.New("phone: calls to this number are refused"
 // ErrSuspended is an app Stream staff stopped from using the phone. Why stays with Stream.
 var ErrSuspended = errors.New("phone: this app's telephony is suspended; contact Stream support")
 
+// ErrVerificationRequired is a number asked for by an organization Stream has not verified (KYC).
+var ErrVerificationRequired = errors.New("phone: the organization must be verified to buy a number")
+
 // ErrNotDialable is a number no call may be placed to: not a full E.164 number, or one refused
 // as a destination. A caller that holds a list of numbers can tell it from a failed call.
 var ErrNotDialable = errors.New("phone: not dialable")
@@ -382,6 +385,9 @@ type Inbound struct {
 	E164 string
 	// Bridge is where the vendor should send the call.
 	Bridge Bridge
+	// PublicURL is where the router is reachable from the internet. A vendor whose numbers ask
+	// a webhook of the router's where each call goes (CallHooked) points them there.
+	PublicURL string
 }
 
 // CallFeature names one of the terms a call can be placed on.
@@ -481,6 +487,23 @@ type DigitsPlayer interface {
 // otherwise. A vendor that asks the router on every call needs no such step.
 type InboundStopper interface {
 	StopInbound(ctx context.Context, e164 string) error
+}
+
+// CallHooked is a vendor whose numbers are pointed at a webhook of the router's, which answers
+// each of their calls. Attach asks it first, so a number is not pointed at a webhook that
+// would refuse its calls.
+type CallHooked interface {
+	// CallHookReady reports which setting the router lacks to answer the vendor's call webhook
+	// at publicURL, or nil when it lacks none.
+	CallHookReady(publicURL string) error
+}
+
+// NumberFinder is a vendor that can say whether its account holds a number, which settles a
+// purchase or a release whose outcome was not recorded (Service.SweepOrders).
+type NumberFinder interface {
+	// HoldsNumber reports whether the account holds e164, and the id its purchase is recorded
+	// by (Number.VendorID), empty when the vendor's listing cannot name it.
+	HoldsNumber(ctx context.Context, e164 string) (string, bool, error)
 }
 
 // Hanger is a vendor that can hang up a call it placed, ringing or answered.

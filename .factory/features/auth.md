@@ -169,12 +169,14 @@ and the advice is the opposite one.
 
 The default is permissive in both directions. A key that is not in the document allows,
 which is what lets a setting be added without rewriting every row, and an app that resolves
-to nothing allows, which covers `noauth` and `proxy` â€” neither reads these tables, so
-neither has settings to read, and a `proxy` deployment's apps live in Stream's tables
-anyway. The levels are therefore only enforced in `api_key` mode, which is the only mode
-where the app is one of these rows.
+to nothing allows, which covers `noauth` and `proxy`: neither resolves a key, and a `proxy`
+deployment's apps mostly live in Stream's tables. The levels are therefore enforced in
+`api_key` mode, with one exception. A guest the router minted is known by its row in `users`,
+and `allow_guest` applies to it in `proxy` mode too, from the settings of the app's row, if
+it has one, held for a minute. A caller whose id could be such a guest's is answered 500
+while that row cannot be read, and a minted guest behind a proxy is while the settings cannot.
 
-The read costs nothing extra. It is joined into the same query that resolves the API key,
+For a key the read costs nothing extra. It is joined into the same query that resolves the API key,
 which was already happening on every authenticated request.
 
 ## Why a token and not a signed request
@@ -202,16 +204,14 @@ The rest of the credential's shape is borrowed rather than invented. `vak_live_â
 config is visible as one, and the key id ends in a CRC32 so a truncated paste is rejected
 before the database is asked. `last4` is all the dashboard would ever show of a secret
 again. A revoked key keeps its row, because a year of request rows pointing at a deleted key
-is unattributable noise, and `last_used_at` is written at most once a minute per key, since
-a synchronous update would double the writes of a busy one.
+is unattributable noise.
 
 ## Not done
 
-- **Nothing creates a key but a database call.** `CreateOrganization`, `CreateApp`,
-  `CreateAPIKey`, `ListAPIKeys` and `RevokeAPIKey` are all there and nothing outside a test
-  calls them: no endpoints, no dashboard page, no bootstrap command. This is the gap that
-  makes `api_key` mode awkward to actually adopt, and it is now the gap that makes the
-  default awkward to adopt.
+- **Keys are managed from the command line only.** `router keys create` mints a key and
+  `router keys revoke --app <id> --key <id>` stops one of an app's keys, on every router at
+  once when the command has the routers' Redis and within a minute (the key cache's TTL)
+  when it has none. There are no endpoints and no dashboard page for either.
 - **Nothing writes app settings either.** The column and the struct are there and are read
   on every request; turning a level off means an UPDATE by hand.
 - **Permissions stop at the session.** Everything else a client-side caller may reach is

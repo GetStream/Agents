@@ -38,12 +38,6 @@ export const Assistant = {
   agentName: "swift_assistant",
 
   /**
-   * The model a written conversation runs on. Grok reads photos and streams its reasoning, which
-   * is what fills a reply's thinking panel. A call keeps the agent's faster model.
-   */
-  chatModel: "xai/grok-4.7",
-
-  /**
    * Who this page is. By default the same person the iOS and Android apps are, so all three list
    * the same conversations; `VITE_USER_ID` and `VITE_USER_NAME` make it somebody else, with
    * conversations and connected accounts of their own.

@@ -167,7 +167,7 @@ func (s *ImageJobsSuite) SetupSuite() {
 }
 
 func (s *ImageJobsSuite) SetupTest() {
-	_, err := s.store.DB().ExecContext(s.ctx, "TRUNCATE image_jobs")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE image_jobs")
 	s.Require().NoError(err)
 	s.chat = chattest.NewServer(s.T())
 	s.posts = conversation.NewForChat(s.chat.Client)
@@ -260,7 +260,7 @@ func (s *ImageJobsSuite) jobs() []store.ImageJob {
 	var jobs []store.ImageJob
 	s.Require().Eventually(func() bool {
 		jobs = nil
-		err := s.store.DB().NewSelect().Model(&jobs).Where("cid = ?", s.cid).Order("tool_call_id").Scan(s.ctx)
+		err := s.store.GlobalDB().NewSelect().Model(&jobs).Where("cid = ?", s.cid).Order("tool_call_id").Scan(s.ctx)
 		if err != nil || len(jobs) == 0 {
 			return false
 		}
@@ -285,7 +285,7 @@ func (s *ImageJobsSuite) rows(n int) []store.Request {
 	var rows []store.Request
 	s.Require().Eventually(func() bool {
 		rows = nil
-		err := s.store.DB().NewSelect().Model(&rows).
+		err := s.store.GlobalDB().NewSelect().Model(&rows).
 			Where("customer_id = ? AND modality = ?", s.customer, string(routing.Image)).Scan(s.ctx)
 		return err == nil && len(rows) == n
 	}, 10*time.Second, 20*time.Millisecond, "the draws were never recorded")
@@ -444,7 +444,7 @@ func (s *ImageJobsSuite) TestADrawNeverStartedForHalfAnHourPostsThatItTookTooLon
 	s.drawer.err = imagegen.Fail(imagegen.Timeout, false, fmt.Errorf("%w: %w", imagegen.ErrNotStarted, context.DeadlineExceeded))
 	worker := s.worker()
 	s.queue(worker, "draw-1")
-	_, err := s.store.DB().NewUpdate().Model((*store.ImageJob)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ImageJob)(nil)).
 		Set("created_at = now() - interval '31 minutes'").Where("cid = ?", s.cid).Exec(s.ctx)
 	s.Require().NoError(err)
 
@@ -471,7 +471,7 @@ func (s *ImageJobsSuite) TestADrawThatFinishesAsTheRouterStopsIsKeptNotDrawnAgai
 
 	stopping.Close()
 	var kept store.ImageJob
-	s.Require().NoError(s.store.DB().NewSelect().Model(&kept).Where("cid = ?", s.cid).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&kept).Where("cid = ?", s.cid).Scan(s.ctx))
 	s.Equal("Here is the picture.", kept.Message, "the drawn picture is kept with its message")
 	s.Equal([]byte("png"), kept.Drawn)
 	s.Equal(1, kept.Draws)
@@ -500,7 +500,7 @@ func (s *ImageJobsSuite) TestARouterThatStopsMidDrawGivesThePictureBackAtOnce() 
 
 	stopped.Close()
 	var given store.ImageJob
-	s.Require().NoError(s.store.DB().NewSelect().Model(&given).Where("cid = ?", s.cid).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&given).Where("cid = ?", s.cid).Scan(s.ctx))
 	s.Equal(store.ImageJobQueued, given.State)
 	s.Zero(given.Draws, "the cut draw is not counted")
 	s.False(given.NextAttemptAt.After(time.Now()), "due again now, not when the lease runs out")
@@ -520,7 +520,7 @@ func (s *ImageJobsSuite) TestARouterKilledMidDrawLeavesThePictureToTheNextOnceIt
 	// Killed, a router writes nothing: the row is left counted and claimed until the lease ends.
 	worker := s.worker()
 	s.queue(worker, "draw-1")
-	_, err := s.store.DB().NewUpdate().Model((*store.ImageJob)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ImageJob)(nil)).
 		Set("attempts = 1, draws = 1, next_attempt_at = now() + interval '200 milliseconds'").
 		Where("cid = ?", s.cid).Exec(s.ctx)
 	s.Require().NoError(err)
@@ -539,7 +539,7 @@ func (s *ImageJobsSuite) TestAJobDrawnAsOftenAsItMayBePostsItsFailure() {
 	// Each draw that never finished may be one that ends routers: it is not tried forever.
 	worker := s.worker()
 	s.queue(worker, "draw-1")
-	_, err := s.store.DB().NewUpdate().Model((*store.ImageJob)(nil)).Set("draws = 2").Where("cid = ?", s.cid).Exec(s.ctx)
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ImageJob)(nil)).Set("draws = 2").Where("cid = ?", s.cid).Exec(s.ctx)
 	s.Require().NoError(err)
 
 	worker.Start(s.ctx, s.posts)
@@ -589,7 +589,7 @@ func (s *ImageJobsSuite) TestAnUploadStreamChatFailedIsTriedAgainWithoutDrawing(
 	s.queue(worker, "draw-1")
 	s.Require().Eventually(func() bool {
 		var job store.ImageJob
-		err := s.store.DB().NewSelect().Model(&job).Where("cid = ?", s.cid).Scan(s.ctx)
+		err := s.store.GlobalDB().NewSelect().Model(&job).Where("cid = ?", s.cid).Scan(s.ctx)
 		return err == nil && job.Posts >= 1
 	}, 10*time.Second, 20*time.Millisecond, "the upload was never tried")
 	s.chat.Heal(http.MethodPost, "/image")
@@ -608,7 +608,7 @@ func (s *ImageJobsSuite) TestAStreamChatRequestTimeoutIsTriedAgain() {
 	s.queue(worker, "draw-1")
 	s.Require().Eventually(func() bool {
 		var job store.ImageJob
-		err := s.store.DB().NewSelect().Model(&job).Where("cid = ?", s.cid).Scan(s.ctx)
+		err := s.store.GlobalDB().NewSelect().Model(&job).Where("cid = ?", s.cid).Scan(s.ctx)
 		return err == nil && job.Posts >= 1
 	}, 10*time.Second, 20*time.Millisecond, "the upload was never tried")
 	s.chat.Heal(http.MethodPost, "/image")
@@ -644,7 +644,7 @@ func (s *ImageJobsSuite) TestAFailureWhosePostFailedIsPostedLater() {
 	s.queue(worker, "draw-1")
 	s.Require().Eventually(func() bool {
 		var job store.ImageJob
-		err := s.store.DB().NewSelect().Model(&job).Where("cid = ?", s.cid).Scan(s.ctx)
+		err := s.store.GlobalDB().NewSelect().Model(&job).Where("cid = ?", s.cid).Scan(s.ctx)
 		return err == nil && job.Posts >= 1
 	}, 10*time.Second, 20*time.Millisecond, "the post was never tried")
 	s.chat.Heal(http.MethodPost, "/message")
@@ -723,8 +723,27 @@ func (s *ImageJobsSuite) TestTheSameCallAskingForAnotherPictureIsAnotherJob() {
 	s.Len(s.queued(), 2)
 }
 
+// Two customers may each have a session of one id, and a turn's id is its time, so the same
+// call of the same turn asking for the same picture is two pictures when two customers ask.
+func (s *ImageJobsSuite) TestTheSameCallOfAnotherCustomersSessionOfTheIdIsAnotherPicture() {
+	worker := s.worker()
+	request := imagejobs.Request{
+		CustomerID: s.customer, CID: s.cid, AgentUser: "illustrator", SessionID: s.session, TurnID: "turn-1",
+		ToolCallID: "draw-1", Target: "stub/draw", Prompt: "a yellow watering can",
+	}
+	_, err := worker.Queue(s.ctx, request)
+	s.Require().NoError(err)
+	request.CustomerID = "somebody-else"
+
+	queued, err := worker.Queue(s.ctx, request)
+
+	s.Require().NoError(err)
+	s.True(queued, "somebody-else's call is not app's run again")
+	s.Len(s.queued(), 2)
+}
+
 func (s *ImageJobsSuite) queued() []store.ImageJob {
 	var jobs []store.ImageJob
-	s.Require().NoError(s.store.DB().NewSelect().Model(&jobs).Where("cid = ?", s.cid).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&jobs).Where("cid = ?", s.cid).Scan(s.ctx))
 	return jobs
 }

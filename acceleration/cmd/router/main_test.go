@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
@@ -15,7 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/api"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/ingest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
@@ -85,7 +86,7 @@ func TestADeploymentWithNoDefaultDailyLimitStillCapsAnAppThatSetsOne(t *testing.
 	liveClient, err := redisready.Retry(address, func() (*live.Client, error) { return live.New(live.Options{Address: address}) })
 	require.NoError(t, err)
 	t.Cleanup(liveClient.Close)
-	policies, err := policy.New(&appconfig.Store{}, policy.Settings{}, logger)
+	policies, err := policy.New(&store.Store{}, policy.Settings{}, logger)
 	require.NoError(t, err)
 	t.Cleanup(policies.Close)
 
@@ -177,6 +178,38 @@ func TestTheRoutersSentryEventsKeepAProvidersReasonAndNotTheKeyItEchoed(t *testi
 	reason := "502 Bad Gateway: upstream error: failed to connect to local service\nrequest headers: [redacted]"
 	require.Equal(t, reason, sent[0].Exception[len(sent[0].Exception)-1].Value)
 	require.Equal(t, reason, sent[0].Breadcrumbs[0].Message)
+}
+
+// A request's staff keys never reach Sentry: sentry-go scrubs every header whose name holds
+// "key" (data_collection_filter.go, defaultSensitiveTerms), and the router's options keep that.
+// The client header beside them shows the request's headers are sent at all.
+func TestTheRoutersSentryEventsCarryNoStaffKey(t *testing.T) {
+	keys := map[string]string{"X-Activity-Key": rand.Text(), "X-Ops-Key": rand.Text(), "X-Manage-Key": rand.Text()}
+	options := sentryOptions()
+	var sent []*sentry.Event
+	redact := options.BeforeSend
+	options.BeforeSend = func(event *sentry.Event, hint *sentry.EventHint) *sentry.Event {
+		sent = append(sent, redact(event, hint))
+		return nil
+	}
+	client, err := sentry.NewClient(options)
+	require.NoError(t, err)
+	scope := sentry.NewScope()
+	request := httptest.NewRequest(http.MethodGet, "/v1/ops/activity", nil)
+	request.Header.Set("X-Stream-Client", "stream-agents-go")
+	for header, key := range keys {
+		request.Header.Set(header, key)
+	}
+	scope.SetRequest(request)
+	sentry.NewHub(client, scope).CaptureException(errors.New("boom"))
+
+	require.Len(t, sent, 1)
+	require.NotNil(t, sent[0].Request)
+	require.Equal(t, "stream-agents-go", sent[0].Request.Headers["X-Stream-Client"])
+	for header, key := range keys {
+		require.NotContains(t, sent[0].Request.Headers[header], key, header)
+		require.NotEmpty(t, sent[0].Request.Headers[header], "the header is sent, its value scrubbed: "+header)
+	}
 }
 
 // The logger main builds takes a key out of a startup failure: a config path that names one is

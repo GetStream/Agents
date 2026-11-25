@@ -141,6 +141,45 @@ func (s *QuotaSuite) TestTheAddressIsCountedWhenTheUserIsFresh() {
 	s.ErrorIs(err, ErrExhausted)
 }
 
+func (s *QuotaSuite) TestTheAddressesOfOneIPv6NetworkSpendOneDay() {
+	limiter := s.limiter(1, 0)
+	limiter.Debit(s.ctx, s.customer, routing.Caller{UserID: "first", IP: "2001:db8:0:1::1"}, 10)
+
+	err := s.allow(limiter, s.customer, routing.Caller{UserID: "second", IP: "2001:db8:0:1:ffff:ffff:ffff:ffff"})
+
+	s.Require().ErrorIs(err, ErrExhausted)
+	s.NoError(s.allow(limiter, s.customer, routing.Caller{UserID: "third", IP: "2001:db8:0:2::1"}))
+}
+
+func (s *QuotaSuite) TestAnIPv4AddressSpendsADayOfItsOwnHoweverItIsWritten() {
+	limiter := s.limiter(1, 0)
+	limiter.Debit(s.ctx, s.customer, routing.Caller{UserID: "first", IP: "192.0.2.1"}, 10)
+
+	err := s.allow(limiter, s.customer, routing.Caller{UserID: "second", IP: "::ffff:192.0.2.1"})
+
+	s.Require().ErrorIs(err, ErrExhausted)
+	s.NoError(s.allow(limiter, s.customer, routing.Caller{UserID: "third", IP: "192.0.2.2"}))
+	s.NoError(s.allow(limiter, s.customer, routing.Caller{UserID: "fourth", IP: "::ffff:192.0.2.2"}))
+}
+
+func (s *QuotaSuite) TestAnAddressThatCannotBeReadIsCountedAsItIsWritten() {
+	limiter := s.limiter(1, 0)
+	limiter.Debit(s.ctx, s.customer, routing.Caller{UserID: "first", IP: "unreadable"}, 10)
+
+	err := s.allow(limiter, s.customer, routing.Caller{UserID: "second", IP: "unreadable"})
+
+	s.Require().ErrorIs(err, ErrExhausted)
+	s.NoError(s.allow(limiter, s.customer, routing.Caller{UserID: "third", IP: "unreadable too"}))
+}
+
+func (s *QuotaSuite) TestUsersWithNoAddressDoNotShareOne() {
+	limiter := s.limiter(1, 0)
+	limiter.Debit(s.ctx, s.customer, routing.Caller{UserID: "first"}, 10)
+
+	s.Require().ErrorIs(s.allow(limiter, s.customer, routing.Caller{UserID: "first"}), ErrExhausted)
+	s.NoError(s.allow(limiter, s.customer, routing.Caller{UserID: "second"}))
+}
+
 func (s *QuotaSuite) TestNobodyToCountAgainstIsNotCounted() {
 	// A customer's own backend, which is trusted with its own spend.
 	limiter := s.limiter(1, 1)
@@ -168,6 +207,7 @@ func (s *QuotaSuite) TestADebitCountsBothMessagesAndTokens() {
 	limiter := s.limiter(10, 1_000)
 	limiter.Debit(s.ctx, s.customer, s.caller, 250)
 	limiter.Debit(s.ctx, s.customer, s.caller, 250)
+	s.written(limiter)
 
 	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())[0])
 
@@ -179,6 +219,7 @@ func (s *QuotaSuite) TestADebitCountsBothMessagesAndTokens() {
 func (s *QuotaSuite) TestADaysCountersExpireOnTheirOwn() {
 	limiter := s.limiterWith(Limits{MessagesPerDay: 10}, s.appQuota(Limits{MessagesPerDay: 10}))
 	limiter.Debit(s.ctx, s.customer, s.caller, 10)
+	s.written(limiter)
 
 	keys := append(deviceKeys(s.customer, s.caller, time.Now()), customerKey(s.customer, s.caller.UserID, time.Now()))
 	s.Len(keys, 3)
@@ -204,6 +245,11 @@ func (s *QuotaSuite) TestANilLimiterAllowsEverything() {
 	limiter.Debit(s.ctx, s.customer, s.caller, 10_000)
 
 	s.NoError(s.allow(limiter, s.customer, s.caller))
+}
+
+// written waits for the debits limiter is still writing to Redis.
+func (s *QuotaSuite) written(limiter *Limiter) {
+	limiter.writes.Wait()
 }
 
 // allow is Allow without the status, for the tests that ask only whether a caller may go on.
@@ -586,6 +632,7 @@ func (s *QuotaSuite) TestTodayIsWhatTheCustomersQuotaCounted() {
 	limiter := s.limiterWith(Limits{}, s.appQuota(Limits{MessagesPerDay: 10}))
 	limiter.Debit(s.ctx, s.customer, s.caller, 100)
 	limiter.Debit(s.ctx, s.customer, s.backend(), 50)
+	s.written(limiter)
 
 	messages, tokens, reset, err := limiter.Today(s.ctx, s.customer, s.caller.UserID)
 
@@ -603,9 +650,11 @@ func (s *QuotaSuite) TestUserKeysAreEveryBucketAUserIsCountedIn() {
 	limiter.Debit(s.ctx, s.customer, s.caller, 10)
 	s.Require().ErrorIs(s.allow(limiter, s.customer, s.caller), ErrExhausted)
 
+	s.written(limiter)
 	for _, key := range UserKeys(s.customer, s.caller.UserID, time.Now()) {
 		s.Require().NoError(s.redis.Do(s.ctx, s.redis.B().Del().Key(key).Build()).Error())
 	}
+	limiter.refresh(s.ctx)
 
 	elsewhere := s.caller
 	elsewhere.IP = "198.51.100.7"
@@ -683,6 +732,7 @@ func (s *QuotaSuite) TestADebitIsCountedInTheCustomersBucketWhenTheUsersOwnQuota
 			s.Require().NoError(err)
 
 			limiter.Debit(s.ctx, customer, tc.caller, 10)
+			s.written(limiter)
 
 			spent, err := limiter.spent(s.ctx, customerKey(customer, tc.caller.UserID, time.Now()))
 			s.Require().NoError(err)
@@ -705,6 +755,7 @@ func (s *QuotaSuite) TestTheWarningForAnUnreadUsersQuotaIsLoggedOncePerCustomerA
 
 	limiter.Debit(s.ctx, other, s.caller, 10)
 	s.Equal(2, strings.Count(logs.String(), "level=WARN"), "another customer still logs")
+	s.written(limiter)
 
 	spent, err := limiter.spent(s.ctx, customerKey(s.customer, s.caller.UserID, time.Now()))
 	s.Require().NoError(err)
@@ -715,6 +766,7 @@ func (s *QuotaSuite) TestADebitStillCountsADeviceCallersAddressWhenTheUsersOwnQu
 	limiter := s.limiterWith(Limits{}, unreadSource(Quota{}))
 
 	limiter.Debit(s.ctx, s.customer, s.caller, 10)
+	s.written(limiter)
 
 	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
 	s.Require().NoError(err)

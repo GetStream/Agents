@@ -32,6 +32,16 @@ final class ClientTest extends TestCase
         $this->router->stop();
     }
 
+    public function testAClientActingForAUserSharesTheAppsTools(): void
+    {
+        $client = $this->router->client();
+        $client->tools->register('weather_lookup', 'The weather somewhere', [], static fn (array $args): string => 'sunny');
+
+        $user = $client->asUser('ada', 'token');
+
+        self::assertSame(['weather_lookup'], array_map(static fn ($tool): string => $tool->name, $user->tools->declared()));
+    }
+
     public function testNamingNoRouterGoesToTheHostedOneThroughTheProxy(): void
     {
         $saved = getenv(Backend::URL_ENV);
@@ -45,7 +55,21 @@ final class ClientTest extends TestCase
         }
 
         self::assertSame(Backend::DEFAULT_URL, $backend->url);
+        self::assertSame('https://accelerate.gcp.stream-io-api.com', $backend->url);
         self::assertTrue($backend->authenticate);
+    }
+
+    public function testTheNearestHostedRouterIsAuthenticated(): void
+    {
+        foreach ([null, Backend::DEFAULT_URL . '/'] as $url) {
+            $backend = self::withEnv(
+                [Backend::URL_ENV => null, Backend::REGION_ENV => null],
+                fn () => new Backend(url: $url, customerId: 'examples', apiKey: 'key', apiSecret: 'secret'),
+            );
+
+            self::assertSame(Backend::DEFAULT_URL, $backend->url);
+            self::assertTrue($backend->authenticate);
+        }
     }
 
     public function testARouterNamedByUrlLeavesTheProxyOff(): void
@@ -207,6 +231,26 @@ final class ClientTest extends TestCase
         self::assertTrue(self::claims($behalf->headers['authorization'])['server']);
         self::assertArrayNotHasKey('user_id', self::claims($behalf->headers['authorization']));
         self::assertSame('ada', $behalf->headers['x-stream-user-id']);
+    }
+
+    // Catches onBehalfOf routed through the helper that drops the backend's own user: base kept it
+    // when the one given was empty.
+    public function testOnBehalfOfAnEmptyUserKeepsTheUserTheBackendWasBuiltWith(): void
+    {
+        $this->router->answer('GET', '/v1/agents/configs', 200, []);
+
+        (new Client(new Backend(url: $this->router->url, apiKey: 'key', apiSecret: 'secret', userId: 'bob')->onBehalfOf('')))->get('/v1/agents/configs');
+
+        self::assertSame('bob', $this->router->received()[0]->headers['x-stream-user-id']);
+    }
+
+    // Catches a device backend's onBehalfOf building a server-side backend instead of refusing.
+    public function testADeviceBackendCannotActOnBehalfOfAUser(): void
+    {
+        $this->expectException(ConfigurationException::class);
+        $this->expectExceptionMessage('server-side');
+
+        new Backend(url: $this->router->url, apiKey: 'key', token: 'tok', userId: 'anya')->onBehalfOf('ada');
     }
 
     public function testOnBehalfOfKeepsTheCustomerHeader(): void

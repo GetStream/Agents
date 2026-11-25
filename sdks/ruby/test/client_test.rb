@@ -13,6 +13,12 @@ class TestClient < LocalRouterTest
     assert_equal({ "name" => "docs" }, request.query)
   end
 
+  def test_a_client_acting_for_a_user_shares_the_apps_tools
+    client.tools.register("weather_lookup", description: "Weather for a place") { "sunny" }
+
+    assert_equal ["weather_lookup"], client.as_user("ada", "token").tools.declarations.map { |tool| tool[:name] }
+  end
+
   def test_path_parameters_are_escaped
     @router.on(:get, %r{\A/v1/agents/sessions/}, body: { "id" => "a b/c" })
 
@@ -267,9 +273,21 @@ class TestBackend < Minitest::Test
     backend = VA::Backend.new(api_key: "key", token: "token-for-ada", user_id: "ada")
 
     assert_equal VA::Backend::DEFAULT_URL, backend.url
+    assert_equal "https://accelerate.gcp.stream-io-api.com", backend.url
     assert backend.authenticate?
   ensure
     ENV[VA::Backend::URL_ENV] = saved if saved
+  end
+
+  def test_the_nearest_hosted_router_is_authenticated
+    with_env(VA::Backend::URL_ENV => nil, VA::Backend::REGION_ENV => nil) do
+      [nil, "#{VA::Backend::DEFAULT_URL}/"].each do |url|
+        backend = VA::Backend.new(url: url, customer_id: "acme", api_key: "key", api_secret: "secret")
+
+        assert_equal VA::Backend::DEFAULT_URL, backend.url
+        assert backend.authenticate?
+      end
+    end
   end
 
   def test_a_router_named_by_url_leaves_the_proxy_off

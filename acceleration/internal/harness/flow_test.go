@@ -128,7 +128,7 @@ func (s *FlowSuite) TestACallerGivingAThoughtInPartsIsSaidToBe() {
 	s.Contains(flowInstructions, "when you are told the caller is giving one thought in parts: choose wait")
 	s.Contains(flowInstructions, "respond once they ask something, correct or change something, or plainly finish")
 
-	s.Require().NoError(s.flow.Decide(FlowTurn{
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
 		ID: "candidate-1", Participant: "Alex", Text: "Delphina says Andre lies.", InParts: true,
 	}))
 	s.Contains(s.waitAsked(1)[0].Input[0].Content, "so they are giving one thought in parts")
@@ -138,7 +138,7 @@ func (s *FlowSuite) TestACallerGivingAThoughtInPartsIsSaidToBe() {
 }
 
 func (s *FlowSuite) TestTheConversationIsQuotedRatherThanReplayed() {
-	s.Require().NoError(s.flow.Decide(FlowTurn{
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
 		ID:           "candidate-1",
 		Instructions: "be brief",
 		Participant:  "Alex",
@@ -164,7 +164,7 @@ func (s *FlowSuite) TestTheConversationIsQuotedRatherThanReplayed() {
 }
 
 func (s *FlowSuite) TestAnOverlappingReplyIsQuotedSoTheControllerCanHold() {
-	s.Require().NoError(s.flow.Decide(FlowTurn{
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
 		ID:          "candidate-1",
 		Participant: "Alex",
 		Text:        "cough",
@@ -185,7 +185,7 @@ func (s *FlowSuite) TestOnlyTheRecentConversationIsShown() {
 		)
 	}
 
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "candidate-1", History: history, Text: "and now"}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "candidate-1", History: history, Text: "and now"}))
 
 	question := s.waitAsked(1)[0].Input[0].Content
 	s.NotContains(question, "question 0", "an old turn does not decide whose the floor is")
@@ -197,7 +197,7 @@ func (s *FlowSuite) TestAnUnreadableAnswerStillEarnsTheCallerAReply() {
 	// question used to go unanswered: nobody was left to notice it had been asked.
 	s.model.answers["candidate-1"] = "With three days, I would start in the Alfama district."
 
-	s.Require().NoError(s.flow.Decide(FlowTurn{
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
 		ID: "candidate-1", Participant: "Alex", Text: "what should I not miss",
 	}))
 
@@ -212,7 +212,7 @@ func (s *FlowSuite) TestAnUnreadableAnswerStillEarnsTheCallerAReply() {
 func (s *FlowSuite) TestAnUnreadableOverlapStopsTheAgent() {
 	s.model.answers["over-1"] = `{"dis`
 
-	s.Require().NoError(s.flow.Decide(FlowTurn{
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
 		ID: "over-1", Participant: "Alex", Text: "oh my god stop", Unfinished: true, Speaking: true,
 	}))
 
@@ -264,7 +264,7 @@ func (s *FlowSuite) TestExtraSpeechIsRejected() {
 
 func (s *FlowSuite) TestTheControllerIsHeldToTheValuesItIsTrustedWith() {
 	// Gemma, asked only for a JSON object, ruled {"disposition":"continue","floor":"continue"}.
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "candidate-1", Participant: "Alex", Text: "go on"}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "candidate-1", Participant: "Alex", Text: "go on"}))
 
 	text := s.waitAsked(1)[0].Text
 	s.Require().NotNil(text.Schema, "a schema is what keeps a floor out of the disposition")
@@ -285,7 +285,7 @@ func (s *FlowSuite) TestARefusedRulingIsCounted() {
 	before := testutil.ToFloat64(invalidRulings.WithLabelValues("disposition"))
 	s.model.answers["candidate-1"] = `{"disposition":"continue","floor":"continue"}`
 
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "candidate-1", Participant: "Alex", Text: "go on"}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "candidate-1", Participant: "Alex", Text: "go on"}))
 
 	s.Require().Eventually(func() bool { return len(s.decisions()) == 1 }, settleFor,
 		5*time.Millisecond, "the caller's turn was dropped")
@@ -297,7 +297,7 @@ func (s *FlowSuite) TestCancelAbandonsACreateThatHasNotReturned() {
 	hold := make(chan struct{})
 	s.model.holdCreate = hold
 
-	s.Require().NoError(s.flow.Decide(FlowTurn{
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
 		ID: "old", Participant: "Alex", Text: "okay",
 	}))
 	s.waitAsked(1)
@@ -313,11 +313,11 @@ func (s *FlowSuite) TestCancelStartsTheWaitingTurnBeforeCreateReturns() {
 	hold := make(chan struct{})
 	s.model.holdCreate = hold
 
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "old", Participant: "Alex", Text: "okay"}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "old", Participant: "Alex", Text: "okay"}))
 	s.waitAsked(1)
 
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "mid", Participant: "Alex", Text: "okay wait"}))
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "new", Participant: "Alex", Text: "okay wait stop"}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "mid", Participant: "Alex", Text: "okay wait"}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "new", Participant: "Alex", Text: "okay wait stop"}))
 	time.Sleep(20 * time.Millisecond)
 	s.Len(s.model.requests(), 1, "Cerebras must not see a pile of superseded asks")
 
@@ -334,11 +334,11 @@ func (s *FlowSuite) TestCancelOfAHungCreateLetsTheNextDecideStart() {
 	hold := make(chan struct{})
 	s.model.holdCreate = hold
 
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "old", Participant: "Alex", Text: "okay"}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "old", Participant: "Alex", Text: "okay"}))
 	s.waitAsked(1)
 	s.Require().NoError(s.flow.Cancel("old"))
 
-	s.Require().NoError(s.flow.Decide(FlowTurn{
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{
 		ID: "new", Participant: "Alex", Text: "tell me something else",
 	}))
 	asked := s.waitAsked(2)
@@ -354,7 +354,7 @@ func (s *FlowSuite) TestCancelCanOverlapTheReturningStream() {
 		s.model.mu.Lock()
 		s.model.holdCreate = hold
 		s.model.mu.Unlock()
-		s.Require().NoError(s.flow.Decide(FlowTurn{ID: id, Participant: "Alex", Text: "okay"}))
+		s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: id, Participant: "Alex", Text: "okay"}))
 		s.waitAsked(round + 1)
 
 		cancelled := make(chan error, 1)
@@ -367,7 +367,7 @@ func (s *FlowSuite) TestCancelCanOverlapTheReturningStream() {
 func (s *FlowSuite) TestNothingIsAskedOnceTheFlowIsClosed() {
 	s.Require().NoError(s.flow.Close())
 
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "late", Participant: "Alex", Text: "okay"}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "late", Participant: "Alex", Text: "okay"}))
 	s.flow.running.Wait()
 	s.emitter.Close()
 	<-s.drained
@@ -378,7 +378,7 @@ func (s *FlowSuite) TestNothingIsAskedOnceTheFlowIsClosed() {
 
 func (s *FlowSuite) TestSlowOverlapYieldsBeforeTheOriginalReplyFinishes() {
 	s.model.holdCreate = make(chan struct{})
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "over-slow", Participant: "Alex", Text: "stop, give me one sentence", Unfinished: true, Speaking: true}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "over-slow", Participant: "Alex", Text: "stop, give me one sentence", Unfinished: true, Speaking: true}))
 	s.Require().Eventually(func() bool { return len(s.decisions()) == 1 }, settleFor, 5*time.Millisecond)
 	decision := s.decisions()[0]
 	s.Equal("over-slow", decision.CandidateID)
@@ -390,16 +390,16 @@ func (s *FlowSuite) TestSlowOverlapYieldsBeforeTheOriginalReplyFinishes() {
 
 func (s *FlowSuite) TestSupersededSlowOverlapCannotInterruptLater() {
 	s.model.holdCreate = make(chan struct{})
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "over-old", Participant: "Alex", Text: "stop", Unfinished: true, Speaking: true}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "over-old", Participant: "Alex", Text: "stop", Unfinished: true, Speaking: true}))
 	s.Require().NoError(s.flow.Cancel("over-old"))
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "over-new", Participant: "Alex", Text: "wait, make it shorter", Unfinished: true, Speaking: true}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "over-new", Participant: "Alex", Text: "wait, make it shorter", Unfinished: true, Speaking: true}))
 	s.Require().Eventually(func() bool { return len(s.decisions()) == 1 }, settleFor, 5*time.Millisecond)
 	s.Equal("over-new", s.decisions()[0].CandidateID)
 	s.Equal(Stop, s.decisions()[0].Floor)
 }
 
 func (s *FlowSuite) TestSlowOverlapStreamAlsoYieldsTheFloor() {
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "over-stream", Participant: "Alex", Text: "stop, give me one sentence", Unfinished: true, Speaking: true}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "over-stream", Participant: "Alex", Text: "stop, give me one sentence", Unfinished: true, Speaking: true}))
 	s.Require().Eventually(func() bool { return len(s.decisions()) == 1 }, settleFor, 5*time.Millisecond)
 	s.Equal(Stop, s.decisions()[0].Floor)
 	s.Equal(Wait, s.decisions()[0].Disposition)
@@ -412,7 +412,7 @@ func (s *FlowSuite) TestADecisionThatOutlivesTheDeadlineStillRulesOnTheTurn() {
 	// deadline closed it, and the caller's question was never ruled on, so never answered.
 	s.flow.deadline = 50 * time.Millisecond
 
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "slow", Participant: "Alex", Text: "what time do you open"}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "slow", Participant: "Alex", Text: "what time do you open"}))
 
 	s.Require().Eventually(func() bool { return len(s.decisions()) == 1 }, settleFor,
 		5*time.Millisecond, "a decision the deadline closed left the caller's turn unruled")
@@ -430,7 +430,7 @@ func (s *FlowSuite) TestADecisionThatOutlivesTheDeadlineStillRulesOnTheTurn() {
 func (s *FlowSuite) TestAFastDecisionIsRuledAsAnswered() {
 	s.model.answers["fast"] = `{"disposition":"respond","floor":"continue"}`
 
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "fast", Participant: "Alex", Text: "what time do you open"}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "fast", Participant: "Alex", Text: "what time do you open"}))
 
 	s.Require().Eventually(func() bool { return len(s.decisions()) == 1 }, settleFor,
 		5*time.Millisecond, "the decision was never ruled")
@@ -442,7 +442,7 @@ func (s *FlowSuite) TestAFastDecisionIsRuledAsAnswered() {
 }
 
 func (s *FlowSuite) TestAStreamClosedBeforeTheDeadlineIsNotRuledOn() {
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "closed", Participant: "Alex", Text: "what time do you open"}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "closed", Participant: "Alex", Text: "what time do you open"}))
 	var stream *llm.Stream
 	s.Require().Eventually(func() bool {
 		s.flow.mu.Lock()
@@ -467,7 +467,7 @@ func (s *FlowSuite) TestARulingSaysWhoseAnswerItIs() {
 		s.model.mu.Lock()
 		s.model.answers[id], s.model.writtenBy = answer, writtenBy
 		s.model.mu.Unlock()
-		s.Require().NoError(s.flow.Decide(turn))
+		s.Require().NoError(s.flow.Decide(s.T().Context(), turn))
 		s.Require().Eventually(func() bool { return len(s.decisions()) > 0 && s.decisions()[len(s.decisions())-1].CandidateID == id },
 			settleFor, 5*time.Millisecond, "no ruling came back")
 		return s.decisions()[len(s.decisions())-1].Ruler
@@ -487,21 +487,21 @@ func (s *FlowSuite) TestARulingSaysWhoseAnswerItIs() {
 
 func (s *FlowSuite) TestARequestTheModelRefusedIsLoggedWithItsProviderAndModel() {
 	s.model.refuses = errors.New("502 Bad Gateway: failed to connect to local service")
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "candidate-1", Participant: "Alex", Text: "go on"}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "candidate-1", Participant: "Alex", Text: "go on"}))
 
 	s.requireLoggedFailure("failed to connect to local service")
 }
 
 func (s *FlowSuite) TestADecisionThatFailedMidStreamIsLoggedWithItsProviderAndModel() {
 	s.model.failing = true
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "candidate-1", Participant: "Alex", Text: "go on"}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "candidate-1", Participant: "Alex", Text: "go on"}))
 
 	s.requireLoggedFailure(errModelDown.Error())
 }
 
 func (s *FlowSuite) TestADecisionAnotherProviderFailedMidStreamIsLoggedWithThatProviderAndModel() {
 	s.model.failing, s.model.writtenBy = true, [2]string{"another-provider", "another-model"}
-	s.Require().NoError(s.flow.Decide(FlowTurn{ID: "candidate-1", Participant: "Alex", Text: "go on"}))
+	s.Require().NoError(s.flow.Decide(s.T().Context(), FlowTurn{ID: "candidate-1", Participant: "Alex", Text: "go on"}))
 
 	s.requireLoggedFailureBy("another-provider", "another-model", errModelDown.Error())
 }

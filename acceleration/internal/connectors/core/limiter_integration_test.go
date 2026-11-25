@@ -7,11 +7,13 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
+	"github.com/redis/rueidis/rueidishook"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
@@ -175,14 +177,14 @@ func (s *LimiterSuite) TestTheCallsUpToTheLimitGoAndTheNextWaitsForTheWindowToEn
 	limiter := core.NewLimiter(s.redis, s.clock.Now)
 
 	for range 3 {
-		s.Zero(limiter.Take(s.ctx, s.key, 3, time.Minute))
+		s.Zero(overOf(limiter.Admit(s.ctx, "", s.key, 3, time.Minute)))
 	}
 
-	s.Equal(25*time.Second, limiter.Take(s.ctx, s.key, 3, time.Minute))
+	s.Equal(25*time.Second, overOf(limiter.Admit(s.ctx, "", s.key, 3, time.Minute)))
 	s.clock.Add(20 * time.Second)
-	s.Equal(5*time.Second, limiter.Take(s.ctx, s.key, 3, time.Minute), "a refused call does not move the window")
+	s.Equal(5*time.Second, overOf(limiter.Admit(s.ctx, "", s.key, 3, time.Minute)), "a refused call does not move the window")
 	s.clock.Add(5 * time.Second)
-	s.Zero(limiter.Take(s.ctx, s.key, 3, time.Minute), "the next window starts a new count")
+	s.Zero(overOf(limiter.Admit(s.ctx, "", s.key, 3, time.Minute)), "the next window starts a new count")
 }
 
 // TestTwoRoutersOnOneRedisCountTheSameCalls: the count is in Redis, so a customer spreading
@@ -192,18 +194,18 @@ func (s *LimiterSuite) TestTwoRoutersOnOneRedisCountTheSameCalls() {
 	second := core.NewLimiter(s.connect(os.Getenv("ROUTER_REDIS_ADDR")), s.clock.Now)
 	s.clock.now = s.clock.now.Truncate(time.Minute)
 
-	s.Zero(first.Take(s.ctx, s.key, 2, time.Minute))
-	s.Zero(second.Take(s.ctx, s.key, 2, time.Minute))
+	s.Zero(overOf(first.Admit(s.ctx, "", s.key, 2, time.Minute)))
+	s.Zero(overOf(second.Admit(s.ctx, "", s.key, 2, time.Minute)))
 
-	s.Positive(first.Take(s.ctx, s.key, 2, time.Minute))
+	s.Positive(overOf(first.Admit(s.ctx, "", s.key, 2, time.Minute)))
 }
 
 func (s *LimiterSuite) TestAnotherKeyIsNotCounted() {
 	limiter := core.NewLimiter(s.redis, s.clock.Now)
-	s.Zero(limiter.Take(s.ctx, s.key, 1, time.Minute))
-	s.Require().Positive(limiter.Take(s.ctx, s.key, 1, time.Minute))
+	s.Zero(overOf(limiter.Admit(s.ctx, "", s.key, 1, time.Minute)))
+	s.Require().Positive(overOf(limiter.Admit(s.ctx, "", s.key, 1, time.Minute)))
 
-	s.Zero(limiter.Take(s.ctx, s.key+":other", 1, time.Minute))
+	s.Zero(overOf(limiter.Admit(s.ctx, "", s.key+":other", 1, time.Minute)))
 }
 
 // TestACountLeavesRedisAfterTwoWindows: no count outlives the window after its own.
@@ -211,7 +213,7 @@ func (s *LimiterSuite) TestACountLeavesRedisAfterTwoWindows() {
 	s.clock.now = s.clock.now.Truncate(time.Minute)
 	limiter := core.NewLimiter(s.redis, s.clock.Now)
 
-	s.Zero(limiter.Take(s.ctx, s.key, 1, time.Minute))
+	s.Zero(overOf(limiter.Admit(s.ctx, "", s.key, 1, time.Minute)))
 
 	ttl, err := s.redis.Do(s.ctx, s.redis.B().Pttl().Key(s.key+":"+strconv.FormatInt(s.clock.now.UnixMilli(), 10)).Build()).AsInt64()
 	s.Require().NoError(err)
@@ -223,22 +225,99 @@ func (s *LimiterSuite) TestNoLimitNoKeyOrNoLimiterCountsNothing() {
 	limiter := core.NewLimiter(s.redis, s.clock.Now)
 	var absent *core.Limiter
 	for range 3 {
-		s.Zero(limiter.Take(s.ctx, s.key, 0, time.Minute))
-		s.Zero(limiter.Take(s.ctx, "", 1, time.Minute))
-		s.Zero(limiter.Take(s.ctx, s.key+":window", 1, 0))
-		s.Zero(absent.Take(s.ctx, s.key, 1, time.Minute))
+		s.Zero(overOf(limiter.Admit(s.ctx, "", s.key, 0, time.Minute)))
+		s.Zero(overOf(limiter.Admit(s.ctx, "", "", 1, time.Minute)))
+		s.Zero(overOf(limiter.Admit(s.ctx, "", s.key+":window", 1, 0)))
+		s.Zero(overOf(absent.Admit(s.ctx, "", s.key, 1, time.Minute)))
 	}
 }
 
-// TestAnUnreachableRedisCountsNothing: Take fails open, as Wait does.
+// TestAnUnreachableRedisCountsNothing: Admit fails open, as Wait does.
 func (s *LimiterSuite) TestAnUnreachableRedisCountsNothing() {
 	gone := s.connect(os.Getenv("ROUTER_REDIS_ADDR"))
 	gone.Close()
 	limiter := core.NewLimiter(gone, s.clock.Now)
 
 	for range 3 {
-		s.Zero(limiter.Take(s.ctx, s.key, 1, time.Minute))
+		s.Zero(overOf(limiter.Admit(s.ctx, "", s.key, 1, time.Minute)))
 	}
+}
+
+// TestAdmittingACallReadsTheBlockAndCountsInOneRoundTrip: limit 1 a minute, from 12:00:35.
+func (s *LimiterSuite) TestAdmittingACallReadsTheBlockAndCountsInOneRoundTrip() {
+	s.clock.now = s.clock.now.Truncate(time.Minute).Add(35 * time.Second)
+	sent := &roundTrips{}
+	limiter := core.NewLimiter(rueidishook.WithHook(s.redis, sent), s.clock.Now)
+	block, calls := s.key+":block", s.key+":calls"
+
+	for _, want := range []time.Duration{0, 25 * time.Second} {
+		before := sent.count.Load()
+		blocked, over := limiter.Admit(s.ctx, block, calls, 1, time.Minute)
+		s.Equal(int64(1), sent.count.Load()-before, "one round trip")
+		s.Zero(blocked)
+		s.Equal(want, over)
+	}
+}
+
+// TestACallRefusedForTheBlockIsNotCounted: limit 1 a minute, from 12:00:35, with the provider
+// holding the key for 10s. A customer retrying through the provider's block keeps their calls.
+func (s *LimiterSuite) TestACallRefusedForTheBlockIsNotCounted() {
+	s.clock.now = s.clock.now.Truncate(time.Minute).Add(35 * time.Second)
+	limiter := core.NewLimiter(s.redis, s.clock.Now)
+	block, calls := s.key+":block", s.key+":calls"
+	s.Require().Equal(10*time.Second, limiter.Block(s.ctx, block, 10*time.Second))
+
+	for range 3 {
+		blocked, _ := limiter.Admit(s.ctx, block, calls, 1, time.Minute)
+		s.Equal(10*time.Second, blocked)
+	}
+	s.clock.Add(10 * time.Second)
+	blocked, over := limiter.Admit(s.ctx, block, calls, 1, time.Minute)
+	s.Zero(blocked)
+	s.Zero(over, "the first call that goes is the window's first")
+}
+
+// roundTrips counts what a client sends Redis: a command, or a pipeline of them, is one.
+type roundTrips struct{ count atomic.Int64 }
+
+func (r *roundTrips) Do(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+	r.count.Add(1)
+	return client.Do(ctx, cmd)
+}
+
+func (r *roundTrips) DoMulti(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) []rueidis.RedisResult {
+	r.count.Add(1)
+	return client.DoMulti(ctx, multi...)
+}
+
+func (r *roundTrips) DoCache(client rueidis.Client, ctx context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	r.count.Add(1)
+	return client.DoCache(ctx, cmd, ttl)
+}
+
+func (r *roundTrips) DoMultiCache(client rueidis.Client, ctx context.Context, multi ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	r.count.Add(1)
+	return client.DoMultiCache(ctx, multi...)
+}
+
+func (r *roundTrips) Receive(client rueidis.Client, ctx context.Context, subscribe rueidis.Completed, fn func(msg rueidis.PubSubMessage)) error {
+	r.count.Add(1)
+	return client.Receive(ctx, subscribe, fn)
+}
+
+func (r *roundTrips) DoStream(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResultStream {
+	r.count.Add(1)
+	return client.DoStream(ctx, cmd)
+}
+
+func (r *roundTrips) DoMultiStream(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) rueidis.MultiRedisResultStream {
+	r.count.Add(1)
+	return client.DoMultiStream(ctx, multi...)
+}
+
+// overOf is Admit's over.
+func overOf(_, over time.Duration) time.Duration {
+	return over
 }
 
 // limiterClock is a clock a test moves.

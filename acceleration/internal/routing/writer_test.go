@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -69,9 +68,9 @@ func (s *WriterSuite) SetupSuite() {
 	own, err := store.Open(testenv.Database(dsn, "writer"))
 	s.Require().NoError(err)
 	var database string
-	s.Require().NoError(own.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(own.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = own.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = own.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	s.Require().NoError(own.Migrate(s.ctx))
 	s.store = own
@@ -94,7 +93,8 @@ func (s *WriterSuite) SetupTest() {
 	_, err := s.store.ShardDB().ExecContext(s.ctx, "TRUNCATE requests")
 	s.Require().NoError(err)
 	s.logs = &lockedBuffer{}
-	s.logger = slog.New(slog.NewTextHandler(s.logs, nil))
+	// Redacted as the router's log is, which a lost row must come through whole.
+	s.logger = slog.New(slog.NewTextHandler(s.logs, &slog.HandlerOptions{ReplaceAttr: store.RedactLogAttr}))
 	s.customer = "writer-" + uuid.NewString()
 	s.organization = usagetest.Organization()
 }
@@ -240,7 +240,7 @@ func (s *WriterSuite) hold(writer *Writer) (release func()) {
 }
 
 // lostRow is the row a "usage row lost" line carries, decoded as replaying it would.
-var lostRow = regexp.MustCompile(`msg="usage row lost".* row=("(?:[^"\\]|\\.)*")`)
+var lostRow = regexp.MustCompile(`msg="usage row lost".* row_hex=([0-9a-f]+)`)
 
 // recording captures what an alerts loop sends to Sentry, through a real client with no DSN
 // whose BeforeSend keeps each event and drops it.
@@ -413,7 +413,11 @@ func (s *WriterSuite) TestWithPostgresDownAFatalStatStillTakesItsProviderOutAtOn
 func (s *WriterSuite) TestALostRowIsLoggedSoItCanBeReplayed() {
 	writer := s.newWriter(func(options *WriterOptions) { options.QueueSize = 1 })
 	s.lock()
-	sent := []queued{s.row(nil), s.row(nil), s.row(func(request *store.Request) { request.Tags = Tags{"project": `a "quoted" one`} })}
+	sent := []queued{s.row(nil), s.row(nil), s.row(func(request *store.Request) {
+		request.APIKey = "key-a"
+		request.Tags = Tags{"project": `a "quoted" one`}
+		request.ErrorMessage = "the caller +15550001101 hung up"
+	})}
 	var lost queued
 	for _, row := range sent {
 		if !writer.enqueue(row) {
@@ -427,14 +431,17 @@ func (s *WriterSuite) TestALostRowIsLoggedSoItCanBeReplayed() {
 		match = lostRow.FindAllStringSubmatch(s.logs.String(), -1)
 		return len(match) > 0 && strings.Contains(match[len(match)-1][0], lost.request.UsageID.String())
 	}, 5*time.Second, 10*time.Millisecond)
-	raw, err := strconv.Unquote(match[len(match)-1][1])
+	raw, err := hex.DecodeString(match[len(match)-1][1])
 	s.Require().NoError(err)
 	var replayed store.Request
-	s.Require().NoError(json.Unmarshal([]byte(raw), &replayed))
+	s.Require().NoError(json.Unmarshal(raw, &replayed))
 
 	s.Equal(lost.request.UsageID, replayed.UsageID)
 	s.Equal(lost.request.CostMicros, replayed.CostMicros)
 	s.Equal(lost.request.Tags, replayed.Tags)
+	s.Equal("key-a", replayed.APIKey)
+	s.Contains(replayed.ErrorMessage, "the caller +1")
+	s.NotContains(replayed.ErrorMessage, "5550001101", "the phone mask still runs over the error, which replay does not need whole")
 }
 
 func (s *WriterSuite) TestCloseWritesWhatIsQueued() {

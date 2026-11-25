@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"net/http"
-	"slices"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -40,21 +39,22 @@ const (
 	activityStepNone           ActivityStep = "none"
 	activityStepDashboardReads ActivityStep = activity.AreaDashboardReads
 	activityStepAgentSetup     ActivityStep = activity.AreaAgentSetup
+	activityStepWorkers        ActivityStep = activity.AreaWorkers
 	activityStepConversations  ActivityStep = activity.AreaConversations
+	activityStepVoiceVideo     ActivityStep = activity.AreaVoiceVideo
+	activityStepPhoneSMS       ActivityStep = activity.AreaPhoneSMS
 	activityStepSteadyUse      ActivityStep = "steady_use"
 )
 
-// activitySteps are the steps an area reaches, the furthest last.
-var activitySteps = []ActivityStep{activityStepDashboardReads, activityStepAgentSetup, activityStepConversations}
-
 func (ActivityStep) Schema(registry huma.Registry) *huma.Schema {
 	return namedEnum(registry, "ActivityStep",
-		"The furthest an organization got: none, dashboard_reads, agent_setup, conversations, then "+
-			"steady_use, which is conversations or model calls answered on three UTC days or more. A "+
-			"step counts only answered requests: an area whose every request was refused was tried, "+
-			"not reached.",
+		"The furthest an organization got: none, dashboard_reads, agent_setup, workers, conversations, "+
+			"voice_video, phone_sms, then steady_use, which is conversations or model calls answered on three "+
+			"UTC days or more. A step counts only answered requests: an area whose every request was refused "+
+			"was tried, not reached.",
 		string(activityStepNone), string(activityStepDashboardReads), string(activityStepAgentSetup),
-		string(activityStepConversations), string(activityStepSteadyUse))
+		string(activityStepWorkers), string(activityStepConversations), string(activityStepVoiceVideo),
+		string(activityStepPhoneSMS), string(activityStepSteadyUse))
 }
 
 // ActivityArea is what an organization's apps did in one area of the API from one client.
@@ -66,6 +66,12 @@ type ActivityArea struct {
 	Requests        int64     `json:"requests" doc:"How many requests arrived, refused ones included."`
 	Refused         int64     `json:"refused" doc:"How many were answered with a status of 400 or more."`
 	LastRefusalCode string    `json:"last_refusal_code" doc:"The error code of the latest refusal, empty when there was none."`
+}
+
+// ActivityStepDay is a step an organization reached and the day it first did.
+type ActivityStepDay struct {
+	Step          string `json:"step" enum:"dashboard_reads,agent_setup,workers,conversations,voice_video,phone_sms" doc:"The step, one of furthest_step's but none and steady_use."`
+	FirstAnswered string `json:"first_answered" format:"date" doc:"The UTC day, YYYY-MM-DD, of the first request answered in the step's area, over every day recorded, not only from since on."`
 }
 
 // ActivityMeter is what an organization's apps' work of one modality came to.
@@ -120,11 +126,12 @@ type OrganizationActivity struct {
 	OrganizationId string            `json:"organization_id" doc:"The organization."`
 	Since          time.Time         `json:"since" doc:"The start of what was read. Areas are kept by UTC day, so they count the whole day it falls on."`
 	FurthestStep   ActivityStep      `json:"furthest_step"`
+	Steps          []ActivityStepDay `json:"steps" doc:"Every step the organization's apps ever had a request answered in, whenever, not only from since on, in furthest_step's order, with the day of the first. A step skipped, such as voice_video by an organization that only texts, is absent, and so is one whose every request was refused."`
 	FirstSeen      *time.Time        `json:"first_seen,omitempty" doc:"When the first request of any area arrived, absent when none did."`
 	LastSeen       *time.Time        `json:"last_seen,omitempty" doc:"When the last request of any area arrived, absent when none did."`
 	Areas          []ActivityArea    `json:"areas" doc:"Every area and client the organization's apps made requests in, by area then client."`
 	Meters         []ActivityMeter   `json:"meters" doc:"What the organization's apps' work came to, by modality, from the shards listed in shards."`
-	Shards         []string          `json:"shards" doc:"The names of the shards whose requests the meters sum, this one's first. A deployment that sets no postgres.shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them."`
+	Shards         []string          `json:"shards" doc:"The names of the shards whose requests the meters sum, this one's first. A deployment that sets no shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them."`
 	Sessions       ActivitySessions  `json:"sessions" doc:"The sessions the organization's apps opened from since on, from the shards listed in shards."`
 	Latency        []ActivityLatency `json:"latency" doc:"How long the turns of the organization's apps took, every agent summed, one item per leg: stt_latency, llm_ttft, tts_ttfb, then roundtrip. Turns are kept by the hour they started in, so they count the whole hour since falls in. The percentiles are read off bins 5% wide, so they are within 5% of the true ones."`
 }
@@ -152,31 +159,39 @@ func (s *Server) getOrganizationActivity(ctx context.Context, request *organizat
 	if since.Before(now.Add(-activityHorizon)) {
 		return nil, errActivityHorizon
 	}
-	apps, err := s.store.OrganizationActivityApps(ctx, request.OrgID)
+	apps, err := s.store.AppOrganizations.ActivityApps(ctx, request.OrgID)
 	if err != nil {
 		return nil, err
 	}
-	areas, err := s.store.ActivityAreas(ctx, apps, since)
+	areas, err := s.store.Activities.Areas(ctx, apps, since)
 	if err != nil {
 		return nil, err
 	}
-	days, err := s.store.ActivityDays(ctx, apps, since, []string{activity.AreaConversations, activity.AreaModelAPI})
+	firsts, err := s.store.Activities.FirstAnswered(ctx, apps)
 	if err != nil {
 		return nil, err
 	}
-	uses, err := s.store.MeterUses(ctx, apps, since)
+	days, err := s.store.Activities.Days(ctx, apps, since, []string{activity.AreaConversations, activity.AreaModelAPI})
 	if err != nil {
 		return nil, err
 	}
-	endings, err := s.store.SessionEndings(ctx, apps, since)
+	uses, err := s.store.Spend.Meters(ctx, apps, since)
 	if err != nil {
 		return nil, err
 	}
-	latest, err := s.store.LatestSessions(ctx, apps, since, latestSessions)
+	endings, err := s.store.Sessions.Endings(ctx, apps, since)
 	if err != nil {
 		return nil, err
 	}
-	legs, err := s.store.TurnLatency(ctx, apps, since)
+	latest, err := s.store.Sessions.Latest(ctx, apps, since, latestSessions)
+	if err != nil {
+		return nil, err
+	}
+	latency := s.store.TurnBuckets.Latency
+	if s.store.StatsShipped() {
+		latency = s.store.TurnBuckets.ShippedLatency
+	}
+	legs, err := latency(ctx, apps, since)
 	if err != nil {
 		return nil, err
 	}
@@ -185,9 +200,10 @@ func (s *Server) getOrganizationActivity(ctx context.Context, request *organizat
 		OrganizationId: request.OrgID,
 		Since:          since.UTC(),
 		FurthestStep:   furthestStep(areas, days),
+		Steps:          reachedSteps(firsts),
 		Areas:          make([]ActivityArea, 0, len(areas)),
 		Meters:         make([]ActivityMeter, 0, len(uses)),
-		Shards:         s.store.MeterShards(),
+		Shards:         s.store.Spend.Shards(),
 		Sessions:       activitySessions(endings, latest),
 		Latency:        make([]ActivityLatency, 0, len(legs)),
 	}
@@ -251,16 +267,20 @@ func furthestStep(areas []store.ActivityArea, days int) ActivityStep {
 	if days >= steadyDays {
 		return activityStepSteadyUse
 	}
-	furthest := -1
-	for _, area := range areas {
-		if area.Requests > area.Refused {
-			furthest = max(furthest, slices.Index(activitySteps, ActivityStep(area.Area)))
-		}
+	if step := activity.FurthestStep(areas); step != "" {
+		return ActivityStep(step)
 	}
-	if furthest < 0 {
-		return activityStepNone
+	return activityStepNone
+}
+
+// reachedSteps is every step first has a day for, with the day each first had a request answered.
+func reachedSteps(first []store.ActivityAreaDay) []ActivityStepDay {
+	reached := activity.ReachedSteps(first)
+	steps := make([]ActivityStepDay, 0, len(reached))
+	for _, step := range reached {
+		steps = append(steps, ActivityStepDay{Step: step.Step, FirstAnswered: step.FirstAnswered.Format(time.DateOnly)})
 	}
-	return activitySteps[furthest]
+	return steps
 }
 
 // registerOrganizationActivity declares Stream staff's read of an organization's activity,
@@ -273,16 +293,18 @@ func (s *Server) registerOrganizationActivity(api huma.API) {
 		Summary:     "Get an organization's Agents activity",
 		Description: "Whether an organization tried Agents, how far it got and how much it used: what " +
 			"its apps did in each area of the API, from each client, and what their work came to by " +
-			"modality, summed over every shard in postgres.shards, which the answer names, with the " +
+			"modality, summed over every shard the shards setting lists, which the answer names, with the " +
 			"sessions they opened, how those ended and how long their turns took. An " +
 			"organization with nothing recorded is answered with empty lists and furthest_step none. " +
 			"Every area and client is one item, so the lists are short and have no cursor. Areas, " +
-			"first_seen, last_seen and furthest_step come from counts kept since they were first " +
+			"first_seen, last_seen, furthest_step and steps come from counts kept since they were first " +
 			"recorded, while meters come from every request, so an organization whose use is older " +
-			"than the counts can read furthest_step none with meters that show use.\n\n" +
-			"Stream staff only: it needs the ops key.",
+			"than the counts can read furthest_step none with meters that show use. steps lists every " +
+			"step reached, not only the furthest, with the UTC day each was first answered: an " +
+			"organization that only texts reaches conversations and never voice_video.\n\n" +
+			"Stream staff only: it needs the ops key or the activity key.",
 		Tags:      []string{staffTag},
-		Security:  opsSecurity,
+		Security:  activitySecurity,
 		Responses: map[string]*huma.Response{"200": {Description: "The organization's activity"}},
 		Errors:    []int{http.StatusBadRequest, http.StatusUnauthorized},
 	}, s.getOrganizationActivity)

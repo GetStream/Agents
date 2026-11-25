@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	persistent "github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
@@ -29,6 +30,9 @@ var ErrNoCallerTool = errors.New("session: the session's caller has no tool by t
 // in progress and every call in flight to finish (agent.SetTools), and the model is offered
 // them from the next turn.
 func (s *Session) AddTools(ctx context.Context, tools []harness.Tool) error {
+	if ungrouped := s.loading.ungrouped(tools); len(ungrouped) > 0 {
+		return stack.Wrap(fmt.Errorf("%w: %s", ErrToolNotConfigured, strings.Join(ungrouped, ", ")))
+	}
 	return s.changeTools(ctx, func(declared []harness.Tool) ([]harness.Tool, error) {
 		next := slices.Clone(declared)
 		for _, tool := range tools {
@@ -83,9 +87,9 @@ func (s *Session) changeTools(ctx context.Context, change func([]harness.Tool) (
 			return stack.Wrap(fmt.Errorf("%w: %s", ErrToolTaken, tool.Name))
 		}
 	}
-	if err := s.current().SetTools(ctx, harness.Tools{Tools: s.offering(next)}, func() {
+	if err := s.current().SetTools(ctx, s.offering(next), func() {
 		s.labelMu.Lock()
-		s.spec.Tools = next
+		s.declare(next)
 		if s.addedTools == nil {
 			s.addedTools = map[string]bool{}
 		}
@@ -99,7 +103,7 @@ func (s *Session) changeTools(ctx context.Context, change func([]harness.Tool) (
 		s.persisted.DescribeTools(toolDisplays(next))
 	}
 	if s.records != nil {
-		s.afterRow(func() { s.records.Offered(s.id, toolRows(s)) })
+		s.afterRow(func() { s.records.Offered(s.spec.CustomerID, s.id, toolRows(s)) })
 	}
 	return nil
 }
@@ -119,10 +123,30 @@ func (s *Session) callerTool(name string) (declared, added bool) {
 	return slices.ContainsFunc(s.spec.Tools, named(name)), s.addedTools[name]
 }
 
+// declare replaces the caller's tools with next, remembering the names of the ones it had and
+// the ones it now has (declaredEver). The caller holds labelMu.
+func (s *Session) declare(next []harness.Tool) {
+	if s.declaredEver == nil {
+		s.declaredEver = map[string]bool{}
+	}
+	for _, tool := range slices.Concat(s.spec.Tools, next) {
+		s.declaredEver[tool.Name] = true
+	}
+	s.spec.Tools = next
+}
+
+// devicesTool reports whether the session's end user's device declared a tool called name,
+// now or earlier in the session (agent.Options.CallersTool).
+func (s *Session) devicesTool(name string) bool {
+	s.labelMu.Lock()
+	defer s.labelMu.Unlock()
+	return s.declaredEver[name] || slices.ContainsFunc(s.spec.Tools, named(name))
+}
+
 // offering is everything the session offers with declared as the caller's tools, which go
-// first as they did when it opened.
-func (s *Session) offering(declared []harness.Tool) []harness.Tool {
-	return slices.Concat(declared, s.otherTools)
+// first as they did when it opened, each loaded as its group or connector binding says.
+func (s *Session) offering(declared []harness.Tool) harness.Tools {
+	return s.loading.arrange(slices.Concat(declared, s.otherTools))
 }
 
 // toolPolicy is next with the caller's tools that asked to be cancelled by an interruption,

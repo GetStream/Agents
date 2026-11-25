@@ -23,6 +23,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
@@ -198,7 +199,7 @@ func (t *TTS) Start(ctx context.Context) error {
 	}
 
 	t.emitter.Send(tts.Connected{Provider: ProviderName, Model: t.options.Model, At: time.Now()})
-	go t.readLoop()
+	goroutine.Go(ctx, t.readLoop)
 	return nil
 }
 

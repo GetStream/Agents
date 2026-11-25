@@ -55,8 +55,8 @@ To reach the Mac over the network instead, add `assistant.routerUrl` and
 `http://192.168.1.20:8098`. From Android 17 that is the local network, which the app then asks
 for when it opens.
 
-The chat asks for `xai/grok-4.7`, a model that streams its reasoning, so the router needs
-`XAI_API_KEY`. Web search needs one of `EXA_API_KEY`, `TAVILY_API_KEY` or `PERPLEXITY_API_KEY`.
+The chat runs on the agent's own model, as a call does: which model a session runs on is the
+backend's to choose, and the router refuses a device that names one. Web search needs one of `EXA_API_KEY`, `TAVILY_API_KEY` or `PERPLEXITY_API_KEY`.
 Stream Chat is on `https://stream-io-repo.com` rather than Maven Central, which
 `settings.gradle.kts` adds. The sign-in card and `AIConversation`'s `contentPadding` need 7.17.0
 or newer, generated UI replies 7.18.0, and `AIConversationState` 7.19.0: `stream-chat-android-ai-compose`,
@@ -78,6 +78,11 @@ or newer, generated UI replies 7.18.0, and `AIConversationState` 7.19.0: `stream
   answer streaming in. Older messages load as you scroll up. Under a finished reply you can
   copy, share and rate it; ratings stay on the phone, as the router takes none yet. The composer
   floats over the bottom of the conversation, which fades away under it.
+- **Incognito chat** is the eye at the top right of a new chat. Its session is created with
+  `incognito = true`, so it has no channel, isn't listed, and Juno learns nothing from it;
+  `AgentTransport` shows it from the session's `turnMessages`, reasoning, tool calls and approval
+  cards included. Leaving it, or picking another conversation, ends it for good. The photos sent
+  with a question go to the agent but don't show on the question once it is sent.
 - **Interactive replies**: the gear at the top right of the drawer, beside New chat, opens
   Settings, where Reply format chooses how Juno answers: in Markdown, or with interactive UI in
   [A2UI](https://a2ui.org) or [OpenUI](https://openui.com). It is the agent's instructions, kept by
@@ -186,4 +191,5 @@ URLs, the customer id, the Stream key, the agent's name and the user.
 - Think harder, which iOS offers in the composer's options: Stream's Android composer has no
   options sheet.
 - A seat selector that brings its own `reserve_table` tool while it is shown, as iOS's does: the
-  Kotlin SDK cannot add a tool to a running session yet.
+  Kotlin SDK has `AgentSession.addTools` and `removeTool` (#2050), but this sample doesn't use them
+  yet.

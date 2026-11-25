@@ -34,15 +34,15 @@ func (s *ResumeHistorySuite) resumable(config store.ResumeHistory, session *Resu
 	ctx := context.Background()
 	agent := store.AgentConfig{
 		CustomerID: s.customerID(), Name: "resume-" + s.utils.uuid(), Mode: store.AgentModeText,
-		LLM: "recites/recites-model", ResumeHistory: config,
+		Models: store.AgentModels{LLM: "recites/recites-model"}, ResumeHistory: config,
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(ctx, &agent))
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &agent))
 	opened := s.serverClient.createSession(CreateSessionRequest{ConfigId: &agent.ID, ResumeHistory: session})
 	s.answerTo(opened.Id, "Is invoice 7 paid?")
 
 	var answered store.AgentResponseItem
 	s.Require().Eventually(func() bool {
-		items, err := s.store.SessionItems(ctx, s.customerID(), opened.Id, "", 0, nil)
+		items, err := s.store.ResponseItems.Select(ctx, s.customerID(), opened.Id, store.ItemFilter{})
 		for _, item := range items {
 			if item.Kind == store.ItemAnswer {
 				answered = item
@@ -50,7 +50,7 @@ func (s *ResumeHistorySuite) resumable(config store.ResumeHistory, session *Resu
 		}
 		return err == nil && answered.ResponseID != ""
 	}, settleFor, 20*time.Millisecond, "the answer was never recorded")
-	s.Require().NoError(s.store.AppendResponseItems(ctx, []store.AgentResponseItem{{
+	s.Require().NoError(s.store.ResponseItems.InsertMany(ctx, []store.AgentResponseItem{{
 		ResponseID: answered.ResponseID, Ordinal: answered.Ordinal + 1, SessionID: opened.Id,
 		Kind: store.ItemToolResult, ToolName: "invoices", Text: "invoice 7: paid on 2026-09-01",
 		Payload: map[string]any{"call_id": "call-7", "arguments": `{"id":7}`},
@@ -151,7 +151,7 @@ func (s *ResumeHistorySuite) TestASessionKeepsWhatItWasOpenedWithOnItsRow() {
 	opened := s.serverClient.createSession(request)
 
 	s.Eventually(func() bool {
-		row, err := s.store.StoredSession(context.Background(), s.customerID(), opened.Id)
+		row, err := s.store.Sessions.Get(context.Background(), s.customerID(), opened.Id)
 		return err == nil && row.ResumeHistory.Tools() && row.ResumeHistory.MaxMessages == 40 &&
 			row.ResumeHistory.MaxCharacters == 90000
 	}, settleFor, 20*time.Millisecond)

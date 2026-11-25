@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
@@ -64,6 +64,9 @@ type turnTracker struct {
 	finished func(Turn)
 	// owner is who the turn belongs to, which is what its span is labelled with.
 	owner routing.Owner
+	// ctx is the call's, which each turn's span is a child of: the agent's once it joined.
+	// Guarded by mu.
+	ctx context.Context
 	// grace is how long a turn waits for the track to take its queued speech.
 	grace time.Duration
 	// origins is what started each of the call's latest originsKept turns. Like
@@ -159,6 +162,8 @@ type openTurn struct {
 	// starts each of its lines with its own kind.
 	answer      string
 	interrupted bool
+	// guardrail is the guardrail's check of the turn, nil when nothing screened it.
+	guardrail *store.GuardrailCheck
 	// why is why the reply was abandoned, set with interrupted.
 	why interruption
 	// marks is what the edge reports queuedAt and pulledAt to.
@@ -182,8 +187,15 @@ func (m *turnMarks) FirstFrameQueued(at time.Time)   { m.tracker.queued(m.turn, 
 func (m *turnMarks) FirstAudiblePulled(at time.Time) { m.tracker.pulled(m.turn, m.id, at) }
 
 func newTurnTracker(owner routing.Owner, finished func(Turn)) *turnTracker {
-	return &turnTracker{open: map[string]*openTurn{}, finished: finished, owner: owner, grace: playoutGrace, origins: map[string]origin{},
+	return &turnTracker{open: map[string]*openTurn{}, finished: finished, owner: owner, ctx: context.Background(), grace: playoutGrace, origins: map[string]origin{},
 		out: map[string]time.Time{}}
+}
+
+// within traces the turns reported from now on under ctx.
+func (t *turnTracker) within(ctx context.Context) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.ctx = ctx
 }
 
 // started records what started a turn, before anything of it is measured or said. A caller
@@ -374,6 +386,15 @@ func (t *turnTracker) begin(turnID string, participant stt.Participant, readyAt,
 	}
 	current.marks = turnMarks{tracker: t, id: turnID, turn: current}
 	t.open[turnID] = current
+}
+
+// screened keeps the guardrail's check of a turn, to be reported with it.
+func (t *turnTracker) screened(turnID string, check *store.GuardrailCheck) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if current := t.open[turnID]; current != nil {
+		current.guardrail = check
+	}
 }
 
 func (t *turnTracker) modelStarted(turnID string, at time.Time) {
@@ -604,7 +625,10 @@ func (t *turnTracker) report(turnID string, current *openTurn, finished *Turn) {
 	if finished == nil {
 		return
 	}
-	traceTurn(t.owner, turnID, current)
+	t.mu.Lock()
+	ctx := t.ctx
+	t.mu.Unlock()
+	traceTurn(ctx, t.owner, turnID, current)
 	if t.finished != nil {
 		t.finished(*finished)
 	}
@@ -633,6 +657,7 @@ func measure(turnID string, current *openTurn) Turn {
 		AudioOutMs:           current.audioOutMs,
 		AudioDroppedMs:       current.audioDroppedMs,
 		Interrupted:          current.interrupted,
+		Guardrail:            current.guardrail,
 	}
 }
 
@@ -689,18 +714,17 @@ func leg(from, to time.Time) float64 {
 // turnRecorder writes finished turns off the conversation's path: the turn to Redis for
 // the hour somebody may read the call back in, and its counts to Postgres for the stats.
 // A conversation must never wait on a database, so recording is asynchronous and turns
-// are what gets dropped when the writer cannot keep up. Either side may be nil.
+// are what gets dropped when the writer cannot keep up.
 type turnRecorder struct {
 	store  *store.Store
-	live   *live.Client
 	owner  routing.Owner
 	logger *slog.Logger
 
-	queue chan live.Turn
+	queue chan store.Turn
 	done  chan struct{}
 
 	// write stores one row; it is the store and Redis unless a test says otherwise.
-	write func(ctx context.Context, row live.Turn) error
+	write func(ctx context.Context, row store.Turn) error
 
 	// ctx is the writer's, cancelled when Close gives up on what is still queued.
 	ctx          context.Context
@@ -717,18 +741,17 @@ type turnRecorder struct {
 	dropped   atomic.Int64
 }
 
-func newTurnRecorder(pgStore *store.Store, liveClient *live.Client, owner routing.Owner, logger *slog.Logger) *turnRecorder {
-	return buildTurnRecorder(pgStore, liveClient, owner, logger).start()
+func newTurnRecorder(pgStore *store.Store, owner routing.Owner, logger *slog.Logger) *turnRecorder {
+	return buildTurnRecorder(pgStore, owner, logger).start()
 }
 
 // buildTurnRecorder is a recorder that has not started writing, so a test can swap how.
-func buildTurnRecorder(pgStore *store.Store, liveClient *live.Client, owner routing.Owner, logger *slog.Logger) *turnRecorder {
+func buildTurnRecorder(pgStore *store.Store, owner routing.Owner, logger *slog.Logger) *turnRecorder {
 	r := &turnRecorder{
 		store:        pgStore,
-		live:         liveClient,
 		owner:        owner,
 		logger:       logger,
-		queue:        make(chan live.Turn, turnQueueSize),
+		queue:        make(chan store.Turn, turnQueueSize),
 		done:         make(chan struct{}),
 		drainTimeout: turnDrainTimeout,
 		writeTimeout: turnWriteTimeout,
@@ -739,13 +762,13 @@ func buildTurnRecorder(pgStore *store.Store, liveClient *live.Client, owner rout
 }
 
 func (r *turnRecorder) start() *turnRecorder {
-	go r.run()
+	goroutine.Go(r.ctx, r.run)
 	return r
 }
 
 // Record queues a finished turn, dropping it if the writer is too far behind.
 func (r *turnRecorder) Record(turn Turn) {
-	row := live.Turn{
+	row := store.Turn{
 		CustomerID:           r.owner.CustomerID,
 		AgentID:              r.owner.AgentID,
 		CallID:               r.owner.CallID,
@@ -768,6 +791,7 @@ func (r *turnRecorder) Record(turn Turn) {
 		AudioOutMs:           measured(turn.AudioOutMs),
 		AudioDroppedMs:       measured(turn.AudioDroppedMs),
 		Interrupted:          turn.Interrupted,
+		Guardrail:            turn.Guardrail,
 	}
 
 	// A turn can finish after the recorder has been closed: interrupting a session closes
@@ -823,16 +847,14 @@ func (r *turnRecorder) run() {
 }
 
 // persist writes a row to Redis and to Postgres, logging what fails.
-func (r *turnRecorder) persist(ctx context.Context, row live.Turn) error {
+func (r *turnRecorder) persist(ctx context.Context, row store.Turn) error {
 	var failures []error
-	if r.live != nil {
-		if err := r.live.RecordTurn(ctx, row); err != nil {
-			r.logger.Error("could not record turn", "error", err)
-			failures = append(failures, err)
-		}
+	if err := r.store.Turns.Insert(ctx, row); err != nil {
+		r.logger.Error("could not record turn", "error", err)
+		failures = append(failures, err)
 	}
 	if r.store != nil {
-		if err := r.store.RecordTurnStats(ctx, sampleOf(row)); err != nil {
+		if err := r.store.TurnBuckets.Add(ctx, sampleOf(row)); err != nil {
 			r.logger.Error("could not count turn", "error", err)
 			failures = append(failures, err)
 		}
@@ -840,7 +862,7 @@ func (r *turnRecorder) persist(ctx context.Context, row live.Turn) error {
 	return errors.Join(failures...)
 }
 
-func sampleOf(turn live.Turn) store.TurnSample {
+func sampleOf(turn store.Turn) store.TurnSample {
 	sample := store.TurnSample{
 		CustomerID:   turn.CustomerID,
 		AgentID:      turn.AgentID,

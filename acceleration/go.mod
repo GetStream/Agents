@@ -1,6 +1,6 @@
 module github.com/GetStream/Vision-Agents/acceleration
 
-go 1.27.0
+go 1.27.4
 
 require (
 	cloud.google.com/go/kms v1.26.0
@@ -11,14 +11,14 @@ require (
 	github.com/danielgtaylor/huma/v2 v2.39.1
 	github.com/daytona/clients/sdk-go v0.211.2
 	github.com/deepgram/deepgram-go-sdk/v3 v3.7.0
-	github.com/emiago/sipgo v1.2.0
+	github.com/emiago/sipgo v1.7.4
 	github.com/getsentry/sentry-go v0.49.0
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/hibiken/asynq v0.26.0
-	github.com/icholy/digest v1.1.0
+	github.com/icholy/digest v1.2.0
 	github.com/joho/godotenv v1.5.1
 	github.com/klippa-app/go-pdfium v1.21.4
 	github.com/knadh/koanf/parsers/yaml v1.1.1
@@ -39,6 +39,7 @@ require (
 	github.com/prometheus/client_model v0.6.2
 	github.com/redis/rueidis v1.0.79
 	github.com/redis/rueidis/rueidisaside v1.0.79
+	github.com/redis/rueidis/rueidishook v1.0.79
 	github.com/redis/rueidis/rueidisotel v1.0.79
 	github.com/richardlehane/mscfb v1.0.9
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
@@ -46,7 +47,7 @@ require (
 	github.com/stretchr/testify v1.12.1
 	github.com/teambition/rrule-go v1.8.2
 	github.com/tetratelabs/wazero v1.12.0
-	github.com/thesyncim/gopus v0.2.2
+	github.com/thesyncim/gopus v0.2.7
 	github.com/uptrace/bun v1.2.18
 	github.com/uptrace/bun/dialect/pgdialect v1.2.18
 	github.com/uptrace/bun/driver/pgdriver v1.2.18

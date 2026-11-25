@@ -145,8 +145,6 @@ type SessionValues struct {
 	// CreatedAt is cut to the microsecond, as a row keeps it.
 	CreatedAt time.Time
 	Custom    map[string]any
-	// ReviewScore is nil for a session nobody reviewed.
-	ReviewScore *int
 }
 
 // Matches reports whether the expression holds for a session, the way the statement where
@@ -163,23 +161,8 @@ func (e *SessionExpr) Matches(values SessionValues) bool {
 	}
 
 	if e.Field == SessionFieldReviewScore {
-		// A missing score is NULL in the statement, which no comparison is true of.
-		if values.ReviewScore == nil {
-			return false
-		}
-		score := *values.ReviewScore
-		switch e.Op {
-		case SessionEq:
-			return score == e.Number
-		case SessionGt:
-			return score > e.Number
-		case SessionGte:
-			return score >= e.Number
-		case SessionLt:
-			return score < e.Number
-		case SessionLte:
-			return score <= e.Number
-		}
+		// A session with no row has no review, and a missing score is NULL in the statement,
+		// which no comparison is true of.
 		return false
 	}
 

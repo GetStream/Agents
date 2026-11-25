@@ -55,9 +55,16 @@ const cacheTTL = 30 * time.Minute
 // asked for together. Anything older is offered the smaller set it answers to, which is
 // the whole reason this is a table rather than one list. GPT-6 keeps the 5.6 ladder, except
 // Astra and GPT-6.1 Sol, which answer none with a 400, so the least thinking they can be
-// asked for is low. GPT-6.1 Sol also stops at xhigh and answers max with a 400. Every
-// family here takes a strict JSON Schema (Structured Outputs, which OpenAI documents from
-// GPT-4o on: https://platform.openai.com/docs/guides/structured-outputs).
+// asked for is low. GPT-6.1 Sol also stops at xhigh and answers max with a 400. GPT-6.2 Sol
+// and Astra answer none and minimal with a 400 and take low to max; left to themselves they
+// think at medium, so they are asked for low as well. Every family here takes a strict JSON
+// Schema (Structured Outputs, which OpenAI documents from GPT-4o on:
+// https://platform.openai.com/docs/guides/structured-outputs).
+//
+// GPT-6.2 places top-level instructions after the input, out of the cached prefix, which
+// input already avoids by sending them as the first, developer, message. It also drops
+// reasoning items when an earlier turn is edited; nothing here replays reasoning, so there
+// is none to lose.
 //
 // None of them reports Store or Conversations, so every turn sends the whole conversation, as
 // it does to every other provider. An organisation with Zero Data Retention answers
@@ -82,6 +89,22 @@ var modelCapabilities = map[string]llm.Capabilities{
 	},
 	"gpt-6.1-sol": {
 		ReasoningEfforts: []string{"low", "medium", "high", "xhigh"},
+		DefaultEffort:    "low",
+		Verbosities:      []string{"low", "medium", "high"},
+		PromptCacheKey:   true,
+		JSONSchema:       true,
+		CacheTTLs:        []time.Duration{cacheTTL},
+	},
+	"gpt-6.2-sol": {
+		ReasoningEfforts: []string{"low", "medium", "high", "xhigh", "max"},
+		DefaultEffort:    "low",
+		Verbosities:      []string{"low", "medium", "high"},
+		PromptCacheKey:   true,
+		JSONSchema:       true,
+		CacheTTLs:        []time.Duration{cacheTTL},
+	},
+	"gpt-6.2-astra": {
+		ReasoningEfforts: []string{"low", "medium", "high", "xhigh", "max"},
 		DefaultEffort:    "low",
 		Verbosities:      []string{"low", "medium", "high"},
 		PromptCacheKey:   true,
@@ -195,6 +218,10 @@ func New(options Options) (*LLM, error) {
 		inFlight:     map[uint64]context.CancelFunc{},
 	}, nil
 }
+
+// Host is the host requests go to, the default endpoint's included, as openaicompat.LLM.Host
+// says it, so a log line names where a call was served.
+func (l *LLM) Host() string { return llm.HostOf(l.options.BaseURL) }
 
 // Client exposes the underlying SDK client, so anything this package does not standardise
 // is still one call away.

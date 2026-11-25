@@ -48,13 +48,13 @@ func (s *StoreSuite) TestAQueryWaitingForAPoolsLastConnectionIsCountedAsAWait() 
 	one, err := Open(s.dsn)
 	s.Require().NoError(err)
 	defer one.Close()
-	one.DB().DB.SetMaxOpenConns(1)
-	held, err := one.DB().DB.Conn(s.ctx)
+	one.GlobalDB().DB.SetMaxOpenConns(1)
+	held, err := one.GlobalDB().DB.Conn(s.ctx)
 	s.Require().NoError(err)
 
 	waited, cancel := context.WithTimeout(s.ctx, 200*time.Millisecond)
 	defer cancel()
-	_, err = one.DB().ExecContext(waited, "SELECT 1")
+	_, err = one.GlobalDB().ExecContext(waited, "SELECT 1")
 	s.Require().ErrorIs(err, context.DeadlineExceeded)
 
 	series := s.poolSeries(one)
@@ -71,7 +71,7 @@ func (s *StoreSuite) TestAQueryWaitingForAPoolsLastConnectionIsCountedAsAWait() 
 }
 
 func (s *ShardedStoreSuite) TestAShardedStoreServesEachOfItsPoolsByShard() {
-	held, err := s.store.DB().DB.Conn(s.ctx)
+	held, err := s.store.GlobalDB().DB.Conn(s.ctx)
 	s.Require().NoError(err)
 	defer held.Close()
 
@@ -81,7 +81,6 @@ func (s *ShardedStoreSuite) TestAShardedStoreServesEachOfItsPoolsByShard() {
 
 	s.Equal(40.0, series["router_db_pool_max_open_connections shared "])
 	s.Equal(40.0, series["router_db_pool_max_open_connections shard here"])
-	s.Equal(8.0, series["router_db_pool_max_open_connections peer there"])
-	// Five metrics for each of the three pools, and no fourth.
-	s.Len(series, 15)
+	// Five metrics for each of the two pools, and none for the other shard's, which is not opened.
+	s.Len(series, 10)
 }

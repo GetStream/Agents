@@ -15,11 +15,9 @@ final readonly class Call
         public string $agentId,
         public string $callId,
         public string $direction,
-        // The session that ran the call, which is what it is held by.
         public string $id,
         public \DateTimeImmutable $startedAt,
         public ?string $campaignId = null,
-        public ?string $configId = null,
         public ?string $contactId = null,
         // Absent while the call is still running.
         public ?\DateTimeImmutable $endedAt = null,
@@ -59,12 +57,12 @@ final readonly class Call
         // The provider/model that spoke, on the same terms as stt_used.
         public ?string $ttsUsed = null,
         public ?CallUsage $usage = null,
-        // Who the agent spoke to, as the client's own token named them. Empty for a call the customer's backend opene...
-        public ?string $userId = null,
         // The voice the call asked for, in the provider's own terms. Empty means the provider's default.
         public ?string $voice = null,
         // The voice that spoke, which is the provider's default when none was asked for. Known only while the call is...
         public ?string $voiceUsed = null,
+        // The session the call was part of. A session starts a new call each time voice is started or stopped on it....
+        public ?string $sessionId = null,
     ) {
     }
 
@@ -80,7 +78,6 @@ final readonly class Call
             id: Json::string($data, 'id'),
             startedAt: Json::date($data, 'started_at'),
             campaignId: array_key_exists('campaign_id', $data) && $data['campaign_id'] !== null ? Json::string($data, 'campaign_id') : null,
-            configId: array_key_exists('config_id', $data) && $data['config_id'] !== null ? Json::string($data, 'config_id') : null,
             contactId: array_key_exists('contact_id', $data) && $data['contact_id'] !== null ? Json::string($data, 'contact_id') : null,
             endedAt: array_key_exists('ended_at', $data) && $data['ended_at'] !== null ? Json::date($data, 'ended_at') : null,
             fromNumber: array_key_exists('from_number', $data) && $data['from_number'] !== null ? Json::string($data, 'from_number') : null,
@@ -103,9 +100,9 @@ final readonly class Call
             tts: array_key_exists('tts', $data) && $data['tts'] !== null ? Json::string($data, 'tts') : null,
             ttsUsed: array_key_exists('tts_used', $data) && $data['tts_used'] !== null ? Json::string($data, 'tts_used') : null,
             usage: array_key_exists('usage', $data) && $data['usage'] !== null ? CallUsage::fromArray(Json::object($data, 'usage')) : null,
-            userId: array_key_exists('user_id', $data) && $data['user_id'] !== null ? Json::string($data, 'user_id') : null,
             voice: array_key_exists('voice', $data) && $data['voice'] !== null ? Json::string($data, 'voice') : null,
             voiceUsed: array_key_exists('voice_used', $data) && $data['voice_used'] !== null ? Json::string($data, 'voice_used') : null,
+            sessionId: array_key_exists('session_id', $data) && $data['session_id'] !== null ? Json::string($data, 'session_id') : null,
         );
     }
 
@@ -124,9 +121,6 @@ final readonly class Call
         $out['started_at'] = Json::dateValue($this->startedAt);
         if ($this->campaignId !== null) {
             $out['campaign_id'] = $this->campaignId;
-        }
-        if ($this->configId !== null) {
-            $out['config_id'] = $this->configId;
         }
         if ($this->contactId !== null) {
             $out['contact_id'] = $this->contactId;
@@ -194,14 +188,14 @@ final readonly class Call
         if ($this->usage !== null) {
             $out['usage'] = $this->usage->toArray();
         }
-        if ($this->userId !== null) {
-            $out['user_id'] = $this->userId;
-        }
         if ($this->voice !== null) {
             $out['voice'] = $this->voice;
         }
         if ($this->voiceUsed !== null) {
             $out['voice_used'] = $this->voiceUsed;
+        }
+        if ($this->sessionId !== null) {
+            $out['session_id'] = $this->sessionId;
         }
         return $out;
     }

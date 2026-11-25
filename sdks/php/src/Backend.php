@@ -20,8 +20,8 @@ use GetStream\VisionAgents\Exception\ConfigurationException;
  */
 final readonly class Backend
 {
-    /** Stream's hosted router, which is where a client goes when nothing says otherwise. */
-    public const string DEFAULT_URL = 'https://accelerate-us-east4.gcp.stream-io-api.com';
+    /** Stream's hosted router in the nearest healthy region, which is where a client goes when nothing says otherwise. */
+    public const string DEFAULT_URL = 'https://accelerate.gcp.stream-io-api.com';
     public const string URL_ENV = 'STREAM_ACCELERATION_URL';
     /** Holds this SDK to the hosted router in one region, such as us-east4. */
     public const string REGION_ENV = 'STREAM_ACCELERATION_REGION';
@@ -160,13 +160,42 @@ final readonly class Backend
      * acts for. Unlike `actingFor`, nothing is signed for that user in any mode, so what it
      * writes is the server's: the router answers it with the model rather than handing it to a
      * dispatch worker.
+     *
+     * @deprecated pass the user to the call instead, as its optional `userId` parameter, such as
+     *     `$client->connections->get($id, userId: 'ada')`
      */
     public function onBehalfOf(string $userId): self
+    {
+        return $this->writingFor($userId);
+    }
+
+    /**
+     * What `onBehalfOf` did before it was deprecated, for the dispatch worker: the backend's own
+     * user stays when `$userId` is empty.
+     *
+     * @internal
+     */
+    public function writingFor(string $userId): self
     {
         if (!$this->serverSide()) {
             throw new ConfigurationException('only a server-side backend can act on behalf of a user');
         }
         return new self($this->url, $this->apiKey === '' ? $this->customerId : '', $this->apiKey, $this->apiSecret, $this->token, $this->userId, $this->authenticate, $userId, team: $this->team, usageCategories: $this->usageCategories);
+    }
+
+    /**
+     * The same server credential, naming `$userId` in `X-Stream-User-Id`, or nobody when it is
+     * empty, whoever this backend otherwise acts for. What a call with a `userId` parameter is
+     * sent with.
+     *
+     * @internal
+     */
+    public function speakingFor(string $userId): self
+    {
+        if (!$this->serverSide()) {
+            throw new ConfigurationException('only a server-side backend can act on behalf of a user');
+        }
+        return new self($this->url, $this->apiKey === '' ? $this->customerId : '', $this->apiKey, $this->apiSecret, $this->token, '', $this->authenticate, $userId, team: $this->team, usageCategories: $this->usageCategories);
     }
 
     /**
@@ -349,11 +378,14 @@ final readonly class Backend
     }
 
     /**
-     * Whether `$url` is the hosted router in some region, which is always behind the
+     * Whether `$url` is the hosted router, nearest or in some region, which is always behind the
      * proxy.
      */
     private static function hosted(string $url): bool
     {
+        if ($url === self::DEFAULT_URL) {
+            return true;
+        }
         $prefix = 'https://accelerate-';
         $suffix = '.gcp.stream-io-api.com';
         if (!str_starts_with($url, $prefix) || !str_ends_with($url, $suffix)) {

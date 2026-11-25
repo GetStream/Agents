@@ -3,6 +3,7 @@ package dlc
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -165,25 +166,68 @@ func (g *Gate) AllowTransfer(ctx context.Context, customerID, to string, into Ca
 	return g.allow(ctx, customerID, Voice, to, into)
 }
 
+// AllowCall is Allow for a call to to, with the room the call is placed in: the organization
+// its leg counts against and, while the calls at once are enforced, how many may be up. The
+// count Allow took can be stale by the time the call is placed, so placing it counts again as
+// one step with keeping its leg (store.CallLegs.PlaceWithin).
+func (g *Gate) AllowCall(ctx context.Context, customerID, to string) (CallRoom, error) {
+	admission, err := g.allowAdmitted(ctx, customerID, Voice, to, Call{})
+	if err != nil {
+		return CallRoom{}, err
+	}
+	room := CallRoom{OrganizationID: admission.OrganizationID, tier: tierNamed(admission.LimitsTier)}
+	if !g.limiting() || g.mode != config.LimitsEnforce || admission.Limits == nil || admission.OrganizationID == "" {
+		return room, nil
+	}
+	if limits, ok := admission.Limits.Channels[Voice]; ok && limits.Concurrent != nil {
+		room.AtOnce = &store.CallsAtOnce{Limit: *limits.Concurrent, Ringing: RingWindow}
+	}
+	return room, nil
+}
+
+// CallRoom is what AllowCall let a call be placed with.
+type CallRoom struct {
+	// OrganizationID is whose calls the call's leg counts among; empty for an app of none.
+	OrganizationID string
+	// AtOnce is how many of them may be up at once, nil when that is not enforced.
+	AtOnce *store.CallsAtOnce
+	tier   string
+}
+
+// Refusal is err, the failure of placing a call in the room, as the gate's refusal when it is
+// the organization's calls at once leaving no room for it.
+func (r CallRoom) Refusal(err error) error {
+	if r.AtOnce == nil || !errors.Is(err, store.ErrCallsAtOnce) {
+		return err
+	}
+	return tooManyAtOnce(r.tier, r.AtOnce.Limit)
+}
+
 func (g *Gate) allow(ctx context.Context, customerID, channel, to string, into Call) error {
+	_, err := g.allowAdmitted(ctx, customerID, channel, to, into)
+	return err
+}
+
+// allowAdmitted is allow, with the admission it was decided on.
+func (g *Gate) allowAdmitted(ctx context.Context, customerID, channel, to string, into Call) (routing.Admission, error) {
 	admission, err := g.admit(ctx, customerID)
 	if err != nil {
-		return err
+		return admission, err
 	}
 	if g == nil || g.store == nil {
-		return nil
+		return admission, nil
 	}
-	optedOut, err := g.store.OptedOut(ctx, customerID, to, channel)
+	optedOut, err := g.store.OptOuts.OptedOut(ctx, customerID, to, channel)
 	if err != nil {
-		return err
+		return admission, err
 	}
 	if optedOut {
-		return refused(codeOptedOut, stack.Wrap(fmt.Errorf("%w: %s opted out of %s", ErrRefused, to, channel)))
+		return admission, refused(codeOptedOut, stack.Wrap(fmt.Errorf("%w: %s opted out of %s", ErrRefused, to, channel)))
 	}
 	if err := g.inSandbox(ctx, customerID, channel, to); err != nil {
-		return err
+		return admission, err
 	}
-	return g.withinTier(ctx, admission, customerID, channel, to, into)
+	return admission, g.withinTier(ctx, admission, customerID, channel, to, into)
 }
 
 // inSandbox refuses what the sandbox does not allow an app none of whose use cases is approved.
@@ -192,7 +236,7 @@ func (g *Gate) inSandbox(ctx context.Context, customerID, channel, to string) er
 	if err != nil || !sandboxed {
 		return err
 	}
-	recipients, err := g.store.SandboxRecipients(ctx, customerID)
+	recipients, err := g.store.SandboxRecipients.Select(ctx, customerID)
 	if err != nil {
 		return err
 	}
@@ -228,13 +272,16 @@ func (g *Gate) Dialed(ctx context.Context, customerID, organizationID, to string
 	g.countChannel(ctx, customerID, organizationID, Voice, to, 0)
 }
 
-// Talked counts how long a leg of an app's call in organizationID lasted: its seconds against
-// the sandbox while it holds the app, and for an outbound leg its minutes, rounded up, against
-// the organization's voice limit a day. Calls people make to the app's numbers are not what
-// that limit holds back, so they never use it up.
+// Talked counts how long a leg of an app's call in organizationID lasted. An outbound leg's
+// seconds count against the sandbox while it holds the app, and its minutes, rounded up,
+// against the organization's voice limit a day. Calls people make to the app's numbers are
+// billed and are not what either limit holds back, so they never use one up.
 func (g *Gate) Talked(ctx context.Context, customerID, organizationID string, outbound bool, lasted time.Duration) {
+	if !outbound {
+		return
+	}
 	g.count(ctx, customerID, secondsField, int64(lasted.Seconds()))
-	if minutes := int64(math.Ceil(lasted.Minutes())); outbound && minutes > 0 {
+	if minutes := int64(math.Ceil(lasted.Minutes())); minutes > 0 {
 		g.countChannel(ctx, customerID, organizationID, Voice, "", minutes)
 	}
 }
@@ -248,7 +295,7 @@ func (g *Gate) Usage(ctx context.Context, customerID string) (Usage, error) {
 	if err != nil {
 		return Usage{}, err
 	}
-	recipients, err := g.store.SandboxRecipients(ctx, customerID)
+	recipients, err := g.store.SandboxRecipients.Select(ctx, customerID)
 	if err != nil {
 		return Usage{}, err
 	}
@@ -265,11 +312,12 @@ func (g *Gate) SetRecipients(ctx context.Context, customerID string, recipients 
 	if g.sandbox.Recipients > 0 && len(recipients) > g.sandbox.Recipients {
 		return stack.Wrap(fmt.Errorf("%w: the sandbox allows %d recipients", ErrInvalid, g.sandbox.Recipients))
 	}
-	return g.store.SetSandboxRecipients(ctx, customerID, recipients)
+	return g.store.SandboxRecipients.Replace(ctx, customerID, recipients)
 }
 
-// Sandboxed reports whether the sandbox holds an app now, which is what gives its texts and
-// minutes away. A nil Gate holds nobody, and neither does one that could not tell.
+// Sandboxed reports whether the sandbox holds an app now, which is what gives the texts it
+// sends and the minutes of the calls it places away. A nil Gate holds nobody, and neither does
+// one that could not tell.
 func (g *Gate) Sandboxed(ctx context.Context, customerID string) (bool, error) {
 	if g == nil || g.store == nil {
 		return false, nil
@@ -283,7 +331,7 @@ func (g *Gate) sandboxed(ctx context.Context, customerID string) (bool, error) {
 	if !g.sandbox.Enabled {
 		return false, nil
 	}
-	approved, err := g.store.HasUseCaseIn(ctx, customerID, Approved)
+	approved, err := g.store.UseCases.HasIn(ctx, customerID, Approved)
 	if err != nil {
 		return false, err
 	}

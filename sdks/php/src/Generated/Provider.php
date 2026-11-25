@@ -29,6 +29,9 @@ final readonly class Provider
         public ?array $supports = null,
         // This model's share of the modality's requests over the last seven days, across every customer, from 0 to 1....
         public ?float $usageShare = null,
+        // The built-in voices this native speech model accepts by id. Left out for models whose voices come from a vo...
+        /** @var list<ModelVoice>|null */
+        public ?array $voices = null,
     ) {
     }
 
@@ -50,6 +53,7 @@ final readonly class Provider
             price: array_key_exists('price', $data) && $data['price'] !== null ? ProviderPrice::fromArray(Json::object($data, 'price')) : null,
             supports: array_key_exists('supports', $data) && $data['supports'] !== null ? Json::strings($data, 'supports') : null,
             usageShare: array_key_exists('usage_share', $data) && $data['usage_share'] !== null ? Json::float($data, 'usage_share') : null,
+            voices: array_key_exists('voices', $data) && $data['voices'] !== null ? array_map(ModelVoice::fromArray(...), Json::objects($data, 'voices')) : null,
         );
     }
 
@@ -82,6 +86,9 @@ final readonly class Provider
         }
         if ($this->usageShare !== null) {
             $out['usage_share'] = $this->usageShare;
+        }
+        if ($this->voices !== null) {
+            $out['voices'] = array_map(static fn (ModelVoice $each): array => $each->toArray(), $this->voices);
         }
         return $out;
     }

@@ -27,10 +27,9 @@ class Call:
         agent_id (str): Which agent ran it, and where its transcript is kept.
         call_id (str):
         direction (CallDirection):
-        id (str): The session that ran the call, which is what it is held by.
+        id (str):
         started_at (datetime.datetime):
         campaign_id (str | Unset):
-        config_id (str | Unset):
         contact_id (str | Unset):
         ended_at (datetime.datetime | Unset): Absent while the call is still running.
         from_number (str | Unset):
@@ -62,12 +61,13 @@ class Call:
         usage (CallUsage | Unset): What the call spent, summed over every request it made. Counted once the call is
             over, so it is absent while one is still running. Requests that failed are included: a model that read the
             prompt and then fell over is still billed for it.
-        user_id (str | Unset): Who the agent spoke to, as the client's own token named them. Empty for a call the
-            customer's backend opened, and for telephony, where the number is the name.
         voice (str | Unset): The voice the call asked for, in the provider's own terms. Empty means the provider's
             default.
         voice_used (str | Unset): The voice that spoke, which is the provider's default when none was asked for. Known
             only while the call is running.
+        session_id (str | Unset): The session the call was part of. A session starts a new call each time voice is
+            started or stopped on it. Absent once the session is deleted.
+        region (str | Unset): The shard the call is kept in. Set on a listed call of a deployment with shards.
     """
 
     agent_id: str
@@ -76,7 +76,6 @@ class Call:
     id: str
     started_at: datetime.datetime
     campaign_id: str | Unset = UNSET
-    config_id: str | Unset = UNSET
     contact_id: str | Unset = UNSET
     ended_at: datetime.datetime | Unset = UNSET
     from_number: str | Unset = UNSET
@@ -99,9 +98,10 @@ class Call:
     tts: str | Unset = UNSET
     tts_used: str | Unset = UNSET
     usage: CallUsage | Unset = UNSET
-    user_id: str | Unset = UNSET
     voice: str | Unset = UNSET
     voice_used: str | Unset = UNSET
+    session_id: str | Unset = UNSET
+    region: str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -116,8 +116,6 @@ class Call:
         started_at = self.started_at.isoformat()
 
         campaign_id = self.campaign_id
-
-        config_id = self.config_id
 
         contact_id = self.contact_id
 
@@ -173,11 +171,13 @@ class Call:
         if not isinstance(self.usage, Unset):
             usage = self.usage.to_dict()
 
-        user_id = self.user_id
-
         voice = self.voice
 
         voice_used = self.voice_used
+
+        session_id = self.session_id
+
+        region = self.region
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -192,8 +192,6 @@ class Call:
         )
         if campaign_id is not UNSET:
             field_dict["campaign_id"] = campaign_id
-        if config_id is not UNSET:
-            field_dict["config_id"] = config_id
         if contact_id is not UNSET:
             field_dict["contact_id"] = contact_id
         if ended_at is not UNSET:
@@ -238,12 +236,14 @@ class Call:
             field_dict["tts_used"] = tts_used
         if usage is not UNSET:
             field_dict["usage"] = usage
-        if user_id is not UNSET:
-            field_dict["user_id"] = user_id
         if voice is not UNSET:
             field_dict["voice"] = voice
         if voice_used is not UNSET:
             field_dict["voice_used"] = voice_used
+        if session_id is not UNSET:
+            field_dict["session_id"] = session_id
+        if region is not UNSET:
+            field_dict["region"] = region
 
         return field_dict
 
@@ -264,8 +264,6 @@ class Call:
         started_at = datetime.datetime.fromisoformat(d.pop("started_at"))
 
         campaign_id = d.pop("campaign_id", UNSET)
-
-        config_id = d.pop("config_id", UNSET)
 
         contact_id = d.pop("contact_id", UNSET)
 
@@ -331,11 +329,13 @@ class Call:
         else:
             usage = CallUsage.from_dict(_usage)
 
-        user_id = d.pop("user_id", UNSET)
-
         voice = d.pop("voice", UNSET)
 
         voice_used = d.pop("voice_used", UNSET)
+
+        session_id = d.pop("session_id", UNSET)
+
+        region = d.pop("region", UNSET)
 
         call = cls(
             agent_id=agent_id,
@@ -344,7 +344,6 @@ class Call:
             id=id,
             started_at=started_at,
             campaign_id=campaign_id,
-            config_id=config_id,
             contact_id=contact_id,
             ended_at=ended_at,
             from_number=from_number,
@@ -367,9 +366,10 @@ class Call:
             tts=tts,
             tts_used=tts_used,
             usage=usage,
-            user_id=user_id,
             voice=voice,
             voice_used=voice_used,
+            session_id=session_id,
+            region=region,
         )
 
         call.additional_properties = d

@@ -6,7 +6,7 @@ library;
 
 export 'agent_event.dart';
 export 'agent_session.dart' hide CameraHandler, CameraPicture;
-export 'backend.dart' hide expireBackendToken;
+export 'backend.dart' hide expireBackendToken, sdkVersion, streamClient;
 export 'command.dart';
 export 'conversation.dart';
 export 'errors.dart' hide withoutCredentials;
@@ -14,6 +14,7 @@ export 'guests.dart' show GuestStore, MemoryGuestStore, guestStorageKey;
 export 'live_value.dart';
 export 'models.dart';
 export 'router.dart';
+export 'scheduled_tasks.dart' show ScheduledTasks;
 export 'sessions.dart' show Responses, Sessions;
 export 'socket.dart';
 export 'stream_agents.dart';

@@ -3,6 +3,7 @@
 package api
 
 import (
+	"crypto/rand"
 	"maps"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/redis/rueidis"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -22,7 +24,7 @@ import (
 var (
 	channelFieldsBefore = []string{"created_by_id", "custom", "members"}
 	channelCustomBefore = []string{
-		"plan", "support_agent_id", "support_customer_id", "support_memory_scope", "support_owner_id", "support_trigger",
+		"plan", "support_agent_id", "support_customer_id", "support_memory_scope", "support_owner_id", "support_owner_kind", "support_trigger",
 	}
 )
 
@@ -78,7 +80,7 @@ func (s *AgentTeamsSuite) TestAForkIsMadeInATeamOnlyWhileTheAppSaysSo() {
 // user of the app without a team would be let into.
 func (s *AgentTeamsSuite) TestASessionOfATeamsConfigIsRefusedWhenTheSettingsCannotBeRead() {
 	config := s.configOf("red")
-	_, err := s.store.DB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
+	_, err := s.store.GlobalDB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
 		s.customerID()).Exec(s.T().Context())
 	s.Require().NoError(err)
 
@@ -127,7 +129,7 @@ func (s *AgentTeamsSuite) TestABackendsOwnTeamDoesNotMoveTheChannel() {
 // makeSettingsUnreadable breaks the suite's app settings row and waits until the router's
 // settings cache no longer holds the readable ones.
 func (s *AgentTeamsSuite) makeSettingsUnreadable() {
-	_, err := s.store.DB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
+	_, err := s.store.GlobalDB().NewRaw(`UPDATE apps SET settings = '{"agent_teams": "unreadable"}'::jsonb WHERE id = ?`,
 		s.customerID()).Exec(s.T().Context())
 	s.Require().NoError(err)
 	client, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{os.Getenv("ROUTER_REDIS_ADDR")}, DisableCache: true})
@@ -135,7 +137,7 @@ func (s *AgentTeamsSuite) makeSettingsUnreadable() {
 	defer client.Close()
 	s.Require().NoError(client.Do(s.T().Context(), client.B().Del().Key("appcfg:app-settings:"+s.customerID()).Build()).Error())
 	s.Require().Eventually(func() bool {
-		_, err := s.configs.AppSettings(s.T().Context(), s.customerID())
+		_, err := s.configs.Apps.GetSettings(s.T().Context(), s.customerID())
 		return err != nil
 	}, 10*time.Second, 20*time.Millisecond)
 }
@@ -164,7 +166,17 @@ func (s *AgentTeamsSuite) madeAsBefore(data map[string]any) {
 // turnTeamsOff turns the setting off for the suite's app, as Stream would, and waits until the
 // router's settings cache no longer holds it on.
 func (s *AgentTeamsSuite) turnTeamsOff() {
-	_, err := s.store.DB().NewRaw(`UPDATE apps SET settings = '{}'::jsonb WHERE id = ?`, s.customerID()).Exec(s.T().Context())
+	s.turnTeams(false)
+}
+
+// turnTeams turns the setting on or off for the suite's app, as Stream would, and waits until the
+// router's settings cache holds it so.
+func (s *RouterSuite) turnTeams(on bool) {
+	settings := `{}`
+	if on {
+		settings = `{"agent_teams": true}`
+	}
+	_, err := s.store.GlobalDB().NewRaw(`UPDATE apps SET settings = ?::jsonb WHERE id = ?`, settings, s.customerID()).Exec(s.T().Context())
 	s.Require().NoError(err)
 	address := os.Getenv("ROUTER_REDIS_ADDR")
 	client, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{address}, DisableCache: true})
@@ -172,8 +184,8 @@ func (s *AgentTeamsSuite) turnTeamsOff() {
 	defer client.Close()
 	s.Require().NoError(client.Do(s.T().Context(), client.B().Del().Key("appcfg:app-settings:"+s.customerID()).Build()).Error())
 	s.Require().Eventually(func() bool {
-		settings, err := s.configs.AppSettings(s.T().Context(), s.customerID())
-		return err == nil && !settings.AgentTeamsChecked()
+		settings, err := s.configs.Apps.GetSettings(s.T().Context(), s.customerID())
+		return err == nil && settings.AgentTeamsChecked() == on
 	}, 10*time.Second, 20*time.Millisecond)
 }
 
@@ -182,7 +194,8 @@ func (s *AgentTeamsSuite) TestASocketSessionIsRefusedWhenTheSettingsCannotBeRead
 	config := s.configOf("red")
 	s.makeSettingsUnreadable()
 	logBefore := len(s.logged.String())
-	connection := s.serverClient.opens("/v1/agents/socket")
+	id := rand.Text()
+	connection := s.serverClient.withRequestID(id).opens("/v1/agents/socket")
 	s.Require().NoError(connection.WriteJSON(map[string]any{
 		"type": "start", "sample_rate": 24_000, "session": map[string]any{"config_id": config.Id},
 	}))
@@ -194,6 +207,37 @@ func (s *AgentTeamsSuite) TestASocketSessionIsRefusedWhenTheSettingsCannotBeRead
 	s.Equal(somethingWentWrong, refused["error"])
 	s.Contains(s.logged.String()[logBefore:], "the app's settings could not be read", "the 500 is logged with its error")
 	s.Equal(string(ErrorTypeInternal), refused["error_type"])
+	s.closedForTheRoutersFailure(connection, id)
+}
+
+// closedForTheRoutersFailure is a refused socket session's access line naming the router's
+// own failure, not the caller's refusal.
+func (s *AgentTeamsSuite) closedForTheRoutersFailure(connection *websocket.Conn, id string) {
+	_, _ = s.socketEnd(connection)
+	s.Require().Eventually(func() bool {
+		return lineWith(s.logged, `msg="served a request"`, " request_id="+id) != ""
+	}, settleFor, 20*time.Millisecond, "the socket left no access line")
+	s.Contains(lineWith(s.logged, `msg="served a request"`, " request_id="+id), " close_reason=server_error close_code=1008 ")
+}
+
+// The device gets no text of the database error, and the router logs the error.
+func (s *AgentTeamsSuite) TestASocketSessionWhoseConfigTheDatabaseCannotReadIsRefusedWithoutTheError() {
+	id := s.utils.uuid()
+	s.failQueries(id)
+	logBefore := len(s.logged.String())
+	request := rand.Text()
+	connection := s.serverClient.withRequestID(request).opens("/v1/agents/socket")
+	s.Require().NoError(connection.WriteJSON(map[string]any{
+		"type": "start", "sample_rate": 24_000, "session": map[string]any{"config_id": id},
+	}))
+
+	var refused map[string]any
+	s.Require().NoError(connection.ReadJSON(&refused))
+
+	s.Equal("error", refused["type"], "%v", refused)
+	s.Equal(somethingWentWrong, refused["error"])
+	s.Contains(s.logged.String()[logBefore:], "could not read the agent config of a socket session")
+	s.closedForTheRoutersFailure(connection, request)
 }
 
 // A chat that ended here is carried on by the next message, a create like any other.

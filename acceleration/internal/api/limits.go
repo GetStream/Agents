@@ -33,6 +33,12 @@ var (
 	errNoSuchLimit = APIError{Type: ErrorTypeNotFound, Code: codeLimitNotFound,
 		Message: "there is no such limit in the organization"}
 	errManageOrganization = invalidRequest("a management call on limits names its organization in organization_id")
+	// errNoSuchApp answers another organization's app as it answers an app that does not
+	// exist, so the answer says nothing of whose it is.
+	errNoSuchApp = notFound("app_id names no app of the organization")
+	// errLimitsManaged is the one answer to every limits operation of an app with sharedID, so it
+	// says nothing of any limit or organization.
+	errLimitsManaged = forbidden("the spend limits of this app are managed by support")
 )
 
 // What a limit's ids may hold. A key is never an origin (hook:chat), which holds a ':'. A user
@@ -424,7 +430,7 @@ func (s *Server) registerLimits(api huma.API) {
 		if err != nil {
 			return nil, err
 		}
-		return s.createLimit(ctx, organization, request.Body, audit)
+		return s.createLimit(ctx, organization, s.billedOrganization(ctx), request.Body, audit)
 	})
 	manageCreate := manage(create)
 	manageCreate.Responses = created
@@ -436,7 +442,7 @@ func (s *Server) registerLimits(api huma.API) {
 		if organization == "" {
 			return nil, errManageOrganization
 		}
-		return s.createLimit(ctx, organization, request.Body.LimitInput, s.manageAudit(ctx, organization))
+		return s.createLimit(ctx, organization, true, request.Body.LimitInput, s.manageAudit(ctx, organization))
 	})
 
 	get := op("getLimit", http.MethodGet, "/v1/spend/limits/{limit_id}", "Read a spend limit", "One limit of the caller's organization.")
@@ -541,7 +547,7 @@ func (s *Server) registerLimits(api huma.API) {
 
 // limitsCaller is the organization a customer's limits call is about and who it is recorded
 // as made by. An app seen in no organization, as with a self-hosted router's own keys, is its
-// own.
+// own, unless its id is also an organization's (sharedID), whose limits are its apps' alone.
 func (s *Server) limitsCaller(ctx context.Context) (string, store.LimitAudit, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
@@ -551,15 +557,78 @@ func (s *Server) limitsCaller(ctx context.Context) (string, store.LimitAudit, er
 		return "", store.LimitAudit{}, errNoLimits
 	}
 	organization := OrganizationFrom(ctx)
-	if organization == "" {
-		organization = customerID
+	if organization != "" {
+		if err := s.recordOrganization(ctx, customerID, organization); err != nil {
+			return "", store.LimitAudit{}, err
+		}
+		return organization, LimitAuditOf(ActorFrom(ctx), RequestIDFrom(ctx), customerID), nil
 	}
-	return organization, LimitAuditOf(ActorFrom(ctx), RequestIDFrom(ctx), customerID), nil
+	shared, err := s.sharedID(ctx, customerID)
+	if err != nil {
+		return "", store.LimitAudit{}, err
+	}
+	if shared {
+		return "", store.LimitAudit{}, errLimitsManaged
+	}
+	return customerID, LimitAuditOf(ActorFrom(ctx), RequestIDFrom(ctx), customerID), nil
+}
+
+// sharedID reports whether an app a request names no organization for has the id of an
+// organization it is not in: one with Members, the app not among them. It reads Postgres, so an
+// organization counts as soon as an app of it is recorded.
+func (s *Server) sharedID(ctx context.Context, app string) (bool, error) {
+	members, err := s.store.AppOrganizations.Members(ctx, app)
+	return len(members) > 0 && !slices.Contains(members, app), err
+}
+
+// recordOrganization records an app in the organization its request names when it is recorded in
+// another or in none, so that sharedID knows the organization before it reads or writes a limit.
+// Enforcer.Join records it in the background, and once per router.
+func (s *Server) recordOrganization(ctx context.Context, app, organization string) error {
+	owners, err := s.store.AppOrganizations.OrganizationsOf(ctx, []string{app})
+	if err != nil || owners[app] == organization {
+		return err
+	}
+	return s.store.AppOrganizations.Upsert(ctx, &store.AppOrganization{AppID: app, OrganizationID: organization})
 }
 
 // billedOrganization reports whether the caller's organization is one the usage service bills,
 // rather than an app that is its own.
 func (s *Server) billedOrganization(ctx context.Context) bool { return OrganizationFrom(ctx) != "" }
+
+// checkLimitApps answers errNoSuchApp for a subject in an app the organization does not hold,
+// so no caller reads another organization's spend or writes a limit, a reset or a grant on its
+// apps. The caller's own app is its organization's whatever is recorded, which a request that
+// names another organization can change meanwhile (recordOrganization, Enforcer.Join). An app in
+// no organization (billed false) holds only itself: an organization whose id is the same as the
+// app's is another customer's. The apps a read names, up to maxUsageSubjects, are looked up
+// together.
+func (s *Server) checkLimitApps(ctx context.Context, organization string, billed bool, refs ...usage.SubjectRef) error {
+	own, _ := CustomerFrom(ctx)
+	var named []string
+	for _, ref := range refs {
+		// A subject of the whole organization names no app.
+		if ref.AppID != "" && ref.AppID != own && !slices.Contains(named, ref.AppID) {
+			named = append(named, ref.AppID)
+		}
+	}
+	if len(named) == 0 {
+		return nil
+	}
+	if !billed {
+		return errNoSuchApp
+	}
+	owners, err := s.store.AppOrganizations.OrganizationsOf(ctx, named)
+	if err != nil {
+		return err
+	}
+	for _, app := range named {
+		if owner, ok := owners[app]; !ok || owner != organization {
+			return errNoSuchApp
+		}
+	}
+	return nil
+}
 
 // manageAudit is who a management write on an organization's limits is recorded as made by.
 // The audit log keeps it under the organization, since staff act as no app.
@@ -772,15 +841,15 @@ func (s *Server) listLimits(ctx context.Context, organization string, request *L
 	if request.Team != "" {
 		filter.Category, filter.CategoryPrefix = usage.TeamPrefix+request.Team, ""
 	}
-	var position int64
 	if after != nil {
-		position = after.ID
+		filter.After = after.ID
 	}
-	rows, err := s.store.ListLimits(ctx, filter, position, request.Limit)
+	filter.Limit = request.Limit
+	rows, err := s.store.Limits.Select(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
-	all, err := s.store.LimitsFor(ctx, []string{organization})
+	all, err := s.store.Limits.SelectOf(ctx, []string{organization})
 	if err != nil {
 		return nil, err
 	}
@@ -795,7 +864,7 @@ func (s *Server) listLimits(ctx context.Context, organization string, request *L
 	return &limitPageResponse{Body: answer}, nil
 }
 
-func (s *Server) createLimit(ctx context.Context, organization string, sent LimitInput, audit store.LimitAudit) (*createdLimitResponse, error) {
+func (s *Server) createLimit(ctx context.Context, organization string, billed bool, sent LimitInput, audit store.LimitAudit) (*createdLimitResponse, error) {
 	ref, level, err := target(sent.LimitTarget, sent.Level, organization, "api_key")
 	if err != nil {
 		return nil, err
@@ -804,19 +873,22 @@ func (s *Server) createLimit(ctx context.Context, organization string, sent Limi
 	if !interval.Valid() {
 		return nil, invalidRequest(fmt.Sprintf("interval %q is not daily, weekly, biweekly or monthly", sent.Interval))
 	}
+	if err := s.checkLimitApps(ctx, organization, billed, ref); err != nil {
+		return nil, err
+	}
 	row := store.Limit{
 		Subject: ref.Subject, Level: level, OrganizationID: organization, AppID: ref.AppID, APIKey: ref.APIKey,
 		UserID: ref.UserID, Category: ref.Category, Interval: interval, LimitMicros: sent.LimitMicros, Note: sent.Note,
 		UpdatedBy: actorName(audit),
 	}
-	all, err := s.store.LimitsFor(ctx, []string{organization})
+	all, err := s.store.Limits.SelectOf(ctx, []string{organization})
 	if err != nil {
 		return nil, err
 	}
 	if err := aboveParent(all, row); err != nil {
 		return nil, err
 	}
-	err = s.store.CreateLimit(ctx, &row, audit)
+	err = s.store.Limits.Insert(ctx, &row, audit)
 	var exists *store.ErrLimitExists
 	if errors.As(err, &exists) {
 		return nil, APIError{Type: ErrorTypeConflict, Code: codeLimitExists, Message: fmt.Sprintf(
@@ -830,14 +902,14 @@ func (s *Server) createLimit(ctx context.Context, organization string, sent Limi
 }
 
 func (s *Server) getLimit(ctx context.Context, organization string, id int64) (*limitResponse, error) {
-	row, err := s.store.Limit(ctx, organization, id)
+	row, err := s.store.Limits.Get(ctx, organization, id)
 	if errors.Is(err, store.ErrNoLimit) {
 		return nil, errNoSuchLimit
 	}
 	if err != nil {
 		return nil, err
 	}
-	all, err := s.store.LimitsFor(ctx, []string{row.OrganizationID})
+	all, err := s.store.Limits.SelectOf(ctx, []string{row.OrganizationID})
 	if err != nil {
 		return nil, err
 	}
@@ -845,7 +917,7 @@ func (s *Server) getLimit(ctx context.Context, organization string, id int64) (*
 }
 
 func (s *Server) updateLimit(ctx context.Context, organization string, id int64, change LimitChange, audit store.LimitAudit) (*limitResponse, error) {
-	existing, err := s.store.Limit(ctx, organization, id)
+	existing, err := s.store.Limits.Get(ctx, organization, id)
 	if errors.Is(err, store.ErrNoLimit) {
 		return nil, errNoSuchLimit
 	}
@@ -855,7 +927,7 @@ func (s *Server) updateLimit(ctx context.Context, organization string, id int64,
 	if audit.CustomerID == "" {
 		audit.CustomerID = existing.OrganizationID
 	}
-	all, err := s.store.LimitsFor(ctx, []string{existing.OrganizationID})
+	all, err := s.store.Limits.SelectOf(ctx, []string{existing.OrganizationID})
 	if err != nil {
 		return nil, err
 	}
@@ -866,7 +938,7 @@ func (s *Server) updateLimit(ctx context.Context, organization string, id int64,
 			return nil, err
 		}
 	}
-	updated, err := s.store.UpdateLimit(ctx, existing.OrganizationID, id,
+	updated, err := s.store.Limits.Update(ctx, existing.OrganizationID, id,
 		store.LimitChange{LimitMicros: change.LimitMicros, Note: change.Note, UpdatedBy: actorName(audit)}, audit)
 	if errors.Is(err, store.ErrNoLimit) {
 		return nil, errNoSuchLimit
@@ -884,7 +956,7 @@ func (s *Server) updateLimit(ctx context.Context, organization string, id int64,
 }
 
 func (s *Server) deleteLimit(ctx context.Context, organization string, id int64, audit store.LimitAudit) error {
-	existing, err := s.store.Limit(ctx, organization, id)
+	existing, err := s.store.Limits.Get(ctx, organization, id)
 	if errors.Is(err, store.ErrNoLimit) {
 		return errNoSuchLimit
 	}
@@ -894,7 +966,7 @@ func (s *Server) deleteLimit(ctx context.Context, organization string, id int64,
 	if audit.CustomerID == "" {
 		audit.CustomerID = existing.OrganizationID
 	}
-	_, err = s.store.DeleteLimit(ctx, existing.OrganizationID, id, audit)
+	err = s.store.Limits.Delete(ctx, existing.OrganizationID, id, audit)
 	if errors.Is(err, store.ErrNoLimit) {
 		return errNoSuchLimit
 	}
@@ -932,6 +1004,9 @@ func (s *Server) limitUsage(ctx context.Context, organization string, billed boo
 			return nil, err
 		}
 	}
+	if err := s.checkLimitApps(ctx, organization, billed, refs...); err != nil {
+		return nil, err
+	}
 	answer, err := s.subjectsUsage(ctx, organization, refs, billed)
 	if err != nil {
 		return nil, err
@@ -955,7 +1030,7 @@ func (s *Server) subjectsUsage(ctx context.Context, organization string, refs []
 	if s.policies == nil {
 		return nil, errNoLimits
 	}
-	limits, err := s.store.LimitsFor(ctx, []string{organization})
+	limits, err := s.store.Limits.SelectOf(ctx, []string{organization})
 	if err != nil {
 		return nil, err
 	}
@@ -966,7 +1041,7 @@ func (s *Server) subjectsUsage(ctx context.Context, organization string, refs []
 			earliest = start
 		}
 	}
-	resets, err := s.store.Resets(ctx, []string{organization}, earliest)
+	resets, err := s.store.UsageResets.Select(ctx, []string{organization}, earliest)
 	if err != nil {
 		return nil, err
 	}
@@ -974,7 +1049,7 @@ func (s *Server) subjectsUsage(ctx context.Context, organization string, refs []
 	if err != nil {
 		return nil, stack.Wrap(err)
 	}
-	live, err := s.store.LiveGrants(ctx, []string{organization}, now)
+	live, err := s.store.LimitGrants.SelectLive(ctx, []string{organization}, now)
 	if err != nil {
 		return nil, err
 	}
@@ -1063,7 +1138,10 @@ func (s *Server) resetLimitUsage(ctx context.Context, organization string, bille
 			}
 		}
 	}
-	limits, err := s.store.LimitsFor(ctx, []string{organization})
+	if err := s.checkLimitApps(ctx, organization, billed, ref); err != nil {
+		return nil, err
+	}
+	limits, err := s.store.Limits.SelectOf(ctx, []string{organization})
 	if err != nil {
 		return nil, err
 	}
@@ -1092,7 +1170,7 @@ func (s *Server) resetLimitUsage(ctx context.Context, organization string, bille
 			Reason: sent.Reason, Actor: actorName(audit),
 		})
 	}
-	if err := s.store.AddResets(ctx, resets, audit); err != nil {
+	if err := s.store.UsageResets.InsertMany(ctx, resets, audit); err != nil {
 		return nil, err
 	}
 	s.policies.LimitsChanged(ctx, organization)

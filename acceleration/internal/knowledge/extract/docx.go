@@ -3,6 +3,7 @@ package extract
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -28,7 +29,7 @@ type wordStyle struct {
 // Pages are numbered where Word recorded them. Word writes where it last laid each page
 // break, and a file saved by anything else has none; counting only the breaks somebody
 // put in by hand would number the pages wrong, so such a file is one page with no number.
-func readDOCX(data []byte) (Document, error) {
+func readDOCX(ctx context.Context, data []byte) (Document, error) {
 	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return Document{}, fail(Corrupt, DOCX, fmt.Errorf("the archive cannot be opened: %w", err))
@@ -61,13 +62,13 @@ func readDOCX(data []byte) (Document, error) {
 	if err != nil {
 		return Document{}, err
 	}
+	parts := newMedia(archive)
 	reader := &wordReader{styles: styles, bullets: bullets, media: func(id string) []byte {
-		data, _ := zipFile(archive, images[id])
-		return data
+		return parts.part(images[id])
 	}}
 	reader.numbered = bytes.Contains(body, []byte("lastRenderedPageBreak"))
-	if err := reader.read(body); err != nil {
-		return Document{}, fail(Corrupt, DOCX, err)
+	if err := reader.read(ctx, body); err != nil {
+		return Document{}, unreadable(ctx, DOCX, err)
 	}
 	return Document{Pages: reader.pages(), Pictures: reader.pictures.kept}, nil
 }
@@ -222,12 +223,15 @@ type wordReader struct {
 	span int
 }
 
-func (w *wordReader) read(body []byte) error {
+func (w *wordReader) read(ctx context.Context, body []byte) error {
 	decoder := xml.NewDecoder(bytes.NewReader(body))
 	// skip is how deep the reader is in something that is not text a reader sees: a
 	// deletion kept for review, a field's code, a footnote's number.
 	skip := 0
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		token, err := decoder.Token()
 		if errors.Is(err, io.EOF) {
 			w.flushParagraph()

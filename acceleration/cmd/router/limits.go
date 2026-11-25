@@ -8,7 +8,6 @@ import (
 
 	"github.com/redis/rueidis"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/limitnotice"
@@ -51,9 +50,10 @@ func limitsNeedSomewhereToRead(settings config.Config, pgStore *store.Store) err
 // when that is set. What each router holds is shared with the others through holds, the
 // deployment's Redis; with none, holds stay in this process. Nil without a configuration
 // store, which limitsNeedSomewhereToRead allows only with limits off. notified is told when a
-// warning that an organization's credit is running out was queued for its destinations. The
+// warning that an organization's credit is running out was queued for its destinations, and
+// sender, when set, posts the first time each organization reaches a money limit. The
 // returned func closes the counters' connection.
-func newPolicies(settings config.Config, configs *appconfig.Store, usageClient *usageservice.Client, holds rueidis.Client, notified func(), logger *slog.Logger) (*policy.Enforcer, func(), error) {
+func newPolicies(settings config.Config, configs *store.Store, usageClient *usageservice.Client, holds rueidis.Client, notified func(), sender *limitnotice.Sender, logger *slog.Logger) (*policy.Enforcer, func(), error) {
 	if configs == nil {
 		return nil, func() {}, nil
 	}
@@ -61,7 +61,7 @@ func newPolicies(settings config.Config, configs *appconfig.Store, usageClient *
 	if err != nil {
 		return nil, nil, err
 	}
-	notices := limitNotices(settings, configs, logger)
+	notices := limitNotices(settings, sender, logger)
 	closeCounters := func() {
 		if counters != nil {
 			counters.Close()
@@ -84,25 +84,45 @@ func newPolicies(settings config.Config, configs *appconfig.Store, usageClient *
 	return enforcer, closeCounters, nil
 }
 
-// limitNotices is what posts the first time each organization reaches a money limit to
-// ROUTER_LIMITS_SLACK_CHANNEL, or nil when that or its token is unset, limits are off or there
-// is no Postgres to keep the notices in.
-func limitNotices(settings config.Config, configs *appconfig.Store, logger *slog.Logger) *limitnotice.Notifier {
-	token := strings.TrimSpace(settings.Limits.SlackToken)
-	channel := strings.TrimSpace(settings.Limits.SlackChannel)
-	if token == "" || channel == "" || settings.Limits.Mode == config.LimitsOff || configs.DB() == nil {
+// noticeSender is what posts the notices to ROUTER_LIMITS_SLACK_CHANNEL, or nil when that or
+// its token is unset or there is no Postgres to keep the notices in.
+func noticeSender(settings config.Config, db *store.Store, logger *slog.Logger) *limitnotice.Sender {
+	options, ok := noticeSenderOptions(settings, db, logger)
+	if !ok {
 		return nil
 	}
-	links := limitnotice.Links{App: settings.Limits.AppURL, Staff: settings.Limits.StaffURL}
-	return limitnotice.New(configs.DB(), limitnotice.NewSlack(token, channel), sandboxEnvironment(), links, logger)
+	return limitnotice.NewSender(options)
 }
 
-// costAnomalies is what posts to ROUTER_LIMITS_SLACK_CHANNEL when an organization's spend today
-// jumps past its own baseline, or nil when that or its token is unset or there is no Postgres
-// to read the spend from. It runs whatever the limits' mode: work is priced and recorded with
-// limits off too.
-func costAnomalies(settings config.Config, db *store.Store, logger *slog.Logger) *limitnotice.Anomalies {
-	options, ok := costAnomalyOptions(settings, db, logger)
+// noticeSenderOptions is how noticeSender configures the sender, and false when there is none.
+func noticeSenderOptions(settings config.Config, db *store.Store, logger *slog.Logger) (limitnotice.SenderOptions, bool) {
+	token := strings.TrimSpace(settings.Limits.SlackToken)
+	channel := strings.TrimSpace(settings.Limits.SlackChannel)
+	if token == "" || channel == "" || db == nil {
+		return limitnotice.SenderOptions{}, false
+	}
+	return limitnotice.SenderOptions{
+		Store: db.Notices, Poster: limitnotice.NewSlack(token, channel), Environment: sandboxEnvironment(),
+		Links:  limitnotice.Links{App: settings.Limits.AppURL, Staff: settings.Limits.StaffURL},
+		Logger: logger,
+	}, true
+}
+
+// limitNotices is what posts the first time each organization reaches a money limit through
+// sender, or nil when there is no sender or limits are off.
+func limitNotices(settings config.Config, sender *limitnotice.Sender, logger *slog.Logger) *limitnotice.Notifier {
+	if sender == nil || settings.Limits.Mode == config.LimitsOff {
+		return nil
+	}
+	return limitnotice.New(sender, logger)
+}
+
+// costAnomalies is what posts through sender when an organization's spend today jumps past its
+// own baseline, and each day the day before's activity digest, and deletes the activity past its
+// keep, or nil when there is no Postgres. With no sender it posts nothing and still deletes. It
+// runs whatever the limits' mode: work is priced and recorded with limits off too.
+func costAnomalies(db *store.Store, sender *limitnotice.Sender, logger *slog.Logger) *limitnotice.Anomalies {
+	options, ok := costAnomalyOptions(db, sender, logger)
 	if !ok {
 		return nil
 	}
@@ -110,16 +130,13 @@ func costAnomalies(settings config.Config, db *store.Store, logger *slog.Logger)
 }
 
 // costAnomalyOptions is how costAnomalies configures the check, and false when it does not run.
-func costAnomalyOptions(settings config.Config, db *store.Store, logger *slog.Logger) (limitnotice.AnomalyOptions, bool) {
-	token := strings.TrimSpace(settings.Limits.SlackToken)
-	channel := strings.TrimSpace(settings.Limits.SlackChannel)
-	if token == "" || channel == "" || db == nil {
+// Without a sender, which needs a Slack token and channel, the check only deletes old activity:
+// the retention does not depend on Slack.
+func costAnomalyOptions(db *store.Store, sender *limitnotice.Sender, logger *slog.Logger) (limitnotice.AnomalyOptions, bool) {
+	if db == nil {
 		return limitnotice.AnomalyOptions{}, false
 	}
-	return limitnotice.AnomalyOptions{
-		Store: db, Poster: limitnotice.NewSlack(token, channel), Environment: sandboxEnvironment(),
-		Links: limitnotice.Links{Staff: settings.Limits.StaffURL}, Logger: logger,
-	}, true
+	return limitnotice.AnomalyOptions{Store: db, Sender: sender, Logger: logger, Digest: sender != nil}, true
 }
 
 // usageCounters connects to the Redis the usage service keeps its spend counters in, or nil

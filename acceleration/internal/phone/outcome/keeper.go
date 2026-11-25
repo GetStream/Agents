@@ -7,8 +7,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -33,21 +31,38 @@ func NewKeeper(st *store.Store, now func() time.Time, vendors []string, logger *
 	return &Keeper{store: st, now: now, vendors: vendors, logger: logger}
 }
 
-// Placed keeps a call about to be dialled and returns its token, for the vendor's status URL.
+// Placed keeps a call about to be dialled, as its leg, and returns its token, for the vendor's
+// status URL. The leg is dialled when it opens with the token.
 func (k *Keeper) Placed(ctx context.Context, call Call) (string, error) {
-	row := store.PhoneCall{
-		Token:        uuid.NewString(),
+	return k.PlacedWithin(ctx, call, "", nil)
+}
+
+// PlacedWithin is Placed for a call whose leg counts among organization's calls, refused with
+// store.ErrCallsAtOnce when atOnce, if set, leaves no room for it (store.CallLegs.PlaceWithin).
+func (k *Keeper) PlacedWithin(ctx context.Context, call Call, organization string, atOnce *store.CallsAtOnce) (string, error) {
+	placed := k.now()
+	row := store.CallLeg{
+		Token:        k.store.MintToken(),
 		CustomerID:   call.CustomerID,
 		StreamAppPK:  call.StreamAppPK,
 		CallType:     call.CallType,
 		CallID:       call.CallID,
 		Vendor:       call.Vendor,
+		Direction:    store.Outbound,
 		LocalNumber:  call.Local,
 		RemoteNumber: call.Remote,
 		Reports:      call.Reports,
-		PlacedAt:     k.now(),
+		PlacedAt:     &placed,
+		// Counted among the organization's calls up from now, not only once it is dialled.
+		OrganizationID: organization,
 	}
-	if err := k.store.InsertPhoneCall(ctx, &row); err != nil {
+	place := k.store.CallLegs.Place
+	if atOnce != nil {
+		place = func(ctx context.Context, leg *store.CallLeg) error {
+			return k.store.CallLegs.PlaceWithin(ctx, leg, *atOnce)
+		}
+	}
+	if err := place(ctx, &row); err != nil {
 		return "", err
 	}
 	return row.Token, nil
@@ -55,7 +70,7 @@ func (k *Keeper) Placed(ctx context.Context, call Call) (string, error) {
 
 // Dialed keeps the vendor's own id for the call once it took the dial.
 func (k *Keeper) Dialed(ctx context.Context, token, vendorCallID string) error {
-	_, err := k.store.ChangePhoneCall(ctx, store.PhoneCallWhere{Token: token}, func(row *store.PhoneCall) bool {
+	_, err := k.store.CallLegs.ChangeOutcome(ctx, store.PlacedWhere{Token: token}, func(row *store.CallLeg) bool {
 		row.VendorCallID = vendorCallID
 		return true
 	})
@@ -65,7 +80,7 @@ func (k *Keeper) Dialed(ctx context.Context, token, vendorCallID string) error {
 // Failed forgets a call that was never dialled, or that the vendor refused to dial: it never
 // rang, so it has no outcome.
 func (k *Keeper) Failed(ctx context.Context, token string) error {
-	return k.store.DeletePhoneCall(ctx, token)
+	return k.store.CallLegs.Unplace(ctx, token)
 }
 
 // Refused forgets a call the vendor was asked to dial and refused, as Failed does, and counts
@@ -78,7 +93,7 @@ func (k *Keeper) Refused(ctx context.Context, token, vendor string) error {
 // Reported takes a vendor's report and counts what it says of the carrier.
 func (k *Keeper) Reported(ctx context.Context, token string, report Report) (Call, error) {
 	e := event{kind: reportedEvent, reported: report.Outcome, word: report.Word, at: k.now()}
-	before, call, err := k.decide(ctx, store.PhoneCallWhere{Token: token}, e)
+	before, call, err := k.decide(ctx, store.PlacedWhere{Token: token}, e)
 	if err != nil {
 		return Call{}, asUnknown(err)
 	}
@@ -110,7 +125,7 @@ func (k *Keeper) Answered(ctx context.Context, key Key, at time.Time) error {
 func (k *Keeper) Ended(ctx context.Context, key Key, at time.Time, leg Leg) error {
 	before, call, err := k.decide(ctx, where(key), event{kind: endedEvent, at: at})
 	switch {
-	case err != nil && !errors.Is(err, store.ErrNoPhoneCall):
+	case err != nil && !errors.Is(err, store.ErrNoPlacedCall):
 		return err
 	case leg.Inbound && leg.Refused:
 		k.count(ctx, key, leg.Vendor, inbound, Failed, nil, at)
@@ -124,7 +139,7 @@ func (k *Keeper) Ended(ctx context.Context, key Key, at time.Time, leg Leg) erro
 
 // ByToken reads the call a token was made for.
 func (k *Keeper) ByToken(ctx context.Context, token string) (Call, error) {
-	row, err := k.store.PhoneCallByToken(ctx, token)
+	row, err := k.store.CallLegs.GetByToken(ctx, token)
 	if err != nil {
 		return Call{}, asUnknown(err)
 	}
@@ -146,7 +161,7 @@ func (k *Keeper) Read(ctx context.Context, customerID, callID string) (Call, err
 
 // ReadMany reads the newest call for each of callIDs, by call id. One with no call is left out.
 func (k *Keeper) ReadMany(ctx context.Context, customerID string, callIDs []string) (map[string]Call, error) {
-	rows, err := k.store.PhoneCalls(ctx, customerID, callIDs)
+	rows, err := k.store.CallLegs.SelectPlaced(ctx, customerID, callIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -160,20 +175,20 @@ func (k *Keeper) ReadMany(ctx context.Context, customerID string, callIDs []stri
 // Sweep clears the tokens of calls placed before placedBefore, so a vendor's late post for one
 // is refused, and keeps their outcomes.
 func (k *Keeper) Sweep(ctx context.Context, placedBefore time.Time) (int64, error) {
-	return k.store.ClearPhoneCallTokens(ctx, placedBefore)
+	return k.store.CallLegs.ClearTokens(ctx, placedBefore)
 }
 
 // decide runs e on the call where finds, under the row's lock, so events arriving at once each
 // see what the others decided. before is the call as e found it: e is what first ended the
 // call when before has no end, which one event of a call is, whatever order they come in.
-func (k *Keeper) decide(ctx context.Context, where store.PhoneCallWhere, e event) (before, call Call, err error) {
-	row, err := k.store.ChangePhoneCall(ctx, where, func(row *store.PhoneCall) bool {
+func (k *Keeper) decide(ctx context.Context, where store.PlacedWhere, e event) (before, call Call, err error) {
+	row, err := k.store.CallLegs.ChangeOutcome(ctx, where, func(row *store.CallLeg) bool {
 		before = callOf(*row)
 		after := decide(before, e)
 		if after == before {
 			return false
 		}
-		row.AnsweredAt, row.EndedAt, row.DecidedAt = after.AnsweredAt, after.EndedAt, after.DecidedAt
+		row.AnsweredAt, row.OutcomeEndedAt, row.DecidedAt = after.AnsweredAt, after.EndedAt, after.DecidedAt
 		row.Outcome, row.VendorStatus = string(after.Outcome), after.VendorStatus
 		return true
 	})
@@ -192,7 +207,7 @@ func (k *Keeper) count(ctx context.Context, key Key, vendor, direction string, o
 	label := string(outcome)
 	vendor = k.vendorLabel(vendor)
 	if answered != nil {
-		session, err := k.store.StoredSession(ctx, key.CustomerID, key.CallID)
+		session, err := k.store.Sessions.Get(ctx, key.CustomerID, key.CallID)
 		switch {
 		case err == nil && leftOnTheLine(session, ended):
 			label = dropped
@@ -215,8 +230,8 @@ func (k *Keeper) vendorLabel(vendor string) string {
 	return vendor
 }
 
-func where(key Key) store.PhoneCallWhere {
-	return store.PhoneCallWhere{
+func where(key Key) store.PlacedWhere {
+	return store.PlacedWhere{
 		CustomerID:   key.CustomerID,
 		StreamAppPK:  key.StreamAppPK,
 		CallType:     key.CallType,
@@ -226,7 +241,11 @@ func where(key Key) store.PhoneCallWhere {
 	}
 }
 
-func callOf(row store.PhoneCall) Call {
+func callOf(row store.CallLeg) Call {
+	var placed time.Time
+	if row.PlacedAt != nil {
+		placed = *row.PlacedAt
+	}
 	return Call{
 		Key: Key{
 			CustomerID:  row.CustomerID,
@@ -239,9 +258,9 @@ func callOf(row store.PhoneCall) Call {
 		Vendor:       row.Vendor,
 		Reports:      row.Reports,
 		VendorCallID: row.VendorCallID,
-		PlacedAt:     row.PlacedAt,
+		PlacedAt:     placed,
 		AnsweredAt:   row.AnsweredAt,
-		EndedAt:      row.EndedAt,
+		EndedAt:      row.OutcomeEndedAt,
 		Outcome:      Outcome(row.Outcome),
 		VendorStatus: row.VendorStatus,
 		DecidedAt:    row.DecidedAt,
@@ -250,7 +269,7 @@ func callOf(row store.PhoneCall) Call {
 
 // asUnknown is err, with a call the store holds no row for as ErrUnknownCall.
 func asUnknown(err error) error {
-	if errors.Is(err, store.ErrNoPhoneCall) {
+	if errors.Is(err, store.ErrNoPlacedCall) {
 		return ErrUnknownCall
 	}
 	return err
@@ -258,7 +277,7 @@ func asUnknown(err error) error {
 
 // skipRowless is err, with a call the store holds no row for as no error.
 func skipRowless(err error) error {
-	if errors.Is(err, store.ErrNoPhoneCall) {
+	if errors.Is(err, store.ErrNoPlacedCall) {
 		return nil
 	}
 	return err

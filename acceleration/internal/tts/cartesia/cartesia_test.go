@@ -15,6 +15,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // fakeCartesia is a WebSocket server that speaks the context protocol, so the provider can
@@ -255,12 +256,12 @@ func (s *CartesiaSuite) TestNewRequiresAPIKey() {
 
 func (s *CartesiaSuite) TestNewFallsBackToEnv() {
 	s.T().Setenv("CARTESIA_API_KEY", "from-env")
-	s.T().Setenv("CARTESIA_VOICE_ID", "voice-from-env")
+	s.T().Setenv("CARTESIA_VOICE_ID", "f786b574-daa5-4673-aa0c-cbe3e8534c02")
 
 	provider, err := New(Options{})
 	s.Require().NoError(err)
 	s.Equal("from-env", provider.options.APIKey)
-	s.Equal("voice-from-env", provider.options.VoiceID)
+	s.Equal("f786b574-daa5-4673-aa0c-cbe3e8534c02", provider.options.VoiceID)
 }
 
 func (s *CartesiaSuite) TestNewDefaultsToSonicAndAVoice() {
@@ -344,7 +345,7 @@ func (s *CartesiaSuite) TestCloseSettlesAnUtteranceThatNeverFinished() {
 func (s *CartesiaSuite) TestAnUtteranceStreamsTextOnOneContextAndThenEndsIt() {
 	fake := newFakeCartesia()
 	defer fake.close()
-	provider, conn := s.connect(fake, Options{VoiceID: "v1", SampleRate: 16_000})
+	provider, conn := s.connect(fake, Options{VoiceID: "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4", SampleRate: 16_000})
 	defer provider.Close()
 
 	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "hello"}))
@@ -355,7 +356,7 @@ func (s *CartesiaSuite) TestAnUtteranceStreamsTextOnOneContextAndThenEndsIt() {
 
 	s.Equal("hello", messages[0].Transcript)
 	s.Equal("u1", messages[0].ContextID)
-	s.Equal("v1", messages[0].Voice.ID)
+	s.Equal("db6b0ed5-d5d3-463d-ae85-518a07d3c2b4", messages[0].Voice.ID)
 	s.Equal(DefaultModel, messages[0].ModelID)
 	s.Equal(outputFormat{Container: "raw", Encoding: "pcm_s16le", SampleRate: 16_000},
 		messages[0].OutputFormat)
@@ -511,26 +512,68 @@ func (s *CartesiaSuite) TestAnUtteranceCannotChangeVoiceHalfway() {
 	// through would be one answer said in two voices.
 	fake := newFakeCartesia()
 	defer fake.close()
-	provider, _ := s.connect(fake, Options{VoiceID: "v1"})
+	provider, _ := s.connect(fake, Options{VoiceID: "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4"})
 	defer provider.Close()
 
 	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "hello"}))
 
-	err := provider.Synthesize(tts.Request{ID: "u1", Text: " world", Voice: "v2"})
-	s.ErrorContains(err, "being said in voice v1, not v2")
+	err := provider.Synthesize(tts.Request{ID: "u1", Text: " world", Voice: "a0e99841-438c-4a64-b679-ae501e7d6091"})
+	s.ErrorContains(err, "being said in voice db6b0ed5-d5d3-463d-ae85-518a07d3c2b4, not a0e99841-438c-4a64-b679-ae501e7d6091")
 }
 
 func (s *CartesiaSuite) TestAnUtteranceCanPickItsOwnVoice() {
 	fake := newFakeCartesia()
 	defer fake.close()
-	provider, conn := s.connect(fake, Options{VoiceID: "session-voice"})
+	provider, conn := s.connect(fake, Options{VoiceID: "694f9389-aac1-45b6-b726-9d9369183238"})
 	defer provider.Close()
 
 	s.Require().NoError(provider.Synthesize(tts.Request{
-		ID: "u1", Text: "hello", Voice: "chosen-voice", Final: true,
+		ID: "u1", Text: "hello", Voice: "3b554273-4299-48b9-9aaf-eefd438e3941", Final: true,
 	}))
 
-	s.Equal("chosen-voice", s.generations(conn, 1)[0].Voice.ID)
+	s.Equal("3b554273-4299-48b9-9aaf-eefd438e3941", s.generations(conn, 1)[0].Voice.ID)
+}
+
+// A spelling of an id that voiceid refuses is refused by the provider itself, wherever the voice
+// came from (an overwrite skips the resolver), as the caller's mistake and before a socket is asked.
+func (s *CartesiaSuite) TestAVoiceThatIsNoCartesiaIdIsRefusedWhereverItComesFrom() {
+	const id = "a0e99841-438c-4a64-b679-ae501e7d6091"
+	for _, voice := range []string{
+		"a0e99841438c4a64b679ae501e7d6091", "{" + id + "}", "urn:uuid:" + id, id + " ", "v1",
+	} {
+		_, err := New(Options{APIKey: "key", VoiceID: voice})
+		s.ErrorIs(err, ErrRefused, voice)
+		s.ErrorIs(err, voiceid.ErrInvalid, voice)
+
+		fake := newFakeCartesia()
+		provider, _ := s.connect(fake, Options{VoiceID: id})
+		err = provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Voice: voice, Final: true})
+		s.ErrorIs(err, ErrRefused, voice)
+
+		s.Require().NoError(provider.Synthesize(tts.Request{ID: "u2", Text: "hello", Final: false}))
+		err = provider.Synthesize(tts.Request{ID: "u2", Text: " again", Voice: voice, Final: true})
+		s.ErrorIs(err, ErrRefused, "an utterance already open: "+voice)
+		provider.Close()
+		fake.close()
+	}
+}
+
+// The id the ownership check compared is the one in the body, whatever case it was typed in.
+func (s *CartesiaSuite) TestAVoiceIdInUpperCaseIsSentInLowercase() {
+	const id = "a0e99841-438c-4a64-b679-ae501e7d6091"
+	fake := newFakeCartesia()
+	defer fake.close()
+	provider, conn := s.connect(fake, Options{VoiceID: "A0E99841-438C-4A64-B679-AE501E7D6091"})
+	defer provider.Close()
+
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: "hello"}))
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u1", Text: " again", Voice: "A0E99841-438C-4A64-B679-AE501E7D6091"}),
+		"the same voice in another case is the same voice")
+	s.Require().NoError(provider.Synthesize(tts.Request{ID: "u2", Text: "hi", Voice: "A0e99841-438c-4a64-b679-aE501e7d6091"}))
+
+	for _, generation := range s.generations(conn, 3) {
+		s.Equal(id, generation.Voice.ID)
+	}
 }
 
 func (s *CartesiaSuite) TestAServerErrorIsReportedAndSettlesTheUtterance() {

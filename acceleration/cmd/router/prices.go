@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -191,7 +190,7 @@ func retryPriceSync(ctx context.Context, pgStore *store.Store, load store.PriceL
 func syncPricesOnce(ctx context.Context, pgStore *store.Store, load store.PriceLoad, every time.Duration, logger *slog.Logger) bool {
 	ctx, cancel := context.WithTimeout(ctx, priceAttempt)
 	defer cancel()
-	change, added, wrote, err := pgStore.SyncPrices(ctx, load)
+	change, added, wrote, err := pgStore.PriceChanges.Sync(ctx, load)
 	if err != nil {
 		logger.Error("could not load the price files into the database; trying again", "in", every, "error", err)
 		return false
@@ -215,9 +214,10 @@ func openPriceStore(settings config.Config) (*store.Store, error) {
 		return nil, errors.New("this needs a database: set postgres.dsn")
 	}
 	return store.OpenShards(store.Options{
+		Shard:    settings.Shard,
 		DSN:      settings.Postgres.DSN,
 		ShardDSN: settings.Postgres.ShardDSN,
-		Shards:   settings.Postgres.Shards,
+		Shards:   settings.Shards,
 	})
 }
 
@@ -261,7 +261,7 @@ func runPricesShow(ctx context.Context, args []string, settings config.Config, o
 		return err
 	}
 	defer pgStore.Close()
-	rows, err := pgStore.ActivePriceEntries(ctx, at)
+	rows, err := pgStore.PriceEntries.Active(ctx, at)
 	if err != nil {
 		return err
 	}
@@ -351,7 +351,7 @@ func runPricesSync(ctx context.Context, args []string, settings config.Config, o
 		return err
 	}
 	defer pgStore.Close()
-	seed, added, err := pgStore.PricesToLoad(ctx, load.Entries)
+	seed, added, err := pgStore.PriceChanges.ToLoad(ctx, load.Entries)
 	if err != nil {
 		return err
 	}
@@ -452,15 +452,13 @@ func describeTarget(ctx context.Context, pgStore *store.Store, settings config.C
 	if err != nil {
 		return "", err
 	}
-	var database string
-	var server sql.NullString
-	if err := pgStore.DB().QueryRowContext(ctx,
-		"SELECT current_database(), host(inet_server_addr()) || ':' || inet_server_port()").Scan(&database, &server); err != nil {
+	database, server, err := pgStore.Server(ctx)
+	if err != nil {
 		return "", err
 	}
 	answers := "over a unix socket"
-	if server.Valid {
-		answers = "as " + server.String
+	if server != "" {
+		answers = "as " + server
 	}
 	return fmt.Sprintf("database %q at %s (%s), which answers %s\n", database, address, network, answers), nil
 }
@@ -491,7 +489,7 @@ func runPricesReload(ctx context.Context, args []string, settings config.Config,
 	if _, err := io.WriteString(out, target); err != nil {
 		return err
 	}
-	reload, err := pgStore.ReloadPrices(ctx, load, *dryRun)
+	reload, err := pgStore.PriceChanges.Reload(ctx, load, *dryRun)
 	if err != nil {
 		return err
 	}
@@ -615,7 +613,7 @@ func runPricesDrift(ctx context.Context, args []string, settings config.Config, 
 		return err
 	}
 	defer pgStore.Close()
-	models, err := pgStore.VendorCostGaps(ctx, time.Now().Add(-*since), driftExamples, *timeout)
+	models, err := pgStore.Requests.VendorCostGaps(ctx, time.Now().Add(-*since), driftExamples, *timeout)
 	if err != nil {
 		return err
 	}

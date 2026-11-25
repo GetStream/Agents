@@ -42,7 +42,9 @@ That is the price of one artifact; do not split it back up without being asked.
 repository's root, so the manifest is the root `Package.swift`, its targets reaching into
 `sdks/swift/core` with `path:`, and the examples reference the root by path. A release is a `v`
 tag, shared with the Python packages: there is nothing to upload, and SwiftPM has no tag prefix
-that would give Swift versions of its own. Never move or delete a released tag. An app clones
+that would give Swift versions of its own. Never move or delete a released tag. `Backend.version`
+is the tag's version, a literal the release PR sets (step 2 of the `release` skill), since a
+package cannot read its own tag; it is the release `X-Stream-Client` names. An app clones
 the whole repository once (`git clone --mirror`, about 300 MB); that is the price of one
 repository. Do not make `Package.swift` branch on an environment variable between `path:` and
 `url:` — resolution stops being reproducible and development paths leak into releases.
@@ -247,11 +249,15 @@ let session = try await agents.agent("myagent").sessions.create()
 let turn = try await session.responses.create("Where is order 1042?")
 ```
 
+`sessions.create` returns once the session's socket is open, so the tools in its options are
+answered from the first turn, as in JS. `watch = false` opens it with no socket; `chat` and
+`voice` open one whose socket waits for `start()`.
+
 and the advanced form is a request value, not thirty initialiser parameters:
 
 ```swift
 var options = SessionOptions(agent: "myagent")
-options.greeting = Greeting("Hello.", mode: .variation)
+options.title = "Order 1042"
 let session = try await agents.sessions.create(options)
 ```
 

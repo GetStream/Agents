@@ -43,7 +43,7 @@ func (s *UsageCommandsSuite) TestTheRentalJobBillsEachMonthAfterThePurchaseOnce(
 	own := store.PhoneNumber{E164: "+15125550103", Vendor: phone.SIPTrunkVendor, Country: "US", CustomerID: "app-1",
 		PurchasedAt: bought}
 	for _, number := range []*store.PhoneNumber{&priced, &unpriced, &own} {
-		s.Require().NoError(s.store.RecordNumber(s.ctx, number))
+		s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, number))
 	}
 	now := time.Date(2026, 10, 14, 11, 0, 0, 0, time.UTC)
 
@@ -66,7 +66,7 @@ func (s *UsageCommandsSuite) TestTheRentalJobBillsEachMonthAfterThePurchaseOnce(
 }
 
 func (s *UsageCommandsSuite) TestTheRentalJobBillsNothingThatBeganBeforeFrom() {
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: "+15125550104", Vendor: "telnyx", Country: "US", CustomerID: "app-1",
 		MonthlyCostMicros: 1_000_000, PurchasedAt: time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC),
 	}))
@@ -87,9 +87,9 @@ func (s *UsageCommandsSuite) TestTheTelephonyJobsNeedFrom() {
 
 func (s *UsageCommandsSuite) TestTheDLCJobBillsACampaignsMonthsFromItsRegistration() {
 	useCase := store.UseCase{CustomerID: "app-1", Name: "support", Status: dlc.Approved, UseCaseType: "low_volume"}
-	s.Require().NoError(s.store.CreateUseCase(s.ctx, &useCase))
+	s.Require().NoError(s.store.UseCases.Insert(s.ctx, &useCase))
 	useCase.Vendor, useCase.VendorCampaignID = "telnyx", "campaign-1"
-	s.Require().NoError(s.store.MoveUseCase(s.ctx, &useCase, dlc.Approved,
+	s.Require().NoError(s.store.UseCases.Move(s.ctx, &useCase, dlc.Approved,
 		&store.ReviewLog{Actor: dlc.ActorVendor, ActorName: "telnyx", Notes: "Registered as campaign campaign-1."}))
 	now := func() time.Time { return time.Now().UTC() }
 	logger := slog.New(slog.DiscardHandler)

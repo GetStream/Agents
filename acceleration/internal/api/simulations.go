@@ -2,11 +2,13 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/simulation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/danielgtaylor/huma/v2"
 )
@@ -25,6 +27,10 @@ var (
 		Type: ErrorTypeNotFound, Code: codeSimulationRunNotFound,
 		Message: "no such simulation run",
 	}
+	errNoAudioSimulations = notConfigured("audio simulations cannot be run here: this deployment has no speech models " +
+		"to give the caller a voice")
+	errSimulationsBusy   = rateLimited("as many simulation runs as can go at once are already going: try again once one has finished")
+	errSimulationsClosed = unavailable("the router is shutting down: try the run again")
 )
 
 // listSimulations returns the calling customer's simulations, newest first.
@@ -37,7 +43,7 @@ func (s *Server) listSimulations(ctx context.Context, _ *listSimulationsRequest)
 		return nil, errNoSimulations
 	}
 
-	stored, err := s.store.CustomerSimulations(ctx, customerID)
+	stored, err := s.store.Simulations.Select(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}
@@ -66,8 +72,8 @@ func (s *Server) createSimulation(ctx context.Context, request *createSimulation
 	if failure := simulationComplaint(ctx, s, customerID, simulation); failure != nil {
 		return nil, failure
 	}
-	if err := s.store.CreateSimulation(ctx, &simulation); err != nil {
-		return nil, invalidRequest(err.Error())
+	if err := s.store.Simulations.Insert(ctx, &simulation); err != nil {
+		return nil, err
 	}
 	return &createSimulationResponse{Body: simulationOf(simulation)}, nil
 }
@@ -82,9 +88,9 @@ func (s *Server) getSimulation(ctx context.Context, request *getSimulationReques
 		return nil, errNoSimulations
 	}
 
-	simulation, err := s.store.Simulation(ctx, customerID, request.Id)
+	simulation, err := s.store.Simulations.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownSimulation
+		return nil, unknownOr(err, store.ErrNoSimulation, errUnknownSimulation)
 	}
 	return &getSimulationResponse{Body: simulationOf(simulation)}, nil
 }
@@ -103,9 +109,9 @@ func (s *Server) updateSimulation(ctx context.Context, request *updateSimulation
 		return nil, invalidRequest("a request body is required")
 	}
 
-	existing, err := s.store.Simulation(ctx, customerID, request.Id)
+	existing, err := s.store.Simulations.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownSimulation
+		return nil, unknownOr(err, store.ErrNoSimulation, errUnknownSimulation)
 	}
 
 	simulation := storedSimulation(*request.Body, customerID)
@@ -113,8 +119,8 @@ func (s *Server) updateSimulation(ctx context.Context, request *updateSimulation
 	if failure := simulationComplaint(ctx, s, customerID, simulation); failure != nil {
 		return nil, failure
 	}
-	if err := s.store.UpdateSimulation(ctx, &simulation); err != nil {
-		return nil, invalidRequest(err.Error())
+	if err := s.store.Simulations.Update(ctx, &simulation); err != nil {
+		return nil, unknownOr(err, store.ErrNoSimulation, errUnknownSimulation)
 	}
 
 	simulation.CreatedAt = existing.CreatedAt
@@ -131,8 +137,8 @@ func (s *Server) deleteSimulation(ctx context.Context, request *deleteSimulation
 		return nil, errNoSimulations
 	}
 
-	if err := s.store.DeleteSimulation(ctx, customerID, request.Id); err != nil {
-		return nil, errUnknownSimulation
+	if err := s.store.Simulations.Delete(ctx, customerID, request.Id); err != nil {
+		return nil, unknownOr(err, store.ErrNoSimulation, errUnknownSimulation)
 	}
 	return nil, nil
 }
@@ -151,12 +157,21 @@ func (s *Server) runSimulation(ctx context.Context, request *runSimulationReques
 		return nil, errCannotRunSimulations
 	}
 
-	if _, err := s.store.Simulation(ctx, customerID, request.Id); err != nil {
-		return nil, errUnknownSimulation
+	if _, err := s.store.Simulations.Get(ctx, customerID, request.Id); err != nil {
+		return nil, unknownOr(err, store.ErrNoSimulation, errUnknownSimulation)
 	}
 	run, err := s.simulations.Start(ctx, customerID, request.Id)
-	if err != nil {
-		return nil, invalidRequest(err.Error())
+	switch {
+	case errors.Is(err, store.ErrNoAgentConfig):
+		return nil, errUnknownConfig
+	case errors.Is(err, simulation.ErrNoAudio):
+		return nil, errNoAudioSimulations
+	case errors.Is(err, simulation.ErrBusy):
+		return nil, errSimulationsBusy
+	case errors.Is(err, simulation.ErrClosed):
+		return nil, errSimulationsClosed
+	case err != nil:
+		return nil, unknownOr(err, store.ErrNoSimulation, errUnknownSimulation)
 	}
 	return &runSimulationResponse{Body: simulationRunOf(run, nil)}, nil
 }
@@ -172,7 +187,6 @@ func (s *Server) listSimulationRuns(ctx context.Context, request *listSimulation
 	}
 
 	filter := store.SimulationRunFilter{
-		CustomerID:   customerID,
 		SimulationID: value(request.SimulationId.ptr()),
 		Limit:        value(request.Limit.ptr()),
 	}
@@ -180,7 +194,7 @@ func (s *Server) listSimulationRuns(ctx context.Context, request *listSimulation
 		filter.State = string(*request.State.ptr())
 	}
 
-	stored, err := s.store.SimulationRuns(ctx, filter)
+	stored, err := s.store.SimulationRuns.Select(ctx, customerID, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -204,11 +218,11 @@ func (s *Server) getSimulationRun(ctx context.Context, request *getSimulationRun
 		return nil, errNoSimulations
 	}
 
-	run, err := s.store.SimulationRun(ctx, customerID, request.Id)
+	run, err := s.store.SimulationRuns.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownSimulationRun
+		return nil, unknownOr(err, store.ErrNoSimulationRun, errUnknownSimulationRun)
 	}
-	cases, err := s.store.SimulationCases(ctx, run.ID)
+	cases, err := s.store.SimulationCases.Select(ctx, run.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +244,7 @@ func (s *Server) cancelSimulationRun(ctx context.Context, request *cancelSimulat
 
 	run, err := s.simulations.Cancel(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownSimulationRun
+		return nil, unknownOr(err, store.ErrNoSimulationRun, errUnknownSimulationRun)
 	}
 	return &cancelSimulationRunResponse{Body: simulationRunOf(run, nil)}, nil
 }
@@ -284,8 +298,8 @@ func simulationComplaint(
 	if err := routing.Tags(simulation.Tags).Validate(); err != nil {
 		return invalidRequest(err.Error())
 	}
-	if _, err := server.store.AgentConfig(ctx, customerID, simulation.ConfigID); err != nil {
-		return errUnknownConfig
+	if _, err := server.store.AgentConfigs.Get(ctx, customerID, simulation.ConfigID); err != nil {
+		return unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	return nil
 }
@@ -472,7 +486,8 @@ func (s *Server) registerSimulations(api huma.API) {
 		Responses: map[string]*huma.Response{
 			"202": {Description: "The run is going"},
 		},
-		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+			http.StatusTooManyRequests, http.StatusServiceUnavailable},
 	}, s.runSimulation)
 	huma.Register(api, huma.Operation{
 		OperationID: "listSimulationRuns",
@@ -558,7 +573,7 @@ type runSimulationResponse struct {
 type listSimulationRunsRequest struct {
 	SimulationId optionalParam[string]                        `query:"simulation_id"`
 	State        optionalParam[ListSimulationRunsParamsState] `query:"state" enum:"running,passed,failed,cancelled,errored"`
-	Limit        optionalParam[int]                           `query:"limit"`
+	Limit        optionalParam[int]                           `query:"limit" doc:"Up to 500. Omitted is 50." minimum:"1" maximum:"500"`
 }
 
 type listSimulationRunsResponse struct {

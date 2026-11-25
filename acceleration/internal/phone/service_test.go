@@ -1,13 +1,17 @@
 package phone
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
 type ServiceSuite struct {
@@ -76,4 +80,32 @@ func (s *ServiceSuite) TestEveryVendorOfTheServiceHasItsCallSeriesAtZeroFromTheS
 	for _, vendor := range vendors {
 		s.True(has[vendor], vendor)
 	}
+}
+
+func (s *ServiceSuite) TestAPlacingTheDatabaseFailedIsAPlacingFailure() {
+	err := notPlaced(context.Background(), errors.New("lock timeout"))
+
+	s.ErrorIs(err, ErrNotPlaced)
+	s.ErrorIs(err, ErrPlacingFailed)
+}
+
+func (s *ServiceSuite) TestAPlacingCutOffByItsContextIsNoPlacingFailure() {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := notPlaced(ctx, ctx.Err())
+
+	s.ErrorIs(err, ErrNotPlaced)
+	s.NotErrorIs(err, ErrPlacingFailed, "a shutdown rings the contact again at once")
+}
+
+// A call that fails before it is sent, for a reason a second try would meet again, is not
+// marked never dialed: a campaign would retry it every few minutes for ever. Anything else is.
+func (s *ServiceSuite) TestOnlyAFailureThatMayPassIsMarkedNeverDialed() {
+	for _, err := range []error{ErrInvalid, store.ErrNoNumber, store.ErrNoSIPTrunk, ErrNoStream, ErrNoSealerToCall, ErrNotConfigured,
+		ErrSIPTrunksDisabled, streamapp.ErrNoIdentity, streamapp.ErrStreamAppMoved, streamapp.ErrStreamAppDisconnected,
+		streamapp.ErrReadOnly, streamapp.ErrDeploymentAppMismatch, lastingError{errors.New("telnyx: no api key")}} {
+		s.True(lasting(stack.Wrap(err)), err.Error())
+	}
+	s.False(lasting(errors.New("store: number: read tcp: i/o timeout")))
 }

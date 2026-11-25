@@ -1,7 +1,7 @@
 import { ConfigurationError } from "./errors.js";
 
-/** Stream's hosted router, which is where a client goes when nothing says otherwise. */
-export const DEFAULT_URL = "https://accelerate-us-east4.gcp.stream-io-api.com";
+/** Stream's hosted router in the nearest healthy region, which is where a client goes when nothing says otherwise. */
+export const DEFAULT_URL = "https://accelerate.gcp.stream-io-api.com";
 
 /** The environment the same variables are read from as in the Go and Python clients. */
 export const URL_ENV = "STREAM_ACCELERATION_URL";
@@ -12,6 +12,15 @@ export const API_KEY_ENV = "STREAM_API_KEY";
 export const API_SECRET_ENV = "STREAM_API_SECRET";
 export const AUTHENTICATE_ENV = "STREAM_ACCELERATION_AUTHENTICATE";
 
+/**
+ * Written in by the build, `vite.config.ts`, from package.json. Undefined where the source runs
+ * without it, as in the tests.
+ */
+declare const __SDK_VERSION__: string | undefined;
+
+/** This SDK's release, the version npm published. */
+export const VERSION: string = typeof __SDK_VERSION__ === "string" ? __SDK_VERSION__ : "0.0.0-development";
+
 /** How long a token minted here lasts. */
 const TOKEN_VALIDITY_SECONDS = 60 * 60;
 
@@ -20,6 +29,12 @@ const MINTED_LIMIT = 64;
 
 /** How many times a request safe to send twice is retried when nothing says. */
 const DEFAULT_MAX_RETRIES = 2;
+
+/** How long a request waits for the router to start answering when nothing says. */
+const DEFAULT_TIMEOUT_MS = 60_000;
+
+/** The longest delay a timer takes, 2^31 - 1 milliseconds; a longer one fires at once. */
+const MAX_TIMER_MS = 2_147_483_647;
 
 /**
  * Where a router with no proxy in front of it reads the team and usage categories, the team
@@ -124,8 +139,11 @@ export function regionUrl(name: string): string {
   return REGION_PREFIX + name + REGION_SUFFIX;
 }
 
-/** Whether url is the hosted router in some region, which is always behind the proxy. */
+/** Whether url is the hosted router, nearest or in some region, which is always behind the proxy. */
 function hosted(url: string): boolean {
+  if (url === DEFAULT_URL) {
+    return true;
+  }
   if (!url.startsWith(REGION_PREFIX) || !url.endsWith(REGION_SUFFIX)) {
     return false;
   }
@@ -162,7 +180,27 @@ export type WebSocketLike = Pick<
   "send" | "close" | "addEventListener" | "removeEventListener" | "readyState"
 > & { binaryType: string };
 
+/**
+ * A WebSocket class, as a page passes one: called with the URL alone, so the browser's own
+ * `WebSocket` is one.
+ */
 export type WebSocketConstructor = new (url: string) => WebSocketLike;
+
+/**
+ * What a backend holding the secret opens its sockets with besides the URL: the credential, as
+ * headers (see `Backend.socketHeaders`). Node's own WebSocket and the `ws` package both take
+ * `{ headers }` as their second argument; a WebSocket passed as the `webSocket` option to such a
+ * backend has to as well.
+ */
+export interface WebSocketInit {
+  headers?: Record<string, string>;
+}
+
+/**
+ * A WebSocket class that takes `WebSocketInit` as its second argument, which a backend holding the
+ * secret calls it with. A page's sockets carry no headers, so one is never called that way there.
+ */
+export type HeaderWebSocketConstructor = new (url: string, init: WebSocketInit) => WebSocketLike;
 
 export interface BackendOptions {
   /**
@@ -256,10 +294,22 @@ export interface BackendOptions {
    * 0 reports the first failure.
    */
   maxRetries?: number;
+  /**
+   * How long a request waits for the router to start answering, in milliseconds, before it is
+   * given up as one that never arrived: a connection that went quiet without closing, as one
+   * does across a network change, would otherwise leave the call pending for good. Once the
+   * answer has begun it is not timed, so an event stream or a long download runs on. Defaults to
+   * 60 seconds; 0 waits as long as it takes.
+   */
+  timeoutMs?: number;
   /** Used for every request. Defaults to the global fetch. */
   fetch?: typeof fetch;
-  /** Used for every socket. Defaults to the global WebSocket. */
-  webSocket?: WebSocketConstructor;
+  /**
+   * Used for every socket. Defaults to the global WebSocket. With `apiSecret` it is called with
+   * a second argument, `{ headers }`, which carry the credential, as Node's own WebSocket and
+   * the `ws` package take them.
+   */
+  webSocket?: WebSocketConstructor | HeaderWebSocketConstructor;
 }
 
 /**
@@ -281,6 +331,8 @@ export class Backend {
   readonly usageCategories: readonly string[];
   /** How many times a transient failure of a request safe to send twice is retried. */
   readonly maxRetries: number;
+  /** How long a request waits for the router to start answering, or 0 for as long as it takes. */
+  readonly timeoutMs: number;
   /** Whether the router is told the customer rather than shown a credential. */
   private readonly byCustomer: boolean;
   /**
@@ -315,7 +367,7 @@ export class Backend {
    */
   private minted = new Map<string, { token: Promise<string>; expiresAt: number }>();
   private readonly fetchImpl: typeof fetch;
-  private readonly webSocketImpl: WebSocketConstructor | undefined;
+  private readonly webSocketImpl: WebSocketConstructor | HeaderWebSocketConstructor | undefined;
 
   constructor(options: BackendOptions = {}) {
     this.team = options.team || undefined;
@@ -342,6 +394,14 @@ export class Backend {
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
     if (!Number.isInteger(this.maxRetries) || this.maxRetries < 0) {
       throw new ConfigurationError(`maxRetries is a count of retries, not ${String(options.maxRetries)}`);
+    }
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    // A timer longer than about 24.8 days overflows and fires at once, which would time every
+    // request out immediately rather than never: 0 is how to say no limit.
+    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs < 0 || this.timeoutMs > MAX_TIMER_MS) {
+      throw new ConfigurationError(
+        `timeoutMs is a number of milliseconds up to ${MAX_TIMER_MS}, or 0 for no limit, not ${String(options.timeoutMs)}`,
+      );
     }
     this.authenticate =
       options.authenticate ?? (boolean(env(AUTHENTICATE_ENV)) || hosted(this.url));
@@ -512,17 +572,13 @@ export class Backend {
    * Unlike `userId` it never mints a token for that user, so the request is still the
    * server's: what it writes is answered by the model rather than handed back to a dispatch
    * worker, and no daily limit is counted. The user goes in `X-Stream-User-Id`.
+   *
+   * @deprecated Name the user on the call instead, with its optional `userId`, such as
+   * `api.connections.create("linear", { userId })`. A dispatch worker's `answer`
+   * already speaks for whoever wrote the message.
    */
   actingFor(userId: string): Backend {
-    const acting = Object.assign(Object.create(Backend.prototype) as Backend, this);
-    acting.userIdValue = "";
-    acting.user = undefined;
-    // A cache of its own: a fetch the original started settles into the original's fields,
-    // so a copied one would be held here forever.
-    acting.fetched = undefined;
-    acting.fetching = undefined;
-    acting.actingForValue = userId;
-    return acting;
+    return speakingFor(this, userId);
   }
 
   /**
@@ -587,6 +643,11 @@ export class Backend {
    * guest asked for by nobody yet.
    */
   async headers(anonymously = false): Promise<Record<string, string>> {
+    return { ...clientHeaders(), ...(await this.credentials(anonymously)) };
+  }
+
+  /** Who is calling, as `headers` sends it. */
+  private async credentials(anonymously: boolean): Promise<Record<string, string>> {
     if (anonymously) {
       return this.authenticate
         ? { api_key: this.apiKey, "stream-auth-type": "anonymous" }
@@ -629,9 +690,10 @@ export class Backend {
   }
 
   /**
-   * The WebSocket URL for a path on the router, credentials included.
+   * The WebSocket URL for a path on the router, credentials included unless `socketHeaders`
+   * carries them.
    *
-   * They go in the query string because a browser WebSocket carries no headers of its own.
+   * A page's go in the query string because a browser WebSocket carries no headers of its own.
    * A socket never says it is a backend: `Stream-Auth-Type: server` has no query counterpart
    * on purpose, and the proxy is only ever told `stream-auth-type=jwt`, which is what it
    * reads for a user whoever the token is for.
@@ -644,18 +706,16 @@ export class Backend {
     }
 
     if (!this.byCustomer) {
-      const token = this.authenticate
-        ? await this.proxyToken()
-        : this.apiSecret
-          ? await this.serverToken()
-          : await this.userToken();
-      url.searchParams.set("api_key", this.apiKey);
-      url.searchParams.set("token", token);
-      if (this.authenticate) {
-        // The proxy reads a socket's credential the way it reads a request's, as
-        // `authorization` and `stream-auth-type`, and refuses one carrying only `token`.
-        url.searchParams.set("authorization", token);
-        url.searchParams.set("stream-auth-type", "jwt");
+      if (!this.socketCarriesHeaders) {
+        const token = this.authenticate ? await this.proxyToken() : await this.userToken();
+        url.searchParams.set("api_key", this.apiKey);
+        url.searchParams.set("token", token);
+        if (this.authenticate) {
+          // The proxy reads a socket's credential the way it reads a request's, as
+          // `authorization` and `stream-auth-type`, and refuses one carrying only `token`.
+          url.searchParams.set("authorization", token);
+          url.searchParams.set("stream-auth-type", "jwt");
+        }
       }
       if (this.userId) {
         url.searchParams.set("user_id", this.userId);
@@ -672,14 +732,88 @@ export class Backend {
     return url.toString();
   }
 
-  /** Opens a socket with the runtime's WebSocket, or the one that was passed in. */
-  openSocket(url: string): WebSocketLike {
+  /**
+   * The headers a socket to the router is opened with, which carry its credential, or
+   * undefined for a socket whose credential is in its URL (see `socketURL`).
+   *
+   * A backend holding the secret sends a token that speaks for the app, and a URL is written
+   * into every access log between here and the router, so it goes as a header, the way a
+   * request's does. It is the same credential the query would have carried, so a socket still
+   * never says it is a backend. A page has neither the secret nor a WebSocket that sends
+   * headers, and its user's token stays in the query.
+   */
+  async socketHeaders(): Promise<Record<string, string> | undefined> {
+    if (!this.socketCarriesHeaders) {
+      return undefined;
+    }
+    this.assertCredentialed();
+    if (this.authenticate) {
+      return {
+        api_key: this.apiKey,
+        "stream-auth-type": "jwt",
+        Authorization: `Bearer ${await this.proxyToken()}`,
+      };
+    }
+    return { "X-Api-Key": this.apiKey, Authorization: `Bearer ${await this.serverToken()}` };
+  }
+
+  /** Whether sockets carry the credential as headers: see `socketHeaders`. */
+  private get socketCarriesHeaders(): boolean {
+    return !this.byCustomer && Boolean(this.apiSecret);
+  }
+
+  /**
+   * What this backend shows when it is logged or serialised: where it goes and who it is acting
+   * for, never the secret, a token handed in or one minted from the secret. Those are held in
+   * fields TypeScript calls private, which `JSON.stringify` and Node's `console.log` print all the
+   * same, and a logged client is the commonest way a credential ends up in a log. A browser's
+   * devtools show fields whatever this says, but a page holds no secret.
+   */
+  toJSON(): Record<string, unknown> {
+    return {
+      url: this.url,
+      ...(this.customerId ? { customerId: this.customerId } : {}),
+      ...(this.apiKey ? { apiKey: this.apiKey } : {}),
+      authenticate: this.authenticate,
+      serverSide: this.serverSide,
+      ...(this.userId ? { userId: this.userId } : {}),
+      ...(this.actsFor ? { actsFor: this.actsFor } : {}),
+      ...(this.team ? { team: this.team } : {}),
+      ...(this.usageCategories.length > 0 ? { usageCategories: [...this.usageCategories] } : {}),
+      ...(this.apiSecret ? { apiSecret: REDACTED } : {}),
+      ...(this.token ? { token: REDACTED } : {}),
+    };
+  }
+
+  /** What Node's `console.log` and `util.inspect` show: the same as `toJSON`. */
+  [Symbol.for("nodejs.util.inspect.custom")](): Record<string, unknown> {
+    return this.toJSON();
+  }
+
+  /**
+   * Opens a socket with the runtime's WebSocket, or the one that was passed in, sending
+   * `headers` where there are any.
+   */
+  openSocket(url: string, headers?: Record<string, string>): WebSocketLike {
     if (!this.webSocketImpl) {
       throw new ConfigurationError(
         "there is no WebSocket here; pass one as the webSocket option or run on Node 22 or newer",
       );
     }
-    return new this.webSocketImpl(url);
+    // A backend holding the secret has the credential to send as headers, and it runs where the
+    // WebSocket takes them: see the `webSocket` option. The SDK's own headers go with it, so the
+    // router counts the socket as the SDK's. Without a credential, only Node's own WebSocket is
+    // given headers: a browser's takes protocols as its second argument, and a socket passed in
+    // as the `webSocket` option is the app's to configure.
+    if (headers) {
+      return new (this.webSocketImpl as HeaderWebSocketConstructor)(url, {
+        headers: { ...clientHeaders(), ...headers },
+      });
+    }
+    if (this.webSocketImpl === globalWebSocket() && runsOnNode()) {
+      return new (this.webSocketImpl as HeaderWebSocketConstructor)(url, { headers: clientHeaders() });
+    }
+    return new (this.webSocketImpl as WebSocketConstructor)(url);
   }
 
   /**
@@ -840,6 +974,9 @@ export class Backend {
   }
 }
 
+/** What a credential is shown as where it is held but must not be printed. */
+export const REDACTED = "[redacted]";
+
 const CATEGORIES_BESIDE_TOKEN =
   "a token handed in carries the team and usage categories it was signed with; " +
   "mint it with createUserToken(userId, { team, usageCategories })";
@@ -869,6 +1006,24 @@ function expiresSoon(token: string, now = Date.now()): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * A copy of `backend` that sends `userId` beside its own credential, for the calls that take
+ * the user as a parameter: what `actingFor` does. A function of its own rather than a method
+ * so that it stays out of `Backend`'s published type: the package exports no path to this
+ * module, and the private fields are reached by name for the same reason.
+ */
+export function speakingFor(backend: Backend, userId: string): Backend {
+  const acting = Object.assign(Object.create(Backend.prototype) as Backend, backend);
+  acting["userIdValue"] = "";
+  acting["user"] = undefined;
+  // A cache of its own: a fetch the original started settles into the original's fields,
+  // so a copied one would be held here forever.
+  acting["fetched"] = undefined;
+  acting["fetching"] = undefined;
+  acting["actingForValue"] = userId;
+  return acting;
 }
 
 /**
@@ -914,6 +1069,26 @@ function base64urlBytes(bytes: Uint8Array): string {
     binary += String.fromCharCode(byte);
   }
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function runsOnNode(): boolean {
+  return Boolean((globalThis as { process?: { versions?: { node?: string } } }).process?.versions?.node);
+}
+
+/**
+ * What every request says this SDK is: `X-Stream-Client` names the SDK, its release and where it
+ * runs, in the shape stream-chat-js sends (`stream-chat-js-v<version>-<node|browser>`). The router
+ * counts a client starting `stream-agents-` as the SDK's rather than the API's, and logs both
+ * headers with the release that made the call.
+ *
+ * A browser sends `X-Stream-Client` alone. It names its own User-Agent, and both the router's
+ * and the proxy's CORS lists allow `X-Stream-Client` and not `User-Agent`, so a page that set
+ * one would have its requests refused at the preflight.
+ */
+function clientHeaders(): Record<string, string> {
+  return runsOnNode()
+    ? { "X-Stream-Client": `stream-agents-js-v${VERSION}-node`, "User-Agent": `stream-agents-js/${VERSION}` }
+    : { "X-Stream-Client": `stream-agents-js-v${VERSION}-browser` };
 }
 
 /**

@@ -76,15 +76,20 @@ func (s *RefusedReviewSuite) TestACallWithARefusedTurnIsReviewedWhenItStops() {
 	}, settleFor, 10*time.Millisecond, "the screen never refused the second turn")
 	s.Require().NoError(created.Close())
 
+	reviewed := func() (store.Call, error) {
+		latest, err := s.store.Calls.Latest(s.ctx, customer, []string{created.ID()})
+		return latest[created.ID()], err
+	}
 	s.Eventually(func() bool {
-		found, err := s.store.Call(s.ctx, customer, created.ID())
+		found, err := reviewed()
 		return err == nil && found.ReviewScore != nil
 	}, settleFor, 20*time.Millisecond, "the call was never reviewed")
 	// The suite's usage rows carry no price or key, which logs errors of its own: only the
 	// review's is this test's.
 	s.NotContains(logs.String(), "could not review the call")
-	row, err := s.store.Call(s.ctx, customer, created.ID())
+	row, err := reviewed()
 	s.Require().NoError(err)
+	s.Equal(created.ID(), row.SessionID)
 	s.Require().NotNil(row.ReviewScore)
 	s.Equal(5, *row.ReviewScore)
 }
@@ -95,21 +100,21 @@ func (s *RefusedReviewSuite) conversed(responses ...storedResponse) (string, str
 	customer, cid := "refused-"+uuid.NewString(), "agent:"+uuid.NewString()
 	at := time.Now().UTC().Add(-time.Hour)
 	sessionID := uuid.NewString()
-	s.Require().NoError(s.store.SaveSession(s.ctx, &store.AgentSession{
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &store.AgentSession{
 		ID: sessionID, CustomerID: customer, AgentName: "docs", ConfigID: "cfg-docs", UserID: "jlahey",
 		CallerKind: "user", State: store.SessionRunning, ConversationID: cid, CreatedAt: at,
 	}))
 	for n, response := range responses {
 		id, started := uuid.NewString(), at.Add(time.Duration(n)*time.Minute)
-		s.Require().NoError(s.store.StartResponse(s.ctx, &store.AgentResponse{
+		s.Require().NoError(s.store.Responses.Insert(s.ctx, &store.AgentResponse{
 			ID: id, SessionID: sessionID, CustomerID: customer, Said: response.said, CreatedAt: started,
 		}))
 		for i := range response.items {
 			response.items[i].ResponseID, response.items[i].Ordinal, response.items[i].SessionID = id, i, sessionID
 			response.items[i].At = started.Add(time.Duration(i) * time.Second)
 		}
-		s.Require().NoError(s.store.AppendResponseItems(s.ctx, response.items))
-		s.Require().NoError(s.store.FinishResponse(s.ctx, id, response.status, "", started.Add(time.Second)))
+		s.Require().NoError(s.store.ResponseItems.InsertMany(s.ctx, response.items))
+		s.Require().NoError(s.store.Responses.Finish(s.ctx, customer, id, response.status, "", started.Add(time.Second)))
 	}
 	return customer, cid
 }

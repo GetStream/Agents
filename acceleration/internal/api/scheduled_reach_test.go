@@ -20,7 +20,7 @@ func (s *ScheduledTasksSuite) reachOf(config string, user *testClient, channel s
 
 // textsFrom records the user as writing to the config on kind from a number of their own.
 func (s *ScheduledTasksSuite) textsFrom(user *testClient, config, kind string) {
-	s.Require().NoError(s.store.SaveChannelIdentity(context.Background(), &store.ChannelIdentity{
+	s.Require().NoError(s.store.ContactMapEntries.Upsert(context.Background(), &store.ContactMapEntry{
 		CustomerID: s.customerID(), ConfigID: config, Kind: kind, Address: s.writerNumber(), UserID: user.userID,
 	}))
 }
@@ -54,7 +54,7 @@ func (s *ScheduledTasksSuite) TestATextOnALineDisconnectedSinceIsUnreachable() {
 	config := s.agentOnSMS(number)
 	user := s.data.createUser()
 	s.textsFrom(user, config, "sms")
-	s.Require().NoError(s.store.DeleteChannelAccount(context.Background(), s.customerID(), "sms", number))
+	s.Require().NoError(s.store.ChannelAccounts.Delete(context.Background(), s.customerID(), "sms", number))
 
 	s.ErrorIs(s.reachOf(config, user, "sms"), channels.ErrUnreachable)
 }
@@ -65,7 +65,7 @@ func (s *ScheduledTasksSuite) TestAWhatsAppMessageMoreThanADayAfterThePersonWrot
 	config := s.agentOnWhatsApp(number)
 	user := s.data.createUser()
 	s.seedWriter(user, config, number, writer)
-	_, err := s.store.DB().NewRaw("UPDATE channel_deliveries SET received_at = ? WHERE account_id = ?",
+	_, err := s.store.GlobalDB().NewRaw("UPDATE channel_deliveries SET received_at = ? WHERE account_id = ?",
 		time.Now().Add(-25*time.Hour), line.Id).Exec(context.Background())
 	s.Require().NoError(err)
 
@@ -76,7 +76,7 @@ func (s *ScheduledTasksSuite) TestAnIMessageWithNoChatToWriteToIsUnreachable() {
 	number := s.lineNumber()
 	sealed, err := s.router.sealChannelSecrets(s.customerID(), channels.Secrets{Token: "linq-key", Signing: "linq-secret"})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.SaveChannelAccount(context.Background(), &store.ChannelAccount{
+	s.Require().NoError(s.store.ChannelAccounts.Upsert(context.Background(), &store.ChannelAccount{
 		CustomerID: s.customerID(), Kind: "imessage", E164: number, Token: "line-" + s.utils.uuid(),
 		SecretsSealed: sealed, SecretsKEKVersion: s.sealer.CurrentVersion(),
 	}))
@@ -92,7 +92,7 @@ func (s *ScheduledTasksSuite) TestAnIMessageWithNoChatToWriteToIsUnreachable() {
 
 func (s *ScheduledTasksSuite) TestATextOnALineWhoseCredentialsDoNotOpenIsAFailureNotUnreachable() {
 	number := s.lineNumber()
-	s.Require().NoError(s.store.SaveChannelAccount(context.Background(), &store.ChannelAccount{
+	s.Require().NoError(s.store.ChannelAccounts.Upsert(context.Background(), &store.ChannelAccount{
 		CustomerID: s.customerID(), Kind: "sms", E164: number, Token: "line-" + s.utils.uuid(),
 	}))
 	config := s.agentOnSMS(number)

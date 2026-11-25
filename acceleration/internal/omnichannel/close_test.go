@@ -73,10 +73,10 @@ func (s *CloserSuite) SetupSuite() {
 func (s *CloserSuite) SetupTest() {
 	// A sweep takes every customer's episodes, so an earlier test's, or an earlier run's,
 	// left open or ended would be swept with this test's. The database is the suite's own.
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE episodes SET status = 'summary_failed' WHERE status IN ('in_progress', 'ended')")
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE episode_activity SET summary_lease_until = NULL")
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episodes SET lease_until = NULL")
 	s.Require().NoError(err)
 	s.chat = chattest.NewServer(s.T())
 	s.apps = streamapp.NewClients(streamapp.NewDeployment(streamapp.DeploymentOptions{
@@ -116,8 +116,8 @@ func (s *CloserSuite) closerOver(db *store.Store) *Closer {
 
 // agentConfig is an agent of the test's customer, on the LLM named.
 func (s *CloserSuite) agentConfig(model string) store.AgentConfig {
-	config := store.AgentConfig{CustomerID: s.customerID, Name: "agent-" + uuid.NewString(), LLM: model}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &config))
+	config := store.AgentConfig{CustomerID: s.customerID, Name: "agent-" + uuid.NewString(), Models: store.AgentModels{LLM: model}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 	return config
 }
 
@@ -162,7 +162,7 @@ func (s *CloserSuite) card(opened Opened) map[string]any {
 // status is the episode's status as stored.
 func (s *CloserSuite) status(opened Opened) string {
 	var status string
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx, "SELECT status FROM episodes WHERE id = ?", opened.Episode.ID).Scan(&status))
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT status FROM episodes WHERE id = ?", opened.Episode.ID).Scan(&status))
 	return status
 }
 
@@ -311,7 +311,7 @@ func (s *CloserSuite) TestAFailedSummaryLeavesSummaryFailedAndTheThreadIntact() 
 func (s *CloserSuite) TestACardIsSummarizedAsItsAuthorAfterTheNumberWasUnlinked() {
 	s.chat.KnownAuthors()
 	user := "anya-" + uuid.NewString()
-	// A Stream user of the deployment's own app, as a link names one (store.LinkUserPhone).
+	// A Stream user of the deployment's own app, as a link names one (store.UserPhones.Link).
 	chatting, err := s.cards.Open(s.ctx, Episode{
 		CustomerID: s.customerID, AgentConfigID: s.config.ID, AgentName: s.config.Name,
 		Person: Person{Kind: store.ContactStreamUser, Address: store.StreamUserAddress(0, user)},
@@ -320,7 +320,7 @@ func (s *CloserSuite) TestACardIsSummarizedAsItsAuthorAfterTheNumberWasUnlinked(
 	s.Require().NoError(err)
 	s.Require().NoError(s.cards.Write(s.ctx, chatting))
 	number := "+15550100"
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &store.UserPhone{CustomerID: s.customerID, UserID: user, Phone: number}))
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &store.UserPhone{CustomerID: s.customerID, UserID: user, Phone: number}))
 	person, err := Phone(number)
 	s.Require().NoError(err)
 	started := time.Now().Add(-2 * time.Hour).UTC().Truncate(time.Second)
@@ -345,7 +345,7 @@ func (s *CloserSuite) TestACardIsSummarizedAsItsAuthorAfterTheNumberWasUnlinked(
 		Message: getstream.MessageRequest{Text: &text, UserID: &author},
 	})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.UnlinkUserPhone(s.ctx, s.customerID, 0, user))
+	s.Require().NoError(s.store.UserPhones.Unlink(s.ctx, s.customerID, 0, user))
 
 	s.Require().NoError(s.closer.Sweep(s.ctx))
 
@@ -384,7 +384,7 @@ func (s *CloserSuite) TestAMessageThatIsNotACardIsNeverUpdatedAsItsAuthor() {
 	s.Require().Len(lines, 1)
 	line, _ := lines[0]["id"].(string)
 	s.Require().NotEmpty(line)
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE episodes SET card_message_id = ? WHERE id = ?", line, opened.Episode.ID)
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episodes SET card_message_id = ? WHERE id = ?", line, opened.Episode.ID)
 	s.Require().NoError(err)
 
 	s.Require().NoError(s.closer.Sweep(s.ctx))
@@ -474,7 +474,7 @@ func (s *CloserSuite) TestTwoRoutersSweepingAtOnceSummarizeEachEpisodeOnce() {
 func (s *CloserSuite) TestAnEpisodeAStoppedRouterLeftEndedIsSummarizedByTheNextSweep() {
 	opened, _ := s.idleThread("where is my order 12?")
 	now := time.Now()
-	_, err := s.store.CloseIdleEpisodes(s.ctx, now.Add(-time.Hour), now, 50, now.Add(-time.Second))
+	_, err := s.store.Episodes.CloseIdle(s.ctx, now.Add(-time.Hour), now, 50, -time.Second, "closer")
 	s.Require().NoError(err)
 	s.Equal(store.EpisodeEnded, s.status(opened))
 

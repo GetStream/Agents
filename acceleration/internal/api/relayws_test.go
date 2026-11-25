@@ -3,13 +3,22 @@
 package api
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime/pprof"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/relay"
 )
 
 // RelayedSessionSuite covers the events socket when it does not land on the node running
@@ -233,6 +242,74 @@ func (s *RelayedSessionSuite) TestASocketOnTheOtherNodeResumesWhereItLeftOff() {
 
 	s.Equal(true, s.await(again, "resumed")["complete"])
 	s.NotEmpty(s.await(again, "responded")["cursor"], "what was said while it was gone crossed the relay again")
+}
+
+func (s *RelayedSessionSuite) TestClosingANodeEndsItsRelaySubscriptionsAndItsWatcherExpiry() {
+	// Labelled, so its goroutines are told from those of the nodes other suites run beside it.
+	label := s.utils.uuid()
+	var node *Server
+	pprof.Do(context.Background(), pprof.Labels("node", label), func(context.Context) {
+		// A shard of its own, so no other node's watcher is answered by this one.
+		node = s.newNode(s.utils.uuid(), slog.Default(), Options{Routers: s.modalities, Logger: slog.Default()})
+	})
+	// Two subscriptions and the watcher expiry, once their goroutines have started.
+	s.Require().Eventually(func() bool { return s.relayGoroutines(label) >= 3 }, 5*time.Second, 10*time.Millisecond,
+		"the node runs no subscription or watcher expiry")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Require().NoError(node.Close(ctx))
+
+	s.Zero(s.relayGoroutines(label), "the node's background work outlived Close")
+}
+
+// An attach the node running the session cannot answer leaves nothing of it there, though the
+// node that asked may be gone before it says it gave up.
+func (s *RelayedSessionSuite) TestAnAttachThatCannotBeAnsweredLeavesNothingPending() {
+	opened := s.inWriting(CreateSessionRequest{})
+	bus, unanswerable, answered := s.router.relayed.bus, s.utils.uuid(), s.utils.uuid()
+	asking := func(watcher, cursor string) relay.Request {
+		return relay.Request{
+			Type: relay.Attach, Node: "gone-" + s.utils.uuid(), Session: opened.Id, Watcher: watcher,
+			Owner:     relay.Owner{CustomerID: s.customerID(), Kind: string(auth.KindServer)},
+			Resumable: cursor != "", Cursor: cursor,
+		}
+	}
+
+	s.Require().NoError(bus.Publish(s.T().Context(), bus.Commands(), asking(unanswerable, "not-a-cursor")))
+	s.Require().NoError(bus.Publish(s.T().Context(), bus.Commands(), asking(answered, "")))
+
+	// Taken in order on the one subscription: once the second is held, the first was answered.
+	s.Require().Eventually(func() bool {
+		s.router.relayed.mu.Lock()
+		defer s.router.relayed.mu.Unlock()
+		_, held := s.router.relayed.proxies[answered]
+		return held
+	}, settleFor, 10*time.Millisecond, "the second attach was never held")
+	s.router.relayed.mu.Lock()
+	_, pending := s.router.relayed.pending[unanswerable]
+	s.router.relayed.mu.Unlock()
+	s.False(pending, "the attach it could not answer is still pending")
+	s.router.relayed.dropProxy(answered)
+}
+
+// relayGoroutines counts the goroutines labelled node=label that run the api or relay
+// package's code.
+func (s *RelayedSessionSuite) relayGoroutines(label string) int {
+	var dump bytes.Buffer
+	s.Require().NoError(pprof.Lookup("goroutine").WriteTo(&dump, 1))
+	total := 0
+	for _, stack := range strings.Split(dump.String(), "\n\n") {
+		if !strings.Contains(stack, `"node":"`+label+`"`) ||
+			!strings.Contains(stack, "acceleration/internal/api.") && !strings.Contains(stack, "acceleration/internal/relay.") {
+			continue
+		}
+		var count int
+		_, err := fmt.Sscanf(stack, "%d @", &count)
+		s.Require().NoError(err)
+		total += count
+	}
+	return total
 }
 
 // inWriting opens a conversation on the suite's own node that keeps no transcript, which

@@ -60,7 +60,7 @@ class VisionAgentsTest {
     fun `naming no router reaches the hosted one`() {
         StreamAgents(apiKey = "key").use { hosted ->
             assertEquals(Backend.DEFAULT_URL, hosted.backend.url)
-            assertEquals("https://accelerate-us-east4.gcp.stream-io-api.com", hosted.backend.url)
+            assertEquals("https://accelerate.gcp.stream-io-api.com", hosted.backend.url)
         }
     }
 
@@ -89,6 +89,8 @@ class VisionAgentsTest {
         assertEquals("acme", arrived.header("X-Customer-Id"))
         assertNull(arrived.header("Authorization"))
         assertNull(arrived.header("X-Stream-User-Id"))
+        assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", arrived.header("X-Stream-Client"))
+        assertEquals("stream-agents-kotlin/${BuildConfig.SDK_VERSION}", arrived.header("User-Agent"))
     }
 
     @Test
@@ -132,6 +134,8 @@ class VisionAgentsTest {
         assertEquals(listOf("key-1"), router.requests.first().query["api_key"])
         assertNull(router.requests.first().header("X-Api-Key"))
         assertEquals("jwt", router.requests.first().header("Stream-Auth-Type"))
+        assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", router.requests.first().header("X-Stream-Client"))
+        assertEquals("stream-agents-kotlin/${BuildConfig.SDK_VERSION}", router.requests.first().header("User-Agent"))
         assertNull(router.requests.first().header("X-Customer-Id"))
         keyed.close()
     }
@@ -172,25 +176,21 @@ class VisionAgentsTest {
                 projectId = "Health",
                 incognito = false,
                 custom = buildJsonObject { put("tenant", "acme") },
-                modelOverwrites = ModelOverwrites(thinking = ModelOverwrites.Thinking.High, temperature = 0.0),
-                greeting = Greeting("Hello.", Greeting.Mode.Variation),
                 returnUrl = "com.example.app:/connected",
+                watch = false,
             ),
-        )
+        ).session
 
         val body = Json.parseToJsonElement(router.requests.single().body).jsonObject
         assertEquals(
             setOf(
-                "id", "agent", "title", "project_id", "incognito", "custom", "model_overwrites", "greeting",
-                "return_url",
+                "id", "agent", "title", "project_id", "incognito", "custom", "return_url",
             ),
             body.keys,
         )
         assertEquals(JsonPrimitive("com.example.app:/connected"), body["return_url"])
         assertEquals(JsonPrimitive("order-1042"), body["id"])
         assertEquals(JsonPrimitive("docs"), body["agent"])
-        assertEquals("""{"temperature":0.0,"thinking":"high"}""", body["model_overwrites"].toString())
-        assertEquals("""{"text":"Hello.","mode":"variation"}""", body["greeting"].toString())
         assertEquals("s1", session.id)
         assertEquals("Billing", session.title)
         assertEquals("Health", session.projectId)
@@ -203,9 +203,9 @@ class VisionAgentsTest {
         router.answer = { Reply(201, sessionJson()) }
         deviceZoneId = { "Asia/Kolkata" }
 
-        agents.sessions.create()
-        agents.agent("docs").sessions.create(SessionOptions(title = "Billing"))
-        agents.sessions.create(SessionOptions(timezone = "Europe/Skopje"))
+        agents.sessions.create(SessionOptions(watch = false))
+        agents.agent("docs").sessions.create(SessionOptions(title = "Billing", watch = false))
+        agents.sessions.create(SessionOptions(timezone = "Europe/Skopje", watch = false))
 
         val (device, agent, named) = router.requests.map { Json.parseToJsonElement(it.body).jsonObject }
         assertEquals("""{"timezone":"Asia/Kolkata"}""", device.toString())
@@ -218,8 +218,8 @@ class VisionAgentsTest {
         router.answer = { Reply(201, sessionJson()) }
         deviceZoneId = { "Asia/Kolkata" }
 
-        agents.sessions.create(SessionOptions(timezone = null))
-        agents.sessions.create(SessionOptions(timezone = ""))
+        agents.sessions.create(SessionOptions(timezone = null, watch = false))
+        agents.sessions.create(SessionOptions(timezone = "", watch = false))
 
         assertEquals(listOf("{}", "{}"), router.requests.map { it.body })
     }
@@ -229,9 +229,9 @@ class VisionAgentsTest {
         router.answer = { Reply(201, sessionJson()) }
         deviceZoneId = { "GMT+05:30" }
 
-        agents.sessions.create()
+        agents.sessions.create(SessionOptions(watch = false))
         // The router is the one that knows which zones it knows, so what the app names is its to refuse.
-        agents.sessions.create(SessionOptions(timezone = "GMT+05:30"))
+        agents.sessions.create(SessionOptions(timezone = "GMT+05:30", watch = false))
 
         val (device, named) = router.requests.map { it.body }
         assertEquals("{}", device)
@@ -255,9 +255,9 @@ class VisionAgentsTest {
         agents.setUser(User("jlahey"), "unused")
 
         agents.sessions.create(
-            SessionOptions(memory = SessionOptions.Memory(filter = mapOf("topic" to "billing"), appId = "web")),
+            SessionOptions(memory = SessionOptions.Memory(filter = mapOf("topic" to "billing"), appId = "web"), watch = false),
         )
-        agents.sessions.create(SessionOptions(memory = SessionOptions.Memory(), incognito = true))
+        agents.sessions.create(SessionOptions(memory = SessionOptions.Memory(), incognito = true, watch = false))
 
         val (narrowed, incognito) = router.requests.map { Json.parseToJsonElement(it.body).jsonObject }
         assertEquals("""{"app_id":"web","filter":{"topic":"billing"},"user_id":"jlahey"}""", narrowed["memory"].toString())
@@ -271,9 +271,20 @@ class VisionAgentsTest {
         router.answer = { Reply(201, sessionJson()) }
         agents.setUser(User("jlahey"), "unused")
 
-        agents.sessions.create()
+        agents.sessions.create(SessionOptions(watch = false))
 
         assertEquals("{}", router.requests.single().body)
+    }
+
+    @Test
+    fun `a session that shows no UI says so, and one that says nothing leaves it to the config`() = runTest {
+        router.answer = { Reply(201, sessionJson()) }
+
+        agents.sessions.create(SessionOptions(ui = false))
+        agents.sessions.create(SessionOptions(ui = true))
+        agents.sessions.create()
+
+        assertEquals(listOf("""{"ui":false}""", """{"ui":true}""", "{}"), router.requests.map { it.body })
     }
 
     @Test
@@ -287,7 +298,7 @@ class VisionAgentsTest {
     fun `a voice session asks to start voice and is on its own call`() = runTest {
         router.answer = { Reply(201, sessionJson(callId = "s1")) }
 
-        val session = agents.sessions.create(SessionOptions(configId = "cfg-1", startVoice = true))
+        val session = agents.sessions.create(SessionOptions(configId = "cfg-1", startVoice = true, watch = false)).session
 
         val body = Json.parseToJsonElement(router.requests.single().body).jsonObject
         assertEquals(setOf("config_id", "start_voice"), body.keys)
@@ -729,9 +740,9 @@ class VisionAgentsTest {
             Reply(200, """{"provider":"exa","model":"exa-fast","answer":"Yes.","results":[{"url":"https://a","title":"A","score":0.5}]}""")
         }
 
-        val found = agents.router(config = "healthcare").search("pricing", SearchOptions(depth = SearchOptions.Depth.Fast))
+        val found = agents.router(config = "healthcare").search("pricing")
 
-        assertEquals("""{"query":"pricing","config_id":"healthcare","options":{"depth":"fast"}}""", router.requests.single().body)
+        assertEquals("""{"query":"pricing","config_id":"healthcare"}""", router.requests.single().body)
         assertEquals("Yes.", found.answer)
         assertEquals(0.5, found.results.single().score)
     }
@@ -747,6 +758,16 @@ class VisionAgentsTest {
         assertEquals(first, again)
         assertEquals(1, router.requests.size)
         assertEquals("""{"name":"Guest"}""", router.requests.single().body)
+    }
+
+    @Test
+    fun `a guest printed shows who they are, never their token`() = runTest {
+        router.answer = { Reply(201, """{"id":"guest-1","token":"tok-guest-secret","name":"Ada","expires_at":"2999-01-01T00:00:00Z"}""") }
+
+        val printed = agents.guestUser(GuestOptions(name = "Ada")).toString()
+
+        assertFalse("tok-guest-secret" in printed, printed)
+        assertTrue("guest-1" in printed && "Ada" in printed && "[redacted]" in printed, printed)
     }
 
     @Test
@@ -810,6 +831,8 @@ class VisionAgentsTest {
         assertEquals("guest-1", guest.id)
         val arrived = router.requests.single()
         assertEquals("anonymous", arrived.header("Stream-Auth-Type"))
+        assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", arrived.header("X-Stream-Client"))
+        assertEquals("stream-agents-kotlin/${BuildConfig.SDK_VERSION}", arrived.header("User-Agent"))
         assertNull(arrived.header("Authorization"))
         assertEquals(listOf("key"), arrived.query["api_key"])
     }

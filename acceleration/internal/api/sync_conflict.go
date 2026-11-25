@@ -77,14 +77,14 @@ func (s *Server) syncConflict(
 	var skills []store.Skill
 	var documents []store.KnowledgeDocument
 	if body.Skills != nil {
-		if skills, err = s.store.CustomerSkills(ctx, customerID, existing.ID); err != nil {
+		if skills, err = s.store.Skills.Select(ctx, customerID, store.SkillFilter{ConfigID: existing.ID}); err != nil {
 			return APIError{}, false, err
 		}
 	}
 	if body.Knowledge != nil && existing.KnowledgeNamespace != "" {
 		// With their text: conflictingDocument asks whether the directory holds what is
 		// stored, which is a question about the text.
-		documents, err = s.store.CustomerKnowledgeDocumentsWithText(ctx, customerID, existing.KnowledgeNamespace)
+		documents, err = s.store.KnowledgeDocuments.Select(ctx, customerID, store.KnowledgeDocumentFilter{Namespace: existing.KnowledgeNamespace, WithText: true})
 		if err != nil {
 			return APIError{}, false, err
 		}

@@ -2,9 +2,7 @@ package ledger
 
 import (
 	"context"
-	"crypto/sha1" //nolint:gosec // EVALSHA names a script by its SHA-1
 	_ "embed"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +13,7 @@ import (
 
 	"github.com/redis/rueidis"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/redisscript"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 )
 
@@ -28,12 +27,6 @@ const scriptChunk = 1000
 //go:embed mirror.lua
 var mirrorScript string
 
-// scriptSHA1 is the digest EVALSHA names the script by.
-var scriptSHA1 = func() string {
-	sum := sha1.Sum([]byte(mirrorScript))
-	return hex.EncodeToString(sum[:])
-}()
-
 var (
 	errDialing = errors.New("ledger: mirror: another write is connecting to redis")
 	errClosed  = errors.New("ledger: mirror: closed")
@@ -43,7 +36,7 @@ var (
 // writes these keys, and only with totals Postgres has committed.
 type Mirror struct {
 	options rueidis.ClientOption
-	script  *rueidis.Lua
+	script  *redisscript.Script
 	logger  *slog.Logger
 	timeout time.Duration
 	every   time.Duration
@@ -122,7 +115,7 @@ func NewMirror(options MirrorOptions) (*Mirror, error) {
 	clientOptions.Dialer.Timeout = options.Timeout
 	return &Mirror{
 		options: clientOptions,
-		script:  rueidis.NewLuaScript(mirrorScript),
+		script:  redisscript.New(mirrorScript),
 		logger:  options.Logger,
 		timeout: options.Timeout,
 		every:   options.RetryEvery,
@@ -181,9 +174,11 @@ func (m *Mirror) Redis() (rueidis.Client, error) {
 }
 
 // Write writes the windows' totals, in one round trip, and reports whether Redis took them
-// all. A total that cannot be written is counted, logged and retried in the background by
-// Run: the batch it came from is durable in Postgres, and is not failed for it. A nil mirror
-// writes nothing, and has taken only an empty list.
+// all. A write that fails is counted (MirrorFailures) and its totals are retried in the
+// background by Run: the batch they came from is durable in Postgres, and is not failed for
+// it. Nothing is logged here, where a Redis that is down fails every batch: Run logs a total
+// only when it gives up on it or stops with it unwritten. A nil mirror writes nothing, and
+// has taken only an empty list.
 func (m *Mirror) Write(ctx context.Context, windows []UsageWindow) bool {
 	if m == nil {
 		return len(windows) == 0
@@ -204,11 +199,10 @@ func (m *Mirror) Write(ctx context.Context, windows []UsageWindow) bool {
 	// Redis.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), m.timeout)
 	defer cancel()
-	failed, err := m.write(ctx, byOrganization)
+	failed, _ := m.write(ctx, byOrganization)
 	if len(failed) == 0 {
 		return true
 	}
-	m.logger.Error("could not mirror window totals to redis, retrying", "organizations", len(failed), "error", err)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
@@ -350,7 +344,7 @@ func (m *Mirror) write(ctx context.Context, byOrganization map[string]map[string
 	var failed []string
 	failing := map[string]bool{}
 	var last error
-	for i, result := range m.exec(ctx, client, calls) {
+	for i, result := range m.script.ExecMulti(ctx, client, calls...) {
 		if err := result.Error(); err != nil {
 			if !failing[owners[i]] {
 				failing[owners[i]] = true
@@ -361,22 +355,6 @@ func (m *Mirror) write(ctx context.Context, byOrganization map[string]map[string
 	}
 	MirrorFailures.Add(float64(len(failed)))
 	return failed, last
-}
-
-// exec runs the calls with EVALSHA in one pipeline, and again with EVAL the ones Redis did
-// not have the script for (a restarted or flushed Redis), which loads it for the next ones.
-func (m *Mirror) exec(ctx context.Context, client rueidis.Client, calls []rueidis.LuaExec) []rueidis.RedisResult {
-	commands := make(rueidis.Commands, 0, len(calls))
-	for _, call := range calls {
-		commands = append(commands, client.B().Evalsha().Sha1(scriptSHA1).Numkeys(int64(len(call.Keys))).Key(call.Keys...).Arg(call.Args...).Build())
-	}
-	results := client.DoMulti(ctx, commands...)
-	for i, result := range results {
-		if redisErr, ok := rueidis.IsRedisErr(result.Error()); ok && redisErr.IsNoScript() {
-			results[i] = m.script.Exec(ctx, client, calls[i].Keys, calls[i].Args)
-		}
-	}
-	return results
 }
 
 // scriptCalls are one organization's counters as the script's keys and arguments, at most

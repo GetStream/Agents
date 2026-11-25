@@ -32,7 +32,7 @@ func (m *Manager) sandboxGrant(ctx context.Context, binding store.ConnectorBindi
 	if manifest.Sandbox == nil && binding.Required {
 		return unavailableSandbox, nil
 	}
-	latest, err := m.options.Store.LatestConnectorDefinition(ctx, connection.CustomerID, binding.ConnectorID)
+	latest, err := m.options.Store.ConnectorDefinitions.Latest(ctx, connection.CustomerID, binding.ConnectorID)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		m.logger.Warn("a connector binding gives the sandbox no access: its connector was deleted", "connector", binding.Name,
 			"connection", connection.ID)
@@ -77,7 +77,7 @@ func (m *Manager) lateGrant(ctx context.Context, spec Spec, binding store.Connec
 	if !binding.Sandbox {
 		return nil
 	}
-	definition, err := m.options.Store.LatestConnectorDefinition(ctx, spec.CustomerID, binding.ConnectorID)
+	definition, err := m.options.Store.ConnectorDefinitions.Latest(ctx, spec.CustomerID, binding.ConnectorID)
 	if err != nil && !errors.Is(err, store.ErrNoConnectorDefinition) {
 		return err
 	}
@@ -211,13 +211,13 @@ func (m *Manager) broker(spec Spec, d *dispatcher) (sandbox.CredentialBroker, er
 		return egress.NewBroker(options)
 	}
 	if m.options.SandboxSecretPrefix == "" {
-		return nil, stack.Wrap(errors.New("session: a connector binding sets sandbox, and this router has no " +
-			"code_sandbox.secret_prefix (ROUTER_CODE_SANDBOX_SECRET_PREFIX) to name its secrets with"))
+		return nil, stack.Wrap(notConfigured(errors.New("session: a connector binding sets sandbox, and this router has no " +
+			"code_sandbox.secret_prefix (ROUTER_CODE_SANDBOX_SECRET_PREFIX) to name its secrets with")))
 	}
 	if m.options.SandboxBroker != metered.SandboxSecretsBroker {
-		return nil, stack.Wrap(fmt.Errorf("session: there is no sandbox broker called %q", m.options.SandboxBroker))
+		return nil, stack.Wrap(notConfigured(fmt.Errorf("session: there is no sandbox broker called %q", m.options.SandboxBroker)))
 	}
-	return metered.SandboxSecrets(m.options.SandboxSecretPrefix, spec.ID, m.sandboxTokens(d.schemes), d.boundLate, m.logger)
+	return metered.SandboxSecrets(m.options.SandboxSecretPrefix, spec.CustomerID, spec.ID, m.sandboxTokens(d.schemes), d.boundLate, m.logger)
 }
 
 // behindProxy refuses a sandbox config the egress proxy cannot serve. Every request goes there,
@@ -225,14 +225,13 @@ func (m *Manager) broker(spec Spec, d *dispatcher) (sandbox.CredentialBroker, er
 // open network or CIDR ranges would reach nothing but the grants.
 func behindProxy(config sandbox.Config) error {
 	if config.Network && len(config.AllowedDomains) == 0 && len(config.NetworkAllowList) == 0 {
-		return stack.Wrap(errors.New("session: the agent config's sandbox_options.network is true, and this router's " +
-			"code_sandbox.broker is proxy, which sends every request from the sandbox through the egress proxy, and the " +
-			"proxy reaches only connectors' hosts and sandbox_options.allowed_domains: list the domains code needs in sandbox_options.allowed_domains instead"))
+		return stack.Wrap(invalid(errors.New("session: the agent config's sandbox_options.network is true with no " +
+			"sandbox_options.allowed_domains, which this router does not take: list the domains code needs in " +
+			"sandbox_options.allowed_domains instead")))
 	}
 	if len(config.NetworkAllowList) > 0 {
-		return stack.Wrap(errors.New("session: the agent config's sandbox_options.network_allow_list is set, and this " +
-			"router's code_sandbox.broker is proxy, which reaches hosts by name only: list the domains code needs in " +
-			"sandbox_options.allowed_domains instead"))
+		return stack.Wrap(invalid(errors.New("session: the agent config's sandbox_options.network_allow_list is set, which " +
+			"this router does not take: list the domains code needs in sandbox_options.allowed_domains instead")))
 	}
 	return nil
 }
@@ -277,7 +276,7 @@ func (m *Manager) sandboxTokens(schemes map[string]core.Scheme) sandbox.Tokens {
 // egress proxy sends it with no further request, as recheck refuses a tool call. A config that
 // cannot be read just now is any other error. One read by primary key.
 func SandboxBound(ctx context.Context, configs *store.Store, grant sandbox.Grant) error {
-	config, err := configs.AgentConfig(ctx, grant.Connection.CustomerID, grant.Config)
+	config, err := configs.AgentConfigs.Get(ctx, grant.Connection.CustomerID, grant.Config)
 	if errors.Is(err, store.ErrNoAgentConfig) {
 		return fmt.Errorf("%w: %w", sandbox.ErrNoCredential, err)
 	}

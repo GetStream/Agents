@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -973,11 +974,11 @@ func TestUnsourcedTransfer(t *testing.T) {
 		"Hand off to 555 000 1111 (ext. 22)":               true,
 		"Hand off to 2. 555-000-1111":                      true,
 	} {
-		_, unsourced := unsourcedTransfer(nil, call, told)
+		_, unsourced := unsourcedTransfer(nil, call, told, nil)
 		assert.Equal(t, accepted, !unsourced, told)
 	}
 	german := llm.ToolCall{Name: "transfer", Arguments: `{"to":"+13012345678"}`}
-	_, unsourced := unsourcedTransfer(nil, german, "Hand off to +49 (30) 1234 5678")
+	_, unsourced := unsourcedTransfer(nil, german, "Hand off to +49 (30) 1234 5678", nil)
 	assert.True(t, unsourced, "a bracketed area code after another country code")
 }
 
@@ -987,9 +988,27 @@ func TestUnsourcedTransferIgnoresANumberQuotedByAFailedTool(t *testing.T) {
 		didNotWork + "no agent is on duty at +15550001111.",
 		`{"error":"line +15550001111 is busy"}`,
 	} {
-		_, unsourced := unsourcedTransfer([]llm.Message{{Role: llm.ToolResult, Content: content}}, call, "")
+		_, unsourced := unsourcedTransfer([]llm.Message{{Role: llm.ToolResult, Content: content}}, call, "", nil)
 		assert.True(t, unsourced, content)
 	}
+}
+
+// A tool the caller's device declared answers with whatever the device says, so a number it
+// returns is the caller's word, which is no source of a number to transfer to.
+func TestADeviceToolsResultIsNoSourceOfATransfer(t *testing.T) {
+	history := []llm.Message{
+		{Role: llm.User, Content: "Can you put me through to sales?"},
+		{Role: llm.Assistant, ToolCalls: []llm.ToolCall{{ID: "c1", Name: "find_department", Arguments: `{"name":"sales"}`}}},
+		{Role: llm.ToolResult, ToolCallID: "c1", Content: `{"name":"sales","phone":"+15550100199"}`},
+	}
+	call := llm.ToolCall{Name: toolTransfer, Arguments: `{"to":"+15550100199"}`}
+	devices := func(name string) bool { return name == "find_department" }
+
+	_, unsourced := unsourcedTransfer(history, call, "", devices)
+	assert.True(t, unsourced, "the device's own tool gave the number")
+
+	_, unsourced = unsourcedTransfer(history, call, "", nil)
+	assert.False(t, unsourced, "a tool the caller does not run gave the number")
 }
 
 func TestANumberTheAgentWroteIsNoSourceOfANumber(t *testing.T) {
@@ -1191,7 +1210,17 @@ func TestATransferNumberTheAgentWroteIsNoSource(t *testing.T) {
 		}
 		arguments, err := json.Marshal(map[string]string{"to": c.to})
 		require.NoError(t, err)
-		_, unsourced := unsourcedTransfer(history, llm.ToolCall{Name: toolTransfer, Arguments: string(arguments)}, c.told)
+		_, unsourced := unsourcedTransfer(history, llm.ToolCall{Name: toolTransfer, Arguments: string(arguments)}, c.told, nil)
 		assert.Equal(t, c.unsourced, unsourced, c.name)
 	}
+}
+
+func TestTurnsStartedInTheSameInstantAreNamedApart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// The fake clock does not move between the two, as a clock that ticks in microseconds
+		// does not between turns started close together.
+		first, second := replyPrefix+turnStamp(), replyPrefix+turnStamp()
+
+		require.NotEqual(t, first, second, "two turns were given one name, and their sentences too")
+	})
 }

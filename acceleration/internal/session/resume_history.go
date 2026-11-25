@@ -20,7 +20,7 @@ type ResumeHistories interface {
 
 // restoring is ctx with the session's resume_history applied to every conversation it
 // reads back, and a thread channel's history cut at the boundary of its number's link
-// (store.ThreadHistorySince). A session asking for nothing, on no linked number's thread, gets
+// (store.UserPhones.ThreadHistorySince). A session asking for nothing, on no linked number's thread, gets
 // ctx as it was, and the default with it. The boundary that cannot be read refuses the session:
 // it is the linked user's word on what they may be told.
 func (m *Manager) restoring(ctx context.Context, spec Spec) (context.Context, error) {
@@ -28,7 +28,7 @@ func (m *Manager) restoring(ctx context.Context, spec Spec) (context.Context, er
 	var since time.Time
 	if spec.Thread && m.options.Store != nil {
 		var err error
-		if since, _, err = m.options.Store.ThreadHistorySince(ctx, spec.CustomerID, spec.ConversationID); err != nil {
+		if since, _, err = m.options.Store.UserPhones.ThreadHistorySince(ctx, spec.CustomerID, spec.ConversationID); err != nil {
 			return nil, err
 		}
 	}
@@ -53,7 +53,7 @@ type recordedConversation struct {
 }
 
 func (r recordedConversation) Rounds(ctx context.Context, cid string, turns []string) map[string][]llm.Message {
-	replies, err := r.store.ReplyItems(ctx, r.customerID, cid, turns)
+	replies, err := r.store.Responses.Replies(ctx, r.customerID, cid, turns)
 	if err != nil {
 		r.logger.Warn("resuming a conversation without its tool calls", "conversation", cid, "error", err)
 		return nil
@@ -72,7 +72,7 @@ func (r recordedConversation) Rounds(ctx context.Context, cid string, turns []st
 }
 
 func (r recordedConversation) Opening(ctx context.Context, cid string) (string, time.Time) {
-	opening, err := r.store.Opening(ctx, r.customerID, cid)
+	opening, err := r.store.Responses.Opening(ctx, r.customerID, cid)
 	if err != nil {
 		r.logger.Warn("resuming a conversation without its first message", "conversation", cid, "error", err)
 		return "", time.Time{}

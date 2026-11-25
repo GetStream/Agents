@@ -20,6 +20,10 @@ import (
 	"github.com/GetStream/Vision-Agents/sdks/go/tools"
 )
 
+// ErrNoCall is a session's call read when the session has none: it is unknown, incognito, or
+// its first call is not written yet.
+var ErrNoCall = errors.New("client: the session has no call")
+
 // SessionOptions is what a conversation is opened with, beyond which agent holds it.
 //
 // Everything here is the caller's own decision about this one conversation: what to call it
@@ -32,7 +36,7 @@ type SessionOptions struct {
 	// searched.
 	Title       string
 	Description string
-	// ProjectID groups conversations, and is carried as a cost label too.
+	// ProjectID groups conversations, and is a cost label too when a backend names it.
 	ProjectID string
 	// Custom is the caller's own labels.
 	Custom map[string]any
@@ -81,8 +85,8 @@ type SessionOptions struct {
 	// leaves the user's stored zone, then the agent's default, to decide.
 	Timezone string
 
-	// Tools are the caller's own, for this conversation only. Nil uses the agent's, which is
-	// the usual arrangement.
+	// Tools are the caller's own, for this conversation only, run in this process. The app's
+	// tools (Client.Tools) reach a conversation through RunDispatch instead.
 	Tools *tools.Registry
 	// Logger is where the session reports what it could not do. Nil uses the default.
 	Logger *slog.Logger
@@ -162,9 +166,6 @@ type Sessions struct {
 // conversation somebody comes back to usually is.
 func (s *Sessions) Create(ctx context.Context, options SessionOptions) (*Session, error) {
 	functions := options.Tools
-	if functions == nil {
-		functions = s.agent.tools
-	}
 
 	// The pipeline is what holds the socket and runs the caller's functions, so this builds
 	// one rather than opening a second socket of its own. What differs between the two
@@ -193,15 +194,14 @@ type ResumeOptions struct {
 
 // Resume carries on a conversation held in writing, by the id of the session it was held
 // in, and starts watching it. One that ended is reopened with what was said in it, the tools
-// its caller declared and the tool timeout it ran with. The agent's functions, when it has
-// any, are declared in place of those tools; a conversation still running keeps its tools
-// until it ends. At most one ResumeOptions is read.
+// its caller declared and the tool timeout it ran with; a conversation still running keeps
+// its tools until it ends. At most one ResumeOptions is read.
 func (s *Sessions) Resume(ctx context.Context, id string, options ...ResumeOptions) (*Session, error) {
 	var chosen ResumeOptions
 	if len(options) > 0 {
 		chosen = options[0]
 	}
-	pipeline := stream.Accelerated(stream.Config{Backend: s.client.backend, Functions: s.agent.tools})
+	pipeline := stream.Accelerated(stream.Config{Backend: s.client.backend})
 	got, err := pipeline.Resume(ctx, id, chosen.ToolTimeout)
 	if err != nil {
 		return nil, err
@@ -393,16 +393,20 @@ func (s *Sessions) Tokens(ctx context.Context, id string) (*acceleration.CallTok
 	return got.JSON200, nil
 }
 
-// Timeline is one conversation's exchanges, with what was said in each and how long the
-// answer took to start, its transcription, model and voice timings kept apart. The timings
-// are kept for an hour. Only a backend may ask.
+// Timeline is the exchanges of a session's newest call, with what was said in each and how
+// long the answer took to start, its transcription, model and voice timings kept apart. The
+// timings are kept for an hour. Only a backend may ask; ErrNoCall when the session has no call.
 func (s *Sessions) Timeline(ctx context.Context, id string) ([]acceleration.TimelineEntry, error) {
 	api, err := s.client.api()
 	if err != nil {
 		return nil, err
 	}
+	call, err := s.newestCall(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 
-	got, err := api.GetCallTimelineWithResponse(ctx, id)
+	got, err := api.GetCallTimelineWithResponse(ctx, call)
 	if err != nil {
 		return nil, fmt.Errorf("client: reading the timeline of %s: %w", id, err)
 	}
@@ -412,16 +416,21 @@ func (s *Sessions) Timeline(ctx context.Context, id string) ([]acceleration.Time
 	return *got.JSON200, nil
 }
 
-// Decisions is what one conversation decided, oldest first: why the agent waited rather than
-// answering, why it read something as not meant for it, why it stopped mid-sentence. They are
-// kept for an hour. Only a backend may ask.
+// Decisions is what a session's newest call decided, oldest first: why the agent waited
+// rather than answering, why it read something as not meant for it, why it stopped
+// mid-sentence. They are kept for an hour. Only a backend may ask; ErrNoCall when the session
+// has no call.
 func (s *Sessions) Decisions(ctx context.Context, id string) ([]acceleration.CallEvent, error) {
 	api, err := s.client.api()
 	if err != nil {
 		return nil, err
 	}
+	call, err := s.newestCall(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 
-	got, err := api.GetCallEventsWithResponse(ctx, id, nil)
+	got, err := api.GetCallEventsWithResponse(ctx, call, nil)
 	if err != nil {
 		return nil, fmt.Errorf("client: reading the decisions of %s: %w", id, err)
 	}
@@ -429,6 +438,27 @@ func (s *Sessions) Decisions(ctx context.Context, id string) ([]acceleration.Cal
 		return nil, failure("reading the decisions of "+id, got.HTTPResponse, got.Body)
 	}
 	return *got.JSON200, nil
+}
+
+// newestCall is the id of session id's newest call. A session starts a new call each time
+// voice is started or stopped on it.
+func (s *Sessions) newestCall(ctx context.Context, id string) (string, error) {
+	api, err := s.client.api()
+	if err != nil {
+		return "", err
+	}
+
+	got, err := api.ListCallsWithResponse(ctx, &acceleration.ListCallsParams{SessionId: &id, Limit: pointer(1)})
+	if err != nil {
+		return "", fmt.Errorf("client: reading the calls of %s: %w", id, err)
+	}
+	if got.JSON200 == nil {
+		return "", failure("reading the calls of "+id, got.HTTPResponse, got.Body)
+	}
+	if len(*got.JSON200) == 0 {
+		return "", fmt.Errorf("%w: %s", ErrNoCall, id)
+	}
+	return (*got.JSON200)[0].Id, nil
 }
 
 // Responses is a session's turns, read back without holding the conversation.
@@ -561,6 +591,17 @@ func (s *Session) RemoveTool(ctx context.Context, name string) error {
 
 // Events yields what the backend did until the conversation ends, when the channel closes.
 func (s *Session) Events() <-chan stream.Event { return s.pipeline.Events() }
+
+// On calls handle with every event of kind until off is called. See stream.Pipeline.On.
+func (s *Session) On(kind string, handle func(stream.Event)) (off func()) {
+	return s.pipeline.On(kind, handle)
+}
+
+// ToolCall is the last state the conversation reported for a tool call. See
+// stream.Pipeline.ToolCall.
+func (s *Session) ToolCall(id string) (acceleration.ToolCallState, bool) {
+	return s.pipeline.ToolCall(id)
+}
 
 // Say speaks text without going through the model, for when the words were never in question.
 func (s *Session) Say(text string, interrupt bool) error { return s.pipeline.Say(text, interrupt) }

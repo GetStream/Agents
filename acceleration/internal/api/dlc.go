@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/mail"
 	"slices"
 	"strings"
 	"time"
@@ -60,7 +61,7 @@ func (s *Server) getBusinessProfile(ctx context.Context, _ *struct{}) (*business
 	if err != nil {
 		return nil, err
 	}
-	profile, err := s.store.BusinessProfile(ctx, customerID)
+	profile, err := s.store.BusinessProfiles.Get(ctx, customerID)
 	if err != nil {
 		return nil, dlcError(err)
 	}
@@ -76,7 +77,7 @@ func (s *Server) saveBusinessProfile(ctx context.Context, request *saveBusinessP
 		return nil, invalidRequest("a request body is required")
 	}
 	profile := profileOf(customerID, *request.Body)
-	if err := s.store.SaveBusinessProfile(ctx, &profile); err != nil {
+	if err := s.store.BusinessProfiles.Upsert(ctx, &profile); err != nil {
 		return nil, err
 	}
 	return &businessProfileResponse{Body: renderedProfile(profile)}, nil
@@ -91,7 +92,7 @@ func (s *Server) listUseCases(ctx context.Context, request *listUseCasesRequest)
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	found, err := s.store.UseCases(ctx, customerID, request.Limit, after)
+	found, err := s.store.UseCases.Select(ctx, customerID, request.Limit, after)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +133,7 @@ func (s *Server) getUseCase(ctx context.Context, request *useCaseIDRequest) (*us
 	if err != nil {
 		return nil, err
 	}
-	useCase, err := s.store.UseCase(ctx, customerID, request.Id)
+	useCase, err := s.store.UseCases.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, dlcError(err)
 	}
@@ -147,7 +148,7 @@ func (s *Server) updateUseCase(ctx context.Context, request *updateUseCaseReques
 	if request.Body == nil {
 		return nil, invalidRequest("a request body is required")
 	}
-	useCase, err := s.store.UseCase(ctx, customerID, request.Id)
+	useCase, err := s.store.UseCases.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, dlcError(err)
 	}
@@ -186,14 +187,14 @@ func (s *Server) listUseCaseReviews(ctx context.Context, request *listUseCaseRev
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.store.UseCase(ctx, customerID, request.Id); err != nil {
+	if _, err := s.store.UseCases.Get(ctx, customerID, request.Id); err != nil {
 		return nil, dlcError(err)
 	}
 	after, err := decodeCursor[store.CreatedPosition](&request.Cursor)
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	found, err := s.store.ReviewLogs(ctx, customerID, request.Id, request.Limit, after)
+	found, err := s.store.ReviewLogs.Select(ctx, customerID, request.Id, request.Limit, after)
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +219,7 @@ func (s *Server) listOptOuts(ctx context.Context, request *listOptOutsRequest) (
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	found, err := s.store.OptOuts(ctx, customerID, request.Limit, after)
+	found, err := s.store.OptOuts.Select(ctx, customerID, request.Limit, after)
 	if err != nil {
 		return nil, err
 	}
@@ -248,13 +249,37 @@ func (s *Server) createOptOut(ctx context.Context, request *createOptOutRequest)
 		Channel:    string(request.Body.Channel),
 		Source:     "api",
 	}
+	if err := optOutRecipient(optOut.Recipient, optOut.Channel); err != nil {
+		return nil, err
+	}
 	if request.Body.Source != nil {
 		optOut.Source = *request.Body.Source
 	}
-	if err := s.store.OptOut(ctx, &optOut); err != nil {
+	if err := s.store.OptOuts.Insert(ctx, &optOut); err != nil {
 		return nil, err
 	}
 	return &optOutResponse{Body: renderedOptOut(optOut)}, nil
+}
+
+// errOptOutRecipient is a recipient an opt-out would never match: one is matched against the
+// recipient of a text or call as it is written, a number in E.164 or, on iMessage, the email
+// address of a handle (the Linq bridge writes such a STOP).
+var errOptOutRecipient = APIError{Type: ErrorTypeInvalidRequest, Code: codeValidationFailed,
+	Message: "recipient must be a number in E.164, such as +15550001111, or for channel imessage or all an email address"}
+
+// optOutRecipient refuses a recipient channel could never be reached at.
+func optOutRecipient(recipient, channel string) error {
+	if store.IsE164(recipient) {
+		return nil
+	}
+	if channel != dlc.IMessage && channel != store.OptOutAll {
+		return errOptOutRecipient
+	}
+	address, err := mail.ParseAddress(recipient)
+	if err != nil || address.Address != recipient {
+		return errOptOutRecipient
+	}
+	return nil
 }
 
 func (s *Server) revokeOptOut(ctx context.Context, request *revokeOptOutRequest) (*struct{}, error) {
@@ -262,7 +287,7 @@ func (s *Server) revokeOptOut(ctx context.Context, request *revokeOptOutRequest)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.RevokeOptOut(ctx, customerID, request.Id); err != nil {
+	if err := s.store.OptOuts.Revoke(ctx, customerID, request.Id); err != nil {
 		return nil, dlcError(err)
 	}
 	return nil, nil
@@ -322,7 +347,7 @@ func (s *Server) listUseCasesForReview(ctx context.Context, request *listUseCase
 	if request.Status != "" {
 		status = string(request.Status)
 	}
-	found, err := s.store.UseCasesInStatus(ctx, status, request.Limit, after)
+	found, err := s.store.UseCases.SelectInStatus(ctx, status, request.Limit, after)
 	if err != nil {
 		return nil, err
 	}
@@ -346,7 +371,7 @@ func (s *Server) getUseCaseForReview(ctx context.Context, request *useCaseIDRequ
 	if s.dlc == nil {
 		return nil, errNoDLC
 	}
-	useCase, err := s.store.UseCaseByID(ctx, request.Id)
+	useCase, err := s.store.UseCases.GetByID(ctx, request.Id)
 	if err != nil {
 		return nil, dlcError(err)
 	}
@@ -389,7 +414,7 @@ func (s *Server) receiveDLCReport(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxReportBytes+1))
 	if err != nil {
-		writeError(w, invalidRequest(err.Error()))
+		writeError(w, invalidRequest("could not read that report"))
 		return
 	}
 	if len(body) > maxReportBytes {
@@ -397,7 +422,9 @@ func (s *Server) receiveDLCReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.dlc.Hook(r.Context(), r.Header, body); errors.Is(err, dlc.ErrRefused) {
-		writeError(w, unauthenticated(err.Error()))
+		// The reason can name the deployment's settings, which are the operator's to read.
+		s.logger.Warn("refused a 10DLC report", "error", store.SafeLogText(err.Error()))
+		writeError(w, unauthenticated("that is not a report from the registrar"))
 		return
 	} else if err != nil {
 		writeFailure(w, r, err)
@@ -415,7 +442,7 @@ func (s *Server) useCaseResponse(ctx context.Context, useCase store.UseCase) (*u
 }
 
 func (s *Server) renderedUseCase(ctx context.Context, useCase store.UseCase) (UseCase, error) {
-	numbers, err := s.store.AssignedNumbers(ctx, useCase.CustomerID, useCase.ID)
+	numbers, err := s.store.UseCases.AssignedNumbers(ctx, useCase.CustomerID, useCase.ID)
 	if err != nil {
 		return UseCase{}, err
 	}
@@ -458,7 +485,7 @@ func (s *Server) useCaseForReview(ctx context.Context, useCase store.UseCase, wi
 		return UseCaseForReview{}, err
 	}
 	forReview := UseCaseForReview{UseCase: rendered, CustomerId: useCase.CustomerID}
-	profile, err := s.store.BusinessProfile(ctx, useCase.CustomerID)
+	profile, err := s.store.BusinessProfiles.Get(ctx, useCase.CustomerID)
 	if err == nil {
 		shown := renderedProfile(profile)
 		forReview.BusinessProfile = &shown
@@ -468,7 +495,7 @@ func (s *Server) useCaseForReview(ctx context.Context, useCase store.UseCase, wi
 	if !withReviews {
 		return forReview, nil
 	}
-	logs, err := s.store.ReviewLogs(ctx, useCase.CustomerID, useCase.ID, store.DLCLimit(maxReviewsShown), nil)
+	logs, err := s.store.ReviewLogs.Select(ctx, useCase.CustomerID, useCase.ID, store.DLCLimit(maxReviewsShown), nil)
 	if err != nil {
 		return UseCaseForReview{}, err
 	}
@@ -790,7 +817,7 @@ func (OptOutChannel) Schema(registry huma.Registry) *huma.Schema {
 // OptOut is somebody who asked not to be reached.
 type OptOut struct {
 	Id        string        `json:"id"`
-	Recipient string        `json:"recipient" doc:"The number, in E.164."`
+	Recipient string        `json:"recipient" doc:"The number in E.164, or an iMessage handle's email address."`
 	Channel   OptOutChannel `json:"channel"`
 	Source    string        `json:"source" doc:"keyword when they texted STOP, campaign when they asked a campaign call not to call again, otherwise api or dashboard."`
 	CreatedAt time.Time     `json:"created_at"`
@@ -811,7 +838,7 @@ type OptOutPage struct {
 
 // CreateOptOutRequest records an opt-out the app heard about another way.
 type CreateOptOutRequest struct {
-	Recipient string        `json:"recipient" minLength:"2" maxLength:"20" doc:"The number, in E.164."`
+	Recipient string        `json:"recipient" minLength:"2" maxLength:"254" doc:"The number in E.164, or an iMessage handle's email address, for channel imessage or all."`
 	Channel   OptOutChannel `json:"channel"`
 	Source    *string       `json:"source,omitempty" enum:"api,dashboard" doc:"Omitted is api."`
 }

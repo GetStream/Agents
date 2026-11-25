@@ -15,8 +15,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
+	"github.com/redis/rueidis/rueidishook"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
@@ -152,7 +152,7 @@ func (s *PolicySuite) dropHolds(client rueidis.Client, organization string) int 
 func (s *PolicySuite) sharer(redis rueidis.Client, change ...func(*Settings)) *reading {
 	enforcer := s.billed(append([]func(*Settings){sharing(redis)}, change...)...)
 	s.T().Cleanup(func() { s.dropHolds(s.direct(), s.org) })
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 	return enforcer
 }
@@ -411,7 +411,7 @@ func (s *PolicySuite) TestRedisDownAdmitsFromMemoryThenRefuses() {
 func (s *PolicySuite) TestWithoutRedisHoldsStayLocalAndNeverRefuse() {
 	s.usage().Credit(s.T(), s.org, 1_000_000)
 	enforcer := s.billed(func(settings *Settings) { settings.FlushMaxLag = 50 * time.Millisecond })
-	enforcer.Join(s.app, s.org, openTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
 	s.read(enforcer.Enforcer, s.org)
 
 	s.Require().NoError(enforcer.Reserve(s.owner(), newID(), 400_000, time.Minute))
@@ -480,11 +480,7 @@ func grantRemaining(enforcer *Enforcer, organization string, id int64) (int64, b
 func (s *PolicySuite) TestAGrantsRemainingNeverRisesPastTheTruthAcrossItsCount() {
 	_, redisA := s.redis()
 	_, redisB := s.redis()
-	configs := func() *appconfig.Store {
-		c, err := appconfig.New(appconfig.Options{Store: s.store})
-		s.Require().NoError(err)
-		return c
-	}
+	configs := func() *store.Store { return s.store }
 	// Both routers read the grants once a second, so the other reads a count up to a second
 	// after this one has let its hold go.
 	slow := func(settings *Settings) { settings.Fresh, settings.MaxStale = time.Second, time.Minute }
@@ -496,7 +492,7 @@ func (s *PolicySuite) TestAGrantsRemainingNeverRisesPastTheTruthAcrossItsCount()
 	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
 	s.spend(s.app, 1_000_000)
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 1_000_000, Reason: "launch", Actor: "test"}
-	s.Require().NoError(s.store.AddGrant(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	for _, enforcer := range []*Enforcer{a, b} {
 		s.eventually(func() bool {
 			admitted := s.admit(enforcer, s.app)
@@ -537,8 +533,8 @@ func (s *PolicySuite) TestAGrantsRemainingNeverRisesPastTheTruthAcrossItsCount()
 	}, time.Second, 2*time.Millisecond, "the other router counts the hold")
 	truth.Store(1_000_000 - cost)
 
-	s.spendAs(store.Request{UsageID: id, CustomerID: s.app, CostMicros: cost, LimitGrants: []int64{grant.ID}})
-	_, err := s.store.AddGrantUses(s.ctx, []store.GrantUse{{GrantID: grant.ID, UsageID: id, Micros: cost}})
+	s.spendAs(store.Request{UsageID: id, CustomerID: s.app, OrganizationID: s.org, CostMicros: cost, LimitGrants: []int64{grant.ID}})
+	_, err := s.store.LimitGrantUses.InsertMany(s.ctx, []store.GrantUse{{GrantID: grant.ID, OrganizationID: s.org, UsageID: id, Micros: cost}})
 	s.Require().NoError(err)
 	a.Written([]routing.Acked{{UsageID: id, OrganizationID: s.org, CostMicros: cost}})
 	a.Counted([]routing.Acked{{UsageID: id, OrganizationID: s.org, CostMicros: cost}})
@@ -658,6 +654,72 @@ func (s *PolicySuite) TestAFlushOfMoreKeysThanAChunkLandsWhole() {
 	s.Equal(users, took, "and each of its users' keys took it")
 }
 
+func (s *PolicySuite) TestAFlushOfOneChunkIsOneRoundTrip() {
+	_, redis := s.redis()
+	counted := &roundTrips{}
+	s.usage().Credit(s.T(), s.org, 100_000_000)
+	enforcer := s.sharer(rueidishook.WithHook(redis, counted), func(settings *Settings) {
+		settings.FlushEvery, settings.HoldRefresh = time.Hour, time.Hour
+	})
+	reserve := func(users int) {
+		for range users {
+			owner := s.owner()
+			owner.UserID = "user-" + uuid.NewString()
+			s.Require().NoError(enforcer.Reserve(owner, newID(), 1_000, time.Minute))
+		}
+	}
+	// Loads the script, which Redis may not have yet.
+	reserve(1)
+	enforcer.money.flushPass(s.ctx)
+
+	reserve(20)
+	before := counted.sent.Load()
+	enforcer.money.flushPass(s.ctx)
+
+	s.Equal(int64(1), counted.sent.Load()-before, "a pass of fewer keys than a chunk")
+	enforcer.money.mu.Lock()
+	defer enforcer.money.mu.Unlock()
+	s.Empty(enforcer.money.dirty, "and every hold is written")
+}
+
+// roundTrips counts what a client sends Redis: a command, or a pipeline of them, is one.
+type roundTrips struct{ sent atomic.Int64 }
+
+func (r *roundTrips) Do(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.Do(ctx, cmd)
+}
+
+func (r *roundTrips) DoMulti(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) []rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.DoMulti(ctx, multi...)
+}
+
+func (r *roundTrips) DoCache(client rueidis.Client, ctx context.Context, cmd rueidis.Cacheable, ttl time.Duration) rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.DoCache(ctx, cmd, ttl)
+}
+
+func (r *roundTrips) DoMultiCache(client rueidis.Client, ctx context.Context, multi ...rueidis.CacheableTTL) []rueidis.RedisResult {
+	r.sent.Add(1)
+	return client.DoMultiCache(ctx, multi...)
+}
+
+func (r *roundTrips) Receive(client rueidis.Client, ctx context.Context, subscribe rueidis.Completed, fn func(msg rueidis.PubSubMessage)) error {
+	r.sent.Add(1)
+	return client.Receive(ctx, subscribe, fn)
+}
+
+func (r *roundTrips) DoStream(client rueidis.Client, ctx context.Context, cmd rueidis.Completed) rueidis.RedisResultStream {
+	r.sent.Add(1)
+	return client.DoStream(ctx, cmd)
+}
+
+func (r *roundTrips) DoMultiStream(client rueidis.Client, ctx context.Context, multi ...rueidis.Completed) rueidis.MultiRedisResultStream {
+	r.sent.Add(1)
+	return client.DoMultiStream(ctx, multi...)
+}
+
 func (s *PolicySuite) TestAPassOfManyChunksGivesUpByItsDeadlineWhenRedisHangs() {
 	proxy, redis := s.redis()
 	s.usage().Credit(s.T(), s.org, 100_000_000)
@@ -689,18 +751,14 @@ func (s *PolicySuite) TestAPassOfManyChunksGivesUpByItsDeadlineWhenRedisHangs() 
 func (s *PolicySuite) TestAGrantHeldOnOneRouterIsHeldOnEvery() {
 	_, redisA := s.redis()
 	_, redisB := s.redis()
-	configs := func() *appconfig.Store {
-		c, err := appconfig.New(appconfig.Options{Store: s.store})
-		s.Require().NoError(err)
-		return c
-	}
+	configs := func() *store.Store { return s.store }
 	a := s.newEnforcer(configs(), nil, sharing(redisA))
 	b := s.newEnforcer(configs(), nil, sharing(redisB))
 	s.T().Cleanup(func() { s.dropHolds(s.direct(), s.org) })
 	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
 	s.spend(s.app, 1_000_000)
 	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 1_000_000, Reason: "launch", Actor: "test"}
-	s.Require().NoError(s.store.AddGrant(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
 	for _, enforcer := range []*Enforcer{a, b} {
 		s.eventually(func() bool { return s.admit(enforcer, s.app).Spend == nil }, 5*time.Second, 10*time.Millisecond,
 			"admitted on the grant once it is read")

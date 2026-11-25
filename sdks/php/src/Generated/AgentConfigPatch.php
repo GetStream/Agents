@@ -26,7 +26,7 @@ final readonly class AgentConfigPatch
         public ?FloorControl $floorControl = null,
         // Replaces the greeting whole. An empty text removes it.
         public ?Greeting $greeting = null,
-        // A guardrail.md: frontmatter saying how a turn is screened, then the policy in prose. An empty string remove...
+        // A guardrail.md: frontmatter saying how a turn is screened, then the policy in prose. A decision_model guard...
         public ?string $guardrail = null,
         public Harness|string|null $harness = null,
         public ?string $instructions = null,
@@ -63,7 +63,9 @@ final readonly class AgentConfigPatch
         public ?string $subagent = null,
         /** @var array<string, string>|null */
         public ?array $tags = null,
-        public ?AgentTools $tools = null,
+        // Replaces the tool groups whole; an empty list removes them all.
+        /** @var list<ToolGroup>|null */
+        public ?array $tools = null,
         public ?string $tts = null,
         public ?SessionVideo $video = null,
         // Tools whose steps end users see on a persistent conversation's replies, as tool names or path.Match pattern...
@@ -84,6 +86,8 @@ final readonly class AgentConfigPatch
         public ?string $image = null,
         // What teaches the agent's model to answer with UI. An empty string removes them.
         public ?string $uiInstructions = null,
+        // The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict whe...
+        public ?\DateTimeImmutable $updatedAt = null,
     ) {
     }
 
@@ -124,7 +128,7 @@ final readonly class AgentConfigPatch
             stt: array_key_exists('stt', $data) && $data['stt'] !== null ? Json::string($data, 'stt') : null,
             subagent: array_key_exists('subagent', $data) && $data['subagent'] !== null ? Json::string($data, 'subagent') : null,
             tags: array_key_exists('tags', $data) && $data['tags'] !== null ? Json::stringMap($data, 'tags') : null,
-            tools: array_key_exists('tools', $data) && $data['tools'] !== null ? AgentTools::fromArray(Json::object($data, 'tools')) : null,
+            tools: array_key_exists('tools', $data) && $data['tools'] !== null ? array_map(ToolGroup::fromArray(...), Json::objects($data, 'tools')) : null,
             tts: array_key_exists('tts', $data) && $data['tts'] !== null ? Json::string($data, 'tts') : null,
             video: array_key_exists('video', $data) && $data['video'] !== null ? SessionVideo::fromArray(Json::object($data, 'video')) : null,
             visibleTools: array_key_exists('visible_tools', $data) && $data['visible_tools'] !== null ? Json::strings($data, 'visible_tools') : null,
@@ -134,6 +138,7 @@ final readonly class AgentConfigPatch
             agents: array_key_exists('agents', $data) && $data['agents'] !== null ? array_map(ChildAgent::fromArray(...), Json::objects($data, 'agents')) : null,
             image: array_key_exists('image', $data) && $data['image'] !== null ? Json::string($data, 'image') : null,
             uiInstructions: array_key_exists('ui_instructions', $data) && $data['ui_instructions'] !== null ? Json::string($data, 'ui_instructions') : null,
+            updatedAt: array_key_exists('updated_at', $data) && $data['updated_at'] !== null ? Json::date($data, 'updated_at') : null,
         );
     }
 
@@ -239,7 +244,7 @@ final readonly class AgentConfigPatch
             $out['tags'] = $this->tags;
         }
         if ($this->tools !== null) {
-            $out['tools'] = $this->tools->toArray();
+            $out['tools'] = array_map(static fn (ToolGroup $each): array => $each->toArray(), $this->tools);
         }
         if ($this->tts !== null) {
             $out['tts'] = $this->tts;
@@ -267,6 +272,9 @@ final readonly class AgentConfigPatch
         }
         if ($this->uiInstructions !== null) {
             $out['ui_instructions'] = $this->uiInstructions;
+        }
+        if ($this->updatedAt !== null) {
+            $out['updated_at'] = Json::dateValue($this->updatedAt);
         }
         return $out;
     }

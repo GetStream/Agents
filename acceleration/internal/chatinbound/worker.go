@@ -37,7 +37,7 @@ const inFlight = 64
 var defaultRetries = []time.Duration{2 * time.Second, 10 * time.Second, 30 * time.Second, 2 * time.Minute, 10 * time.Minute}
 
 // pruneEvery is how often a worker deletes the rows past their keep: a day for an answered
-// message, 30 days for a given-up one (store.PruneChatInbound), so an hour late is nothing.
+// message, 30 days for a given-up one (store.ChatInbounds.Prune), so an hour late is nothing.
 // A choice, the channel bridge's.
 const pruneEvery = time.Hour
 
@@ -178,8 +178,7 @@ func (w *Worker) answerDue(ctx context.Context) (wait time.Duration, again bool)
 	if free == 0 {
 		return 0, false
 	}
-	now := time.Now()
-	claimed, err := w.store.ClaimChatInbound(ctx, now, free, now.Add(w.lease))
+	claimed, err := w.store.ChatInbounds.Claim(ctx, free, w.lease)
 	if err != nil {
 		if ctx.Err() == nil {
 			w.logger.Error("could not take the chat inbound messages due", "error", err)
@@ -198,7 +197,7 @@ func (w *Worker) answerDue(ctx context.Context) (wait time.Duration, again bool)
 			w.attempt(delivery)
 		}()
 	}
-	next, queued, err := w.store.NextChatInboundAt(ctx)
+	next, queued, err := w.store.ChatInbounds.NextDue(ctx)
 	switch {
 	case err != nil:
 		if ctx.Err() == nil {
@@ -218,7 +217,7 @@ func (w *Worker) prune(ctx context.Context) {
 		return
 	}
 	w.pruned = time.Now()
-	if _, err := w.store.PruneChatInbound(ctx, w.pruned); err != nil && ctx.Err() == nil {
+	if _, err := w.store.ChatInbounds.Prune(ctx, w.pruned); err != nil && ctx.Err() == nil {
 		w.logger.Error("could not delete the chat inbound messages past their keep", "error", err)
 	}
 }
@@ -226,7 +225,7 @@ func (w *Worker) prune(ctx context.Context) {
 // attempt answers a claimed message once and records what came of it: answered, due again
 // after the next wait, or given up when the waits ran out.
 func (w *Worker) attempt(delivery store.ChatInbound) {
-	log := w.logger.With("seq", delivery.Seq, "stream_app", delivery.StreamApp, "message", delivery.MessageID)
+	log := w.logger.With("seq", delivery.Seq, "stream_app", delivery.StreamAppPK, "message", delivery.MessageID)
 	log.Info("answering a queued chat inbound message", "attempts", delivery.Attempts)
 	err := w.answer(w.ctx, delivery)
 	if err != nil && w.ctx.Err() != nil {
@@ -238,19 +237,19 @@ func (w *Worker) attempt(delivery store.ChatInbound) {
 	// Recorded even while Close waits: an answered message left leased is tried again.
 	writing, done := context.WithTimeout(context.WithoutCancel(w.ctx), recordTimeout)
 	defer done()
-	attempts := delivery.Attempts + 1
+	attempts := delivery.Attempts
 	var changed bool
 	switch {
 	case err == nil:
-		changed, err = w.store.FinishChatInbound(writing, delivery, time.Now())
+		changed, err = w.store.ChatInbounds.Finish(writing, delivery, time.Now())
 		log.Info("answered a queued chat inbound message", "attempts", attempts)
 	case attempts <= len(w.retries):
 		next := time.Now().Add(w.retries[attempts-1])
 		log.Info("a queued chat inbound message failed and is answered again", "attempts", attempts, "next", next, "error", err)
-		changed, err = w.store.RetryChatInbound(writing, delivery, next)
+		changed, err = w.store.ChatInbounds.Retry(writing, delivery, next)
 	default:
 		log.Warn("gave up a queued chat inbound message", "attempts", attempts, "error", err)
-		changed, err = w.store.FailChatInbound(writing, delivery, time.Now())
+		changed, err = w.store.ChatInbounds.Fail(writing, delivery, time.Now())
 	}
 	switch {
 	case err != nil:

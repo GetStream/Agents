@@ -197,9 +197,10 @@ type Settings struct {
 	// file lists none, which removes them. A null entry is refused: dropping it
 	// would sync an empty list and wipe the stored bindings.
 	Connectors connectorList `yaml:"connectors"`
-	// Tools is how MCP server and connector tools are offered. Nil when the
-	// declaration says nothing about it.
-	Tools *ToolSettings `yaml:"tools"`
+	// Tools are the groups naming the functions this process provides that the agent may
+	// offer: a function no group names is never offered. Nil when the declaration says
+	// nothing, which leaves the groups stored.
+	Tools *toolGroupList `yaml:"tools"`
 	// Channels are the lines the agent answers on besides its Stream Chat channel: a
 	// WhatsApp number, a number to text, an iMessage line. Each names a number the app
 	// connected on the router, which is where the provider's credentials live.
@@ -234,15 +235,66 @@ type Settings struct {
 	App map[string]any `yaml:"app"`
 }
 
-// ToolSettings is how MCP server and connector tools are offered, and how long what any tool
-// was given and gave back is kept.
-type ToolSettings struct {
-	// Progressive offers each tool by a summary, the first call to it returning its full
-	// description instead of running it. Nil when the declaration says nothing about it.
-	Progressive *bool `yaml:"progressive"`
-	// OutputRetention is how long the agent's sessions keep a tool's arguments and output:
-	// none, or a duration such as 12h or 30d. Nil when the declaration says nothing about it.
-	OutputRetention *string `yaml:"output_retention"`
+// ToolGroupSettings is one group of the agent's functions, and how they are offered.
+type ToolGroupSettings struct {
+	Name string `yaml:"name"`
+	// Loading is full, the whole description and schema; summary, the first line, with the
+	// first call returning the rest; or deferred, offered only once the model finds and loads
+	// it. Empty is full.
+	Loading string `yaml:"loading"`
+	// Tools are the names of the functions in the group.
+	Tools []string `yaml:"tools"`
+	// OutputRetention is how long the agent's sessions keep what the group's tools were
+	// given and gave back: none, or a duration such as 12h or 30d. Empty is as long as the
+	// session.
+	OutputRetention string `yaml:"output_retention"`
+}
+
+// toolLoadings are what a group's or a connector's loading may say.
+var toolLoadings = []string{"full", "summary", "deferred"}
+
+// toolGroupList is the tools list. The mapping tools was before groups is refused with where
+// each of its settings went.
+type toolGroupList []ToolGroupSettings
+
+func (t *toolGroupList) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.MappingNode {
+		return fmt.Errorf("line %d: tools is a list of groups, each with a name and its tools, such as "+
+			"- {name: booking, loading: full, tools: [lookup_booking]}; progressive: true is now "+
+			"loading: summary, and output_retention moves onto each group and connector", node.Line)
+	}
+	if node.Kind != yaml.SequenceNode {
+		return fmt.Errorf("line %d: tools must be a list of groups", node.Line)
+	}
+	keys := []string{"name", "loading", "tools", "output_retention"}
+	groups := make(toolGroupList, 0, len(node.Content))
+	for _, item := range node.Content {
+		if item.Kind != yaml.MappingNode {
+			return fmt.Errorf("line %d: a tool group is a mapping with a name and its tools", item.Line)
+		}
+		for index := 0; index < len(item.Content); index += 2 {
+			if key := item.Content[index]; !slices.Contains(keys, key.Value) {
+				return fmt.Errorf("line %d: %q is not something a tool group says; %s are", key.Line, key.Value,
+					strings.Join(keys, ", "))
+			}
+		}
+		var group ToolGroupSettings
+		if err := item.Decode(&group); err != nil {
+			return err
+		}
+		switch {
+		case group.Name == "":
+			return fmt.Errorf("line %d: a tool group needs a name", item.Line)
+		case len(group.Tools) == 0:
+			return fmt.Errorf("line %d: tool group %q names no tools", item.Line, group.Name)
+		case group.Loading != "" && !slices.Contains(toolLoadings, group.Loading):
+			return fmt.Errorf("line %d: tool group %q: loading is %s, not %q", keyLine(item, "loading"), group.Name,
+				strings.Join(toolLoadings, ", "), group.Loading)
+		}
+		groups = append(groups, group)
+	}
+	*t = groups
+	return nil
 }
 
 // ConnectorSettings is one connector the agent binds. agent.yaml gives it as the alias
@@ -267,6 +319,13 @@ type ConnectorSettings struct {
 	// RequireApproval are names or path.Match patterns of the tools whose every call waits for
 	// the session's user to allow it. Nil sends no require_approval key.
 	RequireApproval *[]string `yaml:"require_approval"`
+	// Loading is how the connector's tools are offered, as a tool group's: full, summary or
+	// deferred. Empty is full.
+	Loading string `yaml:"loading"`
+	// OutputRetention is how long the agent's sessions keep what the connector's tools were
+	// given and gave back: none, or a duration such as 12h or 30d. Empty is as long as the
+	// session.
+	OutputRetention string `yaml:"output_retention"`
 }
 
 // connectorKeys are the keys a connector entry may hold: the yaml tags of ConnectorSettings.
@@ -307,6 +366,10 @@ func (c *ConnectorSettings) UnmarshalYAML(node *yaml.Node) error {
 	}
 	if c.Connection != nil && *c.Connection == "" {
 		return fmt.Errorf("line %d: connector %q: connection must be a connection id or label", keyLine(node, "connection"), c.Name)
+	}
+	if c.Loading != "" && !slices.Contains(toolLoadings, c.Loading) {
+		return fmt.Errorf("line %d: connector %q: loading is %s, not %q", keyLine(node, "loading"), c.Name,
+			strings.Join(toolLoadings, ", "), c.Loading)
 	}
 	return nil
 }
@@ -481,8 +544,40 @@ type ChannelSettings struct {
 type GreetingSettings struct {
 	Text string `yaml:"text"`
 	// Mode is exact, said word for word, or variation, which the model rewords on every
-	// call. Empty is exact.
+	// call. agent.yaml leaving it out is variation; empty in a GreetingSettings built in
+	// code is exact.
 	Mode string `yaml:"mode"`
+}
+
+// UnmarshalYAML reads greeting as its text alone, such as `greeting: Hello`, or as a mapping
+// of text and mode. Either way a greeting that names no mode is a variation.
+func (g *GreetingSettings) UnmarshalYAML(node *yaml.Node) error {
+	read := GreetingSettings{Mode: "variation"}
+	switch node.Kind {
+	case yaml.ScalarNode:
+		read.Text = node.Value
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key, value := node.Content[i].Value, node.Content[i+1]
+			if value.Kind != yaml.ScalarNode {
+				return fmt.Errorf("greeting.%s must be a string", key)
+			}
+			switch key {
+			case "text":
+				read.Text = value.Value
+			case "mode":
+				if value.Value != "" {
+					read.Mode = value.Value
+				}
+			default:
+				return fmt.Errorf("%q is not a greeting setting; text and mode are", key)
+			}
+		}
+	default:
+		return errors.New("greeting is its text, or a mapping of text and mode")
+	}
+	*g = read
+	return nil
 }
 
 type VideoSettings struct {
@@ -585,9 +680,14 @@ func Load(path string) (*Folder, error) {
 		return nil, fmt.Errorf("agents: %s is not an agent directory", path)
 	}
 
+	// What is loaded is what the directory holds: a link out of it is refused wherever it is.
+	root, err := realPath(path)
+	if err != nil {
+		return nil, fmt.Errorf("agents: reading %s: %w", path, err)
+	}
 	folder := &Folder{Path: path, Name: filepath.Base(filepath.Clean(path))}
 
-	declaration, err := os.ReadFile(filepath.Join(path, AgentFile))
+	declaration, err := readInside(root, filepath.Join(path, AgentFile))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("agents: %s has no %s, so it is not an agent directory", path, AgentFile)
 	}
@@ -602,7 +702,7 @@ func Load(path string) (*Folder, error) {
 		folder.Name = folder.Settings.Name
 	}
 
-	instructions, err := os.ReadFile(filepath.Join(path, InstructionsFile))
+	instructions, err := readInside(root, filepath.Join(path, InstructionsFile))
 	switch {
 	case err == nil:
 		folder.Instructions = strings.TrimSpace(string(instructions))
@@ -610,7 +710,7 @@ func Load(path string) (*Folder, error) {
 		return nil, fmt.Errorf("agents: reading %s: %w", InstructionsFile, err)
 	}
 
-	policy, err := os.ReadFile(filepath.Join(path, GuardrailFile))
+	policy, err := readInside(root, filepath.Join(path, GuardrailFile))
 	switch {
 	case err == nil:
 		folder.Guardrail = strings.TrimSpace(string(policy))
@@ -618,16 +718,16 @@ func Load(path string) (*Folder, error) {
 		return nil, fmt.Errorf("agents: reading %s: %w", GuardrailFile, err)
 	}
 
-	if folder.Skills, err = loadSkills(filepath.Join(path, SkillsDir)); err != nil {
+	if folder.Skills, err = loadSkills(root, filepath.Join(path, SkillsDir)); err != nil {
 		return nil, err
 	}
-	if folder.Knowledge, err = loadKnowledge(filepath.Join(path, KnowledgeDir)); err != nil {
+	if folder.Knowledge, err = loadKnowledge(root, filepath.Join(path, KnowledgeDir)); err != nil {
 		return nil, err
 	}
-	if folder.KnowledgeURLs, err = loadKnowledgeURLs(filepath.Join(path, KnowledgeDir, KnowledgeURLsFile)); err != nil {
+	if folder.KnowledgeURLs, err = loadKnowledgeURLs(root, filepath.Join(path, KnowledgeDir, KnowledgeURLsFile)); err != nil {
 		return nil, err
 	}
-	if folder.Simulations, err = loadSimulations(filepath.Join(path, SimulationsDir)); err != nil {
+	if folder.Simulations, err = loadSimulations(root, filepath.Join(path, SimulationsDir)); err != nil {
 		return nil, err
 	}
 	if folder.Settings.UI != nil {
@@ -867,7 +967,7 @@ func refuseReplaced(key string, value yaml.Node, replacement string) error {
 
 // loadSkills reads skills/: a skill is either a markdown file, or a folder holding a
 // SKILL.md and whatever files it comes with, nested as deep as they are.
-func loadSkills(path string) ([]Skill, error) {
+func loadSkills(root, path string) ([]Skill, error) {
 	entries, err := os.ReadDir(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -890,7 +990,7 @@ func loadSkills(path string) ([]Skill, error) {
 			continue
 		}
 
-		content, err := os.ReadFile(file)
+		content, err := readInside(root, file)
 		if entry.IsDir() && errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("agents: %s has no %s, so it is not a skill", filepath.Join(path, entry.Name()), SkillFile)
 		}
@@ -907,7 +1007,7 @@ func loadSkills(path string) ([]Skill, error) {
 			return nil, fmt.Errorf("agents: %s: %w", file, err)
 		}
 		if entry.IsDir() {
-			if skill.Files, err = loadSkillFiles(filepath.Join(path, entry.Name())); err != nil {
+			if skill.Files, err = loadSkillFiles(root, filepath.Join(path, entry.Name())); err != nil {
 				return nil, err
 			}
 		}
@@ -918,7 +1018,7 @@ func loadSkills(path string) ([]Skill, error) {
 
 // loadSkillFiles reads every file in a skill folder but its SKILL.md, by slash path
 // relative to the folder. Nil when there are none.
-func loadSkillFiles(dir string) (map[string]string, error) {
+func loadSkillFiles(root, dir string) (map[string]string, error) {
 	var files map[string]string
 	err := filepath.WalkDir(dir, func(file string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -933,7 +1033,7 @@ func loadSkillFiles(dir string) (map[string]string, error) {
 		if entry.IsDir() || file == filepath.Join(dir, SkillFile) {
 			return nil
 		}
-		content, err := os.ReadFile(file)
+		content, err := readInside(root, file)
 		if err != nil {
 			return err
 		}
@@ -954,6 +1054,45 @@ func loadSkillFiles(dir string) (map[string]string, error) {
 		return nil, fmt.Errorf("agents: reading %s: %w", dir, err)
 	}
 	return files, nil
+}
+
+// inside is the real path of path, refused when it is outside the agent directory whose real
+// path is root, as a link left pointing elsewhere on the machine would be. A missing path is
+// an error wrapping fs.ErrNotExist, as from os.ReadFile.
+func inside(root, path string) (string, error) {
+	target, err := realPath(path)
+	if err != nil {
+		return "", err
+	}
+	if leaves(root, target) {
+		return "", fmt.Errorf("%s links outside the agent directory", path)
+	}
+	return target, nil
+}
+
+// realPath is path with every link resolved, made absolute first, since a relative path
+// resolves to a relative one and could not be told apart from an absolute link's target.
+func realPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(absolute)
+}
+
+// readInside reads file from where it really is, once inside has let it through.
+func readInside(root, file string) ([]byte, error) {
+	target, err := inside(root, file)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(target)
+}
+
+// leaves says whether target is outside root, both real paths.
+func leaves(root, target string) bool {
+	relative, err := filepath.Rel(root, target)
+	return err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 // skipped says whether a file or folder in a skill folder is left behind: hidden ones such
@@ -1040,22 +1179,32 @@ func cutFrontmatter(content string) (frontmatter, body string, found bool) {
 	return frontmatter, strings.TrimLeft(body, "-\r\n"), true
 }
 
-func loadKnowledge(path string) ([]Document, error) {
-	root, err := os.Stat(path)
+func loadKnowledge(root, path string) ([]Document, error) {
+	info, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("agents: reading %s: %w", path, err)
 	}
-	if !root.IsDir() {
+	if !info.IsDir() {
 		return nil, fmt.Errorf("agents: %s is not a directory", path)
+	}
+	// A walk does not follow a linked knowledge/, so it would load as empty rather than refused.
+	if _, err := inside(root, path); err != nil {
+		return nil, fmt.Errorf("agents: reading %s: %w", path, err)
 	}
 
 	var documents []Document
 	err = filepath.WalkDir(path, func(file string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if skipped(entry.Name()) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if entry.IsDir() || !readable[strings.ToLower(filepath.Ext(entry.Name()))] {
 			return nil
@@ -1067,7 +1216,7 @@ func loadKnowledge(path string) ([]Document, error) {
 			return nil
 		}
 
-		content, err := os.ReadFile(file)
+		content, err := readInside(root, file)
 		if err != nil {
 			return err
 		}
@@ -1095,8 +1244,8 @@ func loadKnowledge(path string) ([]Document, error) {
 //
 // A bad url is refused here rather than when it is subscribed, since a directory that
 // cannot be turned into a knowledge base is worth hearing about before anything is written.
-func loadKnowledgeURLs(path string) ([]KnowledgeURL, error) {
-	raw, err := os.ReadFile(path)
+func loadKnowledgeURLs(root, path string) ([]KnowledgeURL, error) {
+	raw, err := readInside(root, path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -1114,7 +1263,7 @@ func loadKnowledgeURLs(path string) ([]KnowledgeURL, error) {
 // loadSimulations reads every .yaml and .yml file in simulations/, each a list of
 // simulations. A key nobody knows is refused, as in agent.yaml, and so is a name two
 // simulations share, since a sync finds a simulation by its name.
-func loadSimulations(path string) ([]Simulation, error) {
+func loadSimulations(root, path string) ([]Simulation, error) {
 	entries, err := os.ReadDir(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -1132,7 +1281,7 @@ func loadSimulations(path string) ([]Simulation, error) {
 		}
 
 		file := filepath.Join(path, entry.Name())
-		raw, err := os.ReadFile(file)
+		raw, err := readInside(root, file)
 		if err != nil {
 			return nil, fmt.Errorf("agents: reading %s: %w", file, err)
 		}

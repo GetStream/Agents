@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channelbridge"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -38,8 +39,8 @@ func (s *RouterSuite) schedulingModelOn(config *store.AgentConfig) {
 	s.scheduled = nil
 	s.scheduledMu.Unlock()
 	s.schedulingScript.reset()
-	config.LLM = "scheduling/scheduling-model"
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), config))
+	config.Models.LLM = "scheduling/scheduling-model"
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), config))
 }
 
 // schedulingOn has config answer with the scheduling model, scheduling on.
@@ -58,7 +59,7 @@ func (s *RouterSuite) customersTasks(count int) []store.ScheduledTask {
 	var tasks []store.ScheduledTask
 	s.Require().Eventually(func() bool {
 		var err error
-		tasks, err = s.store.ScheduledTasks(context.Background(), s.customerID(), store.ScheduledTaskFilter{}, 25, nil)
+		tasks, err = s.store.ScheduledTasks.Select(context.Background(), s.customerID(), store.ScheduledTaskFilter{Limit: 25})
 		s.Require().NoError(err)
 		return len(tasks) >= count
 	}, settleFor, 10*time.Millisecond, "the customer holds no %d tasks", count)
@@ -139,18 +140,34 @@ func (s *telnyxLine) smsTurn(person, text string) string {
 // closes it, and only then releases. A probe that takes the turn and gives it back is the wait.
 // The lease (threadTurnLease) outlasts settleFor, so it running out cannot end the wait.
 func (s *RouterSuite) threadTurnIsFree(channel string) {
-	ctx := context.Background()
 	s.Require().Eventually(func() bool {
-		taken, err := s.store.TakeChannelThreadTurn(ctx, channel, "the-test", time.Now().Add(time.Minute))
+		taken, err := s.takeThreadTurn(channel, "the-test")
 		return err == nil && taken
 	}, settleFor, 10*time.Millisecond, "the turn that answered the message in %s was never let go of", channel)
-	s.Require().NoError(s.store.ReleaseChannelThreadTurn(ctx, channel, "the-test"))
+	s.releaseThreadTurn(channel, "the-test")
+}
+
+// takeThreadTurn leases the turn of the thread channel channel to holder for a minute.
+func (s *RouterSuite) takeThreadTurn(channel, holder string) (bool, error) {
+	thread, err := s.store.ChannelThreads.Get(context.Background(), channel)
+	if err != nil {
+		return false, err
+	}
+	return s.store.ChannelTurns.Take(context.Background(), store.ChannelTurn{StreamAppPK: thread.StreamAppPK,
+		CID: chatlog.ChannelType + ":" + channel, LeasedBy: holder, Lease: time.Minute})
+}
+
+// releaseThreadTurn lets go of the turn holder leased in the thread channel channel.
+func (s *RouterSuite) releaseThreadTurn(channel, holder string) {
+	thread, err := s.store.ChannelThreads.Get(context.Background(), channel)
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.ChannelTurns.Release(context.Background(), thread.StreamAppPK, chatlog.ChannelType+":"+channel, holder))
 }
 
 // hasThread is whether the test's customer has a thread channel for person yet.
 func (s *telnyxLine) hasThread(person string) bool {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_threads WHERE customer_id = ? AND connector_id = 'telnyx' AND thread_key = ?",
 		s.customerID(), person).Scan(&count))
 	return count > 0
@@ -193,7 +210,7 @@ func (s *TelnyxChannelSuite) TestTwoPeopleOnOneLineNeverReachEachOthersTasks() {
 	s.planTool("cancel_scheduled_task", `{"id":"`+task.ID+`"}`)
 	s.smsTurn(bob, "cancel "+task.ID)
 	s.toldTheModel(`"error":"scheduled_task_not_found"`)
-	_, err := s.store.ScheduledTask(context.Background(), s.customerID(), task.ID)
+	_, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), task.ID)
 	s.Require().NoError(err, "the other person's cancel left the task")
 
 	s.planTool("list_scheduled_tasks", `{}`)
@@ -202,7 +219,7 @@ func (s *TelnyxChannelSuite) TestTwoPeopleOnOneLineNeverReachEachOthersTasks() {
 	s.planTool("cancel_scheduled_task", `{"id":"`+task.ID+`"}`)
 	s.smsTurn(alice, "never mind")
 	s.toldTheModel(`"cancelled":"Stretch"`)
-	_, err = s.store.ScheduledTask(context.Background(), s.customerID(), task.ID)
+	_, err = s.store.ScheduledTasks.Get(context.Background(), s.customerID(), task.ID)
 	s.ErrorIs(err, store.ErrNoScheduledTask)
 }
 
@@ -220,7 +237,7 @@ func (s *TelnyxChannelSuite) TestSomeoneElseWritingInAPersonsThreadIsNotOfferedT
 	task := store.ScheduledTask{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: "alice", CallerKind: "server", APIKey: s.RouterSuite.app.key,
 		Title: "Alice private review", Instructions: "x", StartLocal: next, Timezone: "Europe/Amsterdam",
 		NextRunAt: &next, Channels: []string{"conversation"}}
-	s.Require().NoError(s.store.CreateScheduledTask(context.Background(), &task, 0))
+	s.Require().NoError(s.store.ScheduledTasks.Insert(context.Background(), &task, 0))
 
 	s.planTool("list_scheduled_tasks", `{}`)
 	sent, replies := len(s.telnyx().sent()), s.repliesIn(channel)
@@ -268,7 +285,7 @@ func (s *TelnyxChannelSuite) TestTheSamePersonOnAnotherCustomersLineReachesNoneO
 	s.smsTurn(person, "cancel "+task.ID)
 	s.toldTheModel(`"error":"scheduled_task_not_found"`)
 
-	_, err := s.store.ScheduledTask(context.Background(), first, task.ID)
+	_, err := s.store.ScheduledTasks.Get(context.Background(), first, task.ID)
 	s.NoError(err, "the other customer's cancel left the task")
 }
 
@@ -328,7 +345,7 @@ func (s *TelnyxChannelSuite) TestAPersonsLimitCountsTheirOwnTasksOnResume() {
 	s.smsTurn(person, "resume the stretch one")
 
 	s.toldTheModel(`"error":"too_many_tasks"`)
-	stored, err := s.store.ScheduledTask(context.Background(), s.customerID(), paused.ID)
+	stored, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), paused.ID)
 	s.Require().NoError(err)
 	s.Equal(store.ScheduledTaskPaused, stored.State)
 }
@@ -341,7 +358,7 @@ func (s *TelnyxChannelSuite) TestAThreadOnAConfigWithoutSchedulingIsOfferedWhatI
 	s.smsTurn("+13125550001", "remind me to stretch in two hours")
 
 	s.Equal([]string{}, s.everyToolOffered())
-	tasks, err := s.store.ScheduledTasks(context.Background(), s.customerID(), store.ScheduledTaskFilter{}, 25, nil)
+	tasks, err := s.store.ScheduledTasks.Select(context.Background(), s.customerID(), store.ScheduledTaskFilter{Limit: 25})
 	s.Require().NoError(err)
 	s.Empty(tasks)
 }
@@ -401,7 +418,7 @@ func (s *LinqChannelSuite) linqTurn(chat, sender string, isGroup any, text strin
 // hasChat is whether the test's customer has a thread channel for a Linq chat yet.
 func (s *LinqChannelSuite) hasChat(chat string) bool {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_threads WHERE customer_id = ? AND connector_id = 'linq' AND thread_key = ?",
 		s.customerID(), chat).Scan(&count))
 	return count > 0
@@ -410,9 +427,8 @@ func (s *LinqChannelSuite) hasChat(chat string) bool {
 // chatPerson is the person the thread of a Linq chat records the chat is with, "" for none.
 func (s *LinqChannelSuite) chatPerson(chat string) string {
 	var person sql.NullString
-	err := s.store.DB().QueryRowContext(context.Background(),
-		"SELECT p.chat_person FROM channel_threads t LEFT JOIN channel_thread_people p ON p.channel_id = t.channel_id"+
-			" WHERE t.customer_id = ? AND t.connector_id = 'linq' AND t.thread_key = ?",
+	err := s.store.GlobalDB().QueryRowContext(context.Background(),
+		"SELECT chat_person FROM channel_threads WHERE customer_id = ? AND connector_id = 'linq' AND thread_key = ?",
 		s.customerID(), chat).Scan(&person)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ""
@@ -540,19 +556,19 @@ func (s *SlackChannelSuite) TestASlackThreadIsNotOfferedTheTools() {
 
 // A store that cannot record the chat's person fails the worker's attempt, not the delivery, and
 // the next attempt records the person and writes the message, once. The write is made to fail by
-// renaming the table away until the first attempt failed: the suite's database is its own
+// a check no person passes until the first attempt failed: the suite's database is its own
 // (SetupSuite), so no other suite sees it, and a defer puts it back.
 func (s *LinqChannelSuite) TestAChatPersonTheStoreCannotWriteIsWrittenOnTheNextAttempt() {
 	ctx := context.Background()
 	chat, person := s.utils.uuid(), "+13125550001"
 	body := s.chatSays(s.received(chat, s.line, person, "hello"), false)
-	_, err := s.store.DB().ExecContext(ctx, "ALTER TABLE channel_thread_people RENAME TO channel_thread_people_off")
+	_, err := s.store.GlobalDB().ExecContext(ctx, "ALTER TABLE channel_threads ADD CONSTRAINT chat_person_off CHECK (chat_person = '') NOT VALID")
 	s.Require().NoError(err)
 	restored := false
 	restore := func() {
 		if !restored {
 			restored = true
-			_, err := s.store.DB().ExecContext(ctx, "ALTER TABLE channel_thread_people_off RENAME TO channel_thread_people")
+			_, err := s.store.GlobalDB().ExecContext(ctx, "ALTER TABLE channel_threads DROP CONSTRAINT chat_person_off")
 			s.Require().NoError(err)
 		}
 	}

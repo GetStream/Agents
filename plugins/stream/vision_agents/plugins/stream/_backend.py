@@ -5,7 +5,7 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional, Sequence, Union
 
 from ._errors import raise_refusal
@@ -36,8 +36,9 @@ TEAM_PREFIX = "team:"
 MAX_CATEGORIES = 10
 _CATEGORY = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 _TEAM = re.compile(r"[A-Za-z0-9_.-]{1,59}")
-# Stream's hosted router, which is where a client goes when nothing says otherwise.
-DEFAULT_URL = "https://accelerate-us-east4.gcp.stream-io-api.com"
+# Stream's hosted router in the nearest healthy region, which is where a client goes when
+# nothing says otherwise.
+DEFAULT_URL = "https://accelerate.gcp.stream-io-api.com"
 
 # How long a token minted here lasts. Short, because it is minted per request and a stolen
 # one should stop working sooner than the credential behind it.
@@ -106,7 +107,9 @@ def checked_categories(
 
 
 def _hosted(url: str) -> bool:
-    """Whether url is the hosted router in some region, which is always behind the proxy."""
+    """Whether url is the hosted router, nearest or in some region, which is always behind the proxy."""
+    if url == DEFAULT_URL:
+        return True
     if not url.startswith(_REGION_PREFIX) or not url.endswith(_REGION_SUFFIX):
         return False
     name = url[len(_REGION_PREFIX) : -len(_REGION_SUFFIX)]
@@ -452,6 +455,15 @@ class Backend:
                 str(self.api_secret),
             )
         return self._server_token()
+
+
+def acting_for(backend: Backend, user_id: str) -> Backend:
+    """A copy of ``backend`` acting for ``user_id``, or for nobody when it is empty.
+
+    It keeps the app's credential and drops the user the backend was built for: behind the
+    proxy that user would be signed a token of their own instead.
+    """
+    return replace(backend, user_id="", user={}, acting_for=user_id)
 
 
 def category_claims(

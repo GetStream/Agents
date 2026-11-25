@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -25,7 +25,7 @@ func TestDecisionRecorderSuite(t *testing.T) {
 
 // recorder is one whose writes are whatever send says, not Redis, with a logger that keeps
 // what it says.
-func (s *DecisionRecorderSuite) recorder(drain time.Duration, send func(context.Context, []live.CallEvent) error) (*decisionRecorder, *bytes.Buffer) {
+func (s *DecisionRecorderSuite) recorder(drain time.Duration, send func(context.Context, []store.CallEvent) error) (*decisionRecorder, *bytes.Buffer) {
 	var logs bytes.Buffer
 	r := buildDecisionRecorder(nil, routing.Owner{CustomerID: "acme", AgentID: "agent-1"}, slog.New(slog.NewTextHandler(&logs, nil)))
 	r.drainTimeout = drain
@@ -46,7 +46,7 @@ func (s *DecisionRecorderSuite) TestTheDrainDeadlineIsTwoWrites() {
 func (s *DecisionRecorderSuite) TestCloseGivesUpOnARedisThatNeverAnswers() {
 	const queued = 200
 	var attempts atomic.Int64
-	r, logs := s.recorder(200*time.Millisecond, func(ctx context.Context, _ []live.CallEvent) error {
+	r, logs := s.recorder(200*time.Millisecond, func(ctx context.Context, _ []store.CallEvent) error {
 		attempts.Add(1)
 		<-ctx.Done()
 		return ctx.Err()
@@ -79,7 +79,7 @@ func (s *DecisionRecorderSuite) TestCloseGivesUpOnARedisThatNeverAnswers() {
 func (s *DecisionRecorderSuite) TestCloseWritesEveryQueuedRowWhenRedisAnswers() {
 	var mu sync.Mutex
 	var written []string
-	r, logs := s.recorder(time.Minute, func(_ context.Context, batch []live.CallEvent) error {
+	r, logs := s.recorder(time.Minute, func(_ context.Context, batch []store.CallEvent) error {
 		mu.Lock()
 		defer mu.Unlock()
 		for _, row := range batch {

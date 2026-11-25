@@ -75,12 +75,16 @@ type pendingTool struct {
 	ctx      context.Context
 	answer   chan toolResult
 	resolved bool
+	// decided is set once the person answered the call's question (decide).
+	decided bool
 }
 
 // toolResult is what the caller said happened.
 type toolResult struct {
 	parts   []llm.ContentPart
 	failure string
+	// ended marks the router's own answer to a call that ended, not the caller's.
+	ended bool
 }
 
 func newBridge(timeout time.Duration, tools []harness.Tool, ask func(ToolCall) error) *bridge {
@@ -162,6 +166,9 @@ func (b *bridge) Run(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart,
 	select {
 	case result := <-answer:
 		if result.failure != "" {
+			if !result.ended {
+				agent.ReportTool(ctx, agent.ToolReport{Client: true})
+			}
 			return nil, errors.New(result.failure)
 		}
 		return result.parts, nil
@@ -217,6 +224,24 @@ func (b *bridge) turnOf(id string) (string, bool) {
 	return pending.turnID, waiting
 }
 
+// decide records that the person answered the question of the call id, waiting on the turn.
+func (b *bridge) decide(id, turnID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if pending, waiting := b.pending[id]; waiting && pending.turnID == turnID {
+		pending.decided = true
+		b.pending[id] = pending
+	}
+}
+
+// asking reports whether the call id still waits for the person's answer to its question.
+func (b *bridge) asking(id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	pending, waiting := b.pending[id]
+	return waiting && !b.closed && !pending.resolved && !pending.decided && pending.ctx.Err() == nil
+}
+
 // Waiting reports whether the call is still waiting for its result.
 func (b *bridge) Waiting(id string) bool {
 	b.mu.Lock()
@@ -257,7 +282,7 @@ func (b *bridge) Close() {
 	b.closed = true
 	for _, pending := range b.pending {
 		select {
-		case pending.answer <- toolResult{failure: "the call ended before it finished"}:
+		case pending.answer <- toolResult{failure: "the call ended before it finished", ended: true}:
 		default:
 		}
 	}

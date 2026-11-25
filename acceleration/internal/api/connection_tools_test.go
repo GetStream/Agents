@@ -70,7 +70,8 @@ func TestConnectionToolsSuite(t *testing.T) {
 }
 
 // SetupSuite builds the schemes against the fake: oauth2_code with the operator's client in
-// the environment as FAKE_MCP_CLIENT_ID and _SECRET, oauth2_client_credentials, bearer and
+// the environment as FAKE_MCP_CLIENT_ID and _SECRET for a built-in and the app's own for a
+// custom connector (withFakeClient), oauth2_client_credentials, bearer and
 // none, and the mcp source. Every connection's client reaches the fake on loopback.
 func (s *ConnectionToolsSuite) SetupSuite() {
 	s.provider = fakeprovider.New(s.T(), fakeprovider.ClientCredentials)
@@ -198,6 +199,33 @@ func (s *ConnectionToolsSuite) TestAClientCredentialsConnectionIsSetUpWithItsCli
 
 	s.Equal(ConnectionStatus(store.ConnectionConnected), connection.Status)
 	s.Equal(validationConnected, string(s.validate(id).Status))
+}
+
+func (s *ConnectionToolsSuite) TestCredentialsWhoseEndpointIsRefusedAreToldTheSameAndTheLogSaysWhy() {
+	for endpoint, cause := range map[string]string{
+		"https://tokens.invalid/token": "egress: endpoint host could not be resolved",
+		"https://localhost/token":      "egress: endpoint host resolved to a non-public address",
+		"https://10.0.0.1/token":       "egress: endpoint host is not publicly routable",
+	} {
+		id := "custom_tools" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+		manifest, err := core.ParseManifest([]byte(s.manifest(id, 1, oauth2cc.Name, "")))
+		s.Require().NoError(err)
+		manifest.Endpoints["token"] = endpoint
+		_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
+		s.Require().NoError(err)
+
+		status, body := s.serverClient.call(http.MethodPut, "/v1/agents/connections/"+s.connectionTo(id)+"/credentials",
+			map[string]any{"expected_revision": 1, "values": map[string]string{
+				oauth2cc.SuppliedClientID: s.provider.ClientID, oauth2cc.SuppliedClientSecret: s.provider.ClientSecret,
+			}})
+
+		s.Equal(http.StatusBadRequest, status)
+		var failure struct{ Error APIError }
+		s.Require().NoError(json.Unmarshal(body, &failure))
+		s.Equal("the credentials were refused: transient: oauth2cc: token: oauth2code: the request was not sent: "+
+			`oauth2code: endpoint "`+endpoint+`" is not an https URL of a public host that resolves`, failure.Error.Message)
+		s.Contains(s.logged.String(), "is not an https URL of a public host that resolves: "+cause)
+	}
 }
 
 // TestAnImportedGrantConnectsWithTheConnectorsEndpoints: the grant names no endpoint and no
@@ -354,6 +382,46 @@ func (s *ConnectionToolsSuite) TestATokenTheProviderRefusesMovesTheConnectionToN
 	s.Equal(validationConnected, string(s.validate(id).Status), "a new token is what fixes it")
 }
 
+// TestANewTokenForARefusedOneBeginsANewGrant: a credentials write that connects a connection
+// a refusal moved to needs_reauthorization begins a grant, as a consent does: connected_at
+// moves, and the tools pinned for the old grant no longer hold. The credential store stamps
+// nothing itself (AI-3504).
+func (s *ConnectionToolsSuite) TestANewTokenForARefusedOneBeginsANewGrant() {
+	id := s.connection(bearer.Name)
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+id+"/credentials", s.bearerToken(1, "not-a-token-the-fake-issued"), nil))
+	before := s.connectedAt(id)
+	s.Require().NotNil(before, "the first write began a grant")
+	_, err := s.store.ConnectorToolPins.Pin(context.Background(), id, before, map[string]string{"echo": "pinned"})
+	s.Require().NoError(err)
+	s.Require().Equal(validationNeedsReauthorization, string(s.validate(id).Status))
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+id+"/credentials", s.bearerToken(s.get(id).Revision, s.token), nil))
+
+	after := s.connectedAt(id)
+	s.Require().NotNil(after)
+	s.True(after.After(*before), "a new grant began")
+	pins, err := s.store.ConnectorToolPins.Select(context.Background(), id, after)
+	s.Require().NoError(err)
+	s.Empty(pins, "the pin taken for the refused token is not one for the new grant")
+}
+
+// TestANewTokenForAConnectionWhoseBlobNoLongerOpensBeginsANewGrant: the stored credentials of a
+// connected row do not open, so the store moves it to needs_reauthorization before the write
+// runs, and the new token begins a grant as one for a refused row does.
+func (s *ConnectionToolsSuite) TestANewTokenForAConnectionWhoseBlobNoLongerOpensBeginsANewGrant() {
+	id := s.connected(bearer.Name)
+	before := s.connectedAt(id)
+	s.Require().NotNil(before)
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), "UPDATE connector_connections SET credentials_sealed = ? WHERE id = ?", []byte("not a sealed blob"), id)
+	s.Require().NoError(err)
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+id+"/credentials", s.bearerToken(s.get(id).Revision, s.token), nil))
+
+	after := s.connectedAt(id)
+	s.Require().NotNil(after)
+	s.True(after.After(*before), "a new grant began")
+}
+
 // TestAValidateTheProviderRefusesLogsItsStatusAndMessageNotTheToken: the provider answers a 4xx
 // whose JSON-RPC error repeats the bearer token, padded past the 1 KiB a line keeps. The validate
 // logs one WARN line with the connection, the connector, the provider's status and its words, cut
@@ -498,7 +566,7 @@ func (s *ConnectionToolsSuite) TestSavingAStaticTokenAgainMovesItOffABrokenRevis
 	id := s.connectionTo(connector)
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+id+"/credentials", s.bearerToken(1, s.token), nil))
 	before := s.connectedAt(id)
-	_, err := s.store.PinConnectorTools(context.Background(), id, before, map[string]string{"echo": "pinned-on-revision-1"})
+	_, err := s.store.ConnectorToolPins.Pin(context.Background(), id, before, map[string]string{"echo": "pinned-on-revision-1"})
 	s.Require().NoError(err)
 	s.builtin(bearer.Name, 2, brokenFirst)
 
@@ -518,7 +586,7 @@ func (s *ConnectionToolsSuite) TestSavingAStaticTokenAgainMovesItOffABrokenRevis
 	s.Require().NotNil(before)
 	s.Require().NotNil(after)
 	s.True(after.After(*before), "a new grant began")
-	pins, err := s.store.ConnectorToolPins(context.Background(), id, after)
+	pins, err := s.store.ConnectorToolPins.Select(context.Background(), id, after)
 	s.Require().NoError(err)
 	s.Empty(pins, "the pin taken on revision 1 is not one for the new grant")
 }
@@ -529,14 +597,14 @@ func (s *ConnectionToolsSuite) TestSavingAStaticTokenAgainMovesItOffABrokenRevis
 func (s *ConnectionToolsSuite) TestRotatingAStaticTokenOnTheLatestRevisionKeepsItsGrant() {
 	id := s.connected(bearer.Name)
 	before := s.connectedAt(id)
-	_, err := s.store.PinConnectorTools(context.Background(), id, before, map[string]string{"echo": "pinned"})
+	_, err := s.store.ConnectorToolPins.Pin(context.Background(), id, before, map[string]string{"echo": "pinned"})
 	s.Require().NoError(err)
 
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+id+"/credentials",
 		s.bearerToken(s.get(id).Revision, s.token), nil))
 
 	s.Equal(before, s.connectedAt(id))
-	pins, err := s.store.ConnectorToolPins(context.Background(), id, s.connectedAt(id))
+	pins, err := s.store.ConnectorToolPins.Select(context.Background(), id, s.connectedAt(id))
 	s.Require().NoError(err)
 	s.Equal(map[string]string{"echo": "pinned"}, pins)
 	s.Equal(1, s.get(id).DefinitionRevision)
@@ -927,7 +995,7 @@ func (s *ConnectionToolsSuite) TestAValidateNeverPinsAChangedToolAgain() {
 	s.validate(id)
 	again := s.validate(id)
 
-	pins, err := s.store.ConnectorToolPins(context.Background(), id, s.connectedAt(id))
+	pins, err := s.store.ConnectorToolPins.Select(context.Background(), id, s.connectedAt(id))
 	s.Require().NoError(err)
 	s.Equal(map[string]string{"echo": "pinned-before-it-changed"}, pins)
 	s.Equal(validationNeedsReapproval, string(again.Status))
@@ -957,7 +1025,7 @@ func (s *ConnectionToolsSuite) TestAConsentThatFinishesWhileTheToolsAreListedIsR
 	listed := 0
 	s.afterList = func() {
 		listed++
-		_, err := s.store.DB().ExecContext(context.Background(),
+		_, err := s.store.GlobalDB().ExecContext(context.Background(),
 			"UPDATE connector_connections SET connected_at = ? WHERE id = ?", before.Add(time.Hour), id)
 		s.Require().NoError(err)
 	}
@@ -988,7 +1056,7 @@ func (s *ConnectionToolsSuite) TestEveryPinIsCheckedNotOnlyTheToolsTheBodyNames(
 func (s *ConnectionToolsSuite) TestAPinOfAnEarlierGrantIsNotAChange() {
 	id := s.connected(bearer.Name)
 	earlier := s.connectedAt(id).Add(-time.Hour)
-	_, err := s.store.PinConnectorTools(context.Background(), id, &earlier, map[string]string{"echo": "pinned-for-the-old-grant"})
+	_, err := s.store.ConnectorToolPins.Pin(context.Background(), id, &earlier, map[string]string{"echo": "pinned-for-the-old-grant"})
 	s.Require().NoError(err)
 
 	validation := s.validate(id)
@@ -1012,7 +1080,7 @@ func (s *ConnectionToolsSuite) TestAGrantLackingAScopeIsReportedBeforeAChangedTo
 
 // pin pins the connection's tools at digests for its current grant, as a session does.
 func (s *ConnectionToolsSuite) pin(id string, digests map[string]string) {
-	_, err := s.store.PinConnectorTools(context.Background(), id, s.connectedAt(id), digests)
+	_, err := s.store.ConnectorToolPins.Pin(context.Background(), id, s.connectedAt(id), digests)
 	s.Require().NoError(err)
 }
 
@@ -1057,15 +1125,16 @@ func (s *ConnectionToolsSuite) driveShaped(coveredBy, granted string) string {
 		"  list: [chat:write, channels:read]\n", "  list: ["+googleDriveReadonly+", "+googleDriveFile+"]\n"+coveredBy, 1)
 	manifest, err := core.ParseManifest([]byte(yaml))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
+	s.withFakeClient(id)
 	var created Connection
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/connections", appOwned(id), &created))
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+created.ID+"/credentials",
 		s.importedGrant(s.token, googleDriveReadonly), nil))
 	scopes, err := json.Marshal([]string{granted})
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(context.Background(), "UPDATE connector_connections SET granted_scopes = ?::jsonb WHERE id = ?",
+	_, err = s.store.GlobalDB().ExecContext(context.Background(), "UPDATE connector_connections SET granted_scopes = ?::jsonb WHERE id = ?",
 		string(scopes), created.ID)
 	s.Require().NoError(err)
 	return created.ID
@@ -1103,14 +1172,28 @@ func (s *ConnectionToolsSuite) connector(scheme, tools string) string {
 	id := "custom_tools" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	manifest, err := core.ParseManifest([]byte(s.manifest(id, 1, scheme, tools)))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
+	if scheme == oauth2code.Name {
+		s.withFakeClient(id)
+	}
 	return id
 }
 
+// withFakeClient puts the fake's preregistered client as the app's own client of connector.
+func (s *ConnectionToolsSuite) withFakeClient(connector string) {
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPut, oauthClientPath(connector),
+		ConnectorOAuthClientRequest{ClientID: s.provider.ClientID, ClientSecret: s.provider.ClientSecret}, nil))
+}
+
 // manifest is a connector at the fake taking scheme, at revision; tools is more YAML under its
-// mcp source.
+// mcp source. A built-in's client is the operator's, a custom one's the app's own
+// (withFakeClient): a custom connector never takes the operator's.
 func (s *ConnectionToolsSuite) manifest(id string, revision int, scheme, tools string) string {
+	client := "  registration: [operator]\n  env: FAKE\n"
+	if strings.HasPrefix(id, store.CustomPrefix) {
+		client = "  registration: [customer]\n"
+	}
 	return `
 id: ` + id + `
 revision: ` + strconv.Itoa(revision) + `
@@ -1121,9 +1204,7 @@ endpoints:
   mcp: ` + s.provider.URL + fakeprovider.PathMCP + `
 schemes: [` + scheme + `]
 client:
-  registration: [operator]
-  env: FAKE
-scopes:
+` + client + `scopes:
   list: [chat:write, channels:read]
   separator: ","
 sources:
@@ -1147,7 +1228,7 @@ func (s *ConnectionToolsSuite) builtin(scheme string, revision int, extra string
 	if revision == 1 {
 		s.builtinID = "fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	}
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), fstest.MapFS{s.builtinID + ".yaml": {
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), fstest.MapFS{s.builtinID + ".yaml": {
 		Data: []byte(s.manifest(s.builtinID, revision, scheme, "") + extra)}}))
 	return s.builtinID
 }
@@ -1161,7 +1242,7 @@ func (s *ConnectionToolsSuite) connectionTo(connector string) string {
 
 // connectedAt is when the connection's grant began, as stored.
 func (s *ConnectionToolsSuite) connectedAt(id string) *time.Time {
-	connection, err := s.store.ConnectorConnection(context.Background(), s.customerID(), id)
+	connection, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), id)
 	s.Require().NoError(err)
 	return connection.ConnectedAt
 }

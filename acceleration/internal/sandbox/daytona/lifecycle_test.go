@@ -112,15 +112,17 @@ func (b *stalled) Prepare(context.Context, []sandbox.Grant) (sandbox.Mount, erro
 	return sandbox.Mount{}, nil
 }
 
-func (b *stalled) BeforeRun(ctx context.Context) error {
+func (b *stalled) BeforeRun(ctx context.Context) (map[string]string, error) {
 	b.entered <- struct{}{}
 	select {
 	case <-b.let:
-		return nil
+		return nil, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
 }
+
+func (b *stalled) AfterRun(context.Context) error { return nil }
 
 func (b *stalled) Close(context.Context) error { return nil }
 
@@ -155,9 +157,11 @@ func (s *LifecycleSuite) run(box *Sandbox) {
 	s.Require().NoError(err)
 }
 
-// told waits for the meter to have been told want.
+// told waits for the meter to have been told want. A poll that outlives a failed wait reads the
+// meter it was given, not the suite's field, which the next test's SetupTest replaces.
 func (s *LifecycleSuite) told(want ...string) {
-	s.EventuallyWithT(func(c *assert.CollectT) { assert.Equal(c, want, s.meter.all()) }, 5*time.Second, 10*time.Millisecond,
+	meter := s.meter
+	s.EventuallyWithT(func(c *assert.CollectT) { assert.Equal(c, want, meter.all()) }, 5*time.Second, 10*time.Millisecond,
 		"what the meter was told")
 }
 
@@ -359,7 +363,7 @@ func (s *LifecycleSuite) TestATimerDueWhileTheGateIsHeldFiresOnceItIsLetGo() {
 		require.NoError(t, err)
 		box.box = &sdk.Sandbox{ID: "sandbox-1"}
 		box.gate <- struct{}{}
-		box.done()
+		box.done(t.Context())
 		// Work takes the gate and holds it past the idle stop, as the delete closeLater makes
 		// after a run can, so the timer the run armed fires and finds the gate held. The work
 		// then arms the timer again, due at once, before it lets the gate go.
@@ -382,15 +386,18 @@ func (s *LifecycleSuite) TestATimerDueWhileTheGateIsHeldFiresOnceItIsLetGo() {
 	})
 }
 
-func (s *LifecycleSuite) TestASandboxIsDeletedWhenItsRunEndsAsCloseGivesUp() {
+// The run ends with half of Close's wait left, so Close takes the sandbox with time to delete it. A
+// run that ends in the last milliseconds of the wait leaves Close too little time, and the delete
+// fails and the sandbox is left an orphan, for its timer to delete.
+func (s *LifecycleSuite) TestASandboxIsDeletedByCloseWhenItsRunEndsWhileCloseWaits() {
 	box, run := s.busy(sandbox.Lifecycle{IdleStop: time.Hour})
-	ending := time.AfterFunc(box.timeout, run.release)
+	ending := time.AfterFunc(box.timeout/2, run.release)
 	defer ending.Stop()
 
-	_ = box.Close()
+	s.NoError(box.Close())
 
 	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "gone")
-	s.Equal([]string{"sandbox-1"}, s.daytona.Deleted(), "deleted whether Close or the run's end got there first")
+	s.Equal([]string{"sandbox-1"}, s.daytona.Deleted(), "deleted by Close, once, as the run ended")
 }
 
 func (s *LifecycleSuite) TestAnIdleSandboxIsBilledAsStoppedThenGone() {
@@ -409,7 +416,8 @@ func (s *LifecycleSuite) TestASandboxDaytonaDidNotStopIsReported() {
 
 	s.run(box)
 
-	s.Eventually(func() bool { return strings.Contains(s.logs.String(), "Daytona has not stopped a sandbox") },
+	logs := s.logs
+	s.Eventually(func() bool { return strings.Contains(logs.String(), "Daytona has not stopped a sandbox") },
 		5*time.Second, 10*time.Millisecond)
 	s.Contains(s.logs.String(), `level=WARN msg="Daytona has not stopped a sandbox that is billed as stopped" sandbox=sandbox-1 billed_as=stopped state=started`)
 }

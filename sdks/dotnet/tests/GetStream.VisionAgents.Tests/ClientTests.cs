@@ -90,6 +90,20 @@ public sealed class ClientTests
         var backend = new Backend(new VisionAgentsOptions { ApiKey = "key", Token = "tok", UserId = "ada" });
 
         Assert.Equal(Backend.DefaultUrl, backend.Url);
+        Assert.Equal("https://accelerate.gcp.stream-io-api.com", backend.Url);
+        Assert.True(backend.Authenticate);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(Backend.DefaultUrl + "/")]
+    public void TheNearestHostedRouterIsAuthenticated(string? url)
+    {
+        var backend = new Backend(
+            new VisionAgentsOptions { Url = url, CustomerId = "acme", ApiKey = "key", ApiSecret = "secret" },
+            Env(new()));
+
+        Assert.Equal(Backend.DefaultUrl, backend.Url);
         Assert.True(backend.Authenticate);
     }
 

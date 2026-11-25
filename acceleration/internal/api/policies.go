@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -42,7 +40,7 @@ type Policy struct {
 	RequireOwnStreamApp  *bool             `json:"require_own_stream_app,omitempty" doc:"Keep the app out of the router's own Stream app: in app mode it is never written there for want of a registered Stream app of its own, and what it wrote there before can only be read. True at either scope requires it, so an app cannot turn its organization's off. An organization's is set by the router's operator and read here; sending it back unchanged is fine, and changing it is refused."`
 	ResumeHistory        *ResumeHistory    `json:"resume_history,omitempty" doc:"How the scope's sessions are handed back a conversation they carry on. The most specific level wins, field by field: a server-side session request, then its agent config, then the app's policy, then the organization's, then the router's default (text only, 100 turns, 60000 characters)."`
 	BalanceWarningMicros *int64            `json:"balance_warning_micros,omitempty" minimum:"0" example:"20000000" doc:"The organization's own warning threshold, in millionths of a dollar: at or below it, every answer to a backend says X-Stream-Balance-Warning: low, and the organization's stream event destinations get one account.balance_low. It wins over the tier's. Left out, the tier's applies. Only an organization's policy has one: an app's that sets it is refused."`
-	ToolOutputRetention  *string           `json:"tool_output_retention,omitempty" pattern:"^(|none|[1-9][0-9]*[hd])$" patternDescription:"none, a number of hours such as 12h, or a number of days such as 30d" example:"30d" doc:"How long a session keeps what its tools were given and gave back on the turns it records: a tool's arguments, its result, a search's query and the wording of a tool's error. none records none of it; a duration such as 12h or 30d (at least 1h, at most 3650d) keeps it that long after the call and then takes it out, within minutes. The item stays, with its tool name, its time, its call id and whether it failed, so a session's items read in the same order and tool usage still counts the call. Left out, or empty, it is kept as long as the session. The shortest of the organization's, the app's and the agent config's tools.output_retention applies, so an agent can shorten it and never lengthen it. It applies to tool calls recorded after it is set. Deleting a session deletes all of it at once."`
+	ToolOutputRetention  *string           `json:"tool_output_retention,omitempty" pattern:"^(|none|[1-9][0-9]*[hd])$" patternDescription:"none, a number of hours such as 12h, or a number of days such as 30d" example:"30d" doc:"How long a session keeps what its tools were given and gave back on the turns it records: a tool's arguments, its result, a search's query and the wording of a tool's error. none records none of it; a duration such as 12h or 30d (at least 1h, at most 3650d) keeps it that long after the call and then takes it out, within minutes. The item stays, with its tool name, its time, its call id and whether it failed, so a session's items read in the same order and tool usage still counts the call. Left out, or empty, it is kept as long as the session. The shortest of the organization's, the app's and the output_retention of the agent config's tool group or connector binding the tool is in applies, so an agent can shorten it and never lengthen it. It applies to tool calls recorded after it is set. Deleting a session deletes all of it at once."`
 }
 
 func (*Policy) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
@@ -103,7 +101,7 @@ func (*Quota) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema
 		"devices ask for and what the app's backend asks for in their name. (An app's quota counted " +
 		"devices only before; the router's default still does.) A quota set here is counted per user " +
 		"only, never by the address a device calls from, which many users can share; the router's " +
-		"default counts a device by its address as well. A turn is counted on the day of the user who " +
+		"default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who " +
 		"sent it. A request over the limit is a " +
 		"429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app " +
 		"<id>, every user of organization <id>), and a counted request carries X-Quota-Limit, " +
@@ -181,7 +179,7 @@ func (s *Server) getAppPolicy(ctx context.Context, _ *struct{}) (*policyResponse
 	}
 	policy, err := s.policyOf(ctx, store.ScopeApp, customerID)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return &policyResponse{Body: policy}, nil
 }
@@ -200,7 +198,7 @@ func (s *Server) updateAppPolicy(ctx context.Context, request *policyRequest) (*
 	}
 	policy, err := s.savePolicy(ctx, store.ScopeApp, customerID, request.Body, customerID)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return &policyResponse{Body: policy}, nil
 }
@@ -219,7 +217,7 @@ func (s *Server) getOrganizationPolicy(ctx context.Context, _ *struct{}) (*polic
 	}
 	policy, err := s.policyOf(ctx, store.ScopeOrganization, organizationID)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return &policyResponse{Body: policy}, nil
 }
@@ -242,7 +240,7 @@ func (s *Server) updateOrganizationPolicy(ctx context.Context, request *policyRe
 	}
 	policy, err := s.savePolicy(ctx, store.ScopeOrganization, organizationID, request.Body, customerID)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return &policyResponse{Body: policy}, nil
 }
@@ -266,7 +264,7 @@ func (s *Server) savePolicy(ctx context.Context, scope store.PolicyScope, id str
 	}
 	// Credit is the organization's, so the balance it is warned at is too.
 	if scope == store.ScopeApp && sent.BalanceWarningMicros != nil {
-		return Policy{}, errors.New("an app has no balance warning of its own: set balance_warning_micros on the organization's policy")
+		return Policy{}, invalidRequest("an app has no balance warning of its own: set balance_warning_micros on the organization's policy")
 	}
 	// Any app's backend can write its organization's policy, so the one setting that keeps
 	// every app of an organization out of the shared Stream app is the operator's alone. It
@@ -274,32 +272,32 @@ func (s *Server) savePolicy(ctx context.Context, scope store.PolicyScope, id str
 	// read is fine, so a policy read and written again round-trips; changing it is refused.
 	if scope == store.ScopeOrganization {
 		if sent.RequireOwnStreamApp != nil {
-			existing, err := s.store.Policy(ctx, scope, id)
+			existing, err := s.store.Policies.Get(ctx, scope, id)
 			if err != nil {
 				return Policy{}, err
 			}
 			if *sent.RequireOwnStreamApp != value(existing.RequireOwnStreamApp) {
-				return Policy{}, errors.New("an organization's require_own_stream_app is set by the router's operator")
+				return Policy{}, invalidRequest("an organization's require_own_stream_app is set by the router's operator")
 			}
 		}
 		document.RequireOwnStreamApp = nil
 	}
 	if message, ok := toolOutputRetentionComplaint("tool_output_retention", document.ToolOutputRetention); !ok {
-		return Policy{}, stack.Wrap(errors.New(message))
+		return Policy{}, invalidRequest(message)
 	}
 	if err := document.DataPolicy.Floor().Validate(); err != nil {
-		return Policy{}, err
+		return Policy{}, invalidRequest(err.Error())
 	}
 	if err := routing.Tags(sent.Tags).Validate(); err != nil {
-		return Policy{}, err
+		return Policy{}, invalidRequest(err.Error())
 	}
 	for _, model := range value(sent.AllowedModels) {
 		if !s.routes(model) {
-			return Policy{}, stack.Wrap(fmt.Errorf("allowed_models names %q, which is not a provider/model this deployment routes", model))
+			return Policy{}, invalidRequest(fmt.Sprintf("allowed_models names %q, which is not a provider/model this deployment routes", model))
 		}
 	}
 	// Read before the write, so the entry can say what the setting was.
-	before, err := s.configs.Policy(ctx, scope, id)
+	before, err := s.configs.Policies.Get(ctx, scope, id)
 	if err != nil {
 		return Policy{}, err
 	}
@@ -315,7 +313,7 @@ func (s *Server) savePolicy(ctx context.Context, scope store.PolicyScope, id str
 
 // policyOf reads a scope's policy.
 func (s *Server) policyOf(ctx context.Context, scope store.PolicyScope, id string) (Policy, error) {
-	document, err := s.configs.Policy(ctx, scope, id)
+	document, err := s.configs.Policies.Get(ctx, scope, id)
 	if err != nil {
 		return Policy{}, err
 	}

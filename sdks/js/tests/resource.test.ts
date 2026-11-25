@@ -5,6 +5,7 @@ import {
   Client,
   ConfigurationError,
   GUEST_STORAGE_KEY,
+  NoCallError,
   RouterError,
   Session,
   type CreateSessionOptions,
@@ -15,6 +16,7 @@ import {
   type SessionSort,
   type Sessions,
   Tools,
+  UnnamedTurnError,
 } from "../src/index.js";
 import { inPage, offPage } from "./device.js";
 import { TestRouter, type Connection } from "./router.js";
@@ -636,13 +638,16 @@ describe("sessions", () => {
         ],
       },
     });
-    router.serve("GET", "/v1/agents/calls/session-1/timeline", {
+    // A session starts a new call each time voice is started or stopped on it, so the
+    // timeline and decisions are its newest call's, under the call's own id.
+    router.serve("GET", "/v1/agents/calls", { body: [{ id: "call-2", session_id: "session-1" }] });
+    router.serve("GET", "/v1/agents/calls/call-2/timeline", {
       body: [
         { turn_id: "turn-1", started_at: "2026-11-10T09:00:00Z", heard: "are you open late", roundtrip_ms: 840 },
         { turn_id: "turn-2", started_at: "2026-11-10T09:00:04Z", heard: "and on sundays", roundtrip_ms: 910 },
       ],
     });
-    router.serve("GET", "/v1/agents/calls/session-1/events", {
+    router.serve("GET", "/v1/agents/calls/call-2/events", {
       body: [{ at: "2026-11-10T09:00:00Z", kind: "ignore", reason: "spoken to someone else" }],
     });
     const sessions = api.agent("docs").sessions;
@@ -659,24 +664,36 @@ describe("sessions", () => {
     assert.equal(timeline[1]?.heard, "and on sundays");
     assert.equal(timeline[1]?.roundtrip_ms, 910);
     assert.deepEqual(decisions.map((decision) => decision.kind), ["ignore"]);
+    for (const listed of router.requestsTo("GET", "/v1/agents/calls")) {
+      assert.equal(listed.query.get("session_id"), "session-1");
+      assert.equal(listed.query.get("limit"), "1", "only the newest call is wanted");
+    }
+    assert.equal(router.requestsTo("GET", "/v1/agents/calls/session-1/timeline").length, 0);
+  });
+
+  it("says a session with no call has no timeline or decisions, rather than asking for a call by its id", async () => {
+    router.serve("GET", "/v1/agents/calls", { body: [] });
+    const sessions = api.agent("docs").sessions;
+
+    await assert.rejects(sessions.timeline("session-1"), NoCallError);
+    await assert.rejects(sessions.decisions("session-1"), NoCallError);
+    assert.equal(router.requestsTo("GET", "/v1/agents/calls/session-1/timeline").length, 0);
+    assert.equal(router.requestsTo("GET", "/v1/agents/calls/session-1/events").length, 0);
   });
 
   it("says the router does not know a session whose tokens, timeline or decisions were asked for", async () => {
-    const noCall = { error: { message: "no such call", type: "not_found", code: "call_not_found" } };
     const noSession = { error: { message: "no such session", type: "not_found", code: "session_not_found" } };
     router.serve("GET", "/v1/agents/sessions/someone-elses/tokens", { status: 404, body: noSession });
-    for (const read of ["timeline", "events"]) {
-      router.serve("GET", `/v1/agents/calls/someone-elses/${read}`, { status: 404, body: noCall });
-    }
+    // The router lists none of another customer's calls, so the session has none to read.
+    router.serve("GET", "/v1/agents/calls", { body: [] });
     const sessions = api.agent("docs").sessions;
 
-    for (const [reading, code] of [
-      [() => sessions.tokens("someone-elses"), "session_not_found"],
-      [() => sessions.timeline("someone-elses"), "call_not_found"],
-      [() => sessions.decisions("someone-elses"), "call_not_found"],
-    ] as const) {
-      await assert.rejects(reading(), (error: unknown) => error instanceof RouterError && error.code === code);
-    }
+    await assert.rejects(
+      sessions.tokens("someone-elses"),
+      (error: unknown) => error instanceof RouterError && error.code === "session_not_found",
+    );
+    await assert.rejects(sessions.timeline("someone-elses"), NoCallError);
+    await assert.rejects(sessions.decisions("someone-elses"), NoCallError);
   });
 
   it("renames, voices, stops and forks a session it is not holding, by its id", async () => {
@@ -1121,6 +1138,29 @@ describe("responses", () => {
     assert.equal(router.last.query.get("response_id"), "response-1");
   });
 
+  it("reads no items for a turn with no id rather than the whole conversation's", async () => {
+    // The router names no turn for an incognito session, a speech-to-speech one or the retry
+    // of a request id it already took.
+    router.serve("POST", "/v1/agents/sessions/session-1/responses", {
+      status: 202,
+      body: { id: "", session_id: "session-1", status: "running", created_at: new Date().toISOString() },
+    });
+    router.serve("GET", "/v1/agents/sessions/session-1/responses/items", {
+      body: { items: [item(0)], has_more: false },
+    });
+
+    const answering = await held.responses.create("Anything");
+
+    await assert.rejects(answering.items.all(), UnnamedTurnError);
+    await assert.rejects(answering.items.list(), UnnamedTurnError);
+    await assert.rejects(answering.items.unwind().next(), UnnamedTurnError);
+    assert.equal(
+      router.requestsTo("GET", "/v1/agents/sessions/session-1/responses/items").length,
+      0,
+      "the router is not asked for every turn in the session",
+    );
+  });
+
   it("reads the whole conversation's items when nothing narrows it", async () => {
     router.serve("GET", "/v1/agents/sessions/session-1/responses/items", { body: { items: [], has_more: false } });
 
@@ -1418,6 +1458,160 @@ describe("guest users", () => {
 
   it("keeps the guest under one key, so two tabs are one visitor", () => {
     assert.equal(GUEST_STORAGE_KEY, "stream-vision-agents-guest");
+  });
+
+  describe("in a browser", () => {
+    const global = globalThis as Record<string, unknown>;
+    const names = ["document", "localStorage", "location"] as const;
+    let saved: Map<string, PropertyDescriptor | undefined>;
+
+    beforeEach(() => {
+      saved = new Map(names.map((name) => [name, Object.getOwnPropertyDescriptor(global, name)]));
+    });
+
+    afterEach(() => {
+      for (const [name, descriptor] of saved) {
+        if (descriptor) {
+          Object.defineProperty(global, name, descriptor);
+        } else {
+          delete global[name];
+        }
+      }
+    });
+
+    /** A page's globals: a cookie jar, and localStorage unless `storage` is false or throws. */
+    function page(options: { storage?: boolean | "blocked" | "full"; https?: boolean; cookie?: string } = {}) {
+      const written: string[] = [];
+      let jar = options.cookie ?? "";
+      const document = {
+        get cookie() {
+          return jar;
+        },
+        set cookie(line: string) {
+          written.push(line);
+          const [pair] = line.split(";");
+          const [name] = (pair ?? "").split("=");
+          const others = jar.split(";").map((one) => one.trim()).filter((one) => one && !one.startsWith(`${name}=`));
+          jar = [...others, ...(line.includes("max-age=0") ? [] : [pair ?? ""])].join("; ");
+        },
+      };
+      const items = new Map<string, string>();
+      const storage = {
+        getItem: (key: string) => items.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          if (options.storage === "full") {
+            throw new Error("QuotaExceededError");
+          }
+          items.set(key, value);
+        },
+        removeItem: (key: string) => void items.delete(key),
+      };
+      Object.defineProperty(global, "document", { value: document, configurable: true, writable: true });
+      Object.defineProperty(global, "location", {
+        value: { protocol: options.https ? "https:" : "http:" },
+        configurable: true,
+        writable: true,
+      });
+      if (options.storage === "blocked") {
+        Object.defineProperty(global, "localStorage", {
+          get() {
+            throw new Error("SecurityError");
+          },
+          configurable: true,
+        });
+      } else if (options.storage === false) {
+        Object.defineProperty(global, "localStorage", { value: undefined, configurable: true, writable: true });
+      } else {
+        Object.defineProperty(global, "localStorage", { value: storage, configurable: true, writable: true });
+      }
+      return { items, written, jar: () => jar };
+    }
+
+    const minted = { id: "guest-1", token: "guest-token", refresh_secret: "renew-once" };
+
+    it("remembers the guest in localStorage, never in a cookie sent with every request", async () => {
+      const { items, written } = page({ https: true });
+      router.serve("POST", "/v1/agents/guests", { status: 201, body: minted });
+
+      await api.guestUser();
+
+      assert.deepEqual(JSON.parse(items.get(GUEST_STORAGE_KEY) ?? "{}"), minted);
+      assert.deepEqual(written, []);
+    });
+
+    it("moves a guest an earlier version kept in a cookie into localStorage, and clears the cookie", async () => {
+      const cookie = `${GUEST_STORAGE_KEY}=${encodeURIComponent(JSON.stringify(minted))}`;
+      const { items, jar } = page({ https: true, cookie });
+
+      const guest = await api.guestUser();
+
+      assert.equal(guest.id, "guest-1", "the same guest, with the same history");
+      assert.equal(router.received.length, 0);
+      assert.ok(items.get(GUEST_STORAGE_KEY));
+      assert.equal(jar(), "");
+    });
+
+    it("clears another visitor's guest from an old cookie when minting a fresh one", async () => {
+      const previous = { id: "guest-0", token: "their-token", refresh_secret: "their-secret" };
+      const { items, jar } = page({ https: true, cookie: `${GUEST_STORAGE_KEY}=${encodeURIComponent(JSON.stringify(previous))}` });
+      router.serve("POST", "/v1/agents/guests", { status: 201, body: minted });
+
+      const guest = await api.guestUser({ fresh: true });
+
+      assert.equal(guest.id, "guest-1");
+      assert.equal(jar(), "", "the previous visitor's token no longer goes out with requests");
+      items.clear();
+      router.serve("POST", "/v1/agents/guests", { status: 201, body: { id: "guest-2", token: "t2" } });
+      assert.notEqual((await api.guestUser()).id, "guest-0", "and cannot come back once localStorage is cleared");
+    });
+
+    it("keeps a refreshed guest in a cookie when a full localStorage refuses it", async () => {
+      const expired = { ...minted, expires_at: "2000-01-01T00:00:00Z" };
+      const { items, jar } = page({ https: true, storage: "full" });
+      items.set(GUEST_STORAGE_KEY, JSON.stringify(expired));
+      const renewed = { id: "guest-1", token: "fresh-token", refresh_secret: "renew-twice" };
+      router.serve("POST", "/v1/agents/guests", { status: 201, body: renewed });
+
+      const guest = await api.guestUser();
+
+      assert.deepEqual(guest, renewed, "handed back although localStorage would not keep it");
+      assert.equal(items.get(GUEST_STORAGE_KEY), undefined, "the spent secret is not read again");
+      assert.match(jar(), /fresh-token/);
+      assert.deepEqual(await api.guestUser(), renewed, "read back from the cookie, not minted again");
+      assert.equal(router.received.length, 1);
+    });
+
+    it("falls back to a Secure cookie on an https page whose localStorage is blocked", async () => {
+      const { written } = page({ https: true, storage: "blocked" });
+      router.serve("POST", "/v1/agents/guests", { status: 201, body: minted });
+
+      await api.guestUser();
+
+      assert.equal(written.length, 1);
+      assert.match(written[0] ?? "", /; Secure$/);
+    });
+
+    it("leaves Secure off a cookie on an http page, which could not set one", async () => {
+      const { written } = page({ storage: false });
+      router.serve("POST", "/v1/agents/guests", { status: 201, body: minted });
+
+      await api.guestUser();
+
+      assert.equal(written.length, 1, "the guest was remembered in the cookie");
+      assert.match(written[0] ?? "", new RegExp(`^${GUEST_STORAGE_KEY}=[^;]*guest-token`));
+      assert.doesNotMatch(written[0] ?? "", /Secure/);
+    });
+
+    it("clears a malformed guest cookie on sign-out, and takes it for no guest", async () => {
+      const { jar } = page({ https: true, cookie: `${GUEST_STORAGE_KEY}=%E0%A4%A` });
+
+      api.forgetGuest();
+      assert.equal(jar(), "", "forgetGuest finished, and the cookie is gone");
+
+      page({ https: true, cookie: `${GUEST_STORAGE_KEY}=%` });
+      router.serve("POST", "/v1/agents/guests", { status: 201, body: minted });
+      assert.equal((await api.guestUser()).id, "guest-1", "a fresh guest rather than a thrown URIError");
+    });
   });
 });
 

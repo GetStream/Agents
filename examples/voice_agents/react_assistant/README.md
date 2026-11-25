@@ -6,7 +6,7 @@ Stream token are all swift_assistant's, as they are for the [Android app](../and
 Only the page is here.
 
 ```
-package.json     React and Vite over @stream-io/stream-agents (0.4.1 and up, for its
+package.json     React and Vite over @stream-io/stream-agents (0.5.0 and up, for its
                  AgentChat, with stream-chat 10) and stream-chat-react's AI components
                  (15.0.1 and up)
 connected.html   where a connector's sign-in comes back to
@@ -15,7 +15,7 @@ tests/           its pure parts (captions, the glow's phases, photos, days) and 
                  over a fake channel and session
 ```
 
-The conversation's state is stream-chat-react's `AIConversationController`: the question on its way, whether Juno thinks or writes, errors and Try again, Send turning into Stop. Its transport is the SDK's `AgentChat` (`agentChatTransport`), which reads the router's channel and session. The page keeps only what is its own, in `src/chatScreen.ts`: voice mode, and naming a new conversation to the list once it is used. Edit and regenerate are turned off (`actions`), since the router keeps the conversation in Stream Chat and can't rewind it.
+The conversation's state is stream-chat-react's `AIConversationController`: the question on its way, whether Juno thinks or writes, errors and Try again, Send turning into Stop. Its transport is the SDK's `AgentChat` (`agentChatTransport`), which reads the router's channel and session. The page keeps only what is its own, in `src/chatScreen.ts`: voice mode, and naming a new conversation to the list once it is used. Regenerating a reply or editing a question asks again beside the earlier version, which the router keeps; an incognito chat keeps nothing to branch from, so it turns both off (`actions`). Answering a tool's question goes through `chat.decide`, which reads the call from the loaded messages, so a question asked before a reload or on another device is answered too.
 It runs on `stream-chat` 10 and `stream-chat-react` 15, with React 19, Vite 8 and TypeScript 7.
 That takes Node 22.18 or newer: `stream-chat` 10's own floor, above Vite 8's.
 
@@ -57,9 +57,9 @@ suggestions, reply actions and the composer's chat options) come from
 and `stream-chat-react/openui`: added in 14.16.0, and read here as 15 has them, with the reply's
 `ai_generated`, `generating` and `ai_ui` under `message.custom` as `stream-chat` 10 keeps them.
 
-The chat asks for `xai/grok-4.7`, a model that streams its reasoning, as a model overwrite the
-router keeps on the session, so a conversation carried on later stays on it. The router needs
-`XAI_API_KEY`, and `GOOGLE_API_KEY`, `DEEPGRAM_API_KEY` and `INWORLD_API_KEY` for a call. Web
+The chat runs on the agent's own model, as a call does: which model a session runs on is the
+backend's to choose, and the router refuses a device that names one. The router needs
+`GOOGLE_API_KEY`, `DEEPGRAM_API_KEY` and `INWORLD_API_KEY` for a call. Web
 search needs one of `EXA_API_KEY`, `TAVILY_API_KEY` or `PERPLEXITY_API_KEY`.
 
 ```bash
@@ -111,7 +111,7 @@ npm run build     # types, then the bundle
   with what they did as its `uiAction`, so the agent answers with a new plan. One done while
   Juno is still answering isn't sent, and the line over the composer says so.
 - **A card brings its own tool.** Ask "Where should we eat in Ohrid tonight?" for restaurant
-  cards and a seat selector of a venue's tables (`bookingComponents.json`). The agent cannot book
+  cards and a seat selector of a venue's tables (swift_assistant's `UIComponents.json`). The agent cannot book
   a table until a seat selector is on the screen: the card defines `reserve_table`
   (`reserveTable.ts`) and gives it to the conversation's session the first time it shows, with
   `Session.addTools`. Tapping a free table then has the agent call it, which asks first

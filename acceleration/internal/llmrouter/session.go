@@ -18,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/mock"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
@@ -85,13 +86,13 @@ func (r *reservation) idOf() uuid.UUID {
 // keep renews the reservation while its response streams, until the returned func is called
 // (it settled) or maxReserved has passed. A renewal refused keeps what was held until it
 // expires.
-func (s *Session) keep(held *reservation) func() {
+func (s *Session) keep(ctx context.Context, held *reservation) func() {
 	if held == nil {
 		return func() {}
 	}
 	done := make(chan struct{})
 	var once sync.Once
-	go func() {
+	goroutine.Go(ctx, func() {
 		ticker := time.NewTicker(reserveRenewEvery)
 		defer ticker.Stop()
 		limit := time.NewTimer(maxReserved)
@@ -108,7 +109,7 @@ func (s *Session) keep(held *reservation) func() {
 				_ = s.recorder.Reserve(s.config, s.owner, held.id, held.estimate, 2*reserveRenewEvery)
 			}
 		}
-	}()
+	})
 	return func() { once.Do(func() { close(done) }) }
 }
 
@@ -214,7 +215,7 @@ func (s *Session) attempt(ctx context.Context, params llm.ResponseParams, hedge 
 		// The provider took nothing on, so nothing it would bill is held.
 		s.recorder.Release(reserved)
 		durationMs := float64(time.Since(startedAt).Microseconds()) / 1000
-		code := outrun(createErrorCode(ctx), true, hedge)
+		code, lost := outrun(createErrorCode(ctx), true, hedge)
 		message := err.Error()
 		if s.config.BYOK && code != routing.ErrorCancelled && keyRefused(err) {
 			code = routing.ErrorKeyRefused
@@ -231,14 +232,15 @@ func (s *Session) attempt(ctx context.Context, params llm.ResponseParams, hedge 
 			Success:      false,
 			ErrorCode:    code,
 			ErrorMessage: message,
+			HedgeLost:    lost,
 		}
 		label(&stat, params, hedge)
 		s.recorder.Record(s.config, stat)
 		endInference(inference, nil, code)
-		slog.Info("model call timing", "call", s.owner.CallID, "operation", params.ID,
+		slog.Info("model call timing", append(s.loggedCall(stat), "operation", params.ID,
 			"purpose", params.Purpose, "turn", params.TurnID,
-			"provider", s.config.Provider, "model", s.config.Model,
-			"duration_ms", durationMs, "success", false, "error_code", code)
+			"duration_ms", durationMs, "success", false, "error_code", code,
+			"error", store.SafeLogText(message), "transient", llm.Transient(err))...)
 		if params.OnTiming != nil {
 			params.OnTiming(llm.CallTiming{OperationID: params.ID, Purpose: params.Purpose,
 				TurnID: params.TurnID, Provider: s.config.Provider, Model: s.config.Model,
@@ -246,22 +248,65 @@ func (s *Session) attempt(ctx context.Context, params llm.ResponseParams, hedge 
 		}
 		return nil, err
 	}
+	// The stream's clock starts where its provider says the request was sent, which for one
+	// that waits on headers is before Create returned: what it measures from then is not
+	// counted twice as a wait for headers.
 	createdAt := time.Now()
+	if at := stream.StartedAt(); !at.IsZero() && at.Before(createdAt) {
+		createdAt = at
+		if createdAt.Before(startedAt) {
+			createdAt = startedAt
+		}
+	}
 	charged := s.charged(ctx)
-	settled := s.keep(held)
+	settling := context.WithoutCancel(ctx)
+	settled := s.keep(ctx, held)
 	// The response settles with its status alone, so what its failure said is taken from the
 	// event that reported it: the last one, as the stream's own Err keeps.
 	var failure string
+	var transient bool
 	return stream.Observe(func(event llm.Event) {
 		if failed, ok := event.(llm.ResponseFailed); ok {
 			failure = failed.Error()
+			transient = llm.Transient(failed.Err)
 		}
 		if completed, done := event.(llm.ResponseCompleted); done {
 			settled()
 			passed.observeStream(s.config, createdAt, completed.Response)
 		}
-		s.observe(startedAt, createdAt, params, hedge, event, owner, charged, reserved, failure, inference)
+		s.observe(settling, startedAt, createdAt, params, hedge, event, owner, charged, reserved, failure, transient, inference)
 	}), nil
+}
+
+// loggedCall is what every "model call timing" line says about whose call it was and what
+// served it (routing.LoggedCall), and the host the provider sent it to. A hedged response names
+// its hedge and whether it was kept, so the attempt that lost can be told apart from the one
+// the caller got.
+func (s *Session) loggedCall(stat routing.Stat) []any {
+	var served []any
+	if host := vendorHost(s.provider); host != "" {
+		served = []any{"vendor_host", host}
+	}
+	fields := routing.LoggedCall(s.owner.CallID, stat.Owner, s.config, served...)
+	if hedge, hedged := stat.Attributes[routing.AttributeHedge]; hedged {
+		fields = append(fields, "hedge", hedge, "kept", stat.Attributes[routing.AttributeKept])
+	}
+	return fields
+}
+
+// vendorHost is the host a provider sends its requests to, for a provider that says
+// (openaicompat.LLM.Host, and the native openai and anthropic Messages adapters). Each says
+// its default endpoint's host too, so every call names where it ran. A provider that says
+// nothing is one with no endpoint to name (mock).
+func vendorHost(provider Provider) string {
+	var inner any = provider
+	if wrapped, ok := provider.(started); ok {
+		inner = wrapped.LLM
+	}
+	if hosted, ok := inner.(interface{ Host() string }); ok {
+		return hosted.Host()
+	}
+	return ""
 }
 
 // label puts on a response's row what its caller and its hedge say about it. The response
@@ -343,19 +388,20 @@ func (s *Session) Close() error {
 // One response is one unit of billable work, the way one synthesis is for text-to-speech,
 // and it is recorded once: a failure is carried on the response that failed rather than
 // written as a row of its own, so one turn stays one row.
-func (s *Session) observe(startedAt, createdAt time.Time, params llm.ResponseParams, hedge *hedgeAttempt, event llm.Event, owner routing.Owner, charged routing.Caller, reserved uuid.UUID, failure string, inference trace.Span) {
+func (s *Session) observe(ctx context.Context, startedAt, createdAt time.Time, params llm.ResponseParams, hedge *hedgeAttempt, event llm.Event, owner routing.Owner, charged routing.Caller, reserved uuid.UUID, failure string, transient bool, inference trace.Span) {
 	completed, settled := event.(llm.ResponseCompleted)
 	if !settled {
 		return
 	}
 
 	response := completed.Response
-	// A provider may wait for response headers before returning its stream. The stream's
-	// own clock starts only then, but the caller has been waiting since Create began.
+	// A provider may wait for response headers before returning its stream. Unless it said
+	// when it sent the request (llm.StreamOptions.StartedAt), the stream's own clock starts
+	// only then, but the caller has been waiting since Create began.
 	headersMs := float64(createdAt.Sub(startedAt).Microseconds()) / 1000
 	ttftMs := measuredLatency(response, headersMs+response.TimeToFirstTokenMs)
 	durationMs := headersMs + response.DurationMs
-	code := outrun(errorCode(response), response.TimeToFirstTokenMs <= 0, hedge)
+	code, lost := outrun(errorCode(response), response.TimeToFirstTokenMs <= 0, hedge)
 	endInference(inference, &response, code)
 	stat := reported(response)
 	estimated := unreported(response)
@@ -372,17 +418,6 @@ func (s *Session) observe(startedAt, createdAt time.Time, params llm.ResponsePar
 		stat.Estimated()
 		estimated = true
 	}
-	slog.Info("model call timing", "call", s.owner.CallID, "operation", response.ID,
-		"purpose", params.Purpose, "turn", params.TurnID,
-		"provider", s.config.Provider, "model", s.config.Model,
-		"ttft_ms", ttftMs, "duration_ms", durationMs,
-		"input_tokens", stat.InputTokens,
-		"cached_tokens", stat.CachedInputTokens,
-		"cache_write_tokens", response.Usage.InputTokensDetails.CacheWriteTokens,
-		"output_tokens", stat.OutputTokens,
-		"reasoning_tokens", response.Usage.OutputTokensDetails.ReasoningTokens,
-		"estimated", estimated,
-		"success", served(response), "error_code", code)
 	composed := llm.Compose(params).Scaled(stat.InputTokens)
 	usage := stat.Usage
 	stat.Owner = owner
@@ -406,19 +441,41 @@ func (s *Session) observe(startedAt, createdAt time.Time, params llm.ResponsePar
 	stat.LatencyMs = measuredLatency(response, ttftMs)
 	stat.Success = served(response)
 	stat.ErrorCode = code
+	stat.HedgeLost = lost
 	// Only a response that did not run to its end says why, so a served one's row and timing
 	// are the ones they always were.
 	if code != "" {
 		stat.ErrorMessage = failure
 	}
 	label(&stat, params, hedge)
+	cost := s.recorder.QuoteStat(s.config, stat).CostMicros
+	logged := append(s.loggedCall(stat), "operation", response.ID,
+		"purpose", params.Purpose, "turn", params.TurnID,
+		"ttft_ms", ttftMs, "duration_ms", durationMs,
+		"input_tokens", stat.InputTokens,
+		"cached_tokens", stat.CachedInputTokens,
+		"cache_write_tokens", response.Usage.InputTokensDetails.CacheWriteTokens,
+		"output_tokens", stat.OutputTokens,
+		"reasoning_tokens", response.Usage.OutputTokensDetails.ReasoningTokens,
+		"estimated", estimated, "cost_micros", cost,
+		"status", string(response.Status), "success", served(response), "error_code", code)
+	if response.IncompleteReason != "" {
+		logged = append(logged, "incomplete_reason", response.IncompleteReason)
+	}
+	if response.ProviderResponseID != "" {
+		logged = append(logged, "provider_response_id", response.ProviderResponseID)
+	}
+	if stat.ErrorMessage != "" {
+		logged = append(logged, "error", store.SafeLogText(stat.ErrorMessage), "transient", transient)
+	}
+	slog.Info("model call timing", logged...)
 	if params.OnTiming != nil {
 		params.OnTiming(llm.CallTiming{OperationID: response.ID, Purpose: params.Purpose,
 			TurnID: params.TurnID, Provider: s.config.Provider, Model: s.config.Model,
 			TTFTMs: ttftMs, DurationMs: durationMs,
 			Success: served(response), ErrorCode: code, ErrorMessage: store.SafeLogText(stat.ErrorMessage),
 			InputTokens: usage.InputTokens, CachedInputTokens: usage.CachedInputTokens,
-			OutputTokens: usage.OutputTokens, CostMicros: s.recorder.QuoteStat(s.config, stat).CostMicros})
+			OutputTokens: usage.OutputTokens, CostMicros: cost})
 	}
 
 	// The debit is taken here rather than where the response was asked for, because what a
@@ -426,10 +483,10 @@ func (s *Session) observe(startedAt, createdAt time.Time, params llm.ResponsePar
 	// limit and then spent the rest of the day's tokens in one answer is refused the next
 	// one, which is the most a limit counted after the fact can do.
 	//
-	// Its context is not the one the response was created with: that one is cancelled when
-	// the caller hangs up, and a response generated by somebody who hung up before reading
-	// it cost exactly as much as one they read.
-	s.debit(charged, stat.InputTokens+stat.OutputTokens)
+	// Its context is the one the response was created with, without its cancellation: that
+	// one is cancelled when the caller hangs up, and a response generated by somebody who hung
+	// up before reading it cost exactly as much as one they read.
+	s.debit(ctx, charged, stat.InputTokens+stat.OutputTokens)
 
 	s.recorder.Record(s.config, stat)
 }
@@ -515,12 +572,12 @@ func errorCode(response llm.Response) string {
 
 // outrun is code, unless the attempt was cancelled because it lost its hedge without having
 // said anything: then it ran past the router's own limit on silence, a timeout, which counts
-// against its provider's health where a cancellation would not.
-func outrun(code string, silent bool, hedge *hedgeAttempt) string {
+// against its provider's health where a cancellation would not. The bool says it was that.
+func outrun(code string, silent bool, hedge *hedgeAttempt) (string, bool) {
 	if code == routing.ErrorCancelled && silent && hedge.stalled() {
-		return routing.ErrorTimeout
+		return routing.ErrorTimeout, true
 	}
-	return code
+	return code, false
 }
 
 // measuredLatency is the time the caller waited for the first token, or nothing when none
@@ -584,12 +641,12 @@ func (s *Session) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	passedOver := s.passesOver(params)
 	if passedOver {
 		if alternate, err := s.fallback(ctx, params); err == nil {
-			return screened(alternate, verdict), nil
+			return screened(ctx, alternate, verdict), nil
 		}
 	}
 	stream, err := open(ctx, params)
 	if err == nil || passedOver || ctx.Err() != nil || s.fallback == nil || params.PreviousResponseID != "" || params.Conversation != "" {
-		return screened(stream, verdict), stack.Wrap(err)
+		return screened(ctx, stream, verdict), stack.Wrap(err)
 	}
 	var apiError *openai.Error
 	// 402 is the provider's billing, not the request: Gemini answers it for every request
@@ -602,7 +659,7 @@ func (s *Session) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 		return nil, stack.Wrap(errors.Join(err, fallbackErr))
 	}
 	routing.CountHandover(routing.LLM, s.config, err)
-	return screened(alternate, verdict), nil
+	return screened(ctx, alternate, verdict), nil
 }
 
 // passesOver reports whether a response is asked of the other candidates before this
@@ -648,19 +705,19 @@ func (s *Session) allow(ctx context.Context) error {
 
 // debit charges the daily limit for the tokens a settled response used. A session that is
 // not counted is never charged.
-func (s *Session) debit(charged routing.Caller, tokens int64) {
+func (s *Session) debit(ctx context.Context, charged routing.Caller, tokens int64) {
 	if !s.counted() {
 		return
 	}
-	s.quota.Debit(context.Background(), s.owner.CustomerID, charged, tokens)
+	s.quota.Debit(ctx, s.owner.CustomerID, charged, tokens)
 }
 
 // screened attaches a verdict to a stream, when there is both.
-func screened(stream *llm.Stream, verdict <-chan error) *llm.Stream {
+func screened(ctx context.Context, stream *llm.Stream, verdict <-chan error) *llm.Stream {
 	if stream == nil || verdict == nil {
 		return stream
 	}
-	return stream.Screen(verdict)
+	return stream.Screen(ctx, verdict)
 }
 
 func (s *Session) addChild(child *Session) bool {

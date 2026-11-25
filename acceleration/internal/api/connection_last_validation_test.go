@@ -123,7 +123,8 @@ func (s *ConnectionToolsSuite) TestA429OrA5xxKeepsAStaticTokenConnected() {
 }
 
 // TestAProviderThatDoesNotAnswerKeepsAStaticTokenConnected: no answer at all (a closed port)
-// says nothing about the credential.
+// says nothing about the credential, and the reason kept names none of the addresses the dial
+// failed between (AI-3575).
 func (s *ConnectionToolsSuite) TestAProviderThatDoesNotAnswerKeepsAStaticTokenConnected() {
 	closed := httptest.NewTLSServer(http.NotFoundHandler())
 	closed.Close()
@@ -138,7 +139,8 @@ func (s *ConnectionToolsSuite) TestAProviderThatDoesNotAnswerKeepsAStaticTokenCo
 	s.Require().NotNil(got.LastValidation)
 	s.Equal(validationFailed, string(got.LastValidation.Status))
 	s.Empty(got.LastValidation.Code, "no status to name")
-	s.Equal(validation.Error, got.LastValidation.Error)
+	s.Equal(providerUnreachable, validation.Error)
+	s.Equal(providerUnreachable, got.LastValidation.Error)
 }
 
 // TestTheAnswerAValidateFailedOnDecidesNotTheSessionsDelete: a stateful MCP server answers
@@ -357,6 +359,24 @@ func (s *ConnectionToolsSuite) TestAValidateThatRenewsTheGrantShowsWhatItFound()
 	s.Equal(validationConnected, string(got.LastValidation.Status))
 }
 
+// TestABuiltInsGrantIsRenewedWithTheOperatorsClient is the control for the operator's client
+// being only a built-in's: a grant imported for a built-in that takes it is issued to it, and
+// the resolver renews it with it.
+func (s *ConnectionToolsSuite) TestABuiltInsGrantIsRenewedWithTheOperatorsClient() {
+	access, refresh := s.codeGrant()
+	id := s.connectionTo(s.builtin(oauth2code.Name, 1, ""))
+	grant := s.importedGrant(access, "chat:write")
+	grant["values"].(map[string]string)[oauth2code.SuppliedRefreshToken] = refresh
+	grant["values"].(map[string]string)[oauth2code.SuppliedExpiresAt] = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+id+"/credentials", grant, nil))
+	refreshes := s.provider.Refreshes()
+
+	s.Equal(validationConnected, string(s.validate(id).Status))
+
+	s.Equal(refreshes+1, s.provider.Refreshes(), "the validate renewed the grant")
+	s.Equal(ConnectionStatus(store.ConnectionConnected), s.get(id).Status)
+}
+
 // TestAnErrorThatEchoesTheCredentialIsStoredWithoutItAndCut (R1.2 of PR #874): go-sdk puts a
 // non-transient error answer's body in the error, and a provider can echo the request's
 // Authorization header in it, padded to megabytes. The last validation keeps neither the token
@@ -390,7 +410,7 @@ func (s *ConnectionToolsSuite) TestAnErrorThatEchoesTheCredentialIsStoredWithout
 				s.Require().Equal(validationFailed, string(s.validate(id).Status))
 
 				var row string
-				s.Require().NoError(s.store.DB().NewRaw("SELECT error FROM connector_connection_validations WHERE connection_id = ?", id).Scan(s.T().Context(), &row))
+				s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT validation_error FROM connector_connections WHERE id = ?", id).Scan(s.T().Context(), &row))
 				one := s.get(id).LastValidation
 				s.Require().NotNil(one)
 				var page ConnectionPage
@@ -464,7 +484,7 @@ func (s *ConnectionToolsSuite) TestATokenSavedDuringAValidateIsNotStoredFromTheP
 
 	var row, errorText string
 	var revision int
-	s.Require().NoError(s.store.DB().NewRaw("SELECT row_to_json(ccv)::text, ccv.error, ccv.revision FROM connector_connection_validations AS ccv WHERE ccv.connection_id = ?", id).
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT row_to_json(cc)::text, cc.validation_error, cc.validation_revision FROM connector_connections AS cc WHERE cc.id = ?", id).
 		Scan(s.T().Context(), &row, &errorText, &revision))
 	// s.False on strings.Contains, not s.NotContains, so a failure never prints the token.
 	s.False(strings.Contains(row, tokenB), "the row holds the token saved during the validate")
@@ -503,7 +523,7 @@ func (s *ConnectionToolsSuite) TestAnAPIKeyEchoedFromItsNamedHeaderIsNotStored()
 	s.Require().Equal(validationFailed, string(s.validate(id).Status))
 
 	var row string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT error FROM connector_connection_validations WHERE connection_id = ?", id).Scan(s.T().Context(), &row))
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT validation_error FROM connector_connections WHERE id = ?", id).Scan(s.T().Context(), &row))
 	one := s.get(id).LastValidation
 	s.Require().NotNil(one)
 	var page ConnectionPage
@@ -638,8 +658,11 @@ func (s *ConnectionToolsSuite) connectorWith(scheme, mcp string) string {
 		"mcp: "+s.provider.URL+fakeprovider.PathMCP, "mcp: "+mcp, 1)
 	manifest, err := core.ParseManifest([]byte(yaml))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
+	if scheme == oauth2code.Name {
+		s.withFakeClient(connector)
+	}
 	return connector
 }
 

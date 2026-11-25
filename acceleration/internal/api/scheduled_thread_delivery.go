@@ -27,7 +27,7 @@ import (
 //	  sandbox gate                                              channel_unreachable
 //	  the organization may not pay (dlc.ErrUnpaid)              its code, such as insufficient_credits, final
 //	  past WhatsApp's 24 h, no template                         outside_window, final
-//	lease the thread's turn (store.TakeChannelThreadTurn)       another turn: wait
+//	lease the thread's turn (store.ChannelTurns.Take)           another turn: wait
 //	the session on the channel, else threadSpec on the task's config
 //	  the organization may not pay                              its code, final
 //	Session.FollowUp("st_<run>"), wait for its reply            no_reply, reply_failed
@@ -47,7 +47,7 @@ func (s *Server) deliverOnThread(ctx context.Context, delivery scheduledDelivery
 	if s.store == nil {
 		return "", "", errors.New("this router has no store to find a task's thread in")
 	}
-	thread, err := s.store.ChannelThread(ctx, channelID)
+	thread, err := s.store.ChannelThreads.Get(ctx, channelID)
 	if errors.Is(err, store.ErrNoChannelThread) {
 		return "", "", undeliveredFinally(scheduling.ReasonThreadGone, err)
 	}
@@ -65,13 +65,13 @@ func (s *Server) deliverOnThread(ctx context.Context, delivery scheduledDelivery
 		return "", "", threadUnreachable(err)
 	}
 	holder := uuid.NewString()
-	if err := s.takeThreadTurn(ctx, thread.ChannelID, holder); err != nil {
+	if err := s.takeThreadTurn(ctx, thread, holder); err != nil {
 		return "", "", err
 	}
 	defer func() {
 		releasing, done := context.WithTimeout(context.WithoutCancel(ctx), threadTurnPoll*20)
 		defer done()
-		if err := s.store.ReleaseChannelThreadTurn(releasing, thread.ChannelID, holder); err != nil {
+		if err := s.store.ChannelTurns.Release(releasing, thread.StreamAppPK, chatlog.ChannelType+":"+thread.ChannelID, holder); err != nil {
 			s.logger.Error("could not let go of a thread's turn; it runs out instead", "channel", thread.ChannelID, "error", err)
 		}
 	}()
@@ -89,38 +89,25 @@ func (s *Server) deliverOnThread(ctx context.Context, delivery scheduledDelivery
 			}
 		}()
 	}
-	delivery.CommandID = replyCommand(found, delivery.CommandID)
+	delivery.CommandID = replyCommand(found, delivery.CommandID, delivery.Earlier)
+	if err := refusedAgain(found, delivery); err != nil {
+		return "", "", err
+	}
 	// The delivery sends the reply itself, to settle the run on whether it went out.
 	replies, release := s.channelBridge.Hold(delivery.CommandID)
 	defer release()
 	// A retried occurrence whose turn the thread already holds is a duplicate follow-up, which
 	// runs nothing (Session.FollowUp); its reply is read back, and sent unless it went out.
 	_, _, retried := found.FollowUpReply(delivery.CommandID)
-	events, detach := found.Watch()
-	defer detach()
 	if err := s.followUpWithin(turn, found, delivery); err != nil {
 		return "", "", err
 	}
 	// The reply as the conversation stored it, with its files: as it finished, or read back
-	// for a follow-up that finished on an earlier attempt.
+	// for a follow-up that finished on an earlier attempt. A turn refused for money fails under
+	// the money (readBackReply).
 	reply, err := s.readBackReply(turn, found, delivery.CommandID)
 	if err != nil {
-		// A turn the organization may not pay for failed on the model's refusal, which the
-		// conversation does not keep: the run records the money, as a text channel's does.
-		for {
-			select {
-			case event, open := <-events:
-				// A session that ended closes its watchers: nothing more comes.
-				if !open {
-					return "", "", err
-				}
-				if refusal := turnRefusal(event); refusal != nil {
-					return "", "", refusal
-				}
-			default:
-				return "", "", err
-			}
-		}
+		return "", "", err
 	}
 	if !retried {
 		select {
@@ -137,7 +124,8 @@ func (s *Server) deliverOnThread(ctx context.Context, delivery scheduledDelivery
 
 // taskThreadSession is the session a task's occurrence is carried out in on its thread: one a
 // caller opened on the channel and keeps, or one opened for the turn on the task's config,
-// answering the task's user as the thread's person, so the turn may schedule for them again.
+// answering the task's user as the thread's person, so the turn reaches their tasks (it sets
+// no run going: session.armedByTask).
 // opened says the delivery opened it, and so closes it.
 func (s *Server) taskThreadSession(ctx context.Context, delivery scheduledDelivery, thread store.ChannelThread) (*session.Session, bool, error) {
 	cid := chatlog.ChannelType + ":" + thread.ChannelID
@@ -149,7 +137,7 @@ func (s *Server) taskThreadSession(ctx context.Context, delivery scheduledDelive
 	if running {
 		return found, false, nil
 	}
-	config, err := s.store.AgentConfig(ctx, delivery.CustomerID, delivery.ConfigID)
+	config, err := s.store.AgentConfigs.Get(ctx, delivery.CustomerID, delivery.ConfigID)
 	if err != nil {
 		return nil, false, err
 	}

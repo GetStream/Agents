@@ -2,7 +2,7 @@ name: Integration (router)
 # The router's `-tags integration` suites that need Postgres, in six jobs: each runs its group of
 # packages one at a time on its own Postgres and Redis. Groups, not a job per package, because each
 # job spends about 35 s on setup; the groups are balanced by test time on CI, so a new package goes
-# in the lightest one. CI (unit) runs `go test ./...` without the tag, so only this workflow runs
+# in the lightest one. CI (Go) runs `go test ./...` without the tag, so only this workflow runs
 # these suites on CI. Not a required check. Vendor suites (tts, stt, llm, sts, search, imagegen, detection)
 # need API keys, so they are not here. internal/campaign, internal/phone/outcome,
 # internal/searchrouter and internal/simulation are Postgres suites left out of the matrix too
@@ -21,6 +21,9 @@ on:
       - '.github/workflows/integration.yml'
   pull_request:
     branches: [ "**" ]
+    # A draft runs nothing: CI starts when the pull request is marked ready (ready_for_review)
+    # and runs on every push after that. The default types leave out ready_for_review.
+    types: [ opened, synchronize, reopened, ready_for_review ]
     paths:
       - 'acceleration/**'
       - '!**/*.md'
@@ -37,8 +40,9 @@ permissions:
 
 jobs:
   integration:
+    if: github.event.pull_request.draft != true
     name: integration (${{ matrix.group }})
-    runs-on: ubuntu-latest
+    runs-on: { group: github-public-amd64 }
     # MEM0_API_KEY lives in this environment, which a pull request's code never enters.
     environment: ${{ github.event_name == 'push' && matrix.mem0 && 'integration' || '' }}
     timeout-minutes: 40
@@ -54,7 +58,7 @@ jobs:
           - group: store
             packages: >-
               ./internal/store ./internal/concurrency ./internal/connectors/core ./internal/usage
-              ./internal/live ./internal/users ./internal/streamapp
+              ./internal/live ./internal/streamapp ./internal/redisscript
           # AI-2003, and claiming a guest does not move its memories yet. Both levels of a
           # skip are alternations, so it also names pairs that do not exist.
           - group: api
@@ -73,7 +77,7 @@ jobs:
               ./internal/channelbridge ./internal/tts/voices ./internal/llmrouter ./internal/policy
               ./internal/stsrouter ./internal/sandbox/egress ./internal/knowledge/urls
               ./internal/metered ./internal/quota ./internal/scheduling ./internal/limitnotice
-              ./internal/appconfig ./internal/decisionrouter ./internal/eventforward
+              ./internal/decisionrouter ./internal/eventforward
               ./internal/chatinbound ./internal/connectors/resolver
               ./internal/connectors/credentialstores/pgsealed ./internal/usage/ledger
               ./internal/usage/server
@@ -85,13 +89,13 @@ jobs:
     # and on disk each TRUNCATE waits on fsync.
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:19-alpine
         env:
           POSTGRES_PASSWORD: postgres
         ports:
           - 5432
         options: >-
-          --tmpfs /var/lib/postgresql/data
+          --tmpfs /var/lib/postgresql
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s
           --health-timeout 3s

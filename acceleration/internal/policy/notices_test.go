@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -23,22 +24,29 @@ func (s *PolicySuite) streamDestination(appID string) string {
 		ID: uuid.NewString(), CustomerID: appID, ConnectorID: store.StreamSource, URL: "https://example.com/" + appID,
 		Forward: store.ForwardAll, SecretSealed: []byte("sealed"), KEKVersion: 1,
 	}
-	s.Require().NoError(s.store.CreateEventDestination(s.ctx, &destination))
+	s.Require().NoError(s.store.EventDestinations.Insert(s.ctx, &destination))
 	return destination.ID
 }
 
 // notices are the warnings written for the organization, oldest first.
 func (s *PolicySuite) notices(organization string) []store.BalanceNotice {
-	var written []store.BalanceNotice
-	s.Require().NoError(s.store.DB().NewSelect().Model(&written).Where("organization_id = ?", organization).
-		Order("created_at", "granted_micros").Scan(s.ctx))
+	var rows []store.Notice
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("organization_id = ?", organization).
+		Where("kind IN (?)", bun.In([]string{store.NoticeBalanceLow, store.NoticeBalanceExhausted})).
+		OrderExpr("created_at, dedupe_key::bigint").Scan(s.ctx))
+	written := make([]store.BalanceNotice, 0, len(rows))
+	for _, row := range rows {
+		notice, err := row.BalanceNotice()
+		s.Require().NoError(err)
+		written = append(written, notice)
+	}
 	return written
 }
 
 // queued is the deliveries queued for the destination, by webhook-id, with their bodies.
 func (s *PolicySuite) queued(destinationID string) map[string]balanceEvent {
 	var deliveries []store.EventDelivery
-	s.Require().NoError(s.store.DB().NewSelect().Model(&deliveries).Where("destination_id = ?", destinationID).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&deliveries).Where("destination_id = ?", destinationID).Scan(s.ctx))
 	bodies := make(map[string]balanceEvent, len(deliveries))
 	for _, delivery := range deliveries {
 		var event balanceEvent
@@ -54,7 +62,7 @@ func (s *PolicySuite) warnable(micros int64, enforcers ...*reading) {
 	s.usage().SetLimits(s.T(), s.org, usage.Limits{LowBalanceMicros: pointer(int64(5_000_000))})
 	s.usage().Credit(s.T(), s.org, micros)
 	for _, enforcer := range enforcers {
-		enforcer.Join(s.app, s.org, usage.DefaultTier)
+		enforcer.Join(s.T().Context(), s.app, s.org, usage.DefaultTier)
 		s.read(enforcer.Enforcer, s.org)
 	}
 }
@@ -62,7 +70,7 @@ func (s *PolicySuite) warnable(micros int64, enforcers ...*reading) {
 func (s *PolicySuite) TestCrossingLowSendsOneEventAcrossTwoRouters() {
 	first, second := s.billed(), s.billed()
 	other := fmt.Sprintf("app-other-%d", time.Now().UnixNano())
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, other, s.org))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: other, OrganizationID: s.org}))
 	mine, theirs := s.streamDestination(s.app), s.streamDestination(other)
 	s.warnable(10_000_000, first, second)
 	s.Empty(s.notices(s.org), "above the threshold, no warning")
@@ -163,10 +171,10 @@ func (s *PolicySuite) TestABlockedNoticeWriteDoesNotHoldUpTheBalances() {
 	s.warnable(10_000_000, enforcer)
 	// A transaction holding the table makes every warning's write wait, as a Postgres that
 	// does not answer would.
-	blocking, err := s.store.DB().BeginTx(s.ctx, nil)
+	blocking, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = blocking.Rollback() }()
-	_, err = blocking.ExecContext(s.ctx, "LOCK TABLE balance_notices IN ACCESS EXCLUSIVE MODE")
+	_, err = blocking.ExecContext(s.ctx, "LOCK TABLE notices IN ACCESS EXCLUSIVE MODE")
 	s.Require().NoError(err)
 
 	s.usage().Spend(s.T(), s.org, 6_000_000)
@@ -193,7 +201,7 @@ func (s *PolicySuite) balance(enforcer *Enforcer) Balance {
 func (s *PolicySuite) TestAnOrganizationNeverGrantedCreditIsNotWarned() {
 	enforcer := s.billed()
 	s.streamDestination(s.app)
-	enforcer.Join(s.app, s.org, usage.DefaultTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, usage.DefaultTier)
 	s.read(enforcer.Enforcer, s.org)
 
 	s.never(func() bool { return len(s.notices(s.org)) > 0 }, 10*quick.Fresh, 10*time.Millisecond, "nothing ran out")
@@ -203,7 +211,7 @@ func (s *PolicySuite) TestOffSendsNothing() {
 	enforcer := s.billed(func(settings *Settings) { settings.Mode = config.LimitsOff })
 	s.streamDestination(s.app)
 	s.usage().Credit(s.T(), s.org, 1_000_000)
-	enforcer.Join(s.app, s.org, usage.DefaultTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, usage.DefaultTier)
 
 	s.never(func() bool { return len(s.notices(s.org)) > 0 }, 10*quick.Fresh, 10*time.Millisecond, "off reads no money")
 }

@@ -60,22 +60,59 @@ export class SocketClosedError extends Error {
 }
 
 /**
+ * A session's timeline or decisions were asked for, and it has no call to read them from.
+ *
+ * A session starts a new call each time voice is started or stopped on it, and the timeline
+ * and decisions are its newest call's. A session held only in writing, an incognito one, or
+ * one the router does not know has none.
+ */
+export class NoCallError extends Error {
+  /** The session that has no call. */
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(`the session has no call: ${sessionId}`);
+    this.name = "NoCallError";
+    this.sessionId = sessionId;
+  }
+}
+
+/**
  * The router would not run a worker's hosted tools for an agent.
  *
  * Kept apart from RouterError because no request failed: the socket is fine, and asking
  * again would only be told the same thing.
  */
 export class HostingRefusedError extends Error {
-  /** The agent the tools were offered for. */
-  readonly agentId: string;
   /** Why the router said no. */
   readonly reason: string;
 
-  constructor(agentId: string, reason: string) {
-    super(`the router refused to host tools for agent ${agentId}: ${reason}`);
+  constructor(reason: string) {
+    super(`the router refused to host tools: ${reason}`);
     this.name = "HostingRefusedError";
-    this.agentId = agentId;
     this.reason = reason;
+  }
+}
+
+/**
+ * What the items of a turn with no id answer.
+ *
+ * The router names no turn for a session that records nothing (incognito), for a
+ * speech-to-speech session, whose model decides what a turn is, and for the retry of a
+ * `request_id` it already took. Reading that turn's items would read every turn in the
+ * session instead, so nothing is asked: an incognito session's answer is on
+ * `session.events()` alone, and the other two record theirs, which `session.responses.items`
+ * reads.
+ */
+export class UnnamedTurnError extends Error {
+  constructor() {
+    super(
+      "the turn has no id, so it has no items of its own to read: the router names no turn for an " +
+        "incognito session, a speech-to-speech session or the retry of a request_id already taken; " +
+        "follow the answer on session.events(), or read session.responses.items for a session that " +
+        "records its turns",
+    );
+    this.name = "UnnamedTurnError";
   }
 }
 
@@ -114,7 +151,7 @@ export async function errorOf(
     return new RouterError(
       response.status,
       operation,
-      text.trim() || `${answeredBy} answered ${response.status}`,
+      clipped(text.trim()) || `${answeredBy} answered ${response.status}`,
       { requestId },
     );
   }
@@ -145,4 +182,21 @@ function objectOf(value: unknown): Record<string, unknown> | undefined {
 
 function stringOf(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
+}
+
+/**
+ * How much of a body that is not the router's own envelope becomes an error's message. Enough to
+ * read what a proxy or a gateway said; past it is a whole HTML page, or a request echoed back,
+ * which an app would log and show in full.
+ */
+const MAX_MESSAGE_CHARS = 1024;
+
+/** `text`, cut to `MAX_MESSAGE_CHARS` with an ellipsis where it was cut, never inside an emoji's pair. */
+export function clipped(text: string): string {
+  if (text.length <= MAX_MESSAGE_CHARS) {
+    return text;
+  }
+  const high = text.charCodeAt(MAX_MESSAGE_CHARS - 1);
+  const end = high >= 0xd800 && high <= 0xdbff ? MAX_MESSAGE_CHARS - 1 : MAX_MESSAGE_CHARS;
+  return `${text.slice(0, end)}…`;
 }

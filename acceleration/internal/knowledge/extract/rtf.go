@@ -1,6 +1,7 @@
 package extract
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"strings"
@@ -35,14 +36,14 @@ type rtfState struct {
 
 // readRTF reads a Rich Text Format document. RTF records no pages, only the breaks
 // somebody put in, so its pages are not numbered.
-func readRTF(data []byte) (Document, error) {
+func readRTF(ctx context.Context, data []byte) (Document, error) {
 	headings, err := rtfHeadingStyles(data)
 	if err != nil {
 		return Document{}, err
 	}
 	r := &rtfReader{headings: headings, decoder: charmap.Windows1252, state: rtfState{uc: 1}}
-	if err := r.read(data); err != nil {
-		return Document{}, fail(Corrupt, RTF, err)
+	if err := r.read(ctx, data); err != nil {
+		return Document{}, unreadable(ctx, RTF, err)
 	}
 	return Document{Pages: r.pages()}, nil
 }
@@ -198,11 +199,14 @@ func rtfHeadingStyles(data []byte) (map[int]int, error) {
 	return headings, err
 }
 
-func (r *rtfReader) read(data []byte) error {
+func (r *rtfReader) read(ctx context.Context, data []byte) error {
 	// ignorable says the group just opened with \*, so a destination it names that is not
 	// known here is skipped rather than read as text.
 	ignorable := false
 	err := rtfTokens(data, func(t rtfToken) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		switch {
 		case t.open:
 			r.stack = append(r.stack, r.state)

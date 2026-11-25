@@ -69,6 +69,8 @@ type store struct {
 	// failing are the path suffixes Fail and FailWith answer, by method, with the status each
 	// is answered with.
 	failing map[string]map[string]int
+	// refusals are what RefuseWith answers instead of Fail's 500 body, by method and suffix.
+	refusals map[string]map[string]Refusal
 	// uploads are the files stored on channels, in the order they came.
 	uploads []Upload
 	// events are the events sent to each channel, by channel id, in the order they came.
@@ -155,6 +157,8 @@ func NewServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("chattest: %v", err)
 	}
+	// Made now, as streamapp does: the SDK makes its video client on first use without a lock.
+	client.Video()
 	return &Server{Client: client, URL: server.URL, Key: key, db: db, t: t}
 }
 
@@ -179,6 +183,17 @@ func (s *Server) Channel(id string) (map[string]any, bool) {
 	defer s.db.mu.Unlock()
 	data, ok := s.db.channels[cidOf(id)]
 	return data, ok
+}
+
+// ForgetCustom drops fields from a channel's custom data, as a channel made before they were
+// written has none of them.
+func (s *Server) ForgetCustom(id string, fields ...string) {
+	s.db.mu.Lock()
+	defer s.db.mu.Unlock()
+	custom, _ := s.db.channels[cidOf(id)]["custom"].(map[string]any)
+	for _, field := range fields {
+		delete(custom, field)
+	}
 }
 
 // cidOf is the cid a test names a channel by: a cid as it is, or an agent channel's id alone.
@@ -490,11 +505,34 @@ func (s *Server) KnownAuthors() {
 	s.db.knownAuthors = true
 }
 
+// Refusal is an error Stream answers with: its HTTP status, its own error code and message.
+type Refusal struct {
+	Status  int
+	Code    int
+	Message string
+}
+
+// RefuseWith is FailWith answering refusal's code and message, such as Stream's code 2 for an
+// api key it does not know.
+func (s *Server) RefuseWith(method, suffix string, refusal Refusal) {
+	s.FailWith(method, suffix, refusal.Status)
+	s.db.mu.Lock()
+	defer s.db.mu.Unlock()
+	if s.db.refusals == nil {
+		s.db.refusals = map[string]map[string]Refusal{}
+	}
+	if s.db.refusals[method] == nil {
+		s.db.refusals[method] = map[string]Refusal{}
+	}
+	s.db.refusals[method][suffix] = refusal
+}
+
 // Heal serves requests of method ending in suffix again.
 func (s *Server) Heal(method, suffix string) {
 	s.db.mu.Lock()
 	defer s.db.mu.Unlock()
 	delete(s.db.failing[method], suffix)
+	delete(s.db.refusals[method], suffix)
 }
 
 // wait keeps the request Hold asked for waiting until it is let go.
@@ -732,8 +770,12 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	for suffix, status := range db.failing[r.Method] {
 		if strings.HasSuffix(r.URL.Path, suffix) {
+			code, message := 4, "boom"
+			if refusal, ok := db.refusals[r.Method][suffix]; ok {
+				code, message = refusal.Code, refusal.Message
+			}
 			w.WriteHeader(status)
-			_ = json.NewEncoder(w).Encode(map[string]any{"code": 4, "message": "boom", "StatusCode": status})
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": code, "message": message, "StatusCode": status})
 			return
 		}
 	}
@@ -1011,6 +1053,15 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		set, _ := body["set"].(map[string]any)
 		maps.Copy(data, set)
+		// Chat reads a field set this way back among the channel's custom data. A set of custom
+		// itself, as a test may send, is the custom data.
+		if custom, ok := data["custom"].(map[string]any); ok {
+			for key, value := range set {
+				if key != "custom" {
+					custom[key] = value
+				}
+			}
+		}
 		result["channel"] = data
 	case r.Method == http.MethodPost && len(parts) >= 3 && parts[len(parts)-3] == "channels":
 		// An update adds the members it names to the channel, which is how a reader comes

@@ -29,8 +29,7 @@ const maxKnowledgeSource = 256
 // second, as an upload from a shop's connection can be.
 const fileReadTimeout = 10 * time.Minute
 
-var errNoKnowledgeFiles = notConfigured("this deployment does not take files for knowledge: it needs a database, a knowledge " +
-	"base, a queue and a bucket to keep the files in (ROUTER_KNOWLEDGE_BUCKET_URL)")
+var errNoKnowledgeFiles = notConfigured("this deployment is not set up to take files for knowledge")
 
 // errFileTooLarge is a file past files.MaxBytes.
 var errFileTooLarge = errors.New("api: the file is larger than a knowledge upload takes")
@@ -69,6 +68,7 @@ func (s *Server) uploadKnowledgeFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A writer that cannot take a deadline still reads the file, only without one.
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(fileReadTimeout))
 	r.Body = http.MaxBytesReader(w, r.Body, files.MaxBytes+maxFormOverhead)
 	form, err := r.MultipartReader()
@@ -89,6 +89,7 @@ func (s *Server) uploadKnowledgeFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if next.FormName() != "file" {
+			// A part that is not the file is skipped; the next read reports a broken form.
 			_ = next.Close()
 			continue
 		}
@@ -144,6 +145,7 @@ func (s *Server) uploadKnowledgeFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusAccepted)
+	// The status is sent: a caller that hung up meanwhile has nothing to be told.
 	_ = json.NewEncoder(w).Encode(indexedKnowledgeDocumentOf(document))
 }
 
@@ -168,6 +170,7 @@ func contentTypeOf(sent, source string) string {
 		return known
 	}
 	if byName := mime.TypeByExtension(extension); byName != "" {
+		// The system's own table of types parses.
 		media, _, _ := mime.ParseMediaType(byName)
 		return media
 	}

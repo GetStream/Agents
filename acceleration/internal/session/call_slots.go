@@ -28,12 +28,13 @@ type slots struct {
 }
 
 // take waits until fewer than limit calls on connection are in flight, or ctx ends, and
-// returns what ends this call's turn. A limit of 0 waits for nothing. The limit of the first
-// call stands until every call on the connection has ended: a connection's calls all read the
-// one revision it pinned (dispatcher.recheck refuses a call when it moved).
-func (c *callSlots) take(ctx context.Context, connection string, limit int) (func(), error) {
+// returns what ends this call's turn and whether it had to wait. A limit of 0 waits for
+// nothing. The limit of the first call stands until every call on the connection has ended: a
+// connection's calls all read the one revision it pinned (dispatcher.recheck refuses a call
+// when it moved).
+func (c *callSlots) take(ctx context.Context, connection string, limit int) (func(), bool, error) {
 	if c == nil || limit <= 0 {
-		return func() {}, nil
+		return func() {}, false, nil
 	}
 	c.mu.Lock()
 	if c.byConnection == nil {
@@ -46,15 +47,21 @@ func (c *callSlots) take(ctx context.Context, connection string, limit int) (fun
 	}
 	s.users++
 	c.mu.Unlock()
+	release := func() {
+		<-s.held
+		c.leave(connection, s)
+	}
 	select {
 	case s.held <- struct{}{}:
-		return func() {
-			<-s.held
-			c.leave(connection, s)
-		}, nil
+		return release, false, nil
+	default:
+	}
+	select {
+	case s.held <- struct{}{}:
+		return release, true, nil
 	case <-ctx.Done():
 		c.leave(connection, s)
-		return nil, ctx.Err()
+		return nil, true, ctx.Err()
 	}
 }
 

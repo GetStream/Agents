@@ -189,15 +189,16 @@ func (c *Conversation) BeginRegenerate(turn Turn, id, questionID string) (Comman
 }
 
 // Branches keeps the copies of the messages branch switches hide and the journal of the
-// switches, so a router that stops partway is finished by the next open. *store.Store is one.
+// switches, so a router that stops partway is finished by the next open: the copies are the
+// store's BranchMessages, the journal its BranchSwitches.
 type Branches interface {
-	SaveBranchMessages(ctx context.Context, messages []store.AgentBranchMessage) error
-	BranchMessages(ctx context.Context, customerID, sessionID string, responseIDs []string) ([]store.AgentBranchMessage, error)
-	StartBranchSwitch(ctx context.Context, branchSwitch *store.AgentBranchSwitch) error
-	AdvanceBranchSwitch(ctx context.Context, customerID, id, state string) error
-	AbandonBranchSwitch(ctx context.Context, customerID, sessionID, id string) error
-	CountBranchResent(ctx context.Context, customerID, id string) (int, error)
-	UnfinishedBranchSwitches(ctx context.Context, customerID, sessionID string) ([]store.AgentBranchSwitch, error)
+	UpsertMany(ctx context.Context, messages []store.AgentBranchMessage) error
+	Select(ctx context.Context, customerID, sessionID string, responseIDs []string) ([]store.AgentBranchMessage, error)
+	Insert(ctx context.Context, branchSwitch *store.AgentBranchSwitch) error
+	Advance(ctx context.Context, customerID, id, state string) error
+	Abandon(ctx context.Context, customerID, sessionID, id string) error
+	CountResent(ctx context.Context, customerID, id string) (int, error)
+	Unfinished(ctx context.Context, customerID, sessionID string) ([]store.AgentBranchSwitch, error)
 }
 
 // SwitchHooks are the session's part of finishing a switch an earlier router left unfinished,
@@ -369,7 +370,7 @@ func (c *Conversation) FinishSwitch(ctx context.Context, switchID string) error 
 	if branches == nil {
 		return stack.Wrap(errors.New("conversation: branch switches are not kept anywhere"))
 	}
-	return branches.AdvanceBranchSwitch(ctx, c.data.Customer, switchID, store.SwitchDone)
+	return branches.Advance(ctx, c.data.Customer, switchID, store.SwitchDone)
 }
 
 // Drain writes everything the conversation has queued for Stream Chat, so a read of the
@@ -468,7 +469,7 @@ func (c *Conversation) switchTo(ctx context.Context, target RewindTarget, chosen
 		}
 	}
 
-	unfinished, err := sw.branches.UnfinishedBranchSwitches(ctx, sw.customer, sw.session)
+	unfinished, err := sw.branches.Unfinished(ctx, sw.customer, sw.session)
 	if err != nil {
 		return RewindOutcome{}, err
 	}
@@ -527,7 +528,7 @@ func (c *Conversation) SettleSwitch(ctx context.Context, target RewindTarget, ch
 	}
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
-	unfinished, err := sw.branches.UnfinishedBranchSwitches(ctx, sw.customer, sw.session)
+	unfinished, err := sw.branches.Unfinished(ctx, sw.customer, sw.session)
 	if err != nil {
 		return RewindOutcome{}, false, err
 	}
@@ -556,7 +557,7 @@ func (c *Conversation) CompleteSwitch(ctx context.Context, switchID string) (Rew
 	}
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
-	unfinished, err := sw.branches.UnfinishedBranchSwitches(ctx, sw.customer, sw.session)
+	unfinished, err := sw.branches.Unfinished(ctx, sw.customer, sw.session)
 	if err != nil {
 		return RewindOutcome{}, err
 	}
@@ -647,6 +648,7 @@ func (c *Conversation) readUpTo(ctx context.Context, client *getstream.Stream, b
 	c.mu.Lock()
 	hidden := maps.Clone(c.hidden)
 	customer, agentID, cid, owner, voiceAgent := c.data.Customer, c.data.Agent, c.data.CID, c.data.Owner, c.voiceAgent
+	ctx = WithCallerKind(ctx, c.data.OwnerKind)
 	c.mu.Unlock()
 	maps.Copy(hidden, tail)
 	page, err := c.service.readPage(ctx, client, customer, agentID, cid, before, owner, nil, hidden, nil, voiceAgent)
@@ -737,10 +739,10 @@ func (sw switcher) rewind(ctx context.Context, target RewindTarget, read func(be
 	row := store.AgentBranchSwitch{ID: target.SwitchID, SessionID: sw.session, CustomerID: sw.customer, Kind: target.Kind,
 		TargetResponseID: target.TargetResponseID, ForkMessageID: target.MessageID, Inclusive: target.Inclusive,
 		HiddenFrom: createdAt(tail.Messages[0]), State: store.SwitchSnapshotted}
-	if err := sw.branches.StartBranchSwitch(ctx, &row); err != nil {
+	if err := sw.branches.Insert(ctx, &row); err != nil {
 		return rewound{}, err
 	}
-	if err := sw.branches.SaveBranchMessages(ctx, copiesOf(row, hidden, responseOf(tail.Messages[0]))); err != nil {
+	if err := sw.branches.UpsertMany(ctx, copiesOf(row, hidden, responseOf(tail.Messages[0]))); err != nil {
 		return rewound{}, err
 	}
 	if len(hidden) > 0 {
@@ -768,7 +770,7 @@ func (sw switcher) rewind(ctx context.Context, target RewindTarget, read func(be
 			if tail, hidden, err = sw.tailFrom(ctx, target); err != nil {
 				break
 			}
-			if err = sw.branches.SaveBranchMessages(ctx, copiesOf(row, hidden, responseOf(tail.Messages[0]))); err != nil {
+			if err = sw.branches.UpsertMany(ctx, copiesOf(row, hidden, responseOf(tail.Messages[0]))); err != nil {
 				return rewound{}, err
 			}
 		}
@@ -792,7 +794,7 @@ func (sw switcher) rewind(ctx context.Context, target RewindTarget, read func(be
 			}
 		}
 		if refusal := branchRefusal(err); refusal != nil {
-			if abandonErr := sw.branches.AbandonBranchSwitch(ctx, sw.customer, sw.session, row.ID); abandonErr != nil {
+			if abandonErr := sw.branches.Abandon(ctx, sw.customer, sw.session, row.ID); abandonErr != nil {
 				// The next open finds the rewind never landed and forgets the switch then.
 				return rewound{}, errors.Join(stack.Wrap(refusal), abandonErr)
 			}
@@ -803,7 +805,7 @@ func (sw switcher) rewind(ctx context.Context, target RewindTarget, read func(be
 			return rewound{}, err
 		}
 	}
-	if err := sw.branches.AdvanceBranchSwitch(ctx, sw.customer, row.ID, store.SwitchRewound); err != nil {
+	if err := sw.branches.Advance(ctx, sw.customer, row.ID, store.SwitchRewound); err != nil {
 		return rewound{}, err
 	}
 	row.State = store.SwitchRewound
@@ -867,7 +869,7 @@ type finished struct {
 // resumeAll finishes the session's unfinished switches, oldest first, and returns every
 // message its switches hid, but those of a switch whose rewind is not known to have landed.
 func (sw switcher) resumeAll(ctx context.Context) (map[string]bool, error) {
-	unfinished, err := sw.branches.UnfinishedBranchSwitches(ctx, sw.customer, sw.session)
+	unfinished, err := sw.branches.Unfinished(ctx, sw.customer, sw.session)
 	if err != nil {
 		return nil, err
 	}
@@ -882,7 +884,7 @@ func (sw switcher) resumeAll(ctx context.Context) (map[string]bool, error) {
 			unknown[row.ID] = true
 		}
 	}
-	copies, err := sw.branches.BranchMessages(ctx, sw.customer, sw.session, nil)
+	copies, err := sw.branches.Select(ctx, sw.customer, sw.session, nil)
 	if err != nil {
 		return nil, errors.Join(append(errs, err)...)
 	}
@@ -903,7 +905,7 @@ func (sw switcher) resumeAll(ctx context.Context) (map[string]bool, error) {
 // (SwitchHooks.Switched) and it is marked done.
 func (sw switcher) resume(ctx context.Context, row store.AgentBranchSwitch, chosen []store.AgentBranchMessage, done bool) (finished, error) {
 	got := finished{state: row.State}
-	copies, err := sw.branches.BranchMessages(ctx, sw.customer, sw.session, nil)
+	copies, err := sw.branches.Select(ctx, sw.customer, sw.session, nil)
 	if err != nil {
 		return got, err
 	}
@@ -924,12 +926,12 @@ func (sw switcher) resume(ctx context.Context, row store.AgentBranchSwitch, chos
 			return finished{state: store.SwitchSnapshotted}, nil
 		}
 		if !landed {
-			if err := sw.branches.AbandonBranchSwitch(ctx, sw.customer, sw.session, row.ID); err != nil {
+			if err := sw.branches.Abandon(ctx, sw.customer, sw.session, row.ID); err != nil {
 				return got, err
 			}
 			return finished{}, nil
 		}
-		if err := sw.branches.AdvanceBranchSwitch(ctx, sw.customer, row.ID, store.SwitchRewound); err != nil {
+		if err := sw.branches.Advance(ctx, sw.customer, row.ID, store.SwitchRewound); err != nil {
 			return got, err
 		}
 		row.State, got.state = store.SwitchRewound, store.SwitchRewound
@@ -956,7 +958,7 @@ func (sw switcher) resume(ctx context.Context, row store.AgentBranchSwitch, chos
 			return got, err
 		}
 	}
-	if err := sw.branches.AdvanceBranchSwitch(ctx, sw.customer, row.ID, store.SwitchDone); err != nil {
+	if err := sw.branches.Advance(ctx, sw.customer, row.ID, store.SwitchDone); err != nil {
 		return got, err
 	}
 	got.state = store.SwitchDone
@@ -1012,7 +1014,7 @@ func (sw switcher) resend(ctx context.Context, row store.AgentBranchSwitch, chos
 	if len(chosen) > MaxResent {
 		return nil, stack.Wrap(ErrBranchTooLong)
 	}
-	if err := sw.branches.AdvanceBranchSwitch(ctx, sw.customer, row.ID, store.SwitchResending); err != nil {
+	if err := sw.branches.Advance(ctx, sw.customer, row.ID, store.SwitchResending); err != nil {
 		return nil, err
 	}
 	remap := make(map[string]string, len(chosen))
@@ -1029,7 +1031,7 @@ func (sw switcher) resend(ctx context.Context, row store.AgentBranchSwitch, chos
 			if err != nil && !sw.alreadyResent(ctx, *req.ID, m.OriginalMessageID) {
 				return out, stack.Wrap(err)
 			}
-			if _, err := sw.branches.CountBranchResent(ctx, sw.customer, row.ID); err != nil {
+			if _, err := sw.branches.CountResent(ctx, sw.customer, row.ID); err != nil {
 				return out, err
 			}
 		}

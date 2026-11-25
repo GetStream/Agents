@@ -62,9 +62,10 @@ func CreateMissingUsers(ctx context.Context, client *getstream.Stream, users map
 	return nil
 }
 
-// UserTeams is the teams Chat holds for a user, read from Stream each time: the backend
-// moves a person between teams, and a copy kept here would let them into the old one. A
-// user Chat does not have is in no team.
+// UserTeams is the teams Chat holds for a user, read from Stream each time it is called: the
+// backend moves a person between teams, and a copy kept for long would let them into the old
+// one. The router holds what it reads only briefly (api's heldTeams). A user Chat does not have
+// is in no team.
 func UserTeams(ctx context.Context, client *getstream.Stream, userID string) ([]string, error) {
 	limit := 1
 	found, err := client.QueryUsers(ctx, &getstream.QueryUsersRequest{Payload: &getstream.QueryUsersPayload{

@@ -40,6 +40,16 @@ var errSocketSampleRate = invalidRequest(fmt.Sprintf(
 // was its call, and stopping voice hung that call up.
 var errSocketVoiceEnded = invalidRequest("voice on a socket session cannot be started again once stopped: open a new socket")
 
+// refusalCode is the code of the APIError err is, and for any other error the code of the
+// internal error an operation returning it is answered with.
+func refusalCode(err error) string {
+	var failure APIError
+	if errors.As(err, &failure) {
+		return failure.Code
+	}
+	return internalError().Code
+}
+
 // openSocketSession holds a voice conversation over the socket itself rather than a call.
 //
 // The caller sends a `start` frame naming the session, the way POST /v1/agents/sessions
@@ -91,22 +101,38 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 		return stack.Wrap(write(websocket.TextMessage, payload))
 	}
 	// A refusal ends the socket with closeSocket: nothing else reads it yet, and the caller
-	// is held to answer the close so the error frame before it is not lost.
-	refuse := func(message string) {
+	// is held to answer the close so the error frame before it is not lost. Its code is
+	// noted for the activity record, which would count the 101 as answered; the frame says
+	// only the message, as it always has. ended is why the socket closed, for its access line.
+	refusal := socketEnd{cause: refusedByRouter, code: websocket.ClosePolicyViolation}
+	refuse := func(ended socketEnd, code, message string) {
+		noteRefusal(w, code)
 		_ = writeFrame(frame{"type": "error", "error": message})
 		closeSocket(connection, websocket.ClosePolicyViolation, "")
+		recordClose(r.Context(), ended)
 	}
 	// refuseWith also names the failure's code and type, which are what
-	// POST /v1/agents/sessions answers the same failure with.
-	refuseWith := func(failure APIError) {
+	// POST /v1/agents/sessions answers the same failure with. cause is refusedByRouter, or
+	// serverFailed for a failure of the router's own.
+	refuseWith := func(cause closeCause, failure APIError) {
+		noteRefusal(w, failure.Code)
 		_ = writeFrame(frame{"type": "error", "error": failure.Message, "code": failure.Code, "error_type": failure.Type})
 		closeSocket(connection, websocket.ClosePolicyViolation, "")
+		recordClose(r.Context(), socketEnd{cause: cause, code: websocket.ClosePolicyViolation})
 	}
 
 	_ = connection.SetReadDeadline(time.Now().Add(startWait))
+	// ReadJSON split in two, so that a caller that closed or dropped before its start frame is
+	// logged as one rather than as refused.
+	const startFirst = "the first frame must be a start frame naming the session"
+	_, message, err := connection.NextReader()
+	if err != nil {
+		refuse(readEnd(err), invalidRequest("").Code, startFirst)
+		return
+	}
 	var start socketStart
-	if err := connection.ReadJSON(&start); err != nil || start.Type != "start" {
-		refuse("the first frame must be a start frame naming the session")
+	if err := json.NewDecoder(message).Decode(&start); err != nil || start.Type != "start" {
+		refuse(refusal, invalidRequest("").Code, startFirst)
 		return
 	}
 	_ = connection.SetReadDeadline(time.Time{})
@@ -114,11 +140,11 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 	// The start frame carries POST /v1/agents/sessions's body, so a request is refused here
 	// as it is refused there.
 	if failure, refused := refuseSessionRequest(ctx, start.Session); refused {
-		refuseWith(failure)
+		refuseWith(refusedByRouter, failure)
 		return
 	}
 	if start.Session.Call != nil {
-		refuseWith(errSocketCall)
+		refuseWith(refusedByRouter, errSocketCall)
 		return
 	}
 
@@ -129,43 +155,69 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 		Cleared:    func() { _ = writeFrame(frame{"type": "cleared"}) },
 	})
 	if err != nil {
-		refuseWith(errSocketSampleRate)
+		refuseWith(refusedByRouter, errSocketSampleRate)
 		return
 	}
 
 	config, failure := s.configFor(ctx, customerID, start.Session.ConfigId, start.Session.Agent)
+	// A failure that is not an APIError comes from the database or from another service. The
+	// device gets no text of it.
+	if _, answered := errors.AsType[APIError](failure); failure != nil && !answered {
+		s.logger.Error("could not read the agent config of a socket session", "error", failure)
+		refuseWith(serverFailed, internalError())
+		return
+	}
 	if failure != nil {
-		refuse(store.RedactLogText(failure.Error()))
+		refuse(refusal, refusalCode(failure), store.RedactLogText(failure.Error()))
 		return
 	}
 	if failure, refused := s.sessionFloorRefusal(ctx, start.Session); refused {
-		refuseWith(failure)
+		refuseWith(refusedByRouter, failure)
 		return
 	}
 	spec := specOf(start.Session, customerID, config)
 	// A socket session carries audio, so voice is started on it whatever the frame says.
 	spec.Text = false
+	keyDeviceAgent(ctx, &spec)
 	ctx = s.threadConversation(ctx, customerID, &spec)
 	spec.Caller = CallerFrom(ctx)
 	spec.CallerKind = KindFrom(ctx)
+	spec.NameProject(start.Session.ProjectId, spec.CallerKind)
 	spec.Edge = edge
 
 	created, err := s.sessions.Create(ctx, spec)
 	if answer, refused := moneyError(err); refused {
-		refuseWith(answer)
+		refuseWith(refusedByRouter, answer)
 		return
 	}
-	if errors.Is(err, session.ErrAppSettingsUnreadable) {
-		s.logger.Error("could not open a socket session", "error", err)
-		refuseWith(internalError())
+	// Noted with the codes POST /v1/agents/sessions answers the same failures with.
+	if errors.Is(err, session.ErrSessionExists) {
+		refuse(refusal, conflict("").Code, store.RedactLogText(err.Error()))
 		return
 	}
-	if errors.Is(err, session.ErrSessionExists) || err != nil {
-		refuse(store.RedactLogText(err.Error()))
+	if err != nil {
+		answer, answered := errors.AsType[APIError](refusedRequest(err))
+		// A failure that is not the caller's mistake can name where the database is. The device
+		// gets no text of it.
+		if !answered {
+			s.logger.Error("could not open a socket session", "error", err)
+			refuseWith(serverFailed, internalError())
+			return
+		}
+		s.logNotConfigured(ctx, customerID, err)
+		refuse(refusal, answer.Code, store.RedactLogText(answer.Message))
 		return
 	}
 	s.rememberTimezone(ctx, customerID, spec)
 	owner := OwnerFrom(ctx)
+	// Deferred before the session is closed, so it runs once the session has ended.
+	var ended socketEnd
+	defer func() {
+		if ended.cause == sessionEnded {
+			ended.endReason = created.EndedFor()
+		}
+		recordClose(r.Context(), ended)
+	}()
 	defer func() {
 		if _, err := s.sessions.Close(created.ID(), owner); err != nil {
 			s.logger.Debug("could not close the socket session", "session", created.ID(), "error", err)
@@ -173,6 +225,7 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if err := writeFrame(frame{"type": "session", "session": sessionOf(ctx, created), "sample_rate": edge.SampleRate()}); err != nil {
+		ended = socketEnd{cause: clientGone}
 		return
 	}
 
@@ -183,6 +236,7 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 	// so the close is still sent; closeBeforeReader bounds the wait for it to closeWait.
 	events, detach := created.Watch()
 	readDone := make(chan struct{})
+	over := make(chan struct{})
 	hungUp := make(chan struct{})
 	defer func() {
 		close(readDone)
@@ -193,6 +247,7 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 		defer close(hungUp)
 		for range events {
 		}
+		close(over)
 		closeBeforeReader(connection, websocket.CloseNormalClosure, "the conversation is over", readDone)
 		// A caller that never answers leaves the read loop reading; closing ends it.
 		_ = connection.Close()
@@ -201,11 +256,21 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 	for {
 		kind, payload, err := connection.ReadMessage()
 		if err != nil {
+			// The caller's answer to the close sent once the conversation was over is no close of
+			// the caller's own.
+			select {
+			case <-over:
+				ended = socketEnd{cause: sessionEnded, code: websocket.CloseNormalClosure}
+			default:
+				ended = readEnd(err)
+			}
 			return
 		}
 		switch kind {
 		case websocket.BinaryMessage:
+			// The agent left the call, so the conversation is over.
 			if err := edge.Hear(payload); err != nil {
+				ended = socketEnd{cause: sessionEnded, code: websocket.CloseNormalClosure}
 				return
 			}
 		case websocket.TextMessage:
@@ -213,6 +278,13 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 				Type string `json:"type"`
 			}
 			if json.Unmarshal(payload, &command) == nil && command.Type == "stop" {
+				// A stop sent once the conversation was over did not end it.
+				select {
+				case <-over:
+					ended = socketEnd{cause: sessionEnded, code: websocket.CloseNormalClosure}
+				default:
+					ended = socketEnd{cause: closedByClient, code: websocket.CloseNormalClosure}
+				}
 				return
 			}
 		}

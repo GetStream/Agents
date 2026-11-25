@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/rand"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -129,6 +130,23 @@ func TestAStreamSocketThatFailsWithNoCredentialSaysWhatItAlwaysSaid(t *testing.T
 	require.Equal(t, `{"error":"503 Service Unavailable","type":"error"}`+"\n", sent)
 	require.Equal(t, websocket.CloseInternalServerErr, closed.Code)
 	require.Equal(t, "503 Service Unavailable", closed.Text)
+}
+
+func TestAStreamSocketThatFailsOnTheNetworkSaysNothingOfIt(t *testing.T) {
+	_, failure := net.Dial("tcp", "vendor.invalid:443")
+	require.Error(t, failure)
+
+	sent, closed := failedAndEnded(t, failure)
+
+	require.Equal(t, `{"error":"something went wrong","type":"error"}`+"\n", sent)
+	require.Equal(t, websocket.CloseInternalServerErr, closed.Code)
+	require.Equal(t, somethingWentWrong, closed.Text)
+	for socket, sent := range errorFrames(t, failure) {
+		t.Run(socket, func(t *testing.T) {
+			require.NotContains(t, sent, "vendor.invalid")
+			require.Contains(t, sent, somethingWentWrong)
+		})
+	}
 }
 
 // A failure frame on a stream socket is not cut, so a refusal naming what the caller sent

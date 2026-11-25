@@ -33,6 +33,9 @@ type approvals struct {
 	await  func(owner, callID, arguments string, approval persistent.ToolApproval) (string, string, bool)
 	waits  func(callID string) bool
 	decide func(agent.ToolApprovalDecided) bool
+	// changed is told a call started waiting and how it was answered, for its state
+	// (Session.trackToolCall). Nil tells nobody.
+	changed func(agent.Event)
 	// wait is how long a call waits, approvalWait when zero.
 	wait time.Duration
 
@@ -44,7 +47,7 @@ type approvals struct {
 // answers.
 type heldCall struct {
 	commandID string
-	asked     string
+	asked     Owner
 	answer    chan approvalAnswer
 }
 
@@ -81,17 +84,20 @@ func (d *dispatcher) holdForApproval(ctx context.Context, r route, call llm.Tool
 	// answer that comes at once finds it (answerApproval).
 	a.mu.Lock()
 	commandID, person, asked := "", "", false
+	title := fmt.Sprintf("Allow %s to run %s?", r.binding.Name, r.tool)
 	if a.await != nil {
-		commandID, person, asked = a.await(d.spec.Caller.UserID, call.ID, call.Arguments, persistent.ToolApproval{
-			Title: fmt.Sprintf("Allow %s to run %s?", r.binding.Name, r.tool)})
+		commandID, person, asked = a.await(d.spec.Caller.UserID, call.ID, call.Arguments, persistent.ToolApproval{Title: title})
 	}
 	if asked {
 		if a.held == nil {
 			a.held = map[string]heldCall{}
 		}
-		a.held[call.ID] = heldCall{commandID: commandID, asked: person, answer: answer}
+		a.held[call.ID] = heldCall{commandID: commandID, asked: d.askedAs(person), answer: answer}
 	}
 	a.mu.Unlock()
+	if asked {
+		a.tell(agent.ToolAwaitingApproval{ID: call.ID, TurnID: call.TurnID, Tool: call.Name, Question: title})
+	}
 	if !asked {
 		return false, approvalText("unavailable", fmt.Sprintf("%s runs only once the user allows it, and nobody can be "+
 				"asked here, so it was not run. Tell the user it needs their approval in a chat of their own.", call.Name)),
@@ -118,9 +124,11 @@ func (d *dispatcher) holdForApproval(ctx context.Context, r route, call llm.Tool
 			return false, nil, failure{kind: store.InvocationClientTimeout},
 				stack.Wrap(fmt.Errorf("session: %s stopped waiting for its approval: %w", call.Name, ctx.Err()))
 		case got := <-answer:
-			if !a.decide(agent.ToolApprovalDecided{ID: call.ID, TurnID: call.TurnID, Allowed: got.allowed, Summary: got.summary}) {
+			decided := agent.ToolApprovalDecided{ID: call.ID, TurnID: call.TurnID, Allowed: got.allowed, Summary: got.summary}
+			if !a.decide(decided) {
 				return stopped()
 			}
+			a.tell(decided)
 			if got.allowed {
 				return true, nil, failure{}, nil
 			}
@@ -128,7 +136,9 @@ func (d *dispatcher) holdForApproval(ctx context.Context, r route, call llm.Tool
 					"run. Do not call it again unless they ask.", call.Name)),
 				failure{kind: store.InvocationDenied, message: "declined by the person"}, nil
 		case <-expiry.C:
-			a.decide(agent.ToolApprovalDecided{ID: call.ID, TurnID: call.TurnID, Summary: "Not allowed in time"})
+			decided := agent.ToolApprovalDecided{ID: call.ID, TurnID: call.TurnID, Summary: "Not allowed in time"}
+			a.decide(decided)
+			a.tell(decided)
 			return false, approvalText("declined", fmt.Sprintf("Nobody allowed %s in time, so it "+
 					"was declined and not run. Tell the user, and that they can ask again.", call.Name)),
 				failure{kind: store.InvocationDenied, message: "declined by timeout"}, nil
@@ -140,10 +150,30 @@ func (d *dispatcher) holdForApproval(ctx context.Context, r route, call llm.Tool
 	}
 }
 
+// tell passes event on to changed, when anything listens.
+func (a *approvals) tell(event agent.Event) {
+	if a.changed != nil {
+		a.changed(event)
+	}
+}
+
+// askedAs is the person a call is held for, as whoever answers it has to reach them
+// (Owner.Reaches): the session's own user as the kind of caller that opened it, even when they
+// wrote the message the reply answers, and any other writer as a backend names a user. The hook
+// that brought such a writer's message says who wrote it and not what proved it, so any verified
+// caller of their id answers for them.
+func (d *dispatcher) askedAs(person string) Owner {
+	kind := auth.KindServer
+	if person == d.spec.Caller.UserID {
+		kind = d.spec.CallerKind
+	}
+	return Owner{CustomerID: d.spec.CustomerID, UserID: person, Kind: kind}
+}
+
 // answerApproval hands an answer to the call id held for a person, when it names the command
 // the call's reply answers and may says the one answering may answer for whom was asked. The
 // call is taken as it is answered, so it is answered once.
-func (d *dispatcher) answerApproval(callID, commandID string, may func(asked string) bool, allowed bool, summary string) error {
+func (d *dispatcher) answerApproval(callID, commandID string, may func(asked Owner) bool, allowed bool, summary string) error {
 	d.approvals.mu.Lock()
 	held, ok := d.approvals.held[callID]
 	if !ok || held.commandID != commandID {
@@ -181,14 +211,13 @@ func approvalText(status, message string) []llm.ContentPart {
 // AnswerConnectorApproval hands a person's answer to a connector call the router holds for
 // their approval, by the call's id and the command its reply answers. Allowed, the call is
 // sent; declined, it is not, and the model is told so. Only the person the call asks, the
-// session's own user or the writer of the message its reply answers (holdForApproval), or the
-// customer's backend may answer: ErrApprovalAskedOfAnother for anyone else, and
-// ErrNoApprovalHeld when no call is held for the answer.
+// session's own user or the writer of the message its reply answers (holdForApproval), by their
+// id and kind as a session's owner is reached (askedAs), or the customer's backend may answer:
+// ErrApprovalAskedOfAnother for anyone else, and ErrNoApprovalHeld when no call is held for the
+// answer.
 func (s *Session) AnswerConnectorApproval(id, commandID string, allowed bool, summary string, by Owner) error {
 	if s.connectors == nil || by.CustomerID != s.spec.CustomerID {
 		return stack.Wrap(ErrNoApprovalHeld)
 	}
-	return s.connectors.answerApproval(id, commandID, func(asked string) bool {
-		return by.Kind == auth.KindServer || by.UserID == asked
-	}, allowed, summary)
+	return s.connectors.answerApproval(id, commandID, by.Reaches, allowed, summary)
 }

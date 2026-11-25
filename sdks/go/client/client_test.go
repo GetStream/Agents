@@ -35,6 +35,8 @@ type router struct {
 	mu sync.Mutex
 	// asked is every request that arrived, as "METHOD /path?query", in order.
 	asked []string
+	// heard are the headers of each request in asked, at the same index.
+	heard []http.Header
 	// bodies are the decoded JSON bodies, keyed by "METHOD /path".
 	bodies map[string]map[string]any
 
@@ -48,6 +50,11 @@ type router struct {
 	frames []map[string]any
 	// calls are the tool calls a session's socket sends once it opens, by session id.
 	calls map[string][]map[string]any
+	// connections are the stored connections, oldest first.
+	connections []acceleration.Connection
+	// unrecorded answers a question with no response id, as the router does for a session
+	// that records nothing.
+	unrecorded bool
 }
 
 func newRouter(t *testing.T) *router {
@@ -83,6 +90,18 @@ func newRouter(t *testing.T) *router {
 			return
 		}
 		answer(w, http.StatusNotFound, acceleration.ErrorResponse{Error: acceleration.ErrorDetail{Message: "no such agent config"}})
+	})
+
+	mux.HandleFunc("GET /v1/stats/agents", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		if r.URL.Query().Get("agent") != "config-1" {
+			answer(w, http.StatusNotFound, acceleration.ErrorResponse{Error: acceleration.ErrorDetail{Message: "no such agent config"}})
+			return
+		}
+		answer(w, http.StatusOK, acceleration.AgentStats{
+			Sessions: 40, AvgTurns: ptr(6.5),
+			Tools: []acceleration.ToolStats{{Tool: "weather_lookup", Calls: 12, Sessions: 10, SessionShare: ptr(0.25)}},
+		})
 	})
 
 	mux.HandleFunc("GET /v1/settings/app", func(w http.ResponseWriter, r *http.Request) {
@@ -201,6 +220,15 @@ func newRouter(t *testing.T) *router {
 			})
 			return
 		}
+		backend.mu.Lock()
+		unrecorded := backend.unrecorded
+		backend.mu.Unlock()
+		if unrecorded {
+			answer(w, http.StatusAccepted, acceleration.AgentResponse{
+				SessionId: r.PathValue("id"), Status: "running", CreatedAt: time.Now(),
+			})
+			return
+		}
 		answer(w, http.StatusAccepted, acceleration.AgentResponse{
 			Id: "response-1", SessionId: r.PathValue("id"), Status: "running",
 			Said: ptr("Is Stream better?"), CreatedAt: time.Now(),
@@ -265,7 +293,8 @@ func newRouter(t *testing.T) *router {
 	})
 
 	// A call's reads answer with what is told apart by the session asked about, so a read of
-	// the wrong session, or of the wrong one of the three, is seen.
+	// the wrong session, or of the wrong one of the three, is seen. session-1's newest call has
+	// an id of its own, so a session id read as a call id is unknown.
 	unknownCall := func(w http.ResponseWriter) {
 		answer(w, http.StatusNotFound, acceleration.ErrorResponse{Error: acceleration.ErrorDetail{
 			Message: "unknown call", Type: acceleration.ErrorTypeNotFound, Code: "call_not_found",
@@ -285,9 +314,18 @@ func newRouter(t *testing.T) *router {
 			Models:     []acceleration.ModelTokens{{Modality: "llm", Provider: "openai", Model: "gpt-5-mini", InputTokens: 1200}},
 		})
 	})
+	mux.HandleFunc("GET /v1/agents/calls", func(w http.ResponseWriter, r *http.Request) {
+		backend.record(r)
+		calls := []acceleration.Call{}
+		switch r.URL.Query().Get("session_id") {
+		case "session-1":
+			calls = []acceleration.Call{{Id: "call-2", SessionId: ptr("session-1")}, {Id: "call-1", SessionId: ptr("session-1")}}
+		}
+		answer(w, http.StatusOK, calls)
+	})
 	mux.HandleFunc("GET /v1/agents/calls/{id}/timeline", func(w http.ResponseWriter, r *http.Request) {
 		backend.record(r)
-		if r.PathValue("id") != "session-1" {
+		if r.PathValue("id") != "call-2" {
 			unknownCall(w)
 			return
 		}
@@ -298,7 +336,7 @@ func newRouter(t *testing.T) *router {
 	})
 	mux.HandleFunc("GET /v1/agents/calls/{id}/events", func(w http.ResponseWriter, r *http.Request) {
 		backend.record(r)
-		if r.PathValue("id") != "session-1" {
+		if r.PathValue("id") != "call-2" {
 			unknownCall(w)
 			return
 		}
@@ -417,6 +455,8 @@ func newRouter(t *testing.T) *router {
 		}
 	})
 
+	backend.serveConnections(mux)
+
 	backend.Server = httptest.NewServer(mux)
 	t.Cleanup(backend.Close)
 	return backend
@@ -442,6 +482,7 @@ func (r *router) record(request *http.Request) {
 	} else {
 		r.asked = append(r.asked, line)
 	}
+	r.heard = append(r.heard, request.Header.Clone())
 
 	if request.Body != nil {
 		var body map[string]any
@@ -1195,17 +1236,13 @@ func TestASessionsMetricsOfAnUnknownSessionAreRefused(t *testing.T) {
 	_, timeline := sessions.Timeline(t.Context(), "someone-elses")
 	_, decisions := sessions.Decisions(t.Context(), "someone-elses")
 
-	for read, refusal := range map[string]struct {
-		err  error
-		code string
-	}{
-		"tokens":    {tokens, "session_not_found"},
-		"timeline":  {timeline, "call_not_found"},
-		"decisions": {decisions, "call_not_found"},
-	} {
-		var refused *stream.RouterError
-		if !errors.As(refusal.err, &refused) || refused.Code != refusal.code {
-			t.Errorf("the %s of an unknown session came back as %v, want %s", read, refusal.err, refusal.code)
+	var refused *stream.RouterError
+	if !errors.As(tokens, &refused) || refused.Code != "session_not_found" {
+		t.Errorf("the tokens of an unknown session came back as %v, want session_not_found", tokens)
+	}
+	for read, err := range map[string]error{"timeline": timeline, "decisions": decisions} {
+		if !errors.Is(err, ErrNoCall) {
+			t.Errorf("the %s of an unknown session came back as %v, want ErrNoCall", read, err)
 		}
 	}
 }
@@ -1427,6 +1464,29 @@ func TestATurnsItemsAreNarrowedToThatTurn(t *testing.T) {
 	query := backend.query(t, "GET", "/v1/agents/sessions/session-1/responses/items")
 	if query.Get("response_id") != "response-1" {
 		t.Errorf("the items were asked for with response_id %q", query.Get("response_id"))
+	}
+}
+
+func TestATurnWithNoIDHasNoItemsRatherThanTheWholeSessions(t *testing.T) {
+	backend := newRouter(t)
+	backend.unrecorded = true
+	backend.items = [][]acceleration.AgentResponseItem{{{ResponseId: "response-0", Kind: "said"}}}
+	session := open(t, backend)
+
+	answer, err := session.Responses.Create(t.Context(), "Is Stream better?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := answer.Items.All(t.Context())
+	if !errors.Is(err, ErrUnnamedTurn) {
+		t.Fatalf("the items of a turn with no id came back as %v, %v", items, err)
+	}
+	page, err := answer.Items.List(t.Context(), 0, "")
+	if !errors.Is(err, ErrUnnamedTurn) {
+		t.Fatalf("a page of the items of a turn with no id came back as %v, %v", page, err)
+	}
+	if asked := backend.requests("GET", "/v1/agents/sessions/session-1/responses/items"); asked != 0 {
+		t.Errorf("the router was asked %d times for the items", asked)
 	}
 }
 
@@ -1936,29 +1996,6 @@ func TestAResumesToolTimeoutGoesOverInMilliseconds(t *testing.T) {
 	}
 }
 
-func TestAResumeDeclaresTheAgentsFunctions(t *testing.T) {
-	backend := newRouter(t)
-	agent := backend.client(t).Agent("docs")
-	if err := register(agent.Tools(), "get_weather"); err != nil {
-		t.Fatal(err)
-	}
-
-	resumed, err := agent.Sessions.Resume(t.Context(), "session-7")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resumed.Close(t.Context())
-
-	body := backend.body(t, "POST", "/v1/agents/sessions/session-7/resume")
-	declared, _ := body["tools"].([]any)
-	if len(declared) != 1 || declared[0].(map[string]any)["name"] != "get_weather" {
-		t.Errorf("tools went over as %v", body["tools"])
-	}
-	if _, sent := body["tool_timeout_ms"]; sent {
-		t.Errorf("tool_timeout_ms went over as %v though none was given", body["tool_timeout_ms"])
-	}
-}
-
 func TestAResumeWithNothingToSayReadsTheConversationAsItIs(t *testing.T) {
 	// A timeout under a millisecond would go over as zero, 30 seconds, not what it ran with.
 	backend := newRouter(t)
@@ -1996,11 +2033,12 @@ func TestForkingWithoutMessagesSaysSo(t *testing.T) {
 func TestAForkInheritsTheParentsFunctions(t *testing.T) {
 	backend := newRouter(t)
 	agent := backend.client(t).Agent("docs")
-	if err := register(agent.Tools(), "get_weather"); err != nil {
+	own := tools.NewRegistry()
+	if err := register(own, "get_weather"); err != nil {
 		t.Fatal(err)
 	}
 
-	session, err := agent.Sessions.Create(t.Context(), SessionOptions{})
+	session, err := agent.Sessions.Create(t.Context(), SessionOptions{Tools: own})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2041,12 +2079,13 @@ func (s *SessionToolsSuite) TestAForkRunsTheToolsTheSessionHasNow() {
 	}}
 	agent := s.backend.client(s.T()).Agent("docs")
 	var withdrawnRan atomic.Bool
-	s.Require().NoError(tools.Register(agent.Tools(), "get_weather", "What the weather is",
+	own := tools.NewRegistry()
+	s.Require().NoError(tools.Register(own, "get_weather", "What the weather is",
 		func(context.Context, struct{}) (any, error) {
 			withdrawnRan.Store(true)
 			return "raining", nil
 		}))
-	session, err := agent.Sessions.Create(s.T().Context(), SessionOptions{})
+	session, err := agent.Sessions.Create(s.T().Context(), SessionOptions{Tools: own})
 	s.Require().NoError(err)
 	defer session.Close(s.T().Context())
 	added := tools.NewRegistry()
@@ -2068,14 +2107,20 @@ func (s *SessionToolsSuite) TestAForkRunsTheToolsTheSessionHasNow() {
 	s.False(withdrawnRan.Load(), "the fork ran a tool the session had withdrawn")
 }
 
-func TestTheModelIsOfferedTheAgentsFunctions(t *testing.T) {
+func TestAConversationDeclaresItsOwnToolsAndNotTheApps(t *testing.T) {
+	// The app's tools are for every agent: declared on a session, the ones its agent's
+	// tool groups do not name would have the router refuse it.
 	backend := newRouter(t)
-	agent := backend.client(t).Agent("docs")
-	if err := register(agent.Tools(), "get_weather"); err != nil {
+	api := backend.client(t)
+	if err := register(api.Tools(), "get_weather"); err != nil {
+		t.Fatal(err)
+	}
+	own := tools.NewRegistry()
+	if err := register(own, "book_table"); err != nil {
 		t.Fatal(err)
 	}
 
-	session, err := agent.Sessions.Create(t.Context(), SessionOptions{})
+	session, err := api.Agent("docs").Sessions.Create(t.Context(), SessionOptions{Tools: own})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2085,7 +2130,7 @@ func TestTheModelIsOfferedTheAgentsFunctions(t *testing.T) {
 	if len(declared) != 1 {
 		t.Fatalf("the session declared %v", declared)
 	}
-	if tool, _ := declared[0].(map[string]any); tool["name"] != "get_weather" {
+	if tool, _ := declared[0].(map[string]any); tool["name"] != "book_table" {
 		t.Errorf("the declared tool is %v", declared[0])
 	}
 }
@@ -2137,6 +2182,37 @@ func TestUpdatingAnAgentNothingIsStoredUnderFails(t *testing.T) {
 		acceleration.AgentConfigPatch{Guardrail: &policy})
 	if err == nil || !strings.Contains(err.Error(), "nowhere") {
 		t.Errorf("updating an agent nobody stored answered %v", err)
+	}
+}
+
+func TestAnAgentsStatsAreReadForItsConfigOverTheWindow(t *testing.T) {
+	backend := newRouter(t)
+	backend.configs = []acceleration.AgentConfig{{Id: "config-1", Name: "docs"}}
+	from := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	to := from.AddDate(0, 1, 0)
+
+	stats, err := backend.client(t).Agent("docs").Stats(t.Context(), from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Sessions != 40 || len(stats.Tools) != 1 || stats.Tools[0].Tool != "weather_lookup" {
+		t.Fatalf("the stats came back as %+v", stats)
+	}
+	asked := backend.query(t, "GET", "/v1/stats/agents")
+	if asked.Get("from") != "2026-11-01T00:00:00Z" || asked.Get("to") != "2026-12-01T00:00:00Z" {
+		t.Errorf("the window went over as %v", asked)
+	}
+}
+
+func TestTheStatsOfAnAgentNothingIsStoredUnderFail(t *testing.T) {
+	backend := newRouter(t)
+
+	_, err := backend.client(t).Agent("nowhere").Stats(t.Context(), time.Now().Add(-time.Hour), time.Now())
+	if err == nil || !strings.Contains(err.Error(), "nowhere") {
+		t.Errorf("reading the stats of an agent nobody stored answered %v", err)
+	}
+	if backend.requests("GET", "/v1/stats/agents") != 0 {
+		t.Error("an agent with no config had every agent's stats read for it")
 	}
 }
 

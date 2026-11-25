@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // recorded is one request the stub synthesis endpoint was sent.
@@ -90,4 +91,24 @@ func (s *RecorderSuite) TestAStyleIsRefusedByTheV3RecordingModel() {
 
 	s.ErrorIs(err, ErrStyle)
 	s.ErrorContains(err, "style is not taken by eleven_v3")
+}
+
+func (s *RecorderSuite) TestAVoiceIdThatIsNotElevenLabsIsRefusedBeforeAnyRequest() {
+	recorder, err := NewRecorder(RecorderOptions{APIKey: "k", BaseURL: s.server.URL})
+	s.Require().NoError(err)
+	for _, id := range badVoiceIDs {
+		_, err := NewRecorder(RecorderOptions{APIKey: "k", VoiceID: id})
+		s.ErrorIs(err, ErrRefused, "%q", id)
+
+		_, err = recorder.Record(context.Background(), tts.Recording{Text: "hello", Voice: id})
+		s.ErrorIs(err, ErrRefused, "%q", id)
+		s.ErrorIs(err, voiceid.ErrInvalid, "%q", id)
+	}
+	s.mu.Lock()
+	sent := s.last
+	s.mu.Unlock()
+	s.Equal(recorded{}, sent, "nothing was sent")
+
+	s.Equal("/21m00Tcm4TlvDq8ikWAM",
+		s.record(RecorderOptions{VoiceID: "v1"}, tts.Recording{Voice: "21m00Tcm4TlvDq8ikWAM"}).path)
 }

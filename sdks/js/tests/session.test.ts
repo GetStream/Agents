@@ -18,7 +18,7 @@ import {
   type ToolCallContext,
 } from "../src/index.js";
 import { TestRouter, type Connection } from "./router.js";
-import { QUERY_PATH, arrive, channelPage, chatClient, chatMessage, heldIds, rewind, until, watch } from "./stream-chat.js";
+import { EVENT_PATH, QUERY_PATH, arrive, channelPage, chatClient, chatMessage, heldIds, rewind, until, watch } from "./stream-chat.js";
 
 describe("Socket", () => {
   let router: TestRouter;
@@ -267,6 +267,51 @@ describe("Session", () => {
     await session.close();
   });
 
+  it("tells the model what onError says of a failure, so a connection string never reaches it", async () => {
+    class DatabaseError extends Error {}
+    const tools = new Tools({
+      onError: (error, call) => (error instanceof DatabaseError ? `${call.name} could not reach its data` : String((error as Error).message)),
+    })
+      .register({
+        name: "lookup",
+        description: "Look something up",
+        run: () => {
+          throw new DatabaseError("connect ECONNREFUSED postgres://app:s3cr3t@db.internal:5432/orders");
+        },
+      })
+      .register({
+        name: "send",
+        description: "Send it",
+        run: () => {
+          throw new Error("An email needs someone to go to.");
+        },
+      });
+    const [session, connection] = await opened(tools);
+
+    connection.send({ type: "tool_call", id: "call_1", name: "lookup", arguments: "{}" });
+    assert.equal((await connection.next())["error"], "lookup could not reach its data");
+    connection.send({ type: "tool_call", id: "call_2", name: "send", arguments: "{}" });
+    assert.equal((await connection.next())["error"], "An email needs someone to go to.", "words meant for the model go through");
+    await session.close();
+  });
+
+  it("cuts a long failure to 1 KiB, and says only that a tool failed when its onError throws", async () => {
+    const long = "x".repeat(5_000);
+    const tools = new Tools()
+      .register({ name: "dump", description: "Dump", run: () => { throw new Error(long); } });
+    const hooked = new Tools({ onError: () => { throw new Error("the hook broke"); } })
+      .register({ name: "secret", description: "Secret", run: () => { throw new Error("token=abc123"); } });
+    const [session, connection] = await opened(tools);
+    connection.send({ type: "tool_call", id: "call_1", name: "dump", arguments: "{}" });
+    assert.equal((await connection.next())["error"], `${long.slice(0, 1024)}…`);
+    await session.close();
+
+    const [other, line] = await opened(hooked);
+    line.send({ type: "tool_call", id: "call_2", name: "secret", arguments: "{}" });
+    assert.equal((await line.next())["error"], "secret failed");
+    await other.close();
+  });
+
   it("leaves a call for a tool held elsewhere to whoever holds it", async () => {
     const tools = new Tools().register({ name: "lookup", description: "Look it up", run: () => "found" });
     const [session, connection] = await opened(tools);
@@ -324,15 +369,13 @@ describe("Session", () => {
     await session.close();
   });
 
-  it("hands a function the call it runs for, and sends how it is going", async () => {
+  it("hands a function the call it runs for", async () => {
     let seen: ToolCallContext | undefined;
     const tools = new Tools().register({
       name: "search",
       description: "Search flights",
       run: (_input, toolCallContext) => {
         seen = toolCallContext;
-        toolCallContext.update("checking three airlines");
-        toolCallContext.say("Still looking, one moment.");
         return "found two";
       },
     });
@@ -349,18 +392,6 @@ describe("Session", () => {
       approved: true,
     });
 
-    assert.deepEqual(await connection.next(), {
-      type: "tool_update",
-      tool_call_id: "call_1",
-      text: "checking three airlines",
-      verbatim: false,
-    });
-    assert.deepEqual(await connection.next(), {
-      type: "tool_update",
-      tool_call_id: "call_1",
-      text: "Still looking, one moment.",
-      verbatim: true,
-    });
     assert.equal((await connection.next())["output"], "found two");
     assert.equal(seen?.id, "call_1");
     assert.equal(seen?.sessionId, "sess_1", "the session the call came over");
@@ -368,6 +399,36 @@ describe("Session", () => {
     assert.deepEqual(seen?.user, { id: "sam", name: "Sam", custom: { tier: "gold" } });
     assert.deepEqual(seen?.conversation, { cid: "agent:kept", custom: { line: "support" } });
     assert.equal(seen?.approved, true);
+    await session.close();
+  });
+
+  it("sends a call's update to the router before its result", async () => {
+    const tools = new Tools().register({
+      name: "search_flights",
+      description: "Search for flights",
+      run: async (_input, toolCallContext) => {
+        toolCallContext.update("Comparing 40 flights");
+        toolCallContext.update({ title: "Booking the cheapest", custom: { cheapest: 129 } });
+        toolCallContext.update({ custom: { seat: "12A" } });
+        return "found 3";
+      },
+    });
+    const [session, connection] = await opened(tools);
+
+    connection.send({ type: "tool_call", id: "call_1", name: "search_flights", arguments: "{}" });
+    assert.deepEqual(await connection.next(), {
+      type: "tool_update",
+      tool_call_id: "call_1",
+      text: "Comparing 40 flights",
+    });
+    assert.deepEqual(await connection.next(), {
+      type: "tool_update",
+      tool_call_id: "call_1",
+      text: "Booking the cheapest",
+      custom: { cheapest: 129 },
+    });
+    assert.deepEqual(await connection.next(), { type: "tool_update", tool_call_id: "call_1", custom: { seat: "12A" } });
+    assert.deepEqual(await connection.next(), { type: "tool_result", tool_call_id: "call_1", output: "found 3" });
     await session.close();
   });
 
@@ -785,6 +846,21 @@ describe("Session", () => {
   });
 
   describe("a function that asks first", () => {
+    /** Waits until the session has read everything sent before, and whatever that started has had time to run. */
+    const readPast = async (
+      session: { on: (kind: string, handler: () => void) => () => void },
+      connection: { send: (frame: Record<string, unknown>) => void },
+    ): Promise<void> => {
+      const read = new Promise<void>((resolve) => {
+        const stop = session.on("read_past", () => {
+          stop();
+          resolve();
+        });
+      });
+      connection.send({ type: "read_past" });
+      await read;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    };
     const refundCall = {
       type: "tool_call",
       id: "call_1",
@@ -950,19 +1026,64 @@ describe("Session", () => {
         await session.close();
       });
 
-      it("allowed with its arguments too long for the conversation to show, tells the model it couldn't run", async () => {
+      it("allowed without its arguments, runs it once the router sends the call, without asking again", async () => {
         const [session, connection] = await opened(refunds());
 
         session.decide("call_1", { allowed: true, call: { name: "issue_refund", requestId: "m1", turnId: "t1" } });
+        assert.deepEqual(await connection.next(), {
+          type: "tool_approval",
+          tool_call_id: "call_1",
+          allowed: true,
+          request_id: "m1",
+          turn_id: "t1",
+        });
+        assert.deepEqual(ran, [], "nothing to run it with yet");
 
-        assert.equal((await connection.next()).type, "tool_approval");
+        connection.send(refundCall);
+
         assert.deepEqual(await connection.next(), {
           type: "tool_result",
           tool_call_id: "call_1",
           request_id: "m1",
           turn_id: "t1",
-          error: "The call's arguments were too long for the conversation to keep, so it could not run.",
+          output: "Refunded A-1042",
         });
+        assert.deepEqual(ran, ["A-1042"]);
+        assert.deepEqual(session.approvals, []);
+        await session.close();
+      });
+
+      it("allowed with its arguments, runs once when the router then delivers the call", async () => {
+        const [session, connection] = await opened(refunds());
+
+        session.decide("call_1", { allowed: true, call: shown });
+        assert.equal((await connection.next()).type, "tool_approval");
+        assert.equal((await connection.next())["output"], "Refunded A-1042");
+
+        connection.send(refundCall);
+        connection.send({ ...refundCall, approved: true });
+        await readPast(session, connection);
+        session.say("still there?");
+
+        assert.deepEqual(await connection.next(), { type: "say", text: "still there?" });
+        assert.deepEqual(ran, ["A-1042"], "neither asked again nor run twice");
+        assert.deepEqual(session.approvals, []);
+        await session.close();
+      });
+
+      it("declined, is not asked again when the router then delivers the call", async () => {
+        const [session, connection] = await opened(refunds());
+
+        session.decide("call_1", { allowed: false, call: shown });
+        assert.equal((await connection.next()).type, "tool_approval");
+        assert.equal((await connection.next()).type, "tool_result");
+
+        connection.send(refundCall);
+        await readPast(session, connection);
+        session.say("still there?");
+
+        assert.deepEqual(await connection.next(), { type: "say", text: "still there?" });
+        assert.deepEqual(session.approvals, []);
         assert.deepEqual(ran, []);
         await session.close();
       });
@@ -997,6 +1118,46 @@ describe("Session", () => {
         assert.deepEqual(ran, ["A-1042"]);
         await session.close();
       });
+    });
+
+    it("does not run a finished call again when the router delivers it again", async () => {
+      let lookups = 0;
+      const tools = new Tools().register({
+        name: "lookup",
+        description: "Look something up",
+        run: () => {
+          lookups += 1;
+          return "found";
+        },
+      });
+      const [session, connection] = await opened(tools);
+      const call = { type: "tool_call", id: "call_9", name: "lookup", arguments: "{}" };
+
+      connection.send(call);
+      assert.equal((await connection.next())["output"], "found");
+      connection.send(call);
+      await readPast(session, connection);
+      session.say("still there?");
+
+      assert.deepEqual(await connection.next(), { type: "say", text: "still there?" }, "no second result");
+      assert.equal(lookups, 1);
+      await session.close();
+    });
+
+    it("does not run a finished call sent as already approved again", async () => {
+      const [session, connection] = await opened(refunds());
+
+      connection.send({ ...refundCall, approved: true });
+      assert.equal((await connection.next())["output"], "Refunded A-1042");
+      connection.send({ ...refundCall, approved: true });
+      connection.send(refundCall);
+      await readPast(session, connection);
+      session.say("still there?");
+
+      assert.deepEqual(await connection.next(), { type: "say", text: "still there?" });
+      assert.deepEqual(ran, ["A-1042"]);
+      assert.deepEqual(session.approvals, [], "nor asked about once it ran");
+      await session.close();
     });
 
     it("runs at once a call the caller already allowed out loud", async () => {
@@ -1606,6 +1767,41 @@ describe("Session", () => {
     await session.close();
   });
 
+  it("stops the reply from the stop button of the channel it opened, until it is closed", async () => {
+    router.serve("POST", "/v1/agents/sessions", {
+      status: 201,
+      body: {
+        id: "sess_1",
+        conversation_id: "agent:support-1",
+        user_id: "john",
+        agent_id: "john",
+        state: "live",
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    });
+    router.serve("POST", QUERY_PATH, channelPage([]));
+    router.serve("POST", EVENT_PATH, { status: 201, body: { event: { type: "ai_indicator.stop" }, duration: "1ms" } });
+    api.use({ chat: (await chatClient(router.url)) as never });
+    const [session, connection] = await opened();
+    const { channel } = await session.chat();
+    await watch(channel);
+    // What the default stop button of stream-chat-react's composer calls.
+    const stopButton = () => (channel as { stopAIResponse(): Promise<void> }).stopAIResponse();
+    const stopEvents = () =>
+      router.requestsTo("POST", EVENT_PATH).map((one) => (one.body as { event?: { type?: string } }).event?.type);
+
+    await stopButton();
+
+    assert.deepEqual(await connection.next(), { type: "interrupt" });
+    assert.deepEqual(stopEvents(), ["ai_indicator.stop"], "the views that follow the event still get it");
+
+    await session.close();
+    assert.deepEqual(await connection.next(), { type: "close" });
+    // A closed session's socket refuses an interrupt, so the button would reject if still attached.
+    await stopButton();
+    assert.deepEqual(stopEvents(), ["ai_indicator.stop", "ai_indicator.stop"]);
+  });
+
   it("opens the channel on the chat client the app handed over, and leaves it connected", async () => {
     router.serve("POST", "/v1/agents/sessions", {
       status: 201,
@@ -1971,8 +2167,8 @@ describe("Regenerate, edit and branches", () => {
 
   /**
    * The session with its channel open and holding `messages`, read by a real stream-chat client
-   * (9, or 10 in CI's js-stream-chat-10 job) from the test router: what is under test is what its
-   * channel state holds, and that 9's query merges rather than replaces.
+   * (9, or 10 in the stream-chat 10 pass of CI's sdks job) from the test router: what is under test
+   * is what its channel state holds, and that 9's query merges rather than replaces.
    */
   async function loaded(messages: Record<string, unknown>[]) {
     const chat = await chatClient(router.url);

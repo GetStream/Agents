@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -181,8 +182,27 @@ func findRoute(routes *chi.Mux, r *http.Request, method string) string {
 // a trace shows in its place.
 const tokenSegment = "{token}"
 
-// loggedPath is the path of r with every segment a {token} in its route's pattern replaced by
-// "{token}", so a log line or a trace never holds a secret the URL carries. A method the route
+// hiddenSegments are the path segments a log or a trace shows by their name: a secret, and an end
+// user's id, which is often an email and which forgetting the user cannot take out of a log.
+var hiddenSegments = []string{tokenSegment, "{user_id}"}
+
+// hiddenIn is the segments of pattern a log or a trace shows by name: hiddenSegments, or the
+// {id} of a customer's policy, which for a user's is <app>/<user id>.
+func hiddenIn(pattern string) []string {
+	if pattern == customerPolicyPath {
+		return []string{"{id}"}
+	}
+	return hiddenSegments
+}
+
+// hidesSegment reports whether pattern has a segment of hiddenIn.
+func hidesSegment(pattern string) bool {
+	return slices.ContainsFunc(hiddenIn(pattern), func(segment string) bool { return strings.Contains(pattern, segment) })
+}
+
+// loggedPath is the path of r with every segment of hiddenIn its route's pattern
+// replaced by its name, so a log line or a trace never holds a secret or an end user's id the
+// URL carries. A method the route
 // does not serve still hides it, as the caller sent the token all the same. A path no pattern
 // matches, or one a wildcard matches, is as sent.
 func loggedPath(routes *chi.Mux, r *http.Request) string {
@@ -194,13 +214,13 @@ func loggedPath(routes *chi.Mux, r *http.Request) string {
 			if pattern == "" {
 				pattern = found
 			}
-			if strings.Contains(found, tokenSegment) {
+			if hidesSegment(found) {
 				pattern = found
 				break
 			}
 		}
 	}
-	if !strings.Contains(pattern, tokenSegment) {
+	if !hidesSegment(pattern) {
 		return r.URL.Path
 	}
 	raw := r.URL.RawPath
@@ -212,8 +232,8 @@ func loggedPath(routes *chi.Mux, r *http.Request) string {
 		return r.URL.Path
 	}
 	for i, segment := range patterned {
-		if segment == tokenSegment {
-			segments[i] = tokenSegment
+		if slices.Contains(hiddenIn(pattern), segment) {
+			segments[i] = segment
 		}
 	}
 	return strings.Join(segments, "/")

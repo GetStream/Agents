@@ -27,7 +27,6 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -116,7 +115,7 @@ func (s *ConnectorSealerSuite) TestProxyWithConnectorsOnRefusesToStartWithoutAKe
 	_, err := newSecretSealer(s.T().Context(), s.settings)
 	s.ErrorContains(err, "connectors.enabled needs a key encryption keyring")
 	s.NotContains(err.Error(), "stream.tenancy")
-	s.ErrorContains(err, "set ROUTER_DEV_KEK on a laptop or in CI, or ROUTER_AUTH_KEK_V1_WRAPPED with auth.kms_key")
+	s.ErrorContains(err, "set ROUTER_DEV_KEK on a laptop or in CI (once, to any random string such as `openssl rand -hex 32`, kept for good; compose reads it from .env), or ROUTER_AUTH_KEK_V1_WRAPPED with auth.kms_key")
 }
 
 func (s *ConnectorSealerSuite) TestProxyWithConnectorsOnBuildsTheSealerFromTheKeyring() {
@@ -674,13 +673,12 @@ func (s *ConnectorSealerSuite) TestWithoutAKMSKeyNoCloudKMSClientIsOpened() {
 
 // apiKeyConfigs is the store api_key mode looks keys up in. Nothing here looks one up, and
 // opening a store connects to nothing until a query runs, so no database is needed.
-func (s *ConnectorSealerSuite) apiKeyConfigs() *appconfig.Store {
+func (s *ConnectorSealerSuite) apiKeyConfigs() *store.Store {
 	s.settings.Auth.Mode = string(auth.APIKey)
 	pg, err := store.Open("postgres://nobody@127.0.0.1:1/unused?sslmode=disable")
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { pg.Close() })
-	configs, err := appconfig.New(appconfig.Options{Store: pg})
-	s.Require().NoError(err)
+	configs := pg
 	return configs
 }
 
@@ -706,7 +704,7 @@ func (s *ConnectorSealerSuite) TestAnAPIKeyStartWithoutTheKeyringUnwrapsNothing(
 
 	_, err := newAuthenticator(s.T().Context(), s.settings, configs, nil, slog.New(slog.DiscardHandler))
 	s.EqualError(err, "auth.mode=api_key needs a key encryption keyring to seal the secrets it holds: "+
-		"set ROUTER_DEV_KEK on a laptop or in CI, or ROUTER_AUTH_KEK_V1_WRAPPED with auth.kms_key "+
+		"set ROUTER_DEV_KEK on a laptop or in CI (once, to any random string such as `openssl rand -hex 32`, kept for good; compose reads it from .env), or ROUTER_AUTH_KEK_V1_WRAPPED with auth.kms_key "+
 		"(ROUTER_AUTH_KMS_KEY) on a hosted router")
 	s.Equal(int64(0), fake.decrypts.Load())
 }
@@ -718,7 +716,7 @@ func (s *ConnectorSealerSuite) TestAnAPIKeyStartWithoutAKeyIsRefusedAsBefore() {
 	s.Require().NoError(err)
 	_, err = newAuthenticator(s.T().Context(), s.settings, configs, secrets, slog.New(slog.DiscardHandler))
 	s.EqualError(err, "auth.mode=api_key needs a key encryption keyring to seal the secrets it holds: "+
-		"set ROUTER_DEV_KEK on a laptop or in CI, or ROUTER_AUTH_KEK_V1_WRAPPED with auth.kms_key "+
+		"set ROUTER_DEV_KEK on a laptop or in CI (once, to any random string such as `openssl rand -hex 32`, kept for good; compose reads it from .env), or ROUTER_AUTH_KEK_V1_WRAPPED with auth.kms_key "+
 		"(ROUTER_AUTH_KMS_KEY) on a hosted router")
 }
 

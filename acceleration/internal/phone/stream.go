@@ -63,6 +63,8 @@ func NewStream(options StreamOptions) (*Stream, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Made now: the SDK makes its video client on first use without a lock.
+	client.Video()
 	return &Stream{client: client}, nil
 }
 

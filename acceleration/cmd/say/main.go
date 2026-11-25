@@ -85,7 +85,7 @@ func (o options) languages() []string {
 	return nil
 }
 
-func run(options options, logger *slog.Logger) error {
+func run(options options, logger *slog.Logger) (err error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -100,8 +100,14 @@ func run(options options, logger *slog.Logger) error {
 		return err
 	}
 	// The sink is closed last, so the session has stopped producing audio by the time the
-	// file is finalised or playback is allowed to finish.
-	defer audioSink.Close()
+	// file is finalised or playback is allowed to finish. A WAV whose header was not written
+	// back is unplayable, so its failure is the run's. ffplay is ended by the same Ctrl-C that
+	// stops the run, which is no failure of it.
+	defer func() {
+		if closeErr := audioSink.Close(); options.out != "" {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 
 	session, err := router.Start(routing.WithAttribution(ctx, routing.Attribution{APIKey: routing.CLIOrigin("say")}), ttsrouter.Request{
 		CustomerID:    options.customerID,

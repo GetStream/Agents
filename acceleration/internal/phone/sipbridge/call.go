@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 
@@ -23,12 +24,18 @@ var errNotEstablished = errors.New("call not set up yet")
 // Call is an established outbound call: two dialogs, and whatever one side sends in its
 // dialog is passed on to the other.
 type Call struct {
+	// ctx is the context the call was dialled or resumed in, without its cancellation: what
+	// the other side asks of the call later (a BYE, a re-INVITE, a keepalive) is traced under it.
+	ctx  context.Context
 	legs [2]leg
 	log  *slog.Logger
 	// media is where each side sent its audio from at setup, fixed before Dial returns.
 	media MediaAddrs
 	// onChange is told when a passed-on re-INVITE changed what either leg last sent.
 	onChange func()
+	// trunkAddr is Config.trunkAddr, where Stream is sent RTP when a customer re-INVITE names no
+	// public address.
+	trunkAddr netip.Addr
 
 	established atomic.Bool
 	ending      atomic.Bool
@@ -37,8 +44,8 @@ type Call struct {
 	err         error
 }
 
-func newCall(customer, stream leg, log *slog.Logger) *Call {
-	return &Call{legs: [2]leg{customer, stream}, log: log, done: make(chan struct{})}
+func newCall(ctx context.Context, customer, stream leg, log *slog.Logger) *Call {
+	return &Call{ctx: context.WithoutCancel(ctx), legs: [2]leg{customer, stream}, log: log, done: make(chan struct{})}
 }
 
 // Done is closed when the call has ended.
@@ -129,13 +136,29 @@ func (c *Call) onReinvite(ctx context.Context, from side, offer []byte) ([]byte,
 		return nil, stack.Wrap(errNotEstablished)
 	}
 	c.log.Info("re-INVITE received, passing it on", media(from, offer)...)
-	answer, err := c.other(from).Reinvite(ctx, offer)
+	sent, err := c.passOn(from, offer)
+	if err != nil {
+		return nil, err
+	}
+	answer, err := c.other(from).Reinvite(ctx, sent)
 	if err != nil {
 		return nil, err
 	}
 	c.log.Info("re-INVITE answered", media(1-from, answer)...)
+	if answer, err = c.passOn(1-from, answer); err != nil {
+		return nil, err
+	}
 	c.changed()
-	return answer, nil
+	return answerFor(offer, answer), nil
+}
+
+// passOn is what the other leg gets of an SDP body from side s. Stream gets the customer's body rebuilt
+// by toStream, never its bytes; an empty body (a re-INVITE that asks for an offer) carries nothing.
+func (c *Call) passOn(s side, body []byte) ([]byte, error) {
+	if s == streamSide || len(body) == 0 {
+		return body, nil
+	}
+	return toStream(body, c.trunkAddr)
 }
 
 func (c *Call) onInfo(ctx context.Context, from side, contentType string, body []byte) error {

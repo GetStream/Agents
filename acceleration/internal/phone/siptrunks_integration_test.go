@@ -38,9 +38,9 @@ func (s *SIPTrunkSuite) SetupSuite() {
 	s.store = opened
 
 	var database string
-	s.Require().NoError(opened.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(opened.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s", database)
-	_, err = opened.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = opened.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	s.Require().NoError(opened.Migrate(s.ctx))
 }
@@ -52,7 +52,7 @@ func (s *SIPTrunkSuite) TearDownSuite() {
 }
 
 func (s *SIPTrunkSuite) SetupTest() {
-	_, err := s.store.DB().ExecContext(s.ctx, "TRUNCATE phone_numbers, sip_trunks CASCADE")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE phone_numbers, sip_trunks CASCADE")
 	s.Require().NoError(err)
 	sealer, err := auth.NewSealer("sip trunk suite")
 	s.Require().NoError(err)
@@ -67,7 +67,7 @@ func (s *SIPTrunkSuite) SetupTest() {
 
 // placed opens the outbound leg customerID placed through its own trunk, as vendorCallID.
 func (s *SIPTrunkSuite) placed(customerID, vendorCallID string) {
-	_, err := s.store.OpenCallLeg(s.ctx, &store.CallLeg{
+	_, err := s.store.CallLegs.Open(s.ctx, &store.CallLeg{
 		CustomerID: customerID, CallType: "default", CallID: "session-" + vendorCallID,
 		Vendor: SIPTrunkVendor, VendorCallID: vendorCallID, Direction: store.Outbound,
 		LocalNumber: "+15125550100", RemoteNumber: "+15125550101",
@@ -115,7 +115,7 @@ func (s *SIPTrunkSuite) TestAPasswordIsStoredSealedAndOpensForADial() {
 	s.Equal(1, trunk.PasswordKEKVersion)
 
 	held := s.number("acme", trunk.ID, "+15550000201")
-	provider, opened, err := s.service.dialVendor(s.ctx, held)
+	provider, opened, err := s.service.dialVendor(s.ctx, held, 0)
 	s.Require().NoError(err)
 	s.Same(s.trunks, provider)
 	s.Equal(&SIPTrunk{
@@ -135,7 +135,7 @@ func (s *SIPTrunkSuite) TestUpdatingWithoutAPasswordKeepsTheStoredOne() {
 	s.Equal(trunk.PasswordSealed, updated.PasswordSealed)
 
 	held := s.number("acme", trunk.ID, "+15550000202")
-	_, opened, err := s.service.dialVendor(s.ctx, held)
+	_, opened, err := s.service.dialVendor(s.ctx, held, 0)
 	s.Require().NoError(err)
 	s.Equal(customerTrunkPassword, opened.Password)
 }
@@ -150,7 +150,7 @@ func (s *SIPTrunkSuite) TestANewPasswordReplacesTheOldOne() {
 	s.Require().NoError(err)
 
 	held := s.number("acme", trunk.ID, "+15550000203")
-	_, opened, err := s.service.dialVendor(s.ctx, held)
+	_, opened, err := s.service.dialVendor(s.ctx, held, 0)
 	s.Require().NoError(err)
 	s.Equal("new", opened.Password)
 }
@@ -159,11 +159,11 @@ func (s *SIPTrunkSuite) TestADialRefusesATrunkWithoutAPassword() {
 	trunk := s.create("acme", customerTrunkPassword)
 	held := s.number("acme", trunk.ID, "+15550000204")
 	// What a data move leaves behind.
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE sip_trunks SET password_sealed = ''::bytea, password_kek_version = 0 WHERE id = ?", trunk.ID)
 	s.Require().NoError(err)
 
-	_, _, err = s.service.dialVendor(s.ctx, held)
+	_, _, err = s.service.dialVendor(s.ctx, held, 0)
 	s.EqualError(err, "phone: sip trunk "+trunk.ID+" has no password; set one before calling through it")
 	s.ErrorIs(err, ErrInvalid)
 }
@@ -173,11 +173,11 @@ func (s *SIPTrunkSuite) TestADialRefusesAPasswordSealedAtNoKey() {
 	held := s.number("acme", trunk.ID, "+15550000211")
 	// A password set again and then overwritten by a later data move keeps its sealed
 	// bytes, but at version 0 no key opens them.
-	_, err := s.store.DB().ExecContext(s.ctx,
+	_, err := s.store.GlobalDB().ExecContext(s.ctx,
 		"UPDATE sip_trunks SET password_kek_version = 0 WHERE id = ?", trunk.ID)
 	s.Require().NoError(err)
 
-	_, _, err = s.service.dialVendor(s.ctx, held)
+	_, _, err = s.service.dialVendor(s.ctx, held, 0)
 	s.EqualError(err, "phone: sip trunk "+trunk.ID+" has no password; set one before calling through it")
 }
 
@@ -223,7 +223,7 @@ func (s *SIPTrunkSuite) TestReleasingATrunkNumberAsksNoVendor() {
 // A deployment without Stream is ErrNoStream, which the router answers 400, not 500.
 func (s *SIPTrunkSuite) TestAttachingWithoutStreamSaysSo() {
 	number := store.PhoneNumber{E164: "+15550000212", Vendor: "telnyx", CustomerID: "acme"}
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &number))
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &number))
 
 	_, err := s.service.Attach(s.ctx, Attachment{CustomerID: "acme", E164: number.E164})
 
@@ -241,13 +241,13 @@ func (s *SIPTrunkSuite) TestAttachingATrunkNumberIsRefused() {
 
 func (s *SIPTrunkSuite) TestABoughtNumberStillGoesThroughTheRegistry() {
 	// bics is declared and not implemented, so it opens without credentials as the stub.
-	s.Require().NoError(s.store.RecordNumber(s.ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
 		E164: "+15550000209", Vendor: "bics", Country: "US", CustomerID: "acme",
 	}))
-	held, err := s.store.Number(s.ctx, "acme", "+15550000209")
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000209")
 	s.Require().NoError(err)
 
-	provider, trunk, err := s.service.dialVendor(s.ctx, held)
+	provider, trunk, err := s.service.dialVendor(s.ctx, held, 0)
 	s.Require().NoError(err)
 	s.Equal("bics", provider.Vendor())
 	s.Nil(trunk)
@@ -299,10 +299,10 @@ var (
 func (s *SIPTrunkSuite) shareLine(id, number string) {
 	sealed, err := s.service.sealer.SealWithAAD(sharedBridgePassword, trunkAAD("acme", id))
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.InTrunkGroup(s.ctx, store.TrunkGroup{CustomerID: "acme", Vendor: SIPTrunkVendor},
+	s.Require().NoError(s.store.StreamTrunks.InGroup(s.ctx, store.TrunkGroup{CustomerID: "acme", Vendor: SIPTrunkVendor},
 		func(_ context.Context, tx *store.TrunkGroupTx) error {
 			return tx.SaveTrunk(store.StreamTrunk{
-				ID: id, Numbers: []string{number}, BridgeURI: "sip:old@shared.example.test",
+				ID: id, BridgeURI: "sip:old@shared.example.test",
 				BridgeUsername: "bridge-user", BridgePasswordSealed: sealed,
 				BridgePasswordKEKVersion: s.service.sealer.CurrentVersion(),
 			})

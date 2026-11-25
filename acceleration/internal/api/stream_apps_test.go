@@ -86,7 +86,7 @@ func (s *StreamAppsSuite) TestAClaimJoinsEachChannelInItsOwnApp() {
 	// A guest's conversations may span the time before and after the customer had an app
 	// of its own, and each is joined where it is.
 	guest := guestPrefix + s.utils.uuid()
-	s.Require().NoError(s.store.RecordGuest(context.Background(), &store.User{
+	s.Require().NoError(s.store.Users.InsertGuest(context.Background(), &store.User{
 		ID: guest, CustomerID: s.customerID(), Name: "Guest",
 	}))
 	before, after := "support-"+s.utils.uuid(), "support-"+s.utils.uuid()
@@ -109,7 +109,7 @@ func (s *StreamAppsSuite) called(app int64) store.Call {
 		ID: s.utils.uuid(), CustomerID: s.customerID(), StreamAppPK: app, CallID: s.utils.callID(),
 		AgentID: "agent-" + s.utils.uuid(), StartedAt: time.Now().UTC().Add(-time.Hour),
 	}
-	s.Require().NoError(s.store.StartCall(context.Background(), &call))
+	s.Require().NoError(s.store.Calls.Start(context.Background(), &call))
 	return call
 }
 
@@ -134,7 +134,7 @@ func (s *StreamAppsSuite) talkedIn(chat *chattest.Server, user, channel string, 
 	_, err := chat.Client.Chat().GetOrCreateChannel(context.Background(), chatlog.ChannelType, channel,
 		&getstream.GetOrCreateChannelRequest{Data: &getstream.ChannelInput{CreatedByID: &creator}})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.SaveSession(context.Background(), &store.AgentSession{
+	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{
 		ID: s.utils.uuid(), CustomerID: s.customerID(), StreamAppPK: app, UserID: user,
 		CallerKind: string(auth.KindGuest), AgentID: "agent", ConversationID: chatlog.ChannelType + ":" + channel, State: store.SessionClosed,
 	}))
@@ -252,7 +252,7 @@ func (s *StreamAppsSuite) TestAMintedGuestCallingWithTheirOwnTokenIsStillMintedA
 	var again GuestUser
 	s.Equal(http.StatusCreated, s.data.signedInAs(minted.Id).do(http.MethodPost, "/v1/agents/guests", GuestUserRequest{Id: pointerTo(minted.Id)}, &again))
 	s.Equal(minted.Id, again.Id)
-	held, err := s.store.Guest(context.Background(), s.customerID(), minted.Id)
+	held, err := s.store.Users.GetGuest(context.Background(), s.customerID(), minted.Id)
 	s.Require().NoError(err, "and they stay a guest to claim")
 	s.Empty(held.ClaimedBy)
 }
@@ -263,12 +263,12 @@ func (s *StreamAppsSuite) TestASessionRecordsTheAppItWasCreatedIn() {
 	created := s.serverClient.createSession(CreateSessionRequest{StartVoice: pointerTo(true)})
 
 	s.Require().Eventually(func() bool {
-		stored, err := s.store.StoredSession(context.Background(), s.customerID(), created.Id)
+		stored, err := s.store.Sessions.Get(context.Background(), s.customerID(), created.Id)
 		return err == nil && stored.StreamAppPK == 4242
 	}, settleFor, 10*time.Millisecond, "the session row carries its app")
 	s.Require().Eventually(func() bool {
-		row, err := s.store.Call(context.Background(), s.customerID(), created.Id)
-		return err == nil && row.StreamAppPK == 4242
+		rows, err := s.store.Calls.Select(context.Background(), s.customerID(), store.CallFilter{SessionID: created.Id})
+		return err == nil && len(rows) > 0 && rows[0].StreamAppPK == 4242
 	}, settleFor, 10*time.Millisecond, "the call row carries its app")
 }
 
@@ -294,7 +294,7 @@ func (s *StreamAppsSuite) TestAPlacedCallMadeInTheCustomersAppIsJoinedThere() {
 // leg's lines are in that app, routed into the session's call.
 func (s *StreamAppsSuite) placedIn(app int64) string {
 	id := s.utils.uuid()
-	s.Require().NoError(s.store.RecordCallResource(context.Background(), &store.CallResource{
+	s.Require().NoError(s.store.CallResources.Insert(context.Background(), &store.CallResource{
 		TrunkID: "trunk-" + s.utils.uuid(), RouteID: "route-" + s.utils.uuid(),
 		CallType: "agent", CallID: id, CustomerID: s.customerID(), StreamAppPK: app,
 	}))
@@ -306,7 +306,7 @@ func (s *StreamAppsSuite) pinOf(id string) int64 {
 	var stored store.AgentSession
 	s.Require().Eventually(func() bool {
 		var err error
-		stored, err = s.store.StoredSession(context.Background(), s.customerID(), id)
+		stored, err = s.store.Sessions.Get(context.Background(), s.customerID(), id)
 		return err == nil
 	}, settleFor, 10*time.Millisecond, "the session was never written down")
 	return stored.StreamAppPK

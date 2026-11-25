@@ -55,7 +55,7 @@ func (s *StoredSuite) SetupSuite() {
 
 func (s *StoredSuite) SetupTest() {
 	// The database is this suite's own, and an api key is the same key in every test.
-	_, err := s.store.DB().ExecContext(s.ctx, "TRUNCATE stream_fallback_uses, stream_app_tokens CASCADE")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE stream_fallback_uses, stream_app_tokens CASCADE")
 	s.Require().NoError(err)
 	s.stream = chattest.NewServer(s.T())
 	s.deployment = NewDeployment(DeploymentOptions{APIKey: "deploy-key", Secret: "deploy-secret", App: 1, Strict: true, BaseURL: s.stream.URL})
@@ -101,7 +101,7 @@ func (s *StoredSuite) TestAnUnregisteredAppFallsBackOnlyWhenAllowed() {
 	s.Require().NoError(err)
 	s.Equal("deploy-key", identity.APIKey)
 	s.Equal(int64(1), identity.StreamApp)
-	uses, err := s.store.StreamFallbackUses(s.ctx, s.clock.Now().Add(-time.Minute))
+	uses, err := s.store.StreamFallbackUses.Select(s.ctx, s.clock.Now().Add(-time.Minute))
 	s.Require().NoError(err)
 	s.Contains(customersOf(uses), s.customer)
 }
@@ -193,6 +193,16 @@ func (s *StoredSuite) TestTheFallbackIsRecordedAtMostOnceAMinute() {
 	s.Equal(int64(4), s.usesOf(s.customer), "uses in between are counted when next written")
 }
 
+// Another customer's request asks where a customer's work goes, which is not a use of the
+// fallback by that customer.
+func (s *StoredSuite) TestAskingWhereAFallingBackCustomersWorkGoesCountsNoUseOfTheFallback() {
+	app, err := NewClients(s.source(true), ClientsOptions{}).Placed(s.ctx, s.customer)
+
+	s.Require().NoError(err)
+	s.Equal(int64(1), app, "the deployment's app, as For answers")
+	s.Equal(int64(0), s.usesOf(s.customer))
+}
+
 func (s *StoredSuite) TestForwardedTokensAreNotKeptWithoutAKeyring() {
 	_, err := NewForwarded(ForwardedOptions{Store: s.store})
 
@@ -200,7 +210,7 @@ func (s *StoredSuite) TestForwardedTokensAreNotKeptWithoutAKeyring() {
 }
 
 func (s *StoredSuite) usesOf(customer string) int64 {
-	uses, err := s.store.StreamFallbackUses(s.ctx, time.Unix(0, 0))
+	uses, err := s.store.StreamFallbackUses.Select(s.ctx, time.Unix(0, 0))
 	s.Require().NoError(err)
 	for _, use := range uses {
 		if use.CustomerID == customer {
@@ -255,6 +265,20 @@ func (s *StoredSuite) TestAPolicyReadErrorRefusesTheFallback() {
 	_, err := s.floored(false, errors.New("the policies could not be read")).For(s.ctx, s.customer)
 
 	s.ErrorIs(err, ErrNoIdentity)
+}
+
+// Catches a policy that could not be read placing a customer in its own app, where its work in
+// the deployment's app would then read as apart from everyone else's there, and answered as
+// ErrNoIdentity, a settled answer, which would refuse a call from a number for good over one
+// failed read.
+func (s *StoredSuite) TestAPolicyReadErrorPlacesNobody() {
+	unread := errors.New("the policies could not be read")
+
+	_, err := NewClients(s.floored(false, unread), ClientsOptions{}).Placed(s.ctx, s.customer)
+
+	s.Require().ErrorIs(err, unread)
+	s.NotErrorIs(err, ErrNoIdentity)
+	s.False(Settled(err), "a read to try again")
 }
 
 func (s *StoredSuite) TestTheDeploymentAppIsUnaffectedByTheRequirement() {

@@ -22,6 +22,7 @@ import (
 	"maps"
 	"math"
 	"net/http"
+	"net/netip"
 	"slices"
 	"sort"
 	"strings"
@@ -123,6 +124,9 @@ type Endpoint struct {
 	Model string
 	// APIKey is empty for an endpoint that takes none.
 	APIKey string
+	// ContextWindow is how many tokens the endpoint serves the model with, zero when not
+	// known.
+	ContextWindow int64
 	// Client is how requests reach it. On a router tenants share it dials public addresses
 	// only, because the endpoint is whatever a tenant wrote.
 	Client *http.Client
@@ -174,6 +178,14 @@ type Spender interface {
 type Reserver interface {
 	Reserve(owner Owner, usageID uuid.UUID, micros int64, ttl time.Duration) error
 	Release(usageID uuid.UUID)
+}
+
+// RunningGate is a Gate that admits work already running, which a refusal stops rather than
+// turns away: AdmitRunning is Admit with a Spend that counts what was spent and not what is set
+// aside, so a reservation, the work's own lease among them, never stops it while there is
+// credit left.
+type RunningGate interface {
+	AdmitRunning(ctx context.Context, owner Owner) (Admission, error)
 }
 
 // Booker sets credit aside for a purchase that costs a known amount at once, such as a number,
@@ -244,6 +256,30 @@ func (a Admission) Labelled(tags Tags) Tags {
 	return merged
 }
 
+// Allowed narrows models to the ones the admission lets the customer's work go to: those on its
+// Models, and of them those whose handling of data its DataPolicy permits. None left is the
+// refusal a routed request gets. No models given is that refusal too, unless the admission holds
+// the customer to neither, which returns none and no error.
+func (a Admission) Allowed(models []ProviderConfig) ([]ProviderConfig, error) {
+	candidates := make([]Candidate, len(models))
+	for i, model := range models {
+		candidates[i].Config = model
+	}
+	candidates, err := allowed(candidates, a.Models)
+	if err != nil {
+		return nil, err
+	}
+	candidates, err = permitted(candidates, a.DataPolicy)
+	if err != nil {
+		return nil, err
+	}
+	kept := make([]ProviderConfig, len(candidates))
+	for i, candidate := range candidates {
+		kept[i] = candidate.Config
+	}
+	return kept, nil
+}
+
 // Options configures a Router. Store, Live and Voices are optional: without them the
 // router still routes, it just stops recording and stops resolving custom voices.
 type Options[P Provider] struct {
@@ -308,6 +344,27 @@ type Caller struct {
 	// or a delivery the app's channel or plugin signed. An anonymous caller's name is not,
 	// so it is never held to that user's own quota nor spends their day.
 	Verified bool
+	// Guest is a user with a temporary account: one whose token says the role guest, or one this
+	// router minted (store.Users.Minted), whose token may say no role and so read as an account's.
+	// It decides what a session offers them, never what is theirs: that is the caller's kind.
+	Guest bool
+}
+
+// CountedAddress is what a count by address is keyed by: an IPv4 address itself, an IPv4-mapped
+// IPv6 one as the IPv4 address it carries, and any other IPv6 address as its /64, since one
+// device holds a whole /64 and may call from any address of it. An IP that is not an address
+// is counted as it is written.
+func (c Caller) CountedAddress() string {
+	address, err := netip.ParseAddr(c.IP)
+	if err != nil {
+		return c.IP
+	}
+	if address = address.Unmap(); address.Is4() {
+		return address.String()
+	}
+	// No error: every IPv6 address has 64 bits. The prefix carries no zone.
+	network, _ := address.Prefix(64)
+	return network.String()
 }
 
 // IsZero says nobody was named: a turn that was heard, not typed.
@@ -623,7 +680,7 @@ func (r *Router[P]) Resolve(ctx context.Context, target string, languageHints []
 	}
 
 	if len(matching) == 0 {
-		return nil, stack.Wrap(fmt.Errorf("routing: no provider satisfies %q for languages %s", target, strings.Join(languageHints, ",")))
+		return nil, stack.Wrap(Refused(fmt.Errorf("routing: no provider satisfies %q for languages %s", target, strings.Join(languageHints, ","))))
 	}
 
 	candidates := r.candidates(ctx, matching)
@@ -1047,6 +1104,13 @@ func (r *Router[P]) startCandidate(ctx context.Context, request Request, candida
 	voice, err := r.voice(voiceCtx, request, candidate.Config.Provider)
 	if err != nil {
 		return zero, err
+	}
+	// The voice overwrites name is handed to the provider as written, and is no more any
+	// customer's to speak in than the request's voice is.
+	if overwritten != "" && r.voices != nil {
+		if _, err := r.voices.ResolveVoice(voiceCtx, request.CustomerID, candidate.Config.Provider, overwritten); err != nil {
+			return zero, err
+		}
 	}
 	// With no top-level voice, a TTS overwrite is the voice spoken: a factory that reads no
 	// overwrites, as Cartesia's does not, would otherwise speak its own default. A top-level

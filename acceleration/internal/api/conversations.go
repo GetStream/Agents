@@ -9,7 +9,9 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
 func (s *Server) getConversationMessages(ctx context.Context, req *getConversationMessagesRequest) (*getConversationMessagesResponse, error) {
@@ -24,13 +26,21 @@ func (s *Server) getConversationMessages(ctx context.Context, req *getConversati
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	page, err := service.HistoryForCaller(ctx, owner, req.AgentId, req.Cid, value(req.Before.ptr()), CallerFrom(ctx).UserID)
-	if err != nil {
-		return nil, invalidRequest(err.Error())
+	page, err := service.HistoryForCaller(conversation.WithCallerKind(ctx, KindFrom(ctx)), owner, req.AgentId, req.Cid, value(req.Before.ptr()), CallerFrom(ctx).UserID)
+	if refused, ok := errors.AsType[conversation.RefusedRead](err); ok {
+		return nil, invalidRequest(refused.Error())
 	}
-	b, _ := json.Marshal(page)
+	if err != nil {
+		return nil, err
+	}
+	b, err := json.Marshal(page)
+	if err != nil {
+		return nil, stack.Wrap(err)
+	}
 	var result map[string]any
-	_ = json.Unmarshal(b, &result)
+	if err := json.Unmarshal(b, &result); err != nil {
+		return nil, stack.Wrap(err)
+	}
 	return &getConversationMessagesResponse{Body: result}, nil
 }
 
@@ -47,9 +57,9 @@ func (s *Server) getConversationCommand(ctx context.Context, req *getConversatio
 	if err != nil {
 		return nil, errUnknownCommand
 	}
-	receipt, err := service.CommandForCaller(ctx, owner, req.AgentId, req.Cid, CallerFrom(ctx).UserID, req.RequestId)
+	receipt, err := service.CommandForCaller(conversation.WithCallerKind(ctx, KindFrom(ctx)), owner, req.AgentId, req.Cid, CallerFrom(ctx).UserID, req.RequestId)
 	if err != nil {
-		return nil, errUnknownCommand
+		return nil, unknownOr(err, conversation.ErrCommandNotFound, errUnknownCommand)
 	}
 	return &getConversationCommandResponse{Body: receiptOf(receipt)}, nil
 }
@@ -98,6 +108,14 @@ func (s *Server) answerToolApproval(ctx context.Context, req *answerToolApproval
 		}
 		if !member {
 			return nil, errNoApprovalHeld
+		}
+		// A session of theirs, which a message of theirs is carried on in, is answered only while
+		// they are in its config's team, as carryOn asks: an answer lets its agent's connector call
+		// go. A channel's session the Router opened is answered as its messages are, by member.
+		if by.Reaches(session.OwnerOf(found.Spec())) {
+			if err := s.refuseOutsideTeam(ctx, customer, found.Spec().ConfigID); err != nil {
+				return nil, unknownOr(err, errUnknownConfig, errNoApprovalHeld)
+			}
 		}
 	}
 	answer := req.Body

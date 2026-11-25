@@ -162,6 +162,67 @@ func (s *SessionSuite) TestAnApprovalIsRecordedOnlyForACallWaitingOnItsTurn() {
 	s.False(running.DecideCommandTool("call-a", "command-a", "turn-a", true, ""), "the call was answered already")
 }
 
+// A call waiting for the person to allow it is sent again, with its command, to a watcher that
+// attaches later, such as an app reopened after the one that was asked was closed: it has the
+// arguments to run it, and its result is taken. Once the person has answered, it is not.
+func (s *SessionSuite) TestACallWaitingForThePersonIsSentAgainToALaterWatcher() {
+	s.persists()
+	running := s.commands()
+	receipt, err := running.persisted.BeginCommand("command-a", "Refund order A-1", "")
+	s.Require().NoError(err)
+	running.persisted.BindTurn(receipt.CommandID, "turn-a")
+	running.persisted.DescribeTools(map[string]persistent.ToolDisplay{
+		"issue_refund": {Approval: &persistent.ToolApproval{Title: "Refund this order?"}},
+	})
+	first, detach := running.Watch()
+
+	resolved := make(chan error, 1)
+	call := llm.ToolCall{ID: "call-a", TurnID: "turn-a", Name: "issue_refund", Arguments: `{"order":"A-1"}`}
+	go func() {
+		_, err := running.tools.Run(context.Background(), call)
+		resolved <- err
+	}()
+	s.Require().NotNil(awaitToolCall(first))
+	running.persisted.Observe(agent.ToolStarted{ID: call.ID, TurnID: call.TurnID, Tool: call.Name,
+		Arguments: call.Arguments, StartedAt: time.Now()})
+	detach()
+
+	reopened, stop := running.Watch()
+	defer stop()
+	asked := awaitToolCall(reopened)
+	s.Require().NotNil(asked)
+	s.Equal(call.ID, asked.ID)
+	s.Equal(call.Arguments, asked.Arguments)
+	s.Equal("command-a", asked.CommandID)
+	s.Equal("turn-a", asked.TurnID)
+	s.True(asked.Run)
+
+	// Answered between the read of what is asked and the send: the call carries the answer
+	// before the conversation does, and the watcher is not asked.
+	running.tools.decide(call.ID, call.TurnID)
+	s.True(running.persisted.AwaitsApproval(call.ID), "the conversation has not heard the answer yet")
+	racing, stopRacing := running.Watch()
+	defer stopRacing()
+	select {
+	case event := <-racing:
+		_, tool := event.(ToolCall)
+		s.False(tool, "a call answered before the send is not sent")
+	default:
+	}
+
+	s.True(running.DecideCommandTool(call.ID, "command-a", "turn-a", true, ""))
+	answered, stopAnswered := running.Watch()
+	defer stopAnswered()
+	select {
+	case event := <-answered:
+		_, tool := event.(ToolCall)
+		s.False(tool, "a call the person answered is not sent again")
+	default:
+	}
+	s.True(running.ResolveCommandTool(call.ID, "command-a", "turn-a", llm.TextParts("refunded"), ""))
+	s.Require().NoError(<-resolved)
+}
+
 // A call whose result came in, or that stopped, waits for nothing, though it is not yet gone.
 func (s *SessionSuite) TestAResolvedCallWaitsOnNoTurn() {
 	tools := newBridge(time.Second, nil, func(ToolCall) error { return nil })
@@ -795,7 +856,7 @@ func (s *SessionSuite) TestAVoiceNoteToAConversationNoLongerTheCallersIsRefusedB
 	s.Require().NoError(err)
 	spec := Spec{CustomerID: "acme", Text: true, PersistConversation: true,
 		AgentID: agentID, ConversationID: "agent:" + channelID,
-		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "alice"}}
+		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "alice"}, CallerKind: auth.KindAuthenticated}
 	alice, err := s.manager.Create(s.ctx, spec)
 	s.Require().NoError(err)
 	spec.Caller.UserID = "bob"
@@ -1138,7 +1199,7 @@ func (s *SessionSuite) TestSharedConversationHandsOffAfterWatcherDetachAndReject
 	setMembers("alice", "bob")
 	spec := Spec{CustomerID: "acme", Text: true, PersistConversation: true,
 		AgentID: agentID, ConversationID: "agent:" + channelID,
-		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "alice"}}
+		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "alice"}, CallerKind: auth.KindAuthenticated}
 	alice, err := s.manager.Create(s.ctx, spec)
 	s.Require().NoError(err)
 	_, detachAlice := alice.Watch()
@@ -1247,6 +1308,43 @@ func (s *SessionSuite) TestAVoiceSessionRestoresChatHistoryWithoutPersisting() {
 		{Role: llm.User, Content: "The project name is Nimbus"},
 		{Role: llm.Assistant, Content: "Hello."},
 	}, voice.current().History())
+}
+
+func (s *SessionSuite) TestAVoiceSessionOfAnotherKindOfCallerRestoresNoHistory() {
+	s.persists()
+	spec := s.writtenBy(auth.KindAuthenticated)
+	spec.Text, spec.PersistConversation, spec.CallID = false, false, "athv-nimbus"
+	spec.STTTarget, spec.TTSTarget = "en-low-latency", "en-low-latency"
+	spec.CallerKind = auth.KindGuest
+
+	_, err := s.manager.Create(s.ctx, spec)
+	s.ErrorContains(err, "another user")
+}
+
+func (s *SessionSuite) TestAForkByAnotherKindOfCallerRecallsNothing() {
+	s.persists()
+	parent := s.writtenBy(auth.KindAuthenticated)
+	fork := parent
+	fork.AgentID, fork.ConversationID = "fork", ""
+	fork.Recall = &Recall{ConversationID: parent.ConversationID, AgentID: parent.AgentID}
+
+	_, err := s.manager.Create(s.ctx, fork)
+	s.Require().NoError(err)
+	fork.CallerKind = auth.KindGuest
+	_, err = s.manager.Create(s.ctx, fork)
+	s.ErrorContains(err, "another user")
+}
+
+// writtenBy is the spec of a written conversation employee-1, a caller of kind, opened, which
+// no session holds.
+func (s *SessionSuite) writtenBy(kind auth.Kind) Spec {
+	spec := Spec{CustomerID: "acme", Text: true, PersistConversation: true, AgentID: "test-agent",
+		LLMTarget: "en-low-latency", Caller: routing.Caller{UserID: "employee-1"}, CallerKind: kind}
+	written, err := s.manager.Create(s.ctx, spec)
+	s.Require().NoError(err)
+	spec.ConversationID = written.Spec().ConversationID
+	s.Require().NoError(written.Close())
+	return spec
 }
 
 func (s *SessionSuite) TestACommandRunningWhenTheRouterStopsIsLeftInterrupted() {

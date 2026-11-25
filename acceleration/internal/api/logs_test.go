@@ -103,6 +103,19 @@ func (s *LogsSuite) TestAPageBiggerThanTheOneAllowedIsRefused() {
 		s.serverClient.do(http.MethodGet, "/v1/agents/logs?limit=251", nil, nil))
 }
 
+func (s *LogsSuite) TestLogsThatCannotBeReadAreAnInternalError() {
+	s.failQueries("agent_logs")
+
+	for _, path := range []string{"/v1/agents/logs", "/v1/agents/logs/1"} {
+		status, body := s.serverClient.call(http.MethodGet, path, nil)
+
+		s.Equal(http.StatusInternalServerError, status, path)
+		s.Contains(string(body), `"code":"internal_error"`, path)
+		s.NotContains(string(body), "storage unavailable", path)
+		s.NotContains(string(body), "deadline", path)
+	}
+}
+
 func (s *LogsSuite) TestAnotherAppsLogIsNotFound() {
 	s.record("info", "First")
 	page := s.page("?limit=1")
@@ -122,7 +135,7 @@ func (s *LogsSuite) TestOnlyTheAppsOwnBackendMayReadItsLogs() {
 
 // record writes one line as an agent of the suite's app would.
 func (s *LogsSuite) record(severity, message string) {
-	s.Require().NoError(s.store.RecordAgentLog(context.Background(), &store.AgentLog{
+	s.Require().NoError(s.store.AgentLogs.Insert(context.Background(), &store.AgentLog{
 		CustomerID: s.customerID(), Source: "agent", Severity: severity,
 		EventType: "test", Message: message,
 	}))

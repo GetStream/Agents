@@ -42,13 +42,11 @@ const (
 	// handshakeTimeout bounds a sandbox's TLS handshake and each request's headers in a
 	// tunnel: http.DefaultTransport's TLSHandshakeTimeout (net/http/transport.go).
 	handshakeTimeout = 10 * time.Second
-	// idleTimeout closes a tunnel to an allowed domain that has carried no byte for it:
-	// http.DefaultTransport's IdleConnTimeout (net/http/transport.go).
-	idleTimeout = 90 * time.Second
 	// keepAliveTimeout closes a connection to the proxy, or to a grant's tunnel, that sends no
-	// next request. It outlasts the idle limit of every client in the sandbox that pools one,
-	// so the client closes it first: a server that closes it as the client reuses it fails a
-	// request the client may not replay, such as a POST read in Go (net/http/transport.go,
+	// next request, and a tunnel to an allowed domain that has carried no byte for it. It
+	// outlasts the idle limit of every client in the sandbox that pools one, so the client
+	// closes it first: a server that closes it as the client reuses it fails a request the
+	// client may not replay, such as a POST read in Go (net/http/transport.go,
 	// shouldRetryRequest). The longest is libcurl's (curl, git), 118 s
 	// (https://curl.se/libcurl/c/CURLOPT_MAXAGE_CONN.html), and 4 min is twice it. Go's
 	// http.DefaultTransport keeps 90 s (net/http/transport.go, IdleConnTimeout), httpx 5 s
@@ -92,13 +90,16 @@ type Options struct {
 	// public addresses only.
 	Dial   func(ctx context.Context, network, address string) (net.Conn, error)
 	Logger *slog.Logger
-	// HandshakeTimeout, IdleTimeout, KeepAliveTimeout, HeaderTimeout and DryRunTimeout replace
-	// handshakeTimeout, idleTimeout, keepAliveTimeout, headerTimeout and dryRunTimeout when set,
-	// for tests.
-	HandshakeTimeout, IdleTimeout, KeepAliveTimeout, HeaderTimeout, DryRunTimeout time.Duration
+	// HandshakeTimeout, KeepAliveTimeout, HeaderTimeout and DryRunTimeout replace handshakeTimeout,
+	// keepAliveTimeout, headerTimeout and dryRunTimeout when set, for tests.
+	HandshakeTimeout, KeepAliveTimeout, HeaderTimeout, DryRunTimeout time.Duration
 	// Now replaces time.Now when set, for tests: it dates a certificate and tells when a kept
 	// one is renewed.
 	Now func() time.Time
+	// KeptBodies replaces maxKeptBodies when set, for tests.
+	KeptBodies int64
+	// MaxTunnels replaces maxTunnels when set, for tests.
+	MaxTunnels int
 }
 
 // Proxy is an HTTP proxy that takes CONNECT only.
@@ -112,12 +113,17 @@ type Proxy struct {
 	dial      func(ctx context.Context, network, address string) (net.Conn, error)
 	logger    *slog.Logger
 
-	handshakeTimeout, idleTimeout, keepAliveTimeout, dryRunTimeout time.Duration
+	handshakeTimeout, keepAliveTimeout, dryRunTimeout time.Duration
 
 	now func() time.Time
+	// keptBodies is the bytes reserved for bodies kept to send again, of keptBudget at most (resendable).
+	keptBodies atomic.Int64
+	keptBudget int64
 	// leaves holds each host's certificate until it is half of leafValidity old, so a handshake
 	// costs no CA signature (P-256 about 66 us, RSA-4096 about 4.5 ms) once a host has one.
 	leaves leaves
+	// tunnels are each sandbox's open tunnels, up to maxTunnels.
+	tunnels sandboxTunnels
 }
 
 type leaves struct {
@@ -148,7 +154,9 @@ func New(options Options) (*Proxy, error) {
 	}
 	transport := options.Transport
 	if transport == nil {
-		transport = publicegress.NewClient(0, nil).Transport
+		// Unpooled: a POST must not ride a connection the origin is closing. Go never sends one twice on HTTP/1.1,
+		// even when resendable gave its body a GetBody.
+		transport = publicegress.NewUnpooledClient(0, nil).Transport
 	}
 	dial := options.Dial
 	if dial == nil {
@@ -160,9 +168,10 @@ func New(options Options) (*Proxy, error) {
 	}
 	return &Proxy{store: options.Store, tokens: options.Tokens, ca: pair.Leaf, caKey: caKey, leafKey: leafKey,
 		transport: outbound{next: transport, headerTimeout: cmp.Or(options.HeaderTimeout, headerTimeout)}, dial: dial, logger: options.Logger,
-		handshakeTimeout: cmp.Or(options.HandshakeTimeout, handshakeTimeout), idleTimeout: cmp.Or(options.IdleTimeout, idleTimeout),
+		handshakeTimeout: cmp.Or(options.HandshakeTimeout, handshakeTimeout),
 		keepAliveTimeout: cmp.Or(options.KeepAliveTimeout, keepAliveTimeout),
-		dryRunTimeout:    cmp.Or(options.DryRunTimeout, dryRunTimeout), now: now, leaves: leaves{byHost: map[string]keptLeaf{}}}, nil
+		dryRunTimeout:    cmp.Or(options.DryRunTimeout, dryRunTimeout), now: now, keptBudget: cmp.Or(options.KeptBodies, maxKeptBodies), leaves: leaves{byHost: map[string]keptLeaf{}},
+		tunnels: sandboxTunnels{max: cmp.Or(options.MaxTunnels, maxTunnels), open: map[string]int{}}}, nil
 }
 
 // ServeHTTP opens a tunnel to port 443 of a host the sandbox's grants or allowed domains cover,
@@ -209,15 +218,26 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		refuse(w, label, r.Method, decisionDeniedHost, http.StatusForbidden, "egress: only port 443 is proxied")
 		return
 	}
-	if !granted {
-		p.passthrough(w, r, record.Session, host)
+	// Every sandbox on the router shares its file descriptors, so each holds at most max tunnels:
+	// a CONNECT past it is refused before anything is dialed or taken over.
+	if !p.tunnels.hold(credential) {
+		p.logger.Warn("the sandbox egress proxy refused a tunnel past the sandbox's limit", "session", record.Session,
+			"host", host, "limit", p.tunnels.max)
+		refuse(w, label, r.Method, decisionDeniedTunnels, http.StatusTooManyRequests,
+			fmt.Sprintf("egress: too many open tunnels: the sandbox holds %d, the most it may; close one and try again", p.tunnels.max))
 		return
 	}
-	conn, buffered, err := http.NewResponseController(w).Hijack()
+	if !granted {
+		p.passthrough(w, r, credential, record.Session, host)
+		return
+	}
+	hijacked, buffered, err := http.NewResponseController(w).Hijack()
 	if err != nil {
+		p.tunnels.release(credential)
 		refuse(w, label, r.Method, decisionError, http.StatusInternalServerError, "egress: the connection cannot be taken over")
 		return
 	}
+	conn := p.tunnels.held(hijacked, credential)
 	if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
 		_ = conn.Close()
 		return
@@ -228,21 +248,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // passthrough tunnels the sandbox's bytes to port 443 of host, an allowed domain, as they are:
 // no certificate of the router's, no token, nothing read or logged. A host that resolves to a
-// non-public address is not dialed (502).
-func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, session, host string) {
+// non-public address is not dialed (502). The tunnel is one of credential's, which ServeHTTP held.
+func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, credential, session, host string) {
 	upstream, err := p.dial(r.Context(), "tcp", net.JoinHostPort(host, httpsPort))
 	if err != nil {
+		p.tunnels.release(credential)
 		// A dial's error holds no byte the host sent.
 		p.logger.Warn("the sandbox egress proxy could not reach an allowed host", "session", session, "host", host, "error", err)
 		refuse(w, otherHost, http.MethodConnect, decisionBlind, http.StatusBadGateway, "egress: the host cannot be reached")
 		return
 	}
-	conn, buffered, err := http.NewResponseController(w).Hijack()
+	hijacked, buffered, err := http.NewResponseController(w).Hijack()
 	if err != nil {
+		p.tunnels.release(credential)
 		_ = upstream.Close()
 		refuse(w, otherHost, http.MethodConnect, decisionError, http.StatusInternalServerError, "egress: the connection cannot be taken over")
 		return
 	}
+	conn := p.tunnels.held(hijacked, credential)
 	if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
 		_ = conn.Close()
 		_ = upstream.Close()
@@ -252,7 +275,10 @@ func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, session, hos
 	tunnelsOpen.Inc()
 	defer tunnelsOpen.Dec()
 	early, _ := buffered.Reader.Peek(buffered.Reader.Buffered())
-	idle := &idleTunnel{timeout: p.idleTimeout, ends: [2]net.Conn{conn, upstream}}
+	// The tunnel's idle clock starts when the proxy reads a byte, before the sandbox's client has
+	// it, so its limit must outlast the client's pooling one as a kept connection's does: a
+	// client that pools the connection reaches its own limit first (AI-2346).
+	idle := &idleTunnel{timeout: p.keepAliveTimeout, ends: [2]net.Conn{conn, upstream}}
 	idle.touch()
 	sandbox := idle.watch(conn)
 	remote := idle.watch(upstream)
@@ -269,7 +295,8 @@ func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, session, hos
 }
 
 // KeepAliveTimeout is how long a connection to the proxy may sit with no request before the
-// server closes it: the one a grant's tunnel is given.
+// server closes it. A grant's tunnel gets the same limit, and so does a tunnel to an allowed domain
+// that carries no byte.
 func (p *Proxy) KeepAliveTimeout() time.Duration {
 	return p.keepAliveTimeout
 }
@@ -423,6 +450,8 @@ func (p *Proxy) inner(t tunnel) http.HandlerFunc {
 			p.refuseWrite(w, r, t, logger, record.readsSQL(host), why)
 			return
 		}
+		// A host's GOAWAY can leave the request unprocessed; a body kept in memory lets Go send it again.
+		defer p.resendable(r)()
 		forward := &httputil.ReverseProxy{
 			Rewrite:   func(pr *httputil.ProxyRequest) { p.toHost(pr, t) },
 			Transport: timed{next: p.transport, host: t.label},

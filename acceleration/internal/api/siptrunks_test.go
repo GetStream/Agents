@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
@@ -99,7 +100,7 @@ func (s *SIPTrunksSuite) TestUpdatingWithoutAPasswordKeepsIt() {
 func (s *SIPTrunksSuite) TestAPasswordSealedAtNoKeyIsNotAPassword() {
 	created := s.createTrunk()
 	// What a data move leaves on a trunk whose password was set again before it.
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE sip_trunks SET password_kek_version = 0 WHERE id = ?", created.Id)
 	s.Require().NoError(err)
 
@@ -193,6 +194,31 @@ func (s *SIPTrunksSuite) TestTheSameNumberTwiceIsAConflict() {
 	status, failure := s.serverClient.failure(http.MethodPost, path, map[string]any{"e164": number, "country": "US"})
 	s.Equal(http.StatusConflict, status)
 	s.Equal("store: the customer already holds this number", failure)
+}
+
+func (s *SIPTrunksSuite) TestANumberAnotherAppHoldsIsAConflictThatNamesNoApp() {
+	theirs := s.createTrunk()
+	number := e164()
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost,
+		"/v1/phone/trunks/"+theirs.Id+"/numbers", map[string]any{"e164": number, "country": "US"}, nil))
+	holder := s.app
+	s.useApp(s.data.createApp())
+	ours := s.createTrunk()
+
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/phone/trunks/"+ours.Id+"/numbers",
+		map[string]any{"e164": number, "country": "US"})
+
+	s.Equal(http.StatusConflict, status, string(payload))
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &answered))
+	s.Equal(codePhoneNumberHeldElsewhere, answered.Error.Code)
+	s.Equal(errNumberHeldElsewhere.Message, answered.Error.Message)
+	for _, named := range []string{holder.app.ID, holder.app.Name, holder.organization.ID, theirs.Id} {
+		s.NotContains(string(payload), named)
+	}
+	var numbers []PhoneNumber
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/phone/numbers", nil, &numbers))
+	s.Empty(numbers)
 }
 
 func (s *SIPTrunksSuite) TestSIPTrunkIsNotAVendorOnOffer() {

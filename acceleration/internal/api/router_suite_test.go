@@ -17,6 +17,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"math"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -35,6 +36,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/hibiken/asynq"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,7 +46,6 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
@@ -92,6 +93,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox/daytona/daytonatest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/simulation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
@@ -103,6 +105,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/ttsrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/twiliosig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage/usagetest"
 	"github.com/GetStream/Vision-Agents/acceleration/prices"
@@ -161,14 +164,14 @@ func (s *RouterSuite) BeforeTest(_, _ string) {
 		return
 	}
 	t := s.T()
-	count, err := s.store.DB().NewSelect().Model((*store.ScheduledTask)(nil)).Count(context.Background())
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.ScheduledTask)(nil)).Count(context.Background())
 	require.NoError(t, err)
 	require.Zero(t, count, "a task is left from an earlier test or run")
 	// A database that stalls past the driver's 10s read timeout fails the delete, and the next
 	// test would then fail on this one's tasks; the delete is tried again until it lands.
 	t.Cleanup(func() {
 		require.EventuallyWithT(t, func(c *assert.CollectT) {
-			_, err := s.store.DB().NewDelete().Model((*store.ScheduledTask)(nil)).Where("true").Exec(context.Background())
+			_, err := s.store.GlobalDB().NewDelete().Model((*store.ScheduledTask)(nil)).Where("true").Exec(context.Background())
 			assert.NoError(c, err)
 		}, time.Minute, 100*time.Millisecond, "the tasks were never deleted")
 	})
@@ -207,14 +210,23 @@ const suiteManageKey = "suite-manage-key"
 type RouterSuite struct {
 	suite.Suite
 
-	store   *store.Store
-	configs *appconfig.Store
-	live    *live.Client
-	sealer  *auth.Sealer
+	store *store.Store
+	// otherStore is the store of otherNode, on the same databases, named for its shard.
+	otherStore *store.Store
+	// otherShardApart keeps otherStore's shard rows in a database of their own, as a shard in
+	// another region keeps them, for a suite to set before it starts.
+	otherShardApart bool
+	configs         *store.Store
+	live            *live.Client
+	sealer          *auth.Sealer
+	// storeOptions are what the suite's store was opened with, for a node on the same databases.
+	storeOptions store.Options
 	// activity is the activity record every node of the suite counts in.
 	activity *activity.Recorder
 	// manager runs the suite's sessions, for a test about what ends them from inside.
 	manager *session.Manager
+	// library is the voice libraries the suite's router reads, empty until a test registers one.
+	library *voices.Catalogue
 
 	// appMode runs the suite's Stream through app mode's own source, over the suite's
 	// database and keyring, with the deployment's app as the fallback: behind a gateway,
@@ -250,6 +262,9 @@ type RouterSuite struct {
 	// limitsMode is the suite's ROUTER_LIMITS_MODE, for a suite to set before it starts the
 	// harness. Empty is enforce.
 	limitsMode config.LimitsMode
+	// privateModels lets the suite's custom models sit on a private address, as a self-hosted
+	// router's models.private_endpoints does; a suite sets it before it starts the harness.
+	privateModels bool
 	// owned are the apps the suite made or used, whose rows must all name a key.
 	ownedMu sync.Mutex
 	owned   []string
@@ -291,6 +306,11 @@ type RouterSuite struct {
 	// about shards to set before it starts the harness. Nodes in two shards have a relay
 	// each. Empty is one deployment of one shard.
 	shard, otherShard string
+	// shardRouting is where every node of the suite sends a hook's work, by shard.
+	shardRouting shardmap.Map
+	// shards are the shards every node of the suite knows (Options.Shards), for a suite to set
+	// before it starts the harness.
+	shards []string
 
 	// unauthenticatedClient sends no credentials. The rest hold the app's key:
 	// anonymousClient goes by a name nothing proves, guestClient and client are signed-in
@@ -312,7 +332,10 @@ type RouterSuite struct {
 	knowledge *knowledgeBase
 	// knowledgeBucket is where an uploaded knowledge file waits to be read.
 	knowledgeBucket *blob.Bucket
-	memories        *keptMemories
+	// knowledgeRedis and knowledgeQueue are where uploaded files wait to be read.
+	knowledgeRedis asynq.RedisClientOpt
+	knowledgeQueue string
+	memories       *keptMemories
 	// voice keeps what every stub voice was told to say. Each socket is given a stub voice
 	// and transcriber of its own, so one a test left open cannot read what the next test
 	// sends; newestVoice and newestEars are the last the router started, read through
@@ -334,6 +357,11 @@ type RouterSuite struct {
 	scheduledMu      sync.Mutex
 	scheduled        []*schedulingModel
 	schedulingScript schedulingScript
+	// retries, when set, are the waits the test's scheduled-task workers retry a failed
+	// occurrence after (newScheduler), in place of the scheduler's own; finishRetries the
+	// waits before they write a failed outcome again.
+	retries       []time.Duration
+	finishRetries []time.Duration
 
 	// chat is the Stream Chat the conversations are written to and transcripts read from:
 	// the deployment's own app. apps gives a customer an app of its own instead, and
@@ -407,12 +435,17 @@ type RouterSuite struct {
 	// logs, set by a suite before it starts the harness, is where the router logs, as text at
 	// debug and up, for a suite about what it warns of. Nil discards them.
 	logs io.Writer
+	// failing makes the queries that a test names with failQueries fail.
+	failing *failingQueries
 	// telnyxPublicKey, set by a suite about Telnyx's call webhook before it starts the
 	// harness, is the key Telnyx's requests are checked against. Nil leaves it unconfigured.
 	telnyxPublicKey ed25519.PublicKey
 	// twilioAuthToken, set by a suite about Twilio's webhooks before it starts the harness, is
 	// the Auth Token Twilio's requests are checked against. Empty leaves it unconfigured.
 	twilioAuthToken string
+	// twilioAccountSID is the Twilio account the router's Twilio numbers are under, for the
+	// same suite to set. Empty is a router with none, which answers no Twilio call.
+	twilioAccountSID string
 	// chatInboundKeys, set by a suite about Stream Chat's delivery endpoint before it starts
 	// the harness, are what its deliveries are checked against, on every node. Nil leaves it
 	// unconfigured.
@@ -514,6 +547,10 @@ type RouterSuite struct {
 	// manageOff builds the router with no manage key, as a deployment that never set
 	// ROUTER_AUTH_MANAGE_KEY has, for a suite about that to set before it starts the harness.
 	manageOff bool
+	// activityKey and previousActivityKey are what the activity paths take in X-Activity-Key,
+	// as ROUTER_AUTH_ACTIVITY_KEY and its _PREVIOUS are, for a suite about them to set before it
+	// starts the harness. Empty, as a deployment that never set them has.
+	activityKey, previousActivityKey string
 	// pricedFromDatabase seeds the price list from the embedded vendor list, as a router's
 	// first start does, and prices the LLM router's rows and the API from it, read every
 	// priceReload, for a suite about the price list to set before it starts the harness.
@@ -561,6 +598,7 @@ func (s *RouterSuite) SetupSuite() {
 		s.T().Skip("ROUTER_POSTGRES_DSN and ROUTER_REDIS_ADDR must be set")
 	}
 	s.forgetPhoneVendors()
+	s.library = voices.NewCatalogue()
 	if s.knowledgeLimits == (ingest.Limits{}) {
 		s.knowledgeLimits = ingest.DefaultLimits
 	}
@@ -572,7 +610,8 @@ func (s *RouterSuite) SetupSuite() {
 
 	// A shard database and Redis run the suite as a hosted shard runs: the shared rows in one
 	// place and the calls, sessions and requests in another.
-	options := store.Options{DSN: testDatabase(s.T(), dsn)}
+	options := store.Options{DSN: testDatabase(s.T(), dsn), Redis: store.Redis{Address: redisAddr},
+		ShardRedis: store.Redis{Address: os.Getenv("ROUTER_REDIS_SHARD_ADDR")}}
 	if s.channelProvider != nil && s.database == "" {
 		s.T().Fatal("a suite with the real channel bridge needs a database of its own: its inbound worker takes every queued message there")
 	}
@@ -582,22 +621,48 @@ func (s *RouterSuite) SetupSuite() {
 	if shardDSN := os.Getenv("ROUTER_POSTGRES_SHARD_DSN"); shardDSN != "" {
 		options.ShardDSN = testDatabase(s.T(), shardDSN)
 	}
+	options.Shard = s.shard
+	s.storeOptions = options
 	pgStore, err := store.OpenShards(options)
 	s.Require().NoError(err)
-	pgStore.DB().SetMaxOpenConns(suiteConnections)
+	pgStore.GlobalDB().SetMaxOpenConns(suiteConnections)
 	s.Require().NoError(migrate(ctx, pgStore, options.DSN))
 	s.store = pgStore
+	s.failing = &failingQueries{}
+	pgStore.GlobalDB().AddQueryHook(s.failing)
+	if pgStore.Sharded() {
+		pgStore.ShardDB().AddQueryHook(s.failing)
+	}
 	s.T().Cleanup(func() { s.Require().NoError(pgStore.Close()) })
+	s.otherStore = pgStore
+	if s.otherShard != s.shard {
+		otherOptions := options
+		otherOptions.Shard = s.otherShard
+		if s.otherShardApart {
+			otherOptions.ShardDSN = testenv.Database(options.DSN, "othershard")
+		}
+		s.otherStore, err = store.OpenShards(otherOptions)
+		s.Require().NoError(err)
+		s.T().Cleanup(func() { s.Require().NoError(s.otherStore.Close()) })
+		if s.otherShardApart {
+			s.Require().NoError(migrate(ctx, s.otherStore, otherOptions.ShardDSN))
+		}
+	}
 	// Registered before everything that records, so it runs once all of it has closed and
 	// written what it held.
 	s.T().Cleanup(s.assertEveryRowNamesAKey)
+	queueFull := usageLostQueueFull(s)
+	s.T().Cleanup(func() {
+		s.Zero(usageLostQueueFull(s)-queueFull, "usage rows were lost to a full writer queue "+
+			"(suiteQueueSize) while this suite ran, by it or by a suite beside it")
+	})
 	if s.database != "" {
 		// Only a suite's own database is emptied, never the shared one. A run killed by
 		// -timeout skips its cleanups, and the database outlives it. A queued inbound row it
 		// left is claimed once its lease lapses, before SetupTest has made the channel fakes.
-		_, err := pgStore.DB().NewDelete().Model((*store.ScheduledTask)(nil)).Where("true").Exec(ctx)
+		_, err := pgStore.GlobalDB().NewDelete().Model((*store.ScheduledTask)(nil)).Where("true").Exec(ctx)
 		s.Require().NoError(err)
-		_, err = pgStore.DB().NewDelete().Model((*store.ChannelInbound)(nil)).Where("true").Exec(ctx)
+		_, err = pgStore.GlobalDB().NewDelete().Model((*store.ChannelInbound)(nil)).Where("true").Exec(ctx)
 		s.Require().NoError(err)
 	}
 
@@ -614,7 +679,7 @@ func (s *RouterSuite) SetupSuite() {
 	s.data = testData{suite: s}
 
 	s.chat = chattest.NewServer(s.T())
-	s.apps = &suiteApps{own: map[string]streamapp.Identity{}, readOnly: map[string]bool{}, waiting: map[string]bool{}, nowhere: map[string]bool{}, deployment: streamapp.NewDeployment(streamapp.DeploymentOptions{
+	s.apps = &suiteApps{own: map[string]streamapp.Identity{}, readOnly: map[string]bool{}, waiting: map[string]bool{}, nowhere: map[string]bool{}, keyless: map[string]bool{}, deployment: streamapp.NewDeployment(streamapp.DeploymentOptions{
 		APIKey: suiteStreamKey, Secret: suiteStreamSecret, BaseURL: s.chat.URL, App: suiteStreamApp,
 	})}
 	s.stream = streamapp.NewClients(s.apps, streamapp.ClientsOptions{})
@@ -635,11 +700,7 @@ func (s *RouterSuite) SetupSuite() {
 		s.stream = streamapp.NewClients(stored, streamapp.ClientsOptions{})
 	}
 	s.store.SetStreamPins(store.StreamPins{Deployment: s.apps.deployment.App, For: s.stream.Pin, Knowable: s.stream.DeploymentAppKnowable})
-	s.configs, err = redisready.Retry(redisAddr, func() (*appconfig.Store, error) {
-		return appconfig.New(appconfig.Options{Store: pgStore, Address: redisAddr, Logger: logger})
-	})
-	s.Require().NoError(err)
-	s.T().Cleanup(s.configs.Close)
+	s.configs = pgStore
 	s.relayPrefix = uuid.NewString()
 
 	if s.pricedFromDatabase {
@@ -749,13 +810,14 @@ func (s *RouterSuite) SetupSuite() {
 		Directory: directory,
 		Sessions:  sessions,
 		Store:     pgStore,
-		Configs:   s.configs,
 		Activity:  s.activity,
 		Live:      liveClient,
 		Auth:      s.authenticator(),
 		AuthMode:  s.authMode(),
 		// App mode is served only behind a gateway that declares kinds.
 		ProxyDeclaresKind: s.appMode,
+		ShardRouting:      s.shardRouting,
+		Shards:            s.shards,
 		Phone:             s.telephony(logger),
 		Simulations:       s.simulations(sessions, streams, logger),
 		Channels:          s.inbound,
@@ -763,13 +825,14 @@ func (s *RouterSuite) SetupSuite() {
 		Gate:              s.gate,
 		OpsKey:            suiteOpsKey,
 		ManageKey:         manageKey,
+		ActivityKeys:      []string{s.activityKey, s.previousActivityKey},
 		Secrets:           s.sealer,
 		Knowledge:         knowledgeBase,
 		KnowledgeLimits:   s.knowledgeLimits,
 		KnowledgeURLs:     s.pages(redisAddr),
 		KnowledgeFiles:    s.knowledgeFiles(redisAddr, knowledgeBase, streams.OCR),
-		Voices:            s.voiceService(),
-		VoiceLibrary:      voices.NewCatalogue(),
+		Voices:            s.voiceService(policies),
+		VoiceLibrary:      s.library,
 		Dispatch:          s.dispatch,
 		Policies:          policies,
 		Documents:         s.documentReader(),
@@ -784,6 +847,7 @@ func (s *RouterSuite) SetupSuite() {
 		HookSecret:         suiteStreamSecret,
 		TelnyxPublicKey:    s.telnyxPublicKey,
 		TwilioAuthToken:    s.twilioAuthToken,
+		TwilioAccountSID:   s.twilioAccountSID,
 		ChatInboundKeys:    s.chatInboundKeys,
 		TelnyxConnectionID: s.telnyxConnectionID,
 		AudioFloor:         s.audioFloor,
@@ -804,6 +868,7 @@ func (s *RouterSuite) SetupSuite() {
 		Episodes:              episodes,
 		SlackApps:             s.slackApps,
 		OperatorProviderApps:  s.operatorApps,
+		PrivateModelEndpoints: s.privateModels,
 	})
 	listener.Config.Handler = server.Handler()
 	listener.Start()
@@ -913,7 +978,7 @@ func (s *RouterSuite) channelBridge(logger *slog.Logger) *channelbridge.Bridge {
 func (s *RouterSuite) writtenByTheInboundWorker(channel string) {
 	var providerID string
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT provider_message_id FROM channel_thread_inbound WHERE channel_id = ? AND state = 'done'", channel).Scan(&providerID) == nil
 	}, settleFor, 10*time.Millisecond, "no written row of %s", channel)
 	stored := s.bridged(channel)
@@ -946,7 +1011,7 @@ func (s *RouterSuite) settled() {
 // inboundRows is how many of the test customer's queued inbound messages are in state.
 func (s *RouterSuite) inboundRows(state string) int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_thread_inbound WHERE customer_id = ? AND state = ?", s.customerID(), state).Scan(&count))
 	return count
 }
@@ -956,7 +1021,7 @@ func (s *RouterSuite) inboundRows(state string) int {
 func (s *RouterSuite) failedOnce() {
 	s.Require().Eventually(func() bool {
 		var count int
-		s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT count(*) FROM channel_thread_inbound WHERE customer_id = ? AND state = 'queued' AND attempts > 0", s.customerID()).Scan(&count))
 		return count > 0
 	}, settleFor, 5*time.Millisecond, "no attempt failed")
@@ -966,7 +1031,7 @@ func (s *RouterSuite) failedOnce() {
 // drop. The table is in the suite's own database (database), and when names the test's
 // customer, so no other test's rows meet it.
 func (s *RouterSuite) trigger(name, table, op, when, body string) (drop func()) {
-	db := s.store.DB()
+	db := s.store.GlobalDB()
 	_, err := db.ExecContext(context.Background(), "CREATE OR REPLACE FUNCTION "+name+"() RETURNS trigger AS $$ BEGIN IF "+when+" THEN "+body+
 		" END IF; RETURN COALESCE(NEW, OLD); END $$ LANGUAGE plpgsql")
 	s.Require().NoError(err)
@@ -986,6 +1051,39 @@ func (s *RouterSuite) trigger(name, table, op, when, body string) (drop func()) 
 	s.T().Cleanup(drop)
 	return drop
 }
+
+// failQueries makes each query that contains value fail, until the test ends.
+func (s *RouterSuite) failQueries(value string) {
+	s.failFirstQueries(value, math.MaxInt64)
+}
+
+// failFirstQueries makes the first n queries that contain value fail, and the ones after them
+// pass, until the test ends.
+func (s *RouterSuite) failFirstQueries(value string, n int64) {
+	s.failing.left.Store(n)
+	s.failing.value.Store(&value)
+	s.T().Cleanup(func() { s.failing.value.Store(nil) })
+}
+
+// failingQueries makes each query that contains a value fail, while it has failures left. The
+// query stops before Postgres gets it, with the same error as when the database does not answer
+// in time.
+type failingQueries struct {
+	value atomic.Pointer[string]
+	left  atomic.Int64
+}
+
+func (f *failingQueries) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	value := f.value.Load()
+	if value == nil || !strings.Contains(event.Query, *value) || f.left.Add(-1) < 0 {
+		return ctx
+	}
+	expired, cancel := context.WithDeadline(ctx, time.Time{})
+	cancel()
+	return expired
+}
+
+func (*failingQueries) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 // channelBridgeOptions are the options channelBridge builds the bridge with, for a test to
 // build another router's bridge.
@@ -1056,9 +1154,7 @@ func (s *RouterSuite) registrations(listener *httptest.Server, logger *slog.Logg
 func (s *RouterSuite) telephonyRecorder(logger *slog.Logger) *routing.Recorder {
 	list, err := pricing.NewList("vendor", pricing.AllAtCost(prices.Vendor().Entries), logger)
 	s.Require().NoError(err)
-	recorder := routing.NewRecorder(routing.Phone, s.store, s.live, list, logger)
-	s.T().Cleanup(recorder.Close)
-	return recorder
+	return routing.NewRecorderOn(routing.Phone, s.routerWriter(s.store, s.live, nil, logger), list, logger)
 }
 
 // vendorPriced is what used of a phone item costs at the vendor list's rates, as
@@ -1166,6 +1262,7 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 	hearing.Probe()
 	transcriber, err := sttrouter.New(sttrouter.Options{
 		Config: heard, Registry: hearing, Store: s.store, Live: s.live, Gate: gate, Logger: logger,
+		Writer: s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(transcriber.Close)
@@ -1299,7 +1396,7 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 	reasoner, err := llmrouter.New(llmrouter.Options{
 		Config: reasoned, Registry: reasoning, Store: s.store, Live: s.live,
 		Quota: limiter, Gate: gate, Pricer: pricer, Logger: logger,
-		Models: llmrouter.NewCustomModels(s.configs, s.sealer, false),
+		Models: llmrouter.NewCustomModels(s.store, s.sealer, false),
 		Writer: s.shippingWriter(gate, logger),
 	})
 	s.Require().NoError(err)
@@ -1319,7 +1416,7 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 	}
 	speaker, err := ttsrouter.New(ttsrouter.Options{
 		Config: ttsConfig, Registry: speaking, Store: s.store, Live: s.live, Voices: s.ttsVoices, Gate: gate,
-		Logger: logger,
+		Logger: logger, Writer: s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(speaker.Close)
@@ -1333,6 +1430,7 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 		Live:         s.live,
 		Gate:         gate,
 		Logger:       logger,
+		Writer:       s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(transcriptions.Close)
@@ -1345,42 +1443,47 @@ func (s *RouterSuite) routers(limiter *quota.Limiter, gate routing.Gate, logger 
 		Voices:    s.ttsVoices,
 		Gate:      gate,
 		Logger:    logger,
+		Writer:    s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(recordings.Close)
 
 	finding, err := searchrouter.New(searchrouter.Options{
 		Config: searchConfig(), Registry: searchRegistry(), Store: s.store, Live: s.live, Gate: gate,
-		Logger: logger,
+		Logger: logger, Writer: s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(finding.Close)
 
 	judging, err := decisionrouter.New(decisionrouter.Options{
 		Config: classifyConfig(), Registry: classifierRegistry(), Logger: logger,
+		Writer: s.routerWriter(nil, nil, nil, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(judging.Close)
 
 	imaging, err := imagerouter.New(imagerouter.Options{
 		Config: imageConfig(), Registry: painterRegistry(), Store: s.store, Live: s.live, Gate: gate, Logger: logger,
+		Writer: s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(imaging.Close)
 
 	detecting, err := detectionrouter.New(detectionrouter.Options{
 		Config: detectionConfig(), Registry: detectorRegistry(), Gate: gate, Logger: logger,
+		Writer: s.routerWriter(nil, nil, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(detecting.Close)
 
 	reading, err := ocrrouter.New(ocrrouter.Options{
 		Config: ocrConfig(), Registry: ocrRegistry(), Store: s.store, Live: s.live, Gate: gate, Logger: logger,
+		Writer: s.routerWriter(s.store, s.live, gate, logger),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(reading.Close)
 
-	conversing, err := stsrouterStub()
+	conversing, err := stsrouterStub(s.routerWriter(nil, nil, nil, logger))
 	s.Require().NoError(err)
 	s.T().Cleanup(conversing.Close)
 
@@ -1440,7 +1543,7 @@ func (s *RouterSuite) serverPricer(logger *slog.Logger) pricing.Pricer {
 func (s *RouterSuite) databasePrices(logger *slog.Logger) *pricing.Active {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.T().Cleanup(cancel)
-	_, _, _, err := s.store.SyncPrices(ctx, store.PriceLoad{Entries: pricingtest.Entries(s.T()),
+	_, _, _, err := s.store.PriceChanges.Sync(ctx, store.PriceLoad{Entries: pricingtest.Entries(s.T()),
 		Source: pricingtest.FileName + ", " + prices.VendorFile, Release: "suite"})
 	s.Require().NoError(err)
 	reasoned := reasoningConfig()
@@ -1449,7 +1552,7 @@ func (s *RouterSuite) databasePrices(logger *slog.Logger) *pricing.Active {
 	fallback, err := prices.Embedded(local, "suite", logger)
 	s.Require().NoError(err)
 	return pricing.NewActive(ctx, pricing.ActiveOptions{
-		Source: s.store.PriceSource(), Fallback: fallback, Local: local, Interval: suitePriceReload, RequireEntries: true, Logger: logger,
+		Source: s.store.PriceEntries.Source(), Fallback: fallback, Local: local, Interval: suitePriceReload, RequireEntries: true, Logger: logger,
 	})
 }
 
@@ -1507,10 +1610,10 @@ func (s *RouterSuite) sessionManager(
 		Store:         s.store,
 		Policies:      policies,
 		Live:          s.live,
-		Configs:       s.configs,
 		Directory:     directory,
 		Connectors:    connectors,
 		Logger:        logger,
+		Writer:        s.routerWriter(s.store, s.live, nil, logger),
 		// The policies a session's resume_history falls back to, as cmd/router passes them.
 		ResumeHistories: policies,
 		Edge: func(context.Context, session.Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
@@ -1555,11 +1658,56 @@ func (s *RouterSuite) assertEveryRowNamesAKey() {
 	}
 }
 
+// usageLostQueueFull is router_usage_lost_total{reason="queue_full"}, the rows a writer
+// dropped because its queue was full (internal/routing/writer.go).
+func usageLostQueueFull(s *RouterSuite) float64 {
+	families, err := prometheus.DefaultGatherer.Gather()
+	s.Require().NoError(err)
+	for _, family := range families {
+		if family.GetName() != "router_usage_lost_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, pair := range metric.GetLabel() {
+				if pair.GetName() == "reason" && pair.GetValue() == "queue_full" {
+					return metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// suiteQueueSize is how many rows each writer of the suite holds, where a deployment's holds
+// 20,000 (internal/routing/writer.go). A finished suite's routers and writers stay in memory
+// to the end of the package: goroutines of its nodes that never end, such as
+// Server.expireProxies, hold its Server. At 20,000 rows a writer, the package needed more
+// memory than CI's runner has (AI-3471). A writer drains its queue in batches of 200 as rows
+// arrive, and 1,000 is five such batches.
+const suiteQueueSize = 1_000
+
+// routerWriter is the writer a router or recorder builds for itself when given none
+// (routing.newRecorder), over pgStore and liveClient, with room for suiteQueueSize rows. It
+// writes what it holds when the suite ends, as the router's Close would.
+func (s *RouterSuite) routerWriter(pgStore *store.Store, liveClient *live.Client, gate routing.Gate, logger *slog.Logger) *routing.Writer {
+	options := routing.WriterOptions{Store: pgStore, Live: liveClient, Logger: logger, QueueSize: suiteQueueSize}
+	if counter, ok := gate.(interface{ Counted([]routing.Acked) }); ok {
+		options.Counted = counter.Counted
+	}
+	writer := routing.NewWriter(options)
+	s.T().Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		writer.Close(ctx)
+	})
+	return writer
+}
+
 // shippingWriter is the writer the conversation model records through when the suite ships,
-// and nil, a writer of the router's own, when it does not.
+// and routerWriter's, the one the router would build for itself, when it does not.
 func (s *RouterSuite) shippingWriter(gate routing.Gate, logger *slog.Logger) *routing.Writer {
 	if !s.shipping {
-		return nil
+		return s.routerWriter(s.store, s.live, gate, logger)
 	}
 	if s.usage == nil {
 		s.usage = usagetest.Start(s.T(), usagetest.Options{Logger: logger})
@@ -1570,7 +1718,7 @@ func (s *RouterSuite) shippingWriter(gate routing.Gate, logger *slog.Logger) *ro
 	}
 	writer := routing.NewWriter(routing.WriterOptions{
 		Store: s.store, Live: s.live, Logger: logger, Gate: gate, Usage: s.usage.Client, Source: "router/suite/" + s.utils.uuid(),
-		Shipped: shipped,
+		Shipped: shipped, QueueSize: suiteQueueSize,
 	})
 	s.T().Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -1589,7 +1737,7 @@ func (s *RouterSuite) authenticator() auth.Authenticator {
 	if s.byCustomer {
 		return auth.NewProxy(auth.ProxyOptions{})
 	}
-	authenticator, err := auth.New(auth.APIKey, s.configs.Lookup(s.sealer))
+	authenticator, err := auth.New(auth.APIKey, s.configs.APIKeys.Lookup(s.sealer))
 	s.Require().NoError(err)
 	return authenticator
 }
@@ -1605,6 +1753,8 @@ func (s *RouterSuite) forgetPhoneVendors() {
 			s.Require().NoError(os.Unsetenv(name))
 		}
 	}
+	// The Twilio provider reads it too, to point numbers at the call webhook.
+	s.Require().NoError(os.Unsetenv(twiliosig.AuthTokenEnvVar))
 }
 
 // telephony serves the phone paths against the real vendor registry with no credentials
@@ -1642,7 +1792,6 @@ func (s *RouterSuite) telephonySealedBy(sealer *auth.Sealer, apps phone.Apps, lo
 		Sealer:    sealer,
 		SIPTrunks: siptrunk.New(siptrunk.Options{Logger: logger}),
 		Apps:      apps,
-		Redis:     s.live.Redis(),
 		Logger:    logger,
 	})
 	s.Require().NoError(err)
@@ -1666,16 +1815,14 @@ func (s *RouterSuite) meteringRecorder(logger *slog.Logger) *routing.Recorder {
 	if s.prices != nil {
 		pricer = s.prices
 	}
-	recorder := routing.NewRecorder(routing.Knowledge, s.store, s.live, pricer, logger)
-	s.T().Cleanup(recorder.Close)
-	return recorder
+	return routing.NewRecorderOn(routing.Knowledge, s.routerWriter(s.store, s.live, nil, logger), pricer, logger)
 }
 
 func (s *RouterSuite) knowledgeWriter(gate routing.Gate) *metered.Knowledge {
 	s.knowledge = newKnowledgeBase()
 	backends := map[string]knowledge.Backend{pricing.DefaultRegion: s.knowledge}
 	maps.Copy(backends, s.knowledgeRegions)
-	return metered.NewRegionalKnowledge(backends, s.metering, gate, s.store)
+	return metered.NewRegionalKnowledge(backends, s.metering, gate, s.store.KnowledgeNamespaces)
 }
 
 // schedulingModel is a model that runs the tool calls its test queued in the suite's
@@ -1720,10 +1867,12 @@ func (s *RouterSuite) knowledgeFiles(redisAddr string, base *metered.Knowledge, 
 	s.knowledgeBucket = bucket
 
 	n := redisDB.Add(1)
+	s.knowledgeRedis = asynq.RedisClientOpt{Addr: redisAddr, DB: int(n)%15 + 1}
+	s.knowledgeQueue = fmt.Sprintf("knowledge-files-%d", n)
 	service, err := files.New(files.Options{
 		Store:         s.store,
-		Redis:         asynq.RedisClientOpt{Addr: redisAddr, DB: int(n)%15 + 1},
-		Queue:         fmt.Sprintf("knowledge-files-%d", n),
+		Redis:         s.knowledgeRedis,
+		Queue:         s.knowledgeQueue,
 		Bucket:        bucket,
 		Extractor:     extract.New(extract.Options{}),
 		Knowledge:     base,
@@ -1739,7 +1888,7 @@ func (s *RouterSuite) knowledgeFiles(redisAddr string, base *metered.Knowledge, 
 
 // voiceService keeps the voices a customer brought with them in a directory of its own,
 // and clones them at a provider answering in process.
-func (s *RouterSuite) voiceService() *voices.Service {
+func (s *RouterSuite) voiceService(gate routing.Gate) *voices.Service {
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/v1/text-to-speech/") {
 			_, _ = w.Write([]byte("spoken"))
@@ -1758,7 +1907,8 @@ func (s *RouterSuite) voiceService() *voices.Service {
 	cloners := voices.NewRegistry()
 	cloners.Register("elevenlabs", cloner)
 
-	service, err := voices.NewService(voices.Options{Store: s.configs, Bucket: bucket, Cloners: cloners, Recorder: s.metering})
+	service, err := voices.NewService(voices.Options{Store: s.store, Bucket: bucket, Cloners: cloners, Recorder: s.metering, Gate: gate,
+		Models: s.ttsConfig.Providers})
 	s.Require().NoError(err)
 	return service
 }
@@ -1806,11 +1956,11 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 		Memory:        metered.NewMemory(&keptMemories{}, s.metering),
 		Conversations: s.conversations,
 		Stream:        s.stream,
-		Store:         s.store,
+		Store:         s.otherStore,
 		Live:          s.live,
-		Configs:       s.configs,
 		Directory:     directory,
 		Logger:        logger,
+		Writer:        s.routerWriter(s.otherStore, s.live, nil, logger),
 		Edge: func(context.Context, session.Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
 			return &silentEdge{inbound: make(chan agent.InboundAudio, 4)}, nil
 		},
@@ -1827,10 +1977,11 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 		Streams:           s.streams,
 		Sessions:          sessions,
 		Directory:         directory,
+		ShardRouting:      s.shardRouting,
+		Shards:            s.shards,
 		Dispatch:          workers,
 		Workers:           everyWorker,
-		Store:             s.store,
-		Configs:           s.configs,
+		Store:             s.otherStore,
 		Activity:          s.activity,
 		Live:              s.live,
 		Auth:              s.authenticator(),
@@ -1864,6 +2015,24 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 // store; nil is a node with no store. Its sessions keep the suite's.
 func (s *RouterSuite) otherNodeServingFrom(served *store.Store, workers *dispatch.Pool, keyring *auth.Sealer, logger *slog.Logger) (*httptest.Server, *Server, *session.Manager) {
 	return s.otherNodeHolding(workers, keyring, logger, func(o *Options) { o.Store = served })
+}
+
+// onAShardDown is the app's client on a node of the suite's databases, shard "here", whose
+// other shard, "there", has no node up; and the store that node reads.
+func (s *RouterSuite) onAShardDown() (*testClient, *store.Store) {
+	shared := testDatabase(s.T(), os.Getenv("ROUTER_POSTGRES_DSN"))
+	if s.database != "" {
+		shared = testenv.Database(shared, s.database)
+	}
+	own := shared
+	if shardDSN := os.Getenv("ROUTER_POSTGRES_SHARD_DSN"); shardDSN != "" {
+		own = testDatabase(s.T(), shardDSN)
+	}
+	served, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: own, Shard: "here", Shards: []string{"here", "there"}})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(served.Close()) })
+	other, _, _ := s.otherNodeServingFrom(served, nil, s.sealer, slog.New(slog.DiscardHandler))
+	return s.serverClient.on(other), served
 }
 
 // deploymentWorkers is one node's view of the dispatch workers across the deployment.
@@ -1908,9 +2077,9 @@ func (s *RouterSuite) nodeDirectory(listener *httptest.Server, shard string, log
 // The node subscribes to its relay as it is made, each subscription on a Redis connection of
 // its own that rueidis gives 5 s to open, which a loaded machine can overrun. The node is then
 // made again until redisready's minute is up, each attempt with a Redis client of its own for
-// the relay, closed when the attempt fails: NewServer holds the subscriptions against the
-// process and goes on trying a failed one, so only closing the client ends what a node nobody
-// holds left subscribed, which would otherwise answer the relay beside the node that came up.
+// the relay, closed when the attempt fails. The node is closed when the test that made it ends,
+// as cmd/router closes it, which ends its subscriptions: they would otherwise hold the node,
+// and everything it was made with, to the end of the package.
 func (s *RouterSuite) newNode(shard string, logger *slog.Logger, options Options) *Server {
 	server, err := redisready.Retry(s.shardRedisAddr, func() (*Server, error) {
 		redis, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{s.shardRedisAddr}, DisableCache: true})
@@ -1930,6 +2099,12 @@ func (s *RouterSuite) newNode(shard string, logger *slog.Logger, options Options
 		return server, nil
 	})
 	s.Require().NoError(err)
+	// After redis.Close's cleanup, so it runs first: the subscriptions end on the cancel.
+	s.T().Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.NoError(server.Close(ctx), "the node's background work did not end")
+	})
 	return server
 }
 
@@ -1951,8 +2126,10 @@ func (s *RouterSuite) workBus(logger *slog.Logger) *relay.Bus {
 const suiteFresh = 100 * time.Millisecond
 
 // suiteFlushMaxLag is how long a suite sharing holds lets one wait unshared before billable
-// work is refused, rather than a router's ten seconds.
-const suiteFlushMaxLag = 300 * time.Millisecond
+// work is refused, rather than a router's ten seconds. It is longer than one flush pass may
+// take (the policy package's flushPassTimeout), so a pass a loaded machine holds up refuses
+// nothing.
+const suiteFlushMaxLag = 3 * time.Second
 
 // limitApp gives the suite's app a spend limit of its own, as the limits API writes one.
 func (s *RouterSuite) limitApp(interval usage.Interval, micros int64) store.Limit {
@@ -1960,7 +2137,7 @@ func (s *RouterSuite) limitApp(interval usage.Interval, micros int64) store.Limi
 		Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.app.organization.ID, AppID: s.customerID(),
 		Interval: interval, LimitMicros: micros, UpdatedBy: "test",
 	}
-	s.Require().NoError(s.store.CreateLimit(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.store.Limits.Insert(s.T().Context(), &limit, store.LimitAudit{CustomerID: s.customerID(), Source: store.AuditSourceAPI}))
 	return limit
 }
 
@@ -2001,6 +2178,8 @@ func (s *RouterSuite) policies(logger *slog.Logger) *policy.Enforcer {
 type usageFront struct {
 	server *httptest.Server
 	down   atomic.Bool
+	// stalled, while set, takes each call and answers none until the channel is closed.
+	stalled atomic.Pointer[chan struct{}]
 }
 
 func newUsageFront(t *testing.T, service *usagetest.Service) *usageFront {
@@ -2010,6 +2189,13 @@ func newUsageFront(t *testing.T, service *usagetest.Service) *usageFront {
 	front := &usageFront{}
 	front.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if front.down.Load() {
+			panic(http.ErrAbortHandler)
+		}
+		if stalled := front.stalled.Load(); stalled != nil {
+			select {
+			case <-*stalled:
+			case <-r.Context().Done():
+			}
 			panic(http.ErrAbortHandler)
 		}
 		proxy.ServeHTTP(w, r)
@@ -2076,6 +2262,45 @@ func (s *RouterSuite) useApp(app testApp) {
 // to. It is what the rows a test writes straight into Postgres have to be filed under to
 // be the ones an endpoint reads back.
 func (s *RouterSuite) customerID() string { return s.app.app.ID }
+
+// endHere ends a session in this node the way one nobody watches ends, which leaves it held
+// under its id, ended, with the spec it ran on.
+func (s *RouterSuite) endHere(id string) {
+	held, ok := s.manager.Get(id, session.Owner{CustomerID: s.customerID(), Kind: auth.KindServer})
+	s.Require().True(ok, "session %s is held here", id)
+	s.Require().NoError(held.Close())
+	s.Require().Equal(session.Ended, held.State())
+}
+
+// heldCall records call as one of a session's, of its customer and agent, under the config
+// and in the conversation named: the session first, as its recorder writes them, since the
+// call names it.
+func (s *RouterSuite) heldCall(call store.Call, configID, conversationID string) store.Call {
+	call.SessionID = s.utils.uuid()
+	call.ConversationID = cmp.Or(call.ConversationID, conversationID)
+	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{ID: call.SessionID,
+		CustomerID: call.CustomerID, AgentID: call.AgentID, ConfigID: configID, ConversationID: conversationID,
+		CreatedAt: call.StartedAt}))
+	s.Require().NoError(s.store.Calls.Start(context.Background(), &call))
+	return call
+}
+
+// sessionCall reads the newest call of session id into into, which may be nil, and answers
+// as a read of the call would: 200, or 404 while none is written.
+func (s *RouterSuite) sessionCall(id string, into *Call) int {
+	var listed []Call
+	status := s.serverClient.do(http.MethodGet, "/v1/agents/calls?session_id="+url.QueryEscape(id), nil, &listed)
+	if status != http.StatusOK {
+		return status
+	}
+	if len(listed) == 0 {
+		return http.StatusNotFound
+	}
+	if into != nil {
+		*into = listed[0]
+	}
+	return http.StatusOK
+}
 
 // signedFor is a token for an end user signed with secret, for a test presenting one that
 // was signed with the wrong one.
@@ -2170,7 +2395,7 @@ func (c *testClient) raw(method, path string, body any) *http.Response {
 		require.NoError(err)
 		payload = bytes.NewReader(encoded)
 	}
-	request, err := http.NewRequest(method, c.suite.server.URL+path, payload)
+	request, err := http.NewRequest(method, c.base()+path, payload)
 	require.NoError(err)
 	request.Header = c.header.Clone()
 	request.Header.Set("Content-Type", "application/json")
@@ -2250,6 +2475,11 @@ func (c *testClient) refusal(path string) (int, string) {
 
 // dial opens a socket with the client's credentials, the way watch describes.
 func (c *testClient) dial(path string) (*websocket.Conn, *http.Response, error) {
+	return c.dialWith(websocket.DefaultDialer, path)
+}
+
+// dialWith is dial through dialer.
+func (c *testClient) dialWith(dialer *websocket.Dialer, path string) (*websocket.Conn, *http.Response, error) {
 	address := "ws" + strings.TrimPrefix(c.base(), "http") + path
 	query := url.Values{}
 	if key := c.header.Get(auth.APIKeyHeader); key != "" {
@@ -2267,7 +2497,37 @@ func (c *testClient) dial(path string) (*websocket.Conn, *http.Response, error) 
 		}
 	}
 
-	return websocket.DefaultDialer.Dial(address, c.header.Clone())
+	return dialer.Dial(address, c.header.Clone())
+}
+
+// handshaking starts opening the socket at path and returns what gives it up: its connection is
+// closed before the router answers, as a client that stops waiting does.
+func (c *testClient) handshaking(path string) (giveUp func()) {
+	connected := make(chan net.Conn, 1)
+	dialer := &websocket.Dialer{NetDialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		connection, err := (&net.Dialer{}).DialContext(ctx, network, address)
+		if err == nil {
+			connected <- connection
+		}
+		return connection, err
+	}}
+	answered := make(chan struct{})
+	go func() {
+		defer close(answered)
+		if connection, _, err := c.dialWith(dialer, path); err == nil {
+			_ = connection.Close()
+		}
+	}()
+	var connection net.Conn
+	select {
+	case connection = <-connected:
+	case <-answered:
+		c.suite.Require().FailNow("the socket " + path + " never connected")
+	}
+	return func() {
+		_ = connection.Close()
+		<-answered
+	}
 }
 
 // opens a socket the handshake must accept.
@@ -2349,11 +2609,28 @@ func (u testUtils) callID() string {
 	return "call-" + u.uuid()
 }
 
-// number is an E.164 number nobody else holds. It is random rather than read off the clock,
-// which ticks in microseconds on some machines and so repeats every ten thousand numbers,
-// and nothing a suite holds is ever released.
+// number is an E.164 number nobody else holds in this run: the next one of a sequence that
+// starts at a random place, so that runs on a kept database start in different places. A number
+// drawn at random could be one another suite of the run holds, and a held number is unique
+// (phone_numbers_held_idx). It is not read off the clock, which ticks in microseconds on some
+// machines and so repeats every ten thousand numbers.
 func (testUtils) number() string {
-	return fmt.Sprintf("+1512%07d", rand.IntN(10_000_000))
+	return fmt.Sprintf("+1512%07d", nextNumber())
+}
+
+// numbersFrom and numbersGiven make nextNumber's numbers; numbersAvailable is how many there
+// are in the seven digits of a number's last part.
+const numbersAvailable = 10_000_000
+
+var (
+	numbersFrom  = rand.Int64N(numbersAvailable)
+	numbersGiven atomic.Int64
+)
+
+// nextNumber is a number no other call in this process gave out, as the seven digits that follow
+// a prefix.
+func nextNumber() int64 {
+	return (numbersFrom + numbersGiven.Add(1)) % numbersAvailable
 }
 
 // testData makes what a test runs against. Nothing it makes is cleaned up.
@@ -2365,9 +2642,9 @@ type testData struct {
 func (d testData) createApp() testApp {
 	s, ctx := d.suite, context.Background()
 	organization := store.Organization{Name: "organization-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateOrganization(ctx, &organization))
+	s.Require().NoError(s.store.Organizations.Insert(ctx, &organization))
 	app := store.App{OrganizationID: organization.ID, Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(ctx, &app))
+	s.Require().NoError(s.store.Apps.Insert(ctx, &app))
 	return d.keyed(organization, app)
 }
 
@@ -2376,9 +2653,9 @@ func (d testData) createApp() testApp {
 func (d testData) createAppAdmitting(settings store.AppSettings) testApp {
 	s, ctx := d.suite, context.Background()
 	organization := store.Organization{Name: "organization-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateOrganization(ctx, &organization))
+	s.Require().NoError(s.store.Organizations.Insert(ctx, &organization))
 	app := store.App{OrganizationID: organization.ID, Name: "app-" + s.utils.uuid(), Settings: settings}
-	s.Require().NoError(s.store.CreateApp(ctx, &app))
+	s.Require().NoError(s.store.Apps.Insert(ctx, &app))
 	return d.keyed(organization, app)
 }
 
@@ -2391,7 +2668,7 @@ func (d testData) keyed(organization store.Organization, app store.App) testApp 
 	s.Require().NoError(err)
 	sealed, err := s.sealer.Seal(secret)
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.CreateAPIKey(ctx, &store.APIKey{
+	s.Require().NoError(s.store.APIKeys.Insert(ctx, &store.APIKey{
 		ID: key, AppID: app.ID, Name: "router suite", Env: string(auth.Test),
 		Sealed: sealed, KEKVersion: auth.KEKVersion, Last4: auth.Last4(secret), CreatedBy: "router suite",
 	}))
@@ -2432,7 +2709,7 @@ func (d testData) briefed(request CreateSessionRequest) (CreateSessionRequest, s
 // straight into the store, for an endpoint that only asks whose a session is.
 func (d testData) storedSession() string {
 	id := "session-" + d.suite.utils.uuid()
-	d.suite.Require().NoError(d.suite.store.SaveSession(context.Background(),
+	d.suite.Require().NoError(d.suite.store.Sessions.Upsert(context.Background(),
 		&store.AgentSession{ID: id, CustomerID: d.suite.customerID()}))
 	return id
 }
@@ -2481,10 +2758,10 @@ func (d testData) backendOfAnotherApp() *testClient {
 // pointer because the absent key means something other than the zero one.
 func pointerTo[T any](value T) *T { return &value }
 
-// textSession asks for a conversation in writing, which needs no call.
+// textSession asks for a conversation in writing, which needs no call, on the default models,
+// so a device may open it as a backend does.
 func textSession(id *string) CreateSessionRequest {
-	target := "en-low-latency"
-	return CreateSessionRequest{Id: id, Llm: &target}
+	return CreateSessionRequest{Id: id}
 }
 
 // inProject lists the sessions in one project, which is how a test sharing a fixture's app
@@ -2530,6 +2807,9 @@ type suiteApps struct {
 	waiting map[string]bool
 	// nowhere are customers with no app to act in at all.
 	nowhere map[string]bool
+	// keyless are customers of a deployment with no Stream keys, which the deployment's own app
+	// answers ErrNoIdentity for whatever it is asked, as an unconfigured Deployment does.
+	keyless map[string]bool
 	// perApp answers as app mode does, where customers act in apps of their own.
 	perApp bool
 }
@@ -2543,7 +2823,7 @@ func (a *suiteApps) PerApp() bool {
 func (a *suiteApps) For(ctx context.Context, customer string) (streamapp.Identity, error) {
 	a.mu.Lock()
 	identity, ok := a.own[customer]
-	waiting, nowhere := a.waiting[customer], a.nowhere[customer]
+	waiting, nowhere := a.waiting[customer], a.nowhere[customer] || a.keyless[customer]
 	a.mu.Unlock()
 	switch {
 	case waiting:
@@ -2569,11 +2849,13 @@ func (a *suiteApps) ForApp(ctx context.Context, customer string, app int64) (str
 func (a *suiteApps) ForAppReading(ctx context.Context, customer string, app int64) (streamapp.Identity, error) {
 	a.mu.Lock()
 	identity, ok := a.own[customer]
-	waiting := a.waiting[customer]
+	waiting, keyless := a.waiting[customer], a.keyless[customer]
 	a.mu.Unlock()
 	switch {
 	case waiting:
 		return streamapp.Identity{}, streamapp.ErrDeploymentAppUnknown
+	case keyless:
+		return streamapp.Identity{}, streamapp.ErrNoIdentity
 	case ok && identity.StreamApp == app:
 		return identity, nil
 	}

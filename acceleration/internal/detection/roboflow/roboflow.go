@@ -1,16 +1,18 @@
 // Package roboflow finds objects with Roboflow's serverless API, through a hosted model or
-// a Workflow.
+// the Workflow built in here.
 //
 // The model name says which. A "project/version" such as coco/3 is a hosted model, called
 // with the image as the body. "faces" is a Workflow built in here: face detection, a crop
 // of each face, and a CLIP embedding of each crop, so every box carries a vector a caller
-// can match against people it has seen. "workflow" is the caller's own Workflow, named in
-// an overwrite by its workspace and id or sent whole as a specification. A Workflow must
-// output "predictions", and may output "embeddings", one per box in the same order.
+// can match against people it has seen.
 //
-// A hosted model is billed one image a call, and a Workflow one image for every model call
-// Roboflow lists, at the rate of the smallest models. A caller's Workflow that runs larger
-// models, or a vision language model billed by the second, costs Roboflow more than that.
+// A caller never names or sends a Workflow of their own. Roboflow runs a Workflow on the
+// account of the key it is sent with, which is the deployment's, and a Workflow can run any
+// block Roboflow has: vision language models billed by the second, uploads into the
+// account's datasets, webhooks and emails.
+//
+// A hosted model is billed one image a call, and the face Workflow one image for every model
+// call Roboflow lists, at the rate of the smallest models.
 package roboflow
 
 import (
@@ -41,11 +43,8 @@ const APIKeyEnvVar = "ROBOFLOW_API_KEY"
 // DefaultBaseURL is Roboflow's serverless API, which serves both models and Workflows.
 const DefaultBaseURL = "https://serverless.roboflow.com"
 
-// The two model names that are Workflows rather than hosted models.
-const (
-	ModelFaces    = "faces"
-	ModelWorkflow = "workflow"
-)
+// ModelFaces is the model name of the face Workflow rather than a hosted model.
+const ModelFaces = "faces"
 
 const (
 	// requestTimeout is Roboflow's own cap on a Workflow, 20 seconds, and some slack.
@@ -76,7 +75,7 @@ var facesSpecification = json.RawMessage(`{
 type Options struct {
 	// APIKey defaults to ROBOFLOW_API_KEY.
 	APIKey string
-	// Model is a "project/version", ModelFaces or ModelWorkflow.
+	// Model is a "project/version" or ModelFaces.
 	Model string
 	// BaseURL replaces the API host, which is what a test needs.
 	BaseURL string
@@ -97,10 +96,10 @@ func New(options Options) (*Provider, error) {
 	if keys.Len() == 0 {
 		return nil, stack.Wrap(errors.New("roboflow: " + APIKeyEnvVar + " is required"))
 	}
-	if options.Model != ModelFaces && options.Model != ModelWorkflow {
+	if options.Model != ModelFaces {
 		project, version, found := strings.Cut(options.Model, "/")
 		if _, err := strconv.Atoi(version); !found || project == "" || err != nil {
-			return nil, stack.Wrap(fmt.Errorf("roboflow: %q is not a project/version such as coco/3, %s or %s", options.Model, ModelFaces, ModelWorkflow))
+			return nil, stack.Wrap(fmt.Errorf("roboflow: %q is not a project/version such as coco/3, or %s", options.Model, ModelFaces))
 		}
 	}
 	if options.BaseURL == "" {
@@ -129,15 +128,6 @@ func (p *Provider) Start(context.Context) error { return nil }
 // Close releases nothing.
 func (p *Provider) Close() error { return nil }
 
-// Overwrite is what a caller may set for Roboflow. Only ModelWorkflow reads it.
-type Overwrite struct {
-	// Workspace and WorkflowID name a saved Workflow.
-	Workspace  string `json:"workspace"`
-	WorkflowID string `json:"workflow_id"`
-	// Specification is a whole Workflow, in place of a saved one.
-	Specification json.RawMessage `json:"specification"`
-}
-
 // predictions is how Roboflow writes boxes, from a model and from a Workflow alike.
 type predictions struct {
 	Image struct {
@@ -164,30 +154,12 @@ type workflowResponse struct {
 // Detect runs the model or Workflow over the image.
 func (p *Provider) Detect(ctx context.Context, request detection.Request) (detection.Result, error) {
 	encoded := base64.StdEncoding.EncodeToString(request.Image)
-	switch p.model {
-	case ModelFaces:
+	if p.model == ModelFaces {
 		if len(request.Overwrite) > 0 {
 			return detection.Result{}, detection.Fail(detection.UnsupportedOption,
 				errors.New("roboflow: faces is a fixed Workflow and takes no overwrite"))
 		}
-		return p.workflow(ctx, "/workflows/run", facesSpecification, encoded, request)
-	case ModelWorkflow:
-		var overwrite Overwrite
-		if len(request.Overwrite) > 0 {
-			if err := json.Unmarshal(request.Overwrite, &overwrite); err != nil {
-				return detection.Result{}, detection.Fail(detection.UnsupportedOption, fmt.Errorf("roboflow: the overwrite is not valid: %w", err))
-			}
-		}
-		switch {
-		case len(overwrite.Specification) > 0:
-			return p.workflow(ctx, "/workflows/run", overwrite.Specification, encoded, request)
-		case overwrite.Workspace != "" && overwrite.WorkflowID != "":
-			path := "/infer/workflows/" + url.PathEscape(overwrite.Workspace) + "/" + url.PathEscape(overwrite.WorkflowID)
-			return p.workflow(ctx, path, nil, encoded, request)
-		default:
-			return detection.Result{}, detection.Fail(detection.UnsupportedOption,
-				errors.New("roboflow: a workflow needs a workspace and a workflow_id, or a specification, in overwrites.roboflow"))
-		}
+		return p.workflow(ctx, encoded, request)
 	}
 
 	if len(request.Overwrite) > 0 || request.Embeddings {
@@ -208,18 +180,15 @@ func (p *Provider) Detect(ctx context.Context, request detection.Request) (detec
 	return boxesOf(answer, nil, request), nil
 }
 
-// workflow runs a saved Workflow at path, or the specification when one is given.
-func (p *Provider) workflow(ctx context.Context, path string, specification json.RawMessage, encoded string, request detection.Request) (detection.Result, error) {
+// workflow runs the face Workflow, sent whole with every call.
+func (p *Provider) workflow(ctx context.Context, encoded string, request detection.Request) (detection.Result, error) {
 	build := func(key string) (string, []byte, error) {
-		body := map[string]any{
-			"api_key": key,
-			"inputs":  map[string]any{"image": map[string]string{"type": "base64", "value": encoded}},
-		}
-		if specification != nil {
-			body["specification"] = specification
-		}
-		payload, err := json.Marshal(body)
-		return p.baseURL + path, payload, err
+		payload, err := json.Marshal(map[string]any{
+			"api_key":       key,
+			"inputs":        map[string]any{"image": map[string]string{"type": "base64", "value": encoded}},
+			"specification": facesSpecification,
+		})
+		return p.baseURL + "/workflows/run", payload, err
 	}
 	var answer workflowResponse
 	header, err := p.post(ctx, "application/json", build, &answer)

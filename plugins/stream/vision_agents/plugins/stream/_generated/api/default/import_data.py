@@ -69,6 +69,11 @@ def _parse_response(
 
         return response_409
 
+    if response.status_code == 413:
+        response_413 = ErrorResponse.from_dict(response.json())
+
+        return response_413
+
     if response.status_code == 500:
         response_500 = ErrorResponse.from_dict(response.json())
 
@@ -78,6 +83,11 @@ def _parse_response(
         response_503 = ErrorResponse.from_dict(response.json())
 
         return response_503
+
+    if response.status_code == 504:
+        response_504 = ErrorResponse.from_dict(response.json())
+
+        return response_504
 
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
@@ -104,16 +114,22 @@ def sync_detailed(
 ) -> Response[DataImport | ErrorResponse]:
     """Write an export, or a batch of changes, into this deployment
 
-     Takes what `exportData` produced, and the same lines with a `change` in place of a `row` for what
-    `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an
-    export from one app cannot be imported into another's rows, and rows belonging to a customer through
-    a parent are only written where that parent is the caller's.
+     Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines
+    with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under
+    the calling app whatever the file says, so an export from one app cannot be imported into another's
+    rows, and rows belonging to a customer through a parent are only written where that parent is the
+    caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not
+    hold here is refused with 400.
     An export's rows are written as the source had them, so an export is refused with 409 `conflict`,
     before any of its rows is written, for an app that already has a row here in a table of the shared
     database: it would undo what was done here since. `full=true` writes it over them anyway, and
     importing the same export twice that way leaves what importing it once would. Changes are applied
     whatever the app holds. An import that stopped partway is run again with `full=true`, since the app
     then holds its first rows.
+    A number on the app's own SIP trunk that another app holds here is not written, nor counted in
+    `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
+    An app runs one import at a time on a router, and a router runs at most four imports at once. An
+    import ends with a 504 `timeout` when a line has taken a minute to arrive.
     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 
     Args:
@@ -148,16 +164,22 @@ def sync(
 ) -> DataImport | ErrorResponse | None:
     """Write an export, or a batch of changes, into this deployment
 
-     Takes what `exportData` produced, and the same lines with a `change` in place of a `row` for what
-    `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an
-    export from one app cannot be imported into another's rows, and rows belonging to a customer through
-    a parent are only written where that parent is the caller's.
+     Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines
+    with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under
+    the calling app whatever the file says, so an export from one app cannot be imported into another's
+    rows, and rows belonging to a customer through a parent are only written where that parent is the
+    caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not
+    hold here is refused with 400.
     An export's rows are written as the source had them, so an export is refused with 409 `conflict`,
     before any of its rows is written, for an app that already has a row here in a table of the shared
     database: it would undo what was done here since. `full=true` writes it over them anyway, and
     importing the same export twice that way leaves what importing it once would. Changes are applied
     whatever the app holds. An import that stopped partway is run again with `full=true`, since the app
     then holds its first rows.
+    A number on the app's own SIP trunk that another app holds here is not written, nor counted in
+    `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
+    An app runs one import at a time on a router, and a router runs at most four imports at once. An
+    import ends with a 504 `timeout` when a line has taken a minute to arrive.
     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 
     Args:
@@ -187,16 +209,22 @@ async def asyncio_detailed(
 ) -> Response[DataImport | ErrorResponse]:
     """Write an export, or a batch of changes, into this deployment
 
-     Takes what `exportData` produced, and the same lines with a `change` in place of a `row` for what
-    `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an
-    export from one app cannot be imported into another's rows, and rows belonging to a customer through
-    a parent are only written where that parent is the caller's.
+     Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines
+    with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under
+    the calling app whatever the file says, so an export from one app cannot be imported into another's
+    rows, and rows belonging to a customer through a parent are only written where that parent is the
+    caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not
+    hold here is refused with 400.
     An export's rows are written as the source had them, so an export is refused with 409 `conflict`,
     before any of its rows is written, for an app that already has a row here in a table of the shared
     database: it would undo what was done here since. `full=true` writes it over them anyway, and
     importing the same export twice that way leaves what importing it once would. Changes are applied
     whatever the app holds. An import that stopped partway is run again with `full=true`, since the app
     then holds its first rows.
+    A number on the app's own SIP trunk that another app holds here is not written, nor counted in
+    `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
+    An app runs one import at a time on a router, and a router runs at most four imports at once. An
+    import ends with a 504 `timeout` when a line has taken a minute to arrive.
     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 
     Args:
@@ -229,16 +257,22 @@ async def asyncio(
 ) -> DataImport | ErrorResponse | None:
     """Write an export, or a batch of changes, into this deployment
 
-     Takes what `exportData` produced, and the same lines with a `change` in place of a `row` for what
-    `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an
-    export from one app cannot be imported into another's rows, and rows belonging to a customer through
-    a parent are only written where that parent is the caller's.
+     Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines
+    with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under
+    the calling app whatever the file says, so an export from one app cannot be imported into another's
+    rows, and rows belonging to a customer through a parent are only written where that parent is the
+    caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not
+    hold here is refused with 400.
     An export's rows are written as the source had them, so an export is refused with 409 `conflict`,
     before any of its rows is written, for an app that already has a row here in a table of the shared
     database: it would undo what was done here since. `full=true` writes it over them anyway, and
     importing the same export twice that way leaves what importing it once would. Changes are applied
     whatever the app holds. An import that stopped partway is run again with `full=true`, since the app
     then holds its first rows.
+    A number on the app's own SIP trunk that another app holds here is not written, nor counted in
+    `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
+    An app runs one import at a time on a router, and a router runs at most four imports at once. An
+    import ends with a 504 `timeout` when a line has taken a minute to arrive.
     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 
     Args:

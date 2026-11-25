@@ -15,7 +15,7 @@ var poolLabels = []string{"pool", "shard"}
 
 var (
 	poolInUse = prometheus.NewDesc("router_db_pool_in_use_connections",
-		"Connections of a Postgres pool running a query or held by a transaction, by pool (shared, shard or peer) "+
+		"Connections of a Postgres pool running a query or held by a transaction, by pool (shared or shard) "+
 			"and shard. At max open the next query waits: alert on the max over pods of in use / max open, never "+
 			"on a sum."+readPerPod, poolLabels, nil)
 	poolIdle = prometheus.NewDesc("router_db_pool_idle_connections",
@@ -43,15 +43,12 @@ type poolCollector struct {
 	pools []pool
 }
 
-// Collector serves the saturation of every Postgres pool the store opened: the shared one,
-// this shard's when it is a database of its own, and each other shard's.
+// Collector serves the saturation of every Postgres pool the store opened: the shared one, and
+// this shard's when it is a database of its own.
 func (s *Store) Collector() prometheus.Collector {
-	pools := []pool{{name: "shared", db: s.db.DB}}
+	pools := []pool{{name: "shared", db: s.global.DB}}
 	if s.Sharded() {
-		pools = append(pools, pool{name: "shard", shard: s.shardNames[0], db: s.shard.DB})
-	}
-	for i, peer := range s.peers {
-		pools = append(pools, pool{name: "peer", shard: s.shardNames[i+1], db: peer.DB})
+		pools = append(pools, pool{name: "shard", shard: s.shardName, db: s.shard.DB})
 	}
 	return poolCollector{pools: pools}
 }
