@@ -598,6 +598,26 @@ func (s *StoreSuite) TestMigrateRebuildsTheTaskChangesIndexLeftInvalid() {
 	s.Equal(want, definition, "built again as the migration builds it")
 }
 
+func (s *StoreSuite) TestMigrateRebuildsTheHeldNumberIndexLeftInvalid() {
+	built := func() (valid bool, definition string) {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT indisvalid, pg_get_indexdef(indexrelid) FROM pg_index "+
+			"WHERE indexrelid = to_regclass('phone_numbers_e164_held_idx')").Scan(&valid, &definition))
+		return valid, definition
+	}
+	const want = "CREATE INDEX phone_numbers_e164_held_idx ON public.phone_numbers USING btree (e164) WHERE (released_at IS NULL)"
+	_, definition := built()
+	s.Equal(want, definition, "as the migration builds it")
+	// As a CONCURRENTLY build that failed leaves it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('phone_numbers_e164_held_idx')")
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	valid, definition := built()
+	s.True(valid, "dropped and built again")
+	s.Equal(want, definition, "built again as the migration builds it")
+}
+
 func (s *StoreSuite) TestMigrateRebuildsTheCampaignAttemptIndexLeftInvalid() {
 	// As a CONCURRENTLY build that failed leaves it: the migration's IF NOT EXISTS skips it.
 	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('campaign_attempts_campaign_idx')")
