@@ -87,7 +87,7 @@ type Usage struct {
 	OutputTokens        int64
 	OutputTokensDetails OutputTokensDetails
 	// TotalTokens is the provider's own total where it sends one, else input and output
-	// added up. A total the two do not add up to is a part of the bill the adapter missed.
+	// added up. A total the two do not add up to, either way, is billed wrong: the adapter needs a fix.
 	TotalTokens int64
 	// OutputUnfinished is an OutputTokens counted before the response ended, by a provider
 	// that reports its output only once it is done: Anthropic's message_start. A response cut
