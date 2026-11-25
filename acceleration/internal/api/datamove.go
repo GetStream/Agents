@@ -263,7 +263,7 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("imported a customer", "customer", customerID, "rows", imported.rows)
+	s.logger.Info("imported a customer", "customer", customerID, "rows", imported.rows, "numbers_left_out", imported.leftOut)
 	writeJSON(w, map[string]any{"rows": imported.rows, "tables": imported.tables, "cursor": imported.cursor})
 }
 
@@ -275,6 +275,7 @@ type dataImport struct {
 	checked bool
 	cursor  *int64
 	rows    int64
+	leftOut int
 	tables  map[string]int64
 }
 
@@ -300,7 +301,12 @@ func (s *Server) importLine(ctx context.Context, controller *http.ResponseContro
 
 	switch {
 	case line.Change != nil:
-		if err := s.store.ApplyChanges(ctx, imported.customerID, []store.DataChange{*line.Change}); err != nil {
+		err := s.store.ApplyChanges(ctx, imported.customerID, []store.DataChange{*line.Change})
+		if left, ok := errors.AsType[*store.NumbersLeftOutError](err); ok {
+			imported.leftOut += len(left.Numbers)
+			return nil
+		}
+		if err != nil {
 			return err
 		}
 		if !line.Change.Skipped() {
@@ -320,7 +326,12 @@ func (s *Server) importLine(ctx context.Context, controller *http.ResponseContro
 			}
 			imported.checked = true
 		}
-		if err := s.store.ImportRow(ctx, imported.customerID, line.Table, line.Row); err != nil {
+		err := s.store.ImportRow(ctx, imported.customerID, line.Table, line.Row)
+		if left, ok := errors.AsType[*store.NumbersLeftOutError](err); ok {
+			imported.leftOut += len(left.Numbers)
+			return nil
+		}
+		if err != nil {
 			return err
 		}
 		imported.rows++
