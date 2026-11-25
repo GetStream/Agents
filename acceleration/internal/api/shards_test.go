@@ -7,7 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -198,6 +200,47 @@ func (s *CallShardSuite) heldToAVendorsLimit(path, refusal string) {
 	s.Equal(http.StatusRequestEntityTooLarge, over)
 	s.Contains(answered, refusal)
 	s.Empty(carried)
+}
+
+func (s *CallShardSuite) TestAStatusCutShortIsNotCarried() {
+	token, carried := s.tokenOfAShardThatAnswers()
+	connection, err := net.Dial("tcp", s.server.Listener.Addr().String())
+	s.Require().NoError(err)
+	defer connection.Close()
+
+	_, err = fmt.Fprintf(connection, "POST /v1/phone/status/%s HTTP/1.1\r\nHost: router\r\nContent-Length: 100\r\n\r\nCallStatus=busy", token)
+	s.Require().NoError(err)
+	s.Require().NoError(connection.(*net.TCPConn).CloseWrite())
+	s.Require().NoError(connection.SetReadDeadline(time.Now().Add(settleFor)))
+	answered, err := io.ReadAll(connection)
+
+	s.Require().NoError(err)
+	s.Contains(string(answered), "400 Bad Request")
+	s.Empty(carried)
+}
+
+// The other node is given its time from when the post is read.
+func (s *CallShardSuite) TestAStatusSlowerThanTheOtherNodesTimeIsCarried() {
+	s.router.forwardTimeout = 2 * time.Second
+	s.T().Cleanup(func() { s.router.forwardTimeout = forwardTimeout })
+	token, _ := s.tokenOfAShardThatAnswers()
+	reader, writer := io.Pipe()
+	s.T().Cleanup(func() { _ = reader.Close() })
+	go func() {
+		for range 4 {
+			time.Sleep(time.Second)
+			if _, err := writer.Write([]byte("a")); err != nil {
+				return
+			}
+		}
+		_ = writer.Close()
+	}()
+
+	response, err := s.server.Client().Post(s.server.URL+"/v1/phone/status/"+token, "application/x-www-form-urlencoded", reader)
+
+	s.Require().NoError(err)
+	s.Require().NoError(response.Body.Close())
+	s.Equal(http.StatusTeapot, response.StatusCode)
 }
 
 // The node that answers a fetch of a plan reads no body, so none is carried.
