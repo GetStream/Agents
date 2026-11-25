@@ -6496,6 +6496,9 @@ type CreditPage struct {
 type CustomConnectorRequest struct {
 	Category *string `json:"category,omitempty"`
 
+	// CheckChanges Refuse the create, with unsynced_changes (409), when the newest revision of the id carries no sync_hash, because no sync wrote it, and says something else than this definition: a sync would write over an edit made outside it, in the dashboard, say. The same definition is not refused. Omitted, the create stores the next revision, as a sync that means to write over the edit wants.
+	CheckChanges *bool `json:"check_changes,omitempty"`
+
 	// Client How the OAuth client a connection uses is registered, and how the client authenticates at the token endpoint.
 	Client      *ConnectorClient `json:"client,omitempty"`
 	Description *string          `json:"description,omitempty"`
@@ -9123,6 +9126,9 @@ type RouterConfig struct {
 
 // RouterConfigRequest defines model for RouterConfigRequest.
 type RouterConfigRequest struct {
+	// CheckChanges Refuse a replace, with unsynced_changes (409), when the config carries no sync_hash, because no sync wrote it, and says something else than this body: a sync would write over an edit made outside it, in the dashboard, say. The same content is not refused. A create has nothing stored to write over. Omitted, the replace writes over whatever is there, as a sync that means to write over the edit wants.
+	CheckChanges *bool `json:"check_changes,omitempty"`
+
 	// Llm How this config answers. The names are the response parameters the router already speaks rather than a second vocabulary for the same things. The system prompt is not among them: what the model answers under belongs to the agent asking, not to the config that decides where the asking goes.
 	Llm *LlmOptions `json:"llm,omitempty"`
 

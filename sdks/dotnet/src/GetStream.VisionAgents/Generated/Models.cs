@@ -7032,6 +7032,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("category")]
         public string? Category { get; set; } = default!;
 
+        /// <summary>
+        /// Refuse the create, with unsynced_changes (409), when the newest revision of the id carries no sync_hash, because no sync wrote it, and says something else than this definition: a sync would write over an edit made outside it, in the dashboard, say. The same definition is not refused. Omitted, the create stores the next revision, as a sync that means to write over the edit wants.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("check_changes")]
+        public bool? CheckChanges { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("client")]
         public ConnectorClient? Client { get; set; } = default!;
 
@@ -12921,6 +12927,12 @@ namespace GetStream.VisionAgents.Models
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class RouterConfigRequest
     {
+
+        /// <summary>
+        /// Refuse a replace, with unsynced_changes (409), when the config carries no sync_hash, because no sync wrote it, and says something else than this body: a sync would write over an edit made outside it, in the dashboard, say. The same content is not refused. A create has nothing stored to write over. Omitted, the replace writes over whatever is there, as a sync that means to write over the edit wants.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("check_changes")]
+        public bool? CheckChanges { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("llm")]
         public LlmOptions? Llm { get; set; } = default!;
