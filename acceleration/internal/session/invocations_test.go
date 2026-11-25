@@ -435,3 +435,59 @@ func (s *InvocationLogSuite) TestASessionWithNoBindingsOpensNoDispatcherAndLogsN
 	s.Empty(unavailable)
 	s.Empty(s.logged(app, 0))
 }
+
+// invocationOf is a row of connection's started offset after now.
+func (s *InvocationLogSuite) invocationOf(connection string, offset time.Duration) store.ConnectorInvocation {
+	return store.ConnectorInvocation{
+		CustomerID: s.customerID, ConnectionID: connection, ConnectorID: s.connectorID, Tool: "whoami",
+		StartedAt: time.Now().Add(offset),
+	}
+}
+
+// every pages through connection's whole log.
+func (s *InvocationLogSuite) every(connection string) []store.ConnectorInvocation {
+	var rows []store.ConnectorInvocation
+	var after *store.InvocationPosition
+	limit := store.InvocationLimit(200)
+	for {
+		page, err := s.store.ConnectorInvocations.Select(s.ctx, s.customerID, store.InvocationFilter{ConnectionID: connection, Limit: limit, After: after})
+		s.Require().NoError(err)
+		if len(page) <= limit {
+			return append(rows, page...)
+		}
+		page = page[:limit]
+		rows = append(rows, page...)
+		last := page[len(page)-1]
+		after = &store.InvocationPosition{StartedAt: last.StartedAt, ID: last.ID}
+	}
+}
+
+func (s *InvocationLogSuite) TestCloseWritesEveryInvocationStillQueued() {
+	recorder := newInvocationRecorder(s.store, slog.Default())
+	connection := s.connection("", "primary")
+	const queued = 2*invocationBatch + 50
+
+	for i := range queued {
+		recorder.Record(s.invocationOf(connection, time.Duration(i)*time.Millisecond))
+	}
+	recorder.Close()
+
+	s.Len(s.every(connection), queued)
+}
+
+func (s *InvocationLogSuite) TestAnInvocationTheDatabaseRefusesLosesOnlyItself() {
+	// Queued before the writer starts, so the three are one batch.
+	recorder := &invocationRecorder{store: s.store, logger: slog.Default(),
+		queue: make(chan store.ConnectorInvocation, invocationQueueSize), done: make(chan struct{})}
+	connection := s.connection("", "primary")
+	refused := s.invocationOf(connection, time.Millisecond)
+	refused.LatencyMs = -1
+	recorder.Record(s.invocationOf(connection, 0))
+	recorder.Record(refused)
+	recorder.Record(s.invocationOf(connection, 2*time.Millisecond))
+
+	go recorder.run()
+	recorder.Close()
+
+	s.Len(s.every(connection), 2)
+}

@@ -1,0 +1,96 @@
+# Two shards of one deployment on this machine: `router` is shard us on 8080 and
+# `router-eu` is shard eu on 8081. One Postgres server holds the global database
+# (model_router) and each shard's (router_us, router_eu); `redis` is the global Redis and
+# each shard has its own beside it.
+#
+# Toxiproxy sits on the links that cross a region in production: the EU router's global
+# Postgres and Redis, and each router's reads of the other shard's database. They pass
+# through untouched until a latency toxic is added: acceleration/dev/shards.sh latency 100.
+#
+#   acceleration/dev/shards.sh up
+services:
+  shard-dbs:
+    image: postgres:19-alpine
+    environment:
+      PGPASSWORD: postgres
+    command: >-
+      sh -c "for db in router_us router_eu; do
+      psql -h postgres -U postgres -tAc \"SELECT 1 FROM pg_database WHERE datname = '$$db'\" | grep -q 1
+      || psql -h postgres -U postgres -c \"CREATE DATABASE $$db\" || exit 1; done"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis-us:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  redis-eu:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    command: ["-host=0.0.0.0", "-config=/etc/toxiproxy.json"]
+    volumes:
+      - ./acceleration/dev/toxiproxy.json:/etc/toxiproxy.json:ro
+    ports:
+      - "127.0.0.1:8474:8474"
+      - "127.0.0.1:15432:15432"
+      - "127.0.0.1:16379:16379"
+      - "127.0.0.1:25432:25432"
+      - "127.0.0.1:25433:25433"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  router:
+    environment:
+      ROUTER_SHARD: us
+      ROUTER_POSTGRES_SHARD_DSN: postgres://postgres:postgres@postgres:5432/router_us?sslmode=disable
+      ROUTER_POSTGRES_SHARDS: >-
+        us=postgres://postgres:postgres@postgres:5432/router_us?sslmode=disable,eu=postgres://postgres:postgres@toxiproxy:25432/router_eu?sslmode=disable
+      ROUTER_REDIS_SHARD_ADDR: redis-us:6379
+      ROUTER_NODE_ADVERTISE: router:8080
+    depends_on:
+      shard-dbs:
+        condition: service_completed_successfully
+      redis-us:
+        condition: service_healthy
+      toxiproxy:
+        condition: service_started
+
+  router-eu:
+    image: vision-agents-router
+    pull_policy: never
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ROUTER_PUBLIC_URL: http://localhost:8081
+      ROUTER_SHARD: eu
+      ROUTER_POSTGRES_DSN: postgres://postgres:postgres@toxiproxy:15432/model_router?sslmode=disable
+      ROUTER_POSTGRES_SHARD_DSN: postgres://postgres:postgres@postgres:5432/router_eu?sslmode=disable
+      ROUTER_POSTGRES_SHARDS: >-
+        eu=postgres://postgres:postgres@postgres:5432/router_eu?sslmode=disable,us=postgres://postgres:postgres@toxiproxy:25433/router_us?sslmode=disable
+      ROUTER_REDIS_ADDR: toxiproxy:16379
+      ROUTER_REDIS_SHARD_ADDR: redis-eu:6379
+      ROUTER_NODE_ADVERTISE: router-eu:8080
+      ROUTER_USAGE_URL: http://usage:8070
+      ROUTER_USAGE_TOKEN: ${USAGE_INGEST_TOKEN:-local-usage-token}
+      ROUTER_USAGE_REDIS_URL: redis://toxiproxy:16379
+    ports:
+      - "${ROUTER_PUBLISH_ADDRESS:-127.0.0.1}:8081:8080"
+    depends_on:
+      router:
+        condition: service_started
+      redis-eu:
+        condition: service_healthy
