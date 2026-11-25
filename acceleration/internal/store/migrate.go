@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"io/fs"
 	"regexp"
@@ -78,20 +79,29 @@ func (s *Store) checkMigrated(ctx context.Context, db *bun.DB, set migrationSet)
 	if err != nil {
 		return fmt.Errorf("store: check %s: %w", set.name, err)
 	}
+	// Without USAGE on it no table is found, and the database would read as never migrated.
+	var usable bool
+	if err := conn.QueryRowContext(ctx, "SELECT current_schema() IS NOT NULL").Scan(&usable); err != nil {
+		return fmt.Errorf("store: check %s: %w", set.name, err)
+	}
+	if !usable {
+		return errors.New("store: the serving role lacks USAGE on the schema")
+	}
 	applied, err := checkHistory(ctx, conn, provider, set)
 	if err != nil {
 		return err
 	}
-	for _, source := range provider.ListSources() {
+	sources := provider.ListSources()
+	for _, source := range sources {
 		if !applied[source.Version] {
 			return fmt.Errorf("store: the database has not applied %s migration %d: run router migrate with this release", set.name, source.Version)
 		}
 		delete(applied, source.Version)
 	}
-	// What is left past the squashed history is a later release's.
+	// What is left past this release's newest is a later release's.
 	var later bool
 	for version := range applied {
-		later = later || version > set.squashed
+		later = later || version > sources[len(sources)-1].Version
 	}
 	for _, index := range usageIndexes {
 		if index.set != set.name {

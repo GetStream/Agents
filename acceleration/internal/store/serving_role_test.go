@@ -343,10 +343,13 @@ func (s *ServingRoleSuite) TestASecretColumnALaterReleaseAddedIsServedBeforeItsT
 		s.exec(otherDB, "INSERT INTO ? (version_id, is_applied) VALUES (29991231000000, true)", bun.Ident(other.table))
 		s.ErrorContains(check(), refused)
 		s.exec(otherDB, "DELETE FROM ? WHERE version_id = 29991231000000", bun.Ident(other.table))
-		// The last of the squashed history is an older release's, not a later one's.
-		s.exec(added.db, "INSERT INTO ? (version_id, is_applied) VALUES (?, true)", bun.Ident(added.set.table), added.set.squashed)
-		s.ErrorContains(check(), refused)
-		s.exec(added.db, "DELETE FROM ? WHERE version_id = ?", bun.Ident(added.set.table), added.set.squashed)
+		// The last of the squashed history is an older release's, and a version before this
+		// release's newest is a migration since renumbered: neither is a later one's.
+		for _, version := range []int64{added.set.squashed, 20270201000050} {
+			s.exec(added.db, "INSERT INTO ? (version_id, is_applied) VALUES (?, true)", bun.Ident(added.set.table), version)
+			s.ErrorContains(check(), refused)
+			s.exec(added.db, "DELETE FROM ? WHERE version_id = ?", bun.Ident(added.set.table), version)
+		}
 
 		s.exec(added.db, "INSERT INTO ? (version_id, is_applied) VALUES (29991231000000, true)", bun.Ident(added.set.table))
 		s.NoError(check())
@@ -390,6 +393,17 @@ func (s *ServingRoleSuite) TestATableTheServingRoleIsNotGrantedIsRefused() {
 			s.exec(db, "GRANT "+privilege+" ON ? TO ?", bun.Ident(table), serving)
 			s.NoError(s.paths.store.CheckMigrated(s.ctx))
 		}
+	}
+}
+
+func (s *ServingRoleSuite) TestASchemaTheServingRoleMayNotUseIsRefused() {
+	serving := bun.Ident(s.serving.Username())
+	for _, db := range []*bun.DB{s.admin.store.global, s.admin.store.shard} {
+		s.exec(db, "REVOKE USAGE ON SCHEMA public FROM ?", serving)
+		s.ErrorContains(s.paths.store.CheckMigrated(s.ctx), "the serving role lacks USAGE on the schema")
+
+		s.exec(db, "GRANT USAGE ON SCHEMA public TO ?", serving)
+		s.NoError(s.paths.store.CheckMigrated(s.ctx))
 	}
 }
 

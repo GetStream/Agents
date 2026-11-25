@@ -2813,10 +2813,11 @@ role. With `migrate_dsn` set, `serve` and every other command that migrates on s
 they change nothing, and refuse to start when a migration or an index of this release is missing,
 when the serving role is not granted a table or sequence, or when a table a move carries has no
 change trigger, or one that would record a secret column. They do not compare a trigger's other
-arguments, so a `router migrate` left to do nothing but change those is not noticed.
-They never connect with `migrate_dsn`, so only `router migrate` needs its password. Each shard's
-migrate runs with that shard's settings, and opens the Redis they name as a router does. `cmd/agent`, `cmd/chat`, `cmd/phone` and `cmd/say` read
-none of this and migrate with `ROUTER_POSTGRES_DSN`: run them as the owner.
+arguments, so a `router migrate` left to do nothing but change those is not noticed. They never
+connect with `migrate_dsn`, so only `router migrate` needs its password. Each shard's migrate runs
+with that shard's settings, and opens the Redis they name as a router does. `cmd/agent`,
+`cmd/chat`, `cmd/phone` and `cmd/say` read none of this and migrate with `ROUTER_POSTGRES_DSN`:
+run them as the owner.
 
 On each database, before the first `router migrate` as `router_owner`:
 
@@ -2848,11 +2849,11 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 
 To roll out a release, run its `router migrate` first and then its routers: one that starts before
 it has finished refuses and starts once it has. Routers of the release before go on serving and
-restarting on the newer schema as long as its migrations only expand it: a start is
-refused once an index or trigger it needs is gone, and nothing checks for a column. To roll back, run the older release's `router migrate` and then
-its routers. A release from before this setting migrates at start, so it needs the owner in
-`postgres.dsn`. A `router migrate` that cannot lock a table within 3 seconds to attach its
-trigger fails, and is run again.
+restarting on the newer schema as long as its migrations only expand it: a start is refused once
+an index or trigger it needs is gone, and nothing checks for a column. To roll back, run the older
+release's `router migrate` and then its routers. A release from before this setting migrates at
+start, so it needs the owner in `postgres.dsn`. A `router migrate` that cannot lock a table within
+3 seconds to attach its trigger fails, and is run again.
 
 ## Moving a customer
 
