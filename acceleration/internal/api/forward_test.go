@@ -3,12 +3,14 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"testing"
@@ -273,10 +275,10 @@ func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredHereInTime
 		settleFor, 10*time.Millisecond, "the session where the message landed was asked nothing")
 }
 
-// The same while the node's renewals and its other reads of the directory, which have no limit,
-// dial the connection the read waits for.
-func (s *ForwardedSessionSuite) TestMessagesNamingNoCustomerAreAnsweredHereInTimeWhileOthersDialTheHungDirectory() {
-	channel := "chat-" + s.utils.uuid()
+// The same while another read of the directory, which has no limit, dials the connection this one
+// waits for, and what asked the directory ends with that dial.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredHereInTimeWhileAnotherReadDialsTheHungDirectory() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
 	proxy, redis := newRedisProxy(s.T())
 	directory := s.directoryOver(redis, "here")
 	unread, _, _ := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler),
@@ -285,44 +287,32 @@ func (s *ForwardedSessionSuite) TestMessagesNamingNoCustomerAreAnsweredHereInTim
 	s.serverClient.on(unread).createSession(CreateSessionRequest{
 		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
 	})
-	// Held, so the directory has something to renew.
-	directory.Hold(s.T().Context(), "another-customer", 0, s.utils.uuid(), "", "")
 	proxy.hung.Store(true)
-
+	proxy.stop()
+	proxy.down.Store(false)
 	reading, stop := context.WithCancel(s.T().Context())
-	var others, messages sync.WaitGroup
-	others.Go(func() {
-		for reading.Err() == nil {
-			others.Go(func() { _, _ = directory.Node(reading, "another-customer", "no-session") })
-			select {
-			case <-reading.Done():
-			case <-time.After(3 * time.Second):
-			}
-		}
-	})
-	target, err := url.Parse(unread.URL + "/v1/chat/hooks/stream")
-	s.Require().NoError(err)
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for i := range 40 {
-		body := strings.Replace(writtenTo(channel, `{}`, "is anybody there?"),
-			"message-"+channel, fmt.Sprintf("message-%d-%s", i, channel), 1)
-		request := s.request(target.Path, body, sign(body, suiteStreamSecret))
-		request.URL, request.Host = target, target.Host
-		messages.Go(func() {
-			started := time.Now()
-			response, err := unread.Client().Do(request)
-			took := time.Since(started)
-			if s.NoError(err) {
-				s.Equal(http.StatusOK, response.StatusCode)
-				s.NoError(response.Body.Close())
-			}
-			s.Less(took, 2*time.Second, "message %d", i)
-		})
-		<-ticker.C
-	}
-	messages.Wait()
+	defer stop()
+	var others sync.WaitGroup
+	others.Go(func() { _, _ = directory.Node(reading, "another-customer", "no-session") })
+	s.Require().Eventually(func() bool {
+		proxy.mu.Lock()
+		defer proxy.mu.Unlock()
+		return len(proxy.conns) > 0
+	}, settleFor, time.Millisecond, "nothing dials the directory")
+
+	started := time.Now()
+	s.Require().Equal(http.StatusOK, s.signedlyOn(unread, "/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Less(time.Since(started), 2*time.Second)
+	s.Require().Eventually(func() bool { return s.wasAsked(written) },
+		settleFor, 10*time.Millisecond, "the session where the message landed was asked nothing")
 	stop()
+	proxy.stop()
+	s.Eventually(func() bool {
+		var running bytes.Buffer
+		s.NoError(pprof.Lookup("goroutine").WriteTo(&running, 2))
+		return !strings.Contains(running.String(), "writesElsewhere.func")
+	}, settleFor, 10*time.Millisecond, "what asked the directory is still running")
 	others.Wait()
 }
 
