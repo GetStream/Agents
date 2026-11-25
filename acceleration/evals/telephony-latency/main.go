@@ -325,7 +325,7 @@ func newProviders(names []string) (map[string]phone.Provider, error) {
 		var err error
 		switch name {
 		case "twilio":
-			provider, err = twilio.New(twilio.Options{})
+			provider, err = twilio.New(twilio.Options{PlainHTTPHook: true})
 		case "telnyx":
 			provider, err = telnyx.New(telnyx.Options{})
 		default:

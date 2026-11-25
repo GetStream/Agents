@@ -80,6 +80,10 @@ type Options struct {
 	Timeout time.Duration
 	// HTTPClient replaces the one built from Timeout.
 	HTTPClient *http.Client
+	// PlainHTTPHook lets a number's voice URL be an http address. Without it only https is
+	// taken, as the webhook's answer holds the number's trunk credentials. Only a bench whose
+	// answer holds none sets it.
+	PlainHTTPHook bool
 }
 
 // Provider is Twilio. It satisfies phone.Provider.
@@ -93,6 +97,8 @@ type Provider struct {
 	client     *http.Client
 	// hookSigned is whether the router checks the signature of its call webhook.
 	hookSigned bool
+	// plainHTTPHook is whether the voice URL may be an http address.
+	plainHTTPHook bool
 
 	mu     sync.Mutex
 	prices map[string]countryPrices
@@ -139,10 +145,12 @@ func New(options Options) (*Provider, error) {
 		user:       cmp.Or(options.APIKeySID, options.AccountSID),
 		authToken:  options.AuthToken,
 		hookSigned: options.WebhookAuthToken != "",
-		baseURL:    strings.TrimSuffix(options.BaseURL, "/"),
-		pricingURL: strings.TrimSuffix(options.PricingURL, "/"),
-		client:     options.HTTPClient,
-		prices:     map[string]countryPrices{},
+
+		plainHTTPHook: options.PlainHTTPHook,
+		baseURL:       strings.TrimSuffix(options.BaseURL, "/"),
+		pricingURL:    strings.TrimSuffix(options.PricingURL, "/"),
+		client:        options.HTTPClient,
+		prices:        map[string]countryPrices{},
 	}, nil
 }
 
@@ -375,7 +383,7 @@ func (p *Provider) CallHookReady(publicURL string) error {
 }
 
 // callHook is the router's Twilio call webhook on publicURL. It is only given when the router
-// checks the webhook's signature, and publicURL is a bare http(s) address: a query or a
+// checks the webhook's signature, and publicURL is a bare https address: a query or a
 // fragment would reach Twilio as part of the URL, and a user would put a credential in it.
 func (p *Provider) callHook(publicURL string) (string, error) {
 	if !p.hookSigned {
@@ -387,9 +395,9 @@ func (p *Provider) callHook(publicURL string) (string, error) {
 			"as twilio asks the router there where each call to a number goes")))
 	}
 	parsed, err := url.Parse(publicURL)
-	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" ||
-		strings.ContainsAny(publicURL, "?#@") {
-		return "", stack.Wrap(phone.NotConfigured(errors.New("twilio: ROUTER_PUBLIC_URL must be an http(s) " +
+	if err != nil || (parsed.Scheme != "https" && !(p.plainHTTPHook && parsed.Scheme == "http")) ||
+		parsed.Host == "" || strings.ContainsAny(publicURL, "?#@") {
+		return "", stack.Wrap(phone.NotConfigured(errors.New("twilio: ROUTER_PUBLIC_URL must be an https " +
 			"address with no user, query or fragment")))
 	}
 	return strings.TrimSuffix(publicURL, "/") + phone.TwilioCallHookPath, nil

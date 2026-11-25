@@ -491,11 +491,11 @@ func (s *TwilioSuite) TestTheCallWebhookURLHasNoFragmentQueryOrUser() {
 
 	s.Require().NoError(s.provider.ConfigureInbound(s.ctx, phone.Inbound{
 		E164: "+15125551234", Bridge: phone.Bridge{URI: "sip:trunk-7@sip.stream-io-api.com"},
-		PublicURL: "http://10.0.0.7:8080",
+		PublicURL: "https://10.0.0.7:8080",
 	}))
 
 	raw := s.seen.form.Get("VoiceUrl")
-	s.Equal("http://10.0.0.7:8080/v1/phone/hooks/twilio", raw)
+	s.Equal("https://10.0.0.7:8080/v1/phone/hooks/twilio", raw)
 	parsed, err := url.Parse(raw)
 	s.Require().NoError(err)
 	s.NotContains(raw, "#")
@@ -540,19 +540,20 @@ func (s *TwilioSuite) TestThePublicURLMustBeABareAddress() {
 		refusal   string
 	}{
 		"missing":        {publicURL: "", refusal: "ROUTER_PUBLIC_URL is required"},
-		"no scheme":      {publicURL: "router.example.test", refusal: "must be an http(s) address"},
-		"another scheme": {publicURL: "ftp://router.example.test", refusal: "must be an http(s) address"},
-		"no host":        {publicURL: "https://", refusal: "must be an http(s) address"},
-		"unparseable":    {publicURL: "https://router.example.test:port", refusal: "must be an http(s) address"},
+		"no scheme":      {publicURL: "router.example.test", refusal: "must be an https address"},
+		"another scheme": {publicURL: "ftp://router.example.test", refusal: "must be an https address"},
+		"no host":        {publicURL: "https://", refusal: "must be an https address"},
+		"unparseable":    {publicURL: "https://router.example.test:port", refusal: "must be an https address"},
 		"a user":         {publicURL: "https://user:pass@router.example.test", refusal: "no user, query or fragment"},
 		"a query":        {publicURL: "https://router.example.test/?token=1", refusal: "no user, query or fragment"},
 		"an empty query": {publicURL: "https://router.example.test?", refusal: "no user, query or fragment"},
 		"a fragment":     {publicURL: "https://router.example.test#rp=ct", refusal: "no user, query or fragment"},
 		"an empty #":     {publicURL: "https://router.example.test#", refusal: "no user, query or fragment"},
+		"plain http":     {publicURL: "http://router.example.test", refusal: "must be an https address"},
 		"https":          {publicURL: "https://router.example.test", hook: "https://router.example.test/v1/phone/hooks/twilio"},
 		"a slash":        {publicURL: "https://router.example.test/", hook: "https://router.example.test/v1/phone/hooks/twilio"},
 		"a path":         {publicURL: "https://example.test/router", hook: "https://example.test/router/v1/phone/hooks/twilio"},
-		"http and port":  {publicURL: "http://10.0.0.7:8080", hook: "http://10.0.0.7:8080/v1/phone/hooks/twilio"},
+		"https and port": {publicURL: "https://10.0.0.7:8080", hook: "https://10.0.0.7:8080/v1/phone/hooks/twilio"},
 	} {
 		s.Run(name, func() {
 			s.seen = request{}
@@ -576,6 +577,27 @@ func (s *TwilioSuite) TestThePublicURLMustBeABareAddress() {
 			s.NoError(s.provider.CallHookReady(test.publicURL))
 		})
 	}
+}
+
+// The webhook's answer holds the trunk's credentials, so an http address is refused for the
+// router's numbers; a bench whose answer holds none opts in and is pointed at http.
+func (s *TwilioSuite) TestAPlainHTTPVoiceURLIsTakenOnlyWhenOptedIn() {
+	s.answer(`{"incoming_phone_numbers":[{"sid":"PN9","phone_number":"+15125551234"}],
+		"sid":"PN9","phone_number":"+15125551234"}`)
+	inbound := phone.Inbound{
+		E164: "+15125551234", Bridge: phone.Bridge{URI: "sip:trunk-7@sip.stream-io-api.com"},
+		PublicURL: "http://10.0.0.7:8080",
+	}
+
+	s.ErrorIs(s.provider.ConfigureInbound(s.ctx, inbound), phone.ErrNotConfigured)
+	s.Empty(s.seen.path, "twilio was not asked anything")
+
+	bench, err := New(Options{
+		AccountSID: "AC123", AuthToken: "secret", WebhookAuthToken: "hook-secret", BaseURL: s.server.URL, PlainHTTPHook: true,
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(bench.ConfigureInbound(s.ctx, inbound))
+	s.Equal("http://10.0.0.7:8080/v1/phone/hooks/twilio", s.seen.form.Get("VoiceUrl"))
 }
 
 func (s *TwilioSuite) TestStoppingInboundClearsTheVoiceURL() {
