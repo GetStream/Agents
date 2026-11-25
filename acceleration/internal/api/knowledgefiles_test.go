@@ -849,6 +849,7 @@ func (s *KnowledgeFilesSuite) nothingLeft(source string) {
 
 func (s *KnowledgeFilesSuite) TestAPostDoneWhileItsBaseIsDeletedIsDeletedWithIt() {
 	s.Require().Equal(http.StatusOK, s.post("done.md", 2))
+	s.Require().Equal(http.StatusOK, s.post("other.md", 2))
 	s.knowledge.onceAfterDrop(func() { s.Equal(http.StatusOK, s.post("done.md", 8)) })
 
 	s.Require().Equal(http.StatusNoContent, s.dropBase())
