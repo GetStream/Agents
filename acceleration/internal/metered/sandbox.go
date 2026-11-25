@@ -164,7 +164,7 @@ type SandboxSpec struct {
 // work may spend no money (Admission.Spend), unless the Recorder's prices make the sandbox
 // free. One in their own organization is refused alike, as a model on their own key is: its fee
 // is billed. A running sandbox refused is stopped, and the code it runs ended, unless its money
-// only could not be checked.
+// only could not be checked; it is refused only for money spent, not for money set aside.
 func (s *Sandboxes) Open(ctx context.Context, owner routing.Owner, spec SandboxSpec) (sandbox.Sandbox, error) {
 	switch {
 	case owner.CustomerID == "":
@@ -204,14 +204,21 @@ func (s *Sandboxes) Open(ctx context.Context, owner routing.Owner, spec SandboxS
 // admit is how owner's sandbox, billed under config, is admitted (Open); nil with no Gate.
 // Spend refuses it as it refuses a model call (llmrouter's Session.Create): when the work is
 // billable, which a BYOK sandbox is, for its fee. With no Recorder to price it, it is: Daytona
-// bills it all the same. Money that could not be checked passes again on its own
-// (policy.Transient), so a sandbox already running is not stopped for it.
+// bills it all the same. A sandbox already running is admitted on what was spent rather than
+// what is set aside (routing.RunningGate), so it is not stopped, its run with it, while its
+// organization has credit that other work, or its own lease, only holds. Money that could not
+// be checked passes again on its own (policy.Transient), so a running sandbox is not stopped
+// for it either.
 func (s *Sandboxes) admit(owner routing.Owner, config routing.ProviderConfig) func(context.Context, bool) error {
 	if s.options.Gate == nil {
 		return nil
 	}
 	return func(ctx context.Context, running bool) error {
-		admission, err := s.options.Gate.Admit(ctx, owner)
+		admit := s.options.Gate.Admit
+		if gate, ok := s.options.Gate.(routing.RunningGate); ok && running {
+			admit = gate.AdmitRunning
+		}
+		admission, err := admit(ctx, owner)
 		if err == nil && admission.Spend != nil && (s.options.Recorder == nil || s.options.Recorder.Billable(config)) {
 			err = stack.Wrap(admission.Spend)
 		}

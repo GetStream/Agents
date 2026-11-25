@@ -1431,8 +1431,10 @@ limits, unless the price list makes sandboxes free; the refusal is the tool resu
 customer's own Daytona organization is refused alike, as a model on their own key is, since its
 BYOK fee is billed. A running sandbox is admitted again every minute, idle or running code, and
 stopped once it is refused, which ends the run in it and bills its disk alone until a run its
-organization may pay for starts it again. Money that only could not be checked, such as a
-balance unread for too long, refuses a new or stopped sandbox and leaves a running one running.
+organization may pay for starts it again; a run that had finished keeps its result. It is refused
+for money spent, not for money set aside: credit that other work, or its own lease, holds does
+not stop it. Money that only could not be checked, such as a balance unread for too long,
+refuses a new or stopped sandbox and leaves a running one running.
 
 `sandbox_options` on the config, or in `agent.yaml`, says how that sandbox is built and how
 long code may run in it: an `image` with Python to start from, `setup` commands run on top of

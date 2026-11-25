@@ -179,6 +179,14 @@ type Reserver interface {
 	Release(usageID uuid.UUID)
 }
 
+// RunningGate is a Gate that admits work already running, which a refusal stops rather than
+// turns away: AdmitRunning is Admit with a Spend that counts what was spent and not what is set
+// aside, so a reservation, the work's own lease among them, never stops it while there is
+// credit left.
+type RunningGate interface {
+	AdmitRunning(ctx context.Context, owner Owner) (Admission, error)
+}
+
 // Booker sets credit aside for a purchase that costs a known amount at once, such as a number,
 // before the vendor is asked: Book refuses unless the organization's credit covers all of it,
 // whatever the limits mode. Its answer is never nil, so its methods can always be called.

@@ -249,6 +249,28 @@ func (s *MeteredSuite) TestARunningSandboxIsStoppedOnceItsOrganizationRunsOutOfC
 	s.NotContains(billed[stopped:], SandboxRunning, "billed as stopped from the stop on: %v", billed)
 }
 
+func (s *MeteredSuite) TestARunningSandboxRunsOnWhileOtherWorkHoldsMoreThanItsOrganizationsCredit() {
+	money, server := s.money(), daytonatest.Start(s.T())
+	// Recorded through the enforcer, so the sandbox holds a lease of its own as it runs.
+	sandboxes := NewSandboxes(SandboxesOptions{Recorder: money.Recorder(routing.Sandbox, s.prices), Gate: money.Enforcer,
+		Lifecycle: sandbox.Lifecycle{IdleStop: time.Minute}, APIKey: "key-1", APIURL: server.APIURL(), Every: 50 * time.Millisecond,
+		Logger: slog.New(slog.DiscardHandler)})
+	owner := s.payer(money, 1_000_000)
+	box := s.opened(sandboxes, owner)
+	s.ran(box)
+	other := uuid.Must(uuid.NewV7())
+	s.Require().NoError(money.Enforcer.Reserve(owner, other, 1_500_000, time.Minute))
+	s.T().Cleanup(func() { money.Enforcer.Release(other) })
+	s.refusing(money, owner, policy.ErrNoCredits)
+
+	s.ran(box)
+
+	s.NotContains(server.Calls(), "POST /api/sandbox/sandbox-1/stop", "$1.00 of credit is left, only held by other work")
+	_, err := s.opened(sandboxes, owner).Run(s.ctx, "print(2)", nil)
+	s.Require().ErrorIs(err, policy.ErrNoCredits, "new work is still refused for what is held")
+	s.Equal([]string{"sandbox-1"}, server.Created())
+}
+
 func (s *MeteredSuite) TestInShadowASandboxOfAnOrganizationWithNoCreditIsMadeAndCountedAsWouldRefuse() {
 	var mu sync.Mutex
 	var hits []policy.LimitHit
