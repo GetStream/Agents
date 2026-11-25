@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -6987,16 +6988,23 @@ func (s *AgentSuite) TestTurnsStampedAtOnceGetAnIDEach() {
 	s.onFakeClock(func() {
 		// The cadence, the voice and the presence tick each start turns on goroutines of their
 		// own, so two can take a stamp at the same moment.
-		const takers, each = 8, 500
+		// They are released together from one signal and take many stamps each, on at least
+		// four threads even under -cpu 1, so the takers overlap: a stamp taken by a plain
+		// store, or a compare-and-swap that does not retry, names two turns alike.
+		const takers, each = 8, 5000
+		defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(max(takers/2, runtime.GOMAXPROCS(0))))
 		stamps := make([][]string, takers)
+		start := make(chan struct{})
 		var wg sync.WaitGroup
 		for taker := range takers {
 			wg.Go(func() {
+				<-start
 				for range each {
 					stamps[taker] = append(stamps[taker], turnStamp())
 				}
 			})
 		}
+		close(start)
 		wg.Wait()
 		unique := map[string]struct{}{}
 		for _, taken := range stamps {
