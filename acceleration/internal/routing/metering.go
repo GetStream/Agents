@@ -57,7 +57,7 @@ var (
 	usageMismatch = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "router",
 		Name:      "usage_mismatch_total",
-		Help:      "Billable work whose input and output tokens do not add up to the vendor's own total: a part of the bill the adapter misses",
+		Help:      "Billable work whose input and output tokens do not add up to the vendor's own total, either way: the row is billed wrong and the adapter needs a fix",
 	}, itemLabels)
 )
 

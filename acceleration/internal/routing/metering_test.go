@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/alerts"
@@ -111,6 +112,17 @@ func (s *MeteringAlertTextSuite) each(check func(r meteringRow, item string, eve
 			check(r, "llm/vendor/"+s.config.Model, s.sent())
 		})
 	}
+}
+
+// The Help is what Prometheus shows beside usage_mismatch_total: it must say the row is wrong
+// whichever way the tokens miss the vendor's total.
+func (s *MeteringAlertTextSuite) TestUsageMismatchHelpSaysItRunsEitherWay() {
+	descs := make(chan *prometheus.Desc, 1)
+	usageMismatch.Describe(descs)
+	s.Contains(
+		(<-descs).String(),
+		`help: "Billable work whose input and output tokens do not add up to the vendor's own total, either way: the row is billed wrong and the adapter needs a fix"`,
+	)
 }
 
 // The fingerprints are what the alerts sent before they had a description, read on the base
