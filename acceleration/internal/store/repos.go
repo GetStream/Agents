@@ -51,7 +51,6 @@ type repos struct {
 	Episodes                       *Episodes
 	EventDeliveries                *EventDeliveries
 	EventDestinations              *EventDestinations
-	Guests                         *Guests
 	ImageJobs                      *ImageJobs
 	KnowledgeDocuments             *KnowledgeDocuments
 	KnowledgeNamespaces            *KnowledgeNamespaces
@@ -156,7 +155,6 @@ func (s *Store) wire() {
 		Episodes:                       &Episodes{store: s},
 		EventDeliveries:                &EventDeliveries{store: s},
 		EventDestinations:              &EventDestinations{store: s},
-		Guests:                         &Guests{store: s},
 		ImageJobs:                      &ImageJobs{store: s},
 		KnowledgeDocuments:             &KnowledgeDocuments{store: s},
 		KnowledgeNamespaces:            &KnowledgeNamespaces{store: s},

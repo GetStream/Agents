@@ -714,9 +714,13 @@ Every reply the agent abandons logs one INFO line, `the agent was interrupted`, 
 
 `AgentResponse.Items`, on the handle `Responses.Create` returns, fails with `client.ErrUnnamedTurn` when the turn has no id: the router names none for an incognito session, a speech-to-speech session or the retry of a `request_id` already taken. It used to read every turn in the session instead, passed off as this turn's; a caller that relied on that now gets the error, and reads `Session.Responses.Items` for the whole session or follows `Session.Events` (AI-3571).
 
+### The JavaScript SDK reads no items for a turn with no id
+
+`items` on the `AgentResponse` that `responses.create` returns rejects with `UnnamedTurnError` when the turn has no id, for the same reasons as Go's: an incognito session, a speech-to-speech session, or the retry of a `requestId` whose turn was not found. It used to read every turn in the session instead, passed off as this turn's; read `session.responses.items` for the whole session, or follow `session.events()` (AI-3571).
+
 ### A call has an id of its own and names its session
 
-A call's `id` was its session's id; it is now the call's own, and a session starts a new call each time voice is started or stopped on it (an incognito session keeps none). `Call` gains `session_id`, absent once the session is deleted, and loses `config_id` and `user_id`, which are the session's. `GET /v1/agents/calls?session_id=` lists one session's calls, newest first. A read of `/v1/agents/calls/{id}` and its `transcript`, `timeline`, `events` and `tokens` with a session id now answers 404 `call_not_found`: list the session's calls for the call id. A call from before keeps the id it had, its session's. The Go SDK's `Sessions.Timeline` and `Sessions.Decisions` read the session's newest call this way, and fail with `client.ErrNoCall` for a session that has none. The other SDKs and the Volt dashboard still read a session id as a call id.
+A call's `id` was its session's id; it is now the call's own, and a session starts a new call each time voice is started or stopped on it (an incognito session keeps none). `Call` gains `session_id`, absent once the session is deleted, and loses `config_id` and `user_id`, which are the session's. `GET /v1/agents/calls?session_id=` lists one session's calls, newest first. A read of `/v1/agents/calls/{id}` and its `transcript`, `timeline`, `events` and `tokens` with a session id now answers 404 `call_not_found`: list the session's calls for the call id. A call from before keeps the id it had, its session's. The Go SDK's `Sessions.Timeline` and `Sessions.Decisions` read the session's newest call this way, and fail with `client.ErrNoCall` for a session that has none. The JavaScript SDK's `sessions.timeline` and `sessions.decisions` do the same, and reject with `NoCallError`. The other SDKs and the Volt dashboard still read a session id as a call id.
 
 ### Deploying this release needs a short stop
 
@@ -866,6 +870,10 @@ A folder whose `agent.yaml` names a `plugins` list now fails to load with `plugi
 ### The Ruby SDK refuses `plugins` in agent.yaml
 
 `Folder.load`, and so `Agent.new(folder: "…")`, raise a `ConfigurationError` for a folder whose agent.yaml names `plugins:`, with an error that names the file and points to `connectors:`. An empty or null `plugins` still loads and sends nothing, as before. Folder sync no longer sends `plugins`, and the warning that plugins are deprecated is gone, as is the check that no name is under both `connectors` and `plugins`. Move each plugin to a `connectors:` entry (AI-2528).
+
+### `POST /v1/phone/opt-outs` refuses a recipient it could never match
+
+A `recipient` that is neither an E.164 number nor, for channel `imessage` or `all`, an iMessage handle's email address is now refused with a 400 `validation_failed` instead of being stored. Such opt-outs never took effect: an opt-out is matched against the number or handle as written, and numbers are always E.164. `15551110000` and `(555) 111-0000` are refused; send `+15551110000`.
 
 ## Bug Fixes
 

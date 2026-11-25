@@ -15,8 +15,10 @@ final readonly class SpendBucket
         // Millionths of a dollar, priced from the configured rates.
         public int $costMicrosTotal,
         public int $requestCount,
-        // The modality or label value this row is for. "other" is everything outside the biggest few, and the empty s...
+        // The modality or label value this row is for. "other" with other true is everything outside the biggest few,...
         public string $value,
+        // True on the row that is everything outside the biggest few, summed. Its value is "other", which a label can...
+        public ?bool $other = null,
     ) {
     }
 
@@ -30,6 +32,7 @@ final readonly class SpendBucket
             costMicrosTotal: Json::int($data, 'cost_micros_total'),
             requestCount: Json::int($data, 'request_count'),
             value: Json::string($data, 'value'),
+            other: array_key_exists('other', $data) && $data['other'] !== null ? Json::bool($data, 'other') : null,
         );
     }
 
@@ -45,6 +48,9 @@ final readonly class SpendBucket
         $out['cost_micros_total'] = $this->costMicrosTotal;
         $out['request_count'] = $this->requestCount;
         $out['value'] = $this->value;
+        if ($this->other !== null) {
+            $out['other'] = $this->other;
+        }
         return $out;
     }
 }

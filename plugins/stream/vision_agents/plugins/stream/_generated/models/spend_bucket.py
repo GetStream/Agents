@@ -8,6 +8,8 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from typing_extensions import Self
 
+from ..types import UNSET, Unset
+
 T = TypeVar("T", bound="SpendBucket")
 
 
@@ -18,15 +20,18 @@ class SpendBucket:
         bucket (datetime.datetime):
         cost_micros_total (int): Millionths of a dollar, priced from the configured rates.
         request_count (int):
-        value (str): The modality or label value this row is for. "other" is everything outside the biggest few, and the
-            empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see
-            which part. Example: support.
+        value (str): The modality or label value this row is for. "other" with other true is everything outside the
+            biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of
+            its traffic can see which part. Example: support.
+        other (bool | Unset): True on the row that is everything outside the biggest few, summed. Its value is "other",
+            which a label can also have: a label of that value is a row of its own, without other.
     """
 
     bucket: datetime.datetime
     cost_micros_total: int
     request_count: int
     value: str
+    other: bool | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -38,6 +43,8 @@ class SpendBucket:
 
         value = self.value
 
+        other = self.other
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -48,6 +55,8 @@ class SpendBucket:
                 "value": value,
             }
         )
+        if other is not UNSET:
+            field_dict["other"] = other
 
         return field_dict
 
@@ -62,11 +71,14 @@ class SpendBucket:
 
         value = d.pop("value")
 
+        other = d.pop("other", UNSET)
+
         spend_bucket = cls(
             bucket=bucket,
             cost_micros_total=cost_micros_total,
             request_count=request_count,
             value=value,
+            other=other,
         )
 
         spend_bucket.additional_properties = d

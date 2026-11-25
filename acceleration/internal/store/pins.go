@@ -169,15 +169,20 @@ func (s *Store) BackfillStreamPins(ctx context.Context, deployment int64) (map[s
 			db = s.global
 		}
 		for {
+			// By id, which a row keeps when another writer changes it mid-statement, where its
+			// ctid would be new and the row skipped. The second IS NULL leaves a row that writer
+			// pinned as it is.
 			result, err := db.ExecContext(ctx, fmt.Sprintf(
-				"UPDATE %[1]s SET %[2]s = ? WHERE ctid IN (SELECT ctid FROM %[1]s WHERE %[2]s IS NULL LIMIT ?)",
+				"UPDATE %[1]s SET %[2]s = ? WHERE id IN (SELECT id FROM %[1]s WHERE %[2]s IS NULL LIMIT ?) AND %[2]s IS NULL",
 				table, pinColumn), deployment, backfillBatch)
 			if err != nil {
 				return pinned, fmt.Errorf("store: backfill %s: %w", table, err)
 			}
 			written, _ := result.RowsAffected()
 			pinned[table] += written
-			if written < backfillBatch {
+			// A batch is short when another writer pinned some of its rows meanwhile, so only
+			// an empty one is the last.
+			if written == 0 {
 				break
 			}
 		}

@@ -593,7 +593,7 @@ sources:
 }
 
 // bindFixed makes an agent config of the suite's app bind the connection as its fixed one,
-// in the shape store.ConnectorConnectionReferenced matches, and returns the config. The
+// in the shape store.ConnectorConnections.DeleteUnbound matches, and returns the config. The
 // column is written directly, so these tests do not depend on what the config endpoints
 // accept.
 func (s *ConnectionsSuite) bindFixed(connectionID string) AgentConfig {

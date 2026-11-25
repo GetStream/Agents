@@ -12,7 +12,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
@@ -671,15 +670,6 @@ func (s *AgentTeamsSuite) TestWithTheSettingOffForksAndReopensAreNotCheckedAndSt
 		}
 		s.Equal(asked, s.teamReads(), "settings %+v", settings)
 	}
-}
-
-// endHere ends a session in this node the way one nobody watches ends, which leaves it held
-// under its id, ended, with the spec it ran on.
-func (s *AgentTeamsSuite) endHere(id string) {
-	held, ok := s.manager.Get(id, session.Owner{CustomerID: s.customerID(), Kind: auth.KindServer})
-	s.Require().True(ok, "session %s is held here", id)
-	s.Require().NoError(held.Close())
-	s.Require().Equal(session.Ended, held.State())
 }
 
 // deleteConfig deletes an agent config of the app, as its backend does.

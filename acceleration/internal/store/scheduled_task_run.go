@@ -26,7 +26,6 @@ const (
 	ScheduledTaskTriggerManual   = "manual"
 
 	ScheduledTaskDeliveredConversation = "conversation"
-	ScheduledTaskDeliveredCall         = "call"
 	ScheduledTaskDeliveredPhone        = "phone"
 )
 
