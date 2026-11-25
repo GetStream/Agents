@@ -407,26 +407,3 @@ public struct ModelOverwrites: Sendable, Hashable {
     }
 }
 
-/// What the agent says as it joins a call, before anyone speaks.
-public struct Greeting: Sendable, Hashable {
-    /// Empty means the agent waits to be spoken to.
-    public var text: String
-    /// Nil says it word for word, as `exact` does.
-    public var mode: Mode?
-
-    public enum Mode: String, Sendable {
-        /// Word for word.
-        case exact
-        /// The model rewords it on every call, so callers do not hear the same opening.
-        case variation
-    }
-
-    public init(_ text: String, mode: Mode? = nil) {
-        self.text = text
-        self.mode = mode
-    }
-
-    var schema: GreetingPayload {
-        .init(mode: mode.map { .init(rawValue: $0.rawValue) }, text: text)
-    }
-}
