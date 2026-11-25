@@ -166,7 +166,7 @@ jobs:
     if: github.event_name == 'push' || needs.changes.outputs.swift == 'true'
     # The examples add StreamChatAI, whose iOS 13 target Xcode 26 refuses beside MarkdownUI's
     # iOS 15. macos-26 carries only Xcode 26; this image carries 27, betas included.
-    runs-on: xcode-27
+    runs-on: { group: scaleway-macos }
     steps:
       - uses: actions/checkout@v4
 
