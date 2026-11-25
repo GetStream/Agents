@@ -406,6 +406,9 @@ func (s *Server) callBack(ctx context.Context, callback string, body any) {
 
 // withoutURL is err without the URL a failed request names, which carries the query.
 func withoutURL(err error) error {
+	if fetch, ok := errors.AsType[fetchFailedError](err); ok {
+		err = fetch.err
+	}
 	var failed *url.Error
 	if errors.As(err, &failed) {
 		return failed.Err

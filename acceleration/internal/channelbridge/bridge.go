@@ -124,16 +124,17 @@ const maxAnswerBytes = 1 << 20
 // none of them itself (keywords.go).
 var episodeSources = map[string]episodeSource{
 	"slack_bot": {source: store.EpisodeSlack, person: omnichannel.SlackUser},
-	"linq":      {source: store.EpisodeIMessage, person: byNumber, optOuts: dlc.IMessage, chats: true, oneToOne: linqOneToOne},
+	"linq":      {source: store.EpisodeIMessage, person: byNumber, optOuts: dlc.IMessage, chats: true, oneToOne: LinqOneToOne},
 	"telnyx":    {source: store.EpisodeSMS, person: byNumber, optOuts: dlc.SMS, answered: telnyxAnswered},
 	"whatsapp":  {source: store.EpisodeWhatsApp, person: byWhatsAppNumber, optOuts: dlc.WhatsApp, recipient: whatsAppNumber, window: whatsAppWindow},
 }
 
-// linqOneToOne is whether a Linq event's chat is one person's: data.chat.is_group false, as the
+// LinqOneToOne is whether a Linq event's chat is one person's: data.chat.is_group false, as the
 // 2026-02-03 payload in linq.yaml's [events] shows it. That page shows the field in its example
 // only, so an event that leaves it out, or writes it as anything but a boolean, is taken as a
-// group's: a task scheduled there would reach everyone in the chat.
-func linqOneToOne(raw []byte) bool {
+// group's: a task scheduled there would reach everyone in the chat. internal/channels' iMessage
+// lines read their deliveries with it too (linqProvider.Parse).
+func LinqOneToOne(raw []byte) bool {
 	var event struct {
 		Data struct {
 			Chat struct {

@@ -13,6 +13,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/cartesia"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // cartesiaBaseURL is the production endpoint. The streaming provider's is a WebSocket URL,
@@ -111,7 +112,12 @@ func (c *Cartesia) clone(ctx context.Context, request Request) (string, error) {
 	if created.ID == "" {
 		return "", stack.Wrap(errors.New("voices: cartesia took the recording but named no voice"))
 	}
-	return created.ID, nil
+	// The id as the ownership check will hold it.
+	canonical, err := voiceid.Cartesia(created.ID)
+	if err != nil {
+		return "", stack.Wrap(fmt.Errorf("voices: cartesia named a voice that is no Cartesia id: %w", err))
+	}
+	return canonical, nil
 }
 
 // Delete takes the voice back off Cartesia.
@@ -119,8 +125,12 @@ func (c *Cartesia) Delete(ctx context.Context, externalID string) error {
 	if externalID == "" {
 		return nil
 	}
+	externalID, err := voiceid.Cartesia(externalID)
+	if err != nil {
+		return err
+	}
 
-	url := strings.TrimSuffix(c.options.BaseURL, "/") + "/voices/" + externalID
+	url := strings.TrimSuffix(c.options.BaseURL, "/") + "/voices/" + url.PathEscape(externalID)
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return stack.Wrap(err)
@@ -267,7 +277,11 @@ func (c *Cartesia) List(ctx context.Context) ([]Library, error) {
 // Preview fetches the sample Cartesia holds for the voice. The URL it hands out wants the
 // same key the listing did, so the audio is read here rather than handed to a browser.
 func (c *Cartesia) Preview(ctx context.Context, id string) (Speech, error) {
-	url := strings.TrimSuffix(c.options.BaseURL, "/") + "/voices/" + id + "?expand[]=preview_file_url"
+	id, err := voiceid.Cartesia(id)
+	if err != nil {
+		return Speech{}, err
+	}
+	url := strings.TrimSuffix(c.options.BaseURL, "/") + "/voices/" + url.PathEscape(id) + "?expand[]=preview_file_url"
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return Speech{}, stack.Wrap(err)

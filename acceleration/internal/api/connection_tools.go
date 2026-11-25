@@ -309,6 +309,9 @@ func (s *Server) putConnectionCredentials(ctx context.Context, request *putConne
 		return nil, err
 	}
 	if err != nil {
+		if _, refused := errors.AsType[*core.EndpointError](err); refused {
+			recordFailure(ctx, err, "")
+		}
 		// A scheme's error names what is wrong, never the value (core AGENTS.md, «Secrets never
 		// print»; contracttest's TestAnErrorAboutAnUnusableValueDoesNotQuoteIt).
 		return nil, invalidRequest("the credentials were refused: " + err.Error())
@@ -762,7 +765,7 @@ func (s *Server) listConnectionTools(ctx context.Context, request *connectionReq
 		return nil, err
 	}
 	// The latest revision, not the one the connection pins: it is what a config save checks a
-	// binding beside a sensitive connector against (SensitiveBindingsComplaint).
+	// binding beside a sensitive connector against (sensitive.ConfigComplaint).
 	// A connector the app can no longer see has no definition: a save skips such a binding, so
 	// no tool of it is a read (read_only false) and the tools are still listed.
 	definition, err := s.store.ConnectorDefinitions.Latest(ctx, connection.CustomerID, connection.ConnectorID)
