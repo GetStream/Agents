@@ -3552,6 +3552,10 @@ components:
         setup:
           $ref: '#/components/schemas/ConnectorSetup'
           description: What a person does at the provider before the first consent, such as registering an OAuth client. Absent when the manifest says nothing.
+        sync_hash:
+          description: The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
+          readOnly: true
+          type: string
       required:
         - id
         - revision
@@ -4286,8 +4290,8 @@ components:
         channel:
           $ref: '#/components/schemas/OptOutChannel'
         recipient:
-          description: The number, in E.164.
-          maxLength: 20
+          description: The number in E.164, or an iMessage handle's email address, for channel imessage or all.
+          maxLength: 254
           minLength: 2
           type: string
         source:
@@ -4462,7 +4466,7 @@ components:
           description: 'The model that controls the floor in this session, and how long a caller may wait once they stop, over the agent config''s. Left out or null, the config''s; an empty object is no choice, which the router''s default rules; {model: flow-controller} keeps the flow controller whatever that default. A model the session was opened with, named here or the config''s then, is its for its life, reopened included; no choice is stored as none, so a reopened session takes its config''s choice as it is then, and the router''s default after it. Server-side only: a device sending it is refused with a 403, because whether a model rules when the agent answers is the app''s to decide.'
         greeting:
           $ref: '#/components/schemas/Greeting'
-          description: What the agent opens the call with, over what the config says.
+          description: 'What the agent opens the call with, over what the config says. Server-side only: a device sending it is refused with a 403.'
         history:
           description: 'The conversation so far, for a backend that keeps its own: a thread in its own Slack app, say, that outlives any one session. Send it when a session closed and the thread goes on: open a new session with the thread''s messages here, oldest first, then send the message to answer to the responses endpoint. The model is handed them before the first response, as a resumed conversation''s history is. They are recorded nowhere, as turns, transcript or Chat messages, so add incognito to keep nothing at all. Up to 100 messages and 60000 characters of text, the most a session reads back of a conversation the router kept; more is refused rather than cut. Server-side only: a device sending it is refused with a 403, because an assistant message puts words in the agent''s mouth.'
           items:
@@ -4490,12 +4494,13 @@ components:
             type: string
           type: array
         llm:
-          description: 'A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured.'
+          description: 'A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured. Server-side only: a device sending it is refused with a 403.'
           type: string
         max_tokens:
+          description: 'Server-side only: a device sending it is refused with a 403.'
           type: integer
         max_tool_rounds:
-          description: The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups.
+          description: 'The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups. Server-side only: a device sending it is refused with a 403.'
           type: integer
         memory:
           $ref: '#/components/schemas/SessionMemory'
@@ -4505,12 +4510,14 @@ components:
           type: number
         model_overwrites:
           $ref: '#/components/schemas/ModelOverwrites'
+          description: 'Server-side only: a device sending it is refused with a 403.'
         navigating:
           default: false
           description: The agent placed this call, so let recordings finish and answer their menus.
           type: boolean
         phone:
           $ref: '#/components/schemas/SessionPhone'
+          description: 'Server-side only: a device sending it is refused with a 403.'
         project_id:
           description: What the conversation belongs to. Also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins.
           type: string
@@ -4521,22 +4528,22 @@ components:
           description: 'The app''s own page a login or step-up the chat asks for goes back to, as createAuthorization''s return_url: the launch page takes the handoff only from a page of its origin, and the browser comes back to it with connection_id and status added to its query. The same rules as createAuthorization''s return_url apply, and a URL they refuse is answered with a 400 invalid_request naming the rule (an error frame on the session socket). Absent or empty, those consents go back to the dashboard. It is kept with the session, so a chat carried on after it ended and a fork go back to it too. An end user''s device may send it: a consent the chat asks for is only ever for the caller''s own connection, shown to the caller alone, and bound to the first browser that hands it off, so the URL only decides where the caller''s own consent lands.'
           type: string
         search:
-          description: Omit it and the config decides, or search-fast when there is no config.
+          description: 'Omit it and the config decides, or search-fast when there is no config. Server-side only: a device sending it is refused with a 403.'
           type: string
         start_voice:
           default: false
           description: 'Start voice as the session opens, as startSessionVoice does: the agent joins the call named in call, else agent:<session id>, which joining creates, and returns once it is there. Left out, the conversation is held in writing until voice is started.'
           type: boolean
         sts:
-          description: 'A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides.'
+          description: 'A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides. Server-side only: a device sending it is refused with a 403.'
           type: string
         stt:
-          description: Omit it and the config decides, or en-low-latency when there is no config.
+          description: 'Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.'
           type: string
         tags:
           additionalProperties:
             type: string
-          description: Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins.
+          description: 'Cost labels, carried onto every request the session makes. Merged with the agent config''s tags; where both name a key, this one wins. Server-side only: a device sending it is refused with a 403.'
           type: object
         team:
           description: 'The team the session''s work is counted under, its team spend limits included, as team:<name> is among a token''s usage categories: 1 to 59 letters, digits, _ . and -. Left out, the session is counted under the team the caller''s token names, else the agent config''s team tag. A token naming another team is refused with a 400: the team a token was signed for is not moved. Server-side only: a device sending it is refused with a 403, since its team is the one its token was signed for.'
@@ -4557,7 +4564,7 @@ components:
             $ref: '#/components/schemas/SessionTool'
           type: array
         tts:
-          description: Omit it and the config decides, or en-low-latency when there is no config.
+          description: 'Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.'
           type: string
         ui:
           description: 'Whether the model is told its config''s ui_instructions in this session. Left out or true, it is told them after the instructions; false leaves them out, for a client that shows no UI. It is no filter: instructions that teach UI themselves still do, and a UI block the model writes is still split off the reply. Reopening or forking the session keeps it. A device may send it, since it only chooses whether to use what the agent''s owner wrote.'
@@ -4572,7 +4579,7 @@ components:
         video:
           $ref: '#/components/schemas/SessionVideo'
         voice:
-          description: 'The voice to speak in: a provider''s own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider''s library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor''s own voice name instead, such as marin at OpenAI.'
+          description: 'The voice to speak in: a provider''s own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider''s library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor''s own voice name instead, such as marin at OpenAI. Server-side only: a device sending it is refused with a 403.'
           type: string
       type: object
     CreateSipTrunkRequest:
@@ -4692,6 +4699,12 @@ components:
           nullable: true
           type: array
           uniqueItems: true
+        sync_hash:
+          description: 'The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one.'
+          maxLength: 128
+          pattern: ^[!-~]*$
+          patternDescription: printable ASCII without a space
+          type: string
       required:
         - id
         - name
@@ -5008,7 +5021,7 @@ components:
           type: number
         overwrites:
           additionalProperties: {}
-          description: Settings for one provider that the options above have no word for, keyed by provider. roboflow takes workspace and workflow_id, or specification, for the roboflow/workflow model. An overwrite for a provider that is not a candidate is refused.
+          description: 'Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it and the next candidate is asked without it. One naming a provider that is not a candidate is refused.'
           type: object
         providers:
           description: A priority list of where to try, in the order given, which wins over target when it holds anything.
@@ -5174,7 +5187,7 @@ components:
     ErrorDetail:
       properties:
         code:
-          description: 'What went wrong, for a program to branch on. Every type has a code of its own name (invalid_request, unauthenticated, forbidden, payment_required, not_found, method_not_allowed, not_acceptable, conflict, gone, payload_too_large, unsupported_media_type, rate_limited, internal_error, unavailable, timeout) that a failure has when nothing names it better. The others are validation_failed, missing_customer, missing_organization, server_side_only, not_configured (this deployment does not offer the feature), modality_not_routed, unsynced_changes (a sync asked to check would write over somebody''s edits), name_taken (a 409: another agent config, router config or voice, or another skill of the same agent config, already has the name, so another name will do), channel_connection_taken (a 409: another live agent config binds the channel connection as fixed, and one agent answers a channel connection''s messages, so the message names that config), call_unanswered (a 409: the call placed for a phone session ended with nobody answering, and the message names how: busy, no_answer, failed or canceled. Opening the session is refused, or, when the status came while the agent was joining the call, the session is ended at once and kept as ended), no_oauth_client (a 400: a consent found no OAuth client for the connector, and the message names each way the connector lets the app give it one), invalid_config (a 400: an agent config a run names does not start a session), tool_not_configured (a 400: a session under an agent config was declared or given a function that none of the config''s tool groups names, and the message names it), insufficient_credits (a 402: the organization''s credit is spent, so work that costs money is refused until credit is added; a model that costs nothing is still served), system_limit_reached (a 402: the organization''s spend hard limit for the day or the month is reached, whatever its credit, and the message names the interval, the amount and when it resets), spend_limit_reached (a 402: one of the organization''s own spend limits is spent, on the organization, an app, a key, a usage category or a team, and the message says which and when it resets, so retrying before then is refused again), user_limit_reached (a 429: a spend limit on the one end user the request is for is spent, which stops that user and no one else, and Retry-After says when its window ends), spend_check_unavailable (a 503: the router could not share what the organization is spending with the other routers for a while, so work that costs money is refused until it can; a model that costs nothing is still served, and Retry-After says to try again in a few seconds), budget_moved (a 400: a policy sent a budget, which spend limits replaced), limit_above_parent (a 400: a spend limit is above a limit of its parent in the same interval, and the message names the parent''s limit), limit_exists (a 409: the subject already has a limit at that level and interval, and the message names its id), no_limit (a 404: the subject has no spend limit to reset or grant past), use_team (a 400: a category starting team: was sent, where the team field names a team), invalid_expiry (a 400: a grant''s expires_at is not in the future, or is more than 366 days away), too_many_grants (a 409: the organization has 20 live grants, as many as it may), tier_limit_reached (the organization''s tier limits refuse the work, and limit says which: a 403 for a call or a transfer, to a country the tier does not reach, past its minutes or recipients of the day, or past its calls at once; a 400 for an agent config whose sandbox is bigger or more open than the organization''s sandbox limits allow. The message names the tier and the limit), account_suspended (a 403: the organization is suspended, and every request is refused, one for a model that costs nothing included, until it is restored; the message says to contact support), concurrency_limited (a 429: the app has as many runs in flight as it may, and Retry-After says when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input does not fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG, WebP or GIF, which retrying the same image does not fix), document_too_large (a 413: a file sent with a response has more pages or text than one may, alone or with the files the conversation already holds, and the message names the limit), document_unreadable (a 400: a file sent with a response could not be read, such as one with a password, one that is damaged or one with no text in it, which retrying the same file does not fix), invalid_usage_categories (a 400: the usage categories the request names, in the token''s usage_categories and team claims or in X-Stream-Usage-Categories, are more than 10, one is not 1 to 64 characters of A-Z, a-z, 0-9, _ . : -, more than one names a team, or the team is over 59 characters), memory_unavailable (a 503: the memory store could not delete what was asked, so nothing that waits on it was deleted either, and the same request later can succeed), billing_not_enabled (a 404: this deployment bills nobody, or the caller''s app is in no organization it bills, so there is no account to read), provider_takes_no_key (a 400: a key was put for a provider whose work is never routed on a customer''s own key here, and the message names the ones that are), campaign_locked (a 409: the campaign''s state does not allow the change, such as a launched campaign''s sequence, or resuming one that is running), campaign_not_ready (a 400: a launch found the campaign missing what it needs to ring anybody, and the message says what), consent_required (a 400: a launch did not say the people on the campaign agreed to be called), branch_limit_reached (a 409: the conversation has as many edit and regenerate points as Stream Chat keeps for it, 100, so a regenerate or an edit is refused and the conversation is continued in a new chat; asking and reading are unaffected), branch_too_long (a 409: the branch an activation would bring back is more than 100 messages to send again, so it is continued in a new chat), branch_unavailable (a 410: the copies of a hidden branch were deleted, as a memory truncate deletes them, so it can be neither read nor brought back), switch_unfinished (a 409: a regenerate, an edit or an activation of the session failed after Stream Chat may have rewound, and finishing it still fails because Stream Chat does not answer, so the session''s questions, regenerates, edits and activations are refused meanwhile; try again: each one tries to finish it first, so it clears once Stream Chat answers), and <resource>_not_found for agent_config, call, campaign, channel_account, command, connection, grant, knowledge_document, knowledge_url, limit, provider_key, router_config, scheduled_task, session, simulation, simulation_run, skill and voice. A scheduled task also has invalid_schedule (a schedule that does not read: at and in both or neither, a date, time or duration that does not parse, or until without repeat), schedule_in_past, schedule_too_far (a one-shot, or an in, more than a year ahead), invalid_timezone, timezone_unknown (no zone was given and neither the user nor the config has one), invalid_repeat, interval_too_short (a run moved to less than 15 minutes from now and earlier than the run it replaces), too_many_tasks (a 409: the user is at their active-task limit) and task_changed (a 409: the task changed between the request''s read and its save, by another edit or pause or by a delivery; nothing was saved, and reading it again and retrying can succeed). More may be added, so a client should expect one it does not know.'
+          description: 'What went wrong, for a program to branch on. Every type has a code of its own name (invalid_request, unauthenticated, forbidden, payment_required, not_found, method_not_allowed, not_acceptable, conflict, gone, payload_too_large, unsupported_media_type, rate_limited, internal_error, unavailable, timeout) that a failure has when nothing names it better. The others are validation_failed, missing_customer, missing_organization, server_side_only, not_configured (this deployment does not offer the feature), modality_not_routed, unsynced_changes (a sync asked to check would write over somebody''s edits), name_taken (a 409: another agent config, router config or voice, or another skill of the same agent config, already has the name, so another name will do), import_running (a 409: an import of the app is already running on this router, which runs one at a time, so the same import once it ends can succeed), channel_connection_taken (a 409: another live agent config binds the channel connection as fixed, and one agent answers a channel connection''s messages, so the message names that config), call_unanswered (a 409: the call placed for a phone session ended with nobody answering, and the message names how: busy, no_answer, failed or canceled. Opening the session is refused, or, when the status came while the agent was joining the call, the session is ended at once and kept as ended), no_oauth_client (a 400: a consent found no OAuth client for the connector, and the message names each way the connector lets the app give it one), invalid_config (a 400: an agent config a run names does not start a session), tool_not_configured (a 400: a session under an agent config was declared or given a function that none of the config''s tool groups names, and the message names it), insufficient_credits (a 402: the organization''s credit is spent, so work that costs money is refused until credit is added; a model that costs nothing is still served), system_limit_reached (a 402: the organization''s spend hard limit for the day or the month is reached, whatever its credit, and the message names the interval, the amount and when it resets), spend_limit_reached (a 402: one of the organization''s own spend limits is spent, on the organization, an app, a key, a usage category or a team, and the message says which and when it resets, so retrying before then is refused again), user_limit_reached (a 429: a spend limit on the one end user the request is for is spent, which stops that user and no one else, and Retry-After says when its window ends), spend_check_unavailable (a 503: the router could not share what the organization is spending with the other routers for a while, so work that costs money is refused until it can; a model that costs nothing is still served, and Retry-After says to try again in a few seconds), budget_moved (a 400: a policy sent a budget, which spend limits replaced), limit_above_parent (a 400: a spend limit is above a limit of its parent in the same interval, and the message names the parent''s limit), limit_exists (a 409: the subject already has a limit at that level and interval, and the message names its id), no_limit (a 404: the subject has no spend limit to reset or grant past), use_team (a 400: a category starting team: was sent, where the team field names a team), invalid_expiry (a 400: a grant''s expires_at is not in the future, or is more than 366 days away), too_many_grants (a 409: the organization has 20 live grants, as many as it may), tier_limit_reached (the organization''s tier limits refuse the work, and limit says which: a 403 for a call or a transfer, to a country the tier does not reach, past its minutes or recipients of the day, or past its calls at once; a 400 for an agent config whose sandbox is bigger or more open than the organization''s sandbox limits allow. The message names the tier and the limit), account_suspended (a 403: the organization is suspended, and every request is refused, one for a model that costs nothing included, until it is restored; the message says to contact support), concurrency_limited (a 429: the app has as many runs in flight as it may, and Retry-After says when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input does not fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG, WebP or GIF, which retrying the same image does not fix), document_too_large (a 413: a file sent with a response has more pages or text than one may, alone or with the files the conversation already holds, and the message names the limit), document_unreadable (a 400: a file sent with a response could not be read, such as one with a password, one that is damaged or one with no text in it, which retrying the same file does not fix), invalid_usage_categories (a 400: the usage categories the request names, in the token''s usage_categories and team claims or in X-Stream-Usage-Categories, are more than 10, one is not 1 to 64 characters of A-Z, a-z, 0-9, _ . : -, more than one names a team, or the team is over 59 characters), memory_unavailable (a 503: the memory store could not delete what was asked, so nothing that waits on it was deleted either, and the same request later can succeed), billing_not_enabled (a 404: this deployment bills nobody, or the caller''s app is in no organization it bills, so there is no account to read), provider_takes_no_key (a 400: a key was put for a provider whose work is never routed on a customer''s own key here, and the message names the ones that are), campaign_locked (a 409: the campaign''s state does not allow the change, such as a launched campaign''s sequence, or resuming one that is running), campaign_not_ready (a 400: a launch found the campaign missing what it needs to ring anybody, and the message says what), consent_required (a 400: a launch did not say the people on the campaign agreed to be called), branch_limit_reached (a 409: the conversation has as many edit and regenerate points as Stream Chat keeps for it, 100, so a regenerate or an edit is refused and the conversation is continued in a new chat; asking and reading are unaffected), branch_too_long (a 409: the branch an activation would bring back is more than 100 messages to send again, so it is continued in a new chat), branch_unavailable (a 410: the copies of a hidden branch were deleted, as a memory truncate deletes them, so it can be neither read nor brought back), switch_unfinished (a 409: a regenerate, an edit or an activation of the session failed after Stream Chat may have rewound, and finishing it still fails because Stream Chat does not answer, so the session''s questions, regenerates, edits and activations are refused meanwhile; try again: each one tries to finish it first, so it clears once Stream Chat answers), and <resource>_not_found for agent_config, call, campaign, channel_account, command, connection, grant, knowledge_document, knowledge_url, limit, provider_key, router_config, scheduled_task, session, simulation, simulation_run, skill and voice. A scheduled task also has invalid_schedule (a schedule that does not read: at and in both or neither, a date, time or duration that does not parse, or until without repeat), schedule_in_past, schedule_too_far (a one-shot, or an in, more than a year ahead), invalid_timezone, timezone_unknown (no zone was given and neither the user nor the config has one), invalid_repeat, interval_too_short (a run moved to less than 15 minutes from now and earlier than the run it replaces), too_many_tasks (a 409: the user is at their active-task limit) and task_changed (a 409: the task changed between the request''s read and its save, by another edit or pause or by a delivery; nothing was saved, and reading it again and retrying can succeed). More may be added, so a client should expect one it does not know.'
           type: string
         doc_url:
           description: Where the code is explained.
@@ -5342,6 +5355,7 @@ components:
           type: boolean
         model_overwrites:
           $ref: '#/components/schemas/ModelOverwrites'
+          description: 'Server-side only: a device sending it is refused with a 403.'
         project_id:
           type: string
         response_id:
@@ -7071,7 +7085,7 @@ components:
         id:
           type: string
         recipient:
-          description: The number, in E.164.
+          description: The number in E.164, or an iMessage handle's email address.
           type: string
         source:
           description: keyword when they texted STOP, campaign when they asked a campaign call not to call again, otherwise api or dashboard.
@@ -7172,6 +7186,9 @@ components:
       type: object
     OrganizationProgress:
       properties:
+        funded:
+          description: 'The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the credit granted minus the trial credit is above zero. Spending the credit does not lower it. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer.'
+          type: boolean
         furthest_step:
           $ref: '#/components/schemas/ActivityStep'
           description: The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since.
@@ -8718,6 +8735,10 @@ components:
           $ref: '#/components/schemas/StsOptions'
         stt:
           $ref: '#/components/schemas/SttOptions'
+        sync_hash:
+          description: The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync.
+          readOnly: true
+          type: string
         tts:
           $ref: '#/components/schemas/TtsOptions'
         updated_at:
@@ -8742,6 +8763,12 @@ components:
           $ref: '#/components/schemas/StsOptions'
         stt:
           $ref: '#/components/schemas/SttOptions'
+        sync_hash:
+          description: The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing.
+          maxLength: 128
+          pattern: ^[!-~]*$
+          patternDescription: printable ASCII without a space
+          type: string
         tts:
           $ref: '#/components/schemas/TtsOptions'
       required:
@@ -12663,6 +12690,11 @@ components:
         - spent_micros
       type: object
   securitySchemes:
+    ActivityKey:
+      description: Stream staff's read-only key for organizations' activity, held by the job that reads it. It reaches listActivity and getOrganizationActivity and nothing else, and is never held by an app or a browser.
+      in: header
+      name: X-Activity-Key
+      type: apiKey
     ApiKey:
       description: The public half of a credential, which names the app and the secret to verify with. A socket sends it as the api_key query parameter, because a browser WebSocket cannot set a header.
       in: header
@@ -12705,7 +12737,7 @@ info:
 
     A session belongs to whoever opened it, and an end user reaches only their own. The session records the customer, the end user and which kind of caller that was, and one that does not match is told the session does not exist rather than that it may not have it. A caller presenting a verified token is a different owner from an anonymous one claiming the same name, so naming somebody else's user id gets an anonymous caller nowhere. The exception is a session a backend opened in a named user's name, which that user's own device reaches: a server-side caller may send X-Stream-User-Id to say who it is acting for, and is then held only to the daily quotas the customer set for that user, never to the router's default.
 
-    An end user's device is capped at a number of model responses and a number of tokens per UTC day, counted against both the `user_id` its token names and the address it came from. A caller with nothing left is answered 429 with a `Retry-After` naming the seconds until the limit resets; on a socket the same refusal arrives as an `error` frame, because the socket was already open when the day ran out. A server-side caller is held only to quotas the customer set: one naming a user counts toward that user's quota, and is refused only work that asks a model for something (a session, a turn, a run, a socket), never a read. The router's default allowances, which count devices only, are ROUTER_RATE_LIMIT_MESSAGES_PER_DAY and ROUTER_RATE_LIMIT_TOKENS_PER_DAY, and a deployment with no Redis to count in caps nothing. In noauth mode the end user is named by `X-Stream-User-Id`, or by a `user_id` query parameter on a socket.
+    An end user's device is capped at a number of model responses (a reply of a text or speech-to-speech model, or a search) and a number of tokens per UTC day, counted against both the `user_id` its token names and the address it came from. A caller with nothing left is answered 429 with a `Retry-After` naming the seconds until the limit resets; on a socket the same refusal arrives as an `error` frame, because the socket was already open when the day ran out. A server-side caller is held only to quotas the customer set: one naming a user counts toward that user's quota, and is refused only work that asks a model for something (a session, a turn, a run, a search, a socket), never a read. The router's default allowances, which count devices only, are ROUTER_RATE_LIMIT_MESSAGES_PER_DAY and ROUTER_RATE_LIMIT_TOKENS_PER_DAY, and a deployment with no Redis to count in caps nothing. In noauth mode the end user is named by `X-Stream-User-Id`, or by a `user_id` query parameter on a socket.
   title: Model Router
   version: 0.2.0
 openapi: 3.0.3
@@ -19326,7 +19358,7 @@ paths:
         On a voice call, a call to a tool declared with an `approval` is asked about out loud instead, and sent only once the caller said yes, with `approved` true; a watcher does not ask again. In writing, a call to a tool declared with an `approval` waits for a person. The client reports their answer with `tool_approval` (`tool_call_id`, `request_id`, `turn_id`, `allowed`, and optionally a `summary` shown when they declined), before it answers the call with `tool_result`. A connector call waiting for the person to sign in (`awaiting_authorization`) is declined with `tool_approval` too, naming only its `tool_call_id` with `allowed` false: the router answers that call itself. A connector call whose binding sets `require_approval` waits on its step (`awaiting_approval`) for the session's user, and the router sends it only once they allow it: `tool_approval` with its `tool_call_id`, the `request_id` of the command it answers and `allowed`, from that user or their backend, `turn_id` left out or not. Declined, or not answered in 10 minutes, it is not sent and the model is told so. It needs no `tool_result`. A `tool_approval` no call waits for (answered already, stopped, or naming another `request_id` or `turn_id`) is answered with `tool_approval_ignored`: the `tool_call_id`, `request_id` and `turn_id` it was sent with, each left out when it was, and `reason`, a sentence saying why; the socket stays open. Every watcher is sent it. The call of a durable command answered with its `request_id` and no `turn_id` is answered so too, its `reason` naming the missing `turn_id`. A call outside a durable command waits for its `tool_result`, so an approval sent before it without a `request_id` gets no answer.
         `tool_result.output` is a string, or an array of parts `[{type: text|image_url, ...}]`. An image has an `image_url` object containing `url` (HTTP(S) or data URI), optionally with `detail` of `auto`, `low` or `high`. One socket message is at most 5 MB.
         `respond` may carry `images: [{url, detail}]`. These schedule the vision skill; the conversation receives the question and later the findings, without raw images. Video capture uses task-correlated `get_video_frames` tool requests and `tool_result` replies. Frames are never attached automatically to conversational turns.
-        A watcher that may lose its connection, such as to the router restarting, asks for a resumable socket with `resumable=true`. Its first frame is `resumed`, and every frame after it except `hearing` carries a `cursor`. To reconnect, open the socket again with the same credentials and `cursor` set to the last one received: the frames sent after it are sent again, then the live ones. A session keeps its last 256 frames for this, for as long as it is held: a persistent text session until 5 minutes after its last watcher left, a call until it ends. `resumed` carries `cursor`, where the stream now carries on from, and `complete`, false when some frames after the cursor asked from are gone, because the router restarted, the conversation was reopened, or the watcher missed more than 256: read what was missed back from the conversation then. `request_id` names a command the watcher was waiting on, and `resumed.command` is its receipt. A command whose reply the router stopped on its way down is `interrupted`: it is never run again, so a client that still wants the answer asks once more under a new request id. A session the router stopped on its way down closes a resumable socket with 1012 (service restart) rather than 1000, which is the cue to reconnect. A socket that does not ask to resume is sent the frames and the close it always was.
+        A watcher that may lose its connection, such as to the router restarting, asks for a resumable socket with `resumable=true`. Its first frame is `resumed`, and every frame after it except `hearing` carries a `cursor`. To reconnect, open the socket again with the same credentials and `cursor` set to the last one received: the frames sent after it are sent again, then the live ones. A session keeps its last 256 frames for this, for as long as it is held: a persistent text session until 5 minutes after its last watcher left, a call until it ends. `resumed` carries `cursor`, where the stream now carries on from, and `complete`, false when some frames after the cursor asked from are gone, because the router restarted, the conversation was reopened, or the watcher missed more than 256: read what was missed back from the conversation then. `request_id` names a command the watcher was waiting on, and `resumed.command` is its receipt. A command whose reply the router stopped on its way down is `interrupted`: it is never run again, so a client that still wants the answer asks once more under a new request id. A session the router stopped on its way down closes a resumable socket with 1012 (service restart) rather than 1000, which is the cue to reconnect. A socket relayed from another node closes with 1011 (the relay to the session ended) when the watcher the node running the session held for it is given back while the session goes on: a resumable socket can reconnect to go on watching. A socket that does not ask to resume is sent the frames and the close it always was.
       operationId: watchSession
       parameters:
         - description: The session, as returned when it was created.
@@ -19394,7 +19426,7 @@ paths:
   /v1/agents/sessions/{id}/fork:
     post:
       description: |-
-        Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with.
+        Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
         The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
       operationId: forkSession
       parameters:
@@ -21248,9 +21280,10 @@ paths:
     get:
       description: |-
         A WebSocket, which OpenAPI cannot describe past the upgrade. Text frames are JSON objects carrying a `type`.
-        The client's first frame is `start`, with `session` (a `CreateSessionRequest`) and an optional `sample_rate`, from 8000 to 192000, and 16000 when left out. A rate outside that range is refused with an `error` frame carrying `code` `invalid_request`. `call_id` may be left out: the router makes one up for the records. A `text` session is refused, because the socket carries audio. A field that `createSession` refuses from an end user's device is refused here too: `history` and `call` are server-side only. A `call` is refused from a backend too, with an `error` frame carrying `code` and `error_type`: the socket carries the audio, so the session joins no Stream call.
+        The client's first frame is `start`, with `session` (a `CreateSessionRequest`) and an optional `sample_rate`, from 8000 to 192000, and 16000 when left out. A rate outside that range is refused with an `error` frame carrying `code` `invalid_request`. `call_id` may be left out: the router makes one up for the records. A `text` session is refused, because the socket carries audio. A field that `createSession` refuses from an end user's device is refused here too: `history`, `instructions`, `call`, `phone`, the models and limits, `greeting` and `tags` are server-side only. A `call` is refused from a backend too, with an `error` frame carrying `code` and `error_type`: the socket carries the audio, so the session joins no Stream call.
         The server answers `session`, with the `Session` and the `sample_rate` in use. Then binary frames are PCM16 mono at that rate in both directions: the caller's audio in, and the agent's speech out at the pace it would be heard on a call. A `cleared` frame says speech already sent was thrown away because the caller cut in. Tool calls and every other event go over the session's events socket, as they do for a call.
         A refused start is an `error` frame with `error`, the message, and the socket closes. An `error` frame for a field refused from a device also carries `code` and `error_type`, the `code` and `type` that `createSession` answers the same field with, and so does a session refused for money: `account_suspended` (`permission`), or `insufficient_credits`, `system_limit_reached` or `spend_limit_reached` (`payment_required`).
+        A caller who has spent their daily quota is refused the handshake with 429 and `Retry-After`, and a speech-to-speech conversation that spends it closes.
         The session lasts as long as the socket. Closing the socket, or sending `stop`, ends the conversation. A conversation that ends closes the socket.
       operationId: openSocketSession
       responses:
@@ -22333,8 +22366,9 @@ paths:
   /v1/data/import:
     post:
       description: |-
-        Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+        Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not hold here is refused with 400.
         An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
+        An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
         Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
       operationId: importData
       parameters:
@@ -22381,7 +22415,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: The file carries an export's rows, the app already has data here and `full` is not true.
+          description: '`import_running`: an import of this app is already running on this router, which runs one at a time. Or `conflict`: the file carries an export''s rows, the app already has data here and `full` is not true.'
         "413":
           content:
             application/json:
@@ -22395,7 +22429,13 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: This deployment has no database to import into.
+          description: 'This deployment has no database to import into, or this router is running as many imports as it takes at once: try again.'
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: A line of the file took more than a minute to arrive. What came before it may be written.
       summary: Write an export, or a batch of changes, into this deployment
   /v1/detection:
     post:
@@ -23664,10 +23704,10 @@ paths:
 
         - Tried: at least one request answered in agent_setup or a later step, a step in steps other than dashboard_reads. dashboard_reads alone is opening the dashboard's Agents tab.
         - API calls: answered requests, requests less refused, of every area but dashboard_reads, hooks_in and webhooks_out. Those are the dashboard's own reads, vendors' hooks and the router's own deliveries.
-        - Production: funded, and conversations answered, an item of conversations with requests above refused, on 5 of the last 7 UTC days. Funded is credit that is not trial credit: the usage service holds it, and the router does not compute it, so join it from there. The 5 of 7 is a judgement, not a measurement.
+        - Production: funded true on the organization, and conversations answered, an item of conversations with requests above refused, on 5 of the last 7 UTC days. The 5 of 7 is a judgement, not a measurement.
         - Churned: was in production, then had no request answered in conversations or model_api for 30 days.
 
-        Stream staff only: it needs the ops key.
+        Stream staff only: it needs the ops key or the activity key.
       operationId: listActivity
       parameters:
         - description: The first UTC day read, YYYY-MM-DD.
@@ -23734,6 +23774,7 @@ paths:
           $ref: '#/components/responses/InternalError'
       security:
         - OpsKey: []
+        - ActivityKey: []
       summary: List every organization's Agents activity by day
       tags:
         - Staff
@@ -23943,7 +23984,7 @@ paths:
       description: |-
         Whether an organization tried Agents, how far it got and how much it used: what its apps did in each area of the API, from each client, and what their work came to by modality, summed over every shard in postgres.shards, which the answer names, with the sessions they opened, how those ended and how long their turns took. An organization with nothing recorded is answered with empty lists and furthest_step none. Every area and client is one item, so the lists are short and have no cursor. Areas, first_seen, last_seen, furthest_step and steps come from counts kept since they were first recorded, while meters come from every request, so an organization whose use is older than the counts can read furthest_step none with meters that show use. steps lists every step reached, not only the furthest, with the UTC day each was first answered: an organization that only texts reaches conversations and never voice_video.
 
-        Stream staff only: it needs the ops key.
+        Stream staff only: it needs the ops key or the activity key.
       operationId: getOrganizationActivity
       parameters:
         - description: The organization.
@@ -23977,6 +24018,7 @@ paths:
           $ref: '#/components/responses/InternalError'
       security:
         - OpsKey: []
+        - ActivityKey: []
       summary: Get an organization's Agents activity
       tags:
         - Staff
@@ -26362,7 +26404,9 @@ paths:
       summary: Replace a router config
   /v1/search:
     post:
-      description: 'The fourth routed modality, reachable on its own rather than only as a tool an agent reaches for. One question, one answer: routed, failed over and billed like the rest, and with no socket because nothing arrives in pieces.'
+      description: |-
+        The fourth routed modality, reachable on its own rather than only as a tool an agent reaches for. One question, one answer: routed, failed over and billed like the rest, and with no socket because nothing arrives in pieces.
+        An end user's device may name a `config_id` but not send `options`, which is refused with 403: how a search is run is the customer's to decide. Each search counts as one message on the caller's daily quota.
       operationId: search
       requestBody:
         content:
@@ -26392,6 +26436,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         "402":
           $ref: '#/components/responses/PaymentRequired'
+        "403":
+          $ref: '#/components/responses/Forbidden'
         "404":
           $ref: '#/components/responses/NotFound'
         "500":

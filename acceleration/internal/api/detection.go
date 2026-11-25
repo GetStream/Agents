@@ -175,7 +175,7 @@ type DetectionOptions struct {
 	Classes       *[]string                   `json:"classes,omitempty" doc:"The labels to keep. An open-vocabulary model (detection-open) looks for these words and has to be given at least one; a fixed-class model returns only these of what it found. Matched without regard to case." maxItems:"8"`
 	Embeddings    *bool                       `json:"embeddings,omitempty" doc:"Return a vector on every box, for matching what was found against what was seen before. Only a model that computes one is asked."`
 	MinConfidence *float64                    `json:"min_confidence,omitempty" doc:"Drop boxes scored below this. Only a model that scores its boxes is asked." minimum:"0" maximum:"1"`
-	Overwrites    *map[string]json.RawMessage `json:"overwrites,omitempty" doc:"Settings for one provider that the options above have no word for, keyed by provider. roboflow takes workspace and workflow_id, or specification, for the roboflow/workflow model. An overwrite for a provider that is not a candidate is refused."`
+	Overwrites    *map[string]json.RawMessage `json:"overwrites,omitempty" doc:"Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it and the next candidate is asked without it. One naming a provider that is not a candidate is refused."`
 	Providers     *[]string                   `json:"providers,omitempty" doc:"A priority list of where to try, in the order given, which wins over target when it holds anything."`
 	Target        *string                     `json:"target,omitempty" doc:"A provider/model or a capability shortcut. Defaults to detection-fast." example:"detection-open"`
 }

@@ -89,12 +89,13 @@ func (r *Voices) Update(ctx context.Context, voice *Voice) error {
 
 	voice.UpdatedAt = time.Now().UTC()
 	// The name the row had is read in the same statement, locked, so the one forgotten is the
-	// one a concurrent rename did not already replace.
+	// one a concurrent rename did not already replace. The lock is the one the update takes,
+	// which a binding being inserted for the voice does not wait on.
 	was := r.store.global.NewSelect().Model((*Voice)(nil)).Column("name").
 		Where("id = ?", voice.ID).
 		Where("customer_id = ?", voice.CustomerID).
 		Where("deleted_at IS NULL").
-		For("UPDATE")
+		For("NO KEY UPDATE")
 	var wasName string
 	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
 		return tx.NewUpdate().Model(voice).
@@ -202,7 +203,7 @@ func (r *Voices) GetByName(ctx context.Context, customerID, name string) (Voice,
 // holds few, and the API lists them all.
 func (r *Voices) Select(ctx context.Context, customerID string) ([]Voice, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var voices []Voice

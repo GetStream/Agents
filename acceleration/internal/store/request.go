@@ -46,7 +46,7 @@ type Request struct {
 	UserID           string   `bun:"user_id,notnull"`
 	UsageCategories  []string `bun:"usage_categories,array,nullzero"`
 	// LimitGrants are the grants the work was admitted on past a spent limit, which its
-	// billable cost is drawn from (20261112121000_requests_limit_grants.sql).
+	// billable cost is drawn from.
 	LimitGrants []int64 `bun:"limit_grants,array,nullzero"`
 	// AgentID is the agent the work was done for. Empty outside a conversation.
 	AgentID string `bun:"agent_id,nullzero"`
@@ -85,7 +85,8 @@ type Request struct {
 	Meters pricing.Quantities `bun:"meters,type:jsonb,nullzero"`
 	// Attributes chose the price (a service tier, a country) or explain the row.
 	Attributes map[string]string `bun:"attributes,type:jsonb,nullzero"`
-	LatencyMs  *float64          `bun:"latency_ms"`
+	// LatencyMs is nil for a request that failed before reaching the provider: it has none.
+	LatencyMs *float64 `bun:"latency_ms"`
 	// CostMicros is millionths of a dollar: what the work is charged at its entry's prices.
 	CostMicros int64 `bun:"cost_micros,notnull"`
 	// OutputCostMicros is the part of CostMicros the generated tokens were priced at.
@@ -182,8 +183,8 @@ func measured(prefix string) string {
 	return "COALESCE(" + prefix + "error_code, '') NOT IN ('" + ErrorCancelled + "', '" + ErrorRefused + "')"
 }
 
-// requestsPrimaryKey is named for the table's first name: 20260815090000_multi_modality.sql
-// renamed the table and not its key.
+// requestsPrimaryKey is named for the table's first name: the table was renamed and its key
+// was not.
 const requestsPrimaryKey = "stt_requests_pkey"
 
 // SpendBucket is what one group cost in one bucket, across every modality. Value is a
@@ -285,24 +286,12 @@ type Requests struct {
 	store *Store
 }
 
-// Insert stores one request, giving it a usage id when it has none. Latency is optional
-// because a request that failed before reaching the provider has none.
-func (r *Requests) Insert(ctx context.Context, request *Request) error {
-	if request.UsageID == uuid.Nil {
-		request.UsageID = uuid.Must(uuid.NewV7())
-	}
-	requests := []Request{*request}
-	_, err := r.InsertMany(ctx, requests)
-	*request = requests[0]
-	return err
-}
-
 // InsertMany writes rows that are not written yet, in one transaction in this shard's
 // database, and returns the usage ids it wrote. A row whose usage id is already there is
 // skipped, so writing a batch again after a failure whose commit did land writes nothing twice.
 // A row InsertMany wrote has its ID set, and one with an agent a provider_request agent log
 // row. With one database each row it wrote counts toward the grants it names, and is logged,
-// in the same transaction (AddGrantUses); with shards the grants are the caller's to count,
+// in the same transaction (addGrantUses); with shards the grants are the caller's to count,
 // apart, and the log rows are written to the shared database after the commit.
 func (r *Requests) InsertMany(ctx context.Context, requests []Request) ([]uuid.UUID, error) {
 	for i := range requests {
@@ -460,8 +449,7 @@ func Unwritable(err error) bool {
 // row carried in with its own id leaves behind. InsertMany has moved the sequence past it by
 // then, so trying again at once writes the rows.
 func IDTaken(err error) bool {
-	var refused pgdriver.Error
-	return errors.As(err, &refused) && refused.Field('C') == "23505" && refused.Field('n') == requestsPrimaryKey
+	return constraint(err) == requestsPrimaryKey
 }
 
 // callsOf is the call each request happened in, in their order: the agent's latest call of the
@@ -719,9 +707,9 @@ func (r *Requests) CountByUser(ctx context.Context, appID, userID string) (int64
 
 // RenameUser replaces an app's end user id with replacement on every shard's requests,
 // writeBatch of them per statement, and in the changes recorded of those requests in the same
-// statement (renamedChanges). One more statement per shard then renames them in the changes
-// left, of requests deleted or no longer theirs. It answers how many rows it rewrote. A
-// request recorded after the last statement keeps its change as it is.
+// statement (renamedChanges). Once a batch comes short, one more statement also renames them in
+// the changes left, of requests deleted or no longer theirs. It answers how many rows it
+// rewrote. A request recorded after the last statement keeps its change as it is.
 func (r *Requests) RenameUser(ctx context.Context, appID, userID, replacement string) (int64, error) {
 	if replacement == userID {
 		// Nothing to rewrite, and every batch would match the rows it just wrote.
@@ -729,13 +717,17 @@ func (r *Requests) RenameUser(ctx context.Context, appID, userID, replacement st
 	}
 	counts, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (int64, error) {
 		var renamed int64
+		last := false
 		for {
 			// Read once for both: the batch's rows and their changes.
 			batch := db.NewSelect().Model((*Request)(nil)).Column("id").
 				Where("customer_id = ?", appID).Where("user_id = ?", userID).Limit(writeBatch)
-			// A data-modifying WITH runs to the end whether or not the statement reads it.
-			changes := renamedChanges(db, appID, "requests", userID, replacement).
-				Where("payload->>'id' IN (SELECT id::text FROM batch)")
+			changes := renamedChanges(db, appID, "requests", userID, replacement)
+			if !last {
+				changes = changes.Where("payload->>'id' = ANY (ARRAY(SELECT id::text FROM batch))")
+			}
+			// A data-modifying WITH runs to the end whether or not the statement reads it. The last
+			// one takes the rows recorded since with their changes, so the two name the same user.
 			result, err := db.NewUpdate().With("batch", batch).With("changes", changes).Model((*Request)(nil)).
 				Set("user_id = ?", replacement).Where("id IN (SELECT id FROM batch)").Exec(ctx)
 			if err != nil {
@@ -747,11 +739,12 @@ func (r *Requests) RenameUser(ctx context.Context, appID, userID, replacement st
 				return renamed, err
 			}
 			if n < int64(writeBatch) {
-				break
+				if last {
+					return renamed, nil
+				}
+				last = true
 			}
 		}
-		_, err := renamedChanges(db, appID, "requests", userID, replacement).Exec(ctx)
-		return renamed, err
 	})
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: rename user requests: %w", err))
@@ -832,14 +825,12 @@ func (r *Requests) Spend(
 		return nil, stack.Wrap(fmt.Errorf("store: unknown granularity %q", granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 	if limit < 1 {
 		return nil, stack.Wrap(errors.New("store: limit must be at least 1"))
 	}
-	if tags == nil {
-		tags = map[string]string{}
-	}
+	tags = orEmptyMap(tags)
 	filter, err := json.Marshal(tags)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer spend: encode tag filter: %w", err))
@@ -914,11 +905,9 @@ func (r *Requests) TagKeys(
 	tags map[string]string,
 ) ([]TagKeySummary, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
-	if tags == nil {
-		tags = map[string]string{}
-	}
+	tags = orEmptyMap(tags)
 	filter, err := json.Marshal(tags)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: customer tag keys: encode tag filter: %w", err))

@@ -51,6 +51,7 @@ type Connector struct {
 	RedirectURI string            `json:"redirect_uri,omitempty" readOnly:"true" format:"uri" doc:"The redirect URI an OAuth client registered for this connector has to list: where every consent of this deployment sends the browser back to, ROUTER_PUBLIC_URL followed by /v1/agents/connectors/oauth/callback. Only on a connector that connects with oauth2_code, and absent when ROUTER_PUBLIC_URL is not set, since no consent can start then."`
 	Channel     bool              `json:"channel" readOnly:"true" doc:"The connector is an inbound channel: its manifest reads messages a provider delivers to the router, which agents answer. A block that reads only signals, such as Slack with a user token, is not one. A dashboard warns on it before a delete that would end those replies."`
 	Sandbox     *ConnectorSandbox `json:"sandbox,omitempty" readOnly:"true" doc:"How code in an agent's sandbox calls the provider's API with a connection's credential without holding it. Absent when the connector offers no such access."`
+	SyncHash    string            `json:"sync_hash,omitempty" readOnly:"true" doc:"The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync."`
 	CreatedAt   time.Time         `json:"created_at" readOnly:"true" doc:"When this revision was stored."`
 }
 
@@ -162,7 +163,10 @@ type ConnectorPage struct {
 // scopes is well over the longest list shipped, Slack's 29 (providers/slack.yaml), and is
 // not measured either. A scope is RFC 6749 section 3.3's scope-token, %x21 / %x23-5B /
 // %x5D-7E, so it can hold neither a space nor a quote. The schemes have no count: each must
-// be a registered one and none may repeat, which bounds them.
+// be a registered one and none may repeat, which bounds them. A sync hash is up to 128
+// characters, a SHA-512 hex digest, well over the 32 of the MD5 hex digest the CLI computes
+// for an agent (Agentrc.Hash in GetStream/cli internal/agentrc/agentrc.go), and printable
+// ASCII without a space, so it holds no NUL, which a Postgres text column refuses.
 type CustomConnectorRequest struct {
 	ID          string           `json:"id" pattern:"^custom_[a-z][a-z0-9_]{0,56}$" patternDescription:"custom_ then a lowercase letter, then up to 56 lowercase letters, digits or underscores" doc:"Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same."`
 	Name        string           `json:"name" minLength:"1" maxLength:"120"`
@@ -172,6 +176,7 @@ type CustomConnectorRequest struct {
 	Schemes     []string         `json:"schemes" minItems:"1" doc:"How a connection may authenticate. Each must be a scheme this deployment has, except oauth2_client_credentials, which a custom connector cannot use: it needs a token endpoint a custom connector cannot set."`
 	Scopes      []string         `json:"scopes,omitempty" maxItems:"100" uniqueItems:"true" pattern:"^[!#-\\[\\]-~]+$" patternDescription:"an RFC 6749 scope token" doc:"The scopes a consent asks for, each an RFC 6749 scope token."`
 	Client      *ConnectorClient `json:"client,omitempty"`
+	SyncHash    string           `json:"sync_hash,omitempty" maxLength:"128" pattern:"^[!-~]*$" patternDescription:"printable ASCII without a space" doc:"The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one."`
 }
 
 func (*CustomConnectorRequest) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
@@ -348,7 +353,7 @@ func (s *Server) createConnector(ctx context.Context, request *createConnectorRe
 		return nil, invalidRequest(store.StreamSource + " is the source of the router's own events, which no connector may be named")
 	}
 	// Every refusal a caller can cause is above, so what the store refuses here is a bug.
-	definition, err := s.store.ConnectorDefinitions.Revise(ctx, customerID, manifest)
+	definition, err := s.store.ConnectorDefinitions.ReviseSynced(ctx, customerID, manifest, request.Body.SyncHash)
 	if err != nil {
 		return nil, err
 	}
@@ -356,7 +361,7 @@ func (s *Server) createConnector(ctx context.Context, request *createConnectorRe
 }
 
 // deleteConnector deletes one of the caller's own definitions, refused while something uses
-// it unless forced (store.DeleteConnectorDefinition).
+// it unless forced (store.ConnectorDefinitions.Delete).
 func (s *Server) deleteConnector(ctx context.Context, request *deleteConnectorRequest) (*struct{}, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
@@ -495,6 +500,7 @@ func connectorOf(definition store.ConnectorDefinition, publicURL string) Connect
 			AuthMethod:   ConnectorClientAuthMethod(manifest.Client.AuthMethod),
 			Alg:          manifest.Client.Alg,
 		},
+		SyncHash:  definition.SyncHash,
 		CreatedAt: definition.CreatedAt,
 	}
 }

@@ -420,7 +420,7 @@ func (r *Runner) mayRing(ctx context.Context, campaign store.Campaign, contact s
 	if err != nil {
 		return store.Campaign{}, false, err
 	}
-	// StopContact marks a contact in a call with the reason it would end with.
+	// store.CampaignContacts.Stop marks a contact in a call with the reason it would end with.
 	marked, _, err := r.store.CampaignContacts.Get(ctx, campaign.ID, contact.ID)
 	if err != nil {
 		return store.Campaign{}, false, err
@@ -506,8 +506,8 @@ const codeDialFailed = "dial_failed"
 const maxDialFailures = 12
 
 // countDial counts a dial in the activity record, refused when it could not be tried or placed
-// no call, with its reason. A dial a shutdown cut off rang nobody and leaves the contact to be
-// rung again, so it is counted when that dial is.
+// no call, with its reason. A dial never placed, cut off by a shutdown or by a placing that
+// failed, rang nobody and leaves the contact to be rung again, so it is counted when that dial is.
 func (r *Runner) countDial(campaign store.Campaign, dialed Dialed, err error) {
 	if dialed.Result == NotPlaced {
 		return
@@ -527,7 +527,7 @@ func (r *Runner) countDial(campaign store.Campaign, dialed Dialed, err error) {
 // takeOver settles the contacts whose router died mid-call, from the call it placed. None is
 // rung again.
 func (r *Runner) takeOver(ctx context.Context) {
-	claimed, err := r.store.CampaignContacts.TakeOverExpired(ctx, r.owner, r.now(), lease, maxCalls)
+	claimed, err := r.store.CampaignContacts.TakeOverExpired(ctx, r.owner, lease, maxCalls)
 	if err != nil {
 		r.logger.Error("could not take over expired campaign leases", "error", err)
 		return
@@ -688,7 +688,7 @@ func (r *Runner) classify(ctx context.Context, claimed store.Classifying) error 
 	}
 	settle.LeaseUntil = contact.LeaseUntil
 	return r.store.CampaignContacts.ClassifyAndSettle(ctx, r.owner,
-		store.Classification{AttemptID: attempt.ID, Outcome: settle.Outcome, Converted: settle.Converted}, contact.ID, settle)
+		store.Classification{AttemptID: attempt.ID, Outcome: settle.Outcome}, contact.ID, settle)
 }
 
 // unanswered settles an answered call nobody spoke on like a dial nobody picked up: the next

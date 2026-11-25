@@ -12,7 +12,7 @@ final readonly class CreateOptOutRequest
 {
     public function __construct(
         public OptOutChannel|string $channel,
-        // The number, in E.164.
+        // The number in E.164, or an iMessage handle's email address, for channel imessage or all.
         public string $recipient,
         // Omitted is api.
         public ?string $source = null,

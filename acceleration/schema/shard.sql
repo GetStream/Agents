@@ -202,6 +202,7 @@ TABLE call_legs
     CREATE INDEX call_legs_token_placed_idx ON public.call_legs USING btree (placed_at) WHERE (token IS NOT NULL)
     CREATE UNIQUE INDEX call_legs_transfer_idx ON public.call_legs USING btree (call_type, call_id, COALESCE(stream_app_pk, (0)::bigint), vendor_call_id) WHERE ((placed_at IS NULL) AND (vendor_call_id IS NOT NULL))
     CREATE INDEX call_legs_unanswered_idx ON public.call_legs USING btree (call_type, call_id) WHERE ((direction = 'outbound'::text) AND (end_reason = 'unanswered'::text))
+    CREATE INDEX call_legs_user_idx ON public.call_legs USING btree (customer_id, user_id) WHERE (user_id <> ''::text)
     CREATE INDEX call_legs_vendor_call_idx ON public.call_legs USING btree (vendor_call_id) WHERE (vendor_call_id IS NOT NULL)
 
 TABLE call_participants

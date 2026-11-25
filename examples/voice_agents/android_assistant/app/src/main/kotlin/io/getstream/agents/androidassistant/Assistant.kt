@@ -55,13 +55,6 @@ object Assistant {
     const val AGENT_NAME: String = "swift_assistant"
 
     /**
-     * The model a written conversation runs on. Grok streams its reasoning, which is what fills
-     * a reply's thinking panel. A call keeps the agent's faster model. It is sent as a model
-     * overwrite, which the session keeps, so a conversation reopened from the list stays on it.
-     */
-    const val CHAT_MODEL: String = "xai/grok-4.7"
-
-    /**
      * Who this phone is. Every conversation listed is theirs, and they are the same person the
      * iOS app is, so both phones list the same conversations.
      */

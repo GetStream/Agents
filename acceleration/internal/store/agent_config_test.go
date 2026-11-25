@@ -157,16 +157,14 @@ func (s *StoreSuite) TestUpdatingAConfigReplacesItsBindings() {
 	s.Equal(replacement.ID, read.Connectors[0].Connection.ConnectionID)
 }
 
-// The containment query in ConnectorConnectionReferenced reads the JSON this model writes,
+// The containment query in boundByConfig reads the JSON this model writes,
 // so a change to its tags shows here rather than as a connection deleted out from under an
 // agent.
 func (s *StoreSuite) TestAFixedBindingAConfigStoresReferencesItsConnection() {
 	connection := s.connection("acme-app", nil)
 	s.boundConfig("acme-app", fixed(connection.ID))
 
-	referenced, err := s.store.ConnectorConnections.Referenced(s.ctx, "acme-app", connection.ID)
-	s.Require().NoError(err)
-	s.True(referenced)
+	s.ErrorIs(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connection.ID), ErrConnectorConnectionBound)
 }
 
 // secondNode is another router's store on the same database and Redis, for what one node
@@ -312,8 +310,8 @@ func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 	config := AgentConfig{CustomerID: "acme-app", Name: "moderator", Role: RoleAgentModerator,
 		Channels: AgentAnswersIn{Chat: []ChatChannel{{Type: "callouts"}}}, Agents: []ChildAgent{{Config: "child"}}}
 
-	s.Equal(3, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config)) }),
-		"begin, the insert and commit: a config that binds nothing locks no connection")
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config)) }),
+		"begin, the insert, its transaction's id when there is a cache, and commit: a config that binds nothing locks no connection")
 	s.Equal(1, s.countQueries(func() {
 		listed, err := s.store.AgentConfigs.Select(s.ctx, "acme-app")
 		s.Require().NoError(err)
@@ -337,11 +335,11 @@ func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 		s.Require().NoError(err)
 	}))
 	config.Instructions = "be brief"
-	s.Equal(4, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &config)) }),
-		"begin, the locked read, the update and commit: a config that binds nothing locks no connection")
+	s.Equal(4+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &config)) }),
+		"begin, the locked read, the update, its transaction's id when there is a cache, and commit: a config that binds nothing locks no connection")
 	read := config.UpdatedAt
 	config.Greeting = "Hello."
-	s.Equal(4, s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Save(s.ctx, &config, read, read)) }),
+	s.Equal(4+s.redisTrips(1), s.countQueries(func() { s.Require().NoError(s.store.AgentConfigs.Save(s.ctx, &config, read, read)) }),
 		"the same as an update: the copy is held against the row the locked read returns")
 	if s.store.cache != nil {
 		for range 2 {

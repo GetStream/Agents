@@ -56,14 +56,13 @@ agent is stored in: `--dart-define=CUSTOMER_ID=` and
 there with `configure` and run the backend with that app's `STREAM_API_KEY` and
 `STREAM_API_SECRET` instead of a customer id.
 
-The chat asks for `xai/grok-4.7`, a model that reads photos and streams its reasoning, so the
-router needs `XAI_API_KEY`. A call needs `GOOGLE_API_KEY`, `DEEPGRAM_API_KEY` and
+The chat runs on the agent's own model, as a call does: which model a session runs on is the
+backend's to choose, and the router refuses a device that names one. The agent needs `GOOGLE_API_KEY`, `DEEPGRAM_API_KEY` and
 `INWORLD_API_KEY`. Web search needs one of `EXA_API_KEY`, `TAVILY_API_KEY` or
 `PERPLEXITY_API_KEY`.
 
-The AI components and the A2UI renderer are `stream_chat_flutter_ai` and
-`stream_chat_flutter_ai_a2ui` 0.2.0 from pub.dev. The OpenUI renderer is the app's own
-(`lib/openui_renderer.dart`) until Stream's is published.
+The AI components and the A2UI and OpenUI renderers are `stream_chat_flutter_ai`,
+`stream_chat_flutter_ai_a2ui` and `stream_chat_flutter_ai_openui` 0.3.0 from pub.dev.
 
 ## Gmail and Linear
 
@@ -224,8 +223,9 @@ also the app's own. Tapping a free table asks to reserve it.
   reduce-motion setting.
 - **Settings › Brand** chooses the accent and corners the UI wears: Stream Default, Ember
   Hospitality or Nordic Mobility (`brand_theme.dart`), kept between launches. Cards already on
-  screen take it on at once: the A2UI and OpenUI renderers and the app's widgets read it from
-  the widget tree. The agent writes the same UI whichever is chosen.
+  screen take it on at once: the brand is an `A2UITheme` and an `OpenUITheme` over the
+  conversation, which the renderers read from the widget tree, as the app's widgets do. The
+  agent writes the same UI whichever is chosen.
 
 ## What is not here yet
 

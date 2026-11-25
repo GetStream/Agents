@@ -188,6 +188,9 @@ type Options struct {
 	// ManageKey is what Stream staff's billing paths, under /v1/manage, are reached with.
 	// Empty turns them off: they answer 404 not_configured.
 	ManageKey string
+	// ActivityKeys are what a job reads the two activity paths with, and nothing else: the
+	// current key and the one being rotated out. An empty one is no key.
+	ActivityKeys []string
 	// Documents reads the files a person sends with a question (createResponse files). Nil
 	// refuses them as a feature this deployment does not offer.
 	Documents *extract.Extractor
@@ -385,11 +388,13 @@ type Server struct {
 	gate               *dlc.Gate
 	opsKey             string
 	manageKey          string
+	activityKeys       []string
 	authenticator      auth.Authenticator
 	authMode           auth.Mode
 	dataRetention      time.Duration
 	exportWritesWait   time.Duration
 	exportLineWait     time.Duration
+	importLineWait     time.Duration
 	exportWait         time.Duration
 	quota              *quota.Limiter
 	policies           *policy.Enforcer
@@ -398,6 +403,9 @@ type Server struct {
 	// exports a place for each export running on it, of maxExports.
 	exporting sync.Map
 	exports   chan struct{}
+	// importing and imports are the same for imports, of maxImports.
+	importing sync.Map
+	imports   chan struct{}
 	// healthLogs throttles the line a dependency that did not answer the health check logs:
 	// every probe asks.
 	healthLogs quota.Throttle
@@ -609,8 +617,10 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		dataRetention:      retention,
 		exportWritesWait:   exportWritesWait,
 		exportLineWait:     exportLineWait,
+		importLineWait:     importLineWait,
 		exportWait:         exportWait,
 		exports:            make(chan struct{}, maxExports),
+		imports:            make(chan struct{}, maxImports),
 		scheduledPoll:      2 * time.Second,
 		scheduledPeerWait:  30 * time.Second,
 		replyPoll:          100 * time.Millisecond,
@@ -638,6 +648,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		gate:               options.Gate,
 		opsKey:             options.OpsKey,
 		manageKey:          options.ManageKey,
+		activityKeys:       options.ActivityKeys,
 		popularity:         newPopularity(options.Store, logger),
 		logger:             logger,
 		release:            options.Release,
@@ -1287,9 +1298,8 @@ func (n operationName) ServeHTTP(_ http.ResponseWriter, r *http.Request) {
 // withServerSide refuses the generated operations only a backend may reach.
 //
 // It sits after withCustomer, because refusing a caller for what it is means having worked
-// out what it is first. The four sockets are left out of the embedded spec by being left
-// out of generation, so socketRoutes puts them back rather than leaving them to be open by
-// omission.
+// out what it is first. The routes served by hand are in the spec too (documentHandWritten),
+// so none is open by omission.
 //
 // A caller that authenticated and asked for one of these gets a 403 rather than a 401: it
 // has already proved who it is, so there is nothing to be learned from a specific answer
@@ -1323,6 +1333,10 @@ var errServerSideOnly = APIError{
 	Message: "this operation is server-side only: it needs " + auth.AuthTypeHeader + ": " +
 		auth.AuthTypeServer + " and a token carrying server: true",
 }
+
+// statusClientClosed is what a request whose caller hung up before it was answered is counted
+// as, nginx's 499: no caller reads it.
+const statusClientClosed = 499
 
 // withCustomer lifts the authenticated principal into the request context so handlers can
 // read it without each one reaching into the raw request.
@@ -1372,6 +1386,15 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 		if errors.Is(err, auth.ErrInvalidUsageCategories) {
 			s.refuseLogged(w, r, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidUsageCategories,
 				Message: strings.TrimPrefix(err.Error(), "auth: ")})
+			return
+		}
+		// A caller that hung up while its credential was checked is no failure of the router's,
+		// and nobody is left to answer. The status is for withMetrics, which counts and times it
+		// as a 4xx: callers giving up on a stalled key store still show there.
+		if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
+			s.logger.Debug("the caller left before its credential was checked", "method", r.Method,
+				"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()))
+			w.WriteHeader(statusClientClosed)
 			return
 		}
 		// A credential that could not be checked (the key store down, a key that would not

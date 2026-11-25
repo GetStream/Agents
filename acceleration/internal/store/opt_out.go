@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
+	"strings"
 	"time"
 
+	"github.com/nyaruka/phonenumbers"
 	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -52,6 +56,7 @@ func (r *OptOuts) Insert(ctx context.Context, optOut *OptOut) error {
 // insertOptOut is OptOuts.Insert on db, which may be the transaction a delivery is claimed
 // in (ChannelDeliveries.ClaimStop).
 func insertOptOut(ctx context.Context, db bun.IDB, optOut *OptOut) error {
+	optOut.Recipient, _ = optOutRecipient(optOut.Recipient, "")
 	if err := optOut.Validate(); err != nil {
 		return stack.Wrap(err)
 	}
@@ -95,16 +100,16 @@ func (r *OptOuts) Revoke(ctx context.Context, customerID, id string) error {
 // RevokeAll lifts every opt-out a recipient has on a channel and on all of them, as
 // texting START does.
 func (r *OptOuts) RevokeAll(ctx context.Context, customerID, recipient, channel string) error {
-	return revokeAllOptOuts(ctx, r.store.global, customerID, recipient, channel)
+	return revokeAllOptOuts(ctx, r.store.global, customerID, channel, recipient)
 }
 
 // revokeAllOptOuts is OptOuts.RevokeAll on db, which may be the transaction a delivery is
-// claimed in (ChannelDeliveries.ClaimStart).
-func revokeAllOptOuts(ctx context.Context, db bun.IDB, customerID, recipient, channel string) error {
+// claimed in (ChannelDeliveries.ClaimStart), of the opt-outs kept under any of recipients.
+func revokeAllOptOuts(ctx context.Context, db bun.IDB, customerID, channel string, recipients ...string) error {
 	_, err := db.NewUpdate().Model((*OptOut)(nil)).
 		Set("revoked_at = ?", time.Now().UTC()).
 		Where("customer_id = ?", customerID).
-		Where("recipient = ?", recipient).
+		Where("recipient IN (?)", bun.In(keptUnder(recipients...))).
 		Where("channel IN (?)", bun.In([]string{channel, OptOutAll})).
 		Where("revoked_at IS NULL").
 		Exec(ctx)
@@ -118,7 +123,7 @@ func revokeAllOptOuts(ctx context.Context, db bun.IDB, customerID, recipient, ch
 func (r *OptOuts) OptedOut(ctx context.Context, customerID, recipient, channel string) (bool, error) {
 	found, err := r.store.global.NewSelect().Model((*OptOut)(nil)).
 		Where("customer_id = ?", customerID).
-		Where("recipient = ?", recipient).
+		Where("recipient IN (?)", bun.In(keptUnder(recipient))).
 		Where("channel IN (?)", bun.In([]string{channel, OptOutAll})).
 		Where("revoked_at IS NULL").
 		Exists(ctx)
@@ -142,4 +147,227 @@ func (r *OptOuts) Select(ctx context.Context, customerID string, limit int, afte
 		return nil, stack.Wrap(fmt.Errorf("store: opt-outs: %w", err))
 	}
 	return optOuts, nil
+}
+
+// NormalizedOptOuts is what OptOuts.Normalize did.
+type NormalizedOptOuts struct {
+	// Rewritten is how many opt-outs now name their recipient in E.164.
+	Rewritten int
+	// Revoked is how many of those were revoked: the recipient already had a live opt-out from
+	// the same channel in E.164, or lifted one after this one was recorded.
+	Revoked int
+	// Handles is how many opt-outs name somebody by what is not a phone number, such as the
+	// email address an iMessage handle can be, and were left as they are.
+	Handles int
+}
+
+// normalizeRetries is how many times Normalize reads a batch again after a STOP recorded at
+// the same moment took the recipient it was rewriting a row to.
+const normalizeRetries = 3
+
+// Normalize rewrites every opt-out whose recipient is a phone number not written in E.164,
+// such as one stored before the recipient was checked, in batches of batch rows, so it
+// matches the number dialled or texted. Of two live opt-outs of one recipient and channel,
+// the one rewritten is revoked rather than deleted, and so is one the recipient lifted under
+// E.164 after it was recorded. A recipient that looks like a number but has no one valid
+// reading is left as it is and handed to unread, one batch at a time. Running it again
+// changes nothing.
+func (r *OptOuts) Normalize(ctx context.Context, batch int, unread func([]OptOut)) (NormalizedOptOuts, error) {
+	var done NormalizedOptOuts
+	after := ""
+	for {
+		var page []OptOut
+		var did NormalizedOptOuts
+		var left []OptOut
+		var err error
+		for attempt := 0; ; attempt++ {
+			page = nil
+			err = r.store.global.NewSelect().Model(&page).
+				Where("id > ?", after).
+				Order("id").Limit(batch).Scan(ctx)
+			if err != nil {
+				return done, stack.Wrap(fmt.Errorf("store: normalize opt-outs: %w", err))
+			}
+			did, left, err = r.normalizePage(ctx, page)
+			if err == nil || !isViolation(err, uniqueViolation) || attempt == normalizeRetries {
+				break
+			}
+		}
+		if err != nil {
+			return done, stack.Wrap(fmt.Errorf("store: normalize opt-outs: %w", err))
+		}
+		if len(page) == 0 {
+			return done, nil
+		}
+		after = page[len(page)-1].ID
+		done.Rewritten += did.Rewritten
+		done.Revoked += did.Revoked
+		done.Handles += did.Handles
+		if len(left) > 0 {
+			unread(left)
+		}
+	}
+}
+
+// normalizePage is Normalize of one batch, in one transaction. It reports the opt-outs it
+// could not read.
+func (r *OptOuts) normalizePage(ctx context.Context, page []OptOut) (NormalizedOptOuts, []OptOut, error) {
+	type key struct{ customer, recipient, channel string }
+	var did NormalizedOptOuts
+	var unread, rewrite []OptOut
+	var targets [][]string
+	var redundant []string
+	live := map[key]bool{}
+	for _, optOut := range page {
+		recipient, kind := optOutRecipient(optOut.Recipient, "")
+		switch {
+		case kind == recipientHandle:
+			did.Handles++
+			continue
+		case kind == recipientUnread:
+			unread = append(unread, optOut)
+			continue
+		case recipient == optOut.Recipient:
+			continue
+		case recipient != strings.TrimSpace(optOut.Recipient):
+			did.Rewritten++
+		}
+		optOut.Recipient = recipient
+		rewrite = append(rewrite, optOut)
+		if optOut.RevokedAt != nil {
+			continue
+		}
+		at := key{optOut.CustomerID, recipient, optOut.Channel}
+		if live[at] {
+			redundant = append(redundant, optOut.ID)
+			continue
+		}
+		live[at] = true
+		targets = append(targets, []string{at.customer, at.recipient, at.channel})
+	}
+	if len(rewrite) == 0 {
+		return did, unread, nil
+	}
+	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if len(targets) > 0 {
+			var held []OptOut
+			err := tx.NewSelect().Model(&held).
+				Column("customer_id", "recipient", "channel", "revoked_at").
+				Where("(customer_id, recipient, channel) IN (?)", bun.In(targets)).
+				Scan(ctx)
+			if err != nil {
+				return err
+			}
+			for _, kept := range held {
+				for _, row := range rewrite {
+					if row.RevokedAt != nil || row.CustomerID != kept.CustomerID ||
+						row.Recipient != kept.Recipient || row.Channel != kept.Channel {
+						continue
+					}
+					// Live here, or lifted after this row was recorded: either way this row
+					// must not be what keeps the recipient opted out.
+					if kept.RevokedAt == nil || kept.RevokedAt.After(row.CreatedAt) {
+						redundant = append(redundant, row.ID)
+					}
+				}
+			}
+		}
+		if len(redundant) > 0 {
+			result, err := tx.NewUpdate().Model((*OptOut)(nil)).
+				Set("revoked_at = ?", time.Now().UTC()).
+				Where("id IN (?)", bun.In(redundant)).
+				Exec(ctx)
+			if err != nil {
+				return err
+			}
+			affected, _ := result.RowsAffected()
+			did.Revoked = int(affected)
+		}
+		_, err := tx.NewUpdate().Model(&rewrite).Column("recipient").Bulk().Exec(ctx)
+		return err
+	})
+	if err != nil {
+		return NormalizedOptOuts{}, nil, err
+	}
+	return did, unread, nil
+}
+
+// recipientKind is what optOutRecipient made of a recipient.
+type recipientKind int
+
+const (
+	// recipientNumber is a phone number, written in E.164.
+	recipientNumber recipientKind = iota
+	// recipientUnread looks like a phone number but has no one valid reading.
+	recipientUnread
+	// recipientHandle is not a phone number, such as an email address.
+	recipientHandle
+)
+
+// numberLike is a recipient written as a phone number: digits, with the punctuation and
+// spaces numbers are written with, and no letters.
+var numberLike = regexp.MustCompile(`^[0-9+()\-. ]*[0-9][0-9+()\-. ]*$`)
+
+// OptOutRecipient is the recipient an opt-out from sender, who wrote to line, is kept under:
+// their number in E.164, read in the line's country when it has no country code, or what they
+// sent when it has no one valid reading.
+func OptOutRecipient(sender, line string) string {
+	region := ""
+	if number, err := phonenumbers.Parse(line, ""); err == nil {
+		region = phonenumbers.GetRegionCodeForNumber(number)
+	}
+	recipient, _ := optOutRecipient(sender, region)
+	return recipient
+}
+
+// optOutRecipient is the recipient an opt-out is kept and matched under, and what it is. A
+// phone number is written in E.164 when exactly one reading of it is a valid number: as written
+// when it has a +; otherwise as an international number without its + (as WhatsApp sends
+// senders, or 1 and a North American number), or as a number of region when one is known. A
+// number read two ways, or none, stays as written: guessing a country would match somebody
+// else. What is not a number, such as the email address an iMessage handle can be, stays as it
+// is too, so whether a recipient must be in E.164 is decided by what it is, the same for an
+// opt-out from one channel and from all of them.
+func optOutRecipient(recipient, region string) (string, recipientKind) {
+	recipient = strings.TrimSpace(recipient)
+	number := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(recipient, "tel:"), "whatsapp:"))
+	if !numberLike.MatchString(number) {
+		return recipient, recipientHandle
+	}
+	readings := []string{number}
+	if !strings.HasPrefix(number, "+") {
+		readings = []string{"+" + number}
+		if region != "" {
+			readings = append(readings, number)
+		}
+	}
+	var valid []string
+	for _, reading := range readings {
+		parsed, err := phonenumbers.Parse(reading, region)
+		if err != nil || !phonenumbers.IsValidNumber(parsed) {
+			continue
+		}
+		if e164 := phonenumbers.Format(parsed, phonenumbers.E164); !slices.Contains(valid, e164) {
+			valid = append(valid, e164)
+		}
+	}
+	if len(valid) != 1 {
+		return recipient, recipientUnread
+	}
+	return valid[0], recipientNumber
+}
+
+// keptUnder is every recipient an opt-out of somebody written as recipients may be kept
+// under: each in E.164, and as written, for a row stored before recipients were normalized.
+func keptUnder(recipients ...string) []string {
+	var kept []string
+	for _, written := range recipients {
+		normalized, _ := optOutRecipient(written, "")
+		for _, recipient := range []string{normalized, strings.TrimSpace(written)} {
+			if !slices.Contains(kept, recipient) {
+				kept = append(kept, recipient)
+			}
+		}
+	}
+	return kept
 }

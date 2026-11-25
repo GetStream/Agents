@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -36,7 +37,7 @@ const maxCapacity = 1024
 //
 // Server-side only, and this is the clearest case of why: a worker is offered other
 // people's callers, so anything that can open this socket can answer for the whole app.
-// socketRoutes already refuses a client-side caller in the middleware; the same question
+// withServerSide already refuses a client-side caller in the middleware; the same question
 // is asked again here because this is the socket where being wrong is worst, and a second
 // check costs one comparison.
 func (s *Server) dispatchCalls(w http.ResponseWriter, r *http.Request) {
@@ -100,9 +101,10 @@ func (s *Server) dispatchCalls(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		gone <- s.readWorker(r.Context(), connection, worker, pongs, replies, writerDone)
 	}()
-	s.writeCalls(connection, worker, gone, pongs, replies, stopTaking)
+	ended := s.writeCalls(connection, worker, gone, pongs, replies, stopTaking)
 
 	s.logger.Info("a dispatch worker stopped waiting", "worker", worker.ID)
+	recordClose(r.Context(), ended)
 }
 
 // registrationOf reads what a worker says about itself off its query string, returning why
@@ -152,9 +154,9 @@ func registrationOf(r *http.Request) (dispatch.Registration, string) {
 }
 
 // writeCalls pushes calls and messages to the worker until it goes away, is released, or
-// the socket breaks. gone carries why the reader stopped, and stopTaking tells
-// the reader the writer takes no more pongs or replies from it.
-func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker, gone <-chan error, pongs <-chan float64, replies <-chan frame, stopTaking func()) {
+// the socket breaks, and says why the socket closed. gone carries why the reader stopped, and
+// stopTaking tells the reader the writer takes no more pongs or replies from it.
+func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker, gone <-chan error, pongs <-chan float64, replies <-chan frame, stopTaking func()) socketEnd {
 	// A reader left handing over a pong would never read the worker's answer to the close.
 	end := func(code int, reason string) {
 		stopTaking()
@@ -164,7 +166,7 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 	ready := frame{"type": "ready", "worker_id": worker.ID}
 	if err := connection.WriteJSON(ready); err != nil {
 		s.logger.Debug("dispatch socket write failed", "worker", worker.ID, "error", err)
-		return
+		return writeEnd(err, gone)
 	}
 
 	ping := time.NewTicker(pingEvery)
@@ -175,13 +177,13 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 		case at := <-pongs:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteJSON(frame{"type": "pong", "at": at}); err != nil {
-				return
+				return writeEnd(err, gone)
 			}
 
 		case reply := <-replies:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteJSON(reply); err != nil {
-				return
+				return writeEnd(err, gone)
 			}
 
 		case call := <-worker.ToolCalls():
@@ -191,7 +193,7 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 				// returning here leads to.
 				s.logger.Error("could not hand a tool call to a worker",
 					"worker", worker.ID, "tool", call.Name, "error", err)
-				return
+				return writeEnd(err, gone)
 			}
 
 		case call := <-worker.Calls():
@@ -201,7 +203,7 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 				// given to. Losing it is worth an error rather than a debug line.
 				s.logger.Error("could not hand a call to a worker",
 					"worker", worker.ID, "call", call.CallID, "error", err)
-				return
+				return writeEnd(err, gone)
 			}
 
 		case message := <-worker.Messages():
@@ -209,24 +211,25 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 			if err := connection.WriteJSON(messageFrame(message)); err != nil {
 				s.logger.Error("could not hand a message to a worker",
 					"worker", worker.ID, "channel", message.ChannelID, "error", err)
-				return
+				return writeEnd(err, gone)
 			}
 
 		case <-ping.C:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
+				return writeEnd(err, gone)
 			}
 
 		case <-s.draining:
 			end(websocket.CloseGoingAway, "router restarting")
-			return
+			return socketEnd{cause: routerShutdown, code: websocket.CloseGoingAway}
 
 		case stopped := <-gone:
 			if errors.Is(stopped, errUnreadableFrame) {
 				refuseUnreadable(connection)
+				return socketEnd{cause: refusedByRouter, code: websocket.ClosePolicyViolation}
 			}
-			return
+			return readEnd(stopped)
 		}
 	}
 }
@@ -236,7 +239,8 @@ func (s *Server) writeCalls(connection *websocket.Conn, worker *dispatch.Worker,
 //
 // A message of a type it does not know is reported and skipped rather than closing the
 // socket: dropping a worker over one bad message would take the calls it is already in with
-// it. A frame that is not JSON at all returns errUnreadableFrame.
+// it. A frame that is not JSON at all returns errUnreadableFrame, and a read that failed
+// returns the read's own error.
 func (s *Server) readWorker(ctx context.Context, connection *websocket.Conn, worker *dispatch.Worker, pongs chan<- float64, replies chan<- frame, writerDone <-chan struct{}) error {
 	connection.SetReadDeadline(time.Now().Add(pongWait))
 	connection.SetPongHandler(func(string) error {
@@ -284,7 +288,7 @@ func (s *Server) readWorker(ctx context.Context, connection *websocket.Conn, wor
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				s.logger.Debug("dispatch socket read failed", "worker", worker.ID, "error", err)
 			}
-			return nil
+			return stack.Wrap(err)
 		}
 		connection.SetReadDeadline(time.Now().Add(pongWait))
 		if json.Unmarshal(payload, &report) != nil {

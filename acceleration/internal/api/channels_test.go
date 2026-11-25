@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -526,6 +527,43 @@ func (s *ChannelsSuite) TestAStartTheStoreRefusedIsObeyedWhenDeliveredAgain() {
 	s.Len(s.meta.to(writer), 3, "the START is confirmed once, however often it is delivered")
 }
 
+// A HELP or an ordinary message the store could not claim fails its delivery with a 500 the
+// provider retries, saying nothing of the store, whose error goes to the log. A trigger
+// refuses the line's deliveries.
+func (s *ChannelsSuite) TestAMessageTheStoreCouldNotClaimIsA500WithoutTheStoresWords() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, "")
+	ctx := context.Background()
+	_, err := s.store.GlobalDB().ExecContext(ctx, `BEGIN;
+		CREATE FUNCTION channels_suite_refuse_delivery() RETURNS trigger AS $$
+			BEGIN RAISE EXCEPTION 'refused by the test'; END $$ LANGUAGE plpgsql;
+		CREATE TRIGGER channels_suite_refuse_delivery BEFORE INSERT ON channel_deliveries FOR EACH ROW
+			WHEN (NEW.account_id = '`+line.Id+`') EXECUTE FUNCTION channels_suite_refuse_delivery();
+		COMMIT`)
+	s.Require().NoError(err)
+	defer func() {
+		_, err := s.store.GlobalDB().ExecContext(ctx, `BEGIN;
+			DROP TRIGGER channels_suite_refuse_delivery ON channel_deliveries;
+			DROP FUNCTION channels_suite_refuse_delivery();
+			COMMIT`)
+		s.Require().NoError(err)
+	}()
+
+	for _, text := range []string{"HELP", "what time do you open?"} {
+		writer := s.writer()
+		body := s.delivery(writer, "msg-"+s.utils.uuid(), text)
+		status, answered := s.post(line.WebhookUrl, s.signed(body), body)
+		s.Equal(http.StatusInternalServerError, status, "%q not claimed is the provider's to deliver again", text)
+		s.Contains(string(answered), "something went wrong", text)
+		s.NotContains(string(answered), "refused by the test", text)
+		s.NotContains(string(answered), "claim channel message", text)
+		s.Empty(s.meta.to(writer), "%q not claimed is not answered", text)
+	}
+	s.Contains(s.logged.String(), `level=ERROR msg="could not claim a channel delivery" customer=`+s.customerID())
+	s.Contains(s.logged.String(), "refused by the test", "what the store said is kept in the log")
+}
+
 // A delivery of a STOP racing a slow first one waits for the first to record the opt-out, and
 // both are answered as taken: the person is opted out and confirmed once.
 func (s *ChannelsSuite) TestARedeliveryRacingASlowStopWaitsForIt() {
@@ -660,6 +698,19 @@ func (s *ChannelsSuite) TestTheNumberThatTextsACodeBecomesThatEndUser() {
 	s.Equal(owner, held.UserID)
 }
 
+// A code is never minted for a user id Stream keeps for itself.
+func (s *ChannelsSuite) TestACodeIsNotMintedForAReservedUserID() {
+	number := s.number()
+	s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: "!anon"})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "user_id may not start with !")
+}
+
 // A code somebody saw go by must not claim a second number.
 func (s *ChannelsSuite) TestACodeAlreadySpentClaimsNothingMore() {
 	number := s.number()
@@ -775,6 +826,146 @@ func (s *ChannelsSuite) TestNumbersGuessingCodesOnOneLineTogetherCannotClaimOne(
 	s.Contains(s.reply(last, 1), "Too many codes")
 	_, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, "whatsapp", "+"+last)
 	s.ErrorIs(err, store.ErrNoContact)
+}
+
+// Wrong codes texted at the same moment from many numbers are held to the line's count too:
+// none of them may be tried on a count that the others have not yet added to.
+func (s *ChannelsSuite) TestWrongCodesTextedAtOnceFromManyNumbersAreTriedNoMoreThanTheLineAllows() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, store.ChannelIdentityLink)
+	guessers := make([]string, 60)
+	for n := range guessers {
+		guessers[n] = s.writer()
+	}
+	s.awayFromAWindowEdge()
+
+	s.deliverAtOnce(line, guessers...)
+
+	tried := 0
+	for _, guesser := range guessers {
+		if s.reply(guesser, 1) == tooManyCodes {
+			continue
+		}
+		s.Equal(sendTheCode, s.reply(guesser, 1))
+		tried++
+	}
+	s.Equal(20, tried, "the line's count of wrong codes")
+}
+
+// Wrong codes one number texts at the same moment are held to that number's count.
+func (s *ChannelsSuite) TestWrongCodesTextedAtOnceFromOneNumberAreTriedNoMoreThanItsCount() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, store.ChannelIdentityLink)
+	guesser := s.writer()
+	s.awayFromAWindowEdge()
+
+	s.deliverAtOnce(line, slices.Repeat([]string{guesser}, 10)...)
+
+	s.reply(guesser, 10)
+	s.Equal(append(slices.Repeat([]string{sendTheCode}, 5), slices.Repeat([]string{tooManyCodes}, 5)...),
+		s.meta.to(guesser), "five tried, then the number is refused")
+}
+
+// A code that ties a number to somebody is no wrong code: it leaves the line as many wrong codes
+// as it had before.
+func (s *ChannelsSuite) TestAClaimedCodeLeavesTheLineItsCountOfWrongCodes() {
+	number := s.number()
+	line := s.connect(number)
+	config := s.agentOn(number, store.ChannelIdentityLink)
+	var minted ChannelLink
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/channels/links",
+		LinkChannelRequest{ConfigId: config.Id, UserId: s.utils.uuid()}, &minted))
+	guessers := make([]string, 19)
+	for n := range guessers {
+		guessers[n] = s.writer()
+	}
+	s.awayFromAWindowEdge()
+	s.deliverAtOnce(line, guessers...)
+	for _, guesser := range guessers {
+		s.Require().Equal(sendTheCode, s.reply(guesser, 1))
+	}
+	owner := s.writer()
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, owner, "msg-"+s.utils.uuid(), minted.Code))
+
+	s.Equal("This number is yours now. What can I do for you?", s.reply(owner, 1), "under the count, a code is claimed")
+	twentieth, last := s.writer(), s.writer()
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, twentieth, "msg-"+s.utils.uuid(), "no such code"))
+	s.Equal(sendTheCode, s.reply(twentieth, 1), "the claim took none of the twenty")
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, last, "msg-"+s.utils.uuid(), "no such code"))
+	s.Equal(tooManyCodes, s.reply(last, 1))
+}
+
+// A code the router could not try is no wrong code: the number is not held to it.
+func (s *ChannelsSuite) TestACodeThatCouldNotBeTriedIsNotCountedAsAWrongOne() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, store.ChannelIdentityLink)
+	writer := s.writer()
+	s.awayFromAWindowEdge()
+	s.failQueries(`DELETE FROM "channel_links"`)
+	for n := range 5 {
+		s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "123456"))
+		s.Require().Equal(sendTheCode, s.reply(writer, n+1))
+	}
+	s.failing.value.Store(nil)
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "no such code"))
+
+	s.Equal(sendTheCode, s.reply(writer, 6))
+}
+
+// Wrong codes of the window before count no more: the line takes codes again in the next one.
+func (s *ChannelsSuite) TestWrongCodesOfTheWindowBeforeDoNotCount() {
+	number := s.number()
+	line := s.connect(number)
+	s.agentOn(number, store.ChannelIdentityLink)
+	account, err := s.store.ChannelAccounts.GetByNumber(context.Background(), s.customerID(), "whatsapp", number)
+	s.Require().NoError(err)
+	guesser := s.writer()
+	s.awayFromAWindowEdge()
+	before := time.Now().UTC().Truncate(channels.LinkValidFor).Add(-channels.LinkValidFor)
+	for n := range 20 {
+		from := "+" + s.writer()
+		if n < 5 {
+			from = "+" + guesser
+		}
+		reserved, err := s.store.ChannelLinkFailures.Reserve(context.Background(), account.ID, from, before, before, 5, 20)
+		s.Require().NoError(err)
+		s.Require().True(reserved, "the window before takes all twenty")
+	}
+
+	s.Require().Equal(http.StatusAccepted, s.deliver(line, guesser, "msg-"+s.utils.uuid(), "no such code"))
+
+	s.Equal(sendTheCode, s.reply(guesser, 1))
+}
+
+const (
+	tooManyCodes = "Too many codes did not match. Try again in a few minutes."
+	sendTheCode  = "Send me the code from your account to get started. It ties this number to you, so I can " +
+		"answer about what is yours."
+)
+
+// deliverAtOnce posts a wrong code from each number to a line's webhook, all at the same moment,
+// and waits until every delivery is taken.
+func (s *ChannelsSuite) deliverAtOnce(line ChannelAccount, from ...string) {
+	answered := make([]<-chan posted, len(from))
+	for n, writer := range from {
+		answered[n] = s.postLater(line, s.delivery(writer, "msg-"+s.utils.uuid(), "guess "+strconv.Itoa(n)))
+	}
+	for _, delivery := range answered {
+		s.Require().Equal(http.StatusAccepted, (<-delivery).status)
+	}
+}
+
+// awayFromAWindowEdge waits, when the window wrong codes are counted in ends within the next
+// ten seconds, until the next one has begun: codes texted across an edge count in two windows.
+func (s *ChannelsSuite) awayFromAWindowEdge() {
+	s.Require().Eventually(func() bool {
+		return time.Until(time.Now().Truncate(channels.LinkValidFor).Add(channels.LinkValidFor)) > 10*time.Second
+	}, 15*time.Second, 100*time.Millisecond)
 }
 
 // A code the router cannot write is its own failure: the caller is told so, not what the store said.

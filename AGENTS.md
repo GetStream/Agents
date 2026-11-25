@@ -29,6 +29,9 @@ Leave a note that the other SDKs also need to update, as a new file in `.claude/
 We run this periodically, you don't need to change all SDKs at once.
 Go goes first, and later on we update the others.
 
+To publish every SDK at once, or one of them, read the `release-sdks` skill
+(`.claude/skills/release-sdks/SKILL.md`). A release of the whole repo publishes them all.
+
 ## Local dev
 
 Everything reads the repo-root `.env` for provider credentials.

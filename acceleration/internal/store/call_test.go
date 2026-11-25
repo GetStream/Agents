@@ -212,7 +212,7 @@ func (s *StoreSuite) TestCallQueryBudgets() {
 	}
 	request := Request{CustomerID: "app", AgentID: "agent", SessionID: "called", Modality: "llm", Provider: "stub",
 		Model: "stub-llm", InputTokens: 10, StartedAt: at.Add(time.Second), Success: true}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, &request))
 	call := &Call{ID: "budgeted", SessionID: "called", CustomerID: "app", AgentID: "agent", StartedAt: at.Add(time.Hour)}
 	score := 4
 	end := at.Add(2 * time.Hour)
@@ -349,4 +349,22 @@ func (s *StoreSuite) TestAnotherCustomersWriteToACallIdChangesNothing() {
 			s.Equal(before, after, "app's call is as it was")
 		})
 	}
+}
+
+func (s *StoreSuite) TestAnotherCustomersCallByTheSameIdIsNotOpenedAgain() {
+	call := Call{ID: "one", CustomerID: "app", CallID: "call-1", AgentID: "agent-theirs", StartedAt: s.base}
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &call))
+	s.Require().NoError(s.store.Calls.Finish(s.ctx, "app", call.ID, s.base.Add(time.Minute)))
+	before, err := s.store.Calls.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+
+	err = s.store.Calls.Start(s.ctx, &Call{
+		ID: "one", CustomerID: "somebody-else", CallID: "call-2", AgentID: "agent-other", StartedAt: s.base.Add(time.Hour),
+	})
+	s.Require().ErrorIs(err, ErrIDTaken)
+
+	after, err := s.store.Calls.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Equal(before, after, "app's call is as it was, still ended")
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &call), "app starting its own call again is not refused")
 }

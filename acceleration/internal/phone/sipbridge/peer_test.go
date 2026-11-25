@@ -16,8 +16,11 @@ import (
 type peerOptions struct {
 	// reinviteStatus answers an INVITE; 0 means 200.
 	reinviteStatus int
-	// challengeOnce answers the first INVITE with a 401.
-	challengeOnce bool
+	// challenges is how many INVITEs, the first ones, are answered with a 401.
+	challenges int
+	// recordRoute puts a Record-Route naming the peer on each 401, as a proxy in front of a
+	// trunk may.
+	recordRoute bool
 	// sdp is the body of the 200 to an INVITE; empty answers with a made-up one.
 	sdp []byte
 	// natReceived and natRport are added to the Via of the answer to an OPTIONS, as a server
@@ -36,7 +39,7 @@ type peer struct {
 
 	mu         sync.Mutex
 	reqs       []*sip.Request
-	challenged bool
+	challenged int
 }
 
 func startPeer(t *testing.T, opts peerOptions) *peer {
@@ -62,9 +65,12 @@ func startPeer(t *testing.T, opts peerOptions) *peer {
 
 	srv.OnInvite(func(req *sip.Request, tx sip.ServerTransaction) {
 		p.record(req)
-		if opts.challengeOnce && p.challenge() {
+		if p.challenge(opts.challenges) {
 			res := sip.NewResponseFromRequest(req, sip.StatusUnauthorized, "Unauthorized", nil)
 			res.AppendHeader(sip.NewHeader("WWW-Authenticate", `Digest realm="x",nonce="n"`))
+			if opts.recordRoute {
+				res.AppendHeader(sip.NewHeader("Record-Route", "<sip:127.0.0.1:"+strconv.Itoa(p.port)+";transport=tcp;lr>"))
+			}
 			_ = tx.Respond(res)
 			return
 		}
@@ -104,13 +110,12 @@ func (p *peer) record(req *sip.Request) {
 	p.reqs = append(p.reqs, req)
 }
 
-// challenge reports whether this is the first INVITE, the one to challenge.
-func (p *peer) challenge() bool {
+// challenge reports whether this INVITE is one of the first n, the ones to challenge.
+func (p *peer) challenge(n int) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	first := !p.challenged
-	p.challenged = true
-	return first
+	p.challenged++
+	return p.challenged <= n
 }
 
 // requests is every request with method in the dialog callID, in the order they came.

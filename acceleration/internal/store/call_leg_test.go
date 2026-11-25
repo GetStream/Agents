@@ -3,9 +3,15 @@
 package store
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/uptrace/bun"
 )
 
 func (s *StoreSuite) TestOnlyTheRefusedCallersLegIsRefused() {
@@ -436,6 +442,8 @@ func (s *StoreSuite) TestCallLegQueryBudgets() {
 
 	leg := s.placedLeg("token", func(leg *CallLeg) { leg.VendorCallID = "v-1" })
 	s.Equal(1, s.countQueries(func() { s.placedLeg("other", nil) }), "Place")
+	// The transaction, its lock, the count in each shard, the insert and the commit.
+	s.Equal(4+shards, s.countQueries(func() { s.Require().NoError(s.placeWithin(s.store, newID(), 1)) }), "PlaceWithin")
 	s.Equal(1, s.countQueries(func() {
 		placed, err := s.store.CallLegs.Placed(s.ctx, leg.CustomerID, leg.Vendor, "v-1")
 		s.Require().NoError(err)
@@ -449,4 +457,235 @@ func (s *StoreSuite) TestCallLegQueryBudgets() {
 		s.Require().NoError(err)
 	}), "ChangeOutcome locks the leg in its shard, then writes it")
 	s.Equal(shards, s.countQueries(func() { s.Require().NoError(s.store.CallLegs.Unplace(s.ctx, "other")) }), "Unplace")
+}
+
+func (s *StoreSuite) TestAPlacedLegNotDialedYetIsACallUp() {
+	organization := newID()
+	s.placedLeg(newID(), func(leg *CallLeg) { leg.OrganizationID = organization })
+
+	total, _, err := s.store.CallLegs.CountOpen(s.ctx, organization, s.base.Add(-time.Minute), "", "")
+	s.Require().NoError(err)
+	s.Equal(1, total, "placed now, so ringing")
+	total, _, err = s.store.CallLegs.CountOpen(s.ctx, organization, s.base.Add(time.Minute), "", "")
+	s.Require().NoError(err)
+	s.Zero(total, "placed longer ago than anything rings")
+}
+
+// placeWithin places a leg of organization at s.base, no more than limit at once.
+func (s *StoreSuite) placeWithin(on *Store, organization string, limit int) error {
+	placed := s.base
+	return on.CallLegs.PlaceWithin(s.ctx, &CallLeg{
+		Token: newID(), CustomerID: "app", OrganizationID: organization, CallType: "default", CallID: "call-" + newID(),
+		Vendor: "telnyx", Direction: Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199", PlacedAt: &placed,
+	}, CallsAtOnce{Limit: limit, Ringing: time.Minute})
+}
+
+func (s *StoreSuite) TestALegPastItsOrganizationsCallsAtOnceIsNotPlaced() {
+	organization := newID()
+	s.Require().NoError(s.placeWithin(s.store, organization, 2))
+	s.Require().NoError(s.placeWithin(s.store, organization, 2))
+
+	s.Require().ErrorIs(s.placeWithin(s.store, organization, 2), ErrCallsAtOnce)
+	s.Require().NoError(s.placeWithin(s.store, newID(), 2), "another organization's calls are its own")
+	total, _, err := s.store.CallLegs.CountOpen(s.ctx, organization, s.base.Add(-time.Minute), "", "")
+	s.Require().NoError(err)
+	s.Equal(2, total)
+}
+
+func (s *StoreSuite) TestCallsPlacedAllAtOnceKeepToTheLimit() {
+	organization := newID()
+	var placed, refused int
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for range 30 {
+		wg.Go(func() {
+			err := s.placeWithin(s.store, organization, 4)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				placed++
+			case errors.Is(err, ErrCallsAtOnce):
+				refused++
+			default:
+				s.Fail("placing failed", "%v", err)
+			}
+		})
+	}
+	wg.Wait()
+
+	s.Equal(4, placed)
+	s.Equal(26, refused)
+}
+
+func (s *ShardedStoreSuite) TestALegAnotherShardPlacedCountsAgainstTheLimitHere() {
+	organization := newID()
+	s.Require().NoError(s.placeWithin(s.other, organization, 2))
+	s.Require().NoError(s.placeWithin(s.store, organization, 2))
+
+	s.Require().ErrorIs(s.placeWithin(s.store, organization, 2), ErrCallsAtOnce)
+	s.Require().ErrorIs(s.placeWithin(s.other, organization, 2), ErrCallsAtOnce)
+}
+
+func (s *StoreSuite) TestManyRoutersPlacingAtOnceKeepToTheLimit() {
+	organization := newID()
+	routers := []*Store{s.store}
+	for range 7 {
+		router, err := s.openRouter()
+		s.Require().NoError(err)
+		s.T().Cleanup(func() { s.Require().NoError(router.Close()) })
+		routers = append(routers, router)
+	}
+	var placed atomic.Int64
+	var wg sync.WaitGroup
+	for _, router := range routers {
+		for range 4 {
+			wg.Go(func() {
+				err := s.placeWithin(router, organization, 3)
+				if err == nil {
+					placed.Add(1)
+					return
+				}
+				s.ErrorIs(err, ErrCallsAtOnce)
+			})
+		}
+	}
+	wg.Wait()
+
+	s.EqualValues(3, placed.Load())
+}
+
+// holdPlacing holds, from a connection of its own, the lock each organization's calls are placed
+// under, until the release it returns is called.
+func (s *StoreSuite) holdPlacing(organizations ...string) (release func()) {
+	held, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	for _, organization := range organizations {
+		s.Require().NoError(lockUntilCommit(s.ctx, held, organization, callsAtOnceLockSeed))
+	}
+	released := false
+	release = func() {
+		if !released {
+			released = true
+			s.Require().NoError(held.Rollback())
+		}
+	}
+	s.T().Cleanup(release)
+	return release
+}
+
+// placingInUse is how many connections of router's shared pool are in use.
+func placingInUse(router *Store) int { return router.global.Stats().InUse }
+
+func (s *StoreSuite) TestAPlacementWaitsForItsOrganizationsLock() {
+	organization := newID()
+	release := s.holdPlacing(organization)
+
+	placed := make(chan error, 1)
+	go func() { placed <- s.placeWithin(s.store, organization, 1) }()
+	s.Never(func() bool { return len(placed) > 0 }, 500*time.Millisecond, 20*time.Millisecond,
+		"placed while another held the organization's lock")
+	release()
+
+	s.Require().NoError(<-placed)
+}
+
+func (s *StoreSuite) TestAPlacementThatCannotTakeItsLockInTimeGivesUp() {
+	organization := newID()
+	s.holdPlacing(organization)
+
+	err := s.placeWithin(s.store, organization, 1)
+
+	s.Require().Error(err)
+	s.NotErrorIs(err, ErrCallsAtOnce)
+	total, _, err := s.store.CallLegs.CountOpen(s.ctx, organization, s.base.Add(-time.Minute), "", "")
+	s.Require().NoError(err)
+	s.Zero(total)
+}
+
+func (s *StoreSuite) TestARouterWaitsOnOneConnectionForAnOrganizationsLock() {
+	router, err := s.openRouter()
+	s.Require().NoError(err)
+	defer router.Close()
+	organization := newID()
+	release := s.holdPlacing(organization)
+
+	var wg sync.WaitGroup
+	for range 6 {
+		wg.Go(func() { s.NoError(s.placeWithin(router, organization, 10)) })
+	}
+	time.Sleep(300 * time.Millisecond)
+	s.Equal(1, placingInUse(router), "one placement of the organization waits for its lock, the others for their turn")
+	release()
+	wg.Wait()
+}
+
+func (s *StoreSuite) TestARouterHoldsAtMostItsPlacementsAtOnce() {
+	router, err := s.openRouter()
+	s.Require().NoError(err)
+	defer router.Close()
+	organizations := make([]string, 3*placingAtOnce)
+	for i := range organizations {
+		organizations[i] = newID()
+	}
+	release := s.holdPlacing(organizations...)
+
+	var wg sync.WaitGroup
+	for _, organization := range organizations {
+		wg.Go(func() { s.NoError(s.placeWithin(router, organization, 1)) })
+	}
+	s.Require().Eventually(func() bool { return placingInUse(router) == placingAtOnce }, 2*time.Second, 10*time.Millisecond,
+		"as many placements as a router holds started, each waiting for its organization's lock")
+	s.Never(func() bool { return placingInUse(router) > placingAtOnce }, 300*time.Millisecond, 10*time.Millisecond,
+		"the shared pool keeps room for every other request")
+	release()
+	wg.Wait()
+}
+
+// cancelAfterInsert ends a context once a leg is inserted.
+type cancelAfterInsert struct{ cancel context.CancelFunc }
+
+func (h cancelAfterInsert) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (h cancelAfterInsert) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if strings.Contains(event.Query, `INSERT INTO "call_legs"`) {
+		h.cancel()
+	}
+}
+
+func (s *ShardedStoreSuite) TestALegItsShardKeptForAPlacementThatFailedHoldsNoCall() {
+	router, err := s.openRouter()
+	s.Require().NoError(err)
+	defer router.Close()
+	ctx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+	// The request goes away once the shard kept the leg, so the lock's commit fails.
+	router.shard.AddQueryHook(cancelAfterInsert{cancel})
+	organization := newID()
+	placed := s.base
+
+	err = router.CallLegs.PlaceWithin(ctx, &CallLeg{
+		Token: newID(), CustomerID: "app", OrganizationID: organization, CallType: "default", CallID: "call-" + newID(),
+		Vendor: "telnyx", Direction: Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199", PlacedAt: &placed,
+	}, CallsAtOnce{Limit: 1, Ringing: time.Minute})
+
+	s.Require().Error(err)
+	total, _, err := s.store.CallLegs.CountOpen(s.ctx, organization, s.base.Add(-time.Minute), "", "")
+	s.Require().NoError(err)
+	s.Zero(total, "the leg the shard kept was deleted")
+	s.NoError(s.placeWithin(s.store, organization, 1))
+}
+
+func (s *StoreSuite) TestADialNamingNoOrganizationKeepsTheOneTheCallWasPlacedUnder() {
+	s.placedLeg("placed", func(leg *CallLeg) { leg.OrganizationID = "org" })
+
+	dialed := CallLeg{Token: "placed", CustomerID: "app", CallType: "default", CallID: "call", Vendor: "telnyx",
+		Direction: Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199", DialedAt: s.base.Add(time.Second)}
+	opened, err := s.store.CallLegs.Open(s.ctx, &dialed)
+	s.Require().NoError(err)
+	s.Require().True(opened)
+
+	s.Equal("org", dialed.OrganizationID, "still counted among the organization's calls")
 }
