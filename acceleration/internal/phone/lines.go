@@ -163,7 +163,9 @@ func (s *Service) join(ctx context.Context, stream *Stream, tx *store.TrunkGroup
 		}
 	}
 	if joined.trunkID == "" {
-		id, bridge, err := stream.CreateTrunk(ctx, Trunk{Name: name, Numbers: []string{held.E164}, AllowedIPs: allowedIPs})
+		id, bridge, err := stream.CreateTrunk(ctx, Trunk{
+			Name: name, Numbers: []string{held.E164}, AllowedIPs: allowedIPs, AddressOnly: !sendsPassword(s.registry, held.Vendor),
+		})
 		if err != nil {
 			return TrunkLine{}, err
 		}

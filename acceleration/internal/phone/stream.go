@@ -77,17 +77,17 @@ type Trunk struct {
 	Name string
 	// Numbers are the numbers the vendor will present on calls to this trunk.
 	Numbers []string
-	// Password authenticates the vendor. Empty on a trunk without AllowedIPs gets a random
-	// one, returned in the bridge: Stream makes none of its own, and a trunk with neither
-	// lets every caller in unchallenged.
+	// Password authenticates the vendor. Empty gets a random one, returned in the bridge,
+	// unless AddressOnly: Stream makes none of its own, and a trunk with neither a password
+	// nor AllowedIPs lets every caller in unchallenged.
 	Password string
-	// AllowedIPs are the vendor's signalling addresses, as IPs or CIDR blocks, for a vendor
-	// that cannot send a password.
-	//
-	// Stream refuses a call from any other address outright, and still challenges a listed
-	// one if the trunk has a password, so a trunk with addresses gets no password. Leaving
-	// them empty accepts every address.
+	// AllowedIPs are the vendor's signalling addresses, as IPs or CIDR blocks. Stream refuses
+	// a call from any other address outright, and still challenges a listed one if the trunk
+	// has a password. Leaving them empty accepts every address.
 	AllowedIPs []string
+	// AddressOnly is a trunk for a vendor that cannot send a password, which gets none: Stream
+	// would challenge a call the vendor has no way to answer.
+	AddressOnly bool
 }
 
 // CreateTrunk creates an inbound trunk and returns the bridge the vendor should send
@@ -107,7 +107,7 @@ func (s *Stream) CreateTrunk(ctx context.Context, trunk Trunk) (string, Bridge, 
 		AllowedIps: trunk.AllowedIPs,
 	}
 	password := trunk.Password
-	if password == "" && len(trunk.AllowedIPs) == 0 {
+	if password == "" && !trunk.AddressOnly {
 		password = rand.Text()
 	}
 	if password != "" {
@@ -205,6 +205,21 @@ func (s *Stream) UpdateTrunk(ctx context.Context, id string, trunk Trunk) error 
 		return stack.Wrap(fmt.Errorf("phone: update sip trunk: %w", err))
 	}
 	return nil
+}
+
+// trunk is the trunk with the id as Stream has it now: its name, numbers and addresses.
+// Stream lists trunks whole, with no page.
+func (s *Stream) trunk(ctx context.Context, id string) (Trunk, error) {
+	listed, err := s.client.Video().ListSIPTrunks(ctx, &getstream.ListSIPTrunksRequest{})
+	if err != nil {
+		return Trunk{}, stack.Wrap(fmt.Errorf("phone: list sip trunks: %w", err))
+	}
+	for _, trunk := range listed.Data.SipTrunks {
+		if trunk.ID == id {
+			return Trunk{Name: trunk.Name, Numbers: trunk.Numbers, AllowedIPs: trunk.AllowedIps}, nil
+		}
+	}
+	return Trunk{}, stack.Wrap(fmt.Errorf("phone: stream has no sip trunk %s", id))
 }
 
 // CreateCall creates a call ahead of anyone joining, with custom data on it, and answers the
