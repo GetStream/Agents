@@ -58,7 +58,11 @@ func OpenShards(options Options) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{global: db, shard: db, globalDSN: options.DSN, shardDSN: options.DSN,
+	locks, err := connect(options.DSN, lockConns)
+	if err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
+	s := &Store{global: db, shard: db, locks: locks, globalDSN: options.DSN, shardDSN: options.DSN,
 		retries: make(chan struct{}, forgetSlots), lost: make(chan struct{}, forgetSlots), polls: make(chan struct{}, pollSlots), writeTimeout: cmp.Or(options.writeTimeout, writeTimeout)}
 	s.closing, s.stop = context.WithCancel(context.Background())
 	if options.ShardDSN != "" && options.ShardDSN != options.DSN {
