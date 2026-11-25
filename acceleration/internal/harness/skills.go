@@ -262,7 +262,7 @@ func ValidSkillName(name string) bool {
 
 // ValidSkillFile reports whether a file's key is a path inside its skill's folder.
 func ValidSkillFile(file string) bool {
-	return file != "" && len(file) <= maxSkillFile && file != "." && !path.IsAbs(file) && path.Clean(file) == file && file != ".." &&
+	return len(file) <= maxSkillFile && file != "." && !path.IsAbs(file) && path.Clean(file) == file && file != ".." &&
 		!strings.HasPrefix(file, "../") && !strings.ContainsAny(file, "\\\x00")
 }
 

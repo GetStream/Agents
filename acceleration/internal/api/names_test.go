@@ -147,7 +147,7 @@ func (s *NamesSuite) skillWith(method, path, configID, name string, files map[st
 }
 
 // notAFolder are names a skill's folder in the sandbox could not have.
-var notAFolder = []string{".", "..", "../../tmp", "a/b", "/a", `a\b`, "-p", ".hidden", "a\x00b", "a\nb", "a\u0085b", strings.Repeat("n", 256)}
+var notAFolder = []string{".", "..", "../../tmp", "a/b", "/a", `a\b`, "-p", ".hidden", "a\x00b", "a\nb", "a\u0085b", "  .hidden", strings.Repeat("n", 256)}
 
 func (s *NamesSuite) TestASkillCannotBeGivenANameItsFolderCouldNotHave() {
 	config := s.agent("support")
@@ -160,7 +160,7 @@ func (s *NamesSuite) TestASkillCannotBeGivenANameItsFolderCouldNotHave() {
 		status, failure := s.skill(config.Id, name)
 		s.Equal(http.StatusBadRequest, status, name)
 		s.Contains(failure.Message, "is not a folder's name", name)
-		s.Less(len(failure.Message), 1000)
+		s.Less(len(failure.Message), 300)
 
 		status, failure = s.skillWith(http.MethodPut, "/v1/agents/skills/"+named.Id, config.Id, name, nil)
 		s.Equal(http.StatusBadRequest, status, name)
@@ -185,10 +185,14 @@ func (s *NamesSuite) TestASkillMayHaveAnyNameItsFolderCanHave() {
 		status, failure := s.skill(config.Id, name)
 		s.Equal(http.StatusCreated, status, name+failure.Message)
 	}
-	status, _ := s.skill(config.Id, "  spaced  ")
+	status, _ := s.skill(config.Id, "  spaced\t\n")
 	s.Equal(http.StatusCreated, status)
 
 	status, failure := s.skill(config.Id, "   ")
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal("a skill needs a name", failure.Message)
+	status, failure = s.refused(http.MethodPost, "/v1/agents/sync", map[string]any{"name": "support", "hash": "v1",
+		"skills": []map[string]any{{"config_id": "", "name": " ", "description": "d", "instructions": "i"}}})
 	s.Equal(http.StatusBadRequest, status)
 	s.Equal("a skill needs a name", failure.Message)
 }
@@ -235,6 +239,7 @@ func (s *NamesSuite) TestASkillsFileIsAPathInsideItsFolder() {
 		status, failure := s.skillWith(http.MethodPost, "/v1/agents/skills", config.Id, "pdf", map[string]string{key: "x"})
 		s.Equal(http.StatusBadRequest, status, key)
 		s.Contains(failure.Message, "is not a path inside the skill's folder", key)
+		s.Less(len(failure.Message), 300)
 	}
 	status, failure := s.skillWith(http.MethodPost, "/v1/agents/skills", config.Id, "pdf",
 		map[string]string{"-v.py": "x", ".env.sample": "x", "a b/返金.md": "x", "..notes": "x", strings.Repeat("a", 1024): "x", "Icon\r": ""})
