@@ -395,6 +395,34 @@ func (s *DataMoveSuite) TestChangesAreAppliedToAnAppThatHoldsData() {
 	s.Equal("edited at the source", s.instructionsOf(agent.Id))
 }
 
+// A row that names a row the app does not hold is the export's to correct, and the answer names it.
+func (s *DataMoveSuite) TestAnImportedRowThatNamesARowTheAppDoesNotHoldIsRefusedNamingIt() {
+	theirs, nobodys, turn := s.utils.uuid(), s.utils.uuid(), s.utils.uuid()
+	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{ID: theirs, CustomerID: s.utils.uuid(),
+		AgentName: "docs", UserID: "sam", CallerKind: "user", CreatedAt: time.Now()}))
+
+	for _, session := range []string{theirs, nobodys} {
+		row := json.RawMessage(`{"id": "` + turn + `", "session_id": "` + session + `", "said": "hello", "status": "completed",
+			"error": "", "created_at": "2026-01-01T00:00:00Z"}`)
+		for _, line := range []dataLine{{Table: "agent_responses", Row: row},
+			{Change: &store.DataChange{Seq: 1, Table: "agent_responses", Op: store.ChangeInsert, At: time.Now(), Payload: row}}} {
+			status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{line}))
+
+			s.Equal(http.StatusBadRequest, status)
+			s.Equal(`store: import agent_responses:{"id":"`+turn+`"}: this row cannot be written here`, failure, "whoever holds the session")
+		}
+	}
+}
+
+func (s *DataMoveSuite) TestAnImportedRunOfATaskTheAppDoesNotHoldIsRefusedTheSame() {
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{{Table: "scheduled_task_runs",
+		Row: json.RawMessage(`{"id": "run", "task_id": "not-here", "state": "delivered", "trigger": "schedule", "attempts": 0, "prompt": "",
+			"delivered_to": "", "session_id": "", "texted": [], "scheduled_for": "2026-01-01T00:00:00Z", "created_at": "2026-01-01T00:00:00Z"}`)}}))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal(`store: import scheduled_task_runs:{"id":"run"}: this row cannot be written here`, failure)
+}
+
 // A change to a policy of another scope is skipped, so the answer counts no row for it.
 func (s *DataMoveSuite) TestAChangeToAnotherScopesPolicyIsNotCountedAsWritten() {
 	key := `{"scope": "organization", "scope_id": ` + strconv.Quote(s.customerID()) + `}`

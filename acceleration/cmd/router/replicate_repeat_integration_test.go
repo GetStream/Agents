@@ -211,6 +211,27 @@ func (s *ReplicateRepeatSuite) TestAFirstCopyBringsEverythingAndSavesTheCursor()
 	s.WithinDuration(time.Now(), saved.ReadAt, time.Minute)
 }
 
+// A page of changes and a full copy each stop at a row that names another app's row here.
+func (s *ReplicateRepeatSuite) TestARunStopsAtARowThatNamesAnotherAppsRowNamingIt() {
+	for _, in := range []*store.Store{s.source, s.target} {
+		_, err := in.GlobalDB().ExecContext(s.ctx, "INSERT INTO agent_sessions (id, customer_id, state) VALUES ('theirs', 'resident', '')")
+		s.Require().NoError(err)
+	}
+	s.recorded(1)
+	s.Require().NoError(s.once("acme", false))
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "INSERT INTO agent_responses (id, session_id, customer_id) VALUES ('turn', 'theirs', 'acme')")
+	s.Require().NoError(err)
+	for _, full := range []bool{false, true} {
+		err = s.once("acme", full)
+
+		s.Require().ErrorIs(err, store.ErrInvalidImport)
+		s.ErrorContains(err, `agent_responses:{"id":"turn"}`)
+		turns, err := s.target.Responses.Select(s.ctx, "acme", "theirs", store.ResponseFilter{})
+		s.Require().NoError(err)
+		s.Empty(turns)
+	}
+}
+
 func (s *ReplicateRepeatSuite) TestARepeatOnceBringsOnlyTheChangesSinceItsCursor() {
 	s.recorded(1)
 	s.recorded(2)

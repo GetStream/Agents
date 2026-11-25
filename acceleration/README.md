@@ -2085,8 +2085,10 @@ number's offer when the purchase names none; with neither, as work with no price
 was bought in under the buyer's key and each after it by `router usage numbers` under
 `job:number_rental`. A 10DLC brand, a campaign's review and its first three months are billed when
 it is registered, and each month after by `router usage dlc` under `job:dlc_fees`. While the 10DLC
-sandbox holds an app, its texts and minutes are priced and given away (`dlc_sandbox = "true"`); a
-leg the sweep ended does not count toward its minutes.
+sandbox holds an app, the texts it sends and the minutes of the calls it places are priced and given
+away (`dlc_sandbox = "true"`), and only those minutes count toward the sandbox's minutes a day. The
+sandbox limits nothing that arrives, so a text the app receives and a call to its number are billed
+as for any app; a leg the sweep ended does not count toward its minutes.
 
 **The audit log holds configuration, not traffic.** `audit_log` keeps one row per change to
 an agent config, skill, knowledge document, knowledge url, router config, plugin or policy:
@@ -2917,7 +2919,10 @@ The customer is always the authenticated caller, never anything in the body or t
 so an export is the caller's own data and an import lands under the caller's own app
 however the file was edited on the way. An import upserts and refuses a row whose primary
 key belongs to another tenant, so replaying the same change twice lands where applying it
-once would and a guessed id overwrites nothing. A request row is the exception: each
+once would and a guessed id overwrites nothing. A session's call, turn or branch, a simulation's
+run and a campaign's attempt name only a session, simulation or contact the app holds here. A row that
+names another is refused, whoever holds that one: `replicate` stops at it and names it, and
+`POST /v1/data/import` answers 400 and says only that the row cannot be written here. A request row is the exception: each
 deployment numbers its own, so it is imported with an id the destination gives it, under a
 `usage_id` made from the importing app and the `usage_id` the row had where it was first
 recorded (its source id, for a row from before usage ids), and written once. It keeps that
