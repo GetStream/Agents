@@ -9,6 +9,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // deviceAsking is an end user's device of the given kind, going by userID.
@@ -105,5 +106,53 @@ func TestADevicesTextOrResumedSessionKeepsItsAgentIDUnset(t *testing.T) {
 		keyDeviceAgent(deviceAsking(auth.KindAuthenticated, "alice"), &spec)
 
 		require.Empty(t, spec.AgentID, name)
+	}
+}
+
+// A config's identity fills in only what the request left to it.
+func TestASessionTakesTheConfigsIdentityWhereTheRequestNamedNone(t *testing.T) {
+	config := store.AgentIdentity{AgentID: "support", UserID: "support-bot", UserName: "Support"}
+	for name, c := range map[string]struct {
+		asked, want session.Spec
+	}{
+		"nothing named": {
+			asked: session.Spec{},
+			want:  session.Spec{AgentID: "support", UserID: "support-bot", UserName: "Support"},
+		},
+		"the defaults named": {
+			asked: session.Spec{UserID: session.DefaultUserID, UserName: session.DefaultUserName},
+			want:  session.Spec{AgentID: "support", UserID: "support-bot", UserName: "Support"},
+		},
+		"its own named": {
+			asked: session.Spec{AgentID: "own", UserID: "alice", UserName: "Own"},
+			want:  session.Spec{AgentID: "own", UserID: "alice", UserName: "Own"},
+		},
+		"carrying on a conversation": {
+			asked: session.Spec{ConversationID: "agent:held"},
+			want:  session.Spec{ConversationID: "agent:held", UserID: "support-bot", UserName: "Support"},
+		},
+	} {
+		spec := c.asked
+		identifyAs(&spec, config)
+
+		require.Equal(t, c.want, spec, name)
+	}
+}
+
+// Each field of the identity stands alone: one the config leaves empty leaves the session as it was.
+func TestAConfigsIdentityFieldLeftEmptyNamesNothing(t *testing.T) {
+	for name, c := range map[string]struct {
+		identity store.AgentIdentity
+		want     session.Spec
+	}{
+		"none":         {want: session.Spec{UserID: session.DefaultUserID, UserName: session.DefaultUserName}},
+		"agent id":     {identity: store.AgentIdentity{AgentID: "support"}, want: session.Spec{AgentID: "support", UserID: session.DefaultUserID, UserName: session.DefaultUserName}},
+		"user id":      {identity: store.AgentIdentity{UserID: "support-bot"}, want: session.Spec{UserID: "support-bot", UserName: session.DefaultUserName}},
+		"display name": {identity: store.AgentIdentity{UserName: "Support"}, want: session.Spec{UserID: session.DefaultUserID, UserName: "Support"}},
+	} {
+		spec := session.Spec{UserID: session.DefaultUserID, UserName: session.DefaultUserName}
+		identifyAs(&spec, c.identity)
+
+		require.Equal(t, c.want, spec, name)
 	}
 }
