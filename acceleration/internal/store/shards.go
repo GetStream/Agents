@@ -290,10 +290,10 @@ func whicheverShard[T any](ctx context.Context, s *Store, read func(context.Cont
 // of its rows, rather than failing the read.
 
 // holders is every database that may hold the rows of a moving table: every shard's, this
-// one's first, then the shared one unless it is this shard's.
+// one's first, then the shared one unless it is already one of the shards.
 func (s *Store) holders() []bun.IDB {
 	all := s.shards()
-	if s.Sharded() {
+	if s.Sharded() && !s.globalIsShard {
 		all = append(all, s.global)
 	}
 	return all
