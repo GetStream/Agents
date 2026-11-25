@@ -493,7 +493,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		floor, err := m.options.Policies.ToolOutputRetention(ctx, spec.CustomerID)
 		if err != nil {
 			m.logger.Warn("could not read the tool output retention, keeping none",
-				"customer", spec.CustomerID, "session", spec.ID, "error", err)
+				"app_id", spec.CustomerID, "session", spec.ID, "error", err)
 		}
 		spec.ToolOutputRetention = floor.Shorter(spec.ToolOutputRetention)
 	}
@@ -1160,7 +1160,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	m.cards.started(created, stream)
 
 	m.logger.Info("session joined",
-		"session", created.id, "call", spec.CallID, "customer", spec.CustomerID)
+		"session", created.id, "call", spec.CallID, "app_id", spec.CustomerID)
 	opened = true
 	return created, nil
 }
@@ -1780,7 +1780,7 @@ func (m *Manager) end(found *Session, reason EndReason) {
 func (m *Manager) idTaken(created *Session) {
 	created.idTaken.Store(true)
 	m.logger.Warn("ending a session whose id another customer's session has",
-		"session", created.id, "customer", created.Spec().CustomerID)
+		"session", created.id, "app_id", created.Spec().CustomerID)
 	done, held := m.take(created)
 	if !held {
 		return
@@ -1926,7 +1926,7 @@ func (m *Manager) hangUpRinging(created *Session, spec Spec) {
 		ctx, cancel := context.WithTimeout(created.ctx, hangUpTimeout)
 		defer cancel()
 		if err := m.options.Phone.HangUpUnanswered(ctx, spec.CustomerID, spec.CallID); err != nil {
-			m.logger.Warn("could not hang up the call its session left ringing", "session", created.id, "call", spec.CallID, "customer", spec.CustomerID, "error", err)
+			m.logger.Warn("could not hang up the call its session left ringing", "session", created.id, "call", spec.CallID, "app_id", spec.CustomerID, "error", err)
 		}
 	}()
 }
@@ -2158,7 +2158,7 @@ func (m *Manager) box(ctx context.Context, spec Spec, connectors *dispatcher) (s
 	slots, err := m.options.SandboxLimits.Sandbox(ctx, owner(spec), policy.SandboxAsk{Config: spec.SandboxOptions, Granted: granted})
 	if err != nil {
 		m.logger.Warn("the session runs without its sandbox, which its organization's sandbox limits do not allow",
-			"code", policy.SandboxLimitCode, "customer", spec.CustomerID, "session", spec.ID, "error", err)
+			"code", policy.SandboxLimitCode, "app_id", spec.CustomerID, "session", spec.ID, "error", err)
 		return nil, nil
 	}
 	asked := metered.SandboxSpec{Config: spec.SandboxOptions, Slots: slots}

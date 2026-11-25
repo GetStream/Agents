@@ -579,7 +579,7 @@ func (s *ChannelsSuite) TestAMessageTheStoreCouldNotClaimIsA500WithoutTheStoresW
 		s.NotContains(string(answered), "claim channel message", text)
 		s.Empty(s.meta.to(writer), "%q not claimed is not answered", text)
 	}
-	s.Contains(s.logged.String(), `level=ERROR msg="could not claim a channel delivery" customer=`+s.customerID())
+	s.Contains(s.logged.String(), `level=ERROR msg="could not claim a channel delivery" app_id=`+s.customerID())
 	s.Contains(s.logged.String(), "refused by the test", "what the store said is kept in the log")
 }
 
@@ -1128,7 +1128,7 @@ func (s *ChannelsSuite) TestAMessageToASuspendedOrganizationIsNotAnsweredAndWarn
 	s.Require().Equal(http.StatusAccepted, s.deliver(line, writer, "msg-"+s.utils.uuid(), "and tomorrow?"))
 
 	s.Require().Eventually(func() bool {
-		return strings.Contains(s.logged.String(), `level=WARN msg="not answering a channel message" channel=whatsapp customer=`+s.customerID())
+		return strings.Contains(s.logged.String(), `level=WARN msg="not answering a channel message" channel=whatsapp app_id=`+s.customerID())
 	}, settleFor, 10*time.Millisecond, "the router never warned")
 	s.NotContains(s.logged.String(), writer, "the log names no number")
 	s.Len(s.meta.to(writer), 1, "only the answer to the first message")
@@ -1154,7 +1154,7 @@ func (s *ChannelsSuite) TestAReplyOfASuspendedOrganizationIsNotWrittenBackAndWar
 	model.answers()
 
 	s.Require().Eventually(func() bool {
-		return strings.Contains(s.logged.String(), `level=WARN msg="not writing back on a channel" channel=whatsapp customer=`+s.customerID())
+		return strings.Contains(s.logged.String(), `level=WARN msg="not writing back on a channel" channel=whatsapp app_id=`+s.customerID())
 	}, settleFor, 10*time.Millisecond, "the router never warned")
 	s.NotContains(s.logged.String(), writer, "the log names no number")
 	s.Len(s.meta.to(writer), 1, "only the answer to the first message")

@@ -172,7 +172,7 @@ func (s *Server) userShard(ctx context.Context, customerID, region, userID strin
 	}
 	last, err := s.store.Users.Shard(ctx, customerID, userID)
 	if err != nil {
-		s.logger.Warn("could not read the shard that last served a user", "customer", customerID, "user", userID, "error", err)
+		s.logger.Warn("could not read the shard that last served a user", "app_id", customerID, "user", userID, "error", err)
 	}
 	return s.shards.ForUser(region, last)
 }
@@ -187,7 +187,7 @@ func (s *Server) configShard(ctx context.Context, customerID, configID, userID s
 	if configID != "" {
 		config, err := s.store.AgentConfigs.Get(ctx, customerID, configID)
 		if err != nil && !errors.Is(err, store.ErrNoAgentConfig) {
-			s.logger.Warn("could not read the region of the agent answering a message", "customer", customerID, "config", configID, "error", err)
+			s.logger.Warn("could not read the region of the agent answering a message", "app_id", customerID, "config", configID, "error", err)
 		}
 		region = config.Region
 	}

@@ -412,7 +412,7 @@ func (b *Bridge) Deliver(ctx context.Context, app store.ConnectorOAuthClient, me
 		}
 		answered = true
 		b.logger.Info("accepted an inbound message", "connector", message.ConnectorID, "provider_app", app.ProviderAppID,
-			"customer", thread.CustomerID, "config", config.ID, "channel", thread.ChannelID)
+			"app_id", thread.CustomerID, "config", config.ID, "channel", thread.ChannelID)
 		var waited func(core.InboundMessage) (store.ChannelInbound, bool, error)
 		if waiting != nil {
 			waited = func(reply core.InboundMessage) (store.ChannelInbound, bool, error) {
@@ -430,10 +430,10 @@ func (b *Bridge) Deliver(ctx context.Context, app store.ConnectorOAuthClient, me
 		}
 		if !fresh {
 			b.logger.Info("dropped a retried inbound message", "connector", message.ConnectorID, "provider_app", app.ProviderAppID,
-				"customer", app.CustomerID, "connection", thread.ConnectionID, "config", config.ID, "channel", thread.ChannelID)
+				"app_id", app.CustomerID, "connection", thread.ConnectionID, "config", config.ID, "channel", thread.ChannelID)
 		} else {
 			b.logger.Info("queued an inbound message", "connector", message.ConnectorID, "provider_app", app.ProviderAppID,
-				"customer", thread.CustomerID, "config", config.ID, "channel", thread.ChannelID)
+				"app_id", thread.CustomerID, "config", config.ID, "channel", thread.ChannelID)
 		}
 		b.wake()
 	}
@@ -647,7 +647,7 @@ func (b *Bridge) take(ctx context.Context, app store.ConnectorOAuthClient, messa
 	connection, err := b.store.AppConnectionByAccount(ctx, app.CustomerID, message.ConnectorID, message.ProviderUnitID)
 	if errors.Is(err, store.ErrNoConnectorConnection) {
 		b.logger.Info("dropped an inbound message: the provider app has no connection of its provider unit",
-			"connector", message.ConnectorID, "customer", app.CustomerID, "provider_unit", message.ProviderUnitID)
+			"connector", message.ConnectorID, "app_id", app.CustomerID, "provider_unit", message.ProviderUnitID)
 		return store.ChannelThread{}, store.AgentConfig{}, nil, nil
 	}
 	if err != nil {
@@ -661,7 +661,7 @@ func (b *Bridge) take(ctx context.Context, app store.ConnectorOAuthClient, messa
 		// None answers a thread nobody bound: the customer's agent configs to fix. A test copy
 		// is not listed, so it never answers (AI-1049).
 		b.logger.Warn("dropped an inbound message: one agent config must bind the connection it came in on",
-			"connector", message.ConnectorID, "customer", app.CustomerID, "connection", connection.ID, "configs", len(configs))
+			"connector", message.ConnectorID, "app_id", app.CustomerID, "connection", connection.ID, "configs", len(configs))
 		return store.ChannelThread{}, store.AgentConfig{}, nil, nil
 	}
 	if len(configs) > 1 {
@@ -674,7 +674,7 @@ func (b *Bridge) take(ctx context.Context, app store.ConnectorOAuthClient, messa
 			others = append(others, other.ID)
 		}
 		b.logger.Warn("more than one agent config binds the connection a message came in on: the oldest answers",
-			"connector", message.ConnectorID, "customer", app.CustomerID, "connection", connection.ID,
+			"connector", message.ConnectorID, "app_id", app.CustomerID, "connection", connection.ID,
 			"config", configs[0].ID, "not_answering", others)
 	}
 	definition, err := b.store.ConnectorDefinitions.Get(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
@@ -689,7 +689,7 @@ func (b *Bridge) take(ctx context.Context, app store.ConnectorOAuthClient, messa
 		// the same revision, so it is dropped, not answered 500. It is a warn, not an info: the
 		// same drop is a pinned revision reading the message with another thread key or id.
 		b.logger.Warn("dropped an inbound message the revision of its connection does not read",
-			"connector", message.ConnectorID, "customer", app.CustomerID, "connection", connection.ID,
+			"connector", message.ConnectorID, "app_id", app.CustomerID, "connection", connection.ID,
 			"revision", connection.DefinitionRevision)
 		return store.ChannelThread{}, store.AgentConfig{}, nil, nil
 	}
@@ -710,7 +710,7 @@ func (b *Bridge) take(ctx context.Context, app store.ConnectorOAuthClient, messa
 		if !linked {
 			// waiting is a reply kept for a message that links its thread to take (wait).
 			b.logger.Info("dropped an inbound message that is not addressed to the connection on a thread nobody linked",
-				"connector", message.ConnectorID, "provider_app", app.ProviderAppID, "customer", app.CustomerID,
+				"connector", message.ConnectorID, "provider_app", app.ProviderAppID, "app_id", app.CustomerID,
 				"connection", connection.ID, "config", configs[0].ID, "waiting", !startsThread(read))
 			return store.ChannelThread{}, store.AgentConfig{}, nil, nil
 		}
@@ -745,7 +745,7 @@ func (b *Bridge) take(ctx context.Context, app store.ConnectorOAuthClient, messa
 				// not read the reply after it waited. Every retry of the message finds the same
 				// revision, so failing it would leave it unanswered for good (AI-2743).
 				b.logger.Warn("dropped a waiting reply the revision of its connection does not read",
-					"connector", reply.ConnectorID, "customer", app.CustomerID, "connection", connection.ID,
+					"connector", reply.ConnectorID, "app_id", app.CustomerID, "connection", connection.ID,
 					"revision", connection.DefinitionRevision, "channel", thread.ChannelID)
 				return reply, false, nil
 			}
