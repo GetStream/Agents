@@ -23,8 +23,8 @@ public typealias TokenProvider = @Sendable () async throws -> String
 /// to `setUser`. A router running locally with nothing in front of it is reached by customer
 /// id instead.
 public struct Backend: Sendable {
-    /// Stream's hosted router.
-    public static let defaultURL = URL(string: "https://accelerate-us-east4.gcp.stream-io-api.com")!
+    /// Stream's hosted router in the nearest healthy region.
+    public static let defaultURL = URL(string: "https://accelerate.gcp.stream-io-api.com")!
 
     /// The release this is: the repository's `v` tag a Swift app depends on. A literal, set by
     /// each release, since SwiftPM gives a package no way to read its own version.
