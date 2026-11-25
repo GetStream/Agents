@@ -23,7 +23,9 @@ const conversationsUsage = `usage: router conversations <command> [flags]
                         sessions held that were made before channels recorded it, where every
                         session of the owner's id on it was of one verified kind, and it is the
                         kind that id's next token says (a guest's is left alone otherwise). Says
-                        what it would do unless --write. Run it once every router records the kind.
+                        what it would do unless --write. Run it a day after every router
+                        records the kind, once no guest holds a token an older router refreshed
+                        to no role.
     --customer          only this customer's conversations
     --write             record the kinds
 `
