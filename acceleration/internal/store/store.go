@@ -32,7 +32,8 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
-// maxConns is how many Postgres connections one router holds at most.
+// maxConns is how many Postgres connections one router's serving pool holds at most: every
+// query but those on the connection a credential or provider app lock is held on (lockConns).
 const maxConns = 40
 
 // Store reads and writes router statistics.
@@ -44,6 +45,11 @@ type Store struct {
 	global *bun.DB
 	shard  *bun.DB
 	peers  []*bun.DB
+	// locks is the shared database again, in a pool of its own that credential and provider
+	// app locks are held on (tryCredentialLock).
+	locks *bun.DB
+	// lockSlots caps how many of locks' connections one customer's locks hold.
+	lockSlots lockSlots
 	// globalDSN and shardDSN are what global and shard were opened with, for the pool a
 	// migration runs on.
 	globalDSN, shardDSN string
@@ -257,7 +263,7 @@ func (s *Store) Close() error {
 	s.stop()
 	s.retrying.Wait()
 	s.closeRedis()
-	return errors.Join(s.closeShards(), s.global.Close())
+	return errors.Join(s.closeShards(), s.locks.Close(), s.global.Close())
 }
 
 // Ping verifies the shared database and this shard's are usable. Another shard being down

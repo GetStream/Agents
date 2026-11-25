@@ -1633,8 +1633,9 @@ func (s *StoreSuite) TestConnectorDefinitionQueryBudgets() {
 	}), "Delete")
 	s.crmConnection("acme-app")
 	s.crmConnection("acme-app")
-	// Delete's, and every connection of the three in one statement.
-	s.Equal(11, s.countQueries(func() {
+	// Delete's, every connection of the three in one statement, and their event subscriptions in
+	// one more.
+	s.Equal(12, s.countQueries(func() {
 		deleted, err := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", "custom_crm", true)
 		s.Require().NoError(err)
 		s.Len(deleted.Connections, 3)

@@ -17,6 +17,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"math"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -1020,17 +1021,28 @@ func (s *RouterSuite) trigger(name, table, op, when, body string) (drop func()) 
 
 // failQueries makes each query that contains value fail, until the test ends.
 func (s *RouterSuite) failQueries(value string) {
+	s.failFirstQueries(value, math.MaxInt64)
+}
+
+// failFirstQueries makes the first n queries that contain value fail, and the ones after them
+// pass, until the test ends.
+func (s *RouterSuite) failFirstQueries(value string, n int64) {
+	s.failing.left.Store(n)
 	s.failing.value.Store(&value)
 	s.T().Cleanup(func() { s.failing.value.Store(nil) })
 }
 
-// failingQueries makes each query that contains a value fail. The query stops before Postgres
-// gets it, with the same error as when the database does not answer in time.
-type failingQueries struct{ value atomic.Pointer[string] }
+// failingQueries makes each query that contains a value fail, while it has failures left. The
+// query stops before Postgres gets it, with the same error as when the database does not answer
+// in time.
+type failingQueries struct {
+	value atomic.Pointer[string]
+	left  atomic.Int64
+}
 
 func (f *failingQueries) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
 	value := f.value.Load()
-	if value == nil || !strings.Contains(event.Query, *value) {
+	if value == nil || !strings.Contains(event.Query, *value) || f.left.Add(-1) < 0 {
 		return ctx
 	}
 	expired, cancel := context.WithDeadline(ctx, time.Time{})
