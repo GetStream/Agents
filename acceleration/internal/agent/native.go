@@ -717,7 +717,7 @@ func (a *Agent) replyComplete(complete sts.ResponseComplete) {
 	}
 	a.generating = false
 	a.saying = ""
-	a.repliedLocked(complete.ResponseID, complete.Interrupted, said != "" || complete.AudioDurationMs > 0)
+	a.repliedLocked(complete.ResponseID, complete.Interrupted, complete.AudioDurationMs > 0)
 	// A goodbye cut short is either the caller talking, which SpeechStarted cancels, or a
 	// lost session, which recoverNative finishes: providers report both as interrupted.
 	if bye := a.goodbye; bye != nil && bye.reply == complete.ResponseID && !complete.Interrupted {
