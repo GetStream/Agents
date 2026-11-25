@@ -519,7 +519,7 @@ func (s *WriterSuite) TestTheUnownedAlertNamesTheAppWhoseRowsWaitUntilItJoinsOne
 	s.swept(sweeper)
 	s.EqualValues(1, unowned.Items(time.Now())[s.customer]["waiting_rows"], "a second sweep counts the same row once")
 
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, s.customer, s.organization))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: s.customer, OrganizationID: s.organization}))
 	s.swept(sweeper)
 
 	s.NotContains(unowned.Items(time.Now()), s.customer)
@@ -534,10 +534,10 @@ func (s *WriterSuite) TestACountThatFailsKeepsTheAppsTheLastOneFound() {
 	s.Require().NoError(sweeper.count(s.ctx))
 	s.Require().Len(*sweeper.unowned.Load(), 1)
 	// Reading the memberships fails while the table is gone.
-	_, err := s.store.DB().ExecContext(s.ctx, "ALTER TABLE app_organizations RENAME TO app_organizations_gone")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "ALTER TABLE app_organizations RENAME TO app_organizations_gone")
 	s.Require().NoError(err)
 	defer func() {
-		_, err := s.store.DB().ExecContext(s.ctx, "ALTER TABLE app_organizations_gone RENAME TO app_organizations")
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, "ALTER TABLE app_organizations_gone RENAME TO app_organizations")
 		s.Require().NoError(err)
 	}()
 
