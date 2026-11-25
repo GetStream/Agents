@@ -48,9 +48,10 @@ A state change that is more than a column write gets a domain verb on the same r
 - `global` is the database every shard shares: tenants, configs, connectors, numbers, limits.
   `shard` is this router's own: sessions, responses, calls, call legs, requests and their
   rollups. A deployment of one database has both handles pointing at it.
-- A repository holds only the handle its table lives in, set in `repos.go`. Reading across
-  every shard goes through `everyShard` / `whicheverShard` (`shards.go`), never a loop over
-  peers.
+- A repository holds only the handle its table lives in, set in `repos.go`. No store opens
+  another shard's database: a read that must cover every shard reads a copy shipped to
+  `global` (`session_index`, `call_index`, the `shard_*_hourly` rollups), and a write to every
+  shard's rows is a `ShardJobs` job each shard runs on its own (`shard_job.go`).
 - Migrations live in `acceleration/migrations/global` or `acceleration/migrations/shard`,
   matching where the table lives. Each set has its own goose version table. A table never
   moves between the sets in place: add it to the new set, copy, then drop it.

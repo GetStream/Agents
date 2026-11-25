@@ -67,6 +67,7 @@ class Call:
             only while the call is running.
         session_id (str | Unset): The session the call was part of. A session starts a new call each time voice is
             started or stopped on it. Absent once the session is deleted.
+        region (str | Unset): The shard the call is kept in. Set on a listed call of a deployment with shards.
     """
 
     agent_id: str
@@ -100,6 +101,7 @@ class Call:
     voice: str | Unset = UNSET
     voice_used: str | Unset = UNSET
     session_id: str | Unset = UNSET
+    region: str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -175,6 +177,8 @@ class Call:
 
         session_id = self.session_id
 
+        region = self.region
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -238,6 +242,8 @@ class Call:
             field_dict["voice_used"] = voice_used
         if session_id is not UNSET:
             field_dict["session_id"] = session_id
+        if region is not UNSET:
+            field_dict["region"] = region
 
         return field_dict
 
@@ -329,6 +335,8 @@ class Call:
 
         session_id = d.pop("session_id", UNSET)
 
+        region = d.pop("region", UNSET)
+
         call = cls(
             agent_id=agent_id,
             call_id=call_id,
@@ -361,6 +369,7 @@ class Call:
             voice=voice,
             voice_used=voice_used,
             session_id=session_id,
+            region=region,
         )
 
         call.additional_properties = d

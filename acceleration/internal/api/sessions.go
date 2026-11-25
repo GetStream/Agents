@@ -709,6 +709,9 @@ func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) erro
 			}
 		}
 	case errors.Is(failure, errUnknownSession):
+		if failure = s.refuseHomedElsewhere(ctx, id); failure != nil {
+			return nil, nil, failure
+		}
 		if spec, failure = s.reopenedFromRow(ctx, id); failure != nil {
 			return nil, nil, failure
 		}
@@ -742,6 +745,26 @@ func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) erro
 	}
 	events, detach := reopened.Watch()
 	return reopened, func() { go holdUntilAnswered(reopened, events, detach) }, nil
+}
+
+// errSessionElsewhere is a session carried on outside the shard it lives in, which has its
+// rows. onOwningNode sends a request about one there; what reaches here did not come that way.
+var errSessionElsewhere = conflict("this session lives in another region and is carried on there")
+
+// refuseHomedElsewhere refuses to carry on a session that lives in another shard.
+func (s *Server) refuseHomedElsewhere(ctx context.Context, id string) error {
+	if s.store == nil {
+		return nil
+	}
+	customer, _ := CustomerFrom(ctx)
+	home, err := s.store.SessionHomes.Elsewhere(ctx, customer, id)
+	if err != nil {
+		return err
+	}
+	if home != "" {
+		return errSessionElsewhere
+	}
+	return nil
 }
 
 // toolsFromRow gives spec, ended here and last carried on by another kind of caller, the tools
@@ -1223,6 +1246,7 @@ func storedSessionOf(row store.AgentSession, call store.Call) Session {
 	if row.State == store.SessionClosed {
 		rendered.State = Ended
 	}
+	rendered.Region = optional(row.Region)
 	// A session whose latest call had no Stream call was held in writing.
 	if call.CallID == "" {
 		text := true

@@ -30,7 +30,8 @@ func (s *TwilioIntegrationSuite) SetupSuite() {
 		s.T().Skip(accountSIDEnvVar + " and " + authTokenEnvVar + " not set")
 	}
 
-	provider, err := New(Options{})
+	// No webhook is answered here, but a number is only looked up once a token is set.
+	provider, err := New(Options{WebhookAuthToken: "not-checked-here"})
 	s.Require().NoError(err)
 	s.provider = provider
 }
@@ -59,8 +60,9 @@ func (s *TwilioIntegrationSuite) TestANumberThisAccountDoesNotOwnIsReportedAsSuc
 	defer cancel()
 
 	err := s.provider.ConfigureInbound(ctx, phone.Inbound{
-		E164:   "+15005550006",
-		Bridge: phone.Bridge{URI: "sip:nobody@sip.stream-io-api.com"},
+		E164:      "+15005550006",
+		Bridge:    phone.Bridge{URI: "sip:nobody@sip.stream-io-api.com"},
+		PublicURL: "https://router.example.test",
 	})
 
 	s.ErrorContains(err, "not one of this account's numbers")

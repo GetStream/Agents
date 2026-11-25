@@ -214,24 +214,20 @@ func (r *Responses) Select(ctx context.Context, customerID, sessionID string, fi
 		return nil, stack.Wrap(errors.New("store: a customer and a session id are required"))
 	}
 
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentResponse, error) {
-		query := db.NewSelect().Model((*AgentResponse)(nil)).
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Where("rewound_at IS NULL").
-			Order("created_at ASC", "id ASC").
-			Limit(SessionLimit(filter.Limit) + 1)
-		if filter.After != nil {
-			query = query.Where("(created_at, id) > (?, ?)", filter.After.CreatedAt, filter.After.ID)
-		}
-		var responses []AgentResponse
-		err := query.Scan(ctx, &responses)
-		return responses, err
-	})
-	if err != nil {
+	query := r.store.shard.NewSelect().Model((*AgentResponse)(nil)).
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Where("rewound_at IS NULL").
+		Order("created_at ASC", "id ASC").
+		Limit(SessionLimit(filter.Limit) + 1)
+	if filter.After != nil {
+		query = query.Where("(created_at, id) > (?, ?)", filter.After.CreatedAt, filter.After.ID)
+	}
+	var responses []AgentResponse
+	if err := query.Scan(ctx, &responses); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: session responses: %w", err))
 	}
-	return merged(lists, oldestResponseFirst, SessionLimit(filter.Limit)+1), nil
+	return responses, nil
 }
 
 func oldestResponseFirst(a, b AgentResponse) int {
@@ -250,20 +246,16 @@ func (r *Responses) Exchanges(ctx context.Context, customerID, sessionID, upTo s
 		return nil, stack.Wrap(errors.New("store: a customer and a session id are required"))
 	}
 
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentResponse, error) {
-		var responses []AgentResponse
-		err := db.NewSelect().Model(&responses).
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Where("rewound_at IS NULL").
-			Order("created_at ASC", "id ASC").
-			Scan(ctx)
-		return responses, err
-	})
+	var responses []AgentResponse
+	err := r.store.shard.NewSelect().Model(&responses).
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Where("rewound_at IS NULL").
+		Order("created_at ASC", "id ASC").
+		Scan(ctx)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: exchanges: %w", err))
 	}
-	responses := merged(lists, oldestResponseFirst, 0)
 	if upTo != "" {
 		end := -1
 		for i, response := range responses {
@@ -285,25 +277,20 @@ func (r *Responses) Exchanges(ctx context.Context, customerID, sessionID, upTo s
 	for _, response := range responses {
 		ids = append(ids, response.ID)
 	}
-	answerLists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentResponseItem, error) {
-		var answers []AgentResponseItem
-		err := db.NewSelect().Model(&answers).
-			Where("response_id IN (?)", bun.In(ids)).
-			Where("kind = ?", ItemAnswer).
-			Order("response_id ASC", "ordinal ASC").
-			Scan(ctx)
-		return answers, err
-	})
+	var answers []AgentResponseItem
+	err = r.store.shard.NewSelect().Model(&answers).
+		Where("response_id IN (?)", bun.In(ids)).
+		Where("kind = ?", ItemAnswer).
+		Order("response_id ASC", "ordinal ASC").
+		Scan(ctx)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: exchanges: answers: %w", err))
 	}
 	// An agent that speaks again once delegated work comes back answers one question twice,
-	// and both halves are the answer. A response's items are all in the shard that ran it.
+	// and both halves are the answer.
 	answered := map[string][]string{}
-	for _, answers := range answerLists {
-		for _, answer := range answers {
-			answered[answer.ResponseID] = append(answered[answer.ResponseID], answer.Text)
-		}
+	for _, answer := range answers {
+		answered[answer.ResponseID] = append(answered[answer.ResponseID], answer.Text)
 	}
 
 	exchanges := make([]Exchange, 0, len(responses))
@@ -336,54 +323,48 @@ func (r *Responses) Replies(ctx context.Context, customerID, conversationID stri
 		Ordinal    int    `bun:"ordinal"`
 		Status     string `bun:"status"`
 	}
-	type found struct {
-		answers []answered
-		items   []AgentResponseItem
+	var answers []answered
+	err := r.store.shard.NewSelect().TableExpr("agent_response_items AS ari").
+		ColumnExpr("ari.response_id, ari.payload->>'turn_id' AS turn_id, ari.ordinal, r.status").
+		Join("JOIN agent_responses AS r ON r.id = ari.response_id").
+		Join("JOIN agent_sessions AS s ON s.id = r.session_id").
+		Where("s.customer_id = ?", customerID).
+		Where("s.conversation_id = ?", conversationID).
+		Where("r.customer_id = ?", customerID).
+		Where("r.rewound_at IS NULL").
+		Where("ari.kind = ?", ItemAnswer).
+		Where("ari.payload->>'turn_id' IN (?)", bun.In(turnIDs)).
+		Scan(ctx, &answers)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: reply items: %w", err))
 	}
-	// A response's items are in the shard that ran its session.
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (found, error) {
-		var f found
-		err := db.NewSelect().TableExpr("agent_response_items AS ari").
-			ColumnExpr("ari.response_id, ari.payload->>'turn_id' AS turn_id, ari.ordinal, r.status").
-			Join("JOIN agent_responses AS r ON r.id = ari.response_id").
-			Join("JOIN agent_sessions AS s ON s.id = r.session_id").
-			Where("s.customer_id = ?", customerID).
-			Where("s.conversation_id = ?", conversationID).
-			Where("r.customer_id = ?", customerID).
-			Where("r.rewound_at IS NULL").
-			Where("ari.kind = ?", ItemAnswer).
-			Where("ari.payload->>'turn_id' IN (?)", bun.In(turnIDs)).
-			Scan(ctx, &f.answers)
-		if err != nil || len(f.answers) == 0 {
-			return f, err
-		}
-		ids := make([]string, 0, len(f.answers))
-		for _, a := range f.answers {
-			ids = append(ids, a.ResponseID)
-		}
-		err = db.NewSelect().Model(&f.items).
-			Where("response_id IN (?)", bun.In(ids)).
-			Where("kind IN (?)", bun.In([]string{ItemAnswer, ItemToolResult})).
-			Order("response_id ASC", "ordinal ASC").
-			Scan(ctx)
-		return f, err
-	})
+	if len(answers) == 0 {
+		return map[string]Reply{}, nil
+	}
+	ids := make([]string, 0, len(answers))
+	for _, a := range answers {
+		ids = append(ids, a.ResponseID)
+	}
+	var items []AgentResponseItem
+	err = r.store.shard.NewSelect().Model(&items).
+		Where("response_id IN (?)", bun.In(ids)).
+		Where("kind IN (?)", bun.In([]string{ItemAnswer, ItemToolResult})).
+		Order("response_id ASC", "ordinal ASC").
+		Scan(ctx)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: reply items: %w", err))
 	}
 	// A response answered more than once, once its tools came back, is the reply its last
 	// answer finished.
 	last := map[string]answered{}
+	for _, a := range answers {
+		if held, ok := last[a.ResponseID]; !ok || a.Ordinal > held.Ordinal {
+			last[a.ResponseID] = a
+		}
+	}
 	byResponse := map[string][]AgentResponseItem{}
-	for _, f := range lists {
-		for _, a := range f.answers {
-			if held, ok := last[a.ResponseID]; !ok || a.Ordinal > held.Ordinal {
-				last[a.ResponseID] = a
-			}
-		}
-		for _, item := range f.items {
-			byResponse[item.ResponseID] = append(byResponse[item.ResponseID], item)
-		}
+	for _, item := range items {
+		byResponse[item.ResponseID] = append(byResponse[item.ResponseID], item)
 	}
 	replies := make(map[string]Reply, len(last))
 	for responseID, a := range last {
@@ -399,25 +380,21 @@ func (r *Responses) Opening(ctx context.Context, customerID, conversationID stri
 	if customerID == "" || conversationID == "" {
 		return Exchange{}, stack.Wrap(errors.New("store: a customer and a conversation id are required"))
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentResponse, error) {
-		var first []AgentResponse
-		err := db.NewSelect().Model(&first).
-			Column("ars.id", "ars.said", "ars.status", "ars.created_at").
-			Join("JOIN agent_sessions AS s ON s.id = ars.session_id").
-			Where("s.customer_id = ?", customerID).
-			Where("s.conversation_id = ?", conversationID).
-			Where("ars.customer_id = ?", customerID).
-			Where("ars.rewound_at IS NULL").
-			Where("ars.said <> ''").
-			Order("ars.created_at ASC").
-			Limit(1).
-			Scan(ctx)
-		return first, err
-	})
+	var first []AgentResponse
+	err := r.store.shard.NewSelect().Model(&first).
+		Column("ars.id", "ars.said", "ars.status", "ars.created_at").
+		Join("JOIN agent_sessions AS s ON s.id = ars.session_id").
+		Where("s.customer_id = ?", customerID).
+		Where("s.conversation_id = ?", conversationID).
+		Where("ars.customer_id = ?", customerID).
+		Where("ars.rewound_at IS NULL").
+		Where("ars.said <> ''").
+		Order("ars.created_at ASC").
+		Limit(1).
+		Scan(ctx)
 	if err != nil {
 		return Exchange{}, stack.Wrap(fmt.Errorf("store: opening: %w", err))
 	}
-	first := merged(lists, func(a, b AgentResponse) int { return a.CreatedAt.Compare(b.CreatedAt) }, 1)
 	if len(first) == 0 {
 		return Exchange{}, nil
 	}
@@ -433,28 +410,21 @@ func (r *Responses) Rewind(ctx context.Context, customerID, sessionID, kept stri
 		at = time.Now().UTC()
 	}
 
-	// The response kept may be in another shard than the ones rewound, so its position is
-	// read first rather than in each shard's update.
-	keptAt, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (AgentResponse, error) {
-		var response AgentResponse
-		err := db.NewSelect().Model(&response).Column("created_at", "id").Where("id = ?", kept).Where("customer_id = ?", customerID).Scan(ctx)
-		return response, err
-	})
+	var keptAt AgentResponse
+	err := r.store.shard.NewSelect().Model(&keptAt).Column("created_at", "id").Where("id = ?", kept).Where("customer_id = ?", customerID).Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: rewind responses: %w", err))
 	}
-	_, err = onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewUpdate().Model((*AgentResponse)(nil)).
-			Set("rewound_at = ?", at).
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Where("rewound_at IS NULL").
-			Where("(created_at, id) > (?, ?)", keptAt.CreatedAt, keptAt.ID).
-			Exec(ctx)
-	})
+	_, err = r.store.shard.NewUpdate().Model((*AgentResponse)(nil)).
+		Set("rewound_at = ?", at).
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Where("rewound_at IS NULL").
+		Where("(created_at, id) > (?, ?)", keptAt.CreatedAt, keptAt.ID).
+		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: rewind responses: %w", err))
 	}
@@ -480,28 +450,23 @@ func (r *Responses) Siblings(ctx context.Context, customerID, sessionID, respons
 	if response.QuestionResponseID == "" {
 		return []AgentResponse{response}, nil
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentResponse, error) {
-		query := db.NewSelect().Model((*AgentResponse)(nil)).
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Where("question_response_id IS NOT NULL").
-			Order("created_at ASC", "id ASC")
-		if response.ParentResponseID == "" {
-			query = query.Where("parent_response_id IS NULL")
-		} else {
-			query = query.Where("parent_response_id = ?", response.ParentResponseID)
-		}
-		if of == SiblingsOfReply {
-			query = query.Where("question_response_id = ?", response.QuestionResponseID)
-		}
-		var siblings []AgentResponse
-		err := query.Scan(ctx, &siblings)
-		return siblings, err
-	})
-	if err != nil {
+	query := r.store.shard.NewSelect().Model((*AgentResponse)(nil)).
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Where("question_response_id IS NOT NULL").
+		Order("created_at ASC", "id ASC")
+	if response.ParentResponseID == "" {
+		query = query.Where("parent_response_id IS NULL")
+	} else {
+		query = query.Where("parent_response_id = ?", response.ParentResponseID)
+	}
+	if of == SiblingsOfReply {
+		query = query.Where("question_response_id = ?", response.QuestionResponseID)
+	}
+	var siblings []AgentResponse
+	if err := query.Scan(ctx, &siblings); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: siblings: %w", err))
 	}
-	siblings := merged(lists, oldestResponseFirst, 0)
 	if of == SiblingsOfQuestion {
 		siblings = distinct(siblings, func(r AgentResponse) string { return r.QuestionResponseID })
 	}
@@ -515,31 +480,21 @@ func (r *Responses) QuestionsAt(ctx context.Context, customerID, sessionID, pare
 	if customerID == "" || sessionID == "" {
 		return 0, stack.Wrap(errors.New("store: a customer and a session id are required"))
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]string, error) {
-		query := db.NewSelect().Model((*AgentResponse)(nil)).
-			ColumnExpr("DISTINCT question_response_id").
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Where("question_response_id IS NOT NULL")
-		if parentID == "" {
-			query = query.Where("parent_response_id IS NULL")
-		} else {
-			query = query.Where("parent_response_id = ?", parentID)
-		}
-		var questions []string
-		err := query.Scan(ctx, &questions)
-		return questions, err
-	})
-	if err != nil {
+	query := r.store.shard.NewSelect().Model((*AgentResponse)(nil)).
+		ColumnExpr("count(DISTINCT question_response_id)").
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Where("question_response_id IS NOT NULL")
+	if parentID == "" {
+		query = query.Where("parent_response_id IS NULL")
+	} else {
+		query = query.Where("parent_response_id = ?", parentID)
+	}
+	var questions int
+	if err := query.Scan(ctx, &questions); err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: questions at: %w", err))
 	}
-	distinct := map[string]bool{}
-	for _, list := range lists {
-		for _, question := range list {
-			distinct[question] = true
-		}
-	}
-	return len(distinct), nil
+	return questions, nil
 }
 
 // SiblingPosition is where response stands among siblings as Siblings returned them for of:
@@ -629,55 +584,46 @@ func (r *Responses) MoveActivePathUntil(ctx context.Context, customerID, session
 
 	// The old branch is rewound before the new one is brought back, so a router stopping in
 	// between leaves the conversation cut short at the fork rather than two branches in it.
-	_, err = onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		query := db.NewUpdate().Model((*AgentResponse)(nil)).
-			Set("rewound_at = ?", at).
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Where("rewound_at IS NULL")
-		if fork != nil {
-			query = query.Where("(created_at, id) > (?, ?)", fork.CreatedAt, fork.ID)
-		}
-		if !until.IsZero() {
-			query = query.Where("created_at <= ?", until)
-		}
-		return query.Exec(ctx)
-	})
-	if err != nil {
+	query := r.store.shard.NewUpdate().Model((*AgentResponse)(nil)).
+		Set("rewound_at = ?", at).
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Where("rewound_at IS NULL")
+	if fork != nil {
+		query = query.Where("(created_at, id) > (?, ?)", fork.CreatedAt, fork.ID)
+	}
+	if !until.IsZero() {
+		query = query.Where("created_at <= ?", until)
+	}
+	if _, err = query.Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: move active path: rewind: %w", err))
 	}
 	if len(back) == 0 {
 		return nil
 	}
-	_, err = onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewUpdate().Model((*AgentResponse)(nil)).
-			Set("rewound_at = NULL").
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Where("id IN (?)", bun.In(back)).
-			Exec(ctx)
-	})
+	_, err = r.store.shard.NewUpdate().Model((*AgentResponse)(nil)).
+		Set("rewound_at = NULL").
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Where("id IN (?)", bun.In(back)).
+		Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: move active path: bring back: %w", err))
 	}
 	return nil
 }
 
-// Get is one of a session's responses, from whichever shard holds it, with its place in the
-// tree and whether it is on the session's conversation (RewoundAt).
+// Get is one of a session's responses, with its place in the tree and whether it is on the session's conversation (RewoundAt).
 func (r *Responses) Get(ctx context.Context, customerID, sessionID, responseID string) (AgentResponse, error) {
 	if customerID == "" || sessionID == "" || responseID == "" {
 		return AgentResponse{}, stack.Wrap(errors.New("store: a customer, a session and a response id are required"))
 	}
-	response, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (AgentResponse, error) {
-		var response AgentResponse
-		err := db.NewSelect().Model(&response).
-			Where("id = ?", responseID).
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Scan(ctx)
-		return response, err
-	})
+	var response AgentResponse
+	err := r.store.shard.NewSelect().Model(&response).
+		Where("id = ?", responseID).
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AgentResponse{}, stack.Wrap(ErrUnknownResponse)
 	}
@@ -715,33 +661,22 @@ func (r *Responses) ActiveLeaf(ctx context.Context, customerID, sessionID string
 	if customerID == "" || sessionID == "" {
 		return "", stack.Wrap(errors.New("store: a customer and a session id are required"))
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentResponse, error) {
-		var newest []AgentResponse
-		err := db.NewSelect().Model((*AgentResponse)(nil)).
-			Column("id", "created_at").
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Where("rewound_at IS NULL").
-			Order("created_at DESC", "id DESC").
-			Limit(1).
-			Scan(ctx, &newest)
-		return newest, err
-	})
+	var newest []AgentResponse
+	err := r.store.shard.NewSelect().Model((*AgentResponse)(nil)).
+		Column("id", "created_at").
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Where("rewound_at IS NULL").
+		Order("created_at DESC", "id DESC").
+		Limit(1).
+		Scan(ctx, &newest)
 	if err != nil {
 		return "", stack.Wrap(fmt.Errorf("store: active leaf: %w", err))
 	}
-	var leaf *AgentResponse
-	for _, list := range lists {
-		for i := range list {
-			if leaf == nil || oldestResponseFirst(list[i], *leaf) > 0 {
-				leaf = &list[i]
-			}
-		}
-	}
-	if leaf == nil {
+	if len(newest) == 0 {
 		return "", nil
 	}
-	return leaf.ID, nil
+	return newest[0].ID, nil
 }
 
 // responseTree is a session's responses by id and by parent.
@@ -750,23 +685,20 @@ type responseTree struct {
 	children map[string][]AgentResponse
 }
 
-// tree reads every response of a session in every shard, rewound or not.
+// tree reads every response of a session, rewound or not.
 func (r *Responses) tree(ctx context.Context, customerID, sessionID string) (responseTree, error) {
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]AgentResponse, error) {
-		var responses []AgentResponse
-		err := db.NewSelect().Model((*AgentResponse)(nil)).
-			Column("id", "session_id", "customer_id", "status", "created_at", "rewound_at", "parent_response_id", "question_response_id").
-			Where("customer_id = ?", customerID).
-			Where("session_id = ?", sessionID).
-			Order("created_at ASC", "id ASC").
-			Scan(ctx, &responses)
-		return responses, err
-	})
+	var responses []AgentResponse
+	err := r.store.shard.NewSelect().Model((*AgentResponse)(nil)).
+		Column("id", "session_id", "customer_id", "status", "created_at", "rewound_at", "parent_response_id", "question_response_id").
+		Where("customer_id = ?", customerID).
+		Where("session_id = ?", sessionID).
+		Order("created_at ASC", "id ASC").
+		Scan(ctx, &responses)
 	if err != nil {
 		return responseTree{}, stack.Wrap(fmt.Errorf("store: response tree: %w", err))
 	}
 	tree := responseTree{byID: map[string]AgentResponse{}, children: map[string][]AgentResponse{}}
-	for _, response := range merged(lists, oldestResponseFirst, 0) {
+	for _, response := range responses {
 		tree.byID[response.ID] = response
 		if response.ParentResponseID != "" {
 			tree.children[response.ParentResponseID] = append(tree.children[response.ParentResponseID], response)

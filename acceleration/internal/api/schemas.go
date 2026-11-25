@@ -122,6 +122,7 @@ type Call struct {
 	Llm          *string            `json:"llm,omitempty" doc:"The target that held the conversation."`
 	LlmUsed      *string            `json:"llm_used,omitempty" doc:"The provider/model that held the conversation."`
 	Mode         *SessionMode       `json:"mode,omitempty"`
+	Region       *string            `json:"region,omitempty" readOnly:"true" doc:"The shard the call is kept in. Set on a listed call of a deployment with shards."`
 	ReviewNotes  *string            `json:"review_notes,omitempty"`
 	ReviewScore  *int               `json:"review_score,omitempty" doc:"How well the agent handled it, from 1 to 5."`
 	SessionId    *string            `json:"session_id,omitempty" doc:"The session the call was part of. A session starts a new call each time voice is started or stopped on it. Absent once the session is deleted."`
@@ -856,6 +857,7 @@ type Session struct {
 	ModelOverwrites  *ModelOverwrites        `json:"model_overwrites,omitempty"`
 	PinnedAt         *time.Time              `json:"pinned_at,omitempty" doc:"When the session was pinned. Absent for one that is not pinned."`
 	ProjectId        *string                 `json:"project_id,omitempty"`
+	Region           *string                 `json:"region,omitempty" readOnly:"true" doc:"The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards."`
 	ReviewNotes      *string                 `json:"review_notes,omitempty" doc:"Why the review scored the conversation as it did. Read by a backend only."`
 	ReviewScore      *int                    `json:"review_score,omitempty" doc:"How well the agent handled the conversation, from 1 to 5, written a few seconds after it ended. Read by a backend only."`
 	State            SessionState            `json:"state"`

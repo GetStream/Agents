@@ -1392,7 +1392,7 @@ func (s *ConfigSuite) TestASingleNodeSetsNoShard() {
 
 	s.Empty(config.Shard)
 	s.Empty(config.Postgres.ShardDSN)
-	s.Empty(config.Postgres.Shards)
+	s.Empty(config.Shards)
 	s.Empty(config.Redis.Shard.Addr)
 }
 
@@ -1400,16 +1400,17 @@ func (s *ConfigSuite) TestAShardIsReadFromAFile() {
 	path := filepath.Join(s.T().TempDir(), "router.yaml")
 	s.Require().NoError(os.WriteFile(path, []byte(`
 shard: us-west1
+shards: [us-east4, us-west1]
 postgres:
   dsn: postgres://global/router
   shard_dsn: postgres://usw/router
-  shards:
-    us-east4: postgres://use/router
-    us-west1: postgres://usw/router
 redis:
   addr: global:6379
   shard:
     addr: usw:6379
+usage:
+  url: http://usage:8070
+  token: ingest
 `), 0o600))
 
 	config, _, err := Load(path)
@@ -1417,7 +1418,7 @@ redis:
 
 	s.Equal("us-west1", config.Shard)
 	s.Equal("postgres://usw/router", config.Postgres.ShardDSN)
-	s.Equal(map[string]string{"us-east4": "postgres://use/router", "us-west1": "postgres://usw/router"}, config.Postgres.Shards)
+	s.Equal([]string{"us-east4", "us-west1"}, config.Shards)
 	s.Equal("usw:6379", config.Redis.Shard.Addr)
 }
 
@@ -1425,16 +1426,51 @@ func (s *ConfigSuite) TestAShardIsReadFromTheEnvironment() {
 	s.T().Setenv("ROUTER_SHARD", "us-west1")
 	s.T().Setenv("ROUTER_POSTGRES_DSN", "postgres://global/router")
 	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
-	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-east4=postgres://use/router, us-west1=postgres://usw/router")
+	s.T().Setenv("ROUTER_SHARDS", "us-east4, us-west1")
 	s.T().Setenv("ROUTER_REDIS_SHARD_ADDR", "usw:6379")
+	s.T().Setenv("ROUTER_USAGE_URL", "http://usage:8070")
+	s.T().Setenv("ROUTER_USAGE_TOKEN", "ingest")
 
 	config, _, err := Load("")
 	s.Require().NoError(err)
 
-	s.Equal(map[string]string{"us-east4": "postgres://use/router", "us-west1": "postgres://usw/router"}, config.Postgres.Shards)
+	s.Equal([]string{"us-east4", "us-west1"}, config.Shards)
 	s.Equal("usw:6379", config.Redis.Shard.Addr)
-	s.Equal("us-east4=postgres://use/router,us-west1=postgres://usw/router", os.Getenv("ROUTER_POSTGRES_SHARDS"),
-		"written back the way it is read")
+	s.Equal("us-east4,us-west1", os.Getenv("ROUTER_SHARDS"), "written back the way it is read")
+}
+
+// A router upgraded with the list of every shard's DSN still set would otherwise start without
+// knowing the other shards, and queue no work for them.
+func (s *ConfigSuite) TestTheOldListOfShardDatabasesIsRefusedFromTheEnvironment() {
+	s.T().Setenv("ROUTER_SHARD", "us-west1")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-east4=postgres://use/router,us-west1=postgres://usw/router")
+	s.T().Setenv("ROUTER_USAGE_URL", "http://usage:8070")
+	s.T().Setenv("ROUTER_USAGE_TOKEN", "ingest")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "postgres.shards (ROUTER_POSTGRES_SHARDS) is no longer read")
+	s.ErrorContains(err, "set shards (ROUTER_SHARDS)")
+}
+
+func (s *ConfigSuite) TestTheOldListOfShardDatabasesIsRefusedFromAFile() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte(`
+shard: us-west1
+shards: [us-east4, us-west1]
+postgres:
+  dsn: postgres://global/router
+  shard_dsn: postgres://usw/router
+  shards:
+    us-east4: postgres://use/router
+    us-west1: postgres://usw/router
+usage:
+  url: http://usage:8070
+  token: ingest
+`), 0o600))
+
+	_, _, err := Load(path)
+	s.ErrorContains(err, "postgres.shards (ROUTER_POSTGRES_SHARDS) is no longer read")
 }
 
 func (s *ConfigSuite) TestKnowledgeAndSandboxRegionsAreReadFromAFile() {
@@ -1561,13 +1597,16 @@ func (s *ConfigSuite) TestTheMigrateDSNsAreReadFromAFileAndExported() {
 	path := filepath.Join(s.T().TempDir(), "router.yaml")
 	s.Require().NoError(os.WriteFile(path, []byte(`
 shard: us-west1
+shards:
+  - us-west1
+usage:
+  url: http://usage:8080
+  token: ingest-secret
 postgres:
   dsn: postgres://global/router
   migrate_dsn: postgres://owner@global/router
   shard_dsn: postgres://usw/router
   shard_migrate_dsn: postgres://owner@usw/router
-  shards:
-    us-west1: postgres://usw/router
 `), 0o600))
 
 	config, _, err := Load(path)
@@ -1581,8 +1620,10 @@ postgres:
 
 func (s *ConfigSuite) TestTheMigrateDSNsAreReadFromTheEnvironment() {
 	s.T().Setenv("ROUTER_SHARD", "us-west1")
+	s.T().Setenv("ROUTER_SHARDS", "us-west1")
+	s.T().Setenv("ROUTER_USAGE_URL", "http://usage:8080")
+	s.T().Setenv("ROUTER_USAGE_TOKEN", "ingest-secret")
 	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
-	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-west1=postgres://usw/router")
 	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
 	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@usw/router")
 
@@ -1600,8 +1641,10 @@ func (s *ConfigSuite) TestADeploymentOfOneDatabaseNeedsNoShardMigrateDSN() {
 	s.NoError(err)
 
 	s.T().Setenv("ROUTER_SHARD", "us-west1")
+	s.T().Setenv("ROUTER_SHARDS", "us-west1")
+	s.T().Setenv("ROUTER_USAGE_URL", "http://usage:8080")
+	s.T().Setenv("ROUTER_USAGE_TOKEN", "ingest-secret")
 	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://global/router")
-	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-west1=postgres://global/router")
 	_, _, err = Load("")
 	s.NoError(err)
 }
@@ -1661,32 +1704,33 @@ func (s *ConfigSuite) TestAShardDatabaseWithoutTheShardListIsRefused() {
 	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
 
 	_, _, err := Load("")
-	s.ErrorContains(err, "set postgres.shards")
+	s.ErrorContains(err, "set shards (ROUTER_SHARDS)")
 }
 
 func (s *ConfigSuite) TestShardsThatLeaveThisOneOutAreRefused() {
 	s.T().Setenv("ROUTER_SHARD", "us-west1")
 	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
-	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-east4=postgres://use/router")
+	s.T().Setenv("ROUTER_SHARDS", "us-east4")
 
 	_, _, err := Load("")
 	s.ErrorContains(err, `does not list this shard, "us-west1"`)
 }
 
 func (s *ConfigSuite) TestShardsWithoutThisOnesNameAreRefused() {
-	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-east4=postgres://use/router")
+	s.T().Setenv("ROUTER_SHARDS", "us-east4")
 
 	_, _, err := Load("")
 	s.ErrorContains(err, "set shard")
 }
 
-func (s *ConfigSuite) TestShardsListingThisOneElsewhereAreRefused() {
+// No shard reads another's requests, so only the usage service sees a customer's spend whole.
+func (s *ConfigSuite) TestShardsWithoutTheUsageServiceAreRefused() {
 	s.T().Setenv("ROUTER_SHARD", "us-west1")
 	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
-	s.T().Setenv("ROUTER_POSTGRES_SHARDS", "us-west1=postgres://other/router")
+	s.T().Setenv("ROUTER_SHARDS", "us-west1")
 
 	_, _, err := Load("")
-	s.ErrorContains(err, "another DSN")
+	s.ErrorContains(err, "set usage.url")
 }
 
 func (s *ConfigSuite) TestMetricsAreNotServedUnlessAnAddressIsSet() {
