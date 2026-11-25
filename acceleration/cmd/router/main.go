@@ -199,6 +199,7 @@ const usage = `usage: router [--config path] [command]
   stream-apps           look after the Stream apps customers registered in app mode
   conversations         look after the conversations kept in Stream Chat
   prices                read and check the price list (router prices for its commands)
+  phone move-twilio     point Twilio numbers attached earlier at the router's call webhook (--apply, --one, --app)
   opt-outs normalize    rewrite opt-outs stored before E.164 was enforced into E.164
   usage replay          write the usage rows a log says were lost, once each (--from path)
   usage reship          send this shard's shipped or refused rows to the usage service again (--since, --rejected)
@@ -293,6 +294,8 @@ func dispatchCommand(command string, args []string, settings config.Config, logg
 		return runOptOuts(args, settings, logger)
 	case "usage":
 		return runUsage(args, settings, os.Stdout)
+	case "phone":
+		return runPhone(args, settings, logger)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil

@@ -1027,6 +1027,14 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		if err != nil {
 			return Attached{}, err
 		}
+		// A number attached before its vendor asked the router's webhook is pointed there now,
+		// when the router can answer it. A running line is not refused over a move that failed.
+		if hooked, ok := provider.(CallHooked); ok && hooked.CallHookReady(s.publicURL) == nil {
+			if _, err := s.moveToCallHook(ctx, provider, hooked, held, true); err != nil {
+				s.logger.Error("could not point an attached number at the router's call webhook",
+					"customer", held.CustomerID, "vendor", held.Vendor, "error", err)
+			}
+		}
 		return attached, nil
 	}
 	if err := s.clearLinesFor(ctx, held, pin); err != nil {
@@ -1182,6 +1190,11 @@ func (s *Service) InboundBridge(ctx context.Context, vendor, e164 string) (Bridg
 	if err := s.gate.Admit(ctx, stored.CustomerID); err != nil {
 		return Bridge{}, err
 	}
+	return s.openBridge(stored, e164)
+}
+
+// openBridge is the stored trunk of the number e164 with its password opened.
+func (s *Service) openBridge(stored store.AttachedBridge, e164 string) (Bridge, error) {
 	aad := trunkAAD(stored.CustomerID, stored.TrunkID)
 	if stored.Own {
 		aad = bridgeAAD(stored.CustomerID, e164)
