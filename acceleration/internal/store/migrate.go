@@ -13,6 +13,7 @@ import (
 
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/database"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/GetStream/Vision-Agents/acceleration/migrations"
@@ -39,7 +40,8 @@ var (
 )
 
 // Migrate applies every pending migration: the shared set to the shared database and the
-// shard set to this shard's, which for a deployment of one database is the same one.
+// shard set to this shard's, which for a deployment of one database is the same one. It
+// connects with the migrate DSNs, whose role owns the schema.
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.migrate(ctx, s.globalDSN, globalSet); err != nil {
 		return err
@@ -49,11 +51,65 @@ func (s *Store) Migrate(ctx context.Context) error {
 	}
 	// Attached here rather than in a migration of their own, so that a table added later
 	// is covered by the deployment reaching it rather than by somebody remembering.
-	if err := s.watchDataChanges(ctx, s.global); err != nil {
+	if err := s.watchDataChanges(ctx, s.globalDSN, s.global); err != nil {
 		return err
 	}
 	if s.Sharded() {
-		return s.watchDataChanges(ctx, s.shard)
+		return s.watchDataChanges(ctx, s.shardDSN, s.shard)
+	}
+	return nil
+}
+
+// CheckMigrated refuses a schema Migrate would still change in a way this release needs: a
+// migration, an index or a change trigger of its own missing. It changes nothing and runs on
+// the serving DSNs, so a router whose role does not own the schema starts with it. A schema a
+// later release migrated passes, so this one's routers restart during its rollout.
+func (s *Store) CheckMigrated(ctx context.Context) error {
+	if err := checkMigrated(ctx, s.global, globalSet); err != nil {
+		return err
+	}
+	if err := checkMigrated(ctx, s.shard, shardSet); err != nil {
+		return fmt.Errorf("store: shard: %w", err)
+	}
+	if err := s.checkDataChangesWatched(ctx, s.global); err != nil {
+		return err
+	}
+	if s.Sharded() {
+		return s.checkDataChangesWatched(ctx, s.shard)
+	}
+	return nil
+}
+
+func checkMigrated(ctx context.Context, db *bun.DB, set migrationSet) error {
+	conn, err := db.DB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("store: check %s: %w", set.name, err)
+	}
+	defer conn.Close() //nolint:errcheck // back to the pool
+	provider, err := goose.NewProvider(goose.DialectPostgres, db.DB, set.files)
+	if err != nil {
+		return fmt.Errorf("store: check %s: %w", set.name, err)
+	}
+	applied, err := checkHistory(ctx, conn, provider, set)
+	if err != nil {
+		return err
+	}
+	for _, source := range provider.ListSources() {
+		if !applied[source.Version] {
+			return fmt.Errorf("store: the database has not applied %s migration %d: run router migrate with this release", set.name, source.Version)
+		}
+	}
+	for _, index := range usageIndexes {
+		if index.set != set.name {
+			continue
+		}
+		valid, _, err := indexState(ctx, conn, index.name)
+		if err != nil {
+			return err
+		}
+		if !valid {
+			return fmt.Errorf("store: the database has no valid index %s: run router migrate with this release", index.name)
+		}
 	}
 	return nil
 }
@@ -62,7 +118,11 @@ func (s *Store) migrate(ctx context.Context, dsn string, set migrationSet) error
 	// A pool of its own with no read timeout: the serving pool gives up on a statement after
 	// the driver's 10 s, and a backfill or an index build on a large table takes longer. The
 	// server would go on running it, holding its locks, while the router restarted into it.
-	db := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn), pgdriver.WithReadTimeout(0)))
+	connector, err := connectorFor(dsn, pgdriver.WithReadTimeout(0))
+	if err != nil {
+		return err
+	}
+	db := sql.OpenDB(connector)
 	defer db.Close() //nolint:errcheck // a pool the migration is done with
 	// Every shard's routers start against the shared database at once in a rollout, and
 	// two goose runs on one database collide, so one migrates while the others wait.
@@ -98,7 +158,7 @@ func (s *Store) migrate(ctx context.Context, dsn string, set migrationSet) error
 	if err != nil {
 		return fmt.Errorf("store: migrate %s: %w", set.name, err)
 	}
-	if err := checkHistory(ctx, conn, provider, set); err != nil {
+	if _, err := checkHistory(ctx, conn, provider, set); err != nil {
 		return err
 	}
 	if _, err := provider.Up(ctx); err != nil {
@@ -114,17 +174,18 @@ func (s *Store) migrate(ctx context.Context, dsn string, set migrationSet) error
 // One that ran the whole history holds the initial migration's schema and starts as it is, and
 // so does one cleaned of it once deployed, which holds no version of it. A version after the
 // squashed history with no file is a later release's, from before a rollback to this one.
-func checkHistory(ctx context.Context, conn *sql.Conn, provider *goose.Provider, set migrationSet) error {
+// It returns the versions applied.
+func checkHistory(ctx context.Context, conn *sql.Conn, provider *goose.Provider, set migrationSet) (map[int64]bool, error) {
 	var recorded, legacy bool
 	err := conn.QueryRowContext(ctx, "SELECT to_regclass($1) IS NOT NULL, to_regclass($2) IS NOT NULL", set.table, set.marker).Scan(&recorded, &legacy)
 	if err != nil {
-		return fmt.Errorf("store: migrate %s: %w", set.name, err)
+		return nil, fmt.Errorf("store: migrate %s: %w", set.name, err)
 	}
 	if !recorded {
 		if legacy {
-			return fmt.Errorf("store: migrate %s: the database ran the migrations from before they were split; recreate it, or start a release from before the history was squashed first", set.name)
+			return nil, fmt.Errorf("store: migrate %s: the database ran the migrations from before they were split; recreate it, or start a release from before the history was squashed first", set.name)
 		}
-		return nil
+		return nil, nil
 	}
 	known := map[int64]bool{0: true}
 	for _, source := range provider.ListSources() {
@@ -135,25 +196,27 @@ func checkHistory(ctx context.Context, conn *sql.Conn, provider *goose.Provider,
 		SELECT DISTINCT ON (version_id) version_id, is_applied FROM `+set.table+` ORDER BY version_id, id DESC) AS latest
 		WHERE is_applied`)
 	if err != nil {
-		return fmt.Errorf("store: migrate %s: %w", set.name, err)
+		return nil, fmt.Errorf("store: migrate %s: %w", set.name, err)
 	}
 	defer rows.Close()
+	applied := map[int64]bool{}
 	var unknown, squashed bool
 	for rows.Next() {
 		var version int64
 		if err := rows.Scan(&version); err != nil {
-			return fmt.Errorf("store: migrate %s: %w", set.name, err)
+			return nil, fmt.Errorf("store: migrate %s: %w", set.name, err)
 		}
+		applied[version] = true
 		unknown = unknown || (!known[version] && version < set.squashed)
 		squashed = squashed || version == set.squashed
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("store: migrate %s: %w", set.name, err)
+		return nil, fmt.Errorf("store: migrate %s: %w", set.name, err)
 	}
 	if unknown && !squashed {
-		return fmt.Errorf("store: migrate %s: the database has not applied migration %d, the last of the history squashed into the initial one; recreate it, or start a release from before the history was squashed first", set.name, set.squashed)
+		return nil, fmt.Errorf("store: migrate %s: the database has not applied migration %d, the last of the history squashed into the initial one; recreate it, or start a release from before the history was squashed first", set.name, set.squashed)
 	}
-	return nil
+	return applied, nil
 }
 
 // migrateLockFirst and migrateLockMost are the pause between two tries at the migrate lock:

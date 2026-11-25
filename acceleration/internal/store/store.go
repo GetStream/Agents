@@ -50,8 +50,8 @@ type Store struct {
 	locks *bun.DB
 	// lockSlots caps how many of locks' connections one customer's locks hold.
 	lockSlots lockSlots
-	// globalDSN and shardDSN are what global and shard were opened with, for the pool a
-	// migration runs on.
+	// globalDSN and shardDSN are what a migration of global and shard connects with: the
+	// migrate DSNs, or what they were opened with.
 	globalDSN, shardDSN string
 	// cache is the shared Redis, holding copies of rows read on every request, and redis the
 	// shard's, holding the state of its running calls. Both are nil without Redis.
@@ -208,8 +208,8 @@ func deleteInBatches(ctx context.Context, db bun.IDB, table, where string, args 
 	}
 }
 
-// connect opens a pool of at most conns connections.
-func connect(dsn string, conns int) (_ *bun.DB, err error) {
+// connectorFor is pgdriver's connector of a DSN.
+func connectorFor(dsn string, opts ...pgdriver.Option) (_ *pgdriver.Connector, err error) {
 	// pgdriver panics on a DSN it cannot parse, and the panic holds the whole DSN, password
 	// included, which would reach the logs past their redaction.
 	defer func() {
@@ -217,7 +217,16 @@ func connect(dsn string, conns int) (_ *bun.DB, err error) {
 			err = stack.Wrap(errors.New("store: the database DSN does not parse"))
 		}
 	}()
-	sqldb := sql.OpenDB(primaryOnly{pgdriver.NewConnector(pgdriver.WithDSN(dsn), sessionDefaults)})
+	return pgdriver.NewConnector(append([]pgdriver.Option{pgdriver.WithDSN(dsn)}, opts...)...), nil
+}
+
+// connect opens a pool of at most conns connections.
+func connect(dsn string, conns int) (*bun.DB, error) {
+	connector, err := connectorFor(dsn, sessionDefaults)
+	if err != nil {
+		return nil, err
+	}
+	sqldb := sql.OpenDB(primaryOnly{connector})
 	// database/sql keeps two idle connections by default, so every burst of writes past two
 	// dials Postgres and shakes hands over TLS again, and under load those handshakes are
 	// what times out. The pool is kept instead, and bounded so that two pods, each running

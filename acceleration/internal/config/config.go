@@ -238,6 +238,12 @@ type Postgres struct {
 	// Shards is every shard's DSN by name, this one's included, which reads of calls,
 	// sessions and requests cover. Empty reads this shard's alone.
 	Shards map[string]string `koanf:"shards"`
+	// MigrateDSN is DSN's database as the role that owns its schema, which router migrate
+	// connects with. Set, every other command checks the schema and never changes it. Empty
+	// migrates with DSN on every start.
+	MigrateDSN string `koanf:"migrate_dsn"`
+	// ShardMigrateDSN is the same for ShardDSN's database.
+	ShardMigrateDSN string `koanf:"shard_migrate_dsn"`
 }
 
 // Redis holds live provider health and the daily counters. An empty address is a router
@@ -600,6 +606,9 @@ var variables = map[string]string{
 	"redis.addr":           "ROUTER_REDIS_ADDR",
 	"redis.username":       "ROUTER_REDIS_USERNAME",
 	"redis.password":       "ROUTER_REDIS_PASSWORD",
+
+	"postgres.migrate_dsn":       "ROUTER_POSTGRES_MIGRATE_DSN",
+	"postgres.shard_migrate_dsn": "ROUTER_POSTGRES_SHARD_MIGRATE_DSN",
 
 	"redis.shard.addr":           "ROUTER_REDIS_SHARD_ADDR",
 	"redis.shard.username":       "ROUTER_REDIS_SHARD_USERNAME",
@@ -1158,6 +1167,16 @@ func (c Config) validateShard() error {
 	if c.Postgres.ShardDSN != "" && c.Postgres.DSN == "" {
 		return errors.New("config: postgres.shard_dsn is a shard's half of postgres.dsn: set postgres.dsn")
 	}
+	if c.Postgres.MigrateDSN != "" && c.Postgres.DSN == "" {
+		return errors.New("config: postgres.migrate_dsn migrates postgres.dsn's database: set postgres.dsn")
+	}
+	if c.Postgres.ShardMigrateDSN != "" && (c.Postgres.MigrateDSN == "" || c.Postgres.ShardDSN == "") {
+		return errors.New("config: postgres.shard_migrate_dsn migrates postgres.shard_dsn's database: set postgres.shard_dsn and postgres.migrate_dsn")
+	}
+	if c.Postgres.MigrateDSN != "" && c.Postgres.ShardMigrateDSN == "" &&
+		c.Postgres.ShardDSN != "" && c.Postgres.ShardDSN != c.Postgres.DSN {
+		return errors.New("config: postgres.migrate_dsn migrates the shared database alone: set postgres.shard_migrate_dsn too")
+	}
 	if c.Redis.Shard.Addr != "" && c.Redis.Addr == "" {
 		return errors.New("config: redis.shard.addr is a shard's half of redis.addr: set redis.addr")
 	}
@@ -1227,6 +1246,8 @@ func (c Config) export() error {
 		"postgres.dsn":                  c.Postgres.DSN,
 		"postgres.shard_dsn":            c.Postgres.ShardDSN,
 		"postgres.shards":               joinPairs(c.Postgres.Shards),
+		"postgres.migrate_dsn":          c.Postgres.MigrateDSN,
+		"postgres.shard_migrate_dsn":    c.Postgres.ShardMigrateDSN,
 		"redis.addr":                    c.Redis.Addr,
 		"redis.username":                c.Redis.Username,
 		"redis.password":                c.Redis.Password,
