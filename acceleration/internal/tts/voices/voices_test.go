@@ -109,14 +109,15 @@ func (s *ClonerSuite) TestElevenLabsSendsEveryRecordingAndKeepsTheVoiceItIsGiven
 }
 
 func (s *ClonerSuite) TestCartesiaClonesFromTheFirstRecordingOnly() {
-	s.reply = `{"id":"ct-42"}`
+	s.reply = `{"id":"DB6B0ED5-D5D3-463D-AE85-518A07D3C2B4"}`
 	cloner, err := NewCartesia(CartesiaOptions{APIKey: "secret", BaseURL: s.server.URL, Language: "fr"})
 	s.Require().NoError(err)
 
 	id, err := cloner.Prepare(s.ctx, s.request())
 	s.Require().NoError(err)
 
-	s.Equal(Prepared{ExternalID: "ct-42", Clones: 1}, id)
+	s.Equal(Prepared{ExternalID: "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4", Clones: 1}, id,
+		"the id is kept in the spelling the ownership check compares")
 	s.Equal("/voices/clone", s.seen.path)
 	s.Equal("Bearer secret", s.seen.header.Get("Authorization"))
 	s.Equal([]string{"first"}, s.seen.files["clip"],

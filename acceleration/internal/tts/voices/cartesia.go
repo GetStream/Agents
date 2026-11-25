@@ -112,7 +112,12 @@ func (c *Cartesia) clone(ctx context.Context, request Request) (string, error) {
 	if created.ID == "" {
 		return "", stack.Wrap(errors.New("voices: cartesia took the recording but named no voice"))
 	}
-	return created.ID, nil
+	// The id as the ownership check will hold it.
+	canonical, err := voiceid.Cartesia(created.ID)
+	if err != nil {
+		return "", stack.Wrap(fmt.Errorf("voices: cartesia named a voice that is no Cartesia id: %w", err))
+	}
+	return canonical, nil
 }
 
 // Delete takes the voice back off Cartesia.
