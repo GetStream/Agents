@@ -428,6 +428,9 @@ type RouterSuite struct {
 	// twilioAuthToken, set by a suite about Twilio's webhooks before it starts the harness, is
 	// the Auth Token Twilio's requests are checked against. Empty leaves it unconfigured.
 	twilioAuthToken string
+	// twilioAccountSID is the Twilio account the router's Twilio numbers are under, for the
+	// same suite to set. Empty is a router with none, which answers no Twilio call.
+	twilioAccountSID string
 	// chatInboundKeys, set by a suite about Stream Chat's delivery endpoint before it starts
 	// the harness, are what its deliveries are checked against, on every node. Nil leaves it
 	// unconfigured.
@@ -812,6 +815,7 @@ func (s *RouterSuite) SetupSuite() {
 		HookSecret:         suiteStreamSecret,
 		TelnyxPublicKey:    s.telnyxPublicKey,
 		TwilioAuthToken:    s.twilioAuthToken,
+		TwilioAccountSID:   s.twilioAccountSID,
 		ChatInboundKeys:    s.chatInboundKeys,
 		TelnyxConnectionID: s.telnyxConnectionID,
 		AudioFloor:         s.audioFloor,

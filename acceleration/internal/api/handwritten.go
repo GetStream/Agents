@@ -783,6 +783,27 @@ func documentHandWritten(api huma.API) {
 		},
 	})
 	document.AddOperation(&huma.Operation{
+		OperationID: "receiveTwilioCall",
+		Method:      http.MethodPost,
+		Path:        twilioCallHookPath,
+		Summary:     "Receive a Twilio call",
+		Description: "Where Twilio asks what to do with a call to one of this router's Twilio numbers. " +
+			"Unauthenticated because Twilio is not a customer: each call is checked against " +
+			"X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this " +
+			"path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call " +
+			"passes, and the answer dials that number's own trunk and no other, or rejects or hangs " +
+			"up the call. A deployment with no Twilio webhook token or no public URL answers 404, so " +
+			"the path never hands out trunk credentials unsigned.",
+		Security: []map[string][]string{},
+		Responses: map[string]*huma.Response{
+			"200": {Description: "TwiML dialling the number's trunk, rejecting the call, or hanging up", Content: map[string]*huma.MediaType{"application/xml": {Schema: &huma.Schema{Type: huma.TypeString}}}},
+			"400": {Description: "The body is not a form"},
+			"401": {Description: "The call is not signed by Twilio"},
+			"404": {Description: "Twilio calls are not configured"},
+			"413": {Description: "The call is over 64 KiB"},
+		},
+	})
+	document.AddOperation(&huma.Operation{
 		OperationID: "receiveTwilioEvent",
 		Method:      http.MethodPost,
 		Path:        twilioEventsHookPath,
