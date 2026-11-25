@@ -33,7 +33,6 @@ const Provider = "daytona"
 
 const apiKeyEnvVar = "DAYTONA_API_KEY"
 const defaultTimeout = 60 * time.Second
-const defaultRunTimeout = 30 * time.Second
 
 // sdkTimeout is the SDK's own HTTP client timeout, which it uses when it is given no client (sdk-go
 // v0.211.2 pkg/daytona/client.go:87, :348).
@@ -228,11 +227,10 @@ func New(o Options) (*Sandbox, error) {
 			o.Timeout = buildTimeout
 		}
 	}
-	if timeout := o.Config.Timeout(); timeout > 0 {
-		o.RunTimeout = timeout
-	}
-	if o.RunTimeout <= 0 {
-		o.RunTimeout = defaultRunTimeout
+	// The config's timeout wins over RunTimeout, and is the one the session's broker is given
+	// (sandbox.Config.RunTimeout).
+	if o.RunTimeout <= 0 || o.Config.Timeout() > 0 {
+		o.RunTimeout = o.Config.RunTimeout()
 	}
 	if o.Lifecycle.IdleStop <= 0 {
 		o.Lifecycle.IdleStop = defaultIdleStop

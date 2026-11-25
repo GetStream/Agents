@@ -39,6 +39,9 @@ const OutputCut = "\n[output cut: the code printed more than 1 MiB; print less, 
 // MaxTimeout is the longest one run of code may be allowed.
 const MaxTimeout = 30 * time.Minute
 
+// DefaultRunTimeout is how long one run of code may take when its config names no timeout.
+const DefaultRunTimeout = 30 * time.Second
+
 // Result is what running a piece of code produced.
 type Result struct {
 	// Output is everything the code printed. A sandbox runs it the way a shell would, so
@@ -123,6 +126,15 @@ func (c Config) Built() bool {
 // Timeout is how long one run of code may take, or zero for the provider's default.
 func (c Config) Timeout() time.Duration {
 	return min(time.Duration(c.TimeoutMs)*time.Millisecond, MaxTimeout)
+}
+
+// RunTimeout is how long one run of code may take: the config's own timeout, else
+// DefaultRunTimeout.
+func (c Config) RunTimeout() time.Duration {
+	if timeout := c.Timeout(); timeout > 0 {
+		return timeout
+	}
+	return DefaultRunTimeout
 }
 
 // Lifecycle is when a provider stops a sandbox nothing runs in, and deletes one that has
