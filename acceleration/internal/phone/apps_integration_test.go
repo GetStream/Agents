@@ -1545,6 +1545,7 @@ func (s *AppsSuite) TestACallFromANumberOnATrunkTakesNoOtherCustomersLine() {
 
 	s.Require().NoError(err)
 	s.leftAsItWas(squatter, line, s.deployment)
+	s.NotNil(s.deployment.Rule(line.StreamRouteID))
 }
 
 func (s *AppsSuite) TestALineForTheNumberInAnotherAppIsLeftAlone() {
