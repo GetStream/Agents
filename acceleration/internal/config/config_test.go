@@ -1548,6 +1548,16 @@ func (s *ConfigSuite) TestAShardMigrateDSNWithoutTheSharedOneIsRefused() {
 	s.ErrorContains(err, "set postgres.shard_dsn and postgres.migrate_dsn")
 }
 
+func (s *ConfigSuite) TestAShardMigrateDSNForTheSharedDatabaseIsRefused() {
+	s.T().Setenv("ROUTER_POSTGRES_DSN", "postgres://global/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://global/router")
+	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@global/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "postgres.shard_dsn's own database")
+}
+
 func (s *ConfigSuite) TestAShardMigrateDSNWithoutAShardIsRefused() {
 	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
 	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@usw/router")

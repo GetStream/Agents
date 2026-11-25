@@ -14,6 +14,7 @@ import (
 	"github.com/pressly/goose/v3"
 	"github.com/pressly/goose/v3/database"
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/GetStream/Vision-Agents/acceleration/migrations"
@@ -49,38 +50,25 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.migrate(ctx, s.shardDSN, shardSet); err != nil {
 		return fmt.Errorf("store: shard: %w", err)
 	}
-	// Attached here rather than in a migration of their own, so that a table added later
-	// is covered by the deployment reaching it rather than by somebody remembering.
-	if err := s.watchDataChanges(ctx, s.globalDSN, s.global); err != nil {
-		return err
-	}
-	if s.Sharded() {
-		return s.watchDataChanges(ctx, s.shardDSN, s.shard)
-	}
 	return nil
 }
 
 // CheckMigrated refuses a schema Migrate would still change in a way this release needs: a
-// migration, an index or a change trigger of its own missing. It changes nothing and runs on
-// the serving DSNs, so a router whose role does not own the schema starts with it. A schema a
-// later release migrated passes, so this one's routers restart during its rollout.
+// migration, an index or a change trigger of its own missing, or a table or sequence the
+// serving role is not granted. It changes nothing and runs on the serving DSNs, so a router
+// whose role does not own the schema starts with it. The schema a later release's expand-only
+// migrations leave passes, so this one's routers restart during its rollout.
 func (s *Store) CheckMigrated(ctx context.Context) error {
-	if err := checkMigrated(ctx, s.global, globalSet); err != nil {
+	if err := s.checkMigrated(ctx, s.global, globalSet); err != nil {
 		return err
 	}
-	if err := checkMigrated(ctx, s.shard, shardSet); err != nil {
+	if err := s.checkMigrated(ctx, s.shard, shardSet); err != nil {
 		return fmt.Errorf("store: shard: %w", err)
-	}
-	if err := s.checkDataChangesWatched(ctx, s.global); err != nil {
-		return err
-	}
-	if s.Sharded() {
-		return s.checkDataChangesWatched(ctx, s.shard)
 	}
 	return nil
 }
 
-func checkMigrated(ctx context.Context, db *bun.DB, set migrationSet) error {
+func (s *Store) checkMigrated(ctx context.Context, db *bun.DB, set migrationSet) error {
 	conn, err := db.DB.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("store: check %s: %w", set.name, err)
@@ -98,6 +86,12 @@ func checkMigrated(ctx context.Context, db *bun.DB, set migrationSet) error {
 		if !applied[source.Version] {
 			return fmt.Errorf("store: the database has not applied %s migration %d: run router migrate with this release", set.name, source.Version)
 		}
+		delete(applied, source.Version)
+	}
+	// What is left past the squashed history is a later release's.
+	var later bool
+	for version := range applied {
+		later = later || version > set.squashed
 	}
 	for _, index := range usageIndexes {
 		if index.set != set.name {
@@ -110,6 +104,43 @@ func checkMigrated(ctx context.Context, db *bun.DB, set migrationSet) error {
 		if !valid {
 			return fmt.Errorf("store: the database has no valid index %s: run router migrate with this release", index.name)
 		}
+	}
+	if err := checkGranted(ctx, db, set); err != nil {
+		return err
+	}
+	return s.checkDataChangesWatched(ctx, set, later)
+}
+
+// checkGranted refuses a database whose tables and sequences the connected role may not all
+// write. A table a later release dropped is none of them.
+func checkGranted(ctx context.Context, db *bun.DB, set migrationSet) error {
+	tables, err := setTables(set)
+	if err != nil {
+		return fmt.Errorf("store: check %s: %w", set.name, err)
+	}
+	// Each privilege on its own: a list is granted when any one of it is.
+	var missing []string
+	if err := db.QueryRowContext(ctx, `
+WITH held AS (
+  SELECT to_regclass(name) AS oid FROM unnest(?::text[]) AS name
+), lacking AS (
+  SELECT privilege || ' on table ' || held.oid::text AS what
+  FROM held, unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS privilege
+  WHERE NOT has_table_privilege(held.oid, privilege)
+  UNION ALL
+  SELECT privilege || ' on sequence ' || c.oid::regclass::text
+  FROM held
+  JOIN pg_depend d ON d.refclassid = 'pg_class'::regclass AND d.refobjid = held.oid AND d.classid = 'pg_class'::regclass
+  JOIN pg_class c ON c.oid = d.objid AND c.relkind = 'S',
+  unnest(ARRAY['USAGE', 'SELECT', 'UPDATE']) AS privilege
+  WHERE CASE WHEN c.relkind = 'S' THEN NOT has_sequence_privilege(c.oid, privilege) END
+)
+SELECT COALESCE(array_agg(what ORDER BY what), '{}') FROM lacking`,
+		pgdialect.Array(append(tables, changeLogTables...))).Scan(pgdialect.Array(&missing)); err != nil {
+		return fmt.Errorf("store: check the grants of %s: %w", set.name, err)
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("store: the serving role lacks %s", strings.Join(missing, ", "))
 	}
 	return nil
 }
@@ -163,6 +194,12 @@ func (s *Store) migrate(ctx context.Context, dsn string, set migrationSet) error
 	}
 	if _, err := provider.Up(ctx); err != nil {
 		return fmt.Errorf("store: migrate %s: %w", set.name, err)
+	}
+	// Attached here rather than in a migration of their own, so that a table added later
+	// is covered by the deployment reaching it rather than by somebody remembering. Before the
+	// indexes, whose build can be long.
+	if err := s.watchDataChanges(ctx, dsn, set); err != nil {
+		return err
 	}
 	return ensureUsageIndexes(ctx, conn, set)
 }

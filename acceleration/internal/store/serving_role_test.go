@@ -231,6 +231,14 @@ func (s *ServingRoleSuite) TestADatabaseAMigrationBehindIsRefused() {
 	s.NoError(s.paths.store.CheckMigrated(s.ctx))
 }
 
+// A version counts by its latest row: one rolled back is not applied.
+func (s *ServingRoleSuite) TestADatabaseThatRolledAMigrationBackIsRefused() {
+	s.exec(s.admin.store.global, "INSERT INTO goose_global_version (version_id, is_applied) VALUES (20270128000000, false)")
+	defer s.exec(s.admin.store.global, "DELETE FROM goose_global_version WHERE NOT is_applied")
+
+	s.ErrorContains(s.paths.store.CheckMigrated(s.ctx), "has not applied global migration 20270128000000: run router migrate")
+}
+
 // One that ran part of the history squashed into the initial migration holds that migration's
 // version, and not its schema.
 func (s *ServingRoleSuite) TestADatabaseThatRanPartOfTheSquashedHistoryIsNotServed() {
@@ -302,6 +310,113 @@ AFTER INSERT OR UPDATE OR DELETE ON users FOR EACH ROW EXECUTE FUNCTION record_d
 
 	attach("'customer_id', '', '', '{later_sealed,refresh_secret_hash}', 'customer_id', 'id'")
 	s.NoError(s.paths.store.CheckMigrated(s.ctx), "a later release's trigger leaves more out")
+}
+
+// A later release adds the column before it attaches the trigger that leaves it out, and this
+// one's routers restart in between.
+// Without a later release, the trigger is this one's migrate to attach.
+func (s *ServingRoleSuite) TestASecretColumnALaterReleaseAddedIsServedBeforeItsTriggerIsAttached() {
+	for _, added := range []struct {
+		db    *bun.DB
+		set   migrationSet
+		table string
+	}{{s.admin.store.global, globalSet, "users"}, {s.admin.store.shard, shardSet, "calls"}} {
+		s.exec(added.db, "ALTER TABLE ? ADD COLUMN later_sealed text", bun.Ident(added.table))
+		check := func() error {
+			fresh, err := OpenShards(Options{DSN: s.paths.dsn, ShardDSN: s.paths.shardDSN})
+			s.Require().NoError(err)
+			defer fresh.Close()
+			return fresh.CheckMigrated(s.ctx)
+		}
+
+		// The other set's later release says nothing of this one's column.
+		other := globalSet
+		otherDB := s.admin.store.global
+		if added.set.name == globalSet.name {
+			other, otherDB = shardSet, s.admin.store.shard
+		}
+		refused := "changes of " + added.table + " would hold later_sealed: run router migrate"
+		s.ErrorContains(check(), refused)
+		s.exec(otherDB, "INSERT INTO ? (version_id, is_applied) VALUES (29991231000000, true)", bun.Ident(other.table))
+		s.ErrorContains(check(), refused)
+		s.exec(otherDB, "DELETE FROM ? WHERE version_id = 29991231000000", bun.Ident(other.table))
+		// The last of the squashed history is an older release's, not a later one's.
+		s.exec(added.db, "INSERT INTO ? (version_id, is_applied) VALUES (?, true)", bun.Ident(added.set.table), added.set.squashed)
+		s.ErrorContains(check(), refused)
+		s.exec(added.db, "DELETE FROM ? WHERE version_id = ?", bun.Ident(added.set.table), added.set.squashed)
+
+		s.exec(added.db, "INSERT INTO ? (version_id, is_applied) VALUES (29991231000000, true)", bun.Ident(added.set.table))
+		s.NoError(check())
+
+		s.exec(added.db, "DELETE FROM ? WHERE version_id = 29991231000000", bun.Ident(added.set.table))
+		s.exec(added.db, "ALTER TABLE ? DROP COLUMN later_sealed", bun.Ident(added.table))
+	}
+}
+
+// An index can wait long on a write, and a column its migration added may not stay recorded
+// meanwhile.
+func (s *ServingRoleSuite) TestTheTriggersAreAttachedBeforeAnIndexIsBuilt() {
+	s.exec(s.admin.store.global, "DROP TRIGGER data_changes_recorded ON users")
+	s.exec(s.admin.store.global, "DROP INDEX image_jobs_undecided")
+	writing, err := s.admin.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	_, err = writing.ExecContext(s.ctx, "UPDATE image_jobs SET customer_id = customer_id WHERE false")
+	s.Require().NoError(err)
+	migrated := make(chan error, 1)
+	go func() { migrated <- s.paths.store.Migrate(s.ctx) }()
+	attached := func() bool {
+		var found bool
+		s.Require().NoError(s.admin.store.global.QueryRowContext(s.ctx, `SELECT EXISTS (SELECT 1 FROM pg_trigger
+			WHERE tgrelid = 'users'::regclass AND tgname = 'data_changes_recorded')`).Scan(&found))
+		return found
+	}
+
+	s.Eventually(attached, 5*time.Second, 50*time.Millisecond)
+
+	s.Require().NoError(writing.Rollback())
+	s.NoError(<-migrated)
+}
+
+func (s *ServingRoleSuite) TestATableTheServingRoleIsNotGrantedIsRefused() {
+	serving := bun.Ident(s.serving.Username())
+	for table, db := range map[string]*bun.DB{"users": s.admin.store.global, "calls": s.admin.store.shard, "data_changes": s.admin.store.shard} {
+		for _, privilege := range []string{"SELECT", "INSERT", "UPDATE", "DELETE"} {
+			s.exec(db, "REVOKE "+privilege+" ON ? FROM ?", bun.Ident(table), serving)
+			s.ErrorContains(s.paths.store.CheckMigrated(s.ctx), "the serving role lacks "+privilege+" on table "+table)
+
+			s.exec(db, "GRANT "+privilege+" ON ? TO ?", bun.Ident(table), serving)
+			s.NoError(s.paths.store.CheckMigrated(s.ctx))
+		}
+	}
+}
+
+func (s *ServingRoleSuite) TestASequenceTheServingRoleIsNotGrantedIsRefused() {
+	serving := bun.Ident(s.serving.Username())
+	for sequence, db := range map[string]*bun.DB{"agent_logs_id_seq": s.admin.store.global, "chat_inbound_seq_seq": s.admin.store.global,
+		"call_legs_id_seq": s.admin.store.shard, "data_changes_seq_seq": s.admin.store.shard} {
+		for _, privilege := range []string{"USAGE", "SELECT", "UPDATE"} {
+			s.exec(db, "REVOKE "+privilege+" ON SEQUENCE ? FROM ?", bun.Ident(sequence), serving)
+			s.ErrorContains(s.paths.store.CheckMigrated(s.ctx), "the serving role lacks "+privilege+" on sequence "+sequence)
+
+			s.exec(db, "GRANT "+privilege+" ON SEQUENCE ? TO ?", bun.Ident(sequence), serving)
+			s.NoError(s.paths.store.CheckMigrated(s.ctx))
+		}
+	}
+}
+
+// A later release drops a table this one no longer reads.
+func (s *ServingRoleSuite) TestATableALaterReleaseDroppedIsServed() {
+	s.exec(s.admin.store.global, "ALTER TABLE activity_digests RENAME TO dropped_digests")
+	defer s.exec(s.admin.store.global, "ALTER TABLE dropped_digests RENAME TO activity_digests")
+
+	s.NoError(s.paths.store.CheckMigrated(s.ctx))
+}
+
+func (s *ServingRoleSuite) TestATriggerThatAlwaysRunsIsServed() {
+	s.exec(s.admin.store.global, "ALTER TABLE users ENABLE ALWAYS TRIGGER data_changes_recorded")
+	defer s.exec(s.admin.store.global, "ALTER TABLE users ENABLE TRIGGER data_changes_recorded")
+
+	s.NoError(s.paths.store.CheckMigrated(s.ctx))
 }
 
 // A trigger takes a lock that a long write holds up, and every write after it waits behind it.

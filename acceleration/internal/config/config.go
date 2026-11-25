@@ -1170,8 +1170,8 @@ func (c Config) validateShard() error {
 	if c.Postgres.MigrateDSN != "" && c.Postgres.DSN == "" {
 		return errors.New("config: postgres.migrate_dsn migrates postgres.dsn's database: set postgres.dsn")
 	}
-	if c.Postgres.ShardMigrateDSN != "" && (c.Postgres.MigrateDSN == "" || c.Postgres.ShardDSN == "") {
-		return errors.New("config: postgres.shard_migrate_dsn migrates postgres.shard_dsn's database: set postgres.shard_dsn and postgres.migrate_dsn")
+	if c.Postgres.ShardMigrateDSN != "" && (c.Postgres.MigrateDSN == "" || c.Postgres.ShardDSN == "" || c.Postgres.ShardDSN == c.Postgres.DSN) {
+		return errors.New("config: postgres.shard_migrate_dsn migrates postgres.shard_dsn's own database: set postgres.shard_dsn and postgres.migrate_dsn")
 	}
 	if c.Postgres.MigrateDSN != "" && c.Postgres.ShardMigrateDSN == "" &&
 		c.Postgres.ShardDSN != "" && c.Postgres.ShardDSN != c.Postgres.DSN {

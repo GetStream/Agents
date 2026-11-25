@@ -2370,8 +2370,8 @@ SELECT count(*) FROM pruned`,
 	}
 }
 
-// watchDataChanges attaches the recording trigger to every table an export carries, in one
-// database, connecting with dsn.
+// watchDataChanges attaches the recording trigger to every table of the set an export carries,
+// connecting with dsn.
 //
 // Changes are only recorded for a customer StartDataCapture marked, which it does in the shared
 // database, so a shard's own tables record none, and a deployment with shards (HasShards)
@@ -2381,7 +2381,7 @@ SELECT count(*) FROM pruned`,
 // covered by the deployment reaching it rather than by somebody remembering to write the
 // trigger by hand. Replacing a trigger that is already right costs a catalogue write at
 // startup and nothing afterwards.
-func (s *Store) watchDataChanges(ctx context.Context, dsn string, side *bun.DB) error {
+func (s *Store) watchDataChanges(ctx context.Context, dsn string, set migrationSet) error {
 	// Not the migration's pool, which has no lock limit: a trigger waiting behind a long write
 	// would hold every write queued behind it.
 	db, err := connect(dsn, 1)
@@ -2390,7 +2390,7 @@ func (s *Store) watchDataChanges(ctx context.Context, dsn string, side *bun.DB) 
 	}
 	defer db.Close() //nolint:errcheck // a pool the triggers are done with
 	for _, table := range dataTables {
-		if s.sideOf(table) != side {
+		if table.shard != (set.name == shardSet.name) {
 			continue
 		}
 		shape, err := s.shapeOf(ctx, table.name)
@@ -2417,12 +2417,14 @@ FOR EACH ROW EXECUTE FUNCTION record_data_change(%s)`, table.name, strings.Join(
 	return nil
 }
 
-// checkDataChangesWatched refuses a database where a table an export carries has no recording
-// trigger, or has one that records a column isSecret leaves out. The trigger's other arguments
-// are not compared: a later release's Migrate may have attached its own.
-func (s *Store) checkDataChangesWatched(ctx context.Context, side *bun.DB) error {
+// checkDataChangesWatched refuses a database where a table of the set an export carries has no
+// recording trigger, or has one that records a column isSecret leaves out, unless a later
+// release has migrated: it may have added the column and be about to attach its trigger, and
+// no router of this release writes it. The trigger's other arguments are not compared: the
+// later release's may be there already.
+func (s *Store) checkDataChangesWatched(ctx context.Context, set migrationSet, later bool) error {
 	for _, table := range dataTables {
-		if s.sideOf(table) != side {
+		if table.shard != (set.name == shardSet.name) {
 			continue
 		}
 		shape, err := s.shapeOf(ctx, table.name)
@@ -2431,7 +2433,7 @@ func (s *Store) checkDataChangesWatched(ctx context.Context, side *bun.DB) error
 		}
 		// The arguments are kept each ending in a zero byte, which escape writes as \000.
 		var attached sql.NullString
-		if err := side.QueryRowContext(ctx, `
+		if err := s.sideOf(table).QueryRowContext(ctx, `
 SELECT (SELECT encode(tgargs, 'escape') FROM pg_trigger
   WHERE tgrelid = to_regclass(?) AND tgname = 'data_changes_recorded' AND tgenabled IN ('O', 'A'))`,
 			table.name).Scan(&attached); err != nil {
@@ -2446,7 +2448,7 @@ SELECT (SELECT encode(tgargs, 'escape') FROM pg_trigger
 			left = strings.Split(strings.Trim(arguments[3], "{}"), ",")
 		}
 		for _, secret := range shape.secrets() {
-			if !slices.Contains(left, secret) {
+			if !later && !slices.Contains(left, secret) {
 				return fmt.Errorf("store: recorded changes of %s would hold %s: run router migrate with this release", table.name, secret)
 			}
 		}
