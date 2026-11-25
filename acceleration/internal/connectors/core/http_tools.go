@@ -57,13 +57,11 @@ const (
 	// OpenAI documents taking in one request.
 	maxHTTPTools = 128
 	// maxHTTPToolDescription is the cap a custom connector's own description has
-	// (CustomConnectorRequest.Description, internal/api/connectors.go), on a tool's description
-	// and on each of its parameters'.
-	maxHTTPToolDescription = 1000
+	// (CustomDescriptionMaxLength), on a tool's description and on each of its parameters'.
+	maxHTTPToolDescription = CustomDescriptionMaxLength
 	// maxHTTPPath is the cap a custom connector's MCP endpoint URL has
-	// (CustomConnectorRequest.Endpoint, internal/api/connectors.go), on a tool's path and on the
-	// http source's endpoint, its base URL.
-	maxHTTPPath = 2048
+	// (CustomEndpointMaxLength), on a tool's path and on the http source's endpoint, its base URL.
+	maxHTTPPath = CustomEndpointMaxLength
 	// maxHTTPParameters is the cap an agent config has on its connector bindings and its
 	// visible_tools (internal/api/configs.go).
 	maxHTTPParameters = 64

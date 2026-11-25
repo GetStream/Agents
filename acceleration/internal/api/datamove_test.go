@@ -242,7 +242,7 @@ func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientAfterAnot
 // connector the API would create (AI-3676), and refuses one whose API is on a private address
 // with the create's own message, storing nothing.
 func (s *DataMoveSuite) TestAnImportedHTTPConnectorIsCheckedAsTheAPIChecksIt() {
-	refused, taken := "custom_"+store.NewID(), "custom_"+store.NewID()
+	refused, taken := "custom_a"+store.NewID(), "custom_a"+store.NewID()
 	line := func(id, base string) dataLine {
 		return dataLine{Table: "connector_definitions", Row: json.RawMessage(`{"id": "` + id + `", "revision": 1, "name": "Acme",
 			"category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": {"id": "` + id + `", "revision": 1,

@@ -3082,7 +3082,7 @@ func (s *DataMoveSuite) TestAnImportedHTTPDefinitionWhoseAPIIsPrivateIsRefused()
 // its transaction opens, not row by row inside it. The first change names no table and fails
 // only once inside the transaction; the definition after it is refused first.
 func (s *DataMoveSuite) TestAChangesDefinitionsAreCheckedBeforeItsTransactionOpens() {
-	id := "custom_" + newID()
+	id := "custom_a" + newID()
 	private := strings.Replace(strings.Replace(customWeather, "https://8.8.8.8/v1", "https://169.254.169.254/v1", 1),
 		`"id": "custom_acme"`, `"id": "`+id+`"`, 1)
 
@@ -3102,7 +3102,7 @@ func (s *DataMoveSuite) TestAChangesDefinitionsAreCheckedBeforeItsTransactionOpe
 // stored as the API would store it, as an import's is: the check before the transaction hands
 // its normalized row on (applyChanges).
 func (s *DataMoveSuite) TestAChangesDefinitionArrivesWithoutAFieldThisReleaseDoesNotRead() {
-	id := "custom_" + newID()
+	id := "custom_a" + newID()
 	manifest := strings.Replace(customManifestWith(`"later": {"env": "GOOGLE"}`), "custom_acme", id, 1)
 
 	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: "connector_definitions", Op: ChangeInsert,
@@ -3150,7 +3150,7 @@ func (s *DataMoveSuite) TestAnImportedDefinitionWhoseIDIsNoStringIsRefused() {
 }
 
 func (s *DataMoveSuite) TestAChangeCarryingADefinitionTheAPIWouldRefuseIsRefused() {
-	id := "custom_" + newID()
+	id := "custom_a" + newID()
 	manifest := strings.Replace(customManifestWith(`"client": {"registration": ["operator"], "env": "GOOGLE"}, "schemes": ["oauth2_code"]`),
 		"custom_acme", id, 1)
 
