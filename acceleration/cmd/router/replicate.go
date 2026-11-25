@@ -353,7 +353,7 @@ func follow(ctx context.Context, source *deployment, pgStore *store.Store, reser
 				return err
 			}
 			for _, change := range page.Changes {
-				if key := store.SkippedRow(change.Table, change.Payload); key != "" && change.Op != store.ChangeDelete {
+				if key := store.SkippedRow(change.Table, change.Payload); key != "" {
 					logger.Warn(skippedRowMessage, "row", key)
 				}
 			}

@@ -2930,7 +2930,7 @@ to the operator of this deployment.
 
 A custom connector definition arrives only if the API would store it: it is held to the same id
 pattern, lengths, scope tokens and client rules, and a row that breaks one stops the move with a
-400 naming its id. Its endpoint is not resolved on the way in; every connection to it still is.
+400 naming its id. Its endpoint is not resolved on the way in: a connection to it still dials only a public address.
 One rule is not a refusal: a definition with `oauth2_client_credentials`, which a custom connector
 could have before it lost that scheme, is left out and the move goes on, since no connection could
 use it. `POST /v1/data/import` names each one in `skipped`, as

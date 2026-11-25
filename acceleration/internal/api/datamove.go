@@ -263,8 +263,9 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 				writeImportFailure(w, r, err)
 				return
 			}
+			// A delete carries no payload, so it is never one of these.
 			switch key := store.SkippedRow(line.Change.Table, line.Change.Payload); {
-			case key != "" && line.Change.Op != store.ChangeDelete:
+			case key != "":
 				skipped = append(skipped, key)
 			case !line.Change.Skipped():
 				rows++
