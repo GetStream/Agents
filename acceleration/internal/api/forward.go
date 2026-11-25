@@ -45,6 +45,9 @@ const unreachableNode = "the node running this session could not be reached"
 // a quota.
 func (s *Server) onOwningNode(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.inPolicyShard(w, r) {
+			return
+		}
 		address, elsewhere, failure := s.owningNode(r)
 		if failure != nil {
 			var refused APIError

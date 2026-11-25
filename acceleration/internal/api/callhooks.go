@@ -78,10 +78,11 @@ func (p callParticipant) phone() bool {
 // Every outcome short of something that did not come from Stream is a 200. Stream retries a
 // non-2xx, and none of the reasons this cannot place a call — no worker waiting, a call
 // belonging to nobody — get better on a second delivery, while the caller is on the line for
-// the whole of it. There are two exceptions, each answered 503. A phone's join or leave the
-// database could not take: its minutes are lost unless Stream delivers it again. And a call
+// the whole of it. There are three exceptions, each answered 503. A phone's join or leave the
+// database could not take: its minutes are lost unless Stream delivers it again. A call
 // that arrived moments ago which a shard that did not answer may have placed
-// (arrivingCallRetryFor): dispatching it could put a second agent on the call.
+// (arrivingCallRetryFor): dispatching it could put a second agent on the call. And a call whose
+// routing policy keeps it in a geography no shard of which took it (errResidencyDown).
 func (s *Server) receiveCallEvent(w http.ResponseWriter, r *http.Request) {
 	if !s.hooksConfigured() {
 		// Refusing is the only safe answer: without the secret there is no way to tell
@@ -240,16 +241,26 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 	// In deployment mode the number is what says whose call it is.
 	activity.NoteCustomer(r.Context(), number.CustomerID, activity.AreaHooksIn)
 	country := cmp.Or(number.Country, phone.Country(number.E164))
-	// The call is answered in the shard of the number's country, so every delivery for it goes
-	// there. Recorded as delivered first, as a hook carried to a worker's node is: the node
-	// it reaches does not record it again.
+	// The call is answered in the shard of the number's country, or the one its routing policy
+	// places it in, so every delivery for it goes there. Recorded as delivered first, as a hook
+	// carried to a worker's node is: the node it reaches does not record it again.
+	place, failure, refused := s.placed(r.Context(), number.CustomerID, number.ConfigID, s.shards.ForCountry(country))
+	if refused {
+		writeError(w, failure)
+		return false
+	}
 	acted := false
-	if shard := s.shards.ForCountry(country); s.routesByShard(r.Context()) && shard != "" && shard != s.directory.Shard() {
+	if len(place.shards) > 0 {
 		if !s.acting(r.Context(), origin, getstream.EventTypeCallSessionStarted, payload) {
 			return true
 		}
 		acted = true
-		if elsewhere, _ := s.handedToShard(r.Context(), s.replayed(r, payload), shard, shardWorkCall); elsewhere {
+		elsewhere, _, down := s.handedToShard(r.Context(), s.replayed(r, payload), place, shardWorkCall)
+		if down {
+			writeError(w, errResidencyDown)
+			return false
+		}
+		if elsewhere {
 			return true
 		}
 	}
