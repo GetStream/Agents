@@ -176,9 +176,11 @@ func (s *StoreSuite) emptyTables(db bun.IDB) {
 	}))
 }
 
-// SetupTest empties the tables one time in each database, and the store's keys in Redis. With
-// one database, the shard database and the shared database are the same database.
+// SetupTest closes the suite's idle connections (closeIdle), then empties the tables one time in
+// each database, and the store's keys in Redis. With one database, the shard database and the
+// shared database are the same database.
 func (s *StoreSuite) SetupTest() {
+	closeIdle(s.store)
 	s.emptyTables(s.store.shard)
 	if s.store.Sharded() {
 		s.emptyTables(s.store.global)
@@ -188,7 +190,63 @@ func (s *StoreSuite) SetupTest() {
 
 func (s *ShardedStoreSuite) SetupTest() {
 	s.StoreSuite.SetupTest()
+	closeIdle(s.other)
 	s.emptyTables(s.other.shard)
+}
+
+// closeIdle closes the connections store's pools keep idle, and keeps the pools as large as
+// connect made them. connect keeps as many idle connections as a pool may open, for 5 minutes,
+// so after a test that ran many statements at once the suite's stores hold them into every later
+// test: 40 of the shared pool's when TestProviderAppLocksOnOneAppNeverOverlapAcrossRouters
+// started in the sharded suite, beside the 3 each of its 8 routers opens, and CI's Postgres keeps
+// the default max_connections of 100 (AI-3960). Each test starts instead from the connections it
+// opens itself.
+func closeIdle(store *Store) {
+	for _, db := range []*bun.DB{store.global, store.shard, store.locks} {
+		db.SetMaxIdleConns(0)
+		db.SetMaxIdleConns(db.Stats().MaxOpenConnections)
+	}
+}
+
+// warm leaves conns idle connections in each of store's pools, as a test that ran that many
+// statements at once leaves them.
+func (s *StoreSuite) warm(store *Store, conns int) {
+	for _, db := range []*bun.DB{store.global, store.shard, store.locks} {
+		held := make([]*sql.Conn, conns)
+		for i := range held {
+			conn, err := db.DB.Conn(s.ctx)
+			s.Require().NoError(err)
+			held[i] = conn
+		}
+		for _, conn := range held {
+			s.Require().NoError(conn.Close())
+		}
+	}
+}
+
+func (s *StoreSuite) TestATestStartsWithoutTheIdleConnectionsAnEarlierOneLeft() {
+	s.warm(s.store, 8)
+	s.Require().Equal(8, s.store.locks.Stats().Idle, "a pool keeps the connections a test opened")
+
+	s.SetupTest()
+
+	s.LessOrEqual(s.store.global.Stats().OpenConnections, 1, "only the one emptying the tables")
+	s.LessOrEqual(s.store.shard.Stats().OpenConnections, 1, "only the one emptying the tables")
+	s.Zero(s.store.locks.Stats().OpenConnections)
+	s.warm(s.store, 8)
+	s.Equal(8, s.store.locks.Stats().Idle, "and keeps them again, up to its size")
+	s.Equal(lockConns, s.store.locks.Stats().MaxOpenConnections)
+}
+
+func (s *ShardedStoreSuite) TestATestStartsWithoutTheIdleConnectionsAnEarlierOneLeftInTheOtherShard() {
+	s.warm(s.other, 8)
+	s.Require().Equal(8, s.other.global.Stats().Idle, "a pool keeps the connections a test opened")
+
+	s.SetupTest()
+
+	s.Zero(s.other.global.Stats().OpenConnections)
+	s.LessOrEqual(s.other.shard.Stats().OpenConnections, 1, "only the one emptying the tables")
+	s.Zero(s.other.locks.Stats().OpenConnections)
 }
 
 func (s *StoreSuite) TestMigrateIsIdempotent() {
