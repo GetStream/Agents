@@ -332,9 +332,9 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 		// message by anybody else gets a session of its own, handed out below, which reads
 		// none of the first person's cards. The first session takes no new message from then
 		// on, and closes once it has answered what it was handed (retire). Only a session whose
-		// transcript goes into this very channel is retired. A device session of a config naming an agent id shares
-		// that id with every other visitor's but keeps its conversation in agent:<its own
-		// session id>, so a message in agent:<that id> retires none of them.
+		// transcript goes into this very channel is retired. A device session of a config naming
+		// an agent id shares that id with every other visitor's but keeps its conversation in
+		// agent:<its own session id>, so a message in agent:<that id> retires none of them.
 		if running && found.Spec().TranscriptChannel() == chatlog.ChannelType+":"+event.ChannelID && found.CardsFor() != "" && (found.CardsFor() != event.Message.User.ID || found.Retiring()) {
 			s.retire(found)
 			running = false
