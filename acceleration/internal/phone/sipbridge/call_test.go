@@ -350,3 +350,29 @@ func TestACallStateHasBothLegsAndTheMedia(t *testing.T) {
 	require.Equal(t, "s", got.Stream.CallID)
 	require.Equal(t, MediaAddrs{Customer: "203.0.113.10", Stream: "198.51.100.20"}, got.Media)
 }
+
+func TestReinviteFromTheCustomerWithAFaxLineReachesStreamAudioOnly(t *testing.T) {
+	c, _, stream := newTestCall(t)
+	stream.reinviteAnswer = streamAnswerSDP
+	offer := "v=0\r\no=- 9 3 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\n" + t38Line
+
+	got, err := c.onReinvite(t.Context(), customerSide, []byte(offer))
+
+	require.NoError(t, err)
+	require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+	require.NotContains(t, string(stream.body(0)), "image")
+	require.Regexp(t, `(?s)m=audio 20000 .*m=image 0 udptl t38\r\n`, string(got))
+}
+
+func TestReinviteFromStreamAnsweredWithAFaxLineReachesStreamAudioOnly(t *testing.T) {
+	c, customer, _ := newTestCall(t)
+	customer.reinviteAnswer = []byte("v=0\r\no=- 5 2 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\n" + t38Line)
+
+	got, err := c.onReinvite(t.Context(), streamSide, streamAnswerSDP)
+
+	require.NoError(t, err)
+	require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, got))
+	require.NotContains(t, string(got), "image")
+}

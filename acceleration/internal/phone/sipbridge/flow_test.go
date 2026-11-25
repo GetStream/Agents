@@ -363,3 +363,46 @@ func TestMediaOfAnUnreadableBodySaysSo(t *testing.T) {
 	require.Contains(t, got, "sdp_error")
 	require.Contains(t, got, "stream")
 }
+
+const t38Line = "m=image 30002 udptl t38\r\na=T38FaxVersion:0\r\n"
+
+func TestFlowAConnectsAnOfferWithAFaxLineAudioOnly(t *testing.T) {
+	offer := "v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\n" + t38Line
+	customer := &fakeLeg{inviteAnswer: []byte(offer)}
+	stream := &fakeLeg{inviteAnswer: streamAnswerSDP}
+
+	_, err := flowA(t.Context(), flowConfig(), customer, stream)
+
+	require.NoError(t, err)
+	sent := string(stream.body(0))
+	require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, []byte(sent)))
+	require.NotContains(t, sent, "image")
+	// The fax line is rejected under its own media type, in the order it was offered.
+	require.Regexp(t, `(?s)m=audio 20000 RTP/AVP 0 101\r\n.*m=image 0 udptl t38\r\n`, string(customer.body(1)))
+}
+
+func TestFlowARefusesAnOfferWithOnlyAFaxLine(t *testing.T) {
+	offer := "v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" + t38Line
+	customer := &fakeLeg{inviteAnswer: []byte(offer)}
+	stream := &fakeLeg{inviteAnswer: streamAnswerSDP}
+
+	_, err := flowA(t.Context(), flowConfig(), customer, stream)
+
+	require.ErrorContains(t, err, "no media of type audio")
+	require.Empty(t, stream.calls())
+}
+
+func TestFlowBConnectsACustomerAnswerWithAFaxLineAudioOnly(t *testing.T) {
+	answer := "v=0\r\no=- 4 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 8\r\n" + t38Line
+	stream := &fakeLeg{inviteAnswer: streamAnswerPCMASDP}
+	customer := &fakeLeg{inviteAnswer: []byte(answer)}
+
+	media, err := flowB(t.Context(), flowConfig(), customer, stream)
+
+	require.NoError(t, err)
+	require.Equal(t, "1.1.1.1", media.Customer)
+	require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcma, dtmfCodec}, Direction: DirSendRecv},
+		mediaOf(t, stream.body(3)))
+}

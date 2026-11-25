@@ -113,9 +113,9 @@ func ParseMedia(body []byte) (Media, error) {
 
 // parseAudio is ParseMedia that also returns the whole body and the index of the m= line it read.
 func parseAudio(body []byte) (Media, *sdp.SessionDescription, int, error) {
-	var sd sdp.SessionDescription
-	if err := sd.Unmarshal(body); err != nil {
-		return Media{}, nil, 0, stack.Wrap(fmt.Errorf("parse sdp: %w", err))
+	sd, _, err := parseSDP(body)
+	if err != nil {
+		return Media{}, nil, 0, err
 	}
 	at := slices.IndexFunc(sd.MediaDescriptions, func(md *sdp.MediaDescription) bool {
 		return md.MediaName.Media == "audio"
@@ -162,7 +162,35 @@ func parseAudio(body []byte) (Media, *sdp.SessionDescription, int, error) {
 			m.Direction = attr.Key
 		}
 	}
-	return m, &sd, at, nil
+	return m, sd, at, nil
+}
+
+// pionMedia are the media types the SDP parser accepts in an m= line (RFC 8866 §8 lists more).
+var pionMedia = []string{"audio", "video", "text", "application", "message"}
+
+// parseSDP unmarshals body, and also returns each m= line as written, without the "m=". The parser
+// refuses a type it does not know, such as m=image (T.38 fax), or formats that are not numbers, which
+// would fail a call that has a usable audio line next to it. Such a line is read as an empty
+// m=application line, and the lines returned tell what it was, so an answer can still reject it by its
+// own type, protocol and formats.
+func parseSDP(body []byte) (*sdp.SessionDescription, []string, error) {
+	var mLines []string
+	lines := strings.Split(string(body), "\n")
+	for i, line := range lines {
+		rest, ok := strings.CutPrefix(strings.TrimSuffix(line, "\r"), "m=")
+		if !ok {
+			continue
+		}
+		mLines = append(mLines, rest)
+		if name, _, _ := strings.Cut(rest, " "); !slices.Contains(pionMedia, name) {
+			lines[i] = "m=application 0 RTP/AVP 0\r"
+		}
+	}
+	var sd sdp.SessionDescription
+	if err := sd.Unmarshal([]byte(strings.Join(lines, "\n"))); err != nil {
+		return nil, nil, stack.Wrap(fmt.Errorf("parse sdp: %w", err))
+	}
+	return &sd, mLines, nil
 }
 
 func buildSDP(m Media, sessionID, version uint64) []byte {
@@ -308,7 +336,11 @@ func reachable(m Media, trunk netip.Addr) Media {
 // m= line per offered line, in order (RFC 3264 §6), so the audio goes where the offer's first audio line
 // was and every other line is rejected with port 0. Any other answer is passed on as it came.
 func answerFor(offer, answer []byte) []byte {
-	_, o, at, err := parseAudio(offer)
+	_, _, at, err := parseAudio(offer)
+	if err != nil {
+		return answer
+	}
+	o, mLines, err := parseSDP(offer)
 	if err != nil || len(o.MediaDescriptions) == 1 {
 		return answer
 	}
@@ -318,14 +350,18 @@ func answerFor(offer, answer []byte) []byte {
 	}
 	audio := a.MediaDescriptions[0]
 	lines := make([]*sdp.MediaDescription, len(o.MediaDescriptions))
-	for i, md := range o.MediaDescriptions {
+	for i := range o.MediaDescriptions {
 		if i == at {
 			lines[i] = audio
 			continue
 		}
+		fields := strings.Fields(mLines[i])
+		if len(fields) < 4 {
+			return answer
+		}
 		lines[i] = &sdp.MediaDescription{
 			MediaName: sdp.MediaName{
-				Media: md.MediaName.Media, Protos: md.MediaName.Protos, Formats: md.MediaName.Formats,
+				Media: fields[0], Protos: strings.Split(fields[2], "/"), Formats: fields[3:],
 			},
 			ConnectionInformation: audio.ConnectionInformation,
 		}
