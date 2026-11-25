@@ -23,9 +23,11 @@ const phoneUsage = `usage: router phone <command> [flags]
                 its call webhook (ROUTER_PUBLIC_URL + /v1/phone/hooks/twilio), as attaching one does
                 now. Says what it would do, a line a number, unless --apply. A number already there
                 is left alone, and so is one whose trunk credentials were not kept, which needs a
-                re-attach. Refuses before asking Twilio anything without TWILIO_WEBHOOK_AUTH_TOKEN,
-                an https ROUTER_PUBLIC_URL, the Twilio account or the keyring.
-    --apply     point the numbers at the webhook
+                re-attach. Gives each number's Stream trunk exactly Twilio's signalling addresses
+                from the phone config, keeping its password; a trunk that has them is left alone.
+                Refuses before asking Twilio anything without TWILIO_WEBHOOK_AUTH_TOKEN, an https
+                ROUTER_PUBLIC_URL, the Twilio account or the keyring.
+    --apply     point the numbers at the webhook and set their trunks' addresses
     --one       only this number, in E.164: move one first and call it
     --app       only the numbers made in this Stream app
 `
@@ -49,7 +51,8 @@ func runPhone(args []string, settings config.Config, logger *slog.Logger) error 
 }
 
 // numberMover is the phone service with what moving a number needs: the database, the keyring
-// the webhook opens trunk passwords with, the vendors and the public URL.
+// the webhook opens trunk passwords with, the vendors, the Stream apps the numbers' trunks are
+// in and the public URL.
 // The store is the caller's to close.
 func numberMover(ctx context.Context, settings config.Config, logger *slog.Logger) (
 	*phone.Service, *store.Store, error,
@@ -66,8 +69,13 @@ func numberMover(ctx context.Context, settings config.Config, logger *slog.Logge
 	if err != nil {
 		return nil, nil, err
 	}
+	clients, err := newStreamClients(settings, pgStore, secrets, logger)
+	if err != nil {
+		pgStore.Close()
+		return nil, nil, err
+	}
 	service, err := phone.NewService(phone.ServiceOptions{
-		Registry: vendors.Registry(vendorConfig), Store: pgStore, Sealer: secrets,
+		Registry: vendors.Registry(vendorConfig), Store: pgStore, Apps: phone.AppsOf(clients), Sealer: secrets,
 		PublicURL: settings.PublicURL, Logger: logger,
 	})
 	if err != nil {
@@ -81,7 +89,7 @@ func numberMover(ctx context.Context, settings config.Config, logger *slog.Logge
 // A line names the number and its app only.
 func moveTwilioNumbers(ctx context.Context, args []string, service *phone.Service, out io.Writer) error {
 	flags := flag.NewFlagSet("phone move-twilio", flag.ContinueOnError)
-	apply := flags.Bool("apply", false, "point the numbers at the webhook")
+	apply := flags.Bool("apply", false, "point the numbers at the webhook and set their trunks' addresses")
 	one := flags.String("one", "", "only this number, in E.164")
 	app := flags.String("app", "", "only the numbers made in this Stream app")
 	if err := flags.Parse(args); err != nil {
@@ -100,18 +108,27 @@ func moveTwilioNumbers(ctx context.Context, args []string, service *phone.Servic
 	}
 
 	counted := map[phone.Move]int{}
+	allowed := map[phone.Allowlist]int{}
 	err := service.MoveToCallHook(ctx, move, func(number phone.MovedNumber) {
 		counted[number.Move]++
+		allowed[number.Allowlist]++
 		app := "deployment"
 		if number.App != 0 {
 			app = strconv.FormatInt(number.App, 10)
 		}
-		fmt.Fprintf(out, "%s\tapp %s\t%s\n", number.E164, app, number.Move)
+		fmt.Fprintf(out, "%s\tapp %s\t%s", number.E164, app, number.Move)
+		if number.Allowlist != "" {
+			fmt.Fprintf(out, "\t%s", number.Allowlist)
+		}
+		fmt.Fprintln(out)
 	})
 	fmt.Fprintf(out, "%d moved, %d to move, %d already moved, %d with no stored bridge\n",
 		counted[phone.Moved], counted[phone.WouldMove], counted[phone.AlreadyMoved], counted[phone.NoStoredBridge])
+	fmt.Fprintf(out, "allowlist: %d set, %d to set, %d already set\n",
+		allowed[phone.AllowlistSet], allowed[phone.WouldSetAllowlist], allowed[phone.AllowlistAlreadySet])
 	if !*apply {
-		fmt.Fprintln(out, "nothing was written at Twilio: --apply points the numbers at the webhook")
+		fmt.Fprintln(out, "nothing was written at Twilio or Stream: --apply points the numbers at the webhook "+
+			"and sets their trunks' addresses")
 	}
 	return err
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -24,12 +25,26 @@ const (
 	NoStoredBridge Move = "no stored bridge, needs a re-attach"
 )
 
+// Allowlist is what MoveToCallHook did, or would do, with the addresses of a number's trunk.
+type Allowlist string
+
+const (
+	// AllowlistSet is a trunk that now takes calls from the vendor's declared addresses only.
+	AllowlistSet Allowlist = "allowlist set"
+	// WouldSetAllowlist is a trunk a run with Apply gives the vendor's declared addresses.
+	WouldSetAllowlist Allowlist = "would set allowlist"
+	// AllowlistAlreadySet is a trunk that has exactly the vendor's declared addresses, left as it is.
+	AllowlistAlreadySet Allowlist = "allowlist already set"
+)
+
 // MovedNumber is one number MoveToCallHook went through.
 type MovedNumber struct {
 	E164 string
 	// App is the Stream app the number is lined in. Zero is the deployment's own.
 	App  int64
 	Move Move
+	// Allowlist is what was done with its trunk's addresses, empty for a number left as it is.
+	Allowlist Allowlist
 }
 
 // CallHookMove picks the numbers MoveToCallHook points at the router's call webhook.
@@ -39,8 +54,8 @@ type CallHookMove struct {
 	App *int64
 	// E164, when set, keeps that one number.
 	E164 string
-	// Apply writes at the vendor. Without it nothing is written there, and each number is
-	// reported with what a run with it would do.
+	// Apply writes at the vendor and at Stream. Without it nothing is written at either, and
+	// each number is reported with what a run with it would do.
 	Apply bool
 }
 
@@ -48,8 +63,9 @@ type CallHookMove struct {
 const callHookMovePage = 100
 
 // MoveToCallHook points the attached numbers of a vendor whose numbers ask the router's call
-// webhook (CallHooked) at that webhook, as Attach does for a number it attaches, and reports
-// each number as it goes. It refuses before anything is read at the vendor when the router
+// webhook (CallHooked) at that webhook, as Attach does for a number it attaches, gives the
+// trunk each is on the vendor's declared signalling addresses, as a trunk made now has, and
+// reports each number as it goes. It refuses before anything is read at the vendor when the router
 // could not answer the webhook. Running it again moves nothing already moved. It stops at the
 // first number it could not read or move.
 func (s *Service) MoveToCallHook(ctx context.Context, move CallHookMove, report func(MovedNumber)) error {
@@ -79,10 +95,14 @@ func (s *Service) MoveToCallHook(ctx context.Context, move CallHookMove, report 
 		}
 		for _, number := range numbers {
 			moved, err := s.moveToCallHook(ctx, provider, hooked, number, move.Apply)
+			var allowed Allowlist
+			if err == nil && moved != NoStoredBridge {
+				allowed, err = s.allowTrunk(ctx, number, move.Apply)
+			}
 			if err != nil {
 				return fmt.Errorf("phone: move %s: %w", number.E164, err)
 			}
-			report(MovedNumber{E164: number.E164, App: number.StreamAppPK, Move: moved})
+			report(MovedNumber{E164: number.E164, App: number.StreamAppPK, Move: moved, Allowlist: allowed})
 		}
 		if len(numbers) < filter.Limit {
 			return nil
@@ -123,4 +143,33 @@ func (s *Service) moveToCallHook(ctx context.Context, provider Provider, hooked 
 		return "", stack.Wrap(err)
 	}
 	return Moved, nil
+}
+
+// allowTrunk gives the trunk an attached number is on exactly the vendor's declared signalling
+// addresses, keeping its name, numbers and password, unless it has them already or apply is
+// false. A trunk shared by several numbers is written for the first of them only.
+func (s *Service) allowTrunk(ctx context.Context, number store.PhoneNumber, apply bool) (Allowlist, error) {
+	allowed, err := s.allowlistFor(number.Vendor)
+	if err != nil {
+		return "", err
+	}
+	stream, err := s.streamForApp(ctx, number.CustomerID, number.StreamAppPK)
+	if err != nil {
+		return "", err
+	}
+	trunk, err := stream.trunk(ctx, number.StreamTrunkID)
+	if err != nil {
+		return "", err
+	}
+	if slices.Equal(slices.Sorted(slices.Values(trunk.AllowedIPs)), slices.Sorted(slices.Values(allowed))) {
+		return AllowlistAlreadySet, nil
+	}
+	if !apply {
+		return WouldSetAllowlist, nil
+	}
+	trunk.AllowedIPs = allowed
+	if err := stream.UpdateTrunk(ctx, number.StreamTrunkID, trunk); err != nil {
+		return "", err
+	}
+	return AllowlistSet, nil
 }

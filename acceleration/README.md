@@ -2742,6 +2742,15 @@ not kept (`no stored bridge`): it needs a detach and an attach. It refuses befor
 anything when the webhook token, an https `ROUTER_PUBLIC_URL`, the Twilio account or the keyring
 is missing.
 
+A Twilio number's Stream trunk takes calls only from Twilio's signalling addresses (`signalling`
+under `twilio` in `internal/phone/phone.yaml`) and still asks for its password. A trunk made or
+updated now has them; the same run of `router phone move-twilio` gives them to each moved number's
+trunk (`would set allowlist`, then `allowlist set`; a trunk that has them is left alone). A call from
+any other address is refused by Stream before it reaches the router, so a range missing from the
+list cuts the calls Twilio sends from it. To roll back, run it again with `--apply` and a phone
+config (`ROUTER_PHONE_CONFIG`) whose `twilio` entry has no `signalling`: that clears the trunks'
+addresses and keeps their passwords.
+
 A customer who already has numbers and a SIP trunk at their own carrier can call out from
 them without buying anything here. `POST /v1/phone/trunks` stores the trunk (host, port,
 transport, username, codecs, and whether it accepts an INVITE without SDP); the password is
