@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +21,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // fakeElevenLabs is a WebSocket server that speaks the multi-stream protocol, so the
@@ -1080,4 +1083,42 @@ func (s *ElevenLabsSuite) TestAnInvalidKeyFrameIsCountedOncePerConnection() {
 
 func (s *ElevenLabsSuite) TestAnotherErrorFrameIsNotAnInvalidKey() {
 	s.Zero(s.refusedBy(`{"message":"API key is invalid.","error":"invalid_request","code":1008}`))
+}
+
+// badVoiceIDs are ids that could leave the URL path segment the voice is put in.
+var badVoiceIDs = []string{"..", "a/../../v1/user", "abc?x=1", "abc#x", "abc%2F", "abc def", "a.b"}
+
+func (s *ElevenLabsSuite) TestAVoiceIdThatIsNotElevenLabsIsRefusedBeforeAnyUrl() {
+	for _, id := range badVoiceIDs {
+		_, err := New(Options{APIKey: "k", VoiceID: id})
+		s.ErrorIs(err, ErrRefused, "%q: the caller's mistake, not the provider's fault", id)
+		s.ErrorIs(err, voiceid.ErrInvalid, "%q", id)
+
+		_, err = NewDialogue(Options{APIKey: "k", VoiceID: id})
+		s.ErrorIs(err, ErrRefused, "dialogue %q", id)
+	}
+	// The voice ElevenLabs hands out, and the default when none is named, still build.
+	s.Equal("/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM/multi-stream-input",
+		s.endpoint(Options{VoiceID: "21m00Tcm4TlvDq8ikWAM"}).Path)
+	s.Equal("/v1/text-to-speech/"+DefaultVoiceID+"/multi-stream-input", s.endpoint(Options{}).Path)
+}
+
+// The language and model are query values: whatever they hold, they cannot add a parameter
+// or end the query.
+func (s *ElevenLabsSuite) TestTheQueryIsEncodedValueByValue() {
+	endpoint := s.endpoint(Options{Model: "eleven_multilingual_v2", Language: "ES&voice_id=x#y"})
+
+	s.Equal(url.Values{
+		"model_id":      {"eleven_multilingual_v2"},
+		"output_format": {"pcm_" + strconv.Itoa(DefaultSampleRate)},
+		"auto_mode":     {"true"},
+		"language_code": {"es&voice_id=x#y"},
+	}, endpoint.Query())
+	s.Empty(endpoint.Fragment)
+}
+
+func (s *ElevenLabsSuite) endpoint(options Options) *url.URL {
+	parsed, err := url.Parse(s.newTTS(options).url())
+	s.Require().NoError(err)
+	return parsed
 }

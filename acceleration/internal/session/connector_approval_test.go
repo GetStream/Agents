@@ -327,6 +327,82 @@ func (s *ConnectorApprovalSuite) TestOnlyTheSessionsUserOrItsBackendMayAnswer() 
 	s.Equal("primary", s.answerOf(again).said)
 }
 
+// The session's user is asked as the kind of caller that opened it: a guest or an anonymous
+// caller going by alice's id is not her.
+func (s *ConnectorApprovalSuite) TestACallerOfAnotherKindGoingByTheUsersIdMayNotAnswer() {
+	session := s.holdingAs(auth.KindAuthenticated)
+
+	answer := s.callInBackground(s.ctx, session.connectors, "call-1", "crm__whoami", "{}")
+	s.Require().Eventually(func() bool { return s.questionOf("call-1") != nil }, 5*time.Second, 10*time.Millisecond)
+
+	s.ErrorIs(session.AnswerConnectorApproval("call-1", "command-1", true, "",
+		Owner{CustomerID: s.customerID, UserID: "alice", Kind: auth.KindGuest}), ErrApprovalAskedOfAnother, "a guest")
+	s.ErrorIs(session.AnswerConnectorApproval("call-1", "command-1", true, "",
+		Owner{CustomerID: s.customerID, UserID: "alice", Kind: auth.KindAnonymous}), ErrApprovalAskedOfAnother, "an anonymous caller")
+	s.NoError(session.AnswerConnectorApproval("call-1", "command-1", true, "",
+		Owner{CustomerID: s.customerID, UserID: "alice", Kind: auth.KindAuthenticated}), "alice")
+	s.Equal("primary", s.answerOf(answer).said)
+}
+
+// A guest's own session asks them as a guest: a signed-in user of the same id is not them.
+func (s *ConnectorApprovalSuite) TestAGuestAnswersTheCallOfTheirSessionAndAUserOfTheirIdDoesNot() {
+	session := s.holdingAs(auth.KindGuest)
+
+	answer := s.callInBackground(s.ctx, session.connectors, "call-1", "crm__whoami", "{}")
+	s.Require().Eventually(func() bool { return s.questionOf("call-1") != nil }, 5*time.Second, 10*time.Millisecond)
+
+	s.ErrorIs(session.AnswerConnectorApproval("call-1", "command-1", true, "",
+		Owner{CustomerID: s.customerID, UserID: "alice", Kind: auth.KindAuthenticated}), ErrApprovalAskedOfAnother, "a user")
+	s.NoError(session.AnswerConnectorApproval("call-1", "command-1", true, "",
+		Owner{CustomerID: s.customerID, UserID: "alice", Kind: auth.KindGuest}), "the guest")
+	s.Equal("primary", s.answerOf(answer).said)
+}
+
+// A session the backend opened in alice's name asks alice, who answers from her own device as
+// she reaches the session itself, signed in or as a guest; an anonymous caller naming her does
+// not.
+func (s *ConnectorApprovalSuite) TestAUserAnswersTheCallOfTheSessionTheirBackendOpenedForThem() {
+	for _, kind := range []auth.Kind{auth.KindAuthenticated, auth.KindGuest} {
+		session := s.holdingAs(auth.KindServer)
+		id := "call-" + string(kind)
+
+		answer := s.callInBackground(s.ctx, session.connectors, id, "crm__whoami", "{}")
+		s.Require().Eventually(func() bool { return s.questionOf(id) != nil }, 5*time.Second, 10*time.Millisecond)
+
+		s.ErrorIs(session.AnswerConnectorApproval(id, "command-1", true, "",
+			Owner{CustomerID: s.customerID, UserID: "alice", Kind: auth.KindAnonymous}), ErrApprovalAskedOfAnother, "an anonymous caller")
+		s.NoError(session.AnswerConnectorApproval(id, "command-1", true, "",
+			Owner{CustomerID: s.customerID, UserID: "alice", Kind: kind}), "alice, %s", kind)
+		s.Equal("primary", s.answerOf(answer).said)
+	}
+}
+
+// The writer of the message a reply answers is named by the hook by id alone, which says nothing
+// of what kind of caller they are: any verified caller of that id answers for them, and an
+// anonymous one naming them does not.
+func (s *ConnectorApprovalSuite) TestAVerifiedCallerOfTheWritersIdAnswersTheCallTheirMessageAsked() {
+	for _, kind := range []auth.Kind{auth.KindAuthenticated, auth.KindGuest} {
+		session := s.holdingAs(auth.KindAuthenticated)
+		asks := session.connectors.approvals.await
+		session.connectors.approvals.await = func(owner, callID, arguments string, approval persistent.ToolApproval) (string, string, bool) {
+			command, _, asked := asks(owner, callID, arguments, approval)
+			return command, "bob", asked
+		}
+		id := "call-" + string(kind)
+
+		answer := s.callInBackground(s.ctx, session.connectors, id, "crm__whoami", "{}")
+		s.Require().Eventually(func() bool { return s.questionOf(id) != nil }, 5*time.Second, 10*time.Millisecond)
+
+		s.ErrorIs(session.AnswerConnectorApproval(id, "command-1", true, "",
+			Owner{CustomerID: s.customerID, UserID: "alice", Kind: auth.KindAuthenticated}), ErrApprovalAskedOfAnother, "the session's user")
+		s.ErrorIs(session.AnswerConnectorApproval(id, "command-1", true, "",
+			Owner{CustomerID: s.customerID, UserID: "bob", Kind: auth.KindAnonymous}), ErrApprovalAskedOfAnother, "an anonymous caller")
+		s.NoError(session.AnswerConnectorApproval(id, "command-1", true, "",
+			Owner{CustomerID: s.customerID, UserID: "bob", Kind: kind}), "bob, %s", kind)
+		s.Equal("primary", s.answerOf(answer).said)
+	}
+}
+
 // A binding without require_approval sends its call as on base (probe on 29091a59: the
 // call answered "primary", reached the provider once, and its row has no error_type).
 func (s *ConnectorApprovalSuite) TestABindingWithoutApprovalSendsTheCallAsBefore() {
@@ -460,6 +536,13 @@ func (s *ConnectorApprovalSuite) holdingWith(change func(*store.ConnectorBinding
 	return s.asking(s.config(binding), "alice"), connection
 }
 
+// holdingAs is holding("whoami") as alice's session, opened by a caller of kind.
+func (s *ConnectorApprovalSuite) holdingAs(kind auth.Kind) *Session {
+	d, _ := s.holding("whoami")
+	d.spec.CallerKind = kind
+	return &Session{spec: d.spec, connectors: d}
+}
+
 // asking is a dispatcher for user's session of config whose conversation asks only alice, as
 // holding's does.
 func (s *ConnectorApprovalSuite) asking(config store.AgentConfig, user string) *dispatcher {
@@ -543,4 +626,4 @@ func (s *ConnectorApprovalSuite) rows(connection string) []store.ConnectorInvoca
 
 // anyone lets whoever answers a held call answer it, for a test of the hold rather than of who
 // may answer (Session.AnswerConnectorApproval).
-func anyone(string) bool { return true }
+func anyone(Owner) bool { return true }

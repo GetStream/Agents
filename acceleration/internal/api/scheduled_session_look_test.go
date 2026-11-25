@@ -51,12 +51,12 @@ func (s *ScheduledTasksSuite) refusingPeer(sessionID string) (asked <-chan struc
 	peer.Start()
 	s.T().Cleanup(peer.Close)
 	agent := rand.Text()
-	directory.Hold(context.Background(), s.customerID(), sessionID, agent, "")
+	directory.Hold(context.Background(), s.customerID(), 0, sessionID, agent, "")
 	s.T().Cleanup(func() { directory.Release(context.Background(), s.customerID(), sessionID) })
 	return got, func(here bool) {
 		directory.Release(context.Background(), s.customerID(), sessionID)
 		if here {
-			s.router.directory.Hold(context.Background(), s.customerID(), sessionID, agent, "")
+			s.router.directory.Hold(context.Background(), s.customerID(), 0, sessionID, agent, "")
 			s.T().Cleanup(func() { s.router.directory.Release(context.Background(), s.customerID(), sessionID) })
 		}
 	}

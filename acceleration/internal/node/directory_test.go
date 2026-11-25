@@ -55,9 +55,9 @@ func (s *DirectorySuite) SetupTest() {
 func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	directory, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: "node-a:1", Shard: "eu", Prefix: s.prefix})
 	s.Require().NoError(err)
-	directory.Close()
+	defer directory.Close()
 	for _, session := range []string{"s1", "s2", "s3"} {
-		directory.Hold(s.ctx, "acme", session, "agent-"+session, "messaging:"+session)
+		directory.Hold(s.ctx, "acme", 7, session, "agent-"+session, "messaging:"+session)
 	}
 	directory.Wait(s.ctx, "acme")
 	directory.Wait(s.ctx, "globex")
@@ -65,9 +65,9 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	directory.Offer(s.ctx, "globex", "agent-s2", []byte(`{"tools":[]}`))
 	keys, err := s.client.Do(s.ctx, s.client.B().Keys().Pattern(s.prefix+":*").Build()).AsStrSlice()
 	s.Require().NoError(err)
-	// Each session: itself, its agent and its conversation, each under its customer and under
-	// its id alone.
-	s.Require().Len(keys, 3*6+2+2+1)
+	// Each session: itself and its conversation, each under its customer and under its id alone,
+	// and its agent by app and customer, by customer, and by its id alone.
+	s.Require().Len(keys, 3*7+2+2+2)
 	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Del().Key(keys...).Build()).Error())
 
 	before := s.roundTrips.sent.Load()
@@ -85,7 +85,7 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	held, err := peer.NodeByConversation(s.ctx, "acme", "messaging:s3")
 	s.Require().NoError(err)
 	s.Equal("node-a:1", held)
-	writing, err := peer.NodesByAgent(s.ctx, "agent-s2")
+	writing, err := peer.NodesByAgent(s.ctx, "agent-s2", everyApp)
 	s.Require().NoError(err)
 	s.Equal(map[string]string{"acme": "node-a:1"}, writing)
 	waiting, err := peer.Waiting(s.ctx, "globex")
@@ -101,8 +101,8 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 func (s *DirectorySuite) TestTwoCustomersSessionsOfOneIdAreFoundApart() {
 	first := s.directoryAt("node-a:1")
 	second := s.directoryAt("node-b:1")
-	first.Hold(s.ctx, "acme", "order-42", "", "")
-	second.Hold(s.ctx, "globex", "order-42", "", "")
+	first.Hold(s.ctx, "acme", 0, "order-42", "", "")
+	second.Hold(s.ctx, "globex", 0, "order-42", "", "")
 
 	peer := s.directoryAt("node-c:1")
 	s.Equal("node-a:1", s.nodeOf(peer, "acme", "order-42"))
@@ -118,7 +118,7 @@ func (s *DirectorySuite) TestASessionHeldUnderItsIdAloneIsFound() {
 
 // A router of the release before reads a session's node by its id alone.
 func (s *DirectorySuite) TestASessionHeldHereIsFoundByItsIdAlone() {
-	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "order-42", "", "")
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", 0, "order-42", "", "")
 
 	held, err := s.client.Do(s.ctx, s.client.B().Get().Key(s.prefix+":session:order-42").Build()).ToString()
 	s.Require().NoError(err)
@@ -128,21 +128,100 @@ func (s *DirectorySuite) TestASessionHeldHereIsFoundByItsIdAlone() {
 // Two customers may each run a session writing as one agent: each customer's is found, whichever
 // node said so last.
 func (s *DirectorySuite) TestTwoCustomersWritingAsOneAgentAreFoundApart() {
-	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "support", "")
-	s.directoryAt("node-b:1").Hold(s.ctx, "globex", "s2", "support", "")
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", 7, "s1", "support", "")
+	s.directoryAt("node-b:1").Hold(s.ctx, "globex", 7, "s2", "support", "")
 
 	peer := s.directoryAt("node-c:1")
-	s.Equal("node-a:1", s.writingAs(peer, "acme", "support"))
-	s.Equal("node-b:1", s.writingAs(peer, "globex", "support"))
-	writing, err := peer.NodesByAgent(s.ctx, "support")
+	s.Equal("node-a:1", s.writingAs(peer, "acme", 7, "support"))
+	s.Equal("node-b:1", s.writingAs(peer, "globex", 7, "support"))
+	writing, err := peer.NodesByAgent(s.ctx, "support", everyApp)
 	s.Require().NoError(err)
 	s.Equal(map[string]string{"acme": "node-a:1", "globex": "node-b:1"}, writing)
 }
 
+// A customer may run a session writing as one agent in each of two Stream apps: each app's is
+// found, and none in a third.
+func (s *DirectorySuite) TestOneCustomerWritingAsOneAgentInTwoAppsIsFoundApartByApp() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", 7, "s1", "support", "")
+	s.directoryAt("node-b:1").Hold(s.ctx, "acme", 8, "s2", "support", "")
+
+	peer := s.directoryAt("node-c:1")
+	s.Equal("node-a:1", s.writingAs(peer, "acme", 7, "support"))
+	s.Equal("node-b:1", s.writingAs(peer, "acme", 8, "support"))
+	s.Empty(s.writingAs(peer, "acme", 0, "support"))
+}
+
+// The nodes writing as an agent are those of the sessions the caller admits by customer and app,
+// as a message in one app is answered only by a session there.
+func (s *DirectorySuite) TestTheNodesWritingAsAnAgentAreThoseOfTheSessionsAdmitted() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", 7, "s1", "support", "")
+	s.directoryAt("node-b:1").Hold(s.ctx, "globex", 8, "s2", "support", "")
+	s.directoryAt("node-c:1").Hold(s.ctx, "initech", 0, "s3", "support", "")
+	peer := s.directoryAt("node-d:1")
+
+	inTheDeploymentsApp, err := peer.NodesByAgent(s.ctx, "support", func(_ string, app int64) bool { return app == 0 || app == 7 })
+	s.Require().NoError(err)
+	globexes, err := peer.NodesByAgent(s.ctx, "support", func(customer string, _ int64) bool { return customer == "globex" })
+	s.Require().NoError(err)
+
+	s.Equal(map[string]string{"acme": "node-a:1", "initech": "node-c:1"}, inTheDeploymentsApp)
+	s.Equal(map[string]string{"globex": "node-b:1"}, globexes)
+}
+
+// The nodes writing as an agent are the others: a node's own claim names a session it runs, which
+// it finds among its own, or one that ended there and has not lapsed yet.
+func (s *DirectorySuite) TestTheNodesWritingAsAnAgentAreNeverTheOneAsking() {
+	here := s.directoryAt("node-a:1")
+	here.Hold(s.ctx, "acme", 7, "s1", "support", "")
+	s.directoryAt("node-b:1").Hold(s.ctx, "globex", 7, "s2", "support", "")
+
+	writing, err := here.NodesByAgent(s.ctx, "support", everyApp)
+
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"globex": "node-b:1"}, writing)
+}
+
+// A customer id may hold a colon, and an app id holds none: the customer is all that follows the
+// first.
+func (s *DirectorySuite) TestACustomerWritingAsAnAgentIsFoundByItsWholeIdThoughItHoldsAColon() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "a:7", 7, "s1", "support", "")
+
+	peer := s.directoryAt("node-c:1")
+	writing, err := peer.NodesByAgent(s.ctx, "support", func(customer string, app int64) bool { return customer == "a:7" && app == 7 })
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"a:7": "node-a:1"}, writing)
+	s.Equal("node-a:1", s.writingAs(peer, "a:7", 7, "support"))
+}
+
+// A claim on an agent that says no app, as a router of the release before writes it, is read
+// nowhere: an app it does not say may be one the message was not written in.
+func (s *DirectorySuite) TestAClaimOnAnAgentByItsCustomerAloneIsFoundNowhere() {
+	live := strconv.FormatInt(time.Now().Add(time.Minute).UnixMilli(), 10)
+	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Hset().Key(s.prefix+":writing-as:support").
+		FieldValue().FieldValue("acme", live+" node-a:1").Build()).Error())
+
+	peer := s.directoryAt("node-c:1")
+	s.Empty(s.writingAs(peer, "acme", 0, "support"))
+	writing, err := peer.NodesByAgent(s.ctx, "support", everyApp)
+	s.Require().NoError(err)
+	s.Empty(writing)
+}
+
+// A router of the release before reads a claim on an agent by its customer alone.
+func (s *DirectorySuite) TestASessionWritingAsAnAgentIsFoundByItsCustomerAlone() {
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", 7, "s1", "support", "")
+
+	entry, err := s.client.Do(s.ctx, s.client.B().Hget().Key(s.prefix+":writing-as:support").Field("acme").Build()).ToString()
+	s.Require().NoError(err)
+	address, live := liveClaim(entry, time.Now().UnixMilli())
+	s.True(live)
+	s.Equal("node-a:1", address)
+}
+
 // The same for two customers answering in conversations of one cid.
 func (s *DirectorySuite) TestTwoCustomersAnsweringInOneConversationAreFoundApart() {
-	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "", "messaging:general")
-	s.directoryAt("node-b:1").Hold(s.ctx, "globex", "s2", "", "messaging:general")
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", 0, "s1", "", "messaging:general")
+	s.directoryAt("node-b:1").Hold(s.ctx, "globex", 0, "s2", "", "messaging:general")
 
 	peer := s.directoryAt("node-c:1")
 	s.Equal("node-a:1", s.answeringIn(peer, "acme", "messaging:general"))
@@ -152,8 +231,8 @@ func (s *DirectorySuite) TestTwoCustomersAnsweringInOneConversationAreFoundApart
 // A customer id may hold a colon, as a cid does, so customer "a:b" in "c:d" and customer "a" in
 // "b:c:d" are two conversations.
 func (s *DirectorySuite) TestACustomerAndCidAreNotTakenForAnother() {
-	s.directoryAt("node-a:1").Hold(s.ctx, "a:b", "s1", "", "c:d")
-	s.directoryAt("node-b:1").Hold(s.ctx, "a", "s2", "", "b:c:d")
+	s.directoryAt("node-a:1").Hold(s.ctx, "a:b", 0, "s1", "", "c:d")
+	s.directoryAt("node-b:1").Hold(s.ctx, "a", 0, "s2", "", "b:c:d")
 
 	peer := s.directoryAt("node-c:1")
 	s.Equal("node-a:1", s.answeringIn(peer, "a:b", "c:d"))
@@ -164,13 +243,13 @@ func (s *DirectorySuite) TestACustomerAndCidAreNotTakenForAnother() {
 // renewals keep the agent's entry alive: that claim lapses all the same.
 func (s *DirectorySuite) TestAClaimOnAnAgentThatLapsedIsFoundNowhere() {
 	lapsed := strconv.FormatInt(time.Now().Add(-time.Second).UnixMilli(), 10)
-	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Hset().Key(s.prefix+":writing-as:support").
-		FieldValue().FieldValue("acme", lapsed+" node-a:1").Build()).Error())
-	s.directoryAt("node-b:1").Hold(s.ctx, "globex", "s2", "support", "")
+	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Hset().Key(s.prefix+":writing-as-in:support").
+		FieldValue().FieldValue("7:acme", lapsed+" node-a:1").Build()).Error())
+	s.directoryAt("node-b:1").Hold(s.ctx, "globex", 7, "s2", "support", "")
 
 	peer := s.directoryAt("node-c:1")
-	s.Empty(s.writingAs(peer, "acme", "support"))
-	writing, err := peer.NodesByAgent(s.ctx, "support")
+	s.Empty(s.writingAs(peer, "acme", 7, "support"))
+	writing, err := peer.NodesByAgent(s.ctx, "support", everyApp)
 	s.Require().NoError(err)
 	s.Equal(map[string]string{"globex": "node-b:1"}, writing)
 }
@@ -187,10 +266,10 @@ func (s *DirectorySuite) TestAConversationHeldUnderItsCidAloneIsFound() {
 // other customers' renewals keep the agent's entry alive.
 func (s *DirectorySuite) TestAClaimOnAnAgentLapsesThirtySecondsAfterItIsMade() {
 	before := time.Now()
-	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "support", "")
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", 7, "s1", "support", "")
 	after := time.Now()
 
-	entry, err := s.client.Do(s.ctx, s.client.B().Hget().Key(s.prefix+":writing-as:support").Field("acme").Build()).ToString()
+	entry, err := s.client.Do(s.ctx, s.client.B().Hget().Key(s.prefix+":writing-as-in:support").Field("7:acme").Build()).ToString()
 	s.Require().NoError(err)
 	until, address, _ := strings.Cut(entry, " ")
 	lapses, err := strconv.ParseInt(until, 10, 64)
@@ -202,7 +281,7 @@ func (s *DirectorySuite) TestAClaimOnAnAgentLapsesThirtySecondsAfterItIsMade() {
 
 // A router of the release before reads a session's agent and conversation by their ids alone.
 func (s *DirectorySuite) TestASessionHeldHereIsFoundByItsAgentAndConversationAlone() {
-	s.directoryAt("node-a:1").Hold(s.ctx, "acme", "s1", "support", "messaging:general")
+	s.directoryAt("node-a:1").Hold(s.ctx, "acme", 7, "s1", "support", "messaging:general")
 
 	for _, key := range []string{s.prefix + ":agent:support", s.prefix + ":channel:messaging:general"} {
 		held, err := s.client.Do(s.ctx, s.client.B().Get().Key(key).Build()).ToString()
@@ -213,7 +292,7 @@ func (s *DirectorySuite) TestASessionHeldHereIsFoundByItsAgentAndConversationAlo
 
 func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhere() {
 	directory := s.directoryAt("node-a:1")
-	directory.Hold(s.ctx, "acme", "order-42", "", "")
+	directory.Hold(s.ctx, "acme", 0, "order-42", "", "")
 
 	directory.Release(s.ctx, "acme", "order-42")
 
@@ -233,7 +312,7 @@ func (s *DirectorySuite) TestEachClaimThatCannotBeTakenBackIsLogged() {
 	})
 	s.Require().NoError(err)
 	directory.Close()
-	directory.Hold(s.ctx, "acme", "order-42", "", "")
+	directory.Hold(s.ctx, "acme", 0, "order-42", "", "")
 	gone, cancel := context.WithCancel(s.ctx)
 	cancel()
 
@@ -249,7 +328,7 @@ func (s *DirectorySuite) TestAReleasedSessionsKeysAreDeletedOneCommandEach() {
 	directory, err := NewDirectory(DirectoryOptions{Redis: rueidishook.WithHook(s.client, sent), Address: "node-a:1", Prefix: s.prefix})
 	s.Require().NoError(err)
 	directory.Close()
-	directory.Hold(s.ctx, "acme", "order-42", "", "")
+	directory.Hold(s.ctx, "acme", 0, "order-42", "", "")
 	sent.reset()
 
 	directory.Release(s.ctx, "acme", "order-42")
@@ -290,7 +369,7 @@ func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhereOnACluster() {
 		slots[slot] = true
 	}
 	s.Require().Len(slots, 2, "the two keys of a session sit in different slots")
-	directory.Hold(s.ctx, "acme", "order-42", "", "")
+	directory.Hold(s.ctx, "acme", 0, "order-42", "", "")
 	for _, key := range keys {
 		exists, err := cluster.Do(s.ctx, cluster.B().Exists().Key(key).Build()).AsInt64()
 		s.Require().NoError(err)
@@ -304,6 +383,45 @@ func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhereOnACluster() {
 		s.Require().NoError(err)
 		s.Zero(exists, "%s is still held", key)
 	}
+}
+
+// The shard's index names the nodes saying they are in it now: not a node of another shard,
+// nor one whose claim lapsed because it stopped renewing.
+func (s *DirectorySuite) TestANodeInAShardIsALiveNodeOfThatShard() {
+	for _, node := range []struct{ address, shard string }{{"eu-a:1", "eu"}, {"us-a:1", "us"}} {
+		directory, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: node.address, Shard: node.shard, Prefix: s.prefix})
+		s.Require().NoError(err)
+		defer directory.Close()
+	}
+	lapsed := float64(time.Now().Add(-time.Second).UnixMilli())
+	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Zadd().Key(s.prefix+":inshard:eu").ScoreMember().
+		ScoreMember(lapsed, "eu-gone:1").Build()).Error())
+	asking, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: "us-b:1", Shard: "us", Prefix: s.prefix})
+	s.Require().NoError(err)
+	asking.Close()
+
+	for range 20 {
+		found, err := asking.NodeInShard(s.ctx, "eu")
+		s.Require().NoError(err)
+		s.Equal("eu-a:1", found)
+	}
+	none, err := asking.NodeInShard(s.ctx, "asia")
+	s.Require().NoError(err)
+	s.Empty(none, "a shard no node is in has a node")
+}
+
+func (s *DirectorySuite) TestANodeThatClosedIsNoNodeOfItsShard() {
+	leaving, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: "eu-a:1", Shard: "eu", Prefix: s.prefix})
+	s.Require().NoError(err)
+	found, err := leaving.NodeInShard(s.ctx, "eu")
+	s.Require().NoError(err)
+	s.Require().Equal("eu-a:1", found)
+
+	leaving.Close()
+
+	found, err = leaving.NodeInShard(s.ctx, "eu")
+	s.Require().NoError(err)
+	s.Empty(found, "a node that closed is still handed its shard's work")
 }
 
 // directoryAt is a node's directory at address, renewing nothing for the test's length.
@@ -321,12 +439,15 @@ func (s *DirectorySuite) nodeOf(directory *Directory, customer, session string) 
 	return address
 }
 
-// writingAs is where directory says a customer's session writing as an agent runs.
-func (s *DirectorySuite) writingAs(directory *Directory, customer, agent string) string {
-	address, err := directory.NodeByAgent(s.ctx, customer, agent)
+// writingAs is where directory says a customer's session in app writing as an agent runs.
+func (s *DirectorySuite) writingAs(directory *Directory, customer string, app int64, agent string) string {
+	address, err := directory.NodeByAgent(s.ctx, customer, app, agent)
 	s.Require().NoError(err)
 	return address
 }
+
+// everyApp admits every customer's sessions in every app.
+func everyApp(string, int64) bool { return true }
 
 // answeringIn is where directory says a customer's session answering in a conversation runs.
 func (s *DirectorySuite) answeringIn(directory *Directory, customer, cid string) string {

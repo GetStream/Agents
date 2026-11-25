@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -203,7 +204,7 @@ var dataTables = []dataTable{
 	{name: "simulations", customer: "customer_id"},
 	{name: "simulation_runs", customer: "customer_id", references: []dataReference{{"simulation_id", "simulations"}}},
 	{name: "simulation_cases", parent: "simulation_runs", parentColumn: "run_id"},
-	{name: "users", customer: "customer_id", vouched: []string{"minted"}},
+	{name: "users", customer: "customer_id", vouched: []string{"minted", "shard"}},
 	{name: "scheduled_tasks", customer: "customer_id"},
 	{name: "scheduled_task_runs", customer: "customer_id"},
 	// Who asked not to be reached: STOP and START at the source carry on here through the changes.
@@ -884,6 +885,9 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		// a customer.
 		if customerID == BuiltinCustomer {
 			return fmt.Errorf("store: an import writes a connector definition under a customer, and none is known yet: %w (name the customer with --as)", ErrNotACustomConnector)
+		}
+		if SkippedRow(table, row) != "" {
+			return nil
 		}
 		if row, err = importableDefinition(row); err != nil {
 			return err
@@ -1933,11 +1937,56 @@ func importableDefinition(row json.RawMessage) (json.RawMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: imported connector definition %q: %w: %w", id, ErrNotACustomConnector, err)
 	}
-	if fields["manifest"], err = json.Marshal(custom); err != nil {
-		return nil, stack.Wrap(err)
+	// A row from a release before sync hashes carries none, as importRow's COALESCE reads it.
+	var hash string
+	if raw, ok := fields["sync_hash"]; ok && json.Unmarshal(raw, &hash) != nil || len(hash) > SyncHashMaxLength || !syncHash.MatchString(hash) {
+		return nil, invalidImport(fmt.Errorf("store: imported connector definition %q: sync_hash is not %s of at most %d characters",
+			id, SyncHashDescription, SyncHashMaxLength))
+	}
+	// The columns a caller is shown are the manifest's, as the API writes them (saveRevision), so
+	// they are held to its limits too.
+	for column, value := range map[string]any{"manifest": custom, "name": custom.Name, "category": custom.Category,
+		"description": custom.Description} {
+		if fields[column], err = json.Marshal(value); err != nil {
+			return nil, stack.Wrap(err)
+		}
 	}
 	return json.Marshal(fields)
 }
+
+// SkippedRow names a row an import leaves out rather than writes, as rowKey does, and is "" for
+// any other row: a custom connector definition with oauth2_client_credentials, which custom
+// connectors could have before they lost the scheme. No connection could use one, since the
+// scheme needs a token endpoint a custom connector cannot set (core.CustomManifest), so it
+// should not stop a move as importableDefinition's refusal would.
+func SkippedRow(table string, row json.RawMessage) string {
+	if table != "connector_definitions" {
+		return ""
+	}
+	// Read by exact column name, as importableDefinition reads it, which refuses a row this
+	// cannot read.
+	var fields map[string]json.RawMessage
+	var manifest core.Manifest
+	if json.Unmarshal(row, &fields) != nil || json.Unmarshal(fields["manifest"], &manifest) != nil ||
+		!slices.Contains(manifest.Schemes, "oauth2_client_credentials") {
+		return ""
+	}
+	// A row is named only by a key the API could have written: anything else is refused by
+	// importableDefinition as before, and never held in a list or echoed back.
+	var id string
+	var revision int64
+	if json.Unmarshal(fields["id"], &id) != nil || !skippedID.MatchString(id) ||
+		json.Unmarshal(fields["revision"], &revision) != nil || revision < 1 {
+		return ""
+	}
+	key, err := rowKey(table, []string{"id", "revision"}, row)
+	if err != nil {
+		return ""
+	}
+	return key
+}
+
+var skippedID = regexp.MustCompile(core.CustomIDPattern)
 
 // identity is what the importing deployment overwrites on every row of this table, which
 // is whose it is. A table holding more than one kind of row has the kind forced too, so

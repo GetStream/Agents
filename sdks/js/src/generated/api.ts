@@ -3482,6 +3482,26 @@ export type paths = {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/v1/phone/hooks/twilio": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Receive a Twilio call
+         * @description Where Twilio asks what to do with a call to one of this router's Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number's own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.
+         */
+        readonly post: operations["receiveTwilioCall"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/v1/phone/hooks/twilio/events": {
         readonly parameters: {
             readonly query?: never;
@@ -7348,6 +7368,13 @@ export type components = {
              * @description How many rows were written.
              */
             readonly rows: number;
+            /** @description The rows left out rather than written, by table and primary key, as connector_definitions:{"id":"custom_crm","revision":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set. */
+            readonly skipped?: readonly string[];
+            /**
+             * Format: int64
+             * @description How many more rows were left out than skipped names, which holds the first 100.
+             */
+            readonly skipped_more?: number;
             /** @description How many of them went into each table. */
             readonly tables?: {
                 readonly [key: string]: number;
@@ -20252,6 +20279,55 @@ export interface operations {
                 content?: never;
             };
             /** @description The event is over 64 KiB */
+            readonly 413: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            readonly 500: components["responses"]["InternalError"];
+        };
+    };
+    readonly receiveTwilioCall: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description TwiML dialling the number's trunk, rejecting the call, or hanging up */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/xml": string;
+                };
+            };
+            /** @description The body is not a form */
+            readonly 400: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The call is not signed by Twilio */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Twilio calls are not configured */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The call is over 64 KiB */
             readonly 413: {
                 headers: {
                     readonly [name: string]: unknown;
