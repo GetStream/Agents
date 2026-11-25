@@ -243,7 +243,8 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 	country := cmp.Or(number.Country, phone.Country(number.E164))
 	// The call is answered in the shard of the number's country, or the one its routing policy
 	// places it in, so every delivery for it goes there. Recorded as delivered first, as a hook
-	// carried to a worker's node is: the node it reaches does not record it again.
+	// carried to a worker's node is: the node it reaches does not record it again. One no shard
+	// of its geography took is forgotten, so Stream's next delivery is placed.
 	place, failure, refused := s.placed(r.Context(), number.CustomerID, number.ConfigID, s.shards.ForCountry(country))
 	if refused {
 		writeError(w, failure)
@@ -257,6 +258,7 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 		acted = true
 		elsewhere, _, down := s.handedToShard(r.Context(), s.replayed(r, payload), place, shardWorkCall)
 		if down {
+			s.unrecord(r.Context(), origin, getstream.EventTypeCallSessionStarted, payload)
 			writeError(w, errResidencyDown)
 			return false
 		}

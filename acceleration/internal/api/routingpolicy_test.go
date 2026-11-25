@@ -5,9 +5,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -357,6 +359,80 @@ func (s *RoutingPolicyShardDownSuite) TestACallKeptInTheEUIsAnswered503AndNotAns
 	s.Equal(http.StatusServiceUnavailable, s.signedly("/v1/phone/hooks/stream", s.numberOf("")))
 
 	s.idle(s.here, "a call kept in the EU was answered outside it")
+}
+
+// RoutingPolicyAppSuite covers, in app mode, where Stream's deliveries are recorded so a delivery
+// made again is not answered twice, a call of an app kept in the EU while no node of the EU is up.
+type RoutingPolicyAppSuite struct {
+	RouterSuite
+
+	apiKey string
+}
+
+func TestRoutingPolicyAppSuite(t *testing.T) {
+	runSuite(t, new(RoutingPolicyAppSuite))
+}
+
+func (s *RoutingPolicyAppSuite) SetupSuite() {
+	s.appMode = true
+	s.shard, s.otherShard = "here", "there"
+	s.shardRouting = routingPolicies
+	s.RouterSuite.SetupSuite()
+}
+
+func (s *RoutingPolicyAppSuite) SetupTest() {
+	s.useApp(s.numberedApp(streamAppID()))
+	s.apiKey = "own-key-" + s.utils.uuid()
+	s.answerAs(s.apiKey, s.appID())
+	s.forwarded(s.apiKey)
+}
+
+// rings delivers a call.session_started from the app, and answers with the status.
+func (s *RoutingPolicyAppSuite) rings(body string) int {
+	request := s.request("/v1/phone/hooks/stream/"+strconv.FormatInt(s.appID(), 10), body, sign(body, ownAppSecret))
+	vouched(request, s.appID(), s.apiKey)
+	response, err := s.server.Client().Do(request)
+	s.Require().NoError(err)
+	s.Require().NoError(response.Body.Close())
+	return response.StatusCode
+}
+
+// Stream delivers a 503 again: had the refusal recorded the delivery, the one made once the EU is
+// back would be dropped as a duplicate.
+func (s *RoutingPolicyAppSuite) TestACallRefusedWhileItsGeographyIsDownIsAnsweredWhenDeliveredAgain() {
+	ctx := context.Background()
+	s.Require().NoError(s.store.Apps.SetRoutingPolicy(ctx, s.customerID(), shardmap.PolicyEUOnly))
+	here, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
+	s.T().Cleanup(release)
+	e164, call := s.utils.number(), "line-"+s.utils.uuid()
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
+		E164: e164, Vendor: "telnyx", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
+	}))
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), e164, store.NumberAttachment{
+		TrunkID: "trunk-" + s.utils.uuid(), StreamAppPK: s.appID(), CallType: "default", CallID: call,
+	}))
+	body := fmt.Sprintf(`{"type": "call.session_started", "call_cid": "default:%s", "session_id": %q,
+  "created_at": %q, "call": {"id": %q, "type": "default", "custom": {}}}`,
+		call, "session-"+s.utils.uuid(), time.Now().UTC().Format(time.RFC3339Nano), call)
+
+	s.Require().Equal(http.StatusServiceUnavailable, s.rings(body))
+	select {
+	case answered := <-here.Calls():
+		s.FailNowf("a call kept in the EU was answered outside it", "call %s", answered.CallID)
+	case <-time.After(dropped):
+	}
+
+	workers := dispatch.NewPool()
+	s.otherNodeDispatching(workers)
+	there, release := workers.Register(s.customerID(), dispatch.Registration{Capacity: 1})
+	s.T().Cleanup(release)
+	s.Require().Equal(http.StatusOK, s.rings(body))
+
+	select {
+	case <-there.Calls():
+	case <-time.After(settleFor):
+		s.FailNow("the call delivered again once the EU was up never reached its worker there")
+	}
 }
 
 func (s *RoutingPolicyShardDownSuite) TestACallToAnAppKeptInUSEastIsAnsweredHereWithTheHomeDown() {

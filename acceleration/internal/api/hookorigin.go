@@ -247,6 +247,25 @@ func (s *Server) firstDelivery(ctx context.Context, origin hookOrigin, eventType
 	return first
 }
 
+// unrecord forgets a delivery acting recorded, for one answered for Stream to deliver again
+// without being acted on: the delivery made again is then the first.
+func (s *Server) unrecord(ctx context.Context, origin hookOrigin, eventType string, payload []byte) {
+	if !s.recorded(eventType) || node.Forwarded(ctx) || s.store == nil {
+		return
+	}
+	var stamp hookStamp
+	if err := json.Unmarshal(payload, &stamp); err != nil {
+		return
+	}
+	key := deliveryKey(origin, eventType, stamp)
+	if key == "" {
+		return
+	}
+	if err := s.store.DeliveriesSeen.Forget(ctx, store.DeliveryScopeHook, key); err != nil {
+		s.logger.Error("could not forget a hook delivery; Stream delivering it again is dropped", "type", eventType, "error", err)
+	}
+}
+
 // deliveryKey is what a delivery is recorded under (store.DeliveriesSeen.First): one key for every
 // delivery of the same event in the same app, whether the webhook or Stream Chat's endpoint
 // (receiveChatInbound) brought it. Empty for an event no key tells apart.
