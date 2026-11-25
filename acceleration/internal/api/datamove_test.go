@@ -16,6 +16,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,6 +34,8 @@ import (
 // changes since it, and writing either of them into a deployment.
 type DataMoveSuite struct {
 	RouterSuite
+	// logged is what the router logged.
+	logged *lockedLog
 }
 
 // TestDataMoveSuite runs on its own rather than beside the other suites: the change feed waits
@@ -46,6 +49,12 @@ func TestDataMoveSuite(t *testing.T) {
 // the deadlines the tests set, for a machine running other suites beside this one. A wait ends
 // as soon as the export has.
 const letGoWithin = 30 * time.Second
+
+func (s *DataMoveSuite) SetupSuite() {
+	s.logged = &lockedLog{}
+	s.logs = s.logged
+	s.RouterSuite.SetupSuite()
+}
 
 func (s *DataMoveSuite) SetupTest() {
 	// Last of the test's cleanups: the router's places for exports are shared by the tests
@@ -470,6 +479,51 @@ func (s *DataMoveSuite) TestAnImportedBoughtNumberIsNotStored() {
 	held, err := s.store.PhoneNumbers.Select(ctx, other, store.PhoneNumberFilter{})
 	s.Require().NoError(err)
 	s.Len(held, 1, "the number stays with the app that holds it")
+}
+
+// The other app holds the numbers bought; the import carries on past them, as a row of an
+// export and as a change, and counts only what it wrote.
+func (s *DataMoveSuite) TestAnImportedNumberOnItsOwnTrunkAnotherAppHoldsIsLeftOutAndNotCounted() {
+	ctx := context.Background()
+	other := s.utils.uuid()
+	held, free := []string{s.utils.number(), s.utils.number()}, []string{s.utils.number(), s.utils.number()}
+	for _, e164 := range held {
+		s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
+			E164: e164, Vendor: "plivo", Country: "US", CustomerID: other,
+		}))
+	}
+	onTrunk := func(e164 string) json.RawMessage {
+		row, err := json.Marshal(map[string]any{
+			"id": rand.Int64N(1 << 50), "e164": e164, "vendor": "sip_trunk", "country": "US",
+			"capabilities": []string{"voice"}, "monthly_cost_micros": 0,
+			"tags": map[string]string{}, "purchased_at": time.Now().UTC(),
+		})
+		s.Require().NoError(err)
+		return row
+	}
+	lines := []dataLine{
+		{Table: "phone_numbers", Row: onTrunk(held[0])},
+		{Table: "phone_numbers", Row: onTrunk(free[0])},
+		{Change: &store.DataChange{Seq: 1, Table: "phone_numbers", Op: store.ChangeInsert, At: time.Now(), Payload: onTrunk(held[1])}},
+		{Change: &store.DataChange{Seq: 2, Table: "phone_numbers", Op: store.ChangeInsert, At: time.Now(), Payload: onTrunk(free[1])}},
+	}
+	var answer struct {
+		Rows   int64            `json:"rows"`
+		Tables map[string]int64 `json:"tables"`
+	}
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import", ndjson(lines), &answer))
+
+	s.Equal(int64(2), answer.Rows)
+	s.Equal(map[string]int64{"phone_numbers": 2}, answer.Tables)
+	s.Regexp(`customer=`+regexp.QuoteMeta(s.customerID())+` rows=2 numbers_left_out=2`, s.logged.String(), "the router logs how many it left out")
+	imported, err := s.store.PhoneNumbers.Select(ctx, s.customerID(), store.PhoneNumberFilter{IncludeReleased: true})
+	s.Require().NoError(err)
+	var numbers []string
+	for _, number := range imported {
+		numbers = append(numbers, number.E164)
+	}
+	s.ElementsMatch(free, numbers)
 }
 
 func (s *DataMoveSuite) TestAnImportedNumberOnItsOwnTrunkInAnotherFormIsRefused() {
