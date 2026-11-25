@@ -47,6 +47,16 @@ type TrunkLine struct {
 // vendor in the app, with a rule of its own, and answers it. A number already on one is
 // answered as it is. A failure leaves Stream as it found it and stores nothing.
 func (s *Service) line(ctx context.Context, stream *Stream, pin int64, held store.PhoneNumber) (TrunkLine, error) {
+	var line TrunkLine
+	err := s.pastForgottenLines(ctx, stream, pin, held.E164, func() (err error) {
+		line, err = s.lineOnce(ctx, stream, pin, held)
+		return err
+	})
+	return line, err
+}
+
+// lineOnce is line as Stream's trunks stand.
+func (s *Service) lineOnce(ctx context.Context, stream *Stream, pin int64, held store.PhoneNumber) (TrunkLine, error) {
 	if s.sealer == nil {
 		return TrunkLine{}, stack.Wrap(ErrNoSealer)
 	}

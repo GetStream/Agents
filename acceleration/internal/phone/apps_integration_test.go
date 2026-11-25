@@ -1789,28 +1789,6 @@ func (s *AppsSuite) TestABuyerAttachesInAnAppItMovedToANumberWhoseLineAMoveLeftT
 	s.forgotten(line)
 }
 
-// The same customer adds the number again: it gets one line, not a second rule beside the first.
-func (s *AppsSuite) TestACustomerCallsAgainFromItsTrunkNumberAMoveDeleted() {
-	s.sealed()
-	s.deployment.OneTrunkPerNumber()
-	e164, customer := aNumber(), "customer-"+uuid.NewString()
-	trunk := s.onATrunk(customer, e164, StreamLegShared)
-	call := CallRequest{Owner: routing.Owner{CustomerID: customer}, From: e164, To: "+15550001111"}
-	_, err := trunk.service.Call(s.ctx, call)
-	s.Require().NoError(err)
-	line, err := s.store.PhoneNumbers.GetByE164(s.ctx, customer, e164)
-	s.Require().NoError(err)
-	s.moved(line, "deleted")
-	s.Require().NoError(s.addOnATrunk(trunk, customer, e164))
-
-	_, err = trunk.service.Call(s.ctx, call)
-
-	s.Require().NoError(err)
-	s.forgotten(line)
-	s.Len(s.deployment.Trunks(), 1)
-	s.Len(s.deployment.Rules(), 1)
-}
-
 // The number is now on another customer's trunk, which adding it here allowed: nobody held it.
 func (s *AppsSuite) TestACustomerCallsFromATrunkNumberWhoseLineAMoveLeftWithoutARow() {
 	e164, squatter, trunk, line := s.squatted()
@@ -1851,23 +1829,6 @@ func (s *AppsSuite) TestAForgottenLineLeavesTheOtherNumbersOfItsTrunk() {
 	s.Equal(before, s.deployment.Trunks())
 }
 
-// The trunk's next update took the number off it, and its rule stayed.
-func (s *AppsSuite) TestAForgottenLinesRuleGoesOnceItsTrunkNoLongerListsTheNumber() {
-	e164, squatter, trunk, line := s.squatted()
-	s.moved(line, "deleted")
-	other := aNumber()
-	s.Require().NoError(s.addOnATrunk(trunk, squatter, other))
-	_, err := trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: other, To: "+15550001111"})
-	s.Require().NoError(err)
-	s.Require().Equal([]string{other}, s.deployment.TrunkNumbers(line.StreamTrunkID))
-
-	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
-
-	s.Require().NoError(err)
-	s.Nil(s.deployment.Rule(line.StreamRouteID))
-	s.Equal([]string{other}, s.deployment.TrunkNumbers(line.StreamTrunkID))
-}
-
 func (s *AppsSuite) TestAForgottenLineStreamWillNotTakeDownIsFoundAgain() {
 	for _, refused := range []string{"rule", "trunk"} {
 		s.Run(refused, func() {
@@ -1905,22 +1866,6 @@ func (s *AppsSuite) TestAForgottenLineOnATrunkStreamWillNotTakeTheNumberOffFails
 
 	s.ErrorContains(err, "update sip trunk")
 	s.Contains(s.deployment.TrunkNumbers(line.StreamTrunkID), other)
-}
-
-// Stream still lists the rule of a trunk it no longer has.
-func (s *AppsSuite) TestAForgottenLineOnATrunkStreamNoLongerHasDoesNotStopTheBuyer() {
-	e164, squatter, trunk, line := s.squatted()
-	other := aNumber()
-	s.Require().NoError(s.addOnATrunk(trunk, squatter, other))
-	_, err := trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: other, To: "+15550001111"})
-	s.Require().NoError(err)
-	s.moved(line, "deleted")
-	s.Require().NoError(NewStreamFromClient(s.deployment.Client).DeleteTrunk(s.ctx, line.StreamTrunkID))
-
-	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
-
-	s.Require().NoError(err)
-	s.Nil(s.deployment.Rule(line.StreamRouteID))
 }
 
 // A trunk no row here names was made by hand or by another router on the app, and a rule of more
@@ -1964,39 +1909,208 @@ func (s *AppsSuite) TestANumberOnATrunkMadeByHandIsLeftThere() {
 	s.Equal([]string{e164}, s.deployment.TrunkNumbers(byHand))
 }
 
-// A number that has its line asks Stream for no list, and neither does one in an app where no
-// customer's own trunk has a line.
-func (s *AppsSuite) TestOnlyANumberBeingLinedBesideTrunkLinesListsStreamsTrunks() {
-	s.sealed()
-	lists := func() int {
-		count := 0
-		for _, request := range s.deployment.Requests(s.deployment.Key) {
-			if request.Method == http.MethodGet && strings.HasSuffix(request.Path, "/sip/inbound_trunks") {
-				count++
-			}
+// lists is how often the deployment's app was asked for its trunks or rules.
+func (s *AppsSuite) lists() int {
+	count := 0
+	for _, request := range s.deployment.Requests(s.deployment.Key) {
+		if request.Method == http.MethodGet && strings.Contains(request.Path, "/sip/") {
+			count++
 		}
-		return count
 	}
-	_, err := s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM stream_trunks WHERE vendor = ?", SIPTrunkVendor)
+	return count
+}
+
+func (s *AppsSuite) TestANumberStreamTakesAsksForNoLists() {
+	s.squatted()
+	for _, leg := range []StreamLeg{StreamLegShared, StreamLegPerCall} {
+		s.vendor.leg = leg
+		before := s.lists()
+		_, err := s.callFrom(s.anotherNumber(s.customer, s.vendor.vendor))
+		s.Require().NoError(err)
+		s.Equal(before, s.lists())
+	}
+}
+
+// A refusal nothing here explains is answered as it was, whether or not the lists can be read.
+func (s *AppsSuite) TestANumberStreamRefusesIsRefusedWhenItsListsFail() {
+	for _, path := range []string{"/sip/inbound_trunks", "none"} {
+		s.Run(path, func() {
+			_, _, _, line := s.squatted()
+			e164 := s.anotherNumber(s.customer, s.vendor.vendor)
+			byHand, _, err := NewStreamFromClient(s.deployment.Client).CreateTrunk(s.ctx, Trunk{Name: "by hand", Numbers: []string{e164}})
+			s.Require().NoError(err)
+			s.deployment.FailWith(http.MethodGet, path, http.StatusTooManyRequests)
+
+			_, err = s.callFrom(e164)
+
+			s.deployment.Heal(http.MethodGet, path)
+			s.ErrorContains(err, "numbers already used by another SIP trunk")
+			s.Equal([]string{e164}, s.deployment.TrunkNumbers(byHand))
+			s.Contains(s.deployment.Trunks(), line.StreamTrunkID)
+		})
+	}
+}
+
+func (s *AppsSuite) TestAFailureOtherThanARefusalAsksForNoLists() {
+	e164, _, _, line := s.squatted()
+	s.moved(line, "deleted")
+	s.deployment.FailWith(http.MethodPost, "/sip/inbound_trunks", http.StatusTooManyRequests)
+	before := s.lists()
+
+	_, err := s.callFrom(e164)
+
+	s.Error(err)
+	s.Equal(before, s.lists())
+}
+
+func (s *AppsSuite) TestAForgottenLineWhoseRulesStreamWillNotListFailsTheCall() {
+	e164, _, _, line := s.squatted()
+	s.moved(line, "deleted")
+	s.deployment.Fail(http.MethodGet, "/sip/inbound_routing_rules")
+
+	_, err := s.callFrom(e164)
+
+	s.ErrorContains(err, "list sip routing rules")
+	s.Contains(s.deployment.TrunkNumbers(line.StreamTrunkID), e164)
+}
+
+// A trunk of the number's own, rather than a shared line, is made past the line too.
+func (s *AppsSuite) TestANumberGetsATrunkOfItsOwnPastAForgottenLine() {
+	makes := map[string]func(e164 string) error{
+		"call": func(e164 string) error {
+			s.vendor.leg = StreamLegPerCall
+			_, err := s.callFrom(e164)
+			return err
+		},
+		"transfer": func(e164 string) error {
+			_, err := s.service.Transfer(s.ctx, TransferRequest{
+				Owner: routing.Owner{CustomerID: s.customer}, From: e164, To: "+15550002222", CallID: "call-1", CallType: "support",
+			})
+			return err
+		},
+		"attach": func(e164 string) error {
+			s.service.sealer = nil
+			_, err := s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+			return err
+		},
+	}
+	for what, make := range makes {
+		s.Run(what, func() {
+			s.vendor.leg = StreamLegShared
+			e164, _, _, line := s.squatted()
+			s.moved(line, "deleted")
+
+			s.Require().NoError(make(e164))
+
+			s.forgotten(line)
+		})
+	}
+}
+
+// boughtPastAMove gives the suite's customer a number another customer lined in the app with the pin, whose
+// row a move then deleted.
+func (s *AppsSuite) boughtPastAMove(pin int64) (string, store.PhoneNumber) {
+	s.sealed()
+	s.own.OneTrunkPerNumber()
+	e164, other := aNumber(), "customer-"+uuid.NewString()
+	s.apps.give(other, pin, s.own)
+	s.apps.give(s.customer, pin, s.own)
+	trunk := s.onATrunk(other, e164, StreamLegShared)
+	_, err := trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: other}, From: e164, To: "+15550001111"})
 	s.Require().NoError(err)
-	_, err = s.callFrom(s.e164)
+	line, err := s.store.PhoneNumbers.GetByE164(s.ctx, other, e164)
 	s.Require().NoError(err)
-	s.Zero(lists())
-	e164, squatter, trunk, _ := s.squatted()
+	s.Require().Equal(pin, line.StreamAppPK)
+	s.moved(line, "deleted")
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
+		E164: e164, Vendor: s.vendor.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
+	}))
+	return e164, line
+}
+
+func (s *AppsSuite) TestAForgottenLineInACustomersOwnAppIsTakenDownThere() {
+	e164, line := s.boughtPastAMove(4242)
+
+	_, err := s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
+	s.Require().NoError(err)
+	s.NotContains(s.own.Trunks(), line.StreamTrunkID)
+	s.Nil(s.own.Rule(line.StreamRouteID))
+	_, err = s.store.StreamTrunks.Get(s.ctx, line.CustomerID, line.StreamTrunkID)
+	s.ErrorIs(err, store.ErrNoStreamTrunk)
+}
+
+func (s *AppsSuite) TestATransferInACustomersOwnAppGetsATrunkPastAForgottenLine() {
+	e164, line := s.boughtPastAMove(4242)
+
+	_, err := s.service.Transfer(s.ctx, TransferRequest{
+		Owner: routing.Owner{CustomerID: s.customer}, From: e164, To: "+15550002222", CallID: "call-1", CallType: "support", StreamApp: 4242,
+	})
+
+	s.Require().NoError(err)
+	s.NotContains(s.own.Trunks(), line.StreamTrunkID)
+}
+
+// Two numbers of a trunk lost their rows: the first one needed deletes the trunk with both their
+// rules, and a rule of the number made twice goes twice.
+func (s *AppsSuite) TestAForgottenTrunkIsDeletedWithTheRulesOfItsNumbers() {
+	e164, squatter, trunk, line := s.squatted()
 	other := aNumber()
 	s.Require().NoError(s.addOnATrunk(trunk, squatter, other))
-	_, err = trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: other, To: "+15550001111"})
+	_, err := trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: other, To: "+15550001111"})
 	s.Require().NoError(err)
-	before := lists()
+	second, err := s.store.PhoneNumbers.GetByE164(s.ctx, squatter, other)
+	s.Require().NoError(err)
+	again, err := NewStreamFromClient(s.deployment.Client).CreateRoute(s.ctx, Route{
+		Name: "again", TrunkIDs: []string{line.StreamTrunkID}, CalledNumbers: []string{e164},
+	})
+	s.Require().NoError(err)
+	s.moved(line, "deleted")
+	s.moved(second, "deleted")
 
-	_, err = s.callFrom(e164)
-	s.Require().NoError(err)
-	s.Equal(1, lists()-before)
-	_, err = s.callFrom(e164)
-	s.Require().NoError(err)
 	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
 	s.Require().NoError(err)
-	s.Equal(1, lists()-before)
+	s.forgotten(line)
+	s.Nil(s.deployment.Rule(second.StreamRouteID))
+	s.Nil(s.deployment.Rule(again))
+}
+
+// Where an app lets a number be on two trunks, every one it was forgotten on is cleared, the first
+// the app lists as well as the last.
+func (s *AppsSuite) TestANumberForgottenOnTwoTrunksIsTakenOffBoth() {
+	e164, _, trunk, line := s.squatted()
+	s.moved(line, "deleted")
+	second, other := "customer-"+uuid.NewString(), aNumber()
+	s.Require().NoError(s.addOnATrunk(trunk, second, other))
+	_, err := trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: second}, From: other, To: "+15550001111"})
+	s.Require().NoError(err)
+	kept, err := s.store.PhoneNumbers.GetByE164(s.ctx, second, other)
+	s.Require().NoError(err)
+	s.NoError(s.deployment.PutOnTrunk(kept.StreamTrunkID, other, e164))
+
+	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
+	s.Require().NoError(err)
+	s.forgotten(line)
+	s.Equal([]string{other}, s.deployment.TrunkNumbers(kept.StreamTrunkID))
+}
+
+// The trunk lists another number before the forgotten one.
+func (s *AppsSuite) TestAForgottenLineIsFoundWhereverItsTrunkListsIt() {
+	e164, squatter, trunk, line := s.squatted()
+	other := aNumber()
+	s.Require().NoError(s.addOnATrunk(trunk, squatter, other))
+	_, err := trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: other, To: "+15550001111"})
+	s.Require().NoError(err)
+	s.NoError(s.deployment.PutOnTrunk(line.StreamTrunkID, other, e164))
+	s.moved(line, "deleted")
+
+	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: e164})
+
+	s.Require().NoError(err)
+	s.Equal([]string{other}, s.deployment.TrunkNumbers(line.StreamTrunkID))
+	s.Equal("phone-sip_trunk-"+squatter, s.deployment.TrunkName(line.StreamTrunkID))
 }
 
 // However a replayed delete, another call from the trunk and the buyer's attach fall, a later

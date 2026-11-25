@@ -403,6 +403,31 @@ func (s *Server) CapTrunks(n int) {
 	s.db.trunkCap = n
 }
 
+// PutOnTrunk has the trunk list the numbers, in that order, whatever its other trunks list, as an
+// app changed past the rule of one trunk per number would.
+func (s *Server) PutOnTrunk(id string, numbers ...string) error {
+	s.db.mu.Lock()
+	defer s.db.mu.Unlock()
+	trunk, ok := s.db.trunks[id]
+	if !ok {
+		return fmt.Errorf("chattest: no trunk %s", id)
+	}
+	listed := make([]any, 0, len(numbers))
+	for _, number := range numbers {
+		listed = append(listed, number)
+	}
+	trunk["numbers"] = listed
+	return nil
+}
+
+// TrunkName is the name the trunk was last written with.
+func (s *Server) TrunkName(id string) string {
+	s.db.mu.Lock()
+	defer s.db.mu.Unlock()
+	name, _ := s.db.trunks[id]["name"].(string)
+	return name
+}
+
 // TrunkNumbers are the numbers the trunk has now.
 func (s *Server) TrunkNumbers(id string) []string {
 	s.db.mu.Lock()

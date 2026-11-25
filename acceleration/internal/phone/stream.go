@@ -320,29 +320,42 @@ func (s *Stream) answering(ctx context.Context, e164, trunkID string) (rules, tr
 	return rules, trunks, holds, nil
 }
 
-// lines are the trunks the app has at Stream that list a number or have a rule made for it alone,
-// by id, each with the ids of those rules.
-func (s *Stream) lines(ctx context.Context, e164 string) (map[string][]string, error) {
-	listedTrunks, err := s.client.Video().ListSIPTrunks(ctx, &getstream.ListSIPTrunksRequest{})
+// listing are the trunks the app has at Stream that list a number.
+func (s *Stream) listing(ctx context.Context, e164 string) ([]string, error) {
+	listed, err := s.client.Video().ListSIPTrunks(ctx, &getstream.ListSIPTrunksRequest{})
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("phone: list sip trunks: %w", err))
 	}
-	lines := map[string][]string{}
-	for _, trunk := range listedTrunks.Data.SipTrunks {
+	var trunks []string
+	for _, trunk := range listed.Data.SipTrunks {
 		if slices.Contains(trunk.Numbers, e164) {
-			lines[trunk.ID] = nil
+			trunks = append(trunks, trunk.ID)
 		}
 	}
-	listedRules, err := s.client.Video().ListSIPInboundRoutingRule(ctx, &getstream.ListSIPInboundRoutingRuleRequest{})
+	return trunks, nil
+}
+
+// rulesOn are the rules the app has at Stream for one number on one trunk, the trunk with the id,
+// each with its number.
+func (s *Stream) rulesOn(ctx context.Context, trunkID string) (map[string]string, error) {
+	listed, err := s.client.Video().ListSIPInboundRoutingRule(ctx, &getstream.ListSIPInboundRoutingRuleRequest{})
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("phone: list sip routing rules: %w", err))
 	}
-	for _, rule := range listedRules.Data.SipInboundRoutingRules {
-		if len(rule.TrunkIds) == 1 && slices.Equal(rule.CalledNumbers, []string{e164}) {
-			lines[rule.TrunkIds[0]] = append(lines[rule.TrunkIds[0]], rule.ID)
+	rules := map[string]string{}
+	for _, rule := range listed.Data.SipInboundRoutingRules {
+		if slices.Equal(rule.TrunkIds, []string{trunkID}) && len(rule.CalledNumbers) == 1 {
+			rules[rule.ID] = rule.CalledNumbers[0]
 		}
 	}
-	return lines, nil
+	return rules, nil
+}
+
+// refused is Stream turning a request down for what it asks, such as a trunk naming a number
+// another trunk lists.
+func refused(err error) bool {
+	var answer *getstream.StreamError
+	return errors.As(err, &answer) && answer.StatusCode == http.StatusBadRequest
 }
 
 // notFound is Stream saying what was to be deleted or updated is not there: removed by hand

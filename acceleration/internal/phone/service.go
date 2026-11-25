@@ -1021,7 +1021,7 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		}
 		return attached, nil
 	}
-	if err := s.clearLinesFor(ctx, stream, held, pin); err != nil {
+	if err := s.clearLinesFor(ctx, held, pin); err != nil {
 		return Attached{}, err
 	}
 	// A number lined in another app is taken off there first: the customer's app is where
@@ -1064,7 +1064,7 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		return Attached{}, stack.Wrap(err)
 	}
 
-	trunkID, bridge, err := stream.CreateTrunk(ctx, Trunk{
+	trunkID, bridge, err := s.createTrunk(ctx, stream, pin, Trunk{
 		Name:       "phone-" + attachment.E164,
 		Numbers:    []string{attachment.E164},
 		AllowedIPs: allowedIPs,
@@ -1388,7 +1388,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 		request.Owner.OrganizationID = room.OrganizationID
 	}
 
-	if err := s.clearLinesFor(ctx, stream, held, pin); err != nil {
+	if err := s.clearLinesFor(ctx, held, pin); err != nil {
 		return Placed{}, err
 	}
 	line, shared, err := s.sharedLine(ctx, stream, pin, provider, held)
@@ -1426,7 +1426,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 		outbound.Bridge, outbound.CallID = line.Bridge, callID
 	} else {
 		var bridge Bridge
-		trunkID, bridge, err = stream.CreateTrunk(ctx, Trunk{
+		trunkID, bridge, err = s.createTrunk(ctx, stream, pin, Trunk{
 			Name:       "call-" + callID,
 			Numbers:    []string{request.From},
 			AllowedIPs: allowedIPs,
@@ -2115,15 +2115,8 @@ func (s *Service) sharedLine(ctx context.Context, stream *Stream, pin int64, pro
 // trunks hold it on, in the app pin names, before it is lined or attached there. Stream lists a
 // number on one trunk per app, so a line made for a trunk the number was added to before it was
 // bought would refuse the buyer's for good: its customer, which may no longer call from it there
-// (dialVendor), would never take it down. A number on the customer's own trunk takes nobody's. A
-// line no row here has any more is nobody's, and is taken down for either (clearForgottenLines).
-func (s *Service) clearLinesFor(ctx context.Context, stream *Stream, held store.PhoneNumber, pin int64) error {
-	// Lined in the app, the number is on the one trunk Stream lists it on there.
-	if held.StreamTrunkID == "" || held.StreamAppPK != pin {
-		if err := s.clearForgottenLines(ctx, stream, held.E164, pin); err != nil {
-			return err
-		}
-	}
+// (dialVendor), would never take it down. A number on the customer's own trunk takes nobody's.
+func (s *Service) clearLinesFor(ctx context.Context, held store.PhoneNumber, pin int64) error {
 	if held.Vendor == SIPTrunkVendor {
 		return nil
 	}
@@ -2139,37 +2132,69 @@ func (s *Service) clearLinesFor(ctx context.Context, stream *Stream, held store.
 	return nil
 }
 
-// clearForgottenLines takes a number off the trunks and rules made in the app for numbers on
-// customers' own trunks, where Stream has it and no row here does. A data move deletes a number's
-// row, gives it back or makes it another number's without reaching Stream, so only Stream still
-// knows the line.
-func (s *Service) clearForgottenLines(ctx context.Context, stream *Stream, e164 string, pin int64) error {
-	trunks, err := s.store.StreamTrunks.OfSIPTrunks(ctx, pin)
-	if err != nil || len(trunks) == 0 {
+// createTrunk makes a trunk for one number at Stream, past a forgotten line of the number's.
+func (s *Service) createTrunk(ctx context.Context, stream *Stream, pin int64, trunk Trunk) (string, Bridge, error) {
+	var id string
+	var bridge Bridge
+	err := s.pastForgottenLines(ctx, stream, pin, trunk.Numbers[0], func() (err error) {
+		id, bridge, err = stream.CreateTrunk(ctx, trunk)
 		return err
+	})
+	return id, bridge, err
+}
+
+// pastForgottenLines runs put, which puts a number on a trunk, and runs it once more when Stream
+// refused it and a forgotten line of the number's was taken down. Stream is asked what it lists only
+// then: a number it takes has no such line in its way, so asking first would let a list that
+// fails or hangs stop a call there is nothing to clear for. A list that fails leaves the refusal
+// the answer; a line Stream will not take down is an error of its own.
+func (s *Service) pastForgottenLines(ctx context.Context, stream *Stream, pin int64, e164 string, put func() error) error {
+	refusal := put()
+	if !refused(refusal) {
+		return refusal
 	}
-	lines, err := stream.lines(ctx, e164)
+	forgotten, err := s.forgottenTrunks(ctx, stream, pin, e164)
 	if err != nil {
-		return err
+		s.logger.Error("could not look for a number's forgotten line", "stream_app", pin, "error", err)
+		return refusal
 	}
-	for _, trunk := range trunks {
-		rules, ok := lines[trunk.ID]
-		if !ok {
-			continue
-		}
-		if err := s.clearForgotten(ctx, stream, trunk, e164, rules); err != nil {
+	var cleared bool
+	for _, trunk := range forgotten {
+		taken, err := s.clearForgotten(ctx, stream, trunk, e164)
+		if err != nil {
 			return err
 		}
+		cleared = cleared || taken
 	}
-	return nil
+	if !cleared {
+		return refusal
+	}
+	return put()
+}
+
+// forgottenTrunks are the trunks made in the app for numbers on customers' own trunks that Stream
+// lists the number on. A data move deletes a number's row, gives it back or makes it another
+// number's without reaching Stream, so only Stream still knows a line it left.
+func (s *Service) forgottenTrunks(ctx context.Context, stream *Stream, pin int64, e164 string) ([]store.StreamTrunk, error) {
+	trunks, err := s.store.StreamTrunks.OfSIPTrunks(ctx, pin)
+	if err != nil || len(trunks) == 0 {
+		return nil, err
+	}
+	listing, err := stream.listing(ctx, e164)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(trunks, func(t store.StreamTrunk) bool { return !slices.Contains(listing, t.ID) }), nil
 }
 
 // clearForgotten deletes a number's rules on a trunk and leaves the trunk with the numbers its
-// rows say, or deletes it when they are none. A number still held on the trunk is left as it is.
-// A failure leaves the trunk's row, to be found again by the next attach or call from the number.
-func (s *Service) clearForgotten(ctx context.Context, stream *Stream, trunk store.StreamTrunk, e164 string, rules []string) error {
+// rows say, or deletes it, with the rules of any number on it alone, when they are none. It answers
+// false for a number still held on the trunk, which it leaves as it is. A failure leaves the trunk's
+// row, to be found again by the next attach or call Stream refuses the number.
+func (s *Service) clearForgotten(ctx context.Context, stream *Stream, trunk store.StreamTrunk, e164 string) (bool, error) {
+	var cleared bool
 	group := store.TrunkGroup{CustomerID: trunk.CustomerID, StreamAppPK: trunk.StreamAppPK, Vendor: trunk.Vendor}
-	return s.inTrunkGroup(ctx, group, func(ctx context.Context, tx *store.TrunkGroupTx) error {
+	err := s.inTrunkGroup(ctx, group, func(ctx context.Context, tx *store.TrunkGroupTx) error {
 		trunks, err := tx.Trunks()
 		if err != nil {
 			return err
@@ -2178,26 +2203,29 @@ func (s *Service) clearForgotten(ctx context.Context, stream *Stream, trunk stor
 		if i < 0 || slices.Contains(trunks[i].Numbers, e164) {
 			return nil
 		}
-		for _, rule := range rules {
-			if err := stream.DeleteRoute(ctx, rule); err != nil {
+		held := trunks[i].Numbers
+		rules, err := stream.rulesOn(ctx, trunk.ID)
+		if err != nil {
+			return err
+		}
+		for id, number := range rules {
+			if number != e164 && len(held) > 0 {
+				continue
+			}
+			if err := stream.DeleteRoute(ctx, id); err != nil {
 				return err
 			}
 		}
-		if len(trunks[i].Numbers) == 0 {
+		cleared = true
+		if len(held) == 0 {
 			if err := stream.DeleteTrunk(ctx, trunk.ID); err != nil {
 				return err
 			}
 			return tx.DeleteTrunk(trunk.ID)
 		}
-		err = stream.UpdateTrunk(ctx, trunk.ID, Trunk{
-			Name: sharedTrunkName(trunk.Vendor, trunk.CustomerID), Numbers: trunks[i].Numbers,
-		})
-		// A trunk Stream no longer has lists the number nowhere.
-		if notFound(err) {
-			return nil
-		}
-		return err
+		return stream.UpdateTrunk(ctx, trunk.ID, Trunk{Name: sharedTrunkName(trunk.Vendor, trunk.CustomerID), Numbers: held})
 	})
+	return cleared, err
 }
 
 // evict takes another customer's line for a number down at Stream, and only then forgets it. A
@@ -2346,7 +2374,7 @@ func (s *Service) Transfer(ctx context.Context, request TransferRequest) (Dialed
 		callType = defaultCallType
 	}
 
-	if err := s.clearLinesFor(ctx, stream, held, request.StreamApp); err != nil {
+	if err := s.clearLinesFor(ctx, held, request.StreamApp); err != nil {
 		return Dialed{}, err
 	}
 	var line TrunkLine
@@ -2365,7 +2393,7 @@ func (s *Service) Transfer(ctx context.Context, request TransferRequest) (Dialed
 	if shared {
 		trunkID, routeID, bridge = line.TrunkID, line.RouteID, line.Bridge
 	} else {
-		trunkID, bridge, err = stream.CreateTrunk(ctx, Trunk{
+		trunkID, bridge, err = s.createTrunk(ctx, stream, request.StreamApp, Trunk{
 			Name:       "transfer-" + request.CallID,
 			Numbers:    []string{request.From},
 			AllowedIPs: allowedIPs,
