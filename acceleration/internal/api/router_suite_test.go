@@ -17,6 +17,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"math"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -528,6 +529,10 @@ type RouterSuite struct {
 	// manageOff builds the router with no manage key, as a deployment that never set
 	// ROUTER_AUTH_MANAGE_KEY has, for a suite about that to set before it starts the harness.
 	manageOff bool
+	// activityKey and previousActivityKey are what the activity paths take in X-Activity-Key,
+	// as ROUTER_AUTH_ACTIVITY_KEY and its _PREVIOUS are, for a suite about them to set before it
+	// starts the harness. Empty, as a deployment that never set them has.
+	activityKey, previousActivityKey string
 	// pricedFromDatabase seeds the price list from the embedded vendor list, as a router's
 	// first start does, and prices the LLM router's rows and the API from it, read every
 	// priceReload, for a suite about the price list to set before it starts the harness.
@@ -785,6 +790,7 @@ func (s *RouterSuite) SetupSuite() {
 		Gate:              s.gate,
 		OpsKey:            suiteOpsKey,
 		ManageKey:         manageKey,
+		ActivityKeys:      []string{s.activityKey, s.previousActivityKey},
 		Secrets:           s.sealer,
 		Knowledge:         knowledgeBase,
 		KnowledgeLimits:   s.knowledgeLimits,
@@ -1012,17 +1018,28 @@ func (s *RouterSuite) trigger(name, table, op, when, body string) (drop func()) 
 
 // failQueries makes each query that contains value fail, until the test ends.
 func (s *RouterSuite) failQueries(value string) {
+	s.failFirstQueries(value, math.MaxInt64)
+}
+
+// failFirstQueries makes the first n queries that contain value fail, and the ones after them
+// pass, until the test ends.
+func (s *RouterSuite) failFirstQueries(value string, n int64) {
+	s.failing.left.Store(n)
 	s.failing.value.Store(&value)
 	s.T().Cleanup(func() { s.failing.value.Store(nil) })
 }
 
-// failingQueries makes each query that contains a value fail. The query stops before Postgres
-// gets it, with the same error as when the database does not answer in time.
-type failingQueries struct{ value atomic.Pointer[string] }
+// failingQueries makes each query that contains a value fail, while it has failures left. The
+// query stops before Postgres gets it, with the same error as when the database does not answer
+// in time.
+type failingQueries struct {
+	value atomic.Pointer[string]
+	left  atomic.Int64
+}
 
 func (f *failingQueries) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
 	value := f.value.Load()
-	if value == nil || !strings.Contains(event.Query, *value) {
+	if value == nil || !strings.Contains(event.Query, *value) || f.left.Add(-1) < 0 {
 		return ctx
 	}
 	expired, cancel := context.WithDeadline(ctx, time.Time{})
@@ -2100,6 +2117,8 @@ func (s *RouterSuite) policies(logger *slog.Logger) *policy.Enforcer {
 type usageFront struct {
 	server *httptest.Server
 	down   atomic.Bool
+	// stalled, while set, takes each call and answers none until the channel is closed.
+	stalled atomic.Pointer[chan struct{}]
 }
 
 func newUsageFront(t *testing.T, service *usagetest.Service) *usageFront {
@@ -2109,6 +2128,13 @@ func newUsageFront(t *testing.T, service *usagetest.Service) *usageFront {
 	front := &usageFront{}
 	front.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if front.down.Load() {
+			panic(http.ErrAbortHandler)
+		}
+		if stalled := front.stalled.Load(); stalled != nil {
+			select {
+			case <-*stalled:
+			case <-r.Context().Done():
+			}
 			panic(http.ErrAbortHandler)
 		}
 		proxy.ServeHTTP(w, r)
@@ -2636,10 +2662,10 @@ func (d testData) backendOfAnotherApp() *testClient {
 // pointer because the absent key means something other than the zero one.
 func pointerTo[T any](value T) *T { return &value }
 
-// textSession asks for a conversation in writing, which needs no call.
+// textSession asks for a conversation in writing, which needs no call, on the default models,
+// so a device may open it as a backend does.
 func textSession(id *string) CreateSessionRequest {
-	target := "en-low-latency"
-	return CreateSessionRequest{Id: id, Llm: &target}
+	return CreateSessionRequest{Id: id}
 }
 
 // inProject lists the sessions in one project, which is how a test sharing a fixture's app

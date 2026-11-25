@@ -50,6 +50,8 @@ class Connector:
             sandbox (ConnectorSandbox | Unset): How code in an agent's sandbox reaches the provider's API with a
                 connection's credential.
             setup (ConnectorSetup | Unset): What a person does at the provider before the first consent.
+            sync_hash (str | Unset): The fingerprint of the file the CLI last synced onto this connector. Absent on a built-
+                in, and on a connector that was never synced or was written since by anything that is not a sync.
     """
 
     channel: bool
@@ -67,6 +69,7 @@ class Connector:
     redirect_uri: str | Unset = UNSET
     sandbox: ConnectorSandbox | Unset = UNSET
     setup: ConnectorSetup | Unset = UNSET
+    sync_hash: str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -122,6 +125,8 @@ class Connector:
         if not isinstance(self.setup, Unset):
             setup = self.setup.to_dict()
 
+        sync_hash = self.sync_hash
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -148,6 +153,8 @@ class Connector:
             field_dict["sandbox"] = sandbox
         if setup is not UNSET:
             field_dict["setup"] = setup
+        if sync_hash is not UNSET:
+            field_dict["sync_hash"] = sync_hash
 
         return field_dict
 
@@ -245,6 +252,8 @@ class Connector:
         else:
             setup = ConnectorSetup.from_dict(_setup)
 
+        sync_hash = d.pop("sync_hash", UNSET)
+
         connector = cls(
             channel=channel,
             client=client,
@@ -261,6 +270,7 @@ class Connector:
             redirect_uri=redirect_uri,
             sandbox=sandbox,
             setup=setup,
+            sync_hash=sync_hash,
         )
 
         connector.additional_properties = d

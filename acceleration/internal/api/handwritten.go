@@ -247,6 +247,9 @@ func documentHandWritten(api huma.API) {
 			"it is never run again, so a client that still wants the answer asks once more under a " +
 			"new request id. A session the router stopped on its way down closes a resumable socket " +
 			"with 1012 (service restart) rather than 1000, which is the cue to reconnect. A socket " +
+			"relayed from another node closes with 1011 (the relay to the session ended) when the " +
+			"watcher the node running the session held for it is given back while the session goes " +
+			"on: a resumable socket can reconnect to go on watching. A socket " +
 			"that does not ask to resume is sent the frames and the close it always was.",
 		Parameters: []*huma.Param{
 			{Name: "id", In: "path", Description: "The session, as returned when it was created.", Required: true, Schema: &huma.Schema{Type: huma.TypeString}},
@@ -280,7 +283,8 @@ func documentHandWritten(api huma.API) {
 			"`invalid_request`. `call_id` may be left out: the router makes " +
 			"one up for the records. A `text` session is refused, because the socket carries audio. " +
 			"A field that `createSession` refuses from an end user's device is refused here too: " +
-			"`history` and `call` are server-side only. A `call` is refused from a backend too, " +
+			"`history`, `instructions`, `call`, `phone`, the models and limits, `greeting` and `tags` are " +
+			"server-side only. A `call` is refused from a backend too, " +
 			"with an `error` frame carrying `code` and `error_type`: the socket carries the audio, " +
 			"so the session joins no Stream call.\n" +
 			"The server answers `session`, with the `Session` and the `sample_rate` in use. Then " +
