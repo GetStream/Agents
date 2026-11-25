@@ -376,3 +376,20 @@ func TestReinviteFromStreamAnsweredWithAFaxLineReachesStreamAudioOnly(t *testing
 	require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, got))
 	require.NotContains(t, string(got), "image")
 }
+
+func TestReinviteFromTheCustomerIsAnsweredWhateverItsLineEndings(t *testing.T) {
+	for name, offer := range lineEndings {
+		t.Run(name, func(t *testing.T) {
+			c, _, stream := newTestCall(t)
+			stream.reinviteAnswer = streamAnswerSDP
+
+			var got []byte
+			var err error
+			require.NotPanics(t, func() { got, err = c.onReinvite(t.Context(), customerSide, []byte(offer)) })
+
+			require.NoError(t, err)
+			require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+			requireAudioThenRejectedVideo(t, got)
+		})
+	}
+}

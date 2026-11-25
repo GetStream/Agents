@@ -318,3 +318,62 @@ func TestAnswerForPassesOnAnAnswerItDoesNotFit(t *testing.T) {
 		})
 	}
 }
+
+// twoStreamLines is an offer with an audio and a video line, one line per element.
+var twoStreamLines = []string{
+	"v=0", "o=- 1 1 IN IP4 1.1.1.1", "s=-", "c=IN IP4 1.1.1.1", "t=0 0",
+	"m=audio 30000 RTP/AVP 0", "a=rtpmap:0 PCMU/8000", "m=video 30002 RTP/AVP 96", "a=rtpmap:96 VP8/90000",
+}
+
+// lineEndings is twoStreamLines written with each way an SDP body may end its lines.
+var lineEndings = map[string]string{
+	"CRLF":                    strings.Join(twoStreamLines, "\r\n") + "\r\n",
+	"LF":                      strings.Join(twoStreamLines, "\n") + "\n",
+	"CR":                      strings.Join(twoStreamLines, "\r") + "\r",
+	"no final line ending":    strings.Join(twoStreamLines, "\r\n"),
+	"mixed":                   mixedEndings(twoStreamLines),
+	"bare CR after the audio": strings.Replace(strings.Join(twoStreamLines, "\r\n")+"\r\n", "0\r\na=rtpmap:0", "0\ra=rtpmap:0", 1),
+	"bare CR between m=":      "v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\rm=video 30002 RTP/AVP 96\r\n",
+}
+
+func mixedEndings(lines []string) string {
+	var b strings.Builder
+	for i, line := range lines {
+		b.WriteString(line + []string{"\r\n", "\n", "\r"}[i%3])
+	}
+	return b.String()
+}
+
+// requireAudioThenRejectedVideo checks an answer to a twoStreamLines offer: Stream's audio, then the
+// video line rejected.
+func requireAudioThenRejectedVideo(t *testing.T, answer []byte) {
+	t.Helper()
+	var got sdp.SessionDescription
+	require.NoError(t, got.Unmarshal(answer))
+	require.Len(t, got.MediaDescriptions, 2)
+	require.Equal(t, "audio", got.MediaDescriptions[0].MediaName.Media)
+	require.NotZero(t, got.MediaDescriptions[0].MediaName.Port.Value)
+	require.Equal(t, "video", got.MediaDescriptions[1].MediaName.Media)
+	require.Zero(t, got.MediaDescriptions[1].MediaName.Port.Value)
+}
+
+func TestAnswerForFitsAnOfferWhateverItsLineEndings(t *testing.T) {
+	answer := buildSDP(Media{Addr: "1.0.0.2", Port: 20000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, 2, 1)
+	for name, offer := range lineEndings {
+		t.Run(name, func(t *testing.T) {
+			var got []byte
+			require.NotPanics(t, func() { got = answerFor([]byte(offer), answer) })
+			requireAudioThenRejectedVideo(t, got)
+		})
+	}
+}
+
+func TestToStreamReadsAnOfferWhateverItsLineEndings(t *testing.T) {
+	for name, offer := range lineEndings {
+		t.Run(name, func(t *testing.T) {
+			got, err := toStream([]byte(offer), testTrunkAddr)
+			require.NoError(t, err)
+			require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, got))
+		})
+	}
+}

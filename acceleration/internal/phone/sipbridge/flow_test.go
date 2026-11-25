@@ -406,3 +406,19 @@ func TestFlowBConnectsACustomerAnswerWithAFaxLineAudioOnly(t *testing.T) {
 	require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcma, dtmfCodec}, Direction: DirSendRecv},
 		mediaOf(t, stream.body(3)))
 }
+
+func TestFlowAConnectsAnOfferWhateverItsLineEndings(t *testing.T) {
+	for name, offer := range lineEndings {
+		t.Run(name, func(t *testing.T) {
+			customer := &fakeLeg{inviteAnswer: []byte(offer)}
+			stream := &fakeLeg{inviteAnswer: streamAnswerSDP}
+
+			var err error
+			require.NotPanics(t, func() { _, err = flowA(t.Context(), flowConfig(), customer, stream) })
+
+			require.NoError(t, err)
+			require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+			requireAudioThenRejectedVideo(t, customer.body(1))
+		})
+	}
+}

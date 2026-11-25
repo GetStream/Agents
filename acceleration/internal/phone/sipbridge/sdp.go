@@ -173,22 +173,28 @@ var pionMedia = []string{"audio", "video", "text", "application", "message"}
 // would fail a call that has a usable audio line next to it. Such a line is read as an empty
 // m=application line, and the lines returned tell what it was, so an answer can still reject it by its
 // own type, protocol and formats.
+//
+// The parser ends some lines at a bare CR as well as at LF, so body is split at either and rejoined
+// with CRLF before it is parsed: the parser then sees exactly the m= lines returned, one each.
 func parseSDP(body []byte) (*sdp.SessionDescription, []string, error) {
 	var mLines []string
-	lines := strings.Split(string(body), "\n")
+	lines := strings.FieldsFunc(string(body), func(r rune) bool { return r == '\r' || r == '\n' })
 	for i, line := range lines {
-		rest, ok := strings.CutPrefix(strings.TrimSuffix(line, "\r"), "m=")
+		rest, ok := strings.CutPrefix(line, "m=")
 		if !ok {
 			continue
 		}
 		mLines = append(mLines, rest)
 		if name, _, _ := strings.Cut(rest, " "); !slices.Contains(pionMedia, name) {
-			lines[i] = "m=application 0 RTP/AVP 0\r"
+			lines[i] = "m=application 0 RTP/AVP 0"
 		}
 	}
 	var sd sdp.SessionDescription
-	if err := sd.Unmarshal([]byte(strings.Join(lines, "\n"))); err != nil {
+	if err := sd.Unmarshal([]byte(strings.Join(lines, "\r\n") + "\r\n")); err != nil {
 		return nil, nil, stack.Wrap(fmt.Errorf("parse sdp: %w", err))
+	}
+	if len(sd.MediaDescriptions) != len(mLines) {
+		return nil, nil, stack.Wrap(fmt.Errorf("parse sdp: %d media sections in %d m= lines", len(sd.MediaDescriptions), len(mLines)))
 	}
 	return &sd, mLines, nil
 }
@@ -341,7 +347,7 @@ func answerFor(offer, answer []byte) []byte {
 		return answer
 	}
 	o, mLines, err := parseSDP(offer)
-	if err != nil || len(o.MediaDescriptions) == 1 {
+	if err != nil || len(o.MediaDescriptions) == 1 || len(mLines) != len(o.MediaDescriptions) || at >= len(mLines) {
 		return answer
 	}
 	var a sdp.SessionDescription
