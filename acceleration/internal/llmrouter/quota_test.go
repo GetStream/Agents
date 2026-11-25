@@ -155,19 +155,23 @@ func (s *LLMQuotaSuite) TestWhatAResponseCostIsCountedOnceItHasSettled() {
 
 func (s *LLMQuotaSuite) TestAResponseIsCountedBeforeItsStreamEnds() {
 	// The next turn is admitted against the day as it stands when this one ends, so a debit
-	// left to land after the stream lets a caller who is quick enough in over the limit.
-	const landing = 300 * time.Millisecond
+	// counted only once its write lands lets a caller who is quick enough in over the limit.
+	// The stream does not wait for that write either: Redis may be a region away.
+	const landing = time.Second
 	session, provider := s.session(1, 0, s.caller)
 	limiter, err := quota.New(slowWrites{s.redis, landing}, quota.Limits{MessagesPerDay: 1}, nil, slog.Default())
 	s.Require().NoError(err)
+	defer limiter.Close()
 	session.quota = limiter
 	stream, err := session.Create(s.ctx, llm.ResponseParams{ID: "c1", Input: prompt()})
 	s.Require().NoError(err)
 
 	start := time.Now()
 	s.answer(provider, stream, 0, 10, 5)
+	_, err = session.Create(s.ctx, llm.ResponseParams{ID: "c2", Input: prompt()})
 
-	s.GreaterOrEqual(time.Since(start), landing, "the stream ended before its debit had landed")
+	s.Less(time.Since(start), landing, "the stream waited for its debit's write")
+	s.ErrorIs(err, quota.ErrExhausted)
 }
 
 func (s *LLMQuotaSuite) TestABackendIsNotLimited() {
