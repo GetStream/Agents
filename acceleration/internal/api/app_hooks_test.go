@@ -4,11 +4,15 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
@@ -135,6 +139,54 @@ func (s *AppHooksSuite) reaches(messages <-chan dispatch.Message) bool {
 	case <-time.After(dropped):
 		return false
 	}
+}
+
+// Every visitor of a browser chat that talks to one named agent has a session under the same
+// agent id, and a message hook finds a session by the agent id its channel is named after. A
+// visitor's conversation is a channel of session commands, which no hook answers, and a session
+// keeping its conversation takes no message from a hook, so what a visitor writes reaches only
+// their own session, through its id, and nothing reaches the newest visitor's.
+func (s *AppHooksSuite) TestAGuestsMessageReachesOnlyItsOwnSessionOfASharedAgentId() {
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
+	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 4})
+	defer release()
+	agentID := "agent-" + s.utils.uuid()
+	alice, bob := s.data.createGuest(), s.data.createGuest()
+	open := func(guest *testClient) Session {
+		backend := s.signedIn(jwt.MapClaims{"server": true}, auth.AuthTypeServer, server, "")
+		backend.header.Set(auth.UserHeader, guest.userID)
+		return backend.createSession(CreateSessionRequest{AgentId: &agentID, Agent: &config.Name})
+	}
+	alices, bobs := open(alice), open(bob)
+	s.Require().Equal(alices.AgentId, bobs.AgentId)
+
+	for _, channel := range []string{value(alices.ConversationId), "agent:" + agentID} {
+		s.Equal(http.StatusOK, s.fromApp(s.appPath("/v1/chat/hooks/stream"), s.writtenBy(alice.userID, channel)))
+		s.False(s.reaches(worker.Messages()), "a message in %s is handed to no session", channel)
+	}
+	s.Require().Equal(http.StatusAccepted, alice.do(http.MethodPost, "/v1/agents/sessions/"+alices.Id+"/responses",
+		CreateResponseRequest{Text: "Is my order on its way?", RequestId: pointerTo(s.utils.uuid())}, nil))
+
+	s.Require().Eventually(func() bool { return len(s.chat.Stored(value(alices.ConversationId))) >= 2 },
+		settleFor, 20*time.Millisecond, "the turn and its reply are kept in the guest's own conversation")
+	s.Empty(s.chat.Stored(value(bobs.ConversationId)), "nothing reaches the other guest's conversation")
+}
+
+// writtenBy is the message.new for a message the user wrote in the channel (type:id), with the
+// custom data the fake Chat holds for it.
+func (s *AppHooksSuite) writtenBy(user, cid string) string {
+	custom := []byte("{}")
+	if held, found := s.chat.Channel(cid); found && held["custom"] != nil {
+		var err error
+		custom, err = json.Marshal(held["custom"])
+		s.Require().NoError(err)
+	}
+	return fmt.Sprintf(`{
+  "type": "message.new", "channel_id": %q, "channel_type": "agent", "created_at": %q, "channel_custom": %s,
+  "message": {"id": %q, "text": "is my order on its way?", "user": {"id": %q, "name": "Sam"}}
+}`, strings.TrimPrefix(cid, "agent:"), time.Now().UTC().Format(time.RFC3339Nano), custom, "message-"+s.utils.uuid(), user)
 }
 
 func (s *AppHooksSuite) TestAMessageHookTheGatewayVouchedForIsDispatched() {
