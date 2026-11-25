@@ -83,12 +83,17 @@ func (r *CallHomes) anotherElsewhere(ctx context.Context, db bun.IDB, scope AppS
 
 // record makes this shard the home of a customer's call in app, unless it has one.
 func (r *CallHomes) record(ctx context.Context, customerID string, app int64, callType, callID string) error {
+	return r.recordWith(ctx, r.store.global, customerID, app, callType, callID)
+}
+
+// recordWith is record with db, the shared database or a transaction of it.
+func (r *CallHomes) recordWith(ctx context.Context, db bun.IDB, customerID string, app int64, callType, callID string) error {
 	if !r.store.homed {
 		return nil
 	}
 	home := CallHome{CallID: callID, CallType: callType, StreamAppPK: app, CustomerID: customerID,
 		Shard: r.store.ShardName(), OpenedAt: time.Now().UTC()}
-	if _, err := r.store.global.NewInsert().Model(&home).On("CONFLICT DO NOTHING").Exec(ctx); err != nil {
+	if _, err := db.NewInsert().Model(&home).On("CONFLICT DO NOTHING").Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: record call home: %w", err))
 	}
 	return nil

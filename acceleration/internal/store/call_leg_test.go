@@ -794,7 +794,7 @@ func (s *StoreSuite) TestADialNamingNoOrganizationKeepsTheOneTheCallWasPlacedUnd
 
 // ownerOf is the customer the call is, read as Claim reads it.
 func (s *StoreSuite) ownerOf(scope AppScope, callID string) string {
-	owner, err := s.store.CallLegs.owner(s.ctx, scope, "agent", callID)
+	owner, err := s.store.CallLegs.owner(s.ctx, s.store.shard, scope, "agent", callID)
 	s.Require().NoError(err)
 	return owner
 }
@@ -873,7 +873,7 @@ func (s *StoreSuite) TestACallIsTheCustomersWhoseLegWasDialledOnItFirst() {
 	s.Equal("first", s.ownerOf(AppScope{Unpinned: true}, "call"))
 	s.Equal("a", s.ownerOf(AppScope{Unpinned: true}, "tied"))
 	s.Empty(s.ownerOf(AppScope{Unpinned: true}, "another call"))
-	other, err := s.store.CallLegs.owner(s.ctx, AppScope{Unpinned: true}, "default", "call")
+	other, err := s.store.CallLegs.owner(s.ctx, s.store.shard, AppScope{Unpinned: true}, "default", "call")
 	s.Require().NoError(err)
 	s.Empty(other, "a call of another type")
 }
@@ -1255,4 +1255,32 @@ func (s *ShardedStoreSuite) TestACallWhoseHomesCannotBeReadIsNotClaimed() {
 	}))
 
 	s.False(held)
+}
+
+// A claim waits on no second connection of the pool it holds one of: more of them than the pool
+// has connections all go through.
+func (s *StoreSuite) TestMoreNamedCallsThanThePoolHasConnectionsAreAllPlaced() {
+	router := s.ownRouter()
+	router.global.SetMaxOpenConns(2)
+	on := NamedCall{Scope: AppScope{Unpinned: true}}
+	errs := make([]error, 24)
+	var wg sync.WaitGroup
+	for i := range errs {
+		wg.Go(func() {
+			call := fmt.Sprintf("call-%d", i)
+			switch i % 3 {
+			case 0:
+				errs[i] = router.CallLegs.Claim(s.ctx, "app", "agent", call, on, func(context.Context) error { return nil })
+			case 1:
+				errs[i] = s.placesWith(router, "app", call, on, nil)
+			default:
+				errs[i] = s.placesWith(router, "app", call, on, &CallsAtOnce{Limit: 100, Ringing: time.Hour})
+			}
+		})
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		s.NoError(err)
+	}
 }

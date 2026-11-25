@@ -478,7 +478,7 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return err
 		}},
 		{name: "CallLegs.Claim", index: "call_legs_call_idx", run: func(ctx context.Context, store *Store) error {
-			_, err := store.CallLegs.owner(ctx, AppScope{App: 3}, "default", "stream-101")
+			_, err := store.CallLegs.owner(ctx, store.shard, AppScope{App: 3}, "default", "stream-101")
 			return err
 		}},
 		{name: "CallLegs.HasParticipant", index: "call_legs_participant_idx", run: func(ctx context.Context, store *Store) error {
