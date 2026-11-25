@@ -1000,7 +1000,9 @@ func (s *SyncSuite) TestASyncRefusedForASkillLeavesItsConfigAsItWas() {
 	s.Equal([]string{"pdf"}, value(config.Skills))
 	s.Equal(value(kept.Config.SyncHash), value(config.SyncHash))
 	s.Equal("v1", value(config.SyncHash))
-	s.Empty(s.skillNamed(config.Id, "extra").Id)
+	var skills []Skill
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/skills?config_id="+config.Id, nil, &skills))
+	s.Len(skills, 1)
 	s.Empty(s.configsNamed("fresh"))
 }
 
