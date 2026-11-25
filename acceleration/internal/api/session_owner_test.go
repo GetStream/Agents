@@ -14,6 +14,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // SessionOwnershipSuite covers whose conversation a session is: who reaches it, who is
@@ -303,6 +305,133 @@ func (s *SessionOwnershipSuite) TestABackendReadsTheConversationOfTheUserItNames
 	s.Equal(http.StatusOK, backend.do(http.MethodGet, conversation+"/commands/"+asked+"?agent_id="+opened.AgentId, nil, nil))
 }
 
+// A conversation made before channels recorded their owner's kind is its owner's by id alone, so
+// a guest going by a signed-in user's id carries it on. Once the backfill records the kind, the
+// guest is refused, their backend reads it, and the user carries it on.
+func (s *SessionOwnershipSuite) TestABackfilledUsersConversationIsRefusedToAGuestOfTheirId() {
+	alice := s.data.createUser()
+	opened := s.withNoKindRecorded(s.ended(alice), alice.userID)
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindStamped: 1}, s.backfilled(true))
+
+	s.refusesToCarryOn(s.guestNamed(alice.userID), opened)
+	s.Equal(http.StatusOK, s.backendFor(alice.userID).do(http.MethodGet, messagesOf(opened), nil, nil))
+	s.carriesOn(alice, opened)
+}
+
+// The same for a guest's conversation and a signed-in user of the guest's id.
+func (s *SessionOwnershipSuite) TestABackfilledGuestsConversationIsRefusedToAUserOfTheirId() {
+	guest := s.data.createGuest()
+	opened := s.withNoKindRecorded(s.ended(guest), guest.userID)
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindStamped: 1}, s.backfilled(true))
+
+	s.refusesToCarryOn(s.data.signedInAs(guest.userID), opened)
+	s.carriesOn(guest, opened)
+}
+
+// A guest whose token said the role came back from a refresh with a token that said none, before
+// a refreshed token kept it, and held a conversation as a signed-in user. Their token says the role
+// again now, so that conversation is left as it is, and they carry it on.
+func (s *SessionOwnershipSuite) TestAConversationAGuestHeldWithATokenOfNoRoleIsLeftAlone() {
+	id := s.utils.uuid()
+	s.heldAs(s.ended(s.guestNamed(id)), id, auth.KindGuest)
+	opened := s.withNoKindRecorded(s.ended(s.data.signedInAs(id)), id)
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{
+		conversation.OwnerKindLeftAlone: 1, conversation.OwnerKindRecorded: 1,
+	}, s.backfilled(true))
+
+	s.carriesOn(s.guestNamed(id), opened)
+}
+
+// Sessions of two kinds of caller under the owner's id leave the channel as it is: nothing says
+// which of them it was made for.
+func (s *SessionOwnershipSuite) TestAConversationTwoKindsOfCallerHeldUnderItsOwnersIdIsLeftAlone() {
+	alice := s.data.createUser()
+	opened := s.withNoKindRecorded(s.ended(s.backendFor(alice.userID)), alice.userID)
+	s.carriesOn(alice, opened)
+	s.heldAs(opened, alice.userID, auth.KindAuthenticated)
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindLeftAlone: 1}, s.backfilled(true))
+
+	s.False(s.kindRecorded(opened))
+}
+
+// A row naming another customer's conversation, as one an import brought may, leaves its channel
+// as it is: the channel says whose it is.
+func (s *SessionOwnershipSuite) TestAnotherCustomersConversationARowNamesIsLeftAsItIs() {
+	alice := s.data.createUser()
+	theirs := s.withNoKindRecorded(s.ended(alice), alice.userID)
+	s.useApp(s.data.createApp())
+	s.Require().NoError(s.store.Sessions.Upsert(s.T().Context(), &store.AgentSession{
+		ID: "session-" + s.utils.uuid(), CustomerID: s.customerID(), ConversationID: *theirs.ConversationId,
+		UserID: alice.userID, CallerKind: string(auth.KindAuthenticated),
+	}))
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindNoOwner: 1}, s.backfilled(true))
+
+	s.False(s.kindRecorded(theirs))
+}
+
+// An anonymous caller's own conversation is left as it is: the name it went by is one nobody
+// checked.
+func (s *SessionOwnershipSuite) TestAnAnonymousCallersConversationIsLeftAlone() {
+	someone := s.data.createAnonymous()
+	opened := s.withNoKindRecorded(s.ended(someone), someone.userID)
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindLeftAlone: 1}, s.backfilled(true))
+
+	s.False(s.kindRecorded(opened))
+}
+
+// A conversation whose session was deleted is not walked: its channel outlives the session, and
+// no session is left to say whose it was.
+func (s *SessionOwnershipSuite) TestAConversationWhoseSessionWasDeletedIsLeftAsItIs() {
+	alice := s.data.createUser()
+	opened := s.withNoKindRecorded(s.ended(alice), alice.userID)
+	alice.deleteSession(opened.Id)
+
+	s.Empty(s.backfilled(true))
+
+	s.False(s.kindRecorded(opened))
+}
+
+// A claimed guest's sessions are the account's now, under its own id, while the channel still
+// names the guest: no session of the owner's id is left, and the channel is left as it is.
+func (s *SessionOwnershipSuite) TestAClaimedGuestsConversationIsLeftAlone() {
+	guest := s.data.createGuest()
+	opened := s.withNoKindRecorded(s.ended(guest), guest.userID)
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/guests/claim",
+		ClaimGuestRequest{GuestId: guest.userID, UserId: s.utils.uuid()}, nil))
+
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindLeftAlone: 1}, s.backfilled(true))
+
+	s.False(s.kindRecorded(opened))
+}
+
+// Without being told to write, the backfill only says what it would do; told to, it records the
+// kind once, and a second run finds it recorded. A channel that recorded its owner's kind when it
+// was made keeps it.
+func (s *SessionOwnershipSuite) TestTheBackfillWritesOnlyWhenToldAndOnce() {
+	alice := s.data.createUser()
+	opened := s.withNoKindRecorded(s.ended(alice), alice.userID)
+	guest := s.data.createGuest()
+	guests := s.ended(guest)
+	s.heldAs(guests, guest.userID, auth.KindGuest)
+
+	dry := s.backfilled(false)
+	s.False(s.kindRecorded(opened))
+	written := s.backfilled(true)
+	again := s.backfilled(true)
+
+	recorded := map[conversation.OwnerKindBackfill]int{conversation.OwnerKindStamped: 1, conversation.OwnerKindRecorded: 1}
+	s.Equal(recorded, dry)
+	s.Equal(recorded, written)
+	s.Equal(map[conversation.OwnerKindBackfill]int{conversation.OwnerKindRecorded: 2}, again)
+	s.refusesToCarryOn(s.data.signedInAs(guest.userID), guests)
+}
+
 func (s *SessionOwnershipSuite) TestAnAnonymousCallerReachesTheSessionItOpenedAndNotAnothers() {
 	// Anonymous is a supported way to hold a conversation, not a way to be refused one:
 	// the name is unverified, so it is kept apart from every verified user of the same
@@ -523,6 +652,49 @@ func (s *SessionOwnershipSuite) refusesToCarryOn(caller *testClient, opened Sess
 
 	s.Equal(http.StatusBadRequest, status, "%s", body)
 	s.Contains(string(body), "another user")
+}
+
+// withNoKindRecorded is opened as a channel made before channels recorded their owner's kind
+// keeps it, once the store holds its session of owner's.
+func (s *SessionOwnershipSuite) withNoKindRecorded(opened Session, owner string) Session {
+	s.Require().Eventually(func() bool {
+		kinds, err := s.store.Sessions.CallerKinds(s.T().Context(), s.customerID(), *opened.ConversationId, owner)
+		return err == nil && len(kinds) > 0
+	}, 5*time.Second, 20*time.Millisecond)
+	s.chat.ForgetCustom(*opened.ConversationId, "support_owner_kind")
+	return opened
+}
+
+// heldAs waits until the store holds a session of kind of owner's on opened's conversation.
+func (s *SessionOwnershipSuite) heldAs(opened Session, owner string, kind auth.Kind) {
+	s.Require().Eventually(func() bool {
+		kinds, err := s.store.Sessions.CallerKinds(s.T().Context(), s.customerID(), *opened.ConversationId, owner)
+		return err == nil && slices.Contains(kinds, string(kind))
+	}, 5*time.Second, 20*time.Millisecond)
+}
+
+// backfilled records the owner's kind on the app's conversations made before channels recorded
+// it, as router conversations backfill-owner-kinds does, and says what came of each.
+func (s *SessionOwnershipSuite) backfilled(write bool) map[conversation.OwnerKindBackfill]int {
+	service, err := s.manager.Conversations()
+	s.Require().NoError(err)
+	counted, err := service.BackfillOwnerKinds(s.T().Context(), s.store, s.customerID(), write)
+	s.Require().NoError(err)
+	return counted
+}
+
+// kindRecorded reports whether opened's channel records its owner's kind.
+func (s *SessionOwnershipSuite) kindRecorded(opened Session) bool {
+	data, found := s.chat.Channel(*opened.ConversationId)
+	s.Require().True(found)
+	custom, _ := data["custom"].(map[string]any)
+	_, recorded := custom["support_owner_kind"]
+	return recorded
+}
+
+// messagesOf is where opened's conversation is read back.
+func messagesOf(opened Session) string {
+	return "/v1/agents/conversations/" + *opened.ConversationId + "/messages?agent_id=" + opened.AgentId
 }
 
 // titled is a written session with a title a search can find it by.

@@ -396,7 +396,9 @@ A persistent conversation is matched the same way. Its channel records whose it 
 sort of caller that was (`support_owner_id`, `support_owner_kind`), and opening it or reading it
 back needs the user id to match and the kind to reach it as above; a backend names the user.
 Another member of a shared conversation has to be a verified user. A channel made before
-`support_owner_kind` keeps the access its owner had. `internal/conversation` enforces this.
+`support_owner_kind` keeps the access its owner had, until `router conversations
+backfill-owner-kinds --write` records the one verified kind its owner's sessions on it agree on
+(left alone otherwise). `internal/conversation` enforces this.
 
 `internal/session` enforces whose a session is rather than the handlers, so `getSession`,
 `stopSession`, `deleteSession`, the events socket, the call token and the session actions cannot each be

@@ -1,0 +1,135 @@
+package conversation
+
+import (
+	"context"
+	"fmt"
+
+	getstream "github.com/GetStream/getstream-go/v5"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
+)
+
+// OwnerKindBackfill is what BackfillOwnerKinds did with a conversation's channel.
+type OwnerKindBackfill string
+
+const (
+	// OwnerKindStamped is a channel that records its owner's kind now (with write, or would).
+	OwnerKindStamped OwnerKindBackfill = "stamped"
+	// OwnerKindRecorded is a channel that recorded its owner's kind already.
+	OwnerKindRecorded OwnerKindBackfill = "already recorded"
+	// OwnerKindNoOwner is a conversation with no channel of the customer's naming an owner: not
+	// an agent channel, gone, another customer's, or a backend's for nobody.
+	OwnerKindNoOwner OwnerKindBackfill = "no owner"
+	// OwnerKindLeftAlone is a channel left as it is, for want of one kind its owner's next
+	// token is sure to prove (backfillOwnerKind).
+	OwnerKindLeftAlone OwnerKindBackfill = "left alone"
+	// OwnerKindFailed is a channel that could not be read or written.
+	OwnerKindFailed OwnerKindBackfill = "failed"
+)
+
+// backfillPage is how many conversations BackfillOwnerKinds reads from the store at once.
+const backfillPage = 500
+
+// BackfillOwnerKinds records the owner's kind on the channels of the conversations this shard's
+// sessions held that were made before channels recorded it (ownerKindField), only customer's when
+// it is not empty. Without write it only says what it would do. It says how many channels came to
+// each outcome. A channel that fails is logged and counted, and the walk goes on; the error then
+// says how many did.
+func (s *Service) BackfillOwnerKinds(ctx context.Context, held *store.Store, customer string, write bool) (map[OwnerKindBackfill]int, error) {
+	counted := map[OwnerKindBackfill]int{}
+	var after store.HeldConversation
+	for {
+		page, err := held.Sessions.HeldConversations(ctx, customer, after, backfillPage)
+		if err != nil {
+			return counted, err
+		}
+		for _, conversation := range page {
+			outcome, err := s.backfillOwnerKind(ctx, held, conversation.CustomerID, conversation.ConversationID, write)
+			if err != nil {
+				s.logger.Warn("could not record the owner's kind on a conversation's channel",
+					"customer", conversation.CustomerID, "conversation", conversation.ConversationID, "error", err)
+			}
+			counted[outcome]++
+		}
+		if len(page) < backfillPage {
+			break
+		}
+		after = page[len(page)-1]
+	}
+	if failed := counted[OwnerKindFailed]; failed > 0 {
+		return counted, stack.Wrap(fmt.Errorf("conversation: %d channels could not be read or written", failed))
+	}
+	return counted, nil
+}
+
+// backfillOwnerKind records the owner's kind on a customer's conversation's channel, when it has
+// none, as the kind of caller every one of the owner's sessions on it was, on any shard.
+//
+// A channel with no kind recorded is its owner's by id alone, so a guest and a signed-in user of
+// one id each reach the other's. A recorded kind is one the owner's next token has to prove
+// (auth.Kind.Reaches), so it is recorded only when the sessions leave no doubt of it, and the
+// channel is left as it is otherwise:
+//   - sessions of more than one kind, or of none: one may be somebody else's going by the id,
+//     and a deleted session leaves its channel behind;
+//   - an anonymous caller's, whose name nobody checked;
+//   - a signed-in user's of an id a guest whose token said the role held a session under
+//     (Sessions.HeldAsGuest): before a refreshed guest token kept the role, such a guest came back
+//     from a refresh as a signed-in user, and their token says the role again now.
+func (s *Service) backfillOwnerKind(ctx context.Context, held *store.Store, customer, cid string, write bool) (OwnerKindBackfill, error) {
+	channelType, id := channelOf(cid)
+	if channelType != streamapp.AgentChannelType {
+		return OwnerKindNoOwner, nil
+	}
+	client, _, err := s.clientFor(ctx, customer, cid)
+	if err != nil {
+		return OwnerKindFailed, stack.Wrap(err)
+	}
+	one, none := 1, 0
+	found, err := client.Chat().QueryChannels(ctx, &getstream.QueryChannelsRequest{
+		FilterConditions: map[string]any{"cid": cid}, Limit: &one, MessageLimit: &none,
+	})
+	if err != nil {
+		return OwnerKindFailed, stack.Wrap(err)
+	}
+	if len(found.Data.Channels) == 0 || found.Data.Channels[0].Channel == nil {
+		return OwnerKindNoOwner, nil
+	}
+	custom := found.Data.Channels[0].Channel.Custom
+	owner, _ := custom["support_owner_id"].(string)
+	// A row may name a conversation in an app another customer shares, as an import may bring
+	// one: the channel says whose it is, as ownedBy reads it.
+	if custom[CustomerField] != customer || owner == "" {
+		return OwnerKindNoOwner, nil
+	}
+	if _, recorded := custom[ownerKindField]; recorded {
+		return OwnerKindRecorded, nil
+	}
+	kinds, err := held.Sessions.CallerKinds(ctx, customer, cid, owner)
+	if err != nil {
+		return OwnerKindFailed, err
+	}
+	if len(kinds) != 1 || !auth.Kind(kinds[0]).Verified() {
+		return OwnerKindLeftAlone, nil
+	}
+	kind := auth.Kind(kinds[0])
+	if kind == auth.KindAuthenticated {
+		guest, err := held.Sessions.HeldAsGuest(ctx, customer, owner)
+		if err != nil {
+			return OwnerKindFailed, err
+		}
+		if guest {
+			return OwnerKindLeftAlone, nil
+		}
+	}
+	if write {
+		if _, err := client.Chat().UpdateChannelPartial(ctx, channelType, id, &getstream.UpdateChannelPartialRequest{
+			Set: map[string]any{ownerKindField: kind}, Unset: []string{},
+		}); err != nil {
+			return OwnerKindFailed, stack.Wrap(err)
+		}
+	}
+	return OwnerKindStamped, nil
+}

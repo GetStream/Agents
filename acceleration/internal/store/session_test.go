@@ -1683,3 +1683,50 @@ func (s *StoreSuite) TestATurnOfExactlyTheCeilingIsKeptWhole() {
 	s.Require().NoError(err)
 	s.Equal(len(exact), len(response.Said), "a turn of exactly 256 KiB is not cut")
 }
+
+// The conversations sessions held are walked a page at a time, each once and in order, and a
+// customer's alone when one is named.
+func (s *StoreSuite) TestHeldConversationsAreWalkedAPageAtATimeEachOnce() {
+	for i, held := range []HeldConversation{
+		{"acme", "agent:b"}, {"acme", "agent:a"}, {"acme", "agent:a"}, {"globex", "agent:a"}, {"acme", ""},
+	} {
+		s.opened(fmt.Sprintf("session-%d", i), held.CustomerID, time.Now(), func(row *AgentSession) {
+			row.ConversationID = held.ConversationID
+		})
+	}
+
+	var walked []HeldConversation
+	var after HeldConversation
+	for {
+		page, err := s.store.Sessions.HeldConversations(s.ctx, "", after, 2)
+		s.Require().NoError(err)
+		walked = append(walked, page...)
+		if len(page) < 2 {
+			break
+		}
+		after = page[len(page)-1]
+	}
+	acmes, err := s.store.Sessions.HeldConversations(s.ctx, "acme", HeldConversation{}, 10)
+	s.Require().NoError(err)
+
+	s.Equal([]HeldConversation{{"acme", "agent:a"}, {"acme", "agent:b"}, {"globex", "agent:a"}}, walked)
+	s.Equal([]HeldConversation{{"acme", "agent:a"}, {"acme", "agent:b"}}, acmes)
+}
+
+// The kinds of caller that held a conversation under a user id are each said once, and only
+// that user's.
+func (s *StoreSuite) TestTheKindsOfCallerThatHeldAConversationUnderAnIdAreThatIdsEachOnce() {
+	for i, kind := range []string{"authenticated", "guest", "guest"} {
+		s.opened(fmt.Sprintf("session-%d", i), "acme", time.Now(), func(row *AgentSession) {
+			row.ConversationID, row.UserID, row.CallerKind = "agent:a", "alice", kind
+		})
+	}
+	s.opened("session-bob", "acme", time.Now(), func(row *AgentSession) {
+		row.ConversationID, row.UserID, row.CallerKind = "agent:a", "bob", "server"
+	})
+
+	kinds, err := s.store.Sessions.CallerKinds(s.ctx, "acme", "agent:a", "alice")
+
+	s.Require().NoError(err)
+	s.ElementsMatch([]string{"authenticated", "guest"}, kinds)
+}
