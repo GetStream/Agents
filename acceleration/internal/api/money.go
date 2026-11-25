@@ -94,8 +94,8 @@ type moneyAnswer struct {
 func (m moneyAnswer) GetHeaders() http.Header { return m.headers }
 
 // refusedRequest is a request routing refused, as the caller is told it: a refusal about money
-// as moneyError says, a mistake of the caller's own (callerMistakes) as theirs to change, and a
-// feature the deployment lacks, its own Stream app's keys included (unkeptAnswer), as not
+// as moneyError says, a mistake of the caller's own (callerMistakes) as theirs to change, a
+// conversation another session holds open as a conflict, and a feature the deployment lacks, its own Stream app's keys included (unkeptAnswer), as not
 // configured. Anything else is ours to answer for, such as a database that failed, whose text
 // names where the database is: the error goes on as is, so Huma logs it with its stack and
 // tells the caller only that something went wrong.
@@ -116,6 +116,8 @@ func refusedRequest(err error) error {
 		return errNoMemory
 	case errors.Is(err, session.ErrNotConfigured):
 		return notConfigured(err.Error())
+	case errors.Is(err, conversation.ErrAlreadyOpen):
+		return conflict(err.Error())
 	case callerMistake(err):
 		return invalidRequest(err.Error())
 	}

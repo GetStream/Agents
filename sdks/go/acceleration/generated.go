@@ -11766,7 +11766,7 @@ type ListCallsParams struct {
 
 // GetCallEventsParams defines parameters for GetCallEvents.
 type GetCallEventsParams struct {
-	// Limit How many to return, oldest first.
+	// Limit How many to return, oldest first. Up to the 10000 a call keeps.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
@@ -12085,7 +12085,9 @@ type ListResponseSiblingsParamsOf string
 type ListSimulationRunsParams struct {
 	SimulationId *string                        `form:"simulation_id,omitempty" json:"simulation_id,omitempty"`
 	State        *ListSimulationRunsParamsState `form:"state,omitempty" json:"state,omitempty"`
-	Limit        *int                           `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Limit Up to 500. Omitted is 50.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // ListSimulationRunsParamsState defines parameters for ListSimulationRuns.

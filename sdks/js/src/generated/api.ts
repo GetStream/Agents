@@ -12444,7 +12444,7 @@ export interface operations {
     readonly getCallEvents: {
         readonly parameters: {
             readonly query?: {
-                /** @description How many to return, oldest first. */
+                /** @description How many to return, oldest first. Up to the 10000 a call keeps. */
                 readonly limit?: number;
             };
             readonly header?: never;
@@ -13536,7 +13536,7 @@ export interface operations {
                     readonly "text/plain": string;
                 };
             };
-            /** @description That is not this line's verify token */
+            /** @description The query is not this line's check: another mode or verify token, a challenge that is not digits, or a line that is not WhatsApp's */
             readonly 403: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -17111,7 +17111,7 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
-            /** @description A session with that id already exists, or the call placed for this phone session ended without an answer (call_unanswered) */
+            /** @description A session with that id already exists, another session holds the conversation it names open, or the call placed for this phone session ended without an answer (call_unanswered) */
             readonly 409: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -18244,6 +18244,7 @@ export interface operations {
     readonly listSimulationRuns: {
         readonly parameters: {
             readonly query?: {
+                /** @description Up to 500. Omitted is 50. */
                 readonly limit?: number;
                 readonly simulation_id?: string;
                 readonly state?: "running" | "passed" | "failed" | "cancelled" | "errored";
