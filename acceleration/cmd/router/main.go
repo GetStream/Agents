@@ -2217,12 +2217,7 @@ func buildSessions(
 	if err := sandboxBroker(settings.CodeSandbox, liveClient, &options); err != nil {
 		return nil, err
 	}
-	// A nil *policy.Enforcer in the interface would not be a nil interface.
-	var gate routing.Gate
-	if policies != nil {
-		gate = policies
-	}
-	options.Sandboxes = newSandboxes(settings, usageWriter, prices, keys, gate, logger)
+	options.Sandboxes = newSandboxes(settings, usageWriter, prices, keys, policies, logger)
 	options.SandboxLimits = policies
 	options.ResumeHistories = policies
 	return session.NewManager(options)

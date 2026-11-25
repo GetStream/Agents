@@ -109,8 +109,9 @@ type Options struct {
 	Slots sandbox.Slots
 	// Admit refuses a sandbox its owner may not pay for. It is asked before each piece of work
 	// in the sandbox, which its refusal refuses before anything is made or started again, and
-	// every AdmitEvery while the sandbox runs; running says it runs already, and a refusal of
-	// one that does stops it, as one stopped for idling. Nil admits every sandbox.
+	// every AdmitEvery while the sandbox runs, idle or running code; running says it runs
+	// already, and a refusal of one that does stops it, as one stopped for idling, ending the
+	// code it runs. Nil admits every sandbox.
 	Admit func(ctx context.Context, running bool) error
 	// AdmitEvery is how often a running sandbox is admitted again. Zero is a minute.
 	AdmitEvery time.Duration
@@ -269,7 +270,7 @@ func (s *Sandbox) Ready(ctx context.Context) (int, error) {
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
-	err := s.use(ctx, func() error { return nil })
+	err := s.use(ctx, func(context.Context) error { return nil })
 	return s.generation, err
 }
 
@@ -287,7 +288,7 @@ func (s *Sandbox) Run(ctx context.Context, code string, outputs []string) (sandb
 		defer s.endRun(ctx)
 	}
 	var ran *types.ExecuteResponse
-	err := s.use(ctx, func() error {
+	err := s.use(ctx, func(ctx context.Context) error {
 		env := s.mount.RunEnv
 		if s.broker != nil {
 			// A hung refresh holds the gate, so it is bounded as a check is.
@@ -403,7 +404,7 @@ func (s *Sandbox) Write(ctx context.Context, name string, data []byte) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	return s.use(ctx, func() error {
+	return s.use(ctx, func(ctx context.Context) error {
 		// A hung upload holds the gate, so it is bounded as a check is: a built sandbox's timeout
 		// is the 20 minutes a build may take, and a skill's files are written one by one.
 		write, end := context.WithTimeout(ctx, s.check)
@@ -421,13 +422,14 @@ func (s *Sandbox) Write(ctx context.Context, name string, data []byte) error {
 	})
 }
 
-// use makes sure there is a sandbox running and calls call in it. A sandbox deleted while in
-// use, by anyone but this Sandbox, shows as Daytona not finding it: it is forgotten, its meter
-// stopped, another made, and call made once more there. The caller holds the gate.
-func (s *Sandbox) use(ctx context.Context, call func() error) error {
+// use makes sure there is a sandbox running and calls call in it, watched. A sandbox deleted
+// while in use, by anyone but this Sandbox, shows as Daytona not finding it: it is forgotten,
+// its meter stopped, another made, and call made once more there. The caller holds the gate.
+func (s *Sandbox) use(ctx context.Context, call func(context.Context) error) error {
+	call = s.watched(call)
 	err := s.started(ctx)
 	if err == nil {
-		err = call()
+		err = call(ctx)
 	}
 	if !s.vanished(ctx, err) {
 		return err
@@ -435,7 +437,52 @@ func (s *Sandbox) use(ctx context.Context, call func() error) error {
 	if err := s.started(ctx); err != nil {
 		return err
 	}
-	return call()
+	return call(ctx)
+}
+
+// watched is call made in the running sandbox with its owner admitted every admitEvery
+// meanwhile: the lifecycle timer waits for the gate, which a run holds for up to its timeout. A
+// refusal ends call, stops the sandbox and is what is returned, rather than the cut call's
+// error. The watch only asks Admit and cuts call; the stop is made once call has ended, under
+// the gate the caller holds.
+func (s *Sandbox) watched(call func(context.Context) error) func(context.Context) error {
+	if s.admit == nil {
+		return call
+	}
+	return func(ctx context.Context) error {
+		ctx, cut := context.WithCancelCause(ctx)
+		defer cut(nil)
+		over, done := make(chan struct{}), make(chan struct{})
+		var refusal error
+		go func() {
+			defer close(done)
+			ticks := time.NewTicker(s.admitEvery)
+			defer ticks.Stop()
+			for {
+				select {
+				case <-over:
+					return
+				case <-ticks.C:
+					if refusal = s.admit(ctx, true); refusal != nil {
+						cut(refusal)
+						return
+					}
+				}
+			}
+		}()
+		err := call(ctx)
+		close(over)
+		<-done
+		if refusal != nil {
+			// One whose session closed is deleted once call lets the gate go, which a stop would
+			// put off: a delete that then fails is tried again only once it idles.
+			if !s.closed.Load() {
+				s.halt(ctx, refusal)
+			}
+			return refusal
+		}
+		return err
+	}
 }
 
 // vanished reports whether err is Daytona not finding the sandbox because it was deleted, as

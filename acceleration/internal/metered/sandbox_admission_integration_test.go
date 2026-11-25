@@ -15,8 +15,10 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy/policytest"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox/daytona"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox/daytona/daytonatest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
@@ -139,15 +141,46 @@ func (s *MeteredSuite) TestAnOrganizationOverItsSpendHardLimitNeitherMakesNorSta
 	s.refusedEverything(box, sandboxes, owner, server, policy.ErrSystemLimit)
 }
 
-func (s *MeteredSuite) TestASandboxInTheOwnersOwnDaytonaOrganizationIsMadeWithNoCredit() {
+func (s *MeteredSuite) TestASandboxInTheOwnersOwnDaytonaOrganizationIsRefusedWithNoCredit() {
 	money, server := s.money(), daytonatest.Start(s.T())
 	owner := s.payer(money, 0)
 	sandboxes := s.admitting(money, server, time.Hour, keptKeys{owner.CustomerID + "/daytona/us": customerDaytonaKey})
+	s.refusing(money, owner, policy.ErrNoCredits)
+
+	_, err := s.opened(sandboxes, owner).Run(s.ctx, "print(1)", nil)
+
+	s.Require().ErrorIs(err, policy.ErrNoCredits, "its BYOK fee is billed, as a BYOK model's is")
+	s.Empty(server.Created())
+}
+
+func (s *MeteredSuite) TestASandboxThePricesMakeFreeIsMadeWithNoCredit() {
+	money, server := s.money(), daytonatest.Start(s.T())
+	free, err := pricing.NewList("free", []pricing.Entry{{Modality: string(routing.Sandbox), Provider: daytona.Provider,
+		Model: SandboxRunning, Region: pricing.RegionUS, Free: true}}, slog.New(slog.DiscardHandler))
+	s.Require().NoError(err)
+	recorder := routing.NewRecorder(routing.Sandbox, s.store, nil, free, slog.New(slog.DiscardHandler))
+	s.T().Cleanup(recorder.Close)
+	sandboxes := NewSandboxes(SandboxesOptions{Recorder: recorder, Gate: money.Enforcer, Lifecycle: sandbox.Lifecycle{IdleStop: idle},
+		APIKey: "key-1", APIURL: server.APIURL(), Every: time.Hour, Logger: slog.New(slog.DiscardHandler)})
+	owner := s.payer(money, 0)
+	s.refusing(money, owner, policy.ErrNoCredits)
 
 	s.ran(s.opened(sandboxes, owner))
 
-	s.Equal([]string{"sandbox-1"}, server.Created(), "Daytona bills the owner for it, not Stream")
-	s.Equal(customerDaytonaKey, server.Keys()[0])
+	s.Equal([]string{"sandbox-1"}, server.Created(), "work that costs nothing runs on, as a free model answers")
+}
+
+func (s *MeteredSuite) TestASandboxRecordedNowhereIsRefusedWithNoCredit() {
+	money, server := s.money(), daytonatest.Start(s.T())
+	sandboxes := NewSandboxes(SandboxesOptions{Gate: money.Enforcer, Lifecycle: sandbox.Lifecycle{IdleStop: idle},
+		APIKey: "key-1", APIURL: server.APIURL(), Every: time.Hour, Logger: slog.New(slog.DiscardHandler)})
+	owner := s.payer(money, 0)
+	s.refusing(money, owner, policy.ErrNoCredits)
+
+	_, err := s.opened(sandboxes, owner).Run(s.ctx, "print(1)", nil)
+
+	s.Require().ErrorIs(err, policy.ErrNoCredits, "Daytona bills it whether or not it is recorded")
+	s.Empty(server.Created())
 }
 
 func (s *MeteredSuite) TestASandboxInTheOwnersOwnDaytonaOrganizationIsRefusedWhileTheyAreSuspended() {
