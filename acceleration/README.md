@@ -534,7 +534,10 @@ window ends; the usage records are untouched. An origin (`hook:chat` and the res
 limit counts, and a user id the usage records leave off is no user.
 
 They are written through `/v1/spend/limits`, server-side only: one server-side credential of
-any app manages every limit of its organization (an app seen in no organization is its own).
+any app manages every limit of its organization (an app seen in no organization is its own). An
+app in no organization whose id is also an organization's, one another app was last seen under or
+is registered under, gets a 403 `forbidden` from every operation on limits, usage, grants and
+teams: staff manage its limits.
 
 | Operation | Path | What it does |
 | --------- | ---- | ------------ |
