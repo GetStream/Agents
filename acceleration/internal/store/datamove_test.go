@@ -4676,7 +4676,10 @@ func (s *DataMoveSuite) boughtHere(e164 string) PhoneNumber {
 // givenBackHere is a number other bought here and then gave back, as it reads here.
 func (s *DataMoveSuite) givenBackHere(e164 string) PhoneNumber {
 	held := s.boughtHere(e164)
-	s.Require().NoError(s.destination.PhoneNumbers.Release(s.ctx, "other", e164, time.Time{}))
+	s.Require().NoError(s.destination.StreamTrunks.InGroup(s.ctx, TrunkGroup{CustomerID: "other", Vendor: "telnyx"},
+		func(_ context.Context, tx *TrunkGroupTx) error {
+			return tx.ReleaseNumber(e164, time.Time{})
+		}))
 	numbers, err := s.destination.PhoneNumbers.Select(s.ctx, "other", PhoneNumberFilter{IncludeReleased: true})
 	s.Require().NoError(err)
 	s.Require().Len(numbers, 1)
