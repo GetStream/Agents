@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/netip"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,8 +18,12 @@ func flowConfig() Config {
 	cfg.Logger = slog.New(slog.DiscardHandler)
 	cfg.Call.RingTimeout = 50 * time.Millisecond
 	cfg.CustomerTrunk.Codecs = []string{"PCMA", "PCMU"}
+	cfg.trunkAddr = testTrunkAddr
 	return cfg
 }
+
+// testTrunkAddr stands for the address the guard checked for the customer trunk.
+var testTrunkAddr = netip.MustParseAddr("1.0.0.1")
 
 var (
 	customerOfferSDP    = buildSDP(Media{Addr: "198.51.100.7", Port: 30000, Codecs: []Codec{pcmu, dtmfCodec}, Direction: DirSendRecv}, 1, 1)
@@ -50,7 +56,46 @@ func TestFlowAConnectsCustomerOfferToStream(t *testing.T) {
 	require.Nil(t, customer.body(0))
 	require.Equal(t, streamAnswerSDP, customer.body(1))
 	require.Equal(t, []string{"invite", "ack"}, stream.calls())
-	require.Equal(t, customerOfferSDP, stream.body(0))
+	// The customer's address is a documentation one, not public, so Stream is sent the trunk's.
+	require.Equal(t,
+		Media{Addr: "1.0.0.1", Port: 30000, Codecs: []Codec{pcmu, dtmfCodec}, Direction: DirSendRecv},
+		mediaOf(t, stream.body(0)))
+}
+
+func TestFlowAStreamGetsTheCustomerOfferRebuilt(t *testing.T) {
+	offer := "v=0\r\no=- 4242 7 IN IP4 10.0.0.5\r\ns=-\r\nc=IN IP4 10.0.0.5\r\nt=0 0\r\n" +
+		"m=video 30002 RTP/AVP 96\r\na=rtpmap:96 VP8/90000\r\n" +
+		"m=audio 30000 RTP/AVP 111 0 101\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:0 PCMU/8000\r\n" +
+		"a=rtpmap:101 telephone-event/8000\r\na=rtcp:30001 IN IP4 10.0.0.5\r\n" +
+		"a=candidate:1 1 UDP 2130706431 10.0.0.5 30000 typ host\r\na=x-extra:1\r\na=sendrecv\r\n"
+	customer := &fakeLeg{inviteAnswer: []byte(offer)}
+	stream := &fakeLeg{inviteAnswer: streamAnswerSDP}
+
+	_, err := flowA(t.Context(), flowConfig(), customer, stream)
+	require.NoError(t, err)
+
+	want := "v=0\r\no=- 4242 7 IN IP4 1.0.0.1\r\ns=sipbridge\r\nc=IN IP4 1.0.0.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\n" +
+		"a=fmtp:101 0-16\r\na=ptime:20\r\na=sendrecv\r\n"
+	require.Equal(t, want, string(stream.body(0)))
+	// The customer offered two streams, so its answer has two m= lines: the video one rejected.
+	ack := string(customer.body(1))
+	require.Regexp(t, `(?s)m=video 0 RTP/AVP 96\r\n.*m=audio 20000 RTP/AVP 0 101\r\n`, ack)
+	require.Equal(t, 2, strings.Count(ack, "m="))
+}
+
+func TestFlowARefusesAnOfferStreamCannotSpeak(t *testing.T) {
+	offer := "v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 111 101\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:101 telephone-event/8000\r\n"
+	customer := &fakeLeg{inviteAnswer: []byte(offer)}
+	stream := &fakeLeg{inviteAnswer: streamAnswerSDP}
+
+	_, err := flowA(t.Context(), flowConfig(), customer, stream)
+
+	require.ErrorContains(t, err, "no codec Stream accepts")
+	require.Empty(t, stream.calls())
+	require.Equal(t, []string{"invite", "ack", "bye"}, customer.calls())
+	require.Equal(t, 0, mediaOf(t, customer.body(1)).Port)
 }
 
 func TestFlowACustomerNotAnsweringNeverRingsStream(t *testing.T) {
@@ -123,9 +168,24 @@ func TestFlowBSetsUpStreamFirstThenRetargets(t *testing.T) {
 	require.Equal(t,
 		Media{Addr: "203.0.113.10", Port: 20000, Codecs: []Codec{pcma, dtmfCodec}, Direction: DirSendRecv},
 		mediaOf(t, customer.body(0)))
+	// The customer answered with a documentation address, not public, so Stream is sent the trunk's.
 	require.Equal(t,
-		Media{Addr: "198.51.100.7", Port: 30000, Codecs: []Codec{pcma, dtmfCodec}, Direction: DirSendRecv},
+		Media{Addr: "1.0.0.1", Port: 30000, Codecs: []Codec{pcma, dtmfCodec}, Direction: DirSendRecv},
 		mediaOf(t, stream.body(3)))
+}
+
+func TestFlowBPointsStreamAtAPublicCustomerAddress(t *testing.T) {
+	for _, addr := range []string{"1.1.1.1", "2606:4700:4700::1111"} {
+		stream := &fakeLeg{inviteAnswer: streamAnswerPCMASDP}
+		answer := buildSDP(Media{Addr: addr, Port: 30000, Codecs: []Codec{pcma}, Direction: DirSendRecv}, 4, 1)
+		customer := &fakeLeg{inviteAnswer: answer}
+
+		media, err := flowB(t.Context(), flowConfig(), customer, stream)
+		require.NoError(t, err)
+
+		require.Equal(t, addr, media.Customer)
+		require.Equal(t, addr, mediaOf(t, stream.body(3)).Addr)
+	}
 }
 
 func TestFlowBTakesStreamsAddressFromItsLastAnswer(t *testing.T) {

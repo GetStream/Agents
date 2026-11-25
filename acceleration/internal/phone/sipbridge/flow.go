@@ -63,14 +63,14 @@ func flowA(ctx context.Context, cfg Config, customer, stream leg) (MediaAddrs, e
 	}
 	log.Info("customer answered", media(customerSide, offer)...)
 
-	toStream, err := streamOffer(offer, cfg.trunkAddr)
+	sent, err := toStream(offer, cfg.trunkAddr)
 	if err != nil {
 		rejectCustomer(ctx, log, customer, offer)
 		return MediaAddrs{}, err
 	}
 	streamCtx, cancelStream := context.WithTimeout(ctx, cfg.Call.RingTimeout)
 	defer cancelStream()
-	answer, err := stream.Invite(streamCtx, toStream)
+	answer, err := stream.Invite(streamCtx, sent)
 	if err != nil {
 		rejectCustomer(ctx, log, customer, offer)
 		return MediaAddrs{}, stack.Wrap(fmt.Errorf("stream leg: %w", err))

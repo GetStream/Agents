@@ -136,25 +136,29 @@ func (c *Call) onReinvite(ctx context.Context, from side, offer []byte) ([]byte,
 		return nil, stack.Wrap(errNotEstablished)
 	}
 	c.log.Info("re-INVITE received, passing it on", media(from, offer)...)
-	// Stream gets only an offer rebuilt from the customer's. An empty one asks Stream to offer, and
-	// what Stream offers is Stream's to pick.
-	sent := offer
-	if from == customerSide && len(offer) > 0 {
-		var err error
-		if sent, err = streamOffer(offer, c.trunkAddr); err != nil {
-			return nil, err
-		}
+	sent, err := c.passOn(from, offer)
+	if err != nil {
+		return nil, err
 	}
 	answer, err := c.other(from).Reinvite(ctx, sent)
 	if err != nil {
 		return nil, err
 	}
-	if from == customerSide {
-		answer = answerFor(offer, answer)
-	}
 	c.log.Info("re-INVITE answered", media(1-from, answer)...)
+	if answer, err = c.passOn(1-from, answer); err != nil {
+		return nil, err
+	}
 	c.changed()
-	return answer, nil
+	return answerFor(offer, answer), nil
+}
+
+// passOn is what the other leg gets of an SDP body from side s. Stream gets the customer's body rebuilt
+// by toStream, never its bytes; an empty body (a re-INVITE that asks for an offer) carries nothing.
+func (c *Call) passOn(s side, body []byte) ([]byte, error) {
+	if s == streamSide || len(body) == 0 {
+		return body, nil
+	}
+	return toStream(body, c.trunkAddr)
 }
 
 func (c *Call) onInfo(ctx context.Context, from side, contentType string, body []byte) error {

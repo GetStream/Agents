@@ -280,7 +280,8 @@ func (s *ResumeSuite) TestAResumedCallTellsWhenAPassedOnReinviteChangedWhatEachL
 	}
 	resumed := s.resume()
 	call.Store(resumed)
-	offer := []byte("v=0 customer offer\r\n")
+	// A public address and codecs Stream speaks: the offer Stream gets rebuilt is the same bytes.
+	offer := sdpAt("1.1.1.1")
 
 	answer := s.customer.sendReinvite(customerCallID, offer)
 

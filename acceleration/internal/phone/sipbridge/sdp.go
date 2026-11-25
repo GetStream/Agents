@@ -261,12 +261,12 @@ func rejectAnswer(offer Media) Media {
 	return Media{Addr: rejectAddr, Port: 0, Codecs: codecs, Direction: DirInactive}
 }
 
-// streamOffer rebuilds an offer from the customer leg into the one Stream gets. Only what buildSDP
-// writes reaches Stream: the first audio stream, the codecs Stream accepts and an address Stream may
-// send RTP to. The customer's other attributes (a=rtcp, ICE candidates) and other m= lines are dropped.
-// The o= line keeps the customer's session id and version, as the offer passed on unchanged did, so a
-// re-INVITE that changes nothing still says so (RFC 3264 §8).
-func streamOffer(body []byte, trunk netip.Addr) ([]byte, error) {
+// toStream rebuilds an SDP body from the customer leg, offer or answer, into the one Stream gets. Only
+// what buildSDP writes reaches Stream: the first audio stream, the codecs Stream accepts and an address
+// Stream may send RTP to. The customer's other attributes (a=rtcp, ICE candidates) and other m= lines are
+// dropped. The o= line keeps the customer's session id and version, as the body passed on unchanged did,
+// so a re-INVITE that changes nothing still says so (RFC 3264 §8).
+func toStream(body []byte, trunk netip.Addr) ([]byte, error) {
 	m, sd, _, err := parseAudio(body)
 	if err != nil {
 		return nil, err
@@ -303,10 +303,10 @@ func reachable(m Media, trunk netip.Addr) Media {
 	return m
 }
 
-// answerFor fits Stream's answer to an offer from the customer leg, which may hold more m= lines than
-// the one Stream saw. An answer has one m= line per offered line, in order (RFC 3264 §6): Stream's audio
-// goes where the customer's first audio line was, and every other line is rejected with port 0. An answer
-// that is not one stream is passed on as it came, as every answer was before offers were rebuilt.
+// answerFor fits a one-stream answer to an offer with more m= lines than the answerer saw: Stream's
+// answer to an offer the customer made, or the customer's answer rebuilt by toStream. An answer has one
+// m= line per offered line, in order (RFC 3264 §6), so the audio goes where the offer's first audio line
+// was and every other line is rejected with port 0. Any other answer is passed on as it came.
 func answerFor(offer, answer []byte) []byte {
 	_, o, at, err := parseAudio(offer)
 	if err != nil || len(o.MediaDescriptions) == 1 {
