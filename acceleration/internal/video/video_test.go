@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -528,6 +529,29 @@ func (s *PublicOnlySuite) TestTheFetchRefusesAServerOnThisMachine() {
 
 	s.ErrorIs(err, errPrivate)
 	s.False(served, "the request reached the server")
+}
+
+// A fetch that reached no public host fails as one kind of error, whose text a caller is not told.
+func (s *PublicOnlySuite) TestAHostThatIsNotPublicFailsAsOneThatDoesNotResolve() {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+	s.Require().NoError(err)
+	for _, source := range []string{"https://clips.invalid/clip.mp4", "http://localhost:" + port + "/clip.mp4", server.URL + "/clip.mp4",
+		"http://10.0.0.1/clip.mp4", "http://169.254.169.254/clip.mp4"} {
+		_, err := load(s.T().Context(), publicClient, source)
+		s.ErrorAs(err, new(*url.Error), source)
+	}
+}
+
+func (s *PublicOnlySuite) TestAURLTheCallerCanCorrectSaysWhatIsWrongWithIt() {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	_, err := load(s.T().Context(), server.Client(), server.URL+"/clip.mp4")
+	s.EqualError(err, "video: fetching the clip: 404 Not Found")
+	_, err = load(s.T().Context(), server.Client(), "ftp://example.com/clip.mp4")
+	s.EqualError(err, "video: url must be an absolute HTTP(S) URL without credentials, or a data URI")
 }
 
 // A seek is told to ffmpeg to the microsecond: at three decimals the frames of a clip

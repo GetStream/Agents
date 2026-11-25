@@ -224,6 +224,23 @@ func (s *ResponsesAskedSuite) TestAVideoNamingNoFrameCountShowsTheFramesAShortCl
 	}, settleFor, 10*time.Millisecond, "the model was never shown the clip's four frames with the question")
 }
 
+func (s *ResponsesAskedSuite) TestAVideoThatCannotBeFetchedIsRefusedInTheSameWords() {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		s.T().Skip("ffmpeg is not installed")
+	}
+	opened := s.serverClient.createSession(CreateSessionRequest{Llm: pointerTo("vision/vision-model")})
+	for _, source := range []string{"https://clips.invalid/clip.mp4", "http://localhost:1/clip.mp4", "http://127.0.0.1:1/clip.mp4",
+		"http://10.0.0.1/clip.mp4", "http://169.254.169.254/clip.mp4"} {
+		status, body := s.serverClient.call(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/responses",
+			CreateResponseRequest{Text: "What is this?", Videos: &[]VideoSource{{Url: source}}})
+		s.Equal(http.StatusBadRequest, status, source)
+		var failure struct{ Error APIError }
+		s.Require().NoError(json.Unmarshal(body, &failure))
+		s.Equal("invalid_request", failure.Error.Code, source)
+		s.Equal("video 1 could not be fetched", failure.Error.Message, source)
+	}
+}
+
 // The retry of a video question already taken is answered from its command: its videos are not
 // fetched again, so a clip that could not be sampled now is not refused, and the model is not
 // asked twice.

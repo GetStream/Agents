@@ -591,7 +591,7 @@ func (s *OAuth2CodeSuite) TestARefreshEndpointThatIsNotPublicIsRefusedBeforeTheT
 
 	s.now = s.now.Add(fakeprovider.AccessTTL)
 	_, _, err := scheme.Retrieve(s.ctx, stored, resolved, core.RetrieveOptions{})
-	s.Require().ErrorContains(err, "egress:")
+	s.Require().ErrorContains(err, "is not a public https URL")
 	s.Equal(0, srv.Refreshes())
 }
 
