@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -9,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"maps"
 	"math/big"
 	"runtime"
@@ -216,6 +218,58 @@ func (s *LeavesSuite) TestCertificatesDueForRenewalMakeRoomBeforeAnyOtherIsDropp
 	s.Equal(other, s.certificate(proxy, "c.test", "sandbox-c"), "c's host is kept")
 	s.Empty(s.changed(proxy, "sandbox-b", live), "b keeps the most, and gives no room while a's are due")
 	s.Equal(map[string]int{"sandbox-b": 3, "sandbox-c": 1}, proxy.leaves.owned)
+}
+
+// together is a CA key whose Sign returns only once n signatures are in progress, so n
+// handshakes for one host have all signed before any of them stores.
+type together struct {
+	crypto.Signer
+	arrived sync.WaitGroup
+}
+
+func (t *together) Sign(random io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	t.arrived.Done()
+	t.arrived.Wait()
+	return t.Signer.Sign(random, digest, opts)
+}
+
+// TestHandshakesThatSignAtOnceGetTheCertificateStoredFirst: two sandboxes' handshakes for one
+// host that both sign before either stores both get the one stored first, counted once.
+func (s *LeavesSuite) TestHandshakesThatSignAtOnceGetTheCertificateStoredFirst() {
+	proxy := s.newProxy(4)
+	signer := &together{Signer: proxy.caKey}
+	signer.arrived.Add(2)
+	proxy.caKey = signer
+	served := make(chan string, 2)
+	var wg sync.WaitGroup
+	for _, owner := range []string{"sandbox-a", "sandbox-b"} {
+		wg.Go(func() {
+			certificate, err := proxy.leaf("api.test", owner)
+			if s.NoError(err) {
+				served <- serial(certificate)
+			}
+		})
+	}
+	wg.Wait()
+	close(served)
+
+	first, second := <-served, <-served
+	s.Equal(first, second, "both handshakes get the certificate stored first")
+	s.Equal(first, serial(proxy.leaves.byHost["api.test"].certificate))
+	s.Len(proxy.leaves.owned, 1, "the one kept certificate counts to one sandbox")
+}
+
+// TestACacheWithRoomKeepsCertificatesDueForRenewalUntilItIsFull: the sweep of due certificates
+// runs only once the cache is full, as on base, so a handshake in a cache with room holds the lock
+// for no pass over the kept certificates.
+func (s *LeavesSuite) TestACacheWithRoomKeepsCertificatesDueForRenewalUntilItIsFull() {
+	proxy := s.newProxy(4)
+	s.keep(proxy, "sandbox-a", "api.a.test")
+	s.advance(halfOfLeafValidity)
+
+	s.certificate(proxy, "api.b.test", "sandbox-b")
+
+	s.Equal(map[string]int{"sandbox-a": 1, "sandbox-b": 1}, proxy.leaves.owned)
 }
 
 // halfOfLeafValidity is when a kept certificate is due for renewal.
