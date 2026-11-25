@@ -262,7 +262,7 @@ func (s *RecorderSuite) TestEachItemTheRecorderCountedIsAnAlertOfItsOwn() {
 
 	var mu sync.Mutex
 	var sent []*sentry.Event
-	client, err := sentry.NewClient(sentry.ClientOptions{BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
+	client, err := sentry.NewClient(sentry.ClientOptions{Environment: "test", BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 		mu.Lock()
 		defer mu.Unlock()
 		sent = append(sent, event)
@@ -283,7 +283,7 @@ func (s *RecorderSuite) TestEachItemTheRecorderCountedIsAnAlertOfItsOwn() {
 			fingerprints = append(fingerprints, event.Fingerprint...)
 		}
 	}
-	s.Equal([]string{"usage_missing:development:llm/vendor/alarmed"}, fingerprints,
+	s.Equal([]string{"usage_missing:test:llm/vendor/alarmed"}, fingerprints,
 		"two rows of one item are one alert, and a response cut short is none")
 }
 

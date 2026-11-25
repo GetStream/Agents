@@ -32,7 +32,7 @@ func TestRefusalAlertsSuite(t *testing.T) {
 }
 
 func (s *RefusalAlertsSuite) SetupTest() {
-	client, err := sentry.NewClient(sentry.ClientOptions{BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
+	client, err := sentry.NewClient(sentry.ClientOptions{Environment: "test", BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.sent = append(s.sent, event)
@@ -73,6 +73,6 @@ func (s *RefusalAlertsSuite) TestAMem0RefusalAndARefusedKeyAlert() {
 	pool.QuotaExceeded(key)
 	stop()
 
-	s.Contains(s.fingerprints(), "usage_mem0_refused:development:search/429")
-	s.Contains(s.fingerprints(), "usage_key_refused:development:"+keyVar+"/quota_exceeded")
+	s.Contains(s.fingerprints(), "usage_mem0_refused:test:search/429")
+	s.Contains(s.fingerprints(), "usage_key_refused:test:"+keyVar+"/quota_exceeded")
 }

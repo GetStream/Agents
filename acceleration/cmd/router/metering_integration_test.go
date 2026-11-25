@@ -48,7 +48,7 @@ func (s *MeteringAlertsSuite) SetupSuite() {
 	s.T().Cleanup(func() { db.Close() })
 	s.db = db
 
-	client, err := sentry.NewClient(sentry.ClientOptions{BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
+	client, err := sentry.NewClient(sentry.ClientOptions{Environment: "test", BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.sent = append(s.sent, event)
@@ -86,6 +86,6 @@ func (s *MeteringAlertsSuite) TestRowsRecordedWhileTheWriterDrainsStillAlert() {
 			s.Equal("router/test", event.Tags["source"])
 		}
 	}
-	s.Equal([]string{"usage_missing:development:llm/vendor/" + model}, fingerprints,
+	s.Equal([]string{"usage_missing:test:llm/vendor/" + model}, fingerprints,
 		"the row recorded after shutdown began is checked once more when the alerts stop")
 }

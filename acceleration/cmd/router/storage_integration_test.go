@@ -169,9 +169,9 @@ func (s *UsageCommandsSuite) TestABaseInACustomersOwnAccountIsSampledOnTheirKeyA
 
 func (s *UsageCommandsSuite) TestAStorageRowWithNoPriceAlertsAsTheJobStops() {
 	var mu sync.Mutex
-	const unpriced = "usage_unpriced:development:knowledge/turbopuffer/storage/eu/false"
+	const unpriced = "usage_unpriced:test:knowledge/turbopuffer/storage/eu/false"
 	var fingerprints, sources []string
-	client, err := sentry.NewClient(sentry.ClientOptions{BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
+	client, err := sentry.NewClient(sentry.ClientOptions{Environment: "test", BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 		mu.Lock()
 		defer mu.Unlock()
 		fingerprints = append(fingerprints, event.Fingerprint...)
