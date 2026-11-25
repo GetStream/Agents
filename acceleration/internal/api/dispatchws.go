@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
@@ -58,6 +60,24 @@ func (s *Server) dispatchCalls(w http.ResponseWriter, r *http.Request) {
 	if failure != "" {
 		writeError(w, invalidRequest(failure))
 		return
+	}
+	// A socket a peer carried here is registered here, or two nodes disagreeing on where it
+	// belongs would pass it back and forth.
+	if s.shards.Enabled() && s.store != nil && s.reachesShards(r.Context()) && r.Header.Get(node.ForwardedHeader) == "" {
+		address, err := s.workerNode(r.Context(), customerID)
+		if err != nil {
+			var refused APIError
+			if !errors.As(err, &refused) {
+				s.logger.Error("could not find the shard a dispatch worker registers in", "customer", customerID, "error", err)
+				refused = internalError()
+			}
+			writeError(w, refused)
+			return
+		}
+		if address != "" {
+			s.proxySocket(w, r, address)
+			return
+		}
 	}
 
 	// Registering before the upgrade would put a worker in the rotation that cannot be
@@ -105,6 +125,55 @@ func (s *Server) dispatchCalls(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("a dispatch worker stopped waiting", "worker", worker.ID)
 	recordClose(r.Context(), ended)
+}
+
+// errWorkerShardDown is a dispatch worker of an app kept in one geography none of whose shards
+// has a node up: registered anywhere else, the work it took would leave the geography.
+var errWorkerShardDown = APIError{Type: ErrorTypeUnavailable, Code: codeShardUnavailable,
+	Message: "no region this app's routing policy keeps its work in could be reached"}
+
+// workerNode is a node of the shard a customer's dispatch worker registers in, empty when that
+// is this node's. Workers register in the home shard, which every other shard carries tool calls
+// and hooks to, unless the app is kept in a geography, whose shards alone may reach its workers
+// (workerShards). With no node of the home shard up, the worker registers here rather than
+// nowhere.
+func (s *Server) workerNode(ctx context.Context, customerID string) (string, error) {
+	policy, err := s.store.Apps.RoutingPolicy(ctx, customerID, "")
+	if err != nil {
+		return "", err
+	}
+	here := s.directory.Shard()
+	shard := cmp.Or(s.shards.Home, here)
+	if policy.Strict() {
+		if shard, err = s.shards.Place(policy, here); err != nil {
+			return "", errWorkerShardDown
+		}
+	}
+	if shard == here {
+		return "", nil
+	}
+	address, err := s.directory.NodeInShard(ctx, shard)
+	switch {
+	case address != "":
+		return address, nil
+	case policy.Strict() && err != nil:
+		return "", stack.Wrap(err)
+	case policy.Strict():
+		return "", errWorkerShardDown
+	}
+	s.logger.Warn("no node of the shard dispatch workers register in is up; registering one here",
+		"shard", shard, "customer", customerID, "error", err)
+	return "", nil
+}
+
+// workerShards is the shards a customer's dispatch workers may be reached in, nil for any
+// (node.Directory.KeepWithin).
+func (s *Server) workerShards(ctx context.Context, customerID string) ([]string, error) {
+	policy, err := s.store.Apps.RoutingPolicy(ctx, customerID, "")
+	if err != nil {
+		return nil, err
+	}
+	return s.shards.Allowed(policy), nil
 }
 
 // registrationOf reads what a worker says about itself off its query string, returning why
