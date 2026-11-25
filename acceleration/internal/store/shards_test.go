@@ -229,7 +229,7 @@ func (s *ShardedStoreSuite) TestASessionFromBeforeCarriedOnElsewhereIsTaggedByWh
 		at    *Store
 		opens time.Duration
 		kind  string
-		// answered is when it answered first, zero for a run that never did.
+		// answered is the hour it answered first, zero for a run that never did.
 		answered time.Duration
 	}
 	const before = -1
@@ -266,9 +266,13 @@ func (s *ShardedStoreSuite) TestASessionFromBeforeCarriedOnElsewhereIsTaggedByWh
 					row.ForkedFrom = "parent"
 				}
 				s.Require().NoError(ran.at.Sessions.Upsert(s.ctx, &row))
-				if ran.answered != 0 {
-					s.Require().NoError(ran.at.Responses.Insert(s.ctx, &AgentResponse{ID: fmt.Sprint(name, at), SessionID: name,
-						CustomerID: "app", CreatedAt: s.base.Add(ran.answered * time.Hour)}))
+				if ran.answered == 0 {
+					continue
+				}
+				// It answered again later, after every run had opened.
+				for _, answered := range []time.Duration{ran.answered, 9} {
+					s.Require().NoError(ran.at.Responses.Insert(s.ctx, &AgentResponse{ID: fmt.Sprint(name, at, answered), SessionID: name,
+						CustomerID: "app", CreatedAt: s.base.Add(answered * time.Hour)}))
 				}
 			}
 
@@ -279,6 +283,22 @@ func (s *ShardedStoreSuite) TestASessionFromBeforeCarriedOnElsewhereIsTaggedByWh
 				s.Equal(tried.want, found.TaggedProject())
 			}
 		})
+	}
+}
+
+// A row that says the tag says it for the session, also of a run after the one that opened it.
+func (s *ShardedStoreSuite) TestALaterRunsProjectTagStandsOverWhoOpenedTheSession() {
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "app", Project: "alpha",
+		CallerKind: "authenticated", CreatedAt: s.base, OpenedAt: s.base}))
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "app", Project: "alpha",
+		CallerKind: "authenticated", ProjectTag: new("beta"), CreatedAt: s.base, OpenedAt: s.base.Add(time.Hour)}))
+
+	for range 20 {
+		for _, store := range []*Store{s.store, s.other} {
+			row := AgentSession{ID: "one", CustomerID: "app", Project: "alpha"}
+			s.Require().NoError(store.Sessions.ReadProjectTag(s.ctx, &row))
+			s.Equal("beta", row.TaggedProject())
+		}
 	}
 }
 
