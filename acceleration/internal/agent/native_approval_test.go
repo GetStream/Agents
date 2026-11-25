@@ -154,11 +154,11 @@ func (s *AgentSuite) TestANativeYesToAQuestionTheCallerCutIntoRunsNothing() {
 
 	s.nativeConfirms(peer, "r3")
 
-	s.Contains(string(s.nativeFrame(peer, "conversation.item.create")["item"]), "talked over the question")
+	s.Contains(string(s.nativeFrame(peer, "conversation.item.create")["item"]), "did not hear the question to its end")
 	s.Empty(s.runner.asked())
 	s.eventually(func() bool { return countOf[ToolApprovalDecided](s.reported()) == 1 }, "the closed call was never reported")
 	decided, _ := firstOf[ToolApprovalDecided](s.reported())
-	s.Equal("Question talked over", decided.Summary)
+	s.Equal("Question not heard", decided.Summary)
 }
 
 func (s *AgentSuite) TestANativeCallerWhoSaysNothingDeclinesOnceTheQuestionWasSaid() {

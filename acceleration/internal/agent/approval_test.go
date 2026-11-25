@@ -397,10 +397,29 @@ func (s *AgentSuite) TestAYesToAQuestionTheCallerTalkedOverRunsNothing() {
 
 		s.says(stt.Participant{ID: "alice"}, "yes do it")
 
-		s.confirmationSays("call-2", "talked over the question")
+		s.confirmationSays("call-2", "did not hear the question to its end")
 		s.Empty(s.runner.asked(), "a yes to a question talked over ran the call")
 		decided, _ := firstOf[ToolApprovalDecided](s.reported())
-		s.Equal(ToolApprovalDecided{ID: "call-1", TurnID: decided.TurnID, Summary: "Question talked over"}, decided)
+		s.Equal(ToolApprovalDecided{ID: "call-1", TurnID: decided.TurnID, Summary: "Question not heard"}, decided)
+	})
+}
+
+// A question the voice refused to say was never heard, so a yes to it runs nothing and closes it.
+func (s *AgentSuite) TestAYesToAQuestionTheVoiceRefusedRunsNothing() {
+	s.onFakeClock(func() {
+		s.agentAsksAndWaits(time.Minute)
+		s.voice.mu.Lock()
+		s.voice.refuses = errors.New("voice unavailable")
+		s.voice.mu.Unlock()
+		s.askFor()
+		s.eventually(func() bool { return countOf[ToolRan](s.reported()) == 1 }, "the call was never asked about")
+		time.Sleep(time.Second) // A tick of the fake clock: nothing is left playing.
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+
+		s.confirmationSays("call-2", "did not hear the question to its end")
+		s.Empty(s.runner.asked())
 	})
 }
 

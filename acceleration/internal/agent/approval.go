@@ -47,8 +47,8 @@ const (
 		"have answered it. Call " + confirmTool + " only once it has been said and they have answered."
 	approvalUnanswered = "Nothing was run: the caller has not spoken since they were asked about %s. Wait for " +
 		"their answer, then call " + confirmTool + " with it."
-	approvalCut = "The caller talked over the question, so they never heard it out and %s was not run. " +
-		"If they want it, call %s again to ask them again."
+	approvalCut = "The caller did not hear the question to its end, so %s was not run and that question is " +
+		"closed. If they want it, call %s again to ask them again."
 )
 
 // approvalSilence is the note a cascade's history is given when the caller let the wait pass.
@@ -301,7 +301,7 @@ func (a *Agent) askLocked(turnID, question string) error {
 
 // confirm runs the call the caller answered, when they said yes in time to its question played
 // out, and returns what the model is told. A yes before they could answer runs nothing and
-// leaves the call waiting, or closes it when they talked over its question. The confirmation's own context is the call's: its timeout starts now.
+// leaves the call waiting, or closes it when its question was cut off. The confirmation's own context is the call's: its timeout starts now.
 // The run gets its own "a tool call came back" line, under the call's name and id.
 func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.ContentPart, bool, error) {
 	var answer struct {
@@ -321,12 +321,6 @@ func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.C
 	if closed {
 		delete(a.approvals, waiting.call.ID)
 	}
-	if closed && unanswered != "" {
-		if a.lapsedApprovals == nil {
-			a.lapsedApprovals = map[string]string{}
-		}
-		a.lapsedApprovals[waiting.call.ID] = waiting.call.Name
-	}
 	a.mu.Unlock()
 	switch {
 	case lapsed != "":
@@ -337,7 +331,7 @@ func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.C
 		a.logger.Info("a yes came before the caller answered a call's question", "tool", waiting.call.Name,
 			"tool_call", waiting.call.ID, "closed", closed)
 		if closed {
-			a.emitter.Send(ToolApprovalDecided{ID: waiting.call.ID, TurnID: waiting.call.TurnID, Summary: "Question talked over"})
+			a.emitter.Send(ToolApprovalDecided{ID: waiting.call.ID, TurnID: waiting.call.TurnID, Summary: "Question not heard"})
 		}
 		return llm.TextParts(unanswered), false, nil
 	}
