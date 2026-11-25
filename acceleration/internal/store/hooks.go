@@ -128,7 +128,7 @@ func (s *Store) CallByAgentInApp(ctx context.Context, scope AppScope, agentID st
 		var calls []HeldCall
 		err := db.NewSelect().Model(&calls).
 			ColumnExpr("c.*").
-			ColumnExpr("COALESCE((SELECT s.config_id FROM agent_sessions AS s WHERE s.id = c.session_id), '') AS config_id").
+			ColumnExpr("COALESCE((SELECT s.config_id FROM agent_sessions AS s WHERE s.customer_id = c.customer_id AND s.id = c.session_id), '') AS config_id").
 			Where("c.agent_id = ?", agentID).
 			ApplyQueryBuilder(scope.where).Order("c.started_at DESC").Limit(20).Scan(ctx)
 		return calls, err

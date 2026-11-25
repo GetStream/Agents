@@ -121,6 +121,18 @@ func (s *Server) updateRouterConfig(ctx context.Context, request *updateRouterCo
 	}
 
 	config := storedRouterConfig(*request.Body, customerID)
+	// A sync of the file last synced onto the config, which nothing has written since: every
+	// other write clears the hash. The content is compared too, so a body that differs under
+	// the same hash is written rather than dropped.
+	if config.SyncHash != "" && config.SyncHash == existing.SyncHash &&
+		len(auditDiff(routerConfigOf(existing), routerConfigOf(config))) == 0 {
+		return &updateRouterConfigResponse{Body: routerConfigOf(existing)}, nil
+	}
+	// That body is no sync of the file the hash names, such as a read sent back edited, so
+	// the hash is not kept on content it does not describe.
+	if config.SyncHash == existing.SyncHash {
+		config.SyncHash = ""
+	}
 	config.ID = existing.ID
 	config.CreatedAt = existing.CreatedAt
 	if err := s.store.RouterConfigs.Update(ctx, &config); err != nil {
@@ -342,6 +354,7 @@ func storedRouterConfig(request RouterConfigRequest, customerID string) store.Ro
 		LLM:        llmOptionsOf(request.Llm),
 		STS:        stsOptionsOf(request.Sts),
 		Search:     searchOptionsOf(request.Search),
+		SyncHash:   request.SyncHash,
 	}
 	config.STT.Keyterms = stt.CleanKeyterms(config.STT.Keyterms)
 	return config
@@ -357,6 +370,7 @@ func routerConfigOf(config store.RouterConfig) RouterConfig {
 		Llm:       llmOptionsFor(config.LLM),
 		Sts:       stsOptionsFor(config.STS),
 		Search:    searchOptionsFor(config.Search),
+		SyncHash:  config.SyncHash,
 		CreatedAt: config.CreatedAt,
 		UpdatedAt: config.UpdatedAt,
 	}
@@ -549,4 +563,6 @@ type RouterConfigRequest struct {
 	Sts    *StsOptions    `json:"sts,omitempty"`
 	Stt    *SttOptions    `json:"stt,omitempty"`
 	Tts    *TtsOptions    `json:"tts,omitempty"`
+	// The limits on a sync hash are CustomConnectorRequest's.
+	SyncHash string `json:"sync_hash,omitempty" maxLength:"128" pattern:"^[!-~]*$" patternDescription:"printable ASCII without a space" doc:"The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing."`
 }

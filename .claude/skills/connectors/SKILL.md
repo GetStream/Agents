@@ -338,11 +338,11 @@ over HTTPS to a host in `sandbox.hosts`. Daytona's egress swaps it for the token
   ends TLS itself and refuses the proxy's certificate for a granted host (staging E2E,
   2026-10-22: `tls: bad certificate`).
 - Behind the proxy, the sandbox gets a placeholder (`va_ph_…`) in the env var. Every command and
-  run of code gets the proxy and the CA in its env, since netleash replaces the env vars a
-  sandbox is created with, but not those of one command or run (live probes, 2026-10-21):
+  run of code gets the CA in its env, and each run of code the proxy, since netleash replaces the
+  env vars a sandbox is created with, but not those of one command or run (live probes, 2026-10-21):
   - `HTTPS_PROXY`, `HTTP_PROXY`, `https_proxy` and `http_proxy` are
-    `http://sbx:<credential>@<proxy address>:<port>`; `NO_PROXY` and `no_proxy` are
-    `localhost,127.0.0.1,::1`;
+    `http://sbx:<credential>@<proxy address>:<port>`, with a credential of the run's own;
+    `NO_PROXY` and `no_proxy` are `localhost,127.0.0.1,::1`;
   - `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` and `GIT_SSL_CAINFO` name
     `/tmp/va-egress-ca-bundle.pem`, and `NODE_EXTRA_CA_CERTS` names the proxy's CA certificate,
     `/tmp/va-egress-ca.pem`;
@@ -366,10 +366,11 @@ over HTTPS to a host in `sandbox.hosts`. Daytona's egress swaps it for the token
   A host both cover is a grant's. A config with `network: true` and no `allowed_domains`, or with
   a `network_allow_list`, is refused when a session with a sandbox grant starts: the proxy reaches
   hosts by name only.
-- Known limit (accepted, Kanat 2026-10-22): the sandbox's proxy credential is in the env of every
-  command and run, so sandbox code can read it and send it out to a granted host or an allowed
-  domain. It is a proxy credential, never a token. It is the sandbox's own, it expires with the
-  sandbox's record, and it reaches only the sandbox's grants and allowed domains.
+- Known limit: a run's proxy credential is in its code's env, so the code can read it and send it
+  out to a granted host or an allowed domain. It is a proxy credential, never a token. It reaches
+  only the sandbox's grants and allowed domains, and it ends when its run ends: the proxy port is
+  open to the internet, so a copy works only while its run is in flight. A process an earlier
+  run left running gets a 407 once that run ends.
 - Sandbox code has root (`sudo` with no password, live probe 2026-10-21). No control inside the
   sandbox protects anything: code can change its env, its CA files and its routes. The controls
   are the token, which stays in the router; Daytona's network allow list, which lets the sandbox

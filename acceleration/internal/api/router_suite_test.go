@@ -211,6 +211,8 @@ type RouterSuite struct {
 	configs *store.Store
 	live    *live.Client
 	sealer  *auth.Sealer
+	// storeOptions are what the suite's store was opened with, for a node on the same databases.
+	storeOptions store.Options
 	// activity is the activity record every node of the suite counts in.
 	activity *activity.Recorder
 	// manager runs the suite's sessions, for a test about what ends them from inside.
@@ -339,6 +341,11 @@ type RouterSuite struct {
 	scheduledMu      sync.Mutex
 	scheduled        []*schedulingModel
 	schedulingScript schedulingScript
+	// retries, when set, are the waits the test's scheduled-task workers retry a failed
+	// occurrence after (newScheduler), in place of the scheduler's own; finishRetries the
+	// waits before they write a failed outcome again.
+	retries       []time.Duration
+	finishRetries []time.Duration
 
 	// chat is the Stream Chat the conversations are written to and transcripts read from:
 	// the deployment's own app. apps gives a customer an app of its own instead, and
@@ -521,6 +528,10 @@ type RouterSuite struct {
 	// manageOff builds the router with no manage key, as a deployment that never set
 	// ROUTER_AUTH_MANAGE_KEY has, for a suite about that to set before it starts the harness.
 	manageOff bool
+	// activityKey and previousActivityKey are what the activity paths take in X-Activity-Key,
+	// as ROUTER_AUTH_ACTIVITY_KEY and its _PREVIOUS are, for a suite about them to set before it
+	// starts the harness. Empty, as a deployment that never set them has.
+	activityKey, previousActivityKey string
 	// pricedFromDatabase seeds the price list from the embedded vendor list, as a router's
 	// first start does, and prices the LLM router's rows and the API from it, read every
 	// priceReload, for a suite about the price list to set before it starts the harness.
@@ -591,6 +602,7 @@ func (s *RouterSuite) SetupSuite() {
 	if shardDSN := os.Getenv("ROUTER_POSTGRES_SHARD_DSN"); shardDSN != "" {
 		options.ShardDSN = testDatabase(s.T(), shardDSN)
 	}
+	s.storeOptions = options
 	pgStore, err := store.OpenShards(options)
 	s.Require().NoError(err)
 	pgStore.GlobalDB().SetMaxOpenConns(suiteConnections)
@@ -633,7 +645,7 @@ func (s *RouterSuite) SetupSuite() {
 	s.data = testData{suite: s}
 
 	s.chat = chattest.NewServer(s.T())
-	s.apps = &suiteApps{own: map[string]streamapp.Identity{}, readOnly: map[string]bool{}, waiting: map[string]bool{}, nowhere: map[string]bool{}, deployment: streamapp.NewDeployment(streamapp.DeploymentOptions{
+	s.apps = &suiteApps{own: map[string]streamapp.Identity{}, readOnly: map[string]bool{}, waiting: map[string]bool{}, nowhere: map[string]bool{}, keyless: map[string]bool{}, deployment: streamapp.NewDeployment(streamapp.DeploymentOptions{
 		APIKey: suiteStreamKey, Secret: suiteStreamSecret, BaseURL: s.chat.URL, App: suiteStreamApp,
 	})}
 	s.stream = streamapp.NewClients(s.apps, streamapp.ClientsOptions{})
@@ -777,6 +789,7 @@ func (s *RouterSuite) SetupSuite() {
 		Gate:              s.gate,
 		OpsKey:            suiteOpsKey,
 		ManageKey:         manageKey,
+		ActivityKeys:      []string{s.activityKey, s.previousActivityKey},
 		Secrets:           s.sealer,
 		Knowledge:         knowledgeBase,
 		KnowledgeLimits:   s.knowledgeLimits,
@@ -2092,6 +2105,8 @@ func (s *RouterSuite) policies(logger *slog.Logger) *policy.Enforcer {
 type usageFront struct {
 	server *httptest.Server
 	down   atomic.Bool
+	// stalled, while set, takes each call and answers none until the channel is closed.
+	stalled atomic.Pointer[chan struct{}]
 }
 
 func newUsageFront(t *testing.T, service *usagetest.Service) *usageFront {
@@ -2101,6 +2116,13 @@ func newUsageFront(t *testing.T, service *usagetest.Service) *usageFront {
 	front := &usageFront{}
 	front.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if front.down.Load() {
+			panic(http.ErrAbortHandler)
+		}
+		if stalled := front.stalled.Load(); stalled != nil {
+			select {
+			case <-*stalled:
+			case <-r.Context().Done():
+			}
 			panic(http.ErrAbortHandler)
 		}
 		proxy.ServeHTTP(w, r)
@@ -2167,6 +2189,15 @@ func (s *RouterSuite) useApp(app testApp) {
 // to. It is what the rows a test writes straight into Postgres have to be filed under to
 // be the ones an endpoint reads back.
 func (s *RouterSuite) customerID() string { return s.app.app.ID }
+
+// endHere ends a session in this node the way one nobody watches ends, which leaves it held
+// under its id, ended, with the spec it ran on.
+func (s *RouterSuite) endHere(id string) {
+	held, ok := s.manager.Get(id, session.Owner{CustomerID: s.customerID(), Kind: auth.KindServer})
+	s.Require().True(ok, "session %s is held here", id)
+	s.Require().NoError(held.Close())
+	s.Require().Equal(session.Ended, held.State())
+}
 
 // heldCall records call as one of a session's, of its customer and agent, under the config
 // and in the conversation named: the session first, as its recorder writes them, since the
@@ -2619,10 +2650,10 @@ func (d testData) backendOfAnotherApp() *testClient {
 // pointer because the absent key means something other than the zero one.
 func pointerTo[T any](value T) *T { return &value }
 
-// textSession asks for a conversation in writing, which needs no call.
+// textSession asks for a conversation in writing, which needs no call, on the default models,
+// so a device may open it as a backend does.
 func textSession(id *string) CreateSessionRequest {
-	target := "en-low-latency"
-	return CreateSessionRequest{Id: id, Llm: &target}
+	return CreateSessionRequest{Id: id}
 }
 
 // inProject lists the sessions in one project, which is how a test sharing a fixture's app
@@ -2668,6 +2699,9 @@ type suiteApps struct {
 	waiting map[string]bool
 	// nowhere are customers with no app to act in at all.
 	nowhere map[string]bool
+	// keyless are customers of a deployment with no Stream keys, which the deployment's own app
+	// answers ErrNoIdentity for whatever it is asked, as an unconfigured Deployment does.
+	keyless map[string]bool
 	// perApp answers as app mode does, where customers act in apps of their own.
 	perApp bool
 }
@@ -2681,7 +2715,7 @@ func (a *suiteApps) PerApp() bool {
 func (a *suiteApps) For(ctx context.Context, customer string) (streamapp.Identity, error) {
 	a.mu.Lock()
 	identity, ok := a.own[customer]
-	waiting, nowhere := a.waiting[customer], a.nowhere[customer]
+	waiting, nowhere := a.waiting[customer], a.nowhere[customer] || a.keyless[customer]
 	a.mu.Unlock()
 	switch {
 	case waiting:
@@ -2707,11 +2741,13 @@ func (a *suiteApps) ForApp(ctx context.Context, customer string, app int64) (str
 func (a *suiteApps) ForAppReading(ctx context.Context, customer string, app int64) (streamapp.Identity, error) {
 	a.mu.Lock()
 	identity, ok := a.own[customer]
-	waiting := a.waiting[customer]
+	waiting, keyless := a.waiting[customer], a.keyless[customer]
 	a.mu.Unlock()
 	switch {
 	case waiting:
 		return streamapp.Identity{}, streamapp.ErrDeploymentAppUnknown
+	case keyless:
+		return streamapp.Identity{}, streamapp.ErrNoIdentity
 	case ok && identity.StreamApp == app:
 		return identity, nil
 	}

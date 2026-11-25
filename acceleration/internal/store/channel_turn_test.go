@@ -11,7 +11,28 @@ import (
 
 // turn is a minute's lease on the channel cid in app, held by holder.
 func channelTurn(app int64, cid, holder string) ChannelTurn {
-	return ChannelTurn{StreamAppPK: app, CID: cid, LeasedBy: holder, LeaseUntil: time.Now().Add(time.Minute)}
+	return ChannelTurn{StreamAppPK: app, CID: cid, LeasedBy: holder, Lease: time.Minute}
+}
+
+// leaseLeft is how long the lease on the channel cid in app has to run, on Postgres's clock.
+func (s *StoreSuite) leaseLeft(app int64, cid string) time.Duration {
+	var seconds float64
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT EXTRACT(EPOCH FROM lease_until - now()) FROM channel_turns WHERE stream_app_pk = ? AND cid = ?", app, cid).Scan(&seconds))
+	return time.Duration(seconds * float64(time.Second))
+}
+
+// A router's clock is no input to the lease: one five seconds behind Postgres (or ahead) used to
+// write a lease_until that now() judged five seconds short (or long). The lease is counted from
+// now() where it is judged.
+func (s *StoreSuite) TestAChannelTurnsLeaseLastsItsFullLengthOnTheDatabasesClock() {
+	cid := "callouts:" + newID()
+
+	taken, err := s.store.ChannelTurns.Take(s.ctx, channelTurn(7, cid, "router-a"))
+
+	s.Require().NoError(err)
+	s.Require().True(taken)
+	s.InDelta(time.Minute, s.leaseLeft(7, cid), float64(time.Second))
 }
 
 // Two routers are two pools on one database; only one may run a channel's turn, in that app.
@@ -96,15 +117,13 @@ func (s *StoreSuite) TestTheHolderOfAChannelTurnExtendsItsLease() {
 	_, err := s.store.ChannelTurns.Take(s.ctx, channelTurn(7, cid, "router-a"))
 	s.Require().NoError(err)
 	later := channelTurn(7, cid, "router-a")
-	later.LeaseUntil = time.Now().Add(time.Hour)
+	later.Lease = time.Hour
 
 	again, err := s.store.ChannelTurns.Take(s.ctx, later)
 
 	s.Require().NoError(err)
 	s.True(again)
-	var until time.Time
-	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT lease_until FROM channel_turns WHERE cid = ?", cid).Scan(&until))
-	s.WithinDuration(later.LeaseUntil, until, time.Millisecond)
+	s.InDelta(time.Hour, s.leaseLeft(7, cid), float64(time.Second))
 }
 
 func (s *StoreSuite) TestAChannelTurnNoOneHoldsIsNotWritten() {

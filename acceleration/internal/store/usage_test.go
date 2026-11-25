@@ -29,10 +29,10 @@ func (s *StoreSuite) TestActivityCountsWhatWasAskedOfTheAgents() {
 }
 
 func (s *StoreSuite) TestAClaimedGuestIsTheSamePersonAsTheUserWhoClaimedThem() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{
 		ID: "guest-1", CustomerID: "acme", Name: "Randy", CreatedAt: s.base,
 	}))
-	_, err := s.store.ClaimGuest(s.ctx, "acme", "guest-1", "randy")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "acme", "guest-1", "randy")
 	s.Require().NoError(err)
 
 	s.opened("as-a-guest", "acme", s.base.Add(time.Minute), func(session *AgentSession) {
@@ -131,6 +131,20 @@ func (s *StoreSuite) TestActivityIsOnlyTheCallingCustomers() {
 	s.Require().NoError(err)
 	s.Require().Len(buckets, 1)
 	s.EqualValues(1, buckets[0].Sessions)
+}
+
+// A turn names its session by id, and a report joined on the id alone took the person of
+// whichever customer's session had it.
+func (s *StoreSuite) TestActivityCountsOnlyThePeopleOfTheCustomersOwnSessions() {
+	theirs := s.opened("one", "globex", s.base, nil)
+	s.turned(&AgentSession{ID: theirs.ID, CustomerID: "acme"}, "acme-turn", s.base.Add(time.Minute), nil)
+
+	buckets, err := s.store.CustomerActivity(s.ctx, "acme", ActivityDaily, s.base, s.base.Add(24*time.Hour))
+
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 1)
+	s.EqualValues(1, buckets[0].Messages)
+	s.Zero(buckets[0].ActiveUsers, "globex's person is not acme's")
 }
 
 // ranTool records one tool call and its result, the way a session writes them, on a
@@ -288,6 +302,23 @@ func (s *StoreSuite) TestToolUsageOfOneAgentIsOutOfThatAgentsSessions() {
 	everyone, err := s.store.CustomerTurns(s.ctx, "acme", "", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
 	s.EqualValues(5, everyone.Sessions)
+}
+
+// One agent's turns and tools are those of the sessions it ran, which were read by the turn's
+// session id alone: another customer's session of that id put them under its agent.
+func (s *StoreSuite) TestOneAgentsTurnsAndToolsAreReadOffTheCustomersOwnSessions() {
+	theirs := s.opened("one", "globex", s.base, func(session *AgentSession) { session.ConfigID = "cfg-a" })
+	mine := &AgentSession{ID: theirs.ID, CustomerID: "acme"}
+	s.turned(mine, "acme-turn", s.base.Add(time.Minute), nil)
+	s.calledTool(mine, "acme-turn", "refund", s.base.Add(time.Minute), map[string]any{"call_id": "c1"}, map[string]any{"call_id": "c1"})
+
+	turns, err := s.store.CustomerTurns(s.ctx, "acme", "cfg-a", s.base, s.base.Add(24*time.Hour))
+	s.Require().NoError(err)
+	_, tools, err := s.store.CustomerToolUsage(s.ctx, "acme", "cfg-a", s.base, s.base.Add(24*time.Hour))
+	s.Require().NoError(err)
+
+	s.Zero(turns, "acme ran no session of cfg-a")
+	s.Empty(tools)
 }
 
 func (s *StoreSuite) TestTurnsBeforeAToolIsUsedAreTheConversationsOwn() {

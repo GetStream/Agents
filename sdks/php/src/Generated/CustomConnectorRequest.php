@@ -31,6 +31,8 @@ final readonly class CustomConnectorRequest
         public ?array $scopes = null,
         // An HTTP API whose tools the connector lists itself, in place of an MCP server. Set this or endpoint, not both.
         public ?CustomHTTPAPI $http = null,
+        // The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a...
+        public ?string $syncHash = null,
     ) {
     }
 
@@ -49,6 +51,7 @@ final readonly class CustomConnectorRequest
             description: array_key_exists('description', $data) && $data['description'] !== null ? Json::string($data, 'description') : null,
             scopes: array_key_exists('scopes', $data) && $data['scopes'] !== null ? Json::strings($data, 'scopes') : null,
             http: array_key_exists('http', $data) && $data['http'] !== null ? CustomHTTPAPI::fromArray(Json::object($data, 'http')) : null,
+            syncHash: array_key_exists('sync_hash', $data) && $data['sync_hash'] !== null ? Json::string($data, 'sync_hash') : null,
         );
     }
 
@@ -80,6 +83,9 @@ final readonly class CustomConnectorRequest
         }
         if ($this->http !== null) {
             $out['http'] = $this->http->toArray();
+        }
+        if ($this->syncHash !== null) {
+            $out['sync_hash'] = $this->syncHash;
         }
         return $out;
     }

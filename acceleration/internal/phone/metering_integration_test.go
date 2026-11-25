@@ -315,6 +315,35 @@ func (s *MeteringSuite) TestACallersJoinBeforeSessionStartedIsTakenByTheInboundL
 	s.Zero(s.kept(callID))
 }
 
+// A caller's join made after the call arrived but delivered before it bills the caller from the
+// arrival, as the same join delivered after it does.
+func (s *MeteringSuite) TestACallerIsBilledFromTheArrivalWhicheverEventIsDeliveredFirst() {
+	arrival := s.clock.now()
+	s.clock.advance(2 * time.Second)
+	joined := func(callID string) {
+		s.Require().NoError(s.service.Connect(s.ctx, everyApp, defaultCallType, callID, "session-1", "caller-1", "15125550199",
+			arrival.Add(time.Second)))
+	}
+	arrived := func(callID string) {
+		s.service.OpenLeg(s.ctx, routing.Owner{CustomerID: s.customer, Attribution: routing.Attribution{APIKey: routing.OriginPhoneInbound}},
+			store.CallLeg{CallType: defaultCallType, CallID: callID, StreamSessionID: "session-1", Vendor: s.vendor.vendor,
+				Direction: store.Inbound, LocalNumber: s.e164, Country: "US", DialedAt: arrival}, true)
+	}
+	joinFirst, arrivalFirst := "call-"+uuid.NewString(), "call-"+uuid.NewString()
+	joined(joinFirst)
+	arrived(joinFirst)
+	arrived(arrivalFirst)
+	joined(arrivalFirst)
+	s.clock.set(arrival.Add(time.Minute))
+
+	s.left(defaultCallType, joinFirst, "caller-1")
+	s.left(defaultCallType, arrivalFirst, "caller-1")
+
+	minutes := s.rowsWhen(ModelCallMinutes, 2)
+	s.Equal(pricing.Quantities{pricing.CallSeconds: 60}, minutes[0].Meters, "from the arrival")
+	s.Equal(minutes[0].Meters, minutes[1].Meters)
+}
+
 // A leave kept between Connect reading the phone's leaves and connecting its leg ends the leg
 // at it, rather than being forgotten with the leg left open, and billed, until the call ends.
 func (s *MeteringSuite) TestALeaveRacingItsJoinEndsTheLeg() {
@@ -875,7 +904,7 @@ func (s *MeteringSuite) TestANumberBoughtWithoutItsRowIsRecordedByTheSweep() {
 	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
 	s.Require().ErrorIs(err, store.ErrNoNumber)
 	month := s.row(ModelNumber)
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err = s.service.SweepOrders(s.ctx)
 
@@ -897,7 +926,7 @@ func (s *MeteringSuite) TestANumberGivenBackWithoutItsReleaseIsReleasedByTheSwee
 	returned := time.Now()
 	_, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, s.e164)
 	s.Require().NoError(err, "the vendor has it back, and the row still holds it")
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err = s.service.SweepOrders(s.ctx)
 
@@ -920,7 +949,7 @@ func (s *MeteringSuite) TestANumberBoughtWhoseAnswerWasLostIsRecordedByTheSweep(
 	s.vendor.doneErr = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/number_orders", Message: "no answer", Cause: context.DeadlineExceeded}
 	_, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: e164, Owner: s.owner()})
 	s.Require().Error(err)
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err = s.service.SweepOrders(s.ctx)
 
@@ -945,7 +974,7 @@ func (s *MeteringSuite) TestANumberGivenBackWhoseAnswerWasAFailureIsReleasedByTh
 	s.vendor.holds = map[string]bool{s.e164: true}
 	s.vendor.doneErr = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/phone_numbers", Status: http.StatusBadGateway}
 	s.Require().Error(s.service.Release(s.ctx, s.customer, s.e164))
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err := s.service.SweepOrders(s.ctx)
 
@@ -962,7 +991,7 @@ func (s *MeteringSuite) TestANumberTheVendorStillHoldsAfterAFailedReleaseStaysHe
 	s.vendor.releaseErr = &VendorError{Vendor: s.vendor.vendor, Path: "/v2/phone_numbers", Status: http.StatusServiceUnavailable}
 	s.Require().Error(s.service.Release(s.ctx, s.customer, s.e164))
 	s.Require().Equal(1, s.orders())
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err := s.service.SweepOrders(s.ctx)
 
@@ -983,7 +1012,7 @@ func (s *MeteringSuite) TestAnOrderAVendorCannotSettleIsKeptAndNotAskedAboutEver
 	s.Require().Error(err)
 	// The vendor as one that has no NumberFinder.
 	s.registry.Register(s.vendor.vendor, func() (Provider, error) { return struct{ Provider }{s.vendor}, nil })
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err = s.service.SweepOrders(s.ctx)
 	s.Require().NoError(err)
@@ -1007,7 +1036,7 @@ func (s *MeteringSuite) TestAnOrderTheVendorDoesNotHoldIsForgottenWithoutANumber
 	s.Require().Error(err)
 	s.vendor.err = nil
 	s.Require().Equal(1, s.orders())
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err = s.service.SweepOrders(s.ctx)
 
@@ -1022,7 +1051,7 @@ func (s *MeteringSuite) TestAnOrderTheVendorDoesNotHoldIsForgottenWithoutANumber
 func (s *MeteringSuite) TestAPurchaseFromAVendorNotImplementedLeavesNoOrder() {
 	_, err := s.service.Buy(s.ctx, Purchase{Vendor: "bics", E164: aNumber(), Owner: s.owner()})
 	s.Require().ErrorIs(err, ErrNotImplemented)
-	s.clock.advance(orderSettles + time.Minute)
+	s.ordersSettle()
 
 	_, err = s.service.SweepOrders(s.ctx)
 
@@ -1050,6 +1079,17 @@ func (s *MeteringSuite) TestAPurchaseTheVendorCannotTakeAsAskedLeavesNoOrder() {
 
 	s.Require().ErrorIs(err, ErrInvalid)
 	s.Zero(s.orders())
+}
+
+// ordersSettle lets this customer's orders get old enough to settle: on the suite's clock, which
+// stamps them, and on Postgres's, which a sweep's claim judges them by.
+func (s *MeteringSuite) ordersSettle() {
+	settled := orderSettles + time.Minute
+	s.clock.advance(settled)
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.PhoneNumberOrder)(nil)).
+		Set("next_attempt_at = next_attempt_at - make_interval(secs => ?)", settled.Seconds()).
+		Where("customer_id = ?", s.customer).Exec(s.ctx)
+	s.Require().NoError(err)
 }
 
 // orders counts the customer's orders still to settle.
@@ -1083,9 +1123,18 @@ func (s *MeteringSuite) TestANumberWithNoPriceIsBillableWorkWithNoPrice() {
 	s.Zero(month.CostMicros)
 }
 
+// release gives one of the suite's customer's numbers back at at, as Service.Release does: in
+// its trunk group's transaction.
+func (s *MeteringSuite) release(e164 string, at time.Time) error {
+	group := store.TrunkGroup{CustomerID: s.customer, Vendor: s.vendor.vendor}
+	return s.store.StreamTrunks.InGroup(s.ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		return tx.ReleaseNumber(e164, at)
+	})
+}
+
 func (s *MeteringSuite) TestANumberIsBilledEachMonthAfterTheOneItWasBoughtIn() {
 	// The suite's own number, which has no price, is not the one under test.
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, s.customer, s.e164, s.clock.now()))
+	s.Require().NoError(s.release(s.e164, s.clock.now()))
 	bought, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: aNumber(), Owner: s.owner()})
 	s.Require().NoError(err)
 	s.row(ModelNumber)
@@ -1109,7 +1158,7 @@ func (s *MeteringSuite) TestANumberIsBilledEachMonthAfterTheOneItWasBoughtIn() {
 	s.Equal(OriginNumberRental, months[1].APIKey)
 	s.Equal(next, months[1].StartedAt.UTC())
 
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, s.customer, bought.E164, next.Add(2*time.Hour)))
+	s.Require().NoError(s.release(bought.E164, next.Add(2*time.Hour)))
 	_, err = rentals.Bill(s.ctx, from, monthAfter(bought.PurchasedAt, 2).Add(time.Hour))
 	s.Require().NoError(err)
 	time.Sleep(300 * time.Millisecond)
@@ -1117,7 +1166,7 @@ func (s *MeteringSuite) TestANumberIsBilledEachMonthAfterTheOneItWasBoughtIn() {
 }
 
 func (s *MeteringSuite) TestAnImportedRequestNamingANumbersComingMonthDoesNotStopItBeingBilled() {
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, s.customer, s.e164, s.clock.now()))
+	s.Require().NoError(s.release(s.e164, s.clock.now()))
 	bought, err := s.service.Buy(s.ctx, Purchase{Vendor: s.vendor.vendor, E164: aNumber(), Owner: s.owner()})
 	s.Require().NoError(err)
 	s.row(ModelNumber)
@@ -1127,8 +1176,9 @@ func (s *MeteringSuite) TestAnImportedRequestNamingANumbersComingMonthDoesNotSto
 
 	// A request row as an export carries it, sent with the usage id of the number's next month.
 	other := "customer-" + uuid.NewString()
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &store.Request{UsageID: uuid.Must(uuid.NewV7()), CustomerID: other,
-		Modality: string(routing.Phone), Provider: s.vendor.vendor, Model: ModelNumber, StartedAt: next, Success: true}))
+	_, err = s.store.Requests.InsertMany(s.ctx, []store.Request{{UsageID: uuid.Must(uuid.NewV7()), CustomerID: other,
+		Modality: string(routing.Phone), Provider: s.vendor.vendor, Model: ModelNumber, StartedAt: next, Success: true}})
+	s.Require().NoError(err)
 	var row map[string]any
 	_, err = s.store.ExportCustomer(s.ctx, other, func(table string, encoded json.RawMessage) error {
 		if table == "requests" {
@@ -1184,7 +1234,7 @@ func (s *MeteringSuite) TestAMonthThatBeganBeforeFromIsNeverBilled() {
 }
 
 func (s *MeteringSuite) TestAMovedCustomersBoughtNumberIsNotBilledAgainHere() {
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, s.customer, s.e164, s.clock.now()))
+	s.Require().NoError(s.release(s.e164, s.clock.now()))
 	now := time.Now().UTC().Truncate(time.Second)
 	// The month that began three days ago is the source's to bill, which held the number then.
 	row, err := json.Marshal(map[string]any{

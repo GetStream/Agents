@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1194,4 +1195,14 @@ func TestATransferNumberTheAgentWroteIsNoSource(t *testing.T) {
 		_, unsourced := unsourcedTransfer(history, llm.ToolCall{Name: toolTransfer, Arguments: string(arguments)}, c.told)
 		assert.Equal(t, c.unsourced, unsourced, c.name)
 	}
+}
+
+func TestTurnsStartedInTheSameInstantAreNamedApart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// The fake clock does not move between the two, as a clock that ticks in microseconds
+		// does not between turns started close together.
+		first, second := replyPrefix+turnStamp(), replyPrefix+turnStamp()
+
+		require.NotEqual(t, first, second, "two turns were given one name, and their sentences too")
+	})
 }

@@ -95,14 +95,18 @@ func (m moneyAnswer) GetHeaders() http.Header { return m.headers }
 
 // refusedRequest is a request routing refused, as the caller is told it: a refusal about money
 // as moneyError says, a mistake of the caller's own (callerMistakes) as theirs to change, and a
-// feature the deployment lacks as not configured. Anything else is ours to answer for, such as
-// a database that failed, whose text names where the database is: the error goes on as is, so
-// Huma logs it with its stack and tells the caller only that something went wrong.
+// feature the deployment lacks, its own Stream app's keys included (unkeptAnswer), as not
+// configured. Anything else is ours to answer for, such as a database that failed, whose text
+// names where the database is: the error goes on as is, so Huma logs it with its stack and
+// tells the caller only that something went wrong.
 func refusedRequest(err error) error {
 	if answer, ok := moneyError(err); ok {
 		if headers := moneyHeaders(err); headers != nil {
 			return moneyAnswer{APIError: answer, headers: headers}
 		}
+		return answer
+	}
+	if answer, unkept := unkeptAnswer(err); unkept {
 		return answer
 	}
 	switch {
@@ -123,7 +127,7 @@ func refusedRequest(err error) error {
 var callerMistakes = []error{
 	session.ErrInvalid, conversation.ErrInvalid, agent.ErrInvalid, harness.ErrInvalid,
 	routing.ErrRequest, routing.ErrModelNotAllowed,
-	session.ErrNoStreamApp, session.ErrNoAgentChannelType, session.ErrUnsafeAgentChannelType,
+	session.ErrNoStreamApp, session.ErrAppStreamKeysRejected, session.ErrNoAgentChannelType, session.ErrUnsafeAgentChannelType,
 	session.ErrConversationReadOnly, session.ErrConversationElsewhere, session.ErrMemoryRegion,
 	streamapp.ErrStreamAppMoved, streamapp.ErrReadOnly, agent.ErrNoVideo,
 	conversation.ErrResponseRunning, conversation.ErrCommandNotFound,

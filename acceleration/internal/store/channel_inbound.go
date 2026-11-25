@@ -28,9 +28,8 @@ const channelInboundDoneKeep = channelMessageKeep
 // for someone to find why it was never answered. 30 days is a choice, not a measurement.
 const channelInboundFailedKeep = 30 * 24 * time.Hour
 
-// ChannelInbound is one inbound message queued to be written into its thread channel
-// (20261205120000_channel_thread_inbound.sql), with what writing it and opening its episode
-// card take.
+// ChannelInbound is one inbound message queued to be written into its thread channel, with
+// what writing it and opening its episode card take.
 type ChannelInbound struct {
 	bun.BaseModel `bun:"table:channel_thread_inbound,alias:cti"`
 
@@ -291,18 +290,18 @@ const channelInboundColumns = `cti.seq, cti.channel_id, cti.provider_message_id,
 cti.provider_unit_id, cti.thread_key, cti.config_id, cti.config_name, cti.author_id, cti.text, cti.media, cti.raw,
 cti.forward, cti.state, cti.keyword_answered, cti.attempts, cti.next_attempt_at, cti.created_at, cti.finished_at`
 
-// Claim takes at most limit messages due at now, oldest due first, and moves each one's next
-// attempt to leaseUntil, so no other worker takes it while this one writes it. Rows another
+// Claim takes at most limit messages due now, oldest due first, and moves each one's next
+// attempt to the end of lease, so no other worker takes it while this one writes it. Rows another
 // worker is claiming at the same moment are skipped, not waited for. It takes only the oldest
 // queued message of a thread channel (queuedChannelInbound).
-func (r *ChannelInbounds) Claim(ctx context.Context, now time.Time, limit int, leaseUntil time.Time) ([]ChannelInbound, error) {
-	return r.claim(ctx, now, limit, leaseUntil, nil)
+func (r *ChannelInbounds) Claim(ctx context.Context, limit int, lease time.Duration) ([]ChannelInbound, error) {
+	return r.claim(ctx, limit, lease, nil)
 }
 
 // claim is Claim with head narrowing the heads it reads, as queuedChannelInbound takes it.
-func (r *ChannelInbounds) claim(ctx context.Context, now time.Time, limit int, leaseUntil time.Time,
+func (r *ChannelInbounds) claim(ctx context.Context, limit int, lease time.Duration,
 	head func(*bun.SelectQuery) *bun.SelectQuery) ([]ChannelInbound, error) {
-	return claim[ChannelInbound](ctx, r.store.global, channelInbounds, now, leaseUntil, limit,
+	return claim[ChannelInbound](ctx, r.store.global, channelInbounds, lease, limit,
 		queuedChannelInbound(r.store.global, head), channelInboundColumns)
 }
 
@@ -325,7 +324,7 @@ func (r *ChannelInbounds) Finish(ctx context.Context, claimed ChannelInbound, at
 // Fail records that a claimed message's last attempt failed and it is given up,
 // at at, and calls forward, when not nil, to forward the message's delivery: when it has one,
 // and no other message of the delivery forwarded it. The event destinations key a forward by
-// the delivery only while it is queued (QueueEventDeliveries; FinishEventDelivery deletes it
+// the delivery only while it is queued (EventDeliveries.Queue; EventDeliveries.Finish deletes it
 // once sent), and one thread's messages are given up minutes apart, so a delivery whose two
 // messages were never written would otherwise reach a destination twice. A message counts as
 // forwarded once forward returned nil, so a forward that fails, or a router that stops before

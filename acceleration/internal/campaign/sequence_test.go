@@ -53,6 +53,17 @@ func (s *SequenceSuite) TestAStepWithElevenAttemptsIsRefused() {
 	s.ErrorContains(seq.Validate(), "attempts")
 }
 
+// A delay up to 30 days is kept, and one past it refused before it could overflow the
+// duration it is made into.
+func (s *SequenceSuite) TestADelayIsAtMostThirtyDays() {
+	seq := DefaultSequence("cfg")
+	seq.Steps[0].Attempts = []Attempt{{DelayMinutes: 0}, {DelayMinutes: 43200}}
+	s.NoError(seq.Validate())
+
+	seq.Steps[0].Attempts[1].DelayMinutes = 43201
+	s.ErrorContains(seq.Validate(), "attempt 2 has a delay over 43200 minutes")
+}
+
 func (s *SequenceSuite) TestAStepNeedsAFirstAttemptRightAwayAndLaterOnesAfterADelay() {
 	seq := DefaultSequence("cfg")
 	seq.Steps[0].Attempts = []Attempt{{DelayMinutes: 5}}

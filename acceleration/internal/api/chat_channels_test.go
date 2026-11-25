@@ -77,7 +77,7 @@ func (s *AppHooksSuite) TestAChannelAnotherRouterIsAnsweringWaitsForItsTurn() {
 	s.answeringIn("callouts")
 	channel := s.groupChannel("callouts", nil)
 	cid := "callouts:" + channel
-	taken, err := s.store.ChannelTurns.Take(context.Background(), store.ChannelTurn{StreamAppPK: s.appID(), CID: cid, LeasedBy: "another-router", LeaseUntil: time.Now().Add(time.Minute)})
+	taken, err := s.store.ChannelTurns.Take(context.Background(), store.ChannelTurn{StreamAppPK: s.appID(), CID: cid, LeasedBy: "another-router", Lease: time.Minute})
 	s.Require().NoError(err)
 	s.Require().True(taken)
 
@@ -88,7 +88,7 @@ func (s *AppHooksSuite) TestAChannelAnotherRouterIsAnsweringWaitsForItsTurn() {
 	s.Require().NoError(s.store.ChannelTurns.Release(context.Background(), s.appID(), cid, "another-router"))
 	s.Eventually(func() bool { return s.replies(cid) == 1 }, settleFor, 20*time.Millisecond, "answered once let go")
 	s.Eventually(func() bool {
-		free, err := s.store.ChannelTurns.Take(context.Background(), store.ChannelTurn{StreamAppPK: s.appID(), CID: cid, LeasedBy: "the-next-router", LeaseUntil: time.Now().Add(time.Minute)})
+		free, err := s.store.ChannelTurns.Take(context.Background(), store.ChannelTurn{StreamAppPK: s.appID(), CID: cid, LeasedBy: "the-next-router", Lease: time.Minute})
 		return err == nil && free
 	}, settleFor, 20*time.Millisecond, "the turn that answered let go of the channel")
 }

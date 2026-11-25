@@ -411,13 +411,6 @@ func (s *Server) deleteAgentConfig(ctx context.Context, request *deleteAgentConf
 	if err != nil {
 		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
-	answering, err := s.store.PhoneNumbers.AnsweredBy(ctx, customerID, request.Id)
-	if err != nil {
-		return nil, err
-	}
-	if len(answering) > 0 {
-		return nil, configAnswersNumbers(answering)
-	}
 	// Children are named by name, so one deleted would leave its parent calling whichever
 	// config takes the name next.
 	if parent, err := s.parentOf(ctx, customerID, existing.Name, existing.ID); err != nil {
@@ -426,6 +419,9 @@ func (s *Server) deleteAgentConfig(ctx context.Context, request *deleteAgentConf
 		return nil, conflict(fmt.Sprintf("%q hands work to this agent: take it out of %q's agents first", parent, parent))
 	}
 	if err := s.store.AgentConfigs.Delete(ctx, customerID, request.Id); err != nil {
+		if answering, ok := errors.AsType[*store.ConfigAnswersNumbersError](err); ok {
+			return nil, configAnswersNumbers(answering.Numbers)
+		}
 		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 	// A deleted config's tasks have no agent left to run on: paused, they stop failing
@@ -692,6 +688,10 @@ func channelConnectionTaken(taken *store.ChannelConnectionTakenError) APIError {
 func storeFailure(err error, taken APIError) error {
 	if owned, ok := errors.AsType[*store.ChannelConnectionTakenError](err); ok {
 		return channelConnectionTaken(owned)
+	}
+	// What channelsWarnings answers, for a config saved at the same time that passed it too.
+	if line, ok := errors.AsType[*store.ChannelLineTakenError](err); ok {
+		return invalidRequest("channels." + line.Kind + ": " + line.Number + " already answers as " + line.OwnerName)
 	}
 	switch {
 	case errors.Is(err, store.ErrNameTaken):

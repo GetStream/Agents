@@ -81,7 +81,7 @@ type ChildAgent struct {
 // agent_configs.connectors.
 //
 // The JSON is the prototype's (ConnectorBinding in internal/store/models.go on
-// codex/connector-support at cf62af0d), and ConnectorConnectionReferenced finds a fixed
+// codex/connector-support at cf62af0d), and boundByConfig finds a fixed
 // binding by containment on {"connection": {"type": "fixed", "connection_id": ...}}, so a
 // change to these tags is a change to that query. core.Binding is the same thing for the
 // adapters, flattened and with a time.Duration; it has no JSON of its own, so it is not
@@ -467,7 +467,7 @@ type User struct {
 	// Kind is what the credential proved them to be, UserKindGuest or
 	// UserKindAuthenticated. Only a guest may be claimed.
 	Kind string `bun:"kind,notnull"`
-	// Minted says the router handed this guest out (RecordGuest). A guest Users.Seen
+	// Minted says the router handed this guest out (Users.InsertGuest). A guest Users.Seen
 	// wrote from a guest token is not: an app signs those itself, for any id it likes.
 	Minted bool   `bun:"minted,notnull"`
 	Name   string `bun:"name,notnull"`
@@ -483,9 +483,8 @@ type User struct {
 	// ClaimedBy is the real user this guest turned out to be, empty while they are still a
 	// guest. A guest is claimed once: a second claim naming somebody else would move one
 	// person's conversations onto another's account.
-	ClaimedBy string     `bun:"claimed_by,nullzero"`
-	ClaimedAt *time.Time `bun:"claimed_at"`
-	// ClaimFinishedAt is when every step of ClaimedBy's claim ran (FinishGuestClaim), nil
+	ClaimedBy string `bun:"claimed_by,nullzero"`
+	// ClaimFinishedAt is when every step of ClaimedBy's claim ran (Users.FinishGuestClaim), nil
 	// while a claim that set ClaimedBy has not got that far.
 	ClaimFinishedAt *time.Time `bun:"claim_finished_at"`
 	// RefreshSecretHash is the SHA-256 of the refresh secret this guest was last handed

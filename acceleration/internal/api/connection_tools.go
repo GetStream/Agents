@@ -517,7 +517,11 @@ func (s *Server) checkConnection(ctx context.Context, connection store.Connector
 	// The credential works, so the events its bindings declare are subscribed to, off the
 	// request (internal/mcpevents). Nil with connectors off.
 	if s.mcpEvents != nil {
-		if err := s.mcpEvents.Reconcile(ctx, resolved); err != nil {
+		err := s.mcpEvents.Reconcile(ctx, resolved)
+		if errors.Is(err, store.ErrNoConnectorConnection) {
+			return nil, errNoSuchConnection
+		}
+		if err != nil {
 			return nil, err
 		}
 	}

@@ -57,10 +57,9 @@ type Contact struct {
 	Outcome    string     `bun:"outcome,notnull"`
 	Converted  bool       `bun:"converted,notnull"`
 	// CallID is the calls row of the last dial.
-	CallID       string    `bun:"call_id,nullzero"`
-	VendorCallID string    `bun:"vendor_call_id,nullzero"`
-	Reason       string    `bun:"reason,nullzero"`
-	CreatedAt    time.Time `bun:"created_at,notnull"`
+	CallID    string    `bun:"call_id,nullzero"`
+	Reason    string    `bun:"reason,nullzero"`
+	CreatedAt time.Time `bun:"created_at,notnull"`
 }
 
 // Validate refuses a contact nobody could be rung at.
@@ -110,9 +109,7 @@ func (r *CampaignContacts) InsertMany(ctx context.Context, campaignID string, co
 		contacts[index].CampaignID = campaignID
 		contacts[index].Stage = Enrolled
 		contacts[index].CreatedAt = now
-		if contacts[index].Variables == nil {
-			contacts[index].Variables = map[string]string{}
-		}
+		contacts[index].Variables = orEmptyMap(contacts[index].Variables)
 		if err := contacts[index].Validate(); err != nil {
 			return nil, nil, stack.Wrap(err)
 		}
@@ -275,9 +272,7 @@ func (r *CampaignContacts) Update(ctx context.Context, campaignID, contactID str
 		if changes.ToNumber == "" {
 			return errors.New("store: a contact needs a number to ring")
 		}
-		if changes.Variables == nil {
-			changes.Variables = map[string]string{}
-		}
+		changes.Variables = orEmptyMap(changes.Variables)
 		err = tx.NewUpdate().Model(&changed).
 			Set("to_number = ?", changes.ToNumber).
 			Set("variables = ?", changes.Variables).
@@ -355,7 +350,7 @@ func (r *CampaignContacts) Select(ctx context.Context, campaignID string, filter
 	if filter.After != nil {
 		query = query.Where("seq > ?", *filter.After)
 	}
-	if err := query.Order("seq ASC").Limit(clampLimit(filter.Limit, defaultCampaignLimit, maxCampaignLimit)).Scan(ctx); err != nil {
+	if err := query.Order("seq ASC").Limit(ClampLimit(filter.Limit, defaultCampaignLimit, maxCampaignLimit)).Scan(ctx); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: query contacts: %w", err))
 	}
 	return contacts, nil
@@ -418,7 +413,9 @@ type Claimed struct {
 	Contact  Contact
 }
 
-// Claim leases up to limit contacts that are due to be rung, to owner until now+lease.
+// Claim gives owner a lease on a maximum of limit contacts that are due for a call at now. Each
+// lease ends after the time in lease, on Postgres's clock. TakeOverExpired on each router
+// compares the lease with the same clock.
 // A campaign never has more contacts in progress than its concurrency, however many runners
 // claim at once.
 func (r *CampaignContacts) Claim(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]Claimed, error) {
@@ -470,13 +467,13 @@ func (r *CampaignContacts) Claim(ctx context.Context, owner string, now time.Tim
 	LIMIT GREATEST(LEAST(?::int, ?::int - (SELECT count(*) FROM campaign_contacts WHERE campaign_id = ? AND stage = ?)), 0)
 	FOR UPDATE SKIP LOCKED
 ), claimed AS (
-	UPDATE campaign_contacts cc SET stage = ?, leased_by = ?, lease_until = ?
+	UPDATE campaign_contacts cc SET stage = ?, leased_by = ?, lease_until = now() + make_interval(secs => ?)
 	FROM due WHERE cc.id = due.id
 	RETURNING cc.*
 )
 SELECT * FROM claimed ORDER BY next_attempt_at, seq`,
 				campaign.ID, Enrolled, now, share, campaign.Concurrency, campaign.ID, InProgress,
-				InProgress, owner, now.Add(lease)).Scan(ctx, &contacts)
+				InProgress, owner, lease.Seconds()).Scan(ctx, &contacts)
 			if err != nil {
 				return fmt.Errorf("store: claim due contacts: %w", err)
 			}
@@ -494,9 +491,12 @@ SELECT * FROM claimed ORDER BY next_attempt_at, seq`,
 
 // TakeOverExpired leases to owner up to limit contacts whose call's runner stopped renewing its
 // lease, most likely because it died. The new owner settles the call; it never dials again.
+// Each new lease ends after the time in lease, on Postgres's clock. TakeOverExpired compares the
+// old leases with the same clock. Thus a router with a clock that is ahead does not take a call
+// that is still in progress.
 // A contact of a campaign a data move paused is the source's until the cut-over, and its dial
 // may not have been imported yet.
-func (r *CampaignContacts) TakeOverExpired(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]Claimed, error) {
+func (r *CampaignContacts) TakeOverExpired(ctx context.Context, owner string, lease time.Duration, limit int) ([]Claimed, error) {
 	if owner == "" {
 		return nil, stack.Wrap(errors.New("store: a take-over needs an owner"))
 	}
@@ -506,7 +506,7 @@ func (r *CampaignContacts) TakeOverExpired(ctx context.Context, owner string, no
 
 	expired := r.store.global.NewSelect().Model((*Contact)(nil)).
 		Column("cc.id").
-		Where("cc.stage = ? AND cc.lease_until < ?", InProgress, now).
+		Where("cc.stage = ? AND cc.lease_until < now()", InProgress).
 		Where("NOT EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND cp.move_paused)").
 		Order("cc.lease_until").
 		Limit(limit).
@@ -515,7 +515,7 @@ func (r *CampaignContacts) TakeOverExpired(ctx context.Context, owner string, no
 	err := r.store.global.NewUpdate().With("expired", expired).Model((*Contact)(nil)).
 		TableExpr("expired").
 		Set("leased_by = ?", owner).
-		Set("lease_until = ?", now.Add(lease)).
+		Set("lease_until = now() + make_interval(secs => ?)", lease.Seconds()).
 		Where("cc.id = expired.id").
 		Returning("cc.*").
 		Scan(ctx, &contacts)
@@ -549,8 +549,13 @@ type Settle struct {
 	Outcome       string
 	Converted     bool
 	Reason        string
-	// CallID and VendorCallID are the last dial's; empty keeps the ones already stored.
-	CallID, VendorCallID string
+	// CallID is the last dial's; empty keeps the one already stored.
+	CallID string
+	// LeaseUntil is the lease the owner's claim returned, which every claim and take-over sets
+	// anew. Set, the contact settles only under that same lease: an owner is one process, and a
+	// call that outlives its lease may find the contact taken over, settled and claimed again
+	// by that same process.
+	LeaseUntil *time.Time
 }
 
 // Settle records where a call left a contact and releases owner's lease on it. A contact
@@ -599,12 +604,12 @@ func (r *CampaignContacts) settleContact(ctx context.Context, owner, contactID s
 			Set("outcome = ?", settle.Outcome).
 			Set("converted = ?", settle.Converted).
 			Set("call_id = COALESCE(?, cc.call_id)", nullable(settle.CallID)).
-			Set("vendor_call_id = COALESCE(?, cc.vendor_call_id)", nullable(settle.VendorCallID)).
 			Set("leased_by = ''").
 			Set("lease_until = NULL").
 			Where("cp.id = cc.campaign_id").
 			Where("cc.id = ? AND cc.leased_by = ?", contactID, owner).
 			Where("cc.stage IN (?, ?)", InProgress, AwaitingOutcome).
+			Where("(?::timestamptz IS NULL OR cc.lease_until = ?)", settle.LeaseUntil, settle.LeaseUntil).
 			Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("store: settle contact: %w", err)
@@ -649,7 +654,6 @@ func (r *CampaignContacts) settleContact(ctx context.Context, owner, contactID s
 type Classification struct {
 	AttemptID string
 	Outcome   string
-	Converted bool
 }
 
 // ClassifyAndSettle records what an answered dial's transcript said and settles its contact, both
@@ -664,7 +668,6 @@ func (r *CampaignContacts) ClassifyAndSettle(ctx context.Context, owner string, 
 			Set("classify_after = NULL").
 			Set("classify_state = ?", classifyDone).
 			Set("outcome = ?", classification.Outcome).
-			Set("converted = ?", classification.Converted).
 			Where("id = ?", classification.AttemptID).
 			Where("classify_state = ?", classifyPending).
 			Exec(ctx)

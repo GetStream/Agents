@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/suite"
 
@@ -74,7 +75,7 @@ func (s *RecordFlushSuite) TestFlushesWaitingOnASlowWriterLeaveRoomForRows() {
 		"the waiting flushes took room in the queue")
 
 	later := s.row()
-	s.records.Opened(later, nil)
+	s.records.Opened(later, nil, nil)
 	s.Zero(s.records.Dropped(), "a row queued behind the waiting flushes was dropped")
 
 	release()
@@ -90,7 +91,7 @@ func (s *RecordFlushSuite) TestFlushesWaitingOnASlowWriterLeaveRoomForRows() {
 func (s *RecordFlushSuite) TestFlushesWaitingTogetherDoNotWaitForRowsQueuedAfterThem() {
 	releaseFirst := s.holdWriter()
 	second, releaseSecond := s.heldRow()
-	s.records.Opened(second, nil)
+	s.records.Opened(second, nil, nil)
 	const callers = 64
 	errs := make(chan error, callers)
 	var started sync.WaitGroup
@@ -107,7 +108,7 @@ func (s *RecordFlushSuite) TestFlushesWaitingTogetherDoNotWaitForRowsQueuedAfter
 	s.Require().Eventually(func() bool { return len(s.records.queue) == 0 }, settleFor, 5*time.Millisecond,
 		"the writer never took the second held row")
 	third, _ := s.heldRow()
-	s.records.Opened(third, nil)
+	s.records.Opened(third, nil, nil)
 
 	releaseSecond()
 	deadline := time.After(recordWriteTimeout / 2)
@@ -124,7 +125,7 @@ func (s *RecordFlushSuite) TestFlushesWaitingTogetherDoNotWaitForRowsQueuedAfter
 func (s *RecordFlushSuite) TestAFlushIsNotHeldByALaterFlushWaitingOnARowQueuedAfterIt() {
 	releaseFirst := s.holdWriter()
 	second, releaseSecond := s.heldRow()
-	s.records.Opened(second, nil)
+	s.records.Opened(second, nil, nil)
 	first := make(chan error, 1)
 	var started sync.WaitGroup
 	started.Add(1)
@@ -138,7 +139,7 @@ func (s *RecordFlushSuite) TestAFlushIsNotHeldByALaterFlushWaitingOnARowQueuedAf
 	s.Require().Eventually(func() bool { return len(s.records.queue) == 0 }, settleFor, 5*time.Millisecond,
 		"the writer never took the second held row")
 	third, _ := s.heldRow()
-	s.records.Opened(third, nil)
+	s.records.Opened(third, nil, nil)
 	go func() { _ = s.records.Flush(s.bounded()) }()
 	// Nothing shows that the later Flush has reached the writer; give it time to.
 	time.Sleep(50 * time.Millisecond)
@@ -180,7 +181,7 @@ func (s *RecordFlushSuite) TestEachFlushWaitsForTheRowItsCallerQueuedBeforeIt() 
 		row := s.row()
 		started.Add(1)
 		finished.Go(func() {
-			s.records.Opened(row, nil)
+			s.records.Opened(row, nil, nil)
 			started.Done()
 			if err := s.records.Flush(s.bounded()); err != nil {
 				missing <- err.Error()
@@ -206,7 +207,7 @@ func (s *RecordFlushSuite) TestEachFlushWaitsForTheRowItsCallerQueuedBeforeIt() 
 
 func (s *RecordFlushSuite) TestAFlushReturnsOnceTheItemsQueuedBeforeItAreWritten() {
 	row := s.row()
-	s.records.Opened(row, nil)
+	s.records.Opened(row, nil, nil)
 	response := store.AgentResponse{ID: rand.Text(), SessionID: row.ID, CustomerID: s.customer, Said: "Where is my order?"}
 	s.records.Responding(response)
 	for ordinal, text := range []string{"Where is my order?", "It ships today.", "Thanks."} {
@@ -225,7 +226,7 @@ func (s *RecordFlushSuite) TestAFlushReturnsOnceTheItemsQueuedBeforeItAreWritten
 func (s *RecordFlushSuite) TestAFlushWaitingAsTheWriterClosesReturnsOnceItsRowIsWritten() {
 	release := s.holdWriter()
 	row := s.row()
-	s.records.Opened(row, nil)
+	s.records.Opened(row, nil, nil)
 	flushed := make(chan error, 1)
 	go func() { flushed <- s.records.Flush(s.bounded()) }()
 	closed := make(chan struct{})
@@ -263,7 +264,7 @@ func (s *RecordFlushSuite) TestAFlushGivesUpWhenItsCallerDoes() {
 func (s *RecordFlushSuite) TestAFlushTheWriterTookInGivesUpWhenItsCallerDoes() {
 	releaseFirst := s.holdWriter()
 	second, _ := s.heldRow()
-	s.records.Opened(second, nil)
+	s.records.Opened(second, nil, nil)
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 	flushed := make(chan error, 1)
@@ -291,13 +292,13 @@ func (s *RecordFlushSuite) TestATitleWrittenAfterTheSessionWasDeletedLogsNoError
 	logged := &syncBuffer{}
 	records := s.recorderLogging(s.store, logged)
 	row := s.row()
-	records.Opened(row, nil)
+	records.Opened(row, nil, nil)
 	s.Require().NoError(records.Flush(s.bounded()))
 
 	// The title is queued behind a write the writer is stuck on, as the one a model is
 	// still composing is when the customer deletes the conversation.
 	held, release := s.heldRow()
-	records.Opened(held, nil)
+	records.Opened(held, nil, nil)
 	records.Described(s.customer, row.ID, "Where an order went", "A question about an order.", nil)
 	s.Require().NoError(s.store.Sessions.Delete(s.ctx, s.customer, row.ID))
 	release()
@@ -315,7 +316,7 @@ func (s *RecordFlushSuite) TestATitleForASessionThatIsThereIsStored() {
 	logged := &syncBuffer{}
 	records := s.recorderLogging(s.store, logged)
 	row := s.row()
-	records.Opened(row, nil)
+	records.Opened(row, nil, nil)
 	records.Described(s.customer, row.ID, "Where an order went", "A question about an order.", nil)
 	s.Require().NoError(records.Flush(s.bounded()))
 
@@ -327,7 +328,7 @@ func (s *RecordFlushSuite) TestATitleForASessionThatIsThereIsStored() {
 
 func (s *RecordFlushSuite) TestAnotherCustomersCloseOfTheSameSessionIdLeavesItOpen() {
 	row := s.row()
-	s.records.Opened(row, nil)
+	s.records.Opened(row, nil, nil)
 
 	s.records.Closed("other-"+s.customer, row.ID, row.OpenedAt, time.Now().UTC(), TimeoutHangup)
 	s.Require().NoError(s.records.Flush(s.bounded()))
@@ -341,14 +342,14 @@ func (s *RecordFlushSuite) TestAnotherCustomersCloseOfTheSameSessionIdLeavesItOp
 
 func (s *RecordFlushSuite) TestACloseQueuedByTheRouterThatHeldASessionBeforeItWasReopenedLeavesItOpen() {
 	row := s.row()
-	s.records.Opened(row, nil)
+	s.records.Opened(row, nil, nil)
 	s.Require().NoError(s.records.Flush(s.bounded()))
 	// Another router carries the session on while the close of this one is still queued.
 	reopening := newSessionRecorder(s.store, slog.New(slog.DiscardHandler))
 	s.T().Cleanup(reopening.Close)
 	reopened := row
 	reopened.OpenedAt = row.OpenedAt.Add(time.Minute)
-	reopening.CarriedOn(reopened, nil)
+	reopening.CarriedOn(reopened, nil, nil)
 	s.Require().NoError(reopening.Flush(s.bounded()))
 
 	s.records.Closed(s.customer, row.ID, row.OpenedAt, time.Now().UTC(), TimeoutHangup)
@@ -371,7 +372,7 @@ func (s *RecordFlushSuite) TestTheItemsOfATurnWhoseIdIsAnotherCustomersAreNotWri
 	turn := rand.Text()
 	s.Require().NoError(s.store.Responses.Insert(s.ctx, &store.AgentResponse{ID: turn, SessionID: theirs.ID, CustomerID: other}))
 	row := s.row()
-	s.records.Opened(row, nil)
+	s.records.Opened(row, nil, nil)
 
 	s.records.Responding(store.AgentResponse{ID: turn, SessionID: row.ID, CustomerID: s.customer})
 	s.records.Item(store.AgentResponseItem{ResponseID: turn, SessionID: row.ID, Kind: "message", Text: "app's answer"})
@@ -381,6 +382,58 @@ func (s *RecordFlushSuite) TestTheItemsOfATurnWhoseIdIsAnotherCustomersAreNotWri
 	written, err := s.store.ResponseItems.Select(s.ctx, other, row.ID, store.ItemFilter{ResponseID: turn})
 	s.Require().NoError(err)
 	s.Empty(written, "no item was written under the other customer's turn")
+}
+
+func (s *RecordFlushSuite) TestASessionOpenedAgainOnceItsIDIsFreeKeepsItsTurns() {
+	other := "other-" + s.customer
+	row := s.row()
+	theirs := store.AgentSession{ID: row.ID, CustomerID: other, State: store.SessionRunning, CreatedAt: time.Now().UTC()}
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &theirs))
+	refused := make(chan struct{})
+	s.records.Opened(row, nil, func() { close(refused) })
+	s.records.Responding(store.AgentResponse{ID: rand.Text(), SessionID: row.ID, CustomerID: s.customer})
+	s.records.Closed(s.customer, row.ID, row.OpenedAt, time.Now().UTC(), EndClosed)
+	s.Require().NoError(s.records.Flush(s.bounded()))
+	s.Require().Eventually(func() bool {
+		select {
+		case <-refused:
+			return true
+		default:
+			return false
+		}
+	}, settleFor, 5*time.Millisecond, "the row taken by another customer was not refused")
+	s.Require().NoError(s.store.Sessions.Delete(s.ctx, other, row.ID))
+
+	s.records.Opened(row, nil, nil)
+	turn := rand.Text()
+	s.records.Responding(store.AgentResponse{ID: turn, SessionID: row.ID, CustomerID: s.customer})
+	s.Require().NoError(s.records.Flush(s.bounded()))
+
+	turns, err := s.store.Responses.Select(s.ctx, s.customer, row.ID, store.ResponseFilter{Limit: 10})
+	s.Require().NoError(err)
+	s.Require().Len(turns, 1, "only the turn of the session opened once the id was free is kept")
+	s.Equal(turn, turns[0].ID)
+}
+
+// The close of the refused session never reached the writer, as when a full queue drops it.
+func (s *RecordFlushSuite) TestASessionOpenedAgainOnceItsIDIsFreeKeepsItsTurnsWithNoCloseBetween() {
+	other := "other-" + s.customer
+	row := s.row()
+	theirs := store.AgentSession{ID: row.ID, CustomerID: other, State: store.SessionRunning, CreatedAt: time.Now().UTC()}
+	s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &theirs))
+	s.records.Opened(row, nil, nil)
+	s.Require().NoError(s.records.Flush(s.bounded()))
+	s.Require().NoError(s.store.Sessions.Delete(s.ctx, other, row.ID))
+
+	s.records.Opened(row, nil, nil)
+	turn := rand.Text()
+	s.records.Responding(store.AgentResponse{ID: turn, SessionID: row.ID, CustomerID: s.customer})
+	s.Require().NoError(s.records.Flush(s.bounded()))
+
+	turns, err := s.store.Responses.Select(s.ctx, s.customer, row.ID, store.ResponseFilter{Limit: 10})
+	s.Require().NoError(err)
+	s.Require().Len(turns, 1, "the session opened once the id was free keeps its turn")
+	s.Equal(turn, turns[0].ID)
 }
 
 func (s *RecordFlushSuite) TestATitleTheStoreCouldNotWriteStillLogsAnError() {
@@ -399,7 +452,7 @@ func (s *RecordFlushSuite) TestATitleTheStoreCouldNotWriteStillLogsAnError() {
 func (s *RecordFlushSuite) TestASessionWriteCutOffByADroppedConnectionIsStoredWithWhatFollowsIt() {
 	held, release := s.heldRow()
 	response := store.AgentResponse{ID: rand.Text(), SessionID: held.ID, CustomerID: s.customer, Said: "Where is my order?"}
-	s.records.Opened(held, nil)
+	s.records.Opened(held, nil, nil)
 	s.records.Responding(response)
 	s.records.Item(store.AgentResponseItem{ResponseID: response.ID, Ordinal: 0, SessionID: held.ID,
 		Kind: store.ItemSaid, Text: "Where is my order?", At: time.Now().UTC()})
@@ -428,8 +481,8 @@ func (s *RecordFlushSuite) TestASessionWriteCutOffByADroppedConnectionIsStoredWi
 
 func (s *RecordFlushSuite) TestAnItemWhoseResponseIsMissingDoesNotStopAnotherSessionsItems() {
 	kept, orphaned := s.row(), s.row()
-	s.records.Opened(kept, nil)
-	s.records.Opened(orphaned, nil)
+	s.records.Opened(kept, nil, nil)
+	s.records.Opened(orphaned, nil, nil)
 	response := store.AgentResponse{ID: rand.Text(), SessionID: kept.ID, CustomerID: s.customer, Said: "Where is my order?"}
 	s.records.Responding(response)
 	lost := testutil.ToFloat64(recordsLost.WithLabelValues(lostItems))
@@ -453,7 +506,7 @@ func (s *RecordFlushSuite) TestAnItemWhoseResponseIsMissingDoesNotStopAnotherSes
 
 func (s *RecordFlushSuite) TestAnItemWhoseResponseIsMissingDoesNotStopItsSessionsStoredTurn() {
 	session := s.row()
-	s.records.Opened(session, nil)
+	s.records.Opened(session, nil, nil)
 	stored := store.AgentResponse{ID: rand.Text(), SessionID: session.ID, CustomerID: s.customer, Said: "Can I change the address?"}
 	s.records.Responding(stored)
 
@@ -525,7 +578,7 @@ func (s *RecordFlushSuite) TestEveryWriteCutOffByADroppedConnectionIsStored() {
 		held: []string{"agent_session_tools"},
 		queue: func(r *sessionRecorder, rows cutRows) {
 			rows.session.Title = "Reopened"
-			r.Opened(rows.session, tool)
+			r.Opened(rows.session, tool, nil)
 		},
 		check: func(rows cutRows) { s.Equal(tool, s.toolsOf(rows.session.ID)) },
 	}, {
@@ -693,6 +746,75 @@ func (s *RecordFlushSuite) TestEndsAFullQueueDropsAreCounted() {
 		"a call end the full queue dropped is not counted")
 }
 
+func (s *RecordFlushSuite) TestEveryWriteAFullQueueDropsIsCounted() {
+	release := s.holdWriter()
+	defer release()
+	for range recordQueueSize {
+		s.records.Voiced(s.customer, rand.Text())
+	}
+	dropped := s.droppedTotal()
+
+	opened := s.row()
+	s.records.Opened(opened, nil, nil)
+	s.records.Responding(store.AgentResponse{ID: rand.Text(), SessionID: opened.ID, CustomerID: s.customer})
+	s.records.Item(store.AgentResponseItem{ResponseID: rand.Text(), SessionID: opened.ID,
+		Kind: store.ItemSaid, Text: "Where is my order?", At: time.Now().UTC()})
+	s.records.Closed(s.customer, opened.ID, opened.OpenedAt, time.Now().UTC(), TimeoutHangup)
+
+	s.Equal(int64(4), s.records.Dropped(), "the queue was not full")
+	s.InDelta(dropped+4, s.droppedTotal(), 0, "a write the full queue dropped is not counted")
+}
+
+// droppedTotal reads the counter of writes a full queue dropped, as a scrape does, 0 before
+// it exists.
+func (s *RecordFlushSuite) droppedTotal() float64 {
+	families, err := prometheus.DefaultGatherer.Gather()
+	s.Require().NoError(err)
+	for _, family := range families {
+		if family.GetName() == "router_session_records_dropped_total" {
+			return family.GetMetric()[0].GetCounter().GetValue()
+		}
+	}
+	return 0
+}
+
+func (s *RecordFlushSuite) TestTheItemsOfATurnWhoseRowIsMissingDoNotFailEveryLaterBatch() {
+	logged := &syncBuffer{}
+	records := s.recorderLogging(s.store, logged)
+	session := s.row()
+	records.Opened(session, nil, nil)
+	stored := store.AgentResponse{ID: rand.Text(), SessionID: session.ID, CustomerID: s.customer, Said: "Where is my order?"}
+	records.Responding(stored)
+	missing := rand.Text()
+	lost := testutil.ToFloat64(recordsLost.WithLabelValues(lostItems))
+
+	// A batch per Flush, each holding an item of the stored turn and one of the turn whose row
+	// was never written.
+	batch := func(ordinal int, said string) {
+		records.Item(store.AgentResponseItem{ResponseID: stored.ID, Ordinal: ordinal, SessionID: session.ID,
+			Kind: store.ItemSaid, Text: said, At: time.Now().UTC()})
+		records.Item(store.AgentResponseItem{ResponseID: missing, Ordinal: ordinal, SessionID: session.ID,
+			Kind: store.ItemSaid, Text: said, At: time.Now().UTC()})
+		s.Require().NoError(records.Flush(s.bounded()))
+	}
+	batch(0, "It ships today.")
+	batch(1, "It arrives on Friday.")
+
+	items, err := s.store.ResponseItems.Select(s.ctx, s.customer, session.ID, store.ItemFilter{ResponseID: stored.ID, Limit: 10})
+	s.Require().NoError(err)
+	s.Len(items, 2, "an item of the stored turn was dropped")
+	s.Equal(1, strings.Count(logged.String(), "its response was never recorded"),
+		"a later batch failed again on the turn already found missing")
+	s.InDelta(lost+2, testutil.ToFloat64(recordsLost.WithLabelValues(lostItems)), 0,
+		"each item of the missing turn is not counted, one by one")
+
+	// Once the turn ended its id is tried again, as any other turn's is.
+	records.Responded(s.customer, missing, store.ResponseCompleted, "", time.Now().UTC())
+	batch(2, "Anything else?")
+	s.Equal(2, strings.Count(logged.String(), "its response was never recorded"),
+		"the turn found missing is still kept after it ended")
+}
+
 // cutRows stores a running text session offered no tools yet, a turn of it and a call of it.
 func (s *RecordFlushSuite) cutRows() cutRows {
 	rows := cutRows{session: s.row()}
@@ -745,7 +867,7 @@ func (s *RecordFlushSuite) sessionOf(id string) store.AgentSession {
 }
 
 func (s *RecordFlushSuite) toolsOf(id string) []store.ToolDefinition {
-	got, err := s.store.SessionTools.Get(s.ctx, id)
+	got, err := s.store.SessionTools.Get(s.ctx, s.customer, id)
 	s.Require().NoError(err)
 	return got
 }
@@ -852,7 +974,7 @@ func (b *syncBuffer) String() string {
 // recordWriteTimeout, so a test releases well before that.
 func (s *RecordFlushSuite) holdWriter() (release func()) {
 	held, release := s.heldRow()
-	s.records.Opened(held, nil)
+	s.records.Opened(held, nil, nil)
 	s.Require().Eventually(func() bool { return len(s.records.queue) == 0 }, settleFor, 5*time.Millisecond,
 		"the writer never took the held row")
 	return release

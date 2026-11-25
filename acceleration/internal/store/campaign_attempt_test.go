@@ -61,7 +61,23 @@ func (s *StoreSuite) TestCampaignAttemptQueryBudgets() {
 	s.Equal(2+2, s.countQueries(func() {
 		s.Require().NoError(s.store.CampaignAttempts.PutOff(s.ctx, "b", classifying[0].Attempt.ID, s.base.Add(time.Hour)))
 	}), "PutOff releases the contact and puts the dial off")
-	s.Equal(1, s.countQueries(func() {
-		s.Require().NoError(s.store.CampaignAttempts.Classified(s.ctx, classifying[1].Attempt.ID, "callback", true))
-	}), "Classified")
+}
+
+// A router whose call outlived its lease ends its dial after the router that took the contact
+// over ended it, and must not write over what that router read.
+func (s *StoreSuite) TestADialEndsOnce() {
+	s.runningCampaign(5, "+15550001")
+	claim := s.claimDue("a", s.base, 10)[0]
+	attempt := CampaignAttempt{CampaignID: claim.Campaign.ID, ContactID: claim.Contact.ID, StepID: "step_1", Attempt: 1, StartedAt: s.base}
+	s.Require().NoError(s.store.CampaignAttempts.Insert(s.ctx, &attempt))
+
+	s.Require().NoError(s.store.CampaignAttempts.End(s.ctx, claim.Campaign.CustomerID, attempt.ID, "", "busy", "", "", s.base.Add(time.Minute), nil))
+	s.Require().NoError(s.store.CampaignAttempts.End(s.ctx, claim.Campaign.CustomerID, attempt.ID, "", "completed", "", "", s.base.Add(2*time.Minute), &s.base))
+
+	ended, found, err := s.store.CampaignAttempts.Latest(s.ctx, claim.Contact.ID)
+	s.Require().NoError(err)
+	s.Require().True(found)
+	s.Equal("busy", ended.CallOutcome)
+	s.Equal(s.base.Add(time.Minute), ended.EndedAt.UTC())
+	s.Empty(ended.ClassifyState)
 }

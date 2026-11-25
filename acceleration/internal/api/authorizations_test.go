@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -579,6 +580,35 @@ func (s *AuthorizationsSuite) TestAReconnectRestoresTheEventSubscriptionsItsBind
 	s.Equal(1, held)
 }
 
+// TestAConsentRacingTheConnectionsDeleteStillConnectsAndLogsNoError: the connection is deleted
+// after the consent stored its credentials and before the MCP events are subscribed. The
+// consent still answers connected; the missing connection is an expected outcome, logged at
+// Info, and the error line stays for any other failure.
+func (s *AuthorizationsSuite) TestAConsentRacingTheConnectionsDeleteStillConnectsAndLogsNoError() {
+	id := s.connection("")
+	alice := s.browser()
+	callback := s.consent(alice.handOff(s.start(id)))
+	var once sync.Once
+	// The router's logger holds its lock while it writes a line, so the delete is made here, in
+	// the store, not through a request that would log.
+	s.logged.whenWritten(func(line string) {
+		if strings.Contains(line, "connector credential event") && strings.Contains(line, id) {
+			once.Do(func() {
+				_, err := s.store.GlobalDB().ExecContext(context.Background(),
+					"UPDATE connector_connections SET deleted_at = now() WHERE id = ?", id)
+				s.NoError(err)
+			})
+		}
+	})
+	s.T().Cleanup(func() { s.logged.whenWritten(nil) })
+
+	response := alice.finish(callback)
+
+	s.Equal(s.landing(id, consentConnected), response.Header.Get("Location"))
+	s.Empty(s.logged.lines("could not subscribe a reconnected connection's MCP events", id))
+	s.NotEmpty(s.logged.lines("a connection was deleted while its consent finished, so its MCP events were not subscribed", id))
+}
+
 // TestAConsentLeavesOneGrantCreatedRowNamingItsAttempt: T47's audit of a grant created at the
 // callback.
 func (s *AuthorizationsSuite) TestAConsentLeavesOneGrantCreatedRowNamingItsAttempt() {
@@ -763,7 +793,7 @@ func (s *AuthorizationsSuite) TestABackendSayingTheSameEmailAgainCostsNoWrite() 
 	backend := s.serverClient.actingFor(alice).withEmail("alice@fake.example")
 	s.Require().Equal(http.StatusOK, backend.do(http.MethodGet, "/v1/agents/connections?owner_type=user", nil, nil))
 	s.Require().Equal("alice@fake.example", s.userEmail(alice))
-	s.Require().NoError(s.store.SetUserEmail(context.Background(), s.customerID(), alice.userID, "behind@fake.example"))
+	s.Require().NoError(s.store.Users.SetEmail(context.Background(), s.customerID(), alice.userID, "behind@fake.example"))
 
 	for range 3 {
 		s.Require().Equal(http.StatusOK, backend.do(http.MethodGet, "/v1/agents/connections?owner_type=user", nil, nil))
@@ -1614,7 +1644,7 @@ func (s *AuthorizationsSuite) assertNothingStored(id string) {
 }
 
 func (s *AuthorizationsSuite) userEmail(user *testClient) string {
-	email, err := s.store.UserEmail(context.Background(), s.customerID(), user.userID)
+	email, err := s.store.Users.GetEmail(context.Background(), s.customerID(), user.userID)
 	s.Require().NoError(err)
 	return email
 }

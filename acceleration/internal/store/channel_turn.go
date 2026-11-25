@@ -23,6 +23,9 @@ type ChannelTurn struct {
 	CID         string    `bun:"cid,pk"`
 	LeasedBy    string    `bun:"leased_by,notnull"`
 	LeaseUntil  time.Time `bun:"lease_until,notnull"`
+	// Lease is how long Take leases the turn for, counted on Postgres's clock: every router
+	// judges the lease by now() there, so a router whose clock is off neither ends nor stretches it.
+	Lease time.Duration `bun:"-"`
 }
 
 // Validate refuses a lease no one holds.
@@ -30,7 +33,7 @@ func (t *ChannelTurn) Validate() error {
 	return validate("channel turn").
 		required("cid", t.CID).
 		required("leased_by", t.LeasedBy).
-		check(!t.LeaseUntil.IsZero(), "lease_until", "is required").
+		check(t.Lease > 0, "lease", "must be positive").
 		done()
 }
 
@@ -39,15 +42,15 @@ type ChannelTurns struct {
 	store *Store
 }
 
-// Take leases the channel's turn to turn.LeasedBy until turn.LeaseUntil, when no turn holds it
+// Take leases the channel's turn to turn.LeasedBy for turn.Lease, when no turn holds it
 // or the one that did ran out. False is a turn another holder has. One statement, so two
 // routers asking at once get one lease between them.
 func (r *ChannelTurns) Take(ctx context.Context, turn ChannelTurn) (bool, error) {
 	if err := turn.Validate(); err != nil {
 		return false, stack.Wrap(err)
 	}
-	turn.LeaseUntil = turn.LeaseUntil.UTC()
 	result, err := r.store.global.NewInsert().Model(&turn).
+		Value("lease_until", "now() + make_interval(secs => ?)", turn.Lease.Seconds()).
 		On("CONFLICT (stream_app_pk, cid) DO UPDATE").
 		Set("leased_by = EXCLUDED.leased_by").
 		Set("lease_until = EXCLUDED.lease_until").

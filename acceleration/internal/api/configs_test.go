@@ -2181,7 +2181,7 @@ func (s *ConfigsSuite) TestNessyBesideSeveralOutboundToolsNamesThemAll() {
 
 // TestNessyBesideAConnectorWithOneOutboundSourceAmongSeveralIsRefused: a connector sends data
 // out if any of its sources may, not only the first. Manifest.Validate accepts several sources
-// and CreateConnectorDefinition takes any manifest, so a custom connector can put a source that
+// and store.ConnectorDefinitions.Revise takes any manifest, so a custom connector can put a source that
 // says outbound: false before one that does not.
 func (s *ConfigsSuite) TestNessyBesideAConnectorWithOneOutboundSourceAmongSeveralIsRefused() {
 	s.useInternalApp()

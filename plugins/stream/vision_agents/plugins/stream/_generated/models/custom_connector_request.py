@@ -35,6 +35,9 @@ class CustomConnectorRequest:
         description (str | Unset):
         scopes (list[str] | None | Unset): The scopes a consent asks for, each an RFC 6749 scope token.
         http (CustomHTTPAPI | Unset): An HTTP API a custom connector calls, and the tools it offers an agent.
+        sync_hash (str | Unset): The fingerprint of the file this definition was synced from, which the connector then
+            carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest
+            revision already says with another hash stores no new revision and records the hash on that one.
     """
 
     id: str
@@ -46,6 +49,7 @@ class CustomConnectorRequest:
     description: str | Unset = UNSET
     scopes: list[str] | None | Unset = UNSET
     http: CustomHTTPAPI | Unset = UNSET
+    sync_hash: str | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         id = self.id
@@ -82,6 +86,8 @@ class CustomConnectorRequest:
         if not isinstance(self.http, Unset):
             http = self.http.to_dict()
 
+        sync_hash = self.sync_hash
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -103,6 +109,8 @@ class CustomConnectorRequest:
             field_dict["scopes"] = scopes
         if http is not UNSET:
             field_dict["http"] = http
+        if sync_hash is not UNSET:
+            field_dict["sync_hash"] = sync_hash
 
         return field_dict
 
@@ -168,6 +176,8 @@ class CustomConnectorRequest:
         else:
             http = CustomHTTPAPI.from_dict(_http)
 
+        sync_hash = d.pop("sync_hash", UNSET)
+
         custom_connector_request = cls(
             id=id,
             name=name,
@@ -178,6 +188,7 @@ class CustomConnectorRequest:
             description=description,
             scopes=scopes,
             http=http,
+            sync_hash=sync_hash,
         )
 
         return custom_connector_request

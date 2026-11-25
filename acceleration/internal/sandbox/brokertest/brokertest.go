@@ -171,6 +171,14 @@ func (s *BrokerContract) returned(err error) error {
 	return err
 }
 
+// run is a run of code starting in subject's sandbox: its BeforeRun, whose error it keeps for
+// TearDownTest. What a request gets (Held, Left) is read during a run: a broker may hold nothing
+// for the sandbox between runs.
+func (s *BrokerContract) run(subject Subject) error {
+	_, err := subject.Broker.BeforeRun(s.ctx)
+	return s.returned(err)
+}
+
 // ref is the value of the sandbox's env var name: a secret's name, or a placeholder.
 func ref(mount sandbox.Mount, name string) string {
 	if secret, ok := mount.Secrets[name]; ok {
@@ -196,6 +204,9 @@ func (s *BrokerContract) TestTheSandboxGetsAReferenceNeverTheToken() {
 	reference := ref(mount, "GITHUB_TOKEN")
 	s.Require().NotEmpty(reference)
 	s.NotContains(fmt.Sprintf("%+v", mount), "gho_first")
+	env, err := subject.Broker.BeforeRun(s.ctx)
+	s.Require().NoError(s.returned(err))
+	s.NotContains(fmt.Sprintf("%+v", env), "gho_first", "a run's env")
 	value, hosts, ok := subject.Held(reference)
 	s.Require().True(ok)
 	s.Equal("gho_first", value)
@@ -208,7 +219,7 @@ func (s *BrokerContract) TestANewRevisionIsHandedOverBeforeTheNextRun() {
 	s.Require().NoError(s.returned(err))
 
 	s.connect("github", "gho_second", 2)
-	s.Require().NoError(s.returned(subject.Broker.BeforeRun(s.ctx)))
+	s.Require().NoError(s.run(subject))
 
 	value, _, ok := subject.Held(ref(mount, "GITHUB_TOKEN"))
 	s.Require().True(ok)
@@ -221,6 +232,7 @@ func (s *BrokerContract) TestClosingLeavesNothingWithTheProvider() {
 	subject := s.subject("session-1")
 	_, err := subject.Broker.Prepare(s.ctx, []sandbox.Grant{grant("github", "GITHUB_TOKEN"), grant("gitlab", "GITLAB_TOKEN")})
 	s.Require().NoError(s.returned(err))
+	s.Require().NoError(s.run(subject))
 	s.Len(subject.Left(), 2)
 
 	s.Require().NoError(s.returned(subject.Broker.Close(s.ctx)))
@@ -237,6 +249,7 @@ func (s *BrokerContract) TestADisconnectedConnectionGivesNoEnvAndAWarning() {
 
 	s.Require().NoError(s.returned(err))
 	s.Empty(ref(mount, "GITHUB_TOKEN"))
+	s.Require().NoError(s.run(subject))
 	s.Empty(subject.Left())
 	s.Contains(s.logs.String(), `"level":"WARN"`)
 	s.Contains(s.logs.String(), "github")
@@ -253,6 +266,7 @@ func (s *BrokerContract) TestARequiredGrantWithoutACredentialRefusesTheSandbox()
 
 	s.Require().Error(s.returned(err))
 	s.ErrorContains(err, "github")
+	s.Require().NoError(s.run(subject))
 	s.Empty(subject.Left(), "what was made before the refusal is gone")
 }
 
@@ -294,9 +308,9 @@ func (s *BrokerContract) TestNoProviderAnswerReachesTheLogs() {
 	s.Require().NoError(s.returned(err))
 
 	s.quoting("gitlab", false)
-	s.Require().NoError(s.returned(subject.Broker.BeforeRun(s.ctx)))
+	s.Require().NoError(s.run(subject))
 	s.quoting("gitlab", true)
-	s.Require().NoError(s.returned(subject.Broker.BeforeRun(s.ctx)))
+	s.Require().NoError(s.run(subject))
 
 	s.GreaterOrEqual(strings.Count(s.logs.String(), `"level":"WARN"`), 4, "one per grant left out, kept or withdrawn")
 }
@@ -309,7 +323,7 @@ func (s *BrokerContract) TestAConnectionRevokedMidSessionIsWithdrawn() {
 	s.Require().NoError(s.returned(err))
 
 	s.disconnect("github")
-	s.Require().NoError(s.returned(subject.Broker.BeforeRun(s.ctx)))
+	s.Require().NoError(s.run(subject))
 
 	s.tokenless(subject, ref(mount, "GITHUB_TOKEN"), "a revoked connection's credential is withdrawn")
 	s.Contains(s.logs.String(), `"level":"WARN"`)
@@ -323,14 +337,16 @@ func (s *BrokerContract) TestABindingRemovedMidSessionIsWithdrawn() {
 	mount, err := subject.Broker.Prepare(s.ctx, []sandbox.Grant{grant("github", "GITHUB_TOKEN")})
 	s.Require().NoError(s.returned(err))
 
+	s.Require().NoError(s.run(subject))
+
 	s.unbind("github")
 	_, _, ok := subject.Held(ref(mount, "GITHUB_TOKEN"))
 	s.Equal(!subject.Live, ok, "a live egress refuses the next request")
-	s.Require().NoError(s.returned(subject.Broker.BeforeRun(s.ctx)))
+	s.Require().NoError(s.run(subject))
 	s.tokenless(subject, ref(mount, "GITHUB_TOKEN"), "the next run has no token")
 
 	s.connect("github", "gho_second", 2)
-	s.Require().NoError(s.returned(subject.Broker.BeforeRun(s.ctx)))
+	s.Require().NoError(s.run(subject))
 	s.tokenless(subject, ref(mount, "GITHUB_TOKEN"), "a binding put back stays withdrawn")
 	s.Require().NoError(s.returned(subject.Broker.Close(s.ctx)))
 	s.Empty(subject.Left())
@@ -344,7 +360,7 @@ func (s *BrokerContract) TestACredentialUnavailableJustNowIsKeptAndAskedForAgain
 	s.Require().NoError(s.returned(err))
 
 	s.unavailable("github")
-	s.Require().NoError(s.returned(subject.Broker.BeforeRun(s.ctx)))
+	s.Require().NoError(s.run(subject))
 
 	value, _, ok := subject.Held(ref(mount, "GITHUB_TOKEN"))
 	if subject.Live {
@@ -356,7 +372,7 @@ func (s *BrokerContract) TestACredentialUnavailableJustNowIsKeptAndAskedForAgain
 	s.Contains(s.logs.String(), `"level":"WARN"`)
 
 	s.connect("github", "gho_second", 2)
-	s.Require().NoError(s.returned(subject.Broker.BeforeRun(s.ctx)))
+	s.Require().NoError(s.run(subject))
 	value, _, _ = subject.Held(ref(mount, "GITHUB_TOKEN"))
 	s.Equal("gho_second", value)
 }
@@ -371,6 +387,8 @@ func (s *BrokerContract) TestTwoSessionsNeverShareACredential() {
 	other, err := second.Broker.Prepare(s.ctx, []sandbox.Grant{grant("github", "GITHUB_TOKEN")})
 	s.Require().NoError(s.returned(err))
 	s.NotEqual(ref(one, "GITHUB_TOKEN"), ref(other, "GITHUB_TOKEN"))
+	s.Require().NoError(s.run(first))
+	s.Require().NoError(s.run(second))
 
 	s.Require().NoError(s.returned(first.Broker.Close(s.ctx)))
 
@@ -378,11 +396,16 @@ func (s *BrokerContract) TestTwoSessionsNeverShareACredential() {
 	s.True(ok)
 }
 
+// TestAProviderThatRefusesLeavesTheTokenInNoError: the sandbox, or its first run, fails. A
+// broker may keep nothing with the provider until a run.
 func (s *BrokerContract) TestAProviderThatRefusesLeavesTheTokenInNoError() {
 	subject := s.subject("session-1")
 	subject.Refuse()
 
 	_, err := subject.Broker.Prepare(s.ctx, []sandbox.Grant{grant("github", "GITHUB_TOKEN")})
+	if err == nil {
+		_, err = subject.Broker.BeforeRun(s.ctx)
+	}
 
 	s.Error(s.returned(err))
 }
@@ -398,8 +421,12 @@ func (s *BrokerContract) TestARefusedRefreshIsAnErrorWithoutTheToken() {
 	s.connect("github", "gho_second", 2)
 	subject.Refuse()
 
-	s.Error(s.returned(subject.Broker.BeforeRun(s.ctx)))
+	s.Error(s.run(subject))
 	subject.Recover()
+	if subject.Live {
+		// A live egress holds nothing for a run that failed: the next run gets the newest.
+		s.Require().NoError(s.run(subject))
+	}
 	value, _, ok := subject.Held(ref(mount, "GITHUB_TOKEN"))
 	s.Require().True(ok)
 	if subject.Live {
@@ -421,12 +448,12 @@ func (s *BrokerContract) TestAWithdrawalTheProviderRefusesIsAnErrorAndIsRetried(
 
 	s.disconnect("github")
 	subject.Refuse()
-	s.Error(s.returned(subject.Broker.BeforeRun(s.ctx)))
+	s.Error(s.run(subject))
 	_, _, ok := subject.Held(ref(mount, "GITHUB_TOKEN"))
 	s.Equal(!subject.Live, ok, "the secret stays while the provider refuses")
 
 	subject.Recover()
-	s.Require().NoError(s.returned(subject.Broker.BeforeRun(s.ctx)))
+	s.Require().NoError(s.run(subject))
 	s.tokenless(subject, ref(mount, "GITHUB_TOKEN"), "the next run withdraws it")
 
 	subject.Refuse()
@@ -460,6 +487,7 @@ func (s *BrokerContract) TestAGitCloneCarriesTheTokenInAuthorizationAlone() {
 	mount, err := subject.Broker.Prepare(s.ctx, []sandbox.Grant{github})
 	s.Require().NoError(s.returned(err))
 	placeholder := ref(mount, "GITHUB_TOKEN")
+	s.Require().NoError(s.run(subject))
 
 	authorizations, cloned, elsewhere := subject.Clone(placeholder, "GITHUB_TOKEN="+placeholder+"\n")
 
@@ -473,6 +501,28 @@ func (s *BrokerContract) TestAGitCloneCarriesTheTokenInAuthorizationAlone() {
 	for _, value := range elsewhere {
 		s.NotContains(value, "gho_first", "the token is in Authorization alone")
 	}
+}
+
+// TestARunsEndLeavesTheNextRunItsGrants: a broker may end what a run got once it has ended, so
+// a live egress reaches nothing between runs, and a run after gets the grants again. A run that
+// ends after Close brings nothing back.
+func (s *BrokerContract) TestARunsEndLeavesTheNextRunItsGrants() {
+	subject := s.subject("session-1")
+	mount, err := subject.Broker.Prepare(s.ctx, []sandbox.Grant{grant("github", "GITHUB_TOKEN")})
+	s.Require().NoError(s.returned(err))
+	s.Require().NoError(s.run(subject))
+
+	s.Require().NoError(s.returned(subject.Broker.AfterRun(s.ctx)))
+
+	_, _, ok := subject.Held(ref(mount, "GITHUB_TOKEN"))
+	s.Equal(!subject.Live, ok, "a live egress holds nothing once the run has ended")
+	s.Require().NoError(s.run(subject))
+	value, _, ok := subject.Held(ref(mount, "GITHUB_TOKEN"))
+	s.Require().True(ok, "the next run")
+	s.Equal("gho_first", value)
+	s.Require().NoError(s.returned(subject.Broker.Close(s.ctx)))
+	s.Require().NoError(s.returned(subject.Broker.AfterRun(s.ctx)))
+	s.Empty(subject.Left())
 }
 
 // late is a grant of binding whose connection the user has not made yet, in config-1.
@@ -514,7 +564,7 @@ func (s *BrokerContract) TestALateGrantGetsATokenOnlyOnceBound() {
 
 	mount, err := subject.Broker.Prepare(s.ctx, []sandbox.Grant{grant("github", "GITHUB_TOKEN"), late("linear", "LINEAR_TOKEN")})
 	s.Require().NoError(s.returned(err))
-	s.Require().NoError(s.returned(subject.Broker.BeforeRun(s.ctx)))
+	s.Require().NoError(s.run(subject))
 
 	reference := ref(mount, "LINEAR_TOKEN")
 	s.Require().NotEmpty(reference)
@@ -523,7 +573,7 @@ func (s *BrokerContract) TestALateGrantGetsATokenOnlyOnceBound() {
 	bound := late("linear", "OTHER_TOKEN")
 	bound.Connection.ConnectionID, bound.Scheme, bound.Hosts = "connection-linear", "bearer", []string{"elsewhere.example.com"}
 	s.binds("linear", bound)
-	s.Require().NoError(s.returned(subject.Broker.BeforeRun(s.ctx)))
+	s.Require().NoError(s.run(subject))
 
 	value, hosts, ok := subject.Held(reference)
 	s.Require().True(ok)
@@ -542,6 +592,7 @@ func (s *BrokerContract) TestALateGrantWithoutBindRefusesTheSandbox() {
 
 	s.Require().Error(s.returned(err))
 	s.ErrorContains(err, "linear")
+	s.Require().NoError(s.run(subject))
 	s.Empty(subject.Left())
 }
 
@@ -556,6 +607,7 @@ func (s *BrokerContract) TestALateGrantThatIsRequiredRefusesTheSandbox() {
 
 	s.Require().Error(s.returned(err))
 	s.ErrorContains(err, "linear")
+	s.Require().NoError(s.run(subject))
 	s.Empty(subject.Left())
 }
 
@@ -570,7 +622,7 @@ func (s *BrokerContract) TestALateGrantGetsNoTokenFromAConnectionItCarries() {
 
 	mount, err := subject.Broker.Prepare(s.ctx, []sandbox.Grant{carrying})
 	s.Require().NoError(s.returned(err))
-	s.Require().NoError(s.returned(subject.Broker.BeforeRun(s.ctx)))
+	s.Require().NoError(s.run(subject))
 
 	s.tokenless(subject, ref(mount, "LINEAR_TOKEN"), "no token without a bind")
 }
@@ -594,14 +646,14 @@ func (s *BrokerContract) TestABindNamingAnotherGrantLeavesTheLateGrantUnbound() 
 		bound.Connection.ConnectionID, bound.Scheme = "connection-linear", "bearer"
 		other(&bound)
 		s.binds("linear", bound)
-		s.Require().NoError(s.returned(subject.Broker.BeforeRun(s.ctx)))
+		s.Require().NoError(s.run(subject))
 		s.tokenless(subject, reference, bound.Binding+"/"+bound.Config+"/"+bound.Connector+" binds nothing")
 	}
 
 	bound := late("linear", "LINEAR_TOKEN")
 	bound.Connection.ConnectionID, bound.Scheme = "connection-linear", "bearer"
 	s.binds("linear", bound)
-	s.Require().NoError(s.returned(subject.Broker.BeforeRun(s.ctx)))
+	s.Require().NoError(s.run(subject))
 	value, _, ok := subject.Held(reference)
 	s.Require().True(ok)
 	s.Equal("lin_late", value)

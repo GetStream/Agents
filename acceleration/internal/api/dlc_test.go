@@ -921,6 +921,31 @@ func (s *DLCSuite) TestAUseCaseIsHiddenFromOtherApps() {
 	})
 }
 
+func (s *DLCSuite) TestAnOptOutNotInE164IsRefused() {
+	for _, recipient := range []string{"15551110000", "+1 555 111 0000", "(555) 111-0000", "+0155511100",
+		"+15551110000x", "+1555111000012345", "ada@example.com"} {
+		status, body := s.serverClient.call(http.MethodPost, "/v1/phone/opt-outs",
+			CreateOptOutRequest{Recipient: recipient, Channel: OptOutChannel(dlc.SMS)})
+		s.Equal(http.StatusBadRequest, status, "%q would never match a text sent", recipient)
+		s.Contains(string(body), `"code":"validation_failed"`, recipient)
+	}
+	s.Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/phone/opt-outs",
+		CreateOptOutRequest{Recipient: "+15551110000", Channel: OptOutChannel(dlc.Voice)}, nil))
+}
+
+func (s *DLCSuite) TestAnIMessageHandlesAddressIsAnOptOutOnIMessageOnly() {
+	for _, channel := range []string{dlc.IMessage, store.OptOutAll} {
+		s.Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/phone/opt-outs",
+			CreateOptOutRequest{Recipient: "ada@example.com", Channel: OptOutChannel(channel)}, nil), channel)
+	}
+	for _, recipient := range []string{"Ada <ada@example.com>", "ada", "15551110000"} {
+		status, body := s.serverClient.call(http.MethodPost, "/v1/phone/opt-outs",
+			CreateOptOutRequest{Recipient: recipient, Channel: OptOutChannel(dlc.IMessage)})
+		s.Equal(http.StatusBadRequest, status, recipient)
+		s.Contains(string(body), `"code":"validation_failed"`, recipient)
+	}
+}
+
 func (s *DLCSuite) TestADialToSomebodyWhoOptedOutIsRefused() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/phone/sandbox/recipients",
 		SetSandboxRecipientsRequest{Recipients: []string{"+15551110000"}}, nil))

@@ -79,7 +79,7 @@ func (s *ByCustomerSocketSuite) headerless(id string, query url.Values) *websock
 
 func (s *ByCustomerSocketSuite) askingForATool() CreateSessionRequest {
 	return CreateSessionRequest{
-		Llm:       pointerTo("tooling/tool-model"),
+		ConfigId:  pointerTo(s.orderConfig(s.byCustomerClient("", s.utils.uuid()))),
 		Incognito: pointerTo(true),
 		Tools: &[]SessionTool{{
 			Name: lookupOrder, Description: "find an order by its number",

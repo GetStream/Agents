@@ -441,7 +441,7 @@ func whyNotManaged(manifest core.Manifest) error {
 	if !slackapps.Serves(manifest) {
 		return invalidRequest(fmt.Sprintf("%s does not authorize at Slack, so the router creates no app for it", manifest.ID))
 	}
-	// The store refuses such a record too (store.PutConnectorOAuthClient); checked here so no
+	// The store refuses such a record too (store.ConnectorOAuthClients.Upsert); checked here so no
 	// app is created at Slack that could never be recorded.
 	if !slices.Contains(manifest.Client.Registration, core.ClientManaged) {
 		return invalidRequest(fmt.Sprintf("%s takes no app the router creates: its client.registration is %v, which does not list managed",

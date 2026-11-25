@@ -800,6 +800,66 @@ func (s *StoreSuite) TestCreatingACustomDefinitionAgainIsTheNextRevisionOnlyWhen
 	s.Equal(2, changed.Revision)
 }
 
+// AI-3663: a sync's hash is recorded on the revision it stores, or on the latest when that
+// already says the same, and a write that is no sync leaves the latest with none.
+func (s *StoreSuite) TestASyncedDefinitionCarriesItsHashUntilAWriteThatIsNoSync() {
+	custom := parsed(s.T(), strings.Replace(acmeManifest, "id: acme", "id: custom_crm", 1))
+	changed := parsed(s.T(), strings.Replace(acmeChanged, "id: acme", "id: custom_crm", 1))
+
+	synced, err := s.store.ConnectorDefinitions.ReviseSynced(s.ctx, "acme", custom, "hash-one")
+	s.Require().NoError(err)
+	s.Equal(1, synced.Revision)
+	s.Equal("hash-one", synced.SyncHash)
+	s.Equal("hash-one", s.latestCustom("custom_crm").SyncHash, "the hash is stored, not only answered")
+
+	before := s.definitionVersion("custom_crm", 1)
+	again, err := s.store.ConnectorDefinitions.ReviseSynced(s.ctx, "acme", custom, "hash-one")
+	s.Require().NoError(err)
+	s.Equal(1, again.Revision)
+	s.Equal("hash-one", again.SyncHash)
+	s.Equal(before, s.definitionVersion("custom_crm", 1), "the same file synced again writes nothing")
+
+	rehashed, err := s.store.ConnectorDefinitions.ReviseSynced(s.ctx, "acme", custom, "hash-two")
+	s.Require().NoError(err)
+	s.Equal(1, rehashed.Revision, "the same manifest under another hash is no new revision")
+	s.Equal("hash-two", s.latestCustom("custom_crm").SyncHash)
+
+	edited, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme", custom)
+	s.Require().NoError(err)
+	s.Equal(1, edited.Revision)
+	s.Empty(edited.SyncHash)
+	s.Empty(s.latestCustom("custom_crm").SyncHash, "a write that is no sync clears the hash")
+
+	next, err := s.store.ConnectorDefinitions.ReviseSynced(s.ctx, "acme", changed, "hash-three")
+	s.Require().NoError(err)
+	s.Equal(2, next.Revision)
+	s.Equal("hash-three", s.latestCustom("custom_crm").SyncHash, "a new revision carries the sync's hash")
+
+	unsynced, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme", custom)
+	s.Require().NoError(err)
+	s.Equal(3, unsynced.Revision)
+	s.Empty(s.latestCustom("custom_crm").SyncHash, "a new revision no sync wrote carries none")
+	first, err := s.store.ConnectorDefinitions.Get(s.ctx, "acme", "custom_crm", 1)
+	s.Require().NoError(err)
+	s.Empty(first.SyncHash, "an older revision keeps what it had")
+}
+
+// latestCustom is acme's latest revision of its own definition id, read from the table.
+func (s *StoreSuite) latestCustom(id string) ConnectorDefinition {
+	definition, err := s.store.ConnectorDefinitions.Latest(s.ctx, "acme", id)
+	s.Require().NoError(err)
+	return definition
+}
+
+// definitionVersion is the xmin of one of acme's revisions, which changes with every write to it.
+func (s *StoreSuite) definitionVersion(id string, revision int) string {
+	var xmin string
+	s.Require().NoError(s.store.global.QueryRowContext(s.ctx,
+		"SELECT xmin::text FROM connector_definitions WHERE customer_id = ? AND id = ? AND revision = ?",
+		"acme", id, revision).Scan(&xmin))
+	return xmin
+}
+
 func (s *StoreSuite) TestACustomDefinitionIsOnlyItsOwnCustomers() {
 	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, providers.FS))
 	_, err := s.store.ConnectorDefinitions.Revise(s.ctx, "acme",
@@ -1065,7 +1125,7 @@ func (s *StoreSuite) TestADeleteWaitsForAConnectionInProgressAndIsRefused() {
 	created := make(chan error, 1)
 	connection := &ConnectorConnection{CustomerID: "acme-app", ConnectorID: id, DefinitionRevision: 1, OwnerType: OwnerApp, AuthScheme: "test_key"}
 	go func() { created <- creator.ConnectorConnections.Insert(s.ctx, testSchemes, connection) }()
-	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credentials_test.go).
+	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credential_lock_test.go).
 	s.Require().Eventually(func() bool { return s.waitingForTable("connector_connections") == 1 },
 		2*time.Second, 10*time.Millisecond, "the create waits at its INSERT")
 	deleter := s.router()
@@ -1458,8 +1518,8 @@ func (s *StoreSuite) TestACustomDefinitionIsInternalRevisionByRevision() {
 }
 
 // An app without the flag, or a customer with no app row, sees the catalog it saw before the flag
-// existed: every embedded built-in that is not internal, each found by LatestConnectorDefinition
-// and ConnectorDefinition at its latest revision. An app with the flag sees the internal ones too.
+// existed: every embedded built-in that is not internal, each found by ConnectorDefinitions.Latest
+// and ConnectorDefinitions.Get at its latest revision. An app with the flag sees the internal ones too.
 func (s *StoreSuite) TestWithoutTheFlagEveryAppSeesTheCatalogItSawBefore() {
 	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, providers.FS))
 	files, err := fs.ReadDir(providers.FS, ".")
@@ -1573,8 +1633,9 @@ func (s *StoreSuite) TestConnectorDefinitionQueryBudgets() {
 	}), "Delete")
 	s.crmConnection("acme-app")
 	s.crmConnection("acme-app")
-	// Delete's, and every connection of the three in one statement.
-	s.Equal(11, s.countQueries(func() {
+	// Delete's, every connection of the three in one statement, and their event subscriptions in
+	// one more.
+	s.Equal(12, s.countQueries(func() {
 		deleted, err := s.store.ConnectorDefinitions.Delete(s.ctx, "acme-app", "custom_crm", true)
 		s.Require().NoError(err)
 		s.Len(deleted.Connections, 3)
