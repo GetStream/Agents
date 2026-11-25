@@ -9,8 +9,10 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/quota"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/transitional"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 )
 
@@ -246,6 +248,42 @@ func refuseReservedUserID(field, userID string) (APIError, bool) {
 		return invalidRequest(field + " may not start with " + reservedUserIDPrefix + ": Stream keeps those user ids for itself"), true
 	}
 	return APIError{}, false
+}
+
+// refuseReservedActingFor refuses a backend's session, run, task or connection made for a user
+// id Stream keeps for itself, named in X-Stream-User-Id or ?user_id=. The router stores what it
+// writes under that id and acts as it in Chat.
+//
+// Why: the Chat proxy refuses such an id, but the router is reachable by other ways too. Reads
+// and deletes are left open, so what is already kept under the id stays readable and erasable.
+// A device's id comes from its verified token, which the proxy has already held to Chat's rules.
+func refuseReservedActingFor(ctx context.Context, endpoint string) (APIError, bool) {
+	if !ServerSideFrom(ctx) {
+		return APIError{}, false
+	}
+	return refuseReservedNewly(ctx, endpoint, "the user acted for ("+auth.UserHeader+" or ?"+auth.UserParam+"=)", CallerFrom(ctx).UserID)
+}
+
+// reservedIDsSwitch turns on refusing a reserved user id in the places CHA-7277 added: the
+// acting-for id, a guest's id and a call id that becomes the agent id. Off, such a request is
+// let through as before and counted (transitional.Switch).
+var reservedIDsSwitch = transitional.Switch{
+	Name: "security.cha7277.reserved_user_ids",
+	Env:  "ROUTER_SECURITY_CHA7277_RESERVED_USER_IDS",
+}
+
+// refuseReservedNewly is refuseReservedUserID for the places reservedIDsSwitch covers: a
+// reserved id is counted, and refused only while the switch is on.
+func refuseReservedNewly(ctx context.Context, endpoint, field, userID string) (APIError, bool) {
+	failure, refused := refuseReservedUserID(field, userID)
+	if !refused {
+		return APIError{}, false
+	}
+	customer, _ := CustomerFrom(ctx)
+	if !reservedIDsSwitch.Applies(customer, endpoint) {
+		return APIError{}, false
+	}
+	return failure, true
 }
 
 // checkUserID holds a user id to Stream Chat's rule, as a spend limit's is.

@@ -12,28 +12,31 @@ from vision_agents.plugins.stream._backend import (
     REGION_ENV,
     URL_ENV,
     Backend,
+    region_url,
 )
 
+DEFAULT_HOST = "accelerate.gcp.stream-io-api.com"
 REGIONAL_HOST = "accelerate-us-east4.gcp.stream-io-api.com"
 WHEN = "2026-01-01T00:00:00Z"
 
 
 class RegionalRouter:
-    """The hosted router in us-east4, answering one authenticated read.
+    """Stream's hosted router, answering one authenticated read.
 
-    Requests keep the regional URL the client built and only their transport is swapped, so
+    Requests keep the hosted URL the client built and only their transport is swapped, so
     what is under test is where the client sends them and what it sends.
     """
 
     def __init__(self):
         self.asked: list[httpx.Request] = []
+        self.host = REGIONAL_HOST
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.asked.append(request)
         if request.method != "GET" or request.url.path != "/v1/agents/configs":
             return httpx.Response(404, json={"message": "not found"})
         if (
-            request.url.host != REGIONAL_HOST
+            request.url.host != self.host
             or request.headers.get("api_key") != "test-key"
             or request.headers.get("stream-auth-type") != "jwt"
             or not request.headers.get("Authorization")
@@ -74,12 +77,15 @@ def router(monkeypatch: pytest.MonkeyPatch) -> RegionalRouter:
     return fake
 
 
-async def read_config(api: stream.Client, router: RegionalRouter) -> None:
+async def read_config(
+    api: stream.Client, router: RegionalRouter, host: str = REGIONAL_HOST
+) -> None:
+    router.host = host
     config = await api.agent("docs").config()
 
     assert config is not None and config.id == "config-1"
     request = router.asked[-1]
-    assert request.url.host == REGIONAL_HOST
+    assert request.url.host == host
     assert request.headers["api_key"] == "test-key"
     assert request.headers["stream-auth-type"] == "jwt"
     assert request.headers["Authorization"]
@@ -87,7 +93,7 @@ async def read_config(api: stream.Client, router: RegionalRouter) -> None:
 
 class TestRegionalClients:
     async def test_the_default_client_reads_a_config(self, router: RegionalRouter):
-        await read_config(stream.Client(), router)
+        await read_config(stream.Client(), router, host=DEFAULT_HOST)
 
     async def test_an_explicit_region_reads_a_config(self, router: RegionalRouter):
         await read_config(stream.Client(region="us-east4"), router)
@@ -102,7 +108,7 @@ class TestRegionalClients:
     async def test_a_regions_own_url_with_a_trailing_slash_reads_a_config(
         self, router: RegionalRouter
     ):
-        api = stream.Client(region="us-east4", url=DEFAULT_URL + "/")
+        api = stream.Client(region="us-east4", url=region_url("us-east4") + "/")
 
         await read_config(api, router)
 
@@ -122,7 +128,7 @@ class TestRegionalClients:
         user = api.as_user("jean", "user-token")
 
         assert isinstance(user.backend, Backend)
-        assert user.backend.url == DEFAULT_URL
+        assert user.backend.url == region_url("us-east4")
         assert user.backend.user_id == "jean"
         assert user.backend.token == "user-token"
         await read_config(user, router)
