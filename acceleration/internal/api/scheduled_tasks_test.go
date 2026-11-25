@@ -1484,12 +1484,7 @@ func (s *ScheduledTasksSuite) TestACallerThatHangsUpAfterTheDeleteStillLeavesIts
 		_, err := s.router.deleteAgentConfig(request, &deleteAgentConfigRequest{Id: config})
 		answered <- err
 	}()
-	s.Require().Eventually(func() bool {
-		var waiting int
-		err := s.store.GlobalDB().QueryRowContext(ctx,
-			"SELECT count(*) FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid))", holder).Scan(&waiting)
-		return err == nil && waiting > 0
-	}, 5*time.Second, 10*time.Millisecond, "the delete never reached its config's tasks")
+	s.waitForBlockedBy(holder, "the delete never reached its config's tasks")
 	hangUp()
 	s.Require().NoError(hold.Rollback())
 	s.Require().NoError(<-answered)
