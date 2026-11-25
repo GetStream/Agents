@@ -674,6 +674,9 @@ pub struct AgentConfig {
     pub review: ::std::option::Option<AgentReview>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub role: ::std::option::Option<AgentRole>,
+    ///Which regions the agent's work may be placed in, over the app's own routing_policy. Absent when the agent follows the app's.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub routing_policy: ::std::option::Option<RoutingPolicy>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sandbox: ::std::option::Option<Sandbox>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -789,6 +792,9 @@ pub struct AgentConfigPatch {
     pub review: ::std::option::Option<AgentReview>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub role: ::std::option::Option<AgentRole>,
+    ///Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub routing_policy: ::std::option::Option<RoutingPolicy>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sandbox: ::std::option::Option<Sandbox>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -923,6 +929,9 @@ pub struct AgentConfigRequest {
     pub review: ::std::option::Option<AgentReview>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub role: ::std::option::Option<AgentRole>,
+    ///Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's. Left out, a new agent follows the app's and an update keeps the stored policy.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub routing_policy: ::std::option::Option<RoutingPolicy>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sandbox: ::std::option::Option<Sandbox>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -1572,6 +1581,8 @@ pub struct AnalyzeReviewsRequest {
 ///What the router does for the calling app. It never carries a secret.
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
 pub struct AppSettings {
+    ///Which regions the app's work may be placed in, unless its agent config sets its own routing_policy. closest when the app never set one.
+    pub routing_policy: RoutingPolicy,
     pub stream: StreamSettings,
 }
 ///`ApprovedConnectionTool`
@@ -10512,6 +10523,68 @@ pub struct RouterConfigRequest {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub tts: ::std::option::Option<TtsOptions>,
 }
+///Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum RoutingPolicy {
+    #[serde(rename = "")]
+    X,
+    #[serde(rename = "closest")]
+    Closest,
+    #[serde(rename = "us_east")]
+    UsEast,
+    #[serde(rename = "us_only")]
+    UsOnly,
+    #[serde(rename = "eu_only")]
+    EuOnly,
+    #[serde(rename = "canada_only")]
+    CanadaOnly,
+    /// A value this SDK's spec does not list, as the router sent it.
+    #[serde(untagged)]
+    Unlisted(::std::string::String),
+}
+impl ::std::fmt::Display for RoutingPolicy {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::X => f.write_str(""),
+            Self::Closest => f.write_str("closest"),
+            Self::UsEast => f.write_str("us_east"),
+            Self::UsOnly => f.write_str("us_only"),
+            Self::EuOnly => f.write_str("eu_only"),
+            Self::CanadaOnly => f.write_str("canada_only"),
+            Self::Unlisted(ref value) => f.write_str(value),
+        }
+    }
+}
+impl ::std::str::FromStr for RoutingPolicy {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "" => Ok(Self::X),
+            "closest" => Ok(Self::Closest),
+            "us_east" => Ok(Self::UsEast),
+            "us_only" => Ok(Self::UsOnly),
+            "eu_only" => Ok(Self::EuOnly),
+            "canada_only" => Ok(Self::CanadaOnly),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for RoutingPolicy {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for RoutingPolicy {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
 ///`Run`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
 pub struct Run {
@@ -14601,6 +14674,13 @@ pub struct UpcomingPriceEntry {
     ///The item under its when stops being priced at effective_at.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub withdrawn: ::std::option::Option<bool>,
+}
+///`UpdateAppSettings`
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
+pub struct UpdateAppSettings {
+    ///Which regions the app's work may be placed in, unless its agent config sets its own. Empty is closest.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub routing_policy: ::std::option::Option<RoutingPolicy>,
 }
 ///`UpdateScheduledTaskRequest`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]

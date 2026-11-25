@@ -1508,7 +1508,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 	documents := api.NewDocumentReader(extract.Options{Logger: logger})
 	defer documents.Close()
 	shardRouting := shardmap.Map{Default: settings.ShardRouting.Default,
-		Countries: settings.ShardRouting.Countries, Regions: settings.ShardRouting.Regions}
+		Countries: settings.ShardRouting.Countries, Regions: settings.ShardRouting.Regions,
+		Home: settings.ShardRouting.Home, Residency: settings.ShardRouting.Residency}
 	shardClaim := store.ShardClaim{Shard: settings.Shard, Routing: shardRouting,
 		Shards: settings.Shards}
 	options := api.Options{

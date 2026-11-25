@@ -4163,7 +4163,7 @@ export type paths = {
         };
         /**
          * What the router does for the calling app
-         * @description Which Stream app the router writes the calling app's conversations and calls into, and whether that app holds the agent channel and call types. Stream is asked at most once a minute.
+         * @description Which Stream app the router writes the calling app's conversations and calls into, and whether that app holds the agent channel and call types. Stream is asked at most once a minute. Also which regions the app's work may be placed in.
          *
          *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
          */
@@ -4173,7 +4173,13 @@ export type paths = {
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
-        readonly patch?: never;
+        /**
+         * Change the calling app's settings
+         * @description Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
+         *
+         *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+         */
+        readonly patch: operations["updateAppSettings"];
         readonly trace?: never;
     };
     readonly "/v1/spend/limits": {
@@ -4986,6 +4992,8 @@ export type components = {
             /** @description Absent when calls are reviewed by Stream's default guide. */
             readonly review?: components["schemas"]["AgentReview"];
             readonly role?: components["schemas"]["AgentRole"];
+            /** @description Which regions the agent's work may be placed in, over the app's own routing_policy. Absent when the agent follows the app's. */
+            readonly routing_policy?: components["schemas"]["RoutingPolicy"];
             readonly sandbox?: components["schemas"]["Sandbox"];
             readonly sandbox_options?: components["schemas"]["SandboxOptions"];
             readonly scheduling?: components["schemas"]["AgentScheduling"];
@@ -5069,6 +5077,8 @@ export type components = {
             readonly resume_history?: components["schemas"]["ResumeHistory"];
             readonly review?: components["schemas"]["AgentReview"];
             readonly role?: components["schemas"]["AgentRole"];
+            /** @description Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's. */
+            readonly routing_policy?: components["schemas"]["RoutingPolicy"];
             readonly sandbox?: components["schemas"]["Sandbox"];
             readonly sandbox_options?: components["schemas"]["SandboxOptions"];
             readonly scheduling?: components["schemas"]["AgentScheduling"];
@@ -5160,6 +5170,8 @@ export type components = {
             /** @description How a finished call under this agent is reviewed. Left out on an update, the stored instructions stay. */
             readonly review?: components["schemas"]["AgentReview"];
             readonly role?: components["schemas"]["AgentRole"];
+            /** @description Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's. Left out, a new agent follows the app's and an update keeps the stored policy. */
+            readonly routing_policy?: components["schemas"]["RoutingPolicy"];
             readonly sandbox?: components["schemas"]["Sandbox"];
             readonly sandbox_options?: components["schemas"]["SandboxOptions"];
             /** @description Whether the agent may schedule tasks for its users, and the defaults those tasks take. Left out on an update, the stored settings stay. */
@@ -5437,6 +5449,8 @@ export type components = {
         };
         /** @description What the router does for the calling app. It never carries a secret. */
         readonly AppSettings: {
+            /** @description Which regions the app's work may be placed in, unless its agent config sets its own routing_policy. closest when the app never set one. */
+            readonly routing_policy: components["schemas"]["RoutingPolicy"];
             readonly stream: components["schemas"]["StreamSettings"];
         };
         readonly AttachedNumber: {
@@ -9648,6 +9662,11 @@ export type components = {
             readonly sync_hash?: string;
             readonly tts?: components["schemas"]["TtsOptions"];
         };
+        /**
+         * @description Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
+         * @enum {string}
+         */
+        readonly RoutingPolicy: "" | "closest" | "us_east" | "us_only" | "eu_only" | "canada_only";
         readonly Run: {
             /** @description What the runs of the child agents it called spent, by the tool each was called by. Absent when it called none. */
             readonly children?: {
@@ -11535,6 +11554,10 @@ export type components = {
             };
             /** @description The item under its when stops being priced at effective_at. */
             readonly withdrawn?: boolean;
+        };
+        readonly UpdateAppSettings: {
+            /** @description Which regions the app's work may be placed in, unless its agent config sets its own. Empty is closest. */
+            readonly routing_policy?: components["schemas"]["RoutingPolicy"];
         };
         readonly UpdateScheduledTaskRequest: {
             /** @description Replaces where an occurrence is delivered, in order. An empty list is the conversation alone. */
@@ -22059,6 +22082,41 @@ export interface operations {
             readonly 401: components["responses"]["Unauthorized"];
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
+            readonly 500: components["responses"]["InternalError"];
+            readonly 503: components["responses"]["Unavailable"];
+        };
+    };
+    readonly updateAppSettings: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["UpdateAppSettings"];
+            };
+        };
+        readonly responses: {
+            /** @description The app's settings */
+            readonly 200: {
+                headers: {
+                    readonly "X-Stream-Balance-Micros": components["headers"]["X-Stream-Balance-Micros"];
+                    readonly "X-Stream-Balance-Warning": components["headers"]["X-Stream-Balance-Warning"];
+                    readonly "X-Stream-Cost-Estimated": components["headers"]["X-Stream-Cost-Estimated"];
+                    readonly "X-Stream-Cost-Micros": components["headers"]["X-Stream-Cost-Micros"];
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AppSettings"];
+                };
+            };
+            readonly 400: components["responses"]["BadRequest"];
+            readonly 401: components["responses"]["Unauthorized"];
+            readonly 402: components["responses"]["PaymentRequired"];
+            readonly 403: components["responses"]["Forbidden"];
+            readonly 404: components["responses"]["NotFound"];
             readonly 500: components["responses"]["InternalError"];
             readonly 503: components["responses"]["Unavailable"];
         };

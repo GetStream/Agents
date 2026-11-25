@@ -18,6 +18,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -382,7 +383,7 @@ func (s *ForwardedDispatchSuite) hostsOnTheOtherNode(agent string) *websocket.Co
 }
 
 // host has a worker for the app client acts for host one tool for an agent of that app.
-func (s *ForwardedDispatchSuite) host(worker *websocket.Conn, client *testClient, agent string) {
+func (s *RouterSuite) host(worker *websocket.Conn, client *testClient, agent string) {
 	client.agentNamed(agent)
 	s.Require().NoError(worker.WriteJSON(frame{
 		"type": "host_tools", "agent_id": agent,
@@ -393,7 +394,7 @@ func (s *ForwardedDispatchSuite) host(worker *websocket.Conn, client *testClient
 
 // sentNothing fails when a worker is sent anything but pongs before the hook could have
 // reached it.
-func (s *ForwardedDispatchSuite) sentNothing(connection *websocket.Conn, complaint string) {
+func (s *RouterSuite) sentNothing(connection *websocket.Conn, complaint string) {
 	s.Require().NoError(connection.SetReadDeadline(time.Now().Add(dropped)))
 	for {
 		var received frame
@@ -408,4 +409,202 @@ func (s *ForwardedDispatchSuite) sentNothing(connection *websocket.Conn, complai
 			return
 		}
 	}
+}
+
+// ShardedDispatchSuite covers which shard a dispatch worker registers in and which sessions
+// reach it: the suite's node is in shard eu, the home node in shard us, the home shard, and
+// shard ca of the Canadian geography has no node up.
+type ShardedDispatchSuite struct {
+	RouterSuite
+
+	// home is the node of the home shard, homeWorkers its pool, and homeReach how a session
+	// on it reaches the deployment's workers.
+	home        *httptest.Server
+	homeWorkers *dispatch.Pool
+	homeReach   *node.Workers
+	// euReach is how a session on the suite's node reaches them, its pool the suite's own.
+	euReach *node.Workers
+}
+
+func TestShardedDispatchSuite(t *testing.T) {
+	runSuite(t, new(ShardedDispatchSuite))
+}
+
+func (s *ShardedDispatchSuite) SetupSuite() {
+	s.shard, s.otherShard = "eu", "us"
+	s.shardRouting = shardmap.Map{Home: "us", Residency: map[string][]string{"us": {"us"}, "eu": {"eu"}, "ca": {"ca"}}}
+	s.RouterSuite.SetupSuite()
+	logger := slog.New(slog.DiscardHandler)
+	s.homeWorkers = dispatch.NewPool()
+	s.home, _, _ = s.otherNodeHolding(s.homeWorkers, s.sealer, logger, func(o *Options) { s.homeReach = o.Workers })
+	s.euReach = s.deploymentWorkers(s.dispatch, s.router.directory, s.workBus(logger))
+}
+
+func (s *ShardedDispatchSuite) SetupTest() {
+	s.useApp(s.data.createApp())
+}
+
+func (s *ShardedDispatchSuite) TestAWorkerOfAClosestAppLandingOutsideTheHomeShardRegistersThere() {
+	s.await(s.serverClient.opens("/v1/dispatch"), "ready")
+
+	s.Len(s.homeWorkers.Workers(s.customerID()), 1, "the worker is not in the home shard")
+	s.Empty(s.dispatch.Workers(s.customerID()), "the worker registered where it landed")
+}
+
+func (s *ShardedDispatchSuite) TestAWorkerOfAnEUOnlyAppLandingInTheEUStaysThere() {
+	s.keptIn(shardmap.PolicyEUOnly)
+
+	s.await(s.serverClient.opens("/v1/dispatch"), "ready")
+
+	s.Len(s.dispatch.Workers(s.customerID()), 1, "the worker left the EU")
+	s.Empty(s.homeWorkers.Workers(s.customerID()))
+}
+
+func (s *ShardedDispatchSuite) TestAWorkerOfAnEUOnlyAppLandingInTheHomeShardRegistersInTheEU() {
+	s.keptIn(shardmap.PolicyEUOnly)
+
+	s.await(s.serverClient.on(s.home).opens("/v1/dispatch"), "ready")
+
+	s.Len(s.dispatch.Workers(s.customerID()), 1, "the worker is not in the EU")
+	s.Empty(s.homeWorkers.Workers(s.customerID()), "the worker registered outside the EU")
+}
+
+// Registered anywhere else, the calls it took would leave the geography.
+func (s *ShardedDispatchSuite) TestAWorkerOfAnAppKeptWhereNoNodeIsUpIsRefused() {
+	s.keptIn(shardmap.PolicyCanadaOnly)
+
+	status, message := s.serverClient.refusal("/v1/dispatch")
+
+	s.Equal(http.StatusServiceUnavailable, status)
+	s.Equal(errWorkerShardDown.Message, message)
+	s.Empty(s.dispatch.Workers(s.customerID()))
+	s.Empty(s.homeWorkers.Workers(s.customerID()))
+}
+
+// The worker landed in the EU and was carried home, and sessions in either shard run its tools.
+func (s *ShardedDispatchSuite) TestASessionOfAClosestAppInAnyShardReachesTheHomeWorker() {
+	agent := "agent-" + s.utils.uuid()
+	worker := s.serverClient.opens("/v1/dispatch")
+	s.await(worker, "ready")
+	s.host(worker, s.serverClient, agent)
+
+	for shard, reach := range map[string]*node.Workers{"eu": s.euReach, "us": s.homeReach} {
+		s.Require().Eventually(func() bool {
+			offered, _ := reach.HostedTools(s.customerID(), agent)
+			return len(offered) == 1
+		}, settleFor, 10*time.Millisecond, "the tool was never offered in %s", shard)
+		answered := make(chan error, 1)
+		go func() {
+			_, err := reach.RunHosted(context.Background(), s.customerID(), agent,
+				dispatch.ToolCall{ID: "call-" + shard, SessionID: "session-1", Name: "investigate_sdk"})
+			answered <- err
+		}()
+		call := s.await(worker, "tool_call")
+		s.Require().NoError(worker.WriteJSON(frame{"type": "tool_result", "id": call["id"], "output": "done"}))
+		select {
+		case err := <-answered:
+			s.NoError(err, shard)
+		case <-time.After(settleFor):
+			s.Failf("the answer never came back", "to %s", shard)
+		}
+	}
+}
+
+func (s *ShardedDispatchSuite) TestASessionOfAnEUOnlyAppReachesAWorkerInTheEU() {
+	s.keptIn(shardmap.PolicyEUOnly)
+	agent := "agent-" + s.utils.uuid()
+	worker := s.serverClient.opens("/v1/dispatch")
+	s.await(worker, "ready")
+	s.host(worker, s.serverClient, agent)
+
+	offered, _ := s.euReach.HostedTools(s.customerID(), agent)
+	s.Require().Len(offered, 1)
+	go func() {
+		_, _ = s.euReach.RunHosted(context.Background(), s.customerID(), agent,
+			dispatch.ToolCall{ID: "call-1", SessionID: "session-1", Name: "investigate_sdk"})
+	}()
+	s.Equal("call-1", s.await(worker, "tool_call")["id"])
+}
+
+// A worker connected in the US before the app was kept in the EU is reached by no session of
+// it in the EU: not for its tools, nor for a message.
+func (s *ShardedDispatchSuite) TestASessionOfAnEUOnlyAppInTheEUDoesNotReachAWorkerInTheUS() {
+	agent, worker := s.hostedInTheUSUntilKeptInTheEU()
+
+	offered, _ := s.euReach.HostedTools(s.customerID(), agent)
+	s.Empty(offered, "a tool run in the US is offered to an EU-only session")
+	_, err := s.euReach.RunHosted(context.Background(), s.customerID(), agent,
+		dispatch.ToolCall{ID: "call-1", SessionID: "session-1", Name: "investigate_sdk"})
+	s.ErrorAs(err, &dispatch.NoWorkerError{})
+	_, err = s.euReach.AssignMessage(context.Background(), s.customerID(),
+		dispatch.Message{SessionID: "session-1", Text: "where is my order?"})
+	s.ErrorIs(err, dispatch.ErrNoWorkers)
+	s.sentNothing(worker, "an EU-only session's work reached a worker in the US")
+}
+
+// Nor by one opened in the US, which no session of an EU-only app should be, on the node the
+// worker is connected to.
+func (s *ShardedDispatchSuite) TestASessionOfAnEUOnlyAppInTheUSDoesNotUseAWorkerThere() {
+	agent, worker := s.hostedInTheUSUntilKeptInTheEU()
+
+	offered, _ := s.homeReach.HostedTools(s.customerID(), agent)
+	s.Empty(offered, "a tool run in the US is offered to an EU-only session")
+	_, err := s.homeReach.RunHosted(context.Background(), s.customerID(), agent,
+		dispatch.ToolCall{ID: "call-1", SessionID: "session-1", Name: "investigate_sdk"})
+	s.ErrorAs(err, &dispatch.NoWorkerError{})
+	_, err = s.homeReach.AssignMessage(context.Background(), s.customerID(),
+		dispatch.Message{SessionID: "session-1", Text: "where is my order?"})
+	s.ErrorIs(err, dispatch.ErrNoWorkers)
+	s.sentNothing(worker, "an EU-only session's work reached a worker in the US")
+}
+
+// hostedInTheUSUntilKeptInTheEU has a worker of the test's app, closest, connect in the home
+// shard and host a tool for an agent, the EU see it offered, and then the app kept in the EU.
+func (s *ShardedDispatchSuite) hostedInTheUSUntilKeptInTheEU() (string, *websocket.Conn) {
+	agent := "agent-" + s.utils.uuid()
+	worker := s.serverClient.on(s.home).opens("/v1/dispatch")
+	s.await(worker, "ready")
+	s.host(worker, s.serverClient, agent)
+	s.Require().Eventually(func() bool {
+		offered, _ := s.euReach.HostedTools(s.customerID(), agent)
+		return len(offered) == 1
+	}, settleFor, 10*time.Millisecond, "the tool was never offered in the EU")
+	s.keptIn(shardmap.PolicyEUOnly)
+	return agent, worker
+}
+
+// keptIn sets the test's app's routing policy, and waits until every node reads it.
+func (s *ShardedDispatchSuite) keptIn(policy shardmap.Policy) {
+	ctx := context.Background()
+	s.Require().NoError(s.store.Apps.SetRoutingPolicy(ctx, s.customerID(), policy))
+	s.Require().Eventually(func() bool {
+		here, errHere := s.store.Apps.RoutingPolicy(ctx, s.customerID(), "")
+		there, errThere := s.otherStore.Apps.RoutingPolicy(ctx, s.customerID(), "")
+		return errHere == nil && errThere == nil && here == policy && there == policy
+	}, settleFor, 10*time.Millisecond, "the routing policy was never read back")
+}
+
+// HomeShardDownDispatchSuite is a deployment whose home shard, us, has no node up.
+type HomeShardDownDispatchSuite struct {
+	RouterSuite
+}
+
+func TestHomeShardDownDispatchSuite(t *testing.T) {
+	runSuite(t, new(HomeShardDownDispatchSuite))
+}
+
+func (s *HomeShardDownDispatchSuite) SetupSuite() {
+	s.shard = "eu"
+	s.shardRouting = shardmap.Map{Home: "us"}
+	s.RouterSuite.SetupSuite()
+}
+
+// A worker refused would leave the app's calls unanswered everywhere; one where it landed is
+// still reached from every shard.
+func (s *HomeShardDownDispatchSuite) TestAWorkerOfAClosestAppRegistersWhereItLanded() {
+	s.useApp(s.data.createApp())
+
+	s.await(s.serverClient.opens("/v1/dispatch"), "ready")
+
+	s.Len(s.dispatch.Workers(s.customerID()), 1)
 }

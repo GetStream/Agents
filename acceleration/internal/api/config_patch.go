@@ -16,6 +16,7 @@ type AgentConfigPatch struct {
 	Name               *string                  `json:"name,omitempty" minLength:"1" doc:"What the config is called, which is unique among the customer's own."`
 	Region             *string                  `json:"region,omitempty" pattern:"^[a-z][a-z0-9-]{0,31}$" patternDescription:"a letter and up to 31 of a-z, 0-9 and hyphens, such as us or eu" example:"eu" doc:"Where the agent's work is done: us or eu for now. A change naming a model with no instance there, a knowledge base kept in another region, or a sandbox where none runs there is refused (400), naming each."`
 	Role               *AgentRole               `json:"role,omitempty"`
+	RoutingPolicy      *RoutingPolicy           `json:"routing_policy,omitempty" doc:"Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's."`
 	Review             *AgentReview             `json:"review,omitempty"`
 	Mode               *AgentMode               `json:"mode,omitempty"`
 	Stt                *string                  `json:"stt,omitempty"`
@@ -177,6 +178,9 @@ func (s *Server) tryPatchAgentConfig(ctx context.Context, request *patchAgentCon
 	}); !ok {
 		return nil, invalidRequest(message)
 	}
+	if message, ok := s.residencyComplaint(patch.RoutingPolicy); !ok {
+		return nil, invalidRequest(message)
+	}
 	if message, ok, err := s.unboundConnectors(ctx, customerID, patch.Connectors); err != nil {
 		return nil, err
 	} else if !ok {
@@ -186,6 +190,9 @@ func (s *Server) tryPatchAgentConfig(ctx context.Context, request *patchAgentCon
 	config.Name = override(config.Name, patch.Name)
 	if patch.Role != nil {
 		config.Role = string(*patch.Role)
+	}
+	if patch.RoutingPolicy != nil {
+		config.RoutingPolicy = string(*patch.RoutingPolicy)
 	}
 	if patch.Mode != nil {
 		config.Mode, _ = modeOf(patch.Mode)
