@@ -97,7 +97,7 @@ func (d *dispatcher) stepUp(ctx context.Context, r route, turnID string, asked c
 		ReturnURL: d.spec.ReturnURL,
 	})
 	if err != nil {
-		s.logger.Warn("could not begin a step-up consent", "connector", r.binding.Name, "error", err)
+		s.logger.Warn("could not begin a step-up consent", "connector", r.binding.Name, "error", core.LoggedError(err))
 		return "", false
 	}
 	s.open[r.connection.ID] = openStepUp{asked: asked, consent: consent, turnID: turnID}

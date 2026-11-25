@@ -7,11 +7,16 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
+	"github.com/redis/rueidis"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
 )
 
 // ForwardedSessionSuite covers what is asked of a session over HTTP when the request does
@@ -178,6 +183,97 @@ func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerOnAChannelTwoCustome
 		"one of the customers' sessions answered a message nothing says is theirs")
 }
 
+// The same when the message lands on the node running one of the two: that session is no more
+// the channel's than the other.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerLandingBesideOneOfTwoCustomersWritingInItIsAnsweredByNeither() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	s.onTheOtherNode(CreateSessionRequest{AgentId: &channel, Llm: pointerTo("vision/vision-model")})
+	s.data.backendOfAnotherApp().createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+
+	s.Require().Equal(http.StatusOK,
+		s.signedly("/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Never(func() bool { return s.wasAsked(written) }, time.Second, 10*time.Millisecond,
+		"the session where the message landed answered a message nothing says is its customer's")
+}
+
+// A session that ended here leaves its claim on the agent behind until it lapses, and is no
+// second customer writing in the channel: the session still running here answers.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredHereThoughAnotherCustomersSessionEndedHere() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	another := s.data.backendOfAnotherApp()
+	ended := another.createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+	another.stopSession(ended.Id)
+	s.serverClient.createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+
+	s.Require().Equal(http.StatusOK,
+		s.signedly("/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Require().Eventually(func() bool { return s.wasAsked(written) },
+		settleFor, 10*time.Millisecond, "the session running here was asked nothing")
+}
+
+// The customer of the session running here writing as the agent on another node too is no second
+// customer writing in the channel: the session here answers.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredHereThoughItsCustomerWritesElsewhereToo() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	s.serverClient.createSession(CreateSessionRequest{AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true)})
+	// Second, so the claim by customer and app names the other node.
+	s.onTheOtherNode(CreateSessionRequest{AgentId: &channel, Llm: pointerTo("vision/vision-model")})
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Require().Eventually(func() bool { return s.wasAsked(written) },
+		settleFor, 10*time.Millisecond, "the customer's session here was asked nothing")
+}
+
+// A directory that cannot be read says nobody writes as the agent elsewhere, as forwardedMessage
+// answers here when it cannot find the node: the session running where the message landed
+// answers it.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredHereWhenTheDirectoryCannotBeRead() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	unread, _, _ := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler),
+		func(options *Options) { options.Directory = s.unreadableDirectory() })
+	s.serverClient.on(unread).createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+
+	s.Require().Equal(http.StatusOK, s.signedlyOn(unread, "/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Require().Eventually(func() bool { return s.wasAsked(written) },
+		settleFor, 10*time.Millisecond, "the session where the message landed was asked nothing")
+}
+
+// A channel stamped with its customer is answered in the hook's app: that customer's session
+// writing as the agent in another app is not where the message goes, and with nothing of theirs
+// running in this app, their worker here is handed it.
+func (s *ForwardedSessionSuite) TestAMessageStampedWithItsCustomerIsNotCarriedToTheirSessionInAnotherApp() {
+	channel := "chat-" + s.utils.uuid()
+	config := s.data.instructedAgent("answer whatever is asked")
+	// Another customer writing as the agent in this app is what has the stamp read at all.
+	s.heldWhereNothingAnswers("another-customer", s.utils.uuid(), channel, "")
+	s.heldInWhereNothingAnswers(streamAppID(), s.customerID(), s.utils.uuid(), channel, "")
+	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
+	defer release()
+
+	stamped := fmt.Sprintf(`{%q: %q, %q: %q}`, conversation.CustomerField, s.customerID(), ConfigField, *config)
+	s.Require().Equal(http.StatusOK,
+		s.signedly("/v1/chat/hooks/stream", writtenTo(channel, stamped, "is anybody there?")))
+
+	select {
+	case message := <-worker.Messages():
+		s.Equal(channel, message.ChannelID)
+	case <-time.After(settleFor):
+		s.Fail("the message was carried to the customer's session in another app")
+	}
+}
+
 // Two customers may each run a session of one id, each on a node of its own: a request reaches
 // the session of the caller's own customer, wherever it lands.
 func (s *ForwardedSessionSuite) TestARequestReachesTheSessionOfTheCallersCustomerOfAnIdTwoRun() {
@@ -224,7 +320,7 @@ func (s *ForwardedSessionSuite) TestAnApprovalIsCarriedToTheCallersNodeThoughAno
 	cid := "messaging:" + s.utils.uuid()
 	s.heldWhereNothingAnswers(s.customerID(), s.utils.uuid(), "", cid)
 	s.nodeDirectory(s.server, s.shard, slog.New(slog.DiscardHandler)).
-		Hold(s.T().Context(), "another-customer", s.utils.uuid(), "", cid)
+		Hold(s.T().Context(), "another-customer", 0, s.utils.uuid(), "", cid)
 
 	s.Equal(http.StatusServiceUnavailable, s.serverClient.do(http.MethodPost, approvalsIn(cid), anApproval, nil),
 		"answered on the node of the customer that held the cid last")
@@ -251,12 +347,43 @@ func approvalsIn(cid string) string {
 }
 
 // heldWhereNothingAnswers has the directory say a node that cannot be reached runs a customer's
-// session id, writing as agent and answering in the conversation cid.
+// session id in the deployment's own app, writing as agent and answering in the conversation cid.
 func (s *RouterSuite) heldWhereNothingAnswers(customer, id, agent, cid string) {
+	s.heldInWhereNothingAnswers(0, customer, id, agent, cid)
+}
+
+// heldInWhereNothingAnswers is heldWhereNothingAnswers in a Stream app.
+func (s *RouterSuite) heldInWhereNothingAnswers(app int64, customer, id, agent, cid string) {
 	gone := httptest.NewUnstartedServer(nil)
 	directory := s.nodeDirectory(gone, s.shard, slog.New(slog.DiscardHandler))
 	gone.Close()
-	directory.Hold(s.T().Context(), customer, id, agent, cid)
+	directory.Hold(s.T().Context(), customer, app, id, agent, cid)
+}
+
+// unreadableDirectory is a node's directory over a Redis connection already closed, so every read
+// of it fails, as one with Redis down does.
+func (s *RouterSuite) unreadableDirectory() *node.Directory {
+	redis, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{s.redisAddr}, DisableCache: true})
+	s.Require().NoError(err)
+	redis.Close()
+	directory, err := node.NewDirectory(node.DirectoryOptions{
+		Redis: redis, Address: "unreadable", Prefix: s.relayPrefix, Logger: slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(directory.Close)
+	return directory
+}
+
+// signedlyOn is signedly delivered to the node at rather than the suite's own.
+func (s *RouterSuite) signedlyOn(at *httptest.Server, path, body string) int {
+	request := s.request(path, body, sign(body, suiteStreamSecret))
+	target, err := url.Parse(at.URL + path)
+	s.Require().NoError(err)
+	request.URL, request.Host = target, target.Host
+	response, err := at.Client().Do(request)
+	s.Require().NoError(err)
+	s.Require().NoError(response.Body.Close())
+	return response.StatusCode
 }
 
 // wasAsked reports whether the model was given something to answer.
