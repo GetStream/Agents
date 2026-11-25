@@ -163,4 +163,11 @@ func TestDialTellsWhenAReinviteFromTheCustomerIsPassedOn(t *testing.T) {
 	customer.sendReinvite(callID, customerPCMA)
 
 	require.Eventually(t, func() bool { return changes.Load() > 0 }, 2*time.Second, 10*time.Millisecond)
+	// The customer's SDP names a documentation address, which is not public, so each offer Stream
+	// got from it, at setup and in the re-INVITE, names the trunk's checked address.
+	invites := stream.requests(sip.INVITE, call.State().Stream.CallID)
+	require.Len(t, invites, 4)
+	for _, inv := range invites[2:] {
+		require.Equal(t, "127.0.0.1", mediaOf(t, inv.Body()).Addr)
+	}
 }

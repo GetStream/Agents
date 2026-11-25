@@ -280,14 +280,14 @@ func (s *ResumeSuite) TestAResumedCallTellsWhenAPassedOnReinviteChangedWhatEachL
 	}
 	resumed := s.resume()
 	call.Store(resumed)
-	// A public address and codecs Stream speaks: the offer Stream gets rebuilt is the same bytes.
-	offer := sdpAt("1.1.1.1")
+	// A private address: Stream gets the offer rebuilt with the trunk's checked address instead.
+	offer := sdpAt("10.0.0.5")
 
 	answer := s.customer.sendReinvite(customerCallID, offer)
 
 	s.Equal(s.stream.sdp, answer)
 	s.Eventually(func() bool {
 		state := last.Load()
-		return state != nil && string(state.Customer.LastSDP) == string(answer) && string(state.Stream.LastSDP) == string(offer)
+		return state != nil && string(state.Customer.LastSDP) == string(answer) && string(state.Stream.LastSDP) == string(sdpAt("127.0.0.1"))
 	}, 2*time.Second, 10*time.Millisecond, "last change notice must see both legs' new SDP")
 }
