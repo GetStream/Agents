@@ -673,17 +673,21 @@ func TestRedactLogTextReadsALongJSONTextInTime(t *testing.T) {
 
 // A JSON text costs about what the rules cost on it as plain text: a string that holds JSON is
 // read as JSON one level deep only, and a string with no escape is read by the rules once. The
-// rows are a string holding JSON 16 levels deep around a payload of 1 MB, and 1 MB of short
-// strings that each hold a keyword and a value.
+// rows are a string holding JSON 16 levels deep around a payload of 1 MB, the same through a
+// key, and 1 MB of short strings that each hold a keyword and a value.
 func TestRedactLogTextAllocatesForAJSONTextAboutWhatTheRulesDo(t *testing.T) {
 	if raceDetector {
 		t.Skip("the race detector drops what sync.Pool holds at random, so allocations vary")
 	}
-	nested := `{"password":"x","m":"` + strings.Repeat("key=Ab1 ", 1<<17) + `"}`
+	payload := `{"password":"x","m":"` + strings.Repeat("key=Ab1 ", 1<<17) + `"}`
+	nested, inKey := payload, payload
 	for range 16 {
 		quoted, err := json.Marshal(nested)
 		require.NoError(t, err)
 		nested = `{"output":` + string(quoted) + `}`
+		quoted, err = json.Marshal(inKey)
+		require.NoError(t, err)
+		inKey = `{` + string(quoted) + `:1}`
 	}
 	allocated := func(redact func(string) string, text string) uint64 {
 		var before, after runtime.MemStats
@@ -695,6 +699,7 @@ func TestRedactLogTextAllocatesForAJSONTextAboutWhatTheRulesDo(t *testing.T) {
 	}
 	for name, text := range map[string]string{
 		"string in string": nested,
+		"string in key":    inKey,
 		"short strings":    `[` + strings.Repeat(`"key=Ab1",`, 100000) + `1]`,
 	} {
 		t.Run(name, func(t *testing.T) {
