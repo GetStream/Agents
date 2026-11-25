@@ -316,6 +316,27 @@ func (s *AlertsSuite) TestAnItemConditionCountsOnlyTheSeriesItIsAbout() {
 	s.Equal([]string{"b"}, slices.Collect(maps.Keys(check(time.Now()))))
 }
 
+// Each detail label lists the values of the item's series that rose since it last held, sorted;
+// an empty value is not listed, and a label with none is left out.
+func (s *AlertsSuite) TestAnItemNamesTheDetailOfTheSeriesThatRose() {
+	refused := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_detailed_total"}, []string{"item", "product", "model"})
+	check := IncreasedPer(refused, time.Hour, []string{"item"}, nil, "product", "model")
+	start := time.Now()
+	refused.WithLabelValues("a", "tts", "voice-2").Inc()
+	refused.WithLabelValues("a", "llm", "").Inc()
+	refused.WithLabelValues("a", "tts", "voice-1").Inc()
+	refused.WithLabelValues("b", "", "").Inc()
+
+	s.Equal(map[string]map[string]any{
+		"a": {"value": 3.0, "increase": 3.0, "product": []string{"llm", "tts"}, "model": []string{"voice-1", "voice-2"}},
+		"b": {"value": 1.0, "increase": 1.0},
+	}, check(start))
+
+	refused.WithLabelValues("a", "tts", "voice-2").Inc()
+	s.Equal(map[string]map[string]any{"a": {"value": 4.0, "increase": 1.0, "product": []string{"tts"}, "model": []string{"voice-2"}}},
+		check(start.Add(2*time.Hour)), "only the series that rose since a last held")
+}
+
 func (s *AlertsSuite) TestAnItemIsDescribedInTheMessageAndNowhereElse() {
 	missing := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_described_total"}, []string{"model"})
 	missing.WithLabelValues("a").Inc()

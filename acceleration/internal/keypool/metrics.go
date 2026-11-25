@@ -47,7 +47,7 @@ var refusedAttempts = promauto.NewCounterVec(prometheus.CounterOpts{
 // fails over, and the key is to top up or replace.
 func Alerts(limit time.Duration) []alerts.Condition {
 	return []alerts.Condition{{Name: "key_refused", Level: alerts.Warn,
-		Items:    alerts.IncreasedPer(refusedAttempts, limit, []string{"key_var", "status"}, map[string]string{"owner": ourOwner}, "product", "model"),
+		Items:    alerts.IncreasedPer(refusedAttempts, limit, []string{"key_var", "status"}, map[string]string{"owner": ourOwner}, "owner", "product", "model"),
 		Describe: describeRefusal}}
 }
 

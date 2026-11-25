@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -232,6 +233,26 @@ func (s *AssemblyAISocketSuite) TestAFrameForWantOfFundsIsCountedAs402() {
 		s.Equal(1.0, s.countedUnder("402", greeting), greeting)
 		s.Zero(s.refusedOn(greeting), greeting)
 	}
+}
+
+// A frame refusal in the handshake is counted for the product the session was started for
+// (keypool.WithCaller), on the context Start was given.
+func (s *AssemblyAISocketSuite) TestAFrameForWantOfFundsIsCountedForTheCallerTheSessionStartedFor() {
+	fake := newFakeSTT()
+	fake.greeting = frame("error_insufficient_funds.json")
+	defer fake.close()
+	provider, err := New(Options{APIKey: "test-key", URL: fake.endpoint()})
+	s.Require().NoError(err)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "stt", "universal-3-6-pro"), 5*time.Second)
+	defer cancel()
+	counted := func() float64 {
+		return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/402"]
+	}
+	before := counted()
+
+	s.Require().Error(provider.Start(ctx))
+
+	s.Equal(before+1, counted(), "a customer's key, so the model is not named")
 }
 
 func (s *AssemblyAISocketSuite) TestTheFundsTextUnderAnotherCodeIsNotCounted() {
