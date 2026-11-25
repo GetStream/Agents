@@ -230,6 +230,25 @@ func (s *AppHooksSuite) TestAMessageInTheDeploymentAppIsAnsweredThereWhateverRun
 	}
 }
 
+// The same across nodes: the session in a customer's own app runs on one, the session in the
+// deployment's app on another, and the message lands on a third. Only the second is in the app
+// the message was written in, so it is carried there.
+func (s *AppHooksSuite) TestAMessageInTheDeploymentAppReachesItsSessionOnAnotherNodeWhateverRunsInAnotherApp() {
+	written := "is my order on its way? " + s.utils.uuid()
+	s.serverClient.on(s.otherNode()).createSession(CreateSessionRequest{
+		AgentId: &s.channelID, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+	s.useApp(s.data.createApp())
+	s.serverClient.on(s.otherNode()).createSession(CreateSessionRequest{
+		AgentId: &s.channelID, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+
+	s.Equal(http.StatusOK, s.hook("/v1/chat/hooks/stream", writtenTo(s.channelID, `{}`, written), suiteStreamSecret, ""))
+
+	s.Eventually(func() bool { return s.wasAsked(written) }, settleFor, 10*time.Millisecond,
+		"the session in the deployment's app was asked nothing")
+}
+
 func (s *AppHooksSuite) TestAMessageInTheDeploymentAppIsNotDispatchedToACustomerNowElsewhere() {
 	// A channel in the router's own app names this customer's config, but the customer
 	// now acts in its own app, so a deployment-signed hook starts nothing of theirs.

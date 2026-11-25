@@ -309,6 +309,9 @@ func (s *Server) putConnectionCredentials(ctx context.Context, request *putConne
 		return nil, err
 	}
 	if err != nil {
+		if _, refused := errors.AsType[*core.EndpointError](err); refused {
+			recordFailure(ctx, err, "")
+		}
 		// A scheme's error names what is wrong, never the value (core AGENTS.md, «Secrets never
 		// print»; contracttest's TestAnErrorAboutAnUnusableValueDoesNotQuoteIt).
 		return nil, invalidRequest("the credentials were refused: " + err.Error())

@@ -3071,7 +3071,7 @@ func (s *DataMoveSuite) TestAnImportedDefinitionWhoseIDIsNoStringIsRefused() {
 }
 
 func (s *DataMoveSuite) TestAChangeCarryingADefinitionTheAPIWouldRefuseIsRefused() {
-	id := "custom_" + newID()
+	id := "custom_a" + newID()
 	manifest := strings.Replace(customManifestWith(`"client": {"registration": ["operator"], "env": "GOOGLE"}, "schemes": ["oauth2_code"]`),
 		"custom_acme", id, 1)
 
@@ -3084,7 +3084,7 @@ func (s *DataMoveSuite) TestAChangeCarryingADefinitionTheAPIWouldRefuseIsRefused
 
 // A change recorded by a release before sync hashes carries no sync_hash key.
 func (s *DataMoveSuite) TestADefinitionChangeFromAReleaseBeforeSyncHashesApplies() {
-	id := "custom_" + newID()
+	id := "custom_a" + newID()
 	manifest := strings.Replace(customAcme, "custom_acme", id, 1)
 
 	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: "connector_definitions", Op: ChangeInsert,
@@ -3092,6 +3092,63 @@ func (s *DataMoveSuite) TestADefinitionChangeFromAReleaseBeforeSyncHashesApplies
 
 	s.Require().NoError(err)
 	s.Equal(1, s.definitionsNamed(id))
+}
+
+// An export from before custom connectors lost oauth2_client_credentials may hold a definition
+// with it, which no connection could use: the import skips it and writes every other row.
+func (s *DataMoveSuite) TestAnImportSkipsAClientCredentialsDefinitionAndWritesTheRest() {
+	skipped, err := s.importDefinition(customManifestWith(`"schemes": ["oauth2_client_credentials"]`))
+	s.Require().NoError(err)
+	written, err := s.importDefinition(customAcme)
+	s.Require().NoError(err)
+
+	s.Zero(s.definitionsNamed(skipped))
+	s.Equal(1, s.definitionsNamed(written))
+}
+
+// A page of changes holding such a definition applies, all but that row.
+func (s *DataMoveSuite) TestAChangePageWithAClientCredentialsDefinitionAppliesTheRest() {
+	change := func(manifest string) (string, DataChange) {
+		id := "custom_a" + newID()
+		manifest = strings.Replace(manifest, "custom_acme", id, 1)
+		return id, DataChange{Table: "connector_definitions", Op: ChangeInsert, Payload: json.RawMessage(`{"id": "` + id +
+			`", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + manifest + `}`)}
+	}
+	before, first := change(customAcme)
+	skipped, second := change(customManifestWith(`"schemes": ["oauth2_code", "oauth2_client_credentials"], "client": {"registration": ["customer"]}`))
+	after, third := change(customAcme)
+
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "moved", []DataChange{first, second, third}))
+
+	s.Equal(1, s.definitionsNamed(before))
+	s.Zero(s.definitionsNamed(skipped))
+	s.Equal(1, s.definitionsNamed(after))
+}
+
+// The API's limits hold for an imported definition, which is refused naming its id.
+func (s *DataMoveSuite) TestAnImportedDefinitionPastAnAPILimitIsRefused() {
+	id, err := s.importDefinition(customManifestWith(`"name": "` + strings.Repeat("a", 121) + `"`))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, id)
+	s.Zero(s.definitionsNamed(id))
+}
+
+// A definition at every limit imports: 64 characters of id, 120 of name in two-byte characters,
+// a scope of each edge of RFC 6749's scope-token and a sync hash of 128.
+func (s *DataMoveSuite) TestAnImportedDefinitionAtTheAPIsLimitsImports() {
+	id := "custom_a" + strings.Repeat("b", 56)
+	name := strings.Repeat("é", 120)
+	row := `{"id": "` + id + `", "revision": 1, "name": "` + name + `", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z",
+		"sync_hash": "` + strings.Repeat("!~", 64) + `", "manifest": ` + strings.Replace(customManifestWith(`"name": "`+name+`", "scopes": {"list": ["!", "#", "[", "]", "~"]}`),
+		"custom_acme", id, 1) + `}`
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", "connector_definitions", json.RawMessage(row)))
+
+	definition, err := s.destination.ConnectorDefinitions.Latest(s.ctx, "moved", id)
+	s.Require().NoError(err)
+	s.Equal(name, definition.Name)
+	s.Equal(strings.Repeat("!~", 64), definition.SyncHash)
 }
 
 // customAcme is a manifest the API stores for a custom connector custom_acme: an MCP server
@@ -3118,7 +3175,7 @@ func (s *DataMoveSuite) importDefinitionRow(manifest string) (string, error) {
 }
 
 func (s *DataMoveSuite) importDefinitionWith(manifest func(id string) string) (string, error) {
-	id := "custom_" + newID()
+	id := "custom_a" + newID()
 	row := `{"customer_id": "moved", "id": "` + id + `", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", ` + manifest(id) + `}`
 	return id, s.destination.ImportRow(s.ctx, "moved", "connector_definitions", json.RawMessage(row))
 }

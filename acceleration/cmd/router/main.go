@@ -1499,6 +1499,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		TelnyxPublicKey:       telnyxPublicKey,
 		ChatInboundKeys:       chatInboundKeys,
 		TwilioAuthToken:       settings.Twilio.WebhookAuthToken,
+		TwilioAccountSID:      settings.Twilio.AccountSID,
 		TelnyxConnectionID:    settings.Telnyx.ConnectionID,
 		Simulations:           simulations,
 		DLC:                   registrations,
