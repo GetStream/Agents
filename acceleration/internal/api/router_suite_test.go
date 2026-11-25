@@ -631,10 +631,7 @@ func (s *RouterSuite) SetupSuite() {
 	s.Require().NoError(migrate(ctx, pgStore, options.DSN))
 	s.store = pgStore
 	s.failing = &failingQueries{}
-	pgStore.GlobalDB().AddQueryHook(s.failing)
-	if pgStore.Sharded() {
-		pgStore.ShardDB().AddQueryHook(s.failing)
-	}
+	s.failing.hook(pgStore)
 	s.T().Cleanup(func() { s.Require().NoError(pgStore.Close()) })
 	s.otherStore = pgStore
 	if s.otherShard != s.shard {
@@ -645,6 +642,8 @@ func (s *RouterSuite) SetupSuite() {
 		}
 		s.otherStore, err = store.OpenShards(otherOptions)
 		s.Require().NoError(err)
+		// The other node's reads fail as the suite's own do.
+		s.failing.hook(s.otherStore)
 		s.T().Cleanup(func() { s.Require().NoError(s.otherStore.Close()) })
 		if s.otherShardApart {
 			s.Require().NoError(migrate(ctx, s.otherStore, otherOptions.ShardDSN))
@@ -1086,6 +1085,14 @@ func (f *failingQueries) BeforeQuery(ctx context.Context, event *bun.QueryEvent)
 }
 
 func (*failingQueries) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+// hook makes the queries of each of pgStore's databases fail as f says.
+func (f *failingQueries) hook(pgStore *store.Store) {
+	pgStore.GlobalDB().AddQueryHook(f)
+	if pgStore.Sharded() {
+		pgStore.ShardDB().AddQueryHook(f)
+	}
+}
 
 // channelBridgeOptions are the options channelBridge builds the bridge with, for a test to
 // build another router's bridge.
