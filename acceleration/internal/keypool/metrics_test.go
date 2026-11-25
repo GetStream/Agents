@@ -515,7 +515,7 @@ func (s *RefusedAttemptsSuite) TestThePoolIsNamedForTheFirstOfSeveralVariables()
 func (s *RefusedAttemptsSuite) TestAQuotaFrameIsCountedAndRestsTheKey() {
 	p := s.pool("frame")
 
-	p.QuotaExceeded(p.keys[0])
+	p.QuotaExceeded(s.T().Context(), p.keys[0])
 
 	s.Equal(map[string]float64{"quota_exceeded": 1}, s.counted(p.keyVars[0]))
 	s.Equal([]string{p.keys[1], p.keys[1]}, []string{p.Next(), p.Next()})
@@ -525,7 +525,7 @@ func (s *RefusedAttemptsSuite) TestAQuotaFrameIsCountedAndRestsTheKey() {
 func (s *RefusedAttemptsSuite) TestAKeyRefusedAfterTheHandshakeIsCountedAndStaysInTurn() {
 	p := s.pool("invalid")
 
-	p.InvalidKey()
+	p.InvalidKey(s.T().Context())
 
 	s.Equal(map[string]float64{"invalid_key": 1}, s.counted(p.keyVars[0]))
 	s.Equal([]string{p.keys[0], p.keys[1], p.keys[0]}, []string{p.Next(), p.Next(), p.Next()})
@@ -535,7 +535,7 @@ func (s *RefusedAttemptsSuite) TestAKeyRefusedAfterTheHandshakeIsCountedAndStays
 func (s *RefusedAttemptsSuite) TestAFrameForWantOfFundsIsCountedAs402AndStaysInTurn() {
 	p := s.pool("funds")
 
-	p.OutOfFunds()
+	p.OutOfFunds(s.T().Context())
 
 	s.Equal(map[string]float64{"402": 1}, s.counted(p.keyVars[0]))
 	s.Equal([]string{p.keys[0], p.keys[1], p.keys[0]}, []string{p.Next(), p.Next(), p.Next()})
@@ -634,9 +634,9 @@ func (s *RefusedAttemptsSuite) TestEveryRefusalStatusAlertsWithItsReason() {
 			s.answerWith(http.StatusTooManyRequests, anthropicSpendCapBody, p.keys[0])
 			s.post(p.Pool)
 		}},
-		{"quota frame", "quota_exceeded", "quota spent, wait for it to reset or raise it", func(p pooled) { p.QuotaExceeded(p.keys[0]) }},
-		{"invalid key frame", "invalid_key", "key not valid, replace it", func(p pooled) { p.InvalidKey() }},
-		{"out of funds frame", "402", "out of funds, top up the account", func(p pooled) { p.OutOfFunds() }},
+		{"quota frame", "quota_exceeded", "quota spent, wait for it to reset or raise it", func(p pooled) { p.QuotaExceeded(s.T().Context(), p.keys[0]) }},
+		{"invalid key frame", "invalid_key", "key not valid, replace it", func(p pooled) { p.InvalidKey(s.T().Context()) }},
+		{"out of funds frame", "402", "out of funds, top up the account", func(p pooled) { p.OutOfFunds(s.T().Context()) }},
 	} {
 		s.Run(tc.name, func() {
 			p := s.pool("reason")
@@ -658,7 +658,7 @@ func (s *RefusedAttemptsSuite) TestAStatusWithNoReasonKeepsItsTitle() {
 	keyVar := "RA_NOREASON_" + strings.ToUpper(rand.Text()) + "_API_KEY"
 	item := keyVar + "/418"
 
-	events := s.sentEvents(keyVar, func() { refusedAttempts.WithLabelValues(keyVar, "418", ourOwner).Inc() })
+	events := s.sentEvents(keyVar, func() { refusedAttempts.WithLabelValues(keyVar, "418", ourOwner, "", "").Inc() })
 
 	s.Require().Contains(events, item)
 	s.Equal("usage alert: key_refused "+item, events[item].Message)
@@ -672,7 +672,7 @@ func (s *RefusedAttemptsSuite) TestASpentQuotaFrameAlertsUnderItsVariable() {
 	refused := s.refusedAlert(start)
 	p := s.pool("framed")
 
-	p.QuotaExceeded(p.keys[0])
+	p.QuotaExceeded(s.T().Context(), p.keys[0])
 
 	s.Contains(refused(start.Add(time.Second)), p.keyVars[0]+"/quota_exceeded")
 }
@@ -757,9 +757,9 @@ func (s *RefusedAttemptsSuite) TestARefusedCustomersKeyIsTheirsAndRaisesNoAlert(
 			_, _, err := s.dial(pool)
 			s.Error(err)
 		}},
-		{"wrong key after the handshake", invalidKeyStatus, func(pool *Pool, _ string) { pool.InvalidKey() }},
-		{"spent quota in a frame", quotaExceededStatus, func(pool *Pool, key string) { pool.QuotaExceeded(key) }},
-		{"out of funds in a frame", outOfFundsStatus, func(pool *Pool, _ string) { pool.OutOfFunds() }},
+		{"wrong key after the handshake", invalidKeyStatus, func(pool *Pool, _ string) { pool.InvalidKey(s.T().Context()) }},
+		{"spent quota in a frame", quotaExceededStatus, func(pool *Pool, key string) { pool.QuotaExceeded(s.T().Context(), key) }},
+		{"out of funds in a frame", outOfFundsStatus, func(pool *Pool, _ string) { pool.OutOfFunds(s.T().Context()) }},
 	} {
 		s.Run(tc.name, func() {
 			start := time.Now()

@@ -70,7 +70,7 @@ func (s *RefusalAlertsSuite) TestAMem0RefusalAndARefusedKeyAlert() {
 
 	_, err = store.Recall(context.Background(), memory.Query{Scope: memory.Scope{AppID: "router", UserID: "acme", AgentID: "support", RunID: "session-1"}, Text: "anything"})
 	s.Require().ErrorContains(err, "429")
-	pool.QuotaExceeded(key)
+	pool.QuotaExceeded(s.T().Context(), key)
 	stop()
 
 	s.Contains(s.fingerprints(), "usage_mem0_refused:search/429")
