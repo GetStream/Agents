@@ -65,7 +65,7 @@ func (s *regionSuite) readSettings(backend stream.Backend) {
 }
 
 func (s *regionSuite) TestTheDefaultClientReadsAppSettings() {
-	s.host = "accelerate-auto.gcp.stream-io-api.com"
+	s.host = "accelerate.gcp.stream-io-api.com"
 	s.readSettings(stream.Backend{})
 }
 

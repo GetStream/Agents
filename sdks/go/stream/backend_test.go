@@ -115,7 +115,7 @@ func TestARegionIsTheHostedRouterThere(t *testing.T) {
 }
 
 func TestTheHostedRouterOutOfTheBoxIsTheNearestRegion(t *testing.T) {
-	if DefaultURL != "https://accelerate-auto.gcp.stream-io-api.com" {
+	if DefaultURL != "https://accelerate.gcp.stream-io-api.com" {
 		t.Errorf("the default is %s", DefaultURL)
 	}
 }
@@ -126,7 +126,7 @@ func TestTheNearestHostedRouterIsAuthenticated(t *testing.T) {
 	t.Setenv(APIKeyEnv, "ntv9")
 	t.Setenv(APISecretEnv, "shh")
 
-	for _, url := range []string{"", "https://accelerate-auto.gcp.stream-io-api.com/"} {
+	for _, url := range []string{"", "https://accelerate.gcp.stream-io-api.com/"} {
 		t.Setenv(URLEnv, url)
 		resolved, err := Backend{}.Resolve()
 		if err != nil {

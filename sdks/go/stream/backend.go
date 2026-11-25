@@ -72,7 +72,7 @@ const (
 	MaxUsageCategories = 10
 	// DefaultURL is the hosted router in the nearest healthy region.
 	// STREAM_ACCELERATION_URL or STREAM_ACCELERATION_REGION moves it.
-	DefaultURL = "https://accelerate-auto.gcp.stream-io-api.com"
+	DefaultURL = "https://accelerate.gcp.stream-io-api.com"
 )
 
 // tokenValidity is how long a minted token lasts. Short, because it is minted per request
