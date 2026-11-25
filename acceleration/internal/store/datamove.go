@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -203,7 +204,7 @@ var dataTables = []dataTable{
 	{name: "simulations", customer: "customer_id"},
 	{name: "simulation_runs", customer: "customer_id", references: []dataReference{{"simulation_id", "simulations"}}},
 	{name: "simulation_cases", parent: "simulation_runs", parentColumn: "run_id"},
-	{name: "users", customer: "customer_id", vouched: []string{"minted"}},
+	{name: "users", customer: "customer_id", vouched: []string{"minted", "shard"}},
 	{name: "scheduled_tasks", customer: "customer_id"},
 	{name: "scheduled_task_runs", customer: "customer_id"},
 	// Who asked not to be reached: STOP and START at the source carry on here through the changes.
@@ -805,24 +806,28 @@ func (t dataTable) selectRows(customerID string, secrets []string) (string, []an
 // A number on the customer's own trunk that another customer holds here is not written:
 // *NumbersLeftOutError.
 func (s *Store) ImportRow(ctx context.Context, customerID, table string, row json.RawMessage) error {
+	// A cached row's write outlives ctx, so an import that has ended stops here.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	spec, _ := dataTableByName(table)
 	var stale []string
-	var err error
 	if table == "phone_numbers" {
 		// A number is checked against who else holds it under a lock its write has to keep
 		// (holders), and only a transaction keeps one.
-		err = s.sideOf(spec).RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		return s.sideOf(spec).RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 			return s.importRow(ctx, tx, customerID, table, row, &stale)
 		})
-	} else {
-		err = s.importRow(ctx, s.sideOf(spec), customerID, table, row, &stale)
 	}
-	if err != nil {
-		return err
+	// Most rows of an export have no keys to drop and pay for no transaction.
+	if !readCached(table) {
+		return s.importRow(ctx, s.sideOf(spec), customerID, table, row, &stale)
 	}
-	s.forget(ctx, stale...)
+	err := s.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		return s.importRow(ctx, tx, customerID, table, row, &stale)
+	}, func() []string { return stale })
 	s.Users.forgetKeys(stale)
-	return nil
+	return err
 }
 
 // sideOf is the database a table's rows are written to here: this shard's or the shared one.
@@ -884,6 +889,9 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 		// a customer.
 		if customerID == BuiltinCustomer {
 			return fmt.Errorf("store: an import writes a connector definition under a customer, and none is known yet: %w (name the customer with --as)", ErrNotACustomConnector)
+		}
+		if SkippedRow(table, row) != "" {
+			return nil
 		}
 		if row, err = importableDefinition(row); err != nil {
 			return err
@@ -1205,6 +1213,12 @@ func cachedByID(table string) bool {
 	return slices.Contains([]string{"agent_configs", "router_configs", "skills", "voices"}, table)
 }
 
+// readCached is whether a moved table's rows are read through a cache (cachedKeys). Every such
+// table is in the shared database.
+func readCached(table string) bool {
+	return cachedByID(table) || table == "policies" || table == "users"
+}
+
 // cachedRow is a row of a cachedByID table, as relation names it in a write, in the form cachedKeys
 // reads. A voice's carries the providers of its bindings, whose ids are cached under the voice
 // (VoiceBindings.GetReady) and read only while it is not deleted.
@@ -1221,10 +1235,13 @@ func cachedRow(table, relation string) string {
 // policy is cached by its app alone, so any row of it names the same values. A user is held by
 // every replica that saw them (Users.Forget).
 func cachedKeys(customerID, table string, row []byte) []string {
+	if !readCached(table) {
+		return nil
+	}
 	if table == "policies" {
 		return policyKeys(ScopeApp, customerID)
 	}
-	if (!cachedByID(table) && table != "users") || len(row) == 0 {
+	if len(row) == 0 {
 		return nil
 	}
 	// The columns are text, which jsonb_populate_record also fills from a number, so a value is
@@ -1933,11 +1950,56 @@ func importableDefinition(row json.RawMessage) (json.RawMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: imported connector definition %q: %w: %w", id, ErrNotACustomConnector, err)
 	}
-	if fields["manifest"], err = json.Marshal(custom); err != nil {
-		return nil, stack.Wrap(err)
+	// A row from a release before sync hashes carries none, as importRow's COALESCE reads it.
+	var hash string
+	if raw, ok := fields["sync_hash"]; ok && json.Unmarshal(raw, &hash) != nil || len(hash) > SyncHashMaxLength || !syncHash.MatchString(hash) {
+		return nil, invalidImport(fmt.Errorf("store: imported connector definition %q: sync_hash is not %s of at most %d characters",
+			id, SyncHashDescription, SyncHashMaxLength))
+	}
+	// The columns a caller is shown are the manifest's, as the API writes them (saveRevision), so
+	// they are held to its limits too.
+	for column, value := range map[string]any{"manifest": custom, "name": custom.Name, "category": custom.Category,
+		"description": custom.Description} {
+		if fields[column], err = json.Marshal(value); err != nil {
+			return nil, stack.Wrap(err)
+		}
 	}
 	return json.Marshal(fields)
 }
+
+// SkippedRow names a row an import leaves out rather than writes, as rowKey does, and is "" for
+// any other row: a custom connector definition with oauth2_client_credentials, which custom
+// connectors could have before they lost the scheme. No connection could use one, since the
+// scheme needs a token endpoint a custom connector cannot set (core.CustomManifest), so it
+// should not stop a move as importableDefinition's refusal would.
+func SkippedRow(table string, row json.RawMessage) string {
+	if table != "connector_definitions" {
+		return ""
+	}
+	// Read by exact column name, as importableDefinition reads it, which refuses a row this
+	// cannot read.
+	var fields map[string]json.RawMessage
+	var manifest core.Manifest
+	if json.Unmarshal(row, &fields) != nil || json.Unmarshal(fields["manifest"], &manifest) != nil ||
+		!slices.Contains(manifest.Schemes, "oauth2_client_credentials") {
+		return ""
+	}
+	// A row is named only by a key the API could have written: anything else is refused by
+	// importableDefinition as before, and never held in a list or echoed back.
+	var id string
+	var revision int64
+	if json.Unmarshal(fields["id"], &id) != nil || !skippedID.MatchString(id) ||
+		json.Unmarshal(fields["revision"], &revision) != nil || revision < 1 {
+		return ""
+	}
+	key, err := rowKey(table, []string{"id", "revision"}, row)
+	if err != nil {
+		return ""
+	}
+	return key
+}
+
+var skippedID = regexp.MustCompile(core.CustomIDPattern)
 
 // identity is what the importing deployment overwrites on every row of this table, which
 // is whose it is. A table holding more than one kind of row has the kind forced too, so
@@ -2221,7 +2283,7 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 		return nil
 	}
 	var stale, left []string
-	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	_, err := s.cachedWrite(ctx, db, func(ctx context.Context, tx bun.Tx) error {
 		if err := lockNumbers(ctx, tx, changes); err != nil {
 			return err
 		}
@@ -2246,12 +2308,11 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 			}
 		}
 		return nil
-	})
+	}, func() []string { return stale }, func() bool { return len(stale) > 0 })
+	s.Users.forgetKeys(stale)
 	if err != nil {
 		return err
 	}
-	s.forget(ctx, stale...)
-	s.Users.forgetKeys(stale)
 	if len(left) > 0 {
 		return stack.Wrap(&NumbersLeftOutError{Numbers: left})
 	}
@@ -2469,20 +2530,27 @@ SELECT count(*) FROM pruned`,
 	}
 }
 
-// watchDataChanges attaches the recording trigger to every table an export carries, in one
-// database.
+// watchDataChanges attaches the recording trigger to every table of the set an export carries,
+// connecting with dsn.
 //
 // Changes are only recorded for a customer StartDataCapture marked, which it does in the shared
 // database, so a shard's own tables record none, and a deployment with shards (HasShards)
 // refuses to be a move's source rather than lose what its shards write after the export.
 //
-// It runs on every start rather than once in a migration, so a table added later is
+// It runs on every Migrate rather than once in a migration, so a table added later is
 // covered by the deployment reaching it rather than by somebody remembering to write the
 // trigger by hand. Replacing a trigger that is already right costs a catalogue write at
 // startup and nothing afterwards.
-func (s *Store) watchDataChanges(ctx context.Context, db *bun.DB) error {
+func (s *Store) watchDataChanges(ctx context.Context, dsn string, set migrationSet) error {
+	// Not the migration's pool, which has no lock limit: a trigger waiting behind a long write
+	// would hold every write queued behind it.
+	db, err := connect(dsn, 1)
+	if err != nil {
+		return err
+	}
+	defer db.Close() //nolint:errcheck // a pool the triggers are done with
 	for _, table := range dataTables {
-		if s.sideOf(table) != db {
+		if table.shard != (set.name == shardSet.name) {
 			continue
 		}
 		shape, err := s.shapeOf(ctx, table.name)
@@ -2504,6 +2572,45 @@ AFTER INSERT OR UPDATE OR DELETE ON %s
 FOR EACH ROW EXECUTE FUNCTION record_data_change(%s)`, table.name, strings.Join(arguments, ", "))
 		if _, err := db.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("store: watch %s: %w", table.name, err)
+		}
+	}
+	return nil
+}
+
+// checkDataChangesWatched refuses a database where a table of the set an export carries has no
+// recording trigger, or has one that records a column isSecret leaves out, unless a later
+// release has migrated: it may have added the column and be about to attach its trigger, and
+// no router of this release writes it. The trigger's other arguments are not compared: the
+// later release's may be there already.
+func (s *Store) checkDataChangesWatched(ctx context.Context, set migrationSet, later bool) error {
+	for _, table := range dataTables {
+		if table.shard != (set.name == shardSet.name) {
+			continue
+		}
+		shape, err := s.shapeOf(ctx, table.name)
+		if err != nil {
+			return err
+		}
+		// The arguments are kept each ending in a zero byte, which escape writes as \000.
+		var attached sql.NullString
+		if err := s.sideOf(table).QueryRowContext(ctx, `
+SELECT (SELECT encode(tgargs, 'escape') FROM pg_trigger
+  WHERE tgrelid = to_regclass(?) AND tgname = 'data_changes_recorded' AND tgenabled IN ('O', 'A'))`,
+			table.name).Scan(&attached); err != nil {
+			return fmt.Errorf("store: check the trigger of %s: %w", table.name, err)
+		}
+		if !attached.Valid {
+			return fmt.Errorf("store: changes of %s are not recorded: run router migrate with this release", table.name)
+		}
+		arguments := strings.Split(attached.String, `\000`)
+		var left []string
+		if len(arguments) > 3 {
+			left = strings.Split(strings.Trim(arguments[3], "{}"), ",")
+		}
+		for _, secret := range shape.secrets() {
+			if !later && !slices.Contains(left, secret) {
+				return fmt.Errorf("store: recorded changes of %s would hold %s: run router migrate with this release", table.name, secret)
+			}
 		}
 	}
 	return nil

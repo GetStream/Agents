@@ -200,6 +200,8 @@ type Scheduler struct {
 	logger  *slog.Logger
 	// activity counts each occurrence settled under its task's app. Nil counts none.
 	activity *activity.Recorder
+	// shard is whose tasks the worker claims. The zero ShardClaim claims every shard's.
+	shard store.ShardClaim
 
 	now           func() time.Time
 	lease         time.Duration
@@ -256,6 +258,12 @@ func (s *Scheduler) SetFinishRetries(waits []time.Duration) {
 // it before Start.
 func (s *Scheduler) SetActivity(record *activity.Recorder) {
 	s.activity = record
+}
+
+// SetShard has the worker claim only shard's tasks, and any left unclaimed where they are meant
+// for. Call it before Start.
+func (s *Scheduler) SetShard(shard store.ShardClaim) {
+	s.shard = shard
 }
 
 // Start runs the worker until ctx ends or Close: it looks at start, when Kick
@@ -323,7 +331,7 @@ func (s *Scheduler) runDue(ctx context.Context) (time.Duration, bool) {
 		if free == 0 {
 			return 0, false
 		}
-		claimed, err := s.store.ScheduledTasks.Claim(ctx, free, s.lease)
+		claimed, err := s.store.ScheduledTasks.Claim(ctx, free, s.lease, s.shard)
 		if err != nil {
 			if ctx.Err() == nil {
 				s.logger.Error("could not claim the scheduled tasks due", "error", err)

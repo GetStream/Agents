@@ -4899,6 +4899,15 @@ components:
           description: How many rows were written.
           format: int64
           type: integer
+        skipped:
+          description: 'The rows left out rather than written, by table and primary key, as connector_definitions:{"id":"custom_crm","revision":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set.'
+          items:
+            type: string
+          type: array
+        skipped_more:
+          description: How many more rows were left out than skipped names, which holds the first 100.
+          format: int64
+          type: integer
         tables:
           additionalProperties:
             format: int64
@@ -24493,6 +24502,29 @@ paths:
           $ref: '#/components/responses/InternalError'
       security: []
       summary: Receive a Telnyx account event
+  /v1/phone/hooks/twilio:
+    post:
+      description: 'Where Twilio asks what to do with a call to one of this router''s Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account''s Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number''s own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.'
+      operationId: receiveTwilioCall
+      responses:
+        "200":
+          content:
+            application/xml:
+              schema:
+                type: string
+          description: TwiML dialling the number's trunk, rejecting the call, or hanging up
+        "400":
+          description: The body is not a form
+        "401":
+          description: The call is not signed by Twilio
+        "404":
+          description: Twilio calls are not configured
+        "413":
+          description: The call is over 64 KiB
+        "500":
+          $ref: '#/components/responses/InternalError'
+      security: []
+      summary: Receive a Twilio call
   /v1/phone/hooks/twilio/events:
     post:
       description: 'Where the Twilio account sends its Monitor alerts (the Debugger webhook) and its usage triggers'' callbacks, as form posts. Unauthenticated because Twilio is not a customer: each event is checked against X-Twilio-Signature, made with the account''s Auth Token over ROUTER_PUBLIC_URL and this path, then logged and counted in vendor_account_events_total by its error code or usage category and its level. An alert whose Sid was counted in the last hour is answered 204 and not counted again. A deployment with no Twilio webhook token or no public URL answers 404, so nobody else can raise the count.'

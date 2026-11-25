@@ -64,9 +64,10 @@ func (o hookOrigin) answer(answer func()) {
 // replayed hands a hook to a peer whole, signature and all, because the node answering it
 // verifies the delivery for itself rather than taking this node's word that it came from
 // Stream. A hook a peer handed here goes nowhere further: two nodes each believing the other
-// answers would pass it back and forth.
+// answers would pass it back and forth. One handed to this node's shard was answered by
+// nothing yet, so it may go on once more, unmarked (node.HandedToShard).
 func (s *Server) replayed(r *http.Request, body []byte) func(ctx context.Context, address string) (*node.ForwardResponse, error) {
-	if r.Header.Get(node.ForwardedHeader) != "" {
+	if r.Header.Get(node.ForwardedHeader) != "" && !node.HandedToShard(r.Context()) {
 		return nil
 	}
 	return func(ctx context.Context, address string) (*node.ForwardResponse, error) {
