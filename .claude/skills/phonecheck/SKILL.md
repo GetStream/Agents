@@ -37,8 +37,8 @@ skill asks what to test, sets it up, runs, reports and puts things back.
   or `printf 'header = "Authorization: Bearer %s"\n' "$TELNYX_PERSON_API_KEY" | curl -sS -K - …`.
   Pipe every reply through `jq` and keep only the fields named here.
 - **Voice URLs: classify, never print.** A vendor's voice URL or connection setting can embed a
-  password: an attached router number's Twilio voice URL holds the Stream SIP trunk's. Never
-  print a voice URL; keep one only after the credential check in "Voice URLs" below passes.
+  password: the voice URL of a router number attached before the router's call webhook existed
+  holds the Stream SIP trunk's. Never print a voice URL; keep one only after the credential check in "Voice URLs" below passes.
 - **Encode numbers.** A `+` in a query must be encoded: `curl -G --data-urlencode 'PhoneNumber=+15550100002'`,
   and the same for Telnyx `filter[…]` keys. In a router path it stays as is.
 - **Ask with AskUserQuestion,** one step at a time, defaults first. Accept several answers at once.
@@ -206,7 +206,8 @@ Show ONE summary and wait for an explicit yes:
   webhook), say plainly: while the test runs, real calls to that number reach the test script
   instead; it is put back afterwards. Recommend a number used only for tests. Never print the URL;
 - cleanup: what goes back (hooks, voice URLs, `connection_id`s, tunnel, router), what stays (the
-  bought numbers, until you say otherwise), and that release is asked per number afterwards.
+  bought numbers, until you say otherwise; a kept Twilio router number points at the closed
+  tunnel), and that release is asked per number afterwards.
 
 No yes: nothing is bought or changed; stop the router this skill started and end.
 
@@ -222,7 +223,11 @@ In this order, each change into the state file:
    (the call hook only: a text to the agent's channel is not answered by this local router)
    (`-remove <stale URL>` only if approved; `-app <id>` only for a router in app mode). A local
    Telnyx router's own TeXML app (`TELNYX_CONNECTION_ID`) needs its voice URL on the tunnel; the
-   human sets that.
+   human sets that. Before any Twilio router number is attached, restart the local router with
+   `ROUTER_PUBLIC_URL=<tunnel URL>` added to its start command (section 1, step 3), as the
+   Twilio number's voice URL is built from it: `kill` the router's id from the state file, wait
+   until nothing listens on :8080, start it again, and write the new process id to the state
+   file. The env file's `ROUTER_PUBLIC_URL` is a local address Twilio cannot reach.
 2. **Router numbers.** Buy (see the table); add to "bought this run". For inbound, after its
    outbound runs: attach.
 3. **Person numbers.** Twilio `POST …/IncomingPhoneNumbers.json` with `PhoneNumber=<n>` (keep
@@ -280,7 +285,9 @@ it lists, in reverse:
    release (see the table; it also unwires an attached one), while the router still runs.
    Person number: Twilio `DELETE …/IncomingPhoneNumbers/<sid>.json`, Telnyx
    `DELETE /v2/phone_numbers/<id>`. Say what is kept and what stays attached: an attached
-   number blocks inbound tests on other numbers.
+   number blocks inbound tests on other numbers. A kept Twilio router number keeps its voice
+   URL on the closed tunnel: its calls fail until the router is reachable there again, so say
+   so.
 4. Stop any phonecheck run left (`pkill -INT -x phonecheck`), then the tunnel, then the router:
    `kill <id>` for each process id in the state file, then their background tasks. Check that
    nothing is left: `pgrep -x phonecheck`, `pgrep -f 'cloudflared tunnel --url http://localhost:8080'`
