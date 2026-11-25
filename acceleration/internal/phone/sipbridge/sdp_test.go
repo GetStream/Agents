@@ -279,6 +279,17 @@ func TestToStreamRefusesWhatItCannotRebuild(t *testing.T) {
 	}
 }
 
+func TestToStreamReadsTheAudioCodecsFromTheAudioLineOnly(t *testing.T) {
+	// The video line comes first and names payload type 96 for another codec.
+	media := "m=video 30002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n" +
+		"m=audio 30000 RTP/AVP 0 96\r\na=rtpmap:96 telephone-event/8000\r\n"
+
+	got, err := toStream(offerAt("c=IN IP4 1.1.1.1\r\n", media), testTrunkAddr)
+	require.NoError(t, err)
+
+	require.Equal(t, []Codec{pcmu, {Name: dtmfCodec.Name, PayloadType: 96, ClockRate: 8000}}, mediaOf(t, got).Codecs)
+}
+
 func TestToStreamKeepsOnlyTheCodecsStreamAccepts(t *testing.T) {
 	media := "m=audio 30000 RTP/AVP 111 9 8 0 101\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:101 telephone-event/8000\r\n"
 

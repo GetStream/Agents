@@ -135,12 +135,15 @@ func parseAudio(body []byte) (Media, *sdp.SessionDescription, int, error) {
 		return Media{}, nil, 0, stack.Wrap(errors.New("sdp has no connection address"))
 	}
 
+	// The parser's codec map covers every m= line, so another line reusing a payload type would rename
+	// an audio codec: only the audio line's own rtpmap and fmtp lines are read.
+	own := &sdp.SessionDescription{MediaDescriptions: []*sdp.MediaDescription{md}}
 	for _, format := range md.MediaName.Formats {
 		pt, err := strconv.ParseUint(format, 10, 8)
 		if err != nil {
 			return Media{}, nil, 0, stack.Wrap(fmt.Errorf("sdp payload type %q: %w", format, err))
 		}
-		if codec, err := sd.GetCodecForPayloadType(uint8(pt)); err == nil {
+		if codec, err := own.GetCodecForPayloadType(uint8(pt)); err == nil {
 			name := codec.Name
 			// Normalize codec names: telephone-event variants -> "telephone-event", others -> uppercase
 			if strings.EqualFold(name, "telephone-event") {
