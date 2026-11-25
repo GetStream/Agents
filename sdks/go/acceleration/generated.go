@@ -3925,7 +3925,7 @@ type AgentConfig struct {
 	// Role What the agent is for in the app, beyond answering people. agent_moderator is the app's moderator agent, which reviews flagged messages. One live agent per app holds a role: giving it to a second is refused, and a test copy (tagged draft_of) may share the role of the agent it copies. Left out on an update or a sync, the stored role stays. Omit it for an ordinary agent.
 	Role *AgentRole `json:"role,omitempty"`
 
-	// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only keep all of the work and its data in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Empty is the app's own on an agent config, and closest on the app.
+	// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
 	RoutingPolicy *RoutingPolicy `json:"routing_policy,omitempty"`
 
 	// Sandbox Where the agent may run code it writes. A text agent runs it itself; a voice agent hands it to the subagent, since running code takes seconds a call has none of. Omit it and the agent works everything out in its head.
@@ -4039,7 +4039,7 @@ type AgentConfigPatch struct {
 	// Role What the agent is for in the app, beyond answering people. agent_moderator is the app's moderator agent, which reviews flagged messages. One live agent per app holds a role: giving it to a second is refused, and a test copy (tagged draft_of) may share the role of the agent it copies. Left out on an update or a sync, the stored role stays. Omit it for an ordinary agent.
 	Role *AgentRole `json:"role,omitempty"`
 
-	// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only keep all of the work and its data in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Empty is the app's own on an agent config, and closest on the app.
+	// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
 	RoutingPolicy *RoutingPolicy `json:"routing_policy,omitempty"`
 
 	// Sandbox Where the agent may run code it writes. A text agent runs it itself; a voice agent hands it to the subagent, since running code takes seconds a call has none of. Omit it and the agent works everything out in its head.
@@ -4171,7 +4171,7 @@ type AgentConfigRequest struct {
 	// Role What the agent is for in the app, beyond answering people. agent_moderator is the app's moderator agent, which reviews flagged messages. One live agent per app holds a role: giving it to a second is refused, and a test copy (tagged draft_of) may share the role of the agent it copies. Left out on an update or a sync, the stored role stays. Omit it for an ordinary agent.
 	Role *AgentRole `json:"role,omitempty"`
 
-	// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only keep all of the work and its data in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Empty is the app's own on an agent config, and closest on the app.
+	// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
 	RoutingPolicy *RoutingPolicy `json:"routing_policy,omitempty"`
 
 	// Sandbox Where the agent may run code it writes. A text agent runs it itself; a voice agent hands it to the subagent, since running code takes seconds a call has none of. Omit it and the agent works everything out in its head.
@@ -4473,7 +4473,7 @@ type AnalyzeReviewsRequest struct {
 
 // AppSettings What the router does for the calling app. It never carries a secret.
 type AppSettings struct {
-	// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only keep all of the work and its data in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Empty is the app's own on an agent config, and closest on the app.
+	// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
 	RoutingPolicy RoutingPolicy `json:"routing_policy"`
 
 	// Stream Which Stream app the router writes the calling app's conversations, transcripts, calls and phone lines into, and whether that app holds the types they need.
@@ -9198,7 +9198,7 @@ type RouterConfigRequest struct {
 	Tts *TtsOptions `json:"tts,omitempty"`
 }
 
-// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only keep all of the work and its data in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Empty is the app's own on an agent config, and closest on the app.
+// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
 type RoutingPolicy string
 
 // Run defines model for Run.
@@ -11251,7 +11251,7 @@ type UpcomingPriceEntry struct {
 
 // UpdateAppSettings defines model for UpdateAppSettings.
 type UpdateAppSettings struct {
-	// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only keep all of the work and its data in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Empty is the app's own on an agent config, and closest on the app.
+	// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
 	RoutingPolicy *RoutingPolicy `json:"routing_policy,omitempty"`
 }
 
@@ -16471,7 +16471,7 @@ type ClientInterface interface {
 
 	// UpdateAppSettingsWithBody Change the calling app's settings
 	//
-	// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is.
+	// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -16482,7 +16482,7 @@ type ClientInterface interface {
 
 	// UpdateAppSettings Change the calling app's settings
 	//
-	// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is.
+	// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -23102,7 +23102,7 @@ func (c *Client) GetAppSettings(ctx context.Context, reqEditors ...RequestEditor
 
 // UpdateAppSettingsWithBody Change the calling app's settings
 //
-// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is.
+// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
@@ -23123,7 +23123,7 @@ func (c *Client) UpdateAppSettingsWithBody(ctx context.Context, contentType stri
 
 // UpdateAppSettings Change the calling app's settings
 //
-// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is.
+// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
@@ -40216,7 +40216,7 @@ type ClientWithResponsesInterface interface {
 
 	// UpdateAppSettingsWithBodyWithResponse Change the calling app's settings
 	//
-	// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is.
+	// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -40227,7 +40227,7 @@ type ClientWithResponsesInterface interface {
 
 	// UpdateAppSettingsWithResponse Change the calling app's settings
 	//
-	// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is.
+	// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -73710,7 +73710,7 @@ func (c *ClientWithResponses) GetAppSettingsWithResponse(ctx context.Context, re
 
 // UpdateAppSettingsWithBodyWithResponse Change the calling app's settings
 //
-// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is.
+// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
@@ -73727,7 +73727,7 @@ func (c *ClientWithResponses) UpdateAppSettingsWithBodyWithResponse(ctx context.
 
 // UpdateAppSettingsWithResponse Change the calling app's settings
 //
-// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is.
+// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
