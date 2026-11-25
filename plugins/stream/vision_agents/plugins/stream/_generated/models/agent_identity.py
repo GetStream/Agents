@@ -17,11 +17,13 @@ class AgentIdentity:
     ignored.
 
         Attributes:
-            agent_id (str | Unset): The agent id a new conversation is kept under, as a session's agent_id. It may not start
-                with !.
+            agent_id (str | Unset): The agent id a new conversation is kept under, as a session's agent_id. A text
+                conversation's replies are written as the Chat user of this id, which the router makes with user_name when the
+                app has none. It may not start with !.
             user_id (str | Unset): The Stream user the agent joins a call and writes Chat messages as, as a session's
-                user_id. It may not start with !.
-            user_name (str | Unset): That user's display name, as a session's user_name.
+                user_id. Up to 128 letters, digits, _, . and -, not starting with !.
+            user_name (str | Unset): That user's display name, as a session's user_name, and the name the router gives the
+                agent_id's Chat user when it makes it.
     """
 
     agent_id: str | Unset = UNSET

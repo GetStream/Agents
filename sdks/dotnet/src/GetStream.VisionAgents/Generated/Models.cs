@@ -1340,7 +1340,7 @@ namespace GetStream.VisionAgents.Models
         public string? Harness { get; set; } = default!;
 
         /// <summary>
-        /// Who the agent is in Stream Chat in a session that names nobody: the agent id a new conversation is kept under, and the user the agent joins a call and writes as, with that user's name. A session that names this config uses each one set, from an end user's device or the app's backend alike, unless its request names its own agent_id, user_id or user_name: one at its default counts as naming none. A session carrying on a conversation_id keeps the agent id that conversation was kept under. Each visitor's conversation stays theirs when every session shares one agent id. Left out or null on an update, the stored identity stays; an empty object removes it.
+        /// Who the agent is in Stream Chat in a session that names nobody: the agent id a new conversation is kept under, and the user the agent joins a call and writes as, with that user's name. A session that names this config uses each one set, from an end user's device or the app's backend alike, unless its request names its own agent_id, user_id or user_name: one at its default counts as naming none. An incognito session keeps no conversation, so it gets an agent id of its own. A session carrying on a conversation_id keeps the agent id that conversation was kept under, and a fork gets an agent id of its own; a session resumed or forked takes user_id and user_name. Each visitor's conversation stays theirs when every session shares one agent id. Left out or null on an update, the stored identity stays; an empty object removes it.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("identity")]
         public AgentIdentity? Identity { get; set; } = default!;
@@ -1676,19 +1676,19 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
-        /// The agent id a new conversation is kept under, as a session's agent_id. It may not start with !.
+        /// The agent id a new conversation is kept under, as a session's agent_id. A text conversation's replies are written as the Chat user of this id, which the router makes with user_name when the app has none. It may not start with !.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("agent_id")]
         public string? AgentId { get; set; } = default!;
 
         /// <summary>
-        /// The Stream user the agent joins a call and writes Chat messages as, as a session's user_id. It may not start with !.
+        /// The Stream user the agent joins a call and writes Chat messages as, as a session's user_id. Up to 128 letters, digits, _, . and -, not starting with !.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("user_id")]
         public string? UserId { get; set; } = default!;
 
         /// <summary>
-        /// That user's display name, as a session's user_name.
+        /// That user's display name, as a session's user_name, and the name the router gives the agent_id's Chat user when it makes it.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("user_name")]
         public string? UserName { get; set; } = default!;

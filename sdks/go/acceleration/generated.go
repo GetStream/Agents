@@ -4264,13 +4264,13 @@ type AgentDispatch struct {
 
 // AgentIdentity Who an agent config's agent is in Stream Chat, set by the app's backend. An unknown field is refused rather than ignored.
 type AgentIdentity struct {
-	// AgentId The agent id a new conversation is kept under, as a session's agent_id. It may not start with !.
+	// AgentId The agent id a new conversation is kept under, as a session's agent_id. A text conversation's replies are written as the Chat user of this id, which the router makes with user_name when the app has none. It may not start with !.
 	AgentId *string `json:"agent_id,omitempty"`
 
-	// UserId The Stream user the agent joins a call and writes Chat messages as, as a session's user_id. It may not start with !.
+	// UserId The Stream user the agent joins a call and writes Chat messages as, as a session's user_id. Up to 128 letters, digits, _, . and -, not starting with !.
 	UserId *string `json:"user_id,omitempty"`
 
-	// UserName That user's display name, as a session's user_name.
+	// UserName That user's display name, as a session's user_name, and the name the router gives the agent_id's Chat user when it makes it.
 	UserName *string `json:"user_name,omitempty"`
 }
 

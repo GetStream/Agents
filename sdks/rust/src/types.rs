@@ -884,7 +884,7 @@ pub struct AgentConfigRequest {
     pub guardrail: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub harness: ::std::option::Option<Harness>,
-    ///Who the agent is in Stream Chat in a session that names nobody: the agent id a new conversation is kept under, and the user the agent joins a call and writes as, with that user's name. A session that names this config uses each one set, from an end user's device or the app's backend alike, unless its request names its own agent_id, user_id or user_name: one at its default counts as naming none. A session carrying on a conversation_id keeps the agent id that conversation was kept under. Each visitor's conversation stays theirs when every session shares one agent id. Left out or null on an update, the stored identity stays; an empty object removes it.
+    ///Who the agent is in Stream Chat in a session that names nobody: the agent id a new conversation is kept under, and the user the agent joins a call and writes as, with that user's name. A session that names this config uses each one set, from an end user's device or the app's backend alike, unless its request names its own agent_id, user_id or user_name: one at its default counts as naming none. An incognito session keeps no conversation, so it gets an agent id of its own. A session carrying on a conversation_id keeps the agent id that conversation was kept under, and a fork gets an agent id of its own; a session resumed or forked takes user_id and user_name. Each visitor's conversation stays theirs when every session shares one agent id. Left out or null on an update, the stored identity stays; an empty object removes it.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub identity: ::std::option::Option<AgentIdentity>,
     ///What the agent draws pictures with, as a provider/model or a capability shortcut such as image-fast. Naming one offers a text agent with a Chat channel the generate_image tool, whose pictures are drawn after the turn and posted into the conversation when ready, billed like POST /v1/image/generations. Empty offers no such tool: unlike search there is no default.
@@ -1098,13 +1098,13 @@ pub struct AgentDispatch {
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentIdentity {
-    ///The agent id a new conversation is kept under, as a session's agent_id. It may not start with !.
+    ///The agent id a new conversation is kept under, as a session's agent_id. A text conversation's replies are written as the Chat user of this id, which the router makes with user_name when the app has none. It may not start with !.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub agent_id: ::std::option::Option<::std::string::String>,
-    ///The Stream user the agent joins a call and writes Chat messages as, as a session's user_id. It may not start with !.
+    ///The Stream user the agent joins a call and writes Chat messages as, as a session's user_id. Up to 128 letters, digits, _, . and -, not starting with !.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub user_id: ::std::option::Option<::std::string::String>,
-    ///That user's display name, as a session's user_name.
+    ///That user's display name, as a session's user_name, and the name the router gives the agent_id's Chat user when it makes it.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub user_name: ::std::option::Option<::std::string::String>,
 }

@@ -15,11 +15,11 @@ use GetStream\VisionAgents\Json;
 final readonly class AgentIdentity
 {
     public function __construct(
-        // The agent id a new conversation is kept under, as a session's agent_id. It may not start with !.
+        // The agent id a new conversation is kept under, as a session's agent_id. A text conversation's replies are w...
         public ?string $agentId = null,
-        // The Stream user the agent joins a call and writes Chat messages as, as a session's user_id. It may not star...
+        // The Stream user the agent joins a call and writes Chat messages as, as a session's user_id. Up to 128 lette...
         public ?string $userId = null,
-        // That user's display name, as a session's user_name.
+        // That user's display name, as a session's user_name, and the name the router gives the agent_id's Chat user...
         public ?string $userName = null,
     ) {
     }
