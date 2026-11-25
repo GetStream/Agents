@@ -51,3 +51,11 @@ func (s *MapSuite) TestAMapOfNothingSendsAUserNowhere() {
 	s.Empty(Map{}.ForUser("us", "us-west1"))
 	s.Empty(Map{}.ForCountry("DE"))
 }
+
+func (s *MapSuite) TestShardsNamesEveryShardTheMapSendsWorkToOnce() {
+	shards := Map{Default: "us-east4", Countries: map[string]string{"DE": "europe-west4", "NL": "europe-west4"},
+		Regions: map[string]string{"asia": "asia-east1"}}
+
+	s.Equal([]string{"asia-east1", "europe-west4", "us-east4"}, shards.Shards())
+	s.Empty(Map{}.Shards())
+}

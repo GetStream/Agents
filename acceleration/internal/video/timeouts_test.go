@@ -80,7 +80,7 @@ func (s *TimeoutsSuite) TestAnIdleConnectionIsClosedAfterNinetySeconds() {
 		time.Sleep(89 * time.Second)
 		synctest.Wait()
 		s.Equal(int64(1), s.open.Load(), "the connection is kept for the next file of its host")
-		time.Sleep(2 * time.Second)
+		time.Sleep(1500 * time.Millisecond)
 		synctest.Wait()
 		s.Zero(s.open.Load())
 	})

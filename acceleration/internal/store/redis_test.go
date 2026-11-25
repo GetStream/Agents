@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -353,12 +354,13 @@ func (s *StoreSuite) TestACachedRowIsForgottenOnceRedisTakesTheDeletionAgain() {
 
 // pgProxy stands between a store and the suite's Postgres and does one thing to the first
 // COMMIT a client sends through it: drops every answer after it, as a network that fails then
-// does, or holds it until let, as a COMMIT slow to reach the server does. Once frozen, it passes
-// no answer on, with every connection still open.
+// does, holds it until let, as a COMMIT slow to reach the server does, or hangs up without
+// sending it on. Once frozen, it passes no answer on, with every connection still open.
 type pgProxy struct {
 	listener net.Listener
 	target   string
 	hold     bool
+	hangUp   bool
 	release  chan struct{}
 	mu       sync.Mutex
 	seen     bool
@@ -454,6 +456,9 @@ func (p *pgProxy) toServer(conn, upstream net.Conn, dropped *atomic.Bool) {
 			return
 		}
 		if header[0] == 'Q' && bytes.HasPrefix(body, []byte("COMMIT")) && p.first() {
+			if p.hangUp {
+				return
+			}
 			if p.hold {
 				<-p.release
 			} else {
@@ -539,6 +544,312 @@ func (s *StoreSuite) TestADeleteWhoseCommitLandsAfterTheLastRetryIsForgottenOnce
 		_, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", config.ID)
 		return errors.Is(err, ErrNoRouterConfig)
 	}, 5*time.Second, 10*time.Millisecond, "the copy cached before the COMMIT landed is dropped once it lands")
+}
+
+// lossyStore is a store whose first COMMIT goes through a proxy that holds it, or loses its answer.
+func (s *StoreSuite) lossyStore(hold bool) (*pgProxy, *Store) {
+	proxy, dsn := s.pgProxy(hold)
+	lossy, err := OpenShards(Options{DSN: dsn, ShardDSN: s.shardDSN, Redis: s.redis()})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(lossy.Close()) })
+	return proxy, lossy
+}
+
+// exportedConfig is a router config of acme-app named fast, cached, and its exported row with the
+// name slow.
+func (s *StoreSuite) exportedConfig() (id string, renamed json.RawMessage) {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	config := s.routerConfig("acme-app", "fast")
+	_, err := s.store.ExportCustomer(s.ctx, "acme-app", func(table string, row json.RawMessage) error {
+		if table == "router_configs" {
+			renamed = bytes.Replace(row, []byte(`"fast"`), []byte(`"slow"`), 1)
+		}
+		return nil
+	})
+	s.Require().NoError(err)
+	s.Require().Contains(string(renamed), `"slow"`)
+	s.Equal("fast", s.configName(config.ID))
+	return config.ID, renamed
+}
+
+func (s *StoreSuite) configName(id string) string {
+	config, err := s.store.RouterConfigs.Get(s.ctx, "acme-app", id)
+	s.Require().NoError(err)
+	return config.Name
+}
+
+func renamingPage(row json.RawMessage) []DataChange {
+	return []DataChange{{Table: "router_configs", Op: ChangeUpdate, Payload: row}}
+}
+
+// landsLate runs write, whose COMMIT is held, reads the config into the cache past the last retry,
+// and lets the COMMIT land.
+func (s *StoreSuite) landsLate(id string, proxy *pgProxy, write func() error) {
+	s.Require().Error(write(), "the COMMIT is held past the read timeout")
+	// The third deletion that follows is 700 ms on.
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		s.Require().Equal("fast", s.configName(id))
+	}
+	proxy.let()
+	s.Eventually(func() bool { return s.configName(id) == "slow" }, 5*time.Second, 10*time.Millisecond,
+		"the copy cached before the COMMIT landed is dropped once it lands")
+}
+
+func (s *StoreSuite) TestAnImportedRowWhoseCommitLandsAfterItGaveUpIsServedOnceItLands() {
+	id, renamed := s.exportedConfig()
+	proxy, slow := s.lossyStore(true)
+
+	s.landsLate(id, proxy, func() error { return slow.ImportRow(s.ctx, "acme-app", "router_configs", renamed) })
+}
+
+func (s *StoreSuite) TestAReplayedPageWhoseCommitLandsAfterItGaveUpIsServedOnceItLands() {
+	id, renamed := s.exportedConfig()
+	proxy, slow := s.lossyStore(true)
+
+	s.landsLate(id, proxy, func() error { return slow.ApplyChanges(s.ctx, "acme-app", renamingPage(renamed)) })
+}
+
+// A page with the fewest keys to drop: a skill's delete names its config's skills alone.
+func (s *StoreSuite) TestAReplayedDeleteOfASkillWhoseCommitLandsAfterItGaveUpIsServedOnceItLands() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	config := s.boundConfig("acme-app")
+	skill := s.skill(config, "refund")
+	held := func() int {
+		named, err := s.store.Skills.GetByNames(s.ctx, "acme-app", config.ID, []string{"refund"})
+		s.Require().NoError(err)
+		return len(named)
+	}
+	s.Require().Equal(1, held())
+	proxy, slow := s.lossyStore(true)
+
+	s.Require().Error(slow.ApplyChanges(s.ctx, "acme-app", []DataChange{
+		{Table: "skills", Op: ChangeDelete, Key: json.RawMessage(`{"id":"` + skill.ID + `"}`)},
+	}), "the COMMIT is held past the read timeout")
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		s.Require().Equal(1, held())
+	}
+	proxy.let()
+
+	s.Eventually(func() bool { return held() == 0 }, 5*time.Second, 10*time.Millisecond,
+		"the copy cached before the COMMIT landed is dropped once it lands")
+}
+
+func (s *StoreSuite) TestAnImportedRowWhoseCommitAnswerIsLostIsServedAtOnce() {
+	id, renamed := s.exportedConfig()
+	_, lossy := s.lossyStore(false)
+
+	s.Require().Error(lossy.ImportRow(s.ctx, "acme-app", "router_configs", renamed), "the COMMIT's answer never comes")
+
+	s.Equal("slow", s.configName(id))
+	s.Require().NoError(lossy.ImportRow(s.ctx, "acme-app", "router_configs", renamed), "imported again")
+	s.Equal("slow", s.configName(id))
+}
+
+func (s *StoreSuite) TestAReplayedPageWhoseCommitAnswerIsLostIsServedAtOnce() {
+	id, renamed := s.exportedConfig()
+	_, lossy := s.lossyStore(false)
+
+	s.Require().Error(lossy.ApplyChanges(s.ctx, "acme-app", renamingPage(renamed)), "the COMMIT's answer never comes")
+
+	s.Equal("slow", s.configName(id))
+	s.Require().NoError(lossy.ApplyChanges(s.ctx, "acme-app", renamingPage(renamed)), "replayed again")
+	s.Equal("slow", s.configName(id))
+}
+
+func (s *StoreSuite) TestAnImportedRowWhoseCommitNeverLandedIsNotServed() {
+	id, renamed := s.exportedConfig()
+	proxy, lossy := s.lossyStore(false)
+	proxy.hangUp = true
+
+	s.Require().Error(lossy.ImportRow(s.ctx, "acme-app", "router_configs", renamed))
+
+	s.Equal("fast", s.configName(id))
+	s.Positive(len(lossy.lost), "the COMMIT is waited on")
+	s.Eventually(func() bool { return len(lossy.lost) == 0 }, 5*time.Second, 10*time.Millisecond, "until it was rolled back")
+	s.Equal("fast", s.configName(id))
+	s.Require().NoError(lossy.ImportRow(s.ctx, "acme-app", "router_configs", renamed), "imported again")
+	s.Equal("slow", s.configName(id))
+}
+
+func (s *StoreSuite) TestAReplayedPageWhoseCommitNeverLandedIsNotServed() {
+	id, renamed := s.exportedConfig()
+	proxy, lossy := s.lossyStore(false)
+	proxy.hangUp = true
+
+	s.Require().Error(lossy.ApplyChanges(s.ctx, "acme-app", renamingPage(renamed)))
+
+	s.Equal("fast", s.configName(id))
+	s.Positive(len(lossy.lost), "the COMMIT is waited on")
+	s.Eventually(func() bool { return len(lossy.lost) == 0 }, 5*time.Second, 10*time.Millisecond, "until it was rolled back")
+	s.Equal("fast", s.configName(id))
+	s.Require().NoError(lossy.ApplyChanges(s.ctx, "acme-app", renamingPage(renamed)), "replayed again")
+	s.Equal("slow", s.configName(id))
+}
+
+func (s *StoreSuite) TestAReplayedPageMayTakeLongerThanTheWriteTimeout() {
+	id, renamed := s.exportedConfig()
+	bounded, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN, Redis: s.redis(), writeTimeout: time.Nanosecond})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(bounded.Close()) })
+	s.Require().ErrorIs(bounded.ImportRow(s.ctx, "acme-app", "router_configs", renamed), context.DeadlineExceeded, "a row may not")
+
+	s.Require().NoError(bounded.ApplyChanges(s.ctx, "acme-app", renamingPage(renamed)))
+
+	s.Equal("slow", s.configName(id))
+}
+
+func (s *StoreSuite) TestAnImportThatGivesUpWaitingOnARowIsServedOnceTheRowLands() {
+	id, renamed := s.exportedConfig()
+	holding, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = holding.Rollback() }()
+	_, err = holding.NewSelect().Model((*RouterConfig)(nil)).Where("id = ?", id).For("UPDATE").Exec(s.ctx)
+	s.Require().NoError(err)
+	gone, cancel := context.WithTimeout(s.ctx, 300*time.Millisecond)
+	defer cancel()
+
+	imported := make(chan error, 1)
+	go func() { imported <- s.store.ImportRow(gone, "acme-app", "router_configs", renamed) }()
+	s.Require().Eventually(func() bool {
+		waiting, err := s.store.global.NewSelect().TableExpr("pg_stat_activity").
+			Where("datname = current_database() AND wait_event_type = 'Lock'").Exists(s.ctx)
+		s.Require().NoError(err)
+		return waiting
+	}, 2*time.Second, 5*time.Millisecond, "the write waits on the row")
+	// Past the end of its context, and so past whatever an import that heeds it does then.
+	for deadline := time.Now().Add(700 * time.Millisecond); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		s.Require().Equal("fast", s.configName(id))
+	}
+	s.Require().Error(gone.Err())
+	s.Require().NoError(holding.Rollback())
+
+	s.Eventually(func() bool { return s.configName(id) == "slow" }, 3*time.Second, 10*time.Millisecond, "the row lands, and the old copy is dropped")
+	s.NoError(<-imported)
+}
+
+func (s *StoreSuite) TestAnImportOrAReplayThatHasEndedWritesNothing() {
+	id, renamed := s.exportedConfig()
+	gone, cancel := context.WithCancel(s.ctx)
+	cancel()
+
+	s.Require().ErrorIs(s.store.ImportRow(gone, "acme-app", "router_configs", renamed), context.Canceled)
+	s.Require().ErrorIs(s.store.ApplyChanges(gone, "acme-app", renamingPage(renamed)), context.Canceled)
+
+	s.Equal("fast", s.configName(id))
+	var name string
+	s.Require().NoError(s.store.global.NewSelect().Model((*RouterConfig)(nil)).Column("name").Where("id = ?", id).Scan(s.ctx, &name))
+	s.Equal("fast", name)
+}
+
+func (s *StoreSuite) TestARefusedRowIsAnsweredTheSameFromItsTransaction() {
+	_, renamed := s.exportedConfig()
+	nameless := bytes.Replace(renamed, []byte(`"slow"`), []byte(`""`), 1)
+
+	var refused *ValidationError
+	s.ErrorAs(s.store.ImportRow(s.ctx, "acme-app", "router_configs", nameless), &refused)
+	s.ErrorIs(s.store.ImportRow(s.ctx, "other-app", "router_configs", renamed), ErrAnotherCustomersRow)
+	s.ErrorAs(s.store.ApplyChanges(s.ctx, "acme-app", renamingPage(nameless)), &refused)
+}
+
+func (s *StoreSuite) TestAnImportedRowOfATableNoCacheHoldsTakesNoTransaction() {
+	row := json.RawMessage(`{"app_id":"acme-app","organization_id":"org-1","area":"llm","client":"curl","day":"2026-01-02","requests":1,"refused":0,"first_at":"2026-01-02T00:00:00Z","last_at":"2026-01-02T00:00:00Z"}`)
+	s.Require().NoError(s.store.ImportRow(s.ctx, "acme-app", "customer_activity", row))
+
+	s.Equal(1, s.countQueries(func() {
+		s.Require().NoError(s.store.ImportRow(s.ctx, "acme-app", "customer_activity", row))
+	}))
+}
+
+func (s *StoreSuite) TestAReplayedPageWithNoCachedRowReadsNoTransactionID() {
+	row := json.RawMessage(`{"app_id":"acme-app","organization_id":"org-1","area":"llm","client":"curl","day":"2026-01-02","requests":1,"refused":0,"first_at":"2026-01-02T00:00:00Z","last_at":"2026-01-02T00:00:00Z"}`)
+	page := []DataChange{{Table: "customer_activity", Op: ChangeInsert, Payload: row}}
+	s.Require().NoError(s.store.ApplyChanges(s.ctx, "acme-app", page))
+
+	s.Equal(3, s.countQueries(func() {
+		s.Require().NoError(s.store.ApplyChanges(s.ctx, "acme-app", page))
+	}), "begin, the write and commit")
+}
+
+func (s *StoreSuite) TestAnImportedUserCostsATransactionAndItsID() {
+	row := json.RawMessage(`{"customer_id":"acme-app","id":"alice","kind":"guest","name":"Guest","custom":{},"created_at":"2026-01-02T00:00:00Z"}`)
+	s.Require().NoError(s.store.ImportRow(s.ctx, "acme-app", "users", row))
+
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() {
+		s.Require().NoError(s.store.ImportRow(s.ctx, "acme-app", "users", row))
+	}), "begin, the write, its transaction's id when there is a cache, and commit")
+}
+
+// A router with no Redis holds who it recorded in its memory alone.
+func (s *StoreSuite) TestAUserRemovedByAReplayWhoseCommitAnswerIsLostIsRecordedAgain() {
+	_, dsn := s.pgProxy(false)
+	lossy, err := OpenShards(Options{DSN: dsn, ShardDSN: s.shardDSN})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(lossy.Close()) })
+	s.Require().NoError(lossy.Users.Seen(s.ctx, "acme-app", "alice", UserKindAuthenticated))
+
+	s.Require().Error(lossy.ApplyChanges(s.ctx, "acme-app", []DataChange{
+		{Table: "users", Op: ChangeDelete, Key: json.RawMessage(`{"customer_id":"acme-app","id":"alice"}`)},
+	}), "the COMMIT's answer never comes")
+
+	s.Require().NoError(lossy.Users.Seen(s.ctx, "acme-app", "alice", UserKindAuthenticated))
+	recorded, err := s.store.global.NewSelect().Model((*User)(nil)).Where("customer_id = 'acme-app' AND id = 'alice'").Exists(s.ctx)
+	s.Require().NoError(err)
+	s.True(recorded)
+}
+
+func (s *StoreSuite) TestAUserRemovedByAPageThatLeftANumberOutIsRecordedAgain() {
+	local, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(local.Close()) })
+	s.Require().NoError(local.Users.Seen(s.ctx, "other", "alice", UserKindAuthenticated))
+	acme, other := s.trunk("acme"), s.trunk("other")
+	s.Require().NoError(s.trunkNumber("acme", acme.ID, "+15550000129"))
+	number, err := json.Marshal(map[string]any{
+		"id": 1 << 40, "e164": "+15550000129", "vendor": "sip_trunk", "country": "US", "capabilities": []string{"voice"},
+		"customer_id": "other", "tags": map[string]string{}, "purchased_at": s.base, "sip_trunk_id": other.ID,
+	})
+	s.Require().NoError(err)
+
+	err = local.ApplyChanges(s.ctx, "other", []DataChange{
+		{Table: "phone_numbers", Op: ChangeInsert, Payload: number},
+		{Table: "users", Op: ChangeDelete, Key: json.RawMessage(`{"customer_id":"other","id":"alice"}`)},
+	})
+	left, ok := errors.AsType[*NumbersLeftOutError](err)
+	s.Require().True(ok, "%v", err)
+	s.Equal([]string{"+15550000129"}, left.Numbers)
+
+	recorded := func() bool {
+		exists, err := s.store.global.NewSelect().Model((*User)(nil)).Where("customer_id = 'other' AND id = 'alice'").Exists(s.ctx)
+		s.Require().NoError(err)
+		return exists
+	}
+	s.Require().False(recorded())
+	s.Require().NoError(local.Users.Seen(s.ctx, "other", "alice", UserKindAuthenticated))
+	s.True(recorded())
+}
+
+func (s *StoreSuite) TestAUserImportedWhoseCommitAnswerIsLostIsRecordedAgain() {
+	_, dsn := s.pgProxy(false)
+	lossy, err := OpenShards(Options{DSN: dsn, ShardDSN: s.shardDSN})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(lossy.Close()) })
+	s.Require().NoError(lossy.Users.Seen(s.ctx, "acme-app", "alice", UserKindAuthenticated))
+
+	s.Require().Error(lossy.ImportRow(s.ctx, "acme-app", "users", json.RawMessage(
+		`{"customer_id":"acme-app","id":"alice","kind":"guest","name":"Guest","custom":{},"created_at":"2026-01-02T00:00:00Z"}`)), "the COMMIT's answer never comes")
+	kind := func() (kind string) {
+		s.Require().NoError(s.store.global.NewSelect().Model((*User)(nil)).Column("kind").
+			Where("customer_id = 'acme-app' AND id = 'alice'").Scan(s.ctx, &kind))
+		return kind
+	}
+	s.Require().Equal("guest", kind())
+
+	s.Require().NoError(lossy.Users.Seen(s.ctx, "acme-app", "alice", UserKindAuthenticated))
+	s.Equal("authenticated", kind())
 }
 
 func (s *StoreSuite) TestADeletionRedisRefusedIsTriedAgainAfterTheFirstRetry() {

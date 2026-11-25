@@ -102,6 +102,7 @@ the other commands that read them there.
 | `ROUTER_ENV`            | `local` (default), `staging` or `testing`. Loads `internal/config/<env>.yaml` when no file of your own is named. The integration suites always use `testing`, which has its own `model_router_test` database and is the one file that wins over the environment |
 | `ROUTER_ADDR`           | HTTP listen address, defaults to `:8080`                   |
 | `ROUTER_POSTGRES_DSN`   | Postgres DSN. Without it, nothing is recorded              |
+| `ROUTER_POSTGRES_MIGRATE_DSN` | The same database as the role that owns its schema, which `router migrate` alone connects with; `ROUTER_POSTGRES_SHARD_MIGRATE_DSN` is the shard's. Set, a start checks the schema and never changes it. Unset, every start migrates with `ROUTER_POSTGRES_DSN`. See [A serving role that owns no table](#a-serving-role-that-owns-no-table) |
 | `ROUTER_REDIS_ADDR`     | Redis `host:port`. Without it, routing ignores health, and a session is only reachable on the node running it |
 | `ROUTER_NODE_ADVERTISE` | `host:port` this node's peers reach it at. Unset works it out from this host's own address and `ROUTER_ADDR`'s port, which is right wherever a pod is reachable from its peers. See [More than one node](#more-than-one-node) |
 | `ROUTER_NODE_LISTEN`    | A second listen address, for this node's peers only. Unset means they use `ROUTER_ADDR`. Set it when two routers share one `ROUTER_ADDR`, so a request for a draining router's session still reaches it |
@@ -1716,6 +1717,11 @@ global one and `migrations/shard` on each shard's, both on the one database of a
 held in another shard is proxied to the node holding it, since that shard's relay is not this
 one's. Empty shard settings fall back to the global ones, which is the single-node setup.
 
+`shard_dsn` without `shards` is refused. The routers sharing a global Redis keep the shard names
+they agree on there (`node:shards`), and a router naming others refuses to start with
+`postgres.shards differs from the running routers'`. A changed list starts 30 seconds after the
+last router with the old one stopped, so roll a change out by stopping every router first.
+
 Percentiles merged from several shards' rollups are approximate: they are weighted by request
 count rather than recomputed. A router with shards cannot be a move's source: its shards'
 tables record no changes after an export, so `GET /v1/data/export` and `GET /v1/data/changes`
@@ -1729,6 +1735,13 @@ otherwise the shard that last served its writer's own client, which each router 
 running stays on its node, and a hook a peer handed over is never handed on to another shard.
 With no node of that shard up, the work is done where it landed and counted in
 `router_shard_handover_fallbacks_total`, which an alert should watch.
+
+Work a router claims from the global database is claimed the same way. A scheduled task goes
+to its agent's region's shard, or else its user's `users.shard`; a campaign's dials and their
+take-overs go to the shard of the country of the number it rings from. Work meant for no shard
+the deployment has (`shard_routing` or `postgres.shards`), such as a user no client of theirs
+has reached yet, is claimed anywhere, and so is work left unclaimed five minutes past when it
+could have been, so a shard that is down holds up nothing for longer.
 
 ## Agents that are configured rather than spelled out
 
@@ -2807,13 +2820,74 @@ go run ./cmd/phone list
 go run ./cmd/phone release -number +1719XXXXXXX
 ```
 
-`cmd/router` applies migrations on startup: the global set and the shard set, each with its own
+`cmd/router` applies migrations on startup, unless `router migrate` does
+([below](#a-serving-role-that-owns-no-table)): the global set and the shard set, each with its own
 goose version table (`goose_global_version`, `goose_shard_version`). After changing a migration,
 regenerate the schema description from `acceleration/`; a test fails while it is out of date:
 
 ```bash
 go run ./cmd/schema
 ```
+
+### A serving role that owns no table
+
+By default every start migrates, so the role in `postgres.dsn` owns the schema. To serve with a
+role that cannot change it, give `router migrate` a DSN of the owner's:
+
+```yaml
+postgres:
+  dsn: postgres://router_serving@global/router
+  migrate_dsn: postgres://router_owner@global/router
+  shard_dsn: postgres://router_serving@usw1/router # a hosted deployment's only
+  shard_migrate_dsn: postgres://router_owner@usw1/router
+```
+
+`router migrate` brings both databases up to date as the owner, then checks them as the serving
+role. With `migrate_dsn` set, `serve` and every other command that migrates on start only check:
+they change nothing, and refuse to start when a migration or an index of this release is missing,
+when the serving role is not granted a table or sequence, or when a table a move carries has no
+change trigger, or one that would record a secret column. They do not compare a trigger's other
+arguments, so a `router migrate` left to do nothing but change those is not noticed. They never
+connect with `migrate_dsn`, so only `router migrate` needs its password. Each shard's migrate runs
+with that shard's settings, and opens the Redis they name as a router does. `cmd/agent`,
+`cmd/chat`, `cmd/phone` and `cmd/say` read none of this and migrate with `ROUTER_POSTGRES_DSN`:
+run them as the owner.
+
+On each database, before the first `router migrate` as `router_owner`:
+
+```sql
+GRANT USAGE, CREATE ON SCHEMA public TO router_owner;
+GRANT USAGE ON SCHEMA public TO router_serving;
+ALTER DEFAULT PRIVILEGES FOR ROLE router_owner IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO router_serving;
+ALTER DEFAULT PRIVILEGES FOR ROLE router_owner IN SCHEMA public
+  GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO router_serving;
+```
+
+A database already migrated keeps its role as `router_owner`, and needs the same on what exists:
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO router_serving;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO router_serving;
+```
+
+A database made before Postgres 15 also lets every role create tables in `public`, the serving
+one too:
+
+```sql
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+```
+
+`router prices reload`, for a development database only, also needs `TRUNCATE` on
+`price_list_entries` and `price_changes`.
+
+To roll out a release, run its `router migrate` first and then its routers: one that starts before
+it has finished refuses and starts once it has. Routers of the release before go on serving and
+restarting on the newer schema as long as its migrations only expand it: a start is refused once
+an index or trigger it needs is gone, and nothing checks for a column. To roll back, run the older
+release's `router migrate` and then its routers. A release from before this setting migrates at
+start, so it needs the owner in `postgres.dsn`. A `router migrate` that cannot lock a table within
+3 seconds to attach its trigger fails, and is run again.
 
 ## Moving a customer
 
