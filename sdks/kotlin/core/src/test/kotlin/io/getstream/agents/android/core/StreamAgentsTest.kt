@@ -90,6 +90,7 @@ class VisionAgentsTest {
         assertNull(arrived.header("Authorization"))
         assertNull(arrived.header("X-Stream-User-Id"))
         assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", arrived.header("X-Stream-Client"))
+        assertEquals("stream-agents-kotlin/${BuildConfig.SDK_VERSION}", arrived.header("User-Agent"))
     }
 
     @Test
@@ -134,6 +135,7 @@ class VisionAgentsTest {
         assertNull(router.requests.first().header("X-Api-Key"))
         assertEquals("jwt", router.requests.first().header("Stream-Auth-Type"))
         assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", router.requests.first().header("X-Stream-Client"))
+        assertEquals("stream-agents-kotlin/${BuildConfig.SDK_VERSION}", router.requests.first().header("User-Agent"))
         assertNull(router.requests.first().header("X-Customer-Id"))
         keyed.close()
     }
@@ -830,6 +832,7 @@ class VisionAgentsTest {
         val arrived = router.requests.single()
         assertEquals("anonymous", arrived.header("Stream-Auth-Type"))
         assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", arrived.header("X-Stream-Client"))
+        assertEquals("stream-agents-kotlin/${BuildConfig.SDK_VERSION}", arrived.header("User-Agent"))
         assertNull(arrived.header("Authorization"))
         assertEquals(listOf("key"), arrived.query["api_key"])
     }
