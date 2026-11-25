@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
-import { Client, ConfigurationError, DEFAULT_URL, type BackendOptions } from "../src/index.js";
+import { Client, ConfigurationError, DEFAULT_URL, regionUrl, type BackendOptions } from "../src/index.js";
 import { TestRouter, type Received } from "./router.js";
 
+const DEFAULT_HOST = "accelerate.gcp.stream-io-api.com";
 const REGIONAL_HOST = "accelerate-us-east4.gcp.stream-io-api.com";
 const VARIABLES = [
   "STREAM_ACCELERATION_URL",
@@ -59,16 +60,16 @@ describe("Regional clients", () => {
     return new Client({ ...options, fetch: redirect });
   }
 
-  async function listConfigs(api: Client): Promise<void> {
+  async function listConfigs(api: Client, host: string = REGIONAL_HOST): Promise<void> {
     const configs = await api.get("/v1/agents/configs");
 
     assert.equal(configs[0]?.name, "john");
-    assert.equal(requested.at(-1)?.host, REGIONAL_HOST);
+    assert.equal(requested.at(-1)?.host, host);
     assert.equal(requested.at(-1)?.protocol, "https:");
   }
 
-  it("lists configs from the regional host with the default client", async () => {
-    await listConfigs(client());
+  it("lists configs from the nearest host with the default client", async () => {
+    await listConfigs(client(), DEFAULT_HOST);
   });
 
   it("lists configs from the regional host with an explicit region", async () => {
@@ -97,7 +98,7 @@ describe("Regional clients", () => {
 
     await api.setUser("jean", "user-token");
 
-    assert.equal(api.backend.url, DEFAULT_URL);
+    assert.equal(api.backend.url, regionUrl("us-east4"));
     assert.equal(api.backend.userId, "jean");
     await listConfigs(api);
     assert.equal(router.last.headers["authorization"], "Bearer user-token");

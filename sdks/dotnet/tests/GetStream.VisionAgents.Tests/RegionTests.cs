@@ -13,6 +13,7 @@ public sealed class ProcessEnvironment;
 [Collection(nameof(ProcessEnvironment))]
 public sealed class RegionTests : IDisposable
 {
+    private const string DefaultHost = "accelerate.gcp.stream-io-api.com";
     private const string RegionalHost = "accelerate-us-east4.gcp.stream-io-api.com";
 
     private static readonly Dictionary<string, string?> Set = new()
@@ -49,11 +50,11 @@ public sealed class RegionTests : IDisposable
     }
 
     [Fact]
-    public async Task TheDefaultClientReadsFromTheRegionalHost()
+    public async Task TheDefaultClientReadsFromTheNearestHost()
     {
         using var client = new VisionAgentsClient(_http);
 
-        await ReadConfigs(client);
+        await ReadConfigs(client, DefaultHost);
     }
 
     [Fact]
@@ -94,20 +95,20 @@ public sealed class RegionTests : IDisposable
 
         var user = client.AsUser("jean", "user-token");
 
-        Assert.Equal(Backend.DefaultUrl, user.Url);
+        Assert.Equal(Backend.RegionUrl("us-east4"), user.Url);
         Assert.Equal("jean", user.Backend.UserId);
         Assert.Equal("user-token", user.Backend.Token);
         await ReadConfigs(user);
         Assert.Equal("Bearer user-token", _recorder.Seen.Single().Headers.GetValues("Authorization").Single());
     }
 
-    private async Task ReadConfigs(VisionAgentsClient client)
+    private async Task ReadConfigs(VisionAgentsClient client, string host = RegionalHost)
     {
         await client.GetAsync<List<AgentConfig>>("/v1/agents/configs", cancellationToken: TestContext.Current.CancellationToken);
 
         var seen = Assert.Single(_recorder.Seen);
         Assert.Equal(HttpMethod.Get, seen.Method);
-        Assert.Equal(RegionalHost, seen.RequestUri!.Host);
+        Assert.Equal(host, seen.RequestUri!.Host);
         Assert.Equal("/v1/agents/configs", seen.RequestUri.AbsolutePath);
         Assert.Equal("test-key", seen.Headers.GetValues("api_key").Single());
         Assert.Equal("jwt", seen.Headers.GetValues("stream-auth-type").Single());

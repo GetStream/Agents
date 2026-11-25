@@ -304,6 +304,9 @@ func (s *Server) createConnection(ctx context.Context, request *createConnection
 	if !ok {
 		return nil, errMissingCustomer
 	}
+	if failure, refused := refuseReservedActingFor(ctx, "CreateConnection"); refused {
+		return nil, failure
+	}
 	if s.store == nil {
 		return nil, errNoConnections
 	}

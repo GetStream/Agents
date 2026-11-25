@@ -6781,7 +6781,7 @@ namespace GetStream.VisionAgents.Models
         public SessionPhone? Phone { get; set; } = default!;
 
         /// <summary>
-        /// What the conversation belongs to. Also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins.
+        /// What the conversation belongs to. Sent server-side it is also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in tags, or the agent config's, wins. A device's groups the session and is no cost tag.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("project_id")]
         public string? ProjectId { get; set; } = default!;
@@ -7972,6 +7972,9 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("model_overwrites")]
         public ModelOverwrites? ModelOverwrites { get; set; } = default!;
 
+        /// <summary>
+        /// What the fork belongs to. Omitted, the parent's is kept. Sent server-side it is also the "project" cost tag, as on createSession; a device's groups the fork, whose cost tag stays the project a backend named for its parent. A tag spelled out in a running parent's tags, or the agent config's, wins.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("project_id")]
         public string? ProjectId { get; set; } = default!;
 
@@ -8533,7 +8536,7 @@ namespace GetStream.VisionAgents.Models
         public System.DateTimeOffset CreatedAt { get; set; } = default!;
 
         /// <summary>
-        /// Why the uploaded file could not be read, or why the passages of posted text could not all be written, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
+        /// Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("error")]
         public string? Error { get; set; } = default!;
@@ -8551,7 +8554,7 @@ namespace GetStream.VisionAgents.Models
         public int Pages { get; set; } = default!;
 
         /// <summary>
-        /// How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote.
+        /// How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote. An indexed one whose file was still being read when newer text or a newer file replaced it can count more than it was cut into, for the same reason, until it is written again.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("passages")]
         public int Passages { get; set; } = default!;

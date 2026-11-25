@@ -27,6 +27,7 @@ final readonly class ForkSessionRequest
         public ?bool $messages = null,
         // Server-side only: a device sending it is refused with a 403.
         public ?ModelOverwrites $modelOverwrites = null,
+        // What the fork belongs to. Omitted, the parent's is kept. Sent server-side it is also the "project" cost tag...
         public ?string $projectId = null,
         // Carry the parent's history only up to the end of this response, so the fork continues from that point rathe...
         public ?string $responseId = null,

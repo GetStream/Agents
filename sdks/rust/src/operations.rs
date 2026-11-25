@@ -4542,7 +4542,7 @@ pub struct ListCallsQuery {
 /// The query string `getCallEvents` takes. A field left `None` is left out.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct GetCallEventsQuery {
-    /// How many to return, oldest first.
+    /// How many to return, oldest first. Up to the 10000 a call keeps.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
 }
@@ -4853,6 +4853,7 @@ pub struct ListSimulationRunsQuery {
     pub simulation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// Up to 500. Omitted is 50.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
 }
