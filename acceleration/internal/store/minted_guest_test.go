@@ -227,6 +227,12 @@ func (s *StoreSuite) TestWhetherAnAppTakesGuestsIsItsOwnAndReadOnce() {
 	s.Require().NoError(err)
 	if s.store.cache != nil {
 		s.False(allowed(s.store.Apps, closed.ID))
+		for _, id := range []string{closed.ID, open.ID} {
+			client := s.store.sharedRedis()
+			left, err := client.Do(s.ctx, client.B().Pttl().Key("appcfg:app-guests:"+id).Build()).AsInt64()
+			s.Require().NoError(err)
+			s.InDelta(60_000, left, 5_000)
+		}
 	}
 	s.False(allowed(without.Apps, closed.ID))
 	s.True(without.Apps.guests.Holds(closed.ID, "", "false", time.Now().Add(50*time.Second)))

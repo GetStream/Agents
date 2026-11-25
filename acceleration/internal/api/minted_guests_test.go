@@ -297,7 +297,10 @@ func (s *MintedGuestsSuite) TestBehindAProxyAMintedGuestIsAnsweredA500WhileSetti
 	guest, other, backend := s.behindProxy(minted, auth.AuthTypeJWT), s.behindProxy(own, auth.AuthTypeJWT), s.behindProxy(minted, auth.AuthTypeServer)
 	s.failQueries(`"ap"."settings"`)
 
-	s.Equal(http.StatusInternalServerError, s.lists(guest))
+	status, body := guest.call(http.MethodPost, "/v1/agents/sessions/query", SessionQuery{})
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), "something went wrong")
+	s.NotContains(string(body), "level of user", "one answer")
 	s.Equal(http.StatusOK, s.lists(other))
 	s.Equal(http.StatusOK, s.lists(backend))
 
