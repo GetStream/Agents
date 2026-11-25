@@ -566,8 +566,8 @@ func (s *Server) heardText(ctx context.Context, spec session.Spec, origin hookOr
 // or for a channel naming nobody the customer ownerOf reads from the store: its last calls,
 // else the customer holding the config it names. Unlike the customer ownerOf works out, this
 // one only ever narrows: it admits only sessions the hook already admits. A channel the store
-// names no customer for is answered by a session only while the sessions on it are one
-// customer's, as a hook matching rows of more than one customer is acted on for nobody.
+// names no customer for is answered by a session only while the sessions on it, on any node, are
+// one customer's, as a hook matching rows of more than one customer is acted on for nobody.
 func (s *Server) liveSessionOn(ctx context.Context, origin hookOrigin, event messageEvent) (*session.Session, bool, error) {
 	if !origin.deployment {
 		found, running := s.sessions.ByAgentWhere(event.ChannelID, origin.owns)
@@ -588,9 +588,10 @@ func (s *Server) liveSessionOn(ctx context.Context, origin hookOrigin, event mes
 		owner = stored
 		if !known {
 			theirs := found.Spec().CustomerID
-			if _, another := s.sessions.ByAgentWhere(event.ChannelID, func(customer string, app int64) bool {
+			another := func(customer string, app int64) bool {
 				return customer != theirs && origin.owns(customer, app)
-			}); another {
+			}
+			if _, here := s.sessions.ByAgentWhere(event.ChannelID, another); here || s.writesElsewhere(ctx, event.ChannelID, another) {
 				return nil, false, store.ErrAmbiguousHook
 			}
 			return found, true, nil
@@ -600,6 +601,21 @@ func (s *Server) liveSessionOn(ctx context.Context, origin hookOrigin, event mes
 		return customer == owner && origin.owns(customer, app)
 	})
 	return found, running, nil
+}
+
+// writesElsewhere reports whether the directory says a session admits takes, by its customer and
+// Stream app, writes as an agent on any node. A directory that cannot be read says none does, as
+// forwardedMessage answers here when it cannot find the node answering.
+func (s *Server) writesElsewhere(ctx context.Context, agentID string, admits func(customer string, app int64) bool) bool {
+	if s.directory == nil {
+		return false
+	}
+	nodes, err := s.directory.NodesByAgent(ctx, agentID, admits)
+	if err != nil {
+		s.logger.Warn("could not find out which nodes write as an agent", "agent", agentID, "error", err)
+		return false
+	}
+	return len(nodes) > 0
 }
 
 // storedOwnerOf is the customer the store says a channel in the hook's app is: its last call's,
