@@ -209,8 +209,9 @@ func acceptChannelInbound(ctx context.Context, tx bun.Tx, message ChannelInbound
 }
 
 // queueChannelInbound queues message in tx to be written into its thread channel, due at
-// message.NextAttemptAt, or now on Postgres's clock when that is zero (ChatInbounds.Queue). A message already queued for the channel under the same provider id,
-// written or given up within its keep, is not queued again: queued is false.
+// message.NextAttemptAt, or now on Postgres's clock when that is zero (ChatInbounds.Queue). A
+// message already queued for the channel under the same provider id, written or given up within
+// its keep, is not queued again: queued is false.
 //
 // It first locks the message's thread channel row until tx ends, so the messages of one
 // thread channel are queued one transaction at a time. seq is taken at the insert, and a

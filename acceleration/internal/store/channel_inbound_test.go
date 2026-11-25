@@ -223,6 +223,25 @@ func (s *StoreSuite) TestAnInboundMessageIsNotClaimedBeforeItIsDue() {
 	s.claimedOne("1759740000.000100")
 }
 
+// now() is one instant throughout a transaction, so the claim is judged at exactly the due time.
+func (s *StoreSuite) TestAnInboundMessageIsClaimedFromExactlyItsDueTime() {
+	s.inbound("thread-one", "1759740000.000100")
+	tx, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer tx.Rollback() //nolint:errcheck // ends the transaction the claims ran in
+	claimDue := func(in string) []ChannelInbound {
+		_, err := tx.ExecContext(s.ctx, "UPDATE channel_thread_inbound SET next_attempt_at = now() + ?::interval", in)
+		s.Require().NoError(err)
+		claimed, err := claim[ChannelInbound](s.ctx, tx, channelInbounds, time.Minute, 10, queuedChannelInbound(tx, nil), channelInboundColumns)
+		s.Require().NoError(err)
+		return claimed
+	}
+
+	s.Empty(claimDue("900 milliseconds"))
+	s.Empty(claimDue("1 microsecond"))
+	s.Len(claimDue("0"), 1)
+}
+
 func (s *StoreSuite) TestAThreadsSecondMessageWaitsUntilItsFirstIsWritten() {
 	s.inbound("thread-one", "1759740000.000100")
 	s.inbound("thread-one", "1759740000.000200")
@@ -508,7 +527,7 @@ func (s *StoreSuite) TestNoInboundMessageIsNextOnceAllAreWrittenOrGivenUp() {
 }
 
 func (s *StoreSuite) TestPruningKeepsAWrittenMessageADayAndAGivenUpOneThirtyDays() {
-	for _, id := range []string{"done-old", "done-new", "failed-old", "failed-new", "queued"} {
+	for _, id := range []string{"done-old", "done-day", "done-new", "failed-old", "failed-days", "failed-new", "queued"} {
 		s.inbound("thread-"+id, id)
 	}
 	for _, claimed := range s.claim() {
@@ -520,6 +539,10 @@ func (s *StoreSuite) TestPruningKeepsAWrittenMessageADayAndAGivenUpOneThirtyDays
 			at = s.base.Add(-30*24*time.Hour - time.Second)
 		case "failed-new":
 			at = s.base.Add(-30*24*time.Hour + time.Second)
+		case "done-day":
+			at = s.base.Add(-24 * time.Hour)
+		case "failed-days":
+			at = s.base.Add(-30 * 24 * time.Hour)
 		case "done-new":
 			at = s.base.Add(-24*time.Hour + time.Second)
 		case "queued":
@@ -548,7 +571,7 @@ func (s *StoreSuite) TestPruningKeepsAWrittenMessageADayAndAGivenUpOneThirtyDays
 		kept = append(kept, id)
 	}
 	s.Require().NoError(rows.Err())
-	s.Equal([]string{"done-new", "failed-new", "queued"}, kept)
+	s.Equal([]string{"done-day", "done-new", "failed-days", "failed-new", "queued"}, kept)
 }
 
 func (s *StoreSuite) TestAThreadChannelsInboundMessagesGoWithIt() {

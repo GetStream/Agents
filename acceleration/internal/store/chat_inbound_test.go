@@ -256,6 +256,25 @@ func (s *StoreSuite) TestAChatMessageIsNotClaimedBeforeItIsDue() {
 	s.claimedChat("msg-one")
 }
 
+// now() is one instant throughout a transaction, so the claim is judged at exactly the due time.
+func (s *StoreSuite) TestAChatMessageIsClaimedFromExactlyItsDueTime() {
+	s.queuedChat("msg-one")
+	tx, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer tx.Rollback() //nolint:errcheck // ends the transaction the claims ran in
+	claimDue := func(in string) []ChatInbound {
+		_, err := tx.ExecContext(s.ctx, "UPDATE chat_inbound SET next_attempt_at = now() + ?::interval", in)
+		s.Require().NoError(err)
+		claimed, err := claim[ChatInbound](s.ctx, tx, chatInbounds, time.Minute, 10, queuedChatInbound, chatInboundColumns)
+		s.Require().NoError(err)
+		return claimed
+	}
+
+	s.Empty(claimDue("900 milliseconds"))
+	s.Empty(claimDue("1 microsecond"))
+	s.Len(claimDue("0"), 1)
+}
+
 // A worker that stopped mid-answer leaves its row leased: another takes it once the lease the
 // claim gave runs out, and not before.
 func (s *StoreSuite) TestAClaimedChatMessageIsClaimedAgainOnceItsLeaseRunsOut() {
@@ -572,15 +591,17 @@ func (s *StoreSuite) TestNoChatMessageIsNextOnceAllAreAnsweredOrGivenUp() {
 }
 
 func (s *StoreSuite) TestPruningKeepsAnAnsweredChatMessageADayAndAGivenUpOneThirtyDays() {
-	for _, id := range []string{"done-old", "done-new", "failed-old", "failed-new"} {
+	for _, id := range []string{"done-old", "done-day", "done-new", "failed-old", "failed-days", "failed-new"} {
 		s.queuedChat(id, func(delivery *ChatInbound) { delivery.NextAttemptAt = s.databaseNow().Add(time.Hour) })
 	}
 	s.queuedChat("queued", func(delivery *ChatInbound) { delivery.NextAttemptAt = s.base.Add(-60 * 24 * time.Hour) })
 	finishedAt := map[string]time.Time{
-		"done-old":   s.base.Add(-24*time.Hour - time.Second),
-		"done-new":   s.base.Add(-24*time.Hour + time.Second),
-		"failed-old": s.base.Add(-30*24*time.Hour - time.Second),
-		"failed-new": s.base.Add(-30*24*time.Hour + time.Second),
+		"done-old":    s.base.Add(-24*time.Hour - time.Second),
+		"done-day":    s.base.Add(-24 * time.Hour),
+		"done-new":    s.base.Add(-24*time.Hour + time.Second),
+		"failed-old":  s.base.Add(-30*24*time.Hour - time.Second),
+		"failed-days": s.base.Add(-30 * 24 * time.Hour),
+		"failed-new":  s.base.Add(-30*24*time.Hour + time.Second),
 	}
 	claimed, err := s.store.ChatInbounds.Claim(s.ctx, 10, chatLease)
 	s.Require().NoError(err)
@@ -612,7 +633,7 @@ func (s *StoreSuite) TestPruningKeepsAnAnsweredChatMessageADayAndAGivenUpOneThir
 		kept = append(kept, id)
 	}
 	s.Require().NoError(rows.Err())
-	s.Equal([]string{"done-new", "failed-new", "queued"}, kept, "a queued row is never pruned, however old")
+	s.Equal([]string{"done-day", "done-new", "failed-days", "failed-new", "queued"}, kept, "a queued row is never pruned, however old")
 }
 
 // A message's answer starts once: the row leaves the queue as it starts, so no later try, nor
