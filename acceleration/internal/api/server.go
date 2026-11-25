@@ -493,6 +493,7 @@ type Server struct {
 	serverSide *http.ServeMux
 	upgrader   websocket.Upgrader
 	popularity *popularity
+	teams      *heldTeams
 	logger     *slog.Logger
 	// release is Options.Release.
 	release string
@@ -653,6 +654,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		manageKey:          options.ManageKey,
 		activityKeys:       options.ActivityKeys,
 		popularity:         newPopularity(options.Store, logger),
+		teams:              newHeldTeams(),
 		logger:             logger,
 		release:            options.Release,
 		draining:           make(chan struct{}),

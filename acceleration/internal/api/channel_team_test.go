@@ -166,7 +166,17 @@ func (s *AgentTeamsSuite) madeAsBefore(data map[string]any) {
 // turnTeamsOff turns the setting off for the suite's app, as Stream would, and waits until the
 // router's settings cache no longer holds it on.
 func (s *AgentTeamsSuite) turnTeamsOff() {
-	_, err := s.store.GlobalDB().NewRaw(`UPDATE apps SET settings = '{}'::jsonb WHERE id = ?`, s.customerID()).Exec(s.T().Context())
+	s.turnTeams(false)
+}
+
+// turnTeams turns the setting on or off for the suite's app, as Stream would, and waits until the
+// router's settings cache holds it so.
+func (s *RouterSuite) turnTeams(on bool) {
+	settings := `{}`
+	if on {
+		settings = `{"agent_teams": true}`
+	}
+	_, err := s.store.GlobalDB().NewRaw(`UPDATE apps SET settings = ?::jsonb WHERE id = ?`, settings, s.customerID()).Exec(s.T().Context())
 	s.Require().NoError(err)
 	address := os.Getenv("ROUTER_REDIS_ADDR")
 	client, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{address}, DisableCache: true})
@@ -175,7 +185,7 @@ func (s *AgentTeamsSuite) turnTeamsOff() {
 	s.Require().NoError(client.Do(s.T().Context(), client.B().Del().Key("appcfg:app-settings:"+s.customerID()).Build()).Error())
 	s.Require().Eventually(func() bool {
 		settings, err := s.configs.Apps.GetSettings(s.T().Context(), s.customerID())
-		return err == nil && !settings.AgentTeamsChecked()
+		return err == nil && settings.AgentTeamsChecked() == on
 	}, 10*time.Second, 20*time.Millisecond)
 }
 
