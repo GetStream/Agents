@@ -134,6 +134,9 @@ const (
 	ReasonConnectionRemoved = "connection_removed"
 	// ReasonTierLimit is a call or a text its organization's tier limits refuse.
 	ReasonTierLimit = "tier_limit_reached"
+	// ReasonNotInTeam is a task its end user made on an agent config of a team they are no
+	// longer in, in an app that keeps each team's configs to its own users.
+	ReasonNotInTeam = "not_in_team"
 	// ReasonPaused is not a failure: it is on the missed run of a one-shot
 	// whose time came while the task was paused, and of an occurrence the
 	// cut-over of a move skipped whose run the source had started.

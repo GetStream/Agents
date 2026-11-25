@@ -186,6 +186,7 @@ Read the task, then its runs, then the logs, in that order.
 | Old history gone | a completed or failed task 404, or old runs missing | A daily job deletes runs finished over 90 days ago, and completed or failed tasks over 90 days old (`ScheduledTasksKept`); active and paused tasks stay. It redacts the changes recorded of what it deletes (`ScheduledTasks.Prune`), and deleting a task redacts those of it and its runs (`ScheduledTasks.Delete`) |
 | Session deleted | task 404 | Deleting a session deletes the tasks made in it or following up in it, with their runs, and redacts the changes recorded of them (`DeleteForSession`) |
 | User forgotten | task 404, its runs gone | `router usage forget-user` deleted every task of that user in the app, with its runs, and redacted the changes recorded of them (`ForgetUserTasks`) |
+| Team left | a device's task 404, missing from its list | In an app with `agent_teams`, a task on a config of a team the user is no longer in is not there to their device, nor one on a deleted config, except to pause or delete it; their backend still reaches it. A router holds a user's teams for 30 s, so a removal is seen within that; held teams that refuse ask Stream again first, at most once a second, and stand while it cannot be asked |
 
 Run `error` codes (`internal/scheduling/scheduler.go:105`):
 
@@ -199,6 +200,7 @@ Run `error` codes (`internal/scheduling/scheduler.go:105`):
 | `outside_window` | A WhatsApp thread task whose person last wrote over 24 h ago, with no template to send after the window | no |
 | `thread_gone` | A thread task's thread no longer exists, or is not its user's thread of its customer | no |
 | `connection_removed` | A thread task's line (its connection) was removed | no |
+| `not_in_team` | In an app that keeps each team's agent configs to its own users (`agent_teams`), the end user the task is for is no longer in its config's team: one they made (`caller_kind` not `server`), or one the agent made talking with them (`created_by` `agent`, outside a thread), whoever opened that chat. The agent is not run and no session is opened. A task the backend made through the API, or the agent made on an SMS, WhatsApp or iMessage thread, is not checked; teams Stream could not read fail the attempt as `delivery_failed`, retried | no |
 | `no_reply` | The agent said nothing and made no file to carry | yes |
 | `reply_failed` | The reply failed, or was cancelled or interrupted and, when run once more under `st_<run>_r1`, was cut off again (a thread task's first cut-off also gives it, and the retry runs it again) | yes |
 | `no_phone_number` | The user never texted this agent by SMS; a number used only on WhatsApp is not rung | yes |
