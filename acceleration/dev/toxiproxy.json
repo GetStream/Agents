@@ -1,0 +1,6 @@
+[
+  {"name": "pg_global", "listen": "0.0.0.0:15432", "upstream": "postgres:5432", "enabled": true},
+  {"name": "redis_global", "listen": "0.0.0.0:16379", "upstream": "redis:6379", "enabled": true},
+  {"name": "pg_eu_from_us", "listen": "0.0.0.0:25432", "upstream": "postgres:5432", "enabled": true},
+  {"name": "pg_us_from_eu", "listen": "0.0.0.0:25433", "upstream": "postgres:5432", "enabled": true}
+]

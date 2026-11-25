@@ -115,7 +115,7 @@ func refusedRequest(err error) error {
 	case errors.Is(err, session.ErrNoMemory):
 		return errNoMemory
 	case errors.Is(err, session.ErrNotConfigured):
-		return notConfigured(err.Error())
+		return errSessionNotConfigured
 	case errors.Is(err, conversation.ErrAlreadyOpen):
 		return conflict(err.Error())
 	case callerMistake(err):

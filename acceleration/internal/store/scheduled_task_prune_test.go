@@ -218,7 +218,7 @@ func (s *StoreSuite) TestPruneRunsBesideFinishesWithoutDeadlock() {
 	for i := range live {
 		s.task(fmt.Sprintf("live-%d", i), func(task *ScheduledTask) { task.NextRunAt = &due })
 	}
-	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, live, time.Hour)
+	claimed, err := s.store.ScheduledTasks.Claim(s.ctx, live, time.Hour, ShardClaim{})
 	s.Require().NoError(err)
 	s.Require().Len(claimed, live)
 	for _, c := range claimed {

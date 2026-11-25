@@ -165,12 +165,17 @@ no reply to show it on, so by voice the binding answers that it is not available
 `require_approval: ["create_issue", "delete_*"]` on a binding holds each call of a tool it names
 until the session's user allows it. The call's step is `awaiting_approval`, addressed to them, and
 nothing reaches the provider before they answer with `tool_approval` (`tool_call_id`, the reply's
-`request_id`, `allowed`), on their socket or their backend's. Declined, or not answered in ten
+`request_id`, `allowed`), on their socket or their backend's. They answer as the kind of caller
+that opened the session, as they reach it (`session.Owner.Reaches`): a guest token with a signed-in
+user's id is not them. Declined, or not answered in ten
 minutes, the call is not sent and the model is told. A session with nobody to ask (incognito, a
 run, a shared chat, an MCP event's) refuses the call at once. In a channel of a type
 `chat_channels` names, the call asks the writer of the message the reply answers, who answers
 with their own user token through `POST /v1/agents/conversations/{cid}/tool_approvals` while a
-member of the channel; the backend may answer any (`api/conversations.go`, AI-3154). There the
+member of the channel. The hook names the writer by id alone, so any verified token of that id
+answers for them, unless they are the session's own user (a session opened through the API
+answering in the channel), who is asked as the kind of caller that opened it; the backend may
+answer any (`api/conversations.go`, AI-3154). There the
 writer has two minutes, not ten, when the Router opened the session for the message, as it does
 unless a session opened through the API answers in the channel: it answers one message for at
 most two minutes (`askTimeout`, `api/messagehooks.go`) and then closes that session, which stops
@@ -181,7 +186,7 @@ binding grants, and `sandbox: true` is refused beside it (`session/connector_app
 Beside a sensitive connector (Nessy), a binding's write tool needs `require_approval`: the
 config is refused unless each tool it grants only reads (`read_only_tools`) or is held, and a
 `tool_patterns` binding needs an entry such as `*` that matches each pattern as written
-(`api/configs.go`, `sensitiveBindingsComplaint`). In agent.yaml it is `require_approval:` on
+(`connectors/sensitive`, `ConfigComplaint`; across a parent and its child agents, `GraphComplaint`). In agent.yaml it is `require_approval:` on
 the connector entry. Tools a caller declares at createSession are not checked. The caller runs
 them, or a person's device does (`executor: client`). The router sends a client tool's
 arguments to the caller on the events socket (`api/sessionws.go`). Every channel member can

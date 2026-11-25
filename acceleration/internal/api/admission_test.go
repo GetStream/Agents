@@ -44,8 +44,10 @@ import (
 // acks let go of what was held against them.
 type AdmissionSuite struct {
 	RouterSuite
-	// line is Telnyx ringing the suite's numbers, and logged what the router said of it.
+	// line is Telnyx ringing the suite's numbers, twilio is Twilio ringing them, and logged
+	// what the router said of it.
 	line   telnyxRinger
+	twilio twilioRinger
 	logged *lockedLog
 	// sharing is the Redis the router shares its holds through, behind a proxy a test can
 	// take down.
@@ -64,6 +66,7 @@ func (s *AdmissionSuite) SetupSuite() {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	s.Require().NoError(err)
 	s.telnyxPublicKey, s.telnyxConnectionID = public, "1234567890"
+	s.twilioAuthToken, s.twilioAccountSID, s.publicURL = rand.Text(), twilioAccount(), twilioCallPublicURL
 	s.logged = &lockedLog{}
 	s.logs = s.logged
 	// A voice the deployment runs itself, reached by name only, so a voiced session on a free
@@ -73,6 +76,7 @@ func (s *AdmissionSuite) SetupSuite() {
 		routing.ProviderConfig{Provider: "plain", Model: "local-voice", Languages: []string{"la"}, Local: true})
 	s.RouterSuite.SetupSuite()
 	s.line = telnyxRinger{suite: &s.RouterSuite, private: private}
+	s.twilio = twilioRinger{suite: &s.RouterSuite, token: s.twilioAuthToken, account: s.twilioAccountSID}
 	// A run cut short leaves its campaigns ringing, and this run's dialer would ring them.
 	_, err = s.store.GlobalDB().ExecContext(context.Background(), "UPDATE campaigns SET state = ? WHERE state IN (?, ?, ?)",
 		store.Stopped, store.Scheduled, store.Running, store.Paused)
@@ -732,6 +736,30 @@ func (s *AdmissionSuite) TestACallToANumberOfAnOrganizationThatMayNotPayIsReject
 		return strings.Contains(body, "<Reject")
 	}, 10*time.Second, 50*time.Millisecond, "and rejected once suspended")
 	s.Contains(s.logged.String(), "code=account_suspended")
+}
+
+// Defect: a Twilio call to a number of an organization out of credit answered, or answered
+// first and then hung up, which bills the call.
+func (s *AdmissionSuite) TestATwilioCallToANumberOfAnOrganizationThatMayNotPayIsRejectedUnanswered() {
+	e164 := s.utils.number()
+	s.twilio.attach(e164, "sip:"+e164+"@trunk.sip.example.test", "trunk-user", "trunk-password")
+	s.refused(http.MethodPost, "/v1/search", SearchRequest{Query: "anything"})
+	form := s.twilio.call(e164)
+
+	status, _, body := s.twilio.deliver(form, s.twilio.sign(form))
+
+	s.Equal(http.StatusOK, status)
+	s.Contains(body, `<Response><Reject reason="rejected"/></Response>`)
+	s.NotContains(body, "trunk-password")
+	s.Contains(s.logged.String(), "rejected a twilio call to a number of an organization that may not pay for it")
+	s.Contains(s.logged.String(), "code=insufficient_credits")
+
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	s.Eventually(func() bool {
+		form := s.twilio.call(e164)
+		_, _, body := s.twilio.deliver(form, s.twilio.sign(form))
+		return strings.Contains(body, "sip:"+e164+"@trunk.sip.example.test")
+	}, 10*time.Second, 50*time.Millisecond, "answered once it has credit")
 }
 
 func (s *AdmissionSuite) TestACallArrivingOverStreamForAnOrganizationThatMayNotPayIsNotAnswered() {

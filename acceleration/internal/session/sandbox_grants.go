@@ -225,14 +225,13 @@ func (m *Manager) broker(spec Spec, d *dispatcher) (sandbox.CredentialBroker, er
 // open network or CIDR ranges would reach nothing but the grants.
 func behindProxy(config sandbox.Config) error {
 	if config.Network && len(config.AllowedDomains) == 0 && len(config.NetworkAllowList) == 0 {
-		return stack.Wrap(invalid(errors.New("session: the agent config's sandbox_options.network is true, and this router's " +
-			"code_sandbox.broker is proxy, which sends every request from the sandbox through the egress proxy, and the " +
-			"proxy reaches only connectors' hosts and sandbox_options.allowed_domains: list the domains code needs in sandbox_options.allowed_domains instead")))
+		return stack.Wrap(invalid(errors.New("session: the agent config's sandbox_options.network is true with no " +
+			"sandbox_options.allowed_domains, which this router does not take: list the domains code needs in " +
+			"sandbox_options.allowed_domains instead")))
 	}
 	if len(config.NetworkAllowList) > 0 {
-		return stack.Wrap(invalid(errors.New("session: the agent config's sandbox_options.network_allow_list is set, and this " +
-			"router's code_sandbox.broker is proxy, which reaches hosts by name only: list the domains code needs in " +
-			"sandbox_options.allowed_domains instead")))
+		return stack.Wrap(invalid(errors.New("session: the agent config's sandbox_options.network_allow_list is set, which " +
+			"this router does not take: list the domains code needs in sandbox_options.allowed_domains instead")))
 	}
 	return nil
 }

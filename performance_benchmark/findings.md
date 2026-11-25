@@ -183,3 +183,61 @@ iterations rather than one pair.
    iteration 6's profile).
 4. **The bench's join path is the next wall past 512**: Stream connect 429s and
    SFU requests waiting for a connection at 1024, before the router's CPU is.
+
+# The EU shard 100 ms from global
+
+`compose.shards.yaml` on one 4-core VM, base commit `6892e8bb`: shard us on :8080, shard eu
+on :8081, Toxiproxy on the four cross-region links (see the README). Both runs used the same
+images and `.env` (`ROUTER_MOCK_PROVIDERS=true`, `ROUTER_AUTH_MODE=noauth`); only the toxic
+differed, `acceleration/dev/shards.sh latency 100` (100 ms ±10 on each answer) against
+`clear`.
+
+**No perfbench numbers yet.** Every session create failed before the agent was dispatched.
+The `STREAM_API_KEY` on that VM is not a Stream app: Stream answers `api_key not found` to
+`GetApp` and `QueryUsers`, from the router and from `curl` alike. The ramp needs a working
+Stream key and secret. The rest of this section is the API and the start, which need neither.
+
+## Links
+
+`redis-cli --latency` over `redis_global` read 0.57 ms at 0 ms and 100.0 ms (91-109) at
+100 ms. In one `psql` session, `select 1` over `pg_global` and `pg_us_from_eu` went from
+0.1-0.3 ms to 95-108 ms. A fresh `psql` connection took 26 ms at 0 ms and 504-536 ms at
+100 ms, because opening one is five round trips. Direct links stayed under 0.5 ms.
+
+## One global round trip per request
+
+Three runs at each setting, alternating. A run is 50 sequential GETs after 5 warmups, and
+the table gives the range of each figure across the three runs:
+
+| router, endpoint | 0 ms p50 | 0 ms p95 | 100 ms p50 | 100 ms p95 |
+|---|---|---|---|---|
+| eu, `GET /v1/agents/configs` | 1.1 | 1.5-1.9 | 101.0-104.0 | 110.8-111.7 |
+| eu, `GET /v1/agents/models` | 1.0 | 1.2-1.4 | 99.2-102.0 | 109.8-111.2 |
+| eu, `GET /v1/agents/calls` | 1.0 | 1.3-1.5 | 100.0-103.1 | 111.0-111.2 |
+| us, `GET /v1/agents/configs` | 1.0-1.1 | 1.4-1.5 | 1.1 | 1.4-1.5 |
+| us, `GET /v1/agents/calls` | 1.0 | 1.3-1.5 | 101.1-103.2 | 110.2-110.6 |
+
+Each request pays exactly one cross-region round trip. With one link slowed at a time,
+`configs` and `models` slow down only over `pg_global` (one global Postgres query each,
+nothing cached), and `calls` slows down only over the other shard's link (the shards are read
+in parallel). Global Redis is on none of these requests. The US router's `configs`, with
+nothing between it and global, is the control and did not move.
+
+## Starting takes ten times longer
+
+From `docker compose start router-eu` to a healthy `/health`, three runs each: 2032, 2051
+and 2043 ms at 0 ms, and 22555, 22691 and 22890 ms at 100 ms: about 200 sequential round trips
+to global before the router serves anything. In the log of a 100 ms start, 18.3 s of it lies
+between `loaded configuration` and the first `billable work has no price`, where the store
+connects and runs the migrations; which of those statements take the time is not yet
+measured. A rollout of the EU shard waits 20 s per pod.
+
+## Still open
+
+1. **The ramp itself** at 0 and 100 ms, with a working Stream key: whether a session create,
+   the agent's join and a turn pay more than the one round trip a request pays here.
+2. **The start's 200 round trips.** Count the statements between opening the store and
+   serving (Postgres `log_statement`); if they are the migrations' checks, running those
+   from the global region would take the 20 s off every EU pod's start.
+3. **`models` and `configs` read global Postgres on every request.** Each is one round trip
+   from the EU shard; whatever of them can be cached in the shard takes it off.
