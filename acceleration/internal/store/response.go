@@ -437,7 +437,7 @@ func (r *Responses) Rewind(ctx context.Context, customerID, sessionID, kept stri
 	// read first rather than in each shard's update.
 	keptAt, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (AgentResponse, error) {
 		var response AgentResponse
-		err := db.NewSelect().Model(&response).Column("created_at", "id").Where("id = ?", kept).Scan(ctx)
+		err := db.NewSelect().Model(&response).Column("created_at", "id").Where("id = ?", kept).Where("customer_id = ?", customerID).Scan(ctx)
 		return response, err
 	})
 	if errors.Is(err, sql.ErrNoRows) {

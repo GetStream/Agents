@@ -396,4 +396,164 @@ class TestFolder < Minitest::Test
 
     assert_equal "123", folder.settings["connectors"].first["name"]
   end
+
+  SKILL = "---\ndescription: Work it out\n---\nReason it through.\n"
+
+  # What links out of the agent directory, what it leads to and what else is there for it.
+  LINKED_OUT = [
+    [{ "agent.yaml" => "name: jean\n" }, {}, "agent.yaml", "agent.yaml"],
+    [{ "notes.md" => "Elsewhere.\n" }, {}, "instructions.md", "notes.md"],
+    [{ "notes.md" => "Elsewhere.\n" }, {}, "guardrail.md", "notes.md"],
+    [{ "skills/think.md" => SKILL }, {}, "skills", "skills"],
+    [{ "think.md" => SKILL }, {}, "skills/think.md", "think.md"],
+    [{ "think/SKILL.md" => SKILL }, {}, "skills/think", "think"],
+    [{ "SKILL.md" => SKILL }, {}, "skills/think/SKILL.md", "SKILL.md"],
+    [{ "notes.txt" => "Elsewhere.\n" }, { "skills/think/SKILL.md" => SKILL }, "skills/think/notes.txt", "notes.txt"],
+    [{ "reference/notes.txt" => "Elsewhere.\n" }, { "skills/think/SKILL.md" => SKILL }, "skills/think/reference",
+     "reference"],
+    [{ "knowledge/doc.md" => "Elsewhere.\n" }, {}, "knowledge", "knowledge"],
+    [{ "doc.md" => "Elsewhere.\n" }, {}, "knowledge/doc.md", "doc.md"],
+    [{ "urls.yaml" => "- https://example.com/elsewhere\n" }, {}, "knowledge/urls.yaml", "urls.yaml"],
+    [{ "simulations/calls.yaml" => "[]\n" }, {}, "simulations", "simulations"],
+    [{ "calls.yaml" => "[]\n" }, {}, "simulations/calls.yaml", "calls.yaml"]
+  ].freeze
+
+  # Points +name+, under the agent directory, at +target+.
+  def link(name, target)
+    path = File.join(@root, name)
+    FileUtils.mkdir_p(File.dirname(path))
+    File.symlink(target, path)
+  end
+
+  # What loading the agent directory came to, unless it was refused for +linked+ linking out.
+  def not_refused(linked)
+    VA::Folder.load(@root)
+    "#{linked}: loaded"
+  rescue VA::ConfigurationError => e
+    "#{linked}: #{e.message}" unless e.message.include?("#{linked} links outside the agent directory")
+  end
+
+  def test_a_file_linked_from_outside_the_agent_directory_is_refused
+    read = LINKED_OUT.filter_map do |outside, inside, linked, to|
+      FileUtils.rm_rf(File.dirname(@root))
+      @root = File.join(Dir.mktmpdir, "jean")
+      elsewhere = File.join(File.dirname(@root), "elsewhere")
+      outside.each do |name, content|
+        FileUtils.mkdir_p(File.dirname(File.join(elsewhere, name)))
+        File.write(File.join(elsewhere, name), content)
+      end
+      write("agent.yaml", "name: jean\n") unless linked == "agent.yaml"
+      inside.each { |name, content| write(name, content) }
+      link(linked, File.join(elsewhere, to))
+
+      not_refused(linked)
+    end
+
+    assert_empty read
+  end
+
+  def test_a_knowledge_directory_linked_one_level_up_is_refused
+    write("agent.yaml", "name: jean\n")
+    # Nothing else is up there, so only refusing knowledge/ itself stops a walk reading the
+    # agent's own files back through it.
+    link("knowledge", File.dirname(@root))
+
+    assert_nil not_refused("knowledge")
+  end
+
+  def test_a_link_that_stays_inside_the_agent_directory_is_read
+    write("agent.yaml", "name: jean\n")
+    write("shared/notes.md", "Be brief.\n")
+    write("shared/think.md", SKILL)
+    write("shared/pricing.md", "A penny.\n")
+    link("instructions.md", "shared/notes.md")
+    link("skills/think.md", "../shared/think.md")
+    link("knowledge/pricing.md", "../shared/pricing.md")
+    # The agent directory is itself reached through a link, as a checkout often is.
+    through = File.join(File.dirname(@root), "linked")
+    File.symlink(@root, through)
+
+    folder = VA::Folder.load(through)
+
+    assert_equal "Be brief.", folder.instructions
+    assert_equal ["Reason it through."], folder.skills.map(&:instructions)
+    assert_equal [["pricing.md", "A penny.\n"]], folder.knowledge.map { |document| [document.source, document.text] }
+  end
+
+  def test_an_agent_directory_named_relative_to_the_working_directory_keeps_its_links
+    write("agent.yaml", "name: jean\n")
+    write("shared/pricing.md", "A penny.\n")
+    link("knowledge/pricing.md", File.join(@root, "shared/pricing.md"))
+    # Relative to the working directory, without changing it under the other tests.
+    relative = ("../" * Dir.pwd.count("/")) + @root.delete_prefix("/")
+
+    assert_equal ["pricing.md"], VA::Folder.load(relative).knowledge.map(&:source)
+
+    elsewhere = File.join(File.dirname(@root), "elsewhere")
+    FileUtils.mkdir_p(elsewhere)
+    File.write(File.join(elsewhere, "notes.md"), "Elsewhere.\n")
+    link("instructions.md", File.join(elsewhere, "notes.md"))
+    error = assert_raises(VA::ConfigurationError) { VA::Folder.load(relative) }
+    assert_includes error.message, "instructions.md links outside the agent directory"
+  end
+
+  def test_a_name_that_only_shares_a_prefix_is_compared_as_a_whole
+    write("agent.yaml", "name: jean\n")
+    write("..shared/a.md", "A penny.\n")
+    link("knowledge/a.md", "../..shared/a.md")
+
+    assert_equal ["A penny.\n"], VA::Folder.load(@root).knowledge.map(&:text)
+
+    FileUtils.mkdir_p("#{@root}-2")
+    File.write("#{@root}-2/notes.md", "Elsewhere.\n")
+    link("instructions.md", "#{@root}-2/notes.md")
+    assert_nil not_refused("instructions.md")
+  end
+
+  def test_a_link_to_itself_is_refused
+    read = %w[instructions.md skills/loop.md knowledge/loop.md simulations/loop.yaml].filter_map do |linked|
+      FileUtils.rm_rf(File.dirname(@root))
+      @root = File.join(Dir.mktmpdir, "jean")
+      write("agent.yaml", "name: jean\n")
+      link(linked, File.join(@root, linked))
+
+      not_refused(linked)
+    end
+
+    assert_empty read
+  end
+
+  def test_hidden_files_are_left_out_of_knowledge
+    write("agent.yaml", "name: jean\n")
+    write("knowledge/pricing.md", "A penny.\n")
+    write("knowledge/.draft.md", "Not yet.\n")
+    write("knowledge/.git/notes.md", "Not a document.\n")
+    write("knowledge/__pycache__/notes.md", "Not a document.\n")
+    write("knowledge/guides/setup.md", "Plug it in.\n")
+    write("knowledge/guides/.draft.md", "Not yet.\n")
+    write("knowledge/guides/.git/notes.md", "Not a document.\n")
+
+    assert_equal ["guides/setup.md", "pricing.md"], VA::Folder.load(@root).knowledge.map(&:source)
+  end
+
+  def test_an_editors_lock_file_in_skills_and_simulations_is_left_out
+    lunch = "- name: lunch\n  scenario: Order lunch.\n  assertion: Lunch is ordered.\n"
+    write("agent.yaml", "name: jean\n")
+    write("instructions.md", "Be brief.\n")
+    write("skills/think.md", SKILL)
+    write("skills/.draft.md", SKILL)
+    write("knowledge/pricing.md", "A penny.\n")
+    write("simulations/calls.yaml", lunch)
+    write("simulations/.draft.yaml", lunch.sub("lunch", "draft"))
+    # What Emacs leaves beside a file with unsaved edits: a link to who is editing it.
+    link("skills/.#think.md", "jean@laptop.4242:1732500000")
+    link("simulations/.#calls.yaml", "jean@laptop.4242:1732500000")
+
+    folder = VA::Folder.load(@root)
+
+    assert_equal "Be brief.", folder.instructions
+    assert_equal ["think"], folder.skills.map(&:name)
+    assert_equal ["pricing.md"], folder.knowledge.map(&:source)
+    assert_equal ["lunch"], folder.simulations.map(&:name)
+  end
 end

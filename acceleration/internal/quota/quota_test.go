@@ -141,6 +141,45 @@ func (s *QuotaSuite) TestTheAddressIsCountedWhenTheUserIsFresh() {
 	s.ErrorIs(err, ErrExhausted)
 }
 
+func (s *QuotaSuite) TestTheAddressesOfOneIPv6NetworkSpendOneDay() {
+	limiter := s.limiter(1, 0)
+	limiter.Debit(s.ctx, s.customer, routing.Caller{UserID: "first", IP: "2001:db8:0:1::1"}, 10)
+
+	err := s.allow(limiter, s.customer, routing.Caller{UserID: "second", IP: "2001:db8:0:1:ffff:ffff:ffff:ffff"})
+
+	s.Require().ErrorIs(err, ErrExhausted)
+	s.NoError(s.allow(limiter, s.customer, routing.Caller{UserID: "third", IP: "2001:db8:0:2::1"}))
+}
+
+func (s *QuotaSuite) TestAnIPv4AddressSpendsADayOfItsOwnHoweverItIsWritten() {
+	limiter := s.limiter(1, 0)
+	limiter.Debit(s.ctx, s.customer, routing.Caller{UserID: "first", IP: "192.0.2.1"}, 10)
+
+	err := s.allow(limiter, s.customer, routing.Caller{UserID: "second", IP: "::ffff:192.0.2.1"})
+
+	s.Require().ErrorIs(err, ErrExhausted)
+	s.NoError(s.allow(limiter, s.customer, routing.Caller{UserID: "third", IP: "192.0.2.2"}))
+	s.NoError(s.allow(limiter, s.customer, routing.Caller{UserID: "fourth", IP: "::ffff:192.0.2.2"}))
+}
+
+func (s *QuotaSuite) TestAnAddressThatCannotBeReadIsCountedAsItIsWritten() {
+	limiter := s.limiter(1, 0)
+	limiter.Debit(s.ctx, s.customer, routing.Caller{UserID: "first", IP: "unreadable"}, 10)
+
+	err := s.allow(limiter, s.customer, routing.Caller{UserID: "second", IP: "unreadable"})
+
+	s.Require().ErrorIs(err, ErrExhausted)
+	s.NoError(s.allow(limiter, s.customer, routing.Caller{UserID: "third", IP: "unreadable too"}))
+}
+
+func (s *QuotaSuite) TestUsersWithNoAddressDoNotShareOne() {
+	limiter := s.limiter(1, 0)
+	limiter.Debit(s.ctx, s.customer, routing.Caller{UserID: "first"}, 10)
+
+	s.Require().ErrorIs(s.allow(limiter, s.customer, routing.Caller{UserID: "first"}), ErrExhausted)
+	s.NoError(s.allow(limiter, s.customer, routing.Caller{UserID: "second"}))
+}
+
 func (s *QuotaSuite) TestNobodyToCountAgainstIsNotCounted() {
 	// A customer's own backend, which is trusted with its own spend.
 	limiter := s.limiter(1, 1)

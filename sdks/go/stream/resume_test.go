@@ -156,10 +156,17 @@ func kinds(events []Event) []string {
 func TestATextSessionCarriesOnThroughARouterRestart(t *testing.T) {
 	var router *restartable
 	restarted := make(chan struct{})
+	question := make(chan struct{})
 	router = newRestartable(t,
 		func(connection *websocket.Conn) {
 			_ = connection.WriteJSON(Frame{"type": "resumed", "cursor": "first.0", "complete": true})
 			_ = connection.WriteJSON(Frame{"type": "responding", "turn_id": "turn-1", "cursor": "first.1"})
+			// The question is asked before the router goes, so the reconnect has it to name.
+			select {
+			case <-question:
+			case <-t.Context().Done():
+				return
+			}
 			closes(connection, websocket.CloseServiceRestart, "router restarting")
 			go func() { router.restart(); close(restarted) }()
 		},
@@ -172,6 +179,7 @@ func TestATextSessionCarriesOnThroughARouterRestart(t *testing.T) {
 	)
 	pipeline := watching(t, router, &acceleration.Session{Id: "session-1"})
 	pipeline.Awaiting("question-1")
+	close(question)
 
 	got := collect(t, pipeline.Events())
 	<-restarted
