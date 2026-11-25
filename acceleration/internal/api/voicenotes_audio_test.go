@@ -3,9 +3,12 @@ package api
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -291,9 +294,171 @@ func (s *VoiceNoteAudioSuite) TestARouterFetchesAVoiceNoteOnlyFromAPublicAddress
 
 	_, err = server.hearVoiceNote(context.Background(), session.Spec{CustomerID: "acme"}, s.cdn.URL+"/note", "")
 
-	s.ErrorContains(err, "non-public address", "the suite's CDN is on loopback")
+	s.EqualError(err, "the voice note could not be used: it could not be fetched", "the suite's CDN is on loopback")
 	s.Zero(s.fetches.Load(), "the note is refused before it is fetched")
 	s.Nil(heard.recording.Audio, "nothing is heard")
+}
+
+func (s *VoiceNoteAudioSuite) TestAVoiceNoteOnAHostThatDoesNotResolveIsRefusedNamingNeitherHostNorResolver() {
+	server, err := NewServer(Options{
+		Routers: map[routing.Modality]routing.Inspector{routing.LLM: idleInspector{}},
+		Auth: auth.Func(func(context.Context, *http.Request) (auth.Principal, error) {
+			return auth.Principal{}, nil
+		}),
+		AuthMode: auth.Custom,
+	})
+	s.Require().NoError(err)
+	heard := &heardTranscriber{}
+	server.streams = &Streams{Transcriptions: s.recordings(heard)}
+
+	_, err = server.hearVoiceNote(context.Background(), session.Spec{CustomerID: "acme"}, "https://notes.invalid/note.wav", "")
+
+	refusal, refused := errors.AsType[APIError](err)
+	s.Require().True(refused, "a note nobody can fetch is the caller's to change: %v", err)
+	s.Equal(ErrorTypeInvalidRequest, refusal.Type)
+	s.NotContains(refusal.Message, "notes.invalid")
+	s.NotContains(refusal.Message, "lookup")
+	s.Nil(heard.recording.Audio, "nothing is heard")
+}
+
+// unfetchable is URLs the router cannot fetch from, each for a reason of its own: a name that
+// does not resolve, a name of this machine and addresses that are not public.
+func (s *VoiceNoteAudioSuite) unfetchable() []string {
+	_, port, err := net.SplitHostPort(s.cdn.Listener.Addr().String())
+	s.Require().NoError(err)
+	return []string{"http://files.invalid/file", "https://files.invalid/file", "http://localhost:" + port + "/file", "https://localhost/file",
+		s.cdn.URL + "/file", "http://10.0.0.1/file", "http://169.254.169.254/file", "http://[::1]:" + port + "/file"}
+}
+
+// publicServer is a server that fetches as the router does when no test set how.
+func (s *VoiceNoteAudioSuite) publicServer() *Server {
+	server, err := NewServer(Options{
+		Routers: map[routing.Modality]routing.Inspector{routing.LLM: idleInspector{}},
+		Auth: auth.Func(func(context.Context, *http.Request) (auth.Principal, error) {
+			return auth.Principal{}, nil
+		}),
+		AuthMode: auth.Custom,
+	})
+	s.Require().NoError(err)
+	server.streams = &Streams{Transcriptions: s.recordings(&heardTranscriber{})}
+	return server
+}
+
+func (s *VoiceNoteAudioSuite) TestAVoiceNoteThatCannotBeFetchedIsRefusedInTheSameWords() {
+	server := s.publicServer()
+	for _, source := range s.unfetchable() {
+		_, err := server.hearVoiceNote(s.T().Context(), session.Spec{CustomerID: "acme"}, source, "")
+		s.Equal(APIError{Type: ErrorTypeInvalidRequest, Code: "invalid_request",
+			Message: "the voice note could not be used: it could not be fetched"}, err, source)
+	}
+	s.Zero(s.fetches.Load())
+}
+
+func (s *VoiceNoteAudioSuite) TestADocumentThatCannotBeFetchedIsRefusedInTheSameWords() {
+	server := s.publicServer()
+	for _, source := range s.unfetchable() {
+		_, _, err := server.fetchDocument(s.T().Context(), FileSource{Url: source})
+		s.Equal(APIError{Type: ErrorTypeInvalidRequest, Code: "invalid_request",
+			Message: "the file could not be used: it could not be fetched"}, err, source)
+	}
+	s.Zero(s.fetches.Load())
+}
+
+func (s *VoiceNoteAudioSuite) TestAnImageThatCannotBeFetchedIsRefusedInTheSameWords() {
+	server := s.publicServer()
+	for _, source := range s.unfetchable() {
+		err := fetchImages(s.T().Context(), server.imageHTTP, []llm.ImagePart{{URL: source}})
+		s.Equal(APIError{Type: ErrorTypeInvalidRequest, Code: "image_unavailable",
+			Message: "image 0 could not be used: it could not be fetched"}, err, source)
+	}
+	s.Zero(s.fetches.Load())
+}
+
+// fails is the error of fetching path from a host that answers as handler does.
+func (s *VoiceNoteAudioSuite) fails(ctx context.Context, handler http.HandlerFunc) error {
+	host := httptest.NewServer(handler)
+	defer host.Close()
+	_, _, err := fetchAtMost(ctx, host.Client(), host.URL+"/file", 1<<20)
+	return err
+}
+
+func (s *VoiceNoteAudioSuite) TestAConnectionRefusedIsAFileThatCouldNotBeFetched() {
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+
+	_, _, err := fetchAtMost(s.T().Context(), http.DefaultClient, closed.URL+"/file", 1<<20)
+
+	s.EqualError(err, "it could not be fetched")
+}
+
+func (s *VoiceNoteAudioSuite) TestACertificateNobodyTrustsIsAFileThatCouldNotBeFetched() {
+	host := httptest.NewTLSServer(http.NotFoundHandler())
+	defer host.Close()
+
+	_, _, err := fetchAtMost(s.T().Context(), http.DefaultClient, host.URL+"/file", 1<<20)
+
+	s.EqualError(err, "it could not be fetched")
+}
+
+func (s *VoiceNoteAudioSuite) TestAPlainHostAskedForTLSIsAFileThatCouldNotBeFetched() {
+	_, _, err := fetchAtMost(s.T().Context(), http.DefaultClient, "https"+strings.TrimPrefix(s.cdn.URL, "http")+"/file", 1<<20)
+
+	s.EqualError(err, "it could not be fetched")
+}
+
+func (s *VoiceNoteAudioSuite) TestAHostThatNeverAnswersIsAFileThatCouldNotBeFetched() {
+	ctx, cancel := context.WithTimeout(s.T().Context(), 50*time.Millisecond)
+	defer cancel()
+
+	err := s.fails(ctx, func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+
+	s.EqualError(err, "it could not be fetched")
+	s.ErrorIs(withoutURL(err), context.DeadlineExceeded, "the log says why")
+}
+
+func (s *VoiceNoteAudioSuite) TestARedirectTheRouterDoesNotFollowIsAFileThatCouldNotBeFetched() {
+	for _, location := range []string{"/file", "ftp://example.com/file", "http://", "http://%zz/"} {
+		err := s.fails(s.T().Context(), func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", location)
+			w.WriteHeader(http.StatusFound)
+		})
+		s.EqualError(err, "it could not be fetched", location)
+	}
+}
+
+func (s *VoiceNoteAudioSuite) TestABodyCutShortIsAFileThatCouldNotBeFetchedAndTheLogSaysWhy() {
+	err := s.fails(s.T().Context(), func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		_, _ = w.Write([]byte("some"))
+	})
+
+	s.EqualError(err, "it could not be fetched")
+	s.EqualError(withoutURL(err), "unexpected EOF", "the log says why")
+}
+
+func (s *VoiceNoteAudioSuite) TestAURLTheCallerCanCorrectSaysWhatIsWrongWithIt() {
+	for source, reason := range map[string]string{
+		s.cdn.URL + "/gone":       "fetching it answered 404 Not Found",
+		"ftp://example.com/file":  "it is not an absolute HTTP(S) URL",
+		"file:///etc/hosts":       "it is not an absolute HTTP(S) URL",
+		"example.com/file":        "it is not an absolute HTTP(S) URL",
+		"https:///file":           "it is not an absolute HTTP(S) URL",
+		"https://:443/file":       "it is not an absolute HTTP(S) URL",
+		"https://a b.example.com": `invalid character " " in host name`,
+	} {
+		_, _, err := fetchAtMost(s.T().Context(), s.cdn.Client(), source, 1<<20)
+		s.EqualError(err, reason, source)
+	}
+}
+
+func (s *VoiceNoteAudioSuite) TestAnyFormOfAnHTTPURLIsFetched() {
+	s.served["/file"] = cdnFile{kind: "text/plain", body: []byte("hello")}
+	for _, source := range []string{"HTTP" + strings.TrimPrefix(s.cdn.URL, "http") + "/file", s.cdn.URL + "/file?signature=a%2Fb#page=2",
+		"http://user:pass@" + strings.TrimPrefix(s.cdn.URL, "http://") + "/file"} {
+		data, _, err := fetchAtMost(s.T().Context(), s.cdn.Client(), source, 1<<20)
+		s.Require().NoError(err, source)
+		s.Equal("hello", string(data))
+	}
 }
 
 func (s *VoiceNoteAudioSuite) TestAnImageARunFetchesIsHeldToTheImageLimit() {

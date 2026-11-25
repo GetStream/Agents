@@ -29,10 +29,13 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 
 private const val SESSION = """{"id":"s1","call_id":"","call_type":"default","user_id":"u1","agent_id":"a1","state":"live","modality":"text","created_at":"2026-09-24T04:03:19Z","text":true}"""
 @Serializable
@@ -87,6 +90,8 @@ class AgentSessionTest {
         assertEquals("jwt", handshake.header("Stream-Auth-Type"))
         assertEquals("acme", handshake.header("X-Customer-Id"))
         assertEquals("jlahey", handshake.header("X-Stream-User-Id"))
+        assertEquals("stream-agents-kotlin-v${BuildConfig.SDK_VERSION}", handshake.header("X-Stream-Client"))
+        assertEquals("stream-agents-kotlin/${BuildConfig.SDK_VERSION}", handshake.header("User-Agent"))
         assertEquals(mapOf("decisions" to listOf("false")), handshake.query)
         assertTrue(chat.isConnected.value)
         chat.close()
@@ -245,6 +250,51 @@ class AgentSessionTest {
     }
 
     @Test
+    fun `a tool's long failure is cut to 1 KiB before the model is told it`() = runBlocking {
+        val broken = AgentTool("lookup_order", "Look up an order.") { error("x".repeat(5000)) }
+        val chat = agents.chat(SessionOptions(tools = listOf(broken)))
+
+        router.script.send(Script.Send("""{"type":"tool_call","id":"c1","name":"lookup_order","arguments":"","request_id":"","turn_id":""}"""))
+
+        val answer = Json.parseToJsonElement(router.nextSent()).jsonObject
+        assertEquals(JsonPrimitive("x".repeat(1024) + "…"), answer["error"])
+        chat.close()
+    }
+
+    @Test
+    fun `the app's onToolError says what the model is told of a failure`() = runBlocking {
+        class ToolError(message: String) : Exception(message)
+        val seen = CopyOnWriteArrayList<String>()
+        agents.onToolError = { call, error ->
+            seen += "${call.id} ${call.name}"
+            if (error is ToolError) error.message.orEmpty() else "${call.name} failed"
+        }
+        val leaky = AgentTool("lookup_order", "Look up an order.") { error("postgres://admin:hunter2@db.internal/orders refused") }
+        val polite = AgentTool("cancel_order", "Cancel an order.") { throw ToolError("That order has already shipped.") }
+        val chat = agents.chat(SessionOptions(tools = listOf(leaky, polite)))
+
+        router.script.send(Script.Send("""{"type":"tool_call","id":"c1","name":"lookup_order","arguments":"","request_id":"","turn_id":""}"""))
+        assertEquals(JsonPrimitive("lookup_order failed"), Json.parseToJsonElement(router.nextSent()).jsonObject["error"])
+        router.script.send(Script.Send("""{"type":"tool_call","id":"c2","name":"cancel_order","arguments":"","request_id":"","turn_id":""}"""))
+        assertEquals(JsonPrimitive("That order has already shipped."), Json.parseToJsonElement(router.nextSent()).jsonObject["error"])
+        assertEquals(listOf("c1 lookup_order", "c2 cancel_order"), seen)
+        chat.close()
+    }
+
+    @Test
+    fun `an onToolError that throws tells the model only that the tool failed`() = runBlocking {
+        agents.onToolError = { _, error -> throw IllegalStateException("hook broke on ${error.message}") }
+        val broken = AgentTool("lookup_order", "Look up an order.") { error("the orders database at db.internal is down") }
+        val chat = agents.chat(SessionOptions(tools = listOf(broken)))
+
+        router.script.send(Script.Send("""{"type":"tool_call","id":"c1","name":"lookup_order","arguments":"","request_id":"","turn_id":""}"""))
+
+        val answer = Json.parseToJsonElement(router.nextSent()).jsonObject
+        assertEquals(JsonPrimitive("lookup_order failed"), answer["error"])
+        chat.close()
+    }
+
+    @Test
     fun `a typed tool called without a required argument tells the model which one`() = runBlocking {
         val ran = AtomicBoolean(false)
         val weather = AgentTool.typed<WeatherLookup>("weather_lookup", "Look up the weather.") {
@@ -327,20 +377,31 @@ class AgentSessionTest {
             first.cancel()
         }
         chat.on(AgentEvent.Kind.ToolCallFinished) { finished += it.string("tool_call_id") }
-        val call = """"tool_call_id":"c1","tool":"search_flights","turn_id":"t1","started_at":"2026-11-18T12:00:00Z""""
+        val call = """"tool_call_id":"c1","tool":"search_flights","turn_id":"t1","display_title":"Searching flights","started_at":"2026-11-18T12:00:00Z""""
 
         router.script.send(Script.Send("""{"type":"tool_call.started",$call,"status":"waiting","duration_ms":0}"""))
         router.script.send(Script.Send("""{"type":"tool_call.progress",$call,"status":"in_progress","duration_ms":100,"progress":"Searching for flights","approved_at":"2026-11-18T12:00:00.1Z"}"""))
-        router.script.send(Script.Send("""{"type":"tool_call.progress",$call,"status":"in_progress","duration_ms":200,"progress":"Comparing prices","approved_at":"2026-11-18T12:00:00.1Z"}"""))
-        router.script.send(Script.Send("""{"type":"tool_call.finished",$call,"status":"success","duration_ms":300,"approved_at":"2026-11-18T12:00:00.1Z"}"""))
+        router.script.send(Script.Send("""{"type":"tool_call.progress",$call,"status":"in_progress","duration_ms":200,"progress":"Comparing prices","custom":{"cheapest":129},"approved_at":"2026-11-18T12:00:00.1Z"}"""))
+        router.script.send(Script.Send("""{"type":"tool_call.finished",$call,"status":"success","duration_ms":300,"custom":{"cheapest":129},"approved_at":"2026-11-18T12:00:00.1Z"}"""))
         until { chat.toolCalls.value["c1"]?.status?.isFinished == true }
 
         val last = chat.toolCalls.value.getValue("c1")
         assertEquals(AgentEvent.ToolCallState.Status.Success, last.status)
         assertEquals(300, last.durationMs)
+        assertEquals("Searching flights", last.displayTitle)
+        assertEquals("t1", last.turnId)
         assertEquals("", last.progress, "the finished frame carries the whole state")
         assertEquals(Instant.parse("2026-11-18T12:00:00.1Z"), last.approvedAt)
+        assertEquals(buildJsonObject { put("cheapest", 129) }, last.custom)
         assertEquals(last, chat.toolCall("c1").first())
+
+        router.script.send(Script.Send("""{"type":"tool_call.started","tool_call_id":"c2","tool":"list_issues","turn_id":"t2","status":"in_progress","started_at":"2026-11-18T12:00:01Z","duration_ms":0}"""))
+        router.script.send(Script.Send("""{"type":"tool_call.progress","tool_call_id":"c3","tool":"read_issues","turn_id":"t2","display_title":"Reading issues","status":"in_progress","progress":"Reading 12 issues","started_at":"2026-11-18T12:00:02Z","duration_ms":0}"""))
+        until { chat.toolCalls.value.containsKey("c3") }
+        assertEquals(listOf("Searching flights"), chat.toolCallsForTurn("t1").first().map { it.title })
+        assertEquals(listOf("list_issues", "Reading 12 issues"), chat.toolCallsForTurn("t2").first().map { it.title })
+        assertEquals(emptyList<AgentEvent.ToolCallState>(), chat.toolCallsForTurn("t3").first())
+        assertEquals(JsonObject(emptyMap()), chat.toolCalls.value.getValue("c3").custom)
         until { finished.isNotEmpty() }
         assertEquals(listOf("Searching for flights"), progress.toList())
         assertEquals(listOf("c1"), finished.toList())

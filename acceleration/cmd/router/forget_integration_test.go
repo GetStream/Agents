@@ -130,9 +130,9 @@ func (s *ForgetUserSuite) emptyDatabase(name string) string {
 	s.Require().NoError(err)
 	defer empty.Close()
 	var database string
-	s.Require().NoError(empty.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(empty.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = empty.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = empty.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	return own
 }
@@ -148,7 +148,7 @@ func (s *ForgetUserSuite) recorded(shard int, app, user string, cost int64) uuid
 // written writes one billable row of app's user on a shard, not shipped yet.
 func (s *ForgetUserSuite) written(shard int, app, user string, cost int64) uuid.UUID {
 	id := uuid.Must(uuid.NewV7())
-	_, err := s.shards[shard].RecordRequests(s.ctx, []store.Request{{
+	_, err := s.shards[shard].Requests.InsertMany(s.ctx, []store.Request{{
 		UsageID: id, Modality: "llm", CustomerID: app, OrganizationID: s.organization, OrganizationTier: usageservice.DefaultTier,
 		APIKey: "key", UserID: user, Provider: "openai", Model: "gpt", StartedAt: time.Now().UTC(),
 		CostMicros: cost, BaseCostMicros: cost, Billable: true, Success: true,
@@ -165,7 +165,7 @@ func (s *ForgetUserSuite) shipped(id uuid.UUID, app, user string, cost int64) {
 // stopped is what a run that stopped after its first call to the usage service left: every
 // shard and the service rewritten to replacement, and nothing after.
 func (s *ForgetUserSuite) stopped(replacement string) {
-	_, err := s.shards[0].RenameUserRequests(s.ctx, s.app, person, replacement)
+	_, err := s.shards[0].Requests.RenameUser(s.ctx, s.app, person, replacement)
 	s.Require().NoError(err)
 	manage, err := usageservice.NewClient(usageservice.ClientOptions{URL: s.service.URL, ManageKey: s.service.ManageKey})
 	s.Require().NoError(err)
@@ -278,25 +278,29 @@ func (s *ForgetUserSuite) settingsOf(app, user string) {
 	shared := s.shards[0]
 	audit := store.LimitAudit{CustomerID: app, Source: store.AuditSourceAPI, ActorID: "staff"}
 	ten := int64(10)
-	s.Require().NoError(shared.SavePolicy(s.ctx, store.ScopeUser, store.UserScopeID(app, user),
-		store.PolicyDocument{Quota: &store.Quota{MessagesPerUserPerDay: &ten}}))
+	s.Require().NoError(shared.Policies.Upsert(s.ctx, &store.Policy{Scope: store.ScopeUser, ScopeID: store.UserScopeID(app, user),
+		Document: store.PolicyDocument{Quota: &store.Quota{MessagesPerUserPerDay: &ten}}}))
 	for _, limit := range []store.Limit{
 		{Subject: usageservice.SubjectUser, Level: store.LevelUser, UserID: user},
 		{Subject: usageservice.SubjectUser, Level: store.LevelApp},
 	} {
 		limit.OrganizationID, limit.AppID, limit.Interval, limit.LimitMicros, limit.UpdatedBy = s.organization, app, usageservice.Daily, 1_000, "staff"
-		s.Require().NoError(shared.CreateLimit(s.ctx, &limit, audit))
+		s.Require().NoError(shared.Limits.Insert(s.ctx, &limit, audit))
 	}
 	start, _ := usageservice.Window(usageservice.Daily, time.Now())
-	s.Require().NoError(shared.AddResets(s.ctx, []store.UsageReset{{
+	s.Require().NoError(shared.UsageResets.InsertMany(s.ctx, []store.UsageReset{{
 		OrganizationID: s.organization, Subject: usageservice.SubjectUser, AppID: app, UserID: user,
 		Interval: usageservice.Daily, WindowStart: start, BaselineMicros: 5, Reason: "support", Actor: "staff",
 	}}, audit))
-	s.Require().NoError(shared.AddGrant(s.ctx, &store.LimitGrant{
+	s.Require().NoError(shared.LimitGrants.Insert(s.ctx, &store.LimitGrant{
 		OrganizationID: s.organization, Subject: usageservice.SubjectUser, AppID: app, UserID: user,
 		AmountMicros: 500, Reason: "support", Actor: "staff",
 	}, audit))
-	s.Require().NoError(shared.CreateCampaign(s.ctx, &store.Campaign{CustomerID: app, Name: "renewals", APIKey: "key", UserID: user}))
+	s.Require().NoError(shared.Campaigns.Insert(s.ctx, &store.Campaign{CustomerID: app, Name: "renewals", APIKey: "key", UserID: user}))
+	s.Require().NoError(shared.ScheduledTasks.Insert(s.ctx, &store.ScheduledTask{
+		ID: "reminder", CustomerID: app, UserID: user, Title: "Stretch", Instructions: "Remind them to stretch.",
+		StartLocal: time.Now(), Timezone: "UTC", State: store.ScheduledTaskActive,
+	}, 0))
 }
 
 // userRows is what the shared database holds of app's user: their own policy, the limits naming
@@ -311,9 +315,9 @@ type userRows struct {
 }
 
 func (s *ForgetUserSuite) userRows(app, user string) userRows {
-	shared := s.shards[0].DB()
+	shared := s.shards[0].GlobalDB()
 	var rows userRows
-	policy, err := s.shards[0].Policy(s.ctx, store.ScopeUser, store.UserScopeID(app, user))
+	policy, err := s.shards[0].Policies.Get(s.ctx, store.ScopeUser, store.UserScopeID(app, user))
 	s.Require().NoError(err)
 	rows.policy = policy.Quota != nil
 	rows.ownLimits, err = shared.NewSelect().Model((*store.Limit)(nil)).Where("app_id = ?", app).Where("level = ?", store.LevelUser).Count(s.ctx)
@@ -331,10 +335,10 @@ func (s *ForgetUserSuite) userRows(app, user string) userRows {
 func (s *ForgetUserSuite) snapshotted(shard int, app, user string) string {
 	id := "session-" + uuid.NewString()
 	now := time.Now().UTC()
-	s.Require().NoError(s.shards[shard].SaveSession(s.ctx, &store.AgentSession{
+	s.Require().NoError(s.shards[shard].Sessions.Upsert(s.ctx, &store.AgentSession{
 		ID: id, CustomerID: app, AgentName: "docs", UserID: user, CallerKind: "user", CreatedAt: now,
 	}))
-	s.Require().NoError(s.shards[shard].SaveBranchMessages(s.ctx, []store.AgentBranchMessage{{
+	s.Require().NoError(s.shards[shard].BranchMessages.UpsertMany(s.ctx, []store.AgentBranchMessage{{
 		SessionID: id, OriginalMessageID: "m-" + uuid.NewString(), CustomerID: app, ResponseID: "second",
 		SwitchID: "switch", ChatCreatedAt: now, AuthorID: user, Message: map[string]any{"text": "hello from " + user},
 	}}))
@@ -450,6 +454,27 @@ func (s *ForgetUserSuite) TestForgettingAUserClearsTheirCountersPolicyAndLimits(
 	s.Contains(out, "shared database: 1 policies and 1 limits deleted; 1 resets, 1 grants and 1 campaigns rewritten")
 }
 
+func (s *ForgetUserSuite) TestForgettingAUserDropsTheirPolicyARouterCached() {
+	router, err := store.OpenShards(store.Options{
+		DSN: s.settings.Postgres.DSN, ShardDSN: s.settings.Postgres.ShardDSN, Shards: s.settings.Postgres.Shards,
+		Redis: store.Redis{Address: s.settings.Redis.Addr},
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(router.Close()) })
+	s.settingsOf(s.app, person)
+	cached, err := router.Policies.Get(s.ctx, store.ScopeUser, store.UserScopeID(s.app, person))
+	s.Require().NoError(err)
+	s.Require().NotNil(cached.Quota)
+
+	s.forget(s.app, person)
+
+	s.Eventually(func() bool {
+		read, err := router.Policies.Get(s.ctx, store.ScopeUser, store.UserScopeID(s.app, person))
+		s.Require().NoError(err)
+		return read.Quota == nil
+	}, 5*time.Second, 10*time.Millisecond, "the router still answers the policy the user had")
+}
+
 func (s *ForgetUserSuite) TestTheAuditRowNeverNamesTheUser() {
 	s.recorded(0, s.app, person, 100)
 	s.settingsOf(s.app, person)
@@ -459,7 +484,7 @@ func (s *ForgetUserSuite) TestTheAuditRowNeverNamesTheUser() {
 
 	replacement := s.forgottenAs(out)
 	s.NotContains(out, person)
-	entries, err := s.shards[0].AuditEntries(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
+	entries, err := s.shards[0].AuditEntries.Select(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 1)
 	entry := entries[0]
@@ -473,8 +498,9 @@ func (s *ForgetUserSuite) TestTheAuditRowNeverNamesTheUser() {
 		counts[change.Field] = change.After.(float64)
 	}
 	s.Equal(map[string]float64{
-		"requests": 1, "branch_messages": 1, "events": 1, "windows": 4, "redis_keys": 1,
-		"policies_deleted": 1, "limits_deleted": 1, "resets": 1, "grants": 1, "campaigns": 1,
+		"requests": 1, "call_legs": 0, "branch_messages": 1, "agent_logs": 0, "events": 1, "windows": 4, "redis_keys": 1,
+		"policies_deleted": 1, "limits_deleted": 1, "resets": 1, "grants": 1, "campaigns": 1, "tasks_deleted": 1, "task_changes_redacted": 0,
+		"phones_unlinked": 0, "contacts_unlinked": 0, "channel_links_deleted": 0, "profiles_deleted": 0, "claims": 0,
 	}, counts)
 	var audits []ledger.ManageAudit
 	s.Require().NoError(s.service.Ledger.DB().NewSelect().Model(&audits).Where("action = ?", ledger.ActionForgetUser).Scan(s.ctx))
@@ -491,15 +517,17 @@ func (s *ForgetUserSuite) TestADryRunChangesNothing() {
 
 	out := s.forget(s.app, person, "--dry-run")
 
-	s.Equal("dry run, nothing is changed\nrequests: 2 rows\nbranch snapshots: 0 messages to delete\nusage service: 2 events, 4 windows\nredis: 8 keys\n"+
-		"shared database: 1 policies and 1 limits to delete; 1 resets, 1 grants and 1 campaigns to rewrite\n", out)
+	s.Equal("dry run, nothing is changed\nscheduled tasks: 1 to delete, 0 recorded changes to redact\nrequests: 2 rows\ncall legs: 0 rows\n"+
+		"branch snapshots: 0 messages to delete\nagent logs: 0 to delete\nusage service: 2 events, 4 windows\nredis: 8 keys\n"+
+		"shared database: 1 policies and 1 limits to delete; 1 resets, 1 grants and 1 campaigns to rewrite\n"+
+		"links: 0 phone links, 0 channel link codes and 0 profiles to delete; 0 contacts to unlink; 0 claimed guests to rewrite\n", out)
 	s.Equal(person, s.requests()[id].UserID)
 	s.Equal(person, s.events()[id].UserID)
 	s.Equal(len(usageservice.Intervals), s.windows(s.app, person))
 	s.Equal(int64(len(routers)), s.present(s.routers, routers))
 	s.Equal(int64(1), s.present(s.counters, counters))
 	s.Equal(before, s.userRows(s.app, person))
-	entries, err := s.shards[0].AuditEntries(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
+	entries, err := s.shards[0].AuditEntries.Select(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
 	s.Require().NoError(err)
 	s.Empty(entries)
 }
@@ -605,7 +633,7 @@ func (s *ForgetUserSuite) TestARunThatStoppedIsFinishedWithItsReplacement() {
 	s.Zero(s.present(s.counters, counters))
 	s.Equal(userRows{appLimits: 1, resetUsers: []string{replacement}, grantUsers: []string{replacement},
 		campaignUser: []string{replacement}}, s.userRows(s.app, person))
-	entries, err := s.shards[0].AuditEntries(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
+	entries, err := s.shards[0].AuditEntries.Select(s.ctx, s.app, store.AuditEntryFilter{ResourceType: store.AuditEndUser})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 1, "one audit row, for the run that completed")
 	s.Equal(replacement, entries[0].ResourceID)
@@ -642,4 +670,87 @@ func (s *ForgetUserSuite) TestForgettingAUserNeedsTheManageKey() {
 	err := s.runForget([]string{"forget-user", "--app", s.app, "--user", person, "--actor", "staff@example.com"}, &bytes.Buffer{})
 
 	s.ErrorContains(err, "ROUTER_USAGE_MANAGE_KEY")
+}
+
+func (s *ForgetUserSuite) TestForgettingAUserDeletesTheirScheduledTasks() {
+	s.recorded(0, s.app, person, 100)
+	s.Require().NoError(s.shards[0].StartDataCapture(s.ctx, s.app, time.Hour, time.Second))
+	s.settingsOf(s.app, person)
+	s.settingsOf("other-"+s.app, person)
+	s.Contains(s.forget(s.app, person, "--dry-run"), "\nscheduled tasks: 1 to delete, 1 recorded changes to redact\n")
+
+	out := s.forget(s.app, person)
+
+	s.Contains(out, "\nscheduled tasks: 1 deleted, 1 recorded changes redacted\nrequests: ", "the tasks go first, so none runs during the forget")
+	_, err := s.shards[0].ScheduledTasks.Get(s.ctx, s.app, "reminder")
+	s.ErrorIs(err, store.ErrNoScheduledTask)
+	_, err = s.shards[0].ScheduledTasks.Get(s.ctx, "other-"+s.app, "reminder")
+	s.Require().NoError(err, "the same user id in another app keeps theirs")
+}
+
+// reachedOf writes, for app's user, a call leg on each shard, an agent log, a phone link, a
+// channel link code, a contact map row linked to them and their profile.
+func (s *ForgetUserSuite) reachedOf(app, user, phone string) {
+	shared := s.shards[0]
+	for _, shard := range s.shards {
+		_, err := shard.ShardDB().NewInsert().Model(&store.CallLeg{CustomerID: app, UserID: user, CallType: "phone", CallID: "call-" + uuid.NewString(),
+			Vendor: "twilio", Direction: store.Outbound, LocalNumber: "+15550100", RemoteNumber: phone, DialedAt: time.Now()}).Exec(s.ctx)
+		s.Require().NoError(err)
+	}
+	s.Require().NoError(shared.AgentLogs.Insert(s.ctx, &store.AgentLog{CustomerID: app, UserID: user, Source: "agent", Severity: "info",
+		EventType: "turn", Message: "a turn"}))
+	s.Require().NoError(shared.UserPhones.Link(s.ctx, &store.UserPhone{CustomerID: app, UserID: user, Phone: phone}))
+	s.Require().NoError(shared.ChannelLinks.Insert(s.ctx, &store.ChannelLink{CustomerID: app, ConfigID: "agent", UserID: user,
+		ExpiresAt: time.Now().Add(time.Hour)}, func() (string, error) { return phone[len(phone)-6:], nil }))
+	s.Require().NoError(shared.ContactMapEntries.Upsert(s.ctx, &store.ContactMapEntry{CustomerID: app, ConfigID: "agent", Kind: "sms",
+		Address: phone, ConversationID: "conversation", UserID: user}))
+	s.Require().NoError(shared.Users.Insert(s.ctx, &store.User{CustomerID: app, ID: user, Kind: store.UserKindAuthenticated, Email: user}))
+}
+
+// namingRows counts, for each table that reachedOf writes, the rows of app naming user.
+func (s *ForgetUserSuite) namingRows(app, user string) map[string]int {
+	found := map[string]int{}
+	for _, shard := range s.shards {
+		count, err := shard.ShardDB().NewSelect().Model((*store.CallLeg)(nil)).Where("customer_id = ? AND user_id = ?", app, user).Count(s.ctx)
+		s.Require().NoError(err)
+		found["call_legs"] += count
+	}
+	for table, where := range map[string]string{
+		"agent_logs": "user_id = ?", "user_phones": "user_id = ?", "channel_links": "user_id = ?", "contact_map": "user_id = ?", "users": "id = ?",
+	} {
+		var count int
+		s.Require().NoError(s.shards[0].GlobalDB().QueryRowContext(s.ctx,
+			"SELECT count(*) FROM "+table+" WHERE customer_id = ? AND "+where, app, user).Scan(&count))
+		found[table] = count
+	}
+	return found
+}
+
+func (s *ForgetUserSuite) TestForgettingAUserReachesTheirCallLegsLogsLinksAndProfile() {
+	other := "other-" + s.app
+	s.recorded(0, s.app, person, 100)
+	s.reachedOf(s.app, person, "+15550199")
+	s.reachedOf(s.app, "grace", "+15550198")
+	s.reachedOf(other, person, "+15550199")
+	every := map[string]int{"call_legs": 2, "agent_logs": 1, "user_phones": 1, "channel_links": 1, "contact_map": 1, "users": 1}
+	s.Require().Equal(every, s.namingRows(s.app, person))
+
+	dry := s.forget(s.app, person, "--dry-run")
+
+	s.Contains(dry, "\ncall legs: 2 rows\n")
+	s.Contains(dry, "\nagent logs: 1 to delete\n")
+	s.Contains(dry, "\nlinks: 1 phone links, 1 channel link codes and 1 profiles to delete; 1 contacts to unlink; 0 claimed guests to rewrite\n")
+	s.Equal(every, s.namingRows(s.app, person), "a dry run changes nothing")
+
+	out := s.forget(s.app, person)
+
+	replacement := s.forgottenAs(out)
+	s.Contains(out, "\ncall legs: 2 rows rewritten\n")
+	s.Contains(out, "\nagent logs: 1 deleted\n")
+	s.Contains(out, "\nlinks: 1 phone links, 1 channel link codes and 1 profiles deleted; 1 contacts unlinked; 0 claimed guests rewritten\n")
+	s.Equal(map[string]int{"call_legs": 0, "agent_logs": 0, "user_phones": 0, "channel_links": 0, "contact_map": 0, "users": 0},
+		s.namingRows(s.app, person))
+	s.Equal(2, s.namingRows(s.app, replacement)["call_legs"], "the legs stay, as billed, on both shards")
+	s.Equal(every, s.namingRows(s.app, "grace"), "another user keeps theirs")
+	s.Equal(every, s.namingRows(other, person), "the same user id in another app keeps theirs")
 }

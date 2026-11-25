@@ -252,7 +252,7 @@ func (s *MessageHooksSuite) TestAHookIsTakenBeforeItsVoiceRecordingIsHeard() {
 func (s *MessageHooksSuite) TestAVoiceRecordingForAConfigInARegionThatHearsNothingIsSaidSo() {
 	worker := s.workerOf(s.customerID())
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(), Mode: "text", Region: pricing.RegionEU}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	var fetched atomic.Int32
 	recording := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fetched.Add(1)
@@ -298,7 +298,8 @@ func (s *MessageHooksSuite) TestAVoiceRecordingToASpeechToSpeechSessionIsNotHear
 		s.recordedMessage("", "is it fixed?", s.recordingAt("hello "+s.utils.uuid()))))
 
 	s.Require().Eventually(func() bool {
-		return strings.Contains(s.logged.String(), `msg="could not answer a message" channel=`+s.channelID)
+		return strings.Contains(s.logged.String(), `msg="could not answer a message" channel=`+s.channelID+" session=") &&
+			loggedOneLine("ERROR", "could not answer a message", s.customerID()).MatchString(s.logged.String())
 	}, settleFor, 10*time.Millisecond, "the session was never asked")
 	s.Never(func() bool { return len(s.sttRowsSince(since)) > 0 }, time.Second, 10*time.Millisecond, "a recording to a speech-to-speech session was heard")
 }

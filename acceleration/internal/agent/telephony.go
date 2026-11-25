@@ -12,9 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // The tools the agent knows how to run. A tool the model asks for by any other name is
@@ -214,6 +217,38 @@ func DestinationTransfer(destinations []Destination) harness.Tool {
 // would never hear about.
 type ToolRunner interface {
 	Run(ctx context.Context, call llm.ToolCall) ([]llm.ContentPart, error)
+}
+
+// ToolReport is what a runner says of a call for the call's log line ("a tool call came back"),
+// where the error it returned cannot say it: a connector call cut off at its binding's timeout
+// returns words for the model and no error.
+type ToolReport struct {
+	// Connector is the connector the tool belongs to.
+	Connector string
+	// ErrorCode is how the call failed, "" when it answered.
+	ErrorCode string
+	// Error is what the failure said, with what the runner redacts already taken out. The line
+	// logs it in place of the returned error's text, which can echo a token.
+	Error string
+	// Client is set when the caller's own code ran the tool and failed it. What it said of the
+	// failure is the caller's, and can carry its users' data, so the line leaves it out.
+	Client bool
+}
+
+type toolReportKey struct{}
+
+// WithToolReport is ctx keeping what a runner reports of the call it is handed for (ReportTool).
+func WithToolReport(ctx context.Context) (context.Context, *ToolReport) {
+	report := &ToolReport{}
+	return context.WithValue(ctx, toolReportKey{}, report), report
+}
+
+// ReportTool keeps report for the line of the call ctx was handed to a runner for. A context
+// made by no WithToolReport keeps nothing.
+func ReportTool(ctx context.Context, report ToolReport) {
+	if kept, ok := ctx.Value(toolReportKey{}).(*ToolReport); ok {
+		*kept = report
+	}
 }
 
 // ToolPolicy is what one tool asks of the agent (Options.ToolPolicy). The zero value asks
@@ -554,12 +589,18 @@ func (a *Agent) prepareTool(requested harness.ToolRequested) (context.Context, c
 	cancels := telephonyTool(requested.Call.Name) || requested.Call.Name == toolEndCall ||
 		a.options.ToolPolicy != nil && a.options.ToolPolicy(a.approvedName(requested.Call)).Cancels
 	a.mu.Lock()
-	parent := a.ctx
-	if parent == nil {
-		parent = context.Background()
-	}
+	parent := a.ctxLocked()
 	if requester := a.requesterLocked(); requester != (Requester{}) {
 		parent = WithRequester(parent, requester)
+	}
+	// A call is the scheduled task's when its reply is known to be (scheduledReply), or when
+	// the last thing is a scheduled turn and the call's reply is not known to be the one that
+	// answered the caller (answerReply).
+	known := requested.TurnID != ""
+	scheduled := a.scheduled && !(known && requested.TurnID == a.answerReply) ||
+		known && requested.TurnID == a.scheduledReply
+	if scheduled {
+		parent = WithScheduledCall(parent)
 	}
 	ctx, cancel := context.WithCancel(parent)
 	if a.toolCancels == nil {
@@ -577,12 +618,7 @@ func (a *Agent) prepareTool(requested harness.ToolRequested) (context.Context, c
 	if a.toolScheduled == nil {
 		a.toolScheduled = map[string]bool{}
 	}
-	// A call is the scheduled task's when its reply is known to be (scheduledReply), or when
-	// the last thing is a scheduled turn and the call's reply is not known to be the one that
-	// answered the caller (answerReply).
-	known := requested.TurnID != ""
-	a.toolScheduled[requested.Call.ID] = a.scheduled && !(known && requested.TurnID == a.answerReply) ||
-		known && requested.TurnID == a.scheduledReply
+	a.toolScheduled[requested.Call.ID] = scheduled
 	if a.toolsRunning == nil {
 		a.toolsRunning = map[string]string{}
 	}
@@ -614,6 +650,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 		a.mu.Unlock()
 	}()
 	began := time.Now()
+	ctx, report := WithToolReport(ctx)
 	started := ToolStarted{ID: requested.Call.ID, TurnID: requested.TurnID, Tool: requested.Call.Name, Arguments: requested.Call.Arguments, StartedAt: time.Now().UTC()}
 	started.Product, started.SDK = toolScope(requested.Call)
 	started.PreSpeech = a.preSpeech([]llm.ToolCall{requested.Call})
@@ -640,7 +677,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 	a.mu.Unlock()
 	// ran is whether the tool was called: the router refuses some calls itself, before it.
 	// asked is whether it was answered with its approval question instead.
-	var ran, asked bool
+	var ran, asked, confirmed bool
 	// What the caller said and the tools returned is checked against the whole call, not the
 	// history the model reads: compaction summarises that, and a value it summarised away
 	// was still said or returned.
@@ -651,7 +688,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 		err = refusal
 	} else if requested.Call.Name == confirmTool && a.offersConfirm() {
 		ran = true
-		parts, err = a.confirm(ctx, requested.Call)
+		parts, confirmed, err = a.confirm(ctx, requested.Call)
 	} else if earlier, repeated := answeredSinceCaller(harness.WithoutNotes(a.History()), requested.Call, a.connected()); repeated {
 		parts = llm.TextParts(alreadyCalled + earlier)
 	} else if refused, again := refusedBefore(harness.WithoutNotes(a.History()), requested.Call); again {
@@ -660,7 +697,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 		parts = llm.TextParts(unfoundIDResult(key, value, known))
 	} else if blank := blankRequired(tool, requested.Call.Arguments); len(blank) > 0 && !telephonyTool(tool.Name) {
 		parts = llm.TextParts(fmt.Sprintf(leftBlank, requested.Call.Name, strings.Join(blank, ", ")))
-	} else if to, unsourced := unsourcedTransfer(record, requested.Call, told); unsourced && len(a.options.Destinations) == 0 {
+	} else if to, unsourced := unsourcedTransfer(record, requested.Call, told, a.transferCallersTool()); unsourced && len(a.options.Destinations) == 0 {
 		parts = llm.TextParts(unsourcedTransferResult(to))
 	} else if key, value, heard, unheard := unheardNumber(record, requested.Call, told); unheard {
 		parts = llm.TextParts(unheardResult(key, value, heard))
@@ -714,8 +751,18 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 	a.mu.Unlock()
 	took := time.Since(began)
 	toolCallSeconds.WithLabelValues(outcome).Observe(took.Seconds())
-	a.logger.Info("a tool call came back", "tool", requested.Call.Name, "tool_call", requested.Call.ID,
-		"turn", requested.TurnID, "duration_ms", took.Milliseconds(), "outcome", outcome)
+	var approval []any
+	if asked {
+		// Answered with its question, the call is not run here: the confirmation runs it.
+		approval = []any{"approval", "asked"}
+	}
+	// The confirmation's line is about the answer; the approved run's own line carries the
+	// connector and the error, so a count by either does not count a run twice.
+	fields := a.loggedTool(*report, err)
+	if confirmed {
+		fields = a.loggedAnswer(err)
+	}
+	a.logToolBack(requested.Call, fields, took, outcome, approval...)
 
 	a.emitter.Send(ToolRan{
 		ID:        requested.Call.ID,
@@ -739,7 +786,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 			if err == nil {
 				a.askedApproval(requested.Call.ID)
 				if bye := a.goodbyeOf(requested.Call.ID, false); bye != nil {
-					go a.hangUpAfter(bye)
+					goroutine.Go(a.ctx, func() { a.hangUpAfter(bye) })
 				}
 			} else {
 				a.goodbyeOf(requested.Call.ID, true)
@@ -759,11 +806,11 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 			a.goodbyeOf(requested.Call.ID, true)
 		}
 		if left {
-			go func() {
+			goroutine.Go(a.ctx, func() {
 				if err := a.Close(); err != nil {
 					a.logger.Error("could not leave after transferring", "error", err)
 				}
-			}()
+			})
 		}
 		return
 	}
@@ -784,11 +831,58 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 	}
 	// Closing waits for the goroutine this is running on, so the agent cannot end its own
 	// call from inside the loop handling the request to end it.
-	go func() {
+	goroutine.Go(a.ctx, func() {
 		if err := a.Close(); err != nil {
 			a.logger.Error("could not leave after transferring", "error", err)
 		}
-	}()
+	})
+}
+
+// loggedTool is what "a tool call came back" says beside the agent logger's customer, session and
+// call: whose agent it was, under the keys "model call timing" names them with, the connector
+// the tool belongs to, and whether it failed and how. A call fails when it returned err or
+// its runner reported a failure (ToolReport); error_code is the runner's, else timeout or
+// cancelled for a context that ended, else error. The error a connector call returned is
+// never logged, only what its runner reported, redacted; nor is the one a caller's own tool
+// failed with (ToolReport.Client). What a call was asked and answered is not logged: it is the
+// caller's and its users'.
+func (a *Agent) loggedTool(report ToolReport, err error) []any {
+	fields := []any{"app_id", a.options.CustomerID, "agent_id", a.options.AgentID}
+	if report.Connector != "" {
+		fields = append(fields, "connector", report.Connector)
+	}
+	code, message := report.ErrorCode, report.Error
+	switch {
+	case code != "" || err == nil:
+	case errors.Is(err, context.DeadlineExceeded):
+		code = routing.ErrorTimeout
+	case errors.Is(err, context.Canceled):
+		code = routing.ErrorCancelled
+	default:
+		code = "error"
+	}
+	if err != nil && report.Connector == "" && !report.Client {
+		message = err.Error()
+	}
+	fields = append(fields, "success", code == "", "error_code", code)
+	if message != "" {
+		fields = append(fields, "error", store.SafeLogText(message))
+	}
+	return fields
+}
+
+// loggedAnswer is loggedTool for a confirmation: who, and whether the answer failed; no
+// connector, error_code or error, which belong to the line of the run it approved.
+func (a *Agent) loggedAnswer(err error) []any {
+	return []any{"app_id", a.options.CustomerID, "agent_id", a.options.AgentID, "success", err == nil}
+}
+
+// logToolBack writes "a tool call came back" for call, which ran in its TurnID for took and
+// ended as outcome, with more fields after the identity and result fields every such line has.
+func (a *Agent) logToolBack(call llm.ToolCall, identity []any, took time.Duration, outcome string, more ...any) {
+	fields := append(identity, "tool", call.Name, "tool_call", call.ID, "turn", call.TurnID,
+		"duration_ms", took.Milliseconds(), "outcome", outcome)
+	a.logger.Info("a tool call came back", append(fields, more...)...)
 }
 
 // toolOutcome names how a tool call ended: cancelled, failed, refused by the router before
@@ -839,7 +933,7 @@ func (a *Agent) callTool(ctx context.Context, call llm.ToolCall) ([]llm.ContentP
 		return nil, false, err
 	}
 	if a.native() && (call.Name == delegateSkill || call.Name == cancelSkill) {
-		return a.nativeDelegate(call)
+		return a.nativeDelegate(ctx, call)
 	}
 
 	if telephonyTool(call.Name) {
@@ -923,6 +1017,15 @@ func (a *Agent) refuseCallLocked(id string, why error) {
 		a.refusedCalls = map[string]error{}
 	}
 	a.refusedCalls[id] = why
+}
+
+// transferCallersTool is Options.CallersTool for a transfer's number, nil when Destinations
+// are set: a transfer then goes to a destination by name, never to a number a tool gave.
+func (a *Agent) transferCallersTool() func(string) bool {
+	if len(a.options.Destinations) > 0 {
+		return nil
+	}
+	return a.options.CallersTool
 }
 
 // offeredTool is the tool called name as the model is offered it now, the native model's
@@ -1351,7 +1454,7 @@ func (a *Agent) resolveToolLocked(call llm.ToolCall, parts []llm.ContentPart, ho
 		}
 		if hold.answered {
 			// On the caller's side for the provider's sake, and said by nobody on the call.
-			message = llm.Message{Role: llm.User, Typed: true}
+			message = llm.Message{Role: llm.User, Typed: true, Router: true}
 			parts = append(llm.TextParts(fmt.Sprintf(lateResult, call.Name, call.ID)), parts...)
 			late = true
 		}

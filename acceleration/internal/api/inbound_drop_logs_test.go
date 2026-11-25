@@ -109,10 +109,10 @@ func (s *SlackChannelSuite) TestAnEventForAProviderAppOfAConnectorWithoutAChanne
 	record.SigningSecretSealed, err = s.sealer.SealWithAAD(secret, providerAppAAD(record.CustomerID, "github", appID))
 	s.Require().NoError(err)
 	record.SigningKEKVersion = s.sealer.CurrentVersion()
-	_, err = s.store.PutConnectorOAuthClient(context.Background(), record)
+	_, err = s.store.ConnectorOAuthClients.Upsert(context.Background(), record)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() {
-		s.Require().NoError(s.store.DeleteConnectorOAuthClient(context.Background(), s.customerID(), "github", core.ClientCustomer))
+		s.Require().NoError(s.store.ConnectorOAuthClients.Delete(context.Background(), s.customerID(), "github", core.ClientCustomer))
 	})
 	before := len(s.logged.String())
 

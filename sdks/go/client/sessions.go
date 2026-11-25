@@ -20,6 +20,10 @@ import (
 	"github.com/GetStream/Vision-Agents/sdks/go/tools"
 )
 
+// ErrNoCall is a session's call read when the session has none: it is unknown, incognito, or
+// its first call is not written yet.
+var ErrNoCall = errors.New("client: the session has no call")
+
 // SessionOptions is what a conversation is opened with, beyond which agent holds it.
 //
 // Everything here is the caller's own decision about this one conversation: what to call it
@@ -32,7 +36,7 @@ type SessionOptions struct {
 	// searched.
 	Title       string
 	Description string
-	// ProjectID groups conversations, and is carried as a cost label too.
+	// ProjectID groups conversations, and is a cost label too when a backend names it.
 	ProjectID string
 	// Custom is the caller's own labels.
 	Custom map[string]any
@@ -389,16 +393,20 @@ func (s *Sessions) Tokens(ctx context.Context, id string) (*acceleration.CallTok
 	return got.JSON200, nil
 }
 
-// Timeline is one conversation's exchanges, with what was said in each and how long the
-// answer took to start, its transcription, model and voice timings kept apart. The timings
-// are kept for an hour. Only a backend may ask.
+// Timeline is the exchanges of a session's newest call, with what was said in each and how
+// long the answer took to start, its transcription, model and voice timings kept apart. The
+// timings are kept for an hour. Only a backend may ask; ErrNoCall when the session has no call.
 func (s *Sessions) Timeline(ctx context.Context, id string) ([]acceleration.TimelineEntry, error) {
 	api, err := s.client.api()
 	if err != nil {
 		return nil, err
 	}
+	call, err := s.newestCall(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 
-	got, err := api.GetCallTimelineWithResponse(ctx, id)
+	got, err := api.GetCallTimelineWithResponse(ctx, call)
 	if err != nil {
 		return nil, fmt.Errorf("client: reading the timeline of %s: %w", id, err)
 	}
@@ -408,16 +416,21 @@ func (s *Sessions) Timeline(ctx context.Context, id string) ([]acceleration.Time
 	return *got.JSON200, nil
 }
 
-// Decisions is what one conversation decided, oldest first: why the agent waited rather than
-// answering, why it read something as not meant for it, why it stopped mid-sentence. They are
-// kept for an hour. Only a backend may ask.
+// Decisions is what a session's newest call decided, oldest first: why the agent waited
+// rather than answering, why it read something as not meant for it, why it stopped
+// mid-sentence. They are kept for an hour. Only a backend may ask; ErrNoCall when the session
+// has no call.
 func (s *Sessions) Decisions(ctx context.Context, id string) ([]acceleration.CallEvent, error) {
 	api, err := s.client.api()
 	if err != nil {
 		return nil, err
 	}
+	call, err := s.newestCall(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 
-	got, err := api.GetCallEventsWithResponse(ctx, id, nil)
+	got, err := api.GetCallEventsWithResponse(ctx, call, nil)
 	if err != nil {
 		return nil, fmt.Errorf("client: reading the decisions of %s: %w", id, err)
 	}
@@ -425,6 +438,27 @@ func (s *Sessions) Decisions(ctx context.Context, id string) ([]acceleration.Cal
 		return nil, failure("reading the decisions of "+id, got.HTTPResponse, got.Body)
 	}
 	return *got.JSON200, nil
+}
+
+// newestCall is the id of session id's newest call. A session starts a new call each time
+// voice is started or stopped on it.
+func (s *Sessions) newestCall(ctx context.Context, id string) (string, error) {
+	api, err := s.client.api()
+	if err != nil {
+		return "", err
+	}
+
+	got, err := api.ListCallsWithResponse(ctx, &acceleration.ListCallsParams{SessionId: &id, Limit: pointer(1)})
+	if err != nil {
+		return "", fmt.Errorf("client: reading the calls of %s: %w", id, err)
+	}
+	if got.JSON200 == nil {
+		return "", failure("reading the calls of "+id, got.HTTPResponse, got.Body)
+	}
+	if len(*got.JSON200) == 0 {
+		return "", fmt.Errorf("%w: %s", ErrNoCall, id)
+	}
+	return (*got.JSON200)[0].Id, nil
 }
 
 // Responses is a session's turns, read back without holding the conversation.

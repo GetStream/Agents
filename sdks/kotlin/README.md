@@ -55,7 +55,7 @@ voice.join()
 agents.disconnect()
 ```
 
-`StreamAgents(apiKey = ...)` reaches Stream's hosted router in us-east4; pass `url` for another router. For another
+`StreamAgents(apiKey = ...)` reaches Stream's hosted router in the nearest healthy region; pass `url` for another router. To pin one
 region, pass `url = Backend.regionUrl("europe-west4")`. A router
 running locally with nothing in front of it is reached by customer id instead:
 `StreamAgents(url = "http://localhost:8080", customerId = "acme")`. Pass `apiKey` beside it and
@@ -185,6 +185,22 @@ Tools are answered inside `AgentSession` whether or not anybody collects `events
 `tool_cancel` cancels the coroutine running one. `displayTitle` is what the people in the
 conversation see while it runs, and `executor = AgentTool.Executor.Client` shows the call as
 waiting on the person's device.
+
+A tool that throws is reported to the model, because the model is mid-sentence waiting for it and
+can only say something useful if it is told. What it is told is the error's message, cut to 1,024
+characters, so a tool may throw words meant for it. The model may repeat them to the person and
+the conversation keeps them, and an error from a library a tool calls can name an internal host, a
+table or a value from a record. To pass on only the words you wrote, throw those as an error of
+your own and say something plain for anything else:
+
+```kotlin
+class ToolError(message: String) : Exception(message) // thrown with words meant for the model
+
+agents.onToolError = { call, error -> if (error is ToolError) error.message.orEmpty() else "${call.name} failed" }
+```
+
+It covers every session of that `StreamAgents`, and a hook that throws tells the model only that
+the tool failed.
 
 A running conversation can be given more tools and have them taken back, such as the ones a card
 shown in it brings:
@@ -416,18 +432,24 @@ The unit tests are plain JVM tests, run by the Android Gradle plugin with no emu
 ## Releasing
 
 `.github/workflows/publish-sdk-kotlin.yml` publishes `io.getstream:stream-agents-android-core`
-to `https://stream-io-repo.com` from `release-kotlin-*` branches only. `version` in
-`gradle.properties` must match the branch:
+to `https://stream-io-repo.com` with each release of the repository, and from `release-kotlin-*`
+branches, whose `version` in `gradle.properties` must match the branch:
 
+- **With the repository:** publishing a GitHub release tagged `vX.Y.Z` or `X.Y.Z` publishes
+  `X.Y.Z` from the tagged commit, whatever `gradle.properties` says, and tags the commit
+  `sdk-kotlin-vX.Y.Z`. The commit must be on `main`. Nothing is published for a pre-release, for
+  another tag (`sdk-js-v*`, `sdks/go/v*`, `X.Y.Z-rc.1`), or when `X.Y.Z` is not newer than the
+  last release or already published. A pre-release made a release later publishes nothing.
 - **A snapshot:** push a branch named `release-kotlin-X.Y.Z-SNAPSHOT` that sets
   `version=X.Y.Z-SNAPSHOT`. Each push publishes `X.Y.Z-<yyyyMMddHHmm>-SNAPSHOT`, which expires
   after 7 days. `X.Y.Z` must be newer than the last release.
-- **A release:** open a pull request to `main` from `release-kotlin-X.Y.Z` that sets
-  `version=X.Y.Z`. It fails unless `X.Y.Z` is newer than the last release and not already
-  published. Merging it publishes the release and tags the commit `sdk-kotlin-vX.Y.Z`.
+- **A Kotlin-only release,** such as a patch between releases of the repository: open a pull
+  request to `main` from `release-kotlin-X.Y.Z` that sets `version=X.Y.Z`. It fails unless `X.Y.Z`
+  is newer than the last release and not already published. Merging it publishes the release and
+  tags the commit `sdk-kotlin-vX.Y.Z`. It makes no GitHub release.
 
 Other merges into `main` publish nothing, even one that sets a new `version`: only the merge of a
 pull request from a `release-kotlin-X.Y.Z` branch publishes. If a release merge's run says nothing
 is published, re-run all its jobs: the lookup of its pull request can lag right after the merge.
 
-There is no GitHub release: publishing one starts the Python release, `release.yml`.
+The last release is the highest `sdk-kotlin-v*` tag.

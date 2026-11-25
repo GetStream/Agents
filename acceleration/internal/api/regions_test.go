@@ -387,7 +387,7 @@ func (s *RegionsSuite) TestARefusedSyncStoresNothing() {
 	s.Equal(http.StatusBadRequest, status)
 	_, stored := s.named(name)
 	s.False(stored)
-	_, kept, err := s.store.KnowledgePlace(context.Background(), s.customerID(), name)
+	_, kept, err := s.store.KnowledgeNamespaces.GetPlace(context.Background(), s.customerID(), name)
 	s.Require().NoError(err)
 	s.False(kept, "its knowledge base was never made")
 }

@@ -31,7 +31,6 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/api"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/billable"
@@ -103,7 +102,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/ttsrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/twiliosig"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/users"
 	"github.com/GetStream/Vision-Agents/acceleration/prices"
 )
 
@@ -151,7 +149,9 @@ const (
 	// A hosted router keeps its keys wrapped, so this is refused beside a KMS setting.
 	devKEKEnvVar = "ROUTER_DEV_KEK"
 	// setAKeyring is what a refusal for a missing keyring tells the operator to set.
-	setAKeyring = "set " + devKEKEnvVar + " on a laptop or in CI, or " + authKEKEnvVar + "_V1" +
+	// A compose user meets it first, so it says what the key is and where compose reads it.
+	setAKeyring = "set " + devKEKEnvVar + " on a laptop or in CI (once, to any random string such as " +
+		"`openssl rand -hex 32`, kept for good; compose reads it from .env), or " + authKEKEnvVar + "_V1" +
 		authKEKWrappedSuffix + " with auth.kms_key (ROUTER_AUTH_KMS_KEY) on a hosted router"
 	shutdownGrace     = 10 * time.Second
 	readHeaderTimeout = 10 * time.Second
@@ -172,12 +172,19 @@ const (
 	// runs first, and the HTTP drain gets the rest of shutdownGrace, so both fit inside the
 	// orchestrator's termination grace period.
 	phoneHangupGrace = 5 * time.Second
+	// legFlushTimeout bounds the last write of the call legs the leg sweep still holds, once
+	// the HTTP and session drains are over: one insert a leg, of at most a few, normally.
+	legFlushTimeout = 5 * time.Second
 	// usageDrainTimeout is how long the usage writer has to write what is queued once
 	// everything that records has stopped: it starts after the HTTP drain, any session drain
 	// and sessions.Shutdown, and counts none of them. What is still queued after it is lost,
 	// and logged in full; what a kill at the end of the pod's termination grace period finds
 	// queued first is lost without a log line.
 	usageDrainTimeout = 15 * time.Second
+	// serverCloseTimeout bounds waiting for the API server's background work once it is
+	// cancelled. Nothing in it waits on anything but the cancel, so this only bounds a Redis
+	// client that does not let go of a subscription; short, on sentryFlushTimeout's reasoning.
+	serverCloseTimeout = 2 * time.Second
 )
 
 // usage is what the binary does besides serving.
@@ -185,9 +192,12 @@ const usage = `usage: router [--config path] [command]
 
   serve                 serve the API (the default)
   keys create           mint a credential for an app, printing the secret once
+  keys revoke           stop one of an app's keys (--app, --key)
   replicate             copy another deployment's data here and follow its changes
   stream-apps           look after the Stream apps customers registered in app mode
+  conversations         look after the conversations kept in Stream Chat
   prices                read and check the price list (router prices for its commands)
+  opt-outs normalize    rewrite opt-outs stored before E.164 was enforced into E.164
   usage replay          write the usage rows a log says were lost, once each (--from path)
   usage reship          send this shard's shipped or refused rows to the usage service again (--since, --rejected)
   usage storage         record the last hour of every knowledge base's size, once each (hourly, one job per turbopuffer key)
@@ -271,8 +281,12 @@ func dispatchCommand(command string, args []string, settings config.Config, logg
 		return runReplicate(args, settings, logger)
 	case "stream-apps":
 		return runStreamApps(args, settings, logger)
+	case "conversations":
+		return runConversations(args, settings, logger)
 	case "prices":
 		return runPrices(args, settings, logger)
+	case "opt-outs":
+		return runOptOuts(args, settings, logger)
 	case "usage":
 		return runUsage(args, settings, os.Stdout)
 	case "help", "-h", "--help":
@@ -580,7 +594,7 @@ var errAPIKeyNeedsKeyring = errors.New("auth.mode=" + string(auth.APIKey) + " ne
 //
 // secrets is the keyring newSecretSealer built, so a start unwraps its keys once; nil
 // refuses api_key, and the keyring is never read again here.
-func newAuthenticator(ctx context.Context, settings config.Config, configs *appconfig.Store, secrets *auth.Sealer, logger *slog.Logger) (auth.Authenticator, error) {
+func newAuthenticator(ctx context.Context, settings config.Config, configs *store.Store, secrets *auth.Sealer, logger *slog.Logger) (auth.Authenticator, error) {
 	mode, err := auth.ParseMode(settings.Auth.Mode)
 	if err != nil {
 		return nil, err
@@ -613,7 +627,7 @@ func newAuthenticator(ctx context.Context, settings config.Config, configs *appc
 		return nil, errAPIKeyNeedsKeyring
 	}
 
-	return auth.New(mode, configs.Lookup(secrets))
+	return auth.New(mode, configs.APIKeys.Lookup(secrets))
 }
 
 func run(settings config.Config, logger *slog.Logger) error {
@@ -755,48 +769,13 @@ func run(settings config.Config, logger *slog.Logger) error {
 		return err
 	}
 
-	// What every request is measured against -- the key it presented, the app behind it,
-	// their policies and what they have configured -- read through Redis and the cache
-	// rueidis keeps beside it. Without Redis it is Postgres on every read, which is what
-	// this deployment did before the cache existed.
-	var configs *appconfig.Store
-	if pgStore != nil {
-		configs, err = appconfig.New(appconfig.Options{
-			Store:    pgStore,
-			Address:  settings.Redis.Addr,
-			Username: settings.Redis.Username,
-			Password: settings.Redis.Password,
-			Logger:   logger,
-		})
-		if err != nil {
-			return err
-		}
-		defer configs.Close()
-	}
+	configs := pgStore
 	// The keys customers keep for their own accounts at the vendors, read through the same cache
 	// and opened with the keyring they were sealed under. Without either, work is routed on the
 	// deployment's own keys alone.
 	var customerKeys routing.CustomerKeys
 	if configs != nil && secrets != nil {
-		customerKeys = providerkeys.NewKeyring(configs, secrets)
-	}
-
-	// Who each app is acting for, written down once per user rather than once per
-	// request: an LRU of the last few thousand this process saw, a key the replicas share
-	// in Redis, and the row underneath.
-	var endUsers *users.Recorder
-	if pgStore != nil {
-		endUsers, err = users.New(users.Options{
-			Store:    pgStore,
-			Address:  settings.Redis.Addr,
-			Username: settings.Redis.Username,
-			Password: settings.Redis.Password,
-			Logger:   logger,
-		})
-		if err != nil {
-			return err
-		}
-		defer endUsers.Close()
+		customerKeys = providerkeys.NewKeyring(configs.ProviderKeys, secrets)
 	}
 
 	// The activity record counts every request an app makes, by area and client, and writes
@@ -836,7 +815,13 @@ func run(settings config.Config, logger *slog.Logger) error {
 			forwarder.Wake()
 		}
 	}
-	policies, closeCounters, err := newPolicies(settings, configs, usageClient, holds, notified, logger)
+	// The sender posts the notices of the limits and the cost anomaly check, so it closes after both.
+	sender := noticeSender(settings, pgStore, logger)
+	if sender != nil {
+		sender.Start()
+		defer sender.Close()
+	}
+	policies, closeCounters, err := newPolicies(settings, configs, usageClient, holds, notified, sender, logger)
 	if err != nil {
 		return err
 	}
@@ -867,8 +852,10 @@ func run(settings config.Config, logger *slog.Logger) error {
 		defer stopSweeper()
 	}
 
-	// One router of the deployment checks every organization's spend for a jump each hour.
-	if anomalies := costAnomalies(settings, pgStore, logger); anomalies != nil {
+	// One router of the deployment checks every organization's spend for a jump each hour, posts
+	// the day before's activity digest each day, and deletes the activity past its keep each day.
+	// It runs on every router with a database: without Slack settings it only deletes.
+	if anomalies := costAnomalies(pgStore, sender, logger); anomalies != nil {
 		anomalies.Start()
 		defer anomalies.Close()
 	}
@@ -1039,7 +1026,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		}
 		var models routing.ModelResolver
 		if configs != nil {
-			models = llmrouter.NewCustomModels(configs, secrets, settings.Models.PrivateEndpoints)
+			models = llmrouter.NewCustomModels(pgStore, secrets, settings.Models.PrivateEndpoints)
 		}
 		thinkers := llmrouter.DefaultRegistry()
 		if settings.MockProviders {
@@ -1075,6 +1062,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 			Registry: stsrouter.DefaultRegistry(),
 			Store:    pgStore,
 			Live:     liveClient,
+			Quota:    limiter,
 			Gate:     gate,
 			Pricer:   prices,
 			Writer:   usageWriter,
@@ -1220,6 +1208,13 @@ func run(settings config.Config, logger *slog.Logger) error {
 		// leg whose row was lost is recorded again. Months of numbers and of 10DLC campaigns are
 		// billed by jobs of their own (router usage numbers, router usage dlc).
 		go telephony.RunLegSweep(ctx, legSweepEvery)
+		// Deferred here, it runs after the drain and sessions.Shutdown, so the legs a webhook or
+		// a session still kept get their last write, and before the usage writer closes.
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), legFlushTimeout)
+			defer cancel()
+			telephony.StopLegSweep(ctx)
+		}()
 		go checkCallHook(ctx, settings, logger)
 		startPhoneSweeper(ctx, telephony, logger)
 	}
@@ -1300,9 +1295,10 @@ func run(settings config.Config, logger *slog.Logger) error {
 			LLM:      streams.LLM,
 			// Speech is what an audio simulation needs and a text one does not, so it is
 			// passed where it exists rather than required.
-			TTS:    streams.TTS,
-			STT:    streams.STT,
-			Logger: logger,
+			TTS:      streams.TTS,
+			STT:      streams.STT,
+			Activity: activityRecord,
+			Logger:   logger,
 		})
 		if err != nil {
 			return err
@@ -1319,7 +1315,8 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// Bringing a voice needs somewhere to keep the recordings, a place to record them and
 	// at least one provider willing to be taught. Missing any of those, the voice paths
 	// say so rather than half-working.
-	voiceService, err := buildVoices(configs, bucket, routing.NewRecorderOn(routing.TTS, usageWriter, prices, logger), logger)
+	voiceService, err := buildVoices(configs, bucket, routing.NewRecorderOn(routing.TTS, usageWriter, prices, logger), gate,
+		capabilities[routing.TTS].Providers, logger)
 	if err != nil {
 		return err
 	}
@@ -1487,8 +1484,6 @@ func run(settings config.Config, logger *slog.Logger) error {
 		KnowledgeURLs:         pages,
 		KnowledgeFiles:        uploads,
 		Store:                 pgStore,
-		Configs:               configs,
-		Users:                 endUsers,
 		Activity:              activityRecord,
 		Live:                  liveClient,
 		Phone:                 telephony,
@@ -1510,6 +1505,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		Gate:                  dlcGate,
 		OpsKey:                settings.Auth.OpsKey,
 		ManageKey:             settings.Auth.ManageKey,
+		ActivityKeys:          []string{settings.Auth.ActivityKey, settings.Auth.ActivityKeyPrevious},
 		Dispatch:              workers,
 		Quota:                 limiter,
 		RunsPerApp:            settings.Runs.ConcurrentPerApp,
@@ -1533,7 +1529,10 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// up, and so closed after it.
 	var forwarder *eventforward.Forwarder
 	if connectorSecrets != nil && pgStore != nil {
-		forwarder, err = eventforward.New(eventforward.Options{Store: pgStore, Secrets: connectorSecrets, Logger: logger})
+		// The activity record closes after it, so a forward it ends while it drains is counted.
+		forwarder, err = eventforward.New(eventforward.Options{
+			Store: pgStore, Secrets: connectorSecrets, Activity: activityRecord, Logger: logger,
+		})
 		if err != nil {
 			return err
 		}
@@ -1671,6 +1670,15 @@ func run(settings config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// Deferred here, it runs once stopServing below has stopped the HTTP servers, and before
+	// Redis is closed.
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), serverCloseTimeout)
+		defer cancel()
+		if err := server.Close(ctx); err != nil {
+			logger.Warn("the API server's background work did not end in time", "error", err)
+		}
+	}()
 	// Every router runs the worker that writes the queued inbound messages and hands each to
 	// the agent; a message is taken by one router at a time. The hand-off is the server's
 	// (AnswerQueued), and the server is built with the bridge (options.ChannelBridge), so the
@@ -1685,6 +1693,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	var scheduler *scheduling.Scheduler
 	if pgStore != nil && sessions != nil {
 		scheduler = scheduling.NewScheduler(pgStore, server.DeliverScheduledTask, logger)
+		scheduler.SetActivity(activityRecord)
 		// Before Start: a session the first delivery opens takes the kick then.
 		server.SetSchedulerKick(scheduler.Kick)
 		scheduler.Start(ctx)
@@ -1699,6 +1708,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 			Dialer:      campaign.NewPhoneDialer(telephony, sessions, pgStore, logger),
 			Transcripts: server,
 			Classifier:  campaign.NewClassifier(streams.LLM),
+			Activity:    activityRecord,
 			Logger:      logger,
 		})
 		if err != nil {
@@ -1982,7 +1992,7 @@ func pruneDataChanges(ctx context.Context, pgStore *store.Store, retention time.
 		} else if removed > 0 {
 			logger.Debug("pruned recorded changes", "rows", removed)
 		}
-		if removed, err := pgStore.PruneGrantUses(ctx); err != nil {
+		if removed, err := pgStore.LimitGrantUses.Prune(ctx); err != nil {
 			logger.Error("could not prune the uses of ended grants", "error", err)
 		} else if removed > 0 {
 			logger.Debug("pruned the uses of ended grants", "rows", removed)
@@ -2001,7 +2011,7 @@ func pruneScheduledTasks(ctx context.Context, pgStore *store.Store, logger *slog
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 	for {
-		runs, tasks, err := pgStore.PruneScheduledTasks(ctx)
+		runs, tasks, err := pgStore.ScheduledTasks.Prune(ctx)
 		if err != nil {
 			logger.Error("could not prune scheduled tasks", "error", err)
 		} else if runs > 0 || tasks > 0 {
@@ -2033,7 +2043,7 @@ func redactToolOutput(ctx context.Context, pgStore *store.Store, logger *slog.Lo
 	for {
 		var redacted int64
 		for range redactBatches {
-			rows, err := pgStore.RedactToolOutput(ctx, time.Now().UTC(), redactBatch)
+			rows, err := pgStore.ResponseItems.Redact(ctx, time.Now().UTC(), redactBatch)
 			if err != nil {
 				logger.Error("could not redact tool output", "error", err)
 				break
@@ -2065,6 +2075,12 @@ func openStore(ctx context.Context, settings config.Config) (*store.Store, error
 		DSN:      settings.Postgres.DSN,
 		ShardDSN: settings.Postgres.ShardDSN,
 		Shards:   settings.Postgres.Shards,
+		Redis:    store.Redis{Address: settings.Redis.Addr, Username: settings.Redis.Username, Password: settings.Redis.Password},
+		ShardRedis: store.Redis{
+			Address:  settings.Redis.Shard.Addr,
+			Username: settings.Redis.Shard.Username,
+			Password: settings.Redis.Shard.Password,
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -2075,7 +2091,7 @@ func openStore(ctx context.Context, settings config.Config) (*store.Store, error
 	}
 	// Seeded whether connectors are on or not: the built-ins are data with no secret in
 	// them, and a deployment that turns connectors on later finds them already there.
-	if err := pgStore.SeedConnectorDefinitions(ctx, providers.FS); err != nil {
+	if err := pgStore.ConnectorDefinitions.Seed(ctx, providers.FS); err != nil {
 		pgStore.Close()
 		return nil, err
 	}
@@ -2138,7 +2154,7 @@ func buildSessions(
 	settings config.Config,
 	streams *api.Streams,
 	pgStore *store.Store,
-	configs *appconfig.Store,
+	configs *store.Store,
 	liveClient *live.Client,
 	usageWriter *routing.Writer,
 	directory *node.Directory,
@@ -2198,7 +2214,6 @@ func buildSessions(
 		Logger:             logger,
 		Edge:               edgeFor(stream),
 		Transcript:         transcriptFor(settings.Agent.ChatTimings),
-		Configs:            configs,
 		Directory:          directory,
 		// The session's dispatcher shares the validate endpoint's transports, so each
 		// connection has one outbound client in the router.
@@ -2207,7 +2222,7 @@ func buildSessions(
 	if err := sandboxBroker(settings.CodeSandbox, liveClient, &options); err != nil {
 		return nil, err
 	}
-	options.Sandboxes = newSandboxes(settings, usageWriter, prices, keys, logger)
+	options.Sandboxes = newSandboxes(settings, usageWriter, prices, keys, policies, logger)
 	options.SandboxLimits = policies
 	options.ResumeHistories = policies
 	return session.NewManager(options)
@@ -2308,7 +2323,7 @@ func queueRedis(redis config.Redis, shared rueidis.Client) asynq.RedisConnOpt {
 }
 
 // newKnowledge is the knowledge base every lookup and write goes through, a backend in each
-// region the settings map, recorded by recorder, each write admitted by gate, and the place
+// region the settings map, recorded by recorder, each read and write admitted by gate, and the place
 // each base is kept recorded in pgStore: its region, and the customer's own account there when
 // keys holds their turbopuffer key for it as the base is first written. Nil without a
 // turbopuffer key of the deployment's.
@@ -2319,10 +2334,10 @@ func newKnowledge(settings config.Config, recorder *routing.Recorder, gate routi
 		logger.Debug("nothing will be looked up or written down", "error", err)
 		return nil
 	}
-	// A nil *store.Store in the interface would not be a nil interface.
+	// A nil *store.KnowledgeNamespaces in the interface would not be a nil interface.
 	var places metered.NamespacePlaces
 	if pgStore != nil {
-		places = pgStore
+		places = pgStore.KnowledgeNamespaces
 	}
 	base := metered.NewRegionalKnowledge(backends, recorder, gate, places)
 	if keys != nil {
@@ -2459,9 +2474,11 @@ func buildLibrary(logger *slog.Logger) *voices.Catalogue {
 // teach them to. The voice paths report the absence rather than failing halfway through an
 // upload.
 func buildVoices(
-	configs *appconfig.Store,
+	configs *store.Store,
 	bucket *blob.Bucket,
 	recorder *routing.Recorder,
+	gate routing.Gate,
+	models []routing.ProviderConfig,
 	logger *slog.Logger,
 ) (*voices.Service, error) {
 	if configs == nil || bucket == nil {
@@ -2489,6 +2506,8 @@ func buildVoices(
 		Bucket:   bucket,
 		Cloners:  cloners,
 		Recorder: recorder,
+		Gate:     gate,
+		Models:   models,
 		Logger:   logger,
 	})
 }
@@ -2515,7 +2534,7 @@ func newPrices(capabilities routing.Config, files store.PriceLoad, version strin
 func newActivePrices(ctx context.Context, pgStore *store.Store, capabilities routing.Config, fallback *pricing.List,
 	requireEntries bool, interval time.Duration, logger *slog.Logger) *pricing.Active {
 	return pricing.NewActive(ctx, pricing.ActiveOptions{
-		Source:         pgStore.PriceSource(),
+		Source:         pgStore.PriceEntries.Source(),
 		Fallback:       fallback,
 		Local:          routing.LocalItems(capabilities),
 		Interval:       interval,
@@ -2562,7 +2581,6 @@ func buildPhone(
 
 	service, err = phone.NewService(phone.ServiceOptions{
 		Registry:  vendors.Registry(vendorConfig),
-		Redis:     shared,
 		Store:     pgStore,
 		Apps:      phone.AppsOf(stream),
 		Recorder:  recorder,

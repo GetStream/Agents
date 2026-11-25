@@ -2,7 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:test/test.dart';
+import 'package:stream_agents/src/core/backend.dart' show sdkVersion;
 import 'package:stream_agents/src/core/core.dart';
+import 'package:yaml/yaml.dart';
 
 import 'support/fixtures.dart';
 import 'support/router.dart';
@@ -101,7 +103,14 @@ void main() {
       expect(request.header('X-Customer-Id'), 'acme');
       expect(request.header('Stream-Auth-Type'), 'jwt');
       expect(request.header('X-Stream-User-Id'), 'ada');
+      expect(request.header('X-Stream-Client'), 'stream-agents-dart-v$sdkVersion');
       expect(request.header('Authorization'), isNull);
+    });
+
+    test('names the release pubspec.yaml publishes', () {
+      final pubspec = loadYaml(File('pubspec.yaml').readAsStringSync()) as YamlMap;
+
+      expect(sdkVersion, pubspec['version']);
     });
 
     test('presents a token with the api key, asking the provider once while it holds', () async {
@@ -131,6 +140,7 @@ void main() {
       expect(request.header('X-Api-Key'), isNull);
       expect(request.header('Authorization'), 'Bearer token-1');
       expect(request.header('Stream-Auth-Type'), 'jwt');
+      expect(request.header('X-Stream-Client'), 'stream-agents-dart-v$sdkVersion');
       expect(request.header('X-Customer-Id'), isNull);
       expect(router.upgrades.single.query['token'], 'token-1');
     });
@@ -211,7 +221,7 @@ void main() {
       final backend = Backend(apiKey: 'key', token: () async => 'token');
 
       expect(backend.url, Backend.defaultUrl);
-      expect(backend.url.toString(), 'https://accelerate-us-east4.gcp.stream-io-api.com');
+      expect(backend.url.toString(), 'https://accelerate.gcp.stream-io-api.com');
     });
 
     test('a region is the hosted router there', () {
@@ -295,10 +305,8 @@ void main() {
         const SessionOptions(
           id: 'order-1042',
           agent: 'docs',
-          greeting: Greeting('Hello.', mode: GreetingMode.variation),
           title: 'Billing',
           projectId: 'Health',
-          modelOverwrites: ModelOverwrites(thinking: Thinking.high),
           returnUrl: 'com.example.app:/connected',
         ),
       );
@@ -306,10 +314,8 @@ void main() {
       expect(router.last('POST /v1/agents/sessions').json, {
         'id': 'order-1042',
         'agent': 'docs',
-        'greeting': {'text': 'Hello.', 'mode': 'variation'},
         'title': 'Billing',
         'project_id': 'Health',
-        'model_overwrites': {'thinking': 'high'},
         'return_url': 'com.example.app:/connected',
       });
       expect(session.id, 's1');
@@ -1440,6 +1446,7 @@ void main() {
       expect(minted.id, 'guest-1');
       final request = router.last('POST /v1/agents/guests');
       expect(request.header('Stream-Auth-Type'), 'anonymous');
+      expect(request.header('X-Stream-Client'), 'stream-agents-dart-v$sdkVersion');
       expect(request.header('Authorization'), isNull);
       expect(request.query['api_key'], 'key');
     });
@@ -1488,20 +1495,17 @@ void main() {
         }),
       );
 
-      final found = await agents
-          .router(config: 'healthcare')
-          .search('antibiotic guidance', const SearchOptions(depth: SearchDepth.fast, results: 3));
+      final found = await agents.router(config: 'healthcare').search('antibiotic guidance');
 
       expect(found.answer, 'Cefazolin.');
       expect(found.results.single.score, 0.5);
       expect(router.last('POST /v1/search').json, {
         'config_id': 'healthcare',
         'query': 'antibiotic guidance',
-        'options': {'depth': 'fast', 'results': 3},
       });
     });
 
-    test('sends no options at all when none were asked for', () async {
+    test('sends only the query when no config or tags are named', () async {
       router.answer(
         'POST /v1/search',
         const Answer(200, {'provider': 'exa', 'model': 'm', 'results': []}),

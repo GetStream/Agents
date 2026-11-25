@@ -14,7 +14,7 @@ import (
 // users of the same Redis (quota, live health, the config cache).
 const limiterPrefix = "connectors:rate_limit:"
 
-// callsPrefix starts every key Take counts a customer's direct calls under, apart from the
+// callsPrefix starts every key Admit counts a customer's direct calls under, apart from the
 // blocks under limiterPrefix.
 const callsPrefix = "connectors:proxy_calls:"
 
@@ -39,14 +39,15 @@ return 0
 
 // countScript adds one to KEYS[1], the count of one window, and returns the count. The call
 // that starts the count sets it to expire after ARGV[1] milliseconds. One script, so no count
-// is left without an expiry.
-var countScript = rueidis.NewLuaScript(`
+// is left without an expiry. Sent as EVAL beside Admit's GET, so the pipeline is one round
+// trip even on a Redis that has not cached it.
+const countScript = `
 local count = redis.call('INCR', KEYS[1])
 if count == 1 then
   redis.call('PEXPIRE', KEYS[1], ARGV[1])
 end
 return count
-`)
+`
 
 // Limiter keeps the providers' own rate limits. After a provider answers a call with 429 and
 // Retry-After, Block holds the call's key (ResolvedManifest.RateLimitKey) until then, and Wait
@@ -99,34 +100,62 @@ func (l *Limiter) Wait(ctx context.Context, key string) time.Duration {
 	return max(time.UnixMilli(until).Sub(l.now()), 0)
 }
 
-// Take counts one call on key in the window it falls in, and says how long until that window
-// ends when the call is over limit, zero when it may go. Windows are fixed: they start at
-// multiples of window, so every router sharing the Redis counts the same one. A refused call
-// is counted as well, which changes nothing: the window it is in is already over limit.
+// Admit says whether one call may go: blocked is how long blockKey is still held, as Wait
+// says, and over how long until the window of callsKey's count ends when the call is over
+// limit. Both are zero when it may go. The block and the count are one pipeline, one round
+// trip.
+//
+// A call that goes, or is over limit, is counted in the window it falls in, which changes
+// nothing for one over limit: the window it is in is already over. A blocked call is not: its
+// count is given back, a second round trip only then. Windows are fixed: they start at
+// multiples of window, so every router sharing the Redis counts the same one.
 //
 // Like Wait, it fails open: a nil Limiter, an empty key, a limit or window of zero, or an
-// unreachable Redis refuses nothing.
+// unreachable Redis refuses nothing. An empty blockKey is never held, and an empty callsKey,
+// a limit or a window of zero counts nothing.
 //
-// Example: limit 60, window a minute. The 61st call of 12:00 gets 25s at 12:00:35, and the
-// first call of 12:01 goes.
-func (l *Limiter) Take(ctx context.Context, key string, limit int64, window time.Duration) time.Duration {
-	if l == nil || key == "" || limit <= 0 || window <= 0 {
-		return 0
+// Example: limit 60, window a minute. The 61st call of 12:00 gets over 25s at 12:00:35, and
+// the first call of 12:01 goes.
+func (l *Limiter) Admit(ctx context.Context, blockKey, callsKey string, limit int64, window time.Duration) (blocked, over time.Duration) {
+	if l == nil {
+		return 0, 0
 	}
 	now := l.now()
 	start := now.Truncate(window)
-	// Two windows: the count outlives the window it belongs to whatever the call that started
-	// it saw of the clock, and leaves Redis soon after.
-	expiry := strconv.FormatInt(2*window.Milliseconds(), 10)
-	count, err := countScript.Exec(ctx, l.redis, []string{key + ":" + strconv.FormatInt(start.UnixMilli(), 10)},
-		[]string{expiry}).AsInt64()
-	if err != nil || count <= limit {
-		return 0
+	var commands rueidis.Commands
+	if blockKey != "" {
+		commands = append(commands, l.redis.B().Get().Key(blockKey).Build())
 	}
-	return start.Add(window).Sub(now)
+	counted := callsKey != "" && limit > 0 && window > 0
+	if counted {
+		// Two windows: the count outlives the window it belongs to whatever the call that
+		// started it saw of the clock, and leaves Redis soon after.
+		commands = append(commands, l.redis.B().Eval().Script(countScript).Numkeys(1).
+			Key(windowKey(callsKey, start)).
+			Arg(strconv.FormatInt(2*window.Milliseconds(), 10)).Build())
+	}
+	if len(commands) == 0 {
+		return 0, 0
+	}
+	results := l.redis.DoMulti(ctx, commands...)
+	if blockKey != "" {
+		if until, err := results[0].AsInt64(); err == nil {
+			blocked = max(time.UnixMilli(until).Sub(now), 0)
+		}
+	}
+	if counted {
+		if count, err := results[len(results)-1].AsInt64(); err == nil {
+			if blocked > 0 {
+				l.redis.Do(ctx, l.redis.B().Decr().Key(windowKey(callsKey, start)).Build())
+			} else if count > limit {
+				over = start.Add(window).Sub(now)
+			}
+		}
+	}
+	return blocked, over
 }
 
-// CallsKey is the key Take counts the customer's direct calls to a connector under: one count
+// CallsKey is the key Admit counts the customer's direct calls to a connector under: one count
 // per customer and connector, whichever connection of theirs the call goes through.
 func CallsKey(customerID, connectorID string) string {
 	// Escaped, so a ":" in an id cannot make two keys one.
@@ -187,4 +216,9 @@ func accountOf(c Connection) []string {
 		return []string{"account", c.AccountID}
 	}
 	return []string{"connection", c.ID}
+}
+
+// windowKey is the key of callsKey's count for the window starting at start.
+func windowKey(callsKey string, start time.Time) string {
+	return callsKey + ":" + strconv.FormatInt(start.UnixMilli(), 10)
 }

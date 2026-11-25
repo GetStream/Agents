@@ -11,6 +11,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -49,27 +50,27 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 		return nil, err
 	}
 	if id != "" {
-		found, err := s.configs.AgentConfig(ctx, customerID, id)
+		found, err := s.store.AgentConfigs.Get(ctx, customerID, id)
 		if err != nil {
-			return nil, errUnknownConfig
+			return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 		}
-		if teams.refuses(found) {
+		if teams.refuses(ctx, found) {
 			return nil, errUnknownConfig
 		}
 		return &found, nil
 	}
 
-	found, exists, err := s.configs.AgentConfigByName(ctx, customerID, named)
-	if err != nil {
-		return nil, invalidRequest(err.Error())
-	}
-	if !exists {
+	found, err := s.store.AgentConfigs.GetByName(ctx, customerID, named)
+	if errors.Is(err, store.ErrNoAgentConfig) {
 		// Refused rather than started unconfigured. A typo in a name would otherwise get a
 		// working session with default instructions, which is far harder to notice than an
 		// error: the agent answers, just not as the agent that was asked for.
 		return nil, notFound("there is no agent called " + named)
 	}
-	if teams.refuses(found) {
+	if err != nil {
+		return nil, err
+	}
+	if teams.refuses(ctx, found) {
 		return nil, notFound("there is no agent called " + named)
 	}
 	return &found, nil
@@ -77,6 +78,9 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 
 // resumeSession carries a conversation on with what the caller says about its tools.
 func (s *Server) resumeSession(ctx context.Context, request *resumeSessionRequest) (*getSessionResponse, error) {
+	if failure, refused := refuseReservedActingFor(ctx, "ResumeSession"); refused {
+		return nil, failure
+	}
 	var over resumed
 	if body := request.Body; body != nil {
 		over.toolTimeoutMs = body.ToolTimeoutMs
@@ -100,6 +104,9 @@ func (s *Server) resumeSession(ctx context.Context, request *resumeSessionReques
 
 // forkSession continues a conversation as a new one.
 func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (*forkSessionResponse, error) {
+	if failure, refused := refuseReservedActingFor(ctx, "ForkSession"); refused {
+		return nil, failure
+	}
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer
@@ -116,6 +123,9 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 	body := ForkSessionRequest{}
 	if request.Body != nil {
 		body = *request.Body
+	}
+	if failure, refused := refuseDeviceModels(ctx, body.ModelOverwrites != nil); refused {
+		return nil, failure
 	}
 
 	// A named agent on the fork replaces the parent's config wholesale, which is the point:
@@ -151,6 +161,12 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 		if err := currentConfig(); err != nil {
 			return nil, err
 		}
+		// A backend naming the fork's project names its tag (Spec.NameProject), whatever the parent's.
+		if body.ProjectId == nil || KindFrom(ctx) != auth.KindServer {
+			if err := s.readProjectTag(ctx, parent.Stored); err != nil {
+				return nil, err
+			}
+		}
 	}
 	spec, err := forkSpec(parent, body, config, current, thread)
 	if err != nil {
@@ -184,9 +200,16 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 		spec.Recall = &session.Recall{Messages: recalled}
 	}
 	spec.CustomerID = customerID
+	spec.NameProject(body.ProjectId, KindFrom(ctx))
 	// A voice fork is keyed under the call it joins, which the request names.
 	ctx = s.threadConversation(ctx, customerID, &spec)
 	spec.Caller = CallerFrom(ctx)
+	// The parent's tools go to the fork only for the kind of caller that declared them, as
+	// they do for a conversation carried on (rowTools): a backend's tool on its end user's
+	// fork would be the device's to answer (Session.seatRuns).
+	if spec.CallerKind != KindFrom(ctx) {
+		spec.Tools = nil
+	}
 	spec.CallerKind = KindFrom(ctx)
 	if body.Messages == nil || *body.Messages {
 		spec.Documents = s.forkedDocuments(ctx, parent, value(body.ResponseId), spec.Caller.UserID)
@@ -200,6 +223,7 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 		return nil, err
 	}
 	if err != nil {
+		s.logUnkept(customerID, err)
 		return nil, refusedRequest(err)
 	}
 	return &forkSessionResponse{Body: sessionOf(ctx, created)}, nil
@@ -208,7 +232,18 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 // getSessionTokens says what the session's models read and wrote, and what their prompts
 // were made of, while it runs and after.
 func (s *Server) getSessionTokens(ctx context.Context, request *getSessionTokensRequest) (*getSessionTokensResponse, error) {
-	spent, err := s.tokensOf(ctx, request.Id, errUnknownSession)
+	customerID, ok := CustomerFrom(ctx)
+	if !ok {
+		return nil, errMissingCustomer
+	}
+	if s.store == nil {
+		return nil, errNoCalls
+	}
+	row, err := s.store.Sessions.Get(ctx, customerID, request.Id)
+	if err != nil {
+		return nil, unknownOr(err, store.ErrNoSession, errUnknownSession)
+	}
+	spent, err := s.tokensOf(ctx, customerID, sessionSpan(row))
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +251,7 @@ func (s *Server) getSessionTokens(ctx context.Context, request *getSessionTokens
 }
 
 // getSession returns one session, running or ended. A backend is also told what was made of
-// it and what it spent, from the call row every session is recorded under.
+// it, from the review on its latest call, and what all of it spent.
 func (s *Server) getSession(ctx context.Context, request *getSessionRequest) (*getSessionResponse, error) {
 	found, failure := s.storedOrLiveSession(ctx, request.Id)
 	if failure == nil && found.Live != nil && !canReadSession(ctx, found.Live.Spec()) {
@@ -231,15 +266,28 @@ func (s *Server) getSession(ctx context.Context, request *getSessionRequest) (*g
 		rendered = sessionOf(ctx, found.Live)
 		rendered.PinnedAt = s.livePinnedAt(ctx, found.Live)
 	} else {
-		rendered = storedSessionOf(*found.Stored)
+		call, err := s.latestCall(ctx, *found.Stored)
+		if err != nil {
+			return nil, err
+		}
+		rendered = storedSessionOf(*found.Stored, call)
 	}
 	if KindFrom(ctx) != auth.KindServer || s.store == nil || value(rendered.Incognito) {
 		return &getSessionResponse{Body: rendered}, nil
 	}
 	rendered.CallOutcome = s.callOutcome(ctx, request.Id)
-	call, err := s.store.Call(ctx, OwnerFrom(ctx).CustomerID, request.Id)
+	row := found.Stored
+	if row == nil {
+		written, err := s.store.Sessions.Get(ctx, OwnerFrom(ctx).CustomerID, request.Id)
+		if err != nil {
+			s.logger.Warn("could not read a session's row", "session", request.Id, "error", err)
+			return &getSessionResponse{Body: rendered}, nil
+		}
+		row = &written
+	}
+	call, err := s.latestCall(ctx, *row)
 	if err != nil {
-		s.logger.Warn("could not read the call a session is recorded under", "session", request.Id, "error", err)
+		s.logger.Warn("could not read a session's latest call", "session", request.Id, "error", err)
 		return &getSessionResponse{Body: rendered}, nil
 	}
 	if call.Summary != "" {
@@ -250,7 +298,7 @@ func (s *Server) getSession(ctx context.Context, request *getSessionRequest) (*g
 	}
 	rendered.ReviewScore = call.ReviewScore
 	var record Call
-	s.attachUsage(ctx, OwnerFrom(ctx).CustomerID, call, &record)
+	s.attachUsage(ctx, OwnerFrom(ctx).CustomerID, sessionSpan(*row), &record)
 	rendered.Usage = record.Usage
 	return &getSessionResponse{Body: rendered}, nil
 }
@@ -289,12 +337,20 @@ func (s *Server) saySession(ctx context.Context, request *saySessionRequest) (*s
 	if request.Body == nil || request.Body.Text == "" {
 		return nil, invalidRequest("there is nothing to say")
 	}
+	if found.Spec().Native() {
+		return nil, errSayNative
+	}
 
+	// Anything else that stops it is the voice's, whose text names its vendor.
 	if err := found.Say(ctx, request.Body.Text); err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return nil, nil
 }
+
+// errSayNative refuses exact words to a speech-to-speech model, which says what it makes of a
+// prompt rather than a script.
+var errSayNative = invalidRequest("a speech-to-speech agent cannot say exact words: use respond")
 
 // respondSession answers a piece of text through the model.
 func (s *Server) respondSession(ctx context.Context, request *respondSessionRequest) (*respondSessionResponse, error) {
@@ -389,7 +445,7 @@ func (s *Server) rewindSession(ctx context.Context, request *rewindSessionReques
 	}
 	defer sent()
 
-	err := found.Rewind(ctx, s.store, request.Body.ResponseId)
+	err := found.Rewind(ctx, session.RecordedIn(s.store), request.Body.ResponseId)
 	// A conversation kept in Chat is rewound the way an edit is, and refused the same ways.
 	if refused := branchRefused(err); refused != nil {
 		return nil, refused
@@ -414,7 +470,7 @@ func (s *Server) getSessionCommand(ctx context.Context, request *getSessionComma
 
 	receipt, err := found.Command(request.RequestId)
 	if err != nil {
-		return nil, errUnknownCommand
+		return nil, unknownOr(err, conversation.ErrCommandNotFound, errUnknownCommand)
 	}
 	return &getSessionCommandResponse{Body: receiptOf(receipt)}, nil
 }
@@ -433,7 +489,8 @@ func (s *Server) interruptSessionCommand(ctx context.Context, request *interrupt
 	if err != nil {
 		// The stop was taken but its durable outcome is not known, so the caller is told
 		// to keep the intent and retry this command id rather than that it stopped.
-		return nil, unavailable(err.Error())
+		recordFailure(ctx, err, stack.Trace(err))
+		return nil, unavailable("the command's outcome could not be read; retry with the same request id")
 	}
 	return &interruptSessionCommandResponse{Body: receiptOf(receipt)}, nil
 }
@@ -474,12 +531,23 @@ func (s *Server) setSessionSettings(ctx context.Context, request *setSessionSett
 		settings.Verbosity = &verbosity
 	}
 	if err := found.SetSettings(ctx, settings); err != nil {
-		if errors.Is(err, session.ErrCardedToNative) {
-			return nil, errCardedSessionToNative
-		}
-		return nil, invalidRequest(err.Error())
+		return nil, settingsRefused(err)
 	}
 	return &setSessionSettingsResponse{Body: sessionOf(ctx, found)}, nil
+}
+
+// settingsRefused answers a move onto other models or another voice that failed with err.
+// Opening a model reads a customer's own model from the database and asks the vendor for a
+// word, and either failing is the router's; what is left is the move asked for.
+func settingsRefused(err error) error {
+	switch {
+	case errors.Is(err, session.ErrCardedToNative):
+		return errCardedSessionToNative
+	case dependencyFailed(err), errors.Is(err, llmrouter.ErrCustomModelKey):
+		return err
+	default:
+		return invalidRequest(err.Error())
+	}
 }
 
 // errCardedSessionToNative is what setSessionSettings and updateSession answer a move onto a
@@ -531,12 +599,13 @@ func (s *Server) storedOrLiveSession(ctx context.Context, id string) (session.Fo
 	if live, ok := s.sessions.Get(id, owner); ok {
 		return session.Found{Live: live}, nil
 	}
-	if s.store == nil {
+	// The store refuses an empty id as an error of its own, which is not ErrNoSession.
+	if s.store == nil || id == "" {
 		return session.Found{}, errUnknownSession
 	}
 	row, err := s.storedSession(ctx, owner.CustomerID, id)
 	if err != nil {
-		return session.Found{}, errUnknownSession
+		return session.Found{}, unknownOr(err, store.ErrNoSession, errUnknownSession)
 	}
 	// The row carries who opened it, which is what the live path checks through the
 	// manager. Skipping it here would let one of a customer's users read another's.
@@ -553,14 +622,14 @@ func (s *Server) storedOrLiveSession(ctx context.Context, id string) (session.Fo
 // yet: on a miss it waits for the writer and reads again. A row already there is answered at
 // once, so a stalled writer holds up only a read that missed.
 func (s *Server) storedSession(ctx context.Context, customerID, id string) (store.AgentSession, error) {
-	row, err := s.store.StoredSession(ctx, customerID, id)
+	row, err := s.store.Sessions.Get(ctx, customerID, id)
 	if err == nil || s.sessions == nil {
 		return row, err
 	}
 	if flushErr := s.sessions.FlushRecords(ctx); flushErr != nil {
 		return store.AgentSession{}, flushErr
 	}
-	return s.store.StoredSession(ctx, customerID, id)
+	return s.store.Sessions.Get(ctx, customerID, id)
 }
 
 // reopenSettleGap is how long a reopened conversation's agent stays quiet, with nothing left
@@ -612,6 +681,13 @@ func (r resumed) onto(ctx context.Context, running *session.Session) {
 // itself, to tell money that may not be paid from money that could not be checked (unpaid).
 func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) error, over resumed) (*session.Session, func(), error) {
 	found, failure := s.session(ctx, id)
+	// Only for an end user still in its config's team, running or ended here, as one carried on
+	// from its row is.
+	if failure == nil {
+		if failure = s.refuseOutsideTeam(ctx, found.Spec().CustomerID, found.Spec().ConfigID); failure != nil {
+			return nil, nil, failure
+		}
+	}
 	var spec session.Spec
 	switch {
 	case failure == nil && (found.State() != session.Ended || !found.Spec().PersistConversation):
@@ -623,12 +699,15 @@ func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) erro
 		// Ended here, so the spec it ran on is still at hand, tools and instructions included.
 		// It is carried on in writing, whether or not it ended on a call.
 		spec = found.Spec().Written()
-		// Only for an end user still in its config's team, as one carried on from its row is.
-		if failure = s.refuseOutsideTeam(ctx, spec.CustomerID, spec.ConfigID); failure != nil {
-			return nil, nil, failure
-		}
 		spec.Phone, spec.Edge = nil, nil
 		spec.Reopened = found.CreatedAt()
+		// Its spec has the tools and timeout of whoever carried it on last. Another kind of
+		// caller takes the ones its row keeps for that kind.
+		if spec.CallerKind != KindFrom(ctx) {
+			if failure = s.toolsFromRow(ctx, &spec); failure != nil {
+				return nil, nil, failure
+			}
+		}
 	case errors.Is(failure, errUnknownSession):
 		if spec, failure = s.reopenedFromRow(ctx, id); failure != nil {
 			return nil, nil, failure
@@ -663,6 +742,56 @@ func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) erro
 	}
 	events, detach := reopened.Watch()
 	return reopened, func() { go holdUntilAnswered(reopened, events, detach) }, nil
+}
+
+// toolsFromRow gives spec, ended here and last carried on by another kind of caller, the tools
+// and timeout its row keeps. The row keeps them for the kind of caller that opened it
+// (Sessions.Upsert), so a device carrying on its backend's conversation leaves the backend
+// its tools. With no row it has no tools.
+func (s *Server) toolsFromRow(ctx context.Context, spec *session.Spec) error {
+	spec.Tools = nil
+	if s.store == nil {
+		return nil
+	}
+	// As for reopenedFromRow: a failed flush reads the row as it is.
+	_ = s.sessions.FlushRecords(ctx)
+	row, err := s.store.Sessions.Get(ctx, spec.CustomerID, spec.ID)
+	if errors.Is(err, store.ErrNoSession) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	rowTools(ctx, spec, row)
+	return nil
+}
+
+// errProjectTagUnread refuses to carry on or fork a session whose project tag a shard that did
+// not answer may say.
+var errProjectTagUnread = unavailable("what the session's usage is tagged with could not be read; try again shortly")
+
+// readProjectTag gives row the project tag its usage has (store.Sessions.ReadProjectTag).
+func (s *Server) readProjectTag(ctx context.Context, row *store.AgentSession) error {
+	err := s.store.Sessions.ReadProjectTag(ctx, row)
+	if errors.Is(err, store.ErrProjectTagUnread) {
+		// A caller that hung up cuts the read off, which says nothing of a shard.
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			s.logger.Error("could not read a session's project tag", "session", row.ID, "error", err)
+		}
+		return errProjectTagUnread
+	}
+	return err
+}
+
+// rowTools gives spec the caller's tools and how long they are waited for, as row keeps them.
+// The tools go only to the kind of caller that declared them: a backend's tool carried on by
+// its end user's device would be the device's to answer (Session.seatRuns).
+func rowTools(ctx context.Context, spec *session.Spec, row store.AgentSession) {
+	spec.ToolTimeoutMs = row.ToolTimeoutMs
+	spec.Tools = nil
+	if row.CallerKind == string(KindFrom(ctx)) {
+		spec.Tools = session.DeclaredTools(row.CallerTools)
+	}
 }
 
 // reopenRaceWait bounds how long a request that lost a reopen waits for the winner to be held.
@@ -716,7 +845,11 @@ func (s *Server) reopenedFromRow(ctx context.Context, id string) (session.Spec, 
 	spec.Text = true
 	spec.PersistConversation = true
 	spec.ConversationID = row.ConversationID
-	spec.Title, spec.Description, spec.Project = row.Title, row.Description, row.Project
+	spec.Title, spec.Description = row.Title, row.Description
+	if err := s.readProjectTag(ctx, row); err != nil {
+		return session.Spec{}, err
+	}
+	spec.KeepProject(*row)
 	spec.Custom = row.Custom
 	spec.ModelOverwrites = row.ModelOverwrites
 	if row.ResumeHistory != (store.ResumeHistory{}) {
@@ -728,12 +861,7 @@ func (s *Server) reopenedFromRow(ctx context.Context, id string) (session.Spec, 
 	spec.ForkedFrom = row.ForkedFrom
 	// The caller's tools and how long they are waited for go on with the chat, as they do
 	// for one carried on in the process that held it (Spec.Written).
-	spec.ToolTimeoutMs = row.ToolTimeoutMs
-	// Tools only for the kind of caller that declared them: a backend's tool carried on by its
-	// end user's device would be the device's to answer (Session.seatRuns).
-	if row.CallerKind == string(KindFrom(ctx)) {
-		spec.Tools = session.DeclaredTools(row.CallerTools)
-	}
+	rowTools(ctx, &spec, *row)
 	// The caller's connections go on with the chat; the session checks each against the
 	// config as it is now and the caller asking, as it did when the chat opened.
 	spec.ConnectorSelections = selectionsOf(*row)
@@ -749,8 +877,12 @@ func (s *Server) reopenedFromRow(ctx context.Context, id string) (session.Spec, 
 	// Its team too: the one it was opened under is in those categories, and a team the config
 	// was tagged with since does not move a conversation already under way.
 	spec.Team = ""
-	// The row keeps the call voice was last on, which voice goes back to once started.
-	return spec.Holding(session.Call{Type: row.CallType, ID: row.CallID}), nil
+	// Voice goes back to the Stream call it was last on once started.
+	call, err := s.store.Calls.LastVoiced(ctx, row.CustomerID, row.ID)
+	if err != nil && !errors.Is(err, store.ErrNoCall) {
+		return session.Spec{}, err
+	}
+	return spec.Holding(session.Call{Type: call.CallType, ID: call.CallID}), nil
 }
 
 // selectionsOf are the connections a stored session's caller chose for its session bindings.
@@ -786,9 +918,30 @@ func holdUntilAnswered(reopened *session.Session, events <-chan session.Event, d
 	}
 }
 
+// latestCalls is the latest call of each session found only as a row, by session id.
+func (s *Server) latestCalls(ctx context.Context, found []session.Found) (map[string]store.Call, error) {
+	var ids []string
+	for _, one := range found {
+		if one.Live == nil && one.Stored != nil {
+			ids = append(ids, one.Stored.ID)
+		}
+	}
+	if len(ids) == 0 || s.store == nil {
+		return nil, nil
+	}
+	return s.store.Calls.Latest(ctx, OwnerFrom(ctx).CustomerID, ids)
+}
+
+// latestCall is the latest call of one stored session, zero when it has none.
+func (s *Server) latestCall(ctx context.Context, row store.AgentSession) (store.Call, error) {
+	calls, err := s.latestCalls(ctx, []session.Found{{Stored: &row}})
+	return calls[row.ID], err
+}
+
 // sessionsOf renders a query's results, taking the live half where there is one: a session
-// in flight knows what routing resolved its models to, which the row does not carry.
-func sessionsOf(ctx context.Context, found []session.Found) []Session {
+// in flight knows what routing resolved its models to, which the row does not carry. calls
+// is the latest call of each session found only as a row.
+func sessionsOf(ctx context.Context, found []session.Found, calls map[string]store.Call) []Session {
 	listed := make([]Session, 0, len(found))
 	for _, one := range found {
 		switch {
@@ -801,7 +954,7 @@ func sessionsOf(ctx context.Context, found []session.Found) []Session {
 			}
 			listed = append(listed, rendered)
 		case one.Stored != nil:
-			listed = append(listed, storedSessionOf(*one.Stored))
+			listed = append(listed, storedSessionOf(*one.Stored, calls[one.Stored.ID]))
 		}
 	}
 	return listed
@@ -848,7 +1001,6 @@ func specOf(request CreateSessionRequest, customerID string, config *store.Agent
 	spec.NoUI = request.Ui != nil && !*request.Ui
 	spec.Title = override(spec.Title, request.Title)
 	spec.Description = override(spec.Description, request.Description)
-	spec.Project = override(spec.Project, request.ProjectId)
 	if request.Custom != nil {
 		spec.Custom = *request.Custom
 	}
@@ -1052,16 +1204,17 @@ func describe(rendered *Session, spec session.Spec) {
 	}
 }
 
-// storedSessionOf renders a session that ended, from the row that outlived it.
+// storedSessionOf renders a session that ended, from the row that outlived it and its latest
+// call.
 //
 // The resolved models are absent rather than guessed. The row carries what the session was
 // asked to use, not what routing picked on each turn, and reporting the request as though it
 // were the answer would have a caller reading a failover that happened as a model that ran.
-func storedSessionOf(row store.AgentSession) Session {
+func storedSessionOf(row store.AgentSession, call store.Call) Session {
 	rendered := Session{
 		Id:        row.ID,
-		CallId:    row.CallID,
-		CallType:  row.CallType,
+		CallId:    call.CallID,
+		CallType:  call.CallType,
 		UserId:    row.UserID,
 		AgentId:   row.AgentID,
 		State:     Live,
@@ -1070,8 +1223,8 @@ func storedSessionOf(row store.AgentSession) Session {
 	if row.State == store.SessionClosed {
 		rendered.State = Ended
 	}
-	// A session with no call was held in writing, which is what the absence of one means.
-	if row.CallID == "" {
+	// A session whose latest call had no Stream call was held in writing.
+	if call.CallID == "" {
 		text := true
 		rendered.Text = &text
 	}
@@ -1249,7 +1402,8 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 		// The conversation goes on after its history, which a greeting would interrupt:
 		// a reopen says none either (sessionToAnswer).
 		spec.Greeting = ""
-		spec.Title, spec.Description, spec.Project = row.Title, row.Description, row.Project
+		spec.Title, spec.Description = row.Title, row.Description
+		spec.KeepProject(*row)
 		spec.Custom, spec.ModelOverwrites = row.Custom, row.ModelOverwrites
 		spec.ConnectorSelections = selectionsOf(*row)
 		spec.ReturnURL = row.ReturnURL
@@ -1276,7 +1430,7 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 		fresh := session.FromConfig(*config)
 		fresh.Text = true
 		fresh.Title, fresh.Description = spec.Title, spec.Description
-		fresh.Project, fresh.Custom = spec.Project, spec.Custom
+		fresh.Project, fresh.ProjectTag, fresh.Custom = spec.Project, spec.ProjectTag, spec.Custom
 		fresh.ConnectorSelections = spec.ConnectorSelections
 		fresh.ReturnURL = spec.ReturnURL
 		fresh.NoUI = spec.NoUI
@@ -1287,7 +1441,6 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 	spec.ForkedFrom = parentID
 	spec.Title = override(spec.Title, request.Title)
 	spec.Description = override(spec.Description, request.Description)
-	spec.Project = override(spec.Project, request.ProjectId)
 	spec.ToolTimeoutMs = override(spec.ToolTimeoutMs, request.ToolTimeoutMs)
 	spec.Incognito = value(request.Incognito)
 	if request.Custom != nil {
@@ -1342,7 +1495,7 @@ func (s *Server) recordedHistory(ctx context.Context, parent session.Found, requ
 			return nil, err
 		}
 	}
-	exchanges, err := s.store.Exchanges(ctx, OwnerFrom(ctx).CustomerID, parent.ID(), responseID)
+	exchanges, err := s.store.Responses.Exchanges(ctx, OwnerFrom(ctx).CustomerID, parent.ID(), responseID)
 	if err != nil {
 		return nil, err
 	}
@@ -1369,7 +1522,7 @@ func (s *Server) forkedDocuments(ctx context.Context, parent session.Found, unti
 	case parent.Stored != nil:
 		scope.ConversationID = parent.Stored.ConversationID
 	}
-	documents, err := s.store.ConversationDocuments(ctx, OwnerFrom(ctx).CustomerID, scope)
+	documents, err := s.store.ConversationDocuments.Select(ctx, OwnerFrom(ctx).CustomerID, scope)
 	if err != nil {
 		s.logger.Error("could not read the files a fork carries", "session", parent.ID(), "error", err)
 		return nil
@@ -1443,7 +1596,8 @@ func (s *Server) registerSessions(api huma.API) {
 		Description: "Opens a session from another's spec, carrying its history across by default, and " +
 			"records where it came from. The usual reason is to ask the same question of a different " +
 			"model without losing the original answer, which is why anything in the request is " +
-			"written over what the parent was opened with.\n" +
+			"written over what the parent was opened with. Models are the backend's to change: a device " +
+			"sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.\n" +
 			"The parent is untouched and keeps running if it was running. Forking an incognito " +
 			"session is refused rather than answered with an empty conversation: there is nothing " +
 			"recorded to fork from, and pretending otherwise would hand back a session that quietly " +
@@ -1452,6 +1606,7 @@ func (s *Server) registerSessions(api huma.API) {
 		DefaultStatus: http.StatusCreated,
 		Responses: map[string]*huma.Response{
 			"201": {Description: "The fork is running"},
+			"403": errorResponse("`model_overwrites` sent by an end user's device, or an agent config the caller may not use"),
 		},
 		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 	}, s.forkSession)
@@ -1685,8 +1840,8 @@ type ForkSessionRequest struct {
 	Incognito       *bool                   `json:"incognito,omitempty" doc:"Hold the fork off the record. The parent still exists; this conversation onwards is simply not kept."`
 	ToolTimeoutMs   *int                    `json:"tool_timeout_ms,omitempty" doc:"How long the fork's model waits for the result of a tool the caller or a worker runs, in milliseconds, as on createSession. Omitted keeps a running parent's; a fork of a conversation that ended has 30 seconds. Zero is 30 seconds, as on createSession."`
 	Messages        *bool                   `json:"messages,omitempty" doc:"Carry the parent's history into the fork, so the new conversation continues from what was already said. False starts the same configuration over from nothing, which is what comparing two answers to the same opening question wants." default:"true"`
-	ModelOverwrites *ModelOverwrites        `json:"model_overwrites,omitempty"`
-	ProjectId       *string                 `json:"project_id,omitempty"`
+	ModelOverwrites *ModelOverwrites        `json:"model_overwrites,omitempty" doc:"Server-side only: a device sending it is refused with a 403."`
+	ProjectId       *string                 `json:"project_id,omitempty" doc:"What the fork belongs to. Omitted, the parent's is kept. Sent server-side it is also the \"project\" cost tag, as on createSession; a device's groups the fork, whose cost tag stays the project a backend named for its parent. A tag spelled out in a running parent's tags, or the agent config's, wins."`
 	ResponseId      *string                 `json:"response_id,omitempty" doc:"Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false."`
 	Title           *string                 `json:"title,omitempty"`
 }

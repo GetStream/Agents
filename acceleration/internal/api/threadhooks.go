@@ -57,7 +57,7 @@ const threadTurnLease = askTimeout + 30*time.Second
 //	    Session.FollowUp(text, photos), its author         the person's message is already
 //	      (WithAuthor); a photo the agent cannot see       in the channel: none is written
 //	      or that cannot be fetched is dropped, with a
-//	      note to the turn (threadPhotos)
+//	      note to the turn (messagePhotos)
 //	    wait until the turn is over; close the session it opened; let go of the lease
 
 // linkedThread is the external thread a channel holds, when it is a thread channel of the
@@ -67,7 +67,7 @@ func (s *Server) linkedThread(ctx context.Context, origin hookOrigin, channelID 
 	if s.store == nil || s.sessions == nil || !strings.HasPrefix(channelID, conversation.ThreadChannelPrefix) {
 		return store.ChannelThread{}, false, nil
 	}
-	thread, err := s.store.ChannelThread(ctx, channelID)
+	thread, err := s.store.ChannelThreads.Get(ctx, channelID)
 	if errors.Is(err, store.ErrNoChannelThread) {
 		return store.ChannelThread{}, false, nil
 	}
@@ -83,16 +83,16 @@ func (s *Server) linkedThread(ctx context.Context, origin hookOrigin, channelID 
 
 // answerThread has a session on a thread channel answer a person's message there. One turn
 // of a thread at a time across every router: the turn's lease is a row in Postgres
-// (store.TakeChannelThreadTurn), and a message that arrives while another router answers
+// (store.ChannelTurns.Take), and a message that arrives while another router answers
 // waits for it. A session this router opens for the turn is closed after it, so the next
 // turn, on whichever router, opens the conversation again from the channel, with every reply
 // in it.
-func (s *Server) answerThread(origin hookOrigin, thread store.ChannelThread, event messageEvent) {
-	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
+func (s *Server) answerThread(ctx context.Context, origin hookOrigin, thread store.ChannelThread, event messageEvent) {
+	ctx, cancel := context.WithTimeout(ctx, askTimeout)
 	defer cancel()
 
 	// Stream may deliver one message.new more than once, and each would be another reply.
-	fresh, err := s.store.ClaimChannelThreadMessage(ctx, thread.ChannelID, store.ClaimTurn, event.Message.ID)
+	fresh, err := s.store.ChannelThreadMessages.Claim(ctx, thread.ChannelID, store.ClaimTurn, event.Message.ID)
 	if err != nil || !fresh {
 		if err != nil {
 			s.logger.Error("could not claim a message of a thread channel", "channel", thread.ChannelID, "error", err)
@@ -128,13 +128,13 @@ func (s *Server) AnswerQueued(ctx context.Context, thread store.ChannelThread, w
 	if !addressed(event) {
 		return nil, nil
 	}
-	fresh, err := s.store.ClaimChannelThreadMessage(ctx, thread.ChannelID, store.ClaimTurn, written.ID)
+	fresh, err := s.store.ChannelThreadMessages.Claim(ctx, thread.ChannelID, store.ClaimTurn, written.ID)
 	if err != nil || !fresh {
 		return nil, err
 	}
 	origin := hookOrigin{customer: thread.CustomerID, app: thread.StreamAppPK}
 	return func() {
-		turn, cancel := context.WithTimeout(context.Background(), askTimeout)
+		turn, cancel := context.WithTimeout(context.WithoutCancel(ctx), askTimeout)
 		defer cancel()
 		s.answerClaimed(turn, origin, thread, event)
 	}, nil
@@ -143,7 +143,7 @@ func (s *Server) AnswerQueued(ctx context.Context, thread store.ChannelThread, w
 // answerClaimed is answerThread past the claim of the message's turn, within ctx.
 func (s *Server) answerClaimed(ctx context.Context, origin hookOrigin, thread store.ChannelThread, event messageEvent) {
 	holder := uuid.NewString()
-	if err := s.takeThreadTurn(ctx, thread.ChannelID, holder); err != nil {
+	if err := s.takeThreadTurn(ctx, thread, holder); err != nil {
 		s.logger.Error("a message in a thread channel waited too long for the thread's turn", "channel", thread.ChannelID, "error", err)
 		return
 	}
@@ -151,11 +151,11 @@ func (s *Server) answerClaimed(ctx context.Context, origin hookOrigin, thread st
 	defer func() {
 		releasing, done := context.WithTimeout(context.WithoutCancel(ctx), threadTurnPoll*20)
 		defer done()
-		if err := s.store.ReleaseChannelThreadTurn(releasing, thread.ChannelID, holder); err != nil {
+		if err := s.store.ChannelTurns.Release(releasing, thread.StreamAppPK, chatlog.ChannelType+":"+thread.ChannelID, holder); err != nil {
 			s.logger.Error("could not let go of a thread's turn; it runs out instead", "channel", thread.ChannelID, "error", err)
 		}
 	}()
-	s.answerHosted(origin, chatlog.ChannelType+":"+thread.ChannelID, thread.CustomerID, event,
+	s.answerHosted(ctx, origin, chatlog.ChannelType+":"+thread.ChannelID, thread.CustomerID, event,
 		func(turn context.Context) (*session.Session, error) {
 			return s.threadSession(turn, origin, thread, event)
 		})
@@ -164,14 +164,14 @@ func (s *Server) answerClaimed(ctx context.Context, origin hookOrigin, thread st
 // answerHosted has the Router's own session on the channel cid, the customer's, answer a
 // person's message there: a thread channel's (answerClaimed), or a channel of a type an agent
 // config answers in (answerChatChannel). open opens the session when none runs on the channel.
-func (s *Server) answerHosted(origin hookOrigin, cid, customer string, event messageEvent,
+func (s *Server) answerHosted(ctx context.Context, origin hookOrigin, cid, customer string, event messageEvent,
 	open func(context.Context) (*session.Session, error)) {
 	// A thread's author is told to the agent by their Stream user alone: the bridge names that
 	// user after the provider's id for them (channelbridge openThread), a phone number on a
 	// texting line, which no model is told. So each person goes under "Speaker N". The people in
 	// a channel of a type an agent config answers in are the customer's own Stream users, whom a
 	// tool may need to name: each goes under their name and user id (agent.WithWriter).
-	attributed := routing.WithAttribution(context.Background(), chatHookAttribution(customer, event))
+	attributed := routing.WithAttribution(context.WithoutCancel(ctx), chatHookAttribution(customer, event))
 	written := agent.WithAuthor(attributed, event.Message.User.ID)
 	if event.ChannelType != chatlog.ChannelType {
 		written = agent.WithWriter(attributed, event.Message.User.ID, conversation.AuthorName(event.Message.User.Name))
@@ -298,18 +298,19 @@ const (
 )
 
 // takeThreadTurn waits for a thread channel's turn and leases it to holder for threadTurnLease.
-func (s *Server) takeThreadTurn(ctx context.Context, channelID, holder string) error {
-	return takeTurn(ctx, func(ctx context.Context, until time.Time) (bool, error) {
-		return s.store.TakeChannelThreadTurn(ctx, channelID, holder, until)
+func (s *Server) takeThreadTurn(ctx context.Context, thread store.ChannelThread, holder string) error {
+	return takeTurn(ctx, func(ctx context.Context) (bool, error) {
+		return s.store.ChannelTurns.Take(ctx, store.ChannelTurn{StreamAppPK: thread.StreamAppPK,
+			CID: chatlog.ChannelType + ":" + thread.ChannelID, LeasedBy: holder, Lease: threadTurnLease})
 	})
 }
 
-// takeTurn waits for a channel's turn, asking take for a lease until threadTurnLease from now
-// every threadTurnWait: a thread channel's (takeThreadTurn) or a chat channel's
+// takeTurn waits for a channel's turn, asking take for a lease of threadTurnLease every
+// threadTurnWait: a thread channel's (takeThreadTurn) or a chat channel's
 // (answerChatChannel).
-func takeTurn(ctx context.Context, take func(context.Context, time.Time) (bool, error)) error {
+func takeTurn(ctx context.Context, take func(context.Context) (bool, error)) error {
 	for {
-		taken, err := take(ctx, time.Now().Add(threadTurnLease))
+		taken, err := take(ctx)
 		if err != nil || taken {
 			return err
 		}
@@ -398,7 +399,7 @@ func (s *Server) heldOnThread(ctx context.Context, found session.Found) (bool, e
 	if !held || !strings.HasPrefix(channel, conversation.ThreadChannelPrefix) {
 		return false, nil
 	}
-	_, err := s.store.ChannelThread(ctx, channel)
+	_, err := s.store.ChannelThreads.Get(ctx, channel)
 	if errors.Is(err, store.ErrNoChannelThread) {
 		return false, nil
 	}
@@ -442,7 +443,7 @@ func (s *Server) threadConversation(ctx context.Context, customerID string, spec
 		return ctx
 	}
 	cid := chatlog.ChannelType + ":" + keyed
-	thread, err := s.store.ChannelThread(ctx, folded)
+	thread, err := s.store.ChannelThreads.Get(ctx, folded)
 	if err != nil && !errors.Is(err, store.ErrNoChannelThread) {
 		// Whether it is a thread channel is not known, so a device is kept out of it.
 		s.logger.Error("could not tell whether an agent id names a thread channel", "channel", keyed, "error", err)

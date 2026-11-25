@@ -1066,6 +1066,8 @@ func (s *AgentSuite) TestALineWrittenForAWaitThatEndedIsNotSaid() {
 	s.says(participant, "where is my order")
 
 	s.eventually(func() bool { return s.spokenText("ships tomorrow") }, "the answer never came")
+	// The hold line is asked for from its own goroutine, which can run after the answer is said.
+	s.eventually(func() bool { return len(s.model.composeRequests()) > 0 }, "no hold line was asked for")
 	s.Require().Len(s.model.composeRequests(), 1)
 	close(written)
 	s.eventually(func() bool { return !s.agent.floor().Composing }, "the line was never settled")
@@ -1455,8 +1457,9 @@ func (s *AgentSuite) TestALateResultWaitsForTheCallsRunningWhenItComes() {
 		last := harness.WithoutNotes(asked[2].Input)
 		s.Equal(llm.ToolResult, last[len(last)-2].Role)
 		s.Equal("call-2", last[len(last)-2].ToolCallID)
-		// Typed: no caller said it (llm.Message.Typed), which no provider reads.
-		s.Equal(llm.Message{Role: llm.User, Content: fmt.Sprintf(lateResult, "lookup_order", "call-1") + "\ncall-1 result", Typed: true},
+		// Typed and Router: no caller said it (llm.Message.Typed, Router), which no provider reads.
+		s.Equal(llm.Message{Role: llm.User, Content: fmt.Sprintf(lateResult, "lookup_order", "call-1") + "\ncall-1 result", Typed: true,
+			Router: true},
 			last[len(last)-1])
 	})
 }

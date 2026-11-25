@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,9 +25,9 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/llmtest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
@@ -170,6 +172,9 @@ type stubSTT struct {
 	holdClose <-chan struct{}
 	// closes counts the times it was closed.
 	closes atomic.Int64
+	// panics, if set, is the value that a goroutine from Start panics with. It is like a bug
+	// in the read loop of a provider.
+	panics any
 }
 
 func newStubSTT() *stubSTT { return &stubSTT{emitter: stt.NewEmitter(64)} }
@@ -187,7 +192,15 @@ func (s *stubSTT) keyterms() []string {
 	return append([]string(nil), s.terms...)
 }
 
-func (s *stubSTT) Start(context.Context) error { return nil }
+func (s *stubSTT) Start(ctx context.Context) error {
+	s.mu.Lock()
+	panics := s.panics
+	s.mu.Unlock()
+	if panics != nil {
+		goroutine.Go(ctx, func() { panic(panics) })
+	}
+	return nil
+}
 
 func (s *stubSTT) ProcessAudio(pcm stt.PcmData, participant stt.Participant) error {
 	s.mu.Lock()
@@ -305,6 +318,10 @@ type stubLLM struct {
 
 	// capabilities are what the model says it takes: text alone unless a test says more.
 	capabilities llm.Capabilities
+
+	// panics, if set, is the value that Create panics with. It is like a bug in a model
+	// adapter.
+	panics any
 }
 
 func newStubLLM() *stubLLM { return &stubLLM{scripts: map[string]*llmtest.Script{}} }
@@ -320,9 +337,12 @@ func (s *stubLLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	sender, _ := routing.CallerFrom(ctx)
 	s.senders = append(s.senders, sender)
 	s.scheduled = append(s.scheduled, routing.ScheduledTurn(ctx))
-	hold, completion, refuses, breaks, screen, verdict := s.holdCreate, s.holdCompletion, s.refuses, s.breaks, s.screen, s.verdict
+	hold, completion, refuses, breaks, screen, verdict, panics := s.holdCreate, s.holdCompletion, s.refuses, s.breaks, s.screen, s.verdict, s.panics
 	s.mu.Unlock()
 
+	if panics != nil {
+		panic(panics)
+	}
 	if refuses != nil {
 		return nil, refuses
 	}
@@ -380,7 +400,7 @@ func (s *stubLLM) Create(ctx context.Context, params llm.ResponseParams) (*llm.S
 	// what lets a reply be caught mid-sentence.
 	if len(reply) == 0 && len(calls) == 0 {
 		if verdict != nil {
-			return script.Stream().Screen(verdict), nil
+			return script.Stream().Screen(ctx, verdict), nil
 		}
 		return screened(script.Stream(), screen, harness.WithoutNotes(params.Input)), nil
 	}
@@ -408,7 +428,7 @@ func screened(stream *llm.Stream, screen func([]llm.Message) error, input []llm.
 	}
 	verdict := make(chan error, 1)
 	verdict <- screen(input)
-	return stream.Screen(verdict)
+	return stream.Screen(context.Background(), verdict)
 }
 
 func (s *stubLLM) compose(params llm.ResponseParams) (*llm.Stream, error) {
@@ -956,10 +976,9 @@ type AgentSuite struct {
 	performing string
 	// voiceName is the voice the agent is configured to speak in.
 	voiceName string
-	// records is where turns are counted, and live where they are kept, when a test gives
-	// the agent a database and a Redis.
+	// records is where turns are counted and kept, when a test gives the agent a database
+	// and a Redis.
 	records *store.Store
-	live    *live.Client
 	// metering records what memory and knowledge did, when a test reads it back. Nil records
 	// nothing.
 	metering *routing.Recorder
@@ -989,6 +1008,9 @@ type AgentSuite struct {
 	// earsPause has the stub transcriber stand in for chorus-asr's, which an acting agent
 	// has ask about its callers' pauses (pausingSTT).
 	earsPause bool
+	// earsSettlePanics, if set, has the stub transcriber panic when it is told to settle its
+	// words, once the channel is closed (panicsOnSettleSTT).
+	earsSettlePanics chan struct{}
 
 	agent  *Agent
 	events *collector
@@ -1033,6 +1055,7 @@ func (s *AgentSuite) SetupTest() {
 	s.speculates = false
 	s.unified = false
 	s.floor, s.floorMode, s.earsPause = nil, "", false
+	s.earsSettlePanics = nil
 	s.performing = ""
 	s.voiceName = ""
 	s.replacement = nil
@@ -1059,10 +1082,23 @@ func (s *AgentSuite) delegates() {
 	}}}
 }
 
-// reasoner is the model router the agent answers through. The agent opens the voice
-// model, the flow controller and the optional subagent from it, in that order.
+// reasoner is the model router a voice agent answers through. It opens the conversation's
+// model, the flow controller and the optional subagent from it, in that order. A text agent
+// opens no flow controller, so it uses textReasoner.
 func (s *AgentSuite) reasoner(logger *slog.Logger) *llmrouter.Router {
-	models := []llmrouter.Provider{s.model, s.flow}
+	return s.reasonerOver(logger, s.model, s.flow)
+}
+
+// textReasoner is reasoner for an agent that holds the conversation in writing, which opens
+// no flow controller: the conversation's model, then the subagent's.
+func (s *AgentSuite) textReasoner(logger *slog.Logger) *llmrouter.Router {
+	return s.reasonerOver(logger, s.model)
+}
+
+// reasonerOver hands out the given models in the order the agent opens them, then the
+// subagent's, the last one for every open after that.
+func (s *AgentSuite) reasonerOver(logger *slog.Logger, opens ...llmrouter.Provider) *llmrouter.Router {
+	models := opens
 	if s.subagent != nil {
 		models = append(models, s.subagent)
 	}
@@ -1148,7 +1184,7 @@ func (s *AgentSuite) joinText() {
 		Tools:              s.tools,
 		ToolRunner:         running,
 		Ender:              ending,
-		LLM:                s.reasoner(logger),
+		LLM:                s.textReasoner(logger),
 		LLMTarget:          "en-low-latency",
 		Knowledge:          reading,
 		KnowledgeNamespace: s.namespace,
@@ -1198,6 +1234,9 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 		}
 		if s.earsPause {
 			return pausingSTT{s.ears}, nil
+		}
+		if s.earsSettlePanics != nil {
+			return panicsOnSettleSTT{stubSTT: s.ears, release: s.earsSettlePanics}, nil
 		}
 		return s.ears, nil
 	}, routing.OverrideRegion)
@@ -1298,7 +1337,6 @@ func (s *AgentSuite) joinWithVoice(streamingVoice bool, wrapVoice func(*stubTTS)
 		Region:             s.region,
 		Incognito:          s.incognito,
 		Store:              s.records,
-		Live:               s.live,
 		SubagentTarget:     subagentTarget,
 		Skills:             s.skills,
 		Telephony:          calling,
@@ -1403,6 +1441,9 @@ func (s *AgentSuite) synthesises(turnID string) {
 func (s *AgentSuite) heardSomeOf(turnID string) {
 	s.synthesises(turnID)
 	s.eventually(func() bool { return len(s.edge.heard()) > 0 }, "none of the reply went out")
+	// On the fake clock no time passes by itself, so words the caller begins next could begin
+	// at the instant the reply went out, which is not after it (answerHeardBefore).
+	time.Sleep(time.Millisecond)
 }
 
 // replyWentOut waits until the reply the agent is saying has begun to go out. Words said
@@ -1430,6 +1471,20 @@ func (s *AgentSuite) actsOnChorusASR() {
 type pausingSTT struct{ *stubSTT }
 
 func (pausingSTT) AskOnPauses(audiofloor.Asker) {}
+
+// panicsOnSettleSTT is a stub transcriber that can be told to settle its words. When it is
+// told, it waits until release is closed and then panics, like a provider with a bug in it.
+// The wait lets a test send all its audio first: the call ends at the panic, and the edge
+// takes no more audio after that.
+type panicsOnSettleSTT struct {
+	*stubSTT
+	release <-chan struct{}
+}
+
+func (s panicsOnSettleSTT) Finalize() error {
+	<-s.release
+	panic("a bug in settling the words")
+}
 
 func (s *AgentSuite) says(participant stt.Participant, text string) {
 	s.saysAfter(participant, text, 0)
@@ -6929,6 +6984,63 @@ func (s *AgentSuite) answerToSilentVoice() {
 	s.Require().False(s.agent.harness.Pending())
 }
 
+func (s *AgentSuite) TestTurnsStampedAtOnceGetAnIDEach() {
+	s.onFakeClock(func() {
+		// The cadence, the voice and the presence tick each start turns on goroutines of their
+		// own, so two can take a stamp at the same moment.
+		// They are released together from one signal and take many stamps each, on at least
+		// four threads even under -cpu 1, so the takers overlap: a stamp taken by a plain
+		// store, or a compare-and-swap that does not retry, names two turns alike.
+		const takers, each = 8, 20000
+		defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(max(takers/2, runtime.GOMAXPROCS(0))))
+		stamps := make([][]string, takers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for taker := range takers {
+			wg.Go(func() {
+				<-start
+				for range each {
+					stamps[taker] = append(stamps[taker], turnStamp())
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+		unique := map[string]struct{}{}
+		for _, taken := range stamps {
+			for _, stamp := range taken {
+				unique[stamp] = struct{}{}
+			}
+		}
+		s.Len(unique, takers*each)
+	})
+}
+
+func (s *AgentSuite) TestTwoLinesSaidAtOnceAreTwoTurns() {
+	s.onFakeClock(func() {
+		s.join(true)
+		s.Require().NoError(s.agent.Say(s.ctx, "Hello."))
+		s.Require().NoError(s.agent.Say(s.ctx, "Welcome back."))
+		s.eventually(func() bool { return countOf[Said](s.reported()) == 2 }, "a line was never said")
+		var turns []string
+		for _, event := range s.reported() {
+			if said, ok := event.(Said); ok {
+				turns = append(turns, said.TurnID)
+			}
+		}
+		s.NotEqual(turns[0], turns[1])
+	})
+}
+
+func (s *AgentSuite) TestATurnIsStampedWithTheTime() {
+	before := time.Now().UnixNano()
+	stamp, err := strconv.ParseInt(turnStamp(), 10, 64)
+	after := time.Now().UnixNano()
+	s.Require().NoError(err)
+	s.GreaterOrEqual(stamp, before)
+	s.LessOrEqual(stamp, after)
+}
+
 func (s *AgentSuite) TestAnAnswerNoVoiceSaidIsOwedAgain() {
 	s.onFakeClock(func() {
 		// Handed over and then lost with no voice to say it, what the answer told is still
@@ -6940,7 +7052,12 @@ func (s *AgentSuite) TestAnAnswerNoVoiceSaidIsOwedAgain() {
 
 		s.refusesVoice()
 
-		s.eventually(func() bool { return s.agent.harness.Pending() }, "the answer nobody heard is not owed again")
+		// Owed again, it is pending until the next chance to speak takes it into a turn of its
+		// own, told it was cut off. That chance can come in the instant it is owed, before the
+		// condition is first checked, so either one is the answer being owed.
+		s.eventually(func() bool {
+			return s.agent.harness.Pending() || s.toldTheModel("cut off before the caller heard it")
+		}, "the answer nobody heard is not owed again")
 	})
 }
 

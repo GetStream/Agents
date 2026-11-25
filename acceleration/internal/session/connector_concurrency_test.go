@@ -145,7 +145,7 @@ func (s *ConcurrencySuite) TestATurnDeadlineEndingTheWaitIsNotSent() {
 	primary := s.connection("", "primary")
 	d := s.attachAll(s.fixed("crm", primary, "whoami"))
 	r := d.routes["crm__whoami"]
-	held, err := d.slots.take(s.ctx, r.connection.ID, r.maxInFlight)
+	held, _, err := d.slots.take(s.ctx, r.connection.ID, r.maxInFlight)
 	s.Require().NoError(err)
 	defer held()
 	turn, stop := context.WithTimeout(s.ctx, 100*time.Millisecond)
@@ -312,7 +312,7 @@ func (s *ConcurrencySuite) capAt(limit int) {
 	manifest, err := core.ParseManifest([]byte(s.crmManifest(s.connectorID, 1) +
 		fmt.Sprintf("rate_limit:\n  max_concurrent_calls: %d\n", limit)))
 	s.Require().NoError(err)
-	definition, err := s.store.CreateConnectorDefinition(s.ctx, s.customerID, manifest)
+	definition, err := s.store.ConnectorDefinitions.Revise(s.ctx, s.customerID, manifest)
 	s.Require().NoError(err)
 	s.revision = definition.Revision
 }
@@ -348,7 +348,7 @@ func (s *ConcurrencySuite) rowOf(connection, binding string) store.ConnectorInvo
 	var found []store.ConnectorInvocation
 	// Eventually runs its condition off the test goroutine, where a failed Require cannot stop the test.
 	s.Require().EventuallyWithT(func(c *assert.CollectT) {
-		rows, err := s.store.ConnectorInvocations(s.ctx, s.customerID, connection, 0, nil)
+		rows, err := s.store.ConnectorInvocations.Select(s.ctx, s.customerID, store.InvocationFilter{ConnectionID: connection, Limit: 0, After: nil})
 		require.NoError(c, err)
 		found = found[:0]
 		for _, row := range rows {

@@ -35,7 +35,7 @@ func (s *ConnectionsSuite) SetupSuite() {
 		bearer.Name:   bearer.New(),
 	}}
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 // SetupTest gives every test an app of its own, so a list holds only what the test made.
@@ -529,7 +529,7 @@ func TestConnectionsWithoutConnectorsSuite(t *testing.T) {
 
 func (s *ConnectionsWithoutConnectorsSuite) SetupSuite() {
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *ConnectionsWithoutConnectorsSuite) SetupTest() {
@@ -587,18 +587,18 @@ sources:
     endpoint: mcp
 `))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	return id
 }
 
 // bindFixed makes an agent config of the suite's app bind the connection as its fixed one,
-// in the shape store.ConnectorConnectionReferenced matches, and returns the config. The
+// in the shape store.ConnectorConnections.DeleteUnbound matches, and returns the config. The
 // column is written directly, so these tests do not depend on what the config endpoints
 // accept.
 func (s *ConnectionsSuite) bindFixed(connectionID string) AgentConfig {
 	config := s.data.createAgentConfig()
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE agent_configs SET connectors = ?::jsonb WHERE id = ?",
 		`[{"name": "tracker", "connector_id": "linear", "connection": {"type": "fixed", "connection_id": "`+connectionID+`"}}]`,
 		config.Id)

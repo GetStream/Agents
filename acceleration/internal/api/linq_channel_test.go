@@ -95,7 +95,7 @@ func (s *linqLine) SetupSuite() {
 	}))
 	s.T().Cleanup(s.images.Close)
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *linqLine) SetupTest() {
@@ -113,13 +113,13 @@ func (s *linqLine) SetupTest() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+s.connection.ID+"/credentials",
 		map[string]any{"expected_revision": s.connection.Revision, "values": map[string]string{bearer.SuppliedToken: s.apiKey}}, &s.connection))
 	s.config = store.AgentConfig{
-		CustomerID: s.customerID(), Name: "linq-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
+		CustomerID: s.customerID(), Name: "linq-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"},
 		Connectors: []store.ConnectorBinding{{
 			Name: "imessage", ConnectorID: "linq",
 			Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: s.connection.ID},
 		}},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &s.config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &s.config))
 }
 
 // The bearer connection's account is its line, the identity linq.yaml names, which is how the
@@ -194,7 +194,7 @@ func (s *LinqChannelSuite) TestAPhotoWithoutACaptionIsAnswered() {
 }
 
 // A photo whose URL answers 404, such as one Linq deleted, is answered with a short reply
-// that it could not be opened (api.threadPhotos), not left in silence.
+// that it could not be opened (api.messagePhotos), not left in silence.
 func (s *LinqChannelSuite) TestAPhotoLinqNoLongerServesIsAnsweredThatItCouldNotBeOpened() {
 	s.answersWith("vision/vision-model")
 	chat, asked := s.utils.uuid(), len(s.vision.replies())
@@ -242,9 +242,9 @@ func (s *LinqChannelSuite) TestAConnectionStillOnRevision2PassesNoPhotoOn() {
 	revision2 := strings.NewReplacer("\nrevision: 3\n", "\nrevision: 2\n",
 		"    media:\n      url: $.data.parts[*].url\n      mime_type: $.data.parts[*].mime_type\n", "").Replace(string(raw))
 	s.Require().NotContains(revision2, "mime_type: $")
-	s.Require().NoError(s.store.SeedConnectorDefinitions(ctx, fstest.MapFS{"linq.yaml": {Data: []byte(revision2)}}))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(ctx, fstest.MapFS{"linq.yaml": {Data: []byte(revision2)}}))
 	// Its credentials are sealed for its revision, so that stays.
-	s.Require().NoError(s.store.WithLockedConnectorConnection(ctx, s.customerID(), s.connection.ID,
+	s.Require().NoError(s.store.ConnectorConnections.WithLocked(ctx, s.customerID(), s.connection.ID,
 		func(connection *store.ConnectorConnection, _ func() error) (bool, error) {
 			connection.DefinitionRevision = 2
 			return true, nil
@@ -266,8 +266,8 @@ func (s *LinqChannelSuite) TestAConnectionStillOnRevision2PassesNoPhotoOn() {
 
 // answersWith has the line's agent answer with model.
 func (s *LinqChannelSuite) answersWith(model string) {
-	s.config.LLM = model
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.Models.LLM = model
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 }
 
 // photo is a media part as Linq's events page shows one (events, message.received), its url
@@ -302,8 +302,8 @@ func photoURLs(message map[string]any) []string {
 // omni-channel the contact map gives the sender's number (T41).
 func (s *LinqChannelSuite) TestAChatIsOneThreadChannelAndOneIMessageCardInTheSendersOmniChannel() {
 	// record writes the card as on does (AI-2856).
-	s.config.EpisodeCardsRecord = true
-	s.Require().NoError(s.store.UpdateAgentConfig(context.Background(), &s.config))
+	s.config.EpisodeCards.Record = true
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &s.config))
 	chat := s.utils.uuid()
 	s.deliver(s.received(chat, s.line, "+12025550199", "first"), time.Now())
 	s.deliver(s.received(chat, s.line, "+12025550199", "second"), time.Now())
@@ -381,7 +381,7 @@ func (s *LinqChannelSuite) replyHeld(channel string, handOver func()) (write fun
 // liveIMessageOptOuts counts the person's iMessage opt-outs not revoked.
 func (s *LinqChannelSuite) liveIMessageOptOuts(person string) int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM opt_outs WHERE customer_id = ? AND recipient = ? AND channel = 'imessage' AND source = 'keyword' AND revoked_at IS NULL",
 		s.customerID(), person).Scan(&count))
 	return count
@@ -463,7 +463,7 @@ func (s *LinqChannelSuite) TestAReplyLinqRefusesIsSentByTheNextHandOff() {
 	s.Require().Eventually(func() bool { return s.linq.refusing() == 0 }, settleFor, 10*time.Millisecond, "Linq refused the reply")
 	s.Require().Eventually(func() bool {
 		var claims int
-		s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT count(*) FROM channel_thread_messages WHERE channel_id = ? AND kind = ?", channel, store.ClaimReply).Scan(&claims))
 		return claims == 0
 	}, settleFor, 10*time.Millisecond, "a refused reply is not kept as sent")
@@ -538,7 +538,7 @@ func (s *linqLine) deliverSigned(body []byte, at time.Time, secret string) int {
 func (s *linqLine) threadChannel(chat string) string {
 	var channel string
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT channel_id FROM channel_threads WHERE customer_id = ? AND connector_id = 'linq' AND thread_key = ?",
 			s.customerID(), chat).Scan(&channel) == nil
 	}, settleFor, 10*time.Millisecond, "no thread channel for chat %s", chat)
@@ -551,8 +551,8 @@ func (s *LinqChannelSuite) omniChannel(number string) string {
 	var cid string
 	// The worker that writes the message opens its episode, after the delivery's answer.
 	s.Require().Eventually(func() bool {
-		return s.store.DB().QueryRowContext(context.Background(),
-			"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND agent_config_id = ? AND kind = 'phone' AND address = ?",
+		return s.store.GlobalDB().QueryRowContext(context.Background(),
+			"SELECT conversation_id FROM contact_map WHERE customer_id = ? AND config_id = ? AND kind = 'phone' AND address = ?",
 			s.customerID(), s.config.ID, number).Scan(&cid) == nil
 	}, settleFor, 10*time.Millisecond, "no contact for %s", number)
 	return strings.TrimPrefix(cid, "agent:")
@@ -562,7 +562,7 @@ func (s *LinqChannelSuite) omniChannel(number string) string {
 func (s *LinqChannelSuite) nothingLinked() {
 	s.Never(func() bool {
 		var count int
-		s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT count(*) FROM channel_threads WHERE customer_id = ?", s.customerID()).Scan(&count))
 		return count > 0
 	}, dropped, 20*time.Millisecond)
@@ -727,9 +727,9 @@ func (s *LinqChannelSuite) TestAnEmailHandleIsAnsweredWithoutACard() {
 	s.Require().Equal(http.StatusOK, s.streamDelivers(channel, 0))
 	s.Equal("Noted.", s.took(1)[0].text)
 	var contacts, episodes int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM contact_map WHERE customer_id = ?", s.customerID()).Scan(&contacts))
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM episodes WHERE customer_id = ?", s.customerID()).Scan(&episodes))
 	s.Zero(contacts)
 	s.Zero(episodes)
@@ -960,13 +960,13 @@ func (s *LinqChannelSuite) TestAMemberTheStoreCannotRecordIsRecordedOnTheNextAtt
 	ctx := context.Background()
 	chat, member := s.utils.uuid(), "+12025550198"
 	body := s.inGroup(chat, member, "STOP")
-	_, err := s.store.DB().ExecContext(ctx, "ALTER TABLE channel_thread_members RENAME TO channel_thread_members_off")
+	_, err := s.store.GlobalDB().ExecContext(ctx, "ALTER TABLE channel_thread_members RENAME TO channel_thread_members_off")
 	s.Require().NoError(err)
 	restored := false
 	restore := func() {
 		if !restored {
 			restored = true
-			_, err := s.store.DB().ExecContext(ctx, "ALTER TABLE channel_thread_members_off RENAME TO channel_thread_members")
+			_, err := s.store.GlobalDB().ExecContext(ctx, "ALTER TABLE channel_thread_members_off RENAME TO channel_thread_members")
 			s.Require().NoError(err)
 		}
 	}
@@ -1016,7 +1016,7 @@ func (s *LinqChannelSuite) TestAKeywordAnswerThatFailsOtherwiseIsAnError() {
 // reachable is what the bridge answers a scheduled delivery into a thread channel asks
 // (channelbridge.Bridge.Reachable).
 func (s *linqLine) reachable(channel string) error {
-	thread, err := s.store.ChannelThread(context.Background(), channel)
+	thread, err := s.store.ChannelThreads.Get(context.Background(), channel)
 	s.Require().NoError(err)
 	return s.bridge.(*channelbridge.Bridge).Reachable(context.Background(), thread)
 }

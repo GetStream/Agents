@@ -47,7 +47,7 @@ type SourceContract struct {
 }
 
 func (s *SourceContract) SetupTest() {
-	s.ctx = context.Background()
+	s.ctx = s.T().Context()
 	s.subject = s.New(s.T())
 	s.Require().NotNil(s.subject.Source, "SourceSubject.Source")
 	s.Require().NotNil(s.subject.Calls, "SourceSubject.Calls")

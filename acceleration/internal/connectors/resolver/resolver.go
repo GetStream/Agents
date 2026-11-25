@@ -41,6 +41,32 @@ const maxAge = 30 * time.Second
 // measured.
 const auditWriteTimeout = 5 * time.Second
 
+// saveAttempts and saveFirstPause bound how often retrieve saves what a renewal left after its
+// checkpoint committed (saveAgain): the first save and up to two more, the first of them
+// 100 ms after it and the next 200 ms after that, 300 ms of waiting in all. Each retry takes
+// the credential store's lock again: the lock belongs to the session of one pool connection
+// (store.withCredentialLock), and the pg driver closes that connection on every failure but a
+// Postgres ERROR (isBadConn in github.com/uptrace/bun/driver/pgdriver v1.2.18), so a dropped
+// connection, the short failure this is for, ends the lock with it. The pauses give the pool time to open another
+// connection. Each retry is a whole Update on the refresh's detached context: a pool
+// connection (pgdriver's DialTimeout, 5 s), the lock's tries and the locked read (its
+// ReadTimeout, 10 s), then the save and the unlock (store's credentialDetachedTimeout, 2 s
+// each). No sum of those is the bound: retrieveTimeout (30 s), counted from the lock taken
+// for the refresh, ends the context, and the pauses then end the retries (wait). The caller
+// is not held for it: Resolve returns when its own ctx ends. Between two tries the lock is
+// free and the row says needs_reauthorization, so a Resolve then gets ErrNotConnected; while
+// the refresh runs a waiter waits on the lock instead. A choice, not measured; a database
+// down for longer still loses the renewal.
+const (
+	saveAttempts   = 3
+	saveFirstPause = 100 * time.Millisecond
+)
+
+// unsavedMost bounds the renewals a router holds in memory once their saves all failed (held),
+// one a connection, each saved on its connection's next Resolve here. One past it is lost, and
+// so is every one held when the process stops: its connection then needs a reconnect.
+const unsavedMost = 1000
+
 // What LastError says after each outcome. core.CredentialState.LastError is shown to whoever
 // has to reconnect, so each says what to do. The wording follows the prototype's
 // (ResolveCredentials in internal/connectors/runtime.go:98-115 at cf62af0d), without the word
@@ -75,7 +101,7 @@ var revokedErrors = map[core.SignalKind]string{
 
 // ErrNotConnected says the connection's status is not connected: it is pending a consent, it
 // needs a reconnect, or it was disconnected. Or it is connected on a definition revision a
-// later one marked broken (store.BrokenConnectorRevision). Only the person who owns it can fix
+// later one marked broken (store.ConnectorBrokenRevisions.Get). Only the person who owns it can fix
 // that.
 var ErrNotConnected = errors.New("resolver: the connection is not connected")
 
@@ -83,6 +109,11 @@ var ErrNotConnected = errors.New("resolver: the connection is not connected")
 // a later call may not. The connection stays connected; the *core.OutcomeError it wraps
 // carries the provider's Retry-After, if it sent one.
 var ErrTemporarilyUnavailable = errors.New("resolver: the provider could not renew the credential just now")
+
+// errMovedSinceCheckpoint says a retried save found the connection other than its checkpoint
+// left it: a reconnect, new credentials or a delete came first, and the renewal must not
+// overwrite them.
+var errMovedSinceCheckpoint = errors.New("resolver: the connection changed after the refresh's checkpoint")
 
 // Config is what a Resolver reads from.
 type Config struct {
@@ -109,6 +140,9 @@ type Resolver struct {
 
 	mu    sync.Mutex
 	cache map[core.ConnectionRef]entry
+	// unsaved are the renewals whose saves all failed with an error a retry may fix, for
+	// the connection's next Resolve to save (saveUnsaved).
+	unsaved map[core.ConnectionRef]unsavedRenewal
 	// swept is when expired entries were last dropped, so connections nobody resolves any
 	// more do not keep theirs.
 	swept time.Time
@@ -123,6 +157,12 @@ type entry struct {
 	fetched    time.Time
 	// renewed says the Retrieve that fetched it renewed the stored credentials.
 	renewed bool
+}
+
+// unsavedRenewal is a renewal saveAgain could not save: the state its checkpoint committed and
+// the one it left.
+type unsavedRenewal struct {
+	atCheckpoint, final core.CredentialState
 }
 
 // New is a Resolver over cfg.
@@ -140,7 +180,7 @@ func New(cfg Config) (*Resolver, error) {
 		logger = slog.Default()
 	}
 	return &Resolver{store: cfg.Store, credentials: cfg.Credentials, schemes: cfg.Schemes, now: now,
-		logger: logger, cache: map[core.ConnectionRef]entry{}}, nil
+		logger: logger, cache: map[core.ConnectionRef]entry{}, unsaved: map[core.ConnectionRef]unsavedRenewal{}}, nil
 }
 
 // Resolve returns an access credential for ref.
@@ -153,10 +193,15 @@ func New(cfg Config) (*Resolver, error) {
 // req.Deadline, on a context of its own: a caller whose ctx ends during a refresh gets ctx's
 // error at once, and the refresh finishes and is committed without it.
 func (r *Resolver) Resolve(ctx context.Context, ref core.ConnectionRef, req core.CredentialRequest) (core.AccessCredential, error) {
-	connection, err := r.store.ConnectorConnection(ctx, ref.CustomerID, ref.ConnectionID)
+	connection, err := r.store.ConnectorConnections.Get(ctx, ref.CustomerID, ref.ConnectionID)
 	if err != nil {
 		r.drop(ref)
 		return core.AccessCredential{}, err
+	}
+	if connection.Status == store.ConnectionNeedsReauthorization {
+		if err := r.saveUnsaved(ctx, ref, connection); err != nil {
+			return core.AccessCredential{}, err
+		}
 	}
 	// A refused credential is never served again from the cache (core.CredentialRequest.Refused).
 	if connection.Status == store.ConnectionConnected && req.Refused == nil {
@@ -237,7 +282,10 @@ func (r *Resolver) Invalidate(ctx context.Context, ref core.ConnectionRef, rejec
 // Revoke moves a connected connection to needs_reauthorization and drops its cached
 // credential, because the provider said the grant ended (a verified core.Signal of kind why).
 // A connection that is not connected keeps its status: pending has no grant to end, and
-// needs_reauthorization and disconnected already say what a revocation would.
+// needs_reauthorization and disconnected already say what a revocation would. One that a
+// renewal's checkpoint left (lostRefresh) gets the signal's last_error, status unchanged, and
+// its audit row: the renewal's save may be retried (saveAgain), and a retry finds the
+// connection moved and leaves it, so the revocation stands.
 //
 // It names no credential, unlike Invalidate, and checks no revision: the provider ended the
 // grant itself, so stored credentials another router renewed a moment ago end with it. It
@@ -258,7 +306,8 @@ func (r *Resolver) Revoke(ctx context.Context, ref core.ConnectionRef, why core.
 	moved, revision := false, 0
 	var ended core.CredentialChange
 	err := r.credentials.Update(ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
-		if state.Status != store.ConnectionConnected {
+		checkpointed := state.Status == store.ConnectionNeedsReauthorization && state.LastError == lostRefresh
+		if state.Status != store.ConnectionConnected && !checkpointed {
 			return false, nil
 		}
 		if !endedAt.IsZero() && state.ConnectedAt.After(endedAt.Add(time.Second)) {
@@ -283,7 +332,8 @@ func (r *Resolver) Revoke(ctx context.Context, ref core.ConnectionRef, why core.
 // the credential the stored credentials still hold, the scheme is asked to renew it whatever
 // its expiry (core.RetrieveOptions.Refused); once they have moved past it, another router
 // already renewed it. ctx only bounds the wait for the lock and the reads; the scheme runs
-// on a detached context.
+// on a detached context, and so does saveAgain, which tries a save that failed after the
+// checkpoint again.
 func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connection store.ConnectorConnection, req core.CredentialRequest) (core.AccessCredential, error) {
 	scheme, found := r.schemes[connection.AuthScheme]
 	if !found {
@@ -299,7 +349,14 @@ func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connect
 		// the provider's own word for it.
 		ended             core.OutcomeKind
 		code, description string
+		// atCheckpoint is the state the checkpoint committed, and final the state the final
+		// save writes after it, set once fn returned without an error: the save to retry.
+		atCheckpoint, final *core.CredentialState
+		// detached is the context the scheme runs on, made once the lock is taken.
+		detached context.Context
+		cancel   = func() {}
 	)
+	defer func() { cancel() }()
 	err := r.credentials.Update(ctx, ref, func(state *core.CredentialState, checkpoint func() error) (bool, error) {
 		committed = state
 		if state.Status != store.ConnectionConnected {
@@ -309,14 +366,14 @@ func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connect
 		// A connection's inputs and scheme are never rewritten, so they are read outside the
 		// lock. Its metadata and definition revision change with a reconnect's grant, so the
 		// manifest is read and resolved inside it.
-		definition, err := r.store.ConnectorDefinition(ctx, ref.CustomerID, connection.ConnectorID, state.DefinitionRevision)
+		definition, err := r.store.ConnectorDefinitions.Get(ctx, ref.CustomerID, connection.ConnectorID, state.DefinitionRevision)
 		if err != nil {
 			return false, err
 		}
 		// A revision a later one marked broken gets no credential, as a connection that needs
 		// a reconnect does: the person logs in again, and that consent runs on the latest
 		// revision. Nothing is written, so the status stays what the provider last said.
-		reason, broken, err := r.store.BrokenConnectorRevision(ctx, connection.ConnectorID, state.DefinitionRevision)
+		reason, broken, err := r.store.ConnectorBrokenRevisions.Get(ctx, connection.ConnectorID, state.DefinitionRevision)
 		if err != nil {
 			return false, err
 		}
@@ -325,14 +382,13 @@ func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connect
 				ErrNotConnected, state.DefinitionRevision, connection.ConnectorID, reason))
 			return false, nil
 		}
-		manifest, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, state.Metadata)
+		manifest, err := definition.Resolve(connection.AuthScheme, connection.Inputs, state.Metadata)
 		if err != nil {
 			return false, err
 		}
 		before = *state
 		checkpointed := false
-		detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), retrieveTimeout)
-		defer cancel()
+		detached, cancel = context.WithTimeout(context.WithoutCancel(ctx), retrieveTimeout)
 		got, next, err := scheme.Retrieve(detached, state.Credentials, manifest, core.RetrieveOptions{
 			ValidUntil: req.Deadline,
 			Refused:    req.Refused != nil && req.Refused.Revision == state.Revision,
@@ -342,9 +398,16 @@ func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connect
 					return err
 				}
 				checkpointed = true
+				at := *state
+				atCheckpoint = &at
 				return nil
 			},
 		})
+		if _, refused := errors.AsType[*core.EndpointError](err); refused {
+			// What the resolver returns is read by callers, who are not told why.
+			r.logger.Warn("a connector endpoint was refused", "connection", ref.ConnectionID, "connector", connection.ConnectorID,
+				"error", core.LoggedError(err))
+		}
 		var outcome *core.OutcomeError
 		switch {
 		case err == nil:
@@ -366,8 +429,15 @@ func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connect
 			// the provider said. A checkpoint that committed stays.
 			return false, err
 		}
+		if checkpointed {
+			saving := *state
+			final = &saving
+		}
 		return checkpointed || changed(before, *state), nil
 	})
+	if err != nil && final != nil {
+		committed, err = r.saveAgain(detached, ref, *atCheckpoint, *final, err)
+	}
 	if err != nil {
 		return core.AccessCredential{}, stack.Wrap(err)
 	}
@@ -406,6 +476,113 @@ func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connect
 	return credential, nil
 }
 
+// saveAgain saves final, the state a Retrieve left after its checkpoint committed
+// atCheckpoint, once its save failed with err: until it lands, the connection says
+// needs_reauthorization and credentials the provider may have rotated are held only in memory.
+// It retries while err is one a retry can fix (retryable), up to saveAttempts saves in all,
+// each in an Update of its own on ctx, the refresh's detached context. An attempt writes only
+// while the connection is still as the checkpoint left it, and finds a save that landed with
+// its answer lost done. It returns the state it committed, or logs the last error once with the
+// connection's id and returns it: the connection then keeps the checkpoint's status.
+func (r *Resolver) saveAgain(ctx context.Context, ref core.ConnectionRef, atCheckpoint, final core.CredentialState, err error) (*core.CredentialState, error) {
+	attempts, pause := 1, saveFirstPause
+	for attempts < saveAttempts && retryable(err) && wait(ctx, pause) {
+		attempts, pause = attempts+1, 2*pause
+		var committed *core.CredentialState
+		if committed, err = r.saveFinal(ctx, ref, atCheckpoint, final); err == nil {
+			return committed, nil
+		}
+	}
+	if retryable(err) && r.hold(ref, unsavedRenewal{atCheckpoint: atCheckpoint, final: final}) {
+		r.logger.Error("could not save a connector credential refresh; this router saves it on the connection's next use, or the connection needs a reconnect",
+			"connection", ref.ConnectionID, "attempts", attempts, "error", err)
+		return nil, err
+	}
+	r.logger.Error("could not save a connector credential refresh; the connection needs a reconnect",
+		"connection", ref.ConnectionID, "attempts", attempts, "error", err)
+	return nil, err
+}
+
+// saveFinal saves final, in an Update of its own, while the connection is still as the
+// checkpoint left it (atCheckpoint). A save that landed with its answer lost is found done.
+func (r *Resolver) saveFinal(ctx context.Context, ref core.ConnectionRef, atCheckpoint, final core.CredentialState) (*core.CredentialState, error) {
+	var committed *core.CredentialState
+	err := r.credentials.Update(ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
+		committed = state
+		if !changed(final, *state) {
+			return false, nil
+		}
+		if changed(atCheckpoint, *state) {
+			return false, stack.Wrap(errMovedSinceCheckpoint)
+		}
+		state.Credentials, state.ExpiresAt = final.Credentials, final.ExpiresAt
+		state.Status, state.LastError = final.Status, final.LastError
+		return true, nil
+	})
+	return committed, err
+}
+
+// saveUnsaved saves the renewal held for ref, if there is one, before connection, which still
+// says needs_reauthorization, is resolved: the renewed credentials the provider may have rotated
+// to are only here. It is forgotten once saved, or once the connection moved since its
+// checkpoint, a reconnect or a revocation coming first; a save that fails in a way a retry may
+// fix keeps it, and fails the call.
+func (r *Resolver) saveUnsaved(ctx context.Context, ref core.ConnectionRef, connection store.ConnectorConnection) error {
+	r.mu.Lock()
+	held, found := r.unsaved[ref]
+	r.mu.Unlock()
+	if !found {
+		return nil
+	}
+	committed, err := r.saveFinal(ctx, ref, held.atCheckpoint, held.final)
+	if err != nil && retryable(err) {
+		return stack.Wrap(err)
+	}
+	r.mu.Lock()
+	delete(r.unsaved, ref)
+	r.mu.Unlock()
+	if err == nil {
+		r.audit(ctx, ref, &connection, store.AuditGrantRefreshed, "", committed.Revision, core.CredentialChange{
+			Previous: core.FingerprintsOf(r.schemes, held.atCheckpoint.Credentials),
+			Current:  core.FingerprintsOf(r.schemes, committed.Credentials),
+		})
+	}
+	return nil
+}
+
+// hold keeps a renewal whose saves failed for the connection's next Resolve, and reports false
+// when unsavedMost are held already.
+func (r *Resolver) hold(ref core.ConnectionRef, renewal unsavedRenewal) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, found := r.unsaved[ref]; !found && len(r.unsaved) >= unsavedMost {
+		return false
+	}
+	r.unsaved[ref] = renewal
+	return true
+}
+
+// retryable says whether saving the same state again may pass: not when the connection moved
+// or is gone (store.ErrConnectorConnectionChanged, store.ErrNoConnectorConnection,
+// errMovedSinceCheckpoint), nor when the store or Postgres refused the row itself
+// (store.Unwritable). A dropped connection, a timeout or a lock may pass.
+func retryable(err error) bool {
+	return !errors.Is(err, store.ErrConnectorConnectionChanged) && !errors.Is(err, store.ErrNoConnectorConnection) &&
+		!errors.Is(err, errMovedSinceCheckpoint) && !store.Unwritable(err)
+}
+
+// wait pauses for d and says whether ctx is still live after it.
+func wait(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 // audit records one change to a connection's grant, with the correlation ids ctx carries
 // (core.CorrelationOf) and the tokens change names, and logs it as one line. It runs after the
 // change committed and detached from ctx, so a caller that gave up still leaves its row;
@@ -415,7 +592,7 @@ func (r *Resolver) audit(ctx context.Context, ref core.ConnectionRef, connection
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
 	defer cancel()
 	if connection == nil {
-		read, err := r.store.ConnectorConnection(ctx, ref.CustomerID, ref.ConnectionID)
+		read, err := r.store.ConnectorConnections.Get(ctx, ref.CustomerID, ref.ConnectionID)
 		if err != nil {
 			r.logger.Error("could not record a connector audit row", "connection", ref.ConnectionID, "action", action, "error", err)
 			return
@@ -434,7 +611,7 @@ func (r *Resolver) audit(ctx context.Context, ref core.ConnectionRef, connection
 	if change != (core.CredentialChange{}) {
 		event.Credential = store.AuditCredential(change)
 	}
-	err := r.store.RecordConnectorAudit(ctx, event)
+	err := r.store.ConnectorAuditEvents.Insert(ctx, event)
 	if err != nil {
 		r.logger.Error("could not record a connector audit row", "connection", ref.ConnectionID, "action", action, "error", err)
 	}

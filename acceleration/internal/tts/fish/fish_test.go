@@ -333,6 +333,30 @@ func (s *FishSuite) TestInterruptStopsTheAudioMidResponse() {
 	s.Less(complete.AudioDurationMs, 10_000.0, "barge-in should not bill the whole utterance")
 }
 
+func (s *FishSuite) TestAResponseThatOutlivesTheTimeoutIsAFailureNotABargeIn() {
+	fake := newFakeFish()
+	defer fake.server.Close()
+	fake.samples, fake.samplesPerWrite = 240_000, 2400
+	fake.pause = 20 * time.Millisecond
+	provider := s.start(fake, Options{Timeout: 150 * time.Millisecond})
+
+	s.Require().NoError(provider.Synthesize(tts.Request{Text: "a very long sentence", Final: true}))
+
+	events := s.collect(provider, func(event tts.Event) bool {
+		_, done := event.(tts.SynthesisComplete)
+		return done
+	})
+	var failures []tts.Error
+	for _, event := range events {
+		if failure, ok := event.(tts.Error); ok {
+			failures = append(failures, failure)
+		}
+	}
+	s.Require().Len(failures, 1, "nobody cut in: the provider ran out of time")
+	s.ErrorIs(failures[0].Err, context.DeadlineExceeded)
+	s.Equal("audio", failures[0].Context)
+}
+
 func (s *FishSuite) TestCloseSettlesAResponseStillStreaming() {
 	fake := newFakeFish()
 	defer fake.server.Close()

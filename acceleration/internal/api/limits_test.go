@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -232,7 +233,7 @@ func (s *LimitsSuite) TestLimitUsageWithTheCallersKeyInTheQuery() {
 
 func (s *LimitsSuite) TestLimitUsagePairsTheAppsWithTheirSubjects() {
 	sibling := store.App{OrganizationID: s.organization(), Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(context.Background(), &sibling))
+	s.Require().NoError(s.store.Apps.Insert(context.Background(), &sibling))
 	s.spend(400_000, func(event *usage.Event) { event.UserID = "u1" })
 	s.spend(700_000, func(event *usage.Event) { event.AppID, event.UserID = sibling.ID, "u1" })
 
@@ -263,7 +264,7 @@ func (s *LimitsSuite) TestAClientTokenCannotReadOrWriteLimits() {
 
 func (s *LimitsSuite) TestOneAppsServerCredentialManagesTheWholeOrganization() {
 	sibling := store.App{OrganizationID: s.organization(), Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(context.Background(), &sibling))
+	s.Require().NoError(s.store.Apps.Insert(context.Background(), &sibling))
 
 	created := s.create(map[string]any{"subject": "app", "app_id": sibling.ID, "interval": "daily", "limit_micros": 1_000_000})
 
@@ -382,7 +383,7 @@ func (s *LimitsSuite) TestATeamIsStoredAsACategoryAndReadAsATeam() {
 	team := s.create(map[string]any{"subject": "team", "team": "finance", "interval": "daily", "limit_micros": 5})
 	s.create(map[string]any{"subject": "category", "category": "project:x", "interval": "daily", "limit_micros": 5})
 
-	stored, err := s.store.Limit(context.Background(), s.organization(), team.Id)
+	stored, err := s.store.Limits.Get(context.Background(), s.organization(), team.Id)
 	s.Require().NoError(err)
 	s.Equal(usage.SubjectCategory, stored.Subject)
 	s.Equal("team:finance", stored.Category)
@@ -480,7 +481,7 @@ func (s *LimitsSuite) TestACustomerResetLetsItSpendAgain() {
 	s.Require().NotNil(daily.RoomMicros)
 	s.Equal(int64(1_000_000), *daily.RoomMicros, "the whole limit is back")
 	s.searchedUntil(s.serverClient, http.StatusOK)
-	entries, err := s.store.AuditEntries(context.Background(), s.customerID(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(context.Background(), s.customerID(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Contains(entries[0].ResourceID, "reset:")
 }
@@ -543,7 +544,7 @@ func (s *LimitsSuite) TestStaffEditACustomerLimitThroughManage() {
 	s.Require().NoError(json.Unmarshal(payload, &created))
 	s.Contains(created.UpdatedBy, "manage:")
 
-	entries, err := s.store.AuditEntries(context.Background(), s.organization(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
+	entries, err := s.store.AuditEntries.Select(context.Background(), s.organization(), store.AuditEntryFilter{ResourceType: store.AuditSpendLimit})
 	s.Require().NoError(err)
 	s.Require().Len(entries, 1)
 	s.Equal(store.AuditSourceManage, entries[0].Source)
@@ -577,4 +578,209 @@ func (s *LimitsSuite) TestAnotherOrganizationsLimitIsNotThere() {
 	s.Equal(http.StatusNotFound, stranger.do(http.MethodGet, "/v1/spend/limits/"+strconv.FormatInt(created.Id, 10), nil, nil))
 	s.Equal(http.StatusNotFound, stranger.do(http.MethodPatch, "/v1/spend/limits/"+strconv.FormatInt(created.Id, 10), map[string]any{"limit_micros": 5}, nil))
 	s.Equal(http.StatusNotFound, stranger.do(http.MethodDelete, "/v1/spend/limits/"+strconv.FormatInt(created.Id, 10), nil, nil))
+}
+
+// refusedAsNoSuchApp asserts a call was answered as naming no app of the organization.
+func (s *RouterSuite) refusedAsNoSuchApp(status int, payload []byte) {
+	s.Equal(http.StatusNotFound, status, string(payload))
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &answered), string(payload))
+	s.Equal(errNoSuchApp.Code, answered.Error.Code)
+	s.Equal(errNoSuchApp.Message, answered.Error.Message)
+}
+
+func (s *LimitsSuite) TestALimitOnAnotherOrganizationsAppIsNotFoundAndNotWritten() {
+	stranger := s.data.createApp()
+
+	s.refusedAsNoSuchApp(s.serverClient.call(http.MethodPost, "/v1/spend/limits",
+		map[string]any{"subject": "app", "app_id": stranger.app.ID, "interval": "daily", "limit_micros": 1_000_000}))
+
+	s.Empty(s.limitIDs(""))
+}
+
+// A default for every user of the organization covers a user of any app a reset names, so a
+// reset naming another organization's app would write a reset and answer that user's spend.
+func (s *LimitsSuite) TestAResetOfAnotherOrganizationsUserIsNotFoundAndNotWritten() {
+	stranger := s.data.createApp()
+	s.create(map[string]any{"subject": "user", "level": "organization", "interval": "daily", "limit_micros": 1_000_000})
+
+	s.refusedAsNoSuchApp(s.serverClient.call(http.MethodPost, "/v1/spend/limits/usage/reset",
+		map[string]any{"subject": "user", "app_id": stranger.app.ID, "user_id": "u1", "reason": "x"}))
+
+	resets, err := s.store.UsageResets.Select(context.Background(), []string{s.organization()}, time.Time{})
+	s.Require().NoError(err)
+	s.Empty(resets)
+}
+
+func (s *LimitsSuite) TestStaffCannotLimitAnAppOutsideTheOrganizationTheyName() {
+	stranger := s.data.createApp()
+
+	s.refusedAsNoSuchApp(s.staff.call(http.MethodPost, "/v1/manage/spend/limits", map[string]any{
+		"organization_id": s.organization(), "subject": "app", "app_id": stranger.app.ID, "interval": "daily", "limit_micros": 1,
+	}))
+}
+
+// SelfHostedLimitsSuite runs the limits API as a router with nothing in front and no usage
+// service does: a backend names its app and its organization itself, and spend is summed from
+// the request rows, which hold every customer's.
+type SelfHostedLimitsSuite struct {
+	RouterSuite
+	// between runs a test's step in the middle of a call, before a query of its choosing.
+	between *beforeQuery
+}
+
+func TestSelfHostedLimitsSuite(t *testing.T) {
+	selfHosted := new(SelfHostedLimitsSuite)
+	selfHosted.byCustomer = true
+	runSuite(t, selfHosted)
+}
+
+func (s *SelfHostedLimitsSuite) SetupSuite() {
+	s.RouterSuite.SetupSuite()
+	s.between = &beforeQuery{}
+	s.store.GlobalDB().AddQueryHook(s.between)
+}
+
+func (s *SelfHostedLimitsSuite) SetupTest() {
+	s.useApp(s.data.createApp())
+}
+
+// backend is app's server naming organization, or naming none when it is empty.
+func (s *SelfHostedLimitsSuite) backend(app, organization string) *testClient {
+	header := http.Header{}
+	header.Set(auth.CustomerHeader, app)
+	if organization != "" {
+		header.Set(auth.OrganizationHeader, organization)
+	}
+	return &testClient{suite: &s.RouterSuite, header: header, kind: server}
+}
+
+// spent records a billable request of app's, costing micros, now, carrying categories.
+func (s *SelfHostedLimitsSuite) spent(app string, micros int64, categories ...string) {
+	_, err := s.store.Requests.InsertMany(context.Background(), []store.Request{{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: app, APIKey: "key_a", Provider: "stub", Model: "stub-llm",
+		StartedAt: time.Now(), CostMicros: micros, Billable: true, Success: true, UsageCategories: categories,
+	}})
+	s.Require().NoError(err)
+}
+
+// stranger is an app the router saw under organization, which has spent.
+func (s *SelfHostedLimitsSuite) stranger(organization string) string {
+	app := s.utils.uuid()
+	s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: app, OrganizationID: organization}))
+	s.spent(app, 700_000)
+	return app
+}
+
+// dailySpend is what the one subject query names spent today, as the backend reads it.
+func (s *SelfHostedLimitsSuite) dailySpend(backend *testClient, query string) int64 {
+	var read []SubjectUsage
+	s.Require().Equal(http.StatusOK, backend.do(http.MethodGet, "/v1/spend/limits/usage?"+query, nil, &read))
+	s.Require().Len(read, 1)
+	return read[0].Windows[0].SpentMicros
+}
+
+func (s *SelfHostedLimitsSuite) TestAnotherOrganizationsAppsSpendIsNotRead() {
+	backend := s.backend(s.customerID(), s.app.organization.ID)
+	s.spent(s.customerID(), 300_000)
+	stranger := s.stranger(s.utils.uuid())
+
+	s.refusedAsNoSuchApp(backend.call(http.MethodGet, "/v1/spend/limits/usage?subject=app&app_id="+
+		url.QueryEscape(s.customerID())+"&app_id="+url.QueryEscape(stranger), nil))
+
+	s.Equal(int64(300_000), s.dailySpend(backend, "subject=app&app_id="+url.QueryEscape(s.customerID())), "its own app alone is read")
+}
+
+// A request that names no organization reads its app alone, also when the app is recorded in
+// the organization of its own id with others.
+func (s *SelfHostedLimitsSuite) TestAnAppInNoOrganizationReadsOnlyItself() {
+	own := s.utils.uuid()
+	backend := s.backend(own, "")
+	s.seen(own, own)
+	s.spent(own, 300_000)
+	stranger := s.stranger(own)
+
+	s.refusedAsNoSuchApp(backend.call(http.MethodGet, "/v1/spend/limits/usage?subject=app&app_id="+url.QueryEscape(stranger), nil))
+
+	s.Equal(int64(300_000), s.dailySpend(backend, "subject=app&app_id="+url.QueryEscape(own)))
+}
+
+// An app can be recorded in another organization while a call on limits is answered. Its own
+// app is read under the organization its request names, whatever is recorded.
+func (s *SelfHostedLimitsSuite) TestAnAppReadsItsOwnSpendWhateverOrganizationIsRecordedForIt() {
+	organization, elsewhere := s.utils.uuid(), s.utils.uuid()
+	backend, own := s.memberRecordedElsewhere(organization)
+	sibling := s.stranger(organization)
+	s.spent(own, 300_000)
+	// The lookup of the apps the read names, its sibling among them.
+	s.between.step.Store(&queryStep{marker: "'" + sibling + "'", run: func() { s.seen(own, elsewhere) }})
+	s.T().Cleanup(func() { s.between.step.Store(nil) })
+
+	var read []SubjectUsage
+	s.Require().Equal(http.StatusOK, backend.do(http.MethodGet, "/v1/spend/limits/usage?subject=app&app_id="+
+		url.QueryEscape(own)+"&app_id="+url.QueryEscape(sibling), nil, &read))
+
+	s.Equal(elsewhere, s.recorded(own), "the record moved in the middle of the read")
+	s.Require().Len(read, 2)
+	s.Equal(int64(300_000), read[0].Windows[0].SpentMicros)
+}
+
+// The organization of a request that names none is its app alone, also when the app is recorded
+// in the organization of its own id with others.
+func (s *SelfHostedLimitsSuite) TestAnAppInNoOrganizationsOrganizationIsItselfAlone() {
+	own := s.utils.uuid()
+	backend := s.backend(own, "")
+	s.seen(own, own)
+	s.spent(own, 300_000)
+	s.stranger(own)
+
+	s.Equal(int64(300_000), s.dailySpend(backend, "subject=organization"))
+}
+
+// An organization is the apps seen under it, not an app whose id is the organization's, which
+// is another customer's.
+func (s *SelfHostedLimitsSuite) TestAnOrganizationsSpendLeavesOutAnAppWhoseIdIsItsOwn() {
+	own, organization := s.utils.uuid(), s.utils.uuid()
+	backend := s.backend(own, organization)
+	s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: own, OrganizationID: organization}))
+	s.spent(own, 300_000)
+	s.spent(organization, 700_000)
+
+	s.Equal(int64(300_000), s.dailySpend(backend, "subject=organization"))
+}
+
+// The teams of a request that names no organization are its app's work's alone, also when the
+// app is recorded in the organization of its own id with others.
+func (s *SelfHostedLimitsSuite) TestAnAppInNoOrganizationsTeamsAreItsOwnWorks() {
+	own, stranger := s.utils.uuid(), s.utils.uuid()
+	s.seen(own, own)
+	s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: stranger, OrganizationID: own}))
+	s.spent(own, 300_000, "team:finance")
+	s.spent(stranger, 700_000, "team:stranger")
+
+	var teams []Team
+	s.Require().Equal(http.StatusOK, s.backend(own, "").do(http.MethodGet, "/v1/teams", nil, &teams))
+
+	s.Require().Len(teams, 1, "%+v", teams)
+	s.Equal("finance", teams[0].Name)
+	s.Equal([]string{own}, teams[0].Apps)
+}
+
+// An organization's teams are the work of every app seen under it, the one whose id is the
+// organization's among them when it was seen there.
+func (s *SelfHostedLimitsSuite) TestAnOrganizationsTeamsAreTheWorkOfEveryAppSeenUnderIt() {
+	own, organization := s.utils.uuid(), s.utils.uuid()
+	for _, app := range []string{own, organization} {
+		s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: app, OrganizationID: organization}))
+	}
+	s.spent(own, 300_000, "team:finance")
+	s.spent(organization, 700_000, "team:finance")
+
+	var teams []Team
+	s.Require().Equal(http.StatusOK, s.backend(own, organization).do(http.MethodGet, "/v1/teams", nil, &teams))
+
+	s.Require().Len(teams, 1, "%+v", teams)
+	s.Equal("finance", teams[0].Name)
+	s.ElementsMatch([]string{own, organization}, teams[0].Apps)
+	s.Equal(int64(1_000_000), teams[0].Spent[3].SpentMicros)
 }

@@ -544,8 +544,40 @@ type ChannelSettings struct {
 type GreetingSettings struct {
 	Text string `yaml:"text"`
 	// Mode is exact, said word for word, or variation, which the model rewords on every
-	// call. Empty is exact.
+	// call. agent.yaml leaving it out is variation; empty in a GreetingSettings built in
+	// code is exact.
 	Mode string `yaml:"mode"`
+}
+
+// UnmarshalYAML reads greeting as its text alone, such as `greeting: Hello`, or as a mapping
+// of text and mode. Either way a greeting that names no mode is a variation.
+func (g *GreetingSettings) UnmarshalYAML(node *yaml.Node) error {
+	read := GreetingSettings{Mode: "variation"}
+	switch node.Kind {
+	case yaml.ScalarNode:
+		read.Text = node.Value
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key, value := node.Content[i].Value, node.Content[i+1]
+			if value.Kind != yaml.ScalarNode {
+				return fmt.Errorf("greeting.%s must be a string", key)
+			}
+			switch key {
+			case "text":
+				read.Text = value.Value
+			case "mode":
+				if value.Value != "" {
+					read.Mode = value.Value
+				}
+			default:
+				return fmt.Errorf("%q is not a greeting setting; text and mode are", key)
+			}
+		}
+	default:
+		return errors.New("greeting is its text, or a mapping of text and mode")
+	}
+	*g = read
+	return nil
 }
 
 type VideoSettings struct {
@@ -648,9 +680,14 @@ func Load(path string) (*Folder, error) {
 		return nil, fmt.Errorf("agents: %s is not an agent directory", path)
 	}
 
+	// What is loaded is what the directory holds: a link out of it is refused wherever it is.
+	root, err := realPath(path)
+	if err != nil {
+		return nil, fmt.Errorf("agents: reading %s: %w", path, err)
+	}
 	folder := &Folder{Path: path, Name: filepath.Base(filepath.Clean(path))}
 
-	declaration, err := os.ReadFile(filepath.Join(path, AgentFile))
+	declaration, err := readInside(root, filepath.Join(path, AgentFile))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("agents: %s has no %s, so it is not an agent directory", path, AgentFile)
 	}
@@ -665,7 +702,7 @@ func Load(path string) (*Folder, error) {
 		folder.Name = folder.Settings.Name
 	}
 
-	instructions, err := os.ReadFile(filepath.Join(path, InstructionsFile))
+	instructions, err := readInside(root, filepath.Join(path, InstructionsFile))
 	switch {
 	case err == nil:
 		folder.Instructions = strings.TrimSpace(string(instructions))
@@ -673,7 +710,7 @@ func Load(path string) (*Folder, error) {
 		return nil, fmt.Errorf("agents: reading %s: %w", InstructionsFile, err)
 	}
 
-	policy, err := os.ReadFile(filepath.Join(path, GuardrailFile))
+	policy, err := readInside(root, filepath.Join(path, GuardrailFile))
 	switch {
 	case err == nil:
 		folder.Guardrail = strings.TrimSpace(string(policy))
@@ -681,16 +718,16 @@ func Load(path string) (*Folder, error) {
 		return nil, fmt.Errorf("agents: reading %s: %w", GuardrailFile, err)
 	}
 
-	if folder.Skills, err = loadSkills(filepath.Join(path, SkillsDir)); err != nil {
+	if folder.Skills, err = loadSkills(root, filepath.Join(path, SkillsDir)); err != nil {
 		return nil, err
 	}
-	if folder.Knowledge, err = loadKnowledge(filepath.Join(path, KnowledgeDir)); err != nil {
+	if folder.Knowledge, err = loadKnowledge(root, filepath.Join(path, KnowledgeDir)); err != nil {
 		return nil, err
 	}
-	if folder.KnowledgeURLs, err = loadKnowledgeURLs(filepath.Join(path, KnowledgeDir, KnowledgeURLsFile)); err != nil {
+	if folder.KnowledgeURLs, err = loadKnowledgeURLs(root, filepath.Join(path, KnowledgeDir, KnowledgeURLsFile)); err != nil {
 		return nil, err
 	}
-	if folder.Simulations, err = loadSimulations(filepath.Join(path, SimulationsDir)); err != nil {
+	if folder.Simulations, err = loadSimulations(root, filepath.Join(path, SimulationsDir)); err != nil {
 		return nil, err
 	}
 	if folder.Settings.UI != nil {
@@ -930,7 +967,7 @@ func refuseReplaced(key string, value yaml.Node, replacement string) error {
 
 // loadSkills reads skills/: a skill is either a markdown file, or a folder holding a
 // SKILL.md and whatever files it comes with, nested as deep as they are.
-func loadSkills(path string) ([]Skill, error) {
+func loadSkills(root, path string) ([]Skill, error) {
 	entries, err := os.ReadDir(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -953,7 +990,7 @@ func loadSkills(path string) ([]Skill, error) {
 			continue
 		}
 
-		content, err := os.ReadFile(file)
+		content, err := readInside(root, file)
 		if entry.IsDir() && errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("agents: %s has no %s, so it is not a skill", filepath.Join(path, entry.Name()), SkillFile)
 		}
@@ -970,7 +1007,7 @@ func loadSkills(path string) ([]Skill, error) {
 			return nil, fmt.Errorf("agents: %s: %w", file, err)
 		}
 		if entry.IsDir() {
-			if skill.Files, err = loadSkillFiles(filepath.Join(path, entry.Name())); err != nil {
+			if skill.Files, err = loadSkillFiles(root, filepath.Join(path, entry.Name())); err != nil {
 				return nil, err
 			}
 		}
@@ -981,7 +1018,7 @@ func loadSkills(path string) ([]Skill, error) {
 
 // loadSkillFiles reads every file in a skill folder but its SKILL.md, by slash path
 // relative to the folder. Nil when there are none.
-func loadSkillFiles(dir string) (map[string]string, error) {
+func loadSkillFiles(root, dir string) (map[string]string, error) {
 	var files map[string]string
 	err := filepath.WalkDir(dir, func(file string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -996,7 +1033,7 @@ func loadSkillFiles(dir string) (map[string]string, error) {
 		if entry.IsDir() || file == filepath.Join(dir, SkillFile) {
 			return nil
 		}
-		content, err := os.ReadFile(file)
+		content, err := readInside(root, file)
 		if err != nil {
 			return err
 		}
@@ -1017,6 +1054,45 @@ func loadSkillFiles(dir string) (map[string]string, error) {
 		return nil, fmt.Errorf("agents: reading %s: %w", dir, err)
 	}
 	return files, nil
+}
+
+// inside is the real path of path, refused when it is outside the agent directory whose real
+// path is root, as a link left pointing elsewhere on the machine would be. A missing path is
+// an error wrapping fs.ErrNotExist, as from os.ReadFile.
+func inside(root, path string) (string, error) {
+	target, err := realPath(path)
+	if err != nil {
+		return "", err
+	}
+	if leaves(root, target) {
+		return "", fmt.Errorf("%s links outside the agent directory", path)
+	}
+	return target, nil
+}
+
+// realPath is path with every link resolved, made absolute first, since a relative path
+// resolves to a relative one and could not be told apart from an absolute link's target.
+func realPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(absolute)
+}
+
+// readInside reads file from where it really is, once inside has let it through.
+func readInside(root, file string) ([]byte, error) {
+	target, err := inside(root, file)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(target)
+}
+
+// leaves says whether target is outside root, both real paths.
+func leaves(root, target string) bool {
+	relative, err := filepath.Rel(root, target)
+	return err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 // skipped says whether a file or folder in a skill folder is left behind: hidden ones such
@@ -1103,22 +1179,32 @@ func cutFrontmatter(content string) (frontmatter, body string, found bool) {
 	return frontmatter, strings.TrimLeft(body, "-\r\n"), true
 }
 
-func loadKnowledge(path string) ([]Document, error) {
-	root, err := os.Stat(path)
+func loadKnowledge(root, path string) ([]Document, error) {
+	info, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("agents: reading %s: %w", path, err)
 	}
-	if !root.IsDir() {
+	if !info.IsDir() {
 		return nil, fmt.Errorf("agents: %s is not a directory", path)
+	}
+	// A walk does not follow a linked knowledge/, so it would load as empty rather than refused.
+	if _, err := inside(root, path); err != nil {
+		return nil, fmt.Errorf("agents: reading %s: %w", path, err)
 	}
 
 	var documents []Document
 	err = filepath.WalkDir(path, func(file string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if skipped(entry.Name()) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if entry.IsDir() || !readable[strings.ToLower(filepath.Ext(entry.Name()))] {
 			return nil
@@ -1130,7 +1216,7 @@ func loadKnowledge(path string) ([]Document, error) {
 			return nil
 		}
 
-		content, err := os.ReadFile(file)
+		content, err := readInside(root, file)
 		if err != nil {
 			return err
 		}
@@ -1158,8 +1244,8 @@ func loadKnowledge(path string) ([]Document, error) {
 //
 // A bad url is refused here rather than when it is subscribed, since a directory that
 // cannot be turned into a knowledge base is worth hearing about before anything is written.
-func loadKnowledgeURLs(path string) ([]KnowledgeURL, error) {
-	raw, err := os.ReadFile(path)
+func loadKnowledgeURLs(root, path string) ([]KnowledgeURL, error) {
+	raw, err := readInside(root, path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -1177,7 +1263,7 @@ func loadKnowledgeURLs(path string) ([]KnowledgeURL, error) {
 // loadSimulations reads every .yaml and .yml file in simulations/, each a list of
 // simulations. A key nobody knows is refused, as in agent.yaml, and so is a name two
 // simulations share, since a sync finds a simulation by its name.
-func loadSimulations(path string) ([]Simulation, error) {
+func loadSimulations(root, path string) ([]Simulation, error) {
 	entries, err := os.ReadDir(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -1195,7 +1281,7 @@ func loadSimulations(path string) ([]Simulation, error) {
 		}
 
 		file := filepath.Join(path, entry.Name())
-		raw, err := os.ReadFile(file)
+		raw, err := readInside(root, file)
 		if err != nil {
 			return nil, fmt.Errorf("agents: reading %s: %w", file, err)
 		}

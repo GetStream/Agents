@@ -56,6 +56,11 @@ def _parse_response(
 
         return response_404
 
+    if response.status_code == 409:
+        response_409 = ErrorResponse.from_dict(response.json())
+
+        return response_409
+
     if response.status_code == 500:
         response_500 = ErrorResponse.from_dict(response.json())
 
@@ -90,7 +95,9 @@ def sync_detailed(
 ) -> Response[Any | ErrorResponse]:
     """Take a document out of a knowledge base
 
-     The passages it was cut into are removed too, so the agent stops answering out of it.
+     The passages it was cut into are removed too, so the agent stops answering out of it. A document
+    that keeps being written while it is removed is refused with a 409 and listed as failed, so it can
+    be deleted again.
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:
@@ -122,7 +129,9 @@ def sync(
 ) -> Any | ErrorResponse | None:
     """Take a document out of a knowledge base
 
-     The passages it was cut into are removed too, so the agent stops answering out of it.
+     The passages it was cut into are removed too, so the agent stops answering out of it. A document
+    that keeps being written while it is removed is refused with a 409 and listed as failed, so it can
+    be deleted again.
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:
@@ -149,7 +158,9 @@ async def asyncio_detailed(
 ) -> Response[Any | ErrorResponse]:
     """Take a document out of a knowledge base
 
-     The passages it was cut into are removed too, so the agent stops answering out of it.
+     The passages it was cut into are removed too, so the agent stops answering out of it. A document
+    that keeps being written while it is removed is refused with a 409 and listed as failed, so it can
+    be deleted again.
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:
@@ -179,7 +190,9 @@ async def asyncio(
 ) -> Any | ErrorResponse | None:
     """Take a document out of a knowledge base
 
-     The passages it was cut into are removed too, so the agent stops answering out of it.
+     The passages it was cut into are removed too, so the agent stops answering out of it. A document
+    that keeps being written while it is removed is refused with a 409 and listed as failed, so it can
+    be deleted again.
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:

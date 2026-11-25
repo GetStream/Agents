@@ -151,6 +151,10 @@ link-local and metadata addresses (`169.254.169.254`) at dial time, so a DNS reb
 redirect cannot get round a check made earlier. Flag `http.Get`, `http.DefaultClient` or a
 fresh `http.Client` on a caller's URL.
 
+A refused URL gets one answer, whatever egress found. A different answer for a name that does
+not resolve and one that resolves to a private address lets a caller probe the router's
+resolver, so never quote the egress error (`createEventDestination`, AI-3575).
+
 ### 7. Secrets stay secret
 
 - Client secrets, API secrets, OAuth tokens and provider keys are sealed with the KEK at
@@ -158,9 +162,50 @@ fresh `http.Client` on a caller's URL.
   schema, and never in a list or get response afterwards.
 - Never logged: check new `slog`/log lines and error messages for tokens, keys, `Authorization`
   headers, query strings carrying `token=`, and request bodies.
-- A 500 says only "something went wrong" (`apierror.go`). Flag an error that returns a
-  wrapped driver, provider or upstream message to the caller.
+- A 500 says only "something went wrong" (`apierror.go`).
+- Error text that a caller gets (the message of any status, a socket frame, a stored field
+  that a caller reads later) is for the caller that sent the request: the end user's device
+  or the customer's backend. A request uses data from three levels:
+  - **Request:** what the caller sends: the request body and the socket frames.
+  - **Customer settings:** what the customer's backend writes: agent configs
+    (`sandbox_options`, connector bindings, `floor_control`), the app's settings and the
+    app's own Stream keys.
+  - **Deployment settings:** what the operator sets: the router's config and environment
+    (`ROUTER_*`, `STREAM_API_*`, `code_sandbox.*`), and what they control: which components
+    the deployment has, and the rules that egress, limits and the sandbox network use.
+- The text shows only data that the caller itself sent or wrote. A device sends the request,
+  so it sees only data from the request. The customer's backend also writes the customer
+  settings, so it sees data from the request and from the customer settings.
+- No caller sees the deployment settings, which only the operator sets or controls: no
+  setting name (such as an environment variable name), no setting value, no part of the
+  router's config, no component, and no rule that the deployment uses because of such a
+  setting.
+- When the caller can correct the error in data that it sent or wrote, the text tells only
+  what to change: the field, and why the router does not accept its value. All other bullets
+  of this rule still apply: the text contains no data that the caller did not send or write,
+  and no text of another error. `fmt.Errorf("%w: %w", ErrInvalid, err)`
+  contains all of the text of `err`.
+- When the caller cannot correct the error in data that it sent or wrote, the text says in
+  fixed words that the caller cannot correct it, with the error `code`. The caller sends the
+  `code` and the `X-Request-Id` to the team that helps it. For a stored field, it sends the
+  id of the resource that holds the field. The router logs the full cause one time, with the
+  same id: `request_id` on the access line of the request (`recordFailure`,
+  `withRequestLog`), or, for a stored field, the ids in [logging.md «What to
+  log»](../go/logging.md#what-to-log) (`session`, `call`, `turn`, `task`, `run`).
+- The text never contains the text of a store, vendor, network or DNS error (it shows hosts,
+  ports, SQL, constraint names, URLs, bodies and the cluster's DNS server), the rule of a
+  security control that refused the request (rule 6 for refused URLs), or internal
+  components and hosts.
+- Flag `invalidRequest(err.Error())`, `"...: " + err.Error()`, `fmt.Sprintf("...: %v", err)`
+  and a stored `err.Error()`, unless the error's text obeys the bullet above for errors that
+  the caller can correct. Flag a session error (`session.ErrInvalid`, `session.ErrNotConfigured`)
+  that shows deployment settings to a caller, or customer settings to a device. How to
+  translate an error is in [errors.md «HTTP»](../go/errors.md#http).
+- Refused outbound URLs: see rule 6.
 - The ops key (`X-Ops-Key`) is compared in constant time and turns the paths off when empty.
+- The activity key (`X-Activity-Key`, `ROUTER_AUTH_ACTIVITY_KEY` and `_PREVIOUS`) is compared in
+  constant time, reaches only the operations under `activitySecurity` (`listActivity`,
+  `getOrganizationActivity`), is off when empty, and is never the ops or the manage key.
 - The manage key (`X-Manage-Key`) is compared in constant time, makes every `/v1/manage/*`
   path a 404 `not_configured` when empty, is never the ops key, and every call with it must
   name its actor in `X-Stream-Actor-Id` (`requireStaffKey`, `ManageSuite`).

@@ -36,7 +36,6 @@ var (
 		Type: ErrorTypeInvalidRequest, Code: codeConsentRequired,
 		Message: "launching a campaign needs consent: true, saying the people on it agreed to be called",
 	}
-	errAutoEnrollUnavailable = invalidRequest("auto-enroll campaigns are not available yet")
 )
 
 // campaignNotReady is a launch refused for what the campaign still lacks.
@@ -70,7 +69,7 @@ func (s *Server) listCampaigns(ctx context.Context, request *listCampaignsReques
 	}
 
 	limit := cmp.Or(request.Limit, defaultCampaignPage)
-	found, err := s.store.QueryCampaigns(ctx, customerID, store.CampaignFilter{State: string(request.State), Limit: limit + 1, After: after})
+	found, err := s.store.Campaigns.Select(ctx, customerID, store.CampaignFilter{State: string(request.State), Limit: limit + 1, After: after})
 	if err != nil {
 		return nil, err
 	}
@@ -105,10 +104,6 @@ func (s *Server) createCampaign(ctx context.Context, request *createCampaignRequ
 	if name == "" {
 		return nil, invalidRequest("a campaign needs a name")
 	}
-	if body.Type != nil && *body.Type != CampaignTypeStandard {
-		return nil, errAutoEnrollUnavailable
-	}
-
 	if from := value(body.FromNumber); from != "" {
 		if err := s.holdsNumber(ctx, customerID, from); err != nil {
 			return nil, err
@@ -134,7 +129,7 @@ func (s *Server) createCampaign(ctx context.Context, request *createCampaignRequ
 	created := store.Campaign{
 		CustomerID:      customerID,
 		Name:            name,
-		Type:            store.Standard,
+		Type:            string(cmp.Or(value(body.Type), CampaignTypeStandard)),
 		ConfigID:        value(configID),
 		FromNumber:      value(body.FromNumber),
 		DefaultCountry:  value(body.DefaultCountry),
@@ -151,7 +146,7 @@ func (s *Server) createCampaign(ctx context.Context, request *createCampaignRequ
 	if err := routing.Tags(created.Tags).Validate(); err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	if err := s.store.CreateCampaign(ctx, &created); err != nil {
+	if err := s.store.Campaigns.Insert(ctx, &created); err != nil {
 		return nil, err
 	}
 	return s.campaignAnswer(ctx, created)
@@ -175,7 +170,7 @@ func (s *Server) campaign(ctx context.Context, id string) (string, store.Campaig
 	if s.store == nil {
 		return "", store.Campaign{}, errNoCampaigns
 	}
-	found, err := s.store.Campaign(ctx, customerID, id)
+	found, err := s.store.Campaigns.Get(ctx, customerID, id)
 	if errors.Is(err, store.ErrNoCampaign) {
 		return "", store.Campaign{}, errUnknownCampaign
 	}
@@ -221,7 +216,7 @@ func (s *Server) configAndSequence(ctx context.Context, customerID string, body 
 	// A campaign that names a config nobody has would fail one call at a time, at whatever
 	// hour it was launched.
 	if *config != "" && *config != configID {
-		_, err := s.configs.AgentConfig(ctx, customerID, *config)
+		_, err := s.store.AgentConfigs.Get(ctx, customerID, *config)
 		if errors.Is(err, store.ErrNoAgentConfig) {
 			return nil, nil, errUnknownConfig
 		}
@@ -290,11 +285,11 @@ func (s *Server) campaignsOf(ctx context.Context, campaigns []store.Campaign) ([
 	for _, one := range campaigns {
 		ids = append(ids, one.ID)
 	}
-	stages, err := s.store.ContactStages(ctx, ids)
+	stages, err := s.store.CampaignContacts.Stages(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
-	totals, err := s.store.CampaignTotals(ctx, ids)
+	totals, err := s.store.Campaigns.Totals(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +405,7 @@ func (s *Server) updateCampaign(ctx context.Context, request *updateCampaignRequ
 		changes.Tags = *body.Tags
 	}
 
-	updated, err := s.store.UpdateCampaign(ctx, customerID, current.ID, changes)
+	updated, err := s.store.Campaigns.Update(ctx, customerID, current.ID, changes)
 	if errors.Is(err, store.ErrCampaignLocked) {
 		return nil, errCampaignLocked
 	}
@@ -426,7 +421,7 @@ func (s *Server) deleteCampaign(ctx context.Context, request *campaignRequest) (
 	if err != nil {
 		return nil, err
 	}
-	err = s.store.DeleteCampaign(ctx, customerID, current.ID)
+	err = s.store.Campaigns.Delete(ctx, customerID, current.ID)
 	if errors.Is(err, store.ErrCampaignLocked) {
 		return nil, campaignInState(current.State, "deleted")
 	}
@@ -473,7 +468,7 @@ func (s *Server) launchCampaign(ctx context.Context, request *launchCampaignRequ
 
 	// The calls it places later, by no request, are owned by whoever launched it.
 	launcher := routing.AttributionFrom(ctx)
-	launched, err := s.store.LaunchCampaign(ctx, customerID, current.ID, store.Launch{
+	launched, err := s.store.Campaigns.Launch(ctx, customerID, current.ID, store.Launch{
 		StartAt: start, Now: now,
 		APIKey: launcher.APIKey, UserID: launcher.UserID, UsageCategories: launcher.UsageCategories,
 	})
@@ -489,17 +484,18 @@ func (s *Server) launchCampaign(ctx context.Context, request *launchCampaignRequ
 // readyToLaunch says what a draft still lacks before it can ring anybody, the first thing it
 // finds.
 func (s *Server) readyToLaunch(ctx context.Context, customerID string, draft store.Campaign) error {
-	contacts, err := s.store.QueryContacts(ctx, draft.ID, store.ContactFilter{Limit: 1})
+	contacts, err := s.store.CampaignContacts.Select(ctx, draft.ID, store.ContactFilter{Limit: 1})
 	if err != nil {
 		return err
 	}
-	if len(contacts) == 0 {
+	// An auto-enroll campaign is given its people as they are found, after it launched.
+	if len(contacts) == 0 && draft.Type != store.AutoEnroll {
 		return campaignNotReady("a campaign needs contacts to ring before it can launch")
 	}
 	if draft.FromNumber == "" {
 		return campaignNotReady("a campaign needs one of the app's numbers to call from before it can launch")
 	}
-	_, err = s.store.Number(ctx, customerID, draft.FromNumber)
+	_, err = s.store.PhoneNumbers.GetByE164(ctx, customerID, draft.FromNumber)
 	if isNumberNotHeld(err) {
 		return campaignNotReady(draft.FromNumber + " is not one of this app's numbers, so the campaign cannot call from it")
 	}
@@ -509,7 +505,7 @@ func (s *Server) readyToLaunch(ctx context.Context, customerID string, draft sto
 	if draft.ConfigID == "" {
 		return campaignNotReady("a campaign needs an agent config to make its calls with before it can launch")
 	}
-	config, err := s.configs.AgentConfig(ctx, customerID, draft.ConfigID)
+	config, err := s.store.AgentConfigs.Get(ctx, customerID, draft.ConfigID)
 	if errors.Is(err, store.ErrNoAgentConfig) {
 		return campaignNotReady("the agent config " + draft.ConfigID + " the campaign calls with no longer exists")
 	}
@@ -554,7 +550,7 @@ func (s *Server) mayCall(ctx context.Context, customerID string) error {
 
 // holdsNumber refuses a number the app does not hold, which no call can be placed from.
 func (s *Server) holdsNumber(ctx context.Context, customerID, e164 string) error {
-	_, err := s.store.Number(ctx, customerID, e164)
+	_, err := s.store.PhoneNumbers.GetByE164(ctx, customerID, e164)
 	if isNumberNotHeld(err) {
 		return invalidRequest(e164 + " is not one of this app's numbers")
 	}
@@ -564,7 +560,7 @@ func (s *Server) holdsNumber(ctx context.Context, customerID, e164 string) error
 // pauseCampaign stops ringing anybody new. The calls already happening are left to finish.
 func (s *Server) pauseCampaign(ctx context.Context, request *campaignRequest) (*campaignResponse, error) {
 	return s.moveCampaign(ctx, request.Id, "paused", func(customerID string, current store.Campaign) error {
-		return s.store.PauseCampaign(ctx, customerID, current.ID, "")
+		return s.store.Campaigns.Pause(ctx, customerID, current.ID, "")
 	})
 }
 
@@ -579,7 +575,7 @@ func (s *Server) resumeCampaign(ctx context.Context, request *campaignRequest) (
 		}
 		// A launched campaign's config cannot change, so one deleted since leaves it nothing to
 		// ring with: the dialer would pause it again at its first call.
-		_, err := s.configs.AgentConfig(ctx, customerID, current.ConfigID)
+		_, err := s.store.AgentConfigs.Get(ctx, customerID, current.ConfigID)
 		if errors.Is(err, store.ErrNoAgentConfig) {
 			return campaignNotReady("the agent config " + current.ConfigID + " the campaign calls with was deleted: duplicate the campaign with another")
 		}
@@ -589,14 +585,14 @@ func (s *Server) resumeCampaign(ctx context.Context, request *campaignRequest) (
 		if err := s.mayCall(ctx, customerID); err != nil {
 			return err
 		}
-		return s.store.ResumeCampaign(ctx, customerID, current.ID)
+		return s.store.Campaigns.Resume(ctx, customerID, current.ID)
 	})
 }
 
 // stopCampaign ends a campaign for good. Nobody waiting is rung; calls in progress finish.
 func (s *Server) stopCampaign(ctx context.Context, request *campaignRequest) (*campaignResponse, error) {
 	return s.moveCampaign(ctx, request.Id, "stopped", func(customerID string, current store.Campaign) error {
-		return s.store.StopCampaign(ctx, customerID, current.ID, time.Now().UTC())
+		return s.store.Campaigns.Stop(ctx, customerID, current.ID, time.Now().UTC())
 	})
 }
 
@@ -613,7 +609,7 @@ func (s *Server) moveCampaign(ctx context.Context, id, move string, apply func(c
 	if err != nil {
 		return nil, err
 	}
-	moved, err := s.store.Campaign(ctx, customerID, current.ID)
+	moved, err := s.store.Campaigns.Get(ctx, customerID, current.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -629,7 +625,7 @@ func (s *Server) duplicateCampaign(ctx context.Context, request *duplicateCampai
 	if request.Body == nil {
 		return nil, invalidRequest("a request body is required")
 	}
-	copied, err := s.store.DuplicateCampaign(ctx, customerID, current.ID, request.Body.Contacts)
+	copied, err := s.store.Campaigns.Duplicate(ctx, customerID, current.ID, request.Body.Contacts)
 	if errors.Is(err, store.ErrCampaignLocked) {
 		return nil, APIError{Type: ErrorTypeConflict, Code: codeCampaignLocked,
 			Message: "the contacts never rung are known once a campaign is stopped or completed; this one is " + current.State}
@@ -646,7 +642,7 @@ func (s *Server) getCampaignAnalytics(ctx context.Context, request *campaignRequ
 	if err != nil {
 		return nil, err
 	}
-	counted, err := s.store.CampaignAnalytics(ctx, current.ID)
+	counted, err := s.store.Campaigns.Analytics(ctx, current.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -738,7 +734,7 @@ func (s *Server) registerCampaigns(api huma.API) {
 		Path:        "/v1/agents/campaigns/{id}/launch",
 		Summary:     "Launch a draft",
 		Description: "Records the customer's consent and rings the contacts from start_at. A draft missing " +
-			"what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused " +
+			"what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused " +
 			"with campaign_not_ready, saying what. An organization that may not pay for calls is refused here " +
 			"as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who " +
 			"opted out of calls are rejected without a call.\n" + serverSideOnly,
@@ -894,7 +890,7 @@ type Campaign struct {
 	Sequence       CampaignSequence  `json:"sequence"`
 	CallingHours   CallingHours      `json:"calling_hours"`
 	Tags           map[string]string `json:"tags" nullable:"false"`
-	PausedReason   *string           `json:"paused_reason,omitempty" doc:"Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it."`
+	PausedReason   *string           `json:"paused_reason,omitempty" doc:"Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, stream_app_disconnected or stream_app_moved when the app's Stream app was disconnected or moved, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it."`
 	StartAt        *time.Time        `json:"start_at,omitempty" doc:"When it was launched to start ringing."`
 	LaunchedAt     *time.Time        `json:"launched_at,omitempty"`
 	StartedAt      *time.Time        `json:"started_at,omitempty" doc:"When it first rang anybody."`
@@ -909,7 +905,8 @@ func (*Campaign) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Sch
 	return schema
 }
 
-// CampaignType is what a campaign rings: standard rings the contacts it was given.
+// CampaignType is what a campaign rings: standard rings the contacts it was given, auto_enroll
+// also those added after it launched.
 type CampaignType string
 
 const (
@@ -919,7 +916,9 @@ const (
 
 func (CampaignType) Schema(registry huma.Registry) *huma.Schema {
 	return namedEnum(registry, "CampaignType", "What a campaign rings. standard rings the contacts it was "+
-		"given; auto_enroll is refused for now. Fixed once the campaign is created.",
+		"given before launch, and completes once it is done with them. auto_enroll also takes contacts "+
+		"while scheduled, running or paused, starts each on the first step within calling hours, and runs "+
+		"until it is stopped. Fixed once the campaign is created.",
 		string(CampaignTypeStandard), string(CampaignTypeAutoEnroll))
 }
 
@@ -969,7 +968,7 @@ type CampaignVoicemail struct {
 
 // CampaignAttempt is one try at reaching a contact.
 type CampaignAttempt struct {
-	DelayMinutes int `json:"delay_minutes" doc:"Minutes after the previous attempt started, pushed into the calling hours."`
+	DelayMinutes int `json:"delay_minutes" doc:"Minutes after the previous attempt started, pushed into the calling hours. At most 43200 (30 days)."`
 }
 
 // CampaignOutcome is one way an answered call can end.

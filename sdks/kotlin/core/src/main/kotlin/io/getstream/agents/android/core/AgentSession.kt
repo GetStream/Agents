@@ -136,6 +136,13 @@ public class AgentSession internal constructor(
     public fun toolCall(id: String): Flow<AgentEvent.ToolCallState?> = calls.map { it[id] }.distinctUntilChanged()
 
     /**
+     * The calls one agent turn made, in the order they started: the ones to show under that
+     * turn's message. Emits again only when one of them changes.
+     */
+    public fun toolCallsForTurn(turnId: String): Flow<List<AgentEvent.ToolCallState>> =
+        calls.map { all -> all.values.filter { it.turnId == turnId } }.distinctUntilChanged()
+
+    /**
      * Calls [handler] with every event of [kind], such as [AgentEvent.Kind.ToolCallFinished], on
      * the session's scope until the returned job is cancelled or the session closes. It is
      * subscribed before this returns, so it misses nothing sent after.
@@ -592,8 +599,9 @@ public class AgentSession internal constructor(
                 throw e
             } catch (e: Exception) {
                 // The model can only say something useful about a tool that did not work if
-                // it is told that it did not work.
-                Command.ToolResult(call.id, error = e.message ?: e.toString(), requestId = call.requestId, turnId = call.turnId)
+                // it is told that it did not work. What it is told is the app's choice
+                // (`onToolError`), since it may repeat it.
+                Command.ToolResult(call.id, error = toolFailure(call, e, backend.onToolError), requestId = call.requestId, turnId = call.turnId)
             }
             try {
                 socket?.send(result)

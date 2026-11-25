@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/eventforward"
@@ -25,8 +26,7 @@ const connectorEventsPath = "/v1/agents/connectors/events/"
 // (T38, AI-878; channels.md on connectors/planning, «Integration modes: one Slack app for each
 // customer»). The URL names the app, and with it the customer and the signing secret, so no
 // lookup by account picks the customer. It names the connector too, because an app id is
-// unique only among one connector's records (connector_oauth_clients_provider_app,
-// 20261006195500).
+// unique only among one connector's records (connector_oauth_clients_provider_app).
 const providerAppEventsPath = "/v1/connectors/events/"
 
 // maxConnectorEventBytes caps the body read before it is verified. Slack's pages name no
@@ -140,7 +140,7 @@ func (s *Server) receiveConnectorEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	connectorID := r.PathValue("connector_id")
-	definition, err := s.store.LatestBuiltinConnectorDefinition(r.Context(), connectorID)
+	definition, err := s.store.ConnectorDefinitions.LatestBuiltin(r.Context(), connectorID)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		writeError(w, errNoConnectorEvents)
 		return
@@ -197,7 +197,7 @@ func (s *Server) receiveProviderAppEvent(w http.ResponseWriter, r *http.Request)
 		writeFailure(w, r, err)
 		return
 	}
-	definition, err := s.store.LatestConnectorDefinition(r.Context(), app.CustomerID, connectorID)
+	definition, err := s.store.ConnectorDefinitions.Latest(r.Context(), app.CustomerID, connectorID)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		writeError(w, errNoConnectorEvents)
 		return
@@ -250,7 +250,7 @@ func (s *Server) answerProviderAppHandshake(w http.ResponseWriter, r *http.Reque
 		writeFailure(w, r, err)
 		return
 	}
-	definition, err := s.store.LatestConnectorDefinition(r.Context(), app.CustomerID, connectorID)
+	definition, err := s.store.ConnectorDefinitions.Latest(r.Context(), app.CustomerID, connectorID)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		methodNotAllowed(w, r)
 		return
@@ -311,7 +311,7 @@ func readConnectorEvent(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 //	each signal -> the connections of its account -> Resolver.Revoke, with when it ended
 //	the messages -> ChannelBridge.Deliver, with app
 //	  none, none skipped and no signal -> an info line
-//	a provider app's delivery -> eventforward.Forward, queued for the customer's event
+//	a provider app's delivery -> eventforward.Forwarder.Forward, queued for the customer's event
 //	  destinations, handled when a signal or an answered message was in it
 //	                                                200, or 500 so the provider retries
 //
@@ -336,6 +336,8 @@ func (s *Server) receiveEvent(w http.ResponseWriter, r *http.Request, body []byt
 		writeError(w, errUnsigned)
 		return
 	}
+	// A connector's own route is the operator's app's, whose events are no one customer's.
+	activity.NoteCustomer(r.Context(), app.CustomerID, activity.AreaHooksIn)
 	if event.Challenge != "" {
 		outcome = eventChallenge
 		writeChallenge(w, event.Challenge)
@@ -411,7 +413,7 @@ func (s *Server) revokeAccount(ctx context.Context, m core.Manifest, signal core
 			metadata[name] = value
 		}
 	}
-	refs, err := s.store.ConnectionsByIdentity(ctx, m.ID, inputs, metadata)
+	refs, err := s.store.ConnectorConnections.SelectByIdentity(ctx, m.ID, inputs, metadata)
 	if err != nil {
 		return err
 	}

@@ -32,7 +32,7 @@ func (s *BranchesSuite) TestRewindingAConversationKeptInChatHidesTheLaterTurnsAn
 	second := s.asks(session, "And tomorrow?")
 	s.asks(session, "And Sunday?")
 
-	s.Require().NoError(session.Rewind(s.ctx, s.store, first))
+	s.Require().NoError(session.Rewind(s.ctx, RecordedIn(s.store), first))
 
 	s.Equal([]string{"Is it raining?", "Answer 1 to Is it raining?"}, s.texts(session), "Chat hides every later turn")
 	s.Equal(s.texts(session), history(session), "the model holds the conversation Chat shows")
@@ -54,10 +54,10 @@ func (s *BranchesSuite) TestTheTurnsARewindHidAreABranchThatCanBeBroughtBack() {
 	session := s.opens()
 	first := s.asks(session, "Is it raining?")
 	second := s.asks(session, "And tomorrow?")
-	s.Require().NoError(session.Rewind(s.ctx, s.store, first))
+	s.Require().NoError(session.Rewind(s.ctx, RecordedIn(s.store), first))
 	next := s.asks(session, "And next week?")
 
-	siblings, err := s.store.Siblings(s.ctx, s.customer, session.ID(), next, store.SiblingsOfQuestion)
+	siblings, err := s.store.Responses.Siblings(s.ctx, s.customer, session.ID(), next, store.SiblingsOfQuestion)
 	s.Require().NoError(err)
 	s.Len(siblings, 2, "the question asked after the rewind stands beside the rewound one")
 	active, shown, err := BranchShown(s.ctx, s.store, s.customer, session.ID(), second)
@@ -84,7 +84,7 @@ func (s *BranchesSuite) TestRewindingAKeptConversationToItsNewestResponseHidesNo
 	s.asks(session, "Is it raining?")
 	second := s.asks(session, "And tomorrow?")
 
-	s.Require().NoError(session.Rewind(s.ctx, s.store, second))
+	s.Require().NoError(session.Rewind(s.ctx, RecordedIn(s.store), second))
 
 	s.False(s.rewound(), "there is nothing after the newest response to hide")
 	s.Len(s.texts(session), 4)
@@ -94,9 +94,9 @@ func (s *BranchesSuite) TestARewindToAResponseOffTheConversationIsRefused() {
 	session := s.opens()
 	first := s.asks(session, "Is it raining?")
 	second := s.asks(session, "And tomorrow?")
-	s.Require().NoError(session.Rewind(s.ctx, s.store, first))
+	s.Require().NoError(session.Rewind(s.ctx, RecordedIn(s.store), first))
 
-	err := session.Rewind(s.ctx, s.store, second)
+	err := session.Rewind(s.ctx, RecordedIn(s.store), second)
 
 	s.ErrorIs(err, persistent.ErrBranchConflict, "a rewound response is brought back with activate, not rewound to")
 }
@@ -105,7 +105,7 @@ func (s *BranchesSuite) TestARewindToAResponseTheSessionDoesNotHaveIsNotFound() 
 	session := s.opens()
 	s.asks(session, "Is it raining?")
 
-	err := session.Rewind(s.ctx, s.store, uuid.NewString())
+	err := session.Rewind(s.ctx, RecordedIn(s.store), uuid.NewString())
 
 	s.ErrorIs(err, store.ErrUnknownResponse)
 }
@@ -116,7 +116,7 @@ func (s *BranchesSuite) TestARewindChatHasTurnedOffIsRefusedAndTheConversationIs
 	s.asks(session, "And tomorrow?")
 	s.chat.DisableRewind()
 
-	err := session.Rewind(s.ctx, s.store, first)
+	err := session.Rewind(s.ctx, RecordedIn(s.store), first)
 
 	s.Require().Error(err)
 	s.True(persistent.Refused(err), "Chat refused: nothing changed, nothing is left to settle")
@@ -138,7 +138,7 @@ func (s *BranchesSuite) TestARewindRightAfterATurnNotYetRecordedHidesIt() {
 		return len(last) == 4 && last[3].state == "completed" && !s.service.Writing()
 	}, 5*time.Second, 5*time.Millisecond, "the reply was never written")
 
-	s.Require().NoError(session.Rewind(s.ctx, s.store, first))
+	s.Require().NoError(session.Rewind(s.ctx, RecordedIn(s.store), first))
 
 	s.Equal([]string{"Is it raining?", "Answer 1 to Is it raining?"}, s.texts(session))
 	s.NotNil(s.response(session, second).RewoundAt)
@@ -153,7 +153,7 @@ func (s *BranchesSuite) TestARewindAskedAgainAfterItsAnswerWasLostFinishesIt() {
 	s.chat.LoseRewindAnswer()
 	waiting, release := s.chat.Hold("/rewind")
 	failed := make(chan error, 1)
-	go func() { failed <- session.Rewind(s.ctx, s.store, first) }()
+	go func() { failed <- session.Rewind(s.ctx, RecordedIn(s.store), first) }()
 	<-waiting
 	// Chat cannot be read once it rewound, so whether it did is not known.
 	s.chat.Fail(http.MethodPost, "/query")
@@ -161,7 +161,7 @@ func (s *BranchesSuite) TestARewindAskedAgainAfterItsAnswerWasLostFinishesIt() {
 	s.Require().Error(<-failed)
 	s.chat.Heal(http.MethodPost, "/query")
 
-	s.Require().NoError(session.Rewind(s.ctx, s.store, first))
+	s.Require().NoError(session.Rewind(s.ctx, RecordedIn(s.store), first))
 
 	s.Equal([]string{"Is it raining?", "Answer 1 to Is it raining?"}, s.texts(session))
 	s.Equal(s.texts(session), history(session))
@@ -179,11 +179,11 @@ func (s *BranchesSuite) TestRewindsAndActivationsAroundARegenerateKeepTheTreesOr
 	branched, err := session.Regenerate(s.ctx, uuid.NewString(), second, options.LLM{})
 	s.Require().NoError(err)
 	s.settled(session)
-	s.Require().NoError(session.Rewind(s.ctx, s.store, first))
+	s.Require().NoError(session.Rewind(s.ctx, RecordedIn(s.store), first))
 	_, err = session.Activate(s.ctx, branched.ResponseID)
 	s.Require().NoError(err)
 	s.written()
-	s.Require().NoError(session.Rewind(s.ctx, s.store, first))
+	s.Require().NoError(session.Rewind(s.ctx, RecordedIn(s.store), first))
 
 	_, err = session.Activate(s.ctx, second)
 	s.Require().NoError(err)
@@ -203,7 +203,7 @@ func (s *BranchesSuite) TestTheQuestionAskedAfterARewindAndAReopenIsShownBesideT
 	session := s.opens()
 	first := s.asks(session, "Q1")
 	s.asks(session, "Q2")
-	s.Require().NoError(session.Rewind(s.ctx, s.store, first))
+	s.Require().NoError(session.Rewind(s.ctx, RecordedIn(s.store), first))
 	reopened := s.reopens(session)
 
 	next := s.asks(reopened, "Q3")
@@ -220,14 +220,14 @@ func (s *BranchesSuite) TestARewindMadeAgainAfterItsTurnWasBroughtBackIsSettledW
 	session := s.opens()
 	first := s.asks(session, "Q1")
 	second := s.asks(session, "Q2")
-	s.Require().NoError(session.Rewind(s.ctx, s.store, first))
+	s.Require().NoError(session.Rewind(s.ctx, RecordedIn(s.store), first))
 	_, err := session.Activate(s.ctx, second)
 	s.Require().NoError(err)
 	s.written()
 	s.chat.LoseRewindAnswer()
 	waiting, release := s.chat.Hold("/rewind")
 	failed := make(chan error, 1)
-	go func() { failed <- session.Rewind(s.ctx, s.store, first) }()
+	go func() { failed <- session.Rewind(s.ctx, RecordedIn(s.store), first) }()
 	<-waiting
 	// Chat cannot be read once it rewound, so whether it did is not known.
 	s.chat.Fail(http.MethodPost, "/query")
@@ -263,7 +263,7 @@ func (s *BranchesSuite) TestARewindWaitsForTheNextTurnsMessagesToReachChat() {
 		release()
 	}()
 
-	s.Require().NoError(session.Rewind(s.ctx, s.store, first))
+	s.Require().NoError(session.Rewind(s.ctx, RecordedIn(s.store), first))
 
 	s.written()
 	s.Equal([]string{"Is it raining?", "Answer 1 to Is it raining?"}, s.texts(session))
@@ -277,10 +277,10 @@ func (s *BranchesSuite) TestARewindThatWouldHideAnUnmarkedResponseIsRefused() {
 	first := s.asks(session, "Is it raining?")
 	spoken := store.AgentResponse{ID: uuid.NewString(), SessionID: session.ID(), CustomerID: s.customer,
 		ParentResponseID: first, Said: "Said on a call", CreatedAt: time.Now().UTC()}
-	s.Require().NoError(s.store.StartResponse(s.ctx, &spoken))
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &spoken))
 	before := s.texts(session)
 
-	err := session.Rewind(s.ctx, s.store, first)
+	err := session.Rewind(s.ctx, RecordedIn(s.store), first)
 
 	unsupported, ok := errors.AsType[*persistent.BranchesUnsupportedError](err)
 	s.Require().True(ok, "%v", err)

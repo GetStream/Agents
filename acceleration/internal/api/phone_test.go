@@ -85,7 +85,7 @@ func (s *PhoneSuite) TestSearchingEveryVendorSaysNoneCanBeAsked() {
 	var answered ErrorResponse
 	s.Require().NoError(json.Unmarshal(payload, &answered), string(payload))
 	s.Equal(http.StatusBadRequest, status)
-	s.Contains(answered.Error.Message, "no vendor has the credentials")
+	s.Equal(errPhoneNotConfigured.Message, answered.Error.Message)
 	s.Equal(codeNotConfigured, answered.Error.Code)
 }
 
@@ -278,12 +278,12 @@ func (s *PhoneSuite) TestANumberThatOnlyPlacedCallsIsNotListedAsAttached() {
 	s.useApp(s.data.createApp())
 	ctx := context.Background()
 	number := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: number, Vendor: "telnyx", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: "telnyx"}
-	s.Require().NoError(s.store.InTrunkGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
-		return tx.SetLine(number, "trunk-"+s.utils.uuid(), "route-"+s.utils.uuid(), store.NumberBridge{})
+	s.Require().NoError(s.store.StreamTrunks.InGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		return tx.SetLine(number, "trunk-"+s.utils.uuid(), "route-"+s.utils.uuid())
 	}))
 
 	var numbers []PhoneNumber
@@ -296,10 +296,10 @@ func (s *PhoneSuite) TestANumberThatOnlyPlacedCallsIsNotListedAsAttached() {
 func (s *PhoneSuite) attachedNumber(customerID string) string {
 	ctx := context.Background()
 	number := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: number, Vendor: "bics", Country: "US", CustomerID: customerID, PurchasedAt: time.Now().UTC(),
 	}))
-	s.Require().NoError(s.store.AttachNumber(ctx, customerID, number, store.NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, customerID, number, store.NumberAttachment{
 		TrunkID: "trunk-" + s.utils.uuid(), RouteID: "route-" + s.utils.uuid(), CallType: "default", CallID: "call-" + s.utils.uuid(),
 	}))
 	return number
@@ -428,7 +428,7 @@ func (s *CallStatusSuite) TestACallIntoASessionWhoseCallCarriesOtherCustomIsAnIn
 	s.useApp(s.data.createApp())
 	ctx := context.Background()
 	e164, session := s.utils.number(), s.utils.uuid()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: e164, Vendor: "twilio", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	creator := "agent-1"
@@ -531,7 +531,7 @@ func (s *CallStatusSuite) hangsUpOnMachines(sessions *session.Manager) (string, 
 
 // endsForVoicemail waits for sessions to stop holding id.
 func (s *CallStatusSuite) endsForVoicemail(sessions *session.Manager, id string) {
-	s.Require().Eventually(func() bool { return !sessions.Running(id) }, 10*time.Second, 20*time.Millisecond,
+	s.Require().Eventually(func() bool { return !sessions.Running(s.customerID(), id) }, 10*time.Second, 20*time.Millisecond,
 		"the session was kept on the answering machine")
 }
 
@@ -574,7 +574,7 @@ func (s *CallStatusSuite) TestAPersonPickingUpKeepsTheSession() {
 	status, _ := s.postMachine(token, url.Values{"AnsweredBy": {"human"}})
 
 	s.Equal(http.StatusNoContent, status)
-	s.Never(func() bool { return !s.manager.Running(id) }, time.Second, 50*time.Millisecond,
+	s.Never(func() bool { return !s.manager.Running(s.customerID(), id) }, time.Second, 50*time.Millisecond,
 		"the session was ended for a person")
 }
 
@@ -678,7 +678,7 @@ func (s *CallStatusSuite) TestABusyStatusEndsItsSessionBeforeTheStartTimeout() {
 
 	s.Require().Equal(http.StatusNoContent, s.postForm(token, url.Values{"CallStatus": {"busy"}}))
 
-	s.Require().Eventually(func() bool { return !s.manager.Running(opened.ID()) }, 10*time.Second, 20*time.Millisecond,
+	s.Require().Eventually(func() bool { return !s.manager.Running(s.customerID(), opened.ID()) }, 10*time.Second, 20*time.Millisecond,
 		"the session waits for its start timeout")
 }
 
@@ -702,7 +702,7 @@ func (s *CallStatusSuite) keptBy(logged *lockedLog, sessions *session.Manager, i
 		}
 		return false
 	}, 10*time.Second, 20*time.Millisecond, "the node did not say it kept the session")
-	s.True(sessions.Running(id), "the session was ended")
+	s.True(sessions.Running(s.customerID(), id), "the session was ended")
 }
 
 // A session can have two calls placed into it. A report that the older went unanswered does
@@ -724,7 +724,7 @@ func (s *CallStatusSuite) TestABusyNewerCallEndsASessionAnOlderCallStillRingsInt
 
 	s.Require().Equal(http.StatusNoContent, s.postForm(newer, url.Values{"CallStatus": {"busy"}}))
 
-	s.Require().Eventually(func() bool { return !s.manager.Running(id) }, 10*time.Second, 20*time.Millisecond,
+	s.Require().Eventually(func() bool { return !s.manager.Running(s.customerID(), id) }, 10*time.Second, 20*time.Millisecond,
 		"the session waits for its start timeout")
 }
 
@@ -777,7 +777,7 @@ func (s *CallStatusSuite) refusesToEnd(answer *node.ForwardResponse, logged *loc
 	s.Equal(int32(http.StatusNotFound), answer.GetStatus(), "body: %s", answer.GetBody())
 	s.Contains(string(answer.GetBody()), `"code":"`+codeCallNotFound+`"`)
 	s.Contains(logged.String(), "refused a peer's ask to end a session")
-	s.Never(func() bool { return !sessions.Running(id) }, time.Second, 50*time.Millisecond,
+	s.Never(func() bool { return !sessions.Running(s.customerID(), id) }, time.Second, 50*time.Millisecond,
 		"the session was ended")
 }
 
@@ -788,7 +788,7 @@ func (s *CallStatusSuite) TestABusyStatusEndsItsSessionOnTheNodeHoldingIt() {
 
 	s.Require().Equal(http.StatusNoContent, s.postForm(token, url.Values{"CallStatus": {"busy"}}))
 
-	s.Require().Eventually(func() bool { return !sessions.Running(id) }, 10*time.Second, 20*time.Millisecond,
+	s.Require().Eventually(func() bool { return !sessions.Running(s.customerID(), id) }, 10*time.Second, 20*time.Millisecond,
 		"the node holding the session kept it")
 }
 
@@ -799,7 +799,7 @@ func (s *CallStatusSuite) TestAPeersAskForACallStoredAsUnansweredEndsItsSession(
 	answer := s.askPeerToEnd(other, s.askedFor(s.customerID(), id))
 
 	s.Equal(int32(http.StatusNoContent), answer.GetStatus(), "body: %s", answer.GetBody())
-	s.False(sessions.Running(id), "the session waits for its start timeout")
+	s.False(sessions.Running(s.customerID(), id), "the session waits for its start timeout")
 }
 
 func (s *CallStatusSuite) TestAPeersAskForACallThatStillRingsIsRefused() {
@@ -830,7 +830,7 @@ func (s *CallStatusSuite) TestAPeersAskWhileAnOlderCallInTheSessionStillRingsEnd
 	answer := s.askPeerToEnd(other, s.askedFor(s.customerID(), id))
 
 	s.Equal(int32(http.StatusNoContent), answer.GetStatus(), "body: %s", answer.GetBody())
-	s.False(sessions.Running(id), "the session waits for its start timeout")
+	s.False(sessions.Running(s.customerID(), id), "the session waits for its start timeout")
 }
 
 func (s *CallStatusSuite) TestAPeersAskForACallSomebodyAnsweredIsRefused() {
@@ -887,7 +887,7 @@ func (s *CallStatusSuite) TestAPeerThatCannotReadTheStoredCallKeepsTheSession() 
 	answer := s.askPeerToEnd(other, s.askedFor(s.customerID(), id))
 
 	s.Equal(int32(http.StatusInternalServerError), answer.GetStatus(), "body: %s", answer.GetBody())
-	s.True(sessions.Running(id), "the session was ended")
+	s.True(sessions.Running(s.customerID(), id), "the session was ended")
 }
 
 // The phone service hands a node an unanswered call once its row is written, so only a
@@ -905,7 +905,7 @@ func (s *CallStatusSuite) TestANodeThatCannotReadTheStoredCallKeepsTheSession() 
 	server.endUnansweredNow(context.Background(), s.customerID(), opened.ID())
 
 	s.Contains(logged.String(), "could not read an unanswered call")
-	s.True(sessions.Running(opened.ID()), "the session was ended")
+	s.True(sessions.Running(s.customerID(), opened.ID()), "the session was ended")
 }
 
 func (s *CallStatusSuite) TestAPeersAskNamingAnotherCustomerIsRefused() {
@@ -941,7 +941,7 @@ func (s *CallStatusSuite) TestAPeerAskOfTheWrongShapeIsRefused() {
 		answer := s.askPeerToEnd(other, asked)
 		s.Equal(int32(http.StatusBadRequest), answer.GetStatus(), "%s: %s", asked, answer.GetBody())
 	}
-	s.True(sessions.Running(id), "the session was ended")
+	s.True(sessions.Running(s.customerID(), id), "the session was ended")
 }
 
 // openPhoneSession opens the session id for a placed call as an SDK does, after placing it.
@@ -1061,7 +1061,7 @@ func (s *CallStatusSuite) TestOpeningASessionAfterItsCallWasBusyIsRefused() {
 	s.Equal(http.StatusConflict, status)
 	s.Equal("call_unanswered", answered.Error.Code)
 	s.Contains(answered.Error.Message, "busy")
-	s.False(s.manager.Running(id))
+	s.False(s.manager.Running(s.customerID(), id))
 	s.Equal(outcome.Busy, s.read(id).Outcome)
 }
 
@@ -1074,7 +1074,7 @@ func (s *CallStatusSuite) TestASessionOpensAfterItsCallCompleted() {
 	defer s.serverClient.stopSession(id)
 
 	s.Equal(http.StatusCreated, status, answered.Error.Message)
-	s.True(s.manager.Running(id))
+	s.True(s.manager.Running(s.customerID(), id))
 }
 
 func (s *CallStatusSuite) TestASessionOpensWhileItsCallRings() {
@@ -1085,7 +1085,7 @@ func (s *CallStatusSuite) TestASessionOpensWhileItsCallRings() {
 	defer s.serverClient.stopSession(id)
 
 	s.Equal(http.StatusCreated, status, answered.Error.Message)
-	s.True(s.manager.Running(id))
+	s.True(s.manager.Running(s.customerID(), id))
 }
 
 // attachedForSessions is a number attached the way attaching does today: every caller gets a
@@ -1093,10 +1093,10 @@ func (s *CallStatusSuite) TestASessionOpensWhileItsCallRings() {
 func (s *PhoneSuite) attachedForSessions(customerID string) string {
 	ctx := context.Background()
 	number := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
 		E164: number, Vendor: "bics", Country: "US", CustomerID: customerID, PurchasedAt: time.Now().UTC(),
 	}))
-	s.Require().NoError(s.store.AttachNumber(ctx, customerID, number, store.NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, customerID, number, store.NumberAttachment{
 		TrunkID: "trunk-" + s.utils.uuid(), RouteID: "route-" + s.utils.uuid(), CallType: "agent",
 	}))
 	return number
@@ -1200,8 +1200,8 @@ func (s *PhoneSuite) TestANumberDetachedByAnOlderRouterDoesNotKeepItsConfig() {
 	ctx := context.Background()
 	number := s.attachedForSessions(s.customerID())
 	config := s.config("echo/local-model")
-	s.Require().NoError(s.store.SetNumberAgent(ctx, s.customerID(), number, config))
-	_, err := s.store.DB().NewUpdate().Model((*store.PhoneNumber)(nil)).
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(ctx, s.customerID(), number, config))
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.PhoneNumber)(nil)).
 		Set("attached_at = NULL").Where("e164 = ?", number).Exec(ctx)
 	s.Require().NoError(err)
 
@@ -1212,13 +1212,13 @@ func (s *PhoneSuite) TestTheRefusedDeleteSaysHowToFreeTheConfig() {
 	s.useApp(s.data.createApp())
 	first, second := s.attachedForSessions(s.customerID()), s.attachedForSessions(s.customerID())
 	config := s.config("echo/local-model")
-	s.Require().NoError(s.store.SetNumberAgent(context.Background(), s.customerID(), first, config))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), first, config))
 
 	_, failure := s.serverClient.failure(http.MethodDelete, "/v1/agents/configs/"+config, nil)
 	s.Contains(failure, "number "+first+" answers")
 	s.Contains(failure, "DELETE /v1/phone/numbers/{e164}/agent")
 
-	s.Require().NoError(s.store.SetNumberAgent(context.Background(), s.customerID(), second, config))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(context.Background(), s.customerID(), second, config))
 	_, failure = s.serverClient.failure(http.MethodDelete, "/v1/agents/configs/"+config, nil)
 	s.Contains(failure, "numbers ")
 	s.Contains(failure, first)
@@ -1228,7 +1228,7 @@ func (s *PhoneSuite) TestTheRefusedDeleteSaysHowToFreeTheConfig() {
 func (s *PhoneSuite) TestANumberThatIsNotAttachedCannotBeGivenAnAgent() {
 	s.useApp(s.data.createApp())
 	number := s.utils.number()
-	s.Require().NoError(s.store.RecordNumber(context.Background(), &store.PhoneNumber{
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &store.PhoneNumber{
 		E164: number, Vendor: "bics", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	config := s.config("echo/local-model")
@@ -1286,7 +1286,7 @@ func (s *PhoneSuite) TestDetachingANumberRemovesItsAgent() {
 
 	s.Require().Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/phone/numbers/"+number+"/attach", nil, nil))
 
-	answering, err := s.store.NumbersAnsweredBy(context.Background(), s.customerID(), config)
+	answering, err := s.store.PhoneNumbers.AnsweredBy(context.Background(), s.customerID(), config)
 	s.Require().NoError(err)
 	s.Empty(answering)
 	s.Nil(s.listedNumber().AgentConfigId)
@@ -1300,12 +1300,15 @@ func (s *PhoneSuite) TestReleasingANumberRemovesItsAgent() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/phone/numbers/"+number+"/agent",
 		SetNumberAgentRequest{ConfigId: &config}, nil))
 
-	s.Require().NoError(s.store.ReleaseNumber(ctx, s.customerID(), number, time.Time{}))
+	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: "bics"}
+	s.Require().NoError(s.store.StreamTrunks.InGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		return tx.ReleaseNumber(number, time.Time{})
+	}))
 
-	answering, err := s.store.NumbersAnsweredBy(ctx, s.customerID(), config)
+	answering, err := s.store.PhoneNumbers.AnsweredBy(ctx, s.customerID(), config)
 	s.Require().NoError(err)
 	s.Empty(answering)
-	held, err := s.store.CustomerNumbers(ctx, s.customerID(), true)
+	held, err := s.store.PhoneNumbers.Select(ctx, s.customerID(), store.PhoneNumberFilter{IncludeReleased: true})
 	s.Require().NoError(err)
 	s.Require().Len(held, 1)
 	s.Empty(held[0].ConfigID, "a released row keeps no agent")
@@ -1318,7 +1321,7 @@ func (s *PhoneSuite) TestReattachingANumberKeepsItsAgent() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/phone/numbers/"+number+"/agent",
 		SetNumberAgentRequest{ConfigId: &config}, nil))
 
-	s.Require().NoError(s.store.AttachNumber(context.Background(), s.customerID(), number, store.NumberAttachment{
+	s.Require().NoError(s.store.PhoneNumbers.Attach(context.Background(), s.customerID(), number, store.NumberAttachment{
 		TrunkID: "trunk-" + s.utils.uuid(), RouteID: "route-" + s.utils.uuid(), CallType: "agent",
 	}))
 
@@ -1336,11 +1339,11 @@ func (s *PhoneSuite) TestClearingANumbersLineRemovesItsAgent() {
 		SetNumberAgentRequest{ConfigId: &config}, nil))
 
 	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: "bics"}
-	s.Require().NoError(s.store.InTrunkGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+	s.Require().NoError(s.store.StreamTrunks.InGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
 		return tx.ClearLine(number)
 	}))
 
-	answering, err := s.store.NumbersAnsweredBy(ctx, s.customerID(), config)
+	answering, err := s.store.PhoneNumbers.AnsweredBy(ctx, s.customerID(), config)
 	s.Require().NoError(err)
 	s.Empty(answering)
 	s.Nil(s.listedNumber().AgentConfigId)

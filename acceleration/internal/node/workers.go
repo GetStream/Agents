@@ -118,8 +118,9 @@ type workReply struct {
 
 // callUpdate is a running hosted call's tool_update, carried back to its conversation.
 type callUpdate struct {
-	Text     string `json:"text"`
-	Verbatim bool   `json:"verbatim,omitempty"`
+	Text     string         `json:"text"`
+	Verbatim bool           `json:"verbatim,omitempty"`
+	Custom   map[string]any `json:"custom,omitempty"`
 }
 
 // NewWorkers returns Workers over this node's pool, and starts taking the work its peers
@@ -142,10 +143,10 @@ func NewWorkers(ctx context.Context, pool *dispatch.Pool, directory *Directory, 
 		progress:  map[string]carriedCall{},
 		running:   map[string]context.CancelFunc{},
 	}
-	if err := bus.Subscribe(ctx, workers.requests, func(payload []byte) { go workers.take(ctx, payload) }); err != nil {
+	if _, err := bus.Subscribe(ctx, workers.requests, func(payload []byte) { go workers.take(ctx, payload) }); err != nil {
 		return nil, err
 	}
-	if err := bus.Subscribe(ctx, workers.replies, workers.resolve); err != nil {
+	if _, err := bus.Subscribe(ctx, workers.replies, workers.resolve); err != nil {
 		return nil, err
 	}
 	return workers, nil
@@ -175,7 +176,7 @@ func (w *Workers) HostedTools(customerID, agentID string) ([]dispatch.Tool, time
 	for _, tool := range offered {
 		seen[tool.Name] = true
 	}
-	for _, offer := range w.elsewhere(customerID, agentID) {
+	for _, offer := range w.elsewhere(context.Background(), customerID, agentID) {
 		longest = max(longest, offer.Timeout)
 		for _, tool := range offer.Tools {
 			if !seen[tool.Name] {
@@ -197,7 +198,7 @@ func (w *Workers) RunHosted(ctx context.Context, customerID, agentID string, cal
 
 	var hosts []string
 	var timeout time.Duration
-	for address, offer := range w.elsewhere(customerID, agentID) {
+	for address, offer := range w.elsewhere(ctx, customerID, agentID) {
 		index := slices.IndexFunc(offer.Tools, func(tool dispatch.Tool) bool { return tool.Name == call.Name })
 		if index < 0 {
 			continue
@@ -306,8 +307,8 @@ func (w *Workers) ask(ctx context.Context, address string, request workRequest, 
 }
 
 // elsewhere is what the other nodes' workers host for an agent.
-func (w *Workers) elsewhere(customerID, agentID string) map[string]toolOffer {
-	ctx, cancel := context.WithTimeout(context.Background(), lookupTimeout)
+func (w *Workers) elsewhere(ctx context.Context, customerID, agentID string) map[string]toolOffer {
+	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
 	defer cancel()
 	raw, err := w.directory.Offers(ctx, customerID, agentID)
 	if err != nil {
@@ -410,7 +411,7 @@ func (w *Workers) heard(news workReply) {
 	w.mu.Unlock()
 	if news.Update != nil {
 		if found {
-			carried.progress.ToolUpdate(carried.id, news.Update.Text, news.Update.Verbatim)
+			carried.progress.ToolUpdate(carried.id, news.Update.Text, news.Update.Verbatim, news.Update.Custom)
 		}
 		return
 	}
@@ -428,8 +429,8 @@ type carriedProgress struct {
 	replyTo string
 }
 
-func (p *carriedProgress) ToolUpdate(_, text string, verbatim bool) {
-	news := workReply{ID: p.request, Update: &callUpdate{Text: text, Verbatim: verbatim}}
+func (p *carriedProgress) ToolUpdate(_, text string, verbatim bool, custom map[string]any) {
+	news := workReply{ID: p.request, Update: &callUpdate{Text: text, Verbatim: verbatim, Custom: custom}}
 	if err := p.workers.bus.Publish(context.Background(), p.replyTo, news); err != nil {
 		p.workers.logger.Warn("could not carry a hosted call's update back", "error", err)
 	}

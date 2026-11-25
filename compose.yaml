@@ -5,14 +5,14 @@ name: vision-agents
 # publishes the router on another address, such as 0.0.0.0 for a phone on the same network.
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:19-alpine
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: model_router
     ports:
       - "127.0.0.1:55432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata19:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d model_router"]
       interval: 5s
@@ -44,6 +44,16 @@ services:
       ROUTER_USAGE_TOKEN: ${USAGE_INGEST_TOKEN:-local-usage-token}
       # The Redis the usage service mirrors spend to, which spend limits read every second.
       ROUTER_USAGE_REDIS_URL: redis://redis:6379
+      # Seals the secrets the router holds. The router refuses to start without it in the
+      # default api_key auth mode or with connectors on. Any random string works. Make it once and keep it, since changing it leaves the stored ones
+      # unreadable:  echo "ROUTER_DEV_KEK=$(openssl rand -hex 32)" >> .env
+      ROUTER_DEV_KEK: "${ROUTER_DEV_KEK:-}"
+      # Off: an organization starts with no credit in the usage service above, and a voice
+      # session's hosted models (speech, voice, the flow controller) are priced, so enforcing
+      # would answer every one 402 until somebody grants credit to themselves. Usage is still
+      # priced and shipped. This variable wins over limits.mode in a mounted config file, so
+      # set ROUTER_LIMITS_MODE=enforce (or shadow) in .env to test limits.
+      ROUTER_LIMITS_MODE: "${ROUTER_LIMITS_MODE:-off}"
     ports:
       - "${ROUTER_PUBLISH_ADDRESS:-127.0.0.1}:8080:8080"
     depends_on:
@@ -55,7 +65,7 @@ services:
   # The usage service, from the router's image, on a database of its own. The router ships
   # the usage it records here.
   usage-db:
-    image: postgres:16-alpine
+    image: postgres:19-alpine
     environment:
       PGPASSWORD: postgres
     command: >-
@@ -91,16 +101,5 @@ services:
       redis:
         condition: service_healthy
 
-  dashboard:
-    build:
-      context: ./dashboard
-      args:
-        NEXT_PUBLIC_ROUTER_URL: http://localhost:8080
-        NEXT_PUBLIC_CUSTOMER_ID: examples
-    ports:
-      - "127.0.0.1:3000:3000"
-    depends_on:
-      - router
-
 volumes:
-  pgdata:
+  pgdata19:

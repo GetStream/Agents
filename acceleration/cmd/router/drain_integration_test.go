@@ -80,9 +80,9 @@ func (s *DrainSuite) TestTheDrainWaitsForAScheduledDeliveryInFlight() {
 		CallerKind: store.UserKindAuthenticated, Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: due, Timezone: "UTC", NextRunAt: &due, State: store.ScheduledTaskActive, CreatedBy: "agent",
 	}
-	s.Require().NoError(s.db.CreateScheduledTask(s.ctx, &task, 25))
+	s.Require().NoError(s.db.ScheduledTasks.Insert(s.ctx, &task, 25))
 	s.T().Cleanup(func() {
-		s.NoError(s.db.DeleteScheduledTask(context.Background(), task.CustomerID, task.ID))
+		s.NoError(s.db.ScheduledTasks.Delete(context.Background(), task.CustomerID, task.ID))
 	})
 	release := make(chan struct{})
 	scheduler := scheduling.NewScheduler(s.db, func(ctx context.Context, _ store.ClaimedScheduledTask) (string, string, error) {
@@ -105,8 +105,8 @@ func (s *DrainSuite) TestTheDrainWaitsForAScheduledDeliveryInFlight() {
 
 func (s *DrainSuite) TestTheDrainWaitsForAChatAnswerInFlight() {
 	id := "message-" + uuid.NewString()
-	queued, err := s.db.QueueChatInbound(s.ctx, store.ChatInbound{
-		StreamApp: 1, MessageID: id, Deployment: true, Body: []byte(`{}`), NextAttemptAt: time.Now(),
+	queued, err := s.db.ChatInbounds.Queue(s.ctx, store.ChatInbound{
+		StreamAppPK: 1, MessageID: id, Deployment: true, Body: []byte(`{}`), NextAttemptAt: time.Now(),
 	})
 	s.Require().NoError(err)
 	s.Require().True(queued)
@@ -166,8 +166,8 @@ func (s *DrainSuite) TestARouterDrainingAnInboundWriteTakesNoMoreMessages() {
 	s.queueInbound(writing, time.Now())
 	s.queueInbound(later, due)
 	message := "message-" + uuid.NewString()
-	queued, err := s.db.QueueChatInbound(s.ctx, store.ChatInbound{
-		StreamApp: 1, MessageID: message, Deployment: true, Body: []byte(`{}`), NextAttemptAt: due,
+	queued, err := s.db.ChatInbounds.Queue(s.ctx, store.ChatInbound{
+		StreamAppPK: 1, MessageID: message, Deployment: true, Body: []byte(`{}`), NextAttemptAt: due,
 	})
 	s.Require().NoError(err)
 	s.Require().True(queued)
@@ -244,8 +244,8 @@ func (s *DrainSuite) TestARouterDrainsAChatCardInFlight() {
 		s.Require().NoError(free.Close())
 	}
 	agent := store.AgentConfig{CustomerID: "customer-" + uuid.NewString(), Name: "chat-" + uuid.NewString(),
-		Mode: store.AgentModeText, LLM: "llm-flow", EpisodeCards: true}
-	s.Require().NoError(s.db.CreateAgentConfig(s.ctx, &agent))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "llm-flow"}, EpisodeCards: store.AgentEpisodeCards{On: true}}
+	s.Require().NoError(s.db.AgentConfigs.Insert(s.ctx, &agent))
 	waiting, release := chat.Hold("/message")
 
 	stopped := make(chan struct{})
@@ -331,8 +331,8 @@ func (s *DrainSuite) TestADrainingRouterStopsSayingItTakesTrunkCallsOver() {
 	}
 	// An episode card held in flight is what keeps the router draining.
 	agent := store.AgentConfig{CustomerID: "customer-" + uuid.NewString(), Name: "chat-" + uuid.NewString(),
-		Mode: store.AgentModeText, LLM: "llm-flow", EpisodeCards: true}
-	s.Require().NoError(s.db.CreateAgentConfig(s.ctx, &agent))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "llm-flow"}, EpisodeCards: store.AgentEpisodeCards{On: true}}
+	s.Require().NoError(s.db.AgentConfigs.Insert(s.ctx, &agent))
 	waiting, release := chat.Hold("/message")
 	before := takers()
 
@@ -421,8 +421,8 @@ func (s *DrainSuite) TestADrainingRouterStillHearsTheRepliesToWorkItCarriedElsew
 	}
 	// An episode card held in flight is what keeps the router draining.
 	agent := store.AgentConfig{CustomerID: "customer-" + uuid.NewString(), Name: "chat-" + uuid.NewString(),
-		Mode: store.AgentModeText, LLM: "llm-flow", EpisodeCards: true}
-	s.Require().NoError(s.db.CreateAgentConfig(s.ctx, &agent))
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "llm-flow"}, EpisodeCards: store.AgentEpisodeCards{On: true}}
+	s.Require().NoError(s.db.AgentConfigs.Insert(s.ctx, &agent))
 	waiting, release := chat.Hold("/message")
 	settings.Node.Advertise = settings.Node.Listen
 	hearing := func() bool {
@@ -493,10 +493,10 @@ func (s *DrainSuite) thread(customer string) store.ChannelThread {
 		ChannelID: conversation.ThreadChannelPrefix + uuid.NewString(), CustomerID: customer, ConnectorID: "fake_line",
 		ProviderUnitID: "T0000TEAM", ThreadKey: uuid.NewString(), ConnectionID: "connection-1",
 	}
-	_, err := s.db.LinkChannelThread(s.ctx, &thread)
+	_, err := s.db.ChannelThreads.Link(s.ctx, &thread)
 	s.Require().NoError(err)
 	s.T().Cleanup(func() {
-		_, err := s.db.DB().NewDelete().Model((*store.ChannelInbound)(nil)).Where("channel_id = ?", thread.ChannelID).Exec(context.Background())
+		_, err := s.db.GlobalDB().NewDelete().Model((*store.ChannelInbound)(nil)).Where("channel_id = ?", thread.ChannelID).Exec(context.Background())
 		s.NoError(err)
 	})
 	return thread
@@ -504,7 +504,7 @@ func (s *DrainSuite) thread(customer string) store.ChannelThread {
 
 // queueInbound queues a message in thread, due at due.
 func (s *DrainSuite) queueInbound(thread store.ChannelThread, due time.Time) {
-	queued, err := s.db.AcceptChannelInbound(s.ctx, store.ChannelInbound{
+	queued, err := s.db.ChannelInbounds.Accept(s.ctx, store.ChannelInbound{
 		ChannelID: thread.ChannelID, ProviderMessageID: "m-1", CustomerID: thread.CustomerID,
 		ConnectorID: thread.ConnectorID, ProviderUnitID: thread.ProviderUnitID, ThreadKey: thread.ThreadKey,
 		ConfigID: "config-1", ConfigName: "Support", AuthorID: "U0000ALICE", Text: "hello",
@@ -517,19 +517,19 @@ func (s *DrainSuite) queueInbound(thread store.ChannelThread, due time.Time) {
 // inbound is thread's queued message as it is now.
 func (s *DrainSuite) inbound(thread store.ChannelThread) store.ChannelInbound {
 	var row store.ChannelInbound
-	s.Require().NoError(s.db.DB().NewSelect().Model(&row).Where("channel_id = ?", thread.ChannelID).Scan(s.ctx))
+	s.Require().NoError(s.db.GlobalDB().NewSelect().Model(&row).Where("channel_id = ?", thread.ChannelID).Scan(s.ctx))
 	return row
 }
 
 // chatInbound is a queued Stream Chat message's row as it is now.
 func (s *DrainSuite) chatInbound(messageID string) store.ChatInbound {
 	var row store.ChatInbound
-	s.Require().NoError(s.db.DB().NewSelect().Model(&row).Where("message_id = ?", messageID).Scan(s.ctx))
+	s.Require().NoError(s.db.GlobalDB().NewSelect().Model(&row).Where("message_id = ?", messageID).Scan(s.ctx))
 	return row
 }
 
 func (s *DrainSuite) deleteChatInbound(messageID string) {
-	_, err := s.db.DB().NewDelete().Model((*store.ChatInbound)(nil)).Where("message_id = ?", messageID).Exec(context.Background())
+	_, err := s.db.GlobalDB().NewDelete().Model((*store.ChatInbound)(nil)).Where("message_id = ?", messageID).Exec(context.Background())
 	s.NoError(err)
 }
 
@@ -561,14 +561,14 @@ func (s *DrainSuite) TestTheDrainWaitsForACampaignCallInFlight() {
 	s.Require().NoError(err)
 	created := store.Campaign{CustomerID: customerID, Name: "renewals", ConfigID: "config-1",
 		FromNumber: "+15550100000", Concurrency: 1, Sequence: sequence, CallingHours: hours}
-	s.Require().NoError(s.db.CreateCampaign(s.ctx, &created))
-	_, _, err = s.db.AddContacts(s.ctx, created.ID, []store.Contact{{ToNumber: "+15550000001"}})
+	s.Require().NoError(s.db.Campaigns.Insert(s.ctx, &created))
+	_, _, err = s.db.CampaignContacts.InsertMany(s.ctx, created.ID, []store.Contact{{ToNumber: "+15550000001"}})
 	s.Require().NoError(err)
 	now := time.Now()
-	_, err = s.db.LaunchCampaign(s.ctx, customerID, created.ID, store.Launch{StartAt: now, Now: now, APIKey: "key-a"})
+	_, err = s.db.Campaigns.Launch(s.ctx, customerID, created.ID, store.Launch{StartAt: now, Now: now, APIKey: "key-a"})
 	s.Require().NoError(err)
 	// Stopped whatever happens, so no later test's dialer rings it.
-	s.T().Cleanup(func() { s.NoError(s.db.StopCampaign(context.Background(), customerID, created.ID, time.Now())) })
+	s.T().Cleanup(func() { s.NoError(s.db.Campaigns.Stop(context.Background(), customerID, created.ID, time.Now())) })
 
 	release := make(chan struct{})
 	dialer, err := campaign.New(campaign.Options{

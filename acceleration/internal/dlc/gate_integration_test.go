@@ -227,7 +227,7 @@ func (s *GateSuite) TestTheConcurrentCallLimitCountsOpenLegs() {
 	s.ErrorContains(err, "allows 1 calls at once")
 	s.NoError(s.gate.Allow(s.ctx, s.app(), dlc.SMS, "+15125550123"), "a text is no call")
 
-	ended, err := s.money.Store.EndCallLegs(s.ctx, store.AppScope{Unpinned: true}, "default", up, time.Now())
+	ended, err := s.money.Store.CallLegs.EndCall(s.ctx, store.AppScope{Unpinned: true}, "default", up, time.Now())
 	s.Require().NoError(err)
 	s.Require().Len(ended, 1)
 	s.NoError(s.gate.Allow(s.ctx, s.app(), dlc.Voice, "+15125550123"), "once it ended")
@@ -277,7 +277,7 @@ func (s *GateSuite) leg(direction string, dialed time.Time, up bool) string {
 	if up {
 		leg.StartedAt = &dialed
 	}
-	opened, err := s.money.Store.OpenCallLeg(s.ctx, &leg)
+	opened, err := s.money.Store.CallLegs.Open(s.ctx, &leg)
 	s.Require().NoError(err)
 	s.Require().True(opened)
 	return call
@@ -304,6 +304,26 @@ func (s *GateSuite) TestInboundMinutesDoNotUseUpTheDay() {
 
 	s.Zero(s.sent(dlc.Voice))
 	s.NoError(s.gate.Allow(s.ctx, s.app(), dlc.Voice, "+15125550123"), "a busy support line still dials out")
+}
+
+// A call to the app's number is billed, so it uses none of the minutes the sandbox gives away a
+// day. Catches its seconds counted against the sandbox, which would let anybody who rings the
+// number refuse the app's own calls.
+func (s *GateSuite) TestInboundSecondsDoNotUseUpTheSandboxsMinutes() {
+	gate := s.newGate(dlc.Sandbox{Enabled: true, Recipients: 2, AudioMinutesPerDay: 1}, config.LimitsEnforce)
+	const recipient = "+15125550123"
+	s.Require().NoError(gate.SetRecipients(s.ctx, s.app(), []string{recipient}))
+
+	gate.Talked(s.ctx, s.app(), s.owner.OrganizationID, false, time.Hour)
+
+	held, err := gate.Usage(s.ctx, s.app())
+	s.Require().NoError(err)
+	s.Zero(held.AudioSeconds)
+	s.NoError(gate.Allow(s.ctx, s.app(), dlc.Voice, recipient), "the app still places its sandbox's calls")
+	gate.Talked(s.ctx, s.app(), s.owner.OrganizationID, true, time.Minute)
+	err = gate.Allow(s.ctx, s.app(), dlc.Voice, recipient)
+	s.ErrorIs(err, dlc.ErrRefused, "a minute it placed uses the day up")
+	s.ErrorContains(err, "the sandbox allows 1 minutes of calls a day")
 }
 
 func (s *GateSuite) TestACallsRecipientIsCountedWhenDialed() {
@@ -339,8 +359,8 @@ func (s *GateSuite) TestAnOrganizationWithNoCreditMayNotText() {
 func (s *GateSuite) TestOffModeKeepsOptOutAndTheSandbox() {
 	s.limit(map[string]usage.ChannelLimits{dlc.SMS: {Countries: []string{"GB"}, PerDay: new(0)}})
 	gate := s.newGate(dlc.Sandbox{Enabled: true, Recipients: 2}, config.LimitsOff)
-	s.Require().NoError(s.money.Store.SetSandboxRecipients(s.ctx, s.app(), []string{"+15125550001", "+15125550002"}))
-	s.Require().NoError(s.money.Store.OptOut(s.ctx, &store.OptOut{
+	s.Require().NoError(s.money.Store.SandboxRecipients.Replace(s.ctx, s.app(), []string{"+15125550001", "+15125550002"}))
+	s.Require().NoError(s.money.Store.OptOuts.Insert(s.ctx, &store.OptOut{
 		CustomerID: s.app(), Recipient: "+15125550002", Channel: dlc.SMS, Source: "test",
 	}))
 
@@ -379,7 +399,7 @@ func (s *GateSuite) TestAGateWithNoLimitsKeepsTodaysBehaviour() {
 
 func (s *GateSuite) TestCountersCountAnAppWithAnApprovedUseCase() {
 	gate := s.newGate(dlc.Sandbox{Enabled: true, Recipients: 2, MessagesPerDay: 30}, config.LimitsEnforce)
-	s.Require().NoError(s.money.Store.CreateUseCase(s.ctx, &store.UseCase{
+	s.Require().NoError(s.money.Store.UseCases.Insert(s.ctx, &store.UseCase{
 		CustomerID: s.app(), Name: "approved", Status: dlc.Approved, UseCaseType: "CUSTOMER_CARE",
 	}))
 	sandboxed, err := gate.Sandboxed(s.ctx, s.app())
@@ -396,7 +416,8 @@ func (s *GateSuite) TestCountersCountAnAppWithAnApprovedUseCase() {
 }
 
 func (s *GateSuite) TestAnAppWhoseUseCasesCannotBeReadIsNotHeldToTheSandbox() {
-	// Being held is what gives an app's texts and minutes away, so not knowing bills them.
+	// Being held is what gives the texts an app sends and the calls it places away, so not
+	// knowing bills them.
 	closed, err := store.Open(testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "dlc_gate"))
 	s.Require().NoError(err)
 	s.Require().NoError(closed.Close())
@@ -455,7 +476,7 @@ func (s *GateSuite) TestShadowStillAllowsWhatItCouldNotCount() {
 }
 
 func (s *GateSuite) TestASandboxWhoseCountersCannotBeReadRefuses() {
-	s.Require().NoError(s.money.Store.SetSandboxRecipients(s.ctx, s.app(), []string{"+15125550123"}))
+	s.Require().NoError(s.money.Store.SandboxRecipients.Replace(s.ctx, s.app(), []string{"+15125550123"}))
 	gate, redis := s.unreachable(dlc.Sandbox{Enabled: true, Recipients: 1, MessagesPerDay: 30, AudioMinutesPerDay: 10}, config.LimitsOff)
 	s.Require().NoError(gate.Allow(s.ctx, s.app(), dlc.SMS, "+15125550123"))
 

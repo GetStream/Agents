@@ -38,16 +38,16 @@ const knowledgeFailed = "knowledge_failed"
 var ErrNoAccountKey = errors.New("metered: the knowledge base is kept in your own account, and you keep no key for it any more")
 
 // NamespacePlaces is where the place each knowledge base is kept is recorded: its region, and
-// the account in it. *store.Store is one.
+// the account in it. *store.KnowledgeNamespaces is one.
 type NamespacePlaces interface {
-	// KnowledgePlace is where the base is kept, and false for one never written.
-	KnowledgePlace(ctx context.Context, customerID, namespace string) (store.KnowledgePlace, bool, error)
-	// ClaimKnowledgePlace keeps the base at place unless it is kept somewhere already, and
+	// GetPlace is where the base is kept, and false for one never written.
+	GetPlace(ctx context.Context, customerID, namespace string) (store.KnowledgePlace, bool, error)
+	// Claim keeps the base at place unless it is kept somewhere already, and
 	// answers where it is kept.
-	ClaimKnowledgePlace(ctx context.Context, customerID, namespace string, place store.KnowledgePlace) (store.KnowledgePlace, error)
-	// ForgetKnowledgePlace forgets where a dropped base was kept, so a base made again under its
+	Claim(ctx context.Context, customerID, namespace string, place store.KnowledgePlace) (store.KnowledgePlace, error)
+	// Delete forgets where a dropped base was kept, so a base made again under its
 	// name is kept where its first write goes.
-	ForgetKnowledgePlace(ctx context.Context, customerID, namespace string) error
+	Delete(ctx context.Context, customerID, namespace string) error
 }
 
 // AccountBackend is the backend of a customer's own account at the knowledge vendor in region,
@@ -80,8 +80,8 @@ type Knowledge struct {
 }
 
 // NewKnowledge meters a backend in the default region, recording through recorder as knowledge
-// rows, and admits each write through gate as a model call is admitted. A nil recorder records
-// nothing; a nil gate admits every write.
+// rows, and admits each read and write through gate as a model call is admitted. A nil recorder
+// records nothing; a nil gate admits every call.
 func NewKnowledge(backend knowledge.Backend, recorder *routing.Recorder, gate routing.Gate) *Knowledge {
 	return NewRegionalKnowledge(map[string]knowledge.Backend{pricing.DefaultRegion: backend}, recorder, gate, nil)
 }
@@ -186,6 +186,17 @@ func (k *Knowledge) meter(owner routing.Owner, backend knowledge.Backend, place 
 	}
 }
 
+// lookup is the meter of a read made in that many queries, which sets aside the least they are
+// billed, as what they are billed past that is known once they have answered: nothing in the
+// customer's own account, where their vendor bills them.
+func (k *Knowledge) lookup(owner routing.Owner, backend knowledge.Backend, place store.KnowledgePlace, queries int) routing.Meter {
+	meter := k.meter(owner, backend, place, KnowledgeLookup)
+	if !meter.Config.BYOK {
+		meter.Estimate[pricing.BytesQueried] = backend.MinimumQueried() * int64(queries)
+	}
+	return meter
+}
+
 // in is the deployment's backend of region. A region with none is refused, naming it.
 func (k *Knowledge) in(region string) (knowledge.Backend, error) {
 	backend, ok := k.backends[region]
@@ -241,7 +252,7 @@ func (k *Knowledge) keptAt(ctx context.Context, customerID, namespace string) (s
 	if k.places == nil || strings.TrimSpace(namespace) == "" {
 		return store.KnowledgePlace{}, false, nil
 	}
-	return k.places.KnowledgePlace(ctx, customerID, namespace)
+	return k.places.GetPlace(ctx, customerID, namespace)
 }
 
 // OwnedKnowledge is a knowledge.Store and a knowledge.Writer for one owner. Each call is a
@@ -258,20 +269,25 @@ var (
 	_ knowledge.Writer = OwnedKnowledge{}
 )
 
-// Search looks a question up.
+// Search looks a question up, when the owner may pay for it.
 func (o OwnedKnowledge) Search(ctx context.Context, query knowledge.Query) ([]knowledge.Document, error) {
 	backend, place, err := o.reading(ctx, query.Namespace)
 	if err != nil {
 		return nil, err
 	}
+	meter := o.knowledge.lookup(o.owner, backend, place, 1)
+	if err := o.admitRead(ctx, meter); err != nil {
+		return nil, err
+	}
 	query.Namespace = o.scoped(query.Namespace)
-	found, err := routing.Call(ctx, o.knowledge.meter(o.owner, backend, place, KnowledgeLookup), func(ctx context.Context) (knowledge.Found, error) {
+	found, err := routing.Call(ctx, meter, func(ctx context.Context) (knowledge.Found, error) {
 		return backend.Search(ctx, query)
 	})
 	return found.Documents, err
 }
 
-// Fetch reads passages back by id. Asking for none asks the provider nothing.
+// Fetch reads passages back by id, when the owner may pay for it. Asking for none asks the
+// provider nothing.
 func (o OwnedKnowledge) Fetch(ctx context.Context, namespace string, ids []string) ([]knowledge.Document, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -280,8 +296,12 @@ func (o OwnedKnowledge) Fetch(ctx context.Context, namespace string, ids []strin
 	if err != nil {
 		return nil, err
 	}
+	meter := o.knowledge.lookup(o.owner, backend, place, (len(ids)+knowledge.WriteBatch-1)/knowledge.WriteBatch)
+	if err := o.admitRead(ctx, meter); err != nil {
+		return nil, err
+	}
 	scoped := o.scoped(namespace)
-	found, err := routing.Call(ctx, o.knowledge.meter(o.owner, backend, place, KnowledgeLookup), func(ctx context.Context) (knowledge.Found, error) {
+	found, err := routing.Call(ctx, meter, func(ctx context.Context) (knowledge.Found, error) {
 		return backend.Fetch(ctx, scoped, ids)
 	})
 	return found.Documents, err
@@ -371,7 +391,7 @@ func (o OwnedKnowledge) Drop(ctx context.Context, namespace string) (bool, error
 		return false, err
 	}
 	if o.knowledge.places != nil {
-		if err := o.knowledge.places.ForgetKnowledgePlace(ctx, o.owner.CustomerID, namespace); err != nil {
+		if err := o.knowledge.places.Delete(ctx, o.owner.CustomerID, namespace); err != nil {
 			return false, err
 		}
 	}
@@ -398,6 +418,23 @@ func (o OwnedKnowledge) Admit(ctx context.Context) error {
 	admission, err := o.knowledge.gate.Admit(ctx, o.owner)
 	if err != nil {
 		return err
+	}
+	return admission.Spend
+}
+
+// admitRead refuses a read to an owner who may do no work, and one the deployment's account is
+// billed for to an owner who may not pay for it. One in the customer's own account is their
+// vendor's to bill.
+func (o OwnedKnowledge) admitRead(ctx context.Context, meter routing.Meter) error {
+	if o.knowledge.gate == nil {
+		return nil
+	}
+	admission, err := o.knowledge.gate.Admit(ctx, o.owner)
+	if err != nil {
+		return err
+	}
+	if meter.Config.BYOK || (meter.Recorder != nil && !meter.Recorder.Billable(meter.Config)) {
+		return nil
 	}
 	return admission.Spend
 }
@@ -449,7 +486,7 @@ func (o OwnedKnowledge) writing(ctx context.Context, namespace string) (knowledg
 	if err != nil || o.knowledge.places == nil || strings.TrimSpace(namespace) == "" {
 		return backend, place, err
 	}
-	kept, err := o.knowledge.places.ClaimKnowledgePlace(ctx, o.owner.CustomerID, namespace, place)
+	kept, err := o.knowledge.places.Claim(ctx, o.owner.CustomerID, namespace, place)
 	if err != nil {
 		return nil, store.KnowledgePlace{}, err
 	}

@@ -5,9 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/uptrace/bun"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
 // DraftOfTag is the tag that marks an agent config as a test copy: a temporary copy the
@@ -30,7 +33,7 @@ func (c AgentConfig) TestCopy() bool {
 const notTestCopy = "coalesce(tags->>'" + DraftOfTag + "', '') = ''"
 
 // channelOwnerLockSeed is the second argument to hashtextextended for the lock a channel
-// connection's owner is decided under. Any value other than the 731 RecordAgentLog uses and
+// connection's owner is decided under. Any value other than the 731 AgentLogs.Insert uses and
 // definitionLockSeed (833) would do; 1049 is this rule's issue, AI-1049.
 const channelOwnerLockSeed = 1049
 
@@ -121,8 +124,9 @@ func refuseSecondChannelAgent(ctx context.Context, tx bun.Tx, config *AgentConfi
 
 // lockChannelOwner takes the lock a channel connection's owner is decided under
 // (refuseSecondChannelAgent) when the live connection id is a channel connection, and returns
-// its connector and whether it is one. A write that also locks the config's row takes this
-// lock first, as UpdateAgentConfig does, or the two would wait on each other in a cycle.
+// its connector and whether it is one. A write of a stored config locks the config's row
+// before this lock (AgentConfigs.save), and Insert locks no stored row, so two writes never
+// wait on each other in a cycle.
 func lockChannelOwner(ctx context.Context, tx bun.Tx, customerID, id string) (string, bool, error) {
 	var connection ConnectorConnection
 	err := tx.NewSelect().Model(&connection).Column("id", "connector_id", "definition_revision").
@@ -151,4 +155,162 @@ func lockChannelOwner(ctx context.Context, tx bun.Tx, customerID, id string) (st
 		return "", false, fmt.Errorf("store: channel connection owner: %w", err)
 	}
 	return connection.ConnectorID, true, nil
+}
+
+// AppConnectionByAccount returns the customer's live app-owned connection of a connector whose
+// account id is accountID: the connection of the provider unit a provider app's event names,
+// such as the bot token of the Slack workspace the app is installed in, whose identity is the
+// team alone.
+//
+// A customer can hold more than one connection of the same account, such as a second connection
+// to a Slack workspace that no agent uses yet (AI-3503). The answer is the connection that a live
+// agent config binds, as AgentConfigsBindingConnection finds that config. Then a connected
+// connection comes before one that is not, and a newer one before an older one. A connection that
+// no config binds is the answer only when none is bound, and the caller then drops the message.
+func (s *Store) AppConnectionByAccount(ctx context.Context, customerID, connectorID, accountID string) (ConnectorConnection, error) {
+	if customerID == "" || connectorID == "" || accountID == "" {
+		return ConnectorConnection{}, stack.Wrap(errors.New("store: a customer, a connector and an account id are required"))
+	}
+	bound := s.global.NewSelect().Model((*AgentConfig)(nil)).ColumnExpr("1").
+		Where("ac.customer_id = cc.customer_id").
+		Where("ac.deleted_at IS NULL").
+		Where(notTestCopy).
+		Where(bindsFixedConnection, bun.Ident("cc.id"))
+	var connection ConnectorConnection
+	err := s.global.NewSelect().Model(&connection).
+		Where("customer_id = ?", customerID).
+		Where("connector_id = ?", connectorID).
+		Where("owner_type = ?", OwnerApp).
+		Where("account_id = ?", accountID).
+		Where("deleted_at IS NULL").
+		OrderExpr("EXISTS (?) DESC", bound).
+		OrderExpr("status = ? DESC", ConnectionConnected).
+		Order("created_at DESC", "id DESC").
+		Limit(1).
+		Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ConnectorConnection{}, stack.Wrap(fmt.Errorf("%w: %s account %s", ErrNoConnectorConnection, connectorID, accountID))
+	}
+	if err != nil {
+		return ConnectorConnection{}, stack.Wrap(fmt.Errorf("store: app connection by account: %w", err))
+	}
+	return connection, nil
+}
+
+// bindsFixedConnection is the WHERE clause that finds the agent configs that bind a connection
+// as their fixed connection, matched as boundByConfig matches them.
+const bindsFixedConnection = "connectors @> jsonb_build_array(jsonb_build_object('connection', jsonb_build_object('type', 'fixed', 'connection_id', ?::text)))"
+
+// AgentConfigsBindingConnection returns the customer's live agent configs that bind the
+// connection as their fixed connection, oldest first: the agents that answer on the provider
+// unit the connection is, matched as boundByConfig matches them. A test copy (DraftOfTag) is
+// left out: it answers no channel message and subscribes to no event (AI-1049, AI-1048). The
+// first is the connection's owner, which refuseSecondChannelAgent keeps the only one on a
+// channel connection.
+func (s *Store) AgentConfigsBindingConnection(ctx context.Context, customerID, connectionID string) ([]AgentConfig, error) {
+	if customerID == "" || connectionID == "" {
+		return nil, stack.Wrap(errors.New("store: a customer and a connection id are required"))
+	}
+	var configs []AgentConfig
+	err := s.global.NewSelect().Model(&configs).
+		Where("customer_id = ?", customerID).
+		Where("deleted_at IS NULL").
+		Where(notTestCopy).
+		Where(bindsFixedConnection, connectionID).
+		Order("created_at", "id").
+		Scan(ctx)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: agent configs binding connection: %w", err))
+	}
+	return configs, nil
+}
+
+// ChannelLineTakenError is a write of a live config naming a channel line, such as an SMS
+// number, another live config already names (refuseSecondLineAgent).
+type ChannelLineTakenError struct {
+	Kind   string
+	Number string
+	// OwnerID and OwnerName are the live config already on the line.
+	OwnerID   string
+	OwnerName string
+}
+
+func (e *ChannelLineTakenError) Error() string {
+	return fmt.Sprintf("store: the %s line %s is named by agent config %s already", e.Kind, e.Number, e.OwnerID)
+}
+
+// channelLineLockSeed is the second argument to hashtextextended for the lock a channel line's
+// agent is decided under, apart from channelOwnerLockSeed's connections.
+const channelLineLockSeed = 3512
+
+// refuseSecondLineAgent refuses a write of a config naming a channel line another live config
+// names, matched as ConfigOnChannel matches it: two agents on one number would both answer
+// every message. The API checks this before the write too, but two configs saved at once both
+// pass that check, so the decision is taken again here under a transaction-scoped lock on the
+// customer and line, in kind order, as refuseSecondChannelAgent takes its.
+func refuseSecondLineAgent(ctx context.Context, tx bun.Tx, config *AgentConfig) error {
+	named := config.Channels.Lines.Lines()
+	for _, kind := range slices.Sorted(maps.Keys(named)) {
+		number := named[kind]
+		if err := lockUntilCommit(ctx, tx, config.CustomerID+"/"+kind+"/"+number, channelLineLockSeed); err != nil {
+			return fmt.Errorf("store: lock channel line: %w", err)
+		}
+		// A line the stored config named already is not a new claim, so a config that shared a
+		// line before this rule can still be saved, as refuseSecondChannelAgent keeps a binding.
+		kept, err := tx.NewSelect().Model((*AgentConfig)(nil)).
+			Where("id = ?", config.ID).
+			Where("customer_id = ?", config.CustomerID).
+			Where("deleted_at IS NULL").
+			Where("channels_lines -> ? ->> 'number' = ?", kind, number).
+			Exists(ctx)
+		if err != nil {
+			return fmt.Errorf("store: channel line owner: %w", err)
+		}
+		if kept {
+			continue
+		}
+		var owner AgentConfig
+		err = tx.NewSelect().Model(&owner).Column("id", "name").
+			Where("customer_id = ?", config.CustomerID).
+			Where("id != ?", config.ID).
+			Where("channels_lines -> ? ->> 'number' = ?", kind, number).
+			Where("deleted_at IS NULL").
+			Order("created_at", "id").
+			Limit(1).
+			Scan(ctx)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("store: channel line owner: %w", err)
+		}
+		return &ChannelLineTakenError{Kind: kind, Number: number, OwnerID: owner.ID, OwnerName: owner.Name}
+	}
+	return nil
+}
+
+// ConfigOnChannel is the agent reachable on a number, and false when none is.
+//
+// It answers both questions there are about a line: which agent a message to it is for, and
+// whether another agent has already claimed it. Two agents on one number would both answer
+// every message, so the second one to ask for it is refused.
+func (s *Store) ConfigOnChannel(ctx context.Context, customerID, kind, number string) (AgentConfig, bool, error) {
+	if customerID == "" || kind == "" || number == "" {
+		return AgentConfig{}, false, nil
+	}
+
+	var config AgentConfig
+	err := s.global.NewSelect().Model(&config).
+		Where("customer_id = ?", customerID).
+		Where("channels_lines -> ? ->> 'number' = ?", kind, number).
+		Where("deleted_at IS NULL").
+		Limit(1).
+		Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AgentConfig{}, false, nil
+	}
+	if err != nil {
+		return AgentConfig{}, false, stack.Wrap(fmt.Errorf("store: config on channel: %w", err))
+	}
+	return config, true, nil
 }

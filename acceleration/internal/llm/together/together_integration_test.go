@@ -28,3 +28,13 @@ type TogetherNemotronIntegrationSuite struct {
 func TestTogetherNemotronIntegrationSuite(t *testing.T) {
 	suite.Run(t, &TogetherNemotronIntegrationSuite{hosttest.Live(t, Host, New, "nvidia/NVIDIA-Nemotron-3.5-Super-VL")})
 }
+
+// TogetherKimiIntegrationSuite runs Kimi K3.1 Pro, whose open weights must take the Kimi
+// template's thinking switch for it to answer a live turn without reasoning first.
+type TogetherKimiIntegrationSuite struct {
+	llmsuite.Suite
+}
+
+func TestTogetherKimiIntegrationSuite(t *testing.T) {
+	suite.Run(t, &TogetherKimiIntegrationSuite{hosttest.Live(t, Host, New, "moonshotai/Kimi-K3.1-Pro")})
+}

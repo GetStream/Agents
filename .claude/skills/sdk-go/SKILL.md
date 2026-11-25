@@ -109,20 +109,26 @@ Every identifier in a code block exists; the quickstart is the example file verb
 `@main` and pkg.go.dev see it. A version is a tag `sdks/go/vX.Y.Z` on a `main` commit; nothing
 is copied. While 0.x, a minor may break a signature; a patch only fixes.
 
-1. Land the change on `main` by a pull request, with the `CHANGELOG.md` entry. The `Go SDK`
-   steps of the `CI (SDKs)` workflow (`.github/workflows/ci-sdks.yml`) check `sdks/go` alone
-   on Go 1.25, as a consumer gets it.
+1. Land the change on `main` by a pull request, with `Version` in `stream/backend.go` set to
+   `X.Y.Z`: it is the `User-Agent` every request sends (`stream-agents-go/X.Y.Z`) and its
+   `X-Stream-Client` (`stream-agents-go-vX.Y.Z`), and nothing else sets it. `release-sdk-go.yml` fails a tag whose `Version` differs. If the change breaks a
+   signature or field, add one line under `# Unreleased` → **Breaking Changes** in the root
+   `CHANGELOG.md`. The `Go SDK` steps of the `CI (SDKs)` workflow (`.github/workflows/ci-sdks.yml`)
+   check `sdks/go` alone on Go 1.25, as a consumer gets it.
 2. Check out the commit to tag (`git switch --detach <the main commit>`), run the smoke set
    from `sdks/go` with `E2E_REQUIRED=1`, as above, and keep its output, so the result is the
    tagged commit's.
 3. Tag the commit that holds the change by its SHA, not whatever `main` is by then. Never
    create a GitHub Release for it: `release.yml` publishes the Python packages on a release.
+   Check its `Version` first, as below: the proxy takes a pushed tag before the workflow runs,
+   so a tag the workflow refuses stays public (`v0.5.0` did).
 
    ```bash
    set -euo pipefail   # a failed check below stops before the tag
    git fetch origin
    SHA=<the main commit>
    git merge-base --is-ancestor "$SHA" origin/main   # exits 0, else the script stops
+   git show "$SHA:sdks/go/stream/backend.go" | grep -q 'Version = "X.Y.Z"'   # the workflow's own check
    git tag sdks/go/vX.Y.Z "$SHA"
    git push origin sdks/go/vX.Y.Z
    ```

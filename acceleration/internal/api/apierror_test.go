@@ -120,6 +120,16 @@ func TestANameTakenInTheStoreIsAConflictTheCallerCanFix(t *testing.T) {
 	require.NotContains(t, logged.String(), "stack=", "a name taken is not a failure to trace")
 }
 
+func TestASwitchUnderAnIDAnotherCustomerHasIsAConflict(t *testing.T) {
+	taken := stack.Wrap(fmt.Errorf("%w: branch switch sw1", store.ErrIDTaken))
+	handler, logged := served(t, func() error { return branchRefused(taken) })
+
+	response := postSync(handler, `{"name":"jean"}`)
+
+	require.Equal(t, http.StatusConflict, response.Code)
+	require.NotContains(t, logged.String(), "stack=", "a taken id is not a failure to trace")
+}
+
 func TestARecordGoneFromTheStoreIsStillTheInvalidRequestItWas(t *testing.T) {
 	gone := fmt.Errorf("%w %s", store.ErrNoSkill, "k1")
 	handler, _ := served(t, func() error { return storeFailure(stack.Wrap(gone), errSkillNameTaken) })

@@ -5,6 +5,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -113,9 +114,27 @@ func TestARegionIsTheHostedRouterThere(t *testing.T) {
 	}
 }
 
-func TestTheHostedRouterOutOfTheBoxIsUSEast4(t *testing.T) {
-	if DefaultURL != "https://accelerate-us-east4.gcp.stream-io-api.com" {
+func TestTheHostedRouterOutOfTheBoxIsTheNearestRegion(t *testing.T) {
+	if DefaultURL != "https://accelerate.gcp.stream-io-api.com" {
 		t.Errorf("the default is %s", DefaultURL)
+	}
+}
+
+func TestTheNearestHostedRouterIsAuthenticated(t *testing.T) {
+	t.Setenv(RegionEnv, "")
+	t.Setenv(CustomerEnv, "acme")
+	t.Setenv(APIKeyEnv, "ntv9")
+	t.Setenv(APISecretEnv, "shh")
+
+	for _, url := range []string{"", "https://accelerate.gcp.stream-io-api.com/"} {
+		t.Setenv(URLEnv, url)
+		resolved, err := Backend{}.Resolve()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resolved.URL != DefaultURL || !resolved.Authenticate {
+			t.Errorf("%q resolved to %s, authenticating %v", url, resolved.URL, resolved.Authenticate)
+		}
 	}
 }
 
@@ -655,7 +674,8 @@ func sentBy(t *testing.T, backend Backend) []string {
 }
 
 // Catches a change to what a client built with the deprecated ActingFor sends. The expected
-// requests were read off a client built the same way at the commit that deprecated the field.
+// requests were read off a client built the same way at the commit that deprecated the field,
+// with the X-Stream-Client that names the release since AI-3641.
 func TestABackendBuiltWithActingForSendsWhatItAlwaysDid(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -665,21 +685,21 @@ func TestABackendBuiltWithActingForSendsWhatItAlwaysDid(t *testing.T) {
 		{
 			"a local router told whom to bill",
 			Backend{CustomerID: "acme", ActingFor: "u"},
-			[]string{"GET /v1/agents/skills", "X-Customer-Id: acme", "X-Stream-Client: sdk", "X-Stream-User-Id: u"},
+			[]string{"GET /v1/agents/skills", "X-Customer-Id: acme", "X-Stream-Client: stream-agents-go-v" + Version, "X-Stream-User-Id: u"},
 		},
 		{
 			"a router behind the proxy",
 			Backend{Authenticate: true, APIKey: "ntv9", APISecret: "shh", ActingFor: "u"},
 			[]string{
 				"GET /v1/agents/skills", "Api_key: ntv9", "Authorization: <token>", "Stream-Auth-Type: jwt",
-				"X-Stream-Client: sdk", "X-Stream-User-Id: u",
+				"X-Stream-Client: stream-agents-go-v" + Version, "X-Stream-User-Id: u",
 			},
 		},
 		{
 			"a team and usage categories",
 			Backend{CustomerID: "acme", ActingFor: "u", Team: "finance", UsageCategories: []string{"project:x"}},
 			[]string{
-				"GET /v1/agents/skills", "X-Customer-Id: acme", "X-Stream-Client: sdk",
+				"GET /v1/agents/skills", "X-Customer-Id: acme", "X-Stream-Client: stream-agents-go-v" + Version,
 				"X-Stream-Usage-Categories: project:x,team:finance", "X-Stream-User-Id: u",
 			},
 		},
@@ -713,5 +733,68 @@ func TestActingForAUserKeepsTheServersToken(t *testing.T) {
 	}
 	if got := credentials.Get(UserHeader); got != "anya" {
 		t.Errorf("%s was %q, want anya", UserHeader, got)
+	}
+}
+
+func TestEveryRequestAndSocketNamesTheGoSDKAndItsRelease(t *testing.T) {
+	// The router's request log and its activity count read these two headers. Left out, a
+	// call is logged as Go's own client with no release, and counted as the API's. The router
+	// counts X-Stream-Client as the SDK's by its stream-agents- start.
+	want := "stream-agents-go/" + Version
+	seen := make(chan http.Header, 2)
+	upgrader := websocket.Upgrader{}
+	router := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Clone()
+		if websocket.IsWebSocketUpgrade(r) {
+			connection, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer connection.Close()
+			_, _, _ = connection.ReadMessage()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer router.Close()
+
+	for name, backend := range map[string]Backend{
+		"a local router":    {URL: router.URL, CustomerID: "acme"},
+		"through the proxy": {URL: router.URL, Authenticate: true, APIKey: "ntv9", APISecret: "shh"},
+	} {
+		client, err := backend.Client()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.ListSkillsWithResponse(t.Context(), nil); err != nil {
+			t.Fatal(err)
+		}
+		credentials, err := backend.Credentials()
+		if err != nil {
+			t.Fatal(err)
+		}
+		socket := NewSocket(backend.SocketURL("/v1/dispatch"), credentials, nil, slog.New(slog.DiscardHandler))
+		if err := socket.Open(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		for _, call := range []string{"request", "socket handshake"} {
+			header := <-seen
+			if got := header.Get("User-Agent"); got != want {
+				t.Errorf("%s: the %s says User-Agent %q, want %q", name, call, got, want)
+			}
+			if got := header.Get(ClientHeader); got != "stream-agents-go-v"+Version {
+				t.Errorf("%s: the %s says %s %q, want stream-agents-go-v%s", name, call, ClientHeader, got, Version)
+			}
+		}
+		socket.Close()
+	}
+}
+
+func TestTheVersionIsAReleaseNumber(t *testing.T) {
+	// A version read from build info is (devel) on any build not fetched by tag, and one
+	// copied from the tag keeps its v: neither is what the release is called on the log.
+	if !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(Version) {
+		t.Errorf("Version %q is not X.Y.Z", Version)
 	}
 }

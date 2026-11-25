@@ -34,9 +34,11 @@ const (
 // intervals is, by counter key, the intervals each subject has a limit in, which are the only
 // ones summed from the shards. A read of the subjects the counters could not answer has the
 // read it is part of as its parent, which fails with it; countersFailed says the counters'
-// Redis failed it.
+// Redis failed it. billed is false for the account of an app in no organization, whose
+// organization's spend is that app's alone.
 type spendRead struct {
 	source         spendSource
+	billed         bool
 	refs           []usage.SubjectRef
 	intervals      map[string][]usage.Interval
 	from           time.Time
@@ -72,7 +74,7 @@ func (m *money) limitsPass(ctx context.Context) {
 	if len(keys) == 0 {
 		return
 	}
-	db := m.enforcer.config.DB()
+	db := m.enforcer.config
 	if db == nil {
 		return
 	}
@@ -149,7 +151,7 @@ func (m *money) land(reads map[string]*spendRead) map[string]bool {
 // admission gave up on it, the next ones do not wait for it, and after one that did not land the
 // next is asked only Fresh later, so an outage costs an admission at most one wait.
 func (m *money) firstRead(ctx context.Context, key string, owner routing.Owner) {
-	db := m.enforcer.config.DB()
+	db := m.enforcer.config
 	if db == nil || m.ctx == nil {
 		return
 	}
@@ -214,8 +216,8 @@ func (m *money) unread(acct *account, key string, owner routing.Owner, now time.
 
 // queueFirst adds an account to the batch of first reads gathering now, under m.mu, and starts
 // one when none is. A batch gathers for firstWindow and at most firstBatches are read at once,
-// so a cold start that sees thousands of accounts makes a few calls of each kind (LimitsFor,
-// Resets, the service's windows) rather than a call of each per account.
+// so a cold start that sees thousands of accounts makes a few calls of each kind (store.Limits.SelectOf,
+// store.UsageResets.Select, the service's windows) rather than a call of each per account.
 func (m *money) queueFirst(db *store.Store, key string) {
 	if m.firstQueue == nil {
 		m.firstQueue = map[string]bool{}
@@ -306,12 +308,12 @@ func (m *money) readLimits(ctx context.Context, db *store.Store, keys []string) 
 	organizations := slices.Sorted(mapsKeys(due))
 	call, cancel := context.WithTimeout(ctx, readTimeout)
 	defer cancel()
-	limits, err := db.LimitsFor(call, organizations)
+	limits, err := db.Limits.SelectOf(call, organizations)
 	if err != nil {
 		m.failedRead("could not read the customers' spend limits, answering with the last ones read", err, "organizations", len(organizations))
 		return false
 	}
-	resets, err := db.Resets(call, organizations, earliestWindow(m.settings.Now()))
+	resets, err := db.UsageResets.Select(call, organizations, earliestWindow(m.settings.Now()))
 	if err != nil {
 		m.failedRead("could not read the customers' usage resets, answering with the last ones read", err, "organizations", len(organizations))
 		return false
@@ -339,7 +341,7 @@ func (m *money) readLimits(ctx context.Context, db *store.Store, keys []string) 
 // own: a slow or failed read of them never delays or skips the limits and resets, which their
 // loop reads apart. With shards it first finds which held rows the reconcile counted.
 func (m *money) grantsPass(ctx context.Context) {
-	db := m.enforcer.config.DB()
+	db := m.enforcer.config
 	if db == nil {
 		return
 	}
@@ -370,7 +372,7 @@ func (m *money) readGrants(ctx context.Context, db *store.Store, keys []string) 
 	organizations = slices.Compact(slices.Sorted(slices.Values(organizations)))
 	from := time.Now()
 	call, cancel := context.WithTimeout(ctx, grantsTimeout)
-	grants, err := db.LiveGrants(call, organizations, m.settings.Now())
+	grants, err := db.LimitGrants.SelectLive(call, organizations, m.settings.Now())
 	cancel()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -398,7 +400,7 @@ func (m *money) reconcilePass(ctx context.Context, db *store.Store) {
 		return
 	}
 	call, cancel := context.WithTimeout(ctx, reconcileTimeout)
-	counted, err := db.ReconcileGrantUses(call)
+	counted, err := db.LimitGrantUses.Reconcile(call)
 	cancel()
 	if counted > 0 {
 		m.enforcer.logger.Warn("counted usage rows toward their grants that their writer had not", "rows", counted)
@@ -498,7 +500,7 @@ func (m *money) planAccount(key string, now time.Time, all bool) *spendRead {
 	}
 	m.mu.Unlock()
 
-	read := &spendRead{source: source, intervals: map[string][]usage.Interval{}}
+	read := &spendRead{source: source, billed: billed(key), intervals: map[string][]usage.Interval{}}
 	unread := false
 	for _, subject := range subjects {
 		for _, interval := range usage.Intervals {
@@ -681,7 +683,7 @@ func (m *money) sumShards(ctx context.Context, db *store.Store, reads []*spendRe
 				reading.Go(func() {
 					defer func() { <-slots }()
 					call, cancel := context.WithTimeout(ctx, readTimeout)
-					spent, err := db.SubjectSpendSince(call, ref, start)
+					spent, err := db.Spend.Subject(call, ref, start, read.billed)
 					cancel()
 					mu.Lock()
 					defer mu.Unlock()

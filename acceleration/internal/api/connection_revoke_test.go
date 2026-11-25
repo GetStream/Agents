@@ -184,46 +184,23 @@ func (s *AuthorizationsSuite) TestACallerThatHangsUpStillEndsTheGrantAtTheProvid
 }
 
 // A caller that hangs up once the delete committed still leaves the delete's "grant revoked"
-// audit row (AI-2163): nothing could write it later. The test holds one of the connection's
-// MCP event subscriptions locked, so the delete waits in mcpEvents.Stop, after its commit and
-// before its audit row, and hangs up there, as net/http does when the caller goes.
+// audit row (AI-2163): nothing could write it later. The test deletes the connection, then lets
+// go of it as deleteConnection does after the commit, with the caller already gone, as net/http
+// cancels a request's context when the caller goes.
 func (s *AuthorizationsSuite) TestACallerThatHangsUpAfterTheDeleteStillLeavesItsAuditRow() {
 	id := s.revokingConnection(s.provider.URL+fakeprovider.PathRevoke, optInRevoke)
 	s.connect(id)
 	ctx := context.Background()
-	_, err := s.store.AddConnectionEventSubscription(ctx, &store.ConnectionEventSubscription{
-		CustomerID: s.customerID(), ConnectionID: id, ConfigID: "cfg_" + s.utils.uuid(), Binding: "crm",
-		Event: "issue_created", Key: "issue_created", Token: s.utils.uuid(), SecretSealed: []byte("synthetic"),
-		KEKVersion: 1, Status: store.ConnectionEventActive,
-	})
+	connection, err := s.store.ConnectorConnections.Get(ctx, s.customerID(), id)
 	s.Require().NoError(err)
-	hold, err := s.store.DB().BeginTx(ctx, nil)
-	s.Require().NoError(err)
-	defer func() { _ = hold.Rollback() }()
-	var holder int
-	s.Require().NoError(hold.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&holder))
-	_, err = hold.ExecContext(ctx, "SELECT 1 FROM connection_event_subscriptions WHERE connection_id = ? FOR UPDATE", id)
-	s.Require().NoError(err)
-
-	request, hangUp := context.WithCancel(context.WithValue(context.WithValue(ctx,
-		customerContextKey{}, s.customerID()), serverSideContextKey{}, true))
-	defer hangUp()
-	answered := make(chan error, 1)
-	go func() {
-		_, err := s.router.deleteConnection(request, &deleteConnectionRequest{ID: id})
-		answered <- err
-	}()
-	s.Require().Eventually(func() bool {
-		var waiting int
-		err := s.store.DB().QueryRowContext(ctx,
-			"SELECT count(*) FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid))", holder).Scan(&waiting)
-		return err == nil && waiting > 0
-	}, 5*time.Second, 10*time.Millisecond, "the delete never reached its MCP event subscriptions")
+	s.Require().NoError(s.store.ConnectorConnections.Delete(ctx, s.customerID(), id))
+	gone, hangUp := context.WithCancel(ctx)
 	hangUp()
-	s.Require().NoError(hold.Rollback())
-	s.Require().NoError(<-answered)
 
-	events, err := s.store.ConnectorAuditEvents(ctx, s.customerID(), store.AuditFilter{ConnectionID: id})
+	s.router.connectionDeleted(gone, s.customerID(), store.DeletedConnection{ID: id, ConnectorID: connection.ConnectorID,
+		OwnerType: connection.OwnerType, HadGrant: true}, core.CredentialChange{})
+
+	events, err := s.store.ConnectorAuditEvents.Select(ctx, s.customerID(), store.AuditFilter{ConnectionID: id})
 	s.Require().NoError(err)
 	s.Require().NotEmpty(events)
 	s.Equal(store.AuditGrantRevoked, events[0].Action)
@@ -237,19 +214,18 @@ func (s *AuthorizationsSuite) TestTheClientOfAConsentWhoseCallerHungUpIsKept() {
 	s.connect(consented)
 	stored, _ := s.held(consented)
 	ctx := context.Background()
-	recorded, err := s.store.ConnectorConnectionClients(ctx, []string{consented})
+	recorded, err := s.store.ConnectorConnections.Get(ctx, s.customerID(), consented)
 	s.Require().NoError(err)
-	s.Require().Contains(recorded, consented, "the consent records its client")
+	s.Require().NotEmpty(recorded.Client.ClientID, "the consent records its client")
 	pending := s.revokingConnection(s.provider.URL+fakeprovider.PathRevoke, optInRevoke)
 
 	gone, hangUp := context.WithCancel(ctx)
 	hangUp()
-	s.router.recordClient(gone, pending, stored)
+	s.router.recordClient(gone, s.customerID(), pending, stored)
 
-	clients, err := s.store.ConnectorConnectionClients(ctx, []string{pending})
+	kept, err := s.store.ConnectorConnections.Get(ctx, s.customerID(), pending)
 	s.Require().NoError(err)
-	s.Require().Contains(clients, pending)
-	s.Equal(recorded[consented].ClientID, clients[pending].ClientID)
+	s.Equal(recorded.Client.ClientID, kept.Client.ClientID)
 }
 
 // A detached write gives up at auditWriteTimeout when the pool has no free connection
@@ -268,7 +244,7 @@ func (s *AuthorizationsSuite) TestADetachedWriteGivesUpWhenThePoolIsFull() {
 		}
 	}()
 	for range suiteConnections {
-		conn, err := s.store.DB().DB.Conn(ctx)
+		conn, err := s.store.GlobalDB().DB.Conn(ctx)
 		s.Require().NoError(err)
 		held = append(held, conn)
 	}
@@ -284,7 +260,7 @@ func (s *AuthorizationsSuite) TestADetachedWriteGivesUpWhenThePoolIsFull() {
 			s.router.auditGrant(gone, connection.CustomerID, connection.ID, connection.ConnectorID, connection.OwnerType,
 				store.AuditGrantRevoked, store.AuditReasonDeleted, 0, "", core.CredentialChange{})
 		},
-		"client": func() { s.router.recordClient(gone, connection.ID, stored) },
+		"client": func() { s.router.recordClient(gone, connection.CustomerID, connection.ID, stored) },
 		"proxy":  func() { s.router.auditProxyCall(gone, connection, "example.com", nil, 1) },
 	}
 	took := make(map[string]time.Duration, len(writes))
@@ -344,7 +320,7 @@ func (s *AuthorizationsSuite) TestTheOptInIsReadFromTheConnectionsRevision() {
 func (s *AuthorizationsSuite) revokingConnection(revoke, extra string) string {
 	var created Connection
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/connections",
-		appOwned(s.revokingConnector("operator", revoke, extra)), &created))
+		appOwned(s.withFakeClient(s.revokingConnector("customer", revoke, extra))), &created))
 	return created.ID
 }
 
@@ -355,7 +331,7 @@ func (s *AuthorizationsSuite) revokingConnector(registration, revoke, extra stri
 	manifest, err := core.ParseManifest([]byte(s.fakeManifest(id, 1, registration, extra)))
 	s.Require().NoError(err)
 	manifest.Endpoints["revoke"] = revoke
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	return id
 }
@@ -364,9 +340,9 @@ func (s *AuthorizationsSuite) revokingConnector(registration, revoke, extra stri
 // resolver reads them, so a test can present them to the provider after the delete.
 func (s *AuthorizationsSuite) held(id string) (core.StoredCredentials, core.ResolvedManifest) {
 	ctx := context.Background()
-	connection, err := s.store.ConnectorConnection(ctx, s.customerID(), id)
+	connection, err := s.store.ConnectorConnections.Get(ctx, s.customerID(), id)
 	s.Require().NoError(err)
-	definition, err := s.store.ConnectorDefinition(ctx, s.customerID(), connection.ConnectorID, connection.DefinitionRevision)
+	definition, err := s.store.ConnectorDefinitions.Get(ctx, s.customerID(), connection.ConnectorID, connection.DefinitionRevision)
 	s.Require().NoError(err)
 	manifest, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	s.Require().NoError(err)

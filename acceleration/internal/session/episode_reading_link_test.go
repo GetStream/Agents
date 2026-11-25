@@ -15,18 +15,18 @@ import (
 
 // A card in progress read for its lines (AI-2716): a thread channel holds every episode of its
 // thread, one after another, so a number's SMS thread holds what it texted before a link set
-// those episodes aside (store.LinkUserPhone), and an app chat's channel holds each run of the
+// those episodes aside (store.UserPhones.Link), and an app chat's channel holds each run of the
 // person's messages.
 
 // inProgress is the status of a card whose episode is still open.
 const inProgress = "in_progress"
 
 // cardsConfig stores the suite's agent config with episode_cards on, as a link sets the
-// number's history aside only for such a config (store.LinkUserPhone, retireHistory).
+// number's history aside only for such a config (store.UserPhones.Link, retireHistory).
 func (s *EpisodeReadingSuite) cardsConfig() {
 	config := store.AgentConfig{CustomerID: s.customerID, Name: "cards-" + uuid.NewString(), Mode: store.AgentModeText,
-		EpisodeCards: true}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &config))
+		EpisodeCards: store.AgentEpisodeCards{On: true}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 	s.configID = config.ID
 }
 
@@ -44,7 +44,7 @@ func (s *EpisodeReadingSuite) textFrom(number, thread string, seconds int, text 
 // endEpisode closes an episode as the idle sweeper does an hour after its last message, before
 // its summary.
 func (s *EpisodeReadingSuite) endEpisode(opened omnichannel.Opened) {
-	_, err := s.store.DB().ExecContext(s.ctx, "UPDATE episodes SET status = ?, ended_at = ? WHERE id = ?",
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE episodes SET status = ?, ended_at = ? WHERE id = ?",
 		store.EpisodeEnded, opened.Episode.StartedAt.Add(time.Hour), opened.Episode.ID)
 	s.Require().NoError(err)
 }
@@ -140,7 +140,7 @@ func (s *EpisodeReadingSuite) TestAChatCardInProgressHasOnlyItsOwnEpisodesLines(
 	s.Equal([]string{"my dog is Pepper"}, cardLines(handed[1]), "the run in progress, from its start")
 }
 
-// linkAt links user to number as the customer's backend does (store.LinkUserPhone), dated
+// linkAt links user to number as the customer's backend does (store.UserPhones.Link), dated
 // seconds after the test's start, where the test's story puts it: the suite dates what is said
 // before now.
 func (s *EpisodeReadingSuite) linkAt(user, number string, seconds int) {
@@ -150,15 +150,15 @@ func (s *EpisodeReadingSuite) linkAt(user, number string, seconds int) {
 // linkWith is linkAt with what the link request says of the number's past: the link's time its
 // history row was written for is dated with it, and so is a boundary at the link's own time.
 func (s *EpisodeReadingSuite) linkWith(user, number string, seconds int, history *store.PhoneHistory) {
-	s.Require().NoError(s.store.LinkUserPhone(s.ctx, &store.UserPhone{CustomerID: s.customerID,
+	s.Require().NoError(s.store.UserPhones.Link(s.ctx, &store.UserPhone{CustomerID: s.customerID,
 		StreamAppPK: suiteDeploymentApp, UserID: user, Phone: number, History: history}))
 	at := s.now.Add(time.Duration(seconds) * time.Second)
-	_, err := s.store.DB().ExecContext(s.ctx, `UPDATE user_phone_history AS h
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, `UPDATE user_phone_history AS h
 SET since = CASE WHEN h.since = up.updated_at THEN ?0 ELSE h.since END, linked_at = ?0 FROM user_phones AS up
 WHERE up.customer_id = h.customer_id AND up.stream_app_pk = h.stream_app_pk AND up.user_id = h.user_id
 	AND h.linked_at = up.updated_at AND up.customer_id = ?1 AND up.user_id = ?2`, at, s.customerID, user)
 	s.Require().NoError(err)
-	_, err = s.store.DB().ExecContext(s.ctx, "UPDATE user_phones SET created_at = ?0, updated_at = ?0 WHERE customer_id = ?1 AND user_id = ?2",
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "UPDATE user_phones SET created_at = ?0, updated_at = ?0 WHERE customer_id = ?1 AND user_id = ?2",
 		at, s.customerID, user)
 	s.Require().NoError(err)
 }
@@ -172,7 +172,7 @@ WHERE up.customer_id = h.customer_id AND up.stream_app_pk = h.stream_app_pk AND 
 // holds only its own episode's lines.
 func (s *EpisodeReadingSuite) TestCardsTurnedOnAfterALinkReadNoneOfTheNumbersEpisodesFromBeforeIt() {
 	config := store.AgentConfig{CustomerID: s.customerID, Name: "cards-" + uuid.NewString(), Mode: store.AgentModeText}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 	s.configID = config.ID
 	number, user := s.phone("+15550100103").Address, "anya-"+uuid.NewString()
 	first := s.thread("sms-author")
@@ -191,8 +191,8 @@ func (s *EpisodeReadingSuite) TestCardsTurnedOnAfterALinkReadNoneOfTheNumbersEpi
 	s.write(chat, user, "hello", nil)
 	s.summarize(s.chatEpisode(user, chat, 0), "Said hello.")
 	s.linkAt(user, number, -3000)
-	config.EpisodeCards = true
-	s.Require().NoError(s.store.UpdateAgentConfig(s.ctx, &config))
+	config.EpisodeCards.On = true
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, &config))
 	s.textFrom(number, first, -60, "my dog is Pepper")
 	s.at(0)
 

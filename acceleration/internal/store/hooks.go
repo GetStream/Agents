@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/uptrace/bun"
 )
@@ -52,11 +51,16 @@ func (a AppScope) clause() bun.Safe {
 // is acted on for nobody rather than for whichever came first.
 var ErrAmbiguousHook = errors.New("store: more than one customer holds what that hook names")
 
+// trunkURI reads a number's PhoneNumber.BridgeURI from its trunk.
+const trunkURI = "(SELECT st.bridge_uri FROM stream_trunks AS st WHERE st.id = pn.stream_trunk_id " +
+	"AND st.customer_id = pn.customer_id) AS bridge_uri"
+
 // NumberByCallInApp finds the number whose lines reach a call, among the numbers attached
 // in one app. A routing rule names the call its callers are put in, which is what an
 // arriving call is recognised by; a number attached before its call was stored is found by
 // the name the call is given after it. A call's id is only unique within its app, so each
-// lookup is made there.
+// lookup is made there. A call that no number reaches and that is not named for a number,
+// most often a video call, matches ErrNoNumber.
 func (s *Store) NumberByCallInApp(ctx context.Context, scope AppScope, callType, callID string) (PhoneNumber, error) {
 	if callID == "" {
 		return PhoneNumber{}, errors.New("store: a call id is required")
@@ -65,7 +69,7 @@ func (s *Store) NumberByCallInApp(ctx context.Context, scope AppScope, callType,
 		callType = "agent"
 	}
 	var held []PhoneNumber
-	if err := s.db.NewSelect().Model(&held).
+	if err := s.global.NewSelect().Model(&held).ColumnExpr("pn.*").ColumnExpr(trunkURI).
 		Where("stream_call_id = ?", callID).Where("stream_call_type = ?", callType).
 		Where("released_at IS NULL").ApplyQueryBuilder(scope.where).Limit(20).Scan(ctx); err != nil {
 		return PhoneNumber{}, fmt.Errorf("store: number by call: %w", err)
@@ -73,10 +77,12 @@ func (s *Store) NumberByCallInApp(ctx context.Context, scope AppScope, callType,
 	if len(held) == 0 {
 		e164, named := strings.CutPrefix(callID, "phone-")
 		if !named {
-			return PhoneNumber{}, fmt.Errorf("store: no number reaches call %s:%s", callType, callID)
+			return PhoneNumber{}, numberNotHeld{fmt.Sprintf("store: no number reaches call %s:%s", callType, callID)}
 		}
-		if err := s.db.NewSelect().Model(&held).
-			Where("e164 = ?", e164).Where("stream_trunk_id IS NOT NULL").
+		// A number on a customer's own trunk is lined for its calls out alone, which are known by
+		// their resources before this is asked, and never answers a call.
+		if err := s.global.NewSelect().Model(&held).ColumnExpr("pn.*").ColumnExpr(trunkURI).
+			Where("e164 = ?", e164).Where("stream_trunk_id IS NOT NULL").Where("vendor <> ?", sipTrunkVendor).
 			Where("released_at IS NULL").ApplyQueryBuilder(scope.where).Limit(20).Scan(ctx); err != nil {
 			return PhoneNumber{}, fmt.Errorf("store: number by call: %w", err)
 		}
@@ -94,7 +100,7 @@ func (s *Store) NumberByCallInApp(ctx context.Context, scope AppScope, callType,
 // in one app: the call is named for the session answering it, so it carries the number.
 func (s *Store) NumberRungInApp(ctx context.Context, scope AppScope, e164 string) (PhoneNumber, error) {
 	var held []PhoneNumber
-	if err := s.db.NewSelect().Model(&held).
+	if err := s.global.NewSelect().Model(&held).ColumnExpr("pn.*").ColumnExpr(trunkURI).
 		Where("e164 = ?", e164).Where("attached_at IS NOT NULL").
 		Where("released_at IS NULL").ApplyQueryBuilder(scope.where).Limit(20).Scan(ctx); err != nil {
 		return PhoneNumber{}, fmt.Errorf("store: number rung: %w", err)
@@ -108,28 +114,38 @@ func (s *Store) NumberRungInApp(ctx context.Context, scope AppScope, e164 string
 	return PhoneNumber{}, ErrAmbiguousHook
 }
 
+// HeldCall is a call and the agent config its session ran under, empty for a call whose
+// session is gone.
+type HeldCall struct {
+	Call     `bun:",extend"`
+	ConfigID string `bun:"config_id,scanonly"`
+}
+
 // CallByAgentInApp is the newest call an agent ran, among the calls made in one app.
-func (s *Store) CallByAgentInApp(ctx context.Context, scope AppScope, agentID string) (Call, error) {
+func (s *Store) CallByAgentInApp(ctx context.Context, scope AppScope, agentID string) (HeldCall, error) {
 	if agentID == "" {
-		return Call{}, errors.New("store: an agent id is required")
+		return HeldCall{}, errors.New("store: an agent id is required")
 	}
-	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]Call, error) {
-		var calls []Call
-		err := db.NewSelect().Model(&calls).Where("agent_id = ?", agentID).
-			ApplyQueryBuilder(scope.where).Order("started_at DESC").Limit(20).Scan(ctx)
+	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]HeldCall, error) {
+		var calls []HeldCall
+		err := db.NewSelect().Model(&calls).
+			ColumnExpr("c.*").
+			ColumnExpr("COALESCE((SELECT s.config_id FROM agent_sessions AS s WHERE s.customer_id = c.customer_id AND s.id = c.session_id), '') AS config_id").
+			Where("c.agent_id = ?", agentID).
+			ApplyQueryBuilder(scope.where).Order("c.started_at DESC").Limit(20).Scan(ctx)
 		return calls, err
 	})
 	if err != nil {
-		return Call{}, fmt.Errorf("store: call by agent: %w", err)
+		return HeldCall{}, fmt.Errorf("store: call by agent: %w", err)
 	}
-	calls := merged(lists, func(a, b Call) int { return b.StartedAt.Compare(a.StartedAt) }, 20)
-	switch customers(calls, func(c Call) string { return c.CustomerID }) {
+	calls := merged(lists, func(a, b HeldCall) int { return b.StartedAt.Compare(a.StartedAt) }, 20)
+	switch customers(calls, func(c HeldCall) string { return c.CustomerID }) {
 	case 0:
-		return Call{}, unknownCall(agentID)
+		return HeldCall{}, unknownCall(agentID)
 	case 1:
 		return calls[0], nil
 	}
-	return Call{}, ErrAmbiguousHook
+	return HeldCall{}, ErrAmbiguousHook
 }
 
 func customers[T any](rows []T, of func(T) string) int {
@@ -138,54 +154,4 @@ func customers[T any](rows []T, of func(T) string) int {
 		seen[of(row)] = true
 	}
 	return len(seen)
-}
-
-// deliveryKeptFor is how long a delivery is remembered, which is longer than Stream retries.
-const deliveryKeptFor = 24 * time.Hour
-
-// deliveriesPrunedEvery is how often deliveries older than a day are forgotten, which is
-// rarely enough that a busy hook does not pay for it on every delivery.
-const deliveriesPrunedEvery = time.Minute
-
-// FirstDelivery records a hook delivery and reports whether it is the first with that key.
-func (s *Store) FirstDelivery(ctx context.Context, key string) (bool, error) {
-	if err := s.forgetDeliveries(ctx); err != nil {
-		return false, err
-	}
-	return recordDelivery(ctx, s.db, key)
-}
-
-// hookDelivery is one hook delivery's key, as FirstDelivery records it.
-type hookDelivery struct {
-	bun.BaseModel `bun:"table:hook_deliveries,alias:hd"`
-
-	Key    string    `bun:"key,pk"`
-	SeenAt time.Time `bun:"seen_at,notnull"`
-}
-
-// forgetDeliveries deletes the deliveries older than a day, at most once every
-// deliveriesPrunedEvery.
-func (s *Store) forgetDeliveries(ctx context.Context) error {
-	now := time.Now().UTC()
-	if last := s.deliveriesPruned.Load(); now.UnixNano()-last >= int64(deliveriesPrunedEvery) &&
-		s.deliveriesPruned.CompareAndSwap(last, now.UnixNano()) {
-		_, err := s.db.NewDelete().Model((*hookDelivery)(nil)).Where("seen_at < ?", now.Add(-deliveryKeptFor)).Exec(ctx)
-		if err != nil {
-			return fmt.Errorf("store: forget hook deliveries: %w", err)
-		}
-	}
-	return nil
-}
-
-// recordDelivery is FirstDelivery's record on db, the store's or a transaction's.
-func recordDelivery(ctx context.Context, db bun.IDB, key string) (bool, error) {
-	result, err := db.NewInsert().Model(&hookDelivery{Key: key}).
-		Column("key").
-		On("CONFLICT (key) DO NOTHING").
-		Exec(ctx)
-	if err != nil {
-		return false, fmt.Errorf("store: record hook delivery: %w", err)
-	}
-	inserted, _ := result.RowsAffected()
-	return inserted == 1, nil
 }

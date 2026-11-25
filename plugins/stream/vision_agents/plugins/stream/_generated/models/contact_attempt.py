@@ -20,9 +20,9 @@ class ContactAttempt:
     Attributes:
         attempt (int): Which attempt of the sequence, from 1.
         dial (int): 1, or 2 for the second call of a double dial.
-        result (str): Why the dial placed no call: invalid_number, refused, deferred, paused or not_placed (the router
-            stopped before the call went out). voicemail for a call an answering machine took. Empty for any other call,
-            whose end call_outcome says.
+        result (str): Why the dial placed no call: invalid_number, refused, deferred, paused, not_placed (the router
+            stopped before the call went out) or dial_failed (it failed before anything rang, and is tried again shortly).
+            voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says.
         started_at (datetime.datetime):
         call_id (str | Unset):
         call_outcome (CallOutcome | Unset): How a placed call ended.

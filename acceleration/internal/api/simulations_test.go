@@ -3,6 +3,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 )
@@ -15,6 +16,32 @@ type SimulationsSuite struct {
 
 func TestSimulationsSuite(t *testing.T) {
 	runSuite(t, new(SimulationsSuite))
+}
+
+// SimulationsShutDownSuite covers a run asked of a router whose simulation runner has
+// stopped. It is a suite of its own because the runner stays stopped.
+type SimulationsShutDownSuite struct {
+	RouterSuite
+}
+
+func TestSimulationsShutDownSuite(t *testing.T) {
+	runSuite(t, new(SimulationsShutDownSuite))
+}
+
+func (s *SimulationsShutDownSuite) TestARunAskedOfARouterThatIsShuttingDownIsUnavailable() {
+	s.useApp(s.data.createApp())
+	var created Simulation
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/simulations", SimulationRequest{
+		Name: "sim-" + s.utils.uuid(), ConfigId: s.data.createAgentConfig().Id, Scenario: "ask about the weather",
+		Assertion: "did the agent answer?",
+	}, &created))
+	s.router.simulations.Close()
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/simulations/"+created.Id+"/run", nil)
+
+	s.Equal(http.StatusServiceUnavailable, status, string(body))
+	s.Contains(string(body), `"type":"unavailable"`)
+	s.NotContains(string(body), "simulation:")
 }
 
 func (s *SimulationsSuite) SetupTest() {
@@ -140,6 +167,25 @@ func (s *SimulationsSuite) TestTheLogOfRunsIsNotOneOfTheRuns() {
 	s.Nil(log[0].Conversations, "a log of fifty runs is not fifty transcripts")
 }
 
+func (s *SimulationsSuite) TestAListOfRunsIsAskedForUpToFiveHundred() {
+	created := s.createSimulation(s.against(s.data.createAgentConfig()))
+	s.run(created.Id)
+	newest := s.run(created.Id)
+
+	for limit, held := range map[string]int{"1": 1, "500": 2} {
+		var log []SimulationRun
+		s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+			"/v1/agents/simulation-runs?simulation_id="+created.Id+"&limit="+limit, nil, &log))
+		s.Require().Len(log, held, limit)
+		s.Equal(newest.Id, log[0].Id, "newest first")
+	}
+	for _, limit := range []string{"0", "-1", "501", "1000000000"} {
+		status, answered := s.serverClient.failure(http.MethodGet, "/v1/agents/simulation-runs?limit="+limit, nil)
+		s.Equal(http.StatusBadRequest, status, limit)
+		s.Contains(answered, "limit", limit)
+	}
+}
+
 func (s *SimulationsSuite) TestARunNobodyStartedIsNotFound() {
 	status, _ := s.serverClient.call(http.MethodGet, "/v1/agents/simulation-runs/"+s.utils.uuid(), nil)
 
@@ -161,6 +207,78 @@ func (s *SimulationsSuite) TestOnlyTheAppsOwnBackendMayWriteASimulation() {
 		status, _ := as.call(http.MethodPost, "/v1/agents/simulations", s.against(agent))
 		return status
 	})
+}
+
+func (s *SimulationsSuite) TestASimulationTheDatabaseCannotStoreIsAnsweredAsInternalWithNothingOfTheDatabase() {
+	request := s.against(s.data.createAgentConfig())
+	s.failQueries(`INSERT INTO "simulations"`)
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/simulations", request)
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), `"code":"internal_error"`)
+	s.NotContains(string(body), "simulations")
+	s.NotContains(string(body), "deadline")
+}
+
+func (s *SimulationsSuite) TestASimulationTheDatabaseCannotEditIsAnsweredAsInternalWithNothingOfTheDatabase() {
+	created := s.createSimulation(s.against(s.data.createAgentConfig()))
+	s.failQueries(`UPDATE "simulations"`)
+
+	status, body := s.serverClient.call(http.MethodPut, "/v1/agents/simulations/"+created.Id,
+		s.against(AgentConfig{Id: created.ConfigId}))
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), `"code":"internal_error"`)
+	s.NotContains(string(body), "simulations")
+	s.NotContains(string(body), "deadline")
+}
+
+func (s *SimulationsSuite) TestARunTheDatabaseCannotStartIsAnsweredAsInternalWithNothingOfTheDatabase() {
+	created := s.createSimulation(s.against(s.data.createAgentConfig()))
+	s.failQueries(`INSERT INTO "simulation_runs"`)
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/simulations/"+created.Id+"/run", nil)
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), `"code":"internal_error"`)
+	s.NotContains(string(body), "simulation_runs")
+	s.NotContains(string(body), "deadline")
+}
+
+func (s *SimulationsSuite) TestARunBeyondTheRunsTheRouterHasAtOnceIsAskedToWait() {
+	// The caller takes a minute over each thing it says, so every run is still going when the
+	// next one is asked for.
+	request := s.against(s.data.createAgentConfig())
+	request.CallerTarget = pointerTo("stuck/stuck-model")
+
+	status, payload := http.StatusAccepted, []byte(nil)
+	for range 10 {
+		created := s.createSimulation(request)
+		status, payload = s.serverClient.call(http.MethodPost, "/v1/agents/simulations/"+created.Id+"/run", nil)
+		if status != http.StatusAccepted {
+			break
+		}
+		var run SimulationRun
+		s.Require().NoError(json.Unmarshal(payload, &run))
+		s.T().Cleanup(func() {
+			s.serverClient.do(http.MethodPost, "/v1/agents/simulation-runs/"+run.Id+"/cancel", nil, nil)
+		})
+	}
+
+	s.Equal(http.StatusTooManyRequests, status, string(payload))
+	s.Contains(string(payload), `"type":"rate_limited"`)
+	s.NotContains(string(payload), "simulation:")
+}
+
+func (s *SimulationsSuite) TestMoreVariationsThanARunTriesIsRefusedSayingHowMany() {
+	request := s.against(s.data.createAgentConfig())
+	request.Variations = pointerTo(11)
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/simulations", request)
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "variations is not between 1 and 10")
 }
 
 // against is a simulation to put one agent through, named so that two tests' rows are not

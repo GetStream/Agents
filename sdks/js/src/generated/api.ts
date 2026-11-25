@@ -459,7 +459,7 @@ export type paths = {
         readonly put?: never;
         /**
          * Add people to ring
-         * @description A draft only: once launched, the list is fixed (409 campaign_locked). Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
+         * @description A draft, or an auto_enroll campaign that is scheduled, running or paused: there they start on the first step at the next calling hours, or at start_at when it has not come. Any other campaign is refused with 409 campaign_locked. Contacts who opted out of calls are added as rejected, without a call, once the campaign has launched. Up to 1,000 a request. Each number is stored in E.164, read in default_country when it has no country code. A row that cannot be rung, or repeats a number the campaign holds, is refused and the rest are added: refused says which and why.
          *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
          */
         readonly post: operations["addCampaignContacts"];
@@ -488,10 +488,20 @@ export type paths = {
         readonly get: operations["getCampaignContact"];
         readonly put?: never;
         readonly post?: never;
-        readonly delete?: never;
+        /**
+         * Remove one contact of a draft
+         * @description Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+         *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+         */
+        readonly delete: operations["deleteCampaignContact"];
         readonly options?: never;
         readonly head?: never;
-        readonly patch?: never;
+        /**
+         * Change one contact of a draft
+         * @description A field left out keeps its value; variables, when sent, replace them all, and an empty time_zone or instructions clears it. A number without a country code is read in the campaign's default_country. A value that would be refused on add is refused with 400, saying the reason. A number another contact of the campaign has is refused with 409 contact_duplicate. Once the campaign has launched, 409 campaign_locked: stop the contact instead.
+         *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+         */
+        readonly patch: operations["updateCampaignContact"];
         readonly trace?: never;
     };
     readonly "/v1/agents/campaigns/{id}/contacts/{contact_id}/stop": {
@@ -547,7 +557,7 @@ export type paths = {
         readonly put?: never;
         /**
          * Launch a draft
-         * @description Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
+         * @description Records the customer's consent and rings the contacts from start_at. A draft missing what it needs (contacts unless it is auto_enroll, one of the app's numbers, an agent config, a ready sequence) is refused with campaign_not_ready, saying what. An organization that may not pay for calls is refused here as a call would be, and a campaign refused midway is paused with paused_reason set. Contacts who opted out of calls are rejected without a call.
          *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
          */
         readonly post: operations["launchCampaign"];
@@ -1432,7 +1442,7 @@ export type paths = {
         /**
          * Mint a guest so somebody can talk to an agent before signing up
          * @description Returns a user id and a Stream token with role guest, which is what the chat and video SDKs connect with, and a refresh_secret to come back with once it has expired. From the router's point of view a guest is an ordinary end user whose name is worth less: their sessions are their own and nobody else's, but a guest id is not evidence of who anybody is, so a guest cannot be handed another guest's conversations by naming their id. A token for an existing guest goes only to the app's backend, to the guest's own still-valid token, or to the refresh_secret the guest was last handed; any other caller naming an id is minted a new guest.
-         *     Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it.
+         *     Open to a page on purpose. A guest that a backend had to mint is a guest every anonymous visitor costs a round trip through the customer's own servers, which is exactly the integration this is meant to remove. An app that has turned guests off refuses it, and so does a suspended organization. One address may mint 60 new guests of an app an hour, an IPv6 address counted by its /64; the app's backend is not counted.
          */
         readonly post: operations["createGuestUser"];
         readonly delete?: never;
@@ -1454,7 +1464,7 @@ export type paths = {
          * Move a guest's conversations onto the account they turned out to be
          * @description For somebody who talked to an agent and then signed up. Their sessions are rewritten to the real user and the guest is marked claimed, in one transaction: a guest marked claimed whose sessions still say the guest owns them is a person who signed up and lost their history, and sessions moved without the guest being marked is a guest that can be claimed again, by somebody else.
          *     Server-side only, and the one operation here that most needs to be. Only the customer's own backend knows that a given guest is a given account -- it is the thing that just authenticated them. A page allowed to ask this could claim anybody's conversations by guessing a guest id, which is the whole attack.
-         *     A guest already claimed is refused rather than moved again.
+         *     A guest another account already claimed is refused. The same claim sent again finishes whatever the first left undone, and moves nothing twice.
          */
         readonly post: operations["claimGuestUser"];
         readonly delete?: never;
@@ -1476,6 +1486,7 @@ export type paths = {
          * Fill a knowledge base with what the business wrote down
          * @description The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
          *     Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+         *     A document that is removed again and again while it is written is refused with a 409: post it again.
          *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
          */
         readonly post: operations["ingestKnowledge"];
@@ -1526,7 +1537,7 @@ export type paths = {
         readonly post?: never;
         /**
          * Take a document out of a knowledge base
-         * @description The passages it was cut into are removed too, so the agent stops answering out of it.
+         * @description The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, so it can be deleted again.
          *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
          */
         readonly delete: operations["deleteKnowledgeDocument"];
@@ -2091,24 +2102,24 @@ export type paths = {
         /**
          * Watch the conversation and answer the model's tool calls
          * @description A WebSocket, which OpenAPI cannot describe past the upgrade. Frames are JSON objects carrying a `type` and the fields of that event.
-         *     The server sends what the conversation did: `joined`, `heard`, `responding`, `response_delta`, `reasoning_delta` (turn_id and text: the next piece of the model's thinking on a written reply, never spoken), `responded` (pending_work remains true while tools or delegated work are outstanding), `said` (a line the agent says as written rather than asking the model, such as its greeting, with the purpose it has), `speaking` (an utterance started being heard: turn_id, synthesis_id, the text the voice had been sent for it by then, at, when the call's track took its first audible frame, and delay_ms, for an utterance reported before the track got to it, how long after at it is expected to be heard, from the speech queued ahead of it, and message_start and message_end, where that text is in the reply's Chat message, whose text is not the voice's: directions a voice acts, digits it is told the count of and sentences held back are in one and not the other; a streaming voice's grows as it is sent more), `spoke` (an utterance finished being synthesised: turn_id, synthesis_id, characters (Unicode code points, as every character count on this socket is), audio_duration_ms, time_to_first_byte_ms, and message_start and message_end for all of it; it follows the utterance's `speaking`), `turn`, `decision`, `delegated`, `task_settled` (files lists what the work's code handed back, each a name, mime_type, url and size, uploaded to a persistent conversation's channel and attached to the reply), `task_cancelled`, `tool_call`, `tool_held`, `tool_approval_ignored`, `tool_started`, `tool_updated`, `tool_ran`, `tool_call.started`, `tool_call.progress`, `tool_call.finished`, `transferred`, `pressed`, `looked_up`, `backchannel`, `interrupted` (turn_id; with synthesis_id, heard_ms, message_start and message_end, the utterance being heard when it was cut, how many milliseconds of it had been, and where all it had been sent is in the reply's message, when any of it had), `overlap_decided`, `conversation_compacted`, `models_changed`, `error` and `left`.
+         *     The server sends what the conversation did: `joined`, `heard`, `responding`, `response_delta`, `reasoning_delta` (turn_id and text: the next piece of the model's thinking on a written reply, never spoken), `responded` (pending_work remains true while tools or delegated work are outstanding), `said` (a line the agent says as written rather than asking the model, such as its greeting, with the purpose it has), `speaking` (an utterance started being heard: turn_id, synthesis_id, the text the voice had been sent for it by then, at, when the call's track took its first audible frame, and delay_ms, for an utterance reported before the track got to it, how long after at it is expected to be heard, from the speech queued ahead of it, and message_start and message_end, where that text is in the reply's Chat message, whose text is not the voice's: directions a voice acts, digits it is told the count of and sentences held back are in one and not the other; a streaming voice's grows as it is sent more), `spoke` (an utterance finished being synthesised: turn_id, synthesis_id, characters (Unicode code points, as every character count on this socket is), audio_duration_ms, time_to_first_byte_ms, and message_start and message_end for all of it; it follows the utterance's `speaking`), `turn`, `decision`, `delegated`, `task_settled` (files lists what the work's code handed back, each a name, mime_type, url and size, uploaded to a persistent conversation's channel and attached to the reply), `task_cancelled`, `tool_call`, `tool_held`, `tool_approval_ignored`, `tool_result_ignored`, `tool_started`, `tool_updated`, `tool_ran`, `tool_call.started`, `tool_call.progress`, `tool_call.finished`, `transferred`, `pressed`, `looked_up`, `backchannel`, `interrupted` (turn_id; with synthesis_id, heard_ms, message_start and message_end, the utterance being heard when it was cut, how many milliseconds of it had been, and where all it had been sent is in the reply's message, when any of it had), `overlap_decided`, `conversation_compacted`, `models_changed`, `error` and `left`.
          *     An `error` frame for a turn the prompt injection screen refused carries `code` `prompt_injection`, and the turn's `responded` has empty text: what streamed before the verdict is not the answer.
          *     message_start and message_end are offsets in Unicode code points into the text of the Chat message the reply is written into, the one whose turn_id names the turn, from message_start up to message_end. They are left out where the router does not know them.
          *     `connector_unavailable` names an optional connector binding the session opened without: name (its alias), connector_id and reason, one of no_selection, shared_session, caller_unverified, connection_unavailable, provider_mismatch, needs_reauthorization, credential_rejected (the provider rejected the token or key a bearer or api_key connection holds, or the connection reads a connector revision marked broken; only saving its credentials again fixes it, so no login is offered), not_connected, open_failed, tool_unavailable and selection_dropped (a fork's or a reopened chat's selection for an alias its config no longer declares). Every watcher is sent each one when it attaches.
          *     `connector_scope_required` says a connector tool call was refused because the caller's own connection lacks access the provider asked for (insufficient_scope or a claims challenge), and a step-up consent was begun for it: name (the binding's alias), connector_id, connection_id, scopes (what the provider asked for, empty for a claims challenge), authorization_id, launch_url, handoff_token and expires_at. A page of the session's return_url's origin, or the dashboard for a session created without one, opens launch_url in a popup and posts it handoff_token, as for a createAuthorization with that return_url: the launch page takes the handoff from that origin only, and the consent goes back to the session's return_url, or else to the dashboard. The old grant keeps working until the step-up succeeds, and the same call works afterwards in the same session. While that step-up is open, calls refused for the same access send no second event.
          *     Persistent text sessions also emit `conversation_updated` with conversation_id and a complete message snapshot: id, request_id, question_id, role, text, state, response_started_at, state_started_at, finished_at, duration_ms, saved, persistence_error, refused (true on a reply the prompt injection screen refused) and attachments. Each tool_calling attachment has tool_call_id, name, title, status, phase, summary, immutable started_at, execution_started_at, finished_at and duration_ms. A connector_authorization attachment asks the end user to connect a connector binding the reply needed with their own account, with name (the binding's alias), connector_id, connection_id, authorization_id, title, launch_url, handoff_token and expires_at: a page of the session's return_url's origin, or the dashboard for a session created without one, opens launch_url in a popup and posts it handoff_token, as for a createAuthorization with that return_url, and the consent goes back to the session's return_url, or else to the dashboard. Once the user finishes that login the message is sent again with status connected and no handoff_token, and the agent carries on by itself. The call that needed the login waits for it on its own ai_tool_call step, in parts: status awaiting_authorization, target_user_id the caller, and an authorization of type oauth with provider (the connector id), provider_name, title, message, url (the launch page), handoff_token and expires_at. A page of the return_url's origin opens url and posts it handoff_token; a native app opens url#handoff_token=<handoff_token> in its web authentication sheet. Connected, the step is running again with authorization.status connected and no handoff_token, and the call runs in the same reply. A tool_approval naming its tool_call_id with allowed false, or the person refusing at the provider, declines the login (declined); a consent that ended otherwise without connecting, such as with another account, is failed, and one not finished by expires_at is expired. Each way the step is cancelled, authorization.status says how, and the call runs nothing. Activity states are thinking, queued, tools, writing, completed, failed and cancelled. tool_started includes tool_call_id, tool, turn_id and started_at, and pre_speech when the tool's connector binding sets one in its policy; tool_ran also includes tool_call_id, and files when the tool was run_code, as on task_settled.
-         *     `tool_call.started`, `tool_call.progress` and `tool_call.finished` (`ToolCallState`) are a call's state as a client shows it, whoever runs the call: tool_call_id, tool, turn_id, status (in_progress, waiting for a person's approval, success, failed or cancelled), display_title (what the call is doing, as its tool was declared with), progress (the last `tool_update`, the binding's pre_speech or the approval question), started_at, duration_ms, approved_at, rejected_at and error. Each carries the whole state: keep the last per tool_call_id.
+         *     `tool_call.started`, `tool_call.progress` and `tool_call.finished` (`ToolCallState`) are a call's state as a client shows it, whoever runs the call: tool_call_id, tool, turn_id, status (in_progress, waiting for a person's approval, success, failed or cancelled), display_title (what the call is doing, as its tool was declared with), progress (the last `tool_update`, the binding's pre_speech or the approval question), started_at, duration_ms, approved_at, rejected_at, error and custom (the data of the last `tool_update` that carried any, kept once the call finishes). Each carries the whole state: keep the last per tool_call_id.
          *     A respond command carrying request_id emits command_accepted with a nested command receipt (request_id, user_message_id, assistant_message_id, state, duplicate). Personal persistent text sessions require this ID. A retry with the same text and images returns the existing IDs without invoking the model again; reuse with different content emits an error. Its images are data URIs, at most 8, uploaded to the conversation's channel and shown on the person's message. On a session a dispatch worker opened for a message handed out from a channel, that message is already there: nothing is written or uploaded for it, user_message_id is empty, and a reused id is answered as a duplicate even with other text or images. After restart an interrupted command is reported, not rerun.
          *     An `interrupt` command carrying `request_id` stops that command and emits `command_stopped` with its terminal receipt. A stop arriving after its command finished replays that command's receipt and leaves the command running now alone; an unknown command is reported as an error. Without `request_id` the frame stops whichever reply is current, which is what a caller with no command to name means by it.
          *     A `decision` frame is one judgement the conversation made, carrying the same fields as a CallEvent. Together they are why the call went the way it did, and they are also written down, so a finished call replays them from `/v1/agents/calls/{id}/events`.
          *     Two frames are only sent when asked for, because they are far more frequent than the rest and most consumers want neither. `interim=true` adds `hearing`, which is a transcript revision as it arrives rather than a settled turn. `decisions=false` drops `decision`.
          *     `replay_pending_tools=true` opts a durable tool host into replay of external tool calls still awaiting results in a live voice session. Completed, cancelled and timed-out requests are excluded at snapshot time. Replays retain their tool and turn IDs and may duplicate live delivery; the host must persist execution receipts and refuse to repeat uncertain writes. Ordinary status watchers should leave this disabled. Persistent text command recovery is unchanged.
-         *     The client sends `tool_result` to answer a `tool_call`, and `say`, `respond`, `interrupt` (optionally naming a `request_id`) or `close` to act on the session. A session's instructions are its agent config's, so there is no command to change them. A `tool_call` is the only frame that must be answered: everything else is a report. It carries `id`, `name`, `arguments`, `turn_id`, `session_id`, `user` (`id` and `name` of the person whose turn asked for it, when the router knows) and `conversation` (`cid` when the conversation is kept, and the session's `custom`). Every watcher sees every `tool_call`, and `run` says whether this one is to run it: only a watcher that runs the tool answers, and a result from any other is dropped. A watcher says which tools it runs with `tools` when it attaches. Without it, it runs the session's tools when it is on the side that created the session: a backend for a session a backend created, the same person for one a device created. A tool a backend declared runs only on a backend, whatever a device says it holds. A call that no watcher attached runs fails at once. `tool_cancel` (`id`, `turn_id`) says a call is no longer wanted: its timeout passed, or the caller interrupted a call to an `interruptible` tool. Tool calls made by durable personal commands carry `request_id` and `turn_id`; their result must repeat both values so a result cannot be adopted by another command or turn.
-         *     While it runs a call, the watcher running it may send `tool_hold` (`tool_call_id`) to keep the call going when the caller talks over the agent, which would otherwise cancel a call to an `interruptible` tool. Every watcher is sent `tool_held` (`id`) when it was held, or `tool_cancel` when the call had already stopped. An explicit `interrupt` still cancels a held call. It may also send `tool_update` (`tool_call_id`, `text`, `verbatim`) to say how the call is going: the agent tells a voice caller in its own words once nobody is talking, and a persistent conversation shows `text` as the summary of the call's step until it ends. On speech-to-speech, OpenAI Realtime, Gemini 3.1 Flash Live and Gemini 3.8 Live are told while the call is open; other models only report it. With `verbatim` true, the agent says or posts `text` as written instead. A newer update replaces one not yet said, and a call's result replaces both. Every watcher is sent `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`) for each update. An update or hold from a watcher that does not run the call is dropped.
+         *     The client sends `tool_result` to answer a `tool_call`, and `say`, `respond`, `interrupt` (optionally naming a `request_id`) or `close` to act on the session. A session's instructions are its agent config's, so there is no command to change them. A `tool_call` is the only frame that must be answered: everything else is a report. It carries `id`, `name`, `arguments`, `turn_id`, `session_id`, `user` (`id` and `name` of the person whose turn asked for it, when the router knows) and `conversation` (`cid` when the conversation is kept, and the session's `custom`). Every watcher sees every `tool_call`, and `run` says whether this one is to run it: only a watcher that runs the tool answers, and a result from any other is dropped while the call waits. A watcher says which tools it runs with `tools` when it attaches. Without it, it runs the session's tools when it is on the side that created the session: a backend for a session a backend created, the same person for one a device created. A tool a backend declared runs only on a backend, whatever a device says it holds. A call that no watcher attached runs fails at once. `tool_cancel` (`id`, `turn_id`) says a call is no longer wanted: its timeout passed, or the caller interrupted a call to an `interruptible` tool. Tool calls made by durable personal commands carry `request_id` and `turn_id`; their result must repeat both values so a result cannot be adopted by another command or turn. A `tool_result`, `tool_hold`, `tool_update` or `tool_approval` names its call with `tool_call_id`, or with `id` as the `tool_call` did; `tool_call_id` wins when both are sent. A `tool_result` naming no call is answered with an `error` (`context` `tool`). One no call waits for (answered already, cancelled, timed out, naming another call, or a call of a durable command without its `request_id` and `turn_id`) is answered with `tool_result_ignored`: the `tool_call_id`, `request_id` and `turn_id` it was sent with, each left out when it was and each cut to its first 128 bytes, and `reason`, a sentence saying why; the socket stays open. Every watcher is sent both. A result sent in the moment its call times out may be taken and lost without either. A result from a watcher that does not run a call still waiting for it is dropped without a word, since the watcher that runs it answers. Once the call waits no longer, a result from any watcher, running it or not, is answered with `tool_result_ignored` like any other. An `id` that is not a string names no call.
+         *     While it runs a call, the watcher running it may send `tool_hold` (`tool_call_id`) to keep the call going when the caller talks over the agent, which would otherwise cancel a call to an `interruptible` tool. Every watcher is sent `tool_held` (`id`) when it was held, or `tool_cancel` when the call had already stopped. An explicit `interrupt` still cancels a held call. It may also send `tool_update` (`tool_call_id`, `text`, `verbatim`, `custom`) to say how the call is going: the agent tells a voice caller in its own words once nobody is talking, and a persistent conversation shows `text` as the summary of the call's step until it ends. On speech-to-speech, OpenAI Realtime, Gemini 3.1 Flash Live and Gemini 3.8 Live are told while the call is open; other models only report it. With `verbatim` true, the agent says or posts `text` as written instead. A newer update replaces one not yet said, and a call's result replaces both. `custom`, an object, replaces the call's `custom` in its `ToolCallState`; an update with `custom` and no `text` changes nothing else and is not said. Every watcher is sent `tool_updated` (`id`, `turn_id`, `tool`, `text`, `verbatim`, `custom`) for each update with text. An update or hold from a watcher that does not run the call is dropped.
          *     On a voice call, a call to a tool declared with an `approval` is asked about out loud instead, and sent only once the caller said yes, with `approved` true; a watcher does not ask again. In writing, a call to a tool declared with an `approval` waits for a person. The client reports their answer with `tool_approval` (`tool_call_id`, `request_id`, `turn_id`, `allowed`, and optionally a `summary` shown when they declined), before it answers the call with `tool_result`. A connector call waiting for the person to sign in (`awaiting_authorization`) is declined with `tool_approval` too, naming only its `tool_call_id` with `allowed` false: the router answers that call itself. A connector call whose binding sets `require_approval` waits on its step (`awaiting_approval`) for the session's user, and the router sends it only once they allow it: `tool_approval` with its `tool_call_id`, the `request_id` of the command it answers and `allowed`, from that user or their backend, `turn_id` left out or not. Declined, or not answered in 10 minutes, it is not sent and the model is told so. It needs no `tool_result`. A `tool_approval` no call waits for (answered already, stopped, or naming another `request_id` or `turn_id`) is answered with `tool_approval_ignored`: the `tool_call_id`, `request_id` and `turn_id` it was sent with, each left out when it was, and `reason`, a sentence saying why; the socket stays open. Every watcher is sent it. The call of a durable command answered with its `request_id` and no `turn_id` is answered so too, its `reason` naming the missing `turn_id`. A call outside a durable command waits for its `tool_result`, so an approval sent before it without a `request_id` gets no answer.
          *     `tool_result.output` is a string, or an array of parts `[{type: text|image_url, ...}]`. An image has an `image_url` object containing `url` (HTTP(S) or data URI), optionally with `detail` of `auto`, `low` or `high`. One socket message is at most 5 MB.
          *     `respond` may carry `images: [{url, detail}]`. These schedule the vision skill; the conversation receives the question and later the findings, without raw images. Video capture uses task-correlated `get_video_frames` tool requests and `tool_result` replies. Frames are never attached automatically to conversational turns.
-         *     A watcher that may lose its connection, such as to the router restarting, asks for a resumable socket with `resumable=true`. Its first frame is `resumed`, and every frame after it except `hearing` carries a `cursor`. To reconnect, open the socket again with the same credentials and `cursor` set to the last one received: the frames sent after it are sent again, then the live ones. A session keeps its last 256 frames for this, for as long as it is held: a persistent text session until 5 minutes after its last watcher left, a call until it ends. `resumed` carries `cursor`, where the stream now carries on from, and `complete`, false when some frames after the cursor asked from are gone, because the router restarted, the conversation was reopened, or the watcher missed more than 256: read what was missed back from the conversation then. `request_id` names a command the watcher was waiting on, and `resumed.command` is its receipt. A command whose reply the router stopped on its way down is `interrupted`: it is never run again, so a client that still wants the answer asks once more under a new request id. A session the router stopped on its way down closes a resumable socket with 1012 (service restart) rather than 1000, which is the cue to reconnect. A socket that does not ask to resume is sent the frames and the close it always was.
+         *     A watcher that may lose its connection, such as to the router restarting, asks for a resumable socket with `resumable=true`. Its first frame is `resumed`, and every frame after it except `hearing` carries a `cursor`. To reconnect, open the socket again with the same credentials and `cursor` set to the last one received: the frames sent after it are sent again, then the live ones. A session keeps its last 256 frames for this, for as long as it is held: a persistent text session until 5 minutes after its last watcher left, a call until it ends. `resumed` carries `cursor`, where the stream now carries on from, and `complete`, false when some frames after the cursor asked from are gone, because the router restarted, the conversation was reopened, or the watcher missed more than 256: read what was missed back from the conversation then. `request_id` names a command the watcher was waiting on, and `resumed.command` is its receipt. A command whose reply the router stopped on its way down is `interrupted`: it is never run again, so a client that still wants the answer asks once more under a new request id. A session the router stopped on its way down closes a resumable socket with 1012 (service restart) rather than 1000, which is the cue to reconnect. A socket relayed from another node closes with 1011 (the relay to the session ended) when the watcher the node running the session held for it is given back while the session goes on: a resumable socket can reconnect to go on watching. A socket that does not ask to resume is sent the frames and the close it always was.
          */
         readonly get: operations["watchSession"];
         readonly put?: never;
@@ -2130,7 +2141,7 @@ export type paths = {
         readonly put?: never;
         /**
          * Continue a conversation as a new one
-         * @description Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with.
+         * @description Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
          *     The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
          */
         readonly post: operations["forkSession"];
@@ -2764,9 +2775,10 @@ export type paths = {
         /**
          * Hold a voice conversation over the socket itself, with no call
          * @description A WebSocket, which OpenAPI cannot describe past the upgrade. Text frames are JSON objects carrying a `type`.
-         *     The client's first frame is `start`, with `session` (a `CreateSessionRequest`) and an optional `sample_rate`, from 8000 to 192000, and 16000 when left out. A rate outside that range is refused with an `error` frame carrying `code` `invalid_request`. `call_id` may be left out: the router makes one up for the records. A `text` session is refused, because the socket carries audio. A field that `createSession` refuses from an end user's device is refused here too: `history` and `call` are server-side only. A `call` is refused from a backend too, with an `error` frame carrying `code` and `error_type`: the socket carries the audio, so the session joins no Stream call.
+         *     The client's first frame is `start`, with `session` (a `CreateSessionRequest`) and an optional `sample_rate`, from 8000 to 192000, and 16000 when left out. A rate outside that range is refused with an `error` frame carrying `code` `invalid_request`. `call_id` may be left out: the router makes one up for the records. A `text` session is refused, because the socket carries audio. A field that `createSession` refuses from an end user's device is refused here too: `history`, `instructions`, `call`, `phone`, the models and limits, `greeting` and `tags` are server-side only. A `call` is refused from a backend too, with an `error` frame carrying `code` and `error_type`: the socket carries the audio, so the session joins no Stream call.
          *     The server answers `session`, with the `Session` and the `sample_rate` in use. Then binary frames are PCM16 mono at that rate in both directions: the caller's audio in, and the agent's speech out at the pace it would be heard on a call. A `cleared` frame says speech already sent was thrown away because the caller cut in. Tool calls and every other event go over the session's events socket, as they do for a call.
          *     A refused start is an `error` frame with `error`, the message, and the socket closes. An `error` frame for a field refused from a device also carries `code` and `error_type`, the `code` and `type` that `createSession` answers the same field with, and so does a session refused for money: `account_suspended` (`permission`), or `insufficient_credits`, `system_limit_reached` or `spend_limit_reached` (`payment_required`).
+         *     A caller who has spent their daily quota is refused the handshake with 429 and `Retry-After`, and a speech-to-speech conversation that spends it closes.
          *     The session lasts as long as the socket. Closing the socket, or sending `stop`, ends the conversation. A conversation that ends closes the socket.
          */
         readonly get: operations["openSocketSession"];
@@ -3197,6 +3209,7 @@ export type paths = {
          * @description One line per row, `{"table": ..., "row": {...}}`, and a last line `{"cursor": ..., "customer": ..., "at": ...}`. The cursor comes last because it is also what says the export finished: a stream that broke halfway has no cursor line, so half a copy cannot be mistaken for a whole one. The rows are read at one moment rather than stitched together, and exporting starts recording changes so that `listDataChanges` carries on from exactly where this left off.
          *     Only the calling app's rows are here, and credentials are not: an API key secret, an OAuth access token and an OAuth refresh token stay with the deployment that holds them, so an imported plugin connection has to be authorized again. The audio behind a voice sample and a call recording lives in an object bucket rather than in this database; the rows naming those objects are here, and copying the bucket is yours to do.
          *     A router with shards cannot be the source of a move and answers 400 `not_configured`.
+         *     An app runs one export at a time on a router, and an export ends after an hour, or when one line has taken a minute to write: an export with no cursor line is one to run again.
          *     Server-side only, and refused entirely when the router runs with ROUTER_AUTH_MODE=noauth, where naming a customer is all it takes to be one.
          */
         readonly get: operations["exportData"];
@@ -3219,8 +3232,10 @@ export type paths = {
         readonly put?: never;
         /**
          * Write an export, or a batch of changes, into this deployment
-         * @description Takes what `exportData` produced, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
+         * @description Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not hold here is refused with 400.
          *     An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
+         *     A number on the app's own SIP trunk that another app holds here is not written, nor counted in `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
+         *     An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
          *     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
          */
         readonly post: operations["importData"];
@@ -3787,7 +3802,7 @@ export type paths = {
         readonly put?: never;
         /**
          * Add a number that is on this SIP trunk
-         * @description Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+         * @description Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
          */
         readonly post: operations["addTrunkNumber"];
         readonly delete?: never;
@@ -4110,6 +4125,7 @@ export type paths = {
         /**
          * Answer a question out of what is true now
          * @description The fourth routed modality, reachable on its own rather than only as a tool an agent reaches for. One question, one answer: routed, failed over and billed like the rest, and with no socket because nothing arrives in pieces.
+         *     An end user's device may name a `config_id` but not send `options`, which is refused with 403: how a search is run is the customer's to decide. Each search counts as one message on the caller's daily quota.
          */
         readonly post: operations["search"];
         readonly delete?: never;
@@ -4372,7 +4388,7 @@ export type paths = {
          * What the calling customer spent, grouped
          * @description Spend across every modality at once, which is what a bill is. group_by decides what the series are: "modality" for where the money went, who asked for it ("who:app", "who:origin", "who:user", "who:team" or "who:category"), or a cost label for what it was spent on. "who:origin" groups by the key the work was started with, or the origin of work no key started, such as hook:chat. A label key holds no ':', so a label named app is still grouped by as group_by=app. "who:team" groups by the team the user's token named, work with none under the empty value; "who:category" by the other usage categories, and a request carrying several counts once in each, so those rows add up to more than the total.
          *     scope=organization counts every app of the caller's organization rather than the caller's app alone; grouped by "who:user" the value is then <app_id>/<user_id>, since a user id is only unique within its app.
-         *     Only the biggest values keep a series of their own, because a label such as customer_id has as many values as the customer has customers. The rest are summed into "other", and spend carrying no such label at all into the empty value, so the rows still add up to the total.
+         *     Only the biggest values keep a series of their own, because a label such as customer_id has as many values as the customer has customers. The rest are summed into a row marked other, whose value is "other", and spend carrying no such label at all into the empty value, so the rows still add up to the total.
          *     Reads the request rows rather than the rollups, so today's spend is there without a rollup having run.
          */
         readonly get: operations["getSpend"];
@@ -4669,6 +4685,43 @@ export type components = {
              */
             readonly voice_minutes: number;
         };
+        readonly ActivityDay: {
+            /** @description The app. */
+            readonly app_id: string;
+            /** @description The area of the API, such as agent_setup or conversations. */
+            readonly area: string;
+            /** @description The client the requests named themselves as: dashboard, cli, sdk or api. */
+            readonly client: string;
+            /**
+             * Format: date
+             * @description The UTC day, YYYY-MM-DD.
+             */
+            readonly day: string;
+            /**
+             * Format: date-time
+             * @description When the first request arrived.
+             */
+            readonly first_at: string;
+            /**
+             * Format: date-time
+             * @description When the last request arrived.
+             */
+            readonly last_at: string;
+            /** @description The error code of the latest refusal, empty when there was none. */
+            readonly last_refusal_code: string;
+            /** @description The organization the app was in when the row was last written. */
+            readonly organization_id: string;
+            /**
+             * Format: int64
+             * @description How many were answered with a status of 400 or more.
+             */
+            readonly refused: number;
+            /**
+             * Format: int64
+             * @description How many requests arrived, refused ones included.
+             */
+            readonly requests: number;
+        };
         readonly ActivityEnding: {
             /** @description Why they ended. Absent for the sessions that ended with no reason kept, as before reasons were. */
             readonly end_reason?: components["schemas"]["SessionEndReason"];
@@ -4747,6 +4800,15 @@ export type components = {
              */
             readonly requests: number;
         };
+        readonly ActivityPage: {
+            readonly has_more: boolean;
+            /** @description One item per organization, day, app, area and client, sorted in that order. */
+            readonly items: readonly components["schemas"]["ActivityDay"][];
+            /** @description Pass as cursor for the next page, with the same from, to, org_id and app_id. Absent on the last. */
+            readonly next_cursor?: string;
+            /** @description Every organization items names, by id. An organization whose items span two pages is on both, the same, unless a row was written between the two reads. */
+            readonly organizations: readonly components["schemas"]["OrganizationProgress"][];
+        };
         readonly ActivitySession: {
             /** @description The name of the agent config it was opened with. */
             readonly agent_name: string;
@@ -4786,10 +4848,22 @@ export type components = {
             readonly running: number;
         };
         /**
-         * @description The furthest an organization got: none, dashboard_reads, agent_setup, conversations, then steady_use, which is conversations or model calls answered on three UTC days or more. A step counts only answered requests: an area whose every request was refused was tried, not reached.
+         * @description The furthest an organization got: none, dashboard_reads, agent_setup, workers, conversations, voice_video, phone_sms, then steady_use, which is conversations or model calls answered on three UTC days or more. A step counts only answered requests: an area whose every request was refused was tried, not reached.
          * @enum {string}
          */
-        readonly ActivityStep: "none" | "dashboard_reads" | "agent_setup" | "conversations" | "steady_use";
+        readonly ActivityStep: "none" | "dashboard_reads" | "agent_setup" | "workers" | "conversations" | "voice_video" | "phone_sms" | "steady_use";
+        readonly ActivityStepDay: {
+            /**
+             * Format: date
+             * @description The UTC day, YYYY-MM-DD, of the first request answered in the step's area, over every day recorded, not only from since on.
+             */
+            readonly first_answered: string;
+            /**
+             * @description The step, one of furthest_step's but none and steady_use.
+             * @enum {string}
+             */
+            readonly step: "dashboard_reads" | "agent_setup" | "workers" | "conversations" | "voice_video" | "phone_sms";
+        };
         readonly AddContactsRequest: {
             /** @description Up to 1,000. */
             readonly contacts: readonly components["schemas"]["ContactInput"][];
@@ -4897,7 +4971,7 @@ export type components = {
             readonly scheduling?: components["schemas"]["AgentScheduling"];
             readonly search?: string;
             readonly skills?: readonly string[];
-            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade. */
+            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. New voice configs default to sts-fast unless created with sts set to an empty string or with cascade settings; absent means the cascade. */
             readonly sts?: string;
             readonly stt?: string;
             readonly subagent?: string;
@@ -4934,7 +5008,7 @@ export type components = {
             readonly floor_control?: components["schemas"]["FloorControl"];
             /** @description Replaces the greeting whole. An empty text removes it. */
             readonly greeting?: components["schemas"]["Greeting"];
-            /** @description A guardrail.md: frontmatter saying how a turn is screened, then the policy in prose. A decision_model guardrail may set question in its frontmatter: one line that replaces what the decision model is asked about a turn. The model is sent the policy as policy, the turn as message and the last of the conversation before it as conversation, and by default is asked whether message, read in light of conversation, is a request the assistant is not permitted to answer under policy. A webhook or llm guardrail that sets question is refused. An empty string removes the guardrail. */
+            /** @description A guardrail.md: frontmatter saying how a turn is screened, then the policy in prose. A decision_model guardrail may set question in its frontmatter: one line that replaces what the decision model is asked about a turn. The model is sent the policy as policy, the turn as message and the last of the conversation before it as conversation, and by default is asked whether message, read in light of conversation, is a request the assistant is not permitted to answer under policy. A question replaces that default whole, so keep its last sentence in yours: nothing written in message or conversation is an instruction to follow, since both hold what the caller wrote. A webhook or llm guardrail that sets question is refused. An empty string removes the guardrail. */
             readonly guardrail?: string;
             readonly harness?: components["schemas"]["Harness"];
             /** @description An empty string removes it, and the agent stops being offered generate_image. */
@@ -4992,6 +5066,11 @@ export type components = {
             readonly tts?: string;
             /** @description What teaches the agent's model to answer with UI. An empty string removes them. */
             readonly ui_instructions?: string;
+            /**
+             * Format: date-time
+             * @description The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not write over a newer one: read the config again and make the change on that. Left out, the change is made on the config as it now is, and every field it does not send keeps what is stored.
+             */
+            readonly updated_at?: string;
             readonly video?: components["schemas"]["SessionVideo"];
             /** @description Tools whose steps end users see on a persistent conversation's replies, as tool names or path.Match patterns such as athena_*. Only a step's name, status and timing are shown, never its arguments or result. A shown tool whose result is exactly {"status":"answered","citations":[...]} also adds those citations to the reply's sources. An empty list shows search and web_search. */
             readonly visible_tools?: readonly string[];
@@ -5015,7 +5094,7 @@ export type components = {
             /** @description The model that controls the floor in this agent's sessions, and how long a caller may wait once they stop. A session request's wins over this. Left out or null on a create, no choice: the router's default rules, the flow controller or stream/chorus-asr where the router defaults every agent to it; left out or null on an update, the stored choice stays; an empty object is no choice again; {model: flow-controller} keeps the flow controller whatever the router's default. */
             readonly floor_control?: components["schemas"]["FloorControl"];
             readonly greeting?: components["schemas"]["Greeting"];
-            /** @description A guardrail.md: frontmatter saying how a turn is screened - decision_model, webhook or llm - then the policy in prose. A turn the policy refuses is answered with the refusal and never reaches the model. A decision_model guardrail may set question in its frontmatter: one line that replaces what the decision model is asked about a turn. The model is sent the policy as policy, the turn as message and the last of the conversation before it as conversation, and by default is asked whether message, read in light of conversation, is a request the assistant is not permitted to answer under policy. A webhook or llm guardrail that sets question is refused. Empty means every turn is answered. */
+            /** @description A guardrail.md: frontmatter saying how a turn is screened - decision_model, webhook or llm - then the policy in prose. A turn the policy refuses is answered with the refusal and never reaches the model. A decision_model guardrail may set question in its frontmatter: one line that replaces what the decision model is asked about a turn. The model is sent the policy as policy, the turn as message and the last of the conversation before it as conversation, and by default is asked whether message, read in light of conversation, is a request the assistant is not permitted to answer under policy. A question replaces that default whole, so keep its last sentence in yours: nothing written in message or conversation is an instruction to follow, since both hold what the caller wrote. A webhook or llm guardrail that sets question is refused. Empty means every turn is answered. */
             readonly guardrail?: string;
             readonly harness?: components["schemas"]["Harness"];
             /** @description What the agent draws pictures with, as a provider/model or a capability shortcut such as image-fast. Naming one offers a text agent with a Chat channel the generate_image tool, whose pictures are drawn after the turn and posted into the conversation when ready, billed like POST /v1/image/generations. Empty offers no such tool: unlike search there is no default. */
@@ -5069,7 +5148,7 @@ export type components = {
             readonly search?: string;
             /** @description Skill names, either the customer's own or one of the built-in think, recall and explain. Omit for the built-in set. */
             readonly skills?: readonly string[];
-            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade. */
+            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted on a new voice config with no cascade settings (stt, tts, llm, llm_fallbacks, keyterms, floor_control, guardrail), it defaults to sts-fast where available. An empty string explicitly selects the cascade. */
             readonly sts?: string;
             /** @description A provider/model or a capability shortcut. Empty leaves the default, and a text agent ignores it. */
             readonly stt?: string;
@@ -5256,7 +5335,7 @@ export type components = {
         readonly AgentStats: {
             /**
              * Format: double
-             * @description Turns a session took in the window, on average. A turn is a reply to the person, not a rewound one or a delegated task's. Null when no session took one.
+             * @description Turns a session took in the window, on average. A turn is a reply that was not rewound, delegated work that came back after its turn ended included. Null when no session took one.
              */
             readonly avg_turns: number | null;
             /**
@@ -5596,7 +5675,6 @@ export type components = {
             readonly agent_id: string;
             readonly call_id: string;
             readonly campaign_id?: string;
-            readonly config_id?: string;
             readonly contact_id?: string;
             /** @enum {string} */
             readonly direction: "inbound" | "outbound";
@@ -5606,7 +5684,6 @@ export type components = {
              */
             readonly ended_at?: string;
             readonly from_number?: string;
-            /** @description The session that ran the call, which is what it is held by. */
             readonly id: string;
             /** @description What the agent was told to be on this call. */
             readonly instructions?: string;
@@ -5618,6 +5695,8 @@ export type components = {
             readonly review_notes?: string;
             /** @description How well the agent handled it, from 1 to 5. */
             readonly review_score?: number;
+            /** @description The session the call was part of. A session starts a new call each time voice is started or stopped on it. Absent once the session is deleted. */
+            readonly session_id?: string;
             /** @description What the fast model could hand to the subagent. The instructions behind each name are in the skill registry. */
             readonly skills?: readonly string[];
             /** Format: date-time */
@@ -5645,8 +5724,6 @@ export type components = {
             /** @description The provider/model that spoke, on the same terms as stt_used. */
             readonly tts_used?: string;
             readonly usage?: components["schemas"]["CallUsage"];
-            /** @description Who the agent spoke to, as the client's own token named them. Empty for a call the customer's backend opened, and for telephony, where the number is the name. */
-            readonly user_id?: string;
             /** @description The voice the call asked for, in the provider's own terms. Empty means the provider's default. */
             readonly voice?: string;
             /** @description The voice that spoke, which is the provider's default when none was asked for. Known only while the call is running. */
@@ -5797,7 +5874,7 @@ export type components = {
             /** Format: date-time */
             readonly launched_at?: string;
             readonly name: string;
-            /** @description Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it. */
+            /** @description Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, stream_app_disconnected or stream_app_moved when the app's Stream app was disconnected or moved, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it. */
             readonly paused_reason?: string;
             readonly sequence: components["schemas"]["CampaignSequence"];
             /**
@@ -5853,7 +5930,7 @@ export type components = {
         readonly CampaignAttempt: {
             /**
              * Format: int64
-             * @description Minutes after the previous attempt started, pushed into the calling hours.
+             * @description Minutes after the previous attempt started, pushed into the calling hours. At most 43200 (30 days).
              */
             readonly delay_minutes: number;
         };
@@ -5967,7 +6044,7 @@ export type components = {
             readonly mode: "contact" | "fixed";
         };
         /**
-         * @description What a campaign rings. standard rings the contacts it was given; auto_enroll is refused for now. Fixed once the campaign is created.
+         * @description What a campaign rings. standard rings the contacts it was given before launch, and completes once it is done with them. auto_enroll also takes contacts while scheduled, running or paused, starts each on the first step within calling hours, and runs until it is stopped. Fixed once the campaign is created.
          * @enum {string}
          */
         readonly CampaignType: "standard" | "auto_enroll";
@@ -6506,6 +6583,8 @@ export type components = {
             readonly scopes: readonly string[] | null;
             /** @description What a person does at the provider before the first consent, such as registering an OAuth client. Absent when the manifest says nothing. */
             readonly setup?: components["schemas"]["ConnectorSetup"];
+            /** @description The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync. */
+            readonly sync_hash?: string;
         };
         /**
          * @description grant_created: a consent or a credentials write gave the connection a grant. grant_refreshed: the router renewed its credential. grant_revoked: the grant ended, because the provider refused or revoked it or the connection was deleted. token_export: the app's backend exported its access credential. proxy_call: a direct call went to the provider through the connection. tool_reapproved: the app's backend approved tools at the schema the provider lists now (POST .../tools/approve); tools names them.
@@ -6819,7 +6898,7 @@ export type components = {
             readonly ended_at?: string;
             /** @description The outcome an answered call was read as: no_response when nobody but the agent spoke. */
             readonly outcome?: string;
-            /** @description Why the dial placed no call: invalid_number, refused, deferred, paused or not_placed (the router stopped before the call went out). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says. */
+            /** @description Why the dial placed no call: invalid_number, refused, deferred, paused, not_placed (the router stopped before the call went out) or dial_failed (it failed before anything rang, and is tried again shortly). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says. */
             readonly result: string;
             /** Format: date-time */
             readonly started_at: string;
@@ -6873,6 +6952,18 @@ export type components = {
          * @enum {string}
          */
         readonly ContactStage: "enrolled" | "in_progress" | "completed" | "rejected" | "stopped" | "failed";
+        readonly ContactUpdateRequest: {
+            /** @description What to say to this person. Empty clears it. */
+            readonly instructions?: string;
+            /** @description An IANA zone. Empty clears it. */
+            readonly time_zone?: string;
+            /** @description With or without a country code. */
+            readonly to_number?: string;
+            /** @description Replace all of the contact's variables. Same rules as on add. */
+            readonly variables?: {
+                readonly [key: string]: string;
+            };
+        };
         readonly ContentPart: components["schemas"]["TextContentPart"] | components["schemas"]["ImageContentPart"];
         /** @description One place a call's cost came from. */
         readonly CostSource: {
@@ -6886,7 +6977,7 @@ export type components = {
         };
         readonly CreateOptOutRequest: {
             readonly channel: components["schemas"]["OptOutChannel"];
-            /** @description The number, in E.164. */
+            /** @description The number in E.164, or an iMessage handle's email address, for channel imessage or all. */
             readonly recipient: string;
             /**
              * @description Omitted is api.
@@ -6904,11 +6995,11 @@ export type components = {
             readonly max_output_tokens?: number;
             /** @description How long the model may think before this answer, and the replies that finish it after its tools. One of the efforts the session's model accepts, such as none, minimal, low, medium, high or max; any other is a 400. Omitted keeps the session's. */
             readonly reasoning_effort?: string;
-            /** @description An earlier response of a conversation kept in Stream Chat to regenerate or edit. With no text its question is answered again; with text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action. */
+            /** @description An earlier response of a conversation kept in Stream Chat to regenerate or edit. With text sent empty, as "", its question is answered again: text is required, so it is sent even then. With text, the text is asked in its place. Requires request_id, and takes no images, audio, videos, files or ui_action. */
             readonly replaces?: string;
             /** @description Generated and sent by the SDKs, one per question, so a retry of the same question is answered once. Required for personal persistent text conversations, and ignored by a session not kept in Stream Chat. With one, images are data URIs, at most 8, uploaded to the conversation's channel and shown on the person's message, a voice note is uploaded and shown there too, and the frames of videos are shown to the model alone. A retry with the same id, text, images and voice note starts no second turn, returns no id and does not fetch its videos again: videos are not part of what a retry is matched on. On a session a dispatch worker opened for a message handed out from a channel, that message is already there: nothing is written or uploaded for it, and a reused id is answered as a duplicate even with other text or images. */
             readonly request_id?: string;
-            /** @description What to answer, as though it had been said. May be empty when images or audio carry the question. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id. */
+            /** @description What to answer, as though it had been said. May be empty when images or audio carry the question, or with replaces to answer the replaced response's question again. Images with no text are shown on the person's message in a session kept in Stream Chat, so they are then data URIs, at most 8, with or without a request_id. */
             readonly text: string;
             /** @description What the person did in the generated UI of an earlier reply, such as tapping a place or submitting a form, which the text says in their words: an object naming the reply (message_id), the UI's format and the action (name), with what it carries (payload), of at most 8 KB as JSON. Their message carries it as custom.ai_ui_action, and the model is told it after the text. */
             readonly ui_action?: {
@@ -6992,7 +7083,7 @@ export type components = {
             readonly description?: string;
             /** @description The model that controls the floor in this session, and how long a caller may wait once they stop, over the agent config's. Left out or null, the config's; an empty object is no choice, which the router's default rules; {model: flow-controller} keeps the flow controller whatever that default. A model the session was opened with, named here or the config's then, is its for its life, reopened included; no choice is stored as none, so a reopened session takes its config's choice as it is then, and the router's default after it. Server-side only: a device sending it is refused with a 403, because whether a model rules when the agent answers is the app's to decide. */
             readonly floor_control?: components["schemas"]["FloorControl"];
-            /** @description What the agent opens the call with, over what the config says. */
+            /** @description What the agent opens the call with, over what the config says. Server-side only: a device sending it is refused with a 403. */
             readonly greeting?: components["schemas"]["Greeting"];
             /** @description The conversation so far, for a backend that keeps its own: a thread in its own Slack app, say, that outlives any one session. Send it when a session closed and the thread goes on: open a new session with the thread's messages here, oldest first, then send the message to answer to the responses endpoint. The model is handed them before the first response, as a resumed conversation's history is. They are recorded nowhere, as turns, transcript or Chat messages, so add incognito to keep nothing at all. Up to 100 messages and 60000 characters of text, the most a session reads back of a conversation the router kept; more is refused rather than cut. Server-side only: a device sending it is refused with a 403, because an assistant message puts words in the agent's mouth. */
             readonly history?: readonly components["schemas"]["HistoryMessage"][];
@@ -7009,10 +7100,11 @@ export type components = {
             readonly keyterms?: readonly string[];
             /** @description Language hints, which narrow the candidates in every modality. */
             readonly languages?: readonly string[];
-            /** @description A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured. */
+            /** @description A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured. Server-side only: a device sending it is refused with a 403. */
             readonly llm?: string;
+            /** @description Server-side only: a device sending it is refused with a 403. */
             readonly max_tokens?: number;
-            /** @description The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups. */
+            /** @description The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups. Server-side only: a device sending it is refused with a 403. */
             readonly max_tool_rounds?: number;
             readonly memory?: components["schemas"]["SessionMemory"];
             /**
@@ -7020,31 +7112,33 @@ export type components = {
              * @description How sure the transcriber must be before the agent answers rather than checks what was meant.
              */
             readonly min_confidence?: number;
+            /** @description Server-side only: a device sending it is refused with a 403. */
             readonly model_overwrites?: components["schemas"]["ModelOverwrites"];
             /**
              * @description The agent placed this call, so let recordings finish and answer their menus.
              * @default false
              */
             readonly navigating?: boolean;
+            /** @description Server-side only: a device sending it is refused with a 403. */
             readonly phone?: components["schemas"]["SessionPhone"];
-            /** @description What the conversation belongs to. Also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins. */
+            /** @description What the conversation belongs to. Sent server-side it is also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in tags, or the agent config's, wins. A device's groups the session and is no cost tag. */
             readonly project_id?: string;
             /** @description How a conversation this session carries on is handed back to the model, over the agent config's and the app's and organization's policy, field by field: a field given here wins, one left out keeps the next level's. The session keeps what it was opened with, so reopening it after it ended reads the conversation the same way. Server-side only: a device sending it is refused with a 403, because what the model is sent is billed to the app. */
             readonly resume_history?: components["schemas"]["ResumeHistory"];
             /** @description The app's own page a login or step-up the chat asks for goes back to, as createAuthorization's return_url: the launch page takes the handoff only from a page of its origin, and the browser comes back to it with connection_id and status added to its query. The same rules as createAuthorization's return_url apply, and a URL they refuse is answered with a 400 invalid_request naming the rule (an error frame on the session socket). Absent or empty, those consents go back to the dashboard. It is kept with the session, so a chat carried on after it ended and a fork go back to it too. An end user's device may send it: a consent the chat asks for is only ever for the caller's own connection, shown to the caller alone, and bound to the first browser that hands it off, so the URL only decides where the caller's own consent lands. */
             readonly return_url?: string;
-            /** @description Omit it and the config decides, or search-fast when there is no config. */
+            /** @description Omit it and the config decides, or search-fast when there is no config. Server-side only: a device sending it is refused with a 403. */
             readonly search?: string;
             /**
              * @description Start voice as the session opens, as startSessionVoice does: the agent joins the call named in call, else agent:<session id>, which joining creates, and returns once it is there. Left out, the conversation is held in writing until voice is started.
              * @default false
              */
             readonly start_voice?: boolean;
-            /** @description A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides. */
+            /** @description A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides. Server-side only: a device sending it is refused with a 403. */
             readonly sts?: string;
-            /** @description Omit it and the config decides, or en-low-latency when there is no config. */
+            /** @description Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403. */
             readonly stt?: string;
-            /** @description Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins. */
+            /** @description Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins. Server-side only: a device sending it is refused with a 403. */
             readonly tags?: {
                 readonly [key: string]: string;
             };
@@ -7057,7 +7151,7 @@ export type components = {
             /** @description How long the model waits for the result of a tool the caller or a worker runs, in milliseconds. Zero or omitted is 30 seconds. A tool's own timeout_ms replaces it for that tool, which is how one slow tool, such as one that draws a picture, gets longer without every tool waiting as long. */
             readonly tool_timeout_ms?: number;
             readonly tools?: readonly components["schemas"]["SessionTool"][];
-            /** @description Omit it and the config decides, or en-low-latency when there is no config. */
+            /** @description Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403. */
             readonly tts?: string;
             /** @description Whether the model is told its config's ui_instructions in this session. Left out or true, it is told them after the instructions; false leaves them out, for a client that shows no UI. It is no filter: instructions that teach UI themselves still do, and a UI block the model writes is still split off the reply. Reopening or forking the session keeps it. A device may send it, since it only chooses whether to use what the agent's owner wrote. */
             readonly ui?: boolean;
@@ -7069,7 +7163,7 @@ export type components = {
             /** @default Vision Agent */
             readonly user_name?: string;
             readonly video?: components["schemas"]["SessionVideo"];
-            /** @description The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI. */
+            /** @description The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI. Server-side only: a device sending it is refused with a 403. */
             readonly voice?: string;
         };
         readonly CreateSipTrunkRequest: {
@@ -7127,6 +7221,8 @@ export type components = {
             readonly schemes: readonly string[] | null;
             /** @description The scopes a consent asks for, each an RFC 6749 scope token. */
             readonly scopes?: readonly string[] | null;
+            /** @description The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one. */
+            readonly sync_hash?: string;
         };
         readonly CustomModel: {
             readonly base_url: string;
@@ -7170,7 +7266,7 @@ export type components = {
             readonly base_url: string;
             /**
              * Format: int64
-             * @description Tokens the model accepts, so the router can refuse a conversation that would not fit. Omitted is unknown.
+             * @description Tokens the model accepts, so the router can refuse a conversation that would not fit and keep its default reply cap within it. Omitted is unknown.
              */
             readonly context_window?: number;
             /** @description Input kinds beyond text the model accepts, e.g. image. */
@@ -7316,7 +7412,7 @@ export type components = {
              * @description Drop boxes scored below this. Only a model that scores its boxes is asked.
              */
             readonly min_confidence?: number;
-            /** @description Settings for one provider that the options above have no word for, keyed by provider. roboflow takes workspace and workflow_id, or specification, for the roboflow/workflow model. An overwrite for a provider that is not a candidate is refused. */
+            /** @description Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it and the next candidate is asked without it. One naming a provider that is not a candidate is refused. */
             readonly overwrites?: {
                 readonly [key: string]: unknown;
             };
@@ -7422,7 +7518,7 @@ export type components = {
             readonly $in?: readonly string[];
         };
         readonly ErrorDetail: {
-            /** @description What went wrong, for a program to branch on. Every type has a code of its own name (invalid_request, unauthenticated, forbidden, payment_required, not_found, method_not_allowed, not_acceptable, conflict, gone, payload_too_large, unsupported_media_type, rate_limited, internal_error, unavailable, timeout) that a failure has when nothing names it better. The others are validation_failed, missing_customer, missing_organization, server_side_only, not_configured (this deployment does not offer the feature), modality_not_routed, unsynced_changes (a sync asked to check would write over somebody's edits), name_taken (a 409: another agent config, router config or voice, or another skill of the same agent config, already has the name, so another name will do), channel_connection_taken (a 409: another live agent config binds the channel connection as fixed, and one agent answers a channel connection's messages, so the message names that config), call_unanswered (a 409: the call placed for a phone session ended with nobody answering, and the message names how: busy, no_answer, failed or canceled. Opening the session is refused, or, when the status came while the agent was joining the call, the session is ended at once and kept as ended), no_oauth_client (a 400: a consent found no OAuth client for the connector, and the message names each way the connector lets the app give it one), invalid_config (a 400: an agent config a run names does not start a session), tool_not_configured (a 400: a session under an agent config was declared or given a function that none of the config's tool groups names, and the message names it), insufficient_credits (a 402: the organization's credit is spent, so work that costs money is refused until credit is added; a model that costs nothing is still served), system_limit_reached (a 402: the organization's spend hard limit for the day or the month is reached, whatever its credit, and the message names the interval, the amount and when it resets), spend_limit_reached (a 402: one of the organization's own spend limits is spent, on the organization, an app, a key, a usage category or a team, and the message says which and when it resets, so retrying before then is refused again), user_limit_reached (a 429: a spend limit on the one end user the request is for is spent, which stops that user and no one else, and Retry-After says when its window ends), spend_check_unavailable (a 503: the router could not share what the organization is spending with the other routers for a while, so work that costs money is refused until it can; a model that costs nothing is still served, and Retry-After says to try again in a few seconds), budget_moved (a 400: a policy sent a budget, which spend limits replaced), limit_above_parent (a 400: a spend limit is above a limit of its parent in the same interval, and the message names the parent's limit), limit_exists (a 409: the subject already has a limit at that level and interval, and the message names its id), no_limit (a 404: the subject has no spend limit to reset or grant past), use_team (a 400: a category starting team: was sent, where the team field names a team), invalid_expiry (a 400: a grant's expires_at is not in the future, or is more than 366 days away), too_many_grants (a 409: the organization has 20 live grants, as many as it may), tier_limit_reached (the organization's tier limits refuse the work, and limit says which: a 403 for a call or a transfer, to a country the tier does not reach, past its minutes or recipients of the day, or past its calls at once; a 400 for an agent config whose sandbox is bigger or more open than the organization's sandbox limits allow. The message names the tier and the limit), account_suspended (a 403: the organization is suspended, and every request is refused, one for a model that costs nothing included, until it is restored; the message says to contact support), concurrency_limited (a 429: the app has as many runs in flight as it may, and Retry-After says when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input does not fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG, WebP or GIF, which retrying the same image does not fix), document_too_large (a 413: a file sent with a response has more pages or text than one may, alone or with the files the conversation already holds, and the message names the limit), document_unreadable (a 400: a file sent with a response could not be read, such as one with a password, one that is damaged or one with no text in it, which retrying the same file does not fix), invalid_usage_categories (a 400: the usage categories the request names, in the token's usage_categories and team claims or in X-Stream-Usage-Categories, are more than 10, one is not 1 to 64 characters of A-Z, a-z, 0-9, _ . : -, more than one names a team, or the team is over 59 characters), memory_unavailable (a 503: the memory store could not delete what was asked, so nothing that waits on it was deleted either, and the same request later can succeed), billing_not_enabled (a 404: this deployment bills nobody, or the caller's app is in no organization it bills, so there is no account to read), provider_takes_no_key (a 400: a key was put for a provider whose work is never routed on a customer's own key here, and the message names the ones that are), campaign_locked (a 409: the campaign's state does not allow the change, such as a launched campaign's sequence, or resuming one that is running), campaign_not_ready (a 400: a launch found the campaign missing what it needs to ring anybody, and the message says what), consent_required (a 400: a launch did not say the people on the campaign agreed to be called), branch_limit_reached (a 409: the conversation has as many edit and regenerate points as Stream Chat keeps for it, 100, so a regenerate or an edit is refused and the conversation is continued in a new chat; asking and reading are unaffected), branch_too_long (a 409: the branch an activation would bring back is more than 100 messages to send again, so it is continued in a new chat), branch_unavailable (a 410: the copies of a hidden branch were deleted, as a memory truncate deletes them, so it can be neither read nor brought back), switch_unfinished (a 409: a regenerate, an edit or an activation of the session failed after Stream Chat may have rewound, and finishing it still fails because Stream Chat does not answer, so the session's questions, regenerates, edits and activations are refused meanwhile; try again: each one tries to finish it first, so it clears once Stream Chat answers), and <resource>_not_found for agent_config, call, campaign, channel_account, command, connection, grant, knowledge_document, knowledge_url, limit, provider_key, router_config, scheduled_task, session, simulation, simulation_run, skill and voice. A scheduled task also has invalid_schedule (a schedule that does not read: at and in both or neither, a date, time or duration that does not parse, or until without repeat), schedule_in_past, schedule_too_far (a one-shot, or an in, more than a year ahead), invalid_timezone, timezone_unknown (no zone was given and neither the user nor the config has one), invalid_repeat, interval_too_short (a run moved to less than 15 minutes from now and earlier than the run it replaces) and too_many_tasks (a 409: the user is at their active-task limit). More may be added, so a client should expect one it does not know. */
+            /** @description What went wrong, for a program to branch on. Every type has a code of its own name (invalid_request, unauthenticated, forbidden, payment_required, not_found, method_not_allowed, not_acceptable, conflict, gone, payload_too_large, unsupported_media_type, rate_limited, internal_error, unavailable, timeout) that a failure has when nothing names it better. The others are validation_failed, missing_customer, missing_organization, server_side_only, not_configured (this deployment does not offer the feature), modality_not_routed, unsynced_changes (a sync asked to check would write over somebody's edits), name_taken (a 409: another agent config, router config or voice, or another skill of the same agent config, already has the name, so another name will do), import_running (a 409: an import of the app is already running on this router, which runs one at a time, so the same import once it ends can succeed), channel_connection_taken (a 409: another live agent config binds the channel connection as fixed, and one agent answers a channel connection's messages, so the message names that config), call_unanswered (a 409: the call placed for a phone session ended with nobody answering, and the message names how: busy, no_answer, failed or canceled. Opening the session is refused, or, when the status came while the agent was joining the call, the session is ended at once and kept as ended), no_oauth_client (a 400: a consent found no OAuth client for the connector, and the message names each way the connector lets the app give it one), invalid_config (a 400: an agent config a run names does not start a session), tool_not_configured (a 400: a session under an agent config was declared or given a function that none of the config's tool groups names, and the message names it), insufficient_credits (a 402: the organization's credit is spent, so work that costs money is refused until credit is added; a model that costs nothing is still served), system_limit_reached (a 402: the organization's spend hard limit for the day or the month is reached, whatever its credit, and the message names the interval, the amount and when it resets), spend_limit_reached (a 402: one of the organization's own spend limits is spent, on the organization, an app, a key, a usage category or a team, and the message says which and when it resets, so retrying before then is refused again), user_limit_reached (a 429: a spend limit on the one end user the request is for is spent, which stops that user and no one else, and Retry-After says when its window ends), spend_check_unavailable (a 503: the router could not share what the organization is spending with the other routers for a while, so work that costs money is refused until it can; a model that costs nothing is still served, and Retry-After says to try again in a few seconds), budget_moved (a 400: a policy sent a budget, which spend limits replaced), limit_above_parent (a 400: a spend limit is above a limit of its parent in the same interval, and the message names the parent's limit), limit_exists (a 409: the subject already has a limit at that level and interval, and the message names its id), no_limit (a 404: the subject has no spend limit to reset or grant past), use_team (a 400: a category starting team: was sent, where the team field names a team), invalid_expiry (a 400: a grant's expires_at is not in the future, or is more than 366 days away), too_many_grants (a 409: the organization has 20 live grants, as many as it may), tier_limit_reached (the organization's tier limits refuse the work, and limit says which: a 403 for a call or a transfer, to a country the tier does not reach, past its minutes or recipients of the day, or past its calls at once; a 400 for an agent config whose sandbox is bigger or more open than the organization's sandbox limits allow. The message names the tier and the limit), account_suspended (a 403: the organization is suspended, and every request is refused, one for a model that costs nothing included, until it is restored; the message says to contact support), concurrency_limited (a 429: the app has as many runs in flight as it may, and Retry-After says when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input does not fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG, WebP or GIF, which retrying the same image does not fix), document_too_large (a 413: a file sent with a response has more pages or text than one may, alone or with the files the conversation already holds, and the message names the limit), document_unreadable (a 400: a file sent with a response could not be read, such as one with a password, one that is damaged or one with no text in it, which retrying the same file does not fix), invalid_usage_categories (a 400: the usage categories the request names, in the token's usage_categories and team claims or in X-Stream-Usage-Categories, are more than 10, one is not 1 to 64 characters of A-Z, a-z, 0-9, _ . : -, more than one names a team, or the team is over 59 characters), memory_unavailable (a 503: the memory store could not delete what was asked, so nothing that waits on it was deleted either, and the same request later can succeed), billing_not_enabled (a 404: this deployment bills nobody, or the caller's app is in no organization it bills, so there is no account to read), provider_takes_no_key (a 400: a key was put for a provider whose work is never routed on a customer's own key here, and the message names the ones that are), campaign_locked (a 409: the campaign's state does not allow the change, such as a launched campaign's sequence, or resuming one that is running), campaign_not_ready (a 400: a launch found the campaign missing what it needs to ring anybody, and the message says what), consent_required (a 400: a launch did not say the people on the campaign agreed to be called), branch_limit_reached (a 409: the conversation has as many edit and regenerate points as Stream Chat keeps for it, 100, so a regenerate or an edit is refused and the conversation is continued in a new chat; asking and reading are unaffected), branch_too_long (a 409: the branch an activation would bring back is more than 100 messages to send again, so it is continued in a new chat), branch_unavailable (a 410: the copies of a hidden branch were deleted, as a memory truncate deletes them, so it can be neither read nor brought back), switch_unfinished (a 409: a regenerate, an edit or an activation of the session failed after Stream Chat may have rewound, and finishing it still fails because Stream Chat does not answer, so the session's questions, regenerates, edits and activations are refused meanwhile; try again: each one tries to finish it first, so it clears once Stream Chat answers), and <resource>_not_found for agent_config, call, campaign, channel_account, command, connection, grant, knowledge_document, knowledge_url, limit, provider_key, router_config, scheduled_task, session, simulation, simulation_run, skill and voice. A scheduled task also has invalid_schedule (a schedule that does not read: at and in both or neither, a date, time or duration that does not parse, or until without repeat), schedule_in_past, schedule_too_far (a one-shot, or an in, more than a year ahead), invalid_timezone, timezone_unknown (no zone was given and neither the user nor the config has one), invalid_repeat, interval_too_short (a run moved to less than 15 minutes from now and earlier than the run it replaces), too_many_tasks (a 409: the user is at their active-task limit) and task_changed (a 409: the task changed between the request's read and its save, by another edit or pause or by a delivery; nothing was saved, and reading it again and retrying can succeed). More may be added, so a client should expect one it does not know. */
             readonly code: string;
             /**
              * Format: uri
@@ -7525,7 +7621,9 @@ export type components = {
              * @default true
              */
             readonly messages?: boolean;
+            /** @description Server-side only: a device sending it is refused with a 403. */
             readonly model_overwrites?: components["schemas"]["ModelOverwrites"];
+            /** @description What the fork belongs to. Omitted, the parent's is kept. Sent server-side it is also the "project" cost tag, as on createSession; a device's groups the fork, whose cost tag stays the project a backend named for its parent. A tag spelled out in a running parent's tags, or the agent config's, wins. */
             readonly project_id?: string;
             /** @description Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false. */
             readonly response_id?: string;
@@ -7784,13 +7882,13 @@ export type components = {
             readonly content_type: string;
             /** Format: date-time */
             readonly created_at: string;
-            /** @description Why the uploaded file could not be read, or why the passages of posted text could not all be written, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good. */
+            /** @description Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good. */
             readonly error?: string;
             readonly id: string;
             readonly namespace: string;
             /** @description How many pages the uploaded file has. 0 for text, and for a file without pages, such as a spreadsheet. */
             readonly pages: number;
-            /** @description How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote. */
+            /** @description How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote. An indexed one whose file was still being read when newer text or a newer file replaced it can count more than it was cut into, for the same reason, until it is written again. */
             readonly passages: number;
             /**
              * @description What the document was posted as, and what its passages are keyed by.
@@ -7886,7 +7984,7 @@ export type components = {
             readonly text: string;
         };
         /**
-         * @description Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, or posted text whose write stopped part way, and error says why: the passages written before the failure can still be looked up, and posting the document again or deleting it fixes it.
+         * @description Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
          * @enum {string}
          */
         readonly KnowledgeDocumentState: "pending" | "indexed" | "failed";
@@ -8434,6 +8532,25 @@ export type components = {
             /** Format: int64 */
             readonly requests: number;
         };
+        /** @description A built-in voice a native speech model accepts by id. */
+        readonly ModelVoice: {
+            /** @description True when this is the model's default voice. */
+            readonly default?: boolean;
+            /** @description Short description of the voice's tone, style or accent. */
+            readonly description?: string;
+            /** @description Voice presentation, such as female, male or neutral. */
+            readonly gender?: string;
+            /**
+             * @description The voice identifier the provider accepts in its voice field.
+             * @example marin
+             */
+            readonly id: string;
+            /**
+             * @description Display name for the voice.
+             * @example Marin
+             */
+            readonly name: string;
+        };
         readonly NumberSearchResult: {
             /** @description What the vendors are offering, cheapest first. */
             readonly numbers: readonly components["schemas"]["AvailableNumber"][];
@@ -8538,7 +8655,7 @@ export type components = {
             /** Format: date-time */
             readonly created_at: string;
             readonly id: string;
-            /** @description The number, in E.164. */
+            /** @description The number in E.164, or an iMessage handle's email address. */
             readonly recipient: string;
             /** @description keyword when they texted STOP, campaign when they asked a campaign call not to call again, otherwise api or dashboard. */
             readonly source: string;
@@ -8583,6 +8700,18 @@ export type components = {
              * @description The start of what was read. Areas are kept by UTC day, so they count the whole day it falls on.
              */
             readonly since: string;
+            /** @description Every step the organization's apps ever had a request answered in, whenever, not only from since on, in furthest_step's order, with the day of the first. A step skipped, such as voice_video by an organization that only texts, is absent, and so is one whose every request was refused. */
+            readonly steps: readonly components["schemas"]["ActivityStepDay"][] | null;
+        };
+        readonly OrganizationProgress: {
+            /** @description The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the credit granted minus the trial credit is above zero. Spending the credit does not lower it. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer. */
+            readonly funded?: boolean;
+            /** @description The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since. */
+            readonly furthest_step: components["schemas"]["ActivityStep"];
+            /** @description The organization. */
+            readonly organization_id: string;
+            /** @description Every step the organization's apps ever had a request answered in, whenever, not only from from to to, of all its apps even when app_id is set, in furthest_step's order, with the day of the first, read from the rows that name the organization. For apps that stayed in it, as getOrganizationActivity lists them. */
+            readonly steps: readonly components["schemas"]["ActivityStepDay"][];
         };
         /**
          * @description What a number can carry. The names are Telnyx's feature names, because they are the widest vocabulary any of these vendors offers.
@@ -9119,6 +9248,8 @@ export type components = {
              * @description This model's share of the modality's requests over the last seven days, across every customer, from 0 to 1. It is how popular the model is, and is 0 when nothing was served or the deployment keeps no statistics.
              */
             readonly usage_share?: number;
+            /** @description The built-in voices this native speech model accepts by id. Left out for models whose voices come from a voice library or that do not speak. */
+            readonly voices?: readonly components["schemas"]["ModelVoice"][];
         };
         /** @description What Artificial Analysis measured for this model, refreshed by hand rather than live. A field is absent when the model was not measured on it. */
         readonly ProviderBenchmark: {
@@ -9236,7 +9367,7 @@ export type components = {
              */
             readonly per_million_output_tokens?: number;
         };
-        /** @description What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset. */
+        /** @description What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset. */
         readonly Quota: {
             /**
              * Format: int64
@@ -9471,6 +9602,8 @@ export type components = {
             readonly search?: components["schemas"]["SearchOptions"];
             readonly sts?: components["schemas"]["StsOptions"];
             readonly stt?: components["schemas"]["SttOptions"];
+            /** @description The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync. */
+            readonly sync_hash?: string;
             readonly tts?: components["schemas"]["TtsOptions"];
             /** Format: date-time */
             readonly updated_at: string;
@@ -9482,6 +9615,8 @@ export type components = {
             readonly search?: components["schemas"]["SearchOptions"];
             readonly sts?: components["schemas"]["StsOptions"];
             readonly stt?: components["schemas"]["SttOptions"];
+            /** @description The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing. */
+            readonly sync_hash?: string;
             readonly tts?: components["schemas"]["TtsOptions"];
         };
         readonly Run: {
@@ -9637,7 +9772,7 @@ export type components = {
             readonly attempts: number;
             /** @description Where the follow-up landed: conversation, sms, whatsapp, imessage or phone. Empty until it lands. */
             readonly delivered_to: string;
-            /** @description Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise. */
+            /** @description Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), not_in_team (in an app that keeps each team's agents to its own users, the user who made the task is no longer in its agent's team, so the agent is not run; not tried again), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise. */
             readonly error: string | null;
             /** Format: date-time */
             readonly finished_at: string | null;
@@ -10352,10 +10487,12 @@ export type components = {
              * @description Millionths of a dollar, priced from the configured rates.
              */
             readonly cost_micros_total: number;
+            /** @description True on the row that is everything outside the biggest few, summed. Its value is "other", which a label can also have: a label of that value is a row of its own, without other. */
+            readonly other?: boolean;
             /** Format: int64 */
             readonly request_count: number;
             /**
-             * @description The modality or label value this row is for. "other" is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
+             * @description The modality or label value this row is for. "other" with other true is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
              * @example support
              */
             readonly value: string;
@@ -10723,7 +10860,7 @@ export type components = {
             /** @description The simulations the directory's simulations/*.yaml declare. Sent, they are the whole of the agent's simulations: each is found by name, and one no longer declared is deleted. Left out, the stored ones are left alone. */
             readonly simulations?: readonly components["schemas"]["SimulationDeclaration"][];
             readonly skills?: readonly components["schemas"]["SkillRequest"][];
-            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade. */
+            /** @description A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted when creating a new voice config with no cascade settings, it defaults to sts-fast where available; on an existing config, omitting it keeps what is stored. An empty string explicitly selects the cascade. */
             readonly sts?: string;
             readonly stt?: string;
             /** @description Only a voice agent names one: a text agent runs everything on its llm. */
@@ -10982,6 +11119,10 @@ export type components = {
              * @description When a person allowed the call.
              */
             readonly approved_at?: string;
+            /** @description The data whoever runs the call last sent with a tool_update, such as what a card under the message shows. Each update with custom replaces it whole, and it is kept once the call finishes. */
+            readonly custom?: {
+                readonly [key: string]: unknown;
+            };
             /** @description What the call is doing, in words for the people in the conversation, such as "Checking the weather": the display_title its tool was declared with, or "Searching the web" for the router's own search. Absent when the tool declared none. */
             readonly display_title?: string;
             /**
@@ -12234,6 +12375,8 @@ export interface operations {
                 readonly max_review_score?: number;
                 /** @description Only calls that have not ended. */
                 readonly running?: boolean;
+                /** @description Narrow to the calls of one session, which starts a new one each time voice is started or stopped on it. */
+                readonly session_id?: string;
                 /** @description Only calls that started before this, exclusive. */
                 readonly to?: string;
             };
@@ -12301,7 +12444,7 @@ export interface operations {
     readonly getCallEvents: {
         readonly parameters: {
             readonly query?: {
-                /** @description How many to return, oldest first. */
+                /** @description How many to return, oldest first. Up to the 10000 a call keeps. */
                 readonly limit?: number;
             };
             readonly header?: never;
@@ -12904,6 +13047,98 @@ export interface operations {
             readonly 503: components["responses"]["Unavailable"];
         };
     };
+    readonly deleteCampaignContact: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                /** @description The contact, as the campaign's contacts list it. */
+                readonly contact_id: string;
+                /** @description The campaign. */
+                readonly id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The contact is gone */
+            readonly 204: {
+                headers: {
+                    readonly "X-Stream-Balance-Micros": components["headers"]["X-Stream-Balance-Micros"];
+                    readonly "X-Stream-Balance-Warning": components["headers"]["X-Stream-Balance-Warning"];
+                    readonly "X-Stream-Cost-Estimated": components["headers"]["X-Stream-Cost-Estimated"];
+                    readonly "X-Stream-Cost-Micros": components["headers"]["X-Stream-Cost-Micros"];
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            readonly 400: components["responses"]["BadRequest"];
+            readonly 401: components["responses"]["Unauthorized"];
+            readonly 402: components["responses"]["PaymentRequired"];
+            readonly 403: components["responses"]["Forbidden"];
+            readonly 404: components["responses"]["NotFound"];
+            /** @description Conflict */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            readonly 500: components["responses"]["InternalError"];
+            readonly 503: components["responses"]["Unavailable"];
+        };
+    };
+    readonly updateCampaignContact: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                /** @description The contact, as the campaign's contacts list it. */
+                readonly contact_id: string;
+                /** @description The campaign. */
+                readonly id: string;
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["ContactUpdateRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description The contact */
+            readonly 200: {
+                headers: {
+                    readonly "X-Stream-Balance-Micros": components["headers"]["X-Stream-Balance-Micros"];
+                    readonly "X-Stream-Balance-Warning": components["headers"]["X-Stream-Balance-Warning"];
+                    readonly "X-Stream-Cost-Estimated": components["headers"]["X-Stream-Cost-Estimated"];
+                    readonly "X-Stream-Cost-Micros": components["headers"]["X-Stream-Cost-Micros"];
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Contact"];
+                };
+            };
+            readonly 400: components["responses"]["BadRequest"];
+            readonly 401: components["responses"]["Unauthorized"];
+            readonly 402: components["responses"]["PaymentRequired"];
+            readonly 403: components["responses"]["Forbidden"];
+            readonly 404: components["responses"]["NotFound"];
+            /** @description Conflict */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            readonly 500: components["responses"]["InternalError"];
+            readonly 503: components["responses"]["Unavailable"];
+        };
+    };
     readonly stopCampaignContact: {
         readonly parameters: {
             readonly query?: never;
@@ -13301,7 +13536,7 @@ export interface operations {
                     readonly "text/plain": string;
                 };
             };
-            /** @description That is not this line's verify token */
+            /** @description The query is not this line's check: another mode or verify token, a challenge that is not digits, or a line that is not WhatsApp's */
             readonly 403: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -15370,8 +15605,17 @@ export interface operations {
             readonly 400: components["responses"]["BadRequest"];
             readonly 401: components["responses"]["Unauthorized"];
             readonly 402: components["responses"]["PaymentRequired"];
-            /** @description This app does not admit guests */
+            /** @description This app does not admit guests, or its organization is suspended */
             readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description This address, or its IPv6 /64, has minted as many guests of this app as it may this hour: retry after Retry-After */
+            readonly 429: {
                 headers: {
                     readonly [name: string]: unknown;
                 };
@@ -15457,6 +15701,15 @@ export interface operations {
             readonly 401: components["responses"]["Unauthorized"];
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
+            /** @description Conflict */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             readonly 500: components["responses"]["InternalError"];
             readonly 503: components["responses"]["Unavailable"];
         };
@@ -15597,6 +15850,15 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
+            /** @description Conflict */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             readonly 500: components["responses"]["InternalError"];
             readonly 503: components["responses"]["Unavailable"];
         };
@@ -16629,6 +16891,15 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
+            /** @description The task changed while the request was made: read it again and retry */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             readonly 500: components["responses"]["InternalError"];
             readonly 503: components["responses"]["Unavailable"];
         };
@@ -16663,6 +16934,15 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
+            /** @description The task changed while the request was made: read it again and retry */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             readonly 500: components["responses"]["InternalError"];
             readonly 503: components["responses"]["Unavailable"];
         };
@@ -16705,7 +16985,7 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
-            /** @description The task is completed, or the user is at their active-task limit */
+            /** @description The task is completed, the user is at their active-task limit, or the task changed while the request was made */
             readonly 409: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -16831,7 +17111,7 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
-            /** @description A session with that id already exists, or the call placed for this phone session ended without an answer (call_unanswered) */
+            /** @description A session with that id already exists, another session holds the conversation it names open, or the call placed for this phone session ended without an answer (call_unanswered) */
             readonly 409: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -17964,6 +18244,7 @@ export interface operations {
     readonly listSimulationRuns: {
         readonly parameters: {
             readonly query?: {
+                /** @description Up to 500. Omitted is 50. */
                 readonly limit?: number;
                 readonly simulation_id?: string;
                 readonly state?: "running" | "passed" | "failed" | "cancelled" | "errored";
@@ -18262,6 +18543,15 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
+            /** @description Too Many Requests */
+            readonly 429: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             readonly 500: components["responses"]["InternalError"];
             readonly 503: components["responses"]["Unavailable"];
         };
@@ -19426,8 +19716,17 @@ export interface operations {
             readonly 401: components["responses"]["Unauthorized"];
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
+            /** @description An export of this app is already running on this router: one runs at a time. */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             readonly 500: components["responses"]["InternalError"];
-            /** @description This deployment has no database to export from, or cannot record changes; or a write that was open when the export started is still open after 30 seconds: try again. */
+            /** @description This deployment has no database to export from, or cannot record changes; or this router is running as many exports as it takes at once; or the export ran out of time before its first row; or a write that was open when the export started is still open after 30 seconds: try again. */
             readonly 503: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -19471,7 +19770,7 @@ export interface operations {
             readonly 401: components["responses"]["Unauthorized"];
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
-            /** @description The file carries an export's rows, the app already has data here and `full` is not true. */
+            /** @description `import_running`: an import of this app is already running on this router, which runs one at a time. Or `conflict`: the file carries an export's rows, the app already has data here and `full` is not true. */
             readonly 409: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -19480,9 +19779,27 @@ export interface operations {
                     readonly "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description A line of the file is over 64 MiB. */
+            readonly 413: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             readonly 500: components["responses"]["InternalError"];
-            /** @description This deployment has no database to import into. */
+            /** @description This deployment has no database to import into, or this router is running as many imports as it takes at once: try again. */
             readonly 503: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description A line of the file took more than a minute to arrive. What came before it may be written. */
+            readonly 504: {
                 headers: {
                     readonly [name: string]: unknown;
                 };
@@ -19802,6 +20119,15 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
+            /** @description Conflict */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             readonly 500: components["responses"]["InternalError"];
             readonly 503: components["responses"]["Unavailable"];
         };
@@ -21605,6 +21931,7 @@ export interface operations {
             readonly 400: components["responses"]["BadRequest"];
             readonly 401: components["responses"]["Unauthorized"];
             readonly 402: components["responses"]["PaymentRequired"];
+            readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
             readonly 500: components["responses"]["InternalError"];
             readonly 503: components["responses"]["Unavailable"];

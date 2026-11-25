@@ -26,6 +26,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -153,6 +154,7 @@ func (s *Server) readDocument(ctx context.Context, found *session.Session, sourc
 	case errors.Is(err, policy.ErrPromptInjection):
 		return sentDocument{}, errDocumentRefused
 	case err != nil:
+		recordFailure(ctx, err, stack.Trace(err))
 		return sentDocument{}, errDocumentUnscreened
 	}
 
@@ -181,7 +183,7 @@ func (s *Server) keepDocument(ctx context.Context, found *session.Session, respo
 		return
 	}
 	// The turn is running whether or not the caller is still there to hear it started.
-	err := s.store.AddConversationDocument(context.WithoutCancel(ctx), &store.ConversationDocument{
+	err := s.store.ConversationDocuments.Insert(context.WithoutCancel(ctx), &store.ConversationDocument{
 		ID: sent.read.ID, CustomerID: spec.CustomerID, OwnerUserID: spec.Caller.UserID, SessionID: found.ID(),
 		ConversationID: spec.ConversationID, ResponseID: responseID, Name: sent.read.Name, Pages: sent.read.Pages,
 		SHA256: sent.sha, Markdown: sent.read.Text,
@@ -225,7 +227,7 @@ func (s *Server) readDocumentPictures(ctx context.Context, spec session.Spec, re
 	if answer, money := moneyError(err); money {
 		return answer
 	}
-	return modelFailed(err)
+	return modelFailed(ctx, err)
 }
 
 // fetchDocument is the bytes of the file at source, a data URI or a URL, and its name.
@@ -247,7 +249,8 @@ func (s *Server) fetchDocument(ctx context.Context, source FileSource) ([]byte, 
 		return nil, "", documentTooLarge(fmt.Sprintf("a file fetched by URL is at most %d MiB", maxFetchedDocument>>20))
 	}
 	if err != nil {
-		return nil, "", invalidRequest(fmt.Sprintf("the file could not be fetched: %v", err))
+		recordFailure(ctx, withoutURL(err), "")
+		return nil, "", invalidRequest(fmt.Sprintf("the file could not be used: %v", err))
 	}
 	fallback := "document"
 	if parsed, err := url.Parse(source.Url); err == nil && path.Base(parsed.Path) != "/" && path.Base(parsed.Path) != "." {

@@ -115,28 +115,29 @@ func (s *Server) updateSession(ctx context.Context, request *updateSessionReques
 			row.Title = override(row.Title, body.Title)
 			row.Description = override(row.Description, body.Description)
 			row.Custom = override(row.Custom, body.Custom)
-			if err := s.store.DescribeSession(ctx, row.CustomerID, row.ID, row.Title, row.Description,
+			if err := s.store.Sessions.Describe(ctx, row.CustomerID, row.ID, row.Title, row.Description,
 				value(body.Custom)); err != nil {
 				return nil, err
 			}
 		}
 		if body.Pinned != nil {
-			pinnedAt, err := s.store.PinSession(ctx, row.CustomerID, row.ID, *body.Pinned, time.Now().UTC())
+			pinnedAt, err := s.store.Sessions.Pin(ctx, row.CustomerID, row.ID, *body.Pinned, time.Now().UTC())
 			if err != nil {
 				return nil, err
 			}
 			row.PinnedAt = pinnedAt
 		}
-		return &sessionResponse{Body: storedSessionOf(row)}, nil
+		call, err := s.latestCall(ctx, row)
+		if err != nil {
+			return nil, err
+		}
+		return &sessionResponse{Body: storedSessionOf(row, call)}, nil
 	}
 
 	live := found.Live
 	if moving {
 		if err := live.SetSettings(ctx, settings); err != nil {
-			if errors.Is(err, session.ErrCardedToNative) {
-				return nil, errCardedSessionToNative
-			}
-			return nil, invalidRequest(err.Error())
+			return nil, settingsRefused(err)
 		}
 	}
 	if labels.Title != nil || labels.Description != nil || labels.Custom != nil {
@@ -169,7 +170,7 @@ func (s *Server) livePinnedAt(ctx context.Context, live *session.Session) *time.
 	if s.store == nil || !live.Recorded() {
 		return nil
 	}
-	row, err := s.store.StoredSession(ctx, live.Spec().CustomerID, live.ID())
+	row, err := s.store.Sessions.Get(ctx, live.Spec().CustomerID, live.ID())
 	if err != nil {
 		return nil
 	}

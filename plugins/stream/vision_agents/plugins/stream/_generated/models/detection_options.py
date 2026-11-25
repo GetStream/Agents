@@ -28,8 +28,8 @@ class DetectionOptions:
             before. Only a model that computes one is asked.
         min_confidence (float | Unset): Drop boxes scored below this. Only a model that scores its boxes is asked.
         overwrites (DetectionOptionsOverwrites | Unset): Settings for one provider that the options above have no word
-            for, keyed by provider. roboflow takes workspace and workflow_id, or specification, for the roboflow/workflow
-            model. An overwrite for a provider that is not a candidate is refused.
+            for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it and
+            the next candidate is asked without it. One naming a provider that is not a candidate is refused.
         providers (list[str] | Unset): A priority list of where to try, in the order given, which wins over target when
             it holds anything.
         target (str | Unset): A provider/model or a capability shortcut. Defaults to detection-fast. Example: detection-

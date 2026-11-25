@@ -35,11 +35,14 @@ a mistake that actually happened.
   Postgres (fsync on). Start the shared server on its own port once, and put that port in each
   agent's `testing.yaml` copy:
   ```bash
-  docker run -d --name va-test-pg --restart unless-stopped -p 127.0.0.1:55433:5432 \
-    -e POSTGRES_PASSWORD=postgres -v va-test-pgdata:/var/lib/postgresql/data postgres:16-alpine \
+  docker run -d --name va-test-pg --restart unless-stopped --shm-size=2g -p 127.0.0.1:55433:5432 \
+    -e POSTGRES_PASSWORD=postgres -v va-test-pg19data:/var/lib/postgresql postgres:19-alpine \
     -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=1000
   ```
   - Keep its data on disk, not on tmpfs. One server held 765 MB over 59 test databases.
+  - Give it `--shm-size=2g`. Postgres keeps every table's statistics in shared memory, which never
+    shrinks: with Docker's default 64 MB, 450 test databases made every query fail with "could not
+    resize shared memory segment".
   - Give each agent its own Redis. The router's Redis config has no database number or key
     prefix, so two agents on one Redis share counters, health and session keys.
   - Set the agent's Redis address as `redis: addr:` in its `testing.yaml` copy, next to its `dsn`.
@@ -54,14 +57,21 @@ a mistake that actually happened.
   create the same new database and fail with a duplicate key.
 - **Migration versions.** goose is strict. A migration older than the newest version a database
   has applied stops the router at start ("found N missing migrations before current version").
+  - The two sets, `acceleration/migrations/global` and `acceleration/migrations/shard`, keep
+    their versions apart (`goose_global_version`, `goose_shard_version`), so slots are per set.
   - Give each PR its own version slot before the agents start, spaced apart. Never let two agents
     pick "the current time".
-  - Merge in version order. Before each merge, check the newest file under `acceleration/migrations`
-    on `origin/main`.
+  - Merge in version order. Before each merge, check the newest file under both sets on
+    `origin/main`.
+  - Two PRs that change the store both edit `internal/store/repos.go`, where the repositories
+    are wired. Keep both sides.
   - A database that ran an earlier build of a PR can hold a version that a later merge lands below.
     Recreate that database.
-- **Shared append files.** Every PR adds a note at the end of `.claude/skills/sdk/SKILL.md` and
-  `CHANGELOG.md`, so any two open PRs conflict there. Keep both sides, the base's entries first.
+- **No shared append files.** An SDK note is a file of its own in `.claude/skills/sdk/notes/`, and
+  the root `CHANGELOG.md` is written only at a release, except one breaking-change line under
+  `# Unreleased`. A branch from before that rule that still adds to the end of
+  `.claude/skills/sdk/SKILL.md` or other lines to the root `CHANGELOG.md` moves its note to a file and
+  drops those changelog lines.
 - **Conflict markers.** Before every `git rebase --continue`, run `git diff --check` and grep for
   `<<<<<<<`, `=======` and `>>>>>>>`. Markers were committed twice by agents that skipped this.
 - **Generated files.** Do not hand-merge `acceleration/api/openapi.yaml` or the generated clients.

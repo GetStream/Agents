@@ -99,7 +99,8 @@ class AgentConfig:
         search (str | Unset):
         skills (list[str] | Unset):
         sts (str | Unset): A speech-to-speech target: one native audio model that hears the caller and speaks back.
-            Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade.
+            Naming one makes the agent native, and stt, tts and llm are then not used. New voice configs default to sts-fast
+            unless created with sts set to an empty string or with cascade settings; absent means the cascade.
         stt (str | Unset):
         subagent (str | Unset):
         sync_hash (str | Unset): Fingerprint of the last directory synced onto this config. Empty if it was never synced

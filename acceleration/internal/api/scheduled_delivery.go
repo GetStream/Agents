@@ -48,16 +48,16 @@ var scheduledReplySettle = 2 * time.Second
 // scheduledReplyWindow bounds reading an answer for a channel. The lease is
 // renewed while a delivery runs, so a slow turn is waited out; one still
 // running at the window's end fails the channel, not the conversation.
-var scheduledReplyWindow = 3 * time.Minute
+const scheduledReplyWindow = 3 * time.Minute
 
 // scheduledPhoneWindow is how long a ring is waited out for somebody to
 // pick up: a vendor's ring is the best part of a minute.
-var scheduledPhoneWindow = 90 * time.Second
+const scheduledPhoneWindow = 90 * time.Second
 
 // scheduledCallLimit is how long a call a task placed may last: the agent
 // hangs up then, whatever is being said. A worker holds the call's slot
 // throughout, and a reminder is a short call, not an open line.
-var scheduledCallLimit = 10 * time.Minute
+const scheduledCallLimit = 10 * time.Minute
 
 // scheduledCallGrace is how late a task may still ring: past it the call is
 // not placed and the occurrence is missed, because a call long after the time
@@ -70,9 +70,9 @@ const scheduledCallGrace = 15 * time.Minute
 // (scheduledPhoneWindow), the task sent as the call's first turn, which may
 // wait out a reply for scheduledWindow (followUpWithin), and the call held to
 // its limit (scheduledCallLimit). The occurrence's own budget still bounds
-// it. A function, because tests shorten the ring and the limit.
-func scheduledPeerWindow() time.Duration {
-	return scheduledPhoneWindow + scheduledWindow + scheduledCallLimit
+// it. A method, because a test shortens the ring and the limit of its own router.
+func (s *Server) scheduledPeerWindow() time.Duration {
+	return s.phoneWindow + scheduledWindow + s.callLimit
 }
 
 // errScheduledNotHere says the conversation's session is not live on this
@@ -101,6 +101,10 @@ type scheduledDelivery struct {
 	// APIKey and UsageCategories are the task's: the key and categories that scheduled it.
 	APIKey          string   `json:"api_key,omitempty"`
 	UsageCategories []string `json:"usage_categories,omitempty"`
+	// Earlier is the reason the occurrence's run records so far (store.ScheduledTaskRun.Error),
+	// if any: the one its last attempt on this worker failed under (deliverWithRetries), or how a
+	// call placed for it ended (SetCallReason). replyCommand reads it.
+	Earlier string `json:"earlier,omitempty"`
 }
 
 func (d scheduledDelivery) owner() session.Owner {
@@ -116,10 +120,11 @@ func (d scheduledDelivery) attribution() routing.Attribution {
 }
 
 // scheduledHandOff is what a peer reads of a scheduledDelivery it is handed: the ids that
-// name the task's occurrence and its owner, which it checks against the rows. Nothing else
-// the asker sends reaches the delivery, so a payload cannot name another conversation, zone,
-// key, prompt or due time. An asker sends the whole scheduledDelivery, so routers on either
-// side of this change still hand off to each other.
+// name the task's occurrence and its owner, which it checks against the rows, and the reason
+// the asker's last attempt failed under, which the run's row does not hold between attempts.
+// Nothing else the asker sends reaches the delivery, so a payload cannot name another
+// conversation, zone, key, prompt or due time. An asker sends the whole scheduledDelivery, so
+// routers on either side of this change still hand off to each other.
 type scheduledHandOff struct {
 	CustomerID string `json:"customer_id"`
 	TaskID     string `json:"task_id"`
@@ -127,6 +132,9 @@ type scheduledHandOff struct {
 	SessionID  string `json:"session_id"`
 	UserID     string `json:"user_id"`
 	CallerKind string `json:"caller_kind"`
+	// Earlier is the reason the run records so far; replyCommand and refusedAgain read it, and
+	// act only on a refusal for money (moneyCode).
+	Earlier string `json:"earlier"`
 }
 
 // scheduledPeerAnswer is what the node holding a conversation answers a
@@ -184,8 +192,34 @@ func (s *Server) DeliverScheduledTask(ctx context.Context, claimed store.Claimed
 			return "", "", &scheduling.Postponed{Until: until}
 		}
 	}
+	// A task that speaks to its end user runs its agent only while they are in the team of its
+	// config, as a request of theirs would, on every way it is delivered; the peer it is handed
+	// to takes this node's word. That is one they made, and one the agent made talking with them,
+	// which it stores with the kind of whoever opened that session, their backend included. One
+	// the backend made through the API is the backend's, and one made on a thread the Router's
+	// own session answers. Out of the team is final for the occurrence; teams that could not be
+	// read fail this attempt only.
+	user := delivery.owner()
+	if task.CreatedBy == "agent" && task.ChannelThread == "" {
+		user.Kind = auth.KindAuthenticated
+	}
+	if err := s.refuseOwnerOutsideTeam(ctx, user, delivery.ConfigID); err != nil {
+		if errors.Is(err, errUnknownConfig) {
+			return "", "", undeliveredFinally(scheduling.ReasonNotInTeam, err)
+		}
+		return "", "", err
+	}
 	if task.ChannelThread != "" {
 		return s.deliverOnThread(ctx, delivery, task.ChannelThread)
+	}
+	if delivery.SessionID == "" {
+		// The claim read the task before an earlier attempt at the occurrence opened its session
+		// (openTaskSession records it on the task): a retry follows up in that one.
+		stored, err := s.store.ScheduledTasks.Get(ctx, task.CustomerID, task.ID)
+		if err != nil {
+			return "", "", err
+		}
+		delivery.SessionID = stored.SessionID
 	}
 	if delivery.SessionID != "" {
 		if _, live := s.sessions.Get(delivery.SessionID, delivery.owner()); live {
@@ -208,7 +242,11 @@ func (s *Server) occurrenceDelivery(ctx context.Context, claimed store.ClaimedSc
 	if held := claimed.Run.PostponedUntil; held != nil {
 		due = *held
 	}
-	return taskDelivery(claimed.Task, claimed.Run.ID, scheduledPrompt(s.withOccurrence(ctx, claimed), time.Now()), due)
+	delivery := taskDelivery(claimed.Task, claimed.Run.ID, scheduledPrompt(s.withOccurrence(ctx, claimed), time.Now()), due)
+	if claimed.Run.Error != nil {
+		delivery.Earlier = *claimed.Run.Error
+	}
+	return delivery
 }
 
 // taskDelivery is the delivery of task's occurrence on run runID: what the
@@ -263,17 +301,18 @@ func (s *Server) deliverChainHere(ctx context.Context, delivery scheduledDeliver
 // conversation is held in, and stops at the first that lands. A failure
 // names every channel tried, for the logs, and is recorded under the first
 // channel's reason, except a call placed already (rangAlready), which gives
-// already_called. It is final when every channel's failure is, and missed
-// when every channel found the occurrence too late. A call placed for the
-// occurrence whose end the run does not record ends the walk (rangAlready), and so
-// does a turn refused for money (refusedTurn): the channels share the turn.
+// already_called. It is final when every channel's failure is, or one kept a
+// text it did not send (errTextKept), and missed when every channel found the
+// occurrence too late. A call placed for the occurrence whose end the run does
+// not record ends the walk (rangAlready), and so does a turn refused for money
+// (refusedTurn): the channels share the turn.
 func (s *Server) deliverChain(ctx context.Context, delivery scheduledDelivery, found *session.Session) (string, string, error) {
 	where := delivery.Channels
 	if len(where) == 0 {
 		where = []string{store.ScheduledTaskDeliveredConversation}
 	}
 	var tried []string
-	reason, final, missed := "", true, true
+	reason, final, missed, kept := "", true, true, false
 	for _, channel := range where {
 		deliveredTo, sessionID, err := s.deliverOn(ctx, delivery, found, channel)
 		if err == nil {
@@ -292,6 +331,7 @@ func (s *Server) deliverChain(ctx context.Context, delivery scheduledDelivery, f
 		var failure *scheduling.Failure
 		reason = cmp.Or(reason, deliveryReason(err))
 		final = final && errors.As(err, &failure) && failure.Final
+		kept = kept || errors.Is(err, errTextKept)
 		missed = false
 		// The turn is the conversation's, shared by the text channels: the next one would only
 		// read it back as failed.
@@ -310,8 +350,12 @@ func (s *Server) deliverChain(ctx context.Context, delivery scheduledDelivery, f
 	if missed {
 		return "", "", &scheduling.Missed{Err: err}
 	}
-	return "", "", &scheduling.Failure{Reason: reason, Final: final, Err: err}
+	return "", "", &scheduling.Failure{Reason: reason, Final: final || kept, Err: err}
 }
+
+// errTextKept says a text channel's send failed and its claim could not be given back: a later
+// attempt would find the words taken and count them sent.
+var errTextKept = errors.New("the unsent text could not be given back")
 
 // rangAlready reports whether a channel failed because the occurrence's call was
 // placed already, by an earlier attempt or a worker that stopped, and the run
@@ -372,7 +416,7 @@ func textUnreachable(err error) error {
 // refusal about money (moneyError), such as a session that cannot open or a text whose
 // reservation is refused (routing.ReservationRefused). A suspension, spent credit or a spent limit
 // lasts until somebody pays or the limit resets, so the run's retries, minutes apart
-// (scheduling.DeliveryRetries), would only be refused again. A refusal because the money could
+// (the scheduler's delivery retries), would only be refused again. A refusal because the money could
 // not be checked (policy.Transient) passes again on its own, and is tried again. Any other error
 // is returned as it is.
 func unpaid(err error) error {
@@ -405,8 +449,8 @@ func (s *Server) deliverOn(ctx context.Context, delivery scheduledDelivery, foun
 		if err := s.waitOutCall(ctx, found, scheduledWindow); err != nil {
 			return "", "", err
 		}
-		delivery.CommandID = replyCommand(found, delivery.CommandID)
-		if err := s.followUpWithin(ctx, found, delivery); err != nil {
+		delivery.CommandID = replyCommand(found, delivery.CommandID, delivery.Earlier)
+		if err := s.followUpInConversation(ctx, found, delivery); err != nil {
 			return "", "", err
 		}
 		return store.ScheduledTaskDeliveredConversation, found.ID(), nil
@@ -423,7 +467,23 @@ func (s *Server) deliverOn(ctx context.Context, delivery scheduledDelivery, foun
 		if err != nil {
 			return "", "", err
 		}
+		// The words go out once per run and channel: an attempt after the one that sent them,
+		// such as a worker taking over a run whose finish was lost, finds them taken.
+		took, err := s.store.ScheduledTaskRuns.TakeText(ctx, delivery.CustomerID, delivery.RunID, channel)
+		if err != nil {
+			return "", "", err
+		}
+		if !took {
+			return channel, found.ID(), nil
+		}
 		if err := s.notifyText(ctx, delivery, channel, text, files); err != nil {
+			// Not sent, so a later attempt may send it.
+			if released := s.store.ScheduledTaskRuns.ReleaseText(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, channel); released != nil {
+				s.logger.Error("could not give back a scheduled task's text", "run", delivery.RunID, "error", released)
+				// Still taken: a later attempt would find the words sent and count the run
+				// delivered, so this one is not tried again.
+				return "", "", fmt.Errorf("%w: %w", errTextKept, undeliveredFinally(deliveryReason(err), err))
+			}
 			return "", "", unpaid(err)
 		}
 		return channel, found.ID(), nil
@@ -464,7 +524,10 @@ func (s *Server) waitOutCall(ctx context.Context, found *session.Session, window
 // of the turn. A follow-up the conversation already holds is not run again:
 // its words and files are read back.
 func (s *Server) captureReply(ctx context.Context, found *session.Session, delivery scheduledDelivery) (string, []sandbox.Attachment, error) {
-	delivery.CommandID = replyCommand(found, delivery.CommandID)
+	delivery.CommandID = replyCommand(found, delivery.CommandID, delivery.Earlier)
+	if err := refusedAgain(found, delivery); err != nil {
+		return "", nil, err
+	}
 	if _, _, known := found.FollowUpReply(delivery.CommandID); known {
 		reply, err := s.readBackReply(ctx, found, delivery.CommandID)
 		return reply.Text, reply.Files, err
@@ -478,7 +541,7 @@ func (s *Server) captureReply(ctx context.Context, found *session.Session, deliv
 	var files []sandbox.Attachment
 	active := found.Busy()
 	last := time.Now()
-	deadline := time.Now().Add(scheduledReplyWindow)
+	deadline := time.Now().Add(s.replyWindow)
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -514,6 +577,66 @@ func (s *Server) captureReply(ctx context.Context, found *session.Session, deliv
 	}
 }
 
+// followUpInConversation puts the follow-up to found, whose conversation carries the reply, and
+// waits for its turn to end. A turn the organization may not pay for ends with the model's
+// refusal, which leaves the user nothing: the run records the money (turnRefusal), as a text
+// channel's does. Any other end leaves the reply in the conversation as it stands, delivered: a
+// turn that finished or failed for another reason, one still running at scheduledReplyWindow, or a
+// session that ended. A follow-up the conversation already holds runs nothing, so nothing is
+// waited for: it stands as it is, except a rerun after a refusal for money (replyCommand) that
+// failed too, which left the user nothing again. That one fails the attempt under the earlier
+// reason, tried again until the run's attempts are spent, as a text channel's is.
+func (s *Server) followUpInConversation(ctx context.Context, found *session.Session, delivery scheduledDelivery) error {
+	if err := refusedAgain(found, delivery); err != nil {
+		return err
+	}
+	_, _, known := found.FollowUpReply(delivery.CommandID)
+	events, detach := found.Watch()
+	defer detach()
+	if err := s.followUpWithin(ctx, found, delivery); err != nil || known {
+		return err
+	}
+	deadline := time.Now().Add(s.replyWindow)
+	ticker := time.NewTicker(s.replyPoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case event, open := <-events:
+			if !open {
+				return nil
+			}
+			if refusal := turnRefusal(event); refusal != nil {
+				return refusal
+			}
+			// The conversation records the agent.Error that fails a turn before the session sends
+			// it to watchers (Session.consume), so the turn has failed by now if it was this one.
+			if _, erred := event.(agent.Error); erred {
+				if state, _, _ := found.FollowUpReply(delivery.CommandID); replyEnded(state) {
+					return nil
+				}
+			}
+		case <-ticker.C:
+			// A failed turn is told by its agent.Error, which says whether it was the money.
+			state, _, _ := found.FollowUpReply(delivery.CommandID)
+			if state != "failed" && replyEnded(state) || time.Now().After(deadline) {
+				return nil
+			}
+		}
+	}
+}
+
+// replyEnded reports whether a follow-up's reply in state (Session.FollowUpReply) has finished,
+// however it did.
+func replyEnded(state string) bool {
+	switch state {
+	case "completed", "cancelled", "interrupted", "failed":
+		return true
+	}
+	return false
+}
+
 // turnRefused is the refusal for money that ended a text turn. The turn's reply reads back as
 // failed to a channel tried after the one that ran it, which cannot tell why, so the walk stops
 // at it (deliverChain).
@@ -541,28 +664,43 @@ func refusedTurn(err error) bool {
 }
 
 // rerunSuffix ends the command id an occurrence's turn runs again under when the reply under
-// the run's own was cancelled or interrupted: the user got nothing, and the run's own id would
-// only read that reply back on every retry. It is one suffix, so the turn runs again once.
+// the run's own was cancelled or interrupted, or failed on a refusal for money the run tries
+// again: the user got nothing, and the run's own id would only read that reply back on every
+// retry. It is one suffix, so the turn runs again once.
 const rerunSuffix = "_r1"
 
 // replyCommand is the command id an occurrence's reply is under in found: the run's own, or
 // the rerun's once the reply under the run's own was cancelled or interrupted. The
 // conversation says which, not the run's attempts: it keeps each follow-up's state across a
 // restart and a worker taking over (commandsIn), and an attempt that never reached the turn,
-// such as one on a call, counts as an attempt too.
-func replyCommand(found *session.Session, id string) string {
-	switch state, _, _ := found.FollowUpReply(id); state {
-	case "cancelled", "interrupted":
+// such as one on a call, counts as an attempt too. A failed reply is the rerun's too when
+// earlier, the reason the last attempt failed under (scheduledDelivery.Earlier), is a refusal
+// for money: one the run tries again passes again on its own (unpaid), so the turn it refused
+// is worth running again. A reply that failed for any other reason is read back as it was.
+func replyCommand(found *session.Session, id, earlier string) string {
+	switch state, _, _ := found.FollowUpReply(id); {
+	case state == "cancelled" || state == "interrupted", state == "failed" && moneyCode(earlier):
 		return id + rerunSuffix
 	}
 	return id
+}
+
+// refusedAgain is the failure of a delivery whose rerun after a refusal for money (replyCommand)
+// failed too, which left the user nothing again: the attempt fails under the earlier reason, tried
+// again until the run's attempts are spent, on every channel that runs a turn. It is nil when the
+// delivery's turn is not a failed one, or its earlier reason is not about money.
+func refusedAgain(found *session.Session, delivery scheduledDelivery) error {
+	if state, _, known := found.FollowUpReply(delivery.CommandID); known && state == "failed" && moneyCode(delivery.Earlier) {
+		return undelivered(delivery.Earlier, turnRefused{errors.New("the turn run again after a refusal for money failed too")})
+	}
+	return nil
 }
 
 // readBackReply is the reply a follow-up already has, with its files, once it
 // has finished: the turn ran for a channel tried before this one, or for an
 // earlier attempt at the occurrence.
 func (s *Server) readBackReply(ctx context.Context, found *session.Session, id string) (conversation.FinishedReply, error) {
-	deadline := time.Now().Add(scheduledReplyWindow)
+	deadline := time.Now().Add(s.replyWindow)
 	for {
 		state, _, _ := found.FollowUpReply(id)
 		switch state {
@@ -682,7 +820,7 @@ func scheduledPrompt(claimed store.ClaimedScheduledTask, now time.Time) string {
 }
 
 // withOccurrence gives a re-dued one-shot back the instant its start names.
-// An edit re-dues the occurrence at the edit time (store.SaveScheduledTask),
+// An edit re-dues the occurrence at the edit time (store.ScheduledTasks.Update),
 // so its next run no longer reads as the start and FromStored cannot tell
 // which pass of a fall-back hour the start is; the run the edit settled can.
 func (s *Server) withOccurrence(ctx context.Context, claimed store.ClaimedScheduledTask) store.ClaimedScheduledTask {
@@ -690,7 +828,7 @@ func (s *Server) withOccurrence(ctx context.Context, claimed store.ClaimedSchedu
 	if task.RRule != "" || claimed.Run.Trigger != store.ScheduledTaskTriggerSchedule || readsAsStart(task, claimed.Run.ScheduledFor) {
 		return claimed
 	}
-	runs, err := s.store.ScheduledTaskRuns(ctx, task.CustomerID, task.ID, 0, nil)
+	runs, err := s.store.ScheduledTaskRuns.Select(ctx, task.CustomerID, store.ScheduledTaskRunFilter{TaskID: task.ID})
 	if err != nil {
 		s.logger.Warn("could not read a re-dued scheduled task's runs", "task", task.ID, "error", err)
 		return claimed
@@ -779,7 +917,7 @@ func (s *Server) handDeliveryToPeer(ctx context.Context, delivery scheduledDeliv
 	if s.directory == nil || s.forwarder == nil {
 		return none, false, nil
 	}
-	address, err := s.directory.Node(ctx, delivery.SessionID)
+	address, err := s.directory.Node(ctx, delivery.CustomerID, delivery.SessionID)
 	if err != nil || address == "" || address == s.directory.Address() {
 		return none, false, nil
 	}
@@ -791,7 +929,7 @@ func (s *Server) handDeliveryToPeer(ctx context.Context, delivery scheduledDeliv
 	if err != nil {
 		return none, false, err
 	}
-	ask, cancel := context.WithTimeout(ctx, scheduledPeerWindow())
+	ask, cancel := context.WithTimeout(ctx, s.scheduledPeerWindow())
 	answer, err := s.forwarder.Ask(ask, address, request, body)
 	cancel()
 	if err == nil && answer.GetStatus() == http.StatusOK {
@@ -818,7 +956,7 @@ func (s *Server) handDeliveryToPeer(ctx context.Context, delivery scheduledDeliv
 		if err := waitFor(ctx, s.scheduledPoll); err != nil {
 			return none, false, err
 		}
-		current, err := s.directory.Node(ctx, delivery.SessionID)
+		current, err := s.directory.Node(ctx, delivery.CustomerID, delivery.SessionID)
 		if err != nil || current == "" || current == s.directory.Address() {
 			return none, false, nil
 		}
@@ -868,6 +1006,7 @@ func (s *Server) deliverScheduledForPeer(w http.ResponseWriter, r *http.Request)
 	// another conversation, zone, key, prompt or due time would ring into that conversation,
 	// bill that key or say those words. Its work is the task's, as the asker attributes it.
 	delivery := s.occurrenceDelivery(r.Context(), claimed)
+	delivery.Earlier = handOff.Earlier
 	ctx := routing.WithAttribution(routing.WithScheduledTurn(r.Context()), delivery.attribution())
 	deliveredTo, sessionID, err := s.deliverChainHere(ctx, delivery)
 	switch {
@@ -901,14 +1040,14 @@ var errNotHandedOff = errors.New("the hand-off does not match the stored task an
 // one names the task's owner and session and a running run of that task. A task or run
 // gone since is refused too; the asker's scheduler tries again later.
 func (s *Server) handedOccurrence(ctx context.Context, handOff scheduledHandOff) (store.ClaimedScheduledTask, error) {
-	task, err := s.store.ScheduledTask(ctx, handOff.CustomerID, handOff.TaskID)
+	task, err := s.store.ScheduledTasks.Get(ctx, handOff.CustomerID, handOff.TaskID)
 	if err != nil {
 		return store.ClaimedScheduledTask{}, err
 	}
 	if !ownsTask(handOff, task) {
 		return store.ClaimedScheduledTask{}, errNotHandedOff
 	}
-	run, err := s.store.ScheduledTaskRun(ctx, handOff.CustomerID, handOff.TaskID, handOff.RunID)
+	run, err := s.store.ScheduledTaskRuns.Get(ctx, handOff.CustomerID, handOff.TaskID, handOff.RunID)
 	if err != nil {
 		return store.ClaimedScheduledTask{}, err
 	}
@@ -955,7 +1094,7 @@ func (s *Server) openTaskSession(ctx context.Context, delivery scheduledDelivery
 	if s.store == nil {
 		return nil, errors.New("this router has no store to open a scheduled task's session from")
 	}
-	config, err := s.store.AgentConfig(ctx, delivery.CustomerID, delivery.ConfigID)
+	config, err := s.store.AgentConfigs.Get(ctx, delivery.CustomerID, delivery.ConfigID)
 	if err != nil {
 		return nil, err
 	}
@@ -973,7 +1112,7 @@ func (s *Server) openTaskSession(ctx context.Context, delivery scheduledDelivery
 		return nil, err
 	}
 	delivery.SessionID = created.ID()
-	if err := s.store.SetScheduledTaskSession(ctx, delivery.CustomerID, delivery.TaskID, created.ID()); err != nil {
+	if err := s.store.ScheduledTasks.SetSession(ctx, delivery.CustomerID, delivery.TaskID, created.ID()); err != nil {
 		// The conversation exists and the follow-up still lands; the next
 		// occurrence opening a second one is the cost of losing this.
 		s.logger.Error("could not record the session a scheduled task opened",
@@ -990,7 +1129,8 @@ func (s *Server) openTaskSession(ctx context.Context, delivery scheduledDelivery
 // is the one the user texts this agent from; the number rung from is the
 // agent's own text line. An occurrence rings once: the call's session is
 // taken on the run before it is placed, so neither a retry nor a worker
-// taking the run over rings the user again (callEnded). A call the
+// taking the run over rings the user again (callEnded): a placed call is rung
+// once, whatever refuses it. A call the
 // occurrence has no time left to ring and hold is missed, not placed: it
 // would be hung up mid-sentence when the occurrence runs out. The call is
 // taken before anything else is checked, so an attempt after the one that
@@ -1004,7 +1144,7 @@ func (s *Server) deliverByPhone(ctx context.Context, delivery scheduledDelivery,
 		return "", "", errors.New("this router has no store to ring from")
 	}
 	sessionID := uuid.NewString()
-	took, rang, err := s.store.TakeScheduledTaskRunCall(ctx, delivery.CustomerID, delivery.RunID, sessionID)
+	took, rang, err := s.store.ScheduledTaskRuns.TakeCall(ctx, delivery.CustomerID, delivery.RunID, sessionID)
 	if err != nil {
 		return "", "", err
 	}
@@ -1014,7 +1154,7 @@ func (s *Server) deliverByPhone(ctx context.Context, delivery scheduledDelivery,
 	spec, err := s.placeCall(ctx, delivery, found, sessionID)
 	if err != nil {
 		// A call that was not placed rang nobody, so a later attempt may.
-		if err := s.store.ReleaseScheduledTaskRunCall(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, sessionID); err != nil {
+		if err := s.store.ScheduledTaskRuns.ReleaseCall(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, sessionID); err != nil {
 			s.logger.Error("could not give back a scheduled task's call", "run", delivery.RunID, "error", err)
 		}
 		return "", "", err
@@ -1035,7 +1175,7 @@ func (s *Server) placeCall(ctx context.Context, delivery scheduledDelivery, foun
 	if found.Voicing() {
 		return session.Spec{}, undelivered(scheduling.ReasonOnACall, errors.New("the user is on a call"))
 	}
-	config, err := s.store.AgentConfig(ctx, delivery.CustomerID, delivery.ConfigID)
+	config, err := s.store.AgentConfigs.Get(ctx, delivery.CustomerID, delivery.ConfigID)
 	if err != nil {
 		return session.Spec{}, err
 	}
@@ -1043,11 +1183,11 @@ func (s *Server) placeCall(ctx context.Context, delivery scheduledDelivery, foun
 	if err != nil {
 		return session.Spec{}, err
 	}
-	from := config.Channels.Lines()["sms"]
+	from := config.Channels.Lines.Lines()["sms"]
 	if from == "" {
 		return session.Spec{}, undelivered(scheduling.ReasonNoLine, errors.New("the agent has no number to call from"))
 	}
-	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < scheduledPhoneWindow+scheduledCallLimit {
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < s.phoneWindow+s.callLimit {
 		return session.Spec{}, &scheduling.Missed{Err: fmt.Errorf("the call would have %s left to ring and be held", lateFor(time.Until(deadline)))}
 	}
 	placed, err := s.phone.Call(ctx, phone.CallRequest{
@@ -1090,16 +1230,21 @@ func callSpec(config store.AgentConfig, delivery scheduledDelivery, agentID stri
 
 // carryOutOnCall opens the session of a call a task placed and holds the
 // call until it is over. The user has been rung by now, so a failure is
-// final: another attempt would ring them again.
+// final: another attempt would ring them again, even after a refusal because
+// the money could not be checked (callEnded).
 func (s *Server) carryOutOnCall(ctx context.Context, delivery scheduledDelivery, spec session.Spec) (string, string, error) {
 	created, err := s.sessions.Create(ctx, spec)
 	if _, unanswered := errors.AsType[*session.CallUnansweredError](err); unanswered {
 		return "", "", s.callEnded(ctx, delivery, spec.ID, undeliveredFinally(scheduling.ReasonNotAnswered, err))
 	}
 	if err != nil {
+		// A session the organization may not pay for fails under the refusal's code (unpaid).
+		if _, refused := moneyError(err); refused {
+			return "", "", s.callEnded(ctx, delivery, spec.ID, unpaid(err))
+		}
 		return "", "", s.callEnded(ctx, delivery, spec.ID, undeliveredFinally(scheduling.ReasonFailed, err))
 	}
-	if err := s.store.SetScheduledTaskSession(ctx, delivery.CustomerID, delivery.TaskID, created.ID()); err != nil {
+	if err := s.store.ScheduledTasks.SetSession(ctx, delivery.CustomerID, delivery.TaskID, created.ID()); err != nil {
 		s.logger.Error("could not record the session a scheduled task rang into",
 			"task", delivery.TaskID, "session", created.ID(), "error", err)
 	}
@@ -1117,13 +1262,17 @@ func (s *Server) carryOutOnCall(ctx context.Context, delivery scheduledDelivery,
 
 // callEnded records on the run the reason the call callID failed under, and
 // answers that failure: a worker taking the run over after this one stopped
-// finds the call placed, and records how it went rather than that it was.
+// finds the call placed, and records how it went rather than that it was. The
+// user has been rung, so every failure is final, a refusal because the money
+// could not be checked (unpaid) included: a retry would ring nobody, and a
+// second ring is the most intrusive way to try again (AI-3597).
 func (s *Server) callEnded(ctx context.Context, delivery scheduledDelivery, callID string, err error) error {
 	var failure *scheduling.Failure
 	if !errors.As(err, &failure) {
 		return err
 	}
-	if err := s.store.SetScheduledTaskRunCallReason(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, callID, failure.Reason); err != nil {
+	failure.Final = true
+	if err := s.store.ScheduledTaskRuns.SetCallReason(context.WithoutCancel(ctx), delivery.CustomerID, delivery.RunID, callID, failure.Reason); err != nil {
 		s.logger.Error("could not record how a scheduled task's call ended", "run", delivery.RunID, "error", err)
 	}
 	return err
@@ -1133,8 +1282,8 @@ func (s *Server) callEnded(ctx context.Context, delivery scheduledDelivery, call
 // text this agent from. A number they only use on WhatsApp is not rung: a
 // person who chose to write there agreed to no call.
 func (s *Server) callableNumber(ctx context.Context, delivery scheduledDelivery) (string, error) {
-	identity, err := s.store.ChannelIdentityByUser(ctx, delivery.CustomerID, delivery.ConfigID, "sms", delivery.UserID)
-	if errors.Is(err, store.ErrUnknownChannelIdentity) {
+	identity, err := s.store.ContactMapEntries.GetByUser(ctx, delivery.CustomerID, delivery.ConfigID, "sms", delivery.UserID)
+	if errors.Is(err, store.ErrNoContact) {
 		return "", undelivered(scheduling.ReasonNoNumber, errors.New("the user has no number to call: they have never texted this agent"))
 	}
 	if err != nil {
@@ -1155,7 +1304,7 @@ func (s *Server) holdCall(ctx context.Context, created *session.Session, deliver
 	if created.CallerJoined() {
 		return s.carryOutAnswered(ctx, created, delivery, events)
 	}
-	ring := time.NewTimer(scheduledPhoneWindow)
+	ring := time.NewTimer(s.phoneWindow)
 	defer ring.Stop()
 	for {
 		select {
@@ -1177,7 +1326,12 @@ func (s *Server) holdCall(ctx context.Context, created *session.Session, deliver
 
 // carryOutAnswered sends the task as the first turn of a call somebody
 // picked up, and stays on it until it ends, or until scheduledCallLimit,
-// when the agent hangs up.
+// when the agent hangs up. A turn the organization may not pay for, refused
+// before the agent answered anything on the call, leaves the agent silent:
+// the attempt fails under the money (turnRefusal), final (callEnded), and the
+// agent hangs up. A refusal because the money could not be checked is final
+// too: a placed call is rung once. A refusal after the agent answered is a
+// later turn's: the task was said.
 func (s *Server) carryOutAnswered(ctx context.Context, created *session.Session, delivery scheduledDelivery, events <-chan session.Event) error {
 	// The call's turn has an id of its own: a channel tried before the call
 	// left its turn in the conversation under the run's, which would be taken
@@ -1186,15 +1340,22 @@ func (s *Server) carryOutAnswered(ctx context.Context, created *session.Session,
 	if err := s.followUpWithin(ctx, created, delivery); err != nil {
 		return undeliveredFinally(scheduling.ReasonFailed, err)
 	}
-	limit := time.NewTimer(scheduledCallLimit)
+	limit := time.NewTimer(s.callLimit)
 	defer limit.Stop()
+	answered := false
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case _, open := <-events:
+		case event, open := <-events:
 			if !open {
 				return nil
+			}
+			if refusal := turnRefusal(event); refusal != nil && !answered {
+				return refusal
+			}
+			if _, ok := event.(agent.Responded); ok {
+				answered = true
 			}
 		case <-limit.C:
 			return nil

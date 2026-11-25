@@ -9,6 +9,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy/policytest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage/ledger"
 )
@@ -67,8 +68,8 @@ func (s *RuntimeSuite) TestASessionsSandboxIsMadeWhileItsLimitsAreSlowToBeRead()
 	s.manager.options.SandboxLimits = money.Enforcer
 	stamp := uuid.NewString()
 	owner := routing.Owner{CustomerID: "app-" + stamp, Attribution: routing.Attribution{OrganizationID: "org-" + stamp}}
-	s.Require().NoError(money.Store.JoinOrganization(s.ctx, owner.CustomerID, owner.Attribution.OrganizationID))
-	money.Enforcer.Join(owner.CustomerID, owner.Attribution.OrganizationID, usage.DefaultTier)
+	s.Require().NoError(money.Store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: owner.CustomerID, OrganizationID: owner.Attribution.OrganizationID}))
+	money.Enforcer.Join(s.T().Context(), owner.CustomerID, owner.Attribution.OrganizationID, usage.DefaultTier)
 
 	box, err := s.manager.box(s.ctx, sandboxSpec(owner, sandbox.Config{}), nil)
 

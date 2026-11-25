@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
@@ -59,9 +60,9 @@ func (s *PriceSyncSuite) emptyDatabase(name string) string {
 	s.Require().NoError(err)
 	defer empty.Close()
 	var database string
-	s.Require().NoError(empty.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(empty.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = empty.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = empty.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	return own
 }
@@ -104,7 +105,7 @@ func (s *PriceSyncSuite) startPrices(ctx context.Context, pgStore *store.Store, 
 }
 
 func (s *PriceSyncSuite) changes(pgStore *store.Store) []store.PriceChange {
-	changes, err := pgStore.PriceChanges(s.ctx, store.PriceChangeFilter{})
+	changes, err := pgStore.PriceChanges.Select(s.ctx, store.PriceChangeFilter{})
 	s.Require().NoError(err)
 	return changes
 }
@@ -129,7 +130,7 @@ func (s *PriceSyncSuite) TestStartupSyncsAndAudits() {
 	s.Equal(store.PriceChangeSeed, seed.Kind)
 	s.Equal(s.settings.PricesFile+", vendor.json, router v1.3.0", seed.Source)
 	s.Equal("router v1.3.0", seed.CreatedBy)
-	active, err := pgStore.ActivePriceEntries(s.ctx, time.Now())
+	active, err := pgStore.PriceEntries.Active(s.ctx, time.Now())
 	s.Require().NoError(err)
 	s.Len(active, len(prices.Vendor().Entries)+2, "the file's own item and its BYOK twin")
 	for _, row := range active {
@@ -146,7 +147,7 @@ func (s *PriceSyncSuite) TestStartupSyncsAndAudits() {
 		}
 	}
 	var audits []store.AuditEntry
-	s.Require().NoError(pgStore.DB().NewSelect().Model(&audits).Where("resource_type = ?", store.AuditResourcePriceList).Scan(s.ctx))
+	s.Require().NoError(pgStore.GlobalDB().NewSelect().Model(&audits).Where("resource_type = ?", store.AuditResourcePriceList).Scan(s.ctx))
 	s.Require().Len(audits, 1)
 	s.Equal(seed.Name, audits[0].ResourceID)
 	s.Equal(store.AuditSourceCLI, audits[0].Source)
@@ -167,7 +168,7 @@ func (s *PriceSyncSuite) TestTheNextReleaseAddsOnlyItsNewItems() {
 	s.Require().Len(changes, 2)
 	s.Regexp(`^\d{14}_release_v1_4_0$`, changes[0].Name)
 	s.Equal("Items new in v1.4.0", changes[0].Reason)
-	_, entries, err := pgStore.PriceChange(s.ctx, changes[0].Name)
+	_, entries, err := pgStore.PriceChanges.Get(s.ctx, changes[0].Name)
 	s.Require().NoError(err)
 	s.Require().Len(entries, 2)
 	s.Equal("own-model", entries[0].Model)
@@ -210,7 +211,7 @@ func (s *PriceSyncSuite) TestRoutersStartingAtOnceLoadOnce() {
 				return
 			}
 			defer pgStore.Close()
-			_, _, _, failed[i] = pgStore.SyncPrices(ctx, load)
+			_, _, _, failed[i] = pgStore.PriceChanges.Sync(ctx, load)
 		})
 	}
 	wg.Wait()
@@ -311,7 +312,7 @@ func (s *PriceSyncSuite) changePrice(pgStore *store.Store, name string, entry pr
 	entry.Rates = map[pricing.Meter]pricing.Rate{pricing.InputTokens: {USD: usd, Per: 1_000_000}}
 	entry.Prices = entry.Rates
 	entry.Tiers, entry.PriceTiers, entry.Version, entry.SKU = nil, nil, "", ""
-	change, _, _, err := pgStore.CreatePriceChange(s.ctx, store.PriceChangeWrite{
+	change, _, _, err := pgStore.PriceChanges.Insert(s.ctx, store.PriceChangeWrite{
 		Name: name, Reason: "A test's change", Source: "the test", EffectiveAt: effectiveAt,
 		Entries: []store.PriceEntryWrite{{Entry: entry}}, ActorID: "tester", ActorName: "tester",
 	}, func(store.PriceListAt, []store.PriceEntryWrite) error { return nil })
@@ -332,7 +333,7 @@ func (s *PriceSyncSuite) tokenPriced() pricing.Entry {
 
 // rateOf is the input token rate the list in force charges for an entry's item and When.
 func (s *PriceSyncSuite) rateOf(pgStore *store.Store, entry pricing.Entry) float64 {
-	active, err := pgStore.ActivePriceEntries(s.ctx, time.Now())
+	active, err := pgStore.PriceEntries.Active(s.ctx, time.Now())
 	s.Require().NoError(err)
 	for _, row := range active {
 		if prices.Name(row.Entry()) == prices.Name(entry) {
@@ -359,10 +360,11 @@ func (s *PriceSyncSuite) TestReloadPutsTheFilesPricesBack() {
 	s.changePrice(pgStore, "own_later", own, 7, &later)
 	s.Require().InDelta(fileRate*3, s.rateOf(pgStore, vendor), 1e-12)
 	s.Require().InDelta(5.0, s.rateOf(pgStore, own), 1e-12)
-	s.Require().NoError(pgStore.RecordRequest(s.ctx, &store.Request{
-		Modality: "llm", CustomerID: "app", Provider: vendor.Provider, Model: vendor.Model, StartedAt: time.Now(),
-		CostMicros: 10, Billable: true, Success: true, PriceVersion: fixed.Name,
-	}))
+	_, err := pgStore.Requests.InsertMany(s.ctx, []store.Request{{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app", Provider: vendor.Provider, Model: vendor.Model,
+		StartedAt: time.Now(), CostMicros: 10, Billable: true, Success: true, PriceVersion: fixed.Name,
+	}})
+	s.Require().NoError(err)
 	var out bytes.Buffer
 
 	s.Require().NoError(runPricesReload(s.ctx, []string{"--development"}, s.settings, &out))
@@ -374,15 +376,15 @@ func (s *PriceSyncSuite) TestReloadPutsTheFilesPricesBack() {
 	seed := changes[0]
 	s.Equal(store.PriceChangeSeed, seed.Kind)
 	s.Equal(s.settings.PricesFile+", vendor.json, router dev", seed.Source)
-	upcoming, err := pgStore.UpcomingPriceEntries(s.ctx, time.Now())
+	upcoming, err := pgStore.PriceEntries.Source().Upcoming(s.ctx, time.Now())
 	s.Require().NoError(err)
 	s.Empty(upcoming, "the scheduled change went with the rest")
-	active, err := pgStore.ActivePriceEntries(s.ctx, time.Now())
+	active, err := pgStore.PriceEntries.Active(s.ctx, time.Now())
 	s.Require().NoError(err)
 	s.Len(active, len(prices.Vendor().Entries)+2)
 
 	var audits []store.AuditEntry
-	s.Require().NoError(pgStore.DB().NewSelect().Model(&audits).Where("resource_type = ?", store.AuditResourcePriceList).
+	s.Require().NoError(pgStore.GlobalDB().NewSelect().Model(&audits).Where("resource_type = ?", store.AuditResourcePriceList).
 		Order("created_at", "id").Scan(s.ctx))
 	s.Require().Len(audits, 6, "the first seed, three changes, the reload's removal and its seed")
 	removal, seedAudit := audits[4], audits[5]
@@ -439,7 +441,7 @@ func (s *PriceSyncSuite) TestReloadOnAFreshDatabaseSeedsIt() {
 	s.Equal(store.PriceChangeSeed, changes[0].Kind)
 	s.Contains(out.String(), "removed 0 price changes")
 	var audits []store.AuditEntry
-	s.Require().NoError(pgStore.DB().NewSelect().Model(&audits).Where("resource_type = ?", store.AuditResourcePriceList).Scan(s.ctx))
+	s.Require().NoError(pgStore.GlobalDB().NewSelect().Model(&audits).Where("resource_type = ?", store.AuditResourcePriceList).Scan(s.ctx))
 	s.Len(audits, 1, "only the seed's: nothing was removed")
 }
 
@@ -468,7 +470,7 @@ func (s *PriceSyncSuite) TestAHeldPricesLockDoesNotKeepTheRouterFromServing() {
 	holder, err := store.Open(s.settings.Postgres.DSN)
 	s.Require().NoError(err)
 	defer holder.Close()
-	held, err := holder.DB().BeginTx(s.ctx, nil)
+	held, err := holder.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	_, err = held.ExecContext(s.ctx, "SELECT pg_advisory_xact_lock(hashtextextended('router.prices', 0))")
 	s.Require().NoError(err)
@@ -494,7 +496,7 @@ func (s *PriceSyncSuite) TestARouterWhoseFirstLoadLostTheLockGoesReadyRightAfter
 	holder, err := store.Open(s.settings.Postgres.DSN)
 	s.Require().NoError(err)
 	defer holder.Close()
-	held, err := holder.DB().BeginTx(s.ctx, nil)
+	held, err := holder.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	_, err = held.ExecContext(s.ctx, "SELECT pg_advisory_xact_lock(hashtextextended('router.prices', 0))")
 	s.Require().NoError(err)
@@ -593,14 +595,36 @@ func (s *PriceSyncSuite) TestDriftNamesARowByItsUsageIDWhereItHasOne() {
 	s.Contains(out.String(), "(usage "+usageID+")")
 }
 
+func (s *PriceSyncSuite) TestDriftLeavesOutWorkOnTheCustomersOwnKey() {
+	pgStore := s.started()
+	s.recordWithVendorCost(pgStore, "grok-4.7", 1_000, 1_000)
+	// Priced at the BYOK fee, at no cost at the vendor's rates: the vendor bills the customer.
+	_, err := pgStore.Requests.InsertMany(s.ctx, []store.Request{{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app", Provider: "grok", Model: "grok-4.7", StartedAt: time.Now(),
+		CostMicros: 200, BaseCostMicros: 0, PriceVersion: "byok", BYOK: true, Billable: true, Success: true,
+		Attributes: map[string]string{store.VendorCostAttribute: "1000"},
+	}})
+	s.Require().NoError(err)
+	var out bytes.Buffer
+
+	s.Require().NoError(runPricesDrift(s.ctx, []string{"--json"}, s.settings, &out))
+
+	var models []driftedModel
+	s.Require().NoError(json.Unmarshal(out.Bytes(), &models))
+	s.Require().Len(models, 1)
+	s.Equal(1, models[0].Rows, "only the row on the operator's key")
+	s.Equal("ok", models[0].Status)
+}
+
 // recordWithVendorCost records an LLM row the list priced at cost, of work the vendor said
 // cost vendorCost.
 func (s *PriceSyncSuite) recordWithVendorCost(router *store.Store, model string, cost, vendorCost int64) {
-	s.Require().NoError(router.RecordRequest(s.ctx, &store.Request{
-		Modality: "llm", CustomerID: "app", Provider: "grok", Model: model, StartedAt: time.Now(),
-		CostMicros: cost, Billable: true, Success: true,
+	_, err := router.Requests.InsertMany(s.ctx, []store.Request{{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app", Provider: "grok", Model: model,
+		StartedAt: time.Now(), CostMicros: cost, Billable: true, Success: true,
 		Attributes: map[string]string{store.VendorCostAttribute: strconv.FormatInt(vendorCost, 10)},
-	}))
+	}})
+	s.Require().NoError(err)
 }
 
 // forwarder is a TCP proxy to a database that can be shut, which is a database a router

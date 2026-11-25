@@ -107,7 +107,7 @@ const (
 	// EmailHeader is the address the user UserHeader names signs in with, as the app's
 	// backend knows it. It is read from a server-side caller only, for the reason UserHeader
 	// is believed from one; from an end user's device it would let one person claim
-	// another's address. The router keeps the latest one per user (store.SetUserEmail).
+	// another's address. The router keeps the latest one per user (store.Users.SetEmail).
 	EmailHeader = "X-Stream-User-Email"
 	// APIKeyIDHeader, TierHeader and UsageCategoriesHeader are what the proxy says every
 	// usage entry is named by beside the app: the public key the request was made with, the
@@ -178,6 +178,15 @@ const (
 // makes the user id worth anything.
 func (k Kind) Verified() bool {
 	return k == KindServer || k == KindAuthenticated || k == KindGuest
+}
+
+// Reaches reports whether a caller of kind k going by userID may have what is kept under the
+// same user id for a caller of kind owner. The customer's backend reaches all of it, anybody
+// else what their own kind opened, and a verified user also what a backend opened in their name
+// (session.Owner.Reaches).
+func (k Kind) Reaches(owner Kind, userID string) bool {
+	return k == KindServer || k == owner ||
+		(owner == KindServer && k.Verified() && userID != "")
 }
 
 // Principal is who a request is from. AppID is the tenant: it is what rows are keyed by,
@@ -253,7 +262,8 @@ func (l Levels) Admits(kind Kind) bool {
 // ErrUnauthenticated when there is no such key, or it has been revoked or has expired.
 type Lookup func(ctx context.Context, key string) (App, error)
 
-// Authenticator resolves the principal a request carries.
+// Authenticator resolves the principal a request carries. A credential it refuses is
+// ErrUnauthenticated; any other error is answered as the router's own failure.
 type Authenticator interface {
 	Authenticate(ctx context.Context, r *http.Request) (Principal, error)
 }
@@ -413,7 +423,7 @@ func (k keyed) Authenticate(ctx context.Context, r *http.Request) (Principal, er
 
 	app, err := k.lookup(ctx, key)
 	if err != nil {
-		return Principal{}, ErrUnauthenticated
+		return Principal{}, err
 	}
 
 	// The method is pinned rather than taken from the token, because a token is allowed to

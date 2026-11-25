@@ -37,6 +37,11 @@ const (
 // maxPictures is the most pictures of one document that are kept to be read.
 const maxPictures = 500
 
+// maxKeptBytes is the most bytes the pictures kept from one document hold in all. Only a
+// picture's header is checked, and padding after it compresses a thousand times, so a file
+// of a few megabytes could otherwise keep gigabytes.
+const maxKeptBytes = 64 << 20
+
 const (
 	pictureOpen  = "<!-- picture "
 	pictureClose = " -->"
@@ -53,14 +58,16 @@ var pictureMarker = regexp.MustCompile(`<!-- picture (\d+) -->`)
 // pictures are the pictures of a document being read, in the order they are placed.
 type pictures struct {
 	kept []Picture
+	// size is how many bytes the kept pictures hold.
+	size int
 	// placed is the hash of every picture kept, so one placed again, as a logo in every
 	// section is, is read once and written where it first is.
 	placed map[[sha256.Size]byte]bool
 }
 
 // keep keeps a picture to be read and returns its marker. A picture that is too small to
-// be a figure, in a format no model is shown, too large to send, placed before, or more
-// than maxPictures is not kept, and its marker is empty.
+// be a figure, in a format no model is shown, too large to send, placed before, more than
+// maxPictures, or past maxKeptBytes is not kept, and its marker is empty.
 func (p *pictures) keep(data []byte) string {
 	if len(p.kept) >= maxPictures {
 		return ""
@@ -70,13 +77,14 @@ func (p *pictures) keep(data []byte) string {
 		return ""
 	}
 	mime, data, ok := readable(data)
-	if !ok {
+	if !ok || p.size+len(data) > maxKeptBytes {
 		return ""
 	}
 	if p.placed == nil {
 		p.placed = map[[sha256.Size]byte]bool{}
 	}
 	p.placed[hash] = true
+	p.size += len(data)
 	p.kept = append(p.kept, Picture{MIME: mime, Data: data})
 	return PictureMarker(len(p.kept))
 }

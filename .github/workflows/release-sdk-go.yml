@@ -3,8 +3,8 @@ name: Release Go SDK (verify)
 # A Go module is released by its tag: pushing sdks/go/vX.Y.Z is the release, and the Go module
 # proxy fetches it the first time anybody asks for it. This checks the tagged copy, then asks
 # for it from an empty module outside this repository, as a consumer would. It publishes
-# nothing and creates no GitHub Release: release.yml publishes the Python packages on any
-# published release.
+# nothing and creates no GitHub Release: release.yml publishes the Python packages when a
+# release is published for a tag that starts with `v`.
 on:
   push:
     tags: [ 'sdks/go/v*' ]
@@ -28,7 +28,7 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: { group: github-public-amd64 }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,6 +43,7 @@ jobs:
             exit 1
           fi
           git merge-base --is-ancestor HEAD origin/main || { echo "$TAG is not on main"; exit 1; }
+          grep -q "Version = \"${TAG#sdks/go/v}\"" sdks/go/stream/backend.go || { echo "stream.Version is not ${TAG#sdks/go/v}"; exit 1; }
 
       - uses: actions/setup-go@v5
         with:
@@ -61,7 +62,7 @@ jobs:
 
   consumer:
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: { group: github-public-amd64 }
     env:
       GOFLAGS: -mod=mod
       GOPROXY: https://proxy.golang.org

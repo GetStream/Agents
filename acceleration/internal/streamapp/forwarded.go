@@ -115,7 +115,7 @@ func (f *Forwarded) keep(ctx context.Context, app int64, token heldToken) (bool,
 	if err != nil {
 		return false, err
 	}
-	kept, err := f.store.KeepStreamAppToken(ctx, store.StreamAppToken{
+	kept, err := f.store.StreamAppTokens.Keep(ctx, &store.StreamAppToken{
 		StreamAppPK: app, CustomerID: token.customer, APIKey: token.apiKey,
 		Sealed: sealed, KEKVersion: f.sealer.CurrentVersion(), ExpiresAt: token.expires,
 	})
@@ -132,8 +132,9 @@ func (f *Forwarded) keep(ctx context.Context, app int64, token heldToken) (bool,
 
 // identity is the customer's own app acted in with the token held for it, refreshed
 // through the gateway when it is about to run out. ErrNoIdentity is an app with no token
-// held and none to be had.
-func (f *Forwarded) identity(ctx context.Context, customer string, app int64) (Identity, error) {
+// held and none to be had. Without refresh the gateway is not asked, so a token that has run
+// out is none to be had, as it is when the gateway will not mint another.
+func (f *Forwarded) identity(ctx context.Context, customer string, app int64, refresh bool) (Identity, error) {
 	if customer != CustomerOf(app) {
 		return Identity{}, ErrNoIdentity
 	}
@@ -141,7 +142,7 @@ func (f *Forwarded) identity(ctx context.Context, customer string, app int64) (I
 	if err != nil {
 		return Identity{}, err
 	}
-	if token.expires.Sub(f.now()) < refreshBefore && f.mint != nil {
+	if refresh && token.expires.Sub(f.now()) < refreshBefore && f.mint != nil {
 		minted, err := f.mint.ServerToken(ctx, app, token.apiKey)
 		switch {
 		case err == nil:
@@ -173,7 +174,7 @@ func (f *Forwarded) read(ctx context.Context, app int64) (heldToken, error) {
 	if ok && held.expires.Sub(f.now()) >= refreshBefore {
 		return held, nil
 	}
-	row, err := f.store.StreamAppToken(ctx, app)
+	row, err := f.store.StreamAppTokens.Get(ctx, app)
 	if errors.Is(err, store.ErrNoStreamAppToken) {
 		return heldToken{}, ErrNoIdentity
 	}

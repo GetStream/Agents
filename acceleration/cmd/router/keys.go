@@ -5,7 +5,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
@@ -21,7 +23,19 @@ const keysUsage = `usage: router keys create [flags]
   --org         the organization to put a new app in
   --key-name    what to call the key, so an operator knows which to revoke
   --env         live or test
+
+       router keys revoke --app <id> --key <id>
+
+  --app         the app the key belongs to
+  --key         the key to stop. Every router stops taking it at once when this command
+                has the routers' Redis (redis.addr), and within a minute when it has none
+                or that Redis does not take the change
 `
+
+// keysKeyring is the keyring `router keys create` seals a new key's secret with. A test
+// swaps it for one whose current version is not 1, which loadKeyring reaches only with a
+// KMS.
+var keysKeyring = loadKeyring
 
 // runKeys mints the first credential a self-hosted router has.
 //
@@ -33,7 +47,11 @@ func runKeys(args []string, settings config.Config, logger *slog.Logger) error {
 	if len(args) == 0 {
 		return errors.New(keysUsage)
 	}
-	if args[0] != "create" {
+	switch args[0] {
+	case "create":
+	case "revoke":
+		return revokeKey(args[1:], settings, logger, os.Stdout)
+	default:
 		return fmt.Errorf("unknown keys command %q\n\n%s", args[0], keysUsage)
 	}
 
@@ -54,7 +72,7 @@ func runKeys(args []string, settings config.Config, logger *slog.Logger) error {
 	}
 	defer pgStore.Close()
 
-	sealer, err := loadKeyring(ctx, settings, "minting a key needs")
+	sealer, err := keysKeyring(ctx, settings, "minting a key needs")
 	if err != nil {
 		return err
 	}
@@ -72,13 +90,13 @@ func runKeys(args []string, settings config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	if err := pgStore.CreateAPIKey(ctx, &store.APIKey{
+	if err := pgStore.APIKeys.Insert(ctx, &store.APIKey{
 		ID:         key,
 		AppID:      app.ID,
 		Name:       *keyName,
 		Env:        *environment,
 		Sealed:     sealed,
-		KEKVersion: auth.KEKVersion,
+		KEKVersion: sealer.CurrentVersion(),
 		Last4:      auth.Last4(secret),
 		CreatedBy:  "router keys create",
 	}); err != nil {
@@ -94,12 +112,54 @@ func runKeys(args []string, settings config.Config, logger *slog.Logger) error {
 	return nil
 }
 
+// revokeKey stops one of an app's keys. The app is asked for as well as the key, so a key
+// id pasted under the wrong app revokes nothing.
+//
+// Routers hold a key's owner in the cache for a minute. A command with the routers' Redis
+// drops it from every one at once; without Redis, or when the drop fails, it cannot tell
+// them, so it says the key works for up to a minute longer.
+func revokeKey(args []string, settings config.Config, logger *slog.Logger, out io.Writer) error {
+	flags := flag.NewFlagSet("keys revoke", flag.ContinueOnError)
+	appID := flags.String("app", "", "the app the key belongs to")
+	keyID := flags.String("key", "", "the key to revoke")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *appID == "" || *keyID == "" {
+		return errors.New("revoking a key needs both --app and --key")
+	}
+
+	ctx := context.Background()
+	pgStore, err := openStore(ctx, settings)
+	if err != nil {
+		return err
+	}
+	defer pgStore.Close()
+
+	told, err := pgStore.APIKeys.Revoke(ctx, *appID, *keyID, "router keys revoke")
+	if errors.Is(err, store.ErrNoAPIKey) {
+		return fmt.Errorf("app %s has no live key %s", *appID, *keyID)
+	}
+	if err != nil {
+		return err
+	}
+	logger.Info("revoked an api key", "app", *appID, "key", *keyID)
+	fmt.Fprintf(out, "revoked key %s of app %s\n", *keyID, *appID)
+	switch {
+	case settings.Redis.Addr == "":
+		fmt.Fprintln(out, "redis.addr is not set here, so the routers are not told: they drop it within a minute.")
+	case !told:
+		fmt.Fprintln(out, "the routers' Redis did not take the change, so the routers are not told: they drop it within a minute.")
+	}
+	return nil
+}
+
 // resolveApp finds the app the key is for, creating it and its organization when it is
 // not there yet. An id that already exists is used as it is, so running this twice adds a
 // second key rather than refusing.
 func resolveApp(ctx context.Context, pgStore *store.Store, appID, appName, orgName string) (store.App, error) {
 	if appID != "" {
-		app, err := pgStore.AppByID(ctx, appID)
+		app, err := pgStore.Apps.Get(ctx, appID)
 		if err == nil {
 			return app, nil
 		}
@@ -112,7 +172,7 @@ func resolveApp(ctx context.Context, pgStore *store.Store, appID, appName, orgNa
 		return store.App{}, errors.New("a new app needs an organization: pass --org")
 	}
 	org := store.Organization{Name: orgName}
-	if err := pgStore.CreateOrganization(ctx, &org); err != nil {
+	if err := pgStore.Organizations.Insert(ctx, &org); err != nil {
 		return store.App{}, err
 	}
 
@@ -121,7 +181,7 @@ func resolveApp(ctx context.Context, pgStore *store.Store, appID, appName, orgNa
 		name = orgName
 	}
 	app := store.App{ID: appID, OrganizationID: org.ID, Name: name}
-	if err := pgStore.CreateApp(ctx, &app); err != nil {
+	if err := pgStore.Apps.Insert(ctx, &app); err != nil {
 		return store.App{}, err
 	}
 	return app, nil

@@ -52,16 +52,27 @@ const (
 	// log records a configuration change as having been made with. An SDK syncing an agent
 	// directory is this one; the dashboard and the CLI name themselves.
 	ClientHeader = "X-Stream-Client"
-	ClientSDK    = "sdk"
+	// ClientSDK is how this SDK names itself there: its name and release, in the shape other
+	// Stream SDKs send (stream-chat-go's stream-go-client-<version>). The router counts any
+	// client starting stream-agents- as the SDK. A browser cannot set User-Agent, so this
+	// header is the one every SDK can name its release in.
+	ClientSDK = "stream-agents-go-v" + Version
+	// Version is this SDK's release, the tag sdks/go/vX.Y.Z without its v. It is written
+	// here by hand at each release (see the sdk-go skill), because build info reads (devel)
+	// for any build not fetched by tag.
+	Version = "0.5.1"
+	// UserAgent is what every request says this SDK is, which is how the router's request log
+	// tells which SDK, and which release of it, made a call.
+	UserAgent = "stream-agents-go/" + Version
 	// UsageCategoriesHeader is where a caller the proxy is not in front of names its usage
 	// categories, its team among them as team:<name>, joined with commas. Behind the proxy
 	// they are claims on the token instead, and the proxy deletes this header.
 	UsageCategoriesHeader = "X-Stream-Usage-Categories"
 	// MaxUsageCategories is the most usage categories a caller may name, its team included.
 	MaxUsageCategories = 10
-	// DefaultURL is the hosted router in us-east4. STREAM_ACCELERATION_URL or
-	// STREAM_ACCELERATION_REGION moves it.
-	DefaultURL = "https://accelerate-us-east4.gcp.stream-io-api.com"
+	// DefaultURL is the hosted router in the nearest healthy region.
+	// STREAM_ACCELERATION_URL or STREAM_ACCELERATION_REGION moves it.
+	DefaultURL = "https://accelerate.gcp.stream-io-api.com"
 )
 
 // tokenValidity is how long a minted token lasts. Short, because it is minted per request
@@ -94,9 +105,12 @@ func RegionURL(name string) (string, error) {
 	return "https://accelerate-" + name + ".gcp.stream-io-api.com", nil
 }
 
-// hosted says whether url is the hosted router in some region, which is always behind
-// the proxy.
+// hosted says whether url is the hosted router, nearest or in some region, which is always
+// behind the proxy.
 func hosted(url string) bool {
+	if url == DefaultURL {
+		return true
+	}
 	name, ok := strings.CutPrefix(url, "https://accelerate-")
 	if !ok {
 		return false
@@ -270,6 +284,7 @@ func (b Backend) token() (string, error) {
 func (b Backend) Credentials() (http.Header, error) {
 	header := http.Header{}
 	header.Set(ClientHeader, ClientSDK)
+	header.Set("User-Agent", UserAgent)
 	if b.ActingFor != "" {
 		header.Set(UserHeader, b.ActingFor)
 	}

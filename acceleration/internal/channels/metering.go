@@ -45,7 +45,8 @@ func Vendor(kind Kind) string {
 func sendFailed(error) string { return "send_failed" }
 
 // textMeter records one message on a channel, to or from other, priced by the channel, its
-// direction and where other is. An app the 10DLC sandbox holds has it priced and given away.
+// direction and where other is. An app the 10DLC sandbox holds has a text it sends priced and
+// given away; one it receives is billed, since the sandbox limits only what the app sends.
 // A WhatsApp or iMessage line sends through the app's own Meta or Linq account, which bills
 // the app, so its messages are priced and not billed again; an SMS line is a number bought
 // through the router, on the deployment's own Telnyx account, and is billed.
@@ -64,14 +65,16 @@ func (s *Service) textMeter(ctx context.Context, kind Kind, direction, other str
 		Code:       sendFailed,
 		Attributes: attributes,
 	}
-	held, err := s.gate.Sandboxed(ctx, owner.CustomerID)
-	if err != nil {
-		s.logger.Warn("could not tell whether the 10DLC sandbox holds an app; its texts are billed",
-			"customer", owner.CustomerID, "error", err)
-	}
-	if held {
-		meter.Free = true
-		meter.Attributes[phone.AttributeDLCSandbox] = "true"
+	if direction == store.Outbound {
+		held, err := s.gate.Sandboxed(ctx, owner.CustomerID)
+		if err != nil {
+			s.logger.Warn("could not tell whether the 10DLC sandbox holds an app; its texts are billed",
+				"customer", owner.CustomerID, "error", err)
+		}
+		if held {
+			meter.Free = true
+			meter.Attributes[phone.AttributeDLCSandbox] = "true"
+		}
 	}
 	if kind != SMS {
 		meter.Free = true
@@ -109,7 +112,11 @@ func (s *Service) received(ctx context.Context, account store.ChannelAccount, me
 func (s *Service) deliver(ctx context.Context, line Account, provider Provider, to, thread string, reply Reply,
 	owner routing.Owner) error {
 	meter := s.textMeter(ctx, line.Kind, store.Outbound, to, owner)
-	meter.Estimate = Sent{Messages: 1, Segments: Segments(reply.Text)}.Used()
+	estimate := Sent{Messages: 1, Segments: Segments(reply.Text)}
+	if e, ok := provider.(Estimator); ok {
+		estimate = e.Estimate(reply)
+	}
+	meter.Estimate = estimate.Used()
 	var partly error
 	_, err := routing.Call(ctx, meter, func(ctx context.Context) (Sent, error) {
 		sent, err := provider.Send(ctx, line, thread, reply)

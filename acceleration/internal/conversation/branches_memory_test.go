@@ -15,7 +15,10 @@ import (
 )
 
 // The store keeps a conversation's branches in production.
-var _ conversation.Branches = (*store.Store)(nil)
+var _ conversation.Branches = struct {
+	*store.BranchMessages
+	*store.BranchSwitches
+}{}
 
 // memoryBranches keeps branch switches the way the store does, in memory, for one router.
 // Advancing to failAdvanceTo, or counting the failCountAt-th message sent again, fails once:
@@ -35,7 +38,7 @@ func newMemoryBranches() *memoryBranches {
 	return &memoryBranches{copies: map[string]store.AgentBranchMessage{}, switches: map[string]store.AgentBranchSwitch{}}
 }
 
-func (m *memoryBranches) SaveBranchMessages(_ context.Context, messages []store.AgentBranchMessage) error {
+func (m *memoryBranches) UpsertMany(_ context.Context, messages []store.AgentBranchMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, message := range messages {
@@ -44,7 +47,7 @@ func (m *memoryBranches) SaveBranchMessages(_ context.Context, messages []store.
 	return nil
 }
 
-func (m *memoryBranches) BranchMessages(_ context.Context, customerID, sessionID string, responseIDs []string) ([]store.AgentBranchMessage, error) {
+func (m *memoryBranches) Select(_ context.Context, customerID, sessionID string, responseIDs []string) ([]store.AgentBranchMessage, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var found []store.AgentBranchMessage
@@ -60,7 +63,7 @@ func (m *memoryBranches) BranchMessages(_ context.Context, customerID, sessionID
 	return found, nil
 }
 
-func (m *memoryBranches) StartBranchSwitch(_ context.Context, row *store.AgentBranchSwitch) error {
+func (m *memoryBranches) Insert(_ context.Context, row *store.AgentBranchSwitch) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.switches[row.ID]; ok {
@@ -78,7 +81,7 @@ func (m *memoryBranches) StartBranchSwitch(_ context.Context, row *store.AgentBr
 
 var switchOrder = []string{store.SwitchSnapshotted, store.SwitchRewound, store.SwitchResending, store.SwitchDone}
 
-func (m *memoryBranches) AdvanceBranchSwitch(_ context.Context, customerID, id, state string) error {
+func (m *memoryBranches) Advance(_ context.Context, customerID, id, state string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failAdvanceTo == state {
@@ -93,7 +96,7 @@ func (m *memoryBranches) AdvanceBranchSwitch(_ context.Context, customerID, id, 
 	return nil
 }
 
-func (m *memoryBranches) AbandonBranchSwitch(_ context.Context, customerID, sessionID, id string) error {
+func (m *memoryBranches) Abandon(_ context.Context, customerID, sessionID, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	maps.DeleteFunc(m.copies, func(_ string, message store.AgentBranchMessage) bool {
@@ -103,7 +106,7 @@ func (m *memoryBranches) AbandonBranchSwitch(_ context.Context, customerID, sess
 	return nil
 }
 
-func (m *memoryBranches) CountBranchResent(_ context.Context, _, id string) (int, error) {
+func (m *memoryBranches) CountResent(_ context.Context, _, id string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.counted++
@@ -116,7 +119,7 @@ func (m *memoryBranches) CountBranchResent(_ context.Context, _, id string) (int
 	return row.Resent, nil
 }
 
-func (m *memoryBranches) UnfinishedBranchSwitches(_ context.Context, customerID, sessionID string) ([]store.AgentBranchSwitch, error) {
+func (m *memoryBranches) Unfinished(_ context.Context, customerID, sessionID string) ([]store.AgentBranchSwitch, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var found []store.AgentBranchSwitch
@@ -139,7 +142,7 @@ func (m *memoryBranches) row(id string) (store.AgentBranchSwitch, bool) {
 
 // copied are the ids of the messages kept as copies, oldest first.
 func (m *memoryBranches) copied(session string) []string {
-	found, _ := m.BranchMessages(context.Background(), "customer", session, nil)
+	found, _ := m.Select(context.Background(), "customer", session, nil)
 	var ids []string
 	for _, message := range found {
 		ids = append(ids, message.OriginalMessageID)

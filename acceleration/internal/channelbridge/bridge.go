@@ -124,16 +124,17 @@ const maxAnswerBytes = 1 << 20
 // none of them itself (keywords.go).
 var episodeSources = map[string]episodeSource{
 	"slack_bot": {source: store.EpisodeSlack, person: omnichannel.SlackUser},
-	"linq":      {source: store.EpisodeIMessage, person: byNumber, optOuts: dlc.IMessage, chats: true, oneToOne: linqOneToOne},
+	"linq":      {source: store.EpisodeIMessage, person: byNumber, optOuts: dlc.IMessage, chats: true, oneToOne: LinqOneToOne},
 	"telnyx":    {source: store.EpisodeSMS, person: byNumber, optOuts: dlc.SMS, answered: telnyxAnswered},
 	"whatsapp":  {source: store.EpisodeWhatsApp, person: byWhatsAppNumber, optOuts: dlc.WhatsApp, recipient: whatsAppNumber, window: whatsAppWindow},
 }
 
-// linqOneToOne is whether a Linq event's chat is one person's: data.chat.is_group false, as the
+// LinqOneToOne is whether a Linq event's chat is one person's: data.chat.is_group false, as the
 // 2026-02-03 payload in linq.yaml's [events] shows it. That page shows the field in its example
 // only, so an event that leaves it out, or writes it as anything but a boolean, is taken as a
-// group's: a task scheduled there would reach everyone in the chat.
-func linqOneToOne(raw []byte) bool {
+// group's: a task scheduled there would reach everyone in the chat. internal/channels' iMessage
+// lines read their deliveries with it too (linqProvider.Parse).
+func LinqOneToOne(raw []byte) bool {
 	var event struct {
 		Data struct {
 			Chat struct {
@@ -168,10 +169,10 @@ type episodeSource struct {
 	// chats is a thread key that is a chat, not the person a reply reaches: a Linq chat id
 	// (linq.yaml). Its replies reach the person who started the thread (replyTo) and everyone
 	// else in the chat, its members as far as their messages show them
-	// (store.AddChannelThreadMember), so one of them who opted out silences it (refusesReply).
+	// (store.ChannelThreadMembers.Insert), so one of them who opted out silences it (refusesReply).
 	chats bool
 	// oneToOne is whether a chat's raw event says the chat is one person's, not a group, so the
-	// thread records its author as the chat's person (store.SetChannelThreadChatPerson). Nil is
+	// thread records its author as the chat's person (store.ChannelThreads.SetChatPerson). Nil is
 	// never.
 	oneToOne func(raw []byte) bool
 	// window is how long after the person's last message the provider takes free text, when
@@ -368,7 +369,7 @@ func (b *Bridge) Close() {
 // Deliver takes the messages one verified event of a provider app carried. For each it finds
 // the app's connection of the provider unit and the agent that answers there, links the
 // external thread to its thread channel, and claims and queues the message by the provider's
-// id for it in one transaction (store.AcceptChannelInbound), so a retried delivery is dropped
+// id for it in one transaction (store.ChannelInbounds.Accept), so a retried delivery is dropped
 // and a claimed message is never left without its row. A worker on any router admits and
 // writes it into Stream Chat with its episode card (Start), off the request: a provider waits
 // a few seconds at most (Slack: «respond ... within three seconds»,
@@ -422,7 +423,7 @@ func (b *Bridge) Deliver(ctx context.Context, app store.ConnectorOAuthClient, me
 		// Off the request, so a provider that hangs up meanwhile leaves the message queued, or
 		// unclaimed, never claimed with no row.
 		accepting, cancel := b.detached(ctx)
-		fresh, err := b.store.AcceptChannelInbound(accepting, inboundRow(thread, config, message, forward), waited)
+		fresh, err := b.store.ChannelInbounds.Accept(accepting, inboundRow(thread, config, message, forward), waited)
 		cancel()
 		if err != nil {
 			return false, err
@@ -468,7 +469,7 @@ func (b *Bridge) admit(ctx context.Context, thread *store.ChannelThread, queued 
 		if source.oneToOne(message.Raw) {
 			thread.ChatPerson = message.AuthorID
 		}
-		if err := b.store.SetChannelThreadChatPerson(ctx, thread.ChannelID, thread.ChatPerson); err != nil {
+		if err := b.store.ChannelThreads.SetChatPerson(ctx, thread.ChannelID, thread.ChatPerson); err != nil {
 			return false, err
 		}
 	}
@@ -476,7 +477,7 @@ func (b *Bridge) admit(ctx context.Context, thread *store.ChannelThread, queued 
 	// any message after it (refusesReply). Every author counts, whatever data.chat.is_group
 	// says: a reply reaches whoever is in the chat.
 	if source := episodeSources[message.ConnectorID]; source.chats {
-		if err := b.store.AddChannelThreadMember(ctx, thread.ChannelID, source.recipientOf(message.AuthorID)); err != nil {
+		if err := b.store.ChannelThreadMembers.Insert(ctx, thread.ChannelID, source.recipientOf(message.AuthorID)); err != nil {
 			return false, err
 		}
 	}
@@ -558,7 +559,7 @@ func (b *Bridge) Send(reply conversation.FinishedReply) error {
 func (b *Bridge) reply(reply conversation.FinishedReply) error {
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
-	thread, err := b.store.ChannelThread(ctx, strings.TrimPrefix(reply.CID, chatlog.ChannelType+":"))
+	thread, err := b.store.ChannelThreads.Get(ctx, strings.TrimPrefix(reply.CID, chatlog.ChannelType+":"))
 	if err != nil {
 		return err
 	}
@@ -571,7 +572,7 @@ func (b *Bridge) reply(reply conversation.FinishedReply) error {
 		return err
 	}
 	text := withFiles(reply.Text, reply.Files)
-	fresh, err := b.store.ClaimChannelThreadMessage(ctx, thread.ChannelID, store.ClaimReply, reply.MessageID)
+	fresh, err := b.store.ChannelThreadMessages.Claim(ctx, thread.ChannelID, store.ClaimReply, reply.MessageID)
 	if err != nil || !fresh {
 		return err
 	}
@@ -609,7 +610,7 @@ func (b *Bridge) reply(reply conversation.FinishedReply) error {
 	// Not sent, so not claimed: whoever hands it over next sends it.
 	releasing, done := context.WithTimeout(context.Background(), sendTimeout)
 	defer done()
-	if released := b.store.ReleaseChannelThreadMessage(releasing, thread.ChannelID, store.ClaimReply, reply.MessageID); released != nil {
+	if released := b.store.ChannelThreadMessages.ReleaseReply(releasing, thread.ChannelID, reply.MessageID); released != nil {
 		return errors.Join(err, released)
 	}
 	return err
@@ -676,7 +677,7 @@ func (b *Bridge) take(ctx context.Context, app store.ConnectorOAuthClient, messa
 			"connector", message.ConnectorID, "customer", app.CustomerID, "connection", connection.ID,
 			"config", configs[0].ID, "not_answering", others)
 	}
-	definition, err := b.store.ConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
+	definition, err := b.store.ConnectorDefinitions.Get(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
 	if err != nil {
 		return store.ChannelThread{}, store.AgentConfig{}, nil, err
 	}
@@ -699,7 +700,7 @@ func (b *Bridge) take(ctx context.Context, app store.ConnectorOAuthClient, messa
 	// channel that does not mention the bot, starts no thread: it is answered only on a
 	// thread a message that did linked before (AI-989).
 	if !rule.Addresses(read, connection.Metadata) {
-		linked, err := b.store.ChannelThreadLinked(ctx, app.CustomerID, message.ConnectorID, message.ProviderUnitID, message.ThreadKey)
+		linked, err := b.store.ChannelThreads.Linked(ctx, app.CustomerID, message.ConnectorID, message.ProviderUnitID, message.ThreadKey)
 		if err == nil && !linked && !startsThread(read) {
 			linked, err = b.wait(ctx, app.CustomerID, *message)
 		}
@@ -726,7 +727,7 @@ func (b *Bridge) take(ctx context.Context, app store.ConnectorOAuthClient, messa
 		ThreadParts:    read.ThreadParts,
 		StreamAppPK:    app.StreamAppPK,
 	}
-	_, err = b.store.LinkChannelThread(ctx, &thread)
+	_, err = b.store.ChannelThreads.Link(ctx, &thread)
 	if err != nil {
 		return store.ChannelThread{}, store.AgentConfig{}, nil, err
 	}
@@ -735,7 +736,7 @@ func (b *Bridge) take(ctx context.Context, app store.ConnectorOAuthClient, messa
 	// mention in a thread of people, leaves them waiting until they are dropped: some came
 	// before the bot was spoken to, which it does not read (AI-989). The message takes them
 	// whether or not it made the link now and whether or not it was taken before, and each
-	// waiting reply is handed out once (store.AcceptChannelInbound).
+	// waiting reply is handed out once (store.ChannelInbounds.Accept).
 	if startsThread(read) {
 		waiting = func(reply core.InboundMessage) (core.InboundMessage, bool, error) {
 			read, rule, err := b.read(connection, definition, reply)
@@ -766,14 +767,14 @@ func (b *Bridge) take(ctx context.Context, app store.ConnectorOAuthClient, messa
 // that message answers it. The second look is after the reply is kept, so one of the two
 // always finds it.
 func (b *Bridge) wait(ctx context.Context, customerID string, message core.InboundMessage) (linked bool, err error) {
-	if _, err := b.store.WaitChannelThreadMessage(ctx, customerID, message); err != nil {
+	if _, err := b.store.WaitingMessages.Wait(ctx, customerID, message); err != nil {
 		return false, err
 	}
-	linked, err = b.store.ChannelThreadLinked(ctx, customerID, message.ConnectorID, message.ProviderUnitID, message.ThreadKey)
+	linked, err = b.store.ChannelThreads.Linked(ctx, customerID, message.ConnectorID, message.ProviderUnitID, message.ThreadKey)
 	if err != nil || !linked {
 		return false, err
 	}
-	return b.store.UnwaitChannelThreadMessage(ctx, customerID, message)
+	return b.store.WaitingMessages.Unwait(ctx, customerID, message)
 }
 
 // startsThread is whether a message is the first of its thread: its own id is a part of its
@@ -819,7 +820,7 @@ func (b *Bridge) episode(ctx context.Context, thread store.ChannelThread, config
 }
 
 // recordStarter records the author of a chat's message as the person who started the chat
-// (store.SetChannelThreadStarter), at the step whose message would open the chat's episode, so
+// (store.ChannelThreads.SetStarter), at the step whose message would open the chat's episode, so
 // the first one the bridge admits names them whatever the config's episode_cards: the person
 // its replies reach while it has no episode (replyTo). An author the contact map cannot key,
 // such as an email handle, starts no chat, as they open no episode.
@@ -832,7 +833,7 @@ func (b *Bridge) recordStarter(ctx context.Context, thread store.ChannelThread, 
 	if err != nil {
 		return nil
 	}
-	return b.store.SetChannelThreadStarter(ctx, thread.ChannelID, person.Address)
+	return b.store.ChannelThreads.SetStarter(ctx, thread.ChannelID, person.Address)
 }
 
 // queuedEpisode opens the episode of a queued message (episode) under its agent config as the
@@ -845,7 +846,7 @@ func (b *Bridge) queuedEpisode(ctx context.Context, thread store.ChannelThread, 
 	if _, carded := episodeSources[message.ConnectorID]; !carded {
 		return omnichannel.Opened{}, nil
 	}
-	config, err := b.store.AgentConfig(ctx, message.CustomerID, message.ConfigID)
+	config, err := b.store.AgentConfigs.Get(ctx, message.CustomerID, message.ConfigID)
 	if errors.Is(err, store.ErrNoAgentConfig) {
 		return omnichannel.Opened{}, nil
 	}
@@ -1026,7 +1027,7 @@ func withFiles(text string, files []sandbox.Attachment) string {
 
 // send posts one reply through the connection's manifest reply template and transport.
 func (b *Bridge) send(ctx context.Context, thread store.ChannelThread, text string) error {
-	connection, err := b.store.ConnectorConnection(ctx, thread.CustomerID, thread.ConnectionID)
+	connection, err := b.store.ConnectorConnections.Get(ctx, thread.CustomerID, thread.ConnectionID)
 	if err != nil {
 		return err
 	}
@@ -1034,11 +1035,11 @@ func (b *Bridge) send(ctx context.Context, thread store.ChannelThread, text stri
 	if !found {
 		return stack.Wrap(fmt.Errorf("%w: %q", store.ErrUnregisteredScheme, connection.AuthScheme))
 	}
-	definition, err := b.store.ConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
+	definition, err := b.store.ConnectorDefinitions.Get(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
 	if err != nil {
 		return err
 	}
-	resolved, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
+	resolved, err := definition.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	if err != nil {
 		return stack.Wrap(err)
 	}

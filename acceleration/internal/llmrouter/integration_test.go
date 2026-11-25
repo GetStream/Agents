@@ -131,7 +131,7 @@ func (s *LLMRouterIntegrationSuite) newRouter() *Router {
 // requests reads back the rows recorded for the current customer.
 func (s *LLMRouterIntegrationSuite) requests() []store.Request {
 	var rows []store.Request
-	err := s.store.DB().NewSelect().
+	err := s.store.GlobalDB().NewSelect().
 		Model(&rows).
 		Where("customer_id = ?", s.customerID).
 		Order("id ASC").
@@ -228,10 +228,10 @@ func (s *LLMRouterIntegrationSuite) TestCompletedTurnsAreRecordedWithTheirTokens
 	// The same rows aggregate into the customer's hourly stats.
 	from := time.Now().UTC().Add(-2 * time.Hour)
 	to := time.Now().UTC().Add(2 * time.Hour)
-	_, err = s.store.Rollup(s.ctx, store.Hourly, from, to)
+	_, err = s.store.Buckets.Rollup(s.ctx, store.Hourly, from, to)
 	s.Require().NoError(err)
 
-	buckets, err := s.store.CustomerStats(s.ctx, "llm", s.customerID, store.Hourly, from, to, nil)
+	buckets, err := s.store.Buckets.Select(s.ctx, s.customerID, store.BucketFilter{Modality: "llm", Granularity: store.Hourly, From: from, To: to})
 	s.Require().NoError(err)
 	s.Require().NotEmpty(buckets)
 	s.Positive(buckets[0].InputTokensTotal)

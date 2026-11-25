@@ -1,6 +1,6 @@
 import type { RewoundTo } from "./branches.js";
 import { onRetry, type Client, type Schemas } from "./client.js";
-import { ConfigurationError } from "./errors.js";
+import { ConfigurationError, UnnamedTurnError } from "./errors.js";
 
 /** How many items are read per request while unwinding. */
 const ITEM_PAGE = 200;
@@ -63,11 +63,14 @@ export class Items {
   private readonly sessionId: string;
   /** Empty for every turn in the session, set for one response's own items. */
   private readonly responseId: string;
+  /** Set on one turn's items, whose empty `responseId` names no turn rather than every one. */
+  private readonly turn: boolean;
 
-  constructor(client: Client, sessionId: string, responseId = "") {
+  constructor(client: Client, sessionId: string, responseId = "", turn = false) {
     this.client = client;
     this.sessionId = sessionId;
     this.responseId = responseId;
+    this.turn = turn;
   }
 
   /**
@@ -92,8 +95,17 @@ export class Items {
     }
   }
 
-  /** One page of items, for a caller doing its own paging. */
-  list(options: { limit?: number; cursor?: string } = {}): Promise<Schemas["AgentResponseItemPage"]> {
+  /**
+   * One page of items, for a caller doing its own paging.
+   *
+   * Fails with `UnnamedTurnError` for a turn the router gave no id.
+   */
+  async list(options: { limit?: number; cursor?: string } = {}): Promise<Schemas["AgentResponseItemPage"]> {
+    // Without this, the request leaves response_id out and reads every turn in the session:
+    // the whole conversation passed off as this turn's, or nothing at all for an incognito one.
+    if (this.turn && !this.responseId) {
+      throw new UnnamedTurnError();
+    }
     return this.client.get("/v1/agents/sessions/{id}/responses/items", {
       path: { id: this.sessionId },
       query: {
@@ -121,6 +133,10 @@ export class Items {
  * finished, because a model takes seconds and a request that waited them out would time out
  * on anything worth asking. So this is a handle on an answer in progress: `items.unwind()`
  * reads what has been written down so far, and `session.events()` is what watches it arrive.
+ *
+ * A turn the router gave no id (an incognito session, a speech-to-speech session, or the
+ * retry of a `requestId` it already took) has no items of its own: reading them fails with
+ * `UnnamedTurnError` rather than reading every turn in the session.
  */
 export class AgentResponse {
   readonly created: Schemas["AgentResponse"];
@@ -128,10 +144,13 @@ export class AgentResponse {
 
   constructor(client: Client, created: Schemas["AgentResponse"]) {
     this.created = created;
-    this.items = new Items(client, created.session_id, created.id);
+    this.items = new Items(client, created.session_id, created.id, true);
   }
 
-  /** The backend's id for this turn, empty for a session that records nothing. */
+  /**
+   * The backend's id for this turn: empty for a session that records nothing, a
+   * speech-to-speech session, and the retry of a `requestId` already taken.
+   */
   get id(): string {
     return this.created.id;
   }

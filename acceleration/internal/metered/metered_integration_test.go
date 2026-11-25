@@ -89,7 +89,7 @@ func (s *MeteredSuite) priced(modality routing.Modality, provider, model string,
 func (s *MeteredSuite) rows() []store.Request {
 	s.recorder.Close()
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", s.owner.CustomerID).
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", s.owner.CustomerID).
 		Order("started_at", "id").Scan(s.ctx))
 	return rows
 }
@@ -127,9 +127,9 @@ func (s *MeteredSuite) TestEachKnowledgeCallWritesOneRowOfWhatItWasBilled() {
 		used  pricing.Quantities
 	}{
 		{KnowledgeWrite, pricing.Quantities{pricing.Requests: 1, pricing.BytesWritten: passage}},
-		{KnowledgeLookup, pricing.Quantities{pricing.Requests: 1, pricing.BytesQueried: turbopuffertest.MinimumQueried,
+		{KnowledgeLookup, pricing.Quantities{pricing.Requests: 1, pricing.BytesQueried: 1_280_000_000,
 			pricing.BytesReturned: passage, pricing.Results: 1}},
-		{KnowledgeLookup, pricing.Quantities{pricing.Requests: 1, pricing.BytesQueried: turbopuffertest.MinimumQueried,
+		{KnowledgeLookup, pricing.Quantities{pricing.Requests: 1, pricing.BytesQueried: 1_280_000_000,
 			pricing.BytesReturned: passage, pricing.Results: 1}},
 		{KnowledgeWrite, pricing.Quantities{pricing.Requests: 1, pricing.BytesWritten: int64(len("pricing.md#0"))}},
 	} {
@@ -355,5 +355,5 @@ func (s *MeteredSuite) TestEveryKnowledgeCallIsRecorded() {
 		s.NotEmpty(row.Attributes[routing.AttributeProviderCostMicros])
 	}
 	s.Positive(rows[0].Quantities()[pricing.BytesWritten])
-	s.GreaterOrEqual(rows[1].Quantities()[pricing.BytesQueried], int64(turbopuffertest.MinimumQueried))
+	s.GreaterOrEqual(rows[1].Quantities()[pricing.BytesQueried], int64(1_280_000_000))
 }

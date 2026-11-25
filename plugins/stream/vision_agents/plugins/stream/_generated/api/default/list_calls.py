@@ -16,6 +16,7 @@ def _get_kwargs(
     running: bool | Unset = False,
     limit: int | Unset = 50,
     agent_id: str | Unset = UNSET,
+    session_id: str | Unset = UNSET,
     campaign_id: str | Unset = UNSET,
     from_: datetime.datetime | Unset = UNSET,
     to: datetime.datetime | Unset = UNSET,
@@ -29,6 +30,8 @@ def _get_kwargs(
     params["limit"] = limit
 
     params["agent_id"] = agent_id
+
+    params["session_id"] = session_id
 
     params["campaign_id"] = campaign_id
 
@@ -121,6 +124,7 @@ def sync_detailed(
     running: bool | Unset = False,
     limit: int | Unset = 50,
     agent_id: str | Unset = UNSET,
+    session_id: str | Unset = UNSET,
     campaign_id: str | Unset = UNSET,
     from_: datetime.datetime | Unset = UNSET,
     to: datetime.datetime | Unset = UNSET,
@@ -136,6 +140,8 @@ def sync_detailed(
         running (bool | Unset):  Default: False.
         limit (int | Unset):  Default: 50.
         agent_id (str | Unset): Narrow to one agent.
+        session_id (str | Unset): Narrow to the calls of one session, which starts a new one each
+            time voice is started or stopped on it.
         campaign_id (str | Unset): Narrow to the calls one campaign placed.
         from_ (datetime.datetime | Unset): Only calls that started at or after this, inclusive.
         to (datetime.datetime | Unset): Only calls that started before this, exclusive.
@@ -153,6 +159,7 @@ def sync_detailed(
         running=running,
         limit=limit,
         agent_id=agent_id,
+        session_id=session_id,
         campaign_id=campaign_id,
         from_=from_,
         to=to,
@@ -172,6 +179,7 @@ def sync(
     running: bool | Unset = False,
     limit: int | Unset = 50,
     agent_id: str | Unset = UNSET,
+    session_id: str | Unset = UNSET,
     campaign_id: str | Unset = UNSET,
     from_: datetime.datetime | Unset = UNSET,
     to: datetime.datetime | Unset = UNSET,
@@ -187,6 +195,8 @@ def sync(
         running (bool | Unset):  Default: False.
         limit (int | Unset):  Default: 50.
         agent_id (str | Unset): Narrow to one agent.
+        session_id (str | Unset): Narrow to the calls of one session, which starts a new one each
+            time voice is started or stopped on it.
         campaign_id (str | Unset): Narrow to the calls one campaign placed.
         from_ (datetime.datetime | Unset): Only calls that started at or after this, inclusive.
         to (datetime.datetime | Unset): Only calls that started before this, exclusive.
@@ -205,6 +215,7 @@ def sync(
         running=running,
         limit=limit,
         agent_id=agent_id,
+        session_id=session_id,
         campaign_id=campaign_id,
         from_=from_,
         to=to,
@@ -218,6 +229,7 @@ async def asyncio_detailed(
     running: bool | Unset = False,
     limit: int | Unset = 50,
     agent_id: str | Unset = UNSET,
+    session_id: str | Unset = UNSET,
     campaign_id: str | Unset = UNSET,
     from_: datetime.datetime | Unset = UNSET,
     to: datetime.datetime | Unset = UNSET,
@@ -233,6 +245,8 @@ async def asyncio_detailed(
         running (bool | Unset):  Default: False.
         limit (int | Unset):  Default: 50.
         agent_id (str | Unset): Narrow to one agent.
+        session_id (str | Unset): Narrow to the calls of one session, which starts a new one each
+            time voice is started or stopped on it.
         campaign_id (str | Unset): Narrow to the calls one campaign placed.
         from_ (datetime.datetime | Unset): Only calls that started at or after this, inclusive.
         to (datetime.datetime | Unset): Only calls that started before this, exclusive.
@@ -250,6 +264,7 @@ async def asyncio_detailed(
         running=running,
         limit=limit,
         agent_id=agent_id,
+        session_id=session_id,
         campaign_id=campaign_id,
         from_=from_,
         to=to,
@@ -267,6 +282,7 @@ async def asyncio(
     running: bool | Unset = False,
     limit: int | Unset = 50,
     agent_id: str | Unset = UNSET,
+    session_id: str | Unset = UNSET,
     campaign_id: str | Unset = UNSET,
     from_: datetime.datetime | Unset = UNSET,
     to: datetime.datetime | Unset = UNSET,
@@ -282,6 +298,8 @@ async def asyncio(
         running (bool | Unset):  Default: False.
         limit (int | Unset):  Default: 50.
         agent_id (str | Unset): Narrow to one agent.
+        session_id (str | Unset): Narrow to the calls of one session, which starts a new one each
+            time voice is started or stopped on it.
         campaign_id (str | Unset): Narrow to the calls one campaign placed.
         from_ (datetime.datetime | Unset): Only calls that started at or after this, inclusive.
         to (datetime.datetime | Unset): Only calls that started before this, exclusive.
@@ -301,6 +319,7 @@ async def asyncio(
             running=running,
             limit=limit,
             agent_id=agent_id,
+            session_id=session_id,
             campaign_id=campaign_id,
             from_=from_,
             to=to,

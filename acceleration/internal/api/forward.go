@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httputil"
@@ -9,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
 // forwardTimeout bounds one request carried to the node that can answer it. Generous,
@@ -31,9 +34,10 @@ const unreachableNode = "the node running this session could not be reached"
 // that process, so without this a request lands on a node that cannot answer it and is
 // told the session does not exist.
 //
-// Outermost of this server's own middlewares, so a request that belongs elsewhere is not
-// authenticated, logged or counted against a quota twice: the node that answers does all
-// three, and this one only hands it over.
+// Inside withCustomer, so a session is found by the caller's customer and its id: two
+// customers may each have a session of one id. The node that answers authenticates the caller
+// again, as it does every request it serves, and is the only one to log it or count it against
+// a quota.
 func (s *Server) onOwningNode(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		address, elsewhere := s.owningNode(r)
@@ -91,18 +95,24 @@ func (s *Server) owningNode(r *http.Request) (string, bool) {
 }
 
 // nodeFor is the node the directory says runs the session a request is about, false when
-// the request is about none or this node runs it.
+// the request is about none, names no customer, or this node runs it. A request that names no
+// customer is answered here, where it is refused.
 func (s *Server) nodeFor(r *http.Request) (string, bool) {
+	customer, ok := CustomerFrom(r.Context())
+	if !ok {
+		return "", false
+	}
 	if cid, ok := approvalInPath(r.URL.Path); ok {
 		if s.sessions != nil {
-			if _, running := s.sessions.ByConversationWhere(cid, nil); running {
+			// Another customer's session in a conversation of the same cid is no reason to answer here.
+			if _, running := s.sessions.ByConversationWhere(cid, func(owner string, _ int64) bool { return owner == customer }); running {
 				return "", false
 			}
 		}
-		address, err := s.directory.NodeByConversation(r.Context(), cid)
+		address, err := s.directory.NodeByConversation(r.Context(), customer, cid)
 		if err != nil {
 			s.logger.Warn("could not find out which node is answering in a conversation",
-				"conversation", cid, "error", err)
+				"customer", customer, "conversation", cid, "error", err)
 			return "", false
 		}
 		return address, true
@@ -111,14 +121,14 @@ func (s *Server) nodeFor(r *http.Request) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if s.sessions != nil && s.sessions.Running(id) {
+	if s.sessions != nil && s.sessions.Running(customer, id) {
 		return "", false
 	}
 
-	address, err := s.directory.Node(r.Context(), id)
+	address, err := s.directory.Node(r.Context(), customer, id)
 	if err != nil {
 		s.logger.Warn("could not find out which node is running a session",
-			"session", id, "error", err)
+			"customer", customer, "session", id, "error", err)
 		return "", false
 	}
 	return address, true
@@ -175,13 +185,20 @@ func approvalInPath(path string) (string, bool) {
 // goes to a worker instead, which is a second agent writing into a conversation the first
 // is already answering in. So the directory decides, not the handover: a node that holds
 // the conversation and cannot be reached is still the only one that may answer. taken is
-// false when that node could not be reached or would not take the message.
+// false when that node could not be reached or would not take the message. A channel sessions
+// of more than one customer write in, and that nothing says is one customer's, is answered by
+// none of them, as liveSessionOn answers one here: elsewhere and taken.
 func (s *Server) forwardedMessage(ctx context.Context, origin hookOrigin, event messageEvent) (elsewhere, taken bool) {
 	if s.directory == nil || s.forwarder == nil || origin.handOver == nil {
 		return false, false
 	}
 
-	address, err := s.directory.NodeByAgent(ctx, event.ChannelID)
+	address, err := s.answeringNode(ctx, origin, event)
+	if errors.Is(err, store.ErrAmbiguousHook) {
+		s.logger.Warn("not answering a message in a channel more than one customer's sessions run on",
+			"channel", event.ChannelID, "stream_app", origin.app, "error", err)
+		return true, true
+	}
 	if err != nil {
 		s.logger.Warn("could not find out which node is answering in a channel",
 			"channel", event.ChannelID, "error", err)
@@ -206,6 +223,39 @@ func (s *Server) forwardedMessage(ctx context.Context, origin hookOrigin, event 
 	}
 
 	return true, false
+}
+
+// answeringNode is the node running the session that answers a message, among the sessions in
+// the hook's app (origin.owns), by customer as liveSessionOn picks one here: the hook's
+// customer's, and in the deployment's app the customer's the channel names or else the store
+// does. While neither does, it is the only customer's writing as the agent, and
+// store.ErrAmbiguousHook when there are more.
+func (s *Server) answeringNode(ctx context.Context, origin hookOrigin, event messageEvent) (string, error) {
+	if !origin.deployment {
+		return s.directory.NodeByAgent(ctx, origin.customer, origin.app, event.ChannelID)
+	}
+	nodes, err := s.directory.NodesByAgent(ctx, event.ChannelID, origin.owns)
+	if err != nil || len(nodes) == 0 {
+		return "", err
+	}
+	if owner, stamped := event.ChannelCustom[conversation.CustomerField]; stamped {
+		customer, _ := owner.(string)
+		return nodes[customer], nil
+	}
+	owner, known, err := s.storedOwnerOf(ctx, origin, event)
+	if err != nil {
+		return "", err
+	}
+	if known {
+		return nodes[owner], nil
+	}
+	if len(nodes) > 1 {
+		return "", store.ErrAmbiguousHook
+	}
+	for _, address := range nodes {
+		return address, nil
+	}
+	return "", nil
 }
 
 // forwardedToWorkers hands a hook to another node with a worker waiting for the customer,

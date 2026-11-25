@@ -38,6 +38,14 @@ public final class AgentSession: ObservableObject {
     public var turns: [Turn] { conversation.turns }
     public var state: Conversation.State { conversation.state }
 
+    /// The calls one agent turn made, in the order they started: the ones to show under that
+    /// turn's message. A view reading it redraws as they change, as with `toolCalls`.
+    public func toolCalls(forTurn turnID: String) -> [ToolCallState] {
+        toolCalls.values
+            .filter { $0.turnID == turnID }
+            .sorted { ($0.startedAt ?? .distantPast, $0.id) < ($1.startedAt ?? .distantPast, $1.id) }
+    }
+
     /// This session's turns as the router wrote them down: asking, reading back, rewinding.
     ///
     /// What is asked here is shown in `turns` straight away, since a conversation in writing
@@ -492,11 +500,18 @@ public final class AgentSession: ObservableObject {
     ///
     /// A task of its own, so a slow tool does not hold up the transcript. The handler is a
     /// nonisolated async closure, so its body does not run on the main actor even though this
-    /// call site is on it.
+    /// call site is on it. A typed tool decodes its type from the arguments as written: turning
+    /// the dictionary back into JSON there recurses as deep as the model nested it, on a
+    /// smaller stack than the main thread's.
     private func run(_ call: AgentEvent.ToolCall, with tool: AgentTool) {
         Task { [socket] in
             do {
-                let output = try await tool.run(call.argumentValues)
+                let output: ToolOutput
+                if let runWritten = tool.runWritten {
+                    output = try await runWritten(call.arguments)
+                } else {
+                    output = try await tool.run(call.argumentValues)
+                }
                 try await socket.send(
                     .toolResult(
                         id: call.id, output: output.text, error: nil, images: output.images,

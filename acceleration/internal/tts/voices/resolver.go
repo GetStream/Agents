@@ -7,11 +7,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // Resolver answers what one provider calls a customer's own voice.
@@ -20,7 +20,7 @@ import (
 // the call. A provider's own library voice is passed straight through, so nothing about
 // existing configs changes, unless the provider says it has no such voice.
 type Resolver struct {
-	store   *appconfig.Store
+	store   *store.Store
 	library *Catalogue
 }
 
@@ -28,7 +28,7 @@ var _ routing.VoiceVetter = (*Resolver)(nil)
 
 // NewResolver returns a resolver backed by the configuration store. The library, which may
 // be nil, is what checks a voice that is not the customer's own.
-func NewResolver(backing *appconfig.Store, library *Catalogue) *Resolver {
+func NewResolver(backing *store.Store, library *Catalogue) *Resolver {
 	return &Resolver{store: backing, library: library}
 }
 
@@ -45,23 +45,23 @@ func (r *Resolver) ResolveVoice(ctx context.Context, customerID, provider, voice
 	asked, theirs := strings.CutPrefix(voice, options.OwnVoicePrefix)
 	if r.store == nil || customerID == "" || asked == "" {
 		if theirs {
-			return "", notTheirs(asked)
+			return "", routing.Refused(notTheirs(asked))
 		}
-		return r.passThrough(ctx, provider, voice)
+		return r.passThrough(ctx, customerID, provider, voice)
 	}
 
 	own, err := r.own(ctx, customerID, asked)
 	if errors.Is(err, store.ErrNoVoice) {
 		if theirs {
-			return "", notTheirs(asked)
+			return "", routing.Refused(notTheirs(asked))
 		}
-		return r.passThrough(ctx, provider, voice)
+		return r.passThrough(ctx, customerID, provider, voice)
 	}
 	if err != nil {
 		return "", err
 	}
 
-	externalID, err := r.store.ReadyVoiceBinding(ctx, customerID, own.ID, provider)
+	externalID, err := r.store.VoiceBindings.GetReady(ctx, customerID, own.ID, provider)
 	if errors.Is(err, store.ErrNoVoice) {
 		return "", stack.Wrap(routing.ErrVoiceNotPrepared)
 	}
@@ -92,9 +92,30 @@ func (r *Resolver) Unvouched(ctx context.Context, customerID, voice string, prov
 }
 
 // passThrough hands a voice that is not the customer's own to the provider as asked, once
-// the provider's library has not said it is missing. A voice the request's overwrites
-// replace is not asked of the provider, so it is not checked.
-func (r *Resolver) passThrough(ctx context.Context, provider, voice string) (string, error) {
+// the provider's library has not said it is missing. The deployment's provider accounts hold
+// every customer's clones, so an id another customer's voice was prepared as is refused
+// rather than spoken in. A voice the request's overwrites replace is not asked of the
+// provider, so it is not checked. An id not shaped like the provider's ids is refused before
+// the ownership check, so the string it compares is the one the provider is handed; under
+// overwrites the provider's own factory refuses it (elevenlabs.checkVoice), since the voice
+// asked at the top level is then not the one it speaks.
+func (r *Resolver) passThrough(ctx context.Context, customerID, provider, voice string) (string, error) {
+	canonical, err := voiceid.Canonical(provider, voice)
+	if err != nil && !routing.VoiceOverwritten(ctx) {
+		return "", routing.Refused(err)
+	}
+	if err == nil {
+		voice = canonical
+	}
+	if r.store != nil {
+		elsewhere, err := r.store.VoiceBindings.Elsewhere(ctx, customerID, provider, voice)
+		if err != nil {
+			return "", err
+		}
+		if elsewhere {
+			return "", routing.Refused(notTheirs(voice))
+		}
+	}
 	if r.library == nil || routing.VoiceOverwritten(ctx) {
 		return voice, nil
 	}
@@ -113,12 +134,12 @@ func notTheirs(voice string) error {
 // own finds the customer's voice by id, and failing that by the name they gave it, since
 // a config is easier to read with a name in it than an opaque id.
 func (r *Resolver) own(ctx context.Context, customerID, voice string) (store.Voice, error) {
-	found, err := r.store.Voice(ctx, customerID, voice)
+	found, err := r.store.Voices.Get(ctx, customerID, voice)
 	if err == nil {
 		return found, nil
 	}
 	if !errors.Is(err, store.ErrNoVoice) {
 		return store.Voice{}, err
 	}
-	return r.store.VoiceNamed(ctx, customerID, voice)
+	return r.store.Voices.GetByName(ctx, customerID, voice)
 }

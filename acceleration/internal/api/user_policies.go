@@ -4,18 +4,25 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/quota"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/transitional"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 )
 
 // errUserPolicyQuotaOnly answers a user's policy that sets anything but a quota.
 var errUserPolicyQuotaOnly = invalidRequest("a user's policy holds a quota only: data_policy, prompt_injection, " +
 	"allowed_models, tags, require_own_stream_app and balance_warning_micros are set on the app or the organization")
+
+// customerPolicyPath is the route of a customer's policy, whose {id} of a user's policy is
+// <app>/<user id>.
+const customerPolicyPath = "/v1/manage/organizations/{organization_id}/policies/{scope}/{id}"
 
 // UserPolicy is one end user's own quota, what they are held to, and what they spent today.
 type UserPolicy struct {
@@ -190,7 +197,7 @@ func (s *Server) registerUserPolicies(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "getCustomerPolicy",
 		Method:      http.MethodGet,
-		Path:        "/v1/manage/organizations/{organization_id}/policies/{scope}/{id}",
+		Path:        customerPolicyPath,
 		Summary:     "Read a customer's policy",
 		Description: "An organization's, an app's or one end user's policy, as the customer's own read answers it." + staff,
 		Tags:        []string{staffTag},
@@ -201,7 +208,7 @@ func (s *Server) registerUserPolicies(api huma.API) {
 	huma.Register(api, huma.Operation{
 		OperationID: "updateCustomerPolicy",
 		Method:      http.MethodPut,
-		Path:        "/v1/manage/organizations/{organization_id}/policies/{scope}/{id}",
+		Path:        customerPolicyPath,
 		Summary:     "Replace a customer's policy",
 		Description: "Held to the customer's own rules: a user's policy holds a quota only, a budget is a 400 " +
 			"budget_moved (spend limits are /v1/manage/spend/limits), and an organization's " +
@@ -228,6 +235,57 @@ func (s *Server) userPolicyCaller(ctx context.Context) (string, error) {
 	return customerID, nil
 }
 
+// reservedUserIDPrefix starts the user ids Stream keeps for itself, such as anonymous users'.
+const reservedUserIDPrefix = "!"
+
+// refuseReservedUserID refuses a user id, named in field, that Stream keeps for itself.
+//
+// Why: the router acts as the ids it is handed with the app's own credentials. Chat refuses
+// storing a reserved id on its own writes, but not the token the router signs locally or the
+// call it joins, so the router checks them where they come in.
+func refuseReservedUserID(field, userID string) (APIError, bool) {
+	if strings.HasPrefix(strings.TrimSpace(userID), reservedUserIDPrefix) {
+		return invalidRequest(field + " may not start with " + reservedUserIDPrefix + ": Stream keeps those user ids for itself"), true
+	}
+	return APIError{}, false
+}
+
+// refuseReservedActingFor refuses a backend's session, run, task or connection made for a user
+// id Stream keeps for itself, named in X-Stream-User-Id or ?user_id=. The router stores what it
+// writes under that id and acts as it in Chat.
+//
+// Why: the Chat proxy refuses such an id, but the router is reachable by other ways too. Reads
+// and deletes are left open, so what is already kept under the id stays readable and erasable.
+// A device's id comes from its verified token, which the proxy has already held to Chat's rules.
+func refuseReservedActingFor(ctx context.Context, endpoint string) (APIError, bool) {
+	if !ServerSideFrom(ctx) {
+		return APIError{}, false
+	}
+	return refuseReservedNewly(ctx, endpoint, "the user acted for ("+auth.UserHeader+" or ?"+auth.UserParam+"=)", CallerFrom(ctx).UserID)
+}
+
+// reservedIDsSwitch turns on refusing a reserved user id in the places CHA-7277 added: the
+// acting-for id, a guest's id and a call id that becomes the agent id. Off, such a request is
+// let through as before and counted (transitional.Switch).
+var reservedIDsSwitch = transitional.Switch{
+	Name: "security.cha7277.reserved_user_ids",
+	Env:  "ROUTER_SECURITY_CHA7277_RESERVED_USER_IDS",
+}
+
+// refuseReservedNewly is refuseReservedUserID for the places reservedIDsSwitch covers: a
+// reserved id is counted, and refused only while the switch is on.
+func refuseReservedNewly(ctx context.Context, endpoint, field, userID string) (APIError, bool) {
+	failure, refused := refuseReservedUserID(field, userID)
+	if !refused {
+		return APIError{}, false
+	}
+	customer, _ := CustomerFrom(ctx)
+	if !reservedIDsSwitch.Applies(customer, endpoint) {
+		return APIError{}, false
+	}
+	return failure, true
+}
+
 // checkUserID holds a user id to Stream Chat's rule, as a spend limit's is.
 func checkUserID(userID string) error {
 	if !limitUserID.MatchString(userID) || usage.IDProblem(userID) != "" {
@@ -249,7 +307,7 @@ func (s *Server) listUserPolicies(ctx context.Context, request *ListUserPolicies
 	if after != nil {
 		position = after.UserID
 	}
-	rows, err := s.store.UserPolicies(ctx, appID, position, request.Limit)
+	rows, err := s.store.Policies.SelectUsers(ctx, appID, position, request.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +375,7 @@ func (s *Server) deleteUserPolicy(ctx context.Context, request *userIDRequest) (
 // audits the change under auditedAs.
 func (s *Server) saveUserPolicy(ctx context.Context, appID, userID string, sent *Quota, auditedAs string) error {
 	id := store.UserScopeID(appID, userID)
-	before, err := s.configs.Policy(ctx, store.ScopeUser, id)
+	before, err := s.configs.Policies.Get(ctx, store.ScopeUser, id)
 	if err != nil {
 		return err
 	}
@@ -340,7 +398,7 @@ func (s *Server) saveUserPolicy(ctx context.Context, appID, userID string, sent 
 
 // userPolicyOf is a user's own quota, what they are held to and what they spent today.
 func (s *Server) userPolicyOf(ctx context.Context, appID, userID string) (UserPolicy, error) {
-	own, err := s.configs.Policy(ctx, store.ScopeUser, store.UserScopeID(appID, userID))
+	own, err := s.configs.Policies.Get(ctx, store.ScopeUser, store.UserScopeID(appID, userID))
 	if err != nil {
 		return UserPolicy{}, err
 	}
@@ -398,7 +456,7 @@ func (s *Server) customerScope(ctx context.Context, organizationID string, scope
 
 // checkOrganizationApp answers unknown for an app that is not the organization's.
 func (s *Server) checkOrganizationApp(ctx context.Context, organizationID, appID string, unknown APIError) error {
-	in, err := s.store.AppInOrganization(ctx, appID, organizationID)
+	in, err := s.store.AppOrganizations.Holds(ctx, organizationID, appID)
 	if err != nil {
 		return err
 	}
@@ -454,7 +512,7 @@ func (s *Server) updateCustomerPolicy(ctx context.Context, request *updateCustom
 	}
 	policy, err := s.savePolicy(ctx, scope, id, sent, auditedAs)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 	return &policyResponse{Body: policy}, nil
 }

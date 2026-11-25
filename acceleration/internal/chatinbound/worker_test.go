@@ -47,7 +47,7 @@ func (s *WorkerSuite) SetupSuite() {
 
 func (s *WorkerSuite) SetupTest() {
 	// A row an earlier test left queued would be the next test's worker's to answer.
-	_, err := s.store.DB().NewDelete().Model((*store.ChatInbound)(nil)).Where("TRUE").Exec(s.ctx)
+	_, err := s.store.GlobalDB().NewDelete().Model((*store.ChatInbound)(nil)).Where("TRUE").Exec(s.ctx)
 	s.Require().NoError(err)
 }
 
@@ -108,7 +108,7 @@ func (s *WorkerSuite) TestADeliveryThatFailedOnceIsAnsweredOnTheNextTry() {
 	})
 
 	s.Eventually(func() bool { return s.row(queued).State == store.ChatInboundDone }, 5*time.Second, 10*time.Millisecond)
-	s.Equal(1, s.row(queued).Attempts)
+	s.Equal(2, s.row(queued).Attempts)
 	s.Equal(2, answers.of(queued))
 }
 
@@ -195,8 +195,8 @@ func (s *WorkerSuite) TestRunningCountsTheAnswersInFlight() {
 	s.Require().Eventually(func() bool { return worker.Running() == 0 }, 5*time.Second, 10*time.Millisecond)
 }
 
-// An answer Close cut short is no attempt: the row waits for its lease to run out, and a
-// router answers it then.
+// An answer Close cut short is not retried early: the claim counted its attempt, the row waits
+// for its lease to run out, and a router answers it then.
 func (s *WorkerSuite) TestAnAnswerCloseCutShortIsLeftForItsLease() {
 	started := make(chan struct{}, 1)
 	queued := s.queue()
@@ -211,7 +211,7 @@ func (s *WorkerSuite) TestAnAnswerCloseCutShortIsLeftForItsLease() {
 
 	row := s.row(queued)
 	s.Equal(store.ChatInboundQueued, row.State)
-	s.Zero(row.Attempts)
+	s.Equal(1, row.Attempts)
 	s.True(row.NextAttemptAt.After(time.Now().Add(Lease-time.Minute)), "the lease was let go of: %s", row.NextAttemptAt)
 }
 
@@ -239,7 +239,7 @@ func (s *WorkerSuite) TestAtMostInFlightAnswersRunAtOnce() {
 
 	s.Eventually(func() bool { return count() == inFlight }, 5*time.Second, 10*time.Millisecond)
 	s.Never(func() bool { return count() > inFlight }, 300*time.Millisecond, 10*time.Millisecond)
-	unclaimed, err := s.store.DB().NewSelect().Model((*store.ChatInbound)(nil)).Where("next_attempt_at <= now()").Count(s.ctx)
+	unclaimed, err := s.store.GlobalDB().NewSelect().Model((*store.ChatInbound)(nil)).Where("next_attempt_at <= now()").Count(s.ctx)
 	s.Require().NoError(err)
 	s.Equal(1, unclaimed)
 	close(release)
@@ -383,8 +383,8 @@ func (s *WorkerSuite) TestTheWorkerDeletesRowsPastTheirKeepOnceAnHour() {
 // queue queues a delivery due now and returns its message id.
 func (s *WorkerSuite) queue() string {
 	id := "message-" + uuid.NewString()
-	queued, err := s.store.QueueChatInbound(s.ctx, store.ChatInbound{
-		StreamApp: 1, MessageID: id, Deployment: true, Body: []byte(`{}`), NextAttemptAt: time.Now(),
+	queued, err := s.store.ChatInbounds.Queue(s.ctx, store.ChatInbound{
+		StreamAppPK: 1, MessageID: id, Deployment: true, Body: []byte(`{}`), NextAttemptAt: time.Now(),
 	})
 	s.Require().NoError(err)
 	s.Require().True(queued)
@@ -412,7 +412,7 @@ func (s *WorkerSuite) startUntil(stopping context.Context, options Options) *Wor
 
 // finished records a queued delivery answered ago, and returns its message id.
 func (s *WorkerSuite) finished(messageID string, ago time.Duration) string {
-	_, err := s.store.DB().NewUpdate().Model((*store.ChatInbound)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ChatInbound)(nil)).
 		Set("state = ?", store.ChatInboundDone).Set("finished_at = ?", time.Now().Add(-ago)).
 		Where("message_id = ?", messageID).Exec(s.ctx)
 	s.Require().NoError(err)
@@ -420,14 +420,14 @@ func (s *WorkerSuite) finished(messageID string, ago time.Duration) string {
 }
 
 func (s *WorkerSuite) exists(messageID string) bool {
-	exists, err := s.store.DB().NewSelect().Model((*store.ChatInbound)(nil)).Where("message_id = ?", messageID).Exists(s.ctx)
+	exists, err := s.store.GlobalDB().NewSelect().Model((*store.ChatInbound)(nil)).Where("message_id = ?", messageID).Exists(s.ctx)
 	s.Require().NoError(err)
 	return exists
 }
 
 func (s *WorkerSuite) row(messageID string) store.ChatInbound {
 	var row store.ChatInbound
-	s.Require().NoError(s.store.DB().NewSelect().Model(&row).Where("message_id = ?", messageID).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&row).Where("message_id = ?", messageID).Scan(s.ctx))
 	return row
 }
 

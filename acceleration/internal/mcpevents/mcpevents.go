@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
@@ -202,6 +203,9 @@ func (s *Service) Close() {
 // so it can be another router's renewal in flight (needs_reauthorization at the resolver's
 // checkpoint) while the stored row is connected again; a deleted or disconnected connection's
 // rows go through the worker and Receive (gone), never from here.
+//
+// A connection a delete removed while this runs is store.ErrNoConnectorConnection, from the
+// first add that comes after the delete committed.
 func (s *Service) Reconcile(ctx context.Context, connection store.ConnectorConnection) error {
 	if connection.Status != store.ConnectionConnected {
 		return nil
@@ -215,24 +219,16 @@ func (s *Service) Reconcile(ctx context.Context, connection store.ConnectorConne
 			return err
 		}
 	}
-	if err := s.store.DueConnectionEventSubscriptions(ctx, connection.CustomerID, connection.ID, time.Now()); err != nil {
+	if err := s.store.ConnectionEventSubscriptions.DueConnection(ctx, connection.CustomerID, connection.ID, time.Now()); err != nil {
 		return err
 	}
 	s.wake()
 	return nil
 }
 
-// Stop drops every subscription of a connection that was deleted or disconnected. Its
-// credential is gone, so the server cannot be asked to stop: it stops when the token answers
-// 410 and the router never refreshes it, at its refreshBefore. The router never asks for a
-// subscription that does not expire («A server MUST NOT return null unless the client
-// suggested ttlMs: null»).
-func (s *Service) Stop(ctx context.Context, customerID, connectionID string) error {
-	return s.store.DeleteConnectionEventSubscriptions(ctx, customerID, connectionID)
-}
-
 // add stores a new pending subscription for one declared event, with a token and a sealed
-// secret of its own, unless the connection already has it.
+// secret of its own, unless the connection already has it. A connection deleted since it was
+// read is store.ErrNoConnectorConnection, and nothing is stored.
 func (s *Service) add(ctx context.Context, connection store.ConnectorConnection, configID, binding string, event store.BindingEvent) error {
 	token, err := newToken()
 	if err != nil {
@@ -247,12 +243,13 @@ func (s *Service) add(ctx context.Context, connection store.ConnectorConnection,
 		return stack.Wrap(err)
 	}
 	now := time.Now().UTC()
-	_, err = s.store.AddConnectionEventSubscription(ctx, &store.ConnectionEventSubscription{
+	_, err = s.store.ConnectionEventSubscriptions.Insert(ctx, &store.ConnectionEventSubscription{
 		CustomerID: connection.CustomerID, ConnectionID: connection.ID, ConfigID: configID, Binding: binding,
 		Event: event.Event, Arguments: event.Arguments, Key: Key(event.Event, event.Arguments),
 		Token: token, SecretSealed: sealed, KEKVersion: s.secrets.CurrentVersion(),
 		Status: store.ConnectionEventPending, NextAttemptAt: &now,
 	})
+
 	return err
 }
 
@@ -272,8 +269,7 @@ func (s *Service) attemptDue() (wait time.Duration, again bool) {
 		if s.ctx.Err() != nil {
 			return 0, false
 		}
-		now := time.Now()
-		claimed, err := s.store.ClaimConnectionEventSubscriptions(s.ctx, now, claimBatch, now.Add(s.lease))
+		claimed, err := s.store.ConnectionEventSubscriptions.Claim(s.ctx, claimBatch, s.lease)
 		if err != nil {
 			if s.ctx.Err() == nil {
 				s.logger.Error("could not take the MCP event subscriptions due", "error", err)
@@ -287,7 +283,7 @@ func (s *Service) attemptDue() (wait time.Duration, again bool) {
 			break
 		}
 	}
-	next, found, err := s.store.NextConnectionEventSubscriptionAt(s.ctx)
+	next, found, err := s.store.ConnectionEventSubscriptions.NextDue(s.ctx)
 	switch {
 	case err != nil:
 		if s.ctx.Err() == nil {
@@ -306,7 +302,7 @@ func (s *Service) attemptDue() (wait time.Duration, again bool) {
 // (declaration), and otherwise asked for, or asked for again, at the server.
 func (s *Service) attempt(sub store.ConnectionEventSubscription) {
 	ctx := s.ctx
-	connection, err := s.store.ConnectorConnection(ctx, sub.CustomerID, sub.ConnectionID)
+	connection, err := s.store.ConnectorConnections.Get(ctx, sub.CustomerID, sub.ConnectionID)
 	if gone(connection, err) {
 		s.drop(ctx, sub, "its connection is deleted or disconnected")
 		return
@@ -321,7 +317,7 @@ func (s *Service) attempt(sub store.ConnectionEventSubscription) {
 		// a consent connects it again, so the subscription waits rather than going.
 		next := waitUntil(time.Now().UTC(), sub.RefreshBefore, s.lease)
 		sub.NextAttemptAt = &next
-		if err := s.store.SaveConnectionEventSubscription(ctx, &sub); err != nil {
+		if err := s.store.ConnectionEventSubscriptions.Update(ctx, &sub); err != nil {
 			s.logger.Warn("could not store an MCP event subscription", "subscription", sub.ID, "error", err)
 		}
 		return
@@ -352,7 +348,7 @@ func (s *Service) attempt(sub store.ConnectionEventSubscription) {
 		next := refreshAt(now, grant.RefreshBefore, s.lease)
 		sub.NextAttemptAt = &next
 	}
-	if err := s.store.SaveConnectionEventSubscription(ctx, &sub); err != nil {
+	if err := s.store.ConnectionEventSubscriptions.Update(ctx, &sub); err != nil {
 		s.logger.Warn("could not store an MCP event subscription", "subscription", sub.ID, "error", err)
 		return
 	}
@@ -361,7 +357,7 @@ func (s *Service) attempt(sub store.ConnectionEventSubscription) {
 		// one that carried the owner's events meanwhile (declaration) goes once the owner's is
 		// active. Only on the change to active, so two that carry one event never wake each other
 		// at every refresh.
-		if err := s.store.DueOtherConnectionEventSubscriptions(ctx, sub.ConnectionID, sub.Key, sub.ID, now); err != nil {
+		if err := s.store.ConnectionEventSubscriptions.DueOthers(ctx, sub.ConnectionID, sub.Key, sub.ID, now); err != nil {
 			s.logger.Warn("could not hand an MCP event over to its owner's subscription", "subscription", sub.ID, "error", err)
 		}
 	}
@@ -465,7 +461,7 @@ func (s *Service) unsubscribe(ctx context.Context, connection store.ConnectorCon
 }
 
 func (s *Service) drop(ctx context.Context, sub store.ConnectionEventSubscription, why string) {
-	if err := s.store.DeleteConnectionEventSubscription(ctx, sub.ID); err != nil {
+	if err := s.store.ConnectionEventSubscriptions.Delete(ctx, sub.ID); err != nil {
 		s.logger.Warn("could not drop an MCP event subscription", "subscription", sub.ID, "error", err)
 		return
 	}
@@ -480,11 +476,11 @@ func (s *Service) eventSource(ctx context.Context, connection store.ConnectorCon
 	if !found {
 		return core.ResolvedBinding{}, nil, stack.Wrap(fmt.Errorf("mcpevents: this deployment has no %s scheme", connection.AuthScheme))
 	}
-	definition, err := s.store.ConnectorDefinition(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
+	definition, err := s.store.ConnectorDefinitions.Get(ctx, connection.CustomerID, connection.ConnectorID, connection.DefinitionRevision)
 	if err != nil {
 		return core.ResolvedBinding{}, nil, err
 	}
-	manifest, err := definition.Manifest.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
+	manifest, err := definition.Resolve(connection.AuthScheme, connection.Inputs, connection.Metadata)
 	if err != nil {
 		return core.ResolvedBinding{}, nil, stack.Wrap(err)
 	}
@@ -524,14 +520,14 @@ func (s *Service) declaration(ctx context.Context, connection store.ConnectorCon
 	if owner.config.ID == sub.ConfigID && owner.binding == sub.Binding {
 		return owner, sub, true, nil
 	}
-	held, err := s.store.ConnectionEventSubscriptionOf(ctx, sub.ConnectionID, owner.config.ID, owner.binding, sub.Key)
+	held, err := s.store.ConnectionEventSubscriptions.GetByBinding(ctx, sub.ConnectionID, owner.config.ID, owner.binding, sub.Key)
 	if errors.Is(err, store.ErrNoConnectionEventSubscription) {
 		// Due at once (add), and the worker woken, as Reconcile wakes it.
 		if err := s.add(ctx, connection, owner.config.ID, owner.binding, owner.event); err != nil {
 			return owned{}, store.ConnectionEventSubscription{}, false, err
 		}
 		s.wake()
-		held, err = s.store.ConnectionEventSubscriptionOf(ctx, sub.ConnectionID, owner.config.ID, owner.binding, sub.Key)
+		held, err = s.store.ConnectionEventSubscriptions.GetByBinding(ctx, sub.ConnectionID, owner.config.ID, owner.binding, sub.Key)
 	}
 	if err != nil {
 		return owned{}, store.ConnectionEventSubscription{}, false, err
@@ -593,13 +589,15 @@ func (s *Service) owners(configs []store.AgentConfig, connection store.Connector
 
 // Receive answers one delivery to a subscription's callback: the challenge a server checks the
 // callback with, or an event, which opens a conversation. A delivery not signed with the
-// subscription's own secret is refused before its body is read.
+// subscription's own secret is refused before its body is read, and counted for nobody: a signed
+// one is the subscription's app's hook, whatever is answered.
 func (s *Service) Receive(ctx context.Context, token string, header http.Header, body []byte) Reply {
-	sub, err := s.store.ConnectionEventSubscriptionByToken(ctx, token)
+	sub, err := s.store.ConnectionEventSubscriptions.GetByToken(ctx, token)
 	if errors.Is(err, store.ErrNoConnectionEventSubscription) {
 		return Reply{Status: http.StatusGone, Body: failure("no such subscription")}
 	}
 	if err != nil {
+		s.logger.Error("could not read an MCP event subscription", "error", err)
 		return Reply{Status: http.StatusInternalServerError, Body: failure("something went wrong")}
 	}
 	secret, err := s.openSecret(sub)
@@ -610,6 +608,7 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 	if err := webhook.Verify(secret, header, body, time.Now()); err != nil {
 		return Reply{Status: http.StatusUnauthorized, Body: failure("the delivery is not signed with the subscription's secret")}
 	}
+	activity.NoteCustomer(ctx, sub.CustomerID, activity.AreaHooksIn)
 
 	var delivered webhook.Event
 	if err := json.Unmarshal(body, &delivered); err != nil {
@@ -628,12 +627,13 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 		return Reply{Status: http.StatusBadRequest, Body: failure("not an event this subscription is for")}
 	}
 
-	connection, err := s.store.ConnectorConnection(ctx, sub.CustomerID, sub.ConnectionID)
+	connection, err := s.store.ConnectorConnections.Get(ctx, sub.CustomerID, sub.ConnectionID)
 	if gone(connection, err) {
 		s.drop(ctx, sub, "its connection is deleted or disconnected")
 		return Reply{Status: http.StatusGone, Body: failure("the connection is gone")}
 	}
 	if err != nil {
+		s.logger.Error("could not read an MCP event subscription's connection", "subscription", sub.ID, "error", err)
 		return Reply{Status: http.StatusInternalServerError, Body: failure("something went wrong")}
 	}
 	if connection.Status != store.ConnectionConnected {
@@ -643,11 +643,12 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 	}
 	owner, held, ok, err := s.declaration(ctx, connection, sub)
 	if err != nil {
+		s.logger.Error("could not read an MCP event subscription's config", "subscription", sub.ID, "error", err)
 		return Reply{Status: http.StatusInternalServerError, Body: failure("something went wrong")}
 	}
 	if !ok {
 		// The worker unsubscribes and drops it.
-		if err := s.store.DueConnectionEventSubscription(ctx, sub.ID, time.Now()); err == nil {
+		if err := s.store.ConnectionEventSubscriptions.Due(ctx, sub.ID, time.Now()); err == nil {
 			s.wake()
 		}
 		return Reply{Status: http.StatusGone, Body: failure("the agent no longer subscribes to this event")}
@@ -655,14 +656,15 @@ func (s *Service) Receive(ctx context.Context, token string, header http.Header,
 	if replaced(sub, held) {
 		// It goes, but still carries this delivery: the server may have sent it before the
 		// owner's subscription was active, to this one alone.
-		if err := s.store.DueConnectionEventSubscription(ctx, sub.ID, time.Now()); err == nil {
+		if err := s.store.ConnectionEventSubscriptions.Due(ctx, sub.ID, time.Now()); err == nil {
 			s.wake()
 		}
 	}
 	// Claimed as the owner's subscription, so the same event delivered again to the owner's,
 	// once it is active, opens no second conversation.
-	fresh, err := s.store.ClaimConnectionEvent(ctx, held.ID, delivered.EventID)
+	fresh, err := s.store.DeliveriesSeen.First(ctx, store.DeliveryScopeConnectionEvent, store.ConnectionEventKey(held.ID, delivered.EventID))
 	if err != nil {
+		s.logger.Error("could not claim an MCP event delivery", "subscription", sub.ID, "error", err)
 		return Reply{Status: http.StatusInternalServerError, Body: failure("something went wrong")}
 	}
 	// A retry of an event already taken is acknowledged without a second conversation, or the

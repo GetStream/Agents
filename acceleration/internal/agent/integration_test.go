@@ -12,11 +12,9 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv/redisready"
 )
 
 // dsnEnvVar and redisEnvVar are where this looks for a Postgres to count turns into and a
@@ -35,10 +33,9 @@ const writeGrace = 10 * time.Second
 type TurnRecordingSuite struct {
 	suite.Suite
 	// agents is the agent fixture, not embedded so its own tests are not run again here.
-	agents     *AgentSuite
-	pgStore    *store.Store
-	liveClient *live.Client
-	startedAt  time.Time
+	agents    *AgentSuite
+	pgStore   *store.Store
+	startedAt time.Time
 }
 
 func TestTurnRecordingSuite(t *testing.T) {
@@ -51,19 +48,13 @@ func (s *TurnRecordingSuite) SetupSuite() {
 		s.T().Skipf("%s and %s must be set", dsnEnvVar, redisEnvVar)
 	}
 
-	pgStore, err := store.Open(dsn)
+	pgStore, err := store.OpenShards(store.Options{DSN: dsn, Redis: store.Redis{
+		Address: redisAddr, Username: os.Getenv("ROUTER_REDIS_USERNAME"), Password: os.Getenv("ROUTER_REDIS_PASSWORD"),
+	}})
 	s.Require().NoError(err)
 	s.pgStore = pgStore
 	s.Require().NoError(pgStore.Ping(context.Background()))
 	s.Require().NoError(pgStore.Migrate(context.Background()))
-
-	liveClient, err := redisready.Retry(redisAddr, func() (*live.Client, error) {
-		return live.New(live.Options{
-			Address: redisAddr, Username: os.Getenv("ROUTER_REDIS_USERNAME"), Password: os.Getenv("ROUTER_REDIS_PASSWORD"),
-		})
-	})
-	s.Require().NoError(err)
-	s.liveClient = liveClient
 }
 
 func (s *TurnRecordingSuite) SetupTest() {
@@ -73,14 +64,10 @@ func (s *TurnRecordingSuite) SetupTest() {
 	// A fresh agent per test, so one run's turns are not another's.
 	s.agents.agentID = fmt.Sprintf("agent-test-%d", time.Now().UnixNano())
 	s.agents.records = s.pgStore
-	s.agents.live = s.liveClient
 	s.startedAt = time.Now().Add(-time.Minute)
 }
 
 func (s *TurnRecordingSuite) TearDownSuite() {
-	if s.liveClient != nil {
-		s.liveClient.Close()
-	}
 	if s.pgStore != nil {
 		s.Require().NoError(s.pgStore.Close())
 	}
@@ -99,7 +86,7 @@ func (s *TurnRecordingSuite) TestAFinishedExchangeIsKeptAndCounted() {
 	// Closing drains the writer, so what follows is not racing it.
 	agents.agent.Close()
 
-	turns, err := s.liveClient.CallTurns(context.Background(), "acme", s.agents.agentID, s.startedAt, nil)
+	turns, err := s.pgStore.Turns.Select(context.Background(), "acme", s.agents.agentID, s.startedAt, nil)
 	s.Require().NoError(err)
 	s.Require().Len(turns, 1, "one exchange, one turn")
 	s.Equal("acme", turns[0].CustomerID)
@@ -108,8 +95,7 @@ func (s *TurnRecordingSuite) TestAFinishedExchangeIsKeptAndCounted() {
 	s.Require().NotNil(turns[0].LLMTTFTMs)
 	s.False(turns[0].Interrupted)
 
-	stats, err := s.pgStore.CustomerTurnStats(
-		context.Background(), "acme", s.agents.agentID, store.Hourly, s.startedAt.Add(-time.Hour), time.Now().Add(time.Hour))
+	stats, err := s.pgStore.TurnBuckets.Select(context.Background(), "acme", store.TurnBucketFilter{AgentID: s.agents.agentID, Granularity: store.Hourly, From: s.startedAt.Add(-time.Hour), To: time.Now().Add(time.Hour)})
 	s.Require().NoError(err)
 	s.Require().Len(stats, 1)
 	s.EqualValues(1, stats[0].TurnCount)
@@ -117,37 +103,28 @@ func (s *TurnRecordingSuite) TestAFinishedExchangeIsKeptAndCounted() {
 }
 
 // TestPersistReportsAWriteTheDeadlineCut is what lets the recorder count a lost row: a
-// write whose context is gone must say so, whichever of the two stores it was meant for.
+// write whose context is gone must say so.
 func (s *TurnRecordingSuite) TestPersistReportsAWriteTheDeadlineCut() {
-	row := live.Turn{CustomerID: "acme", AgentID: s.agents.agentID, TurnID: "turn-persist", StartedAt: time.Now().UTC()}
+	row := store.Turn{CustomerID: "acme", AgentID: s.agents.agentID, TurnID: "turn-persist", StartedAt: time.Now().UTC()}
 	owner := routing.Owner{CustomerID: "acme", AgentID: s.agents.agentID}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	for name, stores := range map[string]struct {
-		pg   *store.Store
-		live *live.Client
-	}{
-		"redis only":    {live: s.liveClient},
-		"postgres only": {pg: s.pgStore},
-		"both":          {pg: s.pgStore, live: s.liveClient},
-	} {
-		r := buildTurnRecorder(stores.pg, stores.live, owner, slog.New(slog.DiscardHandler))
-		s.Error(r.persist(cancelled, row), name+": a write cut by its context is an error")
-		s.NoError(r.persist(context.Background(), row), name+": a write that goes through is not")
-	}
+	r := buildTurnRecorder(s.pgStore, owner, slog.New(slog.DiscardHandler))
+	s.Error(r.persist(cancelled, row), "a write cut by its context is an error")
+	s.NoError(r.persist(context.Background(), row), "a write that goes through is not")
 }
 
 // TestDecisionsReachRedis pins what the recorder writes with by default: a judgement
-// recorded and flushed by Close must be readable back from the live client.
+// recorded and flushed by Close must be readable back from the store.
 func (s *TurnRecordingSuite) TestDecisionsReachRedis() {
 	callID := fmt.Sprintf("call-decisions-%d", time.Now().UnixNano())
 	owner := routing.Owner{CustomerID: "acme", AgentID: s.agents.agentID, CallID: callID}
-	r := newDecisionRecorder(s.liveClient, owner, slog.New(slog.DiscardHandler))
+	r := newDecisionRecorder(s.pgStore.CallEvents, owner, slog.New(slog.DiscardHandler))
 	r.Record(Decided{Kind: "reply", Reason: "asked a question", TurnID: "turn-1", Text: "hello"})
 	r.Close()
 
-	events, err := s.liveClient.CallEvents(context.Background(), "acme", callID, s.startedAt, nil, 10)
+	events, err := s.pgStore.CallEvents.Select(context.Background(), "acme", callID, s.startedAt, nil, 10)
 	s.Require().NoError(err)
 	s.Require().Len(events, 1)
 	s.Equal("reply", events[0].Kind)

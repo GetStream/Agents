@@ -231,7 +231,7 @@ func (s *Server) queryAudit(ctx context.Context, request *queryAuditRequest) (*q
 		}
 	}
 
-	found, err := s.store.AuditEntries(ctx, customerID, filter)
+	found, err := s.store.AuditEntries.Select(ctx, customerID, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -254,9 +254,9 @@ func (s *Server) getAgentChanges(ctx context.Context, request *agentChangesReque
 	if s.store == nil {
 		return nil, errNoAudit
 	}
-	config, err := s.configs.AgentConfig(ctx, customerID, request.Id)
+	config, err := s.store.AgentConfigs.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownConfig
+		return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 	}
 
 	changes, syncedAt, err := s.unsyncedChanges(ctx, customerID, config.ID, "")
@@ -283,7 +283,7 @@ func (s *Server) getAgentChanges(ctx context.Context, request *agentChangesReque
 // else, and that is not a reason to refuse a sync.
 func (s *Server) unsyncedChanges(ctx context.Context, customerID, configID, base string) ([]store.AuditEntry, time.Time, error) {
 	since := time.Time{}
-	synced, found, err := s.store.LatestAuditEntry(ctx, customerID, store.AuditEntryFilter{
+	synced, found, err := s.store.AuditEntries.Latest(ctx, customerID, store.AuditEntryFilter{
 		AgentID: configID, Actions: []string{store.AuditSynced},
 	})
 	if err != nil {
@@ -295,7 +295,7 @@ func (s *Server) unsyncedChanges(ctx context.Context, customerID, configID, base
 	syncedAt := since
 
 	if base != "" {
-		acknowledged, found, err := s.store.AuditEntryByID(ctx, customerID, base)
+		acknowledged, found, err := s.store.AuditEntries.Get(ctx, customerID, base)
 		if err != nil {
 			return nil, time.Time{}, err
 		}
@@ -304,7 +304,7 @@ func (s *Server) unsyncedChanges(ctx context.Context, customerID, configID, base
 		}
 	}
 
-	changes, err := s.store.AuditEntries(ctx, customerID, store.AuditEntryFilter{
+	changes, err := s.store.AuditEntries.Select(ctx, customerID, store.AuditEntryFilter{
 		AgentID: configID,
 		Actions: []string{store.AuditCreated, store.AuditUpdated, store.AuditDeleted},
 		Since:   since,
@@ -401,7 +401,7 @@ func (s *Server) auditAs(ctx context.Context, customerID string, record auditRec
 	}
 	ctx, cancel := detachedWrite(ctx)
 	defer cancel()
-	if err := s.store.RecordAuditEntry(ctx, &entry); err != nil {
+	if err := s.store.AuditEntries.Insert(ctx, &entry); err != nil {
 		s.logger.Error("could not record a configuration change",
 			"customer", customerID, "resource", record.ResourceType, "id", record.ResourceID,
 			"error", err)
@@ -416,7 +416,7 @@ var auditBookkeeping = []string{"id", "created_at", "updated_at", "sync_hash"}
 // auditDiff is the fields that moved between two renderings of a resource.
 //
 // It compares the API's own shape of the thing rather than the stored row, so what a change
-// names is what a client reads the resource by: `tools`, not `progressive_tools`. A field
+// names is what a client reads the resource by: `tools`, not `tool_groups`. A field
 // absent from one side and present on the other has moved, which is what makes a create
 // every field at once and a delete every field back to nothing.
 func auditDiff(before, after any) []store.AuditChange {

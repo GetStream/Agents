@@ -19,7 +19,7 @@ const (
 	ChatInboundFailed = "failed"
 )
 
-// ErrNoChatInbound is a queued Stream Chat message no row is stored for (ChatInboundBySeq).
+// ErrNoChatInbound is a queued Stream Chat message no row is stored for (ChatInbounds.Get).
 var ErrNoChatInbound = errors.New("store: no such queued chat inbound message")
 
 // chatInboundDoneKeep is how long an answered message's row is kept, so a delivery Stream
@@ -32,18 +32,18 @@ const chatInboundDoneKeep = channelMessageKeep
 // as channelInboundFailedKeep.
 const chatInboundFailedKeep = 30 * 24 * time.Hour
 
-// ChatInbound is one Stream Chat message queued to be answered
-// (20261205140000_chat_inbound.sql), with where its delivery came from.
+// ChatInbound is one Stream Chat message queued to be answered, with where its delivery came
+// from.
 type ChatInbound struct {
 	bun.BaseModel `bun:"table:chat_inbound,alias:cd"`
 
 	// Seq is the order the message was queued in.
 	Seq int64 `bun:"seq,pk"`
-	// StreamApp and MessageID are the Stream app and its id for the message. The app is always
+	// StreamAppPK and MessageID are the Stream app and its id for the message. The app is always
 	// known, as the internal endpoint reads it from the signed body.
-	StreamApp int64  `bun:"stream_app,notnull"`
-	MessageID string `bun:"message_id,notnull"`
-	// CustomerID, Deployment and APIKey are, with StreamApp, where the delivery came from as
+	StreamAppPK int64  `bun:"stream_app_pk,notnull"`
+	MessageID   string `bun:"message_id,notnull"`
+	// CustomerID, Deployment and APIKey are, with StreamAppPK, where the delivery came from as
 	// the router verified it.
 	CustomerID string `bun:"customer_id,notnull"`
 	Deployment bool   `bun:"deployment,notnull"`
@@ -51,41 +51,56 @@ type ChatInbound struct {
 	// Body is the verified event as Stream sent it.
 	Body  []byte `bun:"body,notnull"`
 	State string `bun:"state,notnull"`
-	// Attempts is how many answers of the message failed.
+	// Attempts is how many times the message was claimed, the current claim included: the
+	// claim a write holds the row by.
 	Attempts int `bun:"attempts,notnull"`
 	// NextAttemptAt is when the message is due; on a claimed row, the end of the claim's lease.
 	NextAttemptAt time.Time  `bun:"next_attempt_at,notnull"`
-	ReceivedAt    time.Time  `bun:"received_at,notnull"`
 	FinishedAt    *time.Time `bun:"finished_at"`
 	// Heard is what the voice recording sent with the message said, once it was heard
-	// (KeepChatInboundHeard); nil before.
+	// (ChatInbounds.KeepHeard); nil before.
 	Heard *string `bun:"heard"`
+}
+
+// Validate refuses a message that could not be answered, or that would be queued again once
+// its app is known.
+func (d *ChatInbound) Validate() error {
+	return validate("chat inbound").
+		check(d.StreamAppPK != 0, "stream_app_pk", "is required: a message queued without one would be queued again once the app is known").
+		required("message_id", d.MessageID).
+		check(len(d.Body) > 0, "body", "is required").
+		oneOf("state", d.State, ChatInboundQueued, ChatInboundDone, ChatInboundFailed).
+		done()
+}
+
+// ChatInbounds are the Stream Chat messages queued to be answered, a queue of them, in the
+// shared database.
+type ChatInbounds struct {
+	store *Store
 }
 
 // chatInboundColumns are the columns a ChatInbound is read from, named rather than taken
 // with *, so a router older than a migration that adds one still reads the rows.
-const chatInboundColumns = "cd.seq, cd.stream_app, cd.message_id, cd.customer_id, cd.deployment, cd.api_key, cd.body, " +
-	"cd.state, cd.attempts, cd.next_attempt_at, cd.received_at, cd.finished_at, cd.heard"
+const chatInboundColumns = "cd.seq, cd.stream_app_pk, cd.message_id, cd.customer_id, cd.deployment, cd.api_key, cd.body, " +
+	"cd.state, cd.attempts, cd.next_attempt_at, cd.finished_at, cd.heard"
 
-// QueueChatInbound queues delivery to be answered, due at delivery.NextAttemptAt. A message
-// already queued under the same app and id, answered or given up within its keep, is not
-// queued again: queued is false.
-func (s *Store) QueueChatInbound(ctx context.Context, delivery ChatInbound) (queued bool, err error) {
-	return queueChatInbound(ctx, s.db, delivery)
+// Queue queues delivery to be answered, due at delivery.NextAttemptAt. A message already
+// queued under the same app and id, answered or given up within its keep, is not queued again:
+// queued is false.
+func (r *ChatInbounds) Queue(ctx context.Context, delivery ChatInbound) (queued bool, err error) {
+	return queueChatInbound(ctx, r.store.global, delivery)
 }
 
-// queueChatInbound is QueueChatInbound on db, the store's or a transaction's.
+// queueChatInbound is Queue on db, the store's or a transaction's.
 func queueChatInbound(ctx context.Context, db bun.IDB, delivery ChatInbound) (bool, error) {
-	if delivery.MessageID == "" || len(delivery.Body) == 0 {
-		return false, stack.Wrap(errors.New("store: a message id and a body are required"))
-	}
-	if delivery.StreamApp == 0 {
-		return false, stack.Wrap(errors.New("store: a Stream app is required: a message queued without one would be queued again once the app is known"))
+	delivery.State = ChatInboundQueued
+	if err := delivery.Validate(); err != nil {
+		return false, stack.Wrap(err)
 	}
 	delivery.NextAttemptAt = delivery.NextAttemptAt.UTC()
 	result, err := db.NewInsert().Model(&delivery).
-		Column("stream_app", "message_id", "customer_id", "deployment", "api_key", "body", "next_attempt_at").
-		On("CONFLICT (stream_app, message_id) DO NOTHING").
+		Column("stream_app_pk", "message_id", "customer_id", "deployment", "api_key", "body", "next_attempt_at").
+		On("CONFLICT (stream_app_pk, message_id) DO NOTHING").
 		Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: queue chat inbound: %w", err))
@@ -97,16 +112,16 @@ func queueChatInbound(ctx context.Context, db bun.IDB, delivery ChatInbound) (bo
 	return affected == 1, nil
 }
 
-// QueueFirstChatInbound records a delivery under key, as FirstDelivery does, and queues it, in
-// one transaction: the delivery is queued exactly when it is the first under key. queued is
-// false when key was recorded before, by the message webhook or an earlier delivery of the same
+// QueueFirst records a delivery under key, as DeliveriesSeen.First does, and queues it, in one
+// transaction: the delivery is queued exactly when it is the first under key. queued is false
+// when key was recorded before, by the message webhook or an earlier delivery of the same
 // message: that one answers it. An error records nothing, so a delivery made again is queued.
-func (s *Store) QueueFirstChatInbound(ctx context.Context, key string, delivery ChatInbound) (queued bool, err error) {
-	if err := s.forgetDeliveries(ctx); err != nil {
+func (r *ChatInbounds) QueueFirst(ctx context.Context, key string, delivery ChatInbound) (queued bool, err error) {
+	if err := r.store.DeliveriesSeen.prune(ctx); err != nil {
 		return false, stack.Wrap(err)
 	}
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		first, err := recordDelivery(ctx, tx, key)
+	err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		first, err := firstSeen(ctx, tx, DeliveryScopeHook, key)
 		if err != nil || !first {
 			return err
 		}
@@ -119,51 +134,32 @@ func (s *Store) QueueFirstChatInbound(ctx context.Context, key string, delivery 
 	return queued, nil
 }
 
-// ClaimChatInbound takes at most limit messages due at now, oldest due first, and moves
-// each one's next attempt to leaseUntil, so no other worker takes it while this one answers
-// it. Rows another worker is claiming at the same moment are skipped, not waited for.
-func (s *Store) ClaimChatInbound(ctx context.Context, now time.Time, limit int, leaseUntil time.Time) ([]ChatInbound, error) {
-	return s.claimChatInbound(ctx, claimChatInboundQuery, now, limit, leaseUntil)
+// chatInbounds is the queue of Stream Chat messages to answer.
+var chatInbounds = queue{name: "chat inbound", alias: "cd", key: "seq"}
+
+// queuedChatInbound narrows to the messages still to answer.
+func queuedChatInbound(query *bun.SelectQuery) *bun.SelectQuery {
+	return query.Where("cd.state = ?", ChatInboundQueued)
 }
 
-// claimChatInboundQuery is ClaimChatInbound' statement.
-//
-// due checks state and next_attempt_at on the row it locks. When another router's claim, or
-// its finish, commits after the statement started, Postgres locks the row's newer version and
-// checks due's WHERE on it again («the second updater ... re-evaluates its WHERE condition»:
-// Read Committed Isolation Level, https://www.postgresql.org/docs/16/transaction-iso.html), so
-// a row another router just leased or answered is skipped.
-const claimChatInboundQuery = `
-WITH due AS (
-    SELECT cd.seq FROM chat_inbound AS cd
-    WHERE cd.state = 'queued' AND cd.next_attempt_at <= ?
-    ORDER BY cd.next_attempt_at, cd.seq
-    LIMIT ?
-    FOR UPDATE OF cd SKIP LOCKED
-)
-UPDATE chat_inbound AS cd
-SET next_attempt_at = ?
-FROM due
-WHERE cd.seq = due.seq
-RETURNING ` + chatInboundColumns
-
-// claimChatInbound runs query, ClaimChatInbound' statement or a test's variant of it
-// with a pause in it, with ClaimChatInbound' arguments.
-func (s *Store) claimChatInbound(ctx context.Context, query string, now time.Time, limit int, leaseUntil time.Time) ([]ChatInbound, error) {
-	var claimed []ChatInbound
-	if limit < 1 {
-		return claimed, nil
-	}
-	if err := s.db.NewRaw(query, now.UTC(), limit, leaseUntil.UTC()).Scan(ctx, &claimed); err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: claim chat inbound: %w", err))
-	}
-	return claimed, nil
+// Claim takes at most limit messages due now, oldest due first, and moves each one's next
+// attempt to the end of lease, so no other worker takes it while this one answers it. Rows another
+// worker is claiming at the same moment are skipped, not waited for.
+func (r *ChatInbounds) Claim(ctx context.Context, limit int, lease time.Duration) ([]ChatInbound, error) {
+	return r.claim(ctx, limit, lease, queuedChatInbound)
 }
 
-// ChatInboundBySeq returns the message queued as seq, in whatever state it is.
-func (s *Store) ChatInboundBySeq(ctx context.Context, seq int64) (ChatInbound, error) {
+// claim is Claim narrowed by pick, queuedChatInbound or a test's variant of it with a pause in
+// it.
+func (r *ChatInbounds) claim(ctx context.Context, limit int, lease time.Duration,
+	pick func(*bun.SelectQuery) *bun.SelectQuery) ([]ChatInbound, error) {
+	return claim[ChatInbound](ctx, r.store.global, chatInbounds, lease, limit, pick, chatInboundColumns)
+}
+
+// Get returns the message queued as seq, in whatever state it is.
+func (r *ChatInbounds) Get(ctx context.Context, seq int64) (ChatInbound, error) {
 	var delivery ChatInbound
-	err := s.db.NewSelect().Model(&delivery).Where("cd.seq = ?", seq).Scan(ctx)
+	err := r.store.global.NewSelect().Model(&delivery).Where("cd.seq = ?", seq).Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ChatInbound{}, stack.Wrap(fmt.Errorf("%w: %d", ErrNoChatInbound, seq))
 	}
@@ -173,57 +169,42 @@ func (s *Store) ChatInboundBySeq(ctx context.Context, seq int64) (ChatInbound, e
 	return delivery, nil
 }
 
-// NextChatInboundAt is when the queued message due first is due, leased ones at the end of
-// their lease. found is false when no message is queued at all.
-func (s *Store) NextChatInboundAt(ctx context.Context) (next time.Time, found bool, err error) {
-	var at sql.NullTime
-	err = s.db.NewSelect().Model((*ChatInbound)(nil)).
-		ColumnExpr("min(next_attempt_at)").
-		Where("state = ?", ChatInboundQueued).
-		Scan(ctx, &at)
-	if err != nil {
-		return time.Time{}, false, stack.Wrap(fmt.Errorf("store: next chat inbound: %w", err))
-	}
-	return at.Time, at.Valid, nil
+// NextDue is when the queued message due first is due, leased ones at the end of their lease.
+// found is false when no message is queued at all.
+func (r *ChatInbounds) NextDue(ctx context.Context) (next time.Time, found bool, err error) {
+	return nextDue[ChatInbound](ctx, r.store.global, chatInbounds, queuedChatInbound)
 }
 
-// FinishChatInbound records that a claimed message was answered, at at.
+// Finish records that a claimed message was answered, at at.
 //
-// It, RetryChatInbound and FailChatInbound change the row only while the claim's lease is
-// the row's: a worker whose lease ran out while it answered, and whose message another worker
-// took since, changes nothing, so it cannot finish or reschedule the other's attempt. changed
-// is false then. A row the answer settled as it started (StartChatInboundAnswer) keeps its
-// lease and when it left the queue, so it is still this claim's to finish.
-func (s *Store) FinishChatInbound(ctx context.Context, claimed ChatInbound, at time.Time) (changed bool, err error) {
-	return updateClaimedChatInbound(ctx, claimed, []string{ChatInboundQueued, ChatInboundDone},
-		s.db.NewUpdate().Model((*ChatInbound)(nil)).
+// It, Retry and Fail change the row only while the claim still holds it: a worker whose lease
+// ran out while it answered, and whose message another worker took since, changes nothing, so
+// it cannot finish or reschedule the other's attempt. changed is false then. A row the answer
+// settled as it started (StartAnswer) keeps its lease and when it left the queue, so it is
+// still this claim's to finish.
+func (r *ChatInbounds) Finish(ctx context.Context, claimed ChatInbound, at time.Time) (changed bool, err error) {
+	return r.updateClaimed(ctx, claimed, []string{ChatInboundQueued, ChatInboundDone},
+		r.store.global.NewUpdate().Model((*ChatInbound)(nil)).
 			Set("state = ?", ChatInboundDone).
-			Set("attempts = ?", claimed.Attempts).
 			Set("finished_at = COALESCE(finished_at, ?)", at.UTC()))
 }
 
-// FailChatInbound records that a claimed message's last attempt failed and it is given up,
-// at at.
-func (s *Store) FailChatInbound(ctx context.Context, claimed ChatInbound, at time.Time) (changed bool, err error) {
-	return updateClaimedChatInbound(ctx, claimed, []string{ChatInboundQueued}, s.db.NewUpdate().Model((*ChatInbound)(nil)).
+// Fail records that a claimed message's last attempt failed and it is given up, at at.
+func (r *ChatInbounds) Fail(ctx context.Context, claimed ChatInbound, at time.Time) (changed bool, err error) {
+	return r.updateClaimed(ctx, claimed, []string{ChatInboundQueued}, r.store.global.NewUpdate().Model((*ChatInbound)(nil)).
 		Set("state = ?", ChatInboundFailed).
-		Set("attempts = ?", claimed.Attempts+1).
 		Set("finished_at = ?", at.UTC()))
 }
 
-// RetryChatInbound records a failed attempt of a claimed message and when the next one is
-// due.
-func (s *Store) RetryChatInbound(ctx context.Context, claimed ChatInbound, next time.Time) (changed bool, err error) {
-	return updateClaimedChatInbound(ctx, claimed, []string{ChatInboundQueued}, s.db.NewUpdate().Model((*ChatInbound)(nil)).
-		Set("attempts = ?", claimed.Attempts+1).
+// Retry records a failed attempt of a claimed message and when the next one is due.
+func (r *ChatInbounds) Retry(ctx context.Context, claimed ChatInbound, next time.Time) (changed bool, err error) {
+	return r.updateClaimed(ctx, claimed, []string{ChatInboundQueued}, r.store.global.NewUpdate().Model((*ChatInbound)(nil)).
 		Set("next_attempt_at = ?", next.UTC()))
 }
 
-func updateClaimedChatInbound(ctx context.Context, claimed ChatInbound, states []string, update *bun.UpdateQuery) (bool, error) {
-	result, err := update.
-		Where("seq = ?", claimed.Seq).
+func (r *ChatInbounds) updateClaimed(ctx context.Context, claimed ChatInbound, states []string, update *bun.UpdateQuery) (bool, error) {
+	result, err := chatInbounds.heldBy(update, claimed.Seq, claimed.Attempts).
 		Where("state IN (?)", bun.In(states)).
-		Where("next_attempt_at = ?", claimed.NextAttemptAt.UTC()).
 		Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: update chat inbound: %w", err))
@@ -235,17 +216,17 @@ func updateClaimedChatInbound(ctx context.Context, claimed ChatInbound, states [
 	return affected == 1, nil
 }
 
-// StartChatInboundAnswer settles a queued message as its answer starts, at at, so no later try
+// StartAnswer settles a queued message as its answer starts, at at, so no later try
 // of it, on any router, answers it again: a peer that answered and whose reply was lost, an
 // attempt Close cut short after the peer took it, or a router that stopped before it recorded
 // the answer. started is false when the message's answer already started, it was given up, or
 // nothing is queued under streamApp and messageID: there is nothing to answer then. The lease
-// is left as it is, for the worker holding it to finish the row (FinishChatInbound).
-func (s *Store) StartChatInboundAnswer(ctx context.Context, streamApp int64, messageID string, at time.Time) (started bool, err error) {
-	result, err := s.db.NewUpdate().Model((*ChatInbound)(nil)).
+// is left as it is, for the worker holding it to finish the row (Finish).
+func (r *ChatInbounds) StartAnswer(ctx context.Context, streamApp int64, messageID string, at time.Time) (started bool, err error) {
+	result, err := r.store.global.NewUpdate().Model((*ChatInbound)(nil)).
 		Set("state = ?", ChatInboundDone).
 		Set("finished_at = ?", at.UTC()).
-		Where("stream_app = ? AND message_id = ?", streamApp, messageID).
+		Where("stream_app_pk = ? AND message_id = ?", streamApp, messageID).
 		Where("state = ?", ChatInboundQueued).
 		Exec(ctx)
 	if err != nil {
@@ -258,13 +239,13 @@ func (s *Store) StartChatInboundAnswer(ctx context.Context, streamApp int64, mes
 	return affected == 1, nil
 }
 
-// KeepChatInboundHeard keeps what the voice recording of the message queued under streamApp and
+// KeepHeard keeps what the voice recording of the message queued under streamApp and
 // messageID said, so a later try of it hands that on rather than hearing it again. What was
 // kept first stays.
-func (s *Store) KeepChatInboundHeard(ctx context.Context, streamApp int64, messageID, heard string) error {
-	_, err := s.db.NewUpdate().Model((*ChatInbound)(nil)).
+func (r *ChatInbounds) KeepHeard(ctx context.Context, streamApp int64, messageID, heard string) error {
+	_, err := r.store.global.NewUpdate().Model((*ChatInbound)(nil)).
 		Set("heard = ?", heard).
-		Where("stream_app = ? AND message_id = ?", streamApp, messageID).
+		Where("stream_app_pk = ? AND message_id = ?", streamApp, messageID).
 		Where("heard IS NULL").
 		Exec(ctx)
 	if err != nil {
@@ -273,14 +254,14 @@ func (s *Store) KeepChatInboundHeard(ctx context.Context, streamApp int64, messa
 	return nil
 }
 
-// ReleaseChatInboundAnswer queues again a message whose answer started (StartChatInboundAnswer)
+// ReleaseAnswer queues again a message whose answer started (StartAnswer)
 // and that nothing then took, such as a dispatch worker that was not connected, so a later try
 // answers it. The lease is left as it is, for the worker holding it to retry the row.
-func (s *Store) ReleaseChatInboundAnswer(ctx context.Context, streamApp int64, messageID string) error {
-	_, err := s.db.NewUpdate().Model((*ChatInbound)(nil)).
+func (r *ChatInbounds) ReleaseAnswer(ctx context.Context, streamApp int64, messageID string) error {
+	_, err := r.store.global.NewUpdate().Model((*ChatInbound)(nil)).
 		Set("state = ?", ChatInboundQueued).
 		Set("finished_at = NULL").
-		Where("stream_app = ? AND message_id = ?", streamApp, messageID).
+		Where("stream_app_pk = ? AND message_id = ?", streamApp, messageID).
 		Where("state = ?", ChatInboundDone).
 		Exec(ctx)
 	if err != nil {
@@ -289,16 +270,13 @@ func (s *Store) ReleaseChatInboundAnswer(ctx context.Context, streamApp int64, m
 	return nil
 }
 
-// PruneChatInbound deletes the rows of answered messages finished a day before now, and of
+// Prune deletes the rows of answered messages finished a day before now, and of
 // given-up ones 30 days before, and returns how many it deleted.
-func (s *Store) PruneChatInbound(ctx context.Context, now time.Time) (int, error) {
-	result, err := s.db.NewDelete().Model((*ChatInbound)(nil)).
-		Where("(state = ? AND finished_at < ?) OR (state = ? AND finished_at < ?)",
-			ChatInboundDone, now.Add(-chatInboundDoneKeep).UTC(), ChatInboundFailed, now.Add(-chatInboundFailedKeep).UTC()).
-		Exec(ctx)
+func (r *ChatInbounds) Prune(ctx context.Context, now time.Time) (int, error) {
+	pruned, err := deleteInBatches(ctx, r.store.global, "chat_inbound", "(state = ? AND finished_at < ?) OR (state = ? AND finished_at < ?)",
+		ChatInboundDone, now.Add(-chatInboundDoneKeep).UTC(), ChatInboundFailed, now.Add(-chatInboundFailedKeep).UTC())
 	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: prune chat inbound: %w", err))
+		return int(pruned), stack.Wrap(fmt.Errorf("store: prune chat inbound: %w", err))
 	}
-	pruned, _ := result.RowsAffected()
 	return int(pruned), nil
 }

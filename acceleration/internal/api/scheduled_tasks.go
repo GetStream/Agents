@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
@@ -31,6 +33,11 @@ var errUnknownScheduledTask = APIError{
 var errTooManyScheduledTasks = APIError{Type: ErrorTypeConflict, Code: codeTooManyTasks,
 	Message: "the user already has the most active scheduled tasks this agent allows; " +
 		"cancel or pause one first"}
+
+// errScheduledTaskChanged is a write to a task that changed between its read and its save, by a
+// pause, an edit or a delivery: saving the copy read would undo that change.
+var errScheduledTaskChanged = APIError{Type: ErrorTypeConflict, Code: codeTaskChanged,
+	Message: "the scheduled task changed while this request was made; read it again and retry"}
 
 // errUnkeptTaskSession is a create naming a session whose conversation is not kept: an
 // occurrence follows up by reopening the conversation, which an incognito session leaves
@@ -63,9 +70,25 @@ func (s *Server) scheduledTasksCustomer(ctx context.Context) (string, error) {
 // loadScheduledTask reads one of the customer's tasks and refuses it as not there when
 // the caller may not reach it: a task belongs to its user, recorded as user id plus
 // caller kind, and reachability is a session owner's (Owner.Reaches), so a task a
-// backend made is still its user's own device's to read.
+// backend made is still its user's own device's to read. To an end user the teams gate
+// checks, a task on a config of a team they are not in now is not there either, as the
+// list leaves it out: what it says and what it runs are that team's agent's.
 func (s *Server) loadScheduledTask(ctx context.Context, customerID, id string) (store.ScheduledTask, error) {
-	task, err := s.store.ScheduledTask(ctx, customerID, id)
+	task, err := s.ownScheduledTask(ctx, customerID, id)
+	if err != nil {
+		return store.ScheduledTask{}, err
+	}
+	if err := s.refuseOutsideTeam(ctx, customerID, task.ConfigID); err != nil {
+		return store.ScheduledTask{}, unknownOr(err, errUnknownConfig, errUnknownScheduledTask)
+	}
+	return task, nil
+}
+
+// ownScheduledTask is loadScheduledTask without the teams check, for what only stops a task: a
+// pause or a delete runs nothing of its agent, so a user who left its team can still stop a task
+// of theirs that would otherwise go on firing for them.
+func (s *Server) ownScheduledTask(ctx context.Context, customerID, id string) (store.ScheduledTask, error) {
+	task, err := s.store.ScheduledTasks.Get(ctx, customerID, id)
 	if errors.Is(err, store.ErrNoScheduledTask) {
 		return store.ScheduledTask{}, errUnknownScheduledTask
 	}
@@ -112,13 +135,20 @@ func (s *Server) listScheduledTasks(ctx context.Context, request *listScheduledT
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
+	reachable, err := s.reachableTaskConfigs(ctx, customerID, scope)
+	if err != nil {
+		return nil, err
+	}
 	limit := store.ScheduledTaskLimit(value(request.Limit.ptr()))
-	rows, err := s.store.ScheduledTasks(ctx, customerID, store.ScheduledTaskFilter{
+	rows, err := s.store.ScheduledTasks.Select(ctx, customerID, store.ScheduledTaskFilter{
 		Scope:     scope,
 		State:     value(request.State.ptr()),
 		ConfigID:  value(request.ConfigId.ptr()),
 		SessionID: value(request.SessionId.ptr()),
-	}, limit, after)
+		Configs:   reachable,
+		Limit:     limit,
+		After:     after,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -135,9 +165,34 @@ func (s *Server) listScheduledTasks(ctx context.Context, request *listScheduledT
 	return &listScheduledTasksResponse{Body: listed}, nil
 }
 
+// reachableTaskConfigs are the configs of the tasks in scope that the caller may reach, for a
+// list to leave out the tasks on any other, as loadScheduledTask refuses them: nil for a caller
+// the teams gate does not check. They are found before the list is read, so a page is cut from
+// the tasks the caller may see and comes back full.
+func (s *Server) reachableTaskConfigs(ctx context.Context, customerID string, scope store.ScheduledTaskScope) (*[]string, error) {
+	teams, err := s.teamsGateFor(ctx, customerID)
+	if err != nil || !teams.checked {
+		return nil, err
+	}
+	configs, err := s.store.ScheduledTasks.Configs(ctx, customerID, scope)
+	if err != nil {
+		return nil, err
+	}
+	reachable := []string{}
+	for _, config := range configs {
+		if !teams.refuses(ctx, config) {
+			reachable = append(reachable, config.ID)
+		}
+	}
+	return &reachable, nil
+}
+
 func (s *Server) createScheduledTask(ctx context.Context, request *createScheduledTaskRequest) (*createScheduledTaskResponse, error) {
 	customerID, failure := s.scheduledTasksCustomer(ctx)
 	if failure != nil {
+		return nil, failure
+	}
+	if failure, refused := refuseReservedActingFor(ctx, "CreateScheduledTask"); refused {
 		return nil, failure
 	}
 	if request.Body == nil {
@@ -212,7 +267,7 @@ func (s *Server) createScheduledTask(ctx context.Context, request *createSchedul
 		task.ConfigID = config.ID
 	}
 
-	stored, err := s.store.UserTimezone(ctx, customerID, userID)
+	stored, err := s.store.Users.GetTimezone(ctx, customerID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +307,7 @@ func (s *Server) createScheduledTask(ctx context.Context, request *createSchedul
 	if config != nil {
 		maxActive = config.Scheduling.MaxActive()
 	}
-	if err := s.store.CreateScheduledTask(ctx, &task, maxActive); err != nil {
+	if err := s.store.ScheduledTasks.Insert(ctx, &task, maxActive); err != nil {
 		switch {
 		case errors.Is(err, store.ErrScheduledTaskIDTaken):
 			return nil, conflict("a scheduled task with this id already exists; read it back, or choose another id")
@@ -287,7 +342,10 @@ func (s *Server) scheduledTaskSession(ctx context.Context, customerID, userID, i
 		}
 	}
 	row, err := s.storedSession(ctx, customerID, id)
-	if err != nil || row.UserID != userID {
+	if err != nil {
+		return "", "", unknownOr(err, store.ErrNoSession, errUnknownSession)
+	}
+	if row.UserID != userID {
 		return "", "", errUnknownSession
 	}
 	// What reopenedFromRow needs to carry the conversation on.
@@ -389,9 +447,12 @@ func (s *Server) updateScheduledTask(ctx context.Context, request *updateSchedul
 			task.StartLocal = moved.StartLocal
 		}
 	}
-	if err := s.store.SaveScheduledTask(ctx, &task); err != nil {
-		if errors.Is(err, store.ErrNoAgentConfig) {
+	if err := s.store.ScheduledTasks.Update(ctx, &task); err != nil {
+		switch {
+		case errors.Is(err, store.ErrNoAgentConfig):
 			return nil, errUnknownConfig
+		case errors.Is(err, store.ErrScheduledTaskChanged):
+			return nil, errScheduledTaskChanged
 		}
 		return nil, err
 	}
@@ -477,6 +538,16 @@ func (s *Server) rescheduleTask(task *store.ScheduledTask, written ScheduledTask
 		}
 		task.NextRunAt = &next
 	}
+	// A failed task's resume, and the agent's reschedule of a completed one that names no new
+	// time, arm the next occurrence of this schedule as written and check nothing, so that
+	// occurrence is held to the floor here.
+	if task.State == store.ScheduledTaskFailed || task.State == store.ScheduledTaskCompleted {
+		if next, ok := parsed.Next(now); ok {
+			if err := scheduling.CheckMove(next, current, now); err != nil {
+				return scheduleFailure(err)
+			}
+		}
+	}
 	task.StartLocal, task.Timezone, task.RRule = parsed.StartLocal, parsed.Timezone, parsed.Repeat
 	task.UntilDate = nil
 	if !parsed.Until.IsZero() {
@@ -491,24 +562,23 @@ func (s *Server) pauseScheduledTask(ctx context.Context, request *pauseScheduled
 	if failure != nil {
 		return nil, failure
 	}
-	task, err := s.loadScheduledTask(ctx, customerID, request.Id)
+	task, err := s.ownScheduledTask(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, err
 	}
 	// A task a data move paused is paused by the user once they say so, so the cut-over leaves it.
 	if task.State == store.ScheduledTaskActive || (task.State == store.ScheduledTaskPaused && task.MovePaused) {
 		task.State, task.MovePaused = store.ScheduledTaskPaused, false
-		if err := s.store.SaveScheduledTask(ctx, &task); err != nil {
+		if err := s.store.ScheduledTasks.Update(ctx, &task); err != nil {
+			if errors.Is(err, store.ErrScheduledTaskChanged) {
+				return nil, errScheduledTaskChanged
+			}
 			return nil, err
 		}
 	}
 	rendered := s.scheduledTaskOf(ctx, task)
 	return &pauseScheduledTaskResponse{Body: rendered}, nil
 }
-
-// resumedAt is the clock a resume counts a task's next run from. A test sets
-// it to resume inside an hour the wall clock is not in.
-var resumedAt = time.Now
 
 func (s *Server) resumeScheduledTask(ctx context.Context, request *resumeScheduledTaskRequest) (*resumeScheduledTaskResponse, error) {
 	customerID, failure := s.scheduledTasksCustomer(ctx)
@@ -528,7 +598,7 @@ func (s *Server) resumeScheduledTask(ctx context.Context, request *resumeSchedul
 			return nil, scheduleFailure(err)
 		}
 		// Counted from now: what a pause slept through is never replayed.
-		next, ok := schedule.Next(resumedAt())
+		next, ok := schedule.Next(s.resumedAt())
 		if !ok {
 			// A one-shot whose time came while it was paused takes no place and runs
 			// on nothing: it is only closed, with the occurrence it slept through on
@@ -538,33 +608,27 @@ func (s *Server) resumeScheduledTask(ctx context.Context, request *resumeSchedul
 				return nil, scheduleFailure(&scheduling.Error{Code: scheduling.CodeScheduleInPast,
 					Message: "that task has no occurrence left; give it a new schedule, then resume it"})
 			}
-			if err := s.store.InsertScheduledTaskRun(ctx, missed); err != nil {
-				return nil, err
-			}
 			task.State, task.NextRunAt = store.ScheduledTaskCompleted, nil
+			task.ConsecutiveFailures, task.MovePaused = 0, false
+			err = s.store.ScheduledTasks.Close(ctx, &task, missed)
 		} else {
-			maxActive := store.DefaultMaxActiveTasks
 			// A deleted config leaves a task nothing to run on; any other failure to read it is not that.
-			config, err := s.store.AgentConfig(ctx, customerID, task.ConfigID)
-			if errors.Is(err, store.ErrNoAgentConfig) {
+			if _, err := s.store.AgentConfigs.Get(ctx, customerID, task.ConfigID); errors.Is(err, store.ErrNoAgentConfig) {
 				return nil, errUnknownConfig
-			}
-			if err == nil {
-				maxActive = config.Scheduling.MaxActive()
-			}
-			active, err := s.store.ActiveScheduledTaskCount(ctx, customerID, task.UserID, task.ConfigID)
-			if err != nil {
-				return nil, err
-			}
-			if active >= maxActive {
-				return nil, errTooManyScheduledTasks
 			}
 			task.State, task.NextRunAt = store.ScheduledTaskActive, &next
+			task.ConsecutiveFailures, task.MovePaused = 0, false
+			// The save counts the user's active tasks against the config's limit.
+			err = s.store.ScheduledTasks.Update(ctx, &task)
 		}
-		task.ConsecutiveFailures, task.MovePaused = 0, false
-		if err := s.store.SaveScheduledTask(ctx, &task); err != nil {
-			if errors.Is(err, store.ErrNoAgentConfig) {
+		if err != nil {
+			switch {
+			case errors.Is(err, store.ErrNoAgentConfig):
 				return nil, errUnknownConfig
+			case errors.Is(err, store.ErrScheduledTaskChanged):
+				return nil, errScheduledTaskChanged
+			case errors.Is(err, store.ErrTooManyScheduledTasks):
+				return nil, errTooManyScheduledTasks
 			}
 			return nil, err
 		}
@@ -592,18 +656,17 @@ func (s *Server) runScheduledTask(ctx context.Context, request *runScheduledTask
 		Trigger: store.ScheduledTaskTriggerManual, Prompt: task.Instructions,
 		State: store.ScheduledTaskRunRunning, Attempts: 1, StartedAt: &now,
 	}
-	if err := s.store.InsertScheduledTaskRun(ctx, &run); err != nil {
+	if err := s.store.ScheduledTaskRuns.Insert(ctx, &run); err != nil {
 		return nil, err
 	}
-	go s.deliverManualRun(task, run)
+	go s.deliverManualRun(context.WithoutCancel(ctx), task, run)
 	return &runScheduledTaskResponse{Body: scheduledTaskRunOf(task, run)}, nil
 }
 
 // deliverManualRun delivers a run made by hand and records how it landed: a
 // delivery too late to make, such as a call that would ring long after the
 // run was asked for, is missed, as a scheduled occurrence's is.
-func (s *Server) deliverManualRun(task store.ScheduledTask, run store.ScheduledTaskRun) {
-	ctx := context.Background()
+func (s *Server) deliverManualRun(ctx context.Context, task store.ScheduledTask, run store.ScheduledTaskRun) {
 	deliveredTo, sessionID, err := s.DeliverScheduledTask(ctx, store.ClaimedScheduledTask{Task: task, Run: run})
 	state := store.ScheduledTaskRunDelivered
 	failure := ""
@@ -618,10 +681,18 @@ func (s *Server) deliverManualRun(task store.ScheduledTask, run store.ScheduledT
 		s.logger.Error("a scheduled task run by hand did not land",
 			"task", task.ID, "run", run.ID, "error", err)
 	}
-	if err := s.store.FinishManualScheduledTaskRun(ctx, run.ID, state, deliveredTo, sessionID, failure); err != nil {
+	if err := s.store.ScheduledTaskRuns.FinishManual(ctx, run.CustomerID, run.ID, state, deliveredTo, sessionID, failure); err != nil {
 		s.logger.Error("could not record a scheduled task run by hand",
 			"task", task.ID, "run", run.ID, "error", err)
 	}
+	// Counted here whether or not its run was written: no worker takes a run by hand up again.
+	request := activity.Request{
+		AppID: task.CustomerID, Area: activity.AreaScheduling, Client: activity.ClientRouter, At: time.Now(),
+	}
+	if state != store.ScheduledTaskRunDelivered {
+		request.Refused, request.Code = true, cmp.Or(failure, state)
+	}
+	s.activity.Record(request)
 }
 
 func (s *Server) deleteScheduledTask(ctx context.Context, request *deleteScheduledTaskRequest) (*struct{}, error) {
@@ -629,10 +700,10 @@ func (s *Server) deleteScheduledTask(ctx context.Context, request *deleteSchedul
 	if failure != nil {
 		return nil, failure
 	}
-	if _, err := s.loadScheduledTask(ctx, customerID, request.Id); err != nil {
+	if _, err := s.ownScheduledTask(ctx, customerID, request.Id); err != nil {
 		return nil, err
 	}
-	if err := s.store.DeleteScheduledTask(ctx, customerID, request.Id); err != nil {
+	if err := s.store.ScheduledTasks.Delete(ctx, customerID, request.Id); err != nil {
 		if errors.Is(err, store.ErrNoScheduledTask) {
 			return nil, errUnknownScheduledTask
 		}
@@ -655,7 +726,7 @@ func (s *Server) listScheduledTaskRuns(ctx context.Context, request *listSchedul
 		return nil, invalidRequest(err.Error())
 	}
 	limit := store.ScheduledTaskLimit(value(request.Limit.ptr()))
-	rows, err := s.store.ScheduledTaskRuns(ctx, customerID, task.ID, limit, after)
+	rows, err := s.store.ScheduledTaskRuns.Select(ctx, customerID, store.ScheduledTaskRunFilter{TaskID: task.ID, Limit: limit, After: after})
 	if err != nil {
 		return nil, err
 	}
@@ -676,7 +747,7 @@ func (s *Server) listScheduledTaskRuns(ctx context.Context, request *listSchedul
 // last_run_at out rather than failing a change that stands, which a client
 // retrying a create would make twice.
 func (s *Server) scheduledTaskOf(ctx context.Context, task store.ScheduledTask) ScheduledTask {
-	last, err := s.store.LastScheduledTaskRunsAt(ctx, task.CustomerID, []string{task.ID})
+	last, err := s.store.ScheduledTaskRuns.LastFinishedAt(ctx, task.CustomerID, []string{task.ID})
 	if err != nil {
 		s.logger.Error("could not read when a scheduled task last ran", "task", task.ID,
 			"customer", task.CustomerID, "error", err)
@@ -690,7 +761,7 @@ func (s *Server) scheduledTasksOf(ctx context.Context, customerID string, tasks 
 	for _, task := range tasks {
 		ids = append(ids, task.ID)
 	}
-	last, err := s.store.LastScheduledTaskRunsAt(ctx, customerID, ids)
+	last, err := s.store.ScheduledTaskRuns.LastFinishedAt(ctx, customerID, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -824,7 +895,10 @@ func (s *Server) registerScheduledTasks(api huma.API) {
 			"a skip when it lands past the following one — and on a one-shot it is the reschedule. An end " +
 			"user's device may change title, schedule, next, deliver_to and quiet_hours; instructions are " +
 			"server-side, and a device sending them is refused with a 403.",
-		Responses:  map[string]*huma.Response{"200": {Description: "The task as it now is"}},
+		Responses: map[string]*huma.Response{
+			"200": {Description: "The task as it now is"},
+			"409": errorResponse("The task changed while the request was made: read it again and retry"),
+		},
 		Errors:     []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 		Extensions: map[string]any{clientAccessibleExtension: true},
 	}, s.updateScheduledTask)
@@ -834,9 +908,12 @@ func (s *Server) registerScheduledTasks(api huma.API) {
 		Path:        "/v1/agents/scheduled-tasks/{id}/pause",
 		Summary:     "Pause a scheduled task",
 		Description: "Nothing comes due while a task is paused; what it slept through is never replayed.",
-		Responses:   map[string]*huma.Response{"200": {Description: "The task, paused"}},
-		Errors:      []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
-		Extensions:  map[string]any{clientAccessibleExtension: true},
+		Responses: map[string]*huma.Response{
+			"200": {Description: "The task, paused"},
+			"409": errorResponse("The task changed while the request was made: read it again and retry"),
+		},
+		Errors:     []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+		Extensions: map[string]any{clientAccessibleExtension: true},
 	}, s.pauseScheduledTask)
 	huma.Register(api, huma.Operation{
 		OperationID: "resumeScheduledTask",
@@ -852,7 +929,7 @@ func (s *Server) registerScheduledTasks(api huma.API) {
 		Responses: map[string]*huma.Response{
 			"200": {Description: "The task, running again"},
 			"400": errorResponse("The task has no occurrence left (schedule_in_past), or the request is malformed"),
-			"409": errorResponse("The task is completed, or the user is at their active-task limit"),
+			"409": errorResponse("The task is completed, the user is at their active-task limit, or the task changed while the request was made"),
 		},
 		Errors:     []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 		Extensions: map[string]any{clientAccessibleExtension: true},
@@ -987,7 +1064,7 @@ type ScheduledTaskRun struct {
 	Attempts     int        `json:"attempts"`
 	StartedAt    *time.Time `json:"started_at"`
 	FinishedAt   *time.Time `json:"finished_at"`
-	Error        *string    `json:"error" doc:"Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise."`
+	Error        *string    `json:"error" doc:"Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), not_in_team (in an app that keeps each team's agents to its own users, the user who made the task is no longer in its agent's team, so the agent is not run; not tried again), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise."`
 }
 
 // ScheduledTaskPage is a page of scheduled tasks.

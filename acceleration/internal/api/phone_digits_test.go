@@ -61,7 +61,7 @@ func (s *PhoneDigitsSuite) SetupTest() {
 // placedBy opens the leg of a Telnyx call customerID placed and returns its vendor call id.
 func (s *PhoneDigitsSuite) placedBy(customerID string) string {
 	vendorCallID := "v3:" + s.utils.uuid()
-	_, err := s.store.OpenCallLeg(context.Background(), &store.CallLeg{
+	_, err := s.store.CallLegs.Open(context.Background(), &store.CallLeg{
 		CustomerID: customerID, CallType: "default", CallID: s.utils.uuid(),
 		Vendor: "telnyx", VendorCallID: vendorCallID, Direction: store.Outbound,
 		LocalNumber: s.utils.number(), RemoteNumber: s.utils.number(),

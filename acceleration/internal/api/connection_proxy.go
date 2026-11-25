@@ -121,12 +121,6 @@ func (s *Server) proxyConnection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, invalidRequest(err.Error()))
 		return
 	}
-	limit := manifest.RateLimitKey(connection.CustomerID, coreConnection(connection))
-	if wait := s.connectorLimiter.Wait(ctx, limit); wait > 0 {
-		w.Header().Set("Retry-After", waitSeconds(wait))
-		writeError(w, rateLimited(fmt.Sprintf("the provider asked to wait: retry after %s", waitSeconds(wait)+"s")))
-		return
-	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxProxyBody))
 	if maxed := (*http.MaxBytesError)(nil); errors.As(err, &maxed) {
 		writeError(w, payloadTooLarge(fmt.Sprintf("the body is over %d bytes", maxProxyBody)))
@@ -136,16 +130,22 @@ func (s *Server) proxyConnection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, invalidRequest("the body could not be read"))
 		return
 	}
+	limit := manifest.RateLimitKey(connection.CustomerID, coreConnection(connection))
 	// All customers share the router's egress: one customer's calls to a connector are capped
 	// so they cannot spend a provider's limit for everyone (AI-958).
 	calls := core.CallsKey(connection.CustomerID, connection.ConnectorID)
-	if wait := s.connectorLimiter.Take(ctx, calls, s.proxyCallsPerMinute, proxyCallWindow); wait > 0 {
-		w.Header().Set("Retry-After", waitSeconds(wait))
-		writeError(w, rateLimited(fmt.Sprintf("this app's direct calls to %s are over %d a minute: retry after %ss",
-			connection.ConnectorID, s.proxyCallsPerMinute, waitSeconds(wait))))
+	blocked, over := s.connectorLimiter.Admit(ctx, limit, calls, s.proxyCallsPerMinute, proxyCallWindow)
+	if blocked > 0 {
+		w.Header().Set("Retry-After", waitSeconds(blocked))
+		writeError(w, rateLimited(fmt.Sprintf("the provider asked to wait: retry after %s", waitSeconds(blocked)+"s")))
 		return
 	}
-
+	if over > 0 {
+		w.Header().Set("Retry-After", waitSeconds(over))
+		writeError(w, rateLimited(fmt.Sprintf("this app's direct calls to %s are over %d a minute: retry after %ss",
+			connection.ConnectorID, s.proxyCallsPerMinute, waitSeconds(over))))
+		return
+	}
 	observed, exchange := core.WithExchange(ctx)
 	// A bytes.Reader body gets GetBody, so the client can send it again after a 401.
 	request, err := http.NewRequestWithContext(observed, r.Method, target.String(), bytes.NewReader(body))
@@ -406,17 +406,17 @@ func waitSeconds(wait time.Duration) string {
 }
 
 // auditProxyCall records one direct call the connection's client sent (T44): the provider's
-// status, nil when no answer came, the time to its answer and the host it reached
-// (20261007170000_connector_invocations_and_audit.sql). The call happened whatever the row
-// does, so a row that cannot be written is logged.
+// status, nil when no answer came, the time to its answer and the host it reached. The call
+// happened whatever the row does, so a row that cannot be written is logged.
 func (s *Server) auditProxyCall(ctx context.Context, connection store.ConnectorConnection, host string, status *int, latency int64) {
 	ctx, cancel := detachedWrite(ctx)
 	defer cancel()
-	err := s.store.RecordConnectorAudit(ctx, &store.ConnectorAuditEvent{
+	err := s.store.ConnectorAuditEvents.Insert(ctx, &store.ConnectorAuditEvent{
 		CustomerID: connection.CustomerID, ConnectionID: connection.ID, ConnectorID: connection.ConnectorID,
 		OwnerType: connection.OwnerType, Action: store.AuditProxyCall, RequestID: core.CorrelationOf(ctx).RequestID,
 		StatusCode: status, LatencyMs: &latency, Target: host,
 	})
+
 	if err != nil {
 		s.logger.Error("could not record a connector audit row", "connection", connection.ID, "action", store.AuditProxyCall, "error", err)
 	}

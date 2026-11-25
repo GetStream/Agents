@@ -28,7 +28,7 @@ func (s *MeteredSuite) regional() (*Knowledge, *pricing.List) {
 		s.Require().NoError(err)
 		backends[region] = backend
 	}
-	return NewRegionalKnowledge(backends, s.recorder, nil, s.store), list
+	return NewRegionalKnowledge(backends, s.recorder, nil, s.store.KnowledgeNamespaces), list
 }
 
 // in is the suite's owner doing work in region, as an agent kept there does.
@@ -54,7 +54,7 @@ func (s *MeteredSuite) TestWorkInTheEUWritesThereAndIsPricedAtTheEUEntry() {
 
 	s.Equal([]string{knowledge.Scoped(s.owner.CustomerID, "docs")}, s.listed(base, pricing.RegionEU))
 	s.Empty(s.listed(base, pricing.RegionUS), "nothing of eu work is written in the us")
-	kept, recorded, err := s.store.KnowledgePlace(s.ctx, s.owner.CustomerID, "docs")
+	kept, recorded, err := s.store.KnowledgeNamespaces.GetPlace(s.ctx, s.owner.CustomerID, "docs")
 	s.Require().NoError(err)
 	s.True(recorded)
 	s.Equal(store.KnowledgePlace{Region: pricing.RegionEU, Account: store.KnowledgeAccountStream}, kept)
@@ -141,7 +141,7 @@ func (s *MeteredSuite) TestABaseDroppedThroughOneRouterCanBeMadeAgainInAnotherRe
 	s.Require().NoError(err)
 
 	s.Require().NoError(first.For(s.in(pricing.RegionEU)).Upsert(s.ctx, "docs", passage))
-	kept, recorded, err := s.store.KnowledgePlace(s.ctx, s.owner.CustomerID, "docs")
+	kept, recorded, err := s.store.KnowledgeNamespaces.GetPlace(s.ctx, s.owner.CustomerID, "docs")
 	s.Require().NoError(err)
 	s.True(recorded)
 	s.Equal(pricing.RegionEU, kept.Region)
@@ -151,25 +151,25 @@ func (s *MeteredSuite) TestARegionWithNoKnowledgeBackendIsRefusedNamingIt() {
 	server := turbopuffertest.Start(s.T())
 	backend, err := turbopuffer.New(turbopuffer.Options{APIKey: "test-key", BaseURL: server.URL, Cost: listCost})
 	s.Require().NoError(err)
-	owned := NewRegionalKnowledge(map[string]knowledge.Backend{pricing.RegionUS: backend}, s.recorder, nil, s.store).
+	owned := NewRegionalKnowledge(map[string]knowledge.Backend{pricing.RegionUS: backend}, s.recorder, nil, s.store.KnowledgeNamespaces).
 		For(s.in(pricing.RegionEU))
 
 	err = owned.Upsert(s.ctx, "docs", passage)
 
 	s.Require().ErrorIs(err, routing.ErrRequest)
 	s.ErrorContains(err, "keeps no knowledge in region eu")
-	_, recorded, err := s.store.KnowledgePlace(s.ctx, s.owner.CustomerID, "docs")
+	_, recorded, err := s.store.KnowledgeNamespaces.GetPlace(s.ctx, s.owner.CustomerID, "docs")
 	s.Require().NoError(err)
 	s.False(recorded, "a base nothing was written to is kept nowhere")
 }
 
 func (s *MeteredSuite) TestTwoFirstWritesInTwoRegionsKeepTheBaseWhereTheFirstLanded() {
 	eu := store.KnowledgePlace{Region: pricing.RegionEU, Account: store.KnowledgeAccountCustomer}
-	kept, err := s.store.ClaimKnowledgePlace(s.ctx, s.owner.CustomerID, "docs", eu)
+	kept, err := s.store.KnowledgeNamespaces.Claim(s.ctx, s.owner.CustomerID, "docs", eu)
 	s.Require().NoError(err)
 	s.Equal(eu, kept)
 
-	kept, err = s.store.ClaimKnowledgePlace(s.ctx, s.owner.CustomerID, "docs",
+	kept, err = s.store.KnowledgeNamespaces.Claim(s.ctx, s.owner.CustomerID, "docs",
 		store.KnowledgePlace{Region: pricing.RegionUS, Account: store.KnowledgeAccountStream})
 
 	s.Require().NoError(err)

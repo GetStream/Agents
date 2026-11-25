@@ -29,12 +29,6 @@ var errNoCustomConnector = notFound("the app has no custom connector with this i
 // counted. Ten keeps the message a line a person reads; it is not measured.
 const usesNamed = 10
 
-// mcpSource is both the tool source a custom definition runs and the endpoint role it runs
-// against, as the built-in manifests write them (internal/connectors/providers/slack.yaml
-// and linear.yaml: sources: [{kind: mcp, endpoint: mcp}]). MCP is the only source so far
-// (architecture doc, «Layers and interfaces», the Source registry's first member).
-const mcpSource = "mcp"
-
 // Connector is one connector as the catalog shows it and a connection is created from: the
 // revision of its definition (store.ConnectorDefinition) the request read. It is the
 // non-secret part of the manifest: what a caller chooses between (schemes, inputs, scopes,
@@ -57,6 +51,7 @@ type Connector struct {
 	RedirectURI string            `json:"redirect_uri,omitempty" readOnly:"true" format:"uri" doc:"The redirect URI an OAuth client registered for this connector has to list: where every consent of this deployment sends the browser back to, ROUTER_PUBLIC_URL followed by /v1/agents/connectors/oauth/callback. Only on a connector that connects with oauth2_code, and absent when ROUTER_PUBLIC_URL is not set, since no consent can start then."`
 	Channel     bool              `json:"channel" readOnly:"true" doc:"The connector is an inbound channel: its manifest reads messages a provider delivers to the router, which agents answer. A block that reads only signals, such as Slack with a user token, is not one. A dashboard warns on it before a delete that would end those replies."`
 	Sandbox     *ConnectorSandbox `json:"sandbox,omitempty" readOnly:"true" doc:"How code in an agent's sandbox calls the provider's API with a connection's credential without holding it. Absent when the connector offers no such access."`
+	SyncHash    string            `json:"sync_hash,omitempty" readOnly:"true" doc:"The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync."`
 	CreatedAt   time.Time         `json:"created_at" readOnly:"true" doc:"When this revision was stored."`
 }
 
@@ -168,7 +163,10 @@ type ConnectorPage struct {
 // scopes is well over the longest list shipped, Slack's 29 (providers/slack.yaml), and is
 // not measured either. A scope is RFC 6749 section 3.3's scope-token, %x21 / %x23-5B /
 // %x5D-7E, so it can hold neither a space nor a quote. The schemes have no count: each must
-// be a registered one and none may repeat, which bounds them.
+// be a registered one and none may repeat, which bounds them. A sync hash is up to 128
+// characters, a SHA-512 hex digest, well over the 32 of the MD5 hex digest the CLI computes
+// for an agent (Agentrc.Hash in GetStream/cli internal/agentrc/agentrc.go), and printable
+// ASCII without a space, so it holds no NUL, which a Postgres text column refuses.
 type CustomConnectorRequest struct {
 	ID          string           `json:"id" pattern:"^custom_[a-z][a-z0-9_]{0,56}$" patternDescription:"custom_ then a lowercase letter, then up to 56 lowercase letters, digits or underscores" doc:"Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same."`
 	Name        string           `json:"name" minLength:"1" maxLength:"120"`
@@ -178,6 +176,7 @@ type CustomConnectorRequest struct {
 	Schemes     []string         `json:"schemes" minItems:"1" doc:"How a connection may authenticate. Each must be a scheme this deployment has, except oauth2_client_credentials, which a custom connector cannot use: it needs a token endpoint a custom connector cannot set."`
 	Scopes      []string         `json:"scopes,omitempty" maxItems:"100" uniqueItems:"true" pattern:"^[!#-\\[\\]-~]+$" patternDescription:"an RFC 6749 scope token" doc:"The scopes a consent asks for, each an RFC 6749 scope token."`
 	Client      *ConnectorClient `json:"client,omitempty"`
+	SyncHash    string           `json:"sync_hash,omitempty" maxLength:"128" pattern:"^[!-~]*$" patternDescription:"printable ASCII without a space" doc:"The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one."`
 }
 
 func (*CustomConnectorRequest) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
@@ -293,11 +292,12 @@ func (s *Server) listConnectors(ctx context.Context, request *listConnectorsRequ
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	found, err := s.store.ListConnectorDefinitions(ctx, customerID, store.ConnectorDefinitionFilter{
+	found, err := s.store.ConnectorDefinitions.Select(ctx, customerID, store.ConnectorDefinitionFilter{
 		Text:   strings.TrimSpace(request.Q),
 		Cursor: cursor,
 		Limit:  request.Limit,
 	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +326,7 @@ func (s *Server) getConnector(ctx context.Context, request *getConnectorRequest)
 	if s.store == nil {
 		return nil, errNoConnectors
 	}
-	definition, err := s.store.LatestConnectorDefinition(ctx, customerID, request.ID)
+	definition, err := s.store.ConnectorDefinitions.Latest(ctx, customerID, request.ID)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		return nil, notFound("no such connector")
 	}
@@ -353,7 +353,7 @@ func (s *Server) createConnector(ctx context.Context, request *createConnectorRe
 		return nil, invalidRequest(store.StreamSource + " is the source of the router's own events, which no connector may be named")
 	}
 	// Every refusal a caller can cause is above, so what the store refuses here is a bug.
-	definition, err := s.store.CreateConnectorDefinition(ctx, customerID, manifest)
+	definition, err := s.store.ConnectorDefinitions.ReviseSynced(ctx, customerID, manifest, request.Body.SyncHash)
 	if err != nil {
 		return nil, err
 	}
@@ -361,7 +361,7 @@ func (s *Server) createConnector(ctx context.Context, request *createConnectorRe
 }
 
 // deleteConnector deletes one of the caller's own definitions, refused while something uses
-// it unless forced (store.DeleteConnectorDefinition).
+// it unless forced (store.ConnectorDefinitions.Delete).
 func (s *Server) deleteConnector(ctx context.Context, request *deleteConnectorRequest) (*struct{}, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
@@ -370,7 +370,7 @@ func (s *Server) deleteConnector(ctx context.Context, request *deleteConnectorRe
 	if s.store == nil {
 		return nil, errNoConnectors
 	}
-	deleted, err := s.store.DeleteConnectorDefinition(ctx, customerID, request.ID, request.Force)
+	deleted, err := s.store.ConnectorDefinitions.Delete(ctx, customerID, request.ID, request.Force)
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		return nil, errNoCustomConnector
 	}
@@ -429,43 +429,16 @@ func (s *Server) customManifest(ctx context.Context, sent CustomConnectorRequest
 	var client core.ClientPolicy
 	if sent.Client != nil {
 		for _, registration := range sent.Client.Registration {
-			// An operator client is the deployment's own, read from the variables a
-			// built-in's client.env names, and the deployment has none registered with an
-			// app's own server.
-			if core.ClientRegistrationMethod(registration) == core.ClientOperator {
-				return core.Manifest{}, stack.Wrap(errors.New("client.registration cannot be operator for a custom connector: this deployment has no client registered with it"))
-			}
 			client.Registration = append(client.Registration, core.ClientRegistrationMethod(registration))
 		}
 		client.AuthMethod = core.ClientAuthMethod(sent.Client.AuthMethod)
 		client.Alg = sent.Client.Alg
 	}
-	// oauth2_code tries only the mechanisms client.registration names and fails with ErrNoClient when it
-	// names none (pickClient in internal/connectors/schemes/oauth2code/client.go), so such a
-	// definition could be stored and never connected.
-	if slices.Contains(sent.Schemes, "oauth2_code") && len(client.Registration) == 0 {
-		return core.Manifest{}, stack.Wrap(errors.New("client.registration is required with oauth2_code: name how the OAuth client is registered (customer, cimd or dcr)"))
-	}
-	// oauth2_client_credentials gets its token URL from endpoints.token (tokenEndpoint in
-	// internal/connectors/schemes/oauth2cc/scheme.go), and a custom request sets only the MCP endpoint, so
-	// such a definition could be stored and never connected.
-	if slices.Contains(sent.Schemes, "oauth2_client_credentials") {
-		return core.Manifest{}, stack.Wrap(errors.New("oauth2_client_credentials is not available for a custom connector: it needs a token endpoint a custom connector cannot set"))
-	}
-	manifest := core.Manifest{
-		ID: sent.ID,
-		// Validated at the first revision; the store numbers the one it is stored as.
-		Revision:    1,
-		Name:        strings.TrimSpace(sent.Name),
-		Category:    strings.TrimSpace(sent.Category),
-		Description: strings.TrimSpace(sent.Description),
-		Endpoints:   map[string]string{mcpSource: sent.Endpoint},
-		Schemes:     sent.Schemes,
-		Client:      client,
-		Scopes:      core.ScopePolicy{List: sent.Scopes},
-		Sources:     []core.SourceRule{{Kind: mcpSource, Endpoint: mcpSource}},
-	}
-	if err := manifest.Validate(); err != nil {
+	manifest, err := core.CustomManifest(core.CustomConnector{
+		ID: sent.ID, Name: sent.Name, Category: sent.Category, Description: sent.Description,
+		Endpoint: sent.Endpoint, Schemes: sent.Schemes, Scopes: sent.Scopes, Client: client,
+	})
+	if err != nil {
 		return core.Manifest{}, err
 	}
 	// Last, since it resolves the host: the checks above cost nothing.
@@ -527,6 +500,7 @@ func connectorOf(definition store.ConnectorDefinition, publicURL string) Connect
 			AuthMethod:   ConnectorClientAuthMethod(manifest.Client.AuthMethod),
 			Alg:          manifest.Client.Alg,
 		},
+		SyncHash:  definition.SyncHash,
 		CreatedAt: definition.CreatedAt,
 	}
 }

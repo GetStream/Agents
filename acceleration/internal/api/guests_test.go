@@ -5,9 +5,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -272,6 +276,74 @@ func (s *GuestsSuite) TestAGuestTokenWithTheGuestRoleRefreshesTheSameGuest() {
 	s.Equal(store.GuestSecretHash(*first.RefreshSecret), s.storedGuest(first.Id).RefreshSecretHash)
 }
 
+func (s *GuestsSuite) TestAGuestOfTheAppsOwnTokenCarriesOnItsConversationWithTheTokenItRefreshesTo() {
+	seen, resume := s.conversationOfAGuestSeenInAToken()
+
+	again := s.mint(s.asGuest(seen), GuestUserRequest{Id: &seen})
+
+	s.carriesOn(again, resume)
+	s.refusedToASignedInUser(seen, resume)
+}
+
+func (s *GuestsSuite) TestAGuestOfTheAppsOwnTokenCarriesOnItsConversationWithTheTokensItsRefreshSecretBringsIt() {
+	seen, resume := s.conversationOfAGuestSeenInAToken()
+	again := s.mint(s.asGuest(seen), GuestUserRequest{Id: &seen})
+	s.Require().NotNil(again.RefreshSecret)
+
+	// Twice: presenting the first token leaves the guest one that may come back again.
+	for range 2 {
+		again = s.mint(s.data.createAnonymous(), GuestUserRequest{Id: &seen, RefreshSecret: again.RefreshSecret})
+
+		s.Require().Equal(seen, again.Id)
+		s.carriesOn(again, resume)
+	}
+	s.refusedToASignedInUser(seen, resume)
+}
+
+func (s *GuestsSuite) TestAGuestOfTheAppsOwnTokenCarriesOnItsConversationWithTheTokenItsBackendRefreshes() {
+	seen, resume := s.conversationOfAGuestSeenInAToken()
+
+	again := s.mint(s.serverClient, GuestUserRequest{Id: &seen})
+
+	s.carriesOn(again, resume)
+	s.refusedToASignedInUser(seen, resume)
+}
+
+func (s *GuestsSuite) TestAMintedGuestsRefreshedTokenSaysTheRoleOnlyOfTheTokenPresented() {
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	asked := GuestUserRequest{Id: &first.Id, Custom: &map[string]any{"role": "guest"}}
+
+	s.Equal("guest", s.claimsOf(s.mint(s.asGuest(first.Id), asked))["role"])
+	s.NotContains(s.claimsOf(first), "role")
+	s.NotContains(s.claimsOf(s.mint(s.data.signedInAs(first.Id), asked)), "role", "by their own token with no role")
+	s.NotContains(s.claimsOf(s.mint(s.serverClient, asked)), "role", "by the backend")
+	asked.RefreshSecret = s.mint(s.serverClient, GuestUserRequest{Id: &first.Id}).RefreshSecret
+	again := s.mint(s.data.createAnonymous(), asked)
+	s.Equal(first.Id, again.Id)
+	s.NotContains(s.claimsOf(again), "role", "by their refresh secret")
+}
+
+func (s *GuestsSuite) TestAFullTokenWhoseAccountCannotBeRecordedRefreshesToOneOfNoRole() {
+	seen, resume := s.conversationOfAGuestSeenInAToken()
+	s.failQueries(`INSERT INTO "users"`)
+
+	again := s.mint(s.data.signedInAs(seen), GuestUserRequest{Id: &seen})
+
+	s.Equal(seen, again.Id)
+	s.NotContains(s.claimsOf(again), "role")
+	s.refusedToASignedInUser(seen, resume)
+}
+
+func (s *GuestsSuite) TestAClaimedGuestWhoseTokenSaysTheRoleIsNotMintedAgain() {
+	guest := s.recordGuest()
+	s.claim(guest, s.utils.uuid())
+
+	status, failure := s.asGuest(guest).failure(http.MethodPost, "/v1/agents/guests", GuestUserRequest{Id: &guest})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "has been claimed")
+}
+
 func (s *GuestsSuite) TestARefreshSecretBringsTheSameGuestBackWithANewSecret() {
 	first := s.mint(s.data.createAnonymous(), GuestUserRequest{
 		Name: pointerTo("Alice"), Custom: &map[string]any{"plan": "pro"},
@@ -315,6 +387,28 @@ func (s *GuestsSuite) TestAWrongRefreshSecretMintsANewGuest() {
 
 	s.NotEqual(first.Id, minted.Id)
 	s.Equal(before.RefreshSecretHash, s.storedGuest(first.Id).RefreshSecretHash)
+}
+
+func (s *GuestsSuite) TestARefreshSecretNamingAnIdThatIsNotAGuestMintsANewGuest() {
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	for _, named := range []string{s.utils.uuid(), s.data.createUser().userID} {
+		minted := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: &named, RefreshSecret: first.RefreshSecret})
+
+		s.NotEqual(named, minted.Id)
+		s.NotContains(s.claimsOf(minted), "role")
+	}
+}
+
+func (s *GuestsSuite) TestAGuestWhoseRowCannotBeReadKeepsTheSecretItCameWith() {
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	comingBack := GuestUserRequest{Id: &first.Id, RefreshSecret: first.RefreshSecret}
+	s.Run("while it cannot", func() {
+		s.failQueries(`SELECT "u"."customer_id"`)
+		status, _ := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests", comingBack)
+		s.Equal(http.StatusInternalServerError, status)
+	})
+
+	s.Equal(store.GuestSecretHash(*first.RefreshSecret), s.storedGuest(first.Id).RefreshSecretHash)
 }
 
 func (s *GuestsSuite) TestAClaimedGuestsRefreshSecretMintsANewGuest() {
@@ -397,6 +491,39 @@ func (s *GuestsSuite) TestTheSameClaimArrivingTwiceIsNotAConflict() {
 	s.Equal(0, again.SessionsMoved, "the conversations moved the first time")
 }
 
+// A claim that stopped once the guest was marked, before the account joined the channels of
+// the conversations it moved, was answered as done when sent again, and the account never
+// could read them. The store's half is all the first claim got through.
+func (s *GuestsSuite) TestAClaimThatStoppedAfterMovingTheRowsJoinsTheChannelsWhenSentAgain() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	talked := s.talked(guest)
+	_, err := s.store.Users.ClaimGuest(context.Background(), s.customerID(), guest, account.userID)
+	s.Require().NoError(err)
+	s.Require().NotContains(s.chat.Members(s.transcriptOf(talked)), account.userID)
+
+	s.claim(guest, account.userID)
+
+	s.Contains(s.chat.Members(s.transcriptOf(talked)), account.userID, "the account reads what the guest said")
+}
+
+// A claim sent again once every step of it ran did them all again: a backend that claims at
+// every sign-in put the account back into the channel of a conversation it had left, with two
+// Stream calls for each of the account's conversations every time.
+func (s *GuestsSuite) TestAFinishedClaimSentAgainLeavesTheChannelsAsTheyAre() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	talked := s.talked(guest)
+	s.claim(guest, account.userID)
+	channel := s.transcriptOf(talked)
+	s.Require().Contains(s.chat.Members(channel), account.userID)
+	_, err := s.chat.Client.Chat().UpdateChannel(context.Background(), chatlog.ChannelType, channel,
+		&getstream.UpdateChannelRequest{RemoveMembers: []string{account.userID}})
+	s.Require().NoError(err)
+
+	s.claim(guest, account.userID)
+
+	s.NotContains(s.chat.Members(channel), account.userID, "the claim had nothing left to do")
+}
+
 func (s *GuestsSuite) TestAGuestSomebodyElseClaimedIsAConflict() {
 	guest := s.recordGuest()
 	s.claim(guest, s.utils.uuid())
@@ -407,12 +534,78 @@ func (s *GuestsSuite) TestAGuestSomebodyElseClaimedIsAConflict() {
 	s.Equal(http.StatusConflict, status)
 }
 
+func (s *GuestsSuite) TestAGuestIsNotClaimedByAReservedUserID() {
+	guest := s.recordGuest()
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/guests/claim",
+		ClaimGuestRequest{GuestId: guest, UserId: "!anon"})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "user_id may not start with !")
+}
+
 func (s *GuestsSuite) TestAGuestNobodyMintedCannotBeClaimed() {
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/guests/claim",
 		ClaimGuestRequest{GuestId: s.utils.uuid(), UserId: s.utils.uuid()})
 
 	s.Equal(http.StatusNotFound, status)
 	s.Contains(failure, "no such guest")
+}
+
+// TestClaimsRacingForOneGuestLoseWithAConflict: claims sent at once all read the guest
+// unclaimed, and those the store then refuses lost to the one that won, which is a 409 as a
+// claim arriving after it is, not a 500.
+func (s *GuestsSuite) TestClaimsRacingForOneGuestLoseWithAConflict() {
+	guest := s.recordGuest()
+	const claims = 20
+	statuses := make(chan int, claims)
+	var wg sync.WaitGroup
+	for range claims {
+		wg.Go(func() {
+			status, _ := s.serverClient.call(http.MethodPost, "/v1/agents/guests/claim",
+				ClaimGuestRequest{GuestId: guest, UserId: s.utils.uuid()})
+			statuses <- status
+		})
+	}
+	wg.Wait()
+	close(statuses)
+
+	won := 0
+	for status := range statuses {
+		if status == http.StatusOK {
+			won++
+			continue
+		}
+		s.Equal(http.StatusConflict, status)
+	}
+	s.Equal(1, won)
+}
+
+// TestAClaimTheDatabaseCannotMoveIsAnsweredAsInternal (AI-3575): a move the database fails is a
+// 500 that quotes none of the query, not a 400 the caller could correct.
+func (s *GuestsSuite) TestAClaimTheDatabaseCannotMoveIsAnsweredAsInternal() {
+	guest := s.recordGuest()
+	s.failQueries("caller_kind = CASE")
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/guests/claim",
+		ClaimGuestRequest{GuestId: guest, UserId: s.utils.uuid()})
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), `"code":"internal_error"`)
+	s.NotContains(string(body), "claim guest")
+	s.NotContains(string(body), "deadline")
+}
+
+// TestAGuestCannotClaimItself is the control: the one refusal the move made is still a 400
+// saying what is wrong.
+func (s *GuestsSuite) TestAGuestCannotClaimItself() {
+	guest := s.recordGuest()
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/guests/claim",
+		ClaimGuestRequest{GuestId: guest, UserId: guest})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "claimed by itself")
 }
 
 func (s *GuestsSuite) TestAClaimHasToSayWhoIsClaimingWhom() {
@@ -451,13 +644,13 @@ func (s *GuestsSuite) TestAClaimMovesTheGuestsScheduledTasks() {
 		Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second), Timezone: "UTC",
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(ctx, &task, 0))
-	s.T().Cleanup(func() { _ = s.store.DeleteScheduledTask(ctx, task.CustomerID, task.ID) })
+	s.Require().NoError(s.store.ScheduledTasks.Insert(ctx, &task, 0))
+	s.T().Cleanup(func() { _ = s.store.ScheduledTasks.Delete(ctx, task.CustomerID, task.ID) })
 	account := s.utils.uuid()
 
 	s.claim(guest, account)
 
-	moved, err := s.store.ScheduledTask(ctx, s.customerID(), task.ID)
+	moved, err := s.store.ScheduledTasks.Get(ctx, s.customerID(), task.ID)
 	s.Require().NoError(err)
 	s.Equal(account, moved.UserID, "the task follows up for the account the guest turned out to be")
 }
@@ -472,6 +665,23 @@ func (s *GuestsSuite) TestAClaimedGuestsConversationIsTheAccountsByListAndById()
 
 	s.Contains(ids(account.querySessions(SessionQuery{}).Items), talked, "the account lists it")
 	s.Equal(http.StatusOK, account.do(http.MethodGet, "/v1/agents/sessions/"+talked, nil, nil), "and opens it by id")
+}
+
+func (s *GuestsSuite) TestAClaimedGuestKeepsItsConversationAndTheAccountReadsItBack() {
+	guest, account := s.recordGuest(), s.data.createUser()
+	talking := s.asGuest(guest)
+	opened := talking.createSession(textSession(nil))
+	talking.stopSession(opened.Id)
+	s.Require().NoError(s.manager.FlushRecords(context.Background()))
+	s.claim(guest, account.userID)
+	resume := textSession(nil)
+	resume.LegacyConversationId = opened.ConversationId
+
+	resumed := talking.createSession(resume)
+
+	s.Require().NotNil(opened.ConversationId)
+	s.Equal(*opened.ConversationId, value(resumed.ConversationId))
+	s.Equal(opened.Id, account.getSession(opened.Id).Id)
 }
 
 func (s *GuestsSuite) TestAClaimedGuestsScheduledTaskIsListedToTheAccount() {
@@ -504,7 +714,7 @@ func (s *GuestsSuite) TestAClaimLeavesWhatAnAnonymousNamesakeSaidWhereItWas() {
 	s.Contains(s.chat.Members(s.transcriptOf(genuine)), account.userID, "the account reads what the guest said")
 	s.NotContains(s.chat.Members(s.transcriptOf(underTheGuestsName)), account.userID)
 	s.NotContains(s.chat.Members(s.transcriptOf(underTheAccountsName)), account.userID)
-	left, err := s.store.ScheduledTask(context.Background(), s.customerID(), task)
+	left, err := s.store.ScheduledTasks.Get(context.Background(), s.customerID(), task)
 	s.Require().NoError(err)
 	s.Equal(guestID, left.UserID, "the namesake's task is not moved")
 }
@@ -517,7 +727,7 @@ func (s *GuestsSuite) TestAClaimDoesNotLetTheAccountIntoAnotherAppsChannel() {
 	foreign := s.transcriptOf(s.talkedAs(otherUser))
 	own := s.talkedAs(s.data.createUser())
 	var raw string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
 		Scan(context.Background(), &raw))
 	row := map[string]any{}
 	s.Require().NoError(json.Unmarshal([]byte(raw), &row))
@@ -551,7 +761,7 @@ func (s *GuestsSuite) TestAClaimStillJoinsAChannelWithNoCustomerStamp() {
 
 	own := s.talkedAs(s.data.createUser())
 	var raw string
-	s.Require().NoError(s.store.DB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
+	s.Require().NoError(s.store.GlobalDB().NewRaw("SELECT row_to_json(a)::text FROM agent_sessions AS a WHERE id = ?", own).
 		Scan(context.Background(), &raw))
 	row := map[string]any{}
 	s.Require().NoError(json.Unmarshal([]byte(raw), &row))
@@ -570,6 +780,185 @@ func (s *GuestsSuite) TestAClaimStillJoinsAChannelWithNoCustomerStamp() {
 	s.Contains(s.chat.Members(channel), account, "a channel with no stamp is the app's to join")
 }
 
+func (s *GuestsSuite) TestAnAddressIsRefusedItsSixtyFirstNewGuestOfAnAppInAnHour() {
+	s.mintSixtyGuests()
+	written := s.profileWrites()
+
+	status, payload := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Require().Equal(http.StatusTooManyRequests, status, string(payload))
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &answered))
+	s.Equal(ErrorTypeRateLimited, answered.Error.Type)
+	s.Contains(answered.Error.Message, "60 guests of this app this hour")
+	s.Equal(written, s.profileWrites(), "a refused guest is never written to Stream")
+}
+
+func (s *GuestsSuite) TestAnAddressPastItsGuestsIsToldToWaitForTheHoursEnd() {
+	s.mintSixtyGuests()
+	left := time.Until(time.Now().Truncate(time.Hour).Add(time.Hour)).Seconds()
+
+	refused := s.data.createAnonymous().raw(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Require().Equal(http.StatusTooManyRequests, refused.StatusCode)
+	wait, err := strconv.Atoi(refused.Header.Get("Retry-After"))
+	s.Require().NoError(err)
+	s.InDelta(left, wait, 5)
+	_, message := s.data.createAnonymous().failure(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+	_, told, found := strings.Cut(message, "try again in ")
+	s.Require().True(found, message)
+	said, err := strconv.Atoi(strings.TrimSuffix(told, "s"))
+	s.Require().NoError(err, message)
+	s.InDelta(left, said, 5)
+}
+
+func (s *GuestsSuite) TestAnotherAddressStillMintsGuests() {
+	s.trustThisHost()
+	s.mintSixtyGuests()
+
+	minted := s.mint(s.from("203.0.113.9"), GuestUserRequest{})
+
+	s.Contains(minted.Id, guestPrefix)
+}
+
+func (s *GuestsSuite) TestTheAddressesOfOneIPv6NetworkMintTheHoursGuestsTogether() {
+	s.trustThisHost()
+	awayFromTheHour()
+	for i := range 60 {
+		s.mint(s.from(fmt.Sprintf("2001:db8:0:1:%x::%x", i, i+1)), GuestUserRequest{})
+	}
+
+	status, payload := s.from("2001:db8:0:1:ffff:ffff:ffff:ffff").call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Equal(http.StatusTooManyRequests, status, string(payload))
+	minted := s.mint(s.from("2001:db8:0:2::1"), GuestUserRequest{})
+	s.Contains(minted.Id, "guest-", "the next /64 has a count of its own")
+}
+
+func (s *GuestsSuite) TestNeighbouringIPv4AddressesMintGuestsApart() {
+	s.trustThisHost()
+	awayFromTheHour()
+	for range 60 {
+		s.mint(s.from("203.0.113.8"), GuestUserRequest{})
+	}
+
+	status, _ := s.from("::ffff:203.0.113.8").call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Equal(http.StatusTooManyRequests, status, "an IPv4-mapped address is the IPv4 address it carries")
+	minted := s.mint(s.from("::ffff:203.0.113.9"), GuestUserRequest{})
+	s.Contains(minted.Id, guestPrefix)
+}
+
+// trustThisHost believes the X-Forwarded-For of this host for the rest of the test.
+func (s *GuestsSuite) trustThisHost() {
+	was := s.router.trusted
+	s.router.trusted = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+	s.T().Cleanup(func() { s.router.trusted = was })
+}
+
+// from is an anonymous caller of the app from address, once trustThisHost.
+func (s *GuestsSuite) from(address string) *testClient {
+	client := s.data.createAnonymous()
+	client.header.Set(ForwardedHeader, address)
+	return client
+}
+
+func (s *GuestsSuite) TestTheBackendStillMintsGuestsOnceAnAddressHasMintedItsHour() {
+	s.mintSixtyGuests()
+
+	minted := s.mint(s.serverClient, GuestUserRequest{})
+
+	s.Contains(minted.Id, guestPrefix)
+}
+
+func (s *GuestsSuite) TestAGuestComingBackWithTheirSecretIsNotCountedAsANewGuest() {
+	first := s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	for range 59 {
+		s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	}
+
+	again := s.mint(s.data.createAnonymous(), GuestUserRequest{Id: pointerTo(first.Id), RefreshSecret: first.RefreshSecret})
+
+	s.Equal(first.Id, again.Id)
+}
+
+func (s *GuestsSuite) TestAnAddressThatMintedItsHourInOneAppStillMintsGuestsOfAnother() {
+	s.mintSixtyGuests()
+	s.useApp(s.data.createApp())
+
+	minted := s.mint(s.data.createAnonymous(), GuestUserRequest{})
+
+	s.Contains(minted.Id, guestPrefix)
+}
+
+// mintSixtyGuests mints as many new guests of the suite's app as one address may in an hour,
+// each by a caller of its own.
+func (s *GuestsSuite) mintSixtyGuests() {
+	awayFromTheHour()
+	for range 60 {
+		s.mint(s.data.createAnonymous(), GuestUserRequest{})
+	}
+}
+
+// GuestsProxiedSuite mints guests behind a proxy with no trusted ranges, where every request
+// arrives from the proxy's address.
+type GuestsProxiedSuite struct {
+	RouterSuite
+}
+
+func TestGuestsProxiedSuite(t *testing.T) {
+	proxied := new(GuestsProxiedSuite)
+	proxied.proxied = true
+	runSuite(t, proxied)
+}
+
+func (s *GuestsProxiedSuite) SetupTest() {
+	s.useApp(s.data.createApp())
+}
+
+func (s *GuestsProxiedSuite) TestCallersTheProxyNamesAreNotCountedTogetherByTheProxysAddress() {
+	// The address is the proxy's, so counting a caller it names by it would hold every
+	// visitor of the app to one count.
+	for range 61 {
+		status, payload := s.viaProxy(s.utils.uuid()).call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+		s.Require().Equal(http.StatusCreated, status, string(payload))
+	}
+}
+
+func (s *GuestsProxiedSuite) TestCallersTheProxyNamesNobodyForShareTheProxysAddress() {
+	awayFromTheHour()
+	for range 60 {
+		status, payload := s.viaProxy("").call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+		s.Require().Equal(http.StatusCreated, status, string(payload))
+	}
+
+	status, _ := s.viaProxy("").call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Equal(http.StatusTooManyRequests, status)
+}
+
+// viaProxy is an anonymous caller of the app as the proxy forwards it, going by user, or by
+// nobody when user is empty.
+func (s *GuestsProxiedSuite) viaProxy(user string) *testClient {
+	header := http.Header{}
+	header.Set(auth.AppHeader, s.customerID())
+	header.Set(auth.OrganizationHeader, s.app.organization.ID)
+	header.Set(auth.AuthTypeHeader, auth.AuthTypeAnonymous)
+	if user != "" {
+		header.Set(auth.UserHeader, user)
+	}
+	return &testClient{suite: &s.RouterSuite, header: header}
+}
+
+// awayFromTheHour waits out the last minute of a clock hour, so the guests a test mints next
+// are counted in one hour's window: a count that started again at the hour would let the next
+// guest through.
+func awayFromTheHour() {
+	if left := time.Until(time.Now().Truncate(time.Hour).Add(time.Hour)); left < time.Minute {
+		time.Sleep(left)
+	}
+}
+
 // mint asks for a guest as the caller and expects one.
 func (s *GuestsSuite) mint(as *testClient, request GuestUserRequest) GuestUser {
 	var minted GuestUser
@@ -579,7 +968,7 @@ func (s *GuestsSuite) mint(as *testClient, request GuestUserRequest) GuestUser {
 
 // storedGuest is the guest's row as the store holds it.
 func (s *GuestsSuite) storedGuest(id string) store.User {
-	held, err := s.store.Guest(context.Background(), s.customerID(), id)
+	held, err := s.store.Users.GetGuest(context.Background(), s.customerID(), id)
 	s.Require().NoError(err)
 	return held
 }
@@ -609,7 +998,7 @@ func (s *GuestsSuite) assertStreamProfile(id, name string, custom map[string]any
 // over HTTP would reach Stream for the token.
 func (s *GuestsSuite) recordGuest() string {
 	id := guestPrefix + s.utils.uuid()
-	s.Require().NoError(s.store.RecordGuest(context.Background(), &store.User{
+	s.Require().NoError(s.store.Users.InsertGuest(context.Background(), &store.User{
 		ID: id, CustomerID: s.customerID(), Name: "Guest",
 	}))
 	return id
@@ -621,7 +1010,7 @@ func (s *RouterSuite) guestSeenInAToken() string {
 	id := "visitor-" + s.utils.uuid()
 	s.signedIn(jwt.MapClaims{"user_id": id, "role": "guest"}, auth.AuthTypeJWT, guest, id).
 		do(http.MethodGet, "/v1/agents/calls", nil, nil)
-	seen, err := s.store.Guest(context.Background(), s.customerID(), id)
+	seen, err := s.store.Users.GetGuest(context.Background(), s.customerID(), id)
 	s.Require().NoError(err, "the call is what records the guest")
 	s.Require().False(seen.Minted)
 	return id
@@ -651,9 +1040,53 @@ func (s *GuestsSuite) claim(guest, account string) ClaimGuestResult {
 	return claimed
 }
 
-// asGuest is a client holding a guest's token for the id, as a minted guest does.
+// asGuest is a client holding a guest's token for the id, as the app signs one: it says the role.
 func (s *GuestsSuite) asGuest(id string) *testClient {
 	return s.signedIn(jwt.MapClaims{"user_id": id, "role": "guest"}, auth.AuthTypeJWT, guest, id)
+}
+
+// claimsOf is what the guest's token says.
+func (s *GuestsSuite) claimsOf(minted GuestUser) jwt.MapClaims {
+	claims := jwt.MapClaims{}
+	_, _, err := jwt.NewParser().ParseUnverified(minted.Token, claims)
+	s.Require().NoError(err)
+	return claims
+}
+
+// holding is a client whose token says what the guest's does. The suite's Stream app has another
+// secret than its API key, so the token itself is signed again.
+func (s *GuestsSuite) holding(minted GuestUser) *testClient {
+	return s.signedIn(s.claimsOf(minted), auth.AuthTypeJWT, guest, minted.Id)
+}
+
+// conversationOfAGuestSeenInAToken is a guest of the app's own token, in a Stream app of its own,
+// and a session carrying on the conversation it had.
+func (s *GuestsSuite) conversationOfAGuestSeenInAToken() (string, CreateSessionRequest) {
+	id := streamAppID()
+	s.useApp(s.numberedApp(id))
+	s.giveApp(s.customerID(), id, "key-"+s.customerID())
+	seen := s.guestSeenInAToken()
+	opened := s.asGuest(seen).createSession(textSession(nil))
+	s.asGuest(seen).stopSession(opened.Id)
+	s.Require().NotNil(opened.ConversationId)
+	resume := textSession(nil)
+	resume.LegacyConversationId = opened.ConversationId
+	return seen, resume
+}
+
+func (s *GuestsSuite) carriesOn(guest GuestUser, resume CreateSessionRequest) {
+	var resumed Session
+	status, body := s.holding(guest).call(http.MethodPost, "/v1/agents/sessions", resume)
+	s.Require().Equal(http.StatusCreated, status, "%s", body)
+	s.Require().NoError(json.Unmarshal(body, &resumed))
+	s.Equal(*resume.LegacyConversationId, value(resumed.ConversationId))
+	s.holding(guest).stopSession(resumed.Id)
+}
+
+func (s *GuestsSuite) refusedToASignedInUser(name string, resume CreateSessionRequest) {
+	status, body := s.data.signedInAs(name).failure(http.MethodPost, "/v1/agents/sessions", resume)
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(body, "another user")
 }
 
 // scheduledFor is a task for the user, written as a caller of that kind would have.
@@ -664,15 +1097,15 @@ func (s *GuestsSuite) scheduledFor(userID string, kind auth.Kind) string {
 		Title: "Stretch", Instructions: "Remind them to stretch.",
 		StartLocal: time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second), Timezone: "UTC",
 	}
-	s.Require().NoError(s.store.CreateScheduledTask(ctx, &task, 0))
-	s.T().Cleanup(func() { _ = s.store.DeleteScheduledTask(ctx, task.CustomerID, task.ID) })
+	s.Require().NoError(s.store.ScheduledTasks.Insert(ctx, &task, 0))
+	s.T().Cleanup(func() { _ = s.store.ScheduledTasks.Delete(ctx, task.CustomerID, task.ID) })
 	return task.ID
 }
 
 // transcriptOf is the Stream Chat channel the session's words were written to.
 func (s *GuestsSuite) transcriptOf(sessionID string) string {
 	var row store.AgentSession
-	s.Require().NoError(s.store.DB().NewSelect().Model(&row).Where("id = ?", sessionID).Scan(context.Background()))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&row).Where("id = ?", sessionID).Scan(context.Background()))
 	channel := transcriptChannel(row)
 	_, kept := s.chat.Channel(channel)
 	s.Require().True(kept, "the session wrote a transcript")
@@ -684,9 +1117,19 @@ func (s *GuestsSuite) transcriptOf(sessionID string) string {
 // a name would put the name in its channel, so the row is moved under it afterwards.
 func (s *GuestsSuite) underTheName(name string) string {
 	talked := s.talkedAs(s.data.createAnonymous())
-	_, err := s.store.DB().NewUpdate().Model((*store.AgentSession)(nil)).
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentSession)(nil)).
 		Set("user_id = ?", name).Where("id = ?", talked).Exec(context.Background())
 	s.Require().NoError(err)
 	s.Require().NotContains(s.chat.Members(s.transcriptOf(talked)), name)
 	return talked
+}
+
+// A reserved id is never a guest's, so even the backend naming one is minted a new guest
+// rather than a token for that id.
+func (s *GuestsSuite) TestAReservedIDIsTakenAsNamingNoGuest() {
+	for _, caller := range []*testClient{s.serverClient, s.data.createAnonymous()} {
+		minted := s.mint(caller, GuestUserRequest{Id: pointerTo("!anon")})
+
+		s.Contains(minted.Id, guestPrefix, string(caller.kind))
+	}
 }

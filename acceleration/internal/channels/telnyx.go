@@ -129,9 +129,10 @@ func (p *telnyxProvider) Parse(body []byte) ([]Message, error) {
 	}}, nil
 }
 
-// Send writes the reply back. Files go as media URLs, which makes it an MMS, batched because
-// Telnyx takes ten a message. The text is billed by its segments and each MMS by itself.
-func (p *telnyxProvider) Send(ctx context.Context, account Account, thread string, reply Reply) (Sent, error) {
+// telnyxParts splits a reply into what Telnyx is sent: the text, with the link after it, and
+// the media URLs in batches of the ten a message takes. Send posts them and Estimate counts
+// them, so what is held for a reply is what Send bills.
+func telnyxParts(reply Reply) (string, [][]string) {
 	text := reply.Text
 	if link := reply.Link; link != nil {
 		text = strings.TrimSpace(text + "\n\n" + link.Text + ": " + link.URL)
@@ -142,12 +143,33 @@ func (p *telnyxProvider) Send(ctx context.Context, account Account, thread strin
 			urls = append(urls, file.URL)
 		}
 	}
-
-	var bodies []map[string]any
+	var batches [][]string
 	for start := 0; start < len(urls); start += telnyxMaxMedia {
-		body := map[string]any{"to": thread, "from": account.E164}
-		body["media_urls"] = urls[start:min(start+telnyxMaxMedia, len(urls))]
-		bodies = append(bodies, body)
+		batches = append(batches, urls[start:min(start+telnyxMaxMedia, len(urls))])
+	}
+	return text, batches
+}
+
+// Estimate is what Send bills for the reply: the text, and one MMS for each batch of files.
+func (p *telnyxProvider) Estimate(reply Reply) Sent {
+	text, batches := telnyxParts(reply)
+	var sent Sent
+	if text != "" {
+		sent.Messages++
+		sent.Segments = Segments(text)
+	}
+	sent.Messages += int64(len(batches))
+	sent.Media = int64(len(batches))
+	return sent
+}
+
+// Send writes the reply back. Files go as media URLs, which makes it an MMS, batched because
+// Telnyx takes ten a message. The text is billed by its segments and each MMS by itself.
+func (p *telnyxProvider) Send(ctx context.Context, account Account, thread string, reply Reply) (Sent, error) {
+	text, batches := telnyxParts(reply)
+	var bodies []map[string]any
+	for _, urls := range batches {
+		bodies = append(bodies, map[string]any{"to": thread, "from": account.E164, "media_urls": urls})
 	}
 	if text != "" {
 		// The text goes first, so an answer reads before whatever it made arrives.

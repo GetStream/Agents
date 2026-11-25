@@ -107,6 +107,9 @@ type Message struct {
 	// Thread is where a reply is sent: the sender for WhatsApp and SMS, and the chat for
 	// iMessage, where a reply is posted to the conversation rather than to a person.
 	Thread string
+	// Group is a chat of more people than the sender and the line, where a reply reaches
+	// everyone in it: an iMessage chat whose delivery does not say it is one person's.
+	Group bool
 	// Name is what the sender calls themselves, when the provider says.
 	Name string
 	Text string
@@ -159,6 +162,12 @@ type Provider interface {
 	Parse(body []byte) ([]Message, error)
 	// Send writes a reply back to the thread a message came from, and says what it sent.
 	Send(ctx context.Context, account Account, thread string, reply Reply) (Sent, error)
+}
+
+// Estimator is a provider that can say what a reply will bill before it is sent, so the
+// reservation holds what Send will bill. A provider without it is held for one message.
+type Estimator interface {
+	Estimate(reply Reply) Sent
 }
 
 // Sent is what a provider sent for one reply, in the units it bills: the messages, and for a

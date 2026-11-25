@@ -56,6 +56,11 @@ type Meter struct {
 	// longer, such as a picture a queued provider takes minutes over, holds it for as long as
 	// it may run, or concurrent work could spend past a limit once the hold lapsed.
 	ReserveFor time.Duration
+	// Recorded, when set, is told how a Call ended once its row is recorded: the stat the row
+	// was made of and what the row costs, priced as Record prices it (free work and a quoted
+	// cost included), for a line logged beside the row. It is told of a failure and a panic
+	// too, and not of work Omit leaves out. Nil tells nobody.
+	Recorded func(stat Stat, costMicros int64)
 }
 
 // ReserveTTL is how long what a unit of request-and-answer work may cost is set aside before
@@ -63,7 +68,9 @@ type Meter struct {
 const ReserveTTL = 2 * time.Minute
 
 // reserve sets the meter's estimate aside under the stat's usage id, giving it one when it has
-// none, and answers the id reserved under: nil when nothing was.
+// none, and answers the id reserved under: nil when nothing was. The estimate is priced with
+// the stat's attributes, as its row will be, so work priced by them, such as a text by where
+// it goes, holds what it may cost.
 func (m Meter) reserve(stat *Stat) (uuid.UUID, error) {
 	if m.Estimate == nil || m.Recorder == nil || m.Free {
 		return uuid.Nil, nil
@@ -71,7 +78,9 @@ func (m Meter) reserve(stat *Stat) (uuid.UUID, error) {
 	if stat.UsageID == uuid.Nil {
 		stat.UsageID = uuid.Must(uuid.NewV7())
 	}
-	if err := m.Recorder.Reserve(m.Config, m.Owner, stat.UsageID, m.Estimate, cmp.Or(m.ReserveFor, ReserveTTL)); err != nil {
+	estimate := Stat{Attributes: stat.Attributes}
+	estimate.Use(m.Estimate)
+	if err := m.Recorder.ReserveStat(m.Config, m.Owner, stat.UsageID, estimate, cmp.Or(m.ReserveFor, ReserveTTL)); err != nil {
 		return uuid.Nil, refusedReservation{err}
 	}
 	return stat.UsageID, nil
@@ -125,6 +134,10 @@ func Call[R pricing.Metered](ctx context.Context, meter Meter, ask func(context.
 		// A failure bills nothing, and work that names its own id settles under that one.
 		if reserved != uuid.Nil && (omitted || stat.UsageID != reserved) {
 			meter.Recorder.Release(reserved)
+		}
+		// Last, so a hook that panics leaves the row queued and the reservation let go.
+		if !omitted && meter.Recorded != nil {
+			meter.Recorded(stat, meter.cost(stat))
 		}
 	}()
 
@@ -216,6 +229,15 @@ func (m Meter) record(stat Stat) {
 	if m.Recorder != nil {
 		m.Recorder.Record(m.Config, stat)
 	}
+}
+
+// cost is what the stat's row costs, priced as Record prices it. Zero with no recorder.
+func (m Meter) cost(stat Stat) int64 {
+	if m.Recorder == nil {
+		return 0
+	}
+	request, _ := m.Recorder.price(m.Config, stat)
+	return request.CostMicros
 }
 
 func (m Meter) code(err error) string {

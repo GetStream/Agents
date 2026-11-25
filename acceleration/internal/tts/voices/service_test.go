@@ -16,7 +16,6 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/blob"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
@@ -33,7 +32,6 @@ type ServiceSuite struct {
 	suite.Suite
 	ctx      context.Context
 	store    *store.Store
-	configs  *appconfig.Store
 	bucket   *blob.Bucket
 	service  *Service
 	resolver *Resolver
@@ -62,10 +60,7 @@ func (s *ServiceSuite) SetupSuite() {
 	s.Require().NoError(err)
 	s.store = opened
 	s.Require().NoError(opened.Migrate(s.ctx))
-	configs, err := appconfig.New(appconfig.Options{Store: opened})
-	s.Require().NoError(err)
-	s.configs = configs
-	s.resolver = NewResolver(configs, nil)
+	s.resolver = NewResolver(opened, nil)
 }
 
 func (s *ServiceSuite) TearDownSuite() {
@@ -75,7 +70,7 @@ func (s *ServiceSuite) TearDownSuite() {
 }
 
 func (s *ServiceSuite) SetupTest() {
-	_, err := s.store.DB().ExecContext(s.ctx, "TRUNCATE voices CASCADE")
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "TRUNCATE voices CASCADE")
 	s.Require().NoError(err)
 
 	s.status = http.StatusOK
@@ -108,7 +103,7 @@ func (s *ServiceSuite) SetupTest() {
 	s.recorder = routing.NewRecorder(routing.TTS, s.store, nil, list, slog.New(slog.DiscardHandler))
 	s.T().Cleanup(s.recorder.Close)
 
-	service, err := NewService(Options{Store: s.configs, Bucket: bucket, Cloners: cloners, Recorder: s.recorder})
+	service, err := NewService(Options{Store: s.store, Bucket: bucket, Cloners: cloners, Recorder: s.recorder})
 	s.Require().NoError(err)
 	s.service = service
 }
@@ -218,7 +213,7 @@ func (s *ServiceSuite) TestAPreparedVoiceBecomesTheIdTheProviderKnowsItBy() {
 
 func (s *ServiceSuite) TestAProviderThatRefusedTheRecordingsIsNotOfferedTheVoice() {
 	s.status = http.StatusUnprocessableEntity
-	s.reply = `{"detail":"too quiet"}`
+	s.reply = `{"detail":"too quiet","request_id":"req-8f2c","upstream":"clone-3.internal:8443"}`
 
 	voice := s.recorded()
 	s.Require().NoError(s.service.Prepare(s.ctx, "acme", voice.ID, nil),
@@ -228,7 +223,10 @@ func (s *ServiceSuite) TestAProviderThatRefusedTheRecordingsIsNotOfferedTheVoice
 	s.Require().NoError(err)
 	s.Require().Len(bindings, 1)
 	s.Equal(store.VoiceFailed, bindings[0].State)
-	s.Contains(bindings[0].Error, "too quiet")
+	s.Equal(prepareFailed, bindings[0].Error, "the voice endpoints answer with the binding's error")
+	for _, vendor := range []string{"too quiet", "req-8f2c", "clone-3.internal", "http 422", "elevenlabs"} {
+		s.NotContains(bindings[0].Error, vendor)
+	}
 
 	_, err = s.resolver.ResolveVoice(s.ctx, "acme", "elevenlabs", "founder")
 	s.ErrorIs(err, routing.ErrVoiceNotPrepared)
@@ -253,7 +251,7 @@ func (s *ServiceSuite) TestDeletingAVoiceTakesItsRecordingsWithIt() {
 	_, err = s.bucket.Read(s.ctx, key)
 	s.Require().Error(err, "a deleted voice should not leave audio in the bucket")
 
-	_, err = s.store.Voice(s.ctx, "acme", voice.ID)
+	_, err = s.store.Voices.Get(s.ctx, "acme", voice.ID)
 	s.True(errors.Is(err, store.ErrNoVoice))
 }
 
@@ -263,11 +261,58 @@ func (s *ServiceSuite) TestAProvidersOwnLibraryVoicePassesStraightThrough() {
 	s.Equal("Rachel", resolved, "a name nobody registered here belongs to the provider")
 }
 
+// Every customer's clones sit in the deployment's one provider account, so an id is not
+// a key to a voice that another customer made.
+func (s *ServiceSuite) TestAnotherCustomersPreparedVoiceIsRefusedByItsProviderID() {
+	voice := s.recorded()
+	s.Require().NoError(s.service.Prepare(s.ctx, "acme", voice.ID, nil))
+
+	_, err := s.resolver.ResolveVoice(s.ctx, "globex", "elevenlabs", "el-1")
+	s.Require().ErrorIs(err, routing.ErrRequest)
+	s.Contains(err.Error(), "not one of this customer's voices")
+	_, err = s.resolver.ResolveVoice(s.ctx, "", "elevenlabs", "el-1")
+	s.ErrorIs(err, routing.ErrRequest, "a request with no customer is nobody's owner")
+
+	resolved, err := s.resolver.ResolveVoice(s.ctx, "acme", "elevenlabs", "el-1")
+	s.Require().NoError(err)
+	s.Equal("el-1", resolved, "its owner may still name it by the provider's id")
+}
+
+// A UUID is the same voice in any case, so an upper case copy of another customer's Cartesia
+// id must meet the same refusal as the id itself, and the owner's own copy must still work.
+func (s *ServiceSuite) TestACartesiaIdInAnotherCaseIsStillAnotherCustomersVoice() {
+	const bound = "a0e99841-438c-4a64-b679-ae501e7d6091"
+	voice := s.recorded()
+	s.Require().NoError(s.store.VoiceBindings.Upsert(s.ctx, &store.VoiceBinding{
+		VoiceID: voice.ID, Provider: "cartesia", ExternalID: bound, State: store.VoiceReady,
+	}))
+
+	for _, asked := range []string{bound, strings.ToUpper(bound), "A0e99841-438c-4a64-b679-aE501e7d6091"} {
+		_, err := s.resolver.ResolveVoice(s.ctx, "globex", "cartesia", asked)
+		s.Require().ErrorIs(err, routing.ErrRequest, asked)
+		s.Contains(err.Error(), "not one of this customer's voices", asked)
+
+		resolved, err := s.resolver.ResolveVoice(s.ctx, "acme", "cartesia", asked)
+		s.Require().NoError(err, asked)
+		s.Equal(bound, resolved, "its owner is handed the one spelling")
+	}
+}
+
+func (s *ServiceSuite) TestADeletedVoiceIsStillRefusedToAnotherCustomer() {
+	voice := s.recorded()
+	s.Require().NoError(s.service.Prepare(s.ctx, "acme", voice.ID, nil))
+	s.Require().NoError(s.store.Voices.Delete(s.ctx, "acme", voice.ID))
+
+	_, err := s.resolver.ResolveVoice(s.ctx, "globex", "elevenlabs", "el-1")
+
+	s.ErrorIs(err, routing.ErrRequest, "the provider may hold the clone after the voice is deleted here")
+}
+
 func (s *ServiceSuite) TestANameThatIsNotTheirsIsRefusedWhenTheProviderDoesNotHaveIt() {
 	catalogue := NewCatalogue()
 	catalogue.Register("elevenlabs", &findingLister{countingLister: countingLister{voices: []Library{sarah}}})
 
-	_, err := NewResolver(s.configs, catalogue).ResolveVoice(s.ctx, "acme", "elevenlabs", "Sara")
+	_, err := NewResolver(s.store, catalogue).ResolveVoice(s.ctx, "acme", "elevenlabs", "Sara")
 
 	s.Require().ErrorIs(err, routing.ErrRequest)
 	s.Contains(err.Error(), "(EXAVITQu4vr4xnSDxMaL)")
@@ -281,7 +326,7 @@ func (s *ServiceSuite) TestTheirOwnVoiceIsNeverLookedUpInTheProvidersLibrary() {
 	catalogue := NewCatalogue()
 	catalogue.Register("elevenlabs", library)
 
-	external, err := NewResolver(s.configs, catalogue).ResolveVoice(s.ctx, "acme", "elevenlabs", "founder")
+	external, err := NewResolver(s.store, catalogue).ResolveVoice(s.ctx, "acme", "elevenlabs", "founder")
 
 	s.Require().NoError(err)
 	s.Equal("el-1", external)
@@ -297,7 +342,7 @@ func (s *ServiceSuite) TestTheirOwnVoiceLeavesNoProviderOutAndIsNeverLookedUp() 
 	catalogue := NewCatalogue()
 	catalogue.Register("elevenlabs", library)
 
-	unvouched := NewResolver(s.configs, catalogue).Unvouched(s.ctx, "acme", unknownID, []string{"elevenlabs", "cartesia"})
+	unvouched := NewResolver(s.store, catalogue).Unvouched(s.ctx, "acme", unknownID, []string{"elevenlabs", "cartesia"})
 
 	s.Empty(unvouched, "Cartesia may have been given it, and is asked as before")
 	s.Equal(0, library.lookups)
@@ -310,7 +355,7 @@ func (s *ServiceSuite) TestAStoreThatCannotSayWhoseVoiceItIsLeavesNoProviderOut(
 	ctx, cancel := context.WithCancel(s.ctx)
 	cancel()
 
-	unvouched := NewResolver(s.configs, catalogue).Unvouched(ctx, "acme", unknownID, []string{"elevenlabs", "cartesia"})
+	unvouched := NewResolver(s.store, catalogue).Unvouched(ctx, "acme", unknownID, []string{"elevenlabs", "cartesia"})
 
 	s.Empty(unvouched, "the candidates meet the store's error in ResolveVoice, as before")
 	s.Equal(0, library.lookups)

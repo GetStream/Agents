@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -41,7 +42,7 @@ func (s *Server) listRouterConfigs(ctx context.Context, _ *listRouterConfigsRequ
 		return nil, errNoRouterConfigs
 	}
 
-	stored, err := s.store.CustomerRouterConfigs(ctx, customerID)
+	stored, err := s.store.RouterConfigs.Select(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +71,7 @@ func (s *Server) createRouterConfig(ctx context.Context, request *createRouterCo
 	}
 
 	config := storedRouterConfig(*request.Body, customerID)
-	if err := s.configs.CreateRouterConfig(ctx, &config); err != nil {
+	if err := s.store.RouterConfigs.Insert(ctx, &config); err != nil {
 		return nil, storeFailure(err, errRouterNameTaken)
 	}
 	stored := routerConfigOf(config)
@@ -91,9 +92,9 @@ func (s *Server) getRouterConfig(ctx context.Context, request *getRouterConfigRe
 		return nil, errNoRouterConfigs
 	}
 
-	config, err := s.configs.RouterConfig(ctx, customerID, request.Id)
+	config, err := s.store.RouterConfigs.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownRouterConfig
+		return nil, unknownOr(err, store.ErrNoRouterConfig, errUnknownRouterConfig)
 	}
 	return &getRouterConfigResponse{Body: routerConfigOf(config)}, nil
 }
@@ -114,15 +115,27 @@ func (s *Server) updateRouterConfig(ctx context.Context, request *updateRouterCo
 		return nil, invalidRequest(message)
 	}
 
-	existing, err := s.configs.RouterConfig(ctx, customerID, request.Id)
+	existing, err := s.store.RouterConfigs.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownRouterConfig
+		return nil, unknownOr(err, store.ErrNoRouterConfig, errUnknownRouterConfig)
 	}
 
 	config := storedRouterConfig(*request.Body, customerID)
+	// A sync of the file last synced onto the config, which nothing has written since: every
+	// other write clears the hash. The content is compared too, so a body that differs under
+	// the same hash is written rather than dropped.
+	if config.SyncHash != "" && config.SyncHash == existing.SyncHash &&
+		len(auditDiff(routerConfigOf(existing), routerConfigOf(config))) == 0 {
+		return &updateRouterConfigResponse{Body: routerConfigOf(existing)}, nil
+	}
+	// That body is no sync of the file the hash names, such as a read sent back edited, so
+	// the hash is not kept on content it does not describe.
+	if config.SyncHash == existing.SyncHash {
+		config.SyncHash = ""
+	}
 	config.ID = existing.ID
 	config.CreatedAt = existing.CreatedAt
-	if err := s.configs.UpdateRouterConfig(ctx, &config); err != nil {
+	if err := s.store.RouterConfigs.Update(ctx, &config); err != nil {
 		return nil, storeFailure(err, errRouterNameTaken)
 	}
 	stored := routerConfigOf(config)
@@ -144,12 +157,12 @@ func (s *Server) deleteRouterConfig(ctx context.Context, request *deleteRouterCo
 	}
 
 	// Read before it goes, so the entry recording the deletion can say what was deleted.
-	existing, err := s.configs.RouterConfig(ctx, customerID, request.Id)
+	existing, err := s.store.RouterConfigs.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownRouterConfig
+		return nil, unknownOr(err, store.ErrNoRouterConfig, errUnknownRouterConfig)
 	}
-	if err := s.configs.DeleteRouterConfig(ctx, customerID, request.Id); err != nil {
-		return nil, errUnknownRouterConfig
+	if err := s.store.RouterConfigs.Delete(ctx, customerID, request.Id); err != nil {
+		return nil, unknownOr(err, store.ErrNoRouterConfig, errUnknownRouterConfig)
 	}
 	s.audit(ctx, auditRecord{
 		ResourceType: store.AuditRouterConfig, ResourceID: existing.ID, ResourceName: existing.Name,
@@ -341,6 +354,7 @@ func storedRouterConfig(request RouterConfigRequest, customerID string) store.Ro
 		LLM:        llmOptionsOf(request.Llm),
 		STS:        stsOptionsOf(request.Sts),
 		Search:     searchOptionsOf(request.Search),
+		SyncHash:   request.SyncHash,
 	}
 	config.STT.Keyterms = stt.CleanKeyterms(config.STT.Keyterms)
 	return config
@@ -356,6 +370,7 @@ func routerConfigOf(config store.RouterConfig) RouterConfig {
 		Llm:       llmOptionsFor(config.LLM),
 		Sts:       stsOptionsFor(config.STS),
 		Search:    searchOptionsFor(config.Search),
+		SyncHash:  config.SyncHash,
 		CreatedAt: config.CreatedAt,
 		UpdatedAt: config.UpdatedAt,
 	}
@@ -377,15 +392,15 @@ func (s *Server) routerOptions(ctx context.Context, customerID, configID string)
 		return store.RouterConfig{}, errNoRouterConfigs
 	}
 
-	if config, err := s.configs.RouterConfig(ctx, customerID, configID); err == nil {
+	if config, err := s.store.RouterConfigs.Get(ctx, customerID, configID); err == nil {
 		return config, nil
 	}
-	config, found, err := s.configs.RouterConfigByName(ctx, customerID, configID)
+	config, err := s.store.RouterConfigs.GetByName(ctx, customerID, configID)
+	if errors.Is(err, store.ErrNoRouterConfig) {
+		return store.RouterConfig{}, errUnknownRouterConfig
+	}
 	if err != nil {
 		return store.RouterConfig{}, err
-	}
-	if !found {
-		return store.RouterConfig{}, errUnknownRouterConfig
 	}
 	return config, nil
 }
@@ -548,4 +563,6 @@ type RouterConfigRequest struct {
 	Sts    *StsOptions    `json:"sts,omitempty"`
 	Stt    *SttOptions    `json:"stt,omitempty"`
 	Tts    *TtsOptions    `json:"tts,omitempty"`
+	// The limits on a sync hash are CustomConnectorRequest's.
+	SyncHash string `json:"sync_hash,omitempty" maxLength:"128" pattern:"^[!-~]*$" patternDescription:"printable ASCII without a space" doc:"The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing."`
 }

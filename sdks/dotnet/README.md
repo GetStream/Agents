@@ -29,8 +29,8 @@ var pooled = new VisionAgentsClient(factory.CreateClient("vision-agents"));
 Every option left null falls back to the environment the other SDKs read:
 `STREAM_ACCELERATION_URL`, `STREAM_ACCELERATION_CUSTOMER_ID`, `STREAM_API_KEY`,
 `STREAM_API_SECRET` and `STREAM_ACCELERATION_AUTHENTICATE`. With no URL at all the client goes
-to Stream's hosted router in us-east4; `Region = "europe-west4"`, or `STREAM_ACCELERATION_REGION`,
-sends it to the hosted router in another region. A failure raises
+to Stream's hosted router in the nearest healthy region; `Region = "europe-west4"`, or `STREAM_ACCELERATION_REGION`,
+pins it to one region. A failure raises
 `RouterException`, carrying the `Status`, the `Operation` and what the router `Said`, with its
 `Type` and `Code` to branch on (expect codes this SDK does not know), the `DocUrl` explaining
 the code, and the `RequestId` to quote to support when a 500 says only "something went wrong".
@@ -405,6 +405,13 @@ two never differ. Another user's connection is not found, the same as one that d
 An app's connection is reached by every call of a backend, one naming a user included, but
 `ListAsync` with a `UserId` lists only that user's. Leave the user out for the app's own
 connection, which any of its agents may be bound to. Connections are server side only.
+
+A user given replaces the one the client was made for (`VisionAgentsOptions.UserId`), and the
+request keeps the server credential: behind the proxy it is a server token, not a token for the
+client's own user, which is what the router needs to let a backend act for somebody. A client
+with an API key holding a user's token is a device. It cannot act for another user, so a call
+naming one throws a `ConfigurationException` before any request, and a call naming none is sent
+as before.
 
 ## Working on this package
 

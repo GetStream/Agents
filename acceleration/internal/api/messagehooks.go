@@ -206,6 +206,7 @@ func (s *Server) receiveMessageEvent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	s.noteHook(r.Context(), origin)
 	r = loggedHook(r, origin)
 
 	eventType := getstream.GetEventType(payload)
@@ -309,7 +310,7 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 		if strings.TrimSpace(event.Message.Text) == "" && len(event.photos()) == 0 {
 			return true
 		}
-		origin.answer(func() { s.answerThread(origin, thread, event) })
+		origin.answer(func() { s.answerThread(context.WithoutCancel(ctx), origin, thread, event) })
 		return true
 	}
 	// Only a linked thread answers a photo sent without text on a thread channel (addressed).
@@ -347,10 +348,10 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 				if answer, settled := s.answerOnce(ctx, origin, event); !answer {
 					return settled
 				}
-				owed := s.owing.owe(found.ID())
+				owed := s.owing.owe(found.Key())
 				origin.answer(func() {
 					defer owed()
-					s.followUpMessage(origin, found, event)
+					s.followUpMessage(context.WithoutCancel(ctx), origin, found, event)
 				})
 				return true
 			}
@@ -374,7 +375,8 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 					}, "")
 					if err != nil {
 						s.logger.Error("nobody could answer an arriving message",
-							"channel", event.ChannelID, "session", found.ID(), "error", err)
+							"channel", event.ChannelID, "session", found.ID(), "customer", found.Spec().CustomerID,
+							"error", err)
 						if errors.Is(err, node.ErrNoReply) {
 							// The other node may have placed it before its reply was lost: queued
 							// again, it would be placed twice.
@@ -389,7 +391,7 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 			}
 			// The answer goes back to the channel rather than in a response, so there is
 			// nothing here to wait for.
-			origin.answer(func() { s.answerMessage(origin, found, event) })
+			origin.answer(func() { s.answerMessage(context.WithoutCancel(ctx), origin, found, event) })
 			return true
 		}
 	}
@@ -502,7 +504,7 @@ func (s *Server) handOn(ctx context.Context, origin hookOrigin, recorded bool, h
 func (s *Server) unopenedSpec(ctx context.Context, customerID, configID string, event messageEvent) (session.Spec, error) {
 	spec := session.Spec{CustomerID: customerID}
 	if configID != "" {
-		config, err := s.store.AgentConfig(ctx, customerID, configID)
+		config, err := s.store.AgentConfigs.Get(ctx, customerID, configID)
 		switch {
 		case err == nil:
 			spec = session.FromConfig(config)
@@ -546,7 +548,7 @@ func (s *Server) heardText(ctx context.Context, spec session.Spec, origin hookOr
 		return withPhotoNote(event.Message.Text, event.photos(), unheardRecording, unheardRecordingWithMore)
 	}
 	if origin.queuedMessage != "" {
-		if err := s.store.KeepChatInboundHeard(ctx, origin.app, origin.queuedMessage, note.Heard); err != nil {
+		if err := s.store.ChatInbounds.KeepHeard(ctx, origin.app, origin.queuedMessage, note.Heard); err != nil {
 			s.logger.Warn("could not keep what the voice recording of a queued chat inbound message said",
 				"message", origin.queuedMessage, "stream_app", origin.app, "error", err)
 		}
@@ -564,8 +566,8 @@ func (s *Server) heardText(ctx context.Context, spec session.Spec, origin hookOr
 // or for a channel naming nobody the customer ownerOf reads from the store: its last calls,
 // else the customer holding the config it names. Unlike the customer ownerOf works out, this
 // one only ever narrows: it admits only sessions the hook already admits. A channel the store
-// names no customer for is answered by a session only while the sessions on it are one
-// customer's, as a hook matching rows of more than one customer is acted on for nobody.
+// names no customer for is answered by a session only while the sessions on it, on any node, are
+// one customer's, as a hook matching rows of more than one customer is acted on for nobody.
 func (s *Server) liveSessionOn(ctx context.Context, origin hookOrigin, event messageEvent) (*session.Session, bool, error) {
 	if !origin.deployment {
 		found, running := s.sessions.ByAgentWhere(event.ChannelID, origin.owns)
@@ -579,26 +581,17 @@ func (s *Server) liveSessionOn(ctx context.Context, origin hookOrigin, event mes
 		if !running {
 			return nil, false, nil
 		}
-		known := false
-		if s.store != nil {
-			previous, held, err := s.lastCallOn(ctx, origin, event.ChannelID)
-			if err != nil {
-				return nil, false, err
-			}
-			owner, known = previous.CustomerID, held
-			if !held {
-				config, named, err := s.declaredConfigOf(ctx, origin, event)
-				if err != nil {
-					return nil, false, err
-				}
-				owner, known = config.CustomerID, named
-			}
+		stored, known, err := s.storedOwnerOf(ctx, origin, event)
+		if err != nil {
+			return nil, false, err
 		}
+		owner = stored
 		if !known {
 			theirs := found.Spec().CustomerID
-			if _, another := s.sessions.ByAgentWhere(event.ChannelID, func(customer string, app int64) bool {
+			another := func(customer string, app int64) bool {
 				return customer != theirs && origin.owns(customer, app)
-			}); another {
+			}
+			if _, here := s.sessions.ByAgentWhere(event.ChannelID, another); here || s.writesElsewhere(ctx, event.ChannelID, another) {
 				return nil, false, store.ErrAmbiguousHook
 			}
 			return found, true, nil
@@ -608,6 +601,35 @@ func (s *Server) liveSessionOn(ctx context.Context, origin hookOrigin, event mes
 		return customer == owner && origin.owns(customer, app)
 	})
 	return found, running, nil
+}
+
+// writesElsewhere reports whether the directory says a session admits takes, by its customer and
+// Stream app, writes as an agent on any node. A directory that cannot be read says none does, as
+// forwardedMessage answers here when it cannot find the node answering.
+func (s *Server) writesElsewhere(ctx context.Context, agentID string, admits func(customer string, app int64) bool) bool {
+	if s.directory == nil {
+		return false
+	}
+	nodes, err := s.directory.NodesByAgent(ctx, agentID, admits)
+	if err != nil {
+		s.logger.Warn("could not find out which nodes write as an agent", "agent", agentID, "error", err)
+		return false
+	}
+	return len(nodes) > 0
+}
+
+// storedOwnerOf is the customer the store says a channel in the hook's app is: its last call's,
+// else the one holding the config it names. known is false when it says neither.
+func (s *Server) storedOwnerOf(ctx context.Context, origin hookOrigin, event messageEvent) (owner string, known bool, err error) {
+	if s.store == nil {
+		return "", false, nil
+	}
+	previous, held, err := s.lastCallOn(ctx, origin, event.ChannelID)
+	if err != nil || held {
+		return previous.CustomerID, held, err
+	}
+	config, named, err := s.declaredConfigOf(ctx, origin, event)
+	return config.CustomerID, named, err
 }
 
 // ConfigField is the custom field on an agent channel naming the agent config that answers
@@ -663,7 +685,7 @@ func (s *Server) ownerOf(ctx context.Context, origin hookOrigin, event messageEv
 // not known without it. A channel naming no config, or another one than the row's, is not
 // read, nor one with a voice recording, which unopenedSpec reads. A read that fails costs the
 // card, not the answer: nil.
-func (s *Server) heldConfigOf(ctx context.Context, origin hookOrigin, event messageEvent, previous store.Call) *store.AgentConfig {
+func (s *Server) heldConfigOf(ctx context.Context, origin hookOrigin, event messageEvent, previous store.HeldCall) *store.AgentConfig {
 	if _, recorded := event.recording(); recorded {
 		return nil
 	}
@@ -688,9 +710,9 @@ func (s *Server) declaredConfigOf(ctx context.Context, origin hookOrigin, event 
 	}
 
 	if owner, scoped := s.configOwnerOf(origin); scoped {
-		config, err = s.store.AgentConfig(ctx, owner, declared)
+		config, err = s.store.AgentConfigs.Get(ctx, owner, declared)
 	} else {
-		config, err = s.store.AgentConfigOwner(ctx, declared)
+		config, err = s.store.AgentConfigs.GetUnscoped(ctx, declared)
 	}
 	// A config nobody in the app holds is no failure here: an app whose message hooks deliver
 	// to two routers, such as a local one and staging, sends each the other's channels too.
@@ -712,7 +734,7 @@ func (s *Server) declaredConfigOf(ctx context.Context, origin hookOrigin, event 
 // that failed. A hook goes on as for a channel that held none when the read fails, as it always
 // has; a queued delivery is tried again instead, so it is answered by the agent that actually
 // ran there.
-func (s *Server) lastCallOn(ctx context.Context, origin hookOrigin, channelID string) (store.Call, bool, error) {
+func (s *Server) lastCallOn(ctx context.Context, origin hookOrigin, channelID string) (store.HeldCall, bool, error) {
 	previous, err := s.store.CallByAgentInApp(ctx, origin.scope(), channelID)
 	switch {
 	case err == nil:
@@ -802,8 +824,8 @@ func (s *Server) assignMessage(ctx context.Context, customerID string, message d
 // (session.Spec.Dispatched), once the reply it may still be writing is done, as a thread's
 // session answers one (answerClaimed): with what its voice recording says and its photos, read
 // once for every try.
-func (s *Server) followUpMessage(origin hookOrigin, found *session.Session, event messageEvent) {
-	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
+func (s *Server) followUpMessage(ctx context.Context, origin hookOrigin, found *session.Session, event messageEvent) {
+	ctx, cancel := context.WithTimeout(ctx, askTimeout)
 	defer cancel()
 	followUpID := "message_" + store.NewID()
 	text, images := s.messagePhotos(ctx, found.SeesImages(), s.heardText(ctx, found.Spec(), origin, event), event)
@@ -814,7 +836,8 @@ func (s *Server) followUpMessage(origin hookOrigin, found *session.Session, even
 			continue
 		}
 		if err != nil {
-			s.logger.Error("could not answer a message", "channel", event.ChannelID, "session", found.ID(), "error", err)
+			s.logger.Error("could not answer a message", "channel", event.ChannelID, "session", found.ID(),
+				"customer", found.Spec().CustomerID, "error", err)
 		}
 		return
 	}
@@ -825,8 +848,8 @@ func (s *Server) followUpMessage(origin hookOrigin, found *session.Session, even
 // The answer is written rather than spoken. A session on a call has somebody listening to
 // it, and saying a reply to something they never said would interrupt them with an answer
 // to somebody else's question.
-func (s *Server) answerMessage(origin hookOrigin, found *session.Session, event messageEvent) {
-	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
+func (s *Server) answerMessage(ctx context.Context, origin hookOrigin, found *session.Session, event messageEvent) {
+	ctx, cancel := context.WithTimeout(ctx, askTimeout)
 	defer cancel()
 
 	// Ask refuses a speech-to-speech agent, which answers only on the call (Mode), so a
@@ -838,7 +861,7 @@ func (s *Server) answerMessage(origin hookOrigin, found *session.Session, event 
 	text, images := s.messagePhotos(ctx, found.SeesImagesInWriting(), heard, event)
 	if _, err := found.Ask(ctx, text, images...); err != nil {
 		s.logger.Error("could not answer a message",
-			"channel", event.ChannelID, "session", found.ID(), "error", err)
+			"channel", event.ChannelID, "session", found.ID(), "customer", found.Spec().CustomerID, "error", err)
 		return
 	}
 	s.logger.Debug("answered a message in writing",

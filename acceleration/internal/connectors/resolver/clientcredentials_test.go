@@ -3,6 +3,7 @@
 package resolver_test
 
 import (
+	"errors"
 	"io/fs"
 	"strings"
 	"testing/fstest"
@@ -62,6 +63,23 @@ func (s *ResolverSuite) TestASalesforceTokenEndpointThatIsDownAfterExpiryKeepsTh
 	s.Equal(temporarilyUnavailable, stored.LastError)
 }
 
+func (s *ResolverSuite) TestARenewalWhoseEndpointIsRefusedTellsItsCallerOneSentenceAndLogsWhy() {
+	s.f.srv.Use(fakeprovider.ClientCredentials, fakeprovider.IdentityURL)
+	for _, ref := range []core.ConnectionRef{s.salesforceConnection(), s.f.connected()} {
+		s.f.due()
+		reason := errors.New("the test's reason for " + ref.ConnectionID)
+		s.f.endpointRefused = reason
+
+		_, err := s.f.router(s.f.srv.Client()).Resolve(s.f.ctx, ref, core.CredentialRequest{})
+
+		s.f.endpointRefused = nil
+		s.Require().ErrorContains(err, "is not an https URL of a public host that resolves")
+		s.ErrorIs(err, reason)
+		s.NotContains(err.Error(), "the test's reason")
+		s.Contains(s.f.logs.String(), "is not an https URL of a public host that resolves: the test's reason for "+ref.ConnectionID)
+	}
+}
+
 // The follow-up to AI-846: after the client a grant was issued to is removed, the next
 // refresh says so and the connection needs a reconnect, instead of «the client changed
 // during the consent» on a connection that stays connected.
@@ -95,8 +113,8 @@ func (s *ResolverSuite) salesforceConnection() core.ConnectionRef {
 		"https://api.salesforce.com/{mcp_path}", s.f.srv.URL+fakeprovider.PathMCP,
 	).Replace(string(raw))
 	s.Require().NotContains(at, "{login_host}", "every endpoint is at the fake")
-	s.Require().NoError(s.f.db.SeedConnectorDefinitions(s.f.ctx, fstest.MapFS{"salesforce.yaml": {Data: []byte(at)}}))
-	definition, err := s.f.db.LatestConnectorDefinition(s.f.ctx, customer, "salesforce")
+	s.Require().NoError(s.f.db.ConnectorDefinitions.Seed(s.f.ctx, fstest.MapFS{"salesforce.yaml": {Data: []byte(at)}}))
+	definition, err := s.f.db.ConnectorDefinitions.Latest(s.f.ctx, customer, "salesforce")
 	s.Require().NoError(err)
 
 	scheme := s.f.clientCredentials(s.f.srv.Client())
@@ -105,7 +123,7 @@ func (s *ResolverSuite) salesforceConnection() core.ConnectionRef {
 		OwnerType: store.OwnerApp, AuthScheme: oauth2cc.Name,
 	}
 	registry := core.Registry{Schemes: map[string]core.Scheme{oauth2cc.Name: scheme}}
-	s.Require().NoError(s.f.db.CreateConnectorConnection(s.f.ctx, registry, connection))
+	s.Require().NoError(s.f.db.ConnectorConnections.Insert(s.f.ctx, registry, connection))
 	ref := core.ConnectionRef{CustomerID: customer, ConnectionID: connection.ID}
 
 	resolved, err := definition.Manifest.Resolve(oauth2cc.Name, connection.Inputs, nil)
