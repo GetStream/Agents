@@ -2247,7 +2247,7 @@ func buildSessions(
 	if err := sandboxBroker(settings.CodeSandbox, liveClient, &options); err != nil {
 		return nil, err
 	}
-	options.Sandboxes = newSandboxes(settings, usageWriter, prices, keys, logger)
+	options.Sandboxes = newSandboxes(settings, usageWriter, prices, keys, policies, logger)
 	options.SandboxLimits = policies
 	options.ResumeHistories = policies
 	return session.NewManager(options)

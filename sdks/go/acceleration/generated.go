@@ -7200,7 +7200,7 @@ type IndexedKnowledgeDocument struct {
 	ContentType string    `json:"content_type"`
 	CreatedAt   time.Time `json:"created_at"`
 
-	// Error Why the uploaded file could not be read, or why the passages of posted text could not all be written, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
+	// Error Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
 	Error     *string `json:"error,omitempty"`
 	Id        string  `json:"id"`
 	Namespace string  `json:"namespace"`
@@ -7208,7 +7208,7 @@ type IndexedKnowledgeDocument struct {
 	// Pages How many pages the uploaded file has. 0 for text, and for a file without pages, such as a spreadsheet.
 	Pages int `json:"pages"`
 
-	// Passages How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote.
+	// Passages How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote. An indexed one whose file was still being read when newer text or a newer file replaced it can count more than it was cut into, for the same reason, until it is written again.
 	Passages int `json:"passages"`
 
 	// Source What the document was posted as, and what its passages are keyed by.
@@ -7216,7 +7216,7 @@ type IndexedKnowledgeDocument struct {
 	// Example: pricing.md
 	Source string `json:"source"`
 
-	// State Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, or posted text whose write stopped part way, and error says why: the passages written before the failure can still be looked up, and posting the document again or deleting it fixes it.
+	// State Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
 	State KnowledgeDocumentState `json:"state"`
 
 	// Text The document as it was last posted, or as its file was read: Markdown, each page of a file opening with an <!-- page N --> comment. Only reading one document fills it in, and one written before its text was kept has none.
@@ -7298,7 +7298,7 @@ type KnowledgeDocument struct {
 	Text string `json:"text"`
 }
 
-// KnowledgeDocumentState Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, or posted text whose write stopped part way, and error says why: the passages written before the failure can still be looked up, and posting the document again or deleting it fixes it.
+// KnowledgeDocumentState Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
 type KnowledgeDocumentState string
 
 // KnowledgePassage defines model for KnowledgePassage.
@@ -9304,7 +9304,7 @@ type ScheduledTaskRun struct {
 	// DeliveredTo Where the follow-up landed: conversation, sms, whatsapp, imessage or phone. Empty until it lands.
 	DeliveredTo string `json:"delivered_to"`
 
-	// Error Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
+	// Error Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), not_in_team (in an app that keeps each team's agents to its own users, the user who made the task is no longer in its agent's team, so the agent is not run; not tried again), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
 	Error      *string    `json:"error"`
 	FinishedAt *time.Time `json:"finished_at"`
 	Id         string     `json:"id"`
@@ -14369,6 +14369,7 @@ type ClientInterface interface {
 	//
 	// The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 	// Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+	// A document that is removed again and again while it is written is refused with a 409: post it again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes any type of body and a specified content type.
@@ -14380,6 +14381,7 @@ type ClientInterface interface {
 	//
 	// The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 	// Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+	// A document that is removed again and again while it is written is refused with a 409: post it again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes a body of the `application/json` content type.
@@ -14396,7 +14398,7 @@ type ClientInterface interface {
 
 	// DeleteKnowledgeDocument Take a document out of a knowledge base
 	//
-	// The passages it was cut into are removed too, so the agent stops answering out of it.
+	// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, so it can be deleted again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Corresponds with DELETE /v1/agents/knowledge/documents/{id} (the `DeleteKnowledgeDocument` operationId).
@@ -15655,6 +15657,7 @@ type ClientInterface interface {
 	//
 	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not hold here is refused with 400.
 	// An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
+	// A number on the app's own SIP trunk that another app holds here is not written, nor counted in `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
 	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 	// Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 	//
@@ -16065,7 +16068,7 @@ type ClientInterface interface {
 
 	// AddTrunkNumberWithBody Add a number that is on this SIP trunk
 	//
-	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -16074,7 +16077,7 @@ type ClientInterface interface {
 
 	// AddTrunkNumber Add a number that is on this SIP trunk
 	//
-	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -18828,6 +18831,7 @@ func (c *Client) DeleteKnowledge(ctx context.Context, params *DeleteKnowledgePar
 //
 // The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 // Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+// A document that is removed again and again while it is written is refused with a 409: post it again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes any type of body and a specified content type.
@@ -18849,6 +18853,7 @@ func (c *Client) IngestKnowledgeWithBody(ctx context.Context, contentType string
 //
 // The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 // Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+// A document that is removed again and again while it is written is refused with a 409: post it again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes a body of the `application/json` content type.
@@ -18885,7 +18890,7 @@ func (c *Client) ListKnowledgeDocuments(ctx context.Context, params *ListKnowled
 
 // DeleteKnowledgeDocument Take a document out of a knowledge base
 //
-// The passages it was cut into are removed too, so the agent stops answering out of it.
+// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, so it can be deleted again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Corresponds with DELETE /v1/agents/knowledge/documents/{id} (the `DeleteKnowledgeDocument` operationId).
@@ -21434,6 +21439,7 @@ func (c *Client) ExportData(ctx context.Context, reqEditors ...RequestEditorFn) 
 //
 // Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not hold here is refused with 400.
 // An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
+// A number on the app's own SIP trunk that another app holds here is not written, nor counted in `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
 // An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 // Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 //
@@ -22314,7 +22320,7 @@ func (c *Client) UpdateSipTrunk(ctx context.Context, id string, body UpdateSipTr
 
 // AddTrunkNumberWithBody Add a number that is on this SIP trunk
 //
-// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 //
 // Takes any type of body and a specified content type.
 //
@@ -22333,7 +22339,7 @@ func (c *Client) AddTrunkNumberWithBody(ctx context.Context, id string, contentT
 
 // AddTrunkNumber Add a number that is on this SIP trunk
 //
-// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -37690,6 +37696,7 @@ type ClientWithResponsesInterface interface {
 	//
 	// The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 	// Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+	// A document that is removed again and again while it is written is refused with a 409: post it again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -37701,6 +37708,7 @@ type ClientWithResponsesInterface interface {
 	//
 	// The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 	// Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+	// A document that is removed again and again while it is written is refused with a 409: post it again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
@@ -37719,7 +37727,7 @@ type ClientWithResponsesInterface interface {
 
 	// DeleteKnowledgeDocumentWithResponse Take a document out of a knowledge base
 	//
-	// The passages it was cut into are removed too, so the agent stops answering out of it.
+	// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, so it can be deleted again.
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -39106,6 +39114,7 @@ type ClientWithResponsesInterface interface {
 	//
 	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not hold here is refused with 400.
 	// An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
+	// A number on the app's own SIP trunk that another app holds here is not written, nor counted in `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
 	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 	// Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 	//
@@ -39552,7 +39561,7 @@ type ClientWithResponsesInterface interface {
 
 	// AddTrunkNumberWithBodyWithResponse Add a number that is on this SIP trunk
 	//
-	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -39561,7 +39570,7 @@ type ClientWithResponsesInterface interface {
 
 	// AddTrunkNumberWithResponse Add a number that is on this SIP trunk
 	//
-	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+	// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -48970,6 +48979,8 @@ type IngestKnowledgeResponse struct {
 	JSON402 *PaymentRequired
 	// JSON403 the response for an HTTP 403 `application/json` response
 	JSON403 *Forbidden
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
 	// JSON500 the response for an HTTP 500 `application/json` response
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
@@ -49003,6 +49014,11 @@ func (r IngestKnowledgeResponse) GetJSON402() *PaymentRequired {
 // GetJSON403 returns the response for an HTTP 403 `application/json` response
 func (r IngestKnowledgeResponse) GetJSON403() *Forbidden {
 	return r.JSON403
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r IngestKnowledgeResponse) GetJSON409() *ErrorResponse {
+	return r.JSON409
 }
 
 // GetJSON500 returns the response for an HTTP 500 `application/json` response
@@ -49172,6 +49188,8 @@ type DeleteKnowledgeDocumentResponse struct {
 	JSON403 *Forbidden
 	// JSON404 the response for an HTTP 404 `application/json` response
 	JSON404 *NotFound
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
 	// JSON500 the response for an HTTP 500 `application/json` response
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
@@ -49205,6 +49223,11 @@ func (r DeleteKnowledgeDocumentResponse) GetJSON403() *Forbidden {
 // GetJSON404 returns the response for an HTTP 404 `application/json` response
 func (r DeleteKnowledgeDocumentResponse) GetJSON404() *NotFound {
 	return r.JSON404
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r DeleteKnowledgeDocumentResponse) GetJSON409() *ErrorResponse {
+	return r.JSON409
 }
 
 // GetJSON500 returns the response for an HTTP 500 `application/json` response
@@ -60008,6 +60031,8 @@ type TransferPhoneCallResponse struct {
 	JSON403 *Forbidden
 	// JSON404 the response for an HTTP 404 `application/json` response
 	JSON404 *NotFound
+	// JSON409 the response for an HTTP 409 `application/json` response
+	JSON409 *ErrorResponse
 	// JSON500 the response for an HTTP 500 `application/json` response
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
@@ -60046,6 +60071,11 @@ func (r TransferPhoneCallResponse) GetJSON403() *Forbidden {
 // GetJSON404 returns the response for an HTTP 404 `application/json` response
 func (r TransferPhoneCallResponse) GetJSON404() *NotFound {
 	return r.JSON404
+}
+
+// GetJSON409 returns the response for an HTTP 409 `application/json` response
+func (r TransferPhoneCallResponse) GetJSON409() *ErrorResponse {
+	return r.JSON409
 }
 
 // GetJSON500 returns the response for an HTTP 500 `application/json` response
@@ -69678,6 +69708,7 @@ func (c *ClientWithResponses) DeleteKnowledgeWithResponse(ctx context.Context, p
 //
 // The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 // Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+// A document that is removed again and again while it is written is refused with a 409: post it again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -69695,6 +69726,7 @@ func (c *ClientWithResponses) IngestKnowledgeWithBodyWithResponse(ctx context.Co
 //
 // The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
 // Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+// A document that is removed again and again while it is written is refused with a 409: post it again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
@@ -69725,7 +69757,7 @@ func (c *ClientWithResponses) ListKnowledgeDocumentsWithResponse(ctx context.Con
 
 // DeleteKnowledgeDocumentWithResponse Take a document out of a knowledge base
 //
-// The passages it was cut into are removed too, so the agent stops answering out of it.
+// The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, so it can be deleted again.
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Returns a wrapper object for the known response body format(s).
@@ -71886,6 +71918,7 @@ func (c *ClientWithResponses) ExportDataWithResponse(ctx context.Context, reqEdi
 //
 // Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not hold here is refused with 400.
 // An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
+// A number on the app's own SIP trunk that another app holds here is not written, nor counted in `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
 // An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 // Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 //
@@ -72614,7 +72647,7 @@ func (c *ClientWithResponses) UpdateSipTrunkWithResponse(ctx context.Context, id
 
 // AddTrunkNumberWithBodyWithResponse Add a number that is on this SIP trunk
 //
-// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -72629,7 +72662,7 @@ func (c *ClientWithResponses) AddTrunkNumberWithBodyWithResponse(ctx context.Con
 
 // AddTrunkNumberWithResponse Add a number that is on this SIP trunk
 //
-// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+// Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -83856,6 +83889,13 @@ func ParseIngestKnowledgeResponse(rsp *http.Response) (*IngestKnowledgeResponse,
 		}
 		response.JSON403 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
 		var dest InternalError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -84096,6 +84136,13 @@ func ParseDeleteKnowledgeDocumentResponse(rsp *http.Response) (*DeleteKnowledgeD
 			return nil, err
 		}
 		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
 		var dest InternalError
@@ -96803,6 +96850,13 @@ func ParseTransferPhoneCallResponse(rsp *http.Response) (*TransferPhoneCallRespo
 			return nil, err
 		}
 		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
 		var dest InternalError

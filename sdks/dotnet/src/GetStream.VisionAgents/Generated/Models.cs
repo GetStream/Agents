@@ -8533,7 +8533,7 @@ namespace GetStream.VisionAgents.Models
         public System.DateTimeOffset CreatedAt { get; set; } = default!;
 
         /// <summary>
-        /// Why the uploaded file could not be read, or why the passages of posted text could not all be written, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
+        /// Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("error")]
         public string? Error { get; set; } = default!;
@@ -8551,7 +8551,7 @@ namespace GetStream.VisionAgents.Models
         public int Pages { get; set; } = default!;
 
         /// <summary>
-        /// How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote.
+        /// How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote. An indexed one whose file was still being read when newer text or a newer file replaced it can count more than it was cut into, for the same reason, until it is written again.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("passages")]
         public int Passages { get; set; } = default!;
@@ -13316,7 +13316,7 @@ namespace GetStream.VisionAgents.Models
         public string DeliveredTo { get; set; } = default!;
 
         /// <summary>
-        /// Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
+        /// Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), not_in_team (in an app that keeps each team's agents to its own users, the user who made the task is no longer in its agent's team, so the agent is not run; not tried again), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("error")]
         public string? Error { get; set; } = default!;

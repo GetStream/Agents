@@ -1486,6 +1486,7 @@ export type paths = {
          * Fill a knowledge base with what the business wrote down
          * @description The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
          *     Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+         *     A document that is removed again and again while it is written is refused with a 409: post it again.
          *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
          */
         readonly post: operations["ingestKnowledge"];
@@ -1536,7 +1537,7 @@ export type paths = {
         readonly post?: never;
         /**
          * Take a document out of a knowledge base
-         * @description The passages it was cut into are removed too, so the agent stops answering out of it.
+         * @description The passages it was cut into are removed too, so the agent stops answering out of it. A document that keeps being written while it is removed is refused with a 409 and listed as failed, so it can be deleted again.
          *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
          */
         readonly delete: operations["deleteKnowledgeDocument"];
@@ -3233,6 +3234,7 @@ export type paths = {
          * Write an export, or a batch of changes, into this deployment
          * @description Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does not hold here is refused with 400.
          *     An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
+         *     A number on the app's own SIP trunk that another app holds here is not written, nor counted in `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
          *     An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
          *     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
          */
@@ -3800,7 +3802,7 @@ export type paths = {
         readonly put?: never;
         /**
          * Add a number that is on this SIP trunk
-         * @description Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.
+         * @description Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it are dialled through this trunk. Whether the number is really the customer's is for the trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.
          */
         readonly post: operations["addTrunkNumber"];
         readonly delete?: never;
@@ -7879,13 +7881,13 @@ export type components = {
             readonly content_type: string;
             /** Format: date-time */
             readonly created_at: string;
-            /** @description Why the uploaded file could not be read, or why the passages of posted text could not all be written, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good. */
+            /** @description Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good. */
             readonly error?: string;
             readonly id: string;
             readonly namespace: string;
             /** @description How many pages the uploaded file has. 0 for text, and for a file without pages, such as a spreadsheet. */
             readonly pages: number;
-            /** @description How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote. */
+            /** @description How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote. An indexed one whose file was still being read when newer text or a newer file replaced it can count more than it was cut into, for the same reason, until it is written again. */
             readonly passages: number;
             /**
              * @description What the document was posted as, and what its passages are keyed by.
@@ -7981,7 +7983,7 @@ export type components = {
             readonly text: string;
         };
         /**
-         * @description Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, or posted text whose write stopped part way, and error says why: the passages written before the failure can still be looked up, and posting the document again or deleting it fixes it.
+         * @description Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
          * @enum {string}
          */
         readonly KnowledgeDocumentState: "pending" | "indexed" | "failed";
@@ -9769,7 +9771,7 @@ export type components = {
             readonly attempts: number;
             /** @description Where the follow-up landed: conversation, sms, whatsapp, imessage or phone. Empty until it lands. */
             readonly delivered_to: string;
-            /** @description Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise. */
+            /** @description Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), not_in_team (in an app that keeps each team's agents to its own users, the user who made the task is no longer in its agent's team, so the agent is not run; not tried again), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise. */
             readonly error: string | null;
             /** Format: date-time */
             readonly finished_at: string | null;
@@ -15698,6 +15700,15 @@ export interface operations {
             readonly 401: components["responses"]["Unauthorized"];
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
+            /** @description Conflict */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             readonly 500: components["responses"]["InternalError"];
             readonly 503: components["responses"]["Unavailable"];
         };
@@ -15838,6 +15849,15 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
+            /** @description Conflict */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             readonly 500: components["responses"]["InternalError"];
             readonly 503: components["responses"]["Unavailable"];
         };
@@ -20097,6 +20117,15 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
+            /** @description Conflict */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             readonly 500: components["responses"]["InternalError"];
             readonly 503: components["responses"]["Unavailable"];
         };

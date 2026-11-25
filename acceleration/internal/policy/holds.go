@@ -322,7 +322,7 @@ func (e *Enforcer) Reserve(owner routing.Owner, usageID uuid.UUID, micros int64,
 		}
 	}
 	var grants []int64
-	refusal, spend, reason, named := m.refusal(acct, organization, owner, decided, now, &grants)
+	refusal, spend, reason, named := m.refusal(acct, organization, owner, decided, now, false, &grants)
 	seen := seenOf(acct)
 	refused := refusal != nil || spend != nil
 	shadow := m.settings.Mode == config.LimitsShadow

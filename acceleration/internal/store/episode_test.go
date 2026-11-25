@@ -599,12 +599,28 @@ func (s *StoreSuite) TestALeaseAnotherRouterIsTakingIsLeftToIt() {
 	s.Empty(taken)
 }
 
+// endedEpisodes fills episodes with ended ones of calls and threads and analyzes it. On a table
+// nearly empty, which index is cheapest moves with the statistics other tests leave.
+func endedEpisodes(ctx context.Context, tx bun.Tx) error {
+	_, err := tx.ExecContext(ctx, `
+		SET LOCAL session_replication_role = replica;
+		INSERT INTO episodes (id, customer_id, contact_id, source, thread_channel, call_id, session_id, card_message_id, status, started_at)
+		SELECT 'ended-' || n, 'acme', 'contact', CASE WHEN n % 2 = 0 THEN 'call' ELSE 'sms' END, 'thread-' || n,
+			CASE WHEN n % 2 = 0 THEN 'call-' || n END, CASE WHEN n % 2 = 0 THEN 'session-' || n END, '', 'ended', now()
+		FROM generate_series(1, 1000) AS n;
+		ANALYZE episodes`)
+	return err
+}
+
 // The call hook ends a call's episodes for every call that ends in the app, video calls
 // included, so it finds them by an index rather than by reading every episode.
 func (s *StoreSuite) TestACallsEpisodesAreFoundByTheirCall() {
 	var plan []string
 	err := s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+			return err
+		}
+		if err := endedEpisodes(ctx, tx); err != nil {
 			return err
 		}
 		return tx.NewRaw("EXPLAIN "+endCallEpisodesQuery, s.base, (5*time.Minute).Seconds(), "router-a", "call-one", AppScope{App: 4242}.clause()).Scan(ctx, &plan)
@@ -620,6 +636,9 @@ func (s *StoreSuite) TestASweepReadsOnlyTheOpenThreadEpisodes() {
 	var plan []string
 	err := s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+			return err
+		}
+		if err := endedEpisodes(ctx, tx); err != nil {
 			return err
 		}
 		return tx.NewRaw("EXPLAIN "+idleEpisodesQuery, s.base, 10).Scan(ctx, &plan)
