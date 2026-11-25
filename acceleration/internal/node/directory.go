@@ -61,9 +61,9 @@ type Directory struct {
 	address  string
 	shard    string
 	sessions string
-	// agents and channels are a session's agent and conversation by their ids alone, which a
-	// router of the release before reads. Here only channels is read, when a customer's own key
-	// is not there.
+	// agents and channels are a session's agent and conversation by their ids alone: a router
+	// of the release before reads channels, when a customer's own key is not there, as this one
+	// does, and only an older one reads agents.
 	agents   string
 	channels string
 	// writingAs is a claim on an agent by customer alone, which a router of the release before
