@@ -26,7 +26,7 @@ func (s *Server) getConversationMessages(ctx context.Context, req *getConversati
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	page, err := service.HistoryForCaller(ctx, owner, req.AgentId, req.Cid, value(req.Before.ptr()), CallerFrom(ctx).UserID)
+	page, err := service.HistoryForCaller(conversation.WithCallerKind(ctx, KindFrom(ctx)), owner, req.AgentId, req.Cid, value(req.Before.ptr()), CallerFrom(ctx).UserID)
 	if refused, ok := errors.AsType[conversation.RefusedRead](err); ok {
 		return nil, invalidRequest(refused.Error())
 	}
@@ -57,7 +57,7 @@ func (s *Server) getConversationCommand(ctx context.Context, req *getConversatio
 	if err != nil {
 		return nil, errUnknownCommand
 	}
-	receipt, err := service.CommandForCaller(ctx, owner, req.AgentId, req.Cid, CallerFrom(ctx).UserID, req.RequestId)
+	receipt, err := service.CommandForCaller(conversation.WithCallerKind(ctx, KindFrom(ctx)), owner, req.AgentId, req.Cid, CallerFrom(ctx).UserID, req.RequestId)
 	if err != nil {
 		return nil, unknownOr(err, conversation.ErrCommandNotFound, errUnknownCommand)
 	}

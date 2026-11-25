@@ -89,7 +89,7 @@ func (s *Session) changeTools(ctx context.Context, change func([]harness.Tool) (
 	}
 	if err := s.current().SetTools(ctx, s.offering(next), func() {
 		s.labelMu.Lock()
-		s.spec.Tools = next
+		s.declare(next)
 		if s.addedTools == nil {
 			s.addedTools = map[string]bool{}
 		}
@@ -121,6 +121,26 @@ func (s *Session) callerTool(name string) (declared, added bool) {
 	s.labelMu.Lock()
 	defer s.labelMu.Unlock()
 	return slices.ContainsFunc(s.spec.Tools, named(name)), s.addedTools[name]
+}
+
+// declare replaces the caller's tools with next, remembering the names of the ones it had and
+// the ones it now has (declaredEver). The caller holds labelMu.
+func (s *Session) declare(next []harness.Tool) {
+	if s.declaredEver == nil {
+		s.declaredEver = map[string]bool{}
+	}
+	for _, tool := range slices.Concat(s.spec.Tools, next) {
+		s.declaredEver[tool.Name] = true
+	}
+	s.spec.Tools = next
+}
+
+// devicesTool reports whether the session's end user's device declared a tool called name,
+// now or earlier in the session (agent.Options.CallersTool).
+func (s *Session) devicesTool(name string) bool {
+	s.labelMu.Lock()
+	defer s.labelMu.Unlock()
+	return s.declaredEver[name] || slices.ContainsFunc(s.spec.Tools, named(name))
 }
 
 // offering is everything the session offers with declared as the caller's tools, which go

@@ -162,6 +162,10 @@ type Options struct {
 	// Telephony is what the agent may do to the call itself. Without it the agent can
 	// only talk, which is what a call that is not on a phone network can do.
 	Telephony Telephony
+	// CallersTool reports whether the tool called name is one an end user's device declared
+	// and runs itself. Its result is the caller's own word, so it gives no number to transfer
+	// to. Nil means no tool is.
+	CallersTool func(name string) bool
 	// Destinations, when set, are the only places a transfer may go, asked for by name:
 	// a number the model supplies is never dialled.
 	Destinations []Destination
