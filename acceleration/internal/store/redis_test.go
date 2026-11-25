@@ -611,6 +611,33 @@ func (s *StoreSuite) TestAReplayedPageWhoseCommitLandsAfterItGaveUpIsServedOnceI
 	s.landsLate(id, proxy, func() error { return slow.ApplyChanges(s.ctx, "acme-app", renamingPage(renamed)) })
 }
 
+// A page with the fewest keys to drop: a skill's delete names its config's skills alone.
+func (s *StoreSuite) TestAReplayedDeleteOfASkillWhoseCommitLandsAfterItGaveUpIsServedOnceItLands() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	config := s.boundConfig("acme-app")
+	skill := s.skill(config, "refund")
+	held := func() int {
+		named, err := s.store.Skills.GetByNames(s.ctx, "acme-app", config.ID, []string{"refund"})
+		s.Require().NoError(err)
+		return len(named)
+	}
+	s.Require().Equal(1, held())
+	proxy, slow := s.lossyStore(true)
+
+	s.Require().Error(slow.ApplyChanges(s.ctx, "acme-app", []DataChange{
+		{Table: "skills", Op: ChangeDelete, Key: json.RawMessage(`{"id":"` + skill.ID + `"}`)},
+	}), "the COMMIT is held past the read timeout")
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		s.Require().Equal(1, held())
+	}
+	proxy.let()
+
+	s.Eventually(func() bool { return held() == 0 }, 5*time.Second, 10*time.Millisecond,
+		"the copy cached before the COMMIT landed is dropped once it lands")
+}
+
 func (s *StoreSuite) TestAnImportedRowWhoseCommitAnswerIsLostIsServedAtOnce() {
 	id, renamed := s.exportedConfig()
 	_, lossy := s.lossyStore(false)
@@ -772,6 +799,37 @@ func (s *StoreSuite) TestAUserRemovedByAReplayWhoseCommitAnswerIsLostIsRecordedA
 	recorded, err := s.store.global.NewSelect().Model((*User)(nil)).Where("customer_id = 'acme-app' AND id = 'alice'").Exists(s.ctx)
 	s.Require().NoError(err)
 	s.True(recorded)
+}
+
+func (s *StoreSuite) TestAUserRemovedByAPageThatLeftANumberOutIsRecordedAgain() {
+	local, err := OpenShards(Options{DSN: s.dsn, ShardDSN: s.shardDSN})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(local.Close()) })
+	s.Require().NoError(local.Users.Seen(s.ctx, "other", "alice", UserKindAuthenticated))
+	acme, other := s.trunk("acme"), s.trunk("other")
+	s.Require().NoError(s.trunkNumber("acme", acme.ID, "+15550000129"))
+	number, err := json.Marshal(map[string]any{
+		"id": 1 << 40, "e164": "+15550000129", "vendor": "sip_trunk", "country": "US", "capabilities": []string{"voice"},
+		"customer_id": "other", "tags": map[string]string{}, "purchased_at": s.base, "sip_trunk_id": other.ID,
+	})
+	s.Require().NoError(err)
+
+	err = local.ApplyChanges(s.ctx, "other", []DataChange{
+		{Table: "phone_numbers", Op: ChangeInsert, Payload: number},
+		{Table: "users", Op: ChangeDelete, Key: json.RawMessage(`{"customer_id":"other","id":"alice"}`)},
+	})
+	left, ok := errors.AsType[*NumbersLeftOutError](err)
+	s.Require().True(ok, "%v", err)
+	s.Equal([]string{"+15550000129"}, left.Numbers)
+
+	recorded := func() bool {
+		exists, err := s.store.global.NewSelect().Model((*User)(nil)).Where("customer_id = 'other' AND id = 'alice'").Exists(s.ctx)
+		s.Require().NoError(err)
+		return exists
+	}
+	s.Require().False(recorded())
+	s.Require().NoError(local.Users.Seen(s.ctx, "other", "alice", UserKindAuthenticated))
+	s.True(recorded())
 }
 
 func (s *StoreSuite) TestAUserImportedWhoseCommitAnswerIsLostIsRecordedAgain() {
