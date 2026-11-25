@@ -148,7 +148,7 @@ func (m *Manager) attachConnectors(ctx context.Context, spec *Spec) (*dispatcher
 		return nil, nil, nil, stack.Wrap(errors.New("session: connector bindings come from a stored agent config, and this session names none"))
 	}
 	// A config stored past a config write's check, as one stored before the rule held was,
-	// opens none of its connectors while it breaks it.
+	// opens no session while it breaks the rule alone.
 	config := store.AgentConfig{Connectors: spec.ConnectorBindings, Sandbox: store.AgentSandbox{Provider: spec.Sandbox, Options: spec.SandboxOptions}}
 	if message, ok, err := sensitive.ConfigComplaint(ctx, m.options.Store.ConnectorDefinitions, spec.CustomerID, config); err != nil {
 		return nil, nil, nil, err

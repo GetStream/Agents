@@ -140,7 +140,7 @@ func (s *ChildAgentsSuite) TestADelegationWithNoSensitiveConnectorRuns() {
 }
 
 // A config stored past the config writes' check opens no session while it breaks the rule
-// alone. Its nessy alone opens one (TestADelegationIsRefusedWhenTheParentIsSensitiveAndAChildSendsOut).
+// alone. With nessy alone, a config runs (TestADelegationIsRefusedWhenTheParentIsSensitiveAndAChildSendsOut).
 func (s *ChildAgentsSuite) TestASessionOfAConfigThatBreaksTheRuleAloneIsRefused() {
 	s.useInternalApp()
 	agent := s.agentWith("echo/echo-model", map[string]any{"connectors": []map[string]any{sessionNessy("customers")}})
