@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
@@ -63,6 +64,69 @@ func (s *ReplicateRepeatSuite) TestAPageThatEndsWithinTheSensitiveRuleIsApplied(
 // A connector defined earlier in the page is weighed as the page defines it.
 func (s *ReplicateRepeatSuite) TestAPageIsWeighedWithTheConnectorsItDefines() {
 	parent, child := s.copiedParentAndChild(nil)
+	s.definedCRM()
+	// A config the page changes within the rule comes first, so each config the page changes is weighed.
+	s.changed(child, func(config *store.AgentConfig) { config.Instructions = "be briefer" })
+	s.changed(parent, func(config *store.AgentConfig) {
+		config.Connectors = append(config.Connectors, crm())
+	})
+
+	err := s.once("acme", false)
+
+	s.Require().ErrorIs(err, store.ErrInvalidImport)
+	s.ErrorContains(err, `and connector binding "crm" can send data out`)
+	s.Len(s.copied(parent).Connectors, 1, "nothing of the page is written")
+}
+
+// A first copy writes the agents before the connectors they bind (the export's order), and a
+// connector it writes is weighed with the agents binding it.
+func (s *ReplicateRepeatSuite) TestAFirstCopyIsWeighedWithTheConnectorsItDefinesAfterTheAgents() {
+	parent, _ := s.parentAndChild(func(parent, _ *store.AgentConfig) {
+		s.definedCRM()
+		parent.Connectors = append(parent.Connectors, crm())
+	})
+
+	err := s.once("", false)
+
+	s.Require().ErrorIs(err, store.ErrInvalidImport)
+	s.ErrorContains(err, `store: import connector_definitions:{"id":"custom_crm","revision":1}: the agent "parent" binds it: `+
+		`connector binding "customers" binds "nessy", whose tools read private data, and connector binding "crm" can send data out`)
+	s.notDefined("custom_crm")
+	s.Len(s.copied(parent).Connectors, 2, "the agent was written before the connector was refused")
+}
+
+// A page that defines a connector an agent copied by an earlier page binds is weighed with it.
+func (s *ReplicateRepeatSuite) TestAPageDefiningAConnectorAnEarlierPageBoundIsRefused() {
+	parent, _ := s.copiedParentAndChild(nil)
+	s.boundUndefinedCRM(parent)
+	s.Require().NoError(s.once("acme", false))
+	s.Require().Len(s.copied(parent).Connectors, 2)
+	s.definedCRM()
+
+	err := s.once("acme", false)
+
+	s.Require().ErrorIs(err, store.ErrInvalidImport)
+	s.ErrorContains(err, `store: import connector_definitions:{"id":"custom_crm","revision":1}: the agent "parent" binds it: `+
+		`connector binding "customers" binds "nessy", whose tools read private data, and connector binding "crm" can send data out`)
+	s.notDefined("custom_crm")
+}
+
+// A page that binds a connector and then defines it is weighed as it leaves them.
+func (s *ReplicateRepeatSuite) TestAPageBindingAConnectorBeforeDefiningItIsRefused() {
+	parent, _ := s.copiedParentAndChild(nil)
+	s.boundUndefinedCRM(parent)
+	s.definedCRM()
+
+	err := s.once("acme", false)
+
+	s.Require().ErrorIs(err, store.ErrInvalidImport)
+	s.ErrorContains(err, `connector binding "customers" binds "nessy", whose tools read private data, and connector binding "crm" can send data out`)
+	s.Len(s.copied(parent).Connectors, 1, "nothing of the page is written")
+	s.notDefined("custom_crm")
+}
+
+// definedCRM defines acme's custom connector custom_crm at the source.
+func (s *ReplicateRepeatSuite) definedCRM() {
 	manifest, err := core.ParseManifest([]byte(`
 id: custom_crm
 revision: 1
@@ -77,24 +141,35 @@ sources:
 	s.Require().NoError(err)
 	_, err = s.source.ConnectorDefinitions.Revise(s.ctx, "acme", manifest)
 	s.Require().NoError(err)
-	// A config the page changes within the rule comes first, so each config the page changes is weighed.
-	s.changed(child, func(config *store.AgentConfig) { config.Instructions = "be briefer" })
-	s.changed(parent, func(config *store.AgentConfig) {
-		config.Connectors = append(config.Connectors, store.ConnectorBinding{Name: "crm", ConnectorID: "custom_crm",
-			Connection: store.ConnectionBinding{Type: "session"}, Tools: []store.ToolGrant{{Name: "create_contact"}}})
-	})
+}
 
-	err = s.once("acme", false)
+// boundUndefinedCRM binds custom_crm to the parent at the source while acme has not defined it,
+// as a source's SQL can and the store's writes refuse (store.refuseUndefined).
+func (s *ReplicateRepeatSuite) boundUndefinedCRM(parent store.AgentConfig) {
+	binding, err := json.Marshal([]store.ConnectorBinding{crm()})
+	s.Require().NoError(err)
+	_, err = s.source.GlobalDB().ExecContext(s.ctx, "UPDATE agent_configs SET connectors = connectors || ?::jsonb WHERE id = ?",
+		string(binding), parent.ID)
+	s.Require().NoError(err)
+}
 
-	s.Require().ErrorIs(err, store.ErrInvalidImport)
-	s.ErrorContains(err, `and connector binding "crm" can send data out`)
-	s.Len(s.copied(parent).Connectors, 1, "nothing of the page is written")
+// notDefined says the target holds no definition of acme's connector id.
+func (s *ReplicateRepeatSuite) notDefined(id string) {
+	_, err := s.target.ConnectorDefinitions.Latest(s.ctx, "acme", id)
+	s.ErrorIs(err, store.ErrNoConnectorDefinition)
 }
 
 // copiedParentAndChild makes the target a deployment opened as the command opens one
 // (openStore), where acme sees nessy, and copies to it two text agents of acme's from the source:
 // a parent binding nessy and a child binding nothing, as edit leaves them.
 func (s *ReplicateRepeatSuite) copiedParentAndChild(edit func(parent, child *store.AgentConfig)) (store.AgentConfig, store.AgentConfig) {
+	parent, child := s.parentAndChild(edit)
+	s.Require().NoError(s.once("", false))
+	return parent, child
+}
+
+// parentAndChild is copiedParentAndChild before the copy.
+func (s *ReplicateRepeatSuite) parentAndChild(edit func(parent, child *store.AgentConfig)) (store.AgentConfig, store.AgentConfig) {
 	settings := config.Defaults()
 	settings.Postgres.DSN = testenv.Database(os.Getenv(dsnEnvVar), "repeat_target")
 	target, err := openStore(s.ctx, settings)
@@ -116,7 +191,6 @@ func (s *ReplicateRepeatSuite) copiedParentAndChild(edit func(parent, child *sto
 	}
 	s.Require().NoError(s.source.AgentConfigs.Insert(s.ctx, &child))
 	s.Require().NoError(s.source.AgentConfigs.Insert(s.ctx, &parent))
-	s.Require().NoError(s.once("", false))
 	return parent, child
 }
 
@@ -144,4 +218,11 @@ func calling(child store.AgentConfig) []store.ChildAgent {
 func writer() store.ConnectorBinding {
 	return store.ConnectorBinding{Name: "code", ConnectorID: "github", Connection: store.ConnectionBinding{Type: "session"},
 		Tools: []store.ToolGrant{{Name: "create_issue"}}}
+}
+
+// crm is a binding granting a custom_crm tool, which a custom connector's source does not say
+// only reads.
+func crm() store.ConnectorBinding {
+	return store.ConnectorBinding{Name: "crm", ConnectorID: "custom_crm", Connection: store.ConnectionBinding{Type: "session"},
+		Tools: []store.ToolGrant{{Name: "create_contact"}}}
 }

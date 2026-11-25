@@ -696,11 +696,15 @@ func (s *Store) ImportRow(ctx context.Context, customerID, table string, row jso
 	}
 	spec, _ := dataTableByName(table)
 	var stale []string
-	if table == "phone_numbers" {
+	if table == "phone_numbers" || table == "connector_definitions" {
 		// A number is checked against who else holds it under a lock its write has to keep
-		// (holders), and only a transaction keeps one.
+		// (holders), and only a transaction keeps one. A definition is weighed with the configs
+		// binding it as the transaction writes it.
 		return s.sideOf(spec).RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-			return s.importRow(ctx, tx, customerID, table, row, &stale)
+			if err := s.importRow(ctx, tx, customerID, table, row, &stale); err != nil || table != "connector_definitions" {
+				return err
+			}
+			return s.refuseImportedDefinitions(ctx, tx, customerID, []json.RawMessage{row})
 		})
 	}
 	// Most rows of an export have no keys to drop and pay for no transaction.
@@ -1264,10 +1268,7 @@ func (s *Store) refuseImportedConfigs(ctx context.Context, db bun.IDB, customerI
 		if err != nil {
 			return stack.Wrap(fmt.Errorf("store: import agent_configs: %w", err))
 		}
-		message, ok, err := rule.Config(ctx, definitions, customerID, written)
-		if err == nil && ok {
-			message, ok, err = importedGraphComplaint(ctx, db, definitions, rule, customerID, written)
-		}
+		message, ok, err := importedComplaint(ctx, db, definitions, rule, customerID, written)
 		if err != nil {
 			return err
 		}
@@ -1280,6 +1281,64 @@ func (s *Store) refuseImportedConfigs(ctx context.Context, db bun.IDB, customerI
 		}
 	}
 	return nil
+}
+
+// refuseImportedDefinitions refuses an import when a connector definition one of rows wrote
+// makes a live agent config binding it break the config rule, alone or in a set of agents it
+// is part of. An export carries agent configs before connector definitions, so a config is
+// written while a custom connector it binds is not defined yet, and the rule weighs that
+// binding only once the definition is. Each is read on db, the import's transaction.
+func (s *Store) refuseImportedDefinitions(ctx context.Context, db bun.IDB, customerID string, rows []json.RawMessage) error {
+	rule := s.configRule.Load()
+	if rule == nil {
+		return nil
+	}
+	definitions := definitionsOn{db}
+	for _, row := range rows {
+		var fields struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(row, &fields); err != nil {
+			return invalidImport(fmt.Errorf("store: import connector_definitions: %w", err))
+		}
+		bound, err := json.Marshal([]map[string]string{{"connector_id": fields.ID}})
+		if err != nil {
+			return stack.Wrap(err)
+		}
+		var binding []AgentConfig
+		if err := db.NewSelect().Model(&binding).
+			Where("customer_id = ?", customerID).
+			Where("connectors @> ?::jsonb", string(bound)).
+			Where("deleted_at IS NULL").
+			Order("created_at", "id").
+			Scan(ctx); err != nil {
+			return stack.Wrap(fmt.Errorf("store: import connector_definitions: configs binding %s: %w", fields.ID, err))
+		}
+		for _, config := range binding {
+			message, ok, err := importedComplaint(ctx, db, definitions, rule, customerID, config)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				key, err := rowKey("connector_definitions", []string{"id", "revision"}, row)
+				if err != nil {
+					return err
+				}
+				return invalidImport(fmt.Errorf("store: import %s: the agent %q binds it: %s", key, config.Name, message))
+			}
+		}
+	}
+	return nil
+}
+
+// importedComplaint is rule.Config over config, then importedGraphComplaint.
+func importedComplaint(ctx context.Context, db bun.IDB, definitions Definitions, rule *ConfigRule, customerID string,
+	config AgentConfig) (string, bool, error) {
+	message, ok, err := rule.Config(ctx, definitions, customerID, config)
+	if err != nil || !ok {
+		return message, ok, err
+	}
+	return importedGraphComplaint(ctx, db, definitions, rule, customerID, config)
 }
 
 // importedGraphComplaint is rule.Graph over each set of agents config is part of, as a config
@@ -2270,7 +2329,7 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 		if err := lockNumbers(ctx, tx, changes); err != nil {
 			return err
 		}
-		var configs []json.RawMessage
+		var configs, defined []json.RawMessage
 		for _, change := range changes {
 			if change.Skipped() {
 				continue
@@ -2289,14 +2348,20 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 				if err != nil {
 					return err
 				}
-				if change.Table == "agent_configs" {
+				switch change.Table {
+				case "agent_configs":
 					configs = append(configs, change.Payload)
+				case "connector_definitions":
+					defined = append(defined, change.Payload)
 				}
 			}
 		}
 		// Weighed once the page is written, so a parent and its child are weighed as the page
 		// leaves them, whichever of them came first.
-		return s.refuseImportedConfigs(ctx, tx, customerID, configs)
+		if err := s.refuseImportedConfigs(ctx, tx, customerID, configs); err != nil {
+			return err
+		}
+		return s.refuseImportedDefinitions(ctx, tx, customerID, defined)
 	}, func() []string { return stale }, func() bool { return len(stale) > 0 })
 	s.Users.forgetKeys(stale)
 	if err != nil {

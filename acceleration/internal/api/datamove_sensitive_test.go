@@ -150,6 +150,89 @@ func (s *DataMoveSuite) TestAnImportedParentIsNotWeighedWithAnotherAppsAgentOfIt
 	s.True(s.holds(id))
 }
 
+// An export carries agent configs before connector definitions, so a config binding a custom
+// connector beside a sensitive one is weighed again once the definition is written.
+func (s *DataMoveSuite) TestAnImportedConnectorAnAgentBindsBesideASensitiveOneIsRefused() {
+	template := s.agentTemplate()
+	s.useInternalApp()
+	connector := "custom_a" + store.NewID()
+	agent, _ := s.importedAgent(template, map[string]any{
+		"connectors": []map[string]any{sessionNessy("customers"), sessionCustom("crm", connector)}})
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", ndjson([]dataLine{agent, s.customConnector(connector)}))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, `store: import connector_definitions:{"id":"`+connector+`","revision":1}: the agent "`)
+	s.Contains(failure, `" binds it: connector binding "customers" binds "nessy", whose tools read private data, `+
+		`and connector binding "crm" can send data out`)
+	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+connector, nil, nil),
+		"the refused definition is not written")
+}
+
+// The control: the same import, with the custom connector's tool held for a person's approval.
+func (s *DataMoveSuite) TestAnImportedConnectorAnAgentBindsWithApprovalBesideASensitiveOneIsWritten() {
+	template := s.agentTemplate()
+	s.useInternalApp()
+	connector := "custom_a" + store.NewID()
+	approved := sessionCustom("crm", connector)
+	approved["require_approval"] = []string{"create_contact"}
+	agent, _ := s.importedAgent(template, map[string]any{"connectors": []map[string]any{sessionNessy("customers"), approved}})
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import", ndjson([]dataLine{agent, s.customConnector(connector)}), nil))
+
+	s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+connector, nil, nil))
+}
+
+// A definition is weighed with the agents of a config binding it too: a child binding it, whose
+// parent binds nessy.
+func (s *DataMoveSuite) TestAnImportedConnectorAChildBindsUnderASensitiveParentIsRefused() {
+	template := s.agentTemplate()
+	s.useInternalApp()
+	connector := "custom_a" + store.NewID()
+	childName := "agent-" + s.utils.uuid()
+	child, _ := s.importedAgent(template, map[string]any{"name": childName,
+		"connectors": []map[string]any{sessionCustom("crm", connector)}})
+	parent, _ := s.importedAgent(template, map[string]any{"connectors": []map[string]any{sessionNessy("customers")},
+		"agents": []map[string]any{{"config": childName, "tool": "ask_child"}}})
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import",
+		ndjson([]dataLine{parent, child, s.customConnector(connector)}))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, `store: import connector_definitions:{"id":"`+connector+`","revision":1}: the agent "`+childName+`" binds it: the agent `)
+	s.Contains(failure, `and connector binding "crm" of the agent "`+childName+`" can send data out`)
+}
+
+// A config the source deleted, or another app's, runs nothing here beside the definition.
+func (s *DataMoveSuite) TestAnImportedConnectorADeletedOrAnotherAppsAgentBindsIsWritten() {
+	template := s.agentTemplate()
+	s.useInternalApp()
+	connector := "custom_a" + store.NewID()
+	theirs := s.textAgent(map[string]any{"connectors": []map[string]any{sessionNessy("customers")}})
+	_, err := s.store.GlobalDB().ExecContext(s.T().Context(), "UPDATE agent_configs SET connectors = connectors || ?::jsonb WHERE id = ?",
+		`[{"name": "crm", "connector_id": "`+connector+`", "connection": {"type": "session"}, "tools": [{"name": "create_contact"}]}]`, theirs.Id)
+	s.Require().NoError(err)
+	s.useInternalApp()
+	deleted, _ := s.importedAgent(template, map[string]any{"deleted_at": "2026-11-01T00:00:00Z",
+		"connectors": []map[string]any{sessionNessy("customers"), sessionCustom("crm", connector)}})
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import", ndjson([]dataLine{deleted, s.customConnector(connector)}), nil))
+
+	s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+connector, nil, nil))
+}
+
+// customConnector is an export's line of a custom definition id with a bearer scheme.
+func (s *DataMoveSuite) customConnector(id string) dataLine {
+	return s.importedConnector(id, `"schemes": ["bearer"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`)
+}
+
+// sessionCustom binds the custom connector id under alias with a session connection, granting
+// a tool its source does not say only reads.
+func sessionCustom(alias, id string) map[string]any {
+	return map[string]any{"name": alias, "connector_id": id, "connection": map[string]any{"type": "session"},
+		"tools": []map[string]any{{"name": "create_contact"}}}
+}
+
 // useInternalApp gives the test an app of its own that Stream marks internal, the only kind
 // that sees nessy.
 func (s *DataMoveSuite) useInternalApp() {
