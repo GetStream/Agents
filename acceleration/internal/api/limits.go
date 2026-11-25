@@ -598,10 +598,11 @@ func (s *Server) billedOrganization(ctx context.Context) bool { return Organizat
 
 // checkLimitApps answers errNoSuchApp for a subject in an app the organization does not hold,
 // so no caller reads another organization's spend or writes a limit, a reset or a grant on its
-// apps. The caller's own app is its organization's before the router has recorded it there,
-// which Enforcer.Join does in the background. An app in no organization (billed false) holds
-// only itself: an organization whose id is the same as the app's is another customer's. The
-// apps a read names, up to maxUsageSubjects, are looked up together.
+// apps. The caller's own app is its organization's whatever is recorded, which a request that
+// names another organization can change meanwhile (recordOrganization, Enforcer.Join). An app in
+// no organization (billed false) holds only itself: an organization whose id is the same as the
+// app's is another customer's. The apps a read names, up to maxUsageSubjects, are looked up
+// together.
 func (s *Server) checkLimitApps(ctx context.Context, organization string, billed bool, refs ...usage.SubjectRef) error {
 	own, _ := CustomerFrom(ctx)
 	var named []string

@@ -234,6 +234,16 @@ func (s *SelfHostedLimitsSuite) TestAnAppSeenElsewhereWithAnOrganizationsIdDoesN
 	s.refusedAsManaged(own.call(http.MethodGet, "/v1/spend/limits", nil))
 }
 
+// An app's id is no organization's where its request names another.
+func (s *SelfHostedLimitsSuite) TestAnAppWithAnOrganizationsIdKeepsTheLimitsOfTheOneItNames() {
+	_, _, id := s.sharedID()
+	other := s.backend(id, s.utils.uuid())
+
+	s.limitAs(other, teamLimit(7))
+
+	s.Len(s.limitsAs(other), 1)
+}
+
 // An app recorded in the organization of its own id is one of its apps, named or not.
 func (s *SelfHostedLimitsSuite) TestAnAppInTheOrganizationOfItsOwnIdKeepsItsLimits() {
 	own, organization, id := s.sharedID()

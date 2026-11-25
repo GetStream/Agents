@@ -625,12 +625,20 @@ func (s *LimitsSuite) TestStaffCannotLimitAnAppOutsideTheOrganizationTheyName() 
 // the request rows, which hold every customer's.
 type SelfHostedLimitsSuite struct {
 	RouterSuite
+	// between runs a test's step in the middle of a call, before a query of its choosing.
+	between *beforeQuery
 }
 
 func TestSelfHostedLimitsSuite(t *testing.T) {
 	selfHosted := new(SelfHostedLimitsSuite)
 	selfHosted.byCustomer = true
 	runSuite(t, selfHosted)
+}
+
+func (s *SelfHostedLimitsSuite) SetupSuite() {
+	s.RouterSuite.SetupSuite()
+	s.between = &beforeQuery{}
+	s.store.GlobalDB().AddQueryHook(s.between)
 }
 
 func (s *SelfHostedLimitsSuite) SetupTest() {
@@ -697,21 +705,24 @@ func (s *SelfHostedLimitsSuite) TestAnAppInNoOrganizationReadsOnlyItself() {
 	s.Equal(int64(300_000), s.dailySpend(backend, "subject=app&app_id="+url.QueryEscape(own)))
 }
 
-// The organization a request names is recorded after it, and a router that recorded the app
-// there once does not again, so what is recorded can be an organization the app has left.
-// Its own app is read under the organization its request names, whatever is recorded.
+// An app can be recorded in another organization while a call on limits is answered. Its own
+// app is read under the organization its request names, whatever is recorded.
 func (s *SelfHostedLimitsSuite) TestAnAppReadsItsOwnSpendWhateverOrganizationIsRecordedForIt() {
-	own, organization := s.utils.uuid(), s.utils.uuid()
-	backend := s.backend(own, organization)
+	organization, elsewhere := s.utils.uuid(), s.utils.uuid()
+	backend, own := s.memberRecordedElsewhere(organization)
+	sibling := s.stranger(organization)
 	s.spent(own, 300_000)
-	s.Require().Equal(http.StatusOK, backend.do(http.MethodGet, "/v1/spend/limits", nil, nil))
-	s.Require().Eventually(func() bool {
-		recorded, err := s.store.AppOrganizations.Get(context.Background(), own)
-		return err == nil && recorded.OrganizationID == organization
-	}, 5*time.Second, 20*time.Millisecond, "the router records the app under its organization")
-	s.Require().NoError(s.store.AppOrganizations.Upsert(context.Background(), &store.AppOrganization{AppID: own, OrganizationID: s.utils.uuid()}))
+	// The lookup of the apps the read names, its sibling among them.
+	s.between.step.Store(&queryStep{marker: "'" + sibling + "'", run: func() { s.seen(own, elsewhere) }})
+	s.T().Cleanup(func() { s.between.step.Store(nil) })
 
-	s.Equal(int64(300_000), s.dailySpend(backend, "subject=app&app_id="+url.QueryEscape(own)))
+	var read []SubjectUsage
+	s.Require().Equal(http.StatusOK, backend.do(http.MethodGet, "/v1/spend/limits/usage?subject=app&app_id="+
+		url.QueryEscape(own)+"&app_id="+url.QueryEscape(sibling), nil, &read))
+
+	s.Equal(elsewhere, s.recorded(own), "the record moved in the middle of the read")
+	s.Require().Len(read, 2)
+	s.Equal(int64(300_000), read[0].Windows[0].SpentMicros)
 }
 
 // The organization of a request that names none is its app alone, also when the app is recorded
