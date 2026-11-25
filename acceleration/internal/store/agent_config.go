@@ -18,6 +18,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -44,6 +45,9 @@ type AgentConfig struct {
 	// sessions run, its knowledge base and its sandbox are there, and nothing of it is done
 	// elsewhere. Empty is stored as pricing.DefaultRegion.
 	Region string `bun:"region,notnull"`
+	// RoutingPolicy is which shards the agent's work may be placed in, a shardmap.Policy. Empty
+	// follows the app's (AppSettings.RoutingPolicy).
+	RoutingPolicy string `bun:"routing_policy,notnull"`
 	// Models are what the agent's sessions run on, one column each.
 	Models AgentModels `bun:"embed:"`
 	// Video is what the agent sees, in the video_ columns.
@@ -227,6 +231,7 @@ func (c *AgentConfig) Validate() error {
 		oneOf("mode", c.Mode, AgentModeVoice, AgentModeText).
 		oneOf("role", c.Role, "", RoleAgentModerator).
 		check(regionPattern.MatchString(c.Region), "region", "is not a region such as us or eu").
+		check(c.RoutingPolicy == "" || shardmap.Policy(c.RoutingPolicy).Valid(), "routing_policy", "is not a routing policy").
 		oneOf("greeting_mode", c.GreetingMode, GreetingExact, GreetingVariation).
 		check(c.Video.MaxFrames >= 1, "video_max_frames", "is below 1").
 		check(len(c.Keyterms) <= stt.MaxKeyterms, "keyterms", fmt.Sprintf("names more than %d terms", stt.MaxKeyterms)).
@@ -306,7 +311,7 @@ type AgentConfigs struct {
 // A field added to AgentConfig and forgotten here is stored on create and silently
 // dropped on every update after, which reads as a setting that will not save.
 var configColumns = []string{
-	"name", "role", "mode", "region", "stt", "tts", "sts", "voice", "llm", "llm_fallbacks", "agents", "subagent",
+	"name", "role", "mode", "region", "routing_policy", "stt", "tts", "sts", "voice", "llm", "llm_fallbacks", "agents", "subagent",
 	"video_source", "video_max_frames", "search", "image", "instructions", "greeting", "greeting_mode", "guardrail", "review_instructions", "ui_instructions",
 	"skills", "connectors", "left_out_connectors", "channels_lines", "channels_chat", "scheduling", "calls", "keyterms", "visible_tools", "knowledge_namespace", "sandbox_provider", "sandbox_options", "harness", "tags",
 	"dispatch_incoming_call", "dispatch_text", "episode_cards_on", "episode_cards_record", "tool_groups", "resume_history", "floor_control", "sync_hash", "updated_at",

@@ -2,6 +2,12 @@
 
 package store
 
+import (
+	"errors"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
+)
+
 // app stores an organization and an app inside it, which is what a key needs to exist.
 func (s *StoreSuite) app() App {
 	org := Organization{Name: "acme"}
@@ -81,4 +87,113 @@ func (s *StoreSuite) TestAppQueryBudgets() {
 		settings()
 		s.Equal(0, s.countQueries(func() { s.Equal(0, s.countRedis(settings)) }), "then the local cache answers")
 	}
+}
+
+func (s *StoreSuite) TestAnAppsRoutingPolicyIsWrittenWithoutTouchingItsOtherSettings() {
+	app := s.app()
+	_, err := s.store.GlobalDB().NewUpdate().Model((*App)(nil)).
+		Set(`settings = '{"allow_anonymous": false}'`).Where("id = ?", app.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.Apps.SetRoutingPolicy(s.ctx, app.ID, shardmap.PolicyEUOnly))
+
+	read, err := s.store.Apps.Get(s.ctx, app.ID)
+	s.Require().NoError(err)
+	s.Equal("eu_only", read.Settings.RoutingPolicy)
+	s.False(read.Settings.AnonymousAllowed())
+}
+
+func (s *StoreSuite) TestAnAppsRoutingPolicyIsReadBackAtOnceAfterACachedRead() {
+	app := s.app()
+	before, err := s.store.Apps.RoutingPolicy(s.ctx, app.ID, "")
+	s.Require().NoError(err)
+	s.Equal(shardmap.PolicyClosest, before)
+
+	s.Require().NoError(s.store.Apps.SetRoutingPolicy(s.ctx, app.ID, shardmap.PolicyUSEast))
+
+	after, err := s.store.Apps.RoutingPolicy(s.ctx, app.ID, "")
+	s.Require().NoError(err)
+	s.Equal(shardmap.PolicyUSEast, after)
+}
+
+func (s *StoreSuite) TestClearingAnAppsRoutingPolicyMakesItClosest() {
+	app := s.app()
+	s.Require().NoError(s.store.Apps.SetRoutingPolicy(s.ctx, app.ID, shardmap.PolicyUSOnly))
+
+	s.Require().NoError(s.store.Apps.SetRoutingPolicy(s.ctx, app.ID, ""))
+
+	read, err := s.store.Apps.Get(s.ctx, app.ID)
+	s.Require().NoError(err)
+	s.Empty(read.Settings.RoutingPolicy)
+	policy, err := s.store.Apps.RoutingPolicy(s.ctx, app.ID, "")
+	s.Require().NoError(err)
+	s.Equal(shardmap.PolicyClosest, policy)
+}
+
+func (s *StoreSuite) TestARoutingPolicyThatIsNoneIsRefused() {
+	app := s.app()
+
+	err := s.store.Apps.SetRoutingPolicy(s.ctx, app.ID, "eu")
+
+	invalid, ok := errors.AsType[*ValidationError](err)
+	s.Require().True(ok, "%v", err)
+	s.Equal("routing_policy", invalid.Field)
+}
+
+func (s *StoreSuite) TestARoutingPolicyForAnAppWithNoRowIsRefused() {
+	s.ErrorIs(s.store.Apps.SetRoutingPolicy(s.ctx, "never-made", shardmap.PolicyEUOnly), ErrNoApp)
+}
+
+func (s *StoreSuite) TestAnAgentsRoutingPolicyWinsOverItsAppsAndAnAgentWithNoneFollowsTheApp() {
+	app := s.app()
+	s.Require().NoError(s.store.Apps.SetRoutingPolicy(s.ctx, app.ID, shardmap.PolicyUSEast))
+	kept := &AgentConfig{CustomerID: app.ID, Name: "kept", RoutingPolicy: "eu_only"}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, kept))
+	following := &AgentConfig{CustomerID: app.ID, Name: "following"}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, following))
+
+	policy, err := s.store.Apps.RoutingPolicy(s.ctx, app.ID, kept.ID)
+	s.Require().NoError(err)
+	s.Equal(shardmap.PolicyEUOnly, policy)
+	policy, err = s.store.Apps.RoutingPolicy(s.ctx, app.ID, following.ID)
+	s.Require().NoError(err)
+	s.Equal(shardmap.PolicyUSEast, policy)
+}
+
+func (s *StoreSuite) TestAnAgentsRoutingPolicyIsKeptByAnUpdateAndReadBackAfterIt() {
+	app := s.app()
+	config := &AgentConfig{CustomerID: app.ID, Name: "kept", RoutingPolicy: "canada_only"}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, config))
+	_, err := s.store.Apps.RoutingPolicy(s.ctx, app.ID, config.ID)
+	s.Require().NoError(err)
+
+	config.RoutingPolicy = "us_only"
+	s.Require().NoError(s.store.AgentConfigs.Update(s.ctx, config))
+
+	policy, err := s.store.Apps.RoutingPolicy(s.ctx, app.ID, config.ID)
+	s.Require().NoError(err)
+	s.Equal(shardmap.PolicyUSOnly, policy)
+}
+
+func (s *StoreSuite) TestTheRoutingPolicyOfAConfigTheAppDoesNotHoldIsAnError() {
+	app := s.app()
+
+	_, err := s.store.Apps.RoutingPolicy(s.ctx, app.ID, "never-made")
+	s.ErrorIs(err, ErrNoAgentConfig)
+}
+
+func (s *StoreSuite) TestAWarmRoutingPolicyReadSendsNoQuery() {
+	if s.store.cache == nil {
+		s.T().Skip("the store has no Redis to cache in")
+	}
+	app := s.app()
+	config := &AgentConfig{CustomerID: app.ID, Name: "warm"}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, config))
+	read := func() {
+		_, err := s.store.Apps.RoutingPolicy(s.ctx, app.ID, config.ID)
+		s.Require().NoError(err)
+	}
+	read()
+
+	s.Equal(0, s.countQueries(read))
 }

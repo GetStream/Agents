@@ -38,6 +38,7 @@ TABLE agent_configs
     resume_history jsonb NOT NULL DEFAULT '{}'::jsonb
     review_instructions text NOT NULL DEFAULT ''::text
     role text NOT NULL DEFAULT ''::text
+    routing_policy text NOT NULL DEFAULT ''::text
     sandbox_options jsonb NOT NULL DEFAULT '{}'::jsonb
     sandbox_provider text NOT NULL DEFAULT ''::text
     scheduling jsonb NOT NULL DEFAULT '{}'::jsonb
