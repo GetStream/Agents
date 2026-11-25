@@ -87,19 +87,19 @@ func (s *AlertTextSuite) TestEveryAlertSaysWhatItMeans() {
 	}
 	s.Equal(map[string]string{
 		"service_rejected": "usage alert: service_rejected: the usage service refused events for breaking its contract; " +
-			"they stay unbilled until the producer is fixed and ships them again. " +
-			"Look at the reason label of usage_events_rejected_total",
+			"they stay unbilled until the producer is fixed and ships them again " +
+			"(look at the reason label of usage_events_rejected_total)",
 		"batch_refused": "usage alert: batch_refused: the usage service refused whole batches for what they hold " +
-			"(too big, or not a batch); none of their events are recorded until the producer ships them right. " +
-			"Look at the status label of usage_batches_refused_total",
+			"(too big, or not a batch); none of their events are recorded until the producer ships them right " +
+			"(look at the status label of usage_batches_refused_total)",
 		"batch_unauthorized": "usage alert: batch_unauthorized: a caller sent usage events with a wrong or missing token, " +
-			"so none were recorded. Check that every router has the usage service's token",
+			"so none were recorded (check that every router has the usage service's token)",
 		"ingest_failing": "usage alert: ingest_failing: the usage service keeps failing to record batches, answering 503, " +
-			"so their events wait at the producer until it sends them again. Look for the error in the service's log",
-		"event_lag": "usage alert: event_lag: over 1% of a router's events reached the usage service more than 600 seconds " +
-			"after they happened, so balances are stale. Check whether the routers are shipping",
+			"so their events wait at the producer until it sends them again (look for the error in the service's log)",
+		"event_lag": "usage alert: event_lag: over 1% of the routers' events in the last 10 minutes reached the usage service " +
+			"more than 600 seconds after they happened, so balances are stale (check whether the routers are shipping)",
 		"mirror_failing": "usage alert: mirror_failing: the usage service keeps failing to write window totals to Redis, " +
-			"so admission reads stale totals. Check Redis",
+			"so admission reads stale totals (check Redis)",
 	}, messages)
 	s.Equal(map[string]sentry.Level{
 		"service_rejected": sentry.LevelFatal, "batch_refused": sentry.LevelFatal, "batch_unauthorized": sentry.LevelError,
