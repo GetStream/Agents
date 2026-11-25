@@ -346,6 +346,19 @@ func (s *RoutingPolicyShardDownSuite) TestACallPlacedForAnAppKeptInTheEUIsRefuse
 }
 
 // Stream delivers a 503 again, by when the EU may be back.
+// The agent answering the number a call is placed from is the one an inbound call to it
+// reaches, so its policy places the call over its app's.
+func (s *RoutingPolicyShardDownSuite) TestACallPlacedFromANumberWhoseAgentIsKeptInTheEUIsRefusedRatherThanPlacedHere() {
+	config := s.agent(shardmap.PolicyEUOnly)
+	from := s.utils.number()
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &store.PhoneNumber{
+		E164: from, Vendor: "telnyx", CustomerID: s.customerID(), ConfigID: config.ID, PurchasedAt: time.Now().UTC(),
+	}))
+
+	s.Equal(codeShardUnavailable, s.refusedWith(http.MethodPost, "/v1/phone/calls",
+		PlaceCallRequest{From: from, To: s.utils.number()}))
+}
+
 func (s *RoutingPolicyShardDownSuite) TestAMessageKeptInTheEUIsAnswered503AndNotAnsweredHere() {
 	s.Require().Equal(http.StatusServiceUnavailable, s.signedly("/v1/chat/hooks/stream",
 		arrivingMessage("chat-"+s.utils.uuid(), s.agent(shardmap.PolicyEUOnly))))

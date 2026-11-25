@@ -207,15 +207,31 @@ func (s *Server) carryTo(w http.ResponseWriter, r *http.Request, shard, address 
 }
 
 // namedConfig is the id of the agent config a request starting new work names in its body,
-// by config_id or by agent, empty for none or one that is not the customer's, which the
-// operation refuses itself.
+// by config_id or by agent, or that answers the number a placed call is made from, as an
+// inbound call to it is answered. Empty for none, or a config or number that is not the
+// customer's, which the operation refuses itself.
 func (s *Server) namedConfig(ctx context.Context, customerID string, body []byte) (string, APIError, bool) {
 	var named struct {
 		ConfigID string `json:"config_id"`
 		Agent    string `json:"agent"`
+		From     string `json:"from"`
 	}
-	if json.Unmarshal(body, &named) != nil || named.ConfigID != "" || named.Agent == "" {
+	if json.Unmarshal(body, &named) != nil || named.ConfigID != "" {
 		return named.ConfigID, APIError{}, false
+	}
+	if named.Agent == "" && named.From != "" {
+		number, err := s.store.PhoneNumbers.GetByE164(ctx, customerID, named.From)
+		if isNumberNotHeld(err) {
+			return "", APIError{}, false
+		}
+		if err != nil {
+			s.logger.Error("could not read the number a placed call is made from", "customer", customerID, "error", err)
+			return "", errPolicyUnread, true
+		}
+		return number.ConfigID, APIError{}, false
+	}
+	if named.Agent == "" {
+		return "", APIError{}, false
 	}
 	config, err := s.store.AgentConfigs.GetByName(ctx, customerID, named.Agent)
 	if errors.Is(err, store.ErrNoAgentConfig) {
