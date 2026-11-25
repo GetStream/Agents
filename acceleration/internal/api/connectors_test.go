@@ -837,7 +837,9 @@ func (s *ConnectorsSuite) TestAConnectionToAnHTTPConnectorListsItsReadOnlyTool()
 	tools := sent["http"].(map[string]any)["tools"].([]map[string]any)
 	sent["http"].(map[string]any)["tools"] = append(tools, map[string]any{
 		"name": "add_note", "description": "Adds a note.", "method": "POST", "path": "/v1/notes",
-		"parameters": map[string]any{"text": map[string]any{"type": "string", "required": true}}})
+		"parameters": map[string]any{"text": map[string]any{"type": "string", "required": true}}},
+		// A GET tool is read-only only when the file says so.
+		map[string]any{"name": "list_notes", "description": "Lists the notes.", "method": "GET", "path": "/v1/notes"})
 	s.create(sent)
 	var created Connection
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/connections", appOwned(id), &created))
@@ -854,7 +856,7 @@ func (s *ConnectorsSuite) TestAConnectionToAnHTTPConnectorListsItsReadOnlyTool()
 	for _, tool := range listed.Tools {
 		readOnly[tool.Name] = tool.ReadOnly
 	}
-	s.Equal(map[string]bool{"get_forecast": true, "add_note": false}, readOnly)
+	s.Equal(map[string]bool{"get_forecast": true, "add_note": false, "list_notes": false}, readOnly)
 }
 
 // TestAReadOnlyToolThatWritesIsRefusedNamingIt is AC-5 of AI-3669 through the API: a POST or
