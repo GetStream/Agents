@@ -83,6 +83,33 @@ func (s *ChannelsSuite) TestAMessageInAOneToOneChatIsAnsweredAndMovesThePersonsC
 	s.NotEmpty(held.ConversationID)
 }
 
+// The control under phone identity, the default: a 1:1 chat is answered in its chat, which is recorded,
+// and a person already known has their thread moved to it.
+func (s *ChannelsSuite) TestAMessageInAOneToOneChatUnderPhoneIdentityIsAnswered() {
+	number, writer, now := s.number(), "+"+s.writer(), s.utils.uuid()
+	line, config := s.iMessageLine(number, "")
+
+	s.Require().Equal(http.StatusAccepted, s.deliverLinq(line, s.linqSays(now, writer, "what is on my calendar?", false)))
+
+	s.Require().Eventually(func() bool { return len(s.meta.postedIn(now)) > 0 }, settleFor, 50*time.Millisecond)
+	s.Equal([]string{"Noted."}, s.meta.postedIn(now))
+	held, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id, string(channels.IMessage), writer)
+	s.Require().NoError(err)
+	s.Equal(now, held.Thread)
+}
+
+func (s *ChannelsSuite) TestAKnownOneToOneChatUnderPhoneIdentityMovesItsThread() {
+	number, writer, before, now := s.number(), "+"+s.writer(), s.utils.uuid(), s.utils.uuid()
+	line, config := s.iMessageLine(number, "")
+	s.knownIn(config, writer, before)
+
+	s.Require().Equal(http.StatusAccepted, s.deliverLinq(line, s.linqSays(now, writer, "what is on my calendar?", false)))
+
+	s.Require().Eventually(func() bool { return len(s.meta.postedIn(now)) > 0 }, settleFor, 50*time.Millisecond)
+	s.Equal([]string{"Noted."}, s.meta.postedIn(now))
+	s.Equal(now, s.contact(config, writer).Thread)
+}
+
 // A STOP in a group is still recorded and confirmed there, the one message the sender is owed,
 // as the channel bridge does (AI-2015).
 func (s *ChannelsSuite) TestAStopInAGroupChatIsRecordedAndConfirmedThere() {
@@ -98,6 +125,41 @@ func (s *ChannelsSuite) TestAStopInAGroupChatIsRecordedAndConfirmedThere() {
 	s.Require().NoError(err)
 	s.True(blocked)
 	s.Equal(oneToOne, s.contact(config, writer).Thread)
+}
+
+// The same STOP under phone identity: no contact row exists to keep, and none is made for the group.
+func (s *ChannelsSuite) TestAStopInAGroupChatUnderPhoneIdentityIsRecordedAndConfirmedThere() {
+	number, writer, group := s.number(), "+"+s.writer(), s.utils.uuid()
+	line, config := s.iMessageLine(number, "")
+
+	s.Require().Equal(http.StatusAccepted, s.deliverLinq(line, s.linqSays(group, writer, "STOP", true)))
+
+	s.Require().Eventually(func() bool { return len(s.meta.postedIn(group)) > 0 }, settleFor, 50*time.Millisecond)
+	s.Contains(s.meta.postedIn(group)[0], "unsubscribed")
+	blocked, err := s.store.OptOuts.OptedOut(context.Background(), s.customerID(), writer, string(channels.IMessage))
+	s.Require().NoError(err)
+	s.True(blocked)
+	_, err = s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id,
+		string(channels.IMessage), writer)
+	s.True(errors.Is(err, store.ErrNoContact), "no contact row: %v", err)
+}
+
+// A number nobody linked yet, texting in a group under link identity: the group is not told to send
+// a code, no contact row is made with the group as its chat, and the code is not claimed there.
+func (s *ChannelsSuite) TestAMessageInAGroupChatFromAnUnlinkedNumberOpensNothing() {
+	number, writer, group := s.number(), "+"+s.writer(), s.utils.uuid()
+	line, config := s.iMessageLine(number, store.ChannelIdentityLink)
+
+	s.Require().Equal(http.StatusAccepted, s.deliverLinq(line, s.linqSays(group, writer, "hello there", true)))
+
+	s.Require().Eventually(func() bool {
+		return strings.Contains(s.logged.String(), `msg="not answering a message in a group chat" customer=`+s.customerID()) ||
+			len(s.meta.postedIn(group)) > 0
+	}, settleFor, 50*time.Millisecond)
+	_, err := s.store.ContactMapEntries.GetByAddress(context.Background(), s.customerID(), config.Id,
+		string(channels.IMessage), writer)
+	s.True(errors.Is(err, store.ErrNoContact), "no contact row: %v", err)
+	s.Empty(s.meta.postedIn(group), "nothing was posted to the group")
 }
 
 // iMessageLine is a Linq line on number and a text agent answering on it, which knows a
