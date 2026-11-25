@@ -693,7 +693,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 		parts = llm.TextParts(unfoundIDResult(key, value, known))
 	} else if blank := blankRequired(tool, requested.Call.Arguments); len(blank) > 0 && !telephonyTool(tool.Name) {
 		parts = llm.TextParts(fmt.Sprintf(leftBlank, requested.Call.Name, strings.Join(blank, ", ")))
-	} else if to, unsourced := unsourcedTransfer(record, requested.Call, told); unsourced && len(a.options.Destinations) == 0 {
+	} else if to, unsourced := unsourcedTransfer(record, requested.Call, told, a.options.CallersTool); unsourced && len(a.options.Destinations) == 0 {
 		parts = llm.TextParts(unsourcedTransferResult(to))
 	} else if key, value, heard, unheard := unheardNumber(record, requested.Call, told); unheard {
 		parts = llm.TextParts(unheardResult(key, value, heard))
