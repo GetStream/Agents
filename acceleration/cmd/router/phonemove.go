@@ -51,7 +51,9 @@ func runPhone(args []string, settings config.Config, logger *slog.Logger) error 
 // numberMover is the phone service with what moving a number needs: the database, the keyring
 // the webhook opens trunk passwords with, the vendors and the public URL.
 // The store is the caller's to close.
-func numberMover(ctx context.Context, settings config.Config, logger *slog.Logger) (*phone.Service, *store.Store, error) {
+func numberMover(ctx context.Context, settings config.Config, logger *slog.Logger) (
+	*phone.Service, *store.Store, error,
+) {
 	vendorConfig, err := phone.LoadConfig(settings.PhoneConfig)
 	if err != nil {
 		return nil, nil, err

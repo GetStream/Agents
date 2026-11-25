@@ -284,6 +284,7 @@ func (s *PhoneMoveSuite) TestARunStopsAtTheFirstNumberItCouldNotMove() {
 	for name, test := range map[string]struct {
 		breakNumber func(number string) moverSettings
 		failure     string
+		dryRun      bool
 	}{
 		"a password the keyring does not open": {breakNumber: func(string) moverSettings {
 			return s.ready().with(func(m *moverSettings) { m.kek = "another key" })
@@ -296,13 +297,21 @@ func (s *PhoneMoveSuite) TestARunStopsAtTheFirstNumberItCouldNotMove() {
 			s.twilio.refuse(number)
 			return s.ready()
 		}, failure: "500"},
+		"a number twilio does not hold, in a dry run": {breakNumber: func(number string) moverSettings {
+			s.twilio.release(number)
+			return s.ready()
+		}, failure: "not one of this account's numbers", dryRun: true},
 	} {
 		s.Run(name, func() {
 			s.releaseAll()
 			broken, after := s.attachedEarlier(), s.attachedEarlier()
 			settings := test.breakNumber(broken)
+			args := []string{"--apply"}
+			if test.dryRun {
+				args = nil
+			}
 
-			_, err := s.move(settings, "--apply")
+			_, err := s.move(settings, args...)
 
 			s.ErrorContains(err, test.failure)
 			s.ErrorContains(err, broken)

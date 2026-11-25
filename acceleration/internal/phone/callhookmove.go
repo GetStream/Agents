@@ -118,7 +118,8 @@ func (s *Service) moveToCallHook(ctx context.Context, provider Provider, hooked 
 	if !apply {
 		return WouldMove, nil
 	}
-	if err := provider.ConfigureInbound(ctx, Inbound{E164: number.E164, Bridge: bridge, PublicURL: s.publicURL}); err != nil {
+	err = provider.ConfigureInbound(ctx, Inbound{E164: number.E164, Bridge: bridge, PublicURL: s.publicURL})
+	if err != nil {
 		return "", stack.Wrap(err)
 	}
 	return Moved, nil
