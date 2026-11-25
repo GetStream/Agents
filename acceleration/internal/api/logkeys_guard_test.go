@@ -19,6 +19,12 @@ var loggerMethods = map[string]int{
 	"refuseArrivingCall": 6, "failedRead": 2, "hangUp": 3, "refuse": 3,
 }
 
+// attrConstructors are the log/slog functions whose first argument is an attribute key.
+var attrConstructors = map[string]bool{
+	"String": true, "Int": true, "Int64": true, "Uint64": true, "Float64": true,
+	"Bool": true, "Time": true, "Duration": true, "Any": true, "Group": true,
+}
+
 // The router names the Stream app app_id on every line (AI-3909): a line naming it customer
 // is one ClickHouse files under the old key only while its fallback lasts.
 func (s *LogHandlerSuite) TestNoLineNamesTheAppCustomer() {
@@ -56,6 +62,10 @@ func (s *LogHandlerSuite) TestNoLineNamesTheAppCustomer() {
 				case *ast.SelectorExpr:
 					if first, ok := loggerMethods[fun.Sel.Name]; ok {
 						keys(node.Args, first)
+					}
+					// slog.String("app_id", v): the key is the first argument.
+					if pkg, ok := fun.X.(*ast.Ident); ok && pkg.Name == "slog" && attrConstructors[fun.Sel.Name] && len(node.Args) > 0 {
+						keys(node.Args[:1], 0)
 					}
 				case *ast.Ident:
 					if fun.Name == "append" {
