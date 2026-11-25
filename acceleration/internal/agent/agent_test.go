@@ -6991,7 +6991,7 @@ func (s *AgentSuite) TestTurnsStampedAtOnceGetAnIDEach() {
 		// They are released together from one signal and take many stamps each, on at least
 		// four threads even under -cpu 1, so the takers overlap: a stamp taken by a plain
 		// store, or a compare-and-swap that does not retry, names two turns alike.
-		const takers, each = 8, 5000
+		const takers, each = 8, 20000
 		defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(max(takers/2, runtime.GOMAXPROCS(0))))
 		stamps := make([][]string, takers)
 		start := make(chan struct{})
