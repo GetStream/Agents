@@ -127,6 +127,9 @@ func TestCallShardSuite(t *testing.T) {
 }
 
 func (s *CallShardSuite) SetupSuite() {
+	// ShipStats ships every session in its database, and a minute of concurrency for each minute
+	// one is open: other suites leave some open since April, 3.8 million rows.
+	s.database = "call_shard"
 	s.shard, s.otherShard = "here", "there"
 	s.otherShardApart = true
 	s.phoneVendors = s.unreachableVendors()
