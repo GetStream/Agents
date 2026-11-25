@@ -240,6 +240,13 @@ func (s *Service) placed(ctx context.Context, customer string) (int64, error) {
 	return 0, nil
 }
 
+// settled reports whether placed answered where a customer's lines are made: a pin, or a
+// refusal that holds until the customer's app or the deployment changes. Any other failure,
+// such as a database read, is no answer.
+func settled(err error) bool {
+	return errors.Is(err, ErrNoStream) || streamapp.Settled(err)
+}
+
 // streamForApp is the app a line already made is in.
 func (s *Service) streamForApp(ctx context.Context, customer string, app int64) (*Stream, error) {
 	if s.apps != nil {
@@ -2043,14 +2050,19 @@ func (s *Service) dialVendor(ctx context.Context, held store.PhoneNumber, pin in
 	}
 	// A vendor sold the number to another customer, which a trunk's word does not outweigh. Stream
 	// lists a number on one trunk per app, so lined for this call in the app the buyer's lines are
-	// made in, it would leave them unable to attach it or call from it there. A buyer whose app
-	// cannot be read is taken to share this one.
+	// made in, it would leave them unable to attach it or call from it there. A buyer whose app is
+	// known to be unreadable (disconnected, no identity) is taken to share this one; a read that
+	// failed is returned as it is, so the call is tried again rather than refused for good.
 	buyers, err := s.store.PhoneNumbers.BoughtElsewhere(ctx, held.CustomerID, held.E164)
 	if err != nil {
 		return nil, nil, err
 	}
 	for _, buyer := range buyers {
-		if theirs, err := s.placed(ctx, buyer); err != nil || theirs == pin {
+		theirs, err := s.placed(ctx, buyer)
+		if !settled(err) {
+			return nil, nil, err
+		}
+		if err != nil || s.store.SameStreamApp(theirs, pin) {
 			return nil, nil, stack.Wrap(store.ErrNumberHeldElsewhere)
 		}
 	}

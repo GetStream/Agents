@@ -66,6 +66,10 @@ func (s *Store) pinnedTo(pin int64) AppScope {
 	return AppScope{App: pin}
 }
 
+// SameStreamApp reports whether two pins name one Stream app, read as pinnedTo reads them: the
+// deployment's own app is its id or no pin at all.
+func (s *Store) SameStreamApp(a, b int64) bool { return s.pinnedTo(a) == s.pinnedTo(b) }
+
 func (p StreamPins) deployment() int64 {
 	if p.Deployment == nil {
 		return 0

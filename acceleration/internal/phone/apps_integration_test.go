@@ -74,7 +74,7 @@ func (s *AppsSuite) SetupSuite() {
 
 func (s *AppsSuite) SetupTest() {
 	s.deployment, s.own = chattest.NewServer(s.T()), chattest.NewServer(s.T())
-	s.apps = &testApps{deployment: s.deployment, own: map[string]*chattest.Server{}, pins: map[string]int64{}, blocked: map[string]bool{}, cutOff: map[string]bool{}}
+	s.apps = &testApps{deployment: s.deployment, own: map[string]*chattest.Server{}, pins: map[string]int64{}, blocked: map[string]bool{}, cutOff: map[string]bool{}, unread: map[string]bool{}}
 	s.customer = "customer-" + uuid.NewString()
 	s.e164 = aNumber()
 
@@ -958,6 +958,18 @@ type testApps struct {
 	blocked    map[string]bool
 	// cutOff are the customers whose lines cannot be reached to be taken down.
 	cutOff map[string]bool
+	// unread are the customers where whose lines are made cannot be read for now, as a database
+	// that did not answer leaves it.
+	unread map[string]bool
+}
+
+// errPlacedUnread is where a customer's lines are made, not read for now.
+var errPlacedUnread = errors.New("apps: where the customer's lines are made could not be read")
+
+func (a *testApps) cannotRead(customer string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.unread[customer] = true
 }
 
 func (a *testApps) block(customer string) {
@@ -985,6 +997,12 @@ func (a *testApps) For(_ context.Context, customer string) (*Stream, int64, erro
 }
 
 func (a *testApps) Placed(ctx context.Context, customer string) (int64, error) {
+	a.mu.Lock()
+	unread := a.unread[customer]
+	a.mu.Unlock()
+	if unread {
+		return 0, errPlacedUnread
+	}
 	_, pin, err := a.For(ctx, customer)
 	return pin, err
 }
@@ -1671,6 +1689,105 @@ func (s *AppsSuite) TestATrunkNumberABuyerWhoseAppCannotBeReadHoldsIsNotCalledFr
 	_, err := trunks.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: theirs}, From: s.e164, To: "+15550001111"})
 
 	s.ErrorIs(err, store.ErrNumberHeldElsewhere)
+}
+
+// trunkNumberBought is a number another customer added to its own trunk, which the suite's
+// customer has since bought, and that customer's trunk service.
+func (s *AppsSuite) trunkNumberBought() (string, string, trunkCall) {
+	e164, first := aNumber(), "customer-"+uuid.NewString()
+	trunks := s.onATrunk(first, e164, StreamLegShared)
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
+		E164: e164, Vendor: s.vendor.vendor, Country: "US", CustomerID: s.customer, PurchasedAt: time.Now().UTC(),
+	}))
+	return e164, first, trunks
+}
+
+// One failed read of where the buyer's lines are made says nothing about the number: refused as
+// held elsewhere, the call would be lasting, and a campaign would never try the contact again.
+func (s *AppsSuite) TestACallFromATrunkNumberWhoseBuyersAppWasNotReadIsTriedAgain() {
+	e164, first, trunks := s.trunkNumberBought()
+	s.apps.cannotRead(s.customer)
+
+	_, err := trunks.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: first}, From: e164, To: "+15550001111"})
+
+	s.ErrorIs(err, errPlacedUnread)
+	s.ErrorIs(err, ErrNotDialed, "a campaign tries it again")
+	s.NotErrorIs(err, store.ErrNumberHeldElsewhere)
+	s.Empty(trunks.vendor.dialed.From, "the trunk was not dialled")
+	s.Empty(s.deployment.Trunks(), "nothing was made at Stream")
+}
+
+// The buyer's policies could not be read, so with the fallback on, where its lines are made is
+// not known: no answer, rather than no app.
+func (s *AppsSuite) TestACallFromATrunkNumberWhoseBuyersPolicyWasNotReadIsTriedAgain() {
+	e164, first, trunks := s.trunkNumberBought()
+	deployment := streamapp.NewDeployment(streamapp.DeploymentOptions{
+		APIKey: "deploy-key", Secret: "deploy-secret", App: 1, Strict: true, BaseURL: s.deployment.URL,
+	})
+	stored, err := streamapp.NewStored(streamapp.StoredOptions{Store: s.store, Deployment: deployment, FallbackToDeployment: true})
+	s.Require().NoError(err)
+	stored.SetFloor(func(_ context.Context, customer string) (bool, error) {
+		if customer == s.customer {
+			return false, errors.New("the policies could not be read")
+		}
+		return false, nil
+	})
+	trunks.service.apps = AppsOf(streamapp.NewClients(stored, streamapp.ClientsOptions{}))
+
+	_, err = trunks.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: first}, From: e164, To: "+15550001111"})
+
+	s.ErrorIs(err, ErrNotDialed, "a campaign tries it again")
+	s.NotErrorIs(err, store.ErrNumberHeldElsewhere)
+	s.Empty(trunks.vendor.dialed.From, "the trunk was not dialled")
+}
+
+// One failed read of where the holder's lines are made says nothing about the number: the add
+// fails to be tried again, and once read, the holder is in another app.
+func (s *AppsSuite) TestAddingANumberWhoseHoldersAppWasNotReadIsTriedAgain() {
+	s.ownApp()
+	s.apps.cannotRead(s.customer)
+	theirs := "customer-" + uuid.NewString()
+	trunks := s.dialsTrunks(StreamLegShared)
+
+	err := s.addOnATrunk(trunks, theirs, s.e164)
+
+	s.ErrorIs(err, errPlacedUnread)
+	s.NotErrorIs(err, store.ErrNumberHeldElsewhere)
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, theirs, s.e164)
+	s.ErrorIs(err, store.ErrNoNumber, "nothing was added")
+	s.apps.mu.Lock()
+	delete(s.apps.unread, s.customer)
+	s.apps.mu.Unlock()
+	s.NoError(s.addOnATrunk(trunks, theirs, s.e164), "asked again, it is let in")
+}
+
+func (s *AppsSuite) TestAddingANumberWhereTheCustomersAppWasNotReadIsTriedAgain() {
+	s.ownApp()
+	theirs := "customer-" + uuid.NewString()
+	s.apps.cannotRead(theirs)
+
+	err := s.addOnATrunk(s.dialsTrunks(StreamLegShared), theirs, s.e164)
+
+	s.ErrorIs(err, errPlacedUnread)
+	s.NotErrorIs(err, store.ErrNumberHeldElsewhere)
+}
+
+// The session's call was made in the deployment's app before calls were pinned, so it has no
+// pin, and the buyer's lines are made in the deployment's app, named by its id: one app.
+func (s *AppsSuite) TestATransferInAnUnpinnedCallIsRefusedLikeOnePinnedToTheDeploymentsApp() {
+	s.store.SetStreamPins(store.StreamPins{Deployment: func() int64 { return 1 }})
+	s.T().Cleanup(func() { s.store.SetStreamPins(store.StreamPins{}) })
+	e164, first, trunks := s.trunkNumberBought()
+	s.apps.give(s.customer, 1, s.deployment)
+
+	for _, pin := range []int64{0, 1} {
+		_, err := trunks.service.Transfer(s.ctx, TransferRequest{
+			Owner: routing.Owner{CustomerID: first}, From: e164, To: "+15550002222", CallID: "call-1", StreamApp: pin,
+		})
+
+		s.ErrorIs(err, store.ErrNumberHeldElsewhere, "the call pinned %d", pin)
+	}
+	s.Empty(s.deployment.Trunks(), "nothing was made at Stream")
 }
 
 // In app mode a customer with no app of its own falls back to the deployment's; asking where

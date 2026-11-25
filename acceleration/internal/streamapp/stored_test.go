@@ -268,11 +268,17 @@ func (s *StoredSuite) TestAPolicyReadErrorRefusesTheFallback() {
 }
 
 // Catches a policy that could not be read placing a customer in its own app, where its work in
-// the deployment's app would then read as apart from everyone else's there.
+// the deployment's app would then read as apart from everyone else's there, and answered as
+// ErrNoIdentity, a settled answer, which would refuse a call from a number for good over one
+// failed read.
 func (s *StoredSuite) TestAPolicyReadErrorPlacesNobody() {
-	_, err := NewClients(s.floored(false, errors.New("the policies could not be read")), ClientsOptions{}).Placed(s.ctx, s.customer)
+	unread := errors.New("the policies could not be read")
 
-	s.ErrorIs(err, ErrNoIdentity)
+	_, err := NewClients(s.floored(false, unread), ClientsOptions{}).Placed(s.ctx, s.customer)
+
+	s.Require().ErrorIs(err, unread)
+	s.NotErrorIs(err, ErrNoIdentity)
+	s.False(Settled(err), "a read to try again")
 }
 
 func (s *StoredSuite) TestTheDeploymentAppIsUnaffectedByTheRequirement() {

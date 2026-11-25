@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -73,24 +74,33 @@ func (s *Stored) SetFloor(floor Floor) {
 }
 
 // fallsBack reports whether a customer may be written into the deployment's app for want of
-// an app of its own: only while the fallback allows it, and its policies do not forbid it.
+// an app of its own: only while the fallback allows it, and its policies do not forbid it. A
+// policy that could not be read forbids it.
 func (s *Stored) fallsBack(ctx context.Context, customer string) bool {
+	falls, err := s.readFallsBack(ctx, customer)
+	if err != nil {
+		s.logger.Warn("stream: could not read whether a customer must act in its own app, so it may not fall back",
+			"customer_id", customer, "error", err)
+	}
+	return falls
+}
+
+// readFallsBack is fallsBack with a policy that could not be read returned, and false.
+func (s *Stored) readFallsBack(ctx context.Context, customer string) (bool, error) {
 	if !s.fallback {
-		return false
+		return false, nil
 	}
 	s.mu.Lock()
 	floor := s.floor
 	s.mu.Unlock()
 	if floor == nil {
-		return true
+		return true, nil
 	}
 	required, err := floor(ctx, customer)
 	if err != nil {
-		s.logger.Warn("stream: could not read whether a customer must act in its own app, so it may not fall back",
-			"customer_id", customer, "error", err)
-		return false
+		return false, fmt.Errorf("streamapp: read whether a customer must act in its own app: %w", err)
 	}
-	return !required
+	return !required, nil
 }
 
 // tally is the fallback uses of one customer not written down yet.
@@ -156,10 +166,22 @@ func (s *Stored) place(ctx context.Context, customer string, acting bool) (Ident
 	if identity, ok, err := s.inForwardedApp(ctx, customer, acting); ok {
 		return identity, err
 	}
-	if !s.fallsBack(ctx, customer) {
+	var falls bool
+	if acting {
+		falls = s.fallsBack(ctx, customer)
+	} else {
+		var err error
+		// Read without acting, a policy that could not be read is a read to try again: taken to
+		// forbid the fallback, it would answer ErrNoIdentity, which says how the customer stands.
+		if falls, err = s.readFallsBack(ctx, customer); err != nil {
+			return Identity{}, err
+		}
+	}
+	if !falls {
 		// With no fallback, an app's work is made in its own app or nowhere. Read without
 		// acting, a token that has run out is the gateway's to replace, not another app. With
-		// the fallback on, this may be a policy that could not be read, which places nothing.
+		// the fallback on, a policy here requires an app of its own, or, acting, could not be
+		// read: neither places anything.
 		if app, couldBe := ParseAppID(customer); couldBe && !acting && !s.fallback {
 			return Identity{CustomerID: customer, StreamApp: app}, nil
 		}

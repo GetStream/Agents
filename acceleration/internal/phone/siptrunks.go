@@ -289,7 +289,8 @@ func (s *Service) AddTrunkNumber(ctx context.Context, request TrunkNumber) (stor
 // heldApart are the customers holding a number whose lines are made in another Stream app than
 // the customer's. Stream lists a number on one trunk per app, so on the customer's own trunk the
 // number can only block a holder whose lines are made where the customer's are. A holder whose
-// app, or the customer's, cannot be read is taken to share it.
+// app, or the customer's, is known to be unreadable (disconnected, no identity) is taken to share
+// it; a read that failed is returned as it is, so the add is tried again rather than refused.
 func (s *Service) heldApart(ctx context.Context, customer, e164 string) ([]string, error) {
 	held, err := s.store.PhoneNumbers.Holders(ctx, e164)
 	if err != nil {
@@ -300,13 +301,20 @@ func (s *Service) heldApart(ctx context.Context, customer, e164 string) ([]strin
 		return nil, nil
 	}
 	mine, err := s.placed(ctx, customer)
+	if !settled(err) {
+		return nil, err
+	}
 	if err != nil {
 		// Every holder shares an app nobody can name.
 		return nil, nil
 	}
 	var apart []string
 	for _, holder := range others {
-		if theirs, err := s.placed(ctx, holder); err == nil && theirs != mine {
+		theirs, err := s.placed(ctx, holder)
+		if !settled(err) {
+			return nil, err
+		}
+		if err == nil && theirs != mine {
 			apart = append(apart, holder)
 		}
 	}
