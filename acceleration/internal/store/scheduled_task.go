@@ -687,6 +687,9 @@ func (r *ScheduledTasks) Claim(ctx context.Context, limit int, lease time.Durati
 			Where("state = ?", ScheduledTaskActive).
 			Where("next_run_at <= now()").
 			Where("(lease_until IS NULL OR lease_until < now())")
+		if shard.Shard != "" {
+			due = due.Where(scheduledTaskHomedHere, shard.Shard)
+		}
 		if shard.filtered() {
 			claimable, args := shard.scheduledTaskClaimable()
 			due = due.Where(claimable, args...)

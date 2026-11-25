@@ -95,7 +95,7 @@ func (s *StoreSuite) tagged(customerID string, at time.Time, audioMs int64, tags
 
 func (s *StoreSuite) TestTagBucketQueryBudgets() {
 	s.tagged("acme", s.base, 1000, map[string]string{"project": "support"})
-	s.Equal(len(s.store.shards()), s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		buckets, err := s.store.TagBuckets.Select(s.ctx, "acme", TagBucketFilter{Modality: "stt", Key: "project", Granularity: Hourly, From: s.base, To: s.base.Add(time.Hour)})
 		s.Require().NoError(err)
 		s.Len(buckets, 1)

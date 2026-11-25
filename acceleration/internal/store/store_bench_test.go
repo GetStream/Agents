@@ -16,7 +16,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 	"github.com/stretchr/testify/require"
-	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 )
@@ -69,9 +68,7 @@ func newBench(b *testing.B) *bench {
 	h.store, err = OpenShards(Options{DSN: dsn, Redis: Redis{Address: os.Getenv(redisAddressVar)}, redisHook: &h.roundTrips})
 	require.NoError(b, err)
 	b.Cleanup(func() { require.NoError(b, h.store.Close()) })
-	for _, db := range append([]*bun.DB{h.store.global}, h.store.peers...) {
-		db.AddQueryHook(&h.queries)
-	}
+	h.store.global.AddQueryHook(&h.queries)
 	return h
 }
 

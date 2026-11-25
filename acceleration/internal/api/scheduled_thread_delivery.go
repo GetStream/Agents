@@ -99,31 +99,15 @@ func (s *Server) deliverOnThread(ctx context.Context, delivery scheduledDelivery
 	// A retried occurrence whose turn the thread already holds is a duplicate follow-up, which
 	// runs nothing (Session.FollowUp); its reply is read back, and sent unless it went out.
 	_, _, retried := found.FollowUpReply(delivery.CommandID)
-	events, detach := found.Watch()
-	defer detach()
 	if err := s.followUpWithin(turn, found, delivery); err != nil {
 		return "", "", err
 	}
 	// The reply as the conversation stored it, with its files: as it finished, or read back
-	// for a follow-up that finished on an earlier attempt.
+	// for a follow-up that finished on an earlier attempt. A turn refused for money fails under
+	// the money (readBackReply).
 	reply, err := s.readBackReply(turn, found, delivery.CommandID)
 	if err != nil {
-		// A turn the organization may not pay for failed on the model's refusal, which the
-		// conversation does not keep: the run records the money, as a text channel's does.
-		for {
-			select {
-			case event, open := <-events:
-				// A session that ended closes its watchers: nothing more comes.
-				if !open {
-					return "", "", err
-				}
-				if refusal := turnRefusal(event); refusal != nil {
-					return "", "", refusal
-				}
-			default:
-				return "", "", err
-			}
-		}
+		return "", "", err
 	}
 	if !retried {
 		select {

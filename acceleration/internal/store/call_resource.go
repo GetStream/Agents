@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -43,7 +42,7 @@ func (c *CallResource) Validate() error {
 		done()
 }
 
-// CallResources are the trunks and routes outbound legs were given, on each shard.
+// CallResources are the trunks and routes outbound legs were given, each in the shard that placed it.
 type CallResources struct {
 	store *Store
 }
@@ -61,7 +60,7 @@ func (r *CallResources) Insert(ctx context.Context, resource *CallResource) erro
 	if _, err := r.store.shard.NewInsert().Model(resource).Exec(ctx); err != nil {
 		return stack.Wrap(fmt.Errorf("store: record call resource: %w", err))
 	}
-	return nil
+	return r.store.CallHomes.record(ctx, resource.CustomerID, resource.StreamAppPK, resource.CallType, resource.CallID)
 }
 
 // Delete forgets one leg's row, for a leg that was never placed. It is named by its id
@@ -81,108 +80,73 @@ func (r *CallResources) Delete(ctx context.Context, id int64) error {
 // only what that app holds; unpinned also takes the rows written before apps had
 // identities, which were all made in the deployment's own app.
 func (r *CallResources) Release(ctx context.Context, scope AppScope, callType, callID string) ([]CallResource, error) {
-	// A call's legs may have been dialled from more than one shard.
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]CallResource, error) {
-		var released []CallResource
-		err := db.NewDelete().Model((*CallResource)(nil)).
-			Where("call_type = ?", callType).
-			Where("call_id = ?", callID).
-			ApplyQueryBuilder(scope.where).
-			Returning("*").
-			Scan(ctx, &released)
-		return released, err
-	})
+	var released []CallResource
+	err := r.store.shard.NewDelete().Model((*CallResource)(nil)).
+		Where("call_type = ?", callType).
+		Where("call_id = ?", callID).
+		ApplyQueryBuilder(scope.where).
+		Returning("*").
+		Scan(ctx, &released)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: release call resources: %w", err))
 	}
-	return slices.Concat(lists...), nil
+	return released, nil
 }
 
-// SelectStale returns the rows older than before, for calls whose end hook never arrived.
-// They are left in place until Forget.
+// SelectStale returns this shard's rows older than before, for calls whose end hook never
+// arrived. They are left in place until Forget.
 func (r *CallResources) SelectStale(ctx context.Context, before time.Time) ([]CallResource, error) {
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]CallResource, error) {
-		var stale []CallResource
-		err := db.NewSelect().Model(&stale).
-			Where("created_at < ?", before).
-			Scan(ctx)
-		return stale, err
-	})
-	if err != nil {
+	var stale []CallResource
+	if err := r.store.shard.NewSelect().Model(&stale).Where("created_at < ?", before).Scan(ctx); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: stale call resources: %w", err))
 	}
-	return slices.Concat(lists...), nil
+	return stale, nil
 }
 
-// Forget deletes a row SelectStale returned. The row may be on any shard, whose ids are
-// their own, so it is matched by its call and trunk too.
+// Forget deletes a row SelectStale returned.
 func (r *CallResources) Forget(ctx context.Context, resource CallResource) error {
-	_, err := onEveryShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (sql.Result, error) {
-		return db.NewDelete().Model((*CallResource)(nil)).
-			Where("id = ?", resource.ID).
-			Where("call_id = ?", resource.CallID).
-			Where("trunk_id = ?", resource.TrunkID).
-			Exec(ctx)
-	})
+	_, err := r.store.shard.NewDelete().Model((*CallResource)(nil)).Where("id = ?", resource.ID).Exec(ctx)
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: forget call resource: %w", err))
 	}
 	return nil
 }
 
-// Select is a call's lines, read without deleting them: those of the first shard found to hold
-// any, which is the shard that placed the call. It answers whether the router placed a call and
-// whose it is, not everything Release would delete.
-//
-// A call's lines are on the shard that placed it, so rows from one shard settle it while
-// another does not answer; with no rows, a shard that did not answer may hold them.
+// Select is a call's lines in this shard, read without deleting them. It answers whether the
+// router placed a call and whose it is, not everything Release would delete. A call placed in
+// another shard is handed there first (CallHomes).
 func (r *CallResources) Select(ctx context.Context, scope AppScope, callType, callID string) ([]CallResource, error) {
-	lists, failed := answeringShards(ctx, r.store, "call resources", peerReadTimeout, func(resources []CallResource) bool { return len(resources) > 0 }, func(ctx context.Context, db bun.IDB) ([]CallResource, error) {
-		var resources []CallResource
-		err := db.NewSelect().Model(&resources).
-			Where("call_type = ?", callType).
-			Where("call_id = ?", callID).
-			ApplyQueryBuilder(scope.where).
-			Scan(ctx)
-		return resources, err
-	})
-	resources := slices.Concat(lists...)
-	if len(resources) > 0 {
-		return resources, nil
-	}
-	if err := errors.Join(failed...); err != nil {
+	var resources []CallResource
+	err := r.store.shard.NewSelect().Model(&resources).
+		Where("call_type = ?", callType).
+		Where("call_id = ?", callID).
+		ApplyQueryBuilder(scope.where).
+		Scan(ctx)
+	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: call resources: %w", err))
 	}
-	return nil, nil
+	return resources, nil
 }
 
 // Pin is the Stream app a customer's call has its lines in: the app the trunk carrying it
 // was made in, whether an outbound leg's or an attached number's. A session joining the
 // call has to be in that app. Found is false for a call with no lines of its own.
 func (r *CallResources) Pin(ctx context.Context, customerID, callType, callID string) (int64, bool, error) {
-	type pinned struct {
-		Pin       sql.NullInt64 `bun:"stream_app_pk"`
-		CreatedAt time.Time     `bun:"created_at"`
+	var pin sql.NullInt64
+	err := r.store.shard.NewSelect().Model((*CallResource)(nil)).Column("stream_app_pk").
+		Where("customer_id = ?", customerID).
+		Where("call_type = ?", callType).
+		Where("call_id = ?", callID).
+		OrderExpr("created_at DESC").
+		Limit(1).
+		Scan(ctx, &pin)
+	if err == nil {
+		return pin.Int64, true, nil
 	}
-	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]pinned, error) {
-		var newest []pinned
-		err := db.NewSelect().Model((*CallResource)(nil)).Column("stream_app_pk", "created_at").
-			Where("customer_id = ?", customerID).
-			Where("call_type = ?", callType).
-			Where("call_id = ?", callID).
-			OrderExpr("created_at DESC").
-			Limit(1).
-			Scan(ctx, &newest)
-		return newest, err
-	})
-	if err != nil {
+	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, false, stack.Wrap(fmt.Errorf("store: call pin: %w", err))
 	}
-	if newest := merged(lists, func(a, b pinned) int { return b.CreatedAt.Compare(a.CreatedAt) }, 1); len(newest) > 0 {
-		return newest[0].Pin.Int64, true, nil
-	}
 
-	var pin sql.NullInt64
 	err = r.store.global.NewSelect().Model((*PhoneNumber)(nil)).Column("stream_app_pk").
 		Where("customer_id = ?", customerID).
 		Where("stream_call_type = ?", callType).

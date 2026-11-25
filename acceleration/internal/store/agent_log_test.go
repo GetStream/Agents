@@ -3,7 +3,6 @@
 package store
 
 import (
-	"context"
 	"strconv"
 	"time"
 
@@ -190,9 +189,11 @@ func (s *ShardedStoreSuite) TestALogIsWrittenInThisShardAndNotTheSharedDatabase(
 	s.Zero(s.logsIn(s.store.global, "app"))
 }
 
-func (s *ShardedStoreSuite) TestLogsOfTheSharedDatabaseAndEveryShardAreListedAndFoundOnceEach() {
-	written := []AgentLog{s.legacyLog("app", "before the move"), s.logged(s.store, "app", "here"), s.logged(s.other, "app", "there")}
-	ranges := map[int64]bool{}
+// Defect: another shard's logs are read here, or the shared database's are not.
+func (s *ShardedStoreSuite) TestLogsOfTheSharedDatabaseAndThisShardAreListedAndFoundOnceEachAndNoOtherShards() {
+	written := []AgentLog{s.legacyLog("app", "before the move"), s.logged(s.store, "app", "here")}
+	there := s.logged(s.other, "app", "there")
+	ranges := map[int64]bool{logRange(there.ID): true}
 	for _, row := range written {
 		ranges[logRange(row.ID)] = true
 	}
@@ -200,7 +201,9 @@ func (s *ShardedStoreSuite) TestLogsOfTheSharedDatabaseAndEveryShardAreListedAnd
 
 	all, err := s.store.AgentLogs.Select(s.ctx, "app", AgentLogFilter{Limit: 10})
 	s.Require().NoError(err)
-	s.Equal([]string{"there", "here", "before the move"}, logMessages(all), "newest first, whichever database holds it")
+	s.Equal([]string{"here", "before the move"}, logMessages(all), "newest first, from this shard and the shared database")
+	_, err = s.store.AgentLogs.Get(s.ctx, "app", there.ID)
+	s.ErrorIs(err, ErrNoAgentLog, "another shard's log is read there")
 
 	high, err := s.store.AgentLogs.HighWater(s.ctx, "app")
 	s.Require().NoError(err)
@@ -226,7 +229,7 @@ func (s *ShardedStoreSuite) TestLogsOfTheSharedDatabaseAndEveryShardAreListedAnd
 }
 
 func (s *ShardedStoreSuite) TestReadingOnFromAMarkMissesNoRowOfADatabaseNumberingBelowAnother() {
-	s.logged(s.other, "app", "read before")
+	s.logged(s.store, "app", "read before")
 	high, err := s.store.AgentLogs.HighWater(s.ctx, "app")
 	s.Require().NoError(err)
 
@@ -236,27 +239,7 @@ func (s *ShardedStoreSuite) TestReadingOnFromAMarkMissesNoRowOfADatabaseNumberin
 
 	rows, err := s.store.AgentLogs.Select(s.ctx, "app", AgentLogFilter{After: high, Forward: true, Limit: 10})
 	s.Require().NoError(err)
-	s.ElementsMatch([]string{"there", "here", "late in the shared database"}, logMessages(rows))
-}
-
-func (s *ShardedStoreSuite) TestAPeerWithoutTheLogTableYetHoldsNoneOfTheLogs() {
-	_, err := s.other.shard.ExecContext(s.ctx, "ALTER TABLE agent_logs RENAME TO agent_logs_unmigrated")
-	s.Require().NoError(err)
-	s.T().Cleanup(func() {
-		_, err := s.other.shard.ExecContext(context.WithoutCancel(s.ctx), "ALTER TABLE agent_logs_unmigrated RENAME TO agent_logs")
-		s.NoError(err)
-	})
-	here := s.logged(s.store, "app", "here")
-	s.legacyLog("app", "before the move")
-
-	high, err := s.store.AgentLogs.HighWater(s.ctx, "app")
-	s.Require().NoError(err)
-	s.Equal(here.ID, high[logRange(here.ID)])
-	rows, err := s.store.AgentLogs.Select(s.ctx, "app", AgentLogFilter{Limit: 10})
-	s.Require().NoError(err)
-	s.Equal([]string{"here", "before the move"}, logMessages(rows))
-	_, err = s.store.AgentLogs.Get(s.ctx, "app", here.ID+1)
-	s.ErrorIs(err, ErrNoAgentLog)
+	s.ElementsMatch([]string{"here", "late in the shared database"}, logMessages(rows))
 }
 
 func (s *ShardedStoreSuite) TestMigratingAgainKeepsDrawingLogIdsWhereTheShardLeftOff() {

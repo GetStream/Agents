@@ -27,7 +27,7 @@ import (
 
 // twilioCallPublicURL is the suite's ROUTER_PUBLIC_URL, with the trailing slash an operator may
 // write; Twilio signs over it trimmed, then the path.
-const twilioCallPublicURL = "http://localhost:8080/"
+const twilioCallPublicURL = "https://localhost:8080/"
 
 // TwilioHookSuite is Twilio asking the router where a call to one of its Twilio numbers goes,
 // signed with the account's Auth Token as Twilio signs it.

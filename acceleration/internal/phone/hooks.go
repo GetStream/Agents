@@ -18,6 +18,11 @@ import (
 // cannot disagree about the path.
 const CallHookPath = "/v1/phone/hooks/stream"
 
+// TwilioCallHookPath is where Twilio asks the router what to do with a call to one of its
+// numbers. It is here so the vendor that points a number at it and the server that serves it
+// cannot disagree about the path.
+const TwilioCallHookPath = "/v1/phone/hooks/twilio"
+
 // callHookEvents are the events the router asks for.
 //
 // Only these, deliberately. An app-wide hook asking for everything would deliver every message

@@ -452,6 +452,30 @@ type DeletedConnection struct {
 	HadGrant bool
 }
 
+// connectionsArgs are a ShardJobDeleteInvocations job's: the connections deleted.
+type connectionsArgs struct {
+	Connections []string `json:"connections"`
+}
+
+// deleteInvocationsHere deletes this shard's invocations of a customer's connections. A shard
+// that has not migrated the table yet holds none.
+func (r *ConnectorConnections) deleteInvocationsHere(ctx context.Context, customerID string, connections []string) (int64, error) {
+	result, err := r.store.shard.NewDelete().Model((*ConnectorInvocation)(nil)).
+		Where("ci.customer_id = ?", customerID).
+		Where("ci.connection_id IN (?)", bun.In(connections)).Exec(ctx)
+	if absentTable(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: delete connector invocations: %w", err))
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: delete connector invocations: %w", err))
+	}
+	return deleted, nil
+}
+
 // SelectGrantedOfUser is every live connection of one user of the customer's
 // that holds credentials, oldest first: the grants DeleteUser drops.
 func (r *ConnectorConnections) SelectGrantedOfUser(ctx context.Context, customerID, userID string) ([]ConnectorConnection, error) {
@@ -511,19 +535,10 @@ func (r *ConnectorConnections) DeleteUser(ctx context.Context, customerID, userI
 			deleted = append(deleted, DeletedConnection{ID: row.ID, ConnectorID: row.ConnectorID, OwnerType: row.OwnerType, HadGrant: row.HadGrant})
 		}
 		// Invocations in the shards' databases name their connection with no foreign key, so
-		// they go before it, and a failure leaves both for a retry. Those in the shared
-		// database go by its cascade.
+		// each shard deletes its own in a job queued with the delete (ShardJobDeleteInvocations).
+		// Those in the shared database go by its cascade.
 		if r.store.HasShards() {
-			_, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (struct{}, error) {
-				_, err := db.NewDelete().Model((*ConnectorInvocation)(nil)).
-					Where("ci.customer_id = ?", customerID).
-					Where("ci.connection_id IN (?)", bun.In(ids)).Exec(ctx)
-				if absentTable(err) {
-					return struct{}{}, nil
-				}
-				return struct{}{}, err
-			})
-			if err != nil {
+			if _, err := r.store.ShardJobs.queue(ctx, tx, ShardJobDeleteInvocations, customerID, connectionsArgs{Connections: ids}); err != nil {
 				return fmt.Errorf("store: delete a user's connector invocations: %w", err)
 			}
 		}

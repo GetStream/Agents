@@ -22,7 +22,7 @@ const ShardsKey = "node:shards"
 // ErrShardsDisagree is a router that knows other shards than the routers running. Its calls
 // would be written to a shard their readers never look in, or read from fewer shards than
 // they are written to.
-var ErrShardsDisagree = errors.New("node: postgres.shards differs from the running routers'")
+var ErrShardsDisagree = errors.New("node: shards differs from the running routers'")
 
 // agreeScript takes the list for holdFor when no router holds one, renews it when it is the
 // one held, and answers the list in force.

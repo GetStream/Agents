@@ -996,8 +996,16 @@ func (s *KnowledgeFilesSuite) TestAReadCancelledInItsWriteTakesItBackOnceItsDocu
 	s.reached(s.knowledge.writeCancelled(), "the read was never cancelled")
 
 	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+	kept := make(chan struct{})
+	s.knowledge.onceAfterWrite(func() error { close(kept); return nil })
 	write()
 
+	// The queue lets go of a cancelled task at once, and its retry finds the document gone and ends,
+	// while the read that was cancelled is still to write and to take its write back. It is the
+	// read's own write that is waited for, then the passages it left being taken back.
+	s.reached(kept, "the cancelled read never wrote")
+	s.Eventually(func() bool { return s.passagesOf("cancelled.md") == 0 }, 30*time.Second, 5*time.Millisecond,
+		"the cancelled read's passages were never taken back")
 	s.everyFileRead()
 	s.Zero(s.passagesOf("cancelled.md"))
 	s.Empty(s.listed())
