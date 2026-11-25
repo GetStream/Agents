@@ -749,7 +749,7 @@ func (s *StoreSuite) TestACallSomebodyWasOnStaysTheirsAndOneNobodyAnsweredDoesNo
 }
 
 func (s *StoreSuite) TestACallIsTheCustomersWhoseLegWasDialledOnItFirst() {
-	s.onCall("later", "call", 0, s.base.Add(time.Second))
+	s.onCall("a later", "call", 0, s.base.Add(time.Second))
 	s.onCall("first", "call", 0, s.base)
 	// Of two dialled at once, the first by id, whichever row came first.
 	s.onCall("b", "tied", 0, s.base)
@@ -890,4 +890,38 @@ func (s *ShardedStoreSuite) TestACallsOwnerIsTheSameOnEveryShard() {
 			s.Equal(want, owner)
 		}
 	}
+}
+
+// A call is locked while it is claimed, in the deployment's app whether a claim knows its id or
+// not, and another app's call of the name is not.
+func (s *StoreSuite) TestACallIsLockedWhileItIsClaimed() {
+	// Another router's, with turns of its own.
+	elsewhere := &CallLegs{store: s.store}
+	blocked := func(on NamedCall) (err error) {
+		unpinned := NamedCall{Scope: AppScope{Unpinned: true}}
+		s.Require().NoError(s.store.CallLegs.Claim(s.ctx, "a", "agent", "call", unpinned, func(context.Context) error {
+			ctx, cancel := context.WithTimeout(s.ctx, 300*time.Millisecond)
+			defer cancel()
+			err = elsewhere.Claim(ctx, "b", "agent", "call", on, func(context.Context) error { return nil })
+			return nil
+		}))
+		return err
+	}
+
+	s.Error(blocked(NamedCall{Scope: AppScope{App: 1, Unpinned: true}}))
+	s.NoError(blocked(NamedCall{Scope: AppScope{App: 7}}))
+}
+
+func (s *StoreSuite) TestACallWhoseLegsCannotBeReadIsNotClaimed() {
+	ctx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+	held := false
+	on := NamedCall{Scope: AppScope{Unpinned: true}, Holder: func(context.Context) (string, error) {
+		cancel()
+		return "", nil
+	}}
+
+	s.Error(s.store.CallLegs.Claim(ctx, "mine", "agent", "call", on, func(context.Context) error { held = true; return nil }))
+
+	s.False(held)
 }

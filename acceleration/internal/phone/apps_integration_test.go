@@ -2911,7 +2911,9 @@ func (s *AppsSuite) refusedTaken(sessionID string) {
 	trunks := len(s.deployment.Trunks())
 	s.vendor.dialed = Outbound{}
 
-	s.ErrorIs(s.dialInto(sessionID, "+15550001111", map[string]string{"k": "v"}), store.ErrCallTaken)
+	err := s.dialInto(sessionID, "+15550001111", map[string]string{"k": "v"})
+	s.ErrorIs(err, store.ErrCallTaken)
+	s.NotErrorIs(err, ErrPlacingFailed, "a refusal, not a failure to count the call")
 
 	s.Empty(s.vendor.dialed.To)
 	s.Len(s.deployment.Trunks(), trunks)
@@ -3004,11 +3006,15 @@ func (s *AppsSuite) TestACallIntoASessionNobodyCanTellTheCustomerOfIsNotDialled(
 	_, err := s.service.Call(s.ctx, request)
 	s.ErrorIs(err, store.ErrCallUnchecked)
 	s.ErrorIs(err, ErrNotDialed, "worth trying again")
+	s.NotErrorIs(err, ErrPlacingFailed)
 	s.Empty(s.vendor.dialed.To)
 
 	request.MintedID = true
 	_, err = s.service.Call(s.ctx, request)
 	s.NoError(err, "an id the router made is nobody else's to ask about")
+	request.MintedID, request.SessionID = false, ""
+	_, err = s.service.Call(s.ctx, request)
+	s.NoError(err, "nor is one nobody named")
 }
 
 func (s *AppsSuite) TestACallIntoAMintedSessionAsksNothingOfTheCallsLegs() {
@@ -3077,4 +3083,12 @@ func (s *AppsSuite) TestWhoIsOnACallIsAskedOfItsApp() {
 	s.Zero(asked(), "pinned to the deployment's app")
 	s.ownApp()
 	s.EqualValues(4242, asked())
+}
+
+func (s *AppsSuite) TestACallIntoANamedSessionCountsAmongItsOrganizationsCalls() {
+	on := &store.NamedCall{Scope: store.AppScope{Unpinned: true}}
+	_, err := s.service.Outcomes().PlacedWithin(s.ctx, outcome.Call{Key: outcome.Key{CustomerID: s.customer, CallType: defaultCallType,
+		CallID: uuid.NewString(), Local: s.e164, Remote: "+15550001111"}, Vendor: "twilio"}, "org-"+uuid.NewString(), &store.CallsAtOnce{Ringing: time.Hour}, on)
+
+	s.ErrorIs(err, store.ErrCallsAtOnce)
 }

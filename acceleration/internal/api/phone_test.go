@@ -1706,6 +1706,7 @@ func (s *CallStatusSuite) TestADirectoryThatDoesNotAnswerHoldsUpNoSession() {
 	began := time.Now()
 	err = heldOn(sessions, s.customerID(), s.utils.uuid())
 	s.ErrorIs(err, store.ErrCallUnchecked)
+	s.Less(time.Since(began), 2900*time.Millisecond, "asked for a second, not for as long as the claim has")
 	var answer APIError
 	s.Require().ErrorAs(refusedRequest(err), &answer)
 	s.Equal(ErrorTypeUnavailable, answer.Type)
