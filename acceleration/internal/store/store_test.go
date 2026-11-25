@@ -176,9 +176,9 @@ func (s *StoreSuite) emptyTables(db bun.IDB) {
 	}))
 }
 
-// SetupTest closes most of the suite's idle connections (trimIdle), then empties the tables one time in
-// each database, and the store's keys in Redis. With one database, the shard database and the
-// shared database are the same database.
+// SetupTest closes the suite's idle connections past keptIdle (trimIdle), then empties the
+// tables one time in each database, and the store's keys in Redis. With one database, the shard
+// database and the shared database are the same database.
 func (s *StoreSuite) SetupTest() {
 	trimIdle(s.store)
 	s.emptyTables(s.store.shard)
@@ -194,9 +194,9 @@ func (s *ShardedStoreSuite) SetupTest() {
 	s.emptyTables(s.other.shard)
 }
 
-// keptIdle is how many idle connections trimIdle leaves in each pool: as many as most tests use,
-// so a test does not dial Postgres again for the statements every test runs. Closing all of them
-// made 176 tests of the sharded suite take twice as long on a local Postgres (AI-3960).
+// keptIdle is how many idle connections trimIdle leaves in each pool, so the statements a test
+// runs one after another reuse one instead of dialing Postgres again. Closing all of them made
+// 176 tests of the sharded suite take twice as long or more on a local Postgres (AI-3960).
 const keptIdle = 2
 
 // trimIdle closes the idle connections each of store's pools keeps past keptIdle, and keeps the
