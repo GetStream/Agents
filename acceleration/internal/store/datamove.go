@@ -1376,6 +1376,7 @@ func (s *Store) refuseImportedConfigs(ctx context.Context, db bun.IDB, customerI
 	if rule == nil {
 		return nil
 	}
+	definitions := definitionsOn{db}
 	for _, row := range rows {
 		var written AgentConfig
 		err := db.NewSelect().Model(&written).
@@ -1390,9 +1391,9 @@ func (s *Store) refuseImportedConfigs(ctx context.Context, db bun.IDB, customerI
 		if err != nil {
 			return stack.Wrap(fmt.Errorf("store: import agent_configs: %w", err))
 		}
-		message, ok, err := rule.Config(ctx, definitionsOn{db}, customerID, written)
+		message, ok, err := rule.Config(ctx, definitions, customerID, written)
 		if err == nil && ok {
-			message, ok, err = importedGraphComplaint(ctx, db, rule, customerID, written)
+			message, ok, err = importedGraphComplaint(ctx, db, definitions, rule, customerID, written)
 		}
 		if err != nil {
 			return err
@@ -1411,7 +1412,8 @@ func (s *Store) refuseImportedConfigs(ctx context.Context, db bun.IDB, customerI
 // importedGraphComplaint is rule.Graph over each set of agents config is part of, as a config
 // write weighs them (api.sensitiveGraphComplaint): itself with its children, and each live
 // config calling it with all of that one's children, every one read on db.
-func importedGraphComplaint(ctx context.Context, db bun.IDB, rule *ConfigRule, customerID string, config AgentConfig) (string, bool, error) {
+func importedGraphComplaint(ctx context.Context, db bun.IDB, definitions Definitions, rule *ConfigRule, customerID string,
+	config AgentConfig) (string, bool, error) {
 	parents, err := configsCalling(ctx, db, customerID, config.Name, config.ID)
 	if err != nil {
 		return "", false, err
@@ -1433,7 +1435,7 @@ func importedGraphComplaint(ctx context.Context, db bun.IDB, rule *ConfigRule, c
 			Scan(ctx); err != nil {
 			return "", false, stack.Wrap(fmt.Errorf("store: import agent_configs: children: %w", err))
 		}
-		message, ok, err := rule.Graph(ctx, definitionsOn{db}, customerID, append([]AgentConfig{parent}, children...))
+		message, ok, err := rule.Graph(ctx, definitions, customerID, append([]AgentConfig{parent}, children...))
 		if err != nil || !ok {
 			return message, ok, err
 		}

@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/providers"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
@@ -27,7 +28,9 @@ func (s *ReplicateRepeatSuite) TestAPageWhereACalledChildStartsSendingIsRefusedA
 func (s *ReplicateRepeatSuite) refusesThePage(parentFirst bool) {
 	parent, child := s.copiedParentAndChild(nil)
 	calls := func() { s.changed(parent, func(config *store.AgentConfig) { config.Agents = calling(child) }) }
-	sends := func() { s.changed(child, func(config *store.AgentConfig) { config.Connectors = []store.ConnectorBinding{writer()} }) }
+	sends := func() {
+		s.changed(child, func(config *store.AgentConfig) { config.Connectors = []store.ConnectorBinding{writer()} })
+	}
 	if parentFirst {
 		calls()
 		sends()
@@ -55,6 +58,28 @@ func (s *ReplicateRepeatSuite) TestAPageThatEndsWithinTheSensitiveRuleIsApplied(
 
 	s.Empty(s.copied(parent).Agents)
 	s.Len(s.copied(child).Connectors, 1)
+}
+
+// A connector defined earlier in the page is weighed as the page defines it.
+func (s *ReplicateRepeatSuite) TestAPageIsWeighedWithTheConnectorsItDefines() {
+	parent, child := s.copiedParentAndChild(nil)
+	manifest, err := core.ParseManifest([]byte("id: custom_crm\nrevision: 1\nname: CRM\nendpoints:\n  mcp: https://crm.example/mcp\n" +
+		"schemes: [bearer]\nsources:\n  - kind: mcp\n    endpoint: mcp\n"))
+	s.Require().NoError(err)
+	_, err = s.source.ConnectorDefinitions.Revise(s.ctx, "acme", manifest)
+	s.Require().NoError(err)
+	// A config the page changes within the rule comes first, so each config the page changes is weighed.
+	s.changed(child, func(config *store.AgentConfig) { config.Instructions = "be briefer" })
+	s.changed(parent, func(config *store.AgentConfig) {
+		config.Connectors = append(config.Connectors, store.ConnectorBinding{Name: "crm", ConnectorID: "custom_crm",
+			Connection: store.ConnectionBinding{Type: "session"}, Tools: []store.ToolGrant{{Name: "create_contact"}}})
+	})
+
+	err = s.once("acme", false)
+
+	s.Require().ErrorIs(err, store.ErrInvalidImport)
+	s.ErrorContains(err, `and connector binding "crm" can send data out`)
+	s.Len(s.copied(parent).Connectors, 1, "nothing of the page is written")
 }
 
 // copiedParentAndChild makes the target a deployment opened as the command opens one

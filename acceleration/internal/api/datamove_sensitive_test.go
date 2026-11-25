@@ -118,6 +118,38 @@ func (s *DataMoveSuite) TestImportedAgentsWithNoSensitiveConnectorAreWritten() {
 	s.True(s.holds(childID))
 }
 
+// A config the source deleted runs nothing, so one that broke the rule before it held does not
+// keep its app from moving.
+func (s *DataMoveSuite) TestAnImportedDeletedAgentThatBreaksTheRuleIsWritten() {
+	template := s.agentTemplate()
+	s.useInternalApp()
+	line, id := s.importedAgent(template, map[string]any{"deleted_at": "2026-11-01T00:00:00Z",
+		"connectors": []map[string]any{sessionNessy("customers"), sessionGitHubGranting("code", "create_issue")}})
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import", ndjson([]dataLine{line}), nil))
+
+	var deleted bool
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.T().Context(),
+		"SELECT deleted_at IS NOT NULL FROM agent_configs WHERE id = ?", id).Scan(&deleted))
+	s.True(deleted)
+}
+
+// A parent's children are the configs of its own app by those names, not another app's.
+func (s *DataMoveSuite) TestAnImportedParentIsNotWeighedWithAnotherAppsAgentOfItsChildsName() {
+	template := s.agentTemplate()
+	s.useInternalApp()
+	name := "helper-" + s.utils.uuid()
+	s.textAgent(map[string]any{"name": name, "connectors": []map[string]any{sessionGitHubGranting("code", "create_issue")}})
+	s.useInternalApp()
+	s.textAgent(map[string]any{"name": name})
+	parent, id := s.importedAgent(template, map[string]any{"connectors": []map[string]any{sessionNessy("customers")},
+		"agents": []map[string]any{{"config": name, "tool": "ask_helper"}}})
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{parent}), nil))
+
+	s.True(s.holds(id))
+}
+
 // useInternalApp gives the test an app of its own that Stream marks internal, the only kind
 // that sees nessy.
 func (s *DataMoveSuite) useInternalApp() {
