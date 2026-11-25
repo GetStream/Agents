@@ -3,9 +3,13 @@
 ## Local backend
 
 The router, Postgres and Redis run from `compose.yaml` at the repo root. Credentials come
-from the repo-root `.env` (copy `.env.example` if you have none).
+from the repo-root `.env` (copy `.env.example` if you have none). In the default `api_key`
+auth mode the router refuses to start until `.env` sets `ROUTER_DEV_KEK`, the key it seals the
+secrets it holds under (so does a proxy-mode router with connectors on). Run this once:
+running it again changes the key, and the secrets already stored can no longer be read.
 
 ```bash
+echo "ROUTER_DEV_KEK=$(openssl rand -hex 32)" >> .env   # once
 docker compose up -d --build router   # router on :8080, Postgres on :55432, Redis on :56379
 curl http://localhost:8080/health
 ```
@@ -122,7 +126,7 @@ STREAM_ACCELERATION_CUSTOMER_ID=examples
 ```bash
 cd examples/voice_agents/simple_voice_ai
 uv sync
-uv run simple_voice_ai.py run
+uv run simple_voice_ai.py
 ```
 
 It opens a demo call in the browser; talk into it. More in the example's `README.md`.

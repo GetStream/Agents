@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/memory"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
@@ -162,6 +163,10 @@ type commandRecord struct {
 	// Heard is what the voice note sent with the command said, for a retry to carry rather
 	// than hear it again (CheckBegin).
 	Heard string `json:",omitempty"`
+	// Failure is the error the agent.Error that failed the command's reply carried
+	// (FollowUpFailure). It is kept in memory only: a conversation opened again reads no
+	// failure back.
+	Failure error `json:"-"`
 }
 
 var ErrCommandNotFound = errors.New("command not found")
@@ -174,6 +179,20 @@ var ErrCommandConflict = errors.New("command ID was already used with different 
 // ErrResponseRunning is a follow-up refused because a reply is still being written.
 // It is the one refusal worth trying again: the reply finishes and the turn is free.
 var ErrResponseRunning = errors.New("a response is already running")
+
+// ErrInvalid is a command or a conversation asked for in a way it cannot be carried out: the
+// caller's own mistake. Its message says what to change. A failure of Chat or of the database
+// is never one.
+var ErrInvalid = errors.New("conversation: invalid request")
+
+// invalid marks err as ErrInvalid without changing its message.
+func invalid(err error) error { return marked{err, ErrInvalid} }
+
+// marked is err that is also kind, with err's own message.
+type marked struct{ err, kind error }
+
+func (e marked) Error() string   { return e.err.Error() }
+func (e marked) Unwrap() []error { return []error{e.err, e.kind} }
 
 // ReadBackPrefix starts the id of a follow-up whose reply is read back: a scheduled delivery
 // run again sends the reply it already got (FollowUpFinished) rather than run the turn twice.
@@ -188,7 +207,7 @@ var validAuthorID = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
 // maxCommandText is the most text one command carries, in bytes.
 const maxCommandText = 1024 * 1024
 
-var errInvalidCommand = errors.New("invalid command ID or text")
+var errInvalidCommand = invalid(errors.New("invalid command ID or text"))
 
 var validCommandID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
@@ -203,7 +222,9 @@ type ledger struct {
 	Customer string
 	Agent    string
 	Owner    string
-	Current  *Message
+	// OwnerKind is what sort of caller Owner is (WithCallerKind).
+	OwnerKind auth.Kind
+	Current   *Message
 	// VisibleTools are the agent config's visible_tools, kept so a write retried after a
 	// restart shows end users what the agent shows them.
 	VisibleTools []string `json:",omitempty"`
@@ -254,7 +275,10 @@ type known struct {
 	customer, cid string
 }
 type Conversation struct {
-	mu sync.Mutex
+	// ctx is the context of the request that opened the conversation, without its
+	// cancellation: the writes its own loop sends to Stream are traced under it.
+	ctx context.Context
+	mu  sync.Mutex
 	// sendMu is held across each stored write flush sends, from reading the head of Pending to
 	// taking it off, and by anything else that takes ops off Pending: mu is released while
 	// Stream is asked, so without it a write taken off meanwhile would make flush take off the
@@ -473,7 +497,7 @@ func opensDispatched(ctx context.Context, cid string, custom map[string]any, emp
 	if channelType, _ := channelOf(cid); channelType != streamapp.AgentChannelType {
 		return true
 	}
-	for _, stamp := range []string{CustomerField, "support_agent_id", "support_owner_id", "support_access", TriggerField} {
+	for _, stamp := range []string{CustomerField, "support_agent_id", "support_owner_id", ownerKindField, "support_access", TriggerField} {
 		if _, stamped := custom[stamp]; stamped {
 			return false
 		}
@@ -529,6 +553,26 @@ const SessionCommandTrigger = "session_commands"
 // settles in, and a refused reply has failed as far as it is concerned.
 const RefusedField = "refused"
 
+// ownerKindField is the channel field saying what sort of caller support_owner_id was when the
+// conversation was made. A channel made before the field has none (ownedBy).
+const ownerKindField = "support_owner_kind"
+
+// callerKindKey is the context key WithCallerKind keeps its kind under.
+type callerKindKey struct{}
+
+// WithCallerKind is ctx carrying what sort of caller a conversation is opened or read for, which
+// qualifies the caller's user id. A caller of no kind reaches no conversation whose owner's kind
+// is recorded (ownedBy).
+func WithCallerKind(ctx context.Context, kind auth.Kind) context.Context {
+	return context.WithValue(ctx, callerKindKey{}, kind)
+}
+
+// callerKind is the kind ctx carries (WithCallerKind).
+func callerKind(ctx context.Context) auth.Kind {
+	kind, _ := ctx.Value(callerKindKey{}).(auth.Kind)
+	return kind
+}
+
 // CustomerField names the customer a channel the router created belongs to.
 const CustomerField = "support_customer_id"
 
@@ -579,8 +623,8 @@ func (s *Service) opens(key known) func() {
 		s.mu.Unlock()
 	}
 }
-func (s *Service) make(d ledger) *Conversation {
-	c := &Conversation{service: s, data: d, turns: map[string]string{}, created: map[string]bool{}, hidden: map[string]bool{}, stopped: make(chan struct{}), done: make(chan struct{})}
+func (s *Service) make(ctx context.Context, d ledger) *Conversation {
+	c := &Conversation{ctx: context.WithoutCancel(ctx), service: s, data: d, turns: map[string]string{}, created: map[string]bool{}, hidden: map[string]bool{}, stopped: make(chan struct{}), done: make(chan struct{})}
 	s.all[known{d.Customer, d.CID}] = c
 	go c.run()
 	return c
@@ -654,7 +698,7 @@ func (s *Service) CreateInApp(ctx context.Context, app int64, customer, agentID,
 
 func (s *Service) open(ctx context.Context, app int64, customer, agentID, cid string, fresh bool, caller, voiceAgent string, custom map[string]any, team string, scopes ...memory.Scope) (*Conversation, []llm.Message, bool, error) {
 	if voiceAgent != "" && !validAuthorID.MatchString(voiceAgent) {
-		return nil, nil, false, stack.Wrap(errors.New("invalid voice transcript author"))
+		return nil, nil, false, stack.Wrap(invalid(errors.New("invalid voice transcript author")))
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -663,7 +707,7 @@ func (s *Service) open(ctx context.Context, app int64, customer, agentID, cid st
 		scope = scopes[0]
 	}
 	if !Openable(ctx, cid) {
-		return nil, nil, false, stack.Wrap(errors.New("invalid conversation channel"))
+		return nil, nil, false, stack.Wrap(invalid(errors.New("invalid conversation channel")))
 	}
 	// Everything from here is this conversation's turn: what it holds is read, Stream is
 	// asked, and what came back is written, with nothing else opening it in between. The
@@ -682,7 +726,7 @@ func (s *Service) open(ctx context.Context, app int64, customer, agentID, cid st
 		c.mu.Lock()
 		if c.data.Customer != customer || (agentID != "" && c.data.Agent != agentID) || c.data.Owner == "" && caller != "" {
 			c.mu.Unlock()
-			return nil, nil, false, stack.Wrap(errors.New("conversation belongs to another customer or agent"))
+			return nil, nil, false, stack.Wrap(invalid(errors.New("conversation belongs to another customer or agent")))
 		}
 		agentID = c.data.Agent
 		if c.active {
@@ -713,15 +757,15 @@ func (s *Service) open(ctx context.Context, app int64, customer, agentID, cid st
 			}
 		}
 		if !page.dispatched && !sameMemoryScope(page.memoryScope, scope) {
-			return nil, nil, false, stack.Wrap(errors.New("conversation belongs to another memory scope; reopen with its original organization"))
+			return nil, nil, false, stack.Wrap(invalid(errors.New("conversation belongs to another memory scope; reopen with its original organization")))
 		}
 
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if c.data.Owner != caller && !page.shared {
-			return nil, nil, false, stack.Wrap(errors.New("conversation belongs to another user"))
+			return nil, nil, false, stack.Wrap(invalid(errors.New("conversation belongs to another user")))
 		}
-		c.data.Owner = caller
+		c.data.Owner, c.data.OwnerKind = caller, callerKind(ctx)
 		c.shared, c.thread, c.dispatched, c.sessionCommand = page.shared, page.thread, page.dispatched, page.sessionCommand
 		c.session, c.voiceAgent = sessionOf(ctx), voiceAgent
 		c.active = true
@@ -755,6 +799,9 @@ func (s *Service) open(ctx context.Context, app int64, customer, agentID, cid st
 		}
 		stamped := channelCustom(custom)
 		maps.Copy(stamped, map[string]any{CustomerField: customer, "support_agent_id": agentID, "support_memory_scope": scope, "support_owner_id": caller, TriggerField: SessionCommandTrigger})
+		if kind := callerKind(ctx); kind != "" {
+			stamped[ownerKindField] = kind
+		}
 		data = &getstream.ChannelInput{CreatedByID: &agentID, Members: []getstream.ChannelMemberRequest{{UserID: agentID}, {UserID: userID}}, Custom: stamped}
 		if team != "" {
 			data.Team = &team
@@ -777,7 +824,7 @@ func (s *Service) open(ctx context.Context, app int64, customer, agentID, cid st
 		}
 	}
 	if !page.dispatched && !sameMemoryScope(page.memoryScope, scope) {
-		return nil, nil, false, stack.Wrap(errors.New("conversation belongs to another memory scope; reopen with its original organization"))
+		return nil, nil, false, stack.Wrap(invalid(errors.New("conversation belongs to another memory scope; reopen with its original organization")))
 	}
 	if agentID == "" {
 		agentID = page.agent
@@ -789,7 +836,7 @@ func (s *Service) open(ctx context.Context, app int64, customer, agentID, cid st
 		s.mu.Unlock()
 		return nil, nil, false, stack.Wrap(errors.New("conversation service is closed"))
 	}
-	c := s.make(ledger{CID: cid, Customer: customer, Agent: agentID, Owner: caller, Commands: commandsIn(page.Messages), StreamApp: pin})
+	c := s.make(ctx, ledger{CID: cid, Customer: customer, Agent: agentID, Owner: caller, OwnerKind: callerKind(ctx), Commands: commandsIn(page.Messages), StreamApp: pin})
 	s.mu.Unlock()
 	// Nobody here holds the conversation, so a reply Stream still shows as running was
 	// left by a process that stopped.
@@ -880,7 +927,7 @@ func (s *Service) ContextForCaller(ctx context.Context, customer, agentID, cid, 
 		return nil, false, nil
 	}
 	if len(voiceAgent) > 1 || (len(voiceAgent) == 1 && voiceAgent[0] != "" && !validAuthorID.MatchString(voiceAgent[0])) {
-		return nil, false, stack.Wrap(errors.New("invalid voice transcript author"))
+		return nil, false, stack.Wrap(invalid(errors.New("invalid voice transcript author")))
 	}
 	pending, hidden := s.unwritten(customer, cid)
 	page, err := s.history(ctx, customer, agentID, cid, "", caller, pending, hidden, voiceAgent...)
@@ -924,7 +971,7 @@ func (s *Service) Describe(ctx context.Context, customer, cid, title, descriptio
 	// session holds (internal/session), which OpenInApp already let through. A channel of another
 	// type is the customer's own, and keeps its name: the session renaming it holds no word for it.
 	if !Openable(ctx, cid) {
-		return stack.Wrap(errors.New("invalid conversation channel"))
+		return stack.Wrap(invalid(errors.New("invalid conversation channel")))
 	}
 	set := map[string]any{}
 	if title != "" {
@@ -952,32 +999,61 @@ func Shared(custom map[string]any) bool {
 	return custom["support_access"] == "members"
 }
 
+// Shared reports whether the page is of a conversation open to every member of it (Shared).
+func (p Page) Shared() bool { return p.shared }
+
+// RefusedRead is a conversation the caller may not read, as against one that could not be
+// read: a store or Stream failure is not a refusal. Its text is the caller's to see.
+type RefusedRead string
+
+func (r RefusedRead) Error() string { return string(r) }
+
 // ownedBy reads server-owned channel metadata. Explicit member access still
 // requires the caller's current membership, checked against the query response.
 // A channel with no owner is a backend-owned demo, which no end user may claim.
-func ownedBy(custom map[string]any, customer, agentID, caller string) error {
+//
+// The owner is a user id and what sort of caller it was: the caller's id has to equal the
+// owner's, and their kind has to reach it, as it has to reach a session's owner. A channel
+// with no kind recorded, made before it was or by a router that does not record it yet, keeps
+// the access it had to its owner's id: its channel does not say which kind made it, and refusing
+// one would shut its owner out. Another member of a shared one is verified whether or not it has a kind.
+func ownedBy(custom map[string]any, customer, agentID, caller string, kind auth.Kind) error {
 	if custom[CustomerField] != customer || (agentID != "" && custom["support_agent_id"] != agentID) {
-		return stack.Wrap(errors.New("conversation belongs to another customer or agent"))
+		return stack.Wrap(RefusedRead("conversation belongs to another customer or agent"))
 	}
 	rawOwner, bound := custom["support_owner_id"]
 	owner, valid := rawOwner.(string)
 	if bound && !valid {
-		return stack.Wrap(errors.New("conversation has invalid ownership metadata"))
+		return stack.Wrap(RefusedRead("conversation has invalid ownership metadata"))
+	}
+	ownerKind := kind
+	if raw, recorded := custom[ownerKindField]; recorded {
+		name, _ := raw.(string)
+		if name == "" {
+			return stack.Wrap(RefusedRead("conversation has invalid ownership metadata"))
+		}
+		ownerKind = auth.Kind(name)
 	}
 	if mode, present := custom["support_access"]; present {
 		switch mode {
 		case "members":
 			if owner == "" || caller == "" {
-				return stack.Wrap(errors.New("shared conversations require a verified user"))
+				return stack.Wrap(RefusedRead("shared conversations require a verified user"))
 			}
-			return nil
+			// A member is known by id alone, so only a caller whose id was checked is one.
+			if owner != caller {
+				if !kind.Verified() {
+					return stack.Wrap(RefusedRead("shared conversations require a verified user"))
+				}
+				return nil
+			}
 		case "owner":
 		default:
-			return stack.Wrap(errors.New("conversation has invalid access metadata"))
+			return stack.Wrap(RefusedRead("conversation has invalid access metadata"))
 		}
 	}
-	if owner != caller {
-		return stack.Wrap(errors.New("conversation belongs to another user"))
+	if owner != caller || !kind.Reaches(ownerKind, caller) {
+		return stack.Wrap(RefusedRead("conversation belongs to another user"))
 	}
 	return nil
 }
@@ -1029,10 +1105,14 @@ func (s *Service) CommandForCaller(ctx context.Context, customer, agentID, cid, 
 	// overwrite the ownership recorded on one.
 	r, err := client.Chat().GetOrCreateChannel(lookup, channelType, id, &getstream.GetOrCreateChannelRequest{
 		State: &state, Messages: &getstream.MessagePaginationParams{Limit: &limit}})
+	// A channel Chat does not have is answered as one the caller may not read (history).
+	if refused, ok := errors.AsType[*getstream.StreamError](err); ok && (refused.StatusCode == http.StatusBadRequest || refused.StatusCode == http.StatusNotFound) {
+		return CommandReceipt{}, stack.Wrap(ErrCommandNotFound)
+	}
 	if err != nil {
 		return CommandReceipt{}, stack.Wrap(err)
 	}
-	if threadChannel(id, r.Data.Channel.Custom) || ownedBy(r.Data.Channel.Custom, customer, agentID, caller) != nil {
+	if threadChannel(id, r.Data.Channel.Custom) || ownedBy(r.Data.Channel.Custom, customer, agentID, caller, callerKind(ctx)) != nil {
 		return CommandReceipt{}, stack.Wrap(ErrCommandNotFound)
 	}
 	if caller != "" {
@@ -1139,7 +1219,13 @@ func (s *Service) history(ctx context.Context, customer, agentID, cid, before, c
 	if err != nil {
 		return Page{}, stack.Wrap(err)
 	}
-	return s.historyIn(ctx, client, customer, agentID, cid, before, caller, pending, hidden, voiceAgent...)
+	page, err := s.historyIn(ctx, client, customer, agentID, cid, before, caller, pending, hidden, voiceAgent...)
+	// Read without Data, a channel Chat does not have is refused as input (400: server-side
+	// auth must name a creator) or not found, and is refused as one the caller may not read.
+	if refused, ok := errors.AsType[*getstream.StreamError](err); ok && (refused.StatusCode == http.StatusBadRequest || refused.StatusCode == http.StatusNotFound) {
+		return Page{}, stack.Wrap(RefusedRead("invalid conversation channel"))
+	}
+	return page, err
 }
 
 func (s *Service) historyIn(ctx context.Context, client *getstream.Stream, customer, agentID, cid, before, caller string, pending []operation, hidden map[string]bool, voiceAgent ...string) (Page, error) {
@@ -1154,7 +1240,7 @@ func (s *Service) readPage(ctx context.Context, client *getstream.Stream, custom
 	defer cancel()
 	channelType, id := channelOf(cid)
 	if !Openable(ctx, cid) {
-		return Page{}, stack.Wrap(errors.New("invalid conversation channel"))
+		return Page{}, stack.Wrap(RefusedRead("invalid conversation channel"))
 	}
 	limit := 100
 	state := true
@@ -1173,7 +1259,7 @@ func (s *Service) readPage(ctx context.Context, client *getstream.Stream, custom
 	// custom data says it is (opensDispatched).
 	dispatched := opensDispatched(ctx, cid, r.Data.Channel.Custom, len(r.Data.Messages) == 0)
 	if !dispatched {
-		if err := ownedBy(r.Data.Channel.Custom, customer, agentID, caller); err != nil {
+		if err := ownedBy(r.Data.Channel.Custom, customer, agentID, caller, callerKind(ctx)); err != nil {
 			return Page{}, stack.Wrap(err)
 		}
 	}
@@ -1181,11 +1267,11 @@ func (s *Service) readPage(ctx context.Context, client *getstream.Stream, custom
 	// a request names reads nothing there.
 	thread := opensThread(ctx, cid)
 	if !thread && threadChannel(id, r.Data.Channel.Custom) {
-		return Page{}, stack.Wrap(errors.New("invalid conversation channel"))
+		return Page{}, stack.Wrap(RefusedRead("invalid conversation channel"))
 	}
 	if caller != "" {
 		if r.Data.Channel.Custom[TriggerField] != SessionCommandTrigger {
-			return Page{}, stack.Wrap(errors.New("conversation is not a session-command channel"))
+			return Page{}, stack.Wrap(RefusedRead("conversation is not a session-command channel"))
 		}
 		member := false
 		for _, candidate := range r.Data.Members {
@@ -1195,7 +1281,7 @@ func (s *Service) readPage(ctx context.Context, client *getstream.Stream, custom
 			}
 		}
 		if !member {
-			return Page{}, stack.Wrap(errors.New("conversation caller is not a channel member"))
+			return Page{}, stack.Wrap(RefusedRead("conversation caller is not a channel member"))
 		}
 	}
 	p := Page{agent: stored, shared: Shared(r.Data.Channel.Custom), thread: thread, named: channelType != streamapp.AgentChannelType, dispatched: dispatched, empty: len(r.Data.Messages) == 0, Messages: []Message{}, Truncated: len(r.Data.Messages) == limit,
@@ -1489,19 +1575,11 @@ func Supplied(lines []HistoryLine) []llm.Message {
 		}
 		content := line.Text
 		if quoted {
-			type author struct {
-				Name string `json:"display_name,omitempty"`
-			}
 			var sentAt *time.Time
 			if !line.At.IsZero() {
 				sentAt = &line.At
 			}
-			envelope, _ := json.Marshal(struct {
-				Author author     `json:"author"`
-				SentAt *time.Time `json:"sent_at,omitempty"`
-				Text   string     `json:"text"`
-			}{author{line.Name}, sentAt, line.Text})
-			content = string(envelope)
+			content = agent.Quoted(line.Name, sentAt, line.Text)
 		}
 		out = append(out, llm.Message{Role: llm.User, Content: content})
 	}
@@ -1514,13 +1592,18 @@ func (c *Conversation) CID() string { return c.data.CID }
 func (c *Conversation) CheckCaller(ctx context.Context, caller string) error {
 	c.mu.Lock()
 	shared, customer, agentID, cid, owner := c.shared, c.data.Customer, c.data.Agent, c.data.CID, c.data.Owner
+	ctx = WithCallerKind(ctx, c.data.OwnerKind)
 	c.mu.Unlock()
 	if owner != caller {
 		return stack.Wrap(ErrCommandNotFound)
 	}
 	if shared {
-		if _, err := c.service.HistoryForCaller(ctx, customer, agentID, cid, "", caller); err != nil {
+		_, err := c.service.HistoryForCaller(ctx, customer, agentID, cid, "", caller)
+		if _, refused := errors.AsType[RefusedRead](err); refused {
 			return stack.Wrap(ErrCommandNotFound)
+		}
+		if err != nil {
+			return fmt.Errorf("conversation: check the caller of %s: %w", cid, err)
 		}
 	}
 	return nil
@@ -1797,8 +1880,10 @@ func (c *Conversation) Observe(event agent.Event) {
 		return
 	}
 	// A tool's progress reaches watchers through live updates; Stream stores it once the
-	// reply settles.
-	unsaved := false
+	// reply settles. A question for a person, and their answer, are stored at once, as a held
+	// connector call's are (AwaitApproval): a client that opens the conversation while the call
+	// waits, such as an app reopened after it was closed, reads the question there.
+	unsaved, stored := false, false
 	wasState := m.State
 	coalesce := false
 	switch e := event.(type) {
@@ -1895,6 +1980,8 @@ func (c *Conversation) Observe(event agent.Event) {
 		c.called(m, toolCall{id: e.ID, name: e.Tool, arguments: e.Arguments, startedAt: e.StartedAt})
 		c.state("tools")
 		unsaved = true
+		step := toolStep(m, e.ID)
+		stored = step != nil && step.Status == "awaiting_approval"
 	case agent.ToolApprovalDecided:
 		if !c.acceptTurn(e.TurnID, false) {
 			return
@@ -1902,9 +1989,9 @@ func (c *Conversation) Observe(event agent.Event) {
 		if !decided(m, e.ID, e.Allowed, e.Summary, time.Now()) {
 			return
 		}
-		unsaved = true
+		unsaved, stored = true, true
 	case agent.ToolUpdated:
-		if e.Verbatim || !c.acceptTurn(e.TurnID, false) || !reported(m, e.ID, e.Text) {
+		if e.Verbatim || e.Text == "" || !c.acceptTurn(e.TurnID, false) || !reported(m, e.ID, e.Text) {
 			return
 		}
 	case agent.ToolRan:
@@ -2026,6 +2113,12 @@ func (c *Conversation) Observe(event agent.Event) {
 		if e.TurnID != "" && c.acceptTurn(e.TurnID, false) {
 			refuse(m)
 		}
+		// Kept beside the state, so a delivery reads why the reply failed without watching for
+		// this event, which a watcher that has fallen behind never gets.
+		if record, ok := c.data.Commands[m.CommandID]; ok {
+			record.Failure = e.Err
+			c.data.Commands[m.CommandID] = record
+		}
 		c.finish("failed")
 		return
 	case agent.Interrupted:
@@ -2041,6 +2134,9 @@ func (c *Conversation) Observe(event agent.Event) {
 	c.dirty = true
 	if unsaved {
 		m.Saved = false
+	}
+	if stored {
+		c.save()
 	}
 	now := time.Now()
 	c.unpublished = coalesce && now.Sub(c.lastPublished) < answerEvery
@@ -2462,7 +2558,7 @@ func (c *Conversation) flushOne() (bool, *FinishedReply, error) {
 	}
 	visible := c.data.VisibleTools
 	c.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
 	err := c.send(ctx, op, false, visible)
 	cancel()
 	c.mu.Lock()
@@ -2622,7 +2718,7 @@ func (c *Conversation) run() {
 			c.indicate(next)
 			if live {
 				c.lived = now
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
 				err := c.send(ctx, operation{Message: *m, reasoning: window, live: &snapshot}, true, visible)
 				cancel()
 				// A refused or slow live update holds back every update after it, so the reply
@@ -2701,7 +2797,7 @@ func (c *Conversation) indicate(next indication) {
 // sendIndicator sends ai_indicator.update with state, or ai_indicator.clear without one.
 func (c *Conversation) sendIndicator(messageID, state string) {
 	event := IndicatorEvent(c.data.Agent, messageID, state)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
 	defer cancel()
 	client, err := c.chat(ctx)
 	if err != nil {

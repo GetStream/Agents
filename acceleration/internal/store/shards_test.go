@@ -5,60 +5,112 @@ package store
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 )
 
-func (s *ShardedStoreSuite) TestACallAnotherShardRanIsListedAndFound() {
-	s.Require().NoError(s.store.StartCall(s.ctx, &Call{ID: "here", CustomerID: "app", StartedAt: s.base}))
-	s.Require().NoError(s.other.StartCall(s.ctx, &Call{ID: "there", CustomerID: "app", StartedAt: s.base.Add(time.Minute)}))
+func (s *ShardedStoreSuite) TestACallAnotherShardRanIsListedOnceShippedButFoundThereAlone() {
+	s.Require().NoError(s.store.Calls.Start(s.ctx, &Call{ID: "here", CustomerID: "app", StartedAt: s.base}))
+	s.Require().NoError(s.other.Calls.Start(s.ctx, &Call{ID: "there", CustomerID: "app", StartedAt: s.base.Add(time.Minute)}))
+	unshipped, err := s.store.Calls.Select(s.ctx, "app", CallFilter{})
+	s.Require().NoError(err)
+	s.Require().Len(unshipped, 1, "the other shard is not read")
+	s.Equal("here", unshipped[0].ID)
+	s.Require().NoError(s.other.ShipIndex(s.ctx, s.base))
 
-	calls, err := s.store.CustomerCalls(s.ctx, "app", CallFilter{})
+	calls, err := s.store.Calls.Select(s.ctx, "app", CallFilter{})
 	s.Require().NoError(err)
 	s.Require().Len(calls, 2)
 	s.Equal("there", calls[0].ID, "newest first, whichever shard ran it")
 	s.Equal("here", calls[1].ID)
 
-	found, err := s.store.Call(s.ctx, "app", "there")
+	_, err = s.store.Calls.Get(s.ctx, "app", "there")
+	s.ErrorIs(err, ErrNoCall, "its row is in the shard that ran it alone")
+	found, err := s.other.Calls.Get(s.ctx, "app", "there")
 	s.Require().NoError(err)
 	s.Equal("there", found.ID)
 }
 
-func (s *ShardedStoreSuite) TestSpendIsCountedInEveryShard() {
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{Modality: "llm", CustomerID: "app", Provider: "openai", Model: "gpt", StartedAt: s.base, CostMicros: 300}))
-	s.Require().NoError(s.other.RecordRequest(s.ctx, &Request{Modality: "llm", CustomerID: "app", Provider: "openai", Model: "gpt", StartedAt: s.base, CostMicros: 200}))
+// Defect: the owner-kind backfill decides on this shard's sessions alone, and stamps a
+// conversation with the one kind it sees here.
+func (s *ShardedStoreSuite) TestTheKindsAUserHeldAConversationAsAreEveryShardsShipped() {
+	held := func(store *Store, id, kind string) {
+		s.Require().NoError(store.Sessions.Upsert(s.ctx, &AgentSession{ID: id, CustomerID: "app", ConversationID: "agent:c",
+			UserID: "sam", CallerKind: kind, CreatedAt: s.base}))
+	}
+	held(s.store, "here", UserKindAuthenticated)
+	held(s.other, "there", UserKindGuest)
+	s.Require().NoError(s.other.ShipIndex(s.ctx, s.base))
 
-	spent, err := s.store.SpendSince(s.ctx, "app", s.base.Add(-time.Hour))
+	kinds, err := s.store.Sessions.CallerKinds(s.ctx, "app", "agent:c", "sam")
 	s.Require().NoError(err)
-	s.EqualValues(500, spent)
+	s.ElementsMatch([]string{UserKindAuthenticated, UserKindGuest}, kinds)
+	guest, err := s.store.Sessions.HeldAsGuest(s.ctx, "app", "sam")
+	s.Require().NoError(err)
+	s.True(guest, "held as a guest in the other shard")
 }
 
-func (s *ShardedStoreSuite) TestARequestsLogIsInTheSharedDatabase() {
-	s.Require().NoError(s.other.StartCall(s.ctx, &Call{ID: "call", CustomerID: "app", AgentID: "agent", ConfigID: "cfg", StartedAt: s.base}))
-	s.Require().NoError(s.other.RecordRequest(s.ctx, &Request{Modality: "tts", CustomerID: "app", AgentID: "agent", Provider: "cartesia", Model: "sonic", StartedAt: s.base.Add(time.Second), Success: true}))
+func (s *ShardedStoreSuite) TestSpendIsWhatEveryShardShipped() {
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{Modality: "llm", CustomerID: "app", Provider: "openai", Model: "gpt", StartedAt: s.base, CostMicros: 300}))
+	s.Require().NoError(insertRequest(s.ctx, s.other, &Request{Modality: "llm", CustomerID: "app", Provider: "openai", Model: "gpt", StartedAt: s.base, CostMicros: 200}))
+	s.Require().NoError(s.store.ShipStats(s.ctx, s.base.Add(time.Minute)))
 
-	logs, err := s.store.AgentLogs(s.ctx, LogFilter{CustomerID: "app", Limit: 10})
+	meters, err := s.store.Spend.Meters(s.ctx, []string{"app"}, s.base.Add(-time.Hour))
 	s.Require().NoError(err)
-	s.Require().Len(logs, 1, "one row, in the shared database, rather than one in the shard as well")
+	s.Require().Len(meters, 1)
+	s.EqualValues(300, meters[0].CostMicros, "the other shard's request is not read before it ships")
+
+	s.Require().NoError(s.other.ShipStats(s.ctx, s.base.Add(time.Minute)))
+	meters, err = s.store.Spend.Meters(s.ctx, []string{"app"}, s.base.Add(-time.Hour))
+	s.Require().NoError(err)
+	s.Require().Len(meters, 1)
+	s.EqualValues(500, meters[0].CostMicros)
+}
+
+func (s *ShardedStoreSuite) TestSpendALimitReadsIsThisShardsRequestsShippedOrNot() {
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{Modality: "llm", CustomerID: "app", Provider: "openai", Model: "gpt", StartedAt: s.base, CostMicros: 300, Billable: true}))
+	s.Require().NoError(insertRequest(s.ctx, s.other, &Request{Modality: "llm", CustomerID: "app", Provider: "openai", Model: "gpt", StartedAt: s.base, CostMicros: 200, Billable: true}))
+	s.Require().NoError(s.other.ShipStats(s.ctx, s.base.Add(time.Minute)))
+	// A window starting inside the hour: the hourly sums would count the whole hour or none of it.
+	since := s.base.Add(-time.Minute)
+
+	spent, err := s.store.Spend.Since(s.ctx, "app", since)
+	s.Require().NoError(err)
+	s.EqualValues(300, spent, "this shard's unshipped request, and not the other shard's")
+	subject, err := s.store.Spend.Subject(s.ctx, usage.SubjectRef{Subject: usage.SubjectApp, AppID: "app"}, since, false)
+	s.Require().NoError(err)
+	s.EqualValues(300, subject)
+}
+
+func (s *ShardedStoreSuite) TestARequestsLogIsInTheShardThatWroteIt() {
+	s.sessionCall(s.other, Call{ID: "call", SessionID: "session", CustomerID: "app", AgentID: "agent", StartedAt: s.base}, "cfg")
+	s.Require().NoError(insertRequest(s.ctx, s.other, &Request{Modality: "tts", CustomerID: "app", AgentID: "agent", Provider: "cartesia", Model: "sonic", StartedAt: s.base.Add(time.Second), Success: true}))
+
+	logs, err := s.other.AgentLogs.Select(s.ctx, "app", AgentLogFilter{Limit: 10})
+	s.Require().NoError(err)
+	s.Require().Len(logs, 1, "one row, in the shard, rather than one in the shared database as well")
+	here, err := s.store.AgentLogs.Select(s.ctx, "app", AgentLogFilter{Limit: 10})
+	s.Require().NoError(err)
+	s.Empty(here, "another shard's log is read there")
 	s.Equal("tts request completed", logs[0].Message)
 	s.Equal("cfg", logs[0].ConfigID)
-	s.Equal("call", logs[0].SessionID)
-
-	var inShard int
-	s.Require().NoError(s.other.shard.NewSelect().Table("agent_logs").ColumnExpr("count(*)").Scan(s.ctx, &inShard))
-	s.Zero(inShard)
+	s.Equal("session", logs[0].SessionID, "the session of the call, not the call")
+	s.Equal(1, s.logsIn(s.other.shard, "app"))
+	s.Zero(s.logsIn(s.store.global, "app"))
 }
 
 // requestLogged is the log row a request the agent made writes, in a shard. Each test names its
 // own customer, since nothing clears the log between tests.
 func (s *ShardedStoreSuite) requestLogged(customer string, success bool, errorCode string) AgentLog {
-	s.Require().NoError(s.other.StartCall(s.ctx, &Call{ID: "call", CustomerID: customer, AgentID: "agent", ConfigID: "cfg", StartedAt: s.base}))
-	s.Require().NoError(s.other.RecordRequest(s.ctx, &Request{Modality: "llm", CustomerID: customer, AgentID: "agent", Provider: "openai", Model: "gpt",
+	s.sessionCall(s.other, Call{ID: "call", SessionID: "session-" + customer, CustomerID: customer, AgentID: "agent", StartedAt: s.base}, "cfg")
+	s.Require().NoError(insertRequest(s.ctx, s.other, &Request{Modality: "llm", CustomerID: customer, AgentID: "agent", Provider: "openai", Model: "gpt",
 		StartedAt: s.base.Add(time.Second), InputTokens: 10, OutputTokens: 4, Success: success, ErrorCode: errorCode}))
-	logs, err := s.store.AgentLogs(s.ctx, LogFilter{CustomerID: customer, Limit: 10})
+	logs, err := s.other.AgentLogs.Select(s.ctx, customer, AgentLogFilter{Limit: 10})
 	s.Require().NoError(err)
 	s.Require().Len(logs, 1)
-	logged, err := s.store.AgentLog(s.ctx, customer, logs[0].ID)
+	logged, err := s.other.AgentLogs.Get(s.ctx, customer, logs[0].ID)
 	s.Require().NoError(err)
-	return *logged
+	return logged
 }
 
 func (s *ShardedStoreSuite) TestAFailedRequestIsLoggedAsAnError() {
@@ -78,25 +130,14 @@ func (s *ShardedStoreSuite) TestARequestItsCallerCancelledIsLoggedAsNoError() {
 	s.EqualValues(4, logged.Details["output_tokens"], "what it generated is still there")
 }
 
-func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsListedOnce() {
-	s.opened("chat", "app", s.base, func(session *AgentSession) { session.Title = "before" })
-	s.Require().NoError(s.store.CloseSession(s.ctx, "chat", s.base.Add(time.Minute), ""))
-	carried := &AgentSession{ID: "chat", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", Title: "after", CreatedAt: s.base}
-	s.Require().NoError(s.other.SaveSession(s.ctx, carried))
-
-	sessions, err := s.store.QuerySessions(s.ctx, "app", SessionFilter{})
-	s.Require().NoError(err)
-	s.Require().Len(sessions, 1)
-	s.Equal("after", sessions[0].Title, "the row it was carried on in is newer")
-	s.Equal(SessionRunning, sessions[0].State)
-}
-
 func (s *ShardedStoreSuite) TestSessionsOpenInTwoShardsAtOnceAreOnePeak() {
 	s.opened("here", "app", s.base, nil)
-	s.Require().NoError(s.store.CloseSession(s.ctx, "here", s.base.Add(10*time.Minute), ""))
+	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "here", s.base, s.base.Add(10*time.Minute), ""))
 	there := &AgentSession{ID: "there", CustomerID: "app", AgentName: "docs", UserID: "jlahey", CallerKind: "user", CreatedAt: s.base.Add(5 * time.Minute)}
-	s.Require().NoError(s.other.SaveSession(s.ctx, there))
-	s.Require().NoError(s.other.CloseSession(s.ctx, "there", s.base.Add(20*time.Minute), ""))
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, there))
+	s.Require().NoError(s.other.Sessions.Close(s.ctx, "app", "there", s.base.Add(5*time.Minute), s.base.Add(20*time.Minute), ""))
+	s.Require().NoError(s.store.ShipStats(s.ctx, s.base.Add(time.Hour)))
+	s.Require().NoError(s.other.ShipStats(s.ctx, s.base.Add(time.Hour)))
 
 	peak, err := s.store.CustomerConcurrencyPeak(s.ctx, "app", s.base.Add(-time.Hour), s.base.Add(time.Hour))
 	s.Require().NoError(err)
@@ -105,31 +146,15 @@ func (s *ShardedStoreSuite) TestSessionsOpenInTwoShardsAtOnceAreOnePeak() {
 	s.True(peak.At.Equal(s.base.Add(5 * time.Minute)))
 }
 
-func (s *ShardedStoreSuite) TestAGuestsSessionsInEveryShardAreClaimed() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
-	s.opened("here", "app", s.base, func(session *AgentSession) { session.UserID = "guest-1" })
-	there := &AgentSession{ID: "there", CustomerID: "app", AgentName: "docs", UserID: "guest-1", CallerKind: "guest", CreatedAt: s.base}
-	s.Require().NoError(s.other.SaveSession(s.ctx, there))
-
-	moved, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
-	s.Require().NoError(err)
-	s.EqualValues(2, moved)
-
-	again, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
-	s.Require().NoError(err, "the same user claiming again finishes a claim rather than failing")
-	s.Zero(again)
-	_, err = s.store.ClaimGuest(s.ctx, "app", "guest-1", "randy")
-	s.Error(err)
-}
-
-func (s *ShardedStoreSuite) TestAnExportOfTwoShardsFoldsTheirRollups() {
+// Defect: an export opens the other shard's database, or folds its rows into this one's.
+func (s *ShardedStoreSuite) TestAnExportCarriesThisShardsRowsAlone() {
 	latency := 100.0
-	s.Require().NoError(s.store.RecordRequest(s.ctx, &Request{Modality: "stt", CustomerID: "app", Provider: "deepgram", Model: "flux", StartedAt: s.base, AudioMs: 1000, LatencyMs: &latency, Success: true}))
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{Modality: "stt", CustomerID: "app", Provider: "deepgram", Model: "flux", StartedAt: s.base, AudioMs: 1000, LatencyMs: &latency, Success: true}))
 	slower := 300.0
-	s.Require().NoError(s.other.RecordRequest(s.ctx, &Request{Modality: "stt", CustomerID: "app", Provider: "deepgram", Model: "flux", StartedAt: s.base, AudioMs: 500, LatencyMs: &slower, Success: true}))
-	_, err := s.store.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
+	s.Require().NoError(insertRequest(s.ctx, s.other, &Request{Modality: "stt", CustomerID: "app", Provider: "deepgram", Model: "flux", StartedAt: s.base, AudioMs: 500, LatencyMs: &slower, Success: true}))
+	_, err := s.store.Buckets.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
 	s.Require().NoError(err)
-	_, err = s.other.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
+	_, err = s.other.Buckets.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
 	s.Require().NoError(err)
 
 	var hours []map[string]any
@@ -146,9 +171,9 @@ func (s *ShardedStoreSuite) TestAnExportOfTwoShardsFoldsTheirRollups() {
 		return nil
 	})
 	s.Require().NoError(err)
-	s.Equal(2, requests, "every shard's requests")
-	s.Require().Len(hours, 1, "one row for the hour both shards counted")
-	s.EqualValues(1500, hours[0]["audio_ms_total"])
-	s.EqualValues(2, hours[0]["request_count"])
-	s.EqualValues(200, hours[0]["latency_p50_ms"])
+	s.Equal(1, requests, "this shard's request")
+	s.Require().Len(hours, 1)
+	s.EqualValues(1000, hours[0]["audio_ms_total"])
+	s.EqualValues(1, hours[0]["request_count"])
+	s.EqualValues(100, hours[0]["latency_p50_ms"])
 }

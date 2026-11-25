@@ -18,8 +18,8 @@ import (
 func (s *AppHooksSuite) TestAMessageToASessionInAnAgentChannelReachesTheModelAsAtBase() {
 	s.forgetNoted()
 	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(), Mode: store.AgentModeText,
-		LLM: "noted/noted-model", Instructions: "be brief"}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+		Models: store.AgentModels{LLM: "noted/noted-model"}, Instructions: "be brief"}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 	s.serverClient.createSession(CreateSessionRequest{AgentId: &s.channelID, Agent: &config.Name, Incognito: pointerTo(true)})
 
 	s.Require().Equal(http.StatusOK, s.fromApp(s.appPath("/v1/chat/hooks/stream"), s.messageIn("{}")))

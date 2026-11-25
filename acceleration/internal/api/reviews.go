@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -76,7 +79,7 @@ func (s *Server) analyzeReviews(ctx context.Context, request *analyzeReviewsRequ
 		return nil, invalidRequest("to must be after from")
 	}
 
-	calls, err := s.store.CustomerCalls(ctx, customerID, store.CallFilter{
+	calls, err := s.store.Calls.Select(ctx, customerID, store.CallFilter{
 		From:           request.Body.From,
 		To:             request.Body.To,
 		MaxReviewScore: notGoodScore,
@@ -101,7 +104,7 @@ func (s *Server) analyzeReviews(ctx context.Context, request *analyzeReviewsRequ
 		Target:     target,
 	})
 	if err != nil {
-		return nil, unavailable("the reviews could not be analysed: " + err.Error())
+		return nil, analysisFailed(ctx, err)
 	}
 	defer session.Close()
 
@@ -113,11 +116,11 @@ func (s *Server) analyzeReviews(ctx context.Context, request *analyzeReviewsRequ
 		Text:            llm.TextParams{Format: llm.FormatJSONObject},
 	})
 	if err != nil {
-		return nil, unavailable("the reviews could not be analysed: " + err.Error())
+		return nil, analysisFailed(ctx, err)
 	}
 	response, err := llm.Collect(stream)
 	if err != nil {
-		return nil, unavailable("the reviews could not be analysed: " + err.Error())
+		return nil, analysisFailed(ctx, err)
 	}
 
 	var answer struct {
@@ -166,14 +169,28 @@ func (s *Server) analyzeReviews(ctx context.Context, request *analyzeReviewsRequ
 	return &analyzeReviewsResponse{Body: analysis}, nil
 }
 
+// analysisFailed is the answer to a model that did not analyse the reviews. A refusal of the
+// caller's target or money says why; any other failure names the vendor's URL and body, so it
+// is told without them and left for the request log.
+func analysisFailed(ctx context.Context, err error) error {
+	if answer, ok := moneyError(err); ok {
+		return answer
+	}
+	if errors.Is(err, routing.ErrRequest) {
+		return invalidRequest(err.Error())
+	}
+	recordFailure(ctx, err, stack.Trace(err))
+	return unavailable("the reviews could not be analysed: the model failed or gave no answer")
+}
+
 // reviewsRead is the reviews as the analyst reads them, one block a call.
 func reviewsRead(calls []store.Call) string {
 	var written strings.Builder
 	written.WriteString(strconv.Itoa(len(calls)) + " reviews, newest first:\n")
 	for _, call := range calls {
 		fmt.Fprintf(&written, "\nCall %s", call.ID)
-		if call.ConfigID != "" {
-			fmt.Fprintf(&written, " (agent %s)", call.ConfigID)
+		if call.AgentID != "" {
+			fmt.Fprintf(&written, " (agent %s)", call.AgentID)
 		}
 		if call.ReviewScore != nil {
 			fmt.Fprintf(&written, ", score %d", *call.ReviewScore)

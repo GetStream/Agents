@@ -61,8 +61,8 @@ yet: `StreamChatAI`'s `AIConversation` and generative UI, and its renderers of A
 Close `SwiftDemo.xcodeproj` first: it opens the same local package, the repository's root, and Xcode
 gives a local package to one window at a time, so the other reports "Missing package product".
 
-The router needs `XAI_API_KEY` for the chat's model and `GOOGLE_API_KEY`, `DEEPGRAM_API_KEY`
-and `INWORLD_API_KEY` for a call. Web search needs one of `EXA_API_KEY`, `TAVILY_API_KEY` or
+The router needs `GOOGLE_API_KEY` for the agent's model, and `DEEPGRAM_API_KEY` and
+`INWORLD_API_KEY` for a call. Web search needs one of `EXA_API_KEY`, `TAVILY_API_KEY` or
 `PERPLEXITY_API_KEY`; without one the agent is never offered the tool, and only the router's
 log says so.
 
@@ -128,6 +128,11 @@ a change), and `go run ./configure` again, which binds both:
   is not written again and a message is not edited: the router cannot rewind a conversation kept
   in Chat. The composer's options sheet has Think harder, which asks with a higher
   `reasoning_effort`.
+- **Incognito chat** is the dashed circle at the top right of a new chat. Its session is created
+  with `incognito: true`, so it has no channel, isn't listed, and Juno learns nothing from it;
+  `AgentChat` shows it from the session's `turnMessages`, reasoning, tool calls and approvals
+  included. Leaving it, or picking another conversation, ends it for good. The photos sent with a
+  question go to the agent but don't show on the question once it is sent.
 - **Photos** from the composer go with the question, shrunk and inline as data URIs. The
   router uploads them to the conversation's channel and writes them on the person's message,
   where the chat shows them; the model sees them with that question's reply.

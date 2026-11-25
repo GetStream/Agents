@@ -222,7 +222,7 @@ type Entry struct {
 }
 
 // QuotedVersion is the version of a quote for an amount the vendor quoted outright, such as
-// a number's monthly rental: no entry of the list priced it, only QuotedFactorBps.
+// a number's monthly rental: no entry of the list priced it, only PriceFactorBps.
 const QuotedVersion = "quoted"
 
 // Quote is what one unit of work costs, in millionths of a dollar, and the price list
@@ -251,7 +251,7 @@ type Quote struct {
 type Pricer interface {
 	Quote(item Item, used Quantities) Quote
 	// Quoted resells an amount the vendor quoted outright for the item: the amount times
-	// QuotedFactorBps, versioned QuotedVersion.
+	// PriceFactorBps, versioned QuotedVersion.
 	Quoted(item Item, micros int64) Quote
 	Billable(item Item) bool
 	// Entry is the item's entry: its vendor cost and its price.

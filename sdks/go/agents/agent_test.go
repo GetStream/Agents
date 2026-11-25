@@ -200,6 +200,7 @@ func newBackend(t *testing.T) *backend {
 		stored := acceleration.AgentConfig{
 			Id: "config-" + request.Name, Name: request.Name, Instructions: request.Instructions,
 			Subagent: request.Subagent, Llm: request.Llm, Tags: request.Tags,
+			SyncHash:  &request.Hash,
 			CreatedAt: time.Now(), UpdatedAt: time.Now(),
 		}
 		if !router.ignoresUI {
@@ -1219,9 +1220,11 @@ func TestSyncSendsNoChannelsWhenTheFileNamesNone(t *testing.T) {
 	}
 }
 
-func TestSyncSendsWhetherToolsAreOfferedProgressively(t *testing.T) {
+func TestSyncSendsTheToolGroups(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "concierge")
-	write(t, root, "agent.yaml", "tools:\n  progressive: true\n")
+	write(t, root, "agent.yaml", "tools:\n"+
+		"  - name: booking\n    tools: [lookup_booking]\n"+
+		"  - name: refunds\n    loading: deferred\n    output_retention: 30d\n    tools: [refund_booking, void_ticket]\n")
 	router := newBackend(t)
 	agent := agentOn(t, router, Options{Dir: root})
 
@@ -1231,14 +1234,24 @@ func TestSyncSendsWhetherToolsAreOfferedProgressively(t *testing.T) {
 
 	router.mu.Lock()
 	defer router.mu.Unlock()
-	if sent := router.syncs[0].Tools; sent == nil || sent.Progressive == nil || !*sent.Progressive {
-		t.Errorf("tools went as %+v", sent)
+	sent := router.syncs[0].Tools
+	if sent == nil || len(*sent) != 2 {
+		t.Fatalf("tools went as %+v", sent)
+	}
+	booking, refunds := (*sent)[0], (*sent)[1]
+	if booking.Name != "booking" || booking.Loading != nil || booking.OutputRetention != nil {
+		t.Errorf("a group that says nothing more went as %+v", booking)
+	}
+	if refunds.Loading == nil || *refunds.Loading != acceleration.ToolLoadingDeferred ||
+		refunds.OutputRetention == nil || *refunds.OutputRetention != "30d" ||
+		!slices.Equal(refunds.Tools, []string{"refund_booking", "void_ticket"}) {
+		t.Errorf("refunds went as %+v", refunds)
 	}
 }
 
-func TestSyncSendsHowLongToolOutputIsKept(t *testing.T) {
+func TestSyncSendsHowAConnectorsToolsAreOffered(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "concierge")
-	write(t, root, "agent.yaml", "tools:\n  output_retention: 30d\n")
+	write(t, root, "agent.yaml", "connectors:\n  - name: linear\n    loading: summary\n    output_retention: none\n")
 	router := newBackend(t)
 	agent := agentOn(t, router, Options{Dir: root})
 
@@ -1248,8 +1261,14 @@ func TestSyncSendsHowLongToolOutputIsKept(t *testing.T) {
 
 	router.mu.Lock()
 	defer router.mu.Unlock()
-	if sent := router.syncs[0].Tools; sent == nil || sent.OutputRetention == nil || *sent.OutputRetention != "30d" {
-		t.Errorf("tools went as %+v", sent)
+	bindings := router.syncs[0].Connectors
+	if bindings == nil || len(*bindings) != 1 {
+		t.Fatalf("connectors went as %+v", bindings)
+	}
+	binding := (*bindings)[0]
+	if binding.Loading == nil || *binding.Loading != acceleration.ToolLoadingSummary ||
+		binding.OutputRetention == nil || *binding.OutputRetention != "none" {
+		t.Errorf("linear went as %+v", binding)
 	}
 }
 
@@ -2214,6 +2233,43 @@ func TestSyncFailsWhenConnectionsCannotBeListed(t *testing.T) {
 
 // The router does nothing for a hash it already stored (acceleration/internal/api/sync.go:180),
 // so the sync that finds the connection has to send another one.
+func TestAnUnchangedDirectoryIsSyncedToARouterItWasNeverSyncedTo(t *testing.T) {
+	// Synced to a local router first, then pointed at the hosted one: the stamp the first
+	// sync left matches the directory, but the second router keeps nothing of it.
+	root := filepath.Join(t.TempDir(), "concierge")
+	write(t, root, "agent.yaml", "name: concierge\nllm: openai/gpt-5.6\n")
+	local, hosted := newBackend(t), newBackend(t)
+	if _, err := agentOn(t, local, Options{Dir: root}).Sync(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	hosted.mu.Lock()
+	hosted.configs = []acceleration.AgentConfig{{Id: "config-concierge", Name: "concierge", CreatedAt: time.Now(), UpdatedAt: time.Now()}}
+	hosted.mu.Unlock()
+
+	stored, err := agentOn(t, hosted, Options{Dir: root}).Sync(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hosted.mu.Lock()
+	synced := len(hosted.syncs)
+	hosted.mu.Unlock()
+	if synced != 1 {
+		t.Fatalf("the router that never had the directory got %d syncs", synced)
+	}
+	if stored.Llm == nil || *stored.Llm != "openai/gpt-5.6" {
+		t.Errorf("the sync answered the router's old config: %+v", stored)
+	}
+	if _, err := agentOn(t, hosted, Options{Dir: root}).Sync(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	hosted.mu.Lock()
+	defer hosted.mu.Unlock()
+	if len(hosted.syncs) != 1 {
+		t.Errorf("an unchanged directory the router has was sent again: %d syncs", len(hosted.syncs))
+	}
+}
+
 func TestASyncThatLeftAConnectorOutAddsItOnceTheConnectionExists(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "concierge")
 	write(t, root, "agent.yaml", "name: concierge\nconnectors:\n  - name: issues\n    connection: company\n")

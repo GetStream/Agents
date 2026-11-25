@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -95,7 +96,7 @@ func (s *Server) listKnowledgeDocuments(ctx context.Context, request *listKnowle
 		namespace = strings.TrimSpace(*request.Namespace.ptr())
 	}
 
-	stored, err := s.store.CustomerKnowledgeDocuments(ctx, customerID, namespace)
+	stored, err := s.store.KnowledgeDocuments.Select(ctx, customerID, store.KnowledgeDocumentFilter{Namespace: namespace})
 	if err != nil {
 		return nil, err
 	}
@@ -117,9 +118,9 @@ func (s *Server) getKnowledgeDocument(ctx context.Context, request *getKnowledge
 		return nil, errNoKnowledgeDocuments
 	}
 
-	document, err := s.store.KnowledgeDocument(ctx, customerID, request.Id)
+	document, err := s.store.KnowledgeDocuments.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownKnowledgeDocument
+		return nil, unknownOr(err, store.ErrNoKnowledgeDocument, errUnknownKnowledgeDocument)
 	}
 	read := indexedKnowledgeDocumentOf(document)
 	read.Text = &document.Text
@@ -136,9 +137,9 @@ func (s *Server) deleteKnowledgeDocument(ctx context.Context, request *deleteKno
 		return nil, errNoKnowledgeDocuments
 	}
 
-	document, err := s.store.KnowledgeDocument(ctx, customerID, request.Id)
+	document, err := s.store.KnowledgeDocuments.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownKnowledgeDocument
+		return nil, unknownOr(err, store.ErrNoKnowledgeDocument, errUnknownKnowledgeDocument)
 	}
 	if err := s.removeKnowledgeDocument(ctx, document); err != nil {
 		return nil, err
@@ -162,7 +163,7 @@ func (s *Server) deleteKnowledge(ctx context.Context, request *deleteKnowledgeRe
 		return nil, invalidRequest("a namespace is required")
 	}
 
-	configs, err := s.store.CustomerAgentConfigs(ctx, customerID)
+	configs, err := s.store.AgentConfigs.Select(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +188,7 @@ func (s *Server) deleteKnowledge(ctx context.Context, request *deleteKnowledgeRe
 	if err != nil {
 		return nil, err
 	}
-	documents, pages, err := s.store.DeleteKnowledgeBase(ctx, customerID, namespace)
+	documents, pages, err := s.store.KnowledgeDocuments.DeleteBase(ctx, customerID, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -214,9 +215,9 @@ func (s *Server) listKnowledgeDocumentPassages(ctx context.Context, request *lis
 		return nil, errNoKnowledgeDocuments
 	}
 
-	document, err := s.store.KnowledgeDocument(ctx, customerID, request.Id)
+	document, err := s.store.KnowledgeDocuments.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownKnowledgeDocument
+		return nil, unknownOr(err, store.ErrNoKnowledgeDocument, errUnknownKnowledgeDocument)
 	}
 	passages, err := s.knowledgePassages(ctx, customerID, document.Namespace, document.Source, document.Passages)
 	if err != nil {
@@ -262,7 +263,7 @@ func (s *Server) fillKnowledge(
 	// and what the entry below reports as having moved.
 	before := map[string]store.KnowledgeDocument{}
 	if s.store != nil {
-		stored, err := s.store.CustomerKnowledgeDocumentsWithText(ctx, customerID, namespace)
+		stored, err := s.store.KnowledgeDocuments.Select(ctx, customerID, store.KnowledgeDocumentFilter{Namespace: namespace, WithText: true})
 		if err != nil {
 			return 0, 0, err
 		}
@@ -272,8 +273,7 @@ func (s *Server) fillKnowledge(
 	}
 
 	read, cut := 0, 0
-	var passages []knowledge.Document
-	var written []store.KnowledgeDocument
+	var written []postedDocument
 	for _, document := range documents {
 		source := strings.TrimSpace(document.Source)
 		if source == "" {
@@ -290,8 +290,7 @@ func (s *Server) fillKnowledge(
 		if was, had := before[source]; had && was.State == store.KnowledgeDocumentIndexed && was.Text == document.Text && was.Passages == len(split) {
 			continue
 		}
-		passages = append(passages, split...)
-		written = append(written, store.KnowledgeDocument{
+		written = append(written, postedDocument{passages: split, KnowledgeDocument: store.KnowledgeDocument{
 			CustomerID:  customerID,
 			Namespace:   namespace,
 			Source:      source,
@@ -299,7 +298,7 @@ func (s *Server) fillKnowledge(
 			Text:        document.Text,
 			ContentType: "text/markdown",
 			Bytes:       int64(len(document.Text)),
-		})
+		}})
 	}
 
 	if cut == 0 {
@@ -310,7 +309,7 @@ func (s *Server) fillKnowledge(
 	}
 	writer := s.knowledgeFor(ctx, customerID, region)
 	if s.store == nil {
-		if err := writer.Upsert(ctx, namespace, passages); err != nil {
+		if err := writer.Upsert(ctx, namespace, passagesOf(written)); err != nil {
 			return 0, 0, err
 		}
 		return read, cut, nil
@@ -323,39 +322,78 @@ func (s *Server) fillKnowledge(
 		return 0, 0, err
 	}
 
-	// Every row is saved before the passages, counting the old version's passages as well as
-	// the new one's, so a write that stops part way leaves a listed document whose delete
-	// removes every passage either version wrote.
-	indexed := 0
+	agentID := s.agentOfKnowledge(ctx, customerID, namespace)
+	unfinished := written
 	defer func() {
 		if err != nil {
-			s.failKnowledge(ctx, written[indexed:], before)
+			s.failKnowledge(ctx, unfinished)
 		}
 	}()
-	for _, document := range written {
-		document.Passages = max(document.Passages, before[document.Source].Passages)
-		document.State = store.KnowledgeDocumentPending
-		if err = s.store.SaveKnowledgeDocument(ctx, &document); err != nil {
+	for range postAttempts {
+		unfinished, err = s.writeKnowledge(ctx, writer, agentID, namespace, unfinished, before)
+		if err != nil {
 			return 0, 0, err
 		}
+		if len(unfinished) == 0 {
+			return read, cut, nil
+		}
 	}
-	if err = writer.Upsert(ctx, namespace, passages); err != nil {
-		return 0, 0, err
+	err = conflict("a document was removed while it was written: post it again")
+	return 0, 0, err
+}
+
+// postedDocument is a document and the passages it was cut into.
+type postedDocument struct {
+	store.KnowledgeDocument
+	passages []knowledge.Document
+}
+
+func passagesOf(documents []postedDocument) []knowledge.Document {
+	var passages []knowledge.Document
+	for _, document := range documents {
+		passages = append(passages, document.passages...)
+	}
+	return passages
+}
+
+// writeKnowledge writes documents and returns those to write again: a removal or an upload took
+// their rows meanwhile, and may have met their passages. With an error it returns those not
+// finished.
+//
+// Every row is saved before the passages, counting the old version's passages as well as the
+// new one's, so a write that stops part way leaves a listed document whose delete removes every
+// passage either version wrote.
+func (s *Server) writeKnowledge(
+	ctx context.Context, writer metered.OwnedKnowledge, agentID, namespace string, documents []postedDocument,
+	before map[string]store.KnowledgeDocument,
+) ([]postedDocument, error) {
+	for i := range documents {
+		document := &documents[i].KnowledgeDocument
+		document.State = store.KnowledgeDocumentPending
+		if err := s.store.KnowledgeDocuments.Upsert(ctx, document); err != nil {
+			return documents, err
+		}
+	}
+	if err := writer.Upsert(ctx, namespace, passagesOf(documents)); err != nil {
+		return documents, err
 	}
 
-	agentID := s.agentOfKnowledge(ctx, customerID, namespace)
-	for i := range written {
-		document := &written[i]
+	var overtaken []postedDocument
+	for i := range documents {
+		document := &documents[i].KnowledgeDocument
 		was, had := before[document.Source]
 		stale := ingest.IDs(document.Source, document.Passages, was.Passages)
-		if err = writer.Delete(ctx, namespace, stale); err != nil {
-			return 0, 0, err
+		if err := writer.Delete(ctx, namespace, stale); err != nil {
+			return append(overtaken, documents[i:]...), err
 		}
-		document.State = store.KnowledgeDocumentIndexed
-		if err = s.store.SaveKnowledgeDocument(ctx, document); err != nil {
-			return 0, 0, err
+		finished, err := s.store.KnowledgeDocuments.Finish(ctx, document, document.ObjectKey)
+		if err != nil {
+			return append(overtaken, documents[i:]...), err
 		}
-		indexed++
+		if !finished {
+			overtaken = append(overtaken, documents[i])
+			continue
+		}
 		action := store.AuditCreated
 		var previous any
 		if had {
@@ -368,7 +406,7 @@ func (s *Server) fillKnowledge(
 			Changes: auditDiff(previous, auditedKnowledgeOf(*document)),
 		})
 	}
-	return read, cut, nil
+	return overtaken, nil
 }
 
 // knowledgeWriteFailed is why a failed document failed, as its row tells the customer. The
@@ -376,15 +414,15 @@ func (s *Server) fillKnowledge(
 const knowledgeWriteFailed = "the passages could not all be written: post the document again or delete it"
 
 // failKnowledge marks documents whose write stopped part way as failed, still counting every
-// passage either version may have written. It outlives the request, since a caller that hung
-// up is one way a write stops.
-func (s *Server) failKnowledge(ctx context.Context, documents []store.KnowledgeDocument, before map[string]store.KnowledgeDocument) {
+// passage either version may have written. One removed meanwhile is listed again, as its
+// passages may be written. It outlives the request, since a caller that hung up is one way a
+// write stops.
+func (s *Server) failKnowledge(ctx context.Context, documents []postedDocument) {
 	ctx, cancel := detachedWrite(ctx)
 	defer cancel()
 	for _, document := range documents {
-		document.Passages = max(document.Passages, before[document.Source].Passages)
 		document.State, document.Error = store.KnowledgeDocumentFailed, knowledgeWriteFailed
-		if err := s.store.SaveKnowledgeDocument(ctx, &document); err != nil {
+		if err := s.store.KnowledgeDocuments.Upsert(ctx, &document.KnowledgeDocument); err != nil {
 			s.logger.Warn("could not mark a knowledge document failed", "source", document.Source, "error", err)
 			return
 		}
@@ -410,8 +448,8 @@ func (s *Server) agentOfKnowledge(ctx context.Context, customerID, namespace str
 	if s.configs == nil || namespace == "" {
 		return ""
 	}
-	config, found, err := s.configs.AgentConfigByName(ctx, customerID, namespace)
-	if err != nil || !found {
+	config, err := s.store.AgentConfigs.GetByName(ctx, customerID, namespace)
+	if err != nil {
 		return ""
 	}
 	return config.ID
@@ -429,7 +467,7 @@ func (s *Server) forgetKnowledge(
 		}
 	}
 
-	stored, err := s.store.CustomerKnowledgeDocuments(ctx, customerID, namespace)
+	stored, err := s.store.KnowledgeDocuments.Select(ctx, customerID, store.KnowledgeDocumentFilter{Namespace: namespace})
 	if err != nil {
 		return err
 	}
@@ -444,16 +482,72 @@ func (s *Server) forgetKnowledge(
 	return nil
 }
 
+// removeAttempts bounds a removal whose source an upload, a post or a read keeps writing.
+const removeAttempts = 5
+
+// postAttempts bounds a post whose documents removals keep taking. It is more than one removal
+// can take a document: once an attempt, and once more when the last one fails.
+const postAttempts = removeAttempts + 2
+
 // removeKnowledgeDocument deletes a document's passages and then its row. The passages go
 // first: a document we have forgotten but are still answering out of is the failure worth
 // avoiding.
-func (s *Server) removeKnowledgeDocument(ctx context.Context, document store.KnowledgeDocument) error {
-	ids := ingest.IDs(document.Source, 0, document.Passages)
-	if err := s.knowledgeFor(ctx, document.CustomerID, "").Delete(ctx, document.Namespace, ids); err != nil {
-		return err
+//
+// A read of its file can write passages while they are deleted, and the file can be uploaded or
+// its text posted again. Each changes the key the removal holds the row under, so the row is
+// deleted only if it still holds it, and otherwise the passages are deleted again.
+func (s *Server) removeKnowledgeDocument(ctx context.Context, document store.KnowledgeDocument) (err error) {
+	owned := s.knowledgeFor(ctx, document.CustomerID, "")
+	rewritten := false
+	defer func() {
+		if err == nil {
+			return
+		}
+		// The document is marked failed for a caller that hung up as well. On the first
+		// attempt a file uploaded meanwhile is left to its read. A later attempt may have
+		// deleted what a read not yet finished wrote, so its file is let go of too.
+		held, cancel := detachedWrite(ctx)
+		defer cancel()
+		var markErr error
+		if rewritten {
+			_, _, markErr = s.store.KnowledgeDocuments.Take(held, document.CustomerID, document.ID)
+		} else {
+			markErr = s.store.KnowledgeDocuments.FailRemoval(held, document.CustomerID, document.ID)
+		}
+		if markErr != nil && !errors.Is(markErr, store.ErrNoKnowledgeDocument) {
+			s.logger.Warn("could not mark a knowledge document whose removal failed", "id", document.ID, "error", markErr)
+		}
+	}()
+	for range removeAttempts {
+		key, passages, err := s.store.KnowledgeDocuments.Take(ctx, document.CustomerID, document.ID)
+		if errors.Is(err, store.ErrNoKnowledgeDocument) {
+			// Another removal of it finished first.
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := owned.Delete(ctx, document.Namespace, ingest.IDs(document.Source, 0, passages)); err != nil {
+			return err
+		}
+		removed, err := s.forgetKnowledgeDocument(ctx, document, key)
+		if err != nil || removed {
+			return err
+		}
+		rewritten = true
 	}
-	if err := s.store.DeleteKnowledgeDocument(ctx, document.CustomerID, document.ID); err != nil {
-		return err
+	return conflict("the document is being written while it is removed: delete it again")
+}
+
+// forgetKnowledgeDocument deletes the row of a document whose passages are gone, its file and
+// records the removal, and reports whether the removal still held the row. It outlives the
+// request: past the passages, a caller that hung up must not leave the rest undone.
+func (s *Server) forgetKnowledgeDocument(ctx context.Context, document store.KnowledgeDocument, key string) (bool, error) {
+	ctx, cancel := detachedWrite(ctx)
+	defer cancel()
+	removed, err := s.store.KnowledgeDocuments.Delete(ctx, document.CustomerID, document.ID, key)
+	if err != nil || !removed {
+		return false, err
 	}
 	if s.knowledgeFiles != nil {
 		if err := s.knowledgeFiles.Forget(ctx, document); err != nil {
@@ -466,7 +560,7 @@ func (s *Server) removeKnowledgeDocument(ctx context.Context, document store.Kno
 		Action:  store.AuditDeleted,
 		Changes: auditDiff(auditedKnowledgeOf(document), nil),
 	})
-	return nil
+	return true, nil
 }
 
 // knowledgeFor is the knowledge base as the request reads and writes it: every call is a
@@ -514,12 +608,13 @@ func (s *Server) registerKnowledge(api huma.API) {
 			"again after editing it replaces that document's passages rather than leaving two " +
 			"versions of them to be found. A namespace is never shared between agents, and the " +
 			"caller names it.\n" +
+			"A document that is removed again and again while it is written is refused with a 409: post it again.\n" +
 			"Server-side only: it needs a server-side token, so it cannot be reached from an end " +
 			"user's device.",
 		Responses: map[string]*huma.Response{
 			"200": {Description: "The passages were written"},
 		},
-		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden},
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusConflict},
 	}, s.ingestKnowledge)
 	huma.Register(api, huma.Operation{
 		OperationID: "deleteKnowledge",
@@ -567,14 +662,17 @@ func (s *Server) registerKnowledge(api huma.API) {
 		Method:      http.MethodDelete,
 		Path:        "/v1/agents/knowledge/documents/{id}",
 		Summary:     "Take a document out of a knowledge base",
-		Description: "The passages it was cut into are removed too, so the agent stops answering out of it.\n" +
+		Description: "The passages it was cut into are removed too, so the agent stops answering out of it. " +
+			"A document that keeps being written while it is removed is refused with a 409 and listed as " +
+			"failed, so it can be deleted again.\n" +
 			"Server-side only: it needs a server-side token, so it cannot be reached from an end " +
 			"user's device.",
 		DefaultStatus: http.StatusNoContent,
 		Responses: map[string]*huma.Response{
 			"204": {Description: "The document and its passages are gone"},
 		},
-		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+			http.StatusConflict},
 	}, s.deleteKnowledgeDocument)
 	huma.Register(api, huma.Operation{
 		OperationID: "listKnowledgeDocumentPassages",
@@ -637,11 +735,11 @@ type IndexedKnowledgeDocument struct {
 	Bytes       int64                  `json:"bytes" doc:"The size of the file uploaded, or of the text posted. 0 for a document written before sizes were kept."`
 	ContentType string                 `json:"content_type" doc:"The type the file was uploaded as, or text/markdown for text posted. Empty for a document written before types were kept." example:"application/pdf"`
 	CreatedAt   time.Time              `json:"created_at"`
-	Error       *string                `json:"error,omitempty" doc:"Why the uploaded file could not be read, or why the passages of posted text could not all be written, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good."`
+	Error       *string                `json:"error,omitempty" doc:"Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good."`
 	Id          string                 `json:"id"`
 	Namespace   string                 `json:"namespace"`
 	Pages       int                    `json:"pages" doc:"How many pages the uploaded file has. 0 for text, and for a file without pages, such as a spreadsheet."`
-	Passages    int                    `json:"passages" doc:"How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote."`
+	Passages    int                    `json:"passages" doc:"How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote. An indexed one whose file was still being read when newer text or a newer file replaced it can count more than it was cut into, for the same reason, until it is written again."`
 	Source      string                 `json:"source" doc:"What the document was posted as, and what its passages are keyed by." example:"pricing.md"`
 	State       KnowledgeDocumentState `json:"state"`
 	Text        *string                `json:"text,omitempty" doc:"The document as it was last posted, or as its file was read: Markdown, each page of a file opening with an <!-- page N --> comment. Only reading one document fills it in, and one written before its text was kept has none."`
@@ -654,7 +752,7 @@ func (*IndexedKnowledgeDocument) TransformSchema(_ huma.Registry, schema *huma.S
 	return schema
 }
 
-// KnowledgeDocumentState Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, or posted text whose write stopped part way, and error says why: the passages written before the failure can still be looked up, and posting the document again or deleting it fixes it.
+// KnowledgeDocumentState Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
 type KnowledgeDocumentState string
 
 // Defines values for KnowledgeDocumentState.
@@ -675,7 +773,7 @@ func (e KnowledgeDocumentState) Valid() bool {
 }
 
 func (KnowledgeDocumentState) Schema(registry huma.Registry) *huma.Schema {
-	return namedEnum(registry, "KnowledgeDocumentState", "Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, or posted text whose write stopped part way, and error says why: the passages written before the failure can still be looked up, and posting the document again or deleting it fixes it.", "pending", "indexed", "failed")
+	return namedEnum(registry, "KnowledgeDocumentState", "Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.", "pending", "indexed", "failed")
 }
 
 // IngestKnowledgeRequest is the IngestKnowledgeRequest schema.

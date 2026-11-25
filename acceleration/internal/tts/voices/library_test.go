@@ -9,10 +9,13 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/suite"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // countingLister answers with whatever the test put in it and says how often it was asked.
@@ -209,6 +212,23 @@ func (s *CatalogueSuite) TestAVoiceTheProviderDoesNotHaveIsRefusedNamingTheClose
 	s.Require().Error(err)
 	s.Equal(`voices: elevenlabs has no voice "Sara"; the closest in its library is `+
 		`"Sarah - Mature, Reassuring, Confident" (EXAVITQu4vr4xnSDxMaL)`, err.Error())
+}
+
+// The account lists every customer's clones as its own, and a refusal is read by whoever
+// asked.
+func (s *CatalogueSuite) TestARefusalNeverPointsToACloneInTheAccount() {
+	s.catalogue.Register("elevenlabs", &findingLister{
+		countingLister: countingLister{voices: []Library{
+			{ID: "CLONE000000000000001", Name: "Sara Example CEO", Own: true}, sarah,
+		}},
+		exists: map[string]bool{},
+	})
+
+	err := s.catalogue.Check(s.ctx, "elevenlabs", "Sara Example")
+
+	s.Require().Error(err)
+	s.NotContains(err.Error(), "CLONE000000000000001")
+	s.Contains(err.Error(), sarah.ID)
 }
 
 func (s *CatalogueSuite) TestAVoiceAskedForByItsNameIsPointedToItsId() {
@@ -708,17 +728,86 @@ func (s *LibrarySuite) TestAnElevenLabsSearchThatCannotReachTheVendorIsAnError()
 	s.False(exists)
 }
 
-func (s *LibrarySuite) TestAVoiceIdIsLookedUpAsOnePathSegment() {
-	s.routes["/v1/voices/../user"] = voiceNotFound
-	s.statuses["/v1/voices/../user"] = http.StatusBadRequest
-	s.routes["/v1/shared-voices"] = `{"voices":[]}`
+// An id that could reach another endpoint with our key is not one of its voices, so it is not
+// looked up at all and goes through as any other vendor's voice does (errNotAVoiceID).
+func (s *LibrarySuite) TestAVoiceIdThatIsNotOnePathSegmentIsNotLookedUp() {
+	for _, id := range []string{"../user", "..", "a/b", "a?b=1", "a#b", "a%2Fb", "a b", ""} {
+		s.seen = nil
 
-	exists, err := s.elevenLabs().Exists(s.ctx, "../user")
+		exists, err := s.elevenLabs().Exists(s.ctx, id)
 
-	s.Require().NoError(err)
-	s.False(exists)
-	s.Equal("/v1/voices/..%2Fuser", s.seen[0], "a caller's voice cannot reach another endpoint with our key")
+		s.ErrorIs(err, errNotAVoiceID, "%q", id)
+		s.False(exists)
+		s.Empty(s.seen, "%q reached the vendor", id)
+	}
 }
+
+// Every request that names a voice in its path refuses an id that is not one of the vendor's
+// before anything is sent, so none can reach another resource with the deployment's key.
+func (s *LibrarySuite) TestAVoiceIdThatIsNotTheVendorsIsSentNowhere() {
+	elevenLabs := s.elevenLabs()
+	cartesia := s.cartesia()
+	for _, id := range []string{"..", "abc/../../v1/user", "abc?x=1", "abc#x", "abc%2F", "abc ", ""} {
+		s.seen = nil
+		_, preview := elevenLabs.Preview(s.ctx, id)
+		_, spoken := elevenLabs.Speak(s.ctx, id, "hello")
+		_, heard := cartesia.Preview(s.ctx, id)
+		s.ErrorIs(preview, voiceid.ErrInvalid, "elevenlabs preview %q", id)
+		s.ErrorIs(spoken, voiceid.ErrInvalid, "elevenlabs speak %q", id)
+		s.ErrorIs(heard, voiceid.ErrInvalid, "cartesia preview %q", id)
+		if id != "" {
+			// An empty id is no voice to delete, as on the base.
+			s.ErrorIs(elevenLabs.Delete(s.ctx, id), voiceid.ErrInvalid, "elevenlabs delete %q", id)
+			s.ErrorIs(cartesia.Delete(s.ctx, id), voiceid.ErrInvalid, "cartesia delete %q", id)
+		}
+		s.Empty(s.seen, "%q reached the vendor", id)
+	}
+	// An unhyphenated Cartesia id is no UUID of theirs either.
+	_, err := cartesia.Preview(s.ctx, strings.ReplaceAll(cartesiaVoiceID, "-", ""))
+	s.ErrorIs(err, voiceid.ErrInvalid)
+	s.Empty(s.seen)
+}
+
+// An upper case copy of an id is the same voice, and the vendor is asked about the lowercase
+// spelling the ownership check compared, never the one the caller typed.
+func (s *LibrarySuite) TestACartesiaIdInUpperCaseReachesTheVendorInLowercase() {
+	s.routes["/voices/"+cartesiaVoiceID] = `{"preview_file_url":"` + s.server.URL + `/sample.mp3"}`
+	s.routes["/sample.mp3"] = "mp3"
+	s.seen = nil
+
+	_, err := s.cartesia().Preview(s.ctx, strings.ToUpper(cartesiaVoiceID))
+	s.Require().NoError(err)
+	s.Contains(s.seen, "/voices/"+cartesiaVoiceID+"?expand[]=preview_file_url")
+
+	s.seen = nil
+	s.routes["/voices/"+cartesiaVoiceID] = "{}"
+	s.Require().NoError(s.cartesia().Delete(s.ctx, strings.ToUpper(cartesiaVoiceID)))
+	s.Equal([]string{"/voices/" + cartesiaVoiceID}, s.seen)
+}
+
+// The ids the vendors hand out are sent as they are, to their own resource.
+func (s *LibrarySuite) TestAVendorsOwnIdReachesItsOwnResource() {
+	s.routes["/v1/voices/21m00Tcm4TlvDq8ikWAM"] = `{"preview_url":"` + s.server.URL + `/sample.mp3"}`
+	s.routes["/voices/"+cartesiaVoiceID] = `{"preview_file_url":"` + s.server.URL + `/sample.mp3"}`
+	s.routes["/sample.mp3"] = "mp3"
+
+	_, err := s.elevenLabs().Preview(s.ctx, "21m00Tcm4TlvDq8ikWAM")
+	s.Require().NoError(err)
+	_, err = s.cartesia().Preview(s.ctx, cartesiaVoiceID)
+	s.Require().NoError(err)
+	s.Require().NoError(s.elevenLabs().Delete(s.ctx, "21m00Tcm4TlvDq8ikWAM"))
+	s.Require().NoError(s.cartesia().Delete(s.ctx, cartesiaVoiceID))
+
+	s.Equal([]string{
+		"/v1/voices/21m00Tcm4TlvDq8ikWAM", "/sample.mp3",
+		"/voices/" + cartesiaVoiceID + "?expand[]=preview_file_url", "/sample.mp3",
+		"/v1/voices/21m00Tcm4TlvDq8ikWAM",
+		"/voices/" + cartesiaVoiceID,
+	}, s.seen)
+}
+
+// cartesiaVoiceID is a Cartesia voice id as Cartesia hands them out.
+const cartesiaVoiceID = "a0e99841-438c-4a64-b679-ae501e7d6091"
 
 func (s *LibrarySuite) TestCartesiaReadsEveryPageAndAsksForThePreviewUrl() {
 	s.routes["/voices"] = `{"data":[{"id":"1","name":"Aadhya","description":"Slow and calm",
@@ -969,10 +1058,10 @@ func (s *LibrarySuite) TestAListingTheVendorFailsIsWordedAsBefore() {
 }
 
 func (s *LibrarySuite) TestAPreviewTheKeyIsRefusedStillRefusesTheVoice() {
-	s.routes["/voices/x"] = `{"error":"nope"}`
-	s.statuses["/voices/x"] = http.StatusForbidden
+	s.routes["/voices/"+cartesiaVoiceID] = `{"error":"nope"}`
+	s.statuses["/voices/"+cartesiaVoiceID] = http.StatusForbidden
 
-	_, err := s.cartesia().Preview(s.ctx, "x")
+	_, err := s.cartesia().Preview(s.ctx, cartesiaVoiceID)
 
 	// As the base answered it (1b4404556).
 	s.EqualError(err, `voices: cartesia refused the voice (http 403): {"error":"nope"}`)

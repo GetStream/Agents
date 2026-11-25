@@ -168,15 +168,27 @@ class ConnectorSettings:
     require_approval: list[str] | None = None
     """Names or patterns of the tools whose every call waits for the session's user to
     allow it. None sends no require_approval key."""
+    loading: str = ""
+    """How the connector's tools are offered, as a tool group's. Empty is full."""
+    output_retention: str = ""
+    """How long sessions keep what the connector's tools were given and gave back: none, or
+    a duration such as 30d. Empty is as long as the session."""
+
+
+TOOL_LOADINGS = ("full", "summary", "deferred")
 
 
 @dataclass
-class ToolSettings:
-    """How connector tools are offered."""
+class ToolGroupSettings:
+    """One group of the agent's functions, and how they are offered."""
 
-    progressive: bool | None = None
-    """Offer each tool by a summary, the first call to it returning its full description
-    instead of running it. None when the file says nothing about it."""
+    name: str
+    tools: list[str]
+    loading: str = ""
+    """full, summary or deferred. Empty is full."""
+    output_retention: str = ""
+    """How long sessions keep what the group's tools were given and gave back: none, or a
+    duration such as 30d. Empty is as long as the session."""
 
 
 @dataclass
@@ -244,8 +256,10 @@ class Settings:
     connectors: list[ConnectorSettings] | None = None
     """Connectors the agent binds. None when the file says nothing about them, which
     leaves whatever is stored; an empty list removes them."""
-    tools: ToolSettings | None = None
-    """How connector tools are offered. None when the file says nothing about it."""
+    tools: list[ToolGroupSettings] | None = None
+    """The groups naming the functions this process provides that the agent may offer: a
+    function no group names is never offered. None when the file says nothing, which
+    leaves the groups stored."""
     channels: ChannelsSettings | None = None
     """Lines the agent answers on besides Stream Chat. The provider's credentials live on
     the router, connected once for the app; this only names the numbers."""
@@ -362,7 +376,9 @@ def load(path: str | Path) -> Folder:
     root = Path(path)
     if not root.is_dir():
         raise ValueError(f"{root} is not an agent directory")
-    declaration = root / AGENT_FILE
+    # What is loaded is what the directory holds: a link out of it is refused wherever it is.
+    real = root.resolve()
+    declaration = _inside(real, root / AGENT_FILE)
     if not declaration.is_file():
         raise ValueError(f"{root} has no {AGENT_FILE}, so it is not an agent directory")
 
@@ -370,18 +386,18 @@ def load(path: str | Path) -> Folder:
     folder.declaration = declaration.read_text().strip()
     folder.settings = _declare(declaration)
     folder.name = folder.settings.name or root.name
-    instructions = root / INSTRUCTIONS_FILE
+    instructions = _inside(real, root / INSTRUCTIONS_FILE)
     if instructions.is_file():
         folder.instructions = instructions.read_text().strip()
-    guardrail = root / GUARDRAIL_FILE
+    guardrail = _inside(real, root / GUARDRAIL_FILE)
     if guardrail.is_file():
         folder.guardrail = guardrail.read_text().strip()
-    folder.skills = _load_skills(root / SKILLS_DIR)
-    folder.knowledge = _load_knowledge(root / KNOWLEDGE_DIR)
+    folder.skills = _load_skills(real, root / SKILLS_DIR)
+    folder.knowledge = _load_knowledge(real, root / KNOWLEDGE_DIR)
     folder.knowledge_urls = _load_knowledge_urls(
-        root / KNOWLEDGE_DIR / KNOWLEDGE_URLS_FILE
+        _inside(real, root / KNOWLEDGE_DIR / KNOWLEDGE_URLS_FILE)
     )
-    folder.simulations = _load_simulations(root / SIMULATIONS_DIR)
+    folder.simulations = _load_simulations(real, root / SIMULATIONS_DIR)
     return folder
 
 
@@ -636,6 +652,8 @@ def _connectors(path: Path, value: object) -> list[ConnectorSettings] | None:
             "required",
             "sandbox",
             "require_approval",
+            "loading",
+            "output_retention",
         }
         if extra:
             raise ValueError(f"{path} unknown connectors setting: {sorted(extra)[0]}")
@@ -676,6 +694,8 @@ def _connectors(path: Path, value: object) -> list[ConnectorSettings] | None:
                 required=required,
                 sandbox=bool(sandbox),
                 require_approval=_connector_require_approval(path, item),
+                loading=_loading(path, f'connector "{name}"', item.get("loading")),
+                output_retention=_text(item.get("output_retention")),
             )
         )
     return named
@@ -728,18 +748,55 @@ def _greeting(path: Path, value: object) -> GreetingSettings | None:
     return GreetingSettings(text=text, mode=_word(value.get("mode")))
 
 
-def _tools(path: Path, value: object) -> ToolSettings | None:
+def _tools(path: Path, value: object) -> list[ToolGroupSettings] | None:
     if value is None:
         return None
-    if not isinstance(value, dict):
-        raise ValueError(f"{path} should give tools as a mapping")
-    extra = set(value) - {"progressive"}
-    if extra:
-        raise ValueError(f"{path} unknown tools setting: {sorted(extra)[0]}")
-    progressive = value.get("progressive")
-    if progressive is not None and not isinstance(progressive, bool):
-        raise ValueError(f"{path} should give tools progressive as true or false")
-    return ToolSettings(progressive=progressive)
+    if isinstance(value, dict):
+        raise ValueError(
+            f"{path}: tools is a list of groups, each with a name and its tools, such as "
+            "- {name: booking, loading: full, tools: [lookup_booking]}; progressive: true "
+            "is now loading: summary, and output_retention moves onto each group and connector"
+        )
+    if not isinstance(value, list):
+        raise ValueError(f"{path} should give tools as a list of groups")
+    groups: list[ToolGroupSettings] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"{path}: a tool group is a mapping with a name and its tools"
+            )
+        extra = set(item) - {"name", "loading", "tools", "output_retention"}
+        if extra:
+            raise ValueError(f"{path} unknown tool group setting: {sorted(extra)[0]}")
+        name = _text(item.get("name"))
+        if not name:
+            raise ValueError(f"{path}: a tool group needs a name")
+        tools = item.get("tools")
+        if not isinstance(tools, list) or not tools:
+            raise ValueError(f'{path}: tool group "{name}" names no tools')
+        if not all(isinstance(tool, str) for tool in tools):
+            raise ValueError(
+                f'{path}: tool group "{name}" should name its tools as text'
+            )
+        groups.append(
+            ToolGroupSettings(
+                name=name,
+                tools=list(tools),
+                loading=_loading(path, f'tool group "{name}"', item.get("loading")),
+                output_retention=_text(item.get("output_retention")),
+            )
+        )
+    return groups
+
+
+def _loading(path: Path, owner: str, value: object) -> str:
+    """A tool group's or connector's loading, empty when it gives none."""
+    loading = _text(value)
+    if loading and loading not in TOOL_LOADINGS:
+        raise ValueError(
+            f"{path}: {owner}: loading is {', '.join(TOOL_LOADINGS)}, not {loading!r}"
+        )
+    return loading
 
 
 def _channels(path: Path, value: object) -> ChannelsSettings | None:
@@ -874,7 +931,7 @@ def _looks_like_agent(path: Path) -> bool:
     return (path / AGENT_FILE).is_file()
 
 
-def _load_skills(path: Path) -> list[Skill]:
+def _load_skills(root: Path, path: Path) -> list[Skill]:
     """Read `skills/`: each skill is a markdown file, or a folder holding a SKILL.md and
     whatever files it comes with, nested as deep as they are."""
     if not path.is_dir():
@@ -883,8 +940,8 @@ def _load_skills(path: Path) -> list[Skill]:
     skills: list[Skill] = []
     declared: dict[str, str] = {}
     for entry in sorted(path.iterdir()):
-        if entry.is_dir():
-            name, file = entry.name, entry / SKILL_FILE
+        if _inside(root, entry).is_dir():
+            name, file = entry.name, _inside(root, entry / SKILL_FILE)
             if not file.is_file():
                 raise ValueError(f"{entry} has no {SKILL_FILE}, so it is not a skill")
         elif entry.is_file() and entry.suffix == ".md":
@@ -898,12 +955,12 @@ def _load_skills(path: Path) -> list[Skill]:
         declared[name] = entry.name
         skill = _parse_skill(name, file.read_text())
         if entry.is_dir():
-            skill.files = _load_skill_files(entry)
+            skill.files = _load_skill_files(root, entry)
         skills.append(skill)
     return skills
 
 
-def _load_skill_files(folder: Path) -> dict[str, str]:
+def _load_skill_files(root: Path, folder: Path) -> dict[str, str]:
     """Every file in a skill folder but its SKILL.md, by slash path relative to it."""
     files: dict[str, str] = {}
     for dirpath, dirnames, filenames in os.walk(folder):
@@ -915,13 +972,27 @@ def _load_skill_files(folder: Path) -> dict[str, str]:
             if file == folder / SKILL_FILE:
                 continue
             try:
-                text = file.read_bytes().decode("utf-8")
+                text = _inside(root, file).read_bytes().decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise ValueError(
                     f"{file} is not text, and a skill brings only text files"
                 ) from exc
             files[file.relative_to(folder).as_posix()] = text
     return files
+
+
+def _inside(root: Path, path: Path) -> Path:
+    """The real path of `path`, refused when it is outside the agent directory whose real
+    path is `root`, as a link left pointing elsewhere on the machine would be."""
+    refused = f"{path} links outside the agent directory"
+    try:
+        target = path.resolve()
+    except RuntimeError as exc:  # A link loop, before Python 3.13.
+        raise ValueError(refused) from exc
+    # From 3.13 on, a link loop resolves to a link instead.
+    if target.is_symlink() or not target.is_relative_to(root):
+        raise ValueError(refused)
+    return target
 
 
 def _skipped(name: str) -> bool:
@@ -987,21 +1058,22 @@ def _cut_frontmatter(content: str) -> tuple[str, str, bool]:
     return rest[:end], rest[end + 4 :].lstrip("-\r\n"), True
 
 
-def _load_knowledge(path: Path) -> list[Document]:
+def _load_knowledge(root: Path, path: Path) -> list[Document]:
     if not path.is_dir():
         return []
 
     documents: list[Document] = []
-    for dirpath, _, filenames in os.walk(path):
+    for dirpath, dirnames, filenames in os.walk(path):
+        dirnames[:] = [name for name in dirnames if not _skipped(name)]
         for filename in sorted(filenames):
             file = Path(dirpath) / filename
-            if file.suffix.lower() not in _READABLE:
+            if _skipped(filename) or file.suffix.lower() not in _READABLE:
                 continue
             # The declaration of what pages to read is not itself something to look
             # things up in. Only the one at the root is; deeper, it is a document.
             if file == path / KNOWLEDGE_URLS_FILE:
                 continue
-            text = file.read_text()
+            text = _inside(root, file).read_text()
             if not text.strip():
                 continue
             source = file.relative_to(path).as_posix()
@@ -1052,7 +1124,7 @@ def _load_knowledge_urls(path: Path) -> list[KnowledgeURL]:
     return pages
 
 
-def _load_simulations(path: Path) -> list[Simulation] | None:
+def _load_simulations(root: Path, path: Path) -> list[Simulation] | None:
     """Read every .yaml and .yml file in `simulations/`, each a list of simulations.
 
     A key nobody knows is refused, as in `agent.yaml`, and so is a name two simulations
@@ -1067,7 +1139,7 @@ def _load_simulations(path: Path) -> list[Simulation] | None:
     for file in sorted(path.iterdir(), key=lambda entry: entry.name):
         if not file.is_file() or file.suffix.lower() not in (".yaml", ".yml"):
             continue
-        listed = yaml.safe_load(file.read_text()) or []
+        listed = yaml.safe_load(_inside(root, file).read_text()) or []
         if not isinstance(listed, list):
             raise ValueError(f"{file} should list simulations")
 

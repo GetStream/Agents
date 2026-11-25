@@ -133,7 +133,9 @@ func (s *SessionListSuite) walk(client *testClient, asked SessionQuery, limit in
 func (s *SessionListSuite) reviewed(id string, score int) {
 	s.serverClient.querySessions(SessionQuery{})
 	s.Require().Eventually(func() bool {
-		return s.store.ReviewCall(context.Background(), s.customerID(), id, "", &score, "") == nil
+		var call Call
+		return s.sessionCall(id, &call) == http.StatusOK &&
+			s.store.Calls.Review(context.Background(), s.customerID(), call.Id, "", &score, "") == nil
 	}, settleFor, 20*time.Millisecond, "the session's call was never there to review")
 }
 
@@ -524,7 +526,7 @@ func (s *SessionListSuite) TestAnEndedSessionIsPinnedAndKeepsItsPlace() {
 	s.Require().Eventually(func() bool {
 		return s.client.getSession(first.Id).State == Ended
 	}, settleFor, 20*time.Millisecond, "the stopped session never read as ended")
-	before, err := s.store.StoredSession(context.Background(), s.customerID(), first.Id)
+	before, err := s.store.Sessions.Get(context.Background(), s.customerID(), first.Id)
 	s.Require().NoError(err)
 
 	pinned := s.client.updateSession(first.Id, UpdateSessionRequest{Pinned: pointerTo(true)})
@@ -533,7 +535,7 @@ func (s *SessionListSuite) TestAnEndedSessionIsPinnedAndKeepsItsPlace() {
 	again := s.client.updateSession(first.Id, UpdateSessionRequest{Pinned: pointerTo(true)})
 	s.True(again.PinnedAt.Equal(*pinned.PinnedAt), "pinning again keeps the time it was first pinned")
 
-	row, err := s.store.StoredSession(context.Background(), s.customerID(), first.Id)
+	row, err := s.store.Sessions.Get(context.Background(), s.customerID(), first.Id)
 	s.Require().NoError(err)
 	s.True(row.UpdatedAt.Equal(before.UpdatedAt), "a pin does not touch updated_at")
 	s.Equal(before.LastResponseAt, row.LastResponseAt)

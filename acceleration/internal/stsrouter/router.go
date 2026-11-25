@@ -15,6 +15,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/quota"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -44,12 +45,18 @@ type Options struct {
 	// Pricer prices every row recorded. Nil is routing.Prices of Config.
 	Pricer pricing.Pricer
 	Logger *slog.Logger
+	// Quota caps what one end user may spend in a day. Absent means nothing is capped.
+	Quota *quota.Limiter
 }
 
 // Request is what a caller wants a conversation held by.
 type Request struct {
 	// CustomerID owns the request. It is what every statistic is keyed by.
 	CustomerID string
+	// Caller is the end user the work is for, when the request came from a device rather
+	// than from the customer's own backend. It is what daily limits are counted against,
+	// and it is empty for work nothing is counted against.
+	Caller routing.Caller
 	// AgentID is the agent the work is for. Empty outside a conversation.
 	AgentID string
 	// CallID is the call the work happens in. Empty outside a conversation.
@@ -78,6 +85,7 @@ type Router struct {
 	// backend records the text models voices hand their reasoning to. It is one for the
 	// router, so what it logs at most once in a while is logged that seldom.
 	backend *routing.Recorder
+	quota   *quota.Limiter
 }
 
 // New validates the options and returns a Router.
@@ -118,7 +126,7 @@ func New(options Options) (*Router, error) {
 	if err != nil {
 		return nil, err
 	}
-	router = &Router{Router: core, backend: core.Recorder().For(routing.LLM)}
+	router = &Router{Router: core, backend: core.Recorder().For(routing.LLM), quota: options.Quota}
 	return router, nil
 }
 
@@ -145,12 +153,17 @@ func (r *Router) delegatedPriced(provider sts.STS, config routing.ProviderConfig
 }
 
 // Start selects a provider and opens a conversation, falling back to the next candidate
-// when one fails to start. One session holds many turns.
+// when one fails to start. One session holds many turns, so a caller who has spent their day
+// is refused here, and a session is refused its next turn once its replies spend the day.
 func (r *Router) Start(ctx context.Context, request Request) (*Session, error) {
+	if _, err := r.quota.Allow(ctx, request.CustomerID, request.Caller); err != nil {
+		return nil, stack.Wrap(err)
+	}
 	core := routing.Request{
 		CustomerID:      request.CustomerID,
 		Attribution:     routing.AttributionFrom(ctx),
 		Spent:           routing.SpentFrom(ctx),
+		Caller:          request.Caller,
 		AgentID:         request.AgentID,
 		CallID:          request.CallID,
 		Region:          request.Region,
@@ -170,7 +183,7 @@ func (r *Router) Start(ctx context.Context, request Request) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newSession(provider, config, core.Owner(), r.Recorder(), r.backend), nil
+	return newSession(ctx, provider, config, core.Owner(), r.Recorder(), r.backend, r.quota), nil
 }
 
 // declared reports the first thing a config promises of a model that the code behind it

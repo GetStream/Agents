@@ -3,11 +3,15 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 	"github.com/danielgtaylor/huma/v2"
 )
@@ -48,7 +52,7 @@ func (s *Server) listVoices(ctx context.Context, _ *listVoicesRequest) (*listVoi
 		return nil, errNoVoices
 	}
 
-	stored, err := s.store.CustomerVoices(ctx, customerID)
+	stored, err := s.store.Voices.Select(ctx, customerID)
 	if err != nil {
 		return nil, err
 	}
@@ -102,9 +106,9 @@ func (s *Server) getVoice(ctx context.Context, request *getVoiceRequest) (*getVo
 		return nil, errNoVoices
 	}
 
-	voice, err := s.configs.Voice(ctx, customerID, request.Id)
+	voice, err := s.store.Voices.Get(ctx, customerID, request.Id)
 	if err != nil {
-		return nil, errUnknownVoice
+		return nil, unknownOr(err, store.ErrNoVoice, errUnknownVoice)
 	}
 
 	described, err := s.describeVoice(ctx, voice)
@@ -136,7 +140,7 @@ func (s *Server) updateVoice(ctx context.Context, request *updateVoiceRequest) (
 		Name:        request.Body.Name,
 		Description: text(request.Body.Description),
 	}
-	if err := s.configs.UpdateVoice(ctx, &voice); err != nil {
+	if err := s.store.Voices.Update(ctx, &voice); err != nil {
 		if errors.Is(err, store.ErrNoVoice) {
 			return nil, errUnknownVoice
 		}
@@ -161,10 +165,7 @@ func (s *Server) deleteVoice(ctx context.Context, request *deleteVoiceRequest) (
 	}
 
 	if err := s.voices.Delete(ctx, customerID, request.Id); err != nil {
-		if errors.Is(err, store.ErrNoVoice) {
-			return nil, errUnknownVoice
-		}
-		return nil, invalidRequest(err.Error())
+		return nil, unknownOr(err, store.ErrNoVoice, errUnknownVoice)
 	}
 	return nil, nil
 }
@@ -181,6 +182,9 @@ func (s *Server) addVoiceSample(ctx context.Context, request *addVoiceSampleRequ
 	if request.Body == nil {
 		return nil, invalidRequest("a request body is required")
 	}
+	if len(request.Body.Audio) == 0 {
+		return nil, invalidRequest("a recording with no audio in it is not a recording")
+	}
 
 	sample := voices.Sample{
 		Name:        text(request.Body.Filename),
@@ -189,13 +193,10 @@ func (s *Server) addVoiceSample(ctx context.Context, request *addVoiceSampleRequ
 		Transcript:  text(request.Body.Transcript),
 	}
 	if err := s.voices.AddSample(ctx, customerID, request.Id, sample); err != nil {
-		if errors.Is(err, store.ErrNoVoice) {
-			return nil, errUnknownVoice
-		}
-		return nil, invalidRequest(err.Error())
+		return nil, unknownOr(err, store.ErrNoVoice, errUnknownVoice)
 	}
 
-	voice, err := s.configs.Voice(ctx, customerID, request.Id)
+	voice, err := s.store.Voices.Get(ctx, customerID, request.Id)
 	if err != nil {
 		return nil, err
 	}
@@ -220,18 +221,27 @@ func (s *Server) prepareVoice(ctx context.Context, request *prepareVoiceRequest)
 	if request.Body != nil && request.Body.Providers != nil {
 		providers = *request.Body.Providers
 	}
-
-	if err := s.voices.Prepare(ctx, customerID, request.Id, providers); err != nil {
-		if errors.Is(err, store.ErrNoVoice) {
-			return nil, errUnknownVoice
+	for _, provider := range providers {
+		if !slices.Contains(s.voices.Providers(), provider) {
+			return nil, invalidRequest(provider + " cannot be given a voice of your own")
 		}
-		return nil, invalidRequest(err.Error())
 	}
-
-	voice, err := s.configs.Voice(ctx, customerID, request.Id)
+	voice, err := s.store.Voices.Get(ctx, customerID, request.Id)
+	if err != nil {
+		return nil, unknownOr(err, store.ErrNoVoice, errUnknownVoice)
+	}
+	samples, err := s.voices.Samples(ctx, voice.ID)
 	if err != nil {
 		return nil, err
 	}
+	if len(samples) == 0 {
+		return nil, invalidRequest("add a recording before preparing the voice")
+	}
+
+	if err := s.voices.Prepare(ctx, customerID, request.Id, providers); err != nil {
+		return nil, unknownOr(refusedVoice(err), store.ErrNoVoice, errUnknownVoice)
+	}
+
 	described, err := s.describeVoice(ctx, voice)
 	if err != nil {
 		return nil, err
@@ -251,8 +261,12 @@ func (s *Server) listVoiceProviders(ctx context.Context, _ *listVoiceProvidersRe
 }
 
 // listLibraryVoices returns the voices the speech providers themselves offer.
+//
+// The deployment's provider accounts hold every customer's clones, and a provider lists them
+// all as its account's own, so of those only the caller's are listed.
 func (s *Server) listLibraryVoices(ctx context.Context, request *listLibraryVoicesRequest) (*listLibraryVoicesResponse, error) {
-	if _, ok := CustomerFrom(ctx); !ok {
+	customerID, ok := CustomerFrom(ctx)
+	if !ok {
 		return nil, errMissingCustomer
 	}
 	if s.library == nil {
@@ -262,16 +276,33 @@ func (s *Server) listLibraryVoices(ctx context.Context, request *listLibraryVoic
 	provider := text(request.Provider.ptr())
 	found, err := s.library.List(ctx, provider)
 	// Some providers answering is enough to fill a picker, so a failure only refuses the
-	// request when it left nothing to show.
+	// request when it left nothing to show. The catalogue logs each provider it could not
+	// read.
 	if len(found) == 0 && err != nil {
-		return nil, invalidRequest(err.Error())
+		if provider != "" && !slices.Contains(s.library.Providers(), provider) {
+			// The catalogue's own refusal of a provider that publishes no library here.
+			return nil, invalidRequest(err.Error())
+		}
+		return nil, unavailable("no voice library could be read just now: try again shortly")
 	}
-	if err != nil {
-		s.logger.Warn("a voice library could not be read", "error", err)
+
+	var mine map[string]bool
+	if s.store != nil {
+		bindings, err := s.store.VoiceBindings.SelectByCustomer(ctx, customerID)
+		if err != nil {
+			return nil, err
+		}
+		mine = make(map[string]bool, len(bindings))
+		for _, binding := range bindings {
+			mine[binding.Provider+"/"+binding.ExternalID] = true
+		}
 	}
 
 	listed := make([]LibraryVoice, 0, len(found))
 	for _, voice := range found {
+		if voice.Own && mine != nil && !mine[voice.Provider+"/"+voice.ID] {
+			continue
+		}
 		listed = append(listed, LibraryVoice{
 			Provider:    voice.Provider,
 			Id:          voice.ID,
@@ -303,16 +334,41 @@ func (s *Server) listLibraryVoices(ctx context.Context, request *listLibraryVoic
 
 // previewLibraryVoice hands back the sample a provider published for one of its voices.
 func (s *Server) previewLibraryVoice(ctx context.Context, request *previewLibraryVoiceRequest) (*previewLibraryVoiceResponse, error) {
-	if _, ok := CustomerFrom(ctx); !ok {
+	customerID, ok := CustomerFrom(ctx)
+	if !ok {
 		return nil, errMissingCustomer
 	}
 	if s.library == nil {
 		return nil, errNoLibrary
 	}
-
-	spoken, err := s.library.Preview(ctx, request.Provider, request.Voice)
+	// Refused before the ownership check, so the id it compares is the one sent to the vendor.
+	voice, err := voiceid.Canonical(request.Provider, request.Voice)
 	if err != nil {
+		return nil, invalidRequest(fmt.Sprintf("voice: %q is not shaped like a voice id of %s", request.Voice, request.Provider))
+	}
+	if s.store != nil {
+		elsewhere, err := s.store.VoiceBindings.Elsewhere(ctx, customerID, request.Provider, voice)
+		if err != nil {
+			return nil, err
+		}
+		if elsewhere {
+			return nil, notFound(fmt.Sprintf("voices: %s has no voice %q", request.Provider, request.Voice))
+		}
+	}
+
+	spoken, err := s.library.Preview(ctx, request.Provider, voice)
+	if err != nil && !slices.Contains(s.library.Providers(), request.Provider) {
+		// The catalogue's own refusal of a provider that publishes no library here.
 		return nil, notFound(err.Error())
+	}
+	if errors.Is(err, voices.ErrUnknownVoice) {
+		return nil, notFound(request.Provider + " has no voice " + request.Voice)
+	}
+	if errors.Is(err, voices.ErrNoSample) {
+		return nil, notFound(request.Provider + " has published no sample of " + request.Voice)
+	}
+	if err != nil {
+		return nil, err
 	}
 	return &previewLibraryVoiceResponse{Body: VoicePreview{Provider: request.Provider,
 		ContentType: spoken.ContentType,
@@ -331,11 +387,14 @@ func (s *Server) previewVoice(ctx context.Context, request *previewVoiceRequest)
 	if request.Body == nil || strings.TrimSpace(request.Body.Provider) == "" {
 		return nil, invalidRequest("name the provider to hear the voice through")
 	}
-	if _, err := s.configs.Voice(ctx, customerID, request.Id); err != nil {
-		return nil, errUnknownVoice
+	if _, err := s.store.Voices.Get(ctx, customerID, request.Id); err != nil {
+		return nil, unknownOr(err, store.ErrNoVoice, errUnknownVoice)
 	}
 
 	provider := request.Body.Provider
+	if !slices.Contains(s.voices.Providers(), provider) {
+		return nil, invalidRequest(provider + " cannot be given a voice of your own")
+	}
 	line := text(request.Body.Text)
 	if strings.TrimSpace(line) == "" {
 		line = previewLine
@@ -344,12 +403,24 @@ func (s *Server) previewVoice(ctx context.Context, request *previewVoiceRequest)
 	if errors.Is(err, store.ErrNoVoice) {
 		return nil, invalidRequest("the voice is not ready with " + provider + " yet")
 	}
-	if err != nil {
+	if errors.Is(err, voices.ErrLineTooLong) {
 		return nil, invalidRequest(err.Error())
+	}
+	if err != nil {
+		return nil, refusedVoice(err)
 	}
 	return &previewVoiceResponse{Body: VoicePreview{Provider: provider,
 		ContentType: speech.ContentType,
 		Audio:       speech.Audio}}, nil
+}
+
+// refusedVoice is a voice's failure as the caller is told it: what the customer's policies do not
+// allow is theirs to change, and anything else goes on as it is.
+func refusedVoice(err error) error {
+	if errors.Is(err, routing.ErrRequest) || errors.Is(err, routing.ErrModelNotAllowed) {
+		return refusedRequest(err)
+	}
+	return err
 }
 
 // describeVoice reads a voice back with its recordings and bindings, which is what every

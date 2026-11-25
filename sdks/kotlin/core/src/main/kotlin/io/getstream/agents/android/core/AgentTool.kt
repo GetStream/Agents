@@ -2,12 +2,21 @@ package io.getstream.agents.android.core
 
 import io.getstream.agents.android.core.generated.SessionTool
 import io.getstream.agents.android.core.generated.SessionToolApproval
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.SerialInfo
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.SerialKind
+import kotlinx.serialization.descriptors.StructureKind
+import kotlinx.serialization.descriptors.elementNames
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
+import kotlinx.serialization.serializer
 
 /**
  * A function of yours the agent can call.
@@ -20,7 +29,8 @@ public class AgentTool private constructor(
     // First, so this constructor and the public one taking words differ on the JVM.
     /**
      * Runs the tool. What it returns is given to the model as the result; throwing tells the
-     * model the tool failed and why. It is cancelled when the router gives up on the call.
+     * model the tool failed and why, in the error's message or what [StreamAgents.onToolError]
+     * says instead. It is cancelled when the router gives up on the call.
      */
     public val run: suspend (arguments: JsonObject) -> ToolOutput,
     /** What the model calls it. Must be unique within a session. */
@@ -90,6 +100,15 @@ public class AgentTool private constructor(
         val declineTitle: String? = null,
     )
 
+    /**
+     * What an argument of a [typed] tool is, in words the model reads to fill it in. On a class,
+     * it describes the object wherever the class is an argument.
+     */
+    @OptIn(ExperimentalSerializationApi::class)
+    @SerialInfo
+    @Target(AnnotationTarget.PROPERTY, AnnotationTarget.CLASS)
+    public annotation class Describe(public val description: String)
+
     internal val schema: SessionTool
         get() = SessionTool(
             name = name,
@@ -132,6 +151,90 @@ public class AgentTool private constructor(
             AgentTool(run, name, description, parameters, executor, displayTitle, approval)
 
         /**
+         * A tool whose arguments are a `@Serializable` class, which is also its schema.
+         *
+         * Strings, numbers, booleans, enums, lists and nested `@Serializable` classes are
+         * described; a property with no default that is not nullable is required. Arguments
+         * that do not decode tell the model why, as a tool that throws does.
+         *
+         *     @Serializable
+         *     data class WeatherLookup(@AgentTool.Describe("a city or region") val location: String)
+         *
+         *     AgentTool.typed<WeatherLookup>("weather_lookup", "Look up the current weather.") {
+         *         weather.today(it.location)
+         *     }
+         */
+        public inline fun <reified T> typed(
+            name: String,
+            description: String,
+            executor: Executor? = null,
+            displayTitle: String? = null,
+            approval: Approval? = null,
+            noinline run: suspend (arguments: T) -> String,
+        ): AgentTool = decoding(serializer<T>(), name, description, executor, displayTitle, approval, run)
+
+        @PublishedApi
+        internal fun <T> decoding(
+            serializer: KSerializer<T>,
+            name: String,
+            description: String,
+            executor: Executor?,
+            displayTitle: String?,
+            approval: Approval?,
+            run: suspend (arguments: T) -> String,
+        ): AgentTool {
+            require(serializer.descriptor.kind == StructureKind.CLASS) {
+                "A typed tool's arguments are a class, not ${serializer.descriptor.serialName}"
+            }
+            return AgentTool(
+                { ToolOutput(run(wire.decodeFromJsonElement(serializer, it))) },
+                name, description, schemaOf(serializer.descriptor), executor, displayTitle, approval,
+            )
+        }
+
+        @OptIn(ExperimentalSerializationApi::class)
+        private fun schemaOf(descriptor: SerialDescriptor, description: String? = descriptor.annotations.described): JsonObject =
+            buildJsonObject {
+                when (descriptor.kind) {
+                    PrimitiveKind.STRING, PrimitiveKind.CHAR -> put("type", "string")
+                    PrimitiveKind.BOOLEAN -> put("type", "boolean")
+                    PrimitiveKind.BYTE, PrimitiveKind.SHORT, PrimitiveKind.INT, PrimitiveKind.LONG -> put("type", "integer")
+                    PrimitiveKind.FLOAT, PrimitiveKind.DOUBLE -> put("type", "number")
+                    SerialKind.ENUM -> {
+                        put("type", "string")
+                        putJsonArray("enum") { descriptor.elementNames.forEach { add(it) } }
+                    }
+                    StructureKind.LIST -> {
+                        put("type", "array")
+                        put("items", schemaOf(descriptor.getElementDescriptor(0)))
+                    }
+                    StructureKind.CLASS -> {
+                        val elements = 0 until descriptor.elementsCount
+                        put("type", "object")
+                        putJsonObject("properties") {
+                            for (i in elements) {
+                                val element = descriptor.getElementDescriptor(i)
+                                val described = descriptor.getElementAnnotations(i).described ?: element.annotations.described
+                                put(descriptor.getElementName(i), schemaOf(element, described))
+                            }
+                        }
+                        putJsonArray("required") {
+                            for (i in elements) {
+                                if (!descriptor.isElementOptional(i) && !descriptor.getElementDescriptor(i).isNullable) {
+                                    add(descriptor.getElementName(i))
+                                }
+                            }
+                        }
+                    }
+                    else -> throw IllegalArgumentException("${descriptor.serialName} cannot be a tool argument")
+                }
+                description?.let { put("description", it) }
+            }
+
+        private val List<Annotation>.described: String?
+            get() = filterIsInstance<Describe>().firstOrNull()?.description
+
+        /**
          * A JSON Schema object for a tool whose arguments are all strings.
          *
          * A convenience for the common shape, so declaring a tool does not mean writing out a
@@ -171,3 +274,32 @@ public data class ToolOutput(
     /** What the tool shows. */
     val images: List<ImageSource> = emptyList(),
 )
+
+/** The most of a tool's failure the model is told, in UTF-16 units, as the other SDKs count it. */
+private const val MAX_FAILURE_CHARS = 1024
+
+/**
+ * What the model is told of [call] failing with [error]: what [onError] says, else the error's
+ * message, cut to 1,024 characters either way. A hook that throws is answered with no more than
+ * that the tool failed, since the message it was there to keep back is all there would be to say
+ * otherwise.
+ */
+internal fun toolFailure(
+    call: AgentEvent.ToolCall,
+    error: Throwable,
+    onError: ((call: AgentEvent.ToolCall, error: Throwable) -> String)?,
+): String {
+    if (onError == null) return clipped(error.message ?: error.toString())
+    return try {
+        clipped(onError(call, error))
+    } catch (_: Exception) {
+        "${call.name} failed"
+    }
+}
+
+/** [text], cut to [MAX_FAILURE_CHARS] with an ellipsis where it was cut, never inside an emoji's pair. */
+internal fun clipped(text: String): String {
+    if (text.length <= MAX_FAILURE_CHARS) return text
+    val end = if (text[MAX_FAILURE_CHARS - 1].isHighSurrogate()) MAX_FAILURE_CHARS - 1 else MAX_FAILURE_CHARS
+    return text.substring(0, end) + "…"
+}

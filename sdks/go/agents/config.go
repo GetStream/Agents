@@ -97,9 +97,12 @@ func (a *Agent) syncFolder(ctx context.Context, client *acceleration.ClientWithR
 		if err != nil {
 			return nil, err
 		}
-		// A router older than ui_instructions takes the sync and drops them, which the stamp
-		// cannot tell, so a config missing the UI the stamp covers is synced again.
-		if stored != nil && (folder.UIInstructions == "" || deref(stored.UiInstructions) != "") {
+		// The stamp says what this directory last sent, not where: a router that never got it,
+		// such as a hosted one after a local sync, keeps another sync_hash and is synced. A
+		// router older than ui_instructions takes the sync and drops them, which the stamp
+		// cannot tell either, so a config missing the UI the stamp covers is synced again.
+		if stored != nil && deref(stored.SyncHash) == hash &&
+			(folder.UIInstructions == "" || deref(stored.UiInstructions) != "") {
 			return stored, nil
 		}
 	}
@@ -275,9 +278,19 @@ func declareSettings(body *acceleration.SyncAgentRequest, settings Settings) {
 		}
 	}
 	if settings.Tools != nil {
-		body.Tools = &acceleration.AgentTools{
-			Progressive: settings.Tools.Progressive, OutputRetention: settings.Tools.OutputRetention,
+		groups := make([]acceleration.ToolGroup, 0, len(*settings.Tools))
+		for _, group := range *settings.Tools {
+			sent := acceleration.ToolGroup{Name: group.Name, Tools: group.Tools}
+			if group.Loading != "" {
+				loading := acceleration.ToolLoading(group.Loading)
+				sent.Loading = &loading
+			}
+			if group.OutputRetention != "" {
+				sent.OutputRetention = &group.OutputRetention
+			}
+			groups = append(groups, sent)
 		}
+		body.Tools = &groups
 	}
 	if settings.Channels != nil {
 		declared := acceleration.AgentChannels{
@@ -479,6 +492,13 @@ func connectorBinding(ctx context.Context, client *acceleration.ClientWithRespon
 		Connection:   acceleration.AgentConnectorSelection{Type: acceleration.AgentConnectorSelectionTypeSession},
 	}
 	binding.RequireApproval = entry.RequireApproval
+	if entry.Loading != "" {
+		loading := acceleration.ToolLoading(entry.Loading)
+		binding.Loading = &loading
+	}
+	if entry.OutputRetention != "" {
+		binding.OutputRetention = &entry.OutputRetention
+	}
 	if entry.Sandbox {
 		binding.Sandbox = &entry.Sandbox
 	}

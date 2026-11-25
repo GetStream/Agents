@@ -268,7 +268,7 @@ func fromNote(text string) bool {
 
 // A name field can identify a place or business, not just a person. The lexical
 // heuristics must not reject a name the caller or a successful tool already gave. A tool that
-// reads back what the agent wrote with the name in it does not give it (ownLines.readBack).
+// reads back what the agent wrote with the name in it does not give it (heldLines.readBack).
 func nameWasGiven(history []llm.Message, name string) bool {
 	words := func(text string) string {
 		return " " + strings.ToLower(strings.Join(strings.FieldsFunc(text, func(r rune) bool {
@@ -695,8 +695,10 @@ func unheardNumber(history []llm.Message, call llm.ToolCall, told string) (key, 
 
 // unsourcedTransfer reports the number of a transfer that neither the operator's instructions
 // (told) nor a successful tool gave. Unlike unheardNumber it does not count the caller as a
-// source: anyone can read out a number and be put through to it.
-func unsourcedTransfer(history []llm.Message, call llm.ToolCall, told string) (to string, unsourced bool) {
+// source: anyone can read out a number and be put through to it. Nor, for the same reason, is
+// a tool callers reports as the caller's own (Options.CallersTool): its result is whatever the
+// caller's device says.
+func unsourcedTransfer(history []llm.Message, call llm.ToolCall, told string, callers func(name string) bool) (to string, unsourced bool) {
 	var arguments transferArguments
 	if call.Name != toolTransfer || json.Unmarshal([]byte(call.Arguments), &arguments) != nil || strings.TrimSpace(arguments.To) == "" {
 		return "", false
@@ -752,6 +754,7 @@ func unsourcedTransfer(history []llm.Message, call llm.ToolCall, told string) (t
 	var held heldLines
 	sent := 0
 	asked := map[string]ownLines{}
+	names := map[string]string{}
 	for _, message := range history {
 		switch message.Role {
 		case llm.Assistant:
@@ -762,6 +765,9 @@ func unsourcedTransfer(history []llm.Message, call llm.ToolCall, told string) (t
 			}
 			sent += len(own)
 			maps.Copy(asked, calledWith(message))
+			for _, made := range message.ToolCalls {
+				names[made.ID] = made.Name
+			}
 		case llm.ToolResult:
 			// A refusal quotes the value refused: "56305" refused let 5630 through.
 			if failedResult(message.Content) || !gives(message.Content) || asked[message.ToolCallID].echoes(message.Content, written) {
@@ -771,6 +777,11 @@ func unsourcedTransfer(history []llm.Message, call llm.ToolCall, told string) (t
 				rest := held.cut(line, sent, written)
 				return gives(rest)
 			}) {
+				// Asked last, of a result that would give the number, so a caller counting
+				// what it changes counts only that.
+				if callers != nil && callers(names[message.ToolCallID]) {
+					continue
+				}
 				return "", false
 			}
 		}

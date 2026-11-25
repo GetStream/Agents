@@ -62,7 +62,7 @@ func (s *EventForwardingSuite) SetupSuite() {
 	s.channelProvider = func() string { return strings.TrimPrefix(s.slack.URL, "https://") }
 	s.forwardHTTP = destinationClient()
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *EventForwardingSuite) SetupTest() {
@@ -182,9 +182,9 @@ func (s *EventForwardingSuite) TestAReplyThatWaitedAndIsNotWrittenDoesNotForward
 		ConnectionID: bot, ThreadParts: map[string]string{"channel": "C0000CHAN", "thread_ts": "1759740000.000100"},
 		StreamAppPK: s.app.StreamAppPK,
 	}
-	_, err := s.store.LinkChannelThread(context.Background(), &thread)
+	_, err := s.store.ChannelThreads.Link(context.Background(), &thread)
 	s.Require().NoError(err)
-	_, err = s.store.ClaimChannelThreadMessage(context.Background(), thread.ChannelID, store.ClaimInbound, "1759740000.000100")
+	_, err = s.store.ChannelThreadMessages.Claim(context.Background(), thread.ChannelID, store.ClaimInbound, "1759740000.000100")
 	s.Require().NoError(err)
 	// Stream refuses every write of the customer's, as in the test above.
 	s.setApps(s.customerID(), func(apps *suiteApps) { apps.readOnly[s.customerID()] = true })
@@ -225,7 +225,7 @@ func (s *EventForwardingSuite) TestABatchsMessagesThatAreNotWrittenAreForwardedO
 	s.settled()
 	s.Never(func() bool { return len(target.requests()) > 1 }, dropped, 20*time.Millisecond, "one forward for the delivery")
 	var ageing int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_thread_inbound WHERE customer_id = ? AND forward ? 'headers_until'", s.customerID()).Scan(&ageing))
 	s.Zero(ageing, "a delivery whose headers do not age is stored without headers_until")
 }
@@ -241,7 +241,7 @@ func (s *EventForwardingSuite) TestAMessageTheStoreFailsToQueueIsNotClaimed() {
 
 	s.Require().Error(err)
 	var claims int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_thread_messages WHERE channel_id = ? AND kind = ?", s.threadChannel(), store.ClaimInbound).Scan(&claims))
 	s.Zero(claims)
 }
@@ -331,7 +331,7 @@ func (s *EventForwardingSuite) TestAReplyThatWaitedWaitsAgainWhenItsMentionFails
 
 	s.Require().ErrorContains(err, "synthetic queue failure")
 	var waiting int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_thread_waiting WHERE customer_id = ?", s.customerID()).Scan(&waiting))
 	s.Equal(1, waiting, "the reply waits again, and only the reply")
 }
@@ -419,7 +419,7 @@ func (s *EventForwardingSuite) deliverHangingUp(message core.InboundMessage) err
 	}()
 	s.Require().Eventually(func() bool {
 		var inserting int
-		s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND state = 'active'"+
 				" AND query LIKE '%INSERT INTO channel_thread_inbound%'").Scan(&inserting))
 		return inserting == 1
@@ -432,7 +432,7 @@ func (s *EventForwardingSuite) deliverHangingUp(message core.InboundMessage) err
 // channels.
 func (s *EventForwardingSuite) inboundClaims() int {
 	var claims int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM channel_thread_messages m JOIN channel_threads t USING (channel_id) WHERE t.customer_id = ? AND m.kind = ?",
 		s.customerID(), store.ClaimInbound).Scan(&claims))
 	return claims
@@ -466,7 +466,7 @@ func (s *EventForwardingSuite) TestAMessageOfADeliveryGivenUpAfterItsForwardWasS
 	s.Require().NoError(err)
 	s.Require().Eventually(func() bool {
 		var failed int
-		s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT count(*) FROM channel_thread_inbound WHERE customer_id = ? AND state = 'failed'", s.customerID()).Scan(&failed))
 		return failed == 2
 	}, settleFor, 10*time.Millisecond, "the second message was not given up")
@@ -478,6 +478,8 @@ func (s *EventForwardingSuite) TestAMessageOfADeliveryGivenUpAfterItsForwardWasS
 func (s *EventForwardingSuite) TestAMessageARouterQueuedBeforeItStoppedIsWrittenByAnother() {
 	s.answering(s.connectedBot())
 	stopped := s.anotherRouter()
+	// It is due as it is queued, on the clock a claim judges it by.
+	s.trigger("due_on_another_clock", "channel_thread_inbound", "INSERT", "NEW.customer_id = '"+s.customerID()+"' AND NEW.next_attempt_at <> NEW.created_at", "RAISE EXCEPTION 'due on another clock';")
 
 	answered, err := stopped.Deliver(context.Background(), s.app, []core.InboundMessage{s.inbound("1759740000.000100")}, nil)
 	stopped.Close()
@@ -691,7 +693,7 @@ func (s *EventForwardingSuite) forwardedTo(target *destination, count int) []for
 // pendingForwards is how many forwards to the test app's destinations are not done with.
 func (s *EventForwardingSuite) pendingForwards() int {
 	var count int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		`SELECT count(*) FROM connector_event_deliveries d JOIN connector_event_destinations t ON t.id = d.destination_id
 		 WHERE t.customer_id = ?`, s.customerID()).Scan(&count))
 	return count
@@ -760,7 +762,7 @@ func (s *EventForwardingSuite) providerApp(signingSecret string) store.Connector
 	record.SigningSecretSealed, err = s.sealer.SealWithAAD(signingSecret, providerAppAAD(record.CustomerID, "slack_bot", record.ProviderAppID))
 	s.Require().NoError(err)
 	record.SigningKEKVersion = s.sealer.CurrentVersion()
-	_, err = s.store.PutConnectorOAuthClient(context.Background(), record)
+	_, err = s.store.ConnectorOAuthClients.Upsert(context.Background(), record)
 	s.Require().NoError(err)
 	return *record
 }
@@ -789,19 +791,19 @@ func (s *EventForwardingSuite) connectedBot() string {
 // answering is an agent config of the test's app that binds the bot connection as fixed.
 func (s *EventForwardingSuite) answering(connectionID string) {
 	config := store.AgentConfig{
-		CustomerID: s.customerID(), Name: "slack-" + s.utils.uuid(), Mode: store.AgentModeText, LLM: "noted/noted-model",
+		CustomerID: s.customerID(), Name: "slack-" + s.utils.uuid(), Mode: store.AgentModeText, Models: store.AgentModels{LLM: "noted/noted-model"},
 		Connectors: []store.ConnectorBinding{{
 			Name: "slack", ConnectorID: "slack_bot",
 			Connection: store.ConnectionBinding{Type: "fixed", ConnectionID: connectionID},
 		}},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(context.Background(), &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
 }
 
 // threadChannel is the test customer's one thread channel, once the bridge linked it.
 func (s *EventForwardingSuite) threadChannel() string {
 	var channel string
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT channel_id FROM channel_threads WHERE customer_id = ?", s.customerID()).Scan(&channel))
 	return channel
 }

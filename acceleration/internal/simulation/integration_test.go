@@ -205,9 +205,9 @@ func (s *IntegrationSuite) agentThat(instructions string) string {
 		Name:         "order taker",
 		Mode:         store.AgentModeText,
 		Instructions: instructions,
-		LLM:          "openai/gpt-5.6-luna",
+		Models:       store.AgentModels{LLM: "openai/gpt-5.6-luna"},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 	return config.ID
 }
 
@@ -245,7 +245,7 @@ func (s *IntegrationSuite) simulates(simulation store.Simulation) string {
 	// The suite runs on an OpenAI key, and the default judge is whichever model the
 	// quality tier prefers, which is neither guaranteed to be OpenAI's nor quick.
 	simulation.JudgeTarget = "openai/gpt-5.6-terra"
-	s.Require().NoError(s.store.CreateSimulation(s.ctx, &simulation))
+	s.Require().NoError(s.store.Simulations.Insert(s.ctx, &simulation))
 	return simulation.ID
 }
 
@@ -263,7 +263,7 @@ func (s *IntegrationSuite) runs(simulationID string) store.SimulationRun {
 
 	var finished store.SimulationRun
 	s.Require().Eventually(func() bool {
-		run, err := s.store.SimulationRun(s.ctx, s.customerID, started.ID)
+		run, err := s.store.SimulationRuns.Get(s.ctx, s.customerID, started.ID)
 		if err != nil || run.State == store.SimulationRunning {
 			return false
 		}
@@ -275,7 +275,7 @@ func (s *IntegrationSuite) runs(simulationID string) store.SimulationRun {
 
 // conversations reads back what a run said, which is what makes a failure readable.
 func (s *IntegrationSuite) conversations(run store.SimulationRun) []store.SimulationCase {
-	cases, err := s.store.SimulationCases(s.ctx, run.ID)
+	cases, err := s.store.SimulationCases.Select(s.ctx, run.ID)
 	s.Require().NoError(err)
 	return cases
 }
@@ -384,9 +384,9 @@ func (s *IntegrationSuite) TestAnAgentIsHeardThroughItsOwnVoiceRatherThanItsOwnW
 		Mode:         store.AgentModeVoice,
 		Instructions: takesOrders,
 		Greeting:     "Northwind Pizza, what can I get you?",
-		LLM:          "openai/gpt-5.6-luna",
+		Models:       store.AgentModels{LLM: "openai/gpt-5.6-luna"},
 	}
-	s.Require().NoError(s.store.CreateAgentConfig(s.ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
 
 	run := s.runs(s.asksIn(store.SimulationAudio, config.ID, 1))
 	cases := s.conversations(run)

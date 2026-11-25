@@ -115,12 +115,12 @@ func (s *PGSealedSuite) SetupSuite() {
 	s.Require().NoError(db.Ping(s.ctx))
 
 	var database string
-	s.Require().NoError(db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 	s.Require().True(strings.HasSuffix(database, "_test"), "refusing to drop the schema of %s, which is not a test database", database)
-	_, err = db.DB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = db.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	s.Require().NoError(err)
 	s.Require().NoError(db.Migrate(s.ctx))
-	s.Require().NoError(db.SeedConnectorDefinitions(s.ctx, fstest.MapFS{"acme.yaml": {Data: []byte(manifest)}}))
+	s.Require().NoError(db.ConnectorDefinitions.Seed(s.ctx, fstest.MapFS{"acme.yaml": {Data: []byte(manifest)}}))
 
 	s.v1, err = auth.NewSealerWithKeyring(1, map[int]string{1: "test key one"})
 	s.Require().NoError(err)
@@ -133,7 +133,7 @@ func (s *PGSealedSuite) TearDownSuite() {
 }
 
 func (s *PGSealedSuite) SetupTest() {
-	_, err := s.db.DB().ExecContext(s.ctx, "TRUNCATE connector_connections, connector_authorization_attempts CASCADE")
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "TRUNCATE connector_connections, connector_authorization_attempts CASCADE")
 	s.Require().NoError(err)
 }
 
@@ -161,7 +161,7 @@ func (s *PGSealedSuite) connected(customerID string, held tokens, expires time.T
 		CustomerID: customerID, ConnectorID: "acme", DefinitionRevision: 1,
 		OwnerType: store.OwnerApp, AuthScheme: "test_rotating",
 	}
-	s.Require().NoError(s.db.CreateConnectorConnection(s.ctx, schemes, connection))
+	s.Require().NoError(s.db.ConnectorConnections.Insert(s.ctx, schemes, connection))
 	ref := core.ConnectionRef{CustomerID: customerID, ConnectionID: connection.ID}
 	s.Require().NoError(s.credentialStore(s.v1).Update(s.ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
 		state.Credentials = credentials(held)
@@ -173,7 +173,7 @@ func (s *PGSealedSuite) connected(customerID string, held tokens, expires time.T
 }
 
 func (s *PGSealedSuite) stored(ref core.ConnectionRef) store.ConnectorConnection {
-	connection, err := s.db.ConnectorConnection(s.ctx, ref.CustomerID, ref.ConnectionID)
+	connection, err := s.db.ConnectorConnections.Get(s.ctx, ref.CustomerID, ref.ConnectionID)
 	s.Require().NoError(err)
 	return connection
 }
@@ -474,16 +474,18 @@ func (s *PGSealedSuite) TestWhenAConsentConnectedIsKeptAndARefreshKeepsIt() {
 	s.True(connected.Equal(*stored.ConnectedAt))
 }
 
-// A credentials write that connects a connection names no time of its own (T18's write,
-// AI-849); the grant begins when it is committed.
-func (s *PGSealedSuite) TestAConnectionCommittedConnectedFromAnotherStatusIsStampedConnectedNow() {
+// A commit that connects a connection from another status writes the time fn leaves: a
+// renewal saved again after its checkpoint loads needs_reauthorization and is still the same
+// grant (the resolver's saveAgain). Whatever begins a grant names its time (AI-3504).
+func (s *PGSealedSuite) TestAConnectionCommittedConnectedFromAnotherStatusKeepsTheTimeFnLeaves() {
 	ref := s.connected("acme-app", tokens{Access: "a", Refresh: "r"}, time.Time{})
 	credentialStore := s.credentialStore(s.v1)
+	connected := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	s.Require().NoError(credentialStore.Update(s.ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
 		state.Status = store.ConnectionNeedsReauthorization
+		state.ConnectedAt = connected
 		return true, nil
 	}))
-	before := time.Now().UTC()
 
 	s.Require().NoError(credentialStore.Update(s.ctx, ref, func(state *core.CredentialState, _ func() error) (bool, error) {
 		state.Credentials = credentials(tokens{Access: "a2", Refresh: "r2"})
@@ -493,7 +495,7 @@ func (s *PGSealedSuite) TestAConnectionCommittedConnectedFromAnotherStatusIsStam
 
 	stored := s.stored(ref)
 	s.Require().NotNil(stored.ConnectedAt)
-	s.False(stored.ConnectedAt.Before(before.Truncate(time.Microsecond)))
+	s.True(connected.Equal(*stored.ConnectedAt), "the grant's time, not the commit's")
 }
 
 // A refresh checkpoints needs_reauthorization and commits connected again; it is the same
@@ -573,7 +575,7 @@ func (s *PGSealedSuite) TestABlobFromAnEarlierRevisionDoesNotOpen() {
 		return true, nil
 	}))
 	// Somebody with write access to the table puts the earlier credentials back.
-	_, err := s.db.DB().ExecContext(s.ctx, "UPDATE connector_connections SET credentials_sealed = ? WHERE id = ?", earlier, ref.ConnectionID)
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET credentials_sealed = ? WHERE id = ?", earlier, ref.ConnectionID)
 	s.Require().NoError(err)
 
 	s.assertUnreadable(ref)
@@ -583,7 +585,7 @@ func (s *PGSealedSuite) TestABlobFromAnotherConnectionDoesNotOpen() {
 	theirs := s.connected("acme-app", tokens{Access: "theirs", Refresh: "theirs"}, time.Time{})
 	mine := s.connected("acme-app", tokens{Access: "mine", Refresh: "mine"}, time.Time{})
 	s.Equal(s.stored(theirs).Revision, s.stored(mine).Revision, "both at the same revision, so only the id tells them apart")
-	_, err := s.db.DB().ExecContext(s.ctx, "UPDATE connector_connections SET credentials_sealed = ? WHERE id = ?",
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET credentials_sealed = ? WHERE id = ?",
 		s.stored(theirs).CredentialsSealed, mine.ConnectionID)
 	s.Require().NoError(err)
 
@@ -594,7 +596,7 @@ func (s *PGSealedSuite) TestABlobFromAnotherCustomerDoesNotOpen() {
 	theirs := s.connected("other-app", tokens{Access: "theirs", Refresh: "theirs"}, time.Time{})
 	// The row moves to another customer with its id, revision and blob, as an import that
 	// kept the blob would leave it.
-	_, err := s.db.DB().ExecContext(s.ctx, "UPDATE connector_connections SET customer_id = 'acme-app' WHERE id = ?", theirs.ConnectionID)
+	_, err := s.db.GlobalDB().ExecContext(s.ctx, "UPDATE connector_connections SET customer_id = 'acme-app' WHERE id = ?", theirs.ConnectionID)
 	s.Require().NoError(err)
 
 	s.assertUnreadable(core.ConnectionRef{CustomerID: "acme-app", ConnectionID: theirs.ConnectionID})

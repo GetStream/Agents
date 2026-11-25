@@ -32,6 +32,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/openweights"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/parasail"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/phala"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/qwen"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/sailresearch"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/siliconflow"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm/together"
@@ -63,6 +64,17 @@ func DefaultRegistry() *Registry {
 
 	registry.Register(deepseek.ProviderName, func(spec routing.Spec) (Provider, error) {
 		return Started(deepseek.New(deepseek.Options{
+			Model:           spec.Model,
+			APIKey:          spec.APIKey,
+			BaseURL:         spec.BaseURL,
+			Thinking:        spec.Thinking,
+			ReasoningEffort: spec.ReasoningEffort,
+			Logger:          spec.Logger,
+		}))
+	}, instanced...)
+
+	registry.Register(qwen.ProviderName, func(spec routing.Spec) (Provider, error) {
+		return Started(qwen.New(qwen.Options{
 			Model:           spec.Model,
 			APIKey:          spec.APIKey,
 			BaseURL:         spec.BaseURL,
@@ -113,12 +125,13 @@ func DefaultRegistry() *Registry {
 			client = endpoint.Client
 		}
 		return Started(custom.New(custom.Options{
-			Name:       spec.Model,
-			Model:      endpoint.Model,
-			BaseURL:    endpoint.BaseURL,
-			APIKey:     endpoint.APIKey,
-			HTTPClient: client,
-			Logger:     spec.Logger,
+			Name:          spec.Model,
+			Model:         endpoint.Model,
+			BaseURL:       endpoint.BaseURL,
+			APIKey:        endpoint.APIKey,
+			ContextWindow: endpoint.ContextWindow,
+			HTTPClient:    client,
+			Logger:        spec.Logger,
 		}))
 	})
 

@@ -49,9 +49,9 @@ func unflushedHoldsSeconds() float64 {
 }
 
 // Alerts are the router's usage conditions, for the one alerts loop of a process, which sends
-// one event of a condition at most every limit. A row lost or refused while the limit holds the
-// alert back is sent once the limit has passed, and each row is sent once. The names are the
-// alerts' everywhere they are routed.
+// one event of a condition at most every limit, or its Repeat. A row lost or refused while the
+// limit holds the alert back is sent once the limit has passed, and each row is sent once. The
+// names are the alerts' everywhere they are routed.
 func Alerts(limit time.Duration) []alerts.Condition {
 	return []alerts.Condition{
 		// Every lost row is revenue, so there is no hold.
@@ -68,7 +68,7 @@ func Alerts(limit time.Duration) []alerts.Condition {
 		{Name: "ship_stale", Level: alerts.Page, Check: aboveFor(unshippedOldest, shipStaleSeconds, shipStaleFor, "oldest_unshipped_started_seconds_ago"),
 			Summary: "usage rows are not reaching the usage service, so the balances it keeps are stale"},
 		// One alert per app, so each is its own Sentry issue.
-		{Name: "unowned", Level: alerts.Warn, Items: unownedApps(unownedFor), Describe: func(string) string {
+		{Name: "unowned", Level: alerts.Warn, Repeat: 24 * time.Hour, Items: unownedApps(unownedFor), Describe: func(string) string {
 			return "the app has joined no organization, so its usage rows wait and are not billed until it joins one; " +
 				"check app_organizations for the app first, then what wrote the rows (written_by: api_key, modality, provider, model)"
 		}},

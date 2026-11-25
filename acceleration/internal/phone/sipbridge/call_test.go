@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,9 +13,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newTestCall() (*Call, *fakeLeg, *fakeLeg) {
+func newTestCall(t *testing.T) (*Call, *fakeLeg, *fakeLeg) {
 	customer, stream := &fakeLeg{}, &fakeLeg{}
-	c := newCall(customer, stream, slog.New(slog.DiscardHandler))
+	c := newCall(t.Context(), customer, stream, slog.New(slog.DiscardHandler))
+	c.trunkAddr = testTrunkAddr
 	c.establish()
 	return c, customer, stream
 }
@@ -29,7 +31,7 @@ func requireEnded(t *testing.T, c *Call) {
 }
 
 func TestByeFromCustomerEndsStreamLeg(t *testing.T) {
-	c, customer, stream := newTestCall()
+	c, customer, stream := newTestCall(t)
 
 	c.onBye(t.Context(), customerSide)
 
@@ -40,7 +42,7 @@ func TestByeFromCustomerEndsStreamLeg(t *testing.T) {
 }
 
 func TestByeFromStreamEndsCustomerLeg(t *testing.T) {
-	c, customer, stream := newTestCall()
+	c, customer, stream := newTestCall(t)
 
 	c.onBye(t.Context(), streamSide)
 
@@ -50,7 +52,7 @@ func TestByeFromStreamEndsCustomerLeg(t *testing.T) {
 }
 
 func TestByeFromBothSidesAtOnceEndsCallOnce(t *testing.T) {
-	c, customer, stream := newTestCall()
+	c, customer, stream := newTestCall(t)
 
 	var wg sync.WaitGroup
 	for _, s := range []side{customerSide, streamSide} {
@@ -70,7 +72,7 @@ func TestByeFromBothSidesAtOnceEndsCallOnce(t *testing.T) {
 }
 
 func TestAFailedByeStillEndsTheCall(t *testing.T) {
-	c, _, stream := newTestCall()
+	c, _, stream := newTestCall(t)
 	stream.byeErr = errors.New("connection reset")
 
 	c.onBye(t.Context(), customerSide)
@@ -78,20 +80,70 @@ func TestAFailedByeStillEndsTheCall(t *testing.T) {
 	requireEnded(t, c)
 }
 
-func TestReinviteIsForwardedToTheOtherLeg(t *testing.T) {
-	c, _, stream := newTestCall()
-	stream.reinviteAnswer = []byte("answer")
+func TestReinviteFromStreamReachesTheCustomerAsItCameAndItsAnswerRebuilt(t *testing.T) {
+	c, customer, _ := newTestCall(t)
+	customer.reinviteAnswer = []byte("v=0\r\no=- 5 2 IN IP4 10.0.0.5\r\ns=-\r\nc=IN IP4 10.0.0.5\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\na=candidate:1 1 UDP 2130706431 10.0.0.5 30000 typ host\r\n")
 
-	got, err := c.onReinvite(t.Context(), customerSide, []byte("offer"))
+	got, err := c.onReinvite(t.Context(), streamSide, streamAnswerSDP)
 
 	require.NoError(t, err)
-	require.Equal(t, []byte("answer"), got)
+	require.Equal(t, []string{"reinvite"}, customer.calls())
+	require.Equal(t, streamAnswerSDP, customer.body(0))
+	require.Equal(t, Media{Addr: "1.0.0.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, got))
+	require.NotContains(t, string(got), "10.0.0.5")
+}
+
+func TestReinviteFromStreamFailsWhenTheCustomerAnswerCannotBeRead(t *testing.T) {
+	c, customer, _ := newTestCall(t)
+	customer.reinviteAnswer = []byte("answer")
+
+	_, err := c.onReinvite(t.Context(), streamSide, streamAnswerSDP)
+
+	require.ErrorContains(t, err, "parse sdp")
+}
+
+func TestReinviteFromTheCustomerReachesStreamRebuilt(t *testing.T) {
+	c, _, stream := newTestCall(t)
+	stream.reinviteAnswer = streamAnswerSDP
+	offer := "v=0\r\no=- 9 3 IN IP4 192.168.1.20\r\ns=-\r\nc=IN IP4 192.168.1.20\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\na=rtcp:30001 IN IP4 169.254.169.254\r\na=sendrecv\r\n" +
+		"m=video 30002 RTP/AVP 96\r\na=rtpmap:96 VP8/90000\r\n"
+
+	got, err := c.onReinvite(t.Context(), customerSide, []byte(offer))
+
+	require.NoError(t, err)
+	sent := string(stream.body(0))
+	require.Equal(t, Media{Addr: "1.0.0.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, []byte(sent)))
+	require.Contains(t, sent, "o=- 9 3 IN IP4 1.0.0.1\r\n")
+	require.NotContains(t, sent, "169.254.169.254")
+	require.NotContains(t, sent, "video")
+	require.Regexp(t, `(?s)m=audio 20000 .*m=video 0 RTP/AVP 96\r\n`, string(got))
+}
+
+func TestReinviteFromTheCustomerThatCannotBeReadIsRefused(t *testing.T) {
+	c, _, stream := newTestCall(t)
+
+	_, err := c.onReinvite(t.Context(), customerSide, []byte("offer"))
+
+	require.ErrorContains(t, err, "parse sdp")
+	require.Empty(t, stream.calls())
+}
+
+func TestReinviteFromTheCustomerWithoutAnOfferAsksStreamForOne(t *testing.T) {
+	c, _, stream := newTestCall(t)
+	stream.reinviteAnswer = streamAnswerSDP
+
+	got, err := c.onReinvite(t.Context(), customerSide, nil)
+
+	require.NoError(t, err)
+	require.Equal(t, streamAnswerSDP, got)
 	require.Equal(t, []string{"reinvite"}, stream.calls())
-	require.Equal(t, []byte("offer"), stream.body(0))
+	require.Empty(t, stream.body(0))
 }
 
 func TestInfoIsForwardedToTheOtherLeg(t *testing.T) {
-	c, customer, _ := newTestCall()
+	c, customer, _ := newTestCall(t)
 
 	err := c.onInfo(t.Context(), streamSide, "application/dtmf-relay", []byte("Signal=5"))
 
@@ -101,7 +153,7 @@ func TestInfoIsForwardedToTheOtherLeg(t *testing.T) {
 }
 
 func TestLostLegHangsUpTheOtherAndSaysWhy(t *testing.T) {
-	c, customer, _ := newTestCall()
+	c, customer, _ := newTestCall(t)
 
 	c.lost(t.Context(), streamSide, errors.New("EOF"))
 
@@ -111,7 +163,7 @@ func TestLostLegHangsUpTheOtherAndSaysWhy(t *testing.T) {
 }
 
 func TestHangupByesBothLegs(t *testing.T) {
-	c, customer, stream := newTestCall()
+	c, customer, stream := newTestCall(t)
 
 	require.NoError(t, c.Hangup(t.Context()))
 
@@ -121,7 +173,7 @@ func TestHangupByesBothLegs(t *testing.T) {
 }
 
 func TestHangupByesStreamWhileTheCustomerTrunkDoesNotAnswer(t *testing.T) {
-	c, customer, stream := newTestCall()
+	c, customer, stream := newTestCall(t)
 	customer.byeBlocks = true
 	ctx, cancel := context.WithCancel(t.Context())
 	hungUp := make(chan error, 1)
@@ -143,7 +195,7 @@ func TestHangupByesStreamWhileTheCustomerTrunkDoesNotAnswer(t *testing.T) {
 }
 
 func TestHangupBoundsEachByeByItsOwnTimeout(t *testing.T) {
-	c, customer, stream := newTestCall()
+	c, customer, stream := newTestCall(t)
 	var deadlines [2]time.Time
 	customer.onBye = func(ctx context.Context) { deadlines[customerSide], _ = ctx.Deadline() }
 	stream.onBye = func(ctx context.Context) { deadlines[streamSide], _ = ctx.Deadline() }
@@ -157,7 +209,7 @@ func TestHangupBoundsEachByeByItsOwnTimeout(t *testing.T) {
 }
 
 func TestNothingIsForwardedAfterTheCallEnded(t *testing.T) {
-	c, customer, stream := newTestCall()
+	c, customer, stream := newTestCall(t)
 	c.onBye(t.Context(), customerSide)
 
 	c.onBye(t.Context(), streamSide)
@@ -167,7 +219,7 @@ func TestNothingIsForwardedAfterTheCallEnded(t *testing.T) {
 }
 
 func TestHangupAfterRemoteByeSendsNothing(t *testing.T) {
-	c, customer, stream := newTestCall()
+	c, customer, stream := newTestCall(t)
 
 	c.onBye(t.Context(), customerSide)
 	err := c.Hangup(t.Context())
@@ -179,7 +231,7 @@ func TestHangupAfterRemoteByeSendsNothing(t *testing.T) {
 }
 
 func TestReinviteAfterTheCallEndedIsRefused(t *testing.T) {
-	c, customer, stream := newTestCall()
+	c, customer, stream := newTestCall(t)
 	c.onBye(t.Context(), customerSide)
 
 	got, err := c.onReinvite(t.Context(), streamSide, []byte("offer"))
@@ -192,7 +244,7 @@ func TestReinviteAfterTheCallEndedIsRefused(t *testing.T) {
 }
 
 func TestInfoAfterTheCallEndedIsRefused(t *testing.T) {
-	c, customer, stream := newTestCall()
+	c, customer, stream := newTestCall(t)
 	c.onBye(t.Context(), streamSide)
 
 	err := c.onInfo(t.Context(), customerSide, "application/dtmf-relay", []byte("Signal=5"))
@@ -205,13 +257,13 @@ func TestInfoAfterTheCallEndedIsRefused(t *testing.T) {
 
 // setupCall is a call still being set up: Stream answered, but the customer leg is a real
 // leg whose INVITE has no answer yet, so it has no dialog to send requests in.
-func setupCall() *Call {
+func setupCall(t *testing.T) *Call {
 	customer := &sipLeg{side: customerSide, log: slog.New(slog.DiscardHandler)}
-	return newCall(customer, &fakeLeg{}, slog.New(slog.DiscardHandler))
+	return newCall(t.Context(), customer, &fakeLeg{}, slog.New(slog.DiscardHandler))
 }
 
 func TestAReinviteDuringSetupIsAskedToWait(t *testing.T) {
-	c := setupCall()
+	c := setupCall(t)
 	forward := func(ctx context.Context, offer []byte) ([]byte, error) {
 		return c.onReinvite(ctx, streamSide, offer)
 	}
@@ -223,7 +275,7 @@ func TestAReinviteDuringSetupIsAskedToWait(t *testing.T) {
 }
 
 func TestAnInfoDuringSetupIsRefused(t *testing.T) {
-	c := setupCall()
+	c := setupCall(t)
 
 	err := c.onInfo(t.Context(), streamSide, "application/dtmf-relay", []byte("Signal=5"))
 
@@ -237,7 +289,8 @@ func TestAReinviteLogsTheAddressesBothWays(t *testing.T) {
 	var buf bytes.Buffer
 	customer := &fakeLeg{}
 	stream := &fakeLeg{reinviteAnswer: sdpAt("198.51.100.20")}
-	c := newCall(customer, stream, slog.New(slog.NewJSONHandler(&buf, nil)))
+	c := newCall(t.Context(), customer, stream, slog.New(slog.NewJSONHandler(&buf, nil)))
+	c.trunkAddr = testTrunkAddr
 	c.establish()
 
 	_, err := c.onReinvite(t.Context(), customerSide, sdpAt("203.0.113.10"))
@@ -251,7 +304,7 @@ func TestAReinviteLogsTheAddressesBothWays(t *testing.T) {
 }
 
 func TestReleaseEndsTheCallWithoutAByeOnEitherLeg(t *testing.T) {
-	c, customer, stream := newTestCall()
+	c, customer, stream := newTestCall(t)
 
 	c.Release()
 
@@ -262,7 +315,7 @@ func TestReleaseEndsTheCallWithoutAByeOnEitherLeg(t *testing.T) {
 }
 
 func TestAByeAfterReleaseIsNotPassedOn(t *testing.T) {
-	c, _, stream := newTestCall()
+	c, _, stream := newTestCall(t)
 	c.Release()
 
 	c.onBye(t.Context(), customerSide)
@@ -271,7 +324,7 @@ func TestAByeAfterReleaseIsNotPassedOn(t *testing.T) {
 }
 
 func TestAPassedOnReinviteTellsOnChange(t *testing.T) {
-	c, _, stream := newTestCall()
+	c, _, stream := newTestCall(t)
 	stream.reinviteAnswer = sdpAt("198.51.100.20")
 	changes := 0
 	c.onChange = func() { changes++ }
@@ -287,7 +340,7 @@ func TestAPassedOnReinviteTellsOnChange(t *testing.T) {
 }
 
 func TestACallStateHasBothLegsAndTheMedia(t *testing.T) {
-	c, customer, stream := newTestCall()
+	c, customer, stream := newTestCall(t)
 	customer.state = LegState{CallID: "c"}
 	stream.state = LegState{CallID: "s"}
 	c.media = MediaAddrs{Customer: "203.0.113.10", Stream: "198.51.100.20"}
@@ -297,4 +350,63 @@ func TestACallStateHasBothLegsAndTheMedia(t *testing.T) {
 	require.Equal(t, "c", got.Customer.CallID)
 	require.Equal(t, "s", got.Stream.CallID)
 	require.Equal(t, MediaAddrs{Customer: "203.0.113.10", Stream: "198.51.100.20"}, got.Media)
+}
+
+func TestReinviteFromTheCustomerWithAFaxLineReachesStreamAudioOnly(t *testing.T) {
+	c, _, stream := newTestCall(t)
+	stream.reinviteAnswer = streamAnswerSDP
+	offer := "v=0\r\no=- 9 3 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\n" + t38Line
+
+	got, err := c.onReinvite(t.Context(), customerSide, []byte(offer))
+
+	require.NoError(t, err)
+	require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+	require.NotContains(t, string(stream.body(0)), "image")
+	require.Regexp(t, `(?s)m=audio 20000 .*m=image 0 udptl t38\r\n`, string(got))
+}
+
+func TestReinviteFromStreamAnsweredWithAFaxLineReachesStreamAudioOnly(t *testing.T) {
+	c, customer, _ := newTestCall(t)
+	customer.reinviteAnswer = []byte("v=0\r\no=- 5 2 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\n" + t38Line)
+
+	got, err := c.onReinvite(t.Context(), streamSide, streamAnswerSDP)
+
+	require.NoError(t, err)
+	require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, got))
+	require.NotContains(t, string(got), "image")
+}
+
+func TestReinviteFromTheCustomerIsAnsweredWhateverItsLineEndings(t *testing.T) {
+	for name, offer := range lineEndings {
+		t.Run(name, func(t *testing.T) {
+			c, _, stream := newTestCall(t)
+			stream.reinviteAnswer = streamAnswerSDP
+
+			var got []byte
+			var err error
+			require.NotPanics(t, func() { got, err = c.onReinvite(t.Context(), customerSide, []byte(offer)) })
+
+			require.NoError(t, err)
+			require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+			requireAudioThenRejectedVideo(t, got)
+		})
+	}
+}
+
+func TestReinviteFromTheCustomerWithALineTheParserRefusesReachesStreamAudioOnly(t *testing.T) {
+	for name, line := range otherLines {
+		t.Run(name, func(t *testing.T) {
+			c, _, stream := newTestCall(t)
+			stream.reinviteAnswer = streamAnswerSDP
+			offer := "v=0\r\no=- 9 3 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n" + line
+
+			got, err := c.onReinvite(t.Context(), customerSide, []byte(offer))
+
+			require.NoError(t, err)
+			require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+			require.Equal(t, 2, strings.Count(string(got), "m="))
+		})
+	}
 }

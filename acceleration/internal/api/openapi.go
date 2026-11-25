@@ -28,7 +28,7 @@ An end user comes at one of three levels â€” anonymous, guest or authenticated â
 
 A session belongs to whoever opened it, and an end user reaches only their own. The session records the customer, the end user and which kind of caller that was, and one that does not match is told the session does not exist rather than that it may not have it. A caller presenting a verified token is a different owner from an anonymous one claiming the same name, so naming somebody else's user id gets an anonymous caller nowhere. The exception is a session a backend opened in a named user's name, which that user's own device reaches: a server-side caller may send X-Stream-User-Id to say who it is acting for, and is then held only to the daily quotas the customer set for that user, never to the router's default.
 
-An end user's device is capped at a number of model responses and a number of tokens per UTC day, counted against both the ` + "`user_id`" + ` its token names and the address it came from. A caller with nothing left is answered 429 with a ` + "`Retry-After`" + ` naming the seconds until the limit resets; on a socket the same refusal arrives as an ` + "`error`" + ` frame, because the socket was already open when the day ran out. A server-side caller is held only to quotas the customer set: one naming a user counts toward that user's quota, and is refused only work that asks a model for something (a session, a turn, a run, a socket), never a read. The router's default allowances, which count devices only, are ROUTER_RATE_LIMIT_MESSAGES_PER_DAY and ROUTER_RATE_LIMIT_TOKENS_PER_DAY, and a deployment with no Redis to count in caps nothing. In noauth mode the end user is named by ` + "`X-Stream-User-Id`" + `, or by a ` + "`user_id`" + ` query parameter on a socket.
+An end user's device is capped at a number of model responses (a reply of a text or speech-to-speech model, or a search) and a number of tokens per UTC day, counted against both the ` + "`user_id`" + ` its token names and the address it came from, an IPv6 address by its /64. A caller with nothing left is answered 429 with a ` + "`Retry-After`" + ` naming the seconds until the limit resets; on a socket the same refusal arrives as an ` + "`error`" + ` frame, because the socket was already open when the day ran out. A server-side caller is held only to quotas the customer set: one naming a user counts toward that user's quota, and is refused only work that asks a model for something (a session, a turn, a run, a search, a socket), never a read. The router's default allowances, which count devices only, are ROUTER_RATE_LIMIT_MESSAGES_PER_DAY and ROUTER_RATE_LIMIT_TOKENS_PER_DAY, and a deployment with no Redis to count in caps nothing. In noauth mode the end user is named by ` + "`X-Stream-User-Id`" + `, or by a ` + "`user_id`" + ` query parameter on a socket.
 `
 
 // Either the customer header, or an API key and the token signed with its secret. Which of
@@ -46,6 +46,14 @@ var securitySchemes = map[string]*huma.SecurityScheme{
 		Name: opsKeyHeader,
 		Description: "Stream staff's own key, for reviewing 10DLC use cases across apps. It is " +
 			"held by Stream's internal tools and never by an app or a browser.",
+	},
+	"ActivityKey": {
+		Type: "apiKey",
+		In:   "header",
+		Name: activityKeyHeader,
+		Description: "Stream staff's read-only key for organizations' activity, held by the job that " +
+			"reads it. It reaches listActivity and getOrganizationActivity and nothing else, and is " +
+			"never held by an app or a browser.",
 	},
 	"ManageKey": {
 		Type: "apiKey",
@@ -416,6 +424,7 @@ func (s *Server) newAPI(router chi.Router) huma.API {
 	s.registerDLC(api)
 	s.registerSuspensions(api)
 	s.registerOrganizationActivity(api)
+	s.registerActivity(api)
 	s.registerManage(api)
 	s.registerPriceLists(api)
 	return api

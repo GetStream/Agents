@@ -30,12 +30,12 @@ const inboundLease = time.Minute
 const defaultInboundPoll = time.Second
 
 // inboundInFlight is how many queued messages one router writes at once. A thread's messages
-// are written one at a time whatever it is (store.ClaimChannelInbound). eventforward's inFlight,
+// are written one at a time whatever it is (store.ChannelInbounds.Claim). eventforward's inFlight,
 // a choice, not a measurement.
 const inboundInFlight = 16
 
 // pruneEvery is how often a worker deletes the rows past their keep: a day for a written
-// message, 30 days for a given-up one (store.PruneChannelInbound), so an hour late is nothing.
+// message, 30 days for a given-up one (store.ChannelInbounds.Prune), so an hour late is nothing.
 // A choice.
 const pruneEvery = time.Hour
 
@@ -125,8 +125,7 @@ func (b *Bridge) writeDue(ctx context.Context) (wait time.Duration, again bool) 
 		if free == 0 {
 			return 0, false
 		}
-		now := time.Now()
-		claimed, err := b.store.ClaimChannelInbound(ctx, now, free, now.Add(inboundLease))
+		claimed, err := b.store.ChannelInbounds.Claim(ctx, free, inboundLease)
 		if err != nil {
 			if ctx.Err() == nil {
 				b.logger.Error("could not take the inbound messages due", "error", err)
@@ -149,7 +148,7 @@ func (b *Bridge) writeDue(ctx context.Context) (wait time.Duration, again bool) 
 			break
 		}
 	}
-	next, queued, err := b.store.NextChannelInboundAt(ctx)
+	next, queued, err := b.store.ChannelInbounds.NextDue(ctx)
 	switch {
 	case err != nil:
 		if ctx.Err() == nil {
@@ -169,7 +168,7 @@ func (b *Bridge) prune(ctx context.Context) {
 		return
 	}
 	b.pruned = time.Now()
-	if _, err := b.store.PruneChannelInbound(ctx, b.pruned); err != nil && ctx.Err() == nil {
+	if _, err := b.store.ChannelInbounds.Prune(ctx, b.pruned); err != nil && ctx.Err() == nil {
 		b.logger.Error("could not delete the inbound messages past their keep", "error", err)
 	}
 }
@@ -187,11 +186,11 @@ func (b *Bridge) attempt(message store.ChannelInbound) {
 	defer done()
 	log := b.logger.With("connector", message.ConnectorID, "customer", message.CustomerID, "channel", message.ChannelID,
 		"seq", message.Seq)
-	attempts := message.Attempts + 1
+	attempts := message.Attempts
 	var changed bool
 	switch {
 	case err == nil:
-		changed, err = b.store.FinishChannelInbound(recording, message, time.Now())
+		changed, err = b.store.ChannelInbounds.Finish(recording, message, time.Now())
 		if err == nil && changed {
 			log.Info("an inbound message is done", "attempts", attempts)
 		}
@@ -201,10 +200,10 @@ func (b *Bridge) attempt(message store.ChannelInbound) {
 			log.Warn("an opt-out is still not recorded and is tried again", "attempts", attempts, "error", err)
 		}
 		wait := b.inboundRetries[min(attempts, len(b.inboundRetries))-1]
-		changed, err = b.store.RetryChannelInbound(recording, message, time.Now().Add(wait))
+		changed, err = b.store.ChannelInbounds.Retry(recording, message, time.Now().Add(wait))
 	default:
 		cause := err
-		changed, err = b.store.FailChannelInbound(recording, message, time.Now(), b.forwardUnanswered(message))
+		changed, err = b.store.ChannelInbounds.Fail(recording, message, time.Now(), b.forwardUnanswered(message))
 		if changed {
 			log.Warn("gave up an inbound message: it was never written into its thread channel or handed to the agent, so no agent answers it",
 				"attempts", attempts, "error", cause)
@@ -228,7 +227,7 @@ func (b *Bridge) attempt(message store.ChannelInbound) {
 // written. The message is done only once its turn is claimed, so a router that stops between
 // the write and the claim leaves it queued, and the next attempt finds it written and claims it.
 func (b *Bridge) writeQueued(ctx context.Context, message store.ChannelInbound) error {
-	thread, err := b.store.ChannelThread(ctx, message.ChannelID)
+	thread, err := b.store.ChannelThreads.Get(ctx, message.ChannelID)
 	if err != nil {
 		return err
 	}
@@ -256,7 +255,7 @@ func (b *Bridge) writeQueued(ctx context.Context, message store.ChannelInbound) 
 		return err
 	}
 	// The row's last attempt writes the message without a photo Stream Chat keeps failing.
-	media, err := b.upload(ctx, target, thread, inbound.Media, files, message.Attempts+1 > len(b.inboundRetries), log)
+	media, err := b.upload(ctx, target, thread, inbound.Media, files, message.Attempts > len(b.inboundRetries), log)
 	if err != nil {
 		return err
 	}
@@ -267,7 +266,7 @@ func (b *Bridge) writeQueued(ctx context.Context, message store.ChannelInbound) 
 	// longer: it returns, and the worker that took the lease writes.
 	uploaded := uploads(media)
 	if len(uploaded) > len(uploads(inbound.Media)) {
-		changed, err := b.store.SaveChannelInboundMedia(ctx, message, media)
+		changed, err := b.store.ChannelInbounds.SaveMedia(ctx, message, media)
 		if err != nil {
 			return err
 		}
@@ -333,7 +332,7 @@ func (b *Bridge) writeQueued(ctx context.Context, message store.ChannelInbound) 
 }
 
 // forwardUnanswered hands a given-up message's delivery to the customer's event destinations of
-// unhandled events (Options.Unanswered), for store.FailChannelInbound to call: only the first
+// unhandled events (Options.Unanswered), for store.ChannelInbounds.Fail to call: only the first
 // given-up message of a delivery whose forward is queued does, so two of them are one forward.
 // Nil without Options.Unanswered.
 func (b *Bridge) forwardUnanswered(message store.ChannelInbound) func(context.Context) error {

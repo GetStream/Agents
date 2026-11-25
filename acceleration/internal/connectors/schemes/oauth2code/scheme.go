@@ -74,6 +74,16 @@ var (
 	ErrRegistration = errors.New("oauth2code: register")
 )
 
+// ManifestError is a consent the connector's own configuration cannot start: endpoints it
+// lacks or that are not https, or an authorization server that cannot do what it asks (PKCE
+// S256, a client authentication this scheme has). Reason is written for whoever configures
+// the connector, and quotes no URL.
+type ManifestError struct {
+	Reason string
+}
+
+func (e *ManifestError) Error() string { return "oauth2code: " + e.Reason }
+
 // AuthorizationError is the error a provider sent back to the callback (RFC 6749 section
 // 4.1.2.1), such as access_denied when the user declined.
 type AuthorizationError struct {

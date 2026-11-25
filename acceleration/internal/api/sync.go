@@ -7,15 +7,14 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/urls"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
 
 // SyncAgentRequest is an agent directory as it is on disk.
@@ -36,7 +35,7 @@ type SyncAgentRequest struct {
 	Region            *string                    `json:"region,omitempty" pattern:"^[a-z][a-z0-9-]{0,31}$" patternDescription:"a letter and up to 31 of a-z, 0-9 and hyphens, such as us or eu" example:"eu" doc:"agent.yaml's region: where the agent's work is done, us or eu for now. Every model its sessions run is served there and nowhere else, its knowledge base is kept there, and its sandbox is made there. A sync is refused (400), before anything is written, when a model the agent names has no instance there, naming each and the region, when its knowledge base is already kept in another region, since a knowledge base is never moved, or when it names a sandbox and none runs there. Left out, a new agent is in us and a stored one keeps its region."`
 	Stt               *string                    `json:"stt,omitempty"`
 	Tts               *string                    `json:"tts,omitempty"`
-	Sts               *string                    `json:"sts,omitempty" doc:"A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Empty means the cascade."`
+	Sts               *string                    `json:"sts,omitempty" doc:"A speech-to-speech target: one native audio model that hears the caller and speaks back. Naming one makes the agent native, and stt, tts and llm are then not used. Omitted when creating a new voice config with no cascade settings, it defaults to sts-fast where available; on an existing config, omitting it keeps what is stored. An empty string explicitly selects the cascade."`
 	Voice             *string                    `json:"voice,omitempty" doc:"The voice the agent speaks in, as TtsOptions.voice takes it: a provider's own voice id, or one of your voices, with the custom: prefix to mean only yours. A native agent (sts) takes the vendor's own voice name instead."`
 	Llm               *string                    `json:"llm,omitempty"`
 	Video             *SessionVideo              `json:"video,omitempty"`
@@ -59,7 +58,7 @@ type SyncAgentRequest struct {
 	SandboxOptions *SandboxOptions    `json:"sandbox_options,omitempty"`
 	Tags           *map[string]string `json:"tags,omitempty"`
 	Agents         *[]ChildAgent      `json:"agents,omitempty" maxItems:"16" doc:"agent.yaml's agents: the app's other text agents this one may hand work to, each as a tool, by name. Sent, they replace the stored list whole, an empty list removing it; left out, the stored list stays. An agent named must already exist, so a directory is synced after the agents it names."`
-	Tools          *AgentTools        `json:"tools,omitempty" doc:"How connector tools are offered. A setting left out keeps what is stored."`
+	Tools          *[]ToolGroup       `json:"tools,omitempty" maxItems:"64" doc:"agent.yaml's tools: the functions an SDK provides that the agent may offer, in named groups, as AgentConfigRequest's tools names them, with the same rules. Sent, they replace the stored groups whole, an empty list removing them. Left out, the stored ones stay."`
 	Calls          *AgentCalls        `json:"calls,omitempty" doc:"The tools an agent on a phone call is offered: end the call, press keys, transfer. A tool left out keeps what is stored; a tool sent replaces its settings whole."`
 	Scheduling     *AgentScheduling   `json:"scheduling,omitempty" doc:"Whether the agent may schedule tasks for its users, and the defaults those tasks take. A setting left out keeps what is stored."`
 	ResumeHistory  *ResumeHistory     `json:"resume_history,omitempty" doc:"How a conversation is handed back to the model when a session carries it on. A setting left out keeps what is stored."`
@@ -81,7 +80,7 @@ func (*SyncAgentRequest) TransformSchema(_ huma.Registry, schema *huma.Schema) *
 // The caps are the ones the same values have elsewhere: 63 is the longest alias
 // AgentConnectorBinding's name pattern allows, 64 the longest custom connector id
 // (custom_ and 57 more, internal/api/connectors.go) and 120 the longest connection label
-// (CreateConnectionRequest). A built-in connector id is shorter than a custom one.
+// (ConnectionRequest). A built-in connector id is shorter than a custom one.
 type LeftOutConnector struct {
 	Name        string `json:"name" minLength:"1" maxLength:"63" doc:"The alias agent.yaml gave the connector."`
 	ConnectorId string `json:"connector_id" minLength:"1" maxLength:"64" doc:"The connector agent.yaml named, or the alias when it named none."`
@@ -198,6 +197,11 @@ func (s *Server) registerSync(api huma.API) {
 // The hash is a fingerprint of that directory. A second call with the same hash does
 // nothing, so a process that syncs on startup is cheap when nothing has changed.
 func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syncAgentResponse, error) {
+	return onTheConfigAsItIs(func() (*syncAgentResponse, error) { return s.trySyncAgent(ctx, request) })
+}
+
+// trySyncAgent is one try of syncAgent, on the config as it reads it.
+func (s *Server) trySyncAgent(ctx context.Context, request *syncAgentRequest) (*syncAgentResponse, error) {
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer
@@ -225,8 +229,9 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 		return nil, err
 	}
 
-	existing, found, err := s.configs.AgentConfigByName(ctx, customerID, name)
-	if err != nil {
+	existing, err := s.store.AgentConfigs.GetByName(ctx, customerID, name)
+	found := err == nil
+	if err != nil && !errors.Is(err, store.ErrNoAgentConfig) {
 		return nil, err
 	}
 	// A router older than ui_instructions kept a sync's hash and dropped them, so the same sync
@@ -252,16 +257,29 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	if found {
 		stored = sandboxOfConfig(existing)
 	} else {
-		config = store.AgentConfig{CustomerID: customerID, Name: name}
+		config = store.AgentConfig{CustomerID: customerID, Name: name, Mode: store.AgentModeVoice}
 	}
 	applySettings(&config, body)
 	// Named whatever the directory says, so the knowledge the sync writes is never written
 	// into a base kept in another region than the agent's.
 	config.Region = cmp.Or(config.Region, pricing.DefaultRegion)
+	if !found {
+		// Guardrail is applied later for existing configs so syncConflict can inspect the stored one;
+		// new configs need the incoming guardrail here so defaultVoiceSTS sees it.
+		config.Guardrail = value(body.Guardrail)
+		s.defaultVoiceSTS(ctx, &config, body.Sts != nil)
+	}
+	// Before anything is written, for the same reason as the simulations in syncComplaint.
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
 	if message, ok := textSubagentComplaint(&config, body.Subagent); !ok {
 		return nil, invalidRequest(message)
 	}
-	warnings, message, ok := s.channelsWarnings(ctx, config)
+	warnings, message, ok, err := s.channelsWarnings(ctx, config)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return nil, invalidRequest(message)
 	}
@@ -282,7 +300,7 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	if message, ok := teamTagComplaint(config.Tags, existing.Tags); !ok {
 		return nil, invalidRequest(message)
 	}
-	if message, ok := outputRetentionComplaint(config); !ok {
+	if message, ok := toolsComplaint(config); !ok {
 		return nil, invalidRequest(message)
 	}
 	if message, ok, err := s.sandboxBindingsComplaint(ctx, customerID, config); err != nil {
@@ -295,7 +313,7 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	} else if !ok {
 		return nil, invalidRequest(message)
 	}
-	if message, ok := s.liveSTTComplaint(config, existing.STT); !ok {
+	if message, ok := s.liveSTTComplaint(config, existing.Models.STT); !ok {
 		return nil, invalidRequest(message)
 	}
 	var prior *store.AgentConfig
@@ -326,12 +344,22 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 
 	skills := skillsOf(body.Skills)
 	// After the settings, so a sandbox stored before and not repeated still counts.
-	if message, ok := skillSandboxComplaint(skills, config.Sandbox != ""); !ok {
+	if message, ok := skillSandboxComplaint(skills, config.Sandbox.Provider != ""); !ok {
 		return nil, invalidRequest(message)
 	}
 	named := make([]string, 0, len(skills))
 	for _, skill := range skills {
+		// Filled in by upsertSkills, since a new config has no id yet.
+		skill.ConfigId = name
+		if message, ok := skillComplaint(skill); !ok {
+			return nil, invalidRequest(message)
+		}
 		named = append(named, strings.TrimSpace(skill.Name))
+	}
+	if message, ok, err := s.newSkillNamesComplaint(ctx, customerID, existing.ID, named); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, invalidRequest(message)
 	}
 
 	// Before anything is written, and before the knowledge is filled: a caller that asked
@@ -381,8 +409,10 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 			wanted.Title = value(page.Title)
 			wanted.Description = value(page.Description)
 			wanted.RefreshHours = value(page.RefreshHours)
-			if _, err := s.pages.Add(ctx, customerID, wanted); err != nil {
+			if _, err := s.pages.Add(ctx, customerID, wanted); errors.Is(err, urls.ErrRefused) {
 				return nil, invalidRequest(err.Error())
+			} else if err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -399,14 +429,18 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	config.UIInstructions = value(body.UiInstructions)
 	config.Skills = named
 	config.KnowledgeNamespace = namespace
-	config.SyncHash = hash
+	// The hash is written last, after the skills and simulations: written here, a sync whose
+	// skills then failed was found unchanged when sent again, and never wrote them.
+	config.SyncHash = ""
 
 	if found {
-		if err := s.configs.UpdateAgentConfig(ctx, &config); err != nil {
+		// Only over existing, which may have come from the cache: every setting the directory
+		// does not declare is what another save since then wrote.
+		if err := s.store.AgentConfigs.Save(ctx, &config, existing.UpdatedAt, time.Time{}); err != nil {
 			return nil, storeFailure(err, errAgentNameTaken)
 		}
 	} else {
-		if err := s.configs.CreateAgentConfig(ctx, &config); err != nil {
+		if err := s.store.AgentConfigs.Insert(ctx, &config); err != nil {
 			return nil, storeFailure(err, errAgentNameTaken)
 		}
 	}
@@ -420,13 +454,22 @@ func (s *Server) syncAgent(ctx context.Context, request *syncAgentRequest) (*syn
 	// agent has no id to hang them off until it has been stored.
 	if len(skills) > 0 {
 		if err := s.upsertSkills(ctx, customerID, config.ID, skills); err != nil {
-			return nil, invalidRequest(err.Error())
+			return nil, err
 		}
 	}
 	if body.Simulations != nil {
 		if err := s.replaceSimulations(ctx, customerID, config.ID, *body.Simulations); err != nil {
 			return nil, err
 		}
+	}
+	// Only over the config as this sync left it: one saved since no longer holds what the
+	// directory says, and is written again by the next sync of it.
+	marked := config
+	marked.SyncHash = hash
+	if err := s.store.AgentConfigs.Save(ctx, &marked, config.UpdatedAt, time.Time{}); err == nil {
+		config = marked
+	} else if !errors.Is(err, store.ErrStaleAgentConfig) {
+		return nil, err
 	}
 	// Recorded last, after the skills the directory brought with it, because what it marks
 	// is the moment the whole directory and the whole stored agent agreed. An entry written
@@ -453,12 +496,6 @@ func syncComplaint(ctx context.Context, body SyncAgentRequest) (string, bool) {
 	if complaint, ok := guardrailComplaint(ctx, body.Guardrail); !ok {
 		return complaint, false
 	}
-	if len(keytermsOf(body.Keyterms)) > stt.MaxKeyterms {
-		return fmt.Sprintf("a config may name at most %d keyterms", stt.MaxKeyterms), false
-	}
-	if _, ok := sandboxOf(body.Sandbox); !ok {
-		return fmt.Sprintf("there is no sandbox provider called %q", *body.Sandbox), false
-	}
 	if _, ok := harnessOf(body.Harness); !ok {
 		return fmt.Sprintf("there is no harness called %q", *body.Harness), false
 	}
@@ -472,9 +509,6 @@ func syncComplaint(ctx context.Context, body SyncAgentRequest) (string, bool) {
 		return complaint, false
 	}
 	if complaint, ok := chatChannelsComplaint(body.ChatChannels); !ok {
-		return complaint, false
-	}
-	if complaint, ok := sandboxOptionsComplaint(body.SandboxOptions); !ok {
 		return complaint, false
 	}
 	// Simulations are checked here, before anything is written, since a config stored under
@@ -498,7 +532,7 @@ func syncComplaint(ctx context.Context, body SyncAgentRequest) (string, bool) {
 // replaceSimulations makes the config's simulations exactly the ones declared, finding each
 // by name so its runs stay attached to it.
 func (s *Server) replaceSimulations(ctx context.Context, customerID, configID string, declared []SimulationDeclaration) error {
-	all, err := s.store.CustomerSimulations(ctx, customerID)
+	all, err := s.store.Simulations.Select(ctx, customerID)
 	if err != nil {
 		return err
 	}
@@ -529,18 +563,18 @@ func (s *Server) replaceSimulations(ctx context.Context, customerID, configID st
 		delete(stored, simulation.Name)
 		if ok {
 			simulation.ID = existing.ID
-			if err := s.store.UpdateSimulation(ctx, &simulation); err != nil {
+			if err := s.store.Simulations.Update(ctx, &simulation); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := s.store.CreateSimulation(ctx, &simulation); err != nil {
+		if err := s.store.Simulations.Insert(ctx, &simulation); err != nil {
 			return err
 		}
 	}
 
 	for _, simulation := range stored {
-		if err := s.store.DeleteSimulation(ctx, customerID, simulation.ID); err != nil {
+		if err := s.store.Simulations.Delete(ctx, customerID, simulation.ID); err != nil {
 			return err
 		}
 	}
@@ -559,8 +593,8 @@ func simulationsOf(list *[]SimulationDeclaration) []SimulationDeclaration {
 // stored, so a target chosen in the dashboard survives a sync.
 func applySettings(config *store.AgentConfig, body SyncAgentRequest) {
 	if body.Video != nil {
-		config.VideoSource = override(config.VideoSource, body.Video.Source)
-		config.VideoMaxFrames = override(config.VideoMaxFrames, body.Video.MaxFrames)
+		config.Video.Source = override(config.Video.Source, body.Video.Source)
+		config.Video.MaxFrames = override(config.Video.MaxFrames, body.Video.MaxFrames)
 	}
 	if body.Role != nil {
 		config.Role = string(*body.Role)
@@ -573,28 +607,28 @@ func applySettings(config *store.AgentConfig, body SyncAgentRequest) {
 		config.Region = *body.Region
 	}
 	if body.Stt != nil {
-		config.STT = *body.Stt
+		config.Models.STT = *body.Stt
 	}
 	if body.Tts != nil {
-		config.TTS = *body.Tts
+		config.Models.TTS = *body.Tts
 	}
 	if body.Sts != nil {
-		config.STS = *body.Sts
+		config.Models.STS = *body.Sts
 	}
 	if body.Voice != nil {
-		config.Voice = *body.Voice
+		config.Models.Voice = *body.Voice
 	}
 	if body.Llm != nil {
-		config.LLM = *body.Llm
+		config.Models.LLM = *body.Llm
 	}
 	if body.Subagent != nil {
-		config.Subagent = *body.Subagent
+		config.Models.Subagent = *body.Subagent
 	}
 	if body.Search != nil {
-		config.Search = *body.Search
+		config.Models.Search = *body.Search
 	}
 	if body.Image != nil {
-		config.Image = *body.Image
+		config.Models.Image = *body.Image
 	}
 	if body.Greeting != nil {
 		config.Greeting, config.GreetingMode = greetingOf(body.Greeting)
@@ -603,31 +637,31 @@ func applySettings(config *store.AgentConfig, body SyncAgentRequest) {
 		config.Connectors = storedBindings(*body.Connectors)
 		config.LeftOutConnectors = leftOutOf(body.LeftOutConnectors)
 	}
-	config.ProgressiveTools = progressiveOf(config.ProgressiveTools, body.Tools)
-	config.ToolOutputRetention = outputRetentionOf(config.ToolOutputRetention, body.Tools)
+	if body.Tools != nil {
+		config.ToolGroups = toolGroupsOf(*body.Tools)
+	}
 	config.Scheduling = schedulingOr(config.Scheduling, body.Scheduling)
 	config.Calls = callsOr(config.Calls, body.Calls)
 	config.ResumeHistory = resumeHistoryOr(config.ResumeHistory, body.ResumeHistory)
 	config.FloorControl = floorControlOr(config.FloorControl, body.FloorControl)
 	if body.Channels != nil {
-		config.Channels = channelsOf(body.Channels)
+		config.Channels.Lines = channelsOf(body.Channels)
 	}
 	if body.ChatChannels != nil {
-		config.ChatChannels = chatChannelsOf(body.ChatChannels)
+		config.Channels.Chat = chatChannelsOf(body.ChatChannels)
 	}
 	if body.Keyterms != nil {
 		config.Keyterms = keytermsOf(body.Keyterms)
 	}
 	if body.Sandbox != nil {
-		box, _ := sandboxOf(body.Sandbox)
-		config.Sandbox = box
+		config.Sandbox.Provider = sandboxOf(body.Sandbox)
 	}
 	if body.Harness != nil {
 		config.Harness, _ = harnessOf(body.Harness)
 	}
 	applyDispatch(config, body.Dispatch)
 	if body.SandboxOptions != nil {
-		config.SandboxOptions = sandboxConfigOf(body.SandboxOptions)
+		config.Sandbox.Options = sandboxConfigOf(body.SandboxOptions)
 	}
 	if body.Tags != nil {
 		config.Tags = *body.Tags
@@ -654,16 +688,10 @@ func documentsOf(list *[]KnowledgeDocument) []KnowledgeDocument {
 func (s *Server) upsertSkills(ctx context.Context, customerID, configID string, skills []SkillRequest) error {
 	names := make([]string, 0, len(skills))
 	for _, skill := range skills {
-		// The directory names the skill and the config owns it, so the caller does not
-		// repeat the config id per skill and it is filled in here.
-		skill.ConfigId = configID
-		if message, ok := skillComplaint(skill); !ok {
-			return stack.Wrap(errors.New(message))
-		}
 		names = append(names, strings.TrimSpace(skill.Name))
 	}
 
-	stored, err := s.configs.SkillsNamed(ctx, customerID, configID, names)
+	stored, err := s.store.Skills.GetByNames(ctx, customerID, configID, names)
 	if err != nil {
 		return err
 	}
@@ -673,12 +701,14 @@ func (s *Server) upsertSkills(ctx context.Context, customerID, configID string, 
 	}
 
 	for _, skill := range skills {
+		// The directory names the skill and the config owns it, so the caller does not
+		// repeat the config id per skill and it is filled in here.
 		skill.ConfigId = configID
 		row := storedSkill(skill, customerID)
 		if existing, ok := known[row.Name]; ok {
 			row.ID = existing.ID
 			row.CreatedAt = existing.CreatedAt
-			if err := s.configs.UpdateSkill(ctx, &row); err != nil {
+			if err := s.store.Skills.Update(ctx, &row); err != nil {
 				return err
 			}
 			s.audit(ctx, auditRecord{
@@ -688,7 +718,7 @@ func (s *Server) upsertSkills(ctx context.Context, customerID, configID string, 
 			})
 			continue
 		}
-		if err := s.configs.CreateSkill(ctx, &row); err != nil {
+		if err := s.store.Skills.Insert(ctx, &row); err != nil {
 			return err
 		}
 		s.audit(ctx, auditRecord{

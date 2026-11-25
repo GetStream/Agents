@@ -127,7 +127,7 @@ func (s *PriceListsSuite) active() PriceList {
 
 // changeCount is how many price changes the database holds.
 func (s *PriceListsSuite) changeCount() int {
-	count, err := s.store.DB().NewSelect().Model((*store.PriceChange)(nil)).Count(context.Background())
+	count, err := s.store.GlobalDB().NewSelect().Model((*store.PriceChange)(nil)).Count(context.Background())
 	s.Require().NoError(err)
 	return count
 }
@@ -637,7 +637,7 @@ func (s *PriceListsSuite) TestAChangeMoreThanTwoYearsAheadIsRefused() {
 // TestAChangeThatWaitsOutTheLockIsBusy: another session holds the lock every write to the price
 // list takes. The change gives up after the lock timeout with a 503 to send again later.
 func (s *PriceListsSuite) TestAChangeThatWaitsOutTheLockIsBusy() {
-	held, err := s.store.DB().BeginTx(context.Background(), nil)
+	held, err := s.store.GlobalDB().BeginTx(context.Background(), nil)
 	s.Require().NoError(err)
 	defer held.Rollback() //nolint:errcheck // rolled back below; this one is for a failed assertion
 	_, err = held.ExecContext(context.Background(), "SELECT pg_advisory_xact_lock(hashtextextended('router.prices', 0))")
@@ -915,7 +915,7 @@ func (s *PriceListsSuite) TestAnAppCredentialDoesNotReachThePriceList() {
 // auditOf is the audit rows of a change, oldest first.
 func (s *PriceListsSuite) auditOf(name string) []store.AuditEntry {
 	var rows []store.AuditEntry
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("resource_id = ?", name).Order("created_at").Scan(context.Background()))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("resource_id = ?", name).Order("created_at").Scan(context.Background()))
 	return rows
 }
 
@@ -943,7 +943,7 @@ func TestAnEmptyListIsNotReady(t *testing.T) {
 	pgStore, err := store.Open(own)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, pgStore.Close()) })
-	_, err = pgStore.DB().ExecContext(ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	_, err = pgStore.GlobalDB().ExecContext(ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
 	require.NoError(t, err)
 	require.NoError(t, pgStore.Migrate(ctx))
 	running, cancel := context.WithCancel(ctx)
@@ -951,7 +951,7 @@ func TestAnEmptyListIsNotReady(t *testing.T) {
 	fallback, err := prices.Embedded(nil, "test", nil)
 	require.NoError(t, err)
 	active := pricing.NewActive(running, pricing.ActiveOptions{
-		Source: pgStore.PriceSource(), Fallback: fallback, Interval: suitePriceReload, RequireEntries: true,
+		Source: pgStore.PriceEntries.Source(), Fallback: fallback, Interval: suitePriceReload, RequireEntries: true,
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	server, err := NewServer(Options{
@@ -974,7 +974,7 @@ func TestAnEmptyListIsNotReady(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, status)
 	require.Contains(t, body.Dependencies["prices"], "empty")
 
-	_, _, _, err = pgStore.SyncPrices(ctx, store.PriceLoad{Entries: prices.Vendor().Entries, Source: prices.VendorFile, Release: "test"})
+	_, _, _, err = pgStore.PriceChanges.Sync(ctx, store.PriceLoad{Entries: prices.Vendor().Entries, Source: prices.VendorFile, Release: "test"})
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {

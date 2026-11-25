@@ -11,6 +11,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
 
@@ -63,13 +64,14 @@ func validRequestID(id string) bool {
 
 // requestFailure is the error behind a request's answer, left for withRequestLog to report:
 // the answer itself is deliberately vaguer than the error. It also holds the name of the
-// operation that served the request (nameOperation) and the app of a hook it verified
-// (loggedHook).
+// operation that served the request (nameOperation), the app of a hook it verified
+// (loggedHook) and why the socket it upgraded to closed (recordClose).
 type requestFailure struct {
 	err       error
 	trace     string
 	operation string
 	app       string
+	closed    socketEnd
 }
 
 type requestFailureContextKey struct{}
@@ -78,6 +80,14 @@ type requestFailureContextKey struct{}
 func nameOperation(ctx context.Context, name string) {
 	if failure, ok := ctx.Value(requestFailureContextKey{}).(*requestFailure); ok {
 		failure.operation = name
+	}
+}
+
+// recordClose names why the request's socket closed, for its access line. Only the handler's
+// own goroutine may call it, once its socket's other goroutines have stopped.
+func recordClose(ctx context.Context, ended socketEnd) {
+	if failure, ok := ctx.Value(requestFailureContextKey{}).(*requestFailure); ok {
+		failure.closed = ended
 	}
 }
 
@@ -118,6 +128,13 @@ func answerFailure(ctx huma.Context, status int, message string, errs ...error) 
 			}
 		}
 		return answer
+	}
+	var invalid *store.ValidationError
+	if errors.As(errors.Join(errs...), &invalid) {
+		recordFailure(ctx.Context(), invalid, "")
+		failure := invalidRequest(invalid.Error())
+		failure.Code = codeValidationFailed
+		return failure
 	}
 	if status < http.StatusInternalServerError {
 		if len(errs) > 0 {

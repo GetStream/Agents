@@ -1758,6 +1758,62 @@ func (s *SessionSuite) TestAnAnswerToAToolNobodyIsWaitingOnIsDropped() {
 	s.False(created.ResolveTool("call-nobody-asked-for", "here you go", ""))
 }
 
+// A caller's tool fails in the caller's own words, which can carry its users' data: the bridge
+// tells the agent so the tool call's line leaves them out. A call that timed out failed in the
+// router's words, and an answer is no failure.
+func (s *SessionSuite) TestACallersToolFailureIsReportedAsTheCallers() {
+	for _, test := range []struct {
+		name    string
+		failure string
+		client  bool
+	}{
+		{"failed", "no order for ana@example.com, call +1 555 010 0199", true},
+		{"answered", "", false},
+	} {
+		asked := make(chan ToolCall, 1)
+		tools := newBridge(time.Second, nil, func(call ToolCall) error { asked <- call; return nil })
+		ctx, report := agent.WithToolReport(context.Background())
+		finished := make(chan error, 1)
+		go func() {
+			_, err := tools.Run(ctx, llm.ToolCall{ID: "call-one", Name: "lookup_order", Arguments: "{}"})
+			finished <- err
+		}()
+		<-asked
+		s.True(tools.Resolve("call-one", "", llm.TextParts("shipped"), test.failure), test.name)
+
+		err := <-finished
+
+		s.Equal(test.client, report.Client, test.name)
+		s.Equal(test.failure != "", err != nil, test.name)
+	}
+
+	asked := make(chan ToolCall, 2)
+	tools := newBridge(10*time.Millisecond, nil, func(call ToolCall) error { asked <- call; return nil })
+	ctx, report := agent.WithToolReport(context.Background())
+	_, err := tools.Run(ctx, llm.ToolCall{ID: "call-two", Name: "lookup_order", Arguments: "{}"})
+	s.ErrorIs(err, context.DeadlineExceeded)
+	s.False(report.Client, "the router's words for a timeout are not the caller's")
+}
+
+// Closing the bridge answers a call in flight in the router's words, which the tool call's
+// line keeps: they are not the caller's own failure.
+func (s *SessionSuite) TestACallCutByTheCallEndingIsNotReportedAsTheCallers() {
+	asked := make(chan ToolCall, 1)
+	tools := newBridge(time.Minute, nil, func(call ToolCall) error { asked <- call; return nil })
+	ctx, report := agent.WithToolReport(context.Background())
+	finished := make(chan error, 1)
+	go func() {
+		_, err := tools.Run(ctx, llm.ToolCall{ID: "call-one", Name: "lookup_order", Arguments: "{}"})
+		finished <- err
+	}()
+	<-asked
+
+	tools.Close()
+
+	s.EqualError(<-finished, "the call ended before it finished")
+	s.False(report.Client)
+}
+
 func (s *SessionSuite) TestEndingACallStopsAToolWaitingOnAnAnswer() {
 	s.manages()
 	created := s.joins(Spec{
@@ -2074,7 +2130,7 @@ func (s *SessionSuite) TestASessionIsCountedUntilItHasFinishedClosing() {
 		_, err := s.manager.Close(created.ID(), OwnerOf(created.Spec()))
 		closed <- err
 	}()
-	s.eventually(func() bool { return !s.manager.Running(created.ID()) }, "the session was never taken off")
+	s.eventually(func() bool { return !s.manager.Running(created.Spec().CustomerID, created.ID()) }, "the session was never taken off")
 	s.Equal(1, s.manager.Len(), "a session still closing was counted as gone")
 
 	edge.holdSpeech(false)

@@ -190,7 +190,7 @@ func (s *AuthorizationsSuite) TestRemovingTheAppsClientReadsEachRevisionOnce() {
 	connector, _ := s.clientConnection(s.provider.URL+fakeprovider.PathRevoke, "")
 	s.clientUsersConnection(connector)
 	reads := &definitionReads{connector: connector}
-	s.store.DB().AddQueryHook(reads)
+	s.store.GlobalDB().AddQueryHook(reads)
 
 	reads.on.Store(true)
 	status := s.serverClient.do(http.MethodDelete, "/v1/agents/connectors/"+connector+"/oauth-client", nil, nil)
@@ -237,7 +237,7 @@ func (s *AuthorizationsSuite) TestRemovingTheAppsClientWithoutTheOptInRevokesNot
 // to needs_reauthorization.
 func (s *AuthorizationsSuite) TestRemovingTheAppsClientWithoutTheOptInLeavesItsConnectionsAsTheyWere() {
 	connector, id := s.clientConnection(s.provider.URL+fakeprovider.PathRevoke, "")
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		"UPDATE connector_connections SET credentials_sealed = 'not a sealed blob' WHERE id = ?", id)
 	s.Require().NoError(err)
 
@@ -268,7 +268,7 @@ func (s *AuthorizationsSuite) TestARevokeTheProviderRefusesStillRemovesTheClient
 // usersConnection is owner's connected connection to a connector at the fake with its revoke
 // endpoint at revoke; extra is more manifest YAML.
 func (s *AuthorizationsSuite) usersConnection(owner *testClient, revoke, extra string) string {
-	id := s.ownersConnection(s.revokingConnector("operator", revoke, extra), owner, "")
+	id := s.ownersConnection(s.withFakeClient(s.revokingConnector("customer", revoke, extra)), owner, "")
 	s.Require().Equal(s.landing(id, consentConnected), s.finishAs(owner, id))
 	return id
 }

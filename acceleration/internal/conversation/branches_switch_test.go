@@ -98,7 +98,7 @@ func (s *BranchesSuite) TestARegenerateHidesTheReplyAndKeepsACopyOfIt() {
 	s.True(out.Rewound)
 	s.Equal([]string{second.AssistantMessageID}, out.Hidden)
 	s.Equal([]string{first.UserMessageID, first.AssistantMessageID, second.UserMessageID}, s.chat.Visible(s.session))
-	copies, err := s.branches.BranchMessages(s.ctx, "customer", s.session, []string{"resp-2"})
+	copies, err := s.branches.Select(s.ctx, "customer", s.session, []string{"resp-2"})
 	s.Require().NoError(err)
 	s.Require().Len(copies, 1)
 	s.Equal(second.AssistantMessageID, copies[0].OriginalMessageID)
@@ -135,7 +135,7 @@ func (s *BranchesSuite) TestAnUnmarkedMessageIsKeptWithTheTurnItWasWrittenDuring
 	_, err = s.conv.Rewind(s.ctx, regenerate("sw-1", second))
 
 	s.Require().NoError(err)
-	copies, err := s.branches.BranchMessages(s.ctx, "customer", s.session, []string{"resp-2"})
+	copies, err := s.branches.Select(s.ctx, "customer", s.session, []string{"resp-2"})
 	s.Require().NoError(err)
 	var kept []string
 	for _, copied := range copies {
@@ -167,7 +167,7 @@ func (s *BranchesSuite) TestActivatingABranchSendsItAgainUnderNewIDs() {
 	s.Require().NoError(err)
 	edited := s.answered(turn("resp-3", "resp-1"), "ask-2b", "And on Sunday?", "Sun.")
 	s.Require().NoError(s.conv.FinishSwitch(s.ctx, "sw-1"))
-	chosen, err := s.branches.BranchMessages(s.ctx, "customer", s.session, []string{"resp-2"})
+	chosen, err := s.branches.Select(s.ctx, "customer", s.session, []string{"resp-2"})
 	s.Require().NoError(err)
 
 	out, err := s.conv.Activate(s.ctx, conversation.RewindTarget{SwitchID: "sw-2", TargetResponseID: "resp-2",
@@ -324,7 +324,7 @@ func (s *BranchesSuite) TestARewindDuringAStreamingReplyLeavesTheQueueEmptyAndMo
 
 	s.written()
 	s.Equal([]string{first.UserMessageID, first.AssistantMessageID, second.UserMessageID}, s.chat.Visible(s.session))
-	copies, err := s.branches.BranchMessages(s.ctx, "customer", s.session, []string{"resp-3"})
+	copies, err := s.branches.Select(s.ctx, "customer", s.session, []string{"resp-3"})
 	s.Require().NoError(err)
 	s.Require().Len(copies, 2)
 	s.Equal(streaming.AssistantMessageID, copies[1].OriginalMessageID)
@@ -362,9 +362,9 @@ func (s *BranchesSuite) TestAQueueThatCannotBeWrittenRefusesTheRewindWithoutWedg
 func (s *BranchesSuite) TestASwitchWhoseRewindIsNotKnownToHaveLandedIsKeptOnReopen() {
 	_, second := s.twoTurns()
 	// A router that copied the reply and journaled the switch, then lost track of Chat's answer.
-	s.Require().NoError(s.branches.StartBranchSwitch(s.ctx, &store.AgentBranchSwitch{ID: "sw-1", SessionID: s.session, CustomerID: "customer",
+	s.Require().NoError(s.branches.Insert(s.ctx, &store.AgentBranchSwitch{ID: "sw-1", SessionID: s.session, CustomerID: "customer",
 		Kind: store.SwitchRegenerate, TargetResponseID: "resp-2", ForkMessageID: second.UserMessageID}))
-	s.Require().NoError(s.branches.SaveBranchMessages(s.ctx, []store.AgentBranchMessage{{SessionID: s.session, CustomerID: "customer",
+	s.Require().NoError(s.branches.UpsertMany(s.ctx, []store.AgentBranchMessage{{SessionID: s.session, CustomerID: "customer",
 		OriginalMessageID: second.AssistantMessageID, ResponseID: "resp-2", SwitchID: "sw-1", AuthorID: "agent", Message: map[string]any{"text": "Rain."}}}))
 
 	s.reopened(nil)
@@ -478,7 +478,7 @@ func (s *BranchesSuite) activateAfterEdit() (conversation.CommandReceipt, []stor
 	s.Require().NoError(err)
 	edited := s.answered(turn("resp-3", "resp-1"), "ask-2b", "And on Sunday?", "Sun.")
 	s.Require().NoError(s.conv.FinishSwitch(s.ctx, "sw-1"))
-	chosen, err := s.branches.BranchMessages(s.ctx, "customer", s.session, []string{"resp-2"})
+	chosen, err := s.branches.Select(s.ctx, "customer", s.session, []string{"resp-2"})
 	s.Require().NoError(err)
 	_, err = s.conv.Activate(s.ctx, conversation.RewindTarget{SwitchID: "sw-2", TargetResponseID: "resp-2",
 		MessageID: edited.UserMessageID, Inclusive: true}, chosen)
@@ -653,7 +653,7 @@ func (s *BranchesSuite) TestAnEditRetriedWhileItsFirstRewindLandsKeepsItsCopies(
 	s.Require().NoError(out.err)
 	s.True(out.Rewound)
 	s.ElementsMatch([]string{second.UserMessageID, second.AssistantMessageID}, out.Hidden, "what the earlier rewind hid")
-	copies, err := s.branches.BranchMessages(s.ctx, "customer", s.session, []string{"resp-2"})
+	copies, err := s.branches.Select(s.ctx, "customer", s.session, []string{"resp-2"})
 	s.Require().NoError(err)
 	s.Len(copies, 2, "the hidden question and reply are still copied")
 	_, journaled := s.branches.row("sw-1")
@@ -690,7 +690,7 @@ func (s *BranchesSuite) TestAnEditRetriedWhoseCheckOfTheChannelFailsKeepsItsCopi
 
 	s.Require().Error(<-retried)
 	s.chat.Heal(http.MethodPost, "/query")
-	copies, err := s.branches.BranchMessages(s.ctx, "customer", s.session, []string{"resp-2"})
+	copies, err := s.branches.Select(s.ctx, "customer", s.session, []string{"resp-2"})
 	s.Require().NoError(err)
 	s.Len(copies, 2, "the copies of what Chat hid are kept")
 	_, journaled := s.branches.row("sw-1")

@@ -22,10 +22,30 @@ func RequesterFrom(ctx context.Context) (Requester, bool) {
 	return requester, ok
 }
 
+type scheduledCallKey struct{}
+
+// WithScheduledCall marks ctx as a tool call asked for in a turn a scheduled task fired, which
+// nobody asked for just now. It is not routing.WithScheduledTurn: that one makes spend the
+// customer's, and what the tool does after is still charged as it was.
+func WithScheduledCall(ctx context.Context) context.Context {
+	return context.WithValue(ctx, scheduledCallKey{}, true)
+}
+
+// ScheduledCall reports whether the tool call ctx runs was asked for in a turn a scheduled task
+// fired.
+func ScheduledCall(ctx context.Context) bool {
+	scheduled, _ := ctx.Value(scheduledCallKey{}).(bool)
+	return scheduled
+}
+
 // requesterLocked is who the turn being answered came from. A participant heard on a call
-// names their user; a typed command names its sender. The caller holds a.mu.
+// names their user; a message written in a channel of a type an agent config answers in names
+// its writer (WithWriter); a typed command names its sender. The caller holds a.mu.
 func (a *Agent) requesterLocked() Requester {
 	requester := Requester{UserID: a.lastParticipant.UserID, Name: a.lastParticipant.Name}
+	if requester.UserID == "" {
+		requester = Requester{UserID: a.lastWriter.id, Name: a.lastWriter.name}
+	}
 	if requester.UserID == "" {
 		requester.UserID = a.sender.UserID
 	}

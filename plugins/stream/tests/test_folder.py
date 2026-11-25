@@ -7,7 +7,7 @@ from vision_agents.plugins.stream.folder import (
     ConnectorSettings,
     FloorControlSettings,
     GreetingSettings,
-    ToolSettings,
+    ToolGroupSettings,
     SandboxSettings,
     find,
     load,
@@ -19,6 +19,15 @@ def write(root: Path, name: str, content: str) -> None:
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
+
+
+_SKILL = "---\ndescription: Work it out\n---\nReason it through.\n"
+
+
+def link(root: Path, name: str, target: Path) -> None:
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(target)
 
 
 class TestFolder:
@@ -157,6 +166,110 @@ class TestFolder:
         assert load(tmp_path).skills[0].files == {
             "scripts/fill.py": "print('filled')\n"
         }
+
+    @pytest.mark.parametrize(
+        ("outside", "inside", "linked", "to"),
+        [
+            ({"agent.yaml": "name: jean\n"}, {}, "agent.yaml", "agent.yaml"),
+            ({"notes.md": "Elsewhere.\n"}, {}, "instructions.md", "notes.md"),
+            ({"notes.md": "Elsewhere.\n"}, {}, "guardrail.md", "notes.md"),
+            ({"skills/think.md": _SKILL}, {}, "skills", "skills"),
+            ({"think.md": _SKILL}, {}, "skills/think.md", "think.md"),
+            ({"think/SKILL.md": _SKILL}, {}, "skills/think", "think"),
+            ({"SKILL.md": _SKILL}, {}, "skills/think/SKILL.md", "SKILL.md"),
+            (
+                {"notes.txt": "Elsewhere.\n"},
+                {"skills/think/SKILL.md": _SKILL},
+                "skills/think/notes.txt",
+                "notes.txt",
+            ),
+            ({"knowledge/doc.md": "Elsewhere.\n"}, {}, "knowledge", "knowledge"),
+            ({"doc.md": "Elsewhere.\n"}, {}, "knowledge/doc.md", "doc.md"),
+            (
+                {"urls.yaml": "[]\n"},
+                {"knowledge/doc.md": "Here.\n"},
+                "knowledge/urls.yaml",
+                "urls.yaml",
+            ),
+            ({"simulations/calls.yaml": "[]\n"}, {}, "simulations", "simulations"),
+            ({"calls.yaml": "[]\n"}, {}, "simulations/calls.yaml", "calls.yaml"),
+        ],
+    )
+    def test_a_file_linked_from_outside_the_agent_directory_is_refused(
+        self,
+        tmp_path: Path,
+        outside: dict[str, str],
+        inside: dict[str, str],
+        linked: str,
+        to: str,
+    ):
+        elsewhere = tmp_path / "elsewhere"
+        for name, content in outside.items():
+            write(elsewhere, name, content)
+        root = tmp_path / "jean"
+        if linked != "agent.yaml":
+            write(root, "agent.yaml", "name: jean\n")
+        for name, content in inside.items():
+            write(root, name, content)
+        link(root, linked, elsewhere / to)
+
+        with pytest.raises(ValueError, match="links outside the agent directory"):
+            load(root)
+
+    def test_a_knowledge_directory_linked_one_level_up_is_refused(self, tmp_path: Path):
+        root = tmp_path / "jean"
+        write(root, "agent.yaml", "name: jean\n")
+        write(tmp_path, "doc.md", "Elsewhere.\n")
+        link(root, "knowledge", tmp_path)
+
+        with pytest.raises(ValueError, match="links outside the agent directory"):
+            load(root)
+
+    def test_a_link_into_a_sibling_sharing_the_name_prefix_is_refused(
+        self, tmp_path: Path
+    ):
+        root = tmp_path / "jean"
+        write(root, "agent.yaml", "name: jean\n")
+        write(tmp_path, "jean-2/doc.md", "Elsewhere.\n")
+        link(root, "knowledge/doc.md", tmp_path / "jean-2" / "doc.md")
+
+        with pytest.raises(ValueError, match="links outside the agent directory"):
+            load(root)
+
+    @pytest.mark.parametrize(
+        "linked", ["instructions.md", "skills/loop.md", "knowledge/loop.md"]
+    )
+    def test_a_link_to_itself_is_refused(self, tmp_path: Path, linked: str):
+        write(tmp_path, "agent.yaml", "name: jean\n")
+        link(tmp_path, linked, tmp_path / linked)
+
+        with pytest.raises(ValueError, match="links outside the agent directory"):
+            load(tmp_path)
+
+    def test_a_link_that_stays_inside_the_agent_directory_is_read(self, tmp_path: Path):
+        root = tmp_path / "jean"
+        write(root, "agent.yaml", "name: jean\n")
+        write(root, "shared/think.md", _SKILL)
+        write(root, "shared/pricing.md", "A penny.\n")
+        link(root, "skills/think.md", Path("..") / "shared" / "think.md")
+        link(root, "knowledge/pricing.md", Path("..") / "shared" / "pricing.md")
+        # The agent directory is itself reached through a link, as a checkout often is.
+        through = tmp_path / "linked"
+        through.symlink_to(root)
+
+        folder = load(through)
+        assert [skill.instructions for skill in folder.skills] == ["Reason it through."]
+        assert [(doc.source, doc.text) for doc in folder.knowledge] == [
+            ("pricing.md", "A penny.\n")
+        ]
+
+    def test_hidden_files_are_left_out_of_knowledge(self, tmp_path: Path):
+        write(tmp_path, "agent.yaml", "name: jean\n")
+        write(tmp_path, "knowledge/pricing.md", "A penny.\n")
+        write(tmp_path, "knowledge/.draft.md", "Not yet.\n")
+        write(tmp_path, "knowledge/.git/notes.md", "Not a document.\n")
+
+        assert [doc.source for doc in load(tmp_path).knowledge] == ["pricing.md"]
 
     def test_moving_a_skill_into_a_folder_keeps_its_hash(self, tmp_path: Path):
         skill = "---\ndescription: fill PDFs\n---\nFill it."
@@ -658,18 +771,44 @@ class TestFolder:
             "list_issue_statuses",
         ]
 
-    def test_progressive_tools_are_read(self, tmp_path: Path):
+    def test_tool_groups_are_read(self, tmp_path: Path):
+        root = tmp_path / "triage"
+        write(
+            root,
+            "agent.yaml",
+            "name: triage\ntools:\n"
+            "  - name: booking\n    tools: [lookup_booking]\n"
+            "  - name: refunds\n    loading: deferred\n    output_retention: 30d\n"
+            "    tools: [refund_booking]\n",
+        )
+
+        assert load(root).settings.tools == [
+            ToolGroupSettings(name="booking", tools=["lookup_booking"]),
+            ToolGroupSettings(
+                name="refunds",
+                tools=["refund_booking"],
+                loading="deferred",
+                output_retention="30d",
+            ),
+        ]
+
+    def test_the_tool_settings_of_before_groups_say_where_they_went(
+        self, tmp_path: Path
+    ):
         root = tmp_path / "triage"
         write(root, "agent.yaml", "name: triage\ntools:\n  progressive: true\n")
 
-        assert load(root).settings.tools == ToolSettings(progressive=True)
+        with pytest.raises(ValueError, match="loading: summary"):
+            load(root)
 
     @pytest.mark.parametrize(
         "declared",
         [
             "tools: true\n",
-            "tools:\n  progressive: sometimes\n",
-            "tools:\n  lazy: true\n",
+            "tools:\n  - name: booking\n",
+            "tools:\n  - tools: [lookup_booking]\n",
+            "tools:\n  - name: booking\n    loading: lazy\n    tools: [a]\n",
+            "tools:\n  - name: booking\n    progressive: true\n    tools: [a]\n",
         ],
     )
     def test_tools_that_cannot_be_read_are_refused(self, tmp_path: Path, declared: str):

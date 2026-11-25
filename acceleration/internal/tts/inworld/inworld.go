@@ -25,6 +25,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
@@ -160,6 +161,9 @@ type utterance struct {
 
 // TTS is a streaming Inworld text-to-speech session.
 type TTS struct {
+	// call is the context of the call that Start got. The goroutines of the session start
+	// under it, also after a redial.
+	call    context.Context
 	options Options
 	keys    *keypool.Pool
 	logger  *slog.Logger
@@ -171,6 +175,9 @@ type TTS struct {
 
 	// done stops a reconnect that is waiting, so a socket is not reopened behind Close.
 	done chan struct{}
+	// ctx is Start's, without its cancellation: a reconnect is traced under the session that
+	// started the voice. Set before the first dial.
+	ctx context.Context
 
 	mu sync.Mutex
 	// active is every utterance the session still has a use for, which is not the same as
@@ -237,6 +244,8 @@ func (t *TTS) Start(ctx context.Context) error {
 		return stack.Wrap(errors.New("inworld: already started"))
 	}
 	t.started = true
+	t.ctx = context.WithoutCancel(ctx)
+	t.call = ctx
 	t.mu.Unlock()
 
 	if err := t.dial(ctx); err != nil {
@@ -244,7 +253,7 @@ func (t *TTS) Start(ctx context.Context) error {
 	}
 
 	t.emitter.Send(tts.Connected{Provider: ProviderName, Model: t.options.Model, At: time.Now()})
-	go t.keepAlive()
+	goroutine.Go(ctx, t.keepAlive)
 	return nil
 }
 
@@ -272,7 +281,7 @@ func (t *TTS) dial(ctx context.Context) error {
 	t.conn = conn
 	t.mu.Unlock()
 
-	go t.readLoop(conn)
+	goroutine.Go(t.call, func() { t.readLoop(conn) })
 	return nil
 }
 
@@ -283,7 +292,7 @@ func (t *TTS) redial() {
 	case <-time.After(t.options.reconnect):
 	}
 
-	if err := t.dial(context.Background()); err != nil {
+	if err := t.dial(t.ctx); err != nil {
 		t.logger.Debug("could not reopen the voice, leaving it to the next utterance",
 			"error", err)
 		return
@@ -487,7 +496,7 @@ func (t *TTS) send(message clientFrame) error {
 	}
 
 	t.logger.Debug("reconnecting to speak")
-	if err := t.dial(context.Background()); err != nil {
+	if err := t.dial(t.ctx); err != nil {
 		return stack.Wrap(err)
 	}
 
@@ -577,7 +586,7 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 		// An EOF between utterances lost no speech. Reconnect before reporting
 		// success; an EOF with any context still active remains a real failure.
 		_ = conn.Close()
-		if reconnectErr := t.dial(context.Background()); reconnectErr == nil {
+		if reconnectErr := t.dial(t.ctx); reconnectErr == nil {
 			t.logger.Warn("reopened the voice after an idle connection failure", "error", err)
 			t.emitter.Send(tts.Connected{Provider: ProviderName, Model: t.options.Model, At: time.Now()})
 			return
@@ -595,7 +604,7 @@ func (t *TTS) handleReadError(conn *websocket.Conn, err error) {
 			Clean:    true,
 			At:       time.Now(),
 		})
-		go t.redial()
+		goroutine.Go(t.call, t.redial)
 		return
 	}
 	t.emitter.Send(tts.Error{
@@ -805,7 +814,7 @@ func (t *TTS) resetConnection() {
 	}
 	t.settleOutstanding()
 
-	if err := t.dial(context.Background()); err != nil {
+	if err := t.dial(t.ctx); err != nil {
 		t.logger.Debug("could not reopen after a context limit", "error", err)
 		return
 	}

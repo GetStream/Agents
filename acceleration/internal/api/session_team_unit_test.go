@@ -59,7 +59,7 @@ func TestASessionsTeamIsItsRequestsOverItsConfigsTag(t *testing.T) {
 	require.Equal(t, "support", specOf(CreateSessionRequest{}, "acme", config).Team)
 	require.Equal(t, "finance", specOf(CreateSessionRequest{Team: new("finance")}, "acme", config).Team)
 	require.Empty(t, specOf(CreateSessionRequest{Tags: &map[string]string{"team": "sales"}}, "acme", nil).Team,
-		"a session's own tags, which a device may send, name no team")
+		"a session's own tags name no team")
 }
 
 func TestAConfigsTeamTagIsATeamsName(t *testing.T) {

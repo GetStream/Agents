@@ -14,6 +14,17 @@ public sealed record ToolUser(string Id, string Name, JsonObject Custom);
 /// <param name="Custom">The custom data on the channel.</param>
 public sealed record ToolConversation(string Cid, JsonObject Custom);
 
+/// <summary>What a running call tells the people in the conversation.</summary>
+/// <param name="Title">
+/// Replaces the call's display title while it runs, such as "Comparing 40 flights", and on a voice
+/// call the agent tells the caller about it in its own words. Null leaves the title as it was.
+/// </param>
+/// <param name="Custom">
+/// Replaces the call's data whole, for their app to show, such as a card under the message. It is
+/// kept once the call finishes. Null leaves it as it was.
+/// </param>
+public sealed record ToolCallUpdate(string? Title = null, JsonObject? Custom = null);
+
 /// <summary>
 /// A tool call asked to keep going through interruptions too late: the person had already
 /// talked over the agent, so the router cancels the call instead.
@@ -53,17 +64,6 @@ public sealed class ToolCallContext
     public bool Approved { get; init; }
 
     /// <summary>
-    /// Tells the people in the conversation how the call is going, such as "Found three
-    /// flights, comparing prices". The agent puts it in its own words.
-    /// </summary>
-    public Task UpdateAsync(string text, CancellationToken cancellationToken = default) =>
-        SendUpdateAsync(text, false, cancellationToken);
-
-    /// <summary><see cref="UpdateAsync"/>, said word for word.</summary>
-    public Task SayAsync(string text, CancellationToken cancellationToken = default) =>
-        SendUpdateAsync(text, true, cancellationToken);
-
-    /// <summary>
     /// Keeps the call going if the person talks over the agent from here on, for a call that
     /// is past the point of taking back, such as one that has started a payment.
     /// </summary>
@@ -86,10 +86,24 @@ public sealed class ToolCallContext
         }
     }
 
-    private Task SendUpdateAsync(string text, bool verbatim, CancellationToken cancellationToken) =>
-        _line is null
-            ? Task.CompletedTask
-            : _line.Send(Frames.Of("tool_update", ("tool_call_id", Id), ("text", text), ("verbatim", verbatim)), cancellationToken);
+    /// <summary>Sets the call's title while it runs, such as "Comparing 40 flights".</summary>
+    public Task UpdateAsync(string title, CancellationToken cancellationToken = default) =>
+        UpdateAsync(new ToolCallUpdate(title), cancellationToken);
+
+    /// <summary>
+    /// Tells the people in the conversation how the call is going: a new title, data for their
+    /// app to show, or both.
+    /// </summary>
+    public async Task UpdateAsync(ToolCallUpdate update, CancellationToken cancellationToken = default)
+    {
+        if (_line is null)
+        {
+            return;
+        }
+        var title = string.IsNullOrEmpty(update.Title) ? null : update.Title;
+        await _line.Send(Frames.Of("tool_update", ("tool_call_id", Id), ("text", title), ("custom", update.Custom)),
+            cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// The call a <c>tool_call</c> frame asks for. <paramref name="sessionId"/> stands in for

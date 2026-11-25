@@ -2,9 +2,7 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
@@ -30,9 +28,8 @@ const channelInboundDoneKeep = channelMessageKeep
 // for someone to find why it was never answered. 30 days is a choice, not a measurement.
 const channelInboundFailedKeep = 30 * 24 * time.Hour
 
-// ChannelInbound is one inbound message queued to be written into its thread channel
-// (20261205120000_channel_thread_inbound.sql), with what writing it and opening its episode
-// card take.
+// ChannelInbound is one inbound message queued to be written into its thread channel, with
+// what writing it and opening its episode card take.
 type ChannelInbound struct {
 	bun.BaseModel `bun:"table:channel_thread_inbound,alias:cti"`
 
@@ -57,14 +54,33 @@ type ChannelInbound struct {
 	Forward *ChannelInboundForward `bun:"forward,type:jsonb"`
 	State   string                 `bun:"state,notnull"`
 	// KeywordAnswered is whether a worker answered the message's carrier keyword
-	// (MarkChannelInboundKeywordAnswered).
+	// (ChannelInbounds.MarkKeywordAnswered).
 	KeywordAnswered bool `bun:"keyword_answered,notnull"`
-	// Attempts is how many writes of the message failed.
+	// Attempts is how many times the message was claimed, the current claim included: the
+	// claim a write holds the row by.
 	Attempts int `bun:"attempts,notnull"`
 	// NextAttemptAt is when the message is due; on a claimed row, the end of the claim's lease.
 	NextAttemptAt time.Time  `bun:"next_attempt_at,notnull"`
 	CreatedAt     time.Time  `bun:"created_at,notnull"`
 	FinishedAt    *time.Time `bun:"finished_at"`
+}
+
+// Validate refuses a message missing what writing it takes.
+func (m *ChannelInbound) Validate() error {
+	return validate("channel inbound").
+		required("channel_id", m.ChannelID).
+		required("provider_message_id", m.ProviderMessageID).
+		required("customer_id", m.CustomerID).
+		required("connector_id", m.ConnectorID).
+		required("config_id", m.ConfigID).
+		oneOf("state", m.State, "", ChannelInboundQueued, ChannelInboundDone, ChannelInboundFailed).
+		done()
+}
+
+// ChannelInbounds are the inbound messages queued to be written into their thread channels, a
+// queue of them, in the shared database.
+type ChannelInbounds struct {
+	store *Store
 }
 
 // ChannelInboundForward is what forwarding a delivery to the customer's event destinations
@@ -141,23 +157,23 @@ func (m ChannelInbound) Message() core.InboundMessage {
 	}
 }
 
-// AcceptChannelInbound claims message in its thread channel by the provider's id for it
+// Accept claims message in its thread channel by the provider's id for it
 // (ClaimInbound) and queues it, due at message.NextAttemptAt, in one transaction, so a message
 // is claimed only with its row: a store that fails leaves it unclaimed, and the provider's
 // retry takes it again. fresh is false for a message claimed before, which is not queued again.
 //
 // With waited not nil, the message starts its external thread, and the transaction also takes
-// the messages that waited on that thread (takeWaitingChannelThreadMessages), whether or not the
+// the messages that waited on that thread (takeWaitingMessages), whether or not the
 // message is fresh, and claims and queues the row waited makes of each, after the message's: on
 // a failure they wait again, and each waiting message is taken once. A message waited answers
 // with queue false is dropped: taken, and neither claimed nor queued.
-func (s *Store) AcceptChannelInbound(ctx context.Context, message ChannelInbound, waited func(core.InboundMessage) (row ChannelInbound, queue bool, err error)) (fresh bool, err error) {
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+func (r *ChannelInbounds) Accept(ctx context.Context, message ChannelInbound, waited func(core.InboundMessage) (row ChannelInbound, queue bool, err error)) (fresh bool, err error) {
+	err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		fresh, err = acceptChannelInbound(ctx, tx, message)
 		if err != nil || waited == nil {
 			return err
 		}
-		taken, err := takeWaitingChannelThreadMessages(ctx, tx, message.CustomerID, message.ConnectorID, message.ProviderUnitID, message.ThreadKey)
+		taken, err := takeWaitingMessages(ctx, tx, message.CustomerID, message.ConnectorID, message.ProviderUnitID, message.ThreadKey)
 		if err != nil {
 			return err
 		}
@@ -181,8 +197,8 @@ func (s *Store) AcceptChannelInbound(ctx context.Context, message ChannelInbound
 // acceptChannelInbound claims and queues one message in tx. A message claimed before is not
 // queued.
 func acceptChannelInbound(ctx context.Context, tx bun.Tx, message ChannelInbound) (bool, error) {
-	if err := validChannelInbound(message); err != nil {
-		return false, err
+	if err := message.Validate(); err != nil {
+		return false, stack.Wrap(err)
 	}
 	fresh, err := claimChannelThreadMessage(ctx, tx, message.ChannelID, ClaimInbound, message.ProviderMessageID)
 	if err != nil || !fresh {
@@ -192,17 +208,10 @@ func acceptChannelInbound(ctx context.Context, tx bun.Tx, message ChannelInbound
 	return err == nil, err
 }
 
-// validChannelInbound refuses a message missing what writing it takes.
-func validChannelInbound(message ChannelInbound) error {
-	if message.ChannelID == "" || message.ProviderMessageID == "" || message.CustomerID == "" || message.ConnectorID == "" || message.ConfigID == "" {
-		return stack.Wrap(errors.New("store: a channel, a provider message id, a customer, a connector and an agent config are required"))
-	}
-	return nil
-}
-
 // queueChannelInbound queues message in tx to be written into its thread channel, due at
-// message.NextAttemptAt. A message already queued for the channel under the same provider id,
-// written or given up within its keep, is not queued again: queued is false.
+// message.NextAttemptAt, or now on Postgres's clock when that is zero (ChatInbounds.Queue). A
+// message already queued for the channel under the same provider id, written or given up within
+// its keep, is not queued again: queued is false.
 //
 // It first locks the message's thread channel row until tx ends, so the messages of one
 // thread channel are queued one transaction at a time. seq is taken at the insert, and a
@@ -215,6 +224,8 @@ func queueChannelInbound(ctx context.Context, tx bun.Tx, message ChannelInbound)
 	if _, err := tx.NewRaw("SELECT 1 FROM channel_threads WHERE channel_id = ? FOR NO KEY UPDATE", message.ChannelID).Exec(ctx); err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: queue channel inbound: %w", err))
 	}
+	// Not the insert builder: bun writes a JSON \u0000 as the text \\u0000, and a delivery jsonb
+	// cannot hold must fail here, so it stays unclaimed and the provider's retry takes it again.
 	media, err := json.Marshal(message.Media)
 	if err != nil {
 		return false, stack.Wrap(err)
@@ -230,11 +241,11 @@ func queueChannelInbound(ctx context.Context, tx bun.Tx, message ChannelInbound)
 	result, err := tx.NewRaw(`
 INSERT INTO channel_thread_inbound (channel_id, provider_message_id, customer_id, connector_id, provider_unit_id, thread_key,
     config_id, config_name, author_id, text, media, raw, forward, next_attempt_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?::jsonb, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?::jsonb, COALESCE(?::timestamptz, now()))
 ON CONFLICT (channel_id, provider_message_id) DO NOTHING`,
 		message.ChannelID, message.ProviderMessageID, message.CustomerID, message.ConnectorID, message.ProviderUnitID, message.ThreadKey,
 		message.ConfigID, message.ConfigName, message.AuthorID, message.Text, string(media), message.Raw, forward,
-		message.NextAttemptAt.UTC()).Exec(ctx)
+		bun.NullTime{Time: message.NextAttemptAt.UTC()}).Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: queue channel inbound: %w", err))
 	}
@@ -245,102 +256,82 @@ ON CONFLICT (channel_id, provider_message_id) DO NOTHING`,
 	return affected == 1, nil
 }
 
-// ClaimChannelInbound takes at most limit messages due at now, oldest due first, and moves
-// each one's next attempt to leaseUntil, so no other worker takes it while this one writes it.
-// Rows another worker is claiming at the same moment are skipped, not waited for.
+// channelInbounds is the queue of inbound messages to write into their thread channels.
+var channelInbounds = queue{name: "channel inbound", alias: "cti", key: "seq"}
+
+// queuedChannelInbound narrows to the oldest queued message of each thread channel, so a
+// thread's messages are written in the order they were queued, one at a time: the ones behind a
+// message being written or waiting for its retry wait with it. head, when not nil, narrows the
+// select that reads each thread's oldest; a test pauses it there.
 //
-// It takes only the oldest queued message of a thread channel, so a thread's messages are
-// written in the order they were queued, one at a time: the ones behind a message being
-// written or waiting for its retry wait with it.
-func (s *Store) ClaimChannelInbound(ctx context.Context, now time.Time, limit int, leaseUntil time.Time) ([]ChannelInbound, error) {
-	return s.claimChannelInbound(ctx, claimChannelInboundQuery, now, limit, leaseUntil)
+// A claim checks state on the row it locks, not only in the heads, which read the rows as
+// they were when the statement started. When another router's claim, or its finish, commits in
+// between, Postgres locks the row's newer version and checks the claim's own WHERE on it again
+// («the second updater ... re-evaluates its WHERE condition»: Read Committed Isolation Level,
+// https://www.postgresql.org/docs/16/transaction-iso.html). Without that check, a row another
+// router just leased or wrote is leased again.
+func queuedChannelInbound(db bun.IDB, head func(*bun.SelectQuery) *bun.SelectQuery) func(*bun.SelectQuery) *bun.SelectQuery {
+	return func(query *bun.SelectQuery) *bun.SelectQuery {
+		heads := db.NewSelect().ModelTableExpr("channel_thread_inbound AS head").
+			DistinctOn("head.channel_id").
+			Column("head.seq").
+			Where("head.state = ?", ChannelInboundQueued).
+			OrderExpr("head.channel_id, head.seq")
+		if head != nil {
+			heads = head(heads)
+		}
+		return query.Where("cti.state = ?", ChannelInboundQueued).Where("cti.seq IN (?)", heads)
+	}
 }
 
-// claimChannelInboundQuery is ClaimChannelInbound's statement. head is the oldest queued row
-// of each thread channel; due locks the heads that are due.
-//
-// due checks state and next_attempt_at on the row it locks, not only in head, which reads the
-// rows as they were when the statement started. When another router's claim, or its finish,
-// commits in between, Postgres locks the row's newer version and checks only due's own WHERE
-// on it again («the second updater ... re-evaluates its WHERE condition»: Read Committed
-// Isolation Level, https://www.postgresql.org/docs/16/transaction-iso.html). Without the
-// check in due, a row another router just leased is leased again.
-//
-// RETURNING names ChannelInbound's columns rather than cti.*: bun refuses a column the model
-// lacks, so after a later migration adds one, a build rolled back to this one would lease rows
-// and fail to read them.
-const claimChannelInboundQuery = `
-WITH head AS (
-    SELECT DISTINCT ON (cti.channel_id) cti.seq
-    FROM channel_thread_inbound AS cti
-    WHERE cti.state = 'queued'
-    ORDER BY cti.channel_id, cti.seq
-), due AS (
-    SELECT cti.seq FROM channel_thread_inbound AS cti
-    JOIN head ON head.seq = cti.seq
-    WHERE cti.state = 'queued' AND cti.next_attempt_at <= ?
-    ORDER BY cti.next_attempt_at, cti.seq
-    LIMIT ?
-    FOR UPDATE OF cti SKIP LOCKED
-)
-UPDATE channel_thread_inbound AS cti
-SET next_attempt_at = ?
-FROM due
-WHERE cti.seq = due.seq
-RETURNING cti.seq, cti.channel_id, cti.provider_message_id, cti.customer_id, cti.connector_id, cti.provider_unit_id,
-    cti.thread_key, cti.config_id, cti.config_name, cti.author_id, cti.text, cti.media, cti.raw, cti.forward, cti.state,
-    cti.keyword_answered, cti.attempts, cti.next_attempt_at, cti.created_at, cti.finished_at`
+// channelInboundColumns are ChannelInbound's columns, named rather than taken with *: bun
+// refuses a column the model lacks, so after a later migration adds one, a build rolled back
+// to this one would lease rows and fail to read them.
+const channelInboundColumns = `cti.seq, cti.channel_id, cti.provider_message_id, cti.customer_id, cti.connector_id,
+cti.provider_unit_id, cti.thread_key, cti.config_id, cti.config_name, cti.author_id, cti.text, cti.media, cti.raw,
+cti.forward, cti.state, cti.keyword_answered, cti.attempts, cti.next_attempt_at, cti.created_at, cti.finished_at`
 
-// claimChannelInbound runs query, ClaimChannelInbound's statement or a test's variant of it
-// with a pause in it, with ClaimChannelInbound's arguments.
-func (s *Store) claimChannelInbound(ctx context.Context, query string, now time.Time, limit int, leaseUntil time.Time) ([]ChannelInbound, error) {
-	var claimed []ChannelInbound
-	if limit < 1 {
-		return claimed, nil
-	}
-	if err := s.db.NewRaw(query, now.UTC(), limit, leaseUntil.UTC()).Scan(ctx, &claimed); err != nil {
-		return nil, stack.Wrap(fmt.Errorf("store: claim channel inbound: %w", err))
-	}
-	return claimed, nil
+// Claim takes at most limit messages due now, oldest due first, and moves each one's next
+// attempt to the end of lease, so no other worker takes it while this one writes it. Rows another
+// worker is claiming at the same moment are skipped, not waited for. It takes only the oldest
+// queued message of a thread channel (queuedChannelInbound).
+func (r *ChannelInbounds) Claim(ctx context.Context, limit int, lease time.Duration) ([]ChannelInbound, error) {
+	return r.claim(ctx, limit, lease, nil)
 }
 
-// NextChannelInboundAt is when the message due first is due, leased ones at the end of their
-// lease, of the ones a claim may take: the oldest queued message of each thread channel.
-// found is false when no message is queued at all.
-func (s *Store) NextChannelInboundAt(ctx context.Context) (next time.Time, found bool, err error) {
-	var at sql.NullTime
-	if err := s.db.NewRaw(`
-SELECT min(head.next_attempt_at) FROM (
-    SELECT DISTINCT ON (channel_id) next_attempt_at
-    FROM channel_thread_inbound
-    WHERE state = 'queued'
-    ORDER BY channel_id, seq
-) AS head`).Scan(ctx, &at); err != nil {
-		return time.Time{}, false, stack.Wrap(fmt.Errorf("store: next channel inbound: %w", err))
-	}
-	return at.Time, at.Valid, nil
+// claim is Claim with head narrowing the heads it reads, as queuedChannelInbound takes it.
+func (r *ChannelInbounds) claim(ctx context.Context, limit int, lease time.Duration,
+	head func(*bun.SelectQuery) *bun.SelectQuery) ([]ChannelInbound, error) {
+	return claim[ChannelInbound](ctx, r.store.global, channelInbounds, lease, limit,
+		queuedChannelInbound(r.store.global, head), channelInboundColumns)
 }
 
-// FinishChannelInbound records that a claimed message was written, at at.
+// NextDue is when the message due first is due, leased ones at the end of their lease, of the
+// ones a claim may take: the oldest queued message of each thread channel. found is false when
+// no message is queued at all.
+func (r *ChannelInbounds) NextDue(ctx context.Context) (next time.Time, found bool, err error) {
+	return nextDue[ChannelInbound](ctx, r.store.global, channelInbounds, queuedChannelInbound(r.store.global, nil))
+}
+
+// Finish records that a claimed message was written, at at.
 //
-// It, RetryChannelInbound and FailChannelInbound change the row only while the claim's lease
-// is the row's: a worker whose lease ran out while it wrote, and whose message another worker
+// It, Retry and Fail change the row only while the claim still holds it: a worker whose lease ran out while it wrote, and whose message another worker
 // took since, changes nothing, so it cannot finish or reschedule the other's attempt. changed
 // is false then.
-func (s *Store) FinishChannelInbound(ctx context.Context, claimed ChannelInbound, at time.Time) (changed bool, err error) {
-	return leaveChannelInbound(ctx, s.db, claimed, ChannelInboundDone, at)
+func (r *ChannelInbounds) Finish(ctx context.Context, claimed ChannelInbound, at time.Time) (changed bool, err error) {
+	return leaveChannelInbound(ctx, r.store.global, claimed, ChannelInboundDone, at)
 }
 
-// FailChannelInbound records that a claimed message's last attempt failed and it is given up,
+// Fail records that a claimed message's last attempt failed and it is given up,
 // at at, and calls forward, when not nil, to forward the message's delivery: when it has one,
 // and no other message of the delivery forwarded it. The event destinations key a forward by
-// the delivery only while it is queued (QueueEventDeliveries; FinishEventDelivery deletes it
+// the delivery only while it is queued (EventDeliveries.Queue; EventDeliveries.Finish deletes it
 // once sent), and one thread's messages are given up minutes apart, so a delivery whose two
 // messages were never written would otherwise reach a destination twice. A message counts as
 // forwarded once forward returned nil, so a forward that fails, or a router that stops before
 // it, leaves the delivery to the next of its messages given up; forward logs its own error.
-func (s *Store) FailChannelInbound(ctx context.Context, claimed ChannelInbound, at time.Time, forward func(context.Context) error) (changed bool, err error) {
-	err = s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+func (r *ChannelInbounds) Fail(ctx context.Context, claimed ChannelInbound, at time.Time, forward func(context.Context) error) (changed bool, err error) {
+	err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if claimed.Forward != nil {
 			if err := lockChannelInboundDelivery(ctx, tx, claimed); err != nil {
 				return err
@@ -357,8 +348,11 @@ func (s *Store) FailChannelInbound(ctx context.Context, claimed ChannelInbound, 
 		if forward(ctx) != nil {
 			return nil
 		}
-		if _, err := tx.NewRaw("UPDATE channel_thread_inbound SET forward = jsonb_set(forward, '{forwarded}', 'true') WHERE seq = ?",
-			claimed.Seq).Exec(ctx); err != nil {
+		_, err = tx.NewUpdate().Model((*ChannelInbound)(nil)).
+			Set("forward = jsonb_set(forward, '{forwarded}', 'true')").
+			Where("seq = ?", claimed.Seq).
+			Exec(ctx)
+		if err != nil {
 			return fmt.Errorf("store: fail channel inbound: %w", err)
 		}
 		return nil
@@ -372,8 +366,8 @@ func (s *Store) FailChannelInbound(ctx context.Context, claimed ChannelInbound, 
 // lockChannelInboundDelivery locks claimed's delivery until tx ends, so of two messages of it
 // given up at once on two routers, the second sees what the first did.
 func lockChannelInboundDelivery(ctx context.Context, tx bun.Tx, claimed ChannelInbound) error {
-	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
-		"channel_thread_inbound/"+claimed.CustomerID+"/"+claimed.ConnectorID+"/"+claimed.Forward.ID); err != nil {
+	key := "channel_thread_inbound/" + claimed.CustomerID + "/" + claimed.ConnectorID + "/" + claimed.Forward.ID
+	if err := lockUntilCommit(ctx, tx, key, 0); err != nil {
 		return fmt.Errorf("store: fail channel inbound: %w", err)
 	}
 	return nil
@@ -383,61 +377,53 @@ func lockChannelInboundDelivery(ctx context.Context, tx bun.Tx, claimed ChannelI
 // it: one with the same provider id for the delivery, or with none and the same body, as the
 // event destinations key a forward (eventforward.deliveryID).
 func channelInboundDeliveryForwarded(ctx context.Context, tx bun.Tx, claimed ChannelInbound) (bool, error) {
-	var forwarded bool
-	if err := tx.NewRaw(`
-SELECT EXISTS (
-    SELECT 1 FROM channel_thread_inbound
-    WHERE state = 'failed' AND forward->>'forwarded' = 'true' AND customer_id = ? AND connector_id = ?
-      AND forward->>'id' = ? AND (? <> '' OR raw = ?)
-)`, claimed.CustomerID, claimed.ConnectorID, claimed.Forward.ID, claimed.Forward.ID, claimed.Raw).Scan(ctx, &forwarded); err != nil {
+	forwarded, err := tx.NewSelect().Model((*ChannelInbound)(nil)).
+		Where("state = ?", ChannelInboundFailed).
+		Where("forward->>'forwarded' = 'true'").
+		Where("customer_id = ? AND connector_id = ?", claimed.CustomerID, claimed.ConnectorID).
+		Where("forward->>'id' = ?", claimed.Forward.ID).
+		Where("(? <> '' OR raw = ?)", claimed.Forward.ID, claimed.Raw).
+		Exists(ctx)
+	if err != nil {
 		return false, fmt.Errorf("store: fail channel inbound: %w", err)
 	}
 	return forwarded, nil
 }
 
 func leaveChannelInbound(ctx context.Context, db bun.IDB, claimed ChannelInbound, state string, at time.Time) (bool, error) {
-	attempts := claimed.Attempts
-	if state == ChannelInboundFailed {
-		attempts++
-	}
 	return updateClaimedChannelInbound(ctx, claimed, db.NewUpdate().Model((*ChannelInbound)(nil)).
 		Set("state = ?", state).
-		Set("attempts = ?", attempts).
 		Set("finished_at = ?", at.UTC()))
 }
 
-// MarkChannelInboundKeywordAnswered records that a claimed message's carrier keyword is being
+// MarkKeywordAnswered records that a claimed message's carrier keyword is being
 // answered, before the answer is sent, so no later attempt of the row sends it again: an
 // answer is sent at most once, as a reply is (ClaimReply). changed is false when an earlier
-// attempt marked it, or when the claim's lease is no longer the row's and the worker that took
-// it since answers it.
-func (s *Store) MarkChannelInboundKeywordAnswered(ctx context.Context, claimed ChannelInbound) (changed bool, err error) {
-	return updateClaimedChannelInbound(ctx, claimed, s.db.NewUpdate().Model((*ChannelInbound)(nil)).
+// attempt marked it, or when the claim no longer holds the row and the worker that took it
+// since answers it.
+func (r *ChannelInbounds) MarkKeywordAnswered(ctx context.Context, claimed ChannelInbound) (changed bool, err error) {
+	return updateClaimedChannelInbound(ctx, claimed, r.store.global.NewUpdate().Model((*ChannelInbound)(nil)).
 		Set("keyword_answered = true").
 		Where("NOT keyword_answered"))
 }
 
-// RetryChannelInbound records a failed attempt of a claimed message and when the next one is
-// due.
-func (s *Store) RetryChannelInbound(ctx context.Context, claimed ChannelInbound, next time.Time) (changed bool, err error) {
-	return updateClaimedChannelInbound(ctx, claimed, s.db.NewUpdate().Model((*ChannelInbound)(nil)).
-		Set("attempts = ?", claimed.Attempts+1).
+// Retry records a failed attempt of a claimed message and when the next one is due.
+func (r *ChannelInbounds) Retry(ctx context.Context, claimed ChannelInbound, next time.Time) (changed bool, err error) {
+	return updateClaimedChannelInbound(ctx, claimed, r.store.global.NewUpdate().Model((*ChannelInbound)(nil)).
 		Set("next_attempt_at = ?", next.UTC()))
 }
 
-// SaveChannelInboundMedia records media as a claimed message's, such as with the photos an
+// SaveMedia records media as a claimed message's, such as with the photos an
 // attempt uploaded (core.Media.Uploaded), so the next attempt reads them. changed is false
-// when the claim's lease is no longer the row's: the worker that took it since writes its own.
-func (s *Store) SaveChannelInboundMedia(ctx context.Context, claimed ChannelInbound, media ChannelInboundMedia) (changed bool, err error) {
-	return updateClaimedChannelInbound(ctx, claimed, s.db.NewUpdate().Model((*ChannelInbound)(nil)).
+// when the claim no longer holds the row: the worker that took it since writes its own.
+func (r *ChannelInbounds) SaveMedia(ctx context.Context, claimed ChannelInbound, media ChannelInboundMedia) (changed bool, err error) {
+	return updateClaimedChannelInbound(ctx, claimed, r.store.global.NewUpdate().Model((*ChannelInbound)(nil)).
 		Set("media = ?", media))
 }
 
 func updateClaimedChannelInbound(ctx context.Context, claimed ChannelInbound, update *bun.UpdateQuery) (bool, error) {
-	result, err := update.
-		Where("seq = ?", claimed.Seq).
+	result, err := channelInbounds.heldBy(update, claimed.Seq, claimed.Attempts).
 		Where("state = ?", ChannelInboundQueued).
-		Where("next_attempt_at = ?", claimed.NextAttemptAt.UTC()).
 		Exec(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: update channel inbound: %w", err))
@@ -449,16 +435,13 @@ func updateClaimedChannelInbound(ctx context.Context, claimed ChannelInbound, up
 	return affected == 1, nil
 }
 
-// PruneChannelInbound deletes the rows of written messages finished a day before now, and of
+// Prune deletes the rows of written messages finished a day before now, and of
 // given-up ones 30 days before, and returns how many it deleted.
-func (s *Store) PruneChannelInbound(ctx context.Context, now time.Time) (int, error) {
-	result, err := s.db.NewRaw(`
-DELETE FROM channel_thread_inbound
-WHERE (state = 'done' AND finished_at < ?) OR (state = 'failed' AND finished_at < ?)`,
-		now.Add(-channelInboundDoneKeep).UTC(), now.Add(-channelInboundFailedKeep).UTC()).Exec(ctx)
+func (r *ChannelInbounds) Prune(ctx context.Context, now time.Time) (int, error) {
+	pruned, err := deleteInBatches(ctx, r.store.global, "channel_thread_inbound", "(state = ? AND finished_at < ?) OR (state = ? AND finished_at < ?)",
+		ChannelInboundDone, now.Add(-channelInboundDoneKeep).UTC(), ChannelInboundFailed, now.Add(-channelInboundFailedKeep).UTC())
 	if err != nil {
-		return 0, stack.Wrap(fmt.Errorf("store: prune channel inbound: %w", err))
+		return int(pruned), stack.Wrap(fmt.Errorf("store: prune channel inbound: %w", err))
 	}
-	pruned, _ := result.RowsAffected()
 	return int(pruned), nil
 }

@@ -172,6 +172,26 @@ func (s *TelnyxHookSuite) TestANumberAttachedBeforeItsTrunkWasKeptIsHungUpAndSay
 	s.True(s.loggedLine(masked(s.e164), "attach the number again"), "the log says what to do about this number")
 }
 
+// Defect (AI-3349): the access line of a call Telnyx signed naming no customer, as no
+// credential names one, though its number says whose call it is; or an unsigned call naming
+// the number's customer.
+func (s *TelnyxHookSuite) TestTheAccessLineOfASignedCallNamesTheNumbersCustomer() {
+	s.attach(s.e164, "sip:"+s.e164+"@trunk.sip.example.test", "trunk-user", "trunk-password")
+	served := func(parts ...string) bool {
+		return s.loggedLine(append([]string{`msg="served a request"`, " path=" + telnyxCallHookPath + " "}, parts...)...)
+	}
+
+	unsigned, _, _ := s.deliver(s.call(s.e164), false)
+	s.Require().Equal(http.StatusUnauthorized, unsigned)
+	s.Require().Eventually(func() bool { return served(" status=401 ") }, settleFor, 10*time.Millisecond)
+	s.True(served(" status=401 ", ` customer="" `, " error_code=unauthenticated "))
+
+	signed, _, body := s.deliver(s.call(s.e164), true)
+	s.Require().Equal(http.StatusOK, signed, body)
+	s.Require().Eventually(func() bool { return served(" status=200 ") }, settleFor, 10*time.Millisecond)
+	s.True(served(" status=200 ", " customer="+s.customerID()+" "))
+}
+
 // thisTest is what the current test logged, so a line another test logged for a number
 // that masks the same way is not read as this test's.
 func (s *TelnyxHookSuite) thisTest() string { return s.logged.String()[s.since:] }
@@ -240,7 +260,7 @@ func (s *TelnyxHookSuite) TestASignedCallCarryingCredentialsRecordsNoUserAndJoin
 	s.NotContains(string(answered), claimed)
 
 	ctx := context.Background()
-	recorded, err := s.store.DB().NewSelect().Model((*store.User)(nil)).
+	recorded, err := s.store.GlobalDB().NewSelect().Model((*store.User)(nil)).
 		Where("customer_id = ?", s.customerID()).
 		Where("id = ?", userID).
 		Count(ctx)
@@ -248,12 +268,12 @@ func (s *TelnyxHookSuite) TestASignedCallCarryingCredentialsRecordsNoUserAndJoin
 	s.Zero(recorded)
 
 	s.Never(func() bool {
-		under, err := s.store.OrganizationOf(ctx, s.customerID())
-		return err == nil && under != ""
+		under, err := s.store.AppOrganizations.Get(ctx, s.customerID())
+		return err == nil && under.OrganizationID != ""
 	}, time.Second, 20*time.Millisecond)
-	under, err := s.store.OrganizationOf(ctx, claimed)
+	under, err := s.store.AppOrganizations.Get(ctx, claimed)
 	s.Require().NoError(err)
-	s.Empty(under)
+	s.Empty(under.OrganizationID)
 }
 
 func (s *TelnyxHookSuite) call(to string) url.Values {
@@ -311,25 +331,40 @@ func (l telnyxRinger) deliver(form url.Values, signed bool) (int, string, string
 	return response.StatusCode, response.Header.Get("Content-Type"), string(answered)
 }
 
-// attach holds the number at Telnyx for the suite's app and attaches it as the phone
-// service does, its trunk password sealed under the service's key. An empty uri is a
-// number attached before trunks were kept.
+// attach holds the number at Telnyx for the suite's app and attaches it on a trunk of its
+// own, as attachOwnTrunk does.
 func (l telnyxRinger) attach(e164, uri, username, password string) {
-	s := l.suite
+	attachOwnTrunk(l.suite, "telnyx", e164, uri, username, password)
+}
+
+// attachOwnTrunk holds the number at the vendor for the suite's app and attaches it on a trunk
+// of its own, as the phone service does, its trunk password sealed under the service's key. An
+// empty uri is a number attached before trunks were kept.
+func attachOwnTrunk(s *RouterSuite, vendor, e164, uri, username, password string) {
 	ctx := context.Background()
-	s.Require().NoError(s.store.RecordNumber(ctx, &store.PhoneNumber{
-		E164: e164, Vendor: "telnyx", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
+	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
+		E164: e164, Vendor: vendor, Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	attachment := store.NumberAttachment{TrunkID: "trunk-" + s.utils.uuid(), CallType: "default"}
-	if uri != "" {
-		sealer, err := auth.NewSealer(suiteTrunkKEK)
-		s.Require().NoError(err)
-		sealed, err := sealer.SealWithAAD(password, []byte("phone_numbers/"+s.customerID()+"/"+e164))
-		s.Require().NoError(err)
-		attachment.BridgeURI, attachment.BridgeUsername = uri, username
-		attachment.BridgePasswordSealed, attachment.BridgePasswordKEKVersion = sealed, sealer.CurrentVersion()
+	if uri == "" {
+		s.Require().NoError(s.store.PhoneNumbers.Attach(ctx, s.customerID(), e164, attachment))
+		return
 	}
-	s.Require().NoError(s.store.AttachNumber(ctx, s.customerID(), e164, attachment))
+	sealer, err := auth.NewSealer(suiteTrunkKEK)
+	s.Require().NoError(err)
+	sealed, err := sealer.SealWithAAD(password, []byte("phone_numbers/"+s.customerID()+"/"+e164))
+	s.Require().NoError(err)
+	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: vendor}
+	s.Require().NoError(s.store.StreamTrunks.InGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
+		err := tx.SaveTrunk(store.StreamTrunk{
+			ID: attachment.TrunkID, BridgeURI: uri, BridgeUsername: username,
+			BridgePasswordSealed: sealed, BridgePasswordKEKVersion: sealer.CurrentVersion(), Own: true,
+		})
+		if err != nil {
+			return err
+		}
+		return tx.Attach(e164, attachment)
+	}))
 }
 
 // TelnyxHookUnconfiguredSuite is a deployment with no Telnyx public key.

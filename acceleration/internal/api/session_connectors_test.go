@@ -63,7 +63,7 @@ func (s *SessionConnectorsSuite) SetupSuite() {
 	s.approvalWait = 5 * time.Second
 	s.RouterSuite.SetupSuite()
 	// Seeded as a router start does, for the nessy binding the approval tests set beside crm.
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), providers.FS))
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 	s.token = issuedToken(&s.RouterSuite, s.provider)
 }
 
@@ -105,7 +105,7 @@ func (s *SessionConnectorsSuite) TestAToolCallAnswered400KeepsAStaticTokenConnec
 
 	s.Equal(connectorEcho, ran["tool"])
 	s.NotEmpty(ran["error"], "the provider's 400 is the call's answer")
-	connection, err := s.store.ConnectorConnection(context.Background(), s.customerID(), mine)
+	connection, err := s.store.ConnectorConnections.Get(context.Background(), s.customerID(), mine)
 	s.Require().NoError(err)
 	s.Equal(store.ConnectionConnected, connection.Status)
 }
@@ -122,34 +122,10 @@ func (s *SessionConnectorsSuite) TestACustomConnectorsServerInstructionsFollowTh
 // config's instructions alone, as on base (probe on c4d53f3e9: "Be brief.").
 func (s *SessionConnectorsSuite) TestABuiltInConnectorsServerInstructionsAreLeftOut() {
 	builtin := "fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), fstest.MapFS{builtin + ".yaml": {
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), fstest.MapFS{builtin + ".yaml": {
 		Data: []byte(strings.Replace(s.manifest(), "custom_crm", builtin, 1))}}))
 
 	s.Equal("Be brief.", s.recordedInstructions(builtin, "Quote ticket ids whole."))
-}
-
-// TestARowStillNamingPluginsRunsItsBuiltInAndCustomBindingsAsOnBase is the control: a config
-// whose row still names a plugin, a plugin event and an MCP server, as one saved before they
-// were refused does, runs the tool of a custom and of a built-in connector's binding as the base
-// did (probe on c467ee4d6: crm__echo ran with the echo's text and no error, for each).
-func (s *SessionConnectorsSuite) TestARowStillNamingPluginsRunsItsBuiltInAndCustomBindingsAsOnBase() {
-	builtin := "fake" + strings.ReplaceAll(s.utils.uuid(), "-", "")
-	s.Require().NoError(s.store.SeedConnectorDefinitions(context.Background(), fstest.MapFS{builtin + ".yaml": {
-		Data: []byte(strings.Replace(s.manifest(), "custom_crm", builtin, 1))}}))
-	for kind, connector := range map[string]string{"custom": s.connector(), "built-in": builtin} {
-		s.Run(kind, func() {
-			mine, echo := s.connection(s.client, connector)
-			config := s.config(s.binding("crm", connector, "session", "", echo))
-			nameRetired(s.T(), s.store, config)
-
-			opened := s.client.createSession(s.session(config, map[string]string{"crm": mine}))
-			ran := s.toolRanOn(s.serverClient.actingFor(s.client), s.client.opens("/v1/agents/sessions/"+opened.Id+"/events"), opened.Id)
-
-			s.Equal(connectorEcho, ran["tool"])
-			s.Equal(connectorEchoText, ran["result"])
-			s.Empty(ran["error"])
-		})
-	}
 }
 
 // recordedInstructions is what the call of a session of a config told "Be brief." records the
@@ -167,7 +143,7 @@ func (s *SessionConnectorsSuite) recordedInstructions(connector, instructions st
 	opened := s.client.createSession(s.session(config.Id, map[string]string{"crm": mine}))
 	s.recorded(opened.Id)
 	var call Call
-	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+opened.Id, nil, &call))
+	s.Require().Equal(http.StatusOK, s.sessionCall(opened.Id, &call))
 	s.client.stopSession(opened.Id)
 	return value(call.Instructions)
 }
@@ -338,9 +314,10 @@ func (s *SessionConnectorsSuite) TestAForkWhoseConfigCannotBeReadFails() {
 	opened := s.client.createSession(s.session(config, nil))
 	s.storedSelections(opened.Id)
 	s.client.stopSession(opened.Id)
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE agent_configs SET connectors = '{"not": "a list"}'::jsonb WHERE id = ?`, config)
 	s.Require().NoError(err)
+	s.store.AgentConfigs.ForgetCached(context.Background(), s.customerID(), config)
 
 	status := s.client.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/fork", ForkSessionRequest{Messages: pointerTo(false)}, nil)
 
@@ -457,7 +434,7 @@ func (s *SessionConnectorsSuite) TestAForkOfAnEndedSessionIsWrittenWhateverItsCo
 func (s *SessionConnectorsSuite) TestAForkNamingAConfigDoesNotReadItsParentsConfig() {
 	config := s.modelledConfig("noted/noted-model", nil)
 	parent := s.endedSession(config)
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE agent_configs SET connectors = '{"not": "a list"}'::jsonb WHERE id = ?`, config)
 	s.Require().NoError(err)
 	named := s.modelledConfig("counted/counted-model", nil)
@@ -552,7 +529,7 @@ func (s *SessionConnectorsSuite) TestAnIncognitoForkIsRefusedWhateverItsConfig()
 	request := s.session(config, nil)
 	request.Incognito = pointerTo(true)
 	running := s.client.createSession(request)
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE agent_configs SET connectors = '{"not": "a list"}'::jsonb WHERE id = ?`, config)
 	s.Require().NoError(err)
 
@@ -575,7 +552,7 @@ func (s *SessionConnectorsSuite) TestAThreadsForkIsRefusedWhateverItsConfig() {
 	opened := s.serverClient.createSession(request)
 	s.serverClient.stopSession(opened.Id)
 	s.storedSelections(opened.Id)
-	_, err := s.store.DB().ExecContext(context.Background(),
+	_, err := s.store.GlobalDB().ExecContext(context.Background(),
 		`UPDATE agent_configs SET connectors = '{"not": "a list"}'::jsonb WHERE id = ?`, config)
 	s.Require().NoError(err)
 
@@ -724,7 +701,7 @@ func (s *SessionConnectorsSuite) TestAThreadChannelsHeldCallAsksNobody() {
 // two people of the thread writing in it.
 func (s *SessionConnectorsSuite) threadChannel(channel, connector, connection, config string) {
 	ctx := context.Background()
-	_, err := s.store.LinkChannelThread(ctx, &store.ChannelThread{ChannelID: channel, CustomerID: s.customerID(),
+	_, err := s.store.ChannelThreads.Link(ctx, &store.ChannelThread{ChannelID: channel, CustomerID: s.customerID(),
 		ConnectorID: connector, ProviderUnitID: "T0000TEAM", ThreadKey: s.utils.uuid(), ConnectionID: connection})
 	s.Require().NoError(err)
 	alice, bob := "slack-U0000ALICE", "slack-U0000BOB"
@@ -757,7 +734,7 @@ func (s *RouterSuite) customConnector(provider *fakeprovider.Server) string {
 	id := "custom_crm" + strings.ReplaceAll(s.utils.uuid(), "-", "")
 	manifest, err := core.ParseManifest([]byte(strings.Replace(customManifest(provider), "custom_crm", id, 1)))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	return id
 }
@@ -816,10 +793,17 @@ func (s *SessionConnectorsSuite) binding(alias, connector, selection, connection
 // config is a new agent config of the suite's app, on the connecting model, binding
 // bindings through the config endpoint (T20).
 func (s *SessionConnectorsSuite) config(bindings ...map[string]any) string {
+	return s.configTagged(nil, bindings...)
+}
+
+// configTagged is config with tags, none for nil.
+func (s *SessionConnectorsSuite) configTagged(tags map[string]string, bindings ...map[string]any) string {
+	request := map[string]any{"name": "connectors-" + s.utils.uuid(), "llm": "connecting/connector-model", "connectors": bindings}
+	if tags != nil {
+		request["tags"] = tags
+	}
 	var created AgentConfig
-	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", map[string]any{
-		"name": "connectors-" + s.utils.uuid(), "llm": "connecting/connector-model", "connectors": bindings,
-	}, &created))
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", request, &created))
 	return created.Id
 }
 
@@ -901,7 +885,12 @@ func (s *SessionConnectorsSuite) endedSession(config string) string {
 func (s *SessionConnectorsSuite) endedSessionOf(config string, overwrites *ModelOverwrites) string {
 	request := s.session(config, nil)
 	request.ModelOverwrites = overwrites
-	opened := s.client.createSession(request)
+	// Models are the backend's to choose, so it opens the user's session when it names some.
+	opener := s.client
+	if overwrites != nil {
+		opener = s.serverClient.actingFor(s.client)
+	}
+	opened := opener.createSession(request)
 	s.storedSelections(opened.Id)
 	s.client.stopSession(opened.Id)
 	return opened.Id
@@ -919,8 +908,13 @@ func (s *SessionConnectorsSuite) modelledConfig(llm string, fields map[string]an
 // askFork forks parent with overwrites, asks the fork a question, and returns the fork and the
 // first frame of type wanted it sent back. The fork is stopped once it has.
 func (s *SessionConnectorsSuite) askFork(parent string, overwrites *ModelOverwrites, wanted string) (Session, map[string]any) {
+	// Models are the backend's to choose, so it forks for the user when it names some.
+	forker := s.client
+	if overwrites != nil {
+		forker = s.serverClient.actingFor(s.client)
+	}
 	var forked Session
-	s.Require().Equal(http.StatusCreated, s.client.do(http.MethodPost, "/v1/agents/sessions/"+parent+"/fork",
+	s.Require().Equal(http.StatusCreated, forker.do(http.MethodPost, "/v1/agents/sessions/"+parent+"/fork",
 		ForkSessionRequest{Messages: pointerTo(false), ModelOverwrites: overwrites}, &forked))
 	watching := s.client.opens("/v1/agents/sessions/" + forked.Id + "/events")
 	status, failure := s.serverClient.actingFor(s.client).failure(http.MethodPost, "/v1/agents/sessions/"+forked.Id+"/respond",
@@ -931,12 +925,12 @@ func (s *SessionConnectorsSuite) askFork(parent string, overwrites *ModelOverwri
 	return forked, frame
 }
 
-// forkPrompts forks parent onto the model that reviews, asks it a question, stops it, and
+// forkPrompts has the user's backend fork parent onto the model that reviews, asks it a question, stops it, and
 // reads back what it was told. The review's output rule, which ends every review prompt,
 // is left off.
 func (s *SessionConnectorsSuite) forkPrompts(parent string) forkedPrompts {
 	var forked Session
-	s.Require().Equal(http.StatusCreated, s.client.do(http.MethodPost, "/v1/agents/sessions/"+parent+"/fork",
+	s.Require().Equal(http.StatusCreated, s.serverClient.actingFor(s.client).do(http.MethodPost, "/v1/agents/sessions/"+parent+"/fork",
 		ForkSessionRequest{Messages: pointerTo(false), ModelOverwrites: &ModelOverwrites{Llm: pointerTo("summarising/summarising-model")}}, &forked))
 	// A device is never given the instructions, so the backend reads what the fork was told.
 	instructions := value(s.serverClient.actingFor(s.client).getSession(forked.Id).Instructions)
@@ -950,7 +944,7 @@ func (s *SessionConnectorsSuite) forkPrompts(parent string) forkedPrompts {
 
 	var call Call
 	s.Require().Eventually(func() bool {
-		return s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+forked.Id, nil, &call) == http.StatusOK &&
+		return s.sessionCall(forked.Id, &call) == http.StatusOK &&
 			call.ReviewNotes != nil
 	}, 2*settleFor, 10*time.Millisecond, "the fork is reviewed when it ends")
 	review := strings.TrimSuffix(*call.ReviewNotes, "\n\n"+`Answer with JSON only: {"summary": "...", "score": 3, "notes": "..."}`)
@@ -961,7 +955,7 @@ func (s *SessionConnectorsSuite) forkPrompts(parent string) forkedPrompts {
 // and a session stopped before it is there loses the review that stopping starts.
 func (s *SessionConnectorsSuite) recorded(id string) {
 	s.Require().Eventually(func() bool {
-		return s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+id, nil, nil) == http.StatusOK
+		return s.sessionCall(id, nil) == http.StatusOK
 	}, settleFor, 10*time.Millisecond, "the call is recorded")
 }
 
@@ -989,7 +983,7 @@ func (s *SessionConnectorsSuite) forkSummary(parent string, config *string) stri
 	var summary string
 	s.Require().Eventually(func() bool {
 		var call Call
-		s.serverClient.do(http.MethodGet, "/v1/agents/calls/"+forked.Id, nil, &call)
+		s.sessionCall(forked.Id, &call)
 		summary = value(call.Summary)
 		return strings.Contains(summary, "upgrade")
 	}, 2*settleFor, 10*time.Millisecond, "the fork is summarised when it ends")

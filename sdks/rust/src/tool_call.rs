@@ -66,17 +66,6 @@ impl ToolCallContext {
         }
     }
 
-    /// Tells the people in the conversation how the call is going, such as "Found three
-    /// flights, comparing prices". The agent puts it in its own words.
-    pub async fn update(&self, text: &str) -> Result<()> {
-        self.send_update(text, false).await
-    }
-
-    /// [`ToolCallContext::update`], said word for word.
-    pub async fn say(&self, text: &str) -> Result<()> {
-        self.send_update(text, true).await
-    }
-
     /// Keeps the call going if the person talks over the agent from here on, for a call
     /// that is past the point of taking back, such as one that has started a payment.
     ///
@@ -99,14 +88,41 @@ impl ToolCallContext {
         }
     }
 
-    async fn send_update(&self, text: &str, verbatim: bool) -> Result<()> {
+    /// Sets the call's title while it runs, such as "Comparing 40 flights".
+    pub async fn update(&self, title: impl Into<String>) -> Result<()> {
+        self.send_update(ToolCallUpdate {
+            title: Some(title.into()),
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// Tells the people in the conversation how the call is going: a new title, data for
+    /// their app to show, or both.
+    pub async fn send_update(&self, update: ToolCallUpdate) -> Result<()> {
         let Some(line) = &self.line else {
             return Ok(());
         };
-        line.sender
-            .send(&json!({"type": "tool_update", "tool_call_id": self.id, "text": text, "verbatim": verbatim}))
-            .await
+        let mut frame = json!({"type": "tool_update", "tool_call_id": self.id});
+        if let Some(title) = update.title.filter(|title| !title.is_empty()) {
+            frame["text"] = title.into();
+        }
+        if let Some(custom) = update.custom {
+            frame["custom"] = custom.into();
+        }
+        line.sender.send(&frame).await
     }
+}
+
+/// What a running call tells the people in the conversation.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ToolCallUpdate {
+    /// Replaces the call's display title while it runs, and on a voice call the agent tells
+    /// the caller about it in its own words. `None` leaves the title as it was.
+    pub title: Option<String>,
+    /// Replaces the call's data whole, for their app to show, such as a card under the
+    /// message. It is kept once the call finishes. `None` leaves it as it was.
+    pub custom: Option<Map<String, Value>>,
 }
 
 /// A call's way back over the socket that delivered it.

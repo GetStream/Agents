@@ -50,12 +50,12 @@ func TestAGrantAdmitsPastASpentLimit(t *testing.T) {
 	acct := spentAccount([]store.Limit{financeLimit(usage.Daily, 10)}, map[usage.SubjectRef]int64{finance: 10},
 		grantOn(7, finance, 50, nil))
 
-	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow)
+	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow, false)
 	require.NoError(t, verdict.refusal)
 	require.Equal(t, []int64{7}, verdict.grants)
 
 	acct.grants[0].used = 50
-	verdict = acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow)
+	verdict = acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow, false)
 	require.ErrorIs(t, verdict.refusal, ErrBudgetSpent, "a used grant draws nothing")
 	require.Empty(t, verdict.grants)
 }
@@ -64,12 +64,12 @@ func TestAGrantLiftsEveryIntervalOfItsSubject(t *testing.T) {
 	rows := []store.Limit{financeLimit(usage.Daily, 100), financeLimit(usage.Weekly, 10)}
 	acct := spentAccount(rows, map[usage.SubjectRef]int64{finance: 10}, grantOn(7, finance, 50, nil))
 
-	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow)
+	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow, false)
 	require.NoError(t, verdict.refusal, "the weekly one is spent, the daily one not")
 	require.Equal(t, []int64{7}, verdict.grants)
 
 	acct = spentAccount(rows, map[usage.SubjectRef]int64{finance: 1}, grantOn(7, finance, 50, nil))
-	verdict = acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow)
+	verdict = acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow, false)
 	require.NoError(t, verdict.refusal)
 	require.Empty(t, verdict.grants, "with room under both, nothing is drawn")
 }
@@ -82,7 +82,7 @@ func TestAGrantDoesNotLiftAParent(t *testing.T) {
 	}
 	acct := spentAccount(rows, map[usage.SubjectRef]int64{finance: 10, organization: 10}, grantOn(7, finance, 50, nil))
 
-	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow)
+	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow, false)
 
 	require.ErrorIs(t, verdict.refusal, ErrBudgetSpent)
 	require.Equal(t, organization, verdict.ref, "refused by the organization")
@@ -97,8 +97,8 @@ func TestAGrantOnADefaultsSubjectLiftsOneSubject(t *testing.T) {
 		return routing.Owner{CustomerID: "a1", Attribution: routing.Attribution{UserID: user}}
 	}
 
-	require.NoError(t, acct.overLimits(subjectsOf(as("u1"), "o1"), grantNow).refusal)
-	require.ErrorIs(t, acct.overLimits(subjectsOf(as("u2"), "o1"), grantNow).refusal, ErrUserLimit)
+	require.NoError(t, acct.overLimits(subjectsOf(as("u1"), "o1"), grantNow, false).refusal)
+	require.ErrorIs(t, acct.overLimits(subjectsOf(as("u2"), "o1"), grantNow, false).refusal, ErrUserLimit)
 }
 
 func TestAnEarlierSubjectsRefusalLeavesALaterSubjectsGrantNamed(t *testing.T) {
@@ -109,7 +109,7 @@ func TestAnEarlierSubjectsRefusalLeavesALaterSubjectsGrantNamed(t *testing.T) {
 	}
 	acct := spentAccount(rows, map[usage.SubjectRef]int64{finance: 10, organization: 10}, grantOn(7, finance, 50, nil))
 
-	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow)
+	verdict := acct.overLimits(subjectsOf(financeOwner(), "o1"), grantNow, false)
 
 	require.Equal(t, organization, verdict.ref, "refused by the organization")
 	require.Equal(t, []int64{7}, verdict.grants, "work let through anyway is drawn from the team's grant")

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"cmp"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -12,8 +13,8 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -34,7 +35,12 @@ const usageCommands = `usage: router usage <command>
   replay --from path         write the usage rows a log of this shard's routers says were lost
                              (msg="usage row lost"), once each: replaying a file again writes
                              nothing twice. With a usage service (ROUTER_USAGE_URL) the sweeper
-                             ships them. Writes the database
+                             ships them. A line logged with the row as plain JSON (row=, before
+                             row_hex) was rewritten by the log's redaction and cannot be
+                             recovered: it counts as could not be read. A user the log masked
+                             (masked:) is taken from the row's session when that user masks
+                             alike, else the row bills to its app alone: replay before
+                             forget-user. Writes the database
   reship --since time [--rejected]
                              queue this shard's rows started since then (RFC 3339, or a duration
                              back from now such as 24h) that the usage service has to be sent to
@@ -42,23 +48,32 @@ const usageCommands = `usage: router usage <command>
                              it refused instead, once the producer is fixed. A row it never had
                              nor refused is never queued: one written before the router shipped,
                              or carried in by a data move. Writes the database
-  forget-user --app id --user id --actor who [--dry-run] [--settle 2m] [--replacement id]
+  forget-user --app id --user id --actor who [--dry-run] [--settle 2m] [--wait 10m] [--replacement id]
                              replace an app's end user id in the usage records with forgotten:
-                             and 32 random hex characters, in order: the requests of every shard;
+                             and 32 random hex characters, in order, after deleting their
+                             scheduled tasks with their runs, so none runs again, and turning
+                             the changes recorded of them into deletes: the requests of every shard,
+                             each shard rewriting its own in a job its routers run, this one's
+                             here, waited for up to --wait;
                              the usage service's events and windows, and again after --settle
                              for a batch shipped in between; the user's spend counters, holds
                              and quota buckets in Redis, by name; and in the shared database
                              their own policy and user-level limits, deleted, so the app's
-                             defaults apply, and the id on their resets, grants and campaigns.
+                             defaults apply, and the id on their resets, grants and campaigns;
+                             with them their phone links, channel link codes and profile,
+                             deleted, their contact map rows, unlinked, and the id on the
+                             guests they claimed. The call legs of every shard are rewritten
+                             too, and the agent logs naming them deleted, the changes recorded
+                             of the logs and the profile turned into deletes.
                              Usage and cost stay where they were, under the app. Prints each
                              step's count and writes one audit row (end_user, source cli) that
                              names the replacement and --actor, never the id. --dry-run prints
                              the counts and changes nothing. Every step is safe to repeat: to
                              finish a run that stopped, pass the replacement it printed as
                              --replacement, and only what still names the id is rewritten,
-                             under that one replacement. It covers usage records only:
-                             sessions, conversation history and agent_logs have their own
-                             retention. Needs ROUTER_USAGE_URL and ROUTER_USAGE_MANAGE_KEY.
+                             under that one replacement. Sessions, with their conversation
+                             history and documents, stay as they are. Needs ROUTER_USAGE_URL and
+                             ROUTER_USAGE_MANAGE_KEY.
                              Writes the database
   storage [--hour time]      record an hour of every knowledge base's size: the last hour to have
                              ended, or the RFC 3339 hour given. One storage row per knowledge base
@@ -168,6 +183,35 @@ func startUsageSweeper(ctx context.Context, options routing.SweeperOptions) (sto
 	}
 }
 
+// startShipper ships with shipper until the returned function stops it and it has given its
+// lock back.
+func startShipper(ctx context.Context, shipper *store.Shipper) (stop func()) {
+	background, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		shipper.Run(background)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// startShardJobs runs worker until the returned function stops it and its run in progress ended.
+func startShardJobs(ctx context.Context, worker *store.ShardJobWorker) (stop func()) {
+	background, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		worker.Run(background)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 func runUsage(args []string, settings config.Config, out io.Writer) error {
 	if len(args) == 0 {
 		return errors.New(usageCommands)
@@ -218,6 +262,9 @@ func runUsageReplay(ctx context.Context, args []string, settings config.Config, 
 		return err
 	}
 	defer pgStore.Close()
+	if err := sessionUsers(ctx, pgStore, rows); err != nil {
+		return err
+	}
 
 	var written, refused int
 	for start := 0; start < len(rows); start += replayBatch {
@@ -233,11 +280,43 @@ func runUsageReplay(ctx context.Context, args []string, settings config.Config, 
 	return err
 }
 
+// sessionUsers gives a row whose user the log masked (routing.MaskedUser) the user of its
+// session, when that user masks to the same text, so the user's spend and usage count it
+// again. A row with no session, or whose session is gone or another user's, is billed to its
+// app alone.
+func sessionUsers(ctx context.Context, pgStore *store.Store, rows []store.Request) error {
+	users := map[[2]string]string{}
+	for i := range rows {
+		masked, ok := strings.CutPrefix(rows[i].UserID, routing.MaskedUser)
+		if !ok {
+			continue
+		}
+		rows[i].UserID = ""
+		if rows[i].SessionID == "" {
+			continue
+		}
+		key := [2]string{rows[i].CustomerID, rows[i].SessionID}
+		user, read := users[key]
+		if !read {
+			session, err := pgStore.Sessions.Get(ctx, rows[i].CustomerID, rows[i].SessionID)
+			if err != nil && !errors.Is(err, store.ErrNoSession) {
+				return fmt.Errorf("usage replay: %w", err)
+			}
+			user = session.UserID
+			users[key] = user
+		}
+		if store.RedactLogAttr(nil, slog.String("user_id", user)).Value.String() == masked {
+			rows[i].UserID = routing.RecordedUser(user)
+		}
+	}
+	return nil
+}
+
 // replayRows writes one batch of lost rows, and one at a time when the database refuses the
 // batch for a row in it, naming each row it still refuses.
 func replayRows(ctx context.Context, pgStore *store.Store, rows []store.Request, out io.Writer) (written, refused int, err error) {
-	ids, err := pgStore.RecordRequests(ctx, rows)
-	if err == nil || errors.Is(err, store.ErrRequestLogsMissing) {
+	ids, err := pgStore.Requests.InsertMany(ctx, rows)
+	if err == nil {
 		return len(ids), 0, nil
 	}
 	if !store.Unwritable(err) {
@@ -289,23 +368,32 @@ func lostRows(log io.Reader, toShip bool) ([]store.Request, int, error) {
 	return rows, unreadable, nil
 }
 
-// lostRow is the row a lost-row line carries in its row field, quoted as slog's text handler
-// quotes it.
+// lostFields are the fields the writer logs a lost row with, in its order. They follow the
+// message and whatever attributes the writer's logger adds, before anything a customer wrote.
+var lostFields = regexp.MustCompile(`^ reason=\S+ usage_id=\S+ row_hex=([0-9a-f]+)(?: |$)`)
+
+// lostRow is the row a lost-row line carries in its row_hex field, the row's JSON hex-encoded,
+// which slog's text handler prints unquoted. The field is read only where the writer puts it,
+// so a row_hex= in a row's own text or in the error after it is never read as the row.
 func lostRow(line string) (store.Request, bool) {
-	_, value, found := strings.Cut(line, " row=")
+	_, fields, found := strings.Cut(line, lostRowMessage)
 	if !found {
 		return store.Request{}, false
 	}
-	quoted, err := strconv.QuotedPrefix(value)
-	if err != nil {
+	start := strings.Index(fields, " reason=")
+	if start < 0 {
 		return store.Request{}, false
 	}
-	raw, err := strconv.Unquote(quoted)
+	match := lostFields.FindStringSubmatch(fields[start:])
+	if match == nil {
+		return store.Request{}, false
+	}
+	raw, err := hex.DecodeString(match[1])
 	if err != nil {
 		return store.Request{}, false
 	}
 	var row store.Request
-	if err := json.Unmarshal([]byte(raw), &row); err != nil || row.UsageID == uuid.Nil {
+	if err := json.Unmarshal(raw, &row); err != nil || row.UsageID == uuid.Nil {
 		return store.Request{}, false
 	}
 	return row, true
@@ -331,7 +419,7 @@ func runUsageReship(ctx context.Context, args []string, settings config.Config, 
 		return err
 	}
 	defer pgStore.Close()
-	queued, err := pgStore.Reship(ctx, since, *rejected)
+	queued, err := pgStore.Requests.Reship(ctx, since, *rejected)
 	if err != nil {
 		return err
 	}
@@ -359,6 +447,9 @@ func sinceTime(text string, now time.Time) (time.Time, error) {
 // still carrying the id.
 const forgetSettle = 2 * time.Minute
 
+// forgetShards is how long forget-user waits for every shard to run its part.
+const forgetShards = 10 * time.Minute
+
 // forgetting is one run of forget-user: an app's end user and the id that replaces theirs.
 type forgetting struct {
 	store       *store.Store
@@ -367,7 +458,9 @@ type forgetting struct {
 	app, user   string
 	actor       string
 	replacement string
-	out         io.Writer
+	// wait bounds the wait for every shard to run its part.
+	wait time.Duration
+	out  io.Writer
 }
 
 // runUsageForgetUser replaces an end user's id in the usage records, step by step, or counts
@@ -379,6 +472,7 @@ func runUsageForgetUser(ctx context.Context, args []string, settings config.Conf
 	actor := flags.String("actor", "", "who asked for it, recorded in the audit row: a staff member's email")
 	dryRun := flags.Bool("dry-run", false, "print the counts and change nothing")
 	settle := flags.Duration("settle", forgetSettle, "how long to wait before rewriting the usage service's events again")
+	wait := flags.Duration("wait", forgetShards, "how long to wait for every shard to run its part")
 	replacement := flags.String("replacement", "", "the replacement a run that stopped printed, to finish it; empty picks a new one")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -400,11 +494,9 @@ func runUsageForgetUser(ctx context.Context, args []string, settings config.Conf
 	if err != nil {
 		return err
 	}
-	pgStore, err := openPriceStore(settings)
-	if err != nil {
-		return err
+	if settings.Postgres.DSN == "" {
+		return errors.New("this needs a database: set postgres.dsn")
 	}
-	defer pgStore.Close()
 	redis, err := forgetRedis(settings)
 	if err != nil {
 		return err
@@ -414,9 +506,21 @@ func runUsageForgetUser(ctx context.Context, args []string, settings config.Conf
 			client.Close()
 		}
 	}()
+	// With the routers' Redis, so the policy deleted is dropped from what every router cached.
+	pgStore, err := store.OpenShards(store.Options{
+		Shard:    settings.Shard,
+		DSN:      settings.Postgres.DSN,
+		ShardDSN: settings.Postgres.ShardDSN,
+		Shards:   settings.Shards,
+		Redis:    store.Redis{Address: settings.Redis.Addr, Username: settings.Redis.Username, Password: settings.Redis.Password},
+	})
+	if err != nil {
+		return err
+	}
+	defer pgStore.Close()
 	run := forgetting{
 		store: pgStore, usage: client, redis: redis, app: *app, user: *user, actor: *actor,
-		replacement: *replacement, out: out,
+		replacement: *replacement, wait: *wait, out: out,
 	}
 	if *dryRun {
 		return run.count(ctx)
@@ -459,11 +563,15 @@ func forgetRedis(settings config.Config) ([]rueidis.Client, error) {
 
 // count prints what forget would change, and changes nothing.
 func (f forgetting) count(ctx context.Context) error {
-	organizations, err := f.store.UserOrganizations(ctx, f.app, f.user, f.replacement)
+	tasks, err := f.store.CountUserTasks(ctx, f.app, f.user)
 	if err != nil {
 		return err
 	}
-	requests, err := f.store.UserRequests(ctx, f.app, f.user)
+	shards, err := f.shards(ctx, true)
+	if err != nil {
+		return err
+	}
+	organizations, err := f.store.UserOrganizations(ctx, f.app, f.user, f.replacement)
 	if err != nil {
 		return err
 	}
@@ -473,7 +581,7 @@ func (f forgetting) count(ctx context.Context) error {
 	}
 	keys := 0
 	for _, client := range f.redis {
-		for _, response := range client.DoMulti(ctx, f.commands(client, true, organizations, service.Organizations)...) {
+		for _, response := range client.DoMulti(ctx, f.commands(client, true, organizations, shards.Organizations, service.Organizations)...) {
 			found, err := response.AsInt64()
 			if err != nil {
 				return fmt.Errorf("usage forget-user: redis: %w", err)
@@ -481,24 +589,33 @@ func (f forgetting) count(ctx context.Context) error {
 			keys += int(found)
 		}
 	}
-	branches, err := f.store.CountUserBranchMessages(ctx, f.app, f.user)
-	if err != nil {
-		return err
-	}
 	settings, err := f.store.CountUserSettings(ctx, f.app, f.user)
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(f.out, "dry run, nothing is changed\nrequests: %d rows\nbranch snapshots: %d messages to delete\n"+
+	_, err = fmt.Fprintf(f.out, "dry run, nothing is changed\nscheduled tasks: %d to delete, %d recorded changes to redact\n"+
+		"requests: %d rows\ncall legs: %d rows\nbranch snapshots: %d messages to delete\nagent logs: %d to delete\n"+
 		"usage service: %d events, %d windows\nredis: %d keys\n"+
-		"shared database: %d policies and %d limits to delete; %d resets, %d grants and %d campaigns to rewrite\n",
-		requests, branches, service.Events, service.Windows, keys,
-		settings.Policies, settings.Limits, settings.Resets, settings.Grants, settings.Campaigns)
+		"shared database: %d policies and %d limits to delete; %d resets, %d grants and %d campaigns to rewrite\n"+
+		"links: %d phone links, %d channel link codes and %d profiles to delete; %d contacts to unlink; %d claimed guests to rewrite\n",
+		tasks.Tasks, tasks.Changes, shards.Requests, shards.CallLegs, shards.BranchMessages, shards.AgentLogs, service.Events, service.Windows, keys,
+		settings.Policies, settings.Limits, settings.Resets, settings.Grants, settings.Campaigns,
+		settings.Phones, settings.ChannelLinks, settings.Profiles, settings.Contacts, settings.Claims)
 	return err
 }
 
-// forget replaces the id, in the order each step needs: the shards first, so nothing ships the
-// id again, and with them the snapshots of messages a rewind hid, which hold the user's words;
+// shards has every shard run its part of forgetting the user, or of counting it, and waits up to
+// f.wait for them.
+func (f forgetting) shards(ctx context.Context, dryRun bool) (store.UserShards, error) {
+	waiting, cancel := context.WithTimeout(ctx, f.wait)
+	defer cancel()
+	return f.store.ForgetUserOnShards(waiting, f.app, f.user, f.replacement, dryRun)
+}
+
+// forget replaces the id, in the order each step needs, once the user's scheduled tasks are
+// deleted, so none runs and records the id again meanwhile: the shards first, so nothing ships
+// the id again, their call legs with them, and the snapshots of messages a rewind hid and the
+// agent logs naming the user, which hold the user's words;
 // the usage service twice, the second after settle, for a batch read before the
 // shards were rewritten; Redis once the service writes no counter of the id any more; and the
 // shared database last, with the audit row in the same transaction.
@@ -506,22 +623,23 @@ func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 	if _, err := fmt.Fprintf(f.out, "replacing the user's id with %s\n", f.replacement); err != nil {
 		return err
 	}
+	tasks, err := f.store.ForgetUserTasks(ctx, f.app, f.user)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(f.out, "scheduled tasks: %d deleted, %d recorded changes redacted\n", tasks.Tasks, tasks.Changes); err != nil {
+		return err
+	}
+	shards, err := f.shards(ctx, false)
+	if err != nil {
+		return err
+	}
 	organizations, err := f.store.UserOrganizations(ctx, f.app, f.user, f.replacement)
 	if err != nil {
 		return err
 	}
-	requests, err := f.store.RenameUserRequests(ctx, f.app, f.user, f.replacement)
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(f.out, "requests: %d rows rewritten\n", requests); err != nil {
-		return err
-	}
-	branches, err := f.store.DeleteUserBranchMessages(ctx, f.app, f.user)
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(f.out, "branch snapshots: %d messages deleted\n", branches); err != nil {
+	if _, err := fmt.Fprintf(f.out, "requests: %d rows rewritten\ncall legs: %d rows rewritten\nbranch snapshots: %d messages deleted\nagent logs: %d deleted\n",
+		shards.Requests, shards.CallLegs, shards.BranchMessages, shards.AgentLogs); err != nil {
 		return err
 	}
 	forget := usageservice.ForgetUser{AppID: f.app, UserID: f.user, Replacement: f.replacement}
@@ -546,7 +664,7 @@ func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 	}
 	var keys int64
 	for _, client := range f.redis {
-		for _, response := range client.DoMulti(ctx, f.commands(client, false, organizations, first.Organizations, second.Organizations)...) {
+		for _, response := range client.DoMulti(ctx, f.commands(client, false, organizations, shards.Organizations, first.Organizations, second.Organizations)...) {
 			deleted, err := response.AsInt64()
 			if err != nil {
 				return fmt.Errorf("usage forget-user: redis: %w", err)
@@ -561,16 +679,20 @@ func (f forgetting) forget(ctx context.Context, settle time.Duration) error {
 		CustomerID: f.app, ResourceType: store.AuditEndUser, ResourceID: f.replacement,
 		Action: store.AuditUpdated, Source: store.AuditSourceCLI, ActorID: f.actor,
 		Changes: []store.AuditChange{
-			{Field: "requests", After: requests}, {Field: "branch_messages", After: branches}, {Field: "events", After: first.Events + second.Events},
+			{Field: "requests", After: shards.Requests}, {Field: "call_legs", After: shards.CallLegs}, {Field: "branch_messages", After: shards.BranchMessages},
+			{Field: "agent_logs", After: shards.AgentLogs}, {Field: "events", After: first.Events + second.Events},
 			{Field: "windows", After: first.Windows + second.Windows}, {Field: "redis_keys", After: keys},
 		},
 	}
+	entry.Changes = append(entry.Changes, tasks.AuditChanges()...)
 	settings, err := f.store.ForgetUserSettings(ctx, f.app, f.user, f.replacement, entry)
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(f.out, "shared database: %d policies and %d limits deleted; %d resets, %d grants and %d campaigns rewritten\naudit: %s\n",
-		settings.Policies, settings.Limits, settings.Resets, settings.Grants, settings.Campaigns, entry.ID)
+	_, err = fmt.Fprintf(f.out, "shared database: %d policies and %d limits deleted; %d resets, %d grants and %d campaigns rewritten\n"+
+		"links: %d phone links, %d channel link codes and %d profiles deleted; %d contacts unlinked; %d claimed guests rewritten\naudit: %s\n",
+		settings.Policies, settings.Limits, settings.Resets, settings.Grants, settings.Campaigns,
+		settings.Phones, settings.ChannelLinks, settings.Profiles, settings.Contacts, settings.Claims, entry.ID)
 	return err
 }
 

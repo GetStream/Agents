@@ -3,15 +3,22 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -28,11 +35,23 @@ func TestServerSuite(t *testing.T) {
 	runSuite(t, new(ServerSuite))
 }
 
+// insertRequest writes one request as the writer does, through InsertMany, giving it a usage
+// id when it has none, and leaves on request what the write set.
+func insertRequest(ctx context.Context, db *store.Store, request *store.Request) error {
+	if request.UsageID == uuid.Nil {
+		request.UsageID = uuid.Must(uuid.NewV7())
+	}
+	rows := []store.Request{*request}
+	_, err := db.Requests.InsertMany(ctx, rows)
+	*request = rows[0]
+	return err
+}
+
 // SetupSuite records a request for the model this deployment routes to, so that whenever
 // this suite first counts popularity, there is something for the model to have a share of.
 func (s *ServerSuite) SetupSuite() {
 	s.RouterSuite.SetupSuite()
-	s.Require().NoError(s.store.RecordRequest(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality: "stt", CustomerID: s.utils.uuid(),
 		Provider: "stub", Model: "stub-model",
 		StartedAt: time.Now(), Success: true,
@@ -55,6 +74,51 @@ func (s *ServerSuite) TestHealthReportsEveryDependencyAsOk() {
 	s.Equal("ok", status.Dependencies["redis"])
 	s.Equal("ok", status.Dependencies["stt"])
 	s.Equal("ok", status.Dependencies["tts"])
+}
+
+// The health check needs no credential, so what it says of a dependency must not name where
+// the dependency is.
+func (s *ServerSuite) TestHealthSaysADatabaseThatDoesNotAnswerIsUnavailableAndNothingMore() {
+	url := s.unreachableDatabase(slog.New(slog.DiscardHandler))
+
+	response, err := http.Get(url + "/health")
+	s.Require().NoError(err)
+	defer response.Body.Close()
+	var status HealthStatus
+	s.Require().NoError(json.NewDecoder(response.Body).Decode(&status))
+
+	s.Equal(http.StatusServiceUnavailable, response.StatusCode)
+	s.Equal("unavailable", status.Dependencies["postgres"])
+}
+
+// Every probe asks, so a database that is down would otherwise fill the log with one line each.
+func (s *ServerSuite) TestADatabaseThatDoesNotAnswerTheHealthCheckIsLoggedOnceAMinute() {
+	var logged bytes.Buffer
+	url := s.unreachableDatabase(slog.New(slog.NewTextHandler(&logged, nil)))
+
+	for range 2 {
+		response, err := http.Get(url + "/health")
+		s.Require().NoError(err)
+		s.Require().NoError(response.Body.Close())
+		s.Require().Equal(http.StatusServiceUnavailable, response.StatusCode)
+	}
+
+	s.Equal(1, strings.Count(logged.String(), "the database did not answer the health check"))
+}
+
+// unreachableDatabase serves a router whose database never answers, and returns its URL.
+func (s *ServerSuite) unreachableDatabase(logger *slog.Logger) string {
+	unreachable, err := store.Open("postgres://router:secret@127.0.0.1:1/router?sslmode=disable")
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(unreachable.Close()) })
+	server, err := NewServer(Options{
+		Routers: map[routing.Modality]routing.Inspector{routing.LLM: idleInspector{}},
+		Store:   unreachable, Logger: logger,
+	})
+	s.Require().NoError(err)
+	listener := httptest.NewServer(server.Handler())
+	s.T().Cleanup(listener.Close)
+	return listener.URL
 }
 
 func (s *ServerSuite) TestAnAnswerSaysHowLongTheServerTook() {
@@ -158,6 +222,28 @@ func (s *ServerSuite) TestRollupThenStatsReportsTheCustomersUsage() {
 	s.InDelta(2.0/3.0, *bucket.Uptime, 0.001)
 }
 
+// Defect: a router of shards reads the stats from every shard, so one shard being down fails
+// every app's stats page; or it reads only its own shard's shipped buckets.
+func (s *ServerSuite) TestStatsOfShardsAreWhatEveryShardShippedWithAShardDown() {
+	s.recordTurn(s.base.Add(5*time.Minute), 3000, 100, true)
+	client, served := s.onAShardDown()
+	s.Require().NoError(served.ShipStats(context.Background(), s.base.Add(10*time.Minute)))
+	_, err := served.GlobalDB().ExecContext(context.Background(), `
+INSERT INTO shard_stats_hourly (shard, modality, customer_id, provider, model, bucket, audio_ms_total,
+    characters_total, input_tokens_total, cached_input_tokens_total, output_tokens_total, images_total,
+    cost_micros_total, request_count, error_count)
+VALUES ('there', 'stt', ?, 'stub', 'stub-model', ?, 2000, 0, 0, 0, 0, 0, 0, 1, 0)`, s.customerID(), s.base)
+	s.Require().NoError(err)
+
+	var buckets []StatsBucket
+	s.Require().Equal(http.StatusOK, client.do(http.MethodGet,
+		fmt.Sprintf("/v1/stt/stats?granularity=hourly&from=%s&to=%s", s.from(), s.to(time.Hour)), nil, &buckets))
+
+	s.Require().Len(buckets, 1)
+	s.EqualValues(5000, buckets[0].AudioMsTotal)
+	s.EqualValues(2, buckets[0].RequestCount)
+}
+
 func (s *ServerSuite) TestStatsAreReportedPerModality() {
 	s.recordTurn(s.base.Add(5*time.Minute), 3000, 100, true)
 	s.recordSynthesis(s.base.Add(6*time.Minute), 128, 6400)
@@ -178,7 +264,7 @@ func (s *ServerSuite) TestStatsAreScopedToTheCallingCustomer() {
 	s.recordTurn(s.base.Add(5*time.Minute), 3000, 100, true)
 
 	// Another customer's traffic in the same bucket must not show up.
-	s.Require().NoError(s.store.RecordRequest(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality:   "stt",
 		CustomerID: s.utils.uuid(),
 		Provider:   "stub",
@@ -263,6 +349,29 @@ func (s *ServerSuite) TestSpendCanBeGroupedByACostLabel() {
 	s.EqualValues(100, buckets[2].CostMicrosTotal)
 }
 
+// A database that fails is the router's failure, and its text names the database's address.
+func (s *ServerSuite) TestSpendTheDatabaseCannotReadIsAFailureWithNoDatabaseText() {
+	label := s.utils.uuid()
+	s.failQueries(label)
+
+	status, payload := s.serverClient.call(http.MethodGet,
+		fmt.Sprintf("/v1/stats/spend?group_by=%s&from=%s&to=%s", label, s.from(), s.to(24*time.Hour)), nil)
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(payload), "store:")
+}
+
+func (s *ServerSuite) TestTagStatsTheDatabaseCannotReadAreAFailureWithNoDatabaseText() {
+	key := s.utils.uuid()
+	s.failQueries(key)
+
+	status, payload := s.serverClient.call(http.MethodGet,
+		fmt.Sprintf("/v1/llm/stats/tags?key=%s&from=%s&to=%s", key, s.from(), s.to(time.Hour)), nil)
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(payload), "store:")
+}
+
 func (s *ServerSuite) TestTagKeysReportWhichLabelIsWorthABreakdown() {
 	s.recordLabelled(s.base.Add(5*time.Minute), 6000,
 		map[string]string{"product": "support", "environment": "production"})
@@ -297,8 +406,8 @@ func (s *ServerSuite) TestActivityReportsWhoUsedTheAgentsAndHowMuch() {
 		State:      store.SessionRunning,
 		CreatedAt:  s.base.Add(time.Minute),
 	}
-	s.Require().NoError(s.store.SaveSession(ctx, session))
-	s.Require().NoError(s.store.StartResponse(ctx, &store.AgentResponse{
+	s.Require().NoError(s.store.Sessions.Upsert(ctx, session))
+	s.Require().NoError(s.store.Responses.Insert(ctx, &store.AgentResponse{
 		ID:         s.utils.uuid(),
 		SessionID:  session.ID,
 		CustomerID: s.customerID(),
@@ -325,15 +434,15 @@ func (s *ServerSuite) TestAgentStatsReportThePeakAndTheToolsCalled() {
 		State:      store.SessionRunning,
 		CreatedAt:  s.base.Add(time.Minute),
 	}
-	s.Require().NoError(s.store.SaveSession(ctx, session))
+	s.Require().NoError(s.store.Sessions.Upsert(ctx, session))
 	responseID := s.utils.uuid()
-	s.Require().NoError(s.store.StartResponse(ctx, &store.AgentResponse{
+	s.Require().NoError(s.store.Responses.Insert(ctx, &store.AgentResponse{
 		ID:         responseID,
 		SessionID:  session.ID,
 		CustomerID: s.customerID(),
 		CreatedAt:  s.base.Add(2 * time.Minute),
 	}))
-	s.Require().NoError(s.store.AppendResponseItems(ctx, []store.AgentResponseItem{
+	s.Require().NoError(s.store.ResponseItems.InsertMany(ctx, []store.AgentResponseItem{
 		{ResponseID: responseID, Ordinal: 0, SessionID: session.ID, Kind: store.ItemToolCall,
 			ToolName: "lookup_order", Payload: map[string]any{"call_id": "c1"}, At: s.base.Add(2 * time.Minute)},
 		{ResponseID: responseID, Ordinal: 1, SessionID: session.ID, Kind: store.ItemToolResult,
@@ -350,6 +459,17 @@ func (s *ServerSuite) TestAgentStatsReportThePeakAndTheToolsCalled() {
 	s.Equal("lookup_order", stats.Tools[0].Tool)
 	s.Require().NotNil(stats.Tools[0].AvgMs)
 	s.InDelta(250, *stats.Tools[0].AvgMs, 0.01)
+	s.EqualValues(1, stats.Sessions)
+	s.Require().NotNil(stats.Tools[0].SessionShare)
+	s.InDelta(1, *stats.Tools[0].SessionShare, 0.001, "the one session that took a turn called it")
+	s.Require().NotNil(stats.Tools[0].AvgTurnsBeforeUse)
+	s.Zero(*stats.Tools[0].AvgTurnsBeforeUse, "it was called on the first turn")
+}
+
+func (s *ServerSuite) TestAgentStatsOfAnAgentThatIsNotTheCallersAreNotFound() {
+	var failure map[string]any
+	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet,
+		"/v1/stats/agents?from="+s.from()+"&to="+s.to(24*time.Hour)+"&agent="+s.utils.uuid(), nil, &failure))
 }
 
 func (s *ServerSuite) TestProvidersReportLiveHealth() {
@@ -397,6 +517,31 @@ func (s *ServerSuite) TestAProviderShowsTheTokenRatesItIsBilledAt() {
 	s.Nil(prices["stub/stub-model"], "a model billed by no token has no token rates")
 }
 
+func (s *ServerSuite) TestAnSTSProviderListsItsVoicesAndOtherModalitiesLeaveThemOut() {
+	var stsProviders []Provider
+	s.Require().Equal(http.StatusOK,
+		s.serverClient.do(http.MethodGet, "/v1/sts/providers", nil, &stsProviders))
+
+	s.Require().Len(stsProviders, 1)
+	s.Require().Len(stsProviders[0].Voices, 2)
+	s.Equal("alpha", stsProviders[0].Voices[0].Id)
+	s.Equal("Alpha", stsProviders[0].Voices[0].Name)
+	s.Equal(pointerTo("Warm, natural"), stsProviders[0].Voices[0].Description)
+	s.Equal(pointerTo("female"), stsProviders[0].Voices[0].Gender)
+	s.Equal(pointerTo(true), stsProviders[0].Voices[0].Default)
+	s.Equal("beta", stsProviders[0].Voices[1].Id)
+	s.Nil(stsProviders[0].Voices[1].Default)
+
+	status, raw := s.serverClient.call(http.MethodGet, "/v1/llm/providers", nil)
+	s.Require().Equal(http.StatusOK, status)
+	var llmProviders []map[string]any
+	s.Require().NoError(json.Unmarshal(raw, &llmProviders))
+	s.Require().NotEmpty(llmProviders)
+	for _, provider := range llmProviders {
+		s.NotContains(provider, "voices", "non-STS providers omit voices")
+	}
+}
+
 func (s *ServerSuite) TestAModelThatServedRequestsHasAShareOfThem() {
 	var providers []Provider
 	s.Require().Equal(http.StatusOK,
@@ -434,7 +579,7 @@ func (s *ServerSuite) TestNobodyIsToldWhatAnAppSpentWithoutCredentials() {
 
 // recordWho stores billable work of app, billed to organization, for user under categories.
 func (s *ServerSuite) recordWho(app, organization string, costMicros int64, user string, categories ...string) {
-	s.Require().NoError(s.store.RecordRequest(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality: "llm", CustomerID: app, OrganizationID: organization, APIKey: "key-" + app, UserID: user,
 		UsageCategories: categories, Provider: "stub", Model: "stub-llm", StartedAt: s.base.Add(5 * time.Minute),
 		CostMicros: costMicros, Billable: true, Success: true,
@@ -444,7 +589,7 @@ func (s *ServerSuite) recordWho(app, organization string, costMicros int64, user
 // sibling is another app of the suite's app's organization.
 func (s *ServerSuite) sibling() string {
 	app := store.App{OrganizationID: s.app.organization.ID, Name: "app-" + s.utils.uuid()}
-	s.Require().NoError(s.store.CreateApp(context.Background(), &app))
+	s.Require().NoError(s.store.Apps.Insert(context.Background(), &app))
 	return app.ID
 }
 
@@ -473,11 +618,32 @@ func (s *ServerSuite) TestSpendByUserAcrossTheOrganization() {
 		spentBy(s.spend("group_by=who%3Aorigin&granularity=daily&scope=organization")))
 }
 
+func (s *ServerSuite) TestALabelValuedOtherIsKeptApartFromTheRest() {
+	for value, cost := range map[string]int64{"other": 5_000, "a": 3_000, "b": 1_000, "c": 500} {
+		s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
+			Modality: "llm", CustomerID: s.customerID(), OrganizationID: s.app.organization.ID, APIKey: "key",
+			Provider: "stub", Model: "stub-llm", StartedAt: s.base.Add(5 * time.Minute), CostMicros: cost,
+			Billable: true, Success: true, Tags: map[string]string{"project": value},
+		}))
+	}
+
+	type row struct {
+		value string
+		other bool
+	}
+	spent := map[row]int64{}
+	for _, bucket := range s.spend("group_by=project&granularity=daily&limit=2") {
+		spent[row{bucket.Value, bucket.Other}] += bucket.CostMicrosTotal
+	}
+
+	s.Equal(map[row]int64{{"other", false}: 5_000, {"a", false}: 3_000, {"other", true}: 1_500}, spent)
+}
+
 // who:origin groups by the key or origin that started the work (AI-2811).
 func (s *ServerSuite) TestSpendByOrigin() {
 	organization := s.app.organization.ID
 	s.recordWho(s.customerID(), organization, 1_000, "")
-	s.Require().NoError(s.store.RecordRequest(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality: "stt", CustomerID: s.customerID(), OrganizationID: organization, APIKey: "hook:chat",
 		Provider: "stub", Model: "stub-stt", StartedAt: s.base.Add(5 * time.Minute), CostMicros: 2_000, Billable: true, Success: true,
 	}))
@@ -590,13 +756,13 @@ func (s *ServerSuite) recordTurn(at time.Time, audioMs int64, latencyMs float64,
 	if !success {
 		request.ErrorCode = "provider_fatal"
 	}
-	s.Require().NoError(s.store.RecordRequest(context.Background(), request))
+	s.Require().NoError(insertRequest(context.Background(), s.store, request))
 }
 
 // recordSynthesis stores a completed text-to-speech synthesis for the suite's app.
 func (s *ServerSuite) recordSynthesis(at time.Time, characters, costMicros int64) {
 	latencyMs := 180.0
-	s.Require().NoError(s.store.RecordRequest(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality:   "tts",
 		CustomerID: s.customerID(),
 		Provider:   "stub",
@@ -613,7 +779,7 @@ func (s *ServerSuite) recordSynthesis(at time.Time, characters, costMicros int64
 // recordLabelled stores a completed LLM completion carrying the app's own cost labels.
 func (s *ServerSuite) recordLabelled(at time.Time, costMicros int64, tags map[string]string) {
 	latencyMs := 320.0
-	s.Require().NoError(s.store.RecordRequest(context.Background(), &store.Request{
+	s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 		Modality:     "llm",
 		CustomerID:   s.customerID(),
 		Provider:     "stub",

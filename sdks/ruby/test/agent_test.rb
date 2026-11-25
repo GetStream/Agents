@@ -194,7 +194,7 @@ class TestAgent < LocalRouterTest
     end
   end
 
-  def test_a_tool_is_handed_its_call_and_says_how_it_is_going
+  def test_a_tool_is_handed_its_call
     seen = Thread::Queue.new
     frames = Thread::Queue.new
     serve_session do |peer|
@@ -202,21 +202,15 @@ class TestAgent < LocalRouterTest
       peer.send_frame(type: "tool_call", id: "t1", turn_id: "turn_2", name: "search", arguments: "{}",
                       user: { id: "sam", name: "Sam", custom: { tier: "gold" } },
                       conversation: { cid: "agent:kept", custom: { line: "support" } }, approved: true)
-      3.times { frames << peer.receive(timeout: 5) }
+      frames << peer.receive(timeout: 5)
       peer.receive_type("close", timeout: 10)
     end
     tools = VA::Tools.new.register("search", description: "Search flights") do |tool_call_context, _args|
       seen << tool_call_context
-      tool_call_context.update("checking three airlines")
-      tool_call_context.say("Still looking, one moment.")
       "found two"
     end
 
     agent(tools: tools).join(participant_wait_timeout: 0, wait_for_end: false) do
-      assert_equal({ "type" => "tool_update", "tool_call_id" => "t1", "text" => "checking three airlines",
-                     "verbatim" => false }, frames.pop(timeout: 5))
-      assert_equal({ "type" => "tool_update", "tool_call_id" => "t1", "text" => "Still looking, one moment.",
-                     "verbatim" => true }, frames.pop(timeout: 5))
       assert_equal "t1", frames.pop(timeout: 5)["tool_call_id"], "the call addressed elsewhere is left"
     end
     tool_call_context = seen.pop(timeout: 1)
@@ -249,6 +243,32 @@ class TestAgent < LocalRouterTest
     agent(tools: tools).join(participant_wait_timeout: 0, wait_for_end: false) do
       assert_equal({ "type" => "tool_hold", "tool_call_id" => "t1" }, results.pop(timeout: 5))
       assert_equal({ "type" => "tool_result", "tool_call_id" => "t1", "output" => "charged" }, results.pop(timeout: 5))
+    end
+  end
+
+  def test_a_tools_updates_reach_the_router_before_its_result
+    frames = Thread::Queue.new
+    serve_session do |peer|
+      peer.send_frame(type: "tool_call", id: "t1", name: "search_flights", arguments: "{}")
+      3.times { frames << peer.receive_type("tool_update") }
+      frames << peer.receive_type("tool_result")
+      peer.receive_type("close", timeout: 10)
+    end
+    tools = VA::Tools.new.register("search_flights", description: "Search flights") do |tool_call_context, _args|
+      tool_call_context.update("Comparing 40 flights")
+      tool_call_context.update("Booking the cheapest", custom: { cheapest: 129 })
+      tool_call_context.update(custom: { seat: "12A" })
+      "found 3"
+    end
+
+    agent(tools: tools).join(participant_wait_timeout: 0, wait_for_end: false) do
+      assert_equal({ "type" => "tool_update", "tool_call_id" => "t1", "text" => "Comparing 40 flights" },
+                   frames.pop(timeout: 5))
+      assert_equal({ "type" => "tool_update", "tool_call_id" => "t1", "text" => "Booking the cheapest",
+                     "custom" => { "cheapest" => 129 } }, frames.pop(timeout: 5))
+      assert_equal({ "type" => "tool_update", "tool_call_id" => "t1", "custom" => { "seat" => "12A" } },
+                   frames.pop(timeout: 5))
+      assert_equal "found 3", frames.pop(timeout: 5)["output"]
     end
   end
 

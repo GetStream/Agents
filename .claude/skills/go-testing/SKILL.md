@@ -14,6 +14,7 @@ description: How Go tests are written in acceleration/ and sdks/go. Read before 
 - Avoid table tests, common as they are in Go. Write one test per behaviour, each named for what it proves, and put what they share in the suite or a helper.
 - Anything that needs Postgres, Redis or a provider's API starts with `//go:build integration` and skips, rather than fails, when what it needs is not configured.
 - Outside a suite, check with `require`, never `testify/assert`: a failed check stops the test there.
+- A unit test that waits on a real timer runs in a `testing/synctest` bubble, where the timer fires at once (`AgentSuite.onFakeClock` in `internal/agent`). Make the goroutines and channels the test waits on inside the bubble: a goroutine that waits on something from outside stops the fake clock. A test that waits on network I/O stays on the real clock, with or without a build tag (an integration test, or a unit test on a local socket): a wait on network I/O stops the fake clock. A test that needs real time between two events also stays on the real clock: on the fake clock, work that does not wait takes no time.
 - Every skip says what keeps the test from running: the env var or tool that is missing, or what the provider cannot do. A skip with no such reason ("pending fixture") is a test to fix or delete.
 
 ## Which kind of test
@@ -23,3 +24,17 @@ Read the file for what you are testing:
 - [controllers.md](controllers.md): HTTP operations in `internal/api`, run against the whole router with `RouterSuite`. Who may call an endpoint, whose a resource is, fixtures, parallel suites.
 - [store.md](store.md): the models and queries in `internal/store`, run against Postgres with `StoreSuite`.
 - [ai-routing.md](ai-routing.md): STT, TTS, STS, LLM, search and the other AI providers and their routers. One shared suite per kind of AI that every provider embeds.
+
+## Before you push
+
+Checks a reviewer runs and an author often skips:
+
+- Mutate every rule you added, at every call site, in a scratch copy: delete the clause, make the condition `true`, empty a migration's Down. A mutant no test fails is a missing test.
+- Run the touched suites on the merge with current `origin/main`. CI's green is from the `main` it ran on.
+- An entry added to a shared list (`dataTables`, `importedModels`, `usageIndexes`) changes every reader of that list: read each one.
+- Round-trip an id that moves, is derived or is replayed: A to B to A, and a second run, each end as one row.
+- A shipped migration never runs again: change it in a new one.
+- A new migration is expand-only: it drops or renames nothing the release before still reads or writes.
+- A migration's lock timeout is in the `go` skill's `store.md` ("Which database"). Its version slot is in the `parallel-agents` skill ("Migration versions").
+- Work moved onto `context.WithoutCancel` takes its follow-on calls (billing, the cache drop) with it.
+- A fix covers every path to the same data: each writer, and each copy of it (a cache, `data_changes`).

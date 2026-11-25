@@ -401,6 +401,39 @@ func TestTheOldPluginKeysAreRefused(t *testing.T) {
 	}
 }
 
+func TestTheToolSettingsOfBeforeGroupsAreRefusedSayingWhereTheyWent(t *testing.T) {
+	for _, declared := range []string{"tools:\n  progressive: true\n", "tools:\n  output_retention: 30d\n"} {
+		root := filepath.Join(t.TempDir(), "concierge")
+		write(t, root, "agent.yaml", declared)
+
+		_, err := Load(root)
+
+		if err == nil || !strings.Contains(err.Error(), "loading: summary") || !strings.Contains(err.Error(), "output_retention moves") {
+			t.Errorf("%q: %v", declared, err)
+		}
+	}
+}
+
+func TestAToolGroupThatSaysTooLittleOrTooMuchIsRefused(t *testing.T) {
+	for declared, says := range map[string]string{
+		"tools:\n  - tools: [lookup_booking]\n":                              "needs a name",
+		"tools:\n  - name: booking\n":                                        "names no tools",
+		"tools:\n  - name: booking\n    loading: lazy\n    tools: [a]\n":     `not "lazy"`,
+		"tools:\n  - name: booking\n    progressive: true\n    tools: [a]\n": `"progressive" is not something a tool group says`,
+		"tools:\n  - lookup_booking\n":                                       "a tool group is a mapping",
+		"connectors:\n  - name: linear\n    loading: eager\n":                `connector "linear": loading`,
+	} {
+		root := filepath.Join(t.TempDir(), "concierge")
+		write(t, root, "agent.yaml", declared)
+
+		_, err := Load(root)
+
+		if err == nil || !strings.Contains(err.Error(), says) {
+			t.Errorf("%q: %v", declared, err)
+		}
+	}
+}
+
 func TestADeclarationKeyNobodyKnowsIsRefused(t *testing.T) {
 	for _, declaration := range []string{
 		"name: jean\nlmm: openai/gpt-5.6\n",
@@ -417,6 +450,45 @@ func TestADeclarationKeyNobodyKnowsIsRefused(t *testing.T) {
 
 		if _, err := Load(root); err == nil {
 			t.Errorf("accepted %q", declaration)
+		}
+	}
+}
+
+// A greeting is its text alone, said as a variation, or a mapping that names its mode.
+func TestAGreetingIsItsTextOrAMappingThatNamesItsMode(t *testing.T) {
+	for _, c := range []struct {
+		declared string
+		want     *GreetingSettings
+	}{
+		{"greeting: Thanks for calling Acme. How can I help?\n", &GreetingSettings{Text: "Thanks for calling Acme. How can I help?", Mode: "variation"}},
+		{"greeting:\n  text: Hey, it's Juno.\n  mode: exact\n", &GreetingSettings{Text: "Hey, it's Juno.", Mode: "exact"}},
+		{"greeting:\n  text: Hello.\n", &GreetingSettings{Text: "Hello.", Mode: "variation"}},
+		{"greeting: \"\"\n", &GreetingSettings{Mode: "variation"}},
+		{"greeting:\n", nil},
+	} {
+		root := filepath.Join(t.TempDir(), "jean")
+		write(t, root, "agent.yaml", c.declared)
+
+		folder, err := Load(root)
+		if err != nil {
+			t.Errorf("%q: %v", c.declared, err)
+			continue
+		}
+		if !reflect.DeepEqual(folder.Settings.Greeting, c.want) {
+			t.Errorf("%q: greeting read as %+v, not %+v", c.declared, folder.Settings.Greeting, c.want)
+		}
+	}
+
+	for _, c := range []struct{ declared, says string }{
+		{"greeting: {text: Hello., voice: warm}\n", `"voice" is not a greeting setting`},
+		{"greeting: [Hello.]\n", "greeting is its text, or a mapping of text and mode"},
+		{"greeting: {text: [Hello.]}\n", "greeting.text must be a string"},
+	} {
+		root := filepath.Join(t.TempDir(), "jean")
+		write(t, root, "agent.yaml", c.declared)
+
+		if _, err := Load(root); err == nil || !strings.Contains(err.Error(), c.says) {
+			t.Errorf("%q: refused with %v", c.declared, err)
 		}
 	}
 }
@@ -1022,5 +1094,151 @@ func TestASkillsFilesChangeTheHashOnlyWhenThereAreSome(t *testing.T) {
 	}
 	if withFile.Hash() == asFile.Hash() {
 		t.Error("a file added to a skill left the hash as it was")
+	}
+}
+
+// link points name, under root, at target.
+func link(t *testing.T, root, name, target string) {
+	t.Helper()
+	path := filepath.Join(root, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAFileLinkedFromOutsideTheAgentDirectoryIsRefused(t *testing.T) {
+	const skill = "---\ndescription: Work it out\n---\nReason it through.\n"
+	cases := []struct {
+		name    string
+		outside map[string]string
+		inside  map[string]string
+		linked  string
+		to      string
+		// up links to the directory the agent directory is in, rather than to one elsewhere.
+		up bool
+	}{
+		{name: "agent.yaml", outside: map[string]string{"agent.yaml": "name: jean\n"}, linked: "agent.yaml", to: "agent.yaml"},
+		{name: "instructions", outside: map[string]string{"notes.md": "Elsewhere.\n"}, linked: "instructions.md", to: "notes.md"},
+		{name: "guardrail", outside: map[string]string{"notes.md": "Elsewhere.\n"}, linked: "guardrail.md", to: "notes.md"},
+		{name: "skills directory", outside: map[string]string{"skills/think.md": skill}, linked: "skills", to: "skills"},
+		{name: "skill file", outside: map[string]string{"think.md": skill}, linked: "skills/think.md", to: "think.md"},
+		{name: "skill folder's SKILL.md", outside: map[string]string{"SKILL.md": skill}, linked: "skills/think/SKILL.md", to: "SKILL.md"},
+		{name: "file in a skill folder", outside: map[string]string{"notes.txt": "Elsewhere.\n"}, inside: map[string]string{"skills/think/SKILL.md": skill}, linked: "skills/think/notes.txt", to: "notes.txt"},
+		{name: "knowledge directory", outside: map[string]string{"knowledge/doc.md": "Elsewhere.\n"}, linked: "knowledge", to: "knowledge"},
+		{name: "knowledge directory one level up", outside: map[string]string{}, linked: "knowledge", up: true},
+		{name: "knowledge document", outside: map[string]string{"doc.md": "Elsewhere.\n"}, linked: "knowledge/doc.md", to: "doc.md"},
+		{name: "knowledge pages", outside: map[string]string{"urls.yaml": "[]\n"}, inside: map[string]string{"knowledge/doc.md": "Here.\n"}, linked: "knowledge/urls.yaml", to: "urls.yaml"},
+		{name: "simulations directory", outside: map[string]string{"simulations/calls.yaml": "[]\n"}, linked: "simulations", to: "simulations"},
+		{name: "simulation file", outside: map[string]string{"calls.yaml": "[]\n"}, linked: "simulations/calls.yaml", to: "calls.yaml"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			elsewhere := t.TempDir()
+			for name, content := range tc.outside {
+				write(t, elsewhere, name, content)
+			}
+			root := filepath.Join(t.TempDir(), "jean")
+			if tc.linked != "agent.yaml" {
+				write(t, root, "agent.yaml", "name: jean\n")
+			}
+			for name, content := range tc.inside {
+				write(t, root, name, content)
+			}
+			target := filepath.Join(elsewhere, tc.to)
+			if tc.up {
+				target = filepath.Dir(root)
+				write(t, target, "doc.md", "Elsewhere.\n")
+			}
+			link(t, root, tc.linked, target)
+
+			_, err := Load(root)
+			if err == nil || !strings.Contains(err.Error(), "links outside the agent directory") {
+				t.Fatalf("loading a directory whose %s links outside it gave %v", tc.linked, err)
+			}
+		})
+	}
+}
+
+func TestALinkThatStaysInsideTheAgentDirectoryIsRead(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "jean")
+	write(t, root, "agent.yaml", "name: jean\n")
+	write(t, root, "shared/think.md", "---\ndescription: Work it out\n---\nReason it through.\n")
+	write(t, root, "shared/pricing.md", "A penny.\n")
+	link(t, root, "skills/think.md", filepath.Join("..", "shared", "think.md"))
+	link(t, root, "knowledge/pricing.md", filepath.Join("..", "shared", "pricing.md"))
+	// The agent directory is itself reached through a link, as a checkout often is.
+	through := filepath.Join(t.TempDir(), "linked")
+	if err := os.Symlink(root, through); err != nil {
+		t.Fatal(err)
+	}
+
+	folder, err := Load(through)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(folder.Skills) != 1 || folder.Skills[0].Instructions != "Reason it through." {
+		t.Errorf("the skills are %+v", folder.Skills)
+	}
+	if len(folder.Knowledge) != 1 || folder.Knowledge[0].Source != "pricing.md" || folder.Knowledge[0].Text != "A penny.\n" {
+		t.Errorf("the knowledge is %+v", folder.Knowledge)
+	}
+}
+
+func TestALinkToASiblingInsideWhoseNameStartsWithTwoDotsIsRead(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "jean")
+	write(t, root, "agent.yaml", "name: jean\n")
+	write(t, root, "..shared/a.md", "A penny.\n")
+	link(t, root, "knowledge/a.md", filepath.Join("..", "..shared", "a.md"))
+
+	folder, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(folder.Knowledge) != 1 || folder.Knowledge[0].Text != "A penny.\n" {
+		t.Errorf("the knowledge is %+v", folder.Knowledge)
+	}
+}
+
+func TestHiddenFilesAreLeftOutOfKnowledge(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "jean")
+	write(t, root, "agent.yaml", "name: jean\n")
+	write(t, root, "knowledge/pricing.md", "A penny.\n")
+	write(t, root, "knowledge/.draft.md", "Not yet.\n")
+	write(t, root, "knowledge/.git/notes.md", "Not a document.\n")
+
+	folder, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(folder.Knowledge) != 1 || folder.Knowledge[0].Source != "pricing.md" {
+		t.Errorf("the knowledge is %+v", folder.Knowledge)
+	}
+}
+
+func TestAnAgentDirectoryNamedRelativeToTheWorkingDirectoryKeepsItsLinks(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "jean")
+	elsewhere := t.TempDir()
+	write(t, root, "agent.yaml", "name: jean\n")
+	write(t, root, "shared/think.md", "---\ndescription: Work it out\n---\nReason it through.\n")
+	write(t, root, "shared/pricing.md", "A penny.\n")
+	write(t, elsewhere, "notes.md", "Elsewhere.\n")
+	link(t, root, "skills/think.md", filepath.Join(root, "shared", "think.md"))
+	link(t, root, "knowledge/pricing.md", filepath.Join("..", "shared", "pricing.md"))
+	t.Chdir(filepath.Dir(root))
+
+	folder, err := Load("jean")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(folder.Skills) != 1 || len(folder.Knowledge) != 1 {
+		t.Errorf("the skills are %+v and the knowledge %+v", folder.Skills, folder.Knowledge)
+	}
+
+	link(t, root, "instructions.md", filepath.Join(elsewhere, "notes.md"))
+	if _, err := Load("jean"); err == nil || !strings.Contains(err.Error(), "links outside the agent directory") {
+		t.Fatalf("loading a relative directory whose instructions.md links outside it gave %v", err)
 	}
 }

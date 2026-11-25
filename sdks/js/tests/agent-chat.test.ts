@@ -14,7 +14,7 @@ import { messageField } from "../src/message-field.js";
 import { TestRouter } from "./router.js";
 import { until } from "./stream-chat.js";
 
-type Message = { id: string; text?: string; reasoning?: unknown };
+type Message = { id: string; text?: string; reasoning?: unknown; ai_generated?: boolean; generating?: boolean; interrupted?: boolean };
 
 /** A `get`/`subscribe` store, as `session.state` and `session.conversation` are. */
 function store<T extends object>(initial: T) {
@@ -279,10 +279,16 @@ describe("AgentChat", () => {
       ]);
     });
 
-    it("reads the request and turn under custom in a stream-chat 10 reply", async () => {
+    it("reads the step and the request and turn under custom in a stream-chat 10 reply", async () => {
       const channel = new ChannelV10();
+      // stream-chat 10 keeps an attachment's own fields under its custom, as it does a message's.
+      const { type, ...stepFields } = waitingStep;
       channel.latest = [
-        { id: "r1", attachments: [waitingStep], custom: { support_runtime: { command_id: "q1", turn_id: "t1" } } } as Message,
+        {
+          id: "r1",
+          attachments: [{ type, custom: stepFields }],
+          custom: { support_runtime: { command_id: "q1", turn_id: "t1" } },
+        } as Message,
       ];
       const { open, sessions } = opener(channel);
       const chat = new AgentChat<Message>({ sessionId: "s1", open });
@@ -768,6 +774,25 @@ describe("agentChatTransport", () => {
       // No text: the kit shows its own translated message, never the provider's.
       { state: "AI_STATE_ERROR" },
     ]);
+  });
+
+  it("keeps a failed reply's empty message from the conversation while the failure stands", async () => {
+    // The router finishes the reply it couldn't write empty. Fed to the controller, it reads
+    // as the answer, and the error and its Try again go with it.
+    const { channel, session, feed } = await connected();
+    session.conversation.set({ failure: "raw", failureContext: "llm", failureAt: 9 });
+
+    channel.emit({ type: "message.new", message: { id: "r1", text: "", ai_generated: true, generating: false } });
+    assert.deepEqual(feed.messages.at(-1), ["q1:"]);
+
+    // One the router cut off says so, and shows.
+    channel.emit({ type: "message.new", message: { id: "r2", text: "", ai_generated: true, interrupted: true } });
+    assert.deepEqual(feed.messages.at(-1), ["q1:", "r2:"]);
+
+    // Once the agent answers again, nothing is held back.
+    session.conversation.set({ failure: "", failureContext: "", failureAt: 0 });
+    session.state.set({ kind: "responding" });
+    assert.deepEqual(feed.messages.at(-1), ["q1:", "r1:", "r2:"]);
   });
 
   it("words a failure the app's way when it asks to", async () => {

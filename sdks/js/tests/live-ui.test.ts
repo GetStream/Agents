@@ -158,6 +158,51 @@ describe("Conversation dynamic UI streaming", () => {
     assert.equal(conversation.get().turns[1]?.ui?.content, '$party = 4\nroot = Card([hdr])\nhdr = CardHeader("Kaneo")');
   });
 
+  it("merges a patch onto the card the router completed last, never one cut off", () => {
+    // The router never takes an interrupted reply's card as the base: the patch is merged onto
+    // the one before it, and Stream Chat's copy says so.
+    const conversation = new Conversation(true);
+    conversation.observe({ type: "responding", turn_id: "t1" }, 1);
+    conversation.observe(
+      { type: "ui_completed", turn_id: "t1", format: "openui", content: 'root = Card([hdr])\nhdr = CardHeader("Kaneo")' },
+      2,
+    );
+    conversation.observe({ type: "responded", turn_id: "t1", text: "" }, 3);
+    conversation.observe({ type: "responding", turn_id: "t2" }, 4);
+    conversation.observe(
+      { type: "ui_delta", turn_id: "t2", format: "openui", delta: 'root = Card([hdr])\nhdr = CardHeader("Nopa")\n' },
+      5,
+    );
+    conversation.observe({ type: "interrupted", turn_id: "t2" }, 6);
+    conversation.observe({ type: "responding", turn_id: "t3" }, 7);
+
+    conversation.observe({ type: "ui_delta", turn_id: "t3", format: "openui", mode: "patch", delta: "$party = 4\n" }, 8);
+
+    assert.equal(conversation.get().turns[2]?.ui?.content, 'root = Card([hdr])\nhdr = CardHeader("Kaneo")\n$party = 4');
+    assert.equal(conversation.get().turns[1]?.ui?.content, 'root = Card([hdr])\nhdr = CardHeader("Nopa")');
+  });
+
+  it("merges no patch past a card of another format, even one that completes late", () => {
+    // The router's base is the card it last completed whatever its format, and only OpenUI
+    // takes a patch: an A2UI card between leaves the patch to Stream Chat's copy, and drops a
+    // preview already merged onto the older OpenUI card.
+    const conversation = new Conversation(true);
+    conversation.observe({ type: "responding", turn_id: "t1" }, 1);
+    conversation.observe(
+      { type: "ui_completed", turn_id: "t1", format: "openui", content: 'root = Card([hdr])\nhdr = CardHeader("Kaneo")' },
+      2,
+    );
+    conversation.observe({ type: "responding", turn_id: "t2" }, 3);
+    conversation.observe({ type: "responding", turn_id: "t3" }, 4);
+    conversation.observe({ type: "ui_delta", turn_id: "t3", format: "openui", mode: "patch", delta: "$party = 4\n" }, 5);
+    assert.equal(conversation.get().turns[2]?.ui?.status, "streaming");
+
+    conversation.observe({ type: "ui_completed", turn_id: "t2", format: "a2ui", version: "1.0", content: "[]" }, 6);
+    conversation.observe({ type: "ui_completed", turn_id: "t3", format: "openui", mode: "patch", content: "$party = 4" }, 7);
+
+    assert.equal(conversation.get().turns[2]?.ui, undefined);
+  });
+
   it("shows an interrupted turn's last statement when it closed, and settles its UI", () => {
     // An interrupted reply never gets ui_completed: the router drops the block with the turn.
     const conversation = new Conversation(true);

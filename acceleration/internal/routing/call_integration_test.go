@@ -5,14 +5,18 @@ package routing
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"os"
+	"regexp"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/alerts"
@@ -76,7 +80,7 @@ func (s *CallSuite) meter(config ProviderConfig) Meter {
 func (s *CallSuite) rows(meter Meter) []store.Request {
 	meter.Recorder.Close()
 	var rows []store.Request
-	s.Require().NoError(s.store.DB().NewSelect().Model(&rows).Where("customer_id = ?", meter.Owner.CustomerID).Scan(s.ctx))
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&rows).Where("customer_id = ?", meter.Owner.CustomerID).Scan(s.ctx))
 	return rows
 }
 
@@ -313,7 +317,13 @@ func (s *CallSuite) TestSettlingWithoutAUsageIDIsRefusedLoudly() {
 	s.Empty(s.rows(meter), "work that could be billed twice is not billed at all")
 	s.Equal(before+1, alerts.Total(usageLost.WithLabelValues(lostInvalid)), "it is a lost row, which the lost alert reads")
 	s.Contains(logs.String(), `level=ERROR msg="usage row lost" reason=invalid`)
-	s.Contains(logs.String(), `\"InputTokens\":1000`, "logged in full, with what it used")
+	match := regexp.MustCompile(`msg="usage row lost".* row_hex=([0-9a-f]+)`).FindStringSubmatch(logs.String())
+	s.Require().NotNil(match)
+	raw, err := hex.DecodeString(match[1])
+	s.Require().NoError(err)
+	var lost store.Request
+	s.Require().NoError(json.Unmarshal(raw, &lost))
+	s.EqualValues(1000, lost.InputTokens, "logged in full, with what it used")
 }
 
 func (s *CallSuite) TestAMeterNamesTheRowsAttributes() {
@@ -324,4 +334,50 @@ func (s *CallSuite) TestAMeterNamesTheRowsAttributes() {
 	s.Require().NoError(Settle(meter, used{pricing.InputTokens: 1_000}))
 
 	s.Equal(map[string]string{"parent_session": "session-1"}, s.only(meter).Attributes)
+}
+
+// The row of free work costs nothing, and the row of a quoted fee costs the fee resold:
+// neither is what its quantities would cost from the price list (Recorder.QuoteStat), 2,000
+// and nothing.
+func (s *CallSuite) TestARecordedHookIsToldWhatTheStoredRowCosts() {
+	free := s.meter(priced)
+	free.Free = true
+	quoted := s.meter(number)
+	quoted.CostMicros = 1_150_000
+	for name, meter := range map[string]Meter{"priced": s.meter(priced), "free": free, "quoted": quoted} {
+		var costs []int64
+		meter.Recorded = func(_ Stat, costMicros int64) { costs = append(costs, costMicros) }
+
+		_, err := Call(s.ctx, meter, func(context.Context) (used, error) { return used{pricing.InputTokens: 1_000}, nil })
+		s.Require().NoError(err, name)
+
+		row := s.only(meter)
+		s.Equal([]int64{row.CostMicros}, costs, "%s: the line says what the row costs", name)
+		switch name {
+		case "priced":
+			s.EqualValues(2_000, row.CostMicros)
+		case "free":
+			s.Zero(row.CostMicros)
+		case "quoted":
+			s.Positive(row.CostMicros)
+		}
+	}
+}
+
+// A refused user id is counted once for the row: the line's pricing must not count it again.
+func (s *CallSuite) TestARecordedHookCountsARefusedUserIDOncePerRow() {
+	for id, reason := range refusedUsers {
+		meter := s.meter(priced)
+		meter.Owner.UserID = id
+		told := 0
+		meter.Recorded = func(Stat, int64) { told++ }
+		before := testutil.ToFloat64(usageUserIDDropped.WithLabelValues(reason))
+
+		_, err := Call(s.ctx, meter, func(context.Context) (used, error) { return used{"input_tokens": 1_000}, nil })
+
+		s.Require().NoError(err)
+		s.Equal(1, told)
+		s.Empty(s.only(meter).UserID)
+		s.Equal(1.0, testutil.ToFloat64(usageUserIDDropped.WithLabelValues(reason))-before, reason)
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 )
 
@@ -39,11 +40,11 @@ func (m *manager) open(start func(context.Context) (*llmrouter.Session, error)) 
 	m.warming.Add(1)
 	m.mu.Unlock()
 
-	go func() {
+	goroutine.Go(m.call, func() {
 		defer m.warming.Done()
 		defer close(opened.ready)
 		opened.session, opened.err = start(m.ctx)
-	}()
+	})
 }
 
 // current is the subagent new work is asked of.

@@ -35,7 +35,7 @@ func TestInvocationLogSuite(t *testing.T) {
 // written late would be seen, and returns them newest first.
 func (s *InvocationLogSuite) logged(connection string, count int) []store.ConnectorInvocation {
 	fetch := func() ([]store.ConnectorInvocation, error) {
-		return s.store.ConnectorInvocations(s.ctx, s.customerID, connection, 0, nil)
+		return s.store.ConnectorInvocations.Select(s.ctx, s.customerID, store.InvocationFilter{ConnectionID: connection, Limit: 0, After: nil})
 	}
 	read := func() []store.ConnectorInvocation {
 		rows, err := fetch()
@@ -56,14 +56,12 @@ func (s *InvocationLogSuite) logged(connection string, count int) []store.Connec
 	return read()
 }
 
-// stored is every column of connection's log rows as Postgres holds them, with their argument
-// shapes (connector_invocation_arguments), as text.
+// stored is every column of connection's log rows as Postgres holds them, their argument shapes
+// included, as text.
 func (s *InvocationLogSuite) stored(connection string) string {
 	var rows string
-	s.Require().NoError(s.store.DB().QueryRowContext(s.ctx,
-		"SELECT coalesce(string_agg(to_jsonb(ci)::text || ' ' || coalesce(to_jsonb(cia)::text, ''), ' '), '') "+
-			"FROM connector_invocations AS ci LEFT JOIN connector_invocation_arguments AS cia ON cia.invocation_id = ci.id "+
-			"WHERE connection_id = ?",
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT coalesce(string_agg(to_jsonb(ci)::text, ' '), '') FROM connector_invocations AS ci WHERE connection_id = ?",
 		connection).Scan(&rows))
 	return rows
 }
@@ -235,7 +233,7 @@ func (s *InvocationLogSuite) revokedAtOpen(spec Spec, app string) []store.Connec
 	s.Require().Len(unavailable, 1, "the binding could not be opened")
 	var rows []store.ConnectorAuditEvent
 	s.Require().Eventually(func() bool {
-		rows, err = s.store.ConnectorAuditEvents(s.ctx, s.customerID, store.AuditFilter{ConnectionID: app})
+		rows, err = s.store.ConnectorAuditEvents.Select(s.ctx, s.customerID, store.AuditFilter{ConnectionID: app})
 		return err == nil && len(rows) == 1
 	}, 5*time.Second, 20*time.Millisecond)
 	s.Equal(store.AuditGrantRevoked, rows[0].Action)
@@ -267,7 +265,7 @@ func (s *InvocationLogSuite) revokedBy(spec Spec, app string) []store.ConnectorA
 	s.Require().Error(err)
 	var rows []store.ConnectorAuditEvent
 	s.Require().Eventually(func() bool {
-		rows, err = s.store.ConnectorAuditEvents(s.ctx, s.customerID, store.AuditFilter{ConnectionID: app})
+		rows, err = s.store.ConnectorAuditEvents.Select(s.ctx, s.customerID, store.AuditFilter{ConnectionID: app})
 		return err == nil && len(rows) == 1
 	}, 5*time.Second, 20*time.Millisecond)
 	s.Equal(store.AuditGrantRevoked, rows[0].Action)
@@ -379,7 +377,7 @@ func (s *InvocationLogSuite) TestTheLogDoesNotHoldUpTheCall() {
 	app := s.connection("", "primary")
 	d, _, _, err := s.attach(s.spec(s.config(s.fixed("crm", app, "whoami")), "", nil))
 	s.Require().NoError(err)
-	held, err := s.store.DB().BeginTx(s.ctx, nil)
+	held, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	defer func() { _ = held.Rollback() }()
 	_, err = held.ExecContext(s.ctx, "LOCK TABLE connector_invocations IN ACCESS EXCLUSIVE MODE")
@@ -396,7 +394,7 @@ func (s *InvocationLogSuite) TestTheLogDoesNotHoldUpTheCall() {
 	// waiting on it, so the call came back while its row was blocked, not before it was sent.
 	s.Require().Eventually(func() bool {
 		var waiting int
-		err := s.store.DB().QueryRowContext(s.ctx, `SELECT count(*) FROM pg_stat_activity
+		err := s.store.GlobalDB().QueryRowContext(s.ctx, `SELECT count(*) FROM pg_stat_activity
 			WHERE datname = current_database() AND wait_event_type = 'Lock'
 			AND query LIKE 'INSERT INTO "connector_invocations"%'`).Scan(&waiting)
 		return err == nil && waiting > 0
@@ -436,4 +434,60 @@ func (s *InvocationLogSuite) TestASessionWithNoBindingsOpensNoDispatcherAndLogsN
 	s.Empty(tools)
 	s.Empty(unavailable)
 	s.Empty(s.logged(app, 0))
+}
+
+// invocationOf is a row of connection's started offset after now.
+func (s *InvocationLogSuite) invocationOf(connection string, offset time.Duration) store.ConnectorInvocation {
+	return store.ConnectorInvocation{
+		CustomerID: s.customerID, ConnectionID: connection, ConnectorID: s.connectorID, Tool: "whoami",
+		StartedAt: time.Now().Add(offset),
+	}
+}
+
+// every pages through connection's whole log.
+func (s *InvocationLogSuite) every(connection string) []store.ConnectorInvocation {
+	var rows []store.ConnectorInvocation
+	var after *store.InvocationPosition
+	limit := store.InvocationLimit(200)
+	for {
+		page, err := s.store.ConnectorInvocations.Select(s.ctx, s.customerID, store.InvocationFilter{ConnectionID: connection, Limit: limit, After: after})
+		s.Require().NoError(err)
+		if len(page) <= limit {
+			return append(rows, page...)
+		}
+		page = page[:limit]
+		rows = append(rows, page...)
+		last := page[len(page)-1]
+		after = &store.InvocationPosition{StartedAt: last.StartedAt, ID: last.ID}
+	}
+}
+
+func (s *InvocationLogSuite) TestCloseWritesEveryInvocationStillQueued() {
+	recorder := newInvocationRecorder(s.store, slog.Default())
+	connection := s.connection("", "primary")
+	const queued = 2*invocationBatch + 50
+
+	for i := range queued {
+		recorder.Record(s.invocationOf(connection, time.Duration(i)*time.Millisecond))
+	}
+	recorder.Close()
+
+	s.Len(s.every(connection), queued)
+}
+
+func (s *InvocationLogSuite) TestAnInvocationTheDatabaseRefusesLosesOnlyItself() {
+	// Queued before the writer starts, so the three are one batch.
+	recorder := &invocationRecorder{store: s.store, logger: slog.Default(),
+		queue: make(chan store.ConnectorInvocation, invocationQueueSize), done: make(chan struct{})}
+	connection := s.connection("", "primary")
+	refused := s.invocationOf(connection, time.Millisecond)
+	refused.LatencyMs = -1
+	recorder.Record(s.invocationOf(connection, 0))
+	recorder.Record(refused)
+	recorder.Record(s.invocationOf(connection, 2*time.Millisecond))
+
+	go recorder.run()
+	recorder.Close()
+
+	s.Len(s.every(connection), 2)
 }

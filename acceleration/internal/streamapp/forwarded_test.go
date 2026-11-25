@@ -3,6 +3,7 @@
 package streamapp
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -160,6 +161,59 @@ func (s *StoredSuite) TestATokenAboutToExpireIsRefreshedAtTheGateway() {
 	s.Equal(forwardedKey, asked[0]["api_key"])
 }
 
+func (s *StoredSuite) TestAskingWhereAnAppWithATokenAboutToExpireActsAsksTheGatewayNothing() {
+	mint := s.gateway()
+	forwarded := s.forwarded(mint)
+	_, err := forwarded.Keep(s.ctx, s.customer, forwardedKey, s.serverToken(30*time.Minute))
+	s.Require().NoError(err)
+
+	app, err := NewClients(s.forwardedSource(forwarded), ClientsOptions{}).Placed(s.ctx, s.customer)
+
+	s.Require().NoError(err)
+	s.Equal(s.app, app, "its own app, as For answers")
+	s.Empty(mint.requests())
+}
+
+// With no fallback an app's work is made in its own app or nowhere, so a token that has run out
+// leaves it there. Catches an app that stopped acting read as sharing the deployment's app, which
+// would let it hold a number against every app on the deployment.
+func (s *StoredSuite) TestAskingWhereAnAppWhoseTokenRanOutActsAnswersItsOwnApp() {
+	mint := s.gateway()
+	forwarded := s.forwarded(mint)
+	_, err := forwarded.Keep(s.ctx, s.customer, forwardedKey, s.serverToken(time.Hour+time.Minute))
+	s.Require().NoError(err)
+	s.clock.Advance(2 * time.Hour)
+
+	app, err := NewClients(s.forwardedSource(forwarded), ClientsOptions{}).Placed(s.ctx, s.customer)
+
+	s.Require().NoError(err)
+	s.Equal(s.app, app)
+	s.Empty(mint.requests(), "asking where is not acting")
+}
+
+// An app whose policy requires an app of its own is in the same place with the fallback on.
+// Catches it answered as ErrNoIdentity, a settled answer that reads as sharing every app, which
+// would refuse a trunk owner's calls from a number this app bought.
+func (s *StoredSuite) TestAskingWhereAnAppThatMustActInItsOwnAndWhoseTokenRanOutActsAnswersItsOwnApp() {
+	mint := s.gateway()
+	forwarded := s.forwarded(mint)
+	_, err := forwarded.Keep(s.ctx, s.customer, forwardedKey, s.serverToken(time.Hour+time.Minute))
+	s.Require().NoError(err)
+	s.clock.Advance(2 * time.Hour)
+	source, err := NewStored(StoredOptions{
+		Store: s.store, Deployment: s.deployment, Forwarded: forwarded, Now: s.clock.Now,
+		FallbackToDeployment: true,
+	})
+	s.Require().NoError(err)
+	source.SetFloor(func(context.Context, string) (bool, error) { return true, nil })
+
+	app, err := NewClients(source, ClientsOptions{}).Placed(s.ctx, s.customer)
+
+	s.Require().NoError(err)
+	s.Equal(s.app, app)
+	s.Empty(mint.requests(), "asking where is not acting")
+}
+
 func (s *StoredSuite) TestAnExpiredTokenTheGatewayWillNotReplaceActsNowhere() {
 	forwarded := s.forwarded(nil)
 	_, err := forwarded.Keep(s.ctx, s.customer, forwardedKey, s.serverToken(time.Hour+time.Minute))
@@ -180,7 +234,7 @@ func (s *StoredSuite) TestAnAppNoTokenWasForwardedForActsNowhere() {
 // placeholder is the row the migration seeds for an app that had registered its keys: no
 // token, already expired, naming the key to mint with.
 func (s *StoredSuite) placeholder() {
-	_, err := s.store.KeepStreamAppToken(s.ctx, store.StreamAppToken{
+	_, err := s.store.StreamAppTokens.Keep(s.ctx, &store.StreamAppToken{
 		StreamAppPK: s.app, CustomerID: s.customer, APIKey: forwardedKey, Sealed: []byte{}, ExpiresAt: time.Unix(0, 0),
 	})
 	s.Require().NoError(err)
@@ -275,6 +329,20 @@ func (s *StoredSuite) TestAUserTokenForAForwardedAppIsSignedAtTheGateway() {
 	s.Equal("/internal/v1/apps/"+s.customer+"/user-token", mint.requests()[0]["path"])
 	s.Equal(forwardedKey, mint.requests()[0]["api_key"], "work no request asked for mints for the key held")
 	s.Equal(forwardedKey, key)
+}
+
+func (s *StoredSuite) TestTheGatewayMintsNoTokenThatSaysARole() {
+	mint := s.gateway()
+	forwarded := s.forwarded(mint)
+	_, err := forwarded.Keep(s.ctx, s.customer, forwardedKey, s.serverToken(24*time.Hour))
+	s.Require().NoError(err)
+	clients := NewClients(s.forwardedSource(forwarded), ClientsOptions{Now: s.clock.Now})
+	bound, err := clients.For(s.ctx, s.customer)
+	s.Require().NoError(err)
+
+	_, _, err = clients.MintUserTokenAs(s.ctx, bound, "", "guest-1", "guest", time.Hour)
+
+	s.ErrorIs(err, ErrCannotMint)
 }
 
 func (s *StoredSuite) TestAUserTokenIsMintedForTheKeyOfTheRequestBeingServed() {

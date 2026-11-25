@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/rueidis"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
@@ -46,8 +45,7 @@ func (s *PolicySuite) sandboxed(change ...func(*Settings)) *sandboxed {
 
 // readingSandboxes is another enforcer reading the same usage service, as another router.
 func (s *PolicySuite) readingSandboxes(service *usagetest.Service, tiers map[string]usage.Tier, change ...func(*Settings)) *sandboxed {
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	client, err := usage.NewClient(usage.ClientOptions{URL: service.URL, Token: service.Token})
 	s.Require().NoError(err)
 	written := &logs{}
@@ -60,7 +58,7 @@ func (s *PolicySuite) readingSandboxes(service *usagetest.Service, tiers map[str
 
 // on puts the suite's organization on tier and waits for its standing to be read.
 func (s *PolicySuite) on(enforcer *Enforcer, tier string) {
-	enforcer.Join(s.app, s.org, tier)
+	enforcer.Join(s.T().Context(), s.app, s.org, tier)
 	s.eventually(func() bool {
 		enforcer.money.mu.Lock()
 		defer enforcer.money.mu.Unlock()
@@ -189,7 +187,7 @@ func (s *PolicySuite) TestOffChecksNoSandboxAndCountsNone() {
 	_, client := s.redis()
 	b := s.sandboxed(sharingSlots(client), func(settings *Settings) { settings.Mode = config.LimitsOff })
 	tier := s.limited(b.tiers, usage.NetworkNone)
-	b.Join(s.app, s.org, tier.Name)
+	b.Join(s.T().Context(), s.app, s.org, tier.Name)
 
 	slots, err := b.Sandbox(s.ctx, ownerOf(s.app), SandboxAsk{Config: sandbox.Config{Network: true, CPU: 64}})
 
@@ -202,12 +200,11 @@ func (s *PolicySuite) TestOffChecksNoSandboxAndCountsNone() {
 func (s *PolicySuite) unread(change ...func(*Settings)) *Enforcer {
 	unreachable, err := usage.NewClient(usage.ClientOptions{URL: "http://127.0.0.1:1", Token: "none"})
 	s.Require().NoError(err)
-	configs, err := appconfig.New(appconfig.Options{Store: s.store})
-	s.Require().NoError(err)
+	configs := s.store
 	enforcer := s.newEnforcer(configs, nil, append([]func(*Settings){func(settings *Settings) {
 		settings.Usage, settings.FirstRead = unreachable, 20*time.Millisecond
 	}}, change...)...)
-	enforcer.Join(s.app, s.org, usage.DefaultTier)
+	enforcer.Join(s.T().Context(), s.app, s.org, usage.DefaultTier)
 	return enforcer
 }
 

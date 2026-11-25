@@ -10,11 +10,12 @@ description: Create a draft pull request for the Vision-Agents repo using gh CLI
 - Run `git log main..HEAD --oneline`. If the branch contains more than one independent logical change, STOP and ask the user whether to split it before proceeding.
 - Run `uv run --no-sync dev.py check`. Skip if the diff does not touch Python code (`*.py`) or `pyproject.toml` — e.g. docs-only, `.gitignore`, `.github/`, or `.claude/` changes.
 - Do not run integration tests locally, CI handles them.
-- If the change is user-facing (public API break, new feature, bug fix), update `CHANGELOG.md` per the rules in `CLAUDE.md`.
+- Do not edit the root `CHANGELOG.md`: it is written once per release (Changelog in `AGENTS.md`). The one exception is a line under `# Unreleased` → **Breaking Changes** for a PR that breaks a published SDK's API. Put what users need to know in the PR body.
 
 ## Creating
 
 - Always `gh pr create --draft`. Push the branch first.
+- A draft runs no CI workflow; CodeQL, the labeler and CodeRabbit still run. `gh pr ready` starts the workflows whose paths the PR touches, and every push after it runs them again, so mark it ready once the branch is done, not before.
 - Follow `.github/pull_request_template.md`. Read every commit on the branch, do not summarise from the latest commit alone.
 
 ## Title

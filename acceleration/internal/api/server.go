@@ -38,7 +38,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/channels"
@@ -68,6 +67,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/relay"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/simulation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -75,7 +75,6 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tracing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/users"
 )
 
 // tracer records the spans this package opens around work a route pattern does not say.
@@ -134,13 +133,6 @@ type Options struct {
 	// providers alone.
 	Billable []pricing.Item
 	Store    *store.Store
-	// Configs reads and writes the tenant's configuration -- keys, policies, agent and
-	// router configs, voices -- through whatever cache is in front of Postgres. Built
-	// over Store when it is not given, in which case every read is a query.
-	Configs *appconfig.Store
-	// Users writes down the end users each app is seen acting for. Built over Store when
-	// it is not given, in which case it caches in this process alone.
-	Users *users.Recorder
 	// Activity counts every request an app makes, by area and client. A deployment without
 	// one keeps no activity record.
 	Activity *activity.Recorder
@@ -160,6 +152,13 @@ type Options struct {
 	// only that node can answer is carried to it rather than answered with a 404. Absent
 	// when there is no Redis to keep it in, or no address this node's peers reach it at.
 	Directory *node.Directory
+	// ShardRouting is which shard a hook's work is done in, the same on every router. A hook
+	// meant for another shard than the Directory's is handed to a node there. The zero Map, or
+	// no Directory, keeps every hook where it lands.
+	ShardRouting shardmap.Map
+	// Shards names every shard of the deployment, this one's included: the regions a read of
+	// rows one shard keeps may ask for. Empty is this shard alone.
+	Shards []string
 	// Workers is the deployment's dispatch workers, wherever they are connected: told what
 	// the ones here host, and how a running session's text reaches one elsewhere. Absent
 	// when the Directory or the Relay is.
@@ -197,6 +196,9 @@ type Options struct {
 	// ManageKey is what Stream staff's billing paths, under /v1/manage, are reached with.
 	// Empty turns them off: they answer 404 not_configured.
 	ManageKey string
+	// ActivityKeys are what a job reads the two activity paths with, and nothing else: the
+	// current key and the one being rotated out. An empty one is no key.
+	ActivityKeys []string
 	// Documents reads the files a person sends with a question (createResponse files). Nil
 	// refuses them as a feature this deployment does not offer.
 	Documents *extract.Extractor
@@ -240,6 +242,9 @@ type Options struct {
 	// TwilioAuthToken checks that a webhook came from Twilio (TWILIO_WEBHOOK_AUTH_TOKEN).
 	// Without it no Twilio webhook is believed.
 	TwilioAuthToken string
+	// TwilioAccountSID is the Twilio account this router's Twilio numbers are under
+	// (TWILIO_ACCOUNT_SID). A call webhook naming any other is hung up.
+	TwilioAccountSID string
 	// TelnyxConnectionID is the TeXML application this router's Telnyx numbers are on
 	// (TELNYX_CONNECTION_ID). A call webhook for any other is hung up.
 	TelnyxConnectionID string
@@ -356,14 +361,15 @@ type Server struct {
 	prices             *pricing.Active
 	billable           []pricing.Item
 	store              *store.Store
-	configs            *appconfig.Store
-	users              *users.Recorder
+	configs            *store.Store
 	activity           *activity.Recorder
 	live               *live.Client
 	phone              *phone.Service
 	sessions           *session.Manager
 	relayed            *relayed
 	directory          *node.Directory
+	shards             shardmap.Map
+	shardNames         []string
 	workers            *node.Workers
 	forwarder          *node.Forwarder
 	peerCredentials    [][]byte // what a peer may present: one credential per key of the keyring
@@ -376,6 +382,8 @@ type Server struct {
 	chatInboundKeys    []ed25519.PublicKey
 	twilioAuthToken    string
 	twilioAlertSids    rueidis.Client // nil without Redis: every copy of an alert is counted
+	twilioCallSids     rueidis.Client // nil without Redis: every Twilio call is hung up
+	twilioAccountSID   string
 	telnyxConnectionID string
 	simulations        *simulation.Runner
 	knowledge          *metered.Knowledge
@@ -395,13 +403,27 @@ type Server struct {
 	gate               *dlc.Gate
 	opsKey             string
 	manageKey          string
+	activityKeys       []string
 	authenticator      auth.Authenticator
 	authMode           auth.Mode
 	dataRetention      time.Duration
 	exportWritesWait   time.Duration
+	exportLineWait     time.Duration
+	importLineWait     time.Duration
+	exportWait         time.Duration
 	quota              *quota.Limiter
 	policies           *policy.Enforcer
 	connectors         core.Registry
+	// exporting holds the customers with an export running on this router, one each, and
+	// exports a place for each export running on it, of maxExports.
+	exporting sync.Map
+	exports   chan struct{}
+	// importing and imports are the same for imports, of maxImports.
+	importing sync.Map
+	imports   chan struct{}
+	// healthLogs throttles the line a dependency that did not answer the health check logs:
+	// every probe asks.
+	healthLogs quota.Throttle
 	// connectorSecrets seals consent attempts; credentials stores what a consent got. Both
 	// are nil when connectors are off.
 	connectorSecrets *auth.Sealer
@@ -447,6 +469,9 @@ type Server struct {
 	// runSlots counts each app's runs in flight against runsPerApp; nil counts none.
 	runSlots   *concurrency.Slots
 	runsPerApp int64
+	// newGuests counts the guests each address mints in an app (guestsPerAddress); nil counts
+	// none.
+	newGuests *core.Limiter
 	// imageHTTP fetches the images a run is handed by URL.
 	imageHTTP *http.Client
 	// documents reads the files sent with a question.
@@ -466,6 +491,16 @@ type Server struct {
 	// that finished just after a look waited up to 2 s to leave, and every thread task took 2 s
 	// at least. 100 ms is not a delay a person waiting for a text notices.
 	replyPoll time.Duration
+	// replyWindow bounds reading an answer for a channel (scheduledReplyWindow); phoneWindow is how
+	// long a ring is waited out (scheduledPhoneWindow), and callLimit how long a call a task placed
+	// may last (scheduledCallLimit). Each router holds its own, so a test that shortens them on its
+	// router changes no other suite's: the suites run in parallel in one process.
+	replyWindow time.Duration
+	phoneWindow time.Duration
+	callLimit   time.Duration
+	// resumedAt is the clock a resume counts a task's next run from. A test sets it to resume inside
+	// an hour the wall clock is not in.
+	resumedAt func() time.Time
 
 	// serverSide matches the requests the spec marks server-side only. What is registered on
 	// it is the patterns, and matching one is the answer; its handlers only name the operation
@@ -473,6 +508,7 @@ type Server struct {
 	serverSide *http.ServeMux
 	upgrader   websocket.Upgrader
 	popularity *popularity
+	teams      *heldTeams
 	logger     *slog.Logger
 	// release is Options.Release.
 	release string
@@ -481,6 +517,12 @@ type Server struct {
 	// workers to another one.
 	draining  chan struct{}
 	drainOnce sync.Once
+
+	// stopBackground ends the work the server runs for as long as it lives, the relay's
+	// subscriptions and the expiry of its watchers, and background is that work, which Close
+	// waits for.
+	stopBackground context.CancelFunc
+	background     sync.WaitGroup
 }
 
 // Option adjusts the options a server is built from. It exists for the settings a
@@ -538,20 +580,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	configs := options.Configs
-	if configs == nil && options.Store != nil {
-		var err error
-		if configs, err = appconfig.New(appconfig.Options{Store: options.Store, Logger: logger}); err != nil {
-			return nil, err
-		}
-	}
-	recorder := options.Users
-	if recorder == nil && options.Store != nil {
-		var err error
-		if recorder, err = users.New(users.Options{Store: options.Store, Logger: logger}); err != nil {
-			return nil, err
-		}
-	}
+	configs := options.Store
 	pricer := options.Pricer
 	if pricer == nil && options.Prices != nil {
 		pricer = options.Prices
@@ -574,12 +603,13 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		billable:           options.Billable,
 		store:              options.Store,
 		configs:            configs,
-		users:              recorder,
 		activity:           options.Activity,
 		live:               options.Live,
 		phone:              options.Phone,
 		sessions:           options.Sessions,
 		directory:          options.Directory,
+		shards:             options.ShardRouting,
+		shardNames:         options.Shards,
 		workers:            options.Workers,
 		streams:            options.Streams,
 		audioFloor:         options.AudioFloor,
@@ -589,6 +619,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		telnyxPublicKey:    options.TelnyxPublicKey,
 		chatInboundKeys:    options.ChatInboundKeys,
 		twilioAuthToken:    options.TwilioAuthToken,
+		twilioAccountSID:   options.TwilioAccountSID,
 		telnyxConnectionID: options.TelnyxConnectionID,
 		simulations:        options.Simulations,
 		knowledge:          options.Knowledge,
@@ -607,9 +638,18 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		authMode:           authMode,
 		dataRetention:      retention,
 		exportWritesWait:   exportWritesWait,
+		exportLineWait:     exportLineWait,
+		importLineWait:     importLineWait,
+		exportWait:         exportWait,
+		exports:            make(chan struct{}, maxExports),
+		imports:            make(chan struct{}, maxImports),
 		scheduledPoll:      2 * time.Second,
 		scheduledPeerWait:  30 * time.Second,
 		replyPoll:          100 * time.Millisecond,
+		replyWindow:        scheduledReplyWindow,
+		phoneWindow:        scheduledPhoneWindow,
+		callLimit:          scheduledCallLimit,
+		resumedAt:          time.Now,
 		quota:              options.Quota,
 		policies:           options.Policies,
 		connectors:         options.Connectors,
@@ -630,7 +670,9 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		gate:               options.Gate,
 		opsKey:             options.OpsKey,
 		manageKey:          options.ManageKey,
+		activityKeys:       options.ActivityKeys,
 		popularity:         newPopularity(options.Store, logger),
+		teams:              newHeldTeams(),
 		logger:             logger,
 		release:            options.Release,
 		draining:           make(chan struct{}),
@@ -647,13 +689,24 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	server.proxyCallsPerMinute = options.ProxyCallsPerMinute
 	if options.Live != nil {
 		server.runSlots, server.runsPerApp = concurrency.New(options.Live.Redis(), nil), options.RunsPerApp
+		server.newGuests = core.NewLimiter(options.Live.Redis(), nil)
 		server.twilioAlertSids = options.Live.Redis()
+		server.twilioCallSids = options.Live.Redis()
 	}
 	server.imageHTTP = options.ImageHTTP
 	server.documents = options.Documents
 	if server.imageHTTP == nil {
 		// No proxy, which would dial on the client's behalf where the check cannot see.
-		server.imageHTTP = &http.Client{Transport: &http.Transport{Proxy: nil, DialContext: egress.DialPublic}}
+		// A host may take as long to begin its answer as the longest fetch may take in all. The
+		// TLS limit and the idle limits are http.DefaultTransport's.
+		server.imageHTTP = &http.Client{Transport: &http.Transport{
+			Proxy:                 nil,
+			DialContext:           egress.DialPublic,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: inlineDeadline,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+		}}
 	}
 	server.callbackHTTP = options.CallbackHTTP
 	if server.callbackHTTP == nil {
@@ -673,11 +726,13 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	}
 	server.serverSide = serverSide
 
-	// The subscriptions outlive every request, so they are held against the process
-	// rather than against a context a handler brought with it. Closing the Redis client
-	// is what ends them, which is what shutting the deployment down already does.
+	// The subscriptions outlive every request, so they are held against the server rather
+	// than against a context a handler brought with it. Close is what ends them.
+	background, stopBackground := context.WithCancel(context.Background())
+	server.stopBackground = stopBackground
 	if options.Relay != nil {
-		if server.relayed, err = server.newRelayed(context.Background(), options.Relay); err != nil {
+		if server.relayed, err = server.newRelayed(background, options.Relay); err != nil {
+			stopBackground()
 			return nil, fmt.Errorf("api: subscribe to the session relay: %w", err)
 		}
 	}
@@ -732,6 +787,25 @@ func (s *Server) Drain() {
 	s.drainOnce.Do(func() { close(s.draining) })
 }
 
+// Close ends the work the server runs in the background, the relay's subscriptions among it,
+// and waits for it until ctx is done, returning ctx's error if it had not ended by then. A
+// watcher on another node is not served once it is called, so it comes after the HTTP
+// servers have stopped.
+func (s *Server) Close(ctx context.Context) error {
+	s.stopBackground()
+	ended := make(chan struct{})
+	go func() {
+		s.background.Wait()
+		close(ended)
+	}()
+	select {
+	case <-ended:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // methodNotAllowed is the answer to a method a route does not serve.
 func methodNotAllowed(w http.ResponseWriter, r *http.Request) {
 	writeError(w, newAPIError(ErrorTypeMethodNotAllowed, r.Method+" is not served on this route"))
@@ -766,14 +840,15 @@ func (s *Server) Handler() http.Handler {
 	handle(mux, "GET /v1/agents/socket", "OpenSocketSession", s.openSocketSession)
 	handle(mux, "GET /v1/{modality}/stream", "StreamModality", s.streamModality)
 	handle(mux, "GET /v1/dispatch", "DispatchCalls", s.dispatchCalls)
-	handle(mux, "GET /v1/phone/answer/{token}", "PhoneAnswer", s.answerPhoneCall)
-	handle(mux, "POST /v1/phone/answer/{token}", "PhoneAnswer", s.answerPhoneCall)
-	handle(mux, "POST /v1/phone/status/{token}", "ReceiveCallStatus", s.receiveCallStatus)
-	handle(mux, "POST /v1/phone/machine/{token}", "ReceiveCallMachine", s.receiveCallMachine)
+	handle(mux, "GET /v1/phone/answer/{token}", "PhoneAnswer", s.inTokenShard(s.answerPhoneCall))
+	handle(mux, "POST /v1/phone/answer/{token}", "PhoneAnswer", s.inTokenShard(s.answerPhoneCall))
+	handle(mux, "POST /v1/phone/status/{token}", "ReceiveCallStatus", s.inTokenShard(s.receiveCallStatus))
+	handle(mux, "POST /v1/phone/machine/{token}", "ReceiveCallMachine", s.inTokenShard(s.receiveCallMachine))
 	handle(mux, "POST "+phone.CallHookPath, "PhoneHook", s.receiveCallEvent)
 	handle(mux, "POST "+phone.CallHookPath+"/{app}", "PhoneHook", s.receiveCallEvent)
 	handle(mux, "POST "+telnyxCallHookPath, "ReceiveTelnyxCall", s.receiveTelnyxCall)
 	handle(mux, "POST "+telnyxEventsHookPath, "ReceiveTelnyxEvent", s.receiveTelnyxEvent)
+	handle(mux, "POST "+twilioCallHookPath, "ReceiveTwilioCall", s.receiveTwilioCall)
 	handle(mux, "POST "+twilioEventsHookPath, "ReceiveTwilioEvent", s.receiveTwilioEvent)
 	handle(mux, "POST "+chat.MessageHookPath, "ChatHook", s.receiveMessageEvent)
 	handle(mux, "POST "+chat.MessageHookPath+"/{app}", "ChatHook", s.receiveMessageEvent)
@@ -814,7 +889,7 @@ func (s *Server) Handler() http.Handler {
 	// lived socket; blocking the handler's return on event delivery would hold
 	// the connection open past its use. The flush in cmd/router covers shutdown.
 	served := withSentry(mux, withRequestID(withTrace(mux, withMetrics(mux, withTiming(withCORS(s.authMode,
-		s.onOwningNode(s.withCustomer(s.withCost(s.withRequestLog(mux, s.withQuota(s.withServerSide(handler))))))))))))
+		s.withCustomer(s.onOwningNode(s.withCost(s.withRequestLog(mux, s.withQuota(s.withServerSide(handler))))))))))))
 	if s.directory == nil {
 		return served
 	}
@@ -990,7 +1065,8 @@ func withTrace(mux *chi.Mux, next http.Handler) http.Handler {
 // It sits inside withCustomer so it can name the caller, and outside withServerSide so a
 // refusal is a logged 403 rather than a request that appears not to have arrived. It is
 // inside withCORS, which means a preflight goes unlogged: it carries nothing worth routing
-// and doubling the volume to record that a browser asked permission is a poor trade.
+// and doubling the volume to record that a browser asked permission is a poor trade. What
+// withCustomer refuses itself is logged through it all the same (refuseLogged).
 //
 // The path is logged without the query, because a socket names its customer there and a
 // vendor names a token, and an access log is the last place either should end up.
@@ -1016,7 +1092,8 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 		started := time.Now()
 		recorder := &loggedResponse{ResponseWriter: w}
 		failure := &requestFailure{}
-		r = r.WithContext(context.WithValue(r.Context(), requestFailureContextKey{}, failure))
+		ctx, note := activity.WithNote(context.WithValue(r.Context(), requestFailureContextKey{}, failure))
+		r = r.WithContext(ctx)
 		defer func() {
 			recovered := recover()
 			if recovered == nil {
@@ -1024,9 +1101,8 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 			}
 			// ErrAbortHandler is net/http's own way of dropping a connection, not a bug.
 			if recovered != http.ErrAbortHandler {
-				customer, _ := CustomerFrom(r.Context())
 				s.logger.ErrorContext(failure.loggedContext(r.Context()), "a request panicked",
-					"method", r.Method, "path", loggedPath(routes, r), "customer", customer,
+					"method", r.Method, "path", loggedPath(routes, r), "customer", loggedCustomer(r, note),
 					"request_id", RequestIDFrom(r.Context()),
 					"panic", fmt.Sprint(recovered), "stack", string(debug.Stack()))
 				if recorder.code == 0 && recorder.written == 0 && !recorder.hijacked {
@@ -1036,27 +1112,27 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 			panic(recovered)
 		}()
 		next.ServeHTTP(recorder, r)
-		s.recordActivity(routes, r, recorder, started)
+		s.recordActivity(routes, r, recorder, note, started)
 		if answeredHealthy(routes, r, recorder.status(), failure) {
 			return
 		}
 
-		customer, _ := CustomerFrom(r.Context())
 		// A socket reports the life of the connection rather than a time to respond,
-		// since it is logged once it has closed.
+		// since it is logged once it has closed, and why it closed (socketEnd).
 		fields := []any{
 			"method", r.Method,
 			"path", loggedPath(routes, r),
 			"status", recorder.status(),
 			"duration", time.Since(started).Round(time.Millisecond),
-			"customer", customer,
+			"customer", loggedCustomer(r, note),
 			"request_id", RequestIDFrom(r.Context()),
 		}
 		if recorder.written > 0 {
 			fields = append(fields, "bytes", recorder.written)
 		}
+		fields = append(fields, failure.closed.fields()...)
 		if failure.err != nil {
-			fields = append(fields, "error", failure.err.Error())
+			fields = append(fields, "error", core.LoggedError(failure.err))
 		}
 		if failure.trace != "" {
 			fields = append(fields, "stack", failure.trace)
@@ -1071,6 +1147,24 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 	})
 }
 
+// loggedCustomer is the customer the request's access line names: the one its credential names,
+// or, for a hook, which no credential names, the app its handler noted once it checked the hook
+// (activity.NoteCustomer). A hook it did not check names none.
+func loggedCustomer(r *http.Request, note *activity.Note) string {
+	if customer, ok := CustomerFrom(r.Context()); ok {
+		return customer
+	}
+	return note.AppID
+}
+
+// refuseLogged answers r with failure through withRequestLog, for a refusal made before the
+// request reaches it, so the refusal has its access line and its code like any other.
+func (s *Server) refuseLogged(w http.ResponseWriter, r *http.Request, failure APIError) {
+	s.withRequestLog(s.mux, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, failure)
+	})).ServeHTTP(w, r)
+}
+
 // answeredHealthy is whether r is a health probe the router answered below 400 with no error
 // recorded. The load balancer and kubelet ask every few seconds, so the lines would crowd out
 // every request of a customer. A probe that fails keeps its line, so a failing check stays
@@ -1081,8 +1175,9 @@ func answeredHealthy(routes *chi.Mux, r *http.Request, status int, failure *requ
 
 // maxLoggedValue caps a value the caller chose, a header or an anonymous caller's user id, on
 // the access line. net/http admits up to 1 MiB of headers (http.DefaultMaxHeaderBytes), which
-// would otherwise land on one line. The clients the router knows by X-Stream-Client are short
-// words (store.AuditSource), and 256 bytes is enough to tell user agents apart.
+// would otherwise land on one line. The clients the router knows by X-Stream-Client are a word
+// or an SDK's name and release (store.AuditSource), well under it, and 256 bytes is enough to
+// tell user agents apart.
 const maxLoggedValue = 256
 
 // accessFields are the access line's fields named as the Stream platform's access logs name
@@ -1238,9 +1333,8 @@ func (n operationName) ServeHTTP(_ http.ResponseWriter, r *http.Request) {
 // withServerSide refuses the generated operations only a backend may reach.
 //
 // It sits after withCustomer, because refusing a caller for what it is means having worked
-// out what it is first. The four sockets are left out of the embedded spec by being left
-// out of generation, so socketRoutes puts them back rather than leaving them to be open by
-// omission.
+// out what it is first. The routes served by hand are in the spec too (documentHandWritten),
+// so none is open by omission.
 //
 // A caller that authenticated and asked for one of these gets a 403 rather than a 401: it
 // has already proved who it is, so there is nothing to be learned from a specific answer
@@ -1274,6 +1368,10 @@ var errServerSideOnly = APIError{
 	Message: "this operation is server-side only: it needs " + auth.AuthTypeHeader + ": " +
 		auth.AuthTypeServer + " and a token carrying server: true",
 }
+
+// statusClientClosed is what a request whose caller hung up before it was answered is counted
+// as, nginx's 499: no caller reads it.
+const statusClientClosed = 499
 
 // withCustomer lifts the authenticated principal into the request context so handlers can
 // read it without each one reaching into the raw request.
@@ -1309,20 +1407,39 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 		principal, err := s.authenticator.Authenticate(ctx, r)
 		span.End()
 		if errors.Is(err, auth.ErrLevelRefused) {
-			s.logger.Debug("refused a level of user this app turns away",
-				"method", r.Method, "path", loggedPath(s.mux, r), "kind", principal.Kind)
-			writeError(w, forbidden("this app does not accept "+
-				"requests from this level of user"))
+			s.refuseLevel(w, r, principal)
 			return
 		}
 		// The categories are what the request's usage is counted under, so a request naming
 		// ones that break the rule is refused rather than counted under fewer.
 		if errors.Is(err, auth.ErrInvalidUsageCategories) {
-			writeError(w, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidUsageCategories,
+			s.refuseLogged(w, r, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidUsageCategories,
 				Message: strings.TrimPrefix(err.Error(), "auth: ")})
 			return
 		}
+		if err != nil && !errors.Is(err, auth.ErrUnauthenticated) {
+			s.refuseUnchecked(w, r, err)
+			return
+		}
 		if err == nil && principal.AppID != "" {
+			guest, err := s.guestUser(r.Context(), principal.AppID, principal.UserID, principal.Kind)
+			if err != nil {
+				s.refuseUnchecked(w, r, err)
+				return
+			}
+			// The authenticator asked whether the app admits a KindGuest. One this router minted
+			// it took for an account, so that is asked here.
+			if guest {
+				admitted, err := s.guestAdmitted(r.Context(), principal)
+				if err != nil {
+					s.refuseUnchecked(w, r, err)
+					return
+				}
+				if !admitted {
+					s.refuseLevel(w, r, principal)
+					return
+				}
+			}
 			ctx := context.WithValue(r.Context(), customerContextKey{}, principal.AppID)
 			ctx = context.WithValue(ctx, organizationContextKey{}, principal.OrganizationID)
 			ctx = context.WithValue(ctx, serverSideContextKey{}, principal.ServerSide)
@@ -1334,17 +1451,75 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 				IP:         s.callerIP(r, principal.UserID),
 				ServerSide: principal.ServerSide,
 				Verified:   principal.UserID != "" && principal.Kind.Verified(),
+				Guest:      guest,
 			})
 			ctx = context.WithValue(ctx, actorContextKey{}, actorOf(r, principal.ServerSide))
 			ctx = routing.WithAttribution(ctx, attributionOf(principal))
 			r = r.WithContext(ctx)
-			s.policies.Join(principal.AppID, principal.OrganizationID, principal.OrganizationTier)
+			s.policies.Join(ctx, principal.AppID, principal.OrganizationID, principal.OrganizationTier)
 			s.recordUser(ctx, principal)
+			s.recordShard(ctx, principal)
 			s.recordEmail(ctx, principal)
 			s.keepServerToken(ctx, r, principal.AppID)
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// refuseUnchecked answers a caller whose credential, whether it is a guest, or whether its app
+// takes it, could not be checked.
+func (s *Server) refuseUnchecked(w http.ResponseWriter, r *http.Request, err error) {
+	// A caller that hung up while its credential was checked is no failure of the router's,
+	// and nobody is left to answer. The status is for withMetrics, which counts and times it
+	// as a 4xx: callers giving up on a stalled key store still show there.
+	if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
+		s.logger.Debug("the caller left before its credential was checked", "method", r.Method,
+			"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()))
+		w.WriteHeader(statusClientClosed)
+		return
+	}
+	// A credential that could not be checked (the key store down, a key that would not
+	// unseal) is the router's failure, not a wrong key. It is logged here: withRequestLog
+	// runs after this.
+	s.logger.Error("could not check a credential", "method", r.Method,
+		"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()),
+		"error", err, "stack", stack.Trace(err))
+	writeError(w, internalError())
+}
+
+// refuseLevel answers a caller whose level the app turns away.
+func (s *Server) refuseLevel(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	s.logger.Debug("refused a level of user this app turns away",
+		"method", r.Method, "path", loggedPath(s.mux, r), "kind", principal.Kind)
+	// The caller proved which app it is of, so its lines name the app, though it is
+	// no customer here: nothing it asked for is counted under the app.
+	r = r.WithContext(WithLoggedApp(r.Context(), principal.AppID, principal.APIKey))
+	s.refuseLogged(w, r, forbidden("this app does not accept "+
+		"requests from this level of user"))
+}
+
+// guestUser reports whether a user a credential of that kind named is a guest: by kind, or one
+// this router minted, whose token reads as an account's. A backend naming a guest is a backend.
+// Only an id the router could have minted is looked up. A row that cannot be read is an error: it
+// makes a guest of no account, and an account of no guest.
+func (s *Server) guestUser(ctx context.Context, customerID, userID string, kind auth.Kind) (bool, error) {
+	if kind != auth.KindAuthenticated {
+		return kind == auth.KindGuest, nil
+	}
+	if s.store == nil || !strings.HasPrefix(userID, guestPrefix) {
+		return false, nil
+	}
+	return s.store.Users.Minted(ctx, customerID, userID)
+}
+
+// guestAdmitted reports whether the caller's app takes guests: as its key's levels say, or behind
+// a proxy, which resolves none, as its settings do. Settings that cannot be read are an error, as
+// a key that cannot be is.
+func (s *Server) guestAdmitted(ctx context.Context, principal auth.Principal) (bool, error) {
+	if s.authMode == auth.Proxy && s.store != nil {
+		return s.store.Apps.GuestAllowed(ctx, principal.AppID)
+	}
+	return principal.Levels.Admits(auth.KindGuest), nil
 }
 
 // attributionOf is who a request's usage is recorded as asked for by. The user is recorded as
@@ -1414,7 +1589,7 @@ func (s *Server) vouchedKey(r *http.Request, principal auth.Principal) string {
 // caller asked for, and refusing the request they did ask for because of it would be the
 // wrong trade.
 func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
-	if s.users == nil || principal.UserID == "" {
+	if s.store == nil || principal.UserID == "" {
 		return
 	}
 	var err error
@@ -1422,11 +1597,11 @@ func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
 	case auth.KindAnonymous:
 		return
 	case auth.KindAuthenticated:
-		err = s.users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindAuthenticated)
+		err = s.store.Users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindAuthenticated)
 	case auth.KindGuest:
-		err = s.users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindGuest)
+		err = s.store.Users.Seen(ctx, principal.AppID, principal.UserID, store.UserKindGuest)
 	default:
-		err = s.users.Named(ctx, principal.AppID, principal.UserID)
+		err = s.store.Users.Named(ctx, principal.AppID, principal.UserID)
 	}
 	if err != nil {
 		s.logger.Error("could not record an end user",
@@ -1434,16 +1609,33 @@ func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
 	}
 }
 
+// recordShard keeps the shard that served a request the user's own client sent, which the load
+// balancer picked by where they are, so their messages are answered there (userShard). A
+// backend's request says nothing of where its user is, and one a peer handed over was routed to
+// another node. A failure is logged, as recordUser's is.
+func (s *Server) recordShard(ctx context.Context, principal auth.Principal) {
+	if s.store == nil || s.directory == nil || s.directory.Shard() == "" || node.Forwarded(ctx) {
+		return
+	}
+	if principal.Kind != auth.KindAuthenticated && principal.Kind != auth.KindGuest {
+		return
+	}
+	if err := s.store.Users.Served(ctx, principal.AppID, principal.UserID, s.directory.Shard()); err != nil {
+		s.logger.Error("could not record the shard serving an end user",
+			"customer", principal.AppID, "user", principal.UserID, "error", err)
+	}
+}
+
 // recordEmail keeps the address a backend said its user signs in with (auth.EmailHeader),
 // which a consent for a connector whose manifest sets owner_email is checked against. Only a
-// server-side caller has one (auth.Principal.Email), and users.Recorder.Email does nothing
+// server-side caller has one (auth.Principal.Email), and store.Users.Email does nothing
 // without one or without a user, nor for the address it last wrote. A failure is logged, as
 // recordUser's is: the consent it would have served then finds no address and is refused.
 func (s *Server) recordEmail(ctx context.Context, principal auth.Principal) {
-	if s.users == nil {
+	if s.store == nil {
 		return
 	}
-	if err := s.users.Email(ctx, principal.AppID, principal.UserID, principal.Email); err != nil {
+	if err := s.store.Users.Email(ctx, principal.AppID, principal.UserID, principal.Email); err != nil {
 		s.logger.Error("could not record an end user's email", "customer", principal.AppID, "user", principal.UserID, "error", err)
 	}
 }
@@ -1473,7 +1665,7 @@ const corsMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
 
 // corsExposedHeaders are the response headers a page's script may read.
 const corsExposedHeaders = "Server-Timing, " + RequestIDHeader + ", " + quotaLimitHeader + ", " +
-	quotaRemainingHeader + ", " + quotaResetHeader + ", Retry-After"
+	quotaRemainingHeader + ", " + quotaResetHeader + ", Retry-After, " + shardHeader
 
 // withCORS lets a browser at the API from the origins originAllowed accepts.
 //
@@ -1614,7 +1806,11 @@ func (s *Server) getHealth(ctx context.Context, _ *struct{}) (*healthResponse, e
 	if s.store == nil {
 		dependencies["postgres"] = "not configured"
 	} else if err := s.store.Ping(ctx); err != nil {
-		dependencies["postgres"] = err.Error()
+		// Anyone may read the health check, and the error names where the database is.
+		if s.healthLogs.Due("postgres", time.Minute) {
+			s.logger.Error("the database did not answer the health check", "error", err)
+		}
+		dependencies["postgres"] = "unavailable"
 		healthy = false
 	} else {
 		dependencies["postgres"] = "ok"
@@ -1623,7 +1819,10 @@ func (s *Server) getHealth(ctx context.Context, _ *struct{}) (*healthResponse, e
 	if s.live == nil {
 		dependencies["redis"] = "not configured"
 	} else if err := s.live.Ping(ctx); err != nil {
-		dependencies["redis"] = err.Error()
+		if s.healthLogs.Due("redis", time.Minute) {
+			s.logger.Error("redis did not answer the health check", "error", err)
+		}
+		dependencies["redis"] = "unavailable"
 		healthy = false
 	} else {
 		dependencies["redis"] = "ok"
@@ -1684,9 +1883,31 @@ func (s *Server) listProviders(ctx context.Context, request *listProvidersReques
 			UsageShare:  &share,
 			Benchmark:   providerBenchmark(candidate.Config.Benchmark),
 			Price:       s.providerPrice(request.Modality, candidate.Config),
+			Voices:      voicesOf(candidate.Config.Voices),
 		})
 	}
 	return &listProvidersResponse{Body: providers}, nil
+}
+
+// voicesOf renders a model's built-in voices for the wire, nil when it declares none.
+func voicesOf(voices []routing.ModelVoice) []ModelVoice {
+	if len(voices) == 0 {
+		return nil
+	}
+	listed := make([]ModelVoice, 0, len(voices))
+	for _, voice := range voices {
+		item := ModelVoice{
+			Id:          voice.ID,
+			Name:        voice.Name,
+			Description: optional(voice.Description),
+			Gender:      optional(voice.Gender),
+		}
+		if voice.Default {
+			item.Default = new(true)
+		}
+		listed = append(listed, item)
+	}
+	return listed
 }
 
 // supportsOf is the terms a model declared, as the names a request's options use.
@@ -1790,8 +2011,12 @@ func (s *Server) getStats(ctx context.Context, request *getStatsRequest) (*getSt
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.CustomerStats(
-		ctx, string(request.Modality), customerID, granularity, request.From, request.To, tags)
+	read := s.store.Buckets.Select
+	if s.store.StatsShipped() {
+		read = s.store.Buckets.Shipped
+	}
+	buckets, err := read(ctx, customerID, store.BucketFilter{
+		Modality: string(request.Modality), Granularity: granularity, From: request.From, To: request.To, Tags: tags})
 	if err != nil {
 		return nil, err
 	}
@@ -1833,10 +2058,14 @@ func (s *Server) getTagStats(ctx context.Context, request *getTagStatsRequest) (
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.CustomerTagStats(ctx, string(request.Modality), customerID,
-		request.Key, granularity, request.From, request.To)
+	read := s.store.TagBuckets.Select
+	if s.store.StatsShipped() {
+		read = s.store.TagBuckets.Shipped
+	}
+	buckets, err := read(ctx, customerID, store.TagBucketFilter{
+		Modality: string(request.Modality), Key: request.Key, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 
 	stats := make([]TagStatsBucket, 0, len(buckets))
@@ -1881,8 +2110,12 @@ func (s *Server) getTurnStats(ctx context.Context, request *getTurnStatsRequest)
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.CustomerTurnStats(
-		ctx, customerID, agentID, granularity, request.From, request.To)
+	read := s.store.TurnBuckets.Select
+	if s.store.StatsShipped() {
+		read = s.store.TurnBuckets.Shipped
+	}
+	buckets, err := read(ctx, customerID, store.TurnBucketFilter{
+		AgentID: agentID, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
 		return nil, err
 	}
@@ -1932,7 +2165,7 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 	if scope := request.Scope.ptr(); scope != nil && *scope == spendScopeOrganization {
 		// An app in no organization is its own.
 		if organization := OrganizationFrom(ctx); organization != "" {
-			apps, err := s.store.OrganizationApps(ctx, organization)
+			apps, err := s.store.AppOrganizations.Apps(ctx, organization)
 			if err != nil {
 				return nil, err
 			}
@@ -1952,10 +2185,10 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 		limit = *request.Limit.ptr()
 	}
 
-	buckets, err := s.store.CustomerSpend(ctx, customerID, groupBy,
+	buckets, err := s.store.Requests.Spend(ctx, customerID, groupBy,
 		granularityOf(request.Granularity.ptr()), request.From, request.To, limit, tags, who)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
 
 	spend := make([]SpendBucket, 0, len(buckets))
@@ -1963,6 +2196,7 @@ func (s *Server) getSpend(ctx context.Context, request *getSpendRequest) (*getSp
 		spend = append(spend, SpendBucket{
 			Bucket:          bucket.Bucket,
 			Value:           bucket.Value,
+			Other:           bucket.Other,
 			CostMicrosTotal: bucket.CostMicrosTotal,
 			RequestCount:    bucket.RequestCount,
 		})
@@ -2013,7 +2247,7 @@ func (s *Server) getTagKeys(ctx context.Context, request *getTagKeysRequest) (*g
 		return nil, invalidRequest("statistics are not available: no database configured")
 	}
 
-	found, err := s.store.CustomerTagKeys(ctx, customerID, request.From, request.To, tags)
+	found, err := s.store.Requests.TagKeys(ctx, customerID, request.From, request.To, tags)
 	if err != nil {
 		return nil, err
 	}
@@ -2088,11 +2322,22 @@ func (s *Server) getAgentStats(ctx context.Context, request *getAgentStatsReques
 		return nil, invalidRequest("statistics are not available: no database configured")
 	}
 
+	configID := value(request.Agent.ptr())
+	if configID != "" {
+		if _, err := s.store.AgentConfigs.Get(ctx, customerID, configID); err != nil {
+			return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
+		}
+	}
+
 	peak, err := s.store.CustomerConcurrencyPeak(ctx, customerID, request.From, request.To)
 	if err != nil {
 		return nil, err
 	}
-	overall, tools, err := s.store.CustomerToolUsage(ctx, customerID, request.From, request.To)
+	turns, err := s.store.CustomerTurns(ctx, customerID, configID, request.From, request.To)
+	if err != nil {
+		return nil, err
+	}
+	overall, tools, err := s.store.CustomerToolUsage(ctx, customerID, configID, request.From, request.To)
 	if err != nil {
 		return nil, err
 	}
@@ -2100,24 +2345,41 @@ func (s *Server) getAgentStats(ctx context.Context, request *getAgentStatsReques
 	stats := AgentStats{
 		PeakConcurrentSessions: peak.Sessions,
 		PeakAt:                 peak.At,
-		ToolCalls:              toolStatsOf(overall),
+		Sessions:               turns.Sessions,
+		AvgTurns:               share(turns.Turns, turns.Sessions),
+		ToolCalls:              toolStatsOf(overall, turns.Sessions),
 		Tools:                  make([]ToolStats, 0, len(tools)),
 	}
 	for _, tool := range tools {
-		stats.Tools = append(stats.Tools, toolStatsOf(tool))
+		stats.Tools = append(stats.Tools, toolStatsOf(tool, turns.Sessions))
 	}
 	return &getAgentStatsResponse{Body: stats}, nil
 }
 
-func toolStatsOf(usage store.ToolUsage) ToolStats {
+func toolStatsOf(usage store.ToolUsage, sessions int64) ToolStats {
 	return ToolStats{
-		Tool:      usage.Tool,
-		Calls:     usage.Calls,
-		Failed:    usage.Failed,
-		AvgTokens: usage.AvgTokens,
-		AvgMs:     usage.AvgMs,
-		P99Ms:     usage.P99Ms,
+		Tool:              usage.Tool,
+		Calls:             usage.Calls,
+		Failed:            usage.Failed,
+		Sessions:          usage.Sessions,
+		SessionShare:      share(usage.Sessions, sessions),
+		AvgTurnsBeforeUse: usage.AvgTurnsBeforeUse,
+		AvgTokens:         usage.AvgTokens,
+		AvgMs:             usage.AvgMs,
+		P99Ms:             usage.P99Ms,
+		Loading:           usage.Loading,
+		DefinitionTokens:  usage.DefinitionTokens,
+		SummaryTokens:     usage.SummaryTokens,
 	}
+}
+
+// share is part over whole, nil when whole is none.
+func share(part, whole int64) *float64 {
+	if whole == 0 {
+		return nil
+	}
+	ratio := float64(part) / float64(whole)
+	return &ratio
 }
 
 // runRollup aggregates every customer's request rows into a rollup table. It is a
@@ -2134,7 +2396,7 @@ func (s *Server) runRollup(ctx context.Context, request *runRollupRequest) (*run
 	}
 
 	granularity := granularityOf(request.Body.Granularity)
-	written, err := s.store.Rollup(ctx, granularity, request.Body.From, request.Body.To)
+	written, err := s.store.Buckets.Rollup(ctx, granularity, request.Body.From, request.Body.To)
 	if err != nil {
 		return nil, err
 	}
@@ -2356,9 +2618,9 @@ func (s *Server) registerServer(api huma.API) {
 			"app alone; grouped by \"who:user\" the value is then <app_id>/<user_id>, since a user id is " +
 			"only unique within its app.\n" +
 			"Only the biggest values keep a series of their own, because a label such as customer_id " +
-			"has as many values as the customer has customers. The rest are summed into \"other\", and " +
-			"spend carrying no such label at all into the empty value, so the rows still add up to " +
-			"the total.\n" +
+			"has as many values as the customer has customers. The rest are summed into a row marked " +
+			"other, whose value is \"other\", and spend carrying no such label at all into the empty " +
+			"value, so the rows still add up to the total.\n" +
 			"Reads the request rows rather than the rollups, so today's spend is there without a " +
 			"rollup having run.",
 		// Declared rather than read off the input, so the default is documented without
@@ -2410,13 +2672,16 @@ func (s *Server) registerServer(api huma.API) {
 		Path:        "/v1/stats/agents",
 		Summary:     "How the calling customer's agents ran, across all of them",
 		Description: "The most agents that were running at once, and which tools they called: how often, " +
-			"how much each call put in front of the model and how long it took.\n" +
+			"in how many sessions and after how many turns, how much each call put in front of the model, " +
+			"what the tool's definition costs every turn that carries it and how long a call took.\n" +
+			"With agent, the sessions, turns and tools are that agent config's alone; the peak is still " +
+			"every agent's.\n" +
 			"One figure for the whole window rather than a row per bucket, because neither a peak nor " +
 			"a percentile can be summed out of smaller ones.",
 		Responses: map[string]*huma.Response{
 			"200": {Description: "The window's figures"},
 		},
-		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden},
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 	}, s.getAgentStats)
 	huma.Register(api, huma.Operation{
 		OperationID: "runRollup",
@@ -2552,8 +2817,9 @@ type getActivityResponse struct {
 }
 
 type getAgentStatsRequest struct {
-	From time.Time `query:"from" doc:"Start of the window, inclusive." required:"true"`
-	To   time.Time `query:"to" doc:"End of the window, exclusive." required:"true"`
+	From  time.Time             `query:"from" doc:"Start of the window, inclusive." required:"true"`
+	To    time.Time             `query:"to" doc:"End of the window, exclusive." required:"true"`
+	Agent optionalParam[string] `query:"agent" doc:"The id of an agent config: only its sessions are counted. Omitted is every agent."`
 }
 
 type getAgentStatsResponse struct {
@@ -2564,18 +2830,26 @@ type getAgentStatsResponse struct {
 type AgentStats struct {
 	PeakConcurrentSessions int64       `json:"peak_concurrent_sessions" doc:"The most sessions open at the same time, each one an agent running. A session still open counts up to now."`
 	PeakAt                 *time.Time  `json:"peak_at" nullable:"true" doc:"When that peak was first reached. Null when no session was open in the window."`
+	Sessions               int64       `json:"sessions" doc:"Sessions that took a turn in the window: what a tool's session_share is out of."`
+	AvgTurns               *float64    `json:"avg_turns" nullable:"true" doc:"Turns a session took in the window, on average. A turn is a reply that was not rewound, delegated work that came back after its turn ended included. Null when no session took one."`
 	ToolCalls              ToolStats   `json:"tool_calls" doc:"Every tool call in the window, as one. Its tool is empty."`
 	Tools                  []ToolStats `json:"tools" nullable:"false" doc:"One row per tool, most called first."`
 }
 
 // ToolStats is how often a tool ran and what it cost.
 type ToolStats struct {
-	Tool      string   `json:"tool"`
-	Calls     int64    `json:"calls"`
-	Failed    int64    `json:"failed" doc:"Calls that ended in an error."`
-	AvgTokens float64  `json:"avg_tokens" doc:"What a call put in front of the model, its arguments and its result, estimated at four characters a token."`
-	AvgMs     *float64 `json:"avg_ms" nullable:"true" doc:"From the call starting to its result. Null when none was timed."`
-	P99Ms     *float64 `json:"p99_ms" nullable:"true"`
+	Tool              string   `json:"tool"`
+	Calls             int64    `json:"calls"`
+	Failed            int64    `json:"failed" doc:"Calls that ended in an error."`
+	Sessions          int64    `json:"sessions" doc:"Sessions that called it at least once."`
+	SessionShare      *float64 `json:"session_share" nullable:"true" minimum:"0" doc:"Sessions that called it, out of the window's sessions, from 0 to 1. Null when no session took a turn."`
+	AvgTurnsBeforeUse *float64 `json:"avg_turns_before_use" nullable:"true" doc:"Turns a session took before its first call, on average: 0 is a call on the first turn. Null on the row over every tool."`
+	AvgTokens         float64  `json:"avg_tokens" doc:"What a call put in front of the model, its arguments and its result, estimated at four characters a token."`
+	AvgMs             *float64 `json:"avg_ms" nullable:"true" doc:"From the call starting to its result. Null when none was timed."`
+	P99Ms             *float64 `json:"p99_ms" nullable:"true"`
+	Loading           string   `json:"loading" doc:"How the latest call had the tool offered: full, summary or deferred. Empty when no call recorded it, as calls made before it was recorded and built-in tools."`
+	DefinitionTokens  *int64   `json:"definition_tokens" nullable:"true" doc:"What the tool's whole definition, its name, description and schema, costs every turn that carries it, estimated at four characters a token. Null when no call recorded it."`
+	SummaryTokens     *int64   `json:"summary_tokens" nullable:"true" doc:"What its definition costs offered as a summary. Null unless its loading is summary."`
 }
 
 type runRollupRequest struct {
@@ -2717,8 +2991,9 @@ type RollupResult struct {
 type SpendBucket struct {
 	Bucket          time.Time `json:"bucket"`
 	CostMicrosTotal int64     `json:"cost_micros_total" doc:"Millionths of a dollar, priced from the configured rates."`
+	Other           bool      `json:"other,omitempty" doc:"True on the row that is everything outside the biggest few, summed. Its value is \"other\", which a label can also have: a label of that value is a row of its own, without other."`
 	RequestCount    int64     `json:"request_count"`
-	Value           string    `json:"value" doc:"The modality or label value this row is for. \"other\" is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part." example:"support"`
+	Value           string    `json:"value" doc:"The modality or label value this row is for. \"other\" with other true is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part." example:"support"`
 }
 
 // StatsBucket is the StatsBucket schema.

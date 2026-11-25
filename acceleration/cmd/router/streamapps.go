@@ -73,7 +73,7 @@ func runFallbacks(ctx context.Context, args []string, settings config.Config, ou
 	}
 	defer pgStore.Close()
 
-	uses, err := pgStore.StreamFallbackUses(ctx, time.Now().Add(-window))
+	uses, err := pgStore.StreamFallbackUses.Select(ctx, time.Now().Add(-window))
 	if err != nil {
 		return err
 	}
@@ -180,13 +180,13 @@ func runRequire(ctx context.Context, args []string, settings config.Config, out 
 	}
 	defer pgStore.Close()
 
-	document, err := pgStore.Policy(ctx, store.ScopeOrganization, *organization)
+	document, err := pgStore.Policies.Get(ctx, store.ScopeOrganization, *organization)
 	if err != nil {
 		return err
 	}
 	required := !*off
 	document.RequireOwnStreamApp = &required
-	if err := pgStore.SavePolicy(ctx, store.ScopeOrganization, *organization, document); err != nil {
+	if err := pgStore.Policies.Upsert(ctx, &store.Policy{Scope: store.ScopeOrganization, ScopeID: *organization, Document: document}); err != nil {
 		return err
 	}
 	if required {
@@ -196,6 +196,9 @@ func runRequire(ctx context.Context, args []string, settings config.Config, out 
 	}
 	return nil
 }
+
+// legacyWait is how long legacy waits for every shard to count its own rows.
+const legacyWait = 2 * time.Minute
 
 // runLegacy counts what customers other than the deployment's own still have in the
 // deployment's app, which is what turning the fallback off would leave read-only.
@@ -207,7 +210,9 @@ func runLegacy(ctx context.Context, args []string, settings config.Config, logge
 	}
 	return withStored(ctx, settings, logger, func(clients *streamapp.Clients, pgStore *store.Store) error {
 		deployment := clients.DeploymentApp()
-		counted, err := pgStore.LegacyStreamPins(ctx, deployment)
+		counting, cancel := context.WithTimeout(ctx, legacyWait)
+		defer cancel()
+		counted, err := pgStore.LegacyStreamPins(counting, deployment)
 		if err != nil {
 			return err
 		}

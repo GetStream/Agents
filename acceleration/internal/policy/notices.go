@@ -94,14 +94,20 @@ func (m *money) noticesPass(ctx context.Context) {
 // sends it; the others find it written and send nothing. One that could not be written is due
 // again after the next pass.
 func (m *money) notify(ctx context.Context, due []notice) {
-	db := m.enforcer.config.DB()
+	db := m.enforcer.config
 	if len(due) == 0 || db == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, noticesTimeout)
 	defer cancel()
 	for _, warning := range due {
-		sent, queued, err := db.NoteBalance(ctx, warning.row(), warning.delivery(), warning.body)
+		row, err := warning.row().Notice()
+		if err != nil {
+			m.failedRead("could not write that an organization's credit is running out", err,
+				"organization", warning.organization, "kind", warning.kind, "due", len(due))
+			continue
+		}
+		sent, queued, err := db.Notices.InsertQueued(ctx, &row, warning.delivery(), warning.body)
 		if err != nil {
 			m.failedRead("could not write that an organization's credit is running out", err,
 				"organization", warning.organization, "kind", warning.kind, "due", len(due))

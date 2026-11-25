@@ -165,12 +165,17 @@ no reply to show it on, so by voice the binding answers that it is not available
 `require_approval: ["create_issue", "delete_*"]` on a binding holds each call of a tool it names
 until the session's user allows it. The call's step is `awaiting_approval`, addressed to them, and
 nothing reaches the provider before they answer with `tool_approval` (`tool_call_id`, the reply's
-`request_id`, `allowed`), on their socket or their backend's. Declined, or not answered in ten
+`request_id`, `allowed`), on their socket or their backend's. They answer as the kind of caller
+that opened the session, as they reach it (`session.Owner.Reaches`): a guest token with a signed-in
+user's id is not them. Declined, or not answered in ten
 minutes, the call is not sent and the model is told. A session with nobody to ask (incognito, a
 run, a shared chat, an MCP event's) refuses the call at once. In a channel of a type
 `chat_channels` names, the call asks the writer of the message the reply answers, who answers
 with their own user token through `POST /v1/agents/conversations/{cid}/tool_approvals` while a
-member of the channel; the backend may answer any (`api/conversations.go`, AI-3154). There the
+member of the channel. The hook names the writer by id alone, so any verified token of that id
+answers for them, unless they are the session's own user (a session opened through the API
+answering in the channel), who is asked as the kind of caller that opened it; the backend may
+answer any (`api/conversations.go`, AI-3154). There the
 writer has two minutes, not ten, when the Router opened the session for the message, as it does
 unless a session opened through the API answers in the channel: it answers one message for at
 most two minutes (`askTimeout`, `api/messagehooks.go`) and then closes that session, which stops
@@ -181,7 +186,7 @@ binding grants, and `sandbox: true` is refused beside it (`session/connector_app
 Beside a sensitive connector (Nessy), a binding's write tool needs `require_approval`: the
 config is refused unless each tool it grants only reads (`read_only_tools`) or is held, and a
 `tool_patterns` binding needs an entry such as `*` that matches each pattern as written
-(`api/configs.go`, `sensitiveBindingsComplaint`). In agent.yaml it is `require_approval:` on
+(`connectors/sensitive`, `ConfigComplaint`; across a parent and its child agents, `GraphComplaint`). In agent.yaml it is `require_approval:` on
 the connector entry. Tools a caller declares at createSession are not checked. The caller runs
 them, or a person's device does (`executor: client`). The router sends a client tool's
 arguments to the caller on the events socket (`api/sessionws.go`). Every channel member can
@@ -337,11 +342,11 @@ over HTTPS to a host in `sandbox.hosts`. Daytona's egress swaps it for the token
   ends TLS itself and refuses the proxy's certificate for a granted host (staging E2E,
   2026-10-22: `tls: bad certificate`).
 - Behind the proxy, the sandbox gets a placeholder (`va_ph_…`) in the env var. Every command and
-  run of code gets the proxy and the CA in its env, since netleash replaces the env vars a
-  sandbox is created with, but not those of one command or run (live probes, 2026-10-21):
+  run of code gets the CA in its env, and each run of code the proxy, since netleash replaces the
+  env vars a sandbox is created with, but not those of one command or run (live probes, 2026-10-21):
   - `HTTPS_PROXY`, `HTTP_PROXY`, `https_proxy` and `http_proxy` are
-    `http://sbx:<credential>@<proxy address>:<port>`; `NO_PROXY` and `no_proxy` are
-    `localhost,127.0.0.1,::1`;
+    `http://sbx:<credential>@<proxy address>:<port>`, with a credential of the run's own;
+    `NO_PROXY` and `no_proxy` are `localhost,127.0.0.1,::1`;
   - `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` and `GIT_SSL_CAINFO` name
     `/tmp/va-egress-ca-bundle.pem`, and `NODE_EXTRA_CA_CERTS` names the proxy's CA certificate,
     `/tmp/va-egress-ca.pem`;
@@ -365,10 +370,11 @@ over HTTPS to a host in `sandbox.hosts`. Daytona's egress swaps it for the token
   A host both cover is a grant's. A config with `network: true` and no `allowed_domains`, or with
   a `network_allow_list`, is refused when a session with a sandbox grant starts: the proxy reaches
   hosts by name only.
-- Known limit (accepted, Kanat 2026-10-22): the sandbox's proxy credential is in the env of every
-  command and run, so sandbox code can read it and send it out to a granted host or an allowed
-  domain. It is a proxy credential, never a token. It is the sandbox's own, it expires with the
-  sandbox's record, and it reaches only the sandbox's grants and allowed domains.
+- Known limit: a run's proxy credential is in its code's env, so the code can read it and send it
+  out to a granted host or an allowed domain. It is a proxy credential, never a token. It reaches
+  only the sandbox's grants and allowed domains, and it ends when its run ends: the proxy port is
+  open to the internet, so a copy works only while its run is in flight. A process an earlier
+  run left running gets a 407 once that run ends.
 - Sandbox code has root (`sudo` with no password, live probe 2026-10-21). No control inside the
   sandbox protects anything: code can change its env, its CA files and its routes. The controls
   are the token, which stays in the router; Daytona's network allow list, which lets the sandbox

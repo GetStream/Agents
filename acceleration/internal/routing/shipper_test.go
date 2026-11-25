@@ -562,7 +562,7 @@ func (s *WriterSuite) TestARowWithNoOrganizationWaitsForOne() {
 	s.Zero(sweeper.unshipped.Load(), "counted by unowned, which warns, and not by the shipping gauges, which page")
 	s.Contains(s.logs.String(), "app="+s.customer)
 
-	s.Require().NoError(s.store.JoinOrganization(s.ctx, s.customer, s.organization))
+	s.Require().NoError(s.store.AppOrganizations.Upsert(s.ctx, &store.AppOrganization{AppID: s.customer, OrganizationID: s.organization}))
 	s.swept(sweeper)
 
 	rows := s.shipped(1)

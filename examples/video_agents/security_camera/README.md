@@ -45,20 +45,6 @@ on each crop. Nothing has to be set up in Roboflow. Matching is cosine similarit
 people 0.76. CLIP is not a face recognition model, so treat a name as a good guess rather
 than an identity.
 
-To use a Workflow of your own instead, with a better embedding model, point the faces
-processor at `roboflow/workflow` and name it:
-
-```python
-stream.DetectionProcessor(
-    target="roboflow/workflow",
-    embeddings=True,
-    overwrites={"roboflow": {"workspace": "my-workspace", "workflow_id": "faces"}},
-    ...
-)
-```
-
-It has to output `predictions` and `embeddings`, one embedding per prediction.
-
 ## Prerequisites
 
 A running acceleration router from the repo root, rebuilt so it has detection:
@@ -66,6 +52,10 @@ A running acceleration router from the repo root, rebuilt so it has detection:
 ```bash
 docker compose up -d --build router
 ```
+
+In the default `api_key` auth mode it refuses to start until the repo-root `.env` sets
+`ROUTER_DEV_KEK` (proxy mode with connectors off starts without one): make one once with
+`echo "ROUTER_DEV_KEK=$(openssl rand -hex 32)" >> .env` (see `DEVELOPMENT.md`).
 
 The router reads the provider keys from the repo-root `.env`:
 
@@ -90,10 +80,11 @@ Roboflow, Settings, API.
 ```bash
 cd examples/video_agents/security_camera
 uv sync
-uv run security_camera.py run
+uv run security_camera.py
 ```
 
-`run` prints a call URL and opens the demo page on it. Turn the camera on and try:
+It stores this directory with `agent.sync()`, then prints a call URL and opens the demo page
+on it. Turn the camera on and try:
 
 1. Put a box in view. The agent says a package appeared.
 2. Face the camera and say "remember me as Sam". Leave, come back: it greets Sam.

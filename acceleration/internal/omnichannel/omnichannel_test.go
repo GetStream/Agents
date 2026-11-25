@@ -148,7 +148,7 @@ func (s *PersonSuite) TestAnOmniChannelIsKnownByItsID() {
 // answers in it; only a chat card of that config may read it. A stamp, where there is one,
 // decides, and a card of any other source reads only a stamped channel.
 func (s *PersonSuite) TestOnlyAChatCardOfTheConfigAChannelNamesReadsAnUnstampedChannel() {
-	chat := store.EpisodeCard{Episode: store.Episode{CustomerID: "acme", Source: store.EpisodeChat}, AgentConfigID: "config-1"}
+	chat := store.EpisodeCard{Episode: store.Episode{CustomerID: "acme", Source: store.EpisodeChat}, ConfigID: "config-1"}
 	sms := chat
 	sms.Source = store.EpisodeSMS
 

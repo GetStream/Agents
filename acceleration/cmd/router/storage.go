@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/alerts"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/metered"
@@ -70,7 +69,7 @@ func runUsageStorage(ctx context.Context, args []string, settings config.Config,
 		return err
 	}
 	defer stop()
-	base := metered.NewRegionalKnowledge(backends, recording, nil, pgStore)
+	base := metered.NewRegionalKnowledge(backends, recording, nil, pgStore.KnowledgeNamespaces)
 	// The bases kept in customers' own accounts are read on their keys, which only the keyring
 	// they were sealed under opens.
 	secrets, err := newSecretSealer(ctx, settings)
@@ -78,7 +77,7 @@ func runUsageStorage(ctx context.Context, args []string, settings config.Config,
 		return fmt.Errorf("usage storage: %w", err)
 	}
 	if secrets != nil {
-		base.WithCustomerAccounts(providerkeys.NewKeyring(pgStore, secrets), knowledgeAccounts(settings.Knowledge, storageReadTimeout, logger))
+		base.WithCustomerAccounts(providerkeys.NewKeyring(pgStore.ProviderKeys, secrets), knowledgeAccounts(settings.Knowledge, storageReadTimeout, logger))
 	}
 	return recordStorage(ctx, base, pgStore, hour, logger, out)
 }
@@ -108,28 +107,20 @@ func jobRecorder(ctx context.Context, settings config.Config, pgStore *store.Sto
 	if err != nil {
 		return nil, nil, err
 	}
-	configs, err := appconfig.New(appconfig.Options{
-		Store: pgStore, Address: settings.Redis.Addr, Username: settings.Redis.Username, Password: settings.Redis.Password, Logger: logger,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
 	// The job admits nothing, so it reads no money and holds none: its policies only attribute
 	// each row.
-	policies, err := policy.New(configs, policy.Settings{Mode: config.LimitsOff}, logger)
+	policies, err := policy.New(pgStore, policy.Settings{Mode: config.LimitsOff}, logger)
 	if err != nil {
-		configs.Close()
 		return nil, nil, err
 	}
 	fallback, err := prices.Embedded(nil, release, logger)
 	if err != nil {
 		policies.Close()
-		configs.Close()
 		return nil, nil, err
 	}
 	reading, stopReading := context.WithCancel(ctx)
 	active := pricing.NewActive(reading, pricing.ActiveOptions{
-		Source: pgStore.PriceSource(), Fallback: fallback, Interval: time.Hour, Logger: logger,
+		Source: pgStore.PriceEntries.Source(), Fallback: fallback, Interval: time.Hour, Logger: logger,
 	})
 	host, _ := os.Hostname()
 	shard := cmp.Or(settings.Shard, routing.Unsharded)
@@ -147,7 +138,6 @@ func jobRecorder(ctx context.Context, settings config.Config, pgStore *store.Sto
 		stopAlerts()
 		stopReading()
 		policies.Close()
-		configs.Close()
 	}, nil
 }
 
@@ -171,7 +161,6 @@ func recordStorage(ctx context.Context, base *metered.Knowledge, pgStore *store.
 	for _, region := range base.Regions() {
 		listed, err := base.Namespaces(ctx, region, "")
 		if err != nil {
-			logger.Error("could not list the knowledge bases, so no storage is recorded for the hour", "hour", at, "region", region, "error", err)
 			alerts.SendItem(storageMissed, at, alerts.Warn, map[string]any{"hour": at, "region": region, "listing": err.Error()})
 			return fmt.Errorf("usage storage: list the knowledge bases in %s: %w", region, err)
 		}
@@ -179,9 +168,8 @@ func recordStorage(ctx context.Context, base *metered.Knowledge, pgStore *store.
 			namespaces = append(namespaces, located{place: store.KnowledgePlace{Region: region, Account: store.KnowledgeAccountStream}, namespace: namespace})
 		}
 	}
-	theirs, err := pgStore.KnowledgeInCustomerAccounts(ctx)
+	theirs, err := pgStore.KnowledgeNamespaces.SelectInCustomerAccounts(ctx)
 	if err != nil {
-		logger.Error("could not list the knowledge bases in customers' own accounts, so no storage is recorded for the hour", "hour", at, "error", err)
 		alerts.SendItem(storageMissed, at, alerts.Warn, map[string]any{"hour": at, "listing": err.Error()})
 		return fmt.Errorf("usage storage: %w", err)
 	}
@@ -197,7 +185,7 @@ func recordStorage(ctx context.Context, base *metered.Knowledge, pgStore *store.
 			ids = append(ids, customerID)
 		}
 	}
-	known, err := pgStore.KnownApps(ctx, ids)
+	known, err := pgStore.Apps.Known(ctx, ids)
 	if err != nil {
 		alerts.SendItem(storageMissed, at, alerts.Warn, map[string]any{"hour": at, "apps": err.Error()})
 		return fmt.Errorf("usage storage: which apps are this deployment's: %w", err)

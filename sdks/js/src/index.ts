@@ -20,6 +20,7 @@ export {
   REGION_ENV,
   URL_ENV,
   USAGE_CATEGORIES_HEADER,
+  VERSION,
   regionUrl,
   signToken,
   type BackendOptions,
@@ -27,7 +28,9 @@ export {
   type StreamUser,
   type TokenSource,
   type UserTokenOptions,
+  type HeaderWebSocketConstructor,
   type WebSocketConstructor,
+  type WebSocketInit,
   type WebSocketLike,
 } from "./backend.js";
 
@@ -41,6 +44,16 @@ export {
 } from "./client.js";
 
 export { AgentHandle } from "./handle.js";
+
+export {
+  Connections,
+  type Authorization,
+  type AuthorizationOptions,
+  type Connection,
+  type ConnectionFilter,
+  type ConnectionOptions,
+  type ConnectionUser,
+} from "./connections.js";
 
 export { Memories } from "./memories.js";
 
@@ -108,8 +121,10 @@ export {
 export {
   ConfigurationError,
   HostingRefusedError,
+  NoCallError,
   RouterError,
   SocketClosedError,
+  UnnamedTurnError,
   type RouterErrorType,
 } from "./errors.js";
 
@@ -138,9 +153,11 @@ export {
   type Tool,
   type ToolApproval,
   type ToolCallFields,
+  type ToolCallUpdate,
   type ToolConversation,
   type ToolLine,
   type ToolUser,
+  type ToolsOptions,
 } from "./tools.js";
 
 export { LiveReasoning } from "./reasoning.js";
@@ -155,6 +172,7 @@ export {
 } from "./ui-catalog.js";
 
 export { ConversationState, type AgentState, type ConversationSnapshot } from "./state.js";
+export { ToolCalls, toolCallTitle, type ToolCallState, type ToolCallStatus } from "./tool-calls.js";
 export {
   Conversation,
   mergeOpenUIStatements,

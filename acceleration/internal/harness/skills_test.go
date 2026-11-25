@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -151,6 +152,60 @@ func (s *SkillsSuite) TestASkillWithScriptsNeedsASandbox() {
 
 	s.NoError(NeedsSandbox("pdf", []string{"scripts/fill.py"}, true))
 	s.NoError(NeedsSandbox("pdf", []string{"reference/forms.md"}, false), "a reference is read, not run")
+}
+
+func (s *SkillsSuite) TestASkillsFilesArePutInAFolderOfItsName() {
+	long := strings.Repeat("n", 255)
+	for _, name := range []string{"pdf", "Refund Decision", "50% off", "café", "返金", "v1.2", "a..b", "it's", "refund_v2-final", "👩\u200d💻 desk", long} {
+		s.Equal("skills/"+name+"/scripts/fill.py", BundlePath(name, "scripts/fill.py"))
+	}
+	s.Equal("skills/pdf/.env.sample", BundlePath("pdf", ".env.sample"))
+	deep := strings.Repeat(long+"/", 3) + long
+	whole := strings.Repeat("a/", 511) + "aa"
+	s.Equal("skills/pdf/"+whole, BundlePath("pdf", whole))
+	s.Equal("skills/pdf/"+deep, BundlePath("pdf", deep))
+	s.Equal("skills/pdf/-v/..notes", BundlePath("pdf", "-v/..notes"))
+}
+
+func (s *SkillsSuite) TestASkillStoredUnderAnyNameIsPutInAFolderOfItsOwn() {
+	names := []string{"", ".", "..", "skill-5ec1f7e700f37c3d0b2981d04855fc34b94aaa15457b05ca571817442d228f81", "../../tmp", "a/b", "a", "/a", "a\\b", "-p", "../-p", ".hidden", "a\x00b", "a\nb", "a\u0085b",
+		strings.Repeat("n", 255), strings.Repeat("n", 256), strings.Repeat("返", 86), strings.Repeat("返", 256)}
+	folders := map[string]bool{}
+	for _, name := range names {
+		folder := path.Dir(BundlePath(name, "fill.py"))
+		s.Equal("skills", path.Dir(folder), name)
+		s.Regexp(`^[^-/\\\x00-\x1f][^/\\\x00-\x1f]*$`, path.Base(folder), name)
+		s.LessOrEqual(len(path.Base(folder)), 255)
+		s.NotContains([]string{".", ".."}, path.Base(folder))
+		s.Equal(folder+"/fill.py", BundlePath(name, "fill.py"))
+		folders[folder] = true
+	}
+	s.Len(folders, len(names), "no two skills share a folder")
+	s.Contains(Listing("../../tmp", []string{"fill.py"}, true), "under "+path.Dir(BundlePath("../../tmp", "fill.py"))+"/,",
+		"the model is told the folder the files are in")
+}
+
+func (s *SkillsSuite) TestAFileStoredUnderAnyKeyIsPutInItsSkillsFolder() {
+	keys := []string{"", ".", "..", "../fill.py", "../pdf2/fill.py", "a/../../fill.py", "/tmp/fill.py", "fill.py", "a\\fill.py", "a\x00", "a//b", "a/",
+		strings.Repeat("n", 256), "a/" + strings.Repeat("n", 256), strings.Repeat("n", 256) + "/a", strings.Repeat("a/", 512) + "a"}
+	places := map[string]bool{}
+	for _, key := range keys {
+		place := BundlePath("pdf", key)
+		s.Regexp(`^skills/pdf/[^/\\\x00]+$`, place, key)
+		s.NotContains([]string{".", ".."}, path.Base(place))
+		s.LessOrEqual(len(path.Base(place)), 255)
+		places[place] = true
+	}
+	s.Len(places, len(keys), "no two files share a place")
+}
+
+func (s *SkillsSuite) TestAListingSaysWhereAFileIsWhenItIsNotAtItsKey() {
+	listed := Listing("pdf", []string{"../fill.py", "scripts/fill.py"}, true)
+
+	s.Regexp(`\n- \.\./fill\.py \(in the sandbox: skills/pdf/\.file-[0-9a-f]{64}\)\n- scripts/fill\.py$`, listed)
+	s.Contains(listed, "(in the sandbox: "+BundlePath("pdf", "../fill.py")+")")
+	s.NotContains(Listing("pdf", []string{"../fill.py"}, false), "in the sandbox", "nothing is put there")
+	s.NotContains(Listing("pdf", []string{"../notes.md"}, true), "in the sandbox", "a skill with no script is not put there")
 }
 
 func (s *SkillsSuite) TestASkillsFileIsReadByItsPath() {

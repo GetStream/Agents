@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -171,6 +172,22 @@ func refused(provider string, response *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
 	return stack.Wrap(fmt.Errorf("voices: %s refused the voice (http %d): %s",
 		provider, response.StatusCode, bytes.TrimSpace(body)))
+}
+
+// ErrUnknownVoice is a voice its provider answered 404 for when asked for it by id.
+var ErrUnknownVoice = errors.New("voices: the provider has no voice by that id")
+
+// ErrNoSample is a voice its provider has but has published no sample of to hear.
+var ErrNoSample = errors.New("voices: the provider has published no sample of the voice")
+
+// previewRefused is refused for a preview's lookup of the voice, where a 404 is the provider
+// saying it has no voice by that id.
+func previewRefused(provider string, response *http.Response) error {
+	if response.StatusCode != http.StatusNotFound {
+		return refused(provider, response)
+	}
+	body, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
+	return stack.Wrap(fmt.Errorf("%w: %s (http 404): %s", ErrUnknownVoice, provider, bytes.TrimSpace(body)))
 }
 
 // listRefused is refused for a listing. A list names no voice, so a 401 or 403 on one is

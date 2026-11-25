@@ -155,7 +155,7 @@ func (s *ConnectionRecordsSuite) TestACursorTheLogDidNotHandOutIsRefused() {
 		"/v1/agents/connections/"+id+"/invocations?cursor=not-a-cursor", nil, nil))
 }
 
-// TestStoringACredentialLeavesOneGrantCreatedRowNamingTheRequest: the credentials write, then
+// TestStoringACredentialAndDeletingTheConnectionEachLeaveOneRow: the credentials write, then
 // the delete, each once, and the deleted connection's rows still listed.
 func (s *ConnectionRecordsSuite) TestStoringACredentialAndDeletingTheConnectionEachLeaveOneRow() {
 	connector := s.connector()
@@ -269,11 +269,11 @@ func (s *ConnectionRecordsSuite) TestDeletingAUsersConnectionsLeavesTheNextSessi
 		s.Equal(http.StatusNotFound, s.serverClient.actingFor(alice).do(http.MethodGet, "/v1/agents/connections/"+id, nil, nil))
 	}
 	var left int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_connections WHERE customer_id = ? AND owner_id = ?", s.customerID(), alice.userID).Scan(&left))
 	s.Zero(left)
 	var logged int
-	s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_invocations WHERE connection_id = ?", hers).Scan(&logged))
 	s.Zero(logged)
 	s.Equal(http.StatusOK, s.serverClient.actingFor(bob).do(http.MethodGet, "/v1/agents/connections/"+bobs, nil, nil))
@@ -308,7 +308,7 @@ func (s *ConnectionRecordsSuite) TestASessionWithNoConnectorsWritesNoRecord() {
 
 	for _, table := range []string{"connector_invocations", "connector_audit"} {
 		var rows int
-		s.Require().NoError(s.store.DB().QueryRowContext(context.Background(),
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 			"SELECT count(*) FROM "+table+" WHERE customer_id = ?", s.customerID()).Scan(&rows))
 		s.Zero(rows, table)
 	}
@@ -352,7 +352,7 @@ sources:
     endpoint: mcp
 `))
 	s.Require().NoError(err)
-	_, err = s.store.CreateConnectorDefinition(context.Background(), s.customerID(), manifest)
+	_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
 	s.Require().NoError(err)
 	return id
 }

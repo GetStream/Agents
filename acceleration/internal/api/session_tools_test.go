@@ -97,6 +97,19 @@ func (s *SessionToolsSuite) TestASessionSaysWhatItsModelIsOffered() {
 	s.Equal(total, offered.Tokens)
 }
 
+// The names of the phone tools stay the phone's: a session with no phone line is offered
+// neither, though its device declared them.
+func (s *SessionToolsSuite) TestADevicesToolNamedAsAPhoneToolIsNotOfferedWithoutAPhoneLine() {
+	request := textSession(nil)
+	request.Tools = &[]SessionTool{s.lookupOrder(), {Name: "transfer", Description: "hand over"}, {Name: "press", Description: "press keys"}}
+	opened := s.client.createSession(request)
+
+	sources := s.toolSourcesAs(s.serverClient.actingFor(s.client), opened.Id)
+	s.Equal("session", sources[lookupOrder])
+	s.NotContains(sources, "transfer")
+	s.NotContains(sources, "press")
+}
+
 func (s *SessionToolsSuite) TestASessionSaysWhereEachToolItIsOfferedCameFrom() {
 	agent := "agent-" + s.utils.uuid()
 	s.await(s.serverClient.opens("/v1/dispatch"), "ready")
@@ -131,10 +144,10 @@ func (s *SessionToolsSuite) TestASessionOpenedWithNoWorkerHostingItsAgentHasNoWo
 
 func (s *SessionToolsSuite) TestASessionTheRouterLetGoOfSaysWhereItsToolsCameFrom() {
 	id := s.utils.uuid()
-	s.Require().NoError(s.store.SaveSession(context.Background(), &store.AgentSession{
+	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{
 		ID: id, CustomerID: s.customerID(), AgentName: "support", AgentID: "support", State: store.SessionClosed,
 	}))
-	s.Require().NoError(s.store.SaveSessionTools(context.Background(), id, []store.ToolDefinition{
+	s.Require().NoError(s.store.SessionTools.Upsert(context.Background(), s.customerID(), id, []store.ToolDefinition{
 		{Name: "investigate_sdk", Description: "Read SDK source", Source: "worker"},
 		{Name: "lookup_order", Description: "find an order by its number"},
 	}))
@@ -329,9 +342,14 @@ func (s *SessionToolsSuite) lookupOrder() SessionTool {
 
 // toolSources is where each tool a session is offered came from, by name.
 func (s *SessionToolsSuite) toolSources(sessionID string) map[string]string {
+	return s.toolSourcesAs(s.serverClient, sessionID)
+}
+
+// toolSourcesAs is toolSources read by the client given.
+func (s *SessionToolsSuite) toolSourcesAs(as *testClient, sessionID string) map[string]string {
 	var offered OfferedTools
 	s.Require().Equal(http.StatusOK,
-		s.serverClient.do(http.MethodGet, "/v1/agents/sessions/"+sessionID+"/tools", nil, &offered))
+		as.do(http.MethodGet, "/v1/agents/sessions/"+sessionID+"/tools", nil, &offered))
 	sources := map[string]string{}
 	for _, tool := range offered.Tools {
 		sources[tool.Name] = tool.Source
@@ -341,10 +359,10 @@ func (s *SessionToolsSuite) toolSources(sessionID string) map[string]string {
 
 func (s *SessionToolsSuite) TestASessionTheRouterLetGoOfListsWhatItWasOffered() {
 	id := s.utils.uuid()
-	s.Require().NoError(s.store.SaveSession(context.Background(), &store.AgentSession{
+	s.Require().NoError(s.store.Sessions.Upsert(context.Background(), &store.AgentSession{
 		ID: id, CustomerID: s.customerID(), AgentName: "support", AgentID: "support", State: store.SessionClosed,
 	}))
-	s.Require().NoError(s.store.SaveSessionTools(context.Background(), id, []store.ToolDefinition{
+	s.Require().NoError(s.store.SessionTools.Upsert(context.Background(), s.customerID(), id, []store.ToolDefinition{
 		{Name: "lookup_order", Description: "find an order by its number", Parameters: map[string]any{"type": "object"}},
 	}))
 

@@ -113,18 +113,19 @@ type Call struct {
 	AgentId      string             `json:"agent_id" doc:"Which agent ran it, and where its transcript is kept."`
 	CallId       string             `json:"call_id"`
 	CampaignId   *string            `json:"campaign_id,omitempty"`
-	ConfigId     *string            `json:"config_id,omitempty"`
 	ContactId    *string            `json:"contact_id,omitempty"`
 	Direction    CallDirection      `json:"direction" enum:"inbound,outbound"`
 	EndedAt      *time.Time         `json:"ended_at,omitempty" doc:"Absent while the call is still running."`
 	FromNumber   *string            `json:"from_number,omitempty"`
-	Id           string             `json:"id" doc:"The session that ran the call, which is what it is held by."`
+	Id           string             `json:"id"`
 	Instructions *string            `json:"instructions,omitempty" doc:"What the agent was told to be on this call."`
 	Llm          *string            `json:"llm,omitempty" doc:"The target that held the conversation."`
 	LlmUsed      *string            `json:"llm_used,omitempty" doc:"The provider/model that held the conversation."`
 	Mode         *SessionMode       `json:"mode,omitempty"`
+	Region       *string            `json:"region,omitempty" readOnly:"true" doc:"The shard the call is kept in. Set on a listed call of a deployment with shards."`
 	ReviewNotes  *string            `json:"review_notes,omitempty"`
 	ReviewScore  *int               `json:"review_score,omitempty" doc:"How well the agent handled it, from 1 to 5."`
+	SessionId    *string            `json:"session_id,omitempty" doc:"The session the call was part of. A session starts a new call each time voice is started or stopped on it. Absent once the session is deleted."`
 	Skills       *[]string          `json:"skills,omitempty" doc:"What the fast model could hand to the subagent. The instructions behind each name are in the skill registry."`
 	StartedAt    time.Time          `json:"started_at"`
 	Sts          *string            `json:"sts,omitempty" doc:"The speech-to-speech target, for a native call, on the same terms as stt."`
@@ -139,7 +140,6 @@ type Call struct {
 	Tts          *string            `json:"tts,omitempty" doc:"The voice target, on the same terms as stt."`
 	TtsUsed      *string            `json:"tts_used,omitempty" doc:"The provider/model that spoke, on the same terms as stt_used."`
 	Usage        *CallUsage         `json:"usage,omitempty"`
-	UserId       *string            `json:"user_id,omitempty" doc:"Who the agent spoke to, as the client's own token named them. Empty for a call the customer's backend opened, and for telephony, where the number is the name."`
 	Voice        *string            `json:"voice,omitempty" doc:"The voice the call asked for, in the provider's own terms. Empty means the provider's default."`
 	VoiceUsed    *string            `json:"voice_used,omitempty" doc:"The voice that spoke, which is the provider's default when none was asked for. Known only while the call is running."`
 }
@@ -261,7 +261,7 @@ type CreateSessionRequest struct {
 	ContextTruncated  *bool                      `json:"context_truncated,omitempty" doc:"Older history was omitted from the model context."`
 	Custom            *map[string]interface{}    `json:"custom,omitempty" doc:"Anything the caller wants to remember about the session, handed back untouched and never read by the router. Sessions can be queried by these, which is what makes them worth writing."`
 	Description       *string                    `json:"description,omitempty" doc:"A longer note about the conversation, searched alongside the title."`
-	Greeting          *Greeting                  `json:"greeting,omitempty" doc:"What the agent opens the call with, over what the config says."`
+	Greeting          *Greeting                  `json:"greeting,omitempty" doc:"What the agent opens the call with, over what the config says. Server-side only: a device sending it is refused with a 403."`
 	History           *[]HistoryMessage          `json:"history,omitempty" doc:"The conversation so far, for a backend that keeps its own: a thread in its own Slack app, say, that outlives any one session. Send it when a session closed and the thread goes on: open a new session with the thread's messages here, oldest first, then send the message to answer to the responses endpoint. The model is handed them before the first response, as a resumed conversation's history is. They are recorded nowhere, as turns, transcript or Chat messages, so add incognito to keep nothing at all. Up to 100 messages and 60000 characters of text, the most a session reads back of a conversation the router kept; more is refused rather than cut. Server-side only: a device sending it is refused with a 403, because an assistant message puts words in the agent's mouth." maxItems:"100"`
 	Id                *string                    `json:"id,omitempty" doc:"The id to hold the session by, so a caller can know it before the session exists. It may be any string of up to 64 letters, digits, - and _, such as your own record's id, that nobody has used for a session before. A UUID is held lowercase. Omitted, the router generates a UUIDv7."`
 	// LegacyConversationId is the Stream Chat CID a session resumed before v0.6.35, which
@@ -271,35 +271,35 @@ type CreateSessionRequest struct {
 	Instructions         *string            `json:"instructions,omitempty" doc:"What the agent is told to be for this session alone, in place of its config's instructions: a role given at call time, such as the brief of a customer somebody practises on, without a stored config per brief. Empty or left out, the config's instructions stand. There is no limit but the request body's, as a config's instructions have none. They are held only by the running session: a session carried on in writing after it ended in another process, a fork of a session no longer running and a fork naming a config run on the config's instructions again. Server-side only: a device sending them is refused with a 403, because what the agent is told decides who it is, and a device could make it impersonate a different agent."`
 	Keyterms             *[]string          `json:"keyterms,omitempty" doc:"Business-specific words the transcriber would otherwise get wrong. Up to 100 terms, and providers that cannot be told about vocabulary ignore them."`
 	Languages            *[]string          `json:"languages,omitempty" doc:"Language hints, which narrow the candidates in every modality."`
-	Llm                  *string            `json:"llm,omitempty" doc:"A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured."`
-	MaxTokens            *int               `json:"max_tokens,omitempty"`
-	MaxToolRounds        *int               `json:"max_tool_rounds,omitempty" doc:"The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups."`
+	Llm                  *string            `json:"llm,omitempty" doc:"A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured. Server-side only: a device sending it is refused with a 403."`
+	MaxTokens            *int               `json:"max_tokens,omitempty" doc:"Server-side only: a device sending it is refused with a 403."`
+	MaxToolRounds        *int               `json:"max_tool_rounds,omitempty" doc:"The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups. Server-side only: a device sending it is refused with a 403."`
 	Memory               *SessionMemory     `json:"memory,omitempty"`
 	MinConfidence        *float64           `json:"min_confidence,omitempty" doc:"How sure the transcriber must be before the agent answers rather than checks what was meant."`
-	ModelOverwrites      *ModelOverwrites   `json:"model_overwrites,omitempty"`
+	ModelOverwrites      *ModelOverwrites   `json:"model_overwrites,omitempty" doc:"Server-side only: a device sending it is refused with a 403."`
 	FloorControl         *FloorControl      `json:"floor_control,omitempty" doc:"The model that controls the floor in this session, and how long a caller may wait once they stop, over the agent config's. Left out or null, the config's; an empty object is no choice, which the router's default rules; {model: flow-controller} keeps the flow controller whatever that default. A model the session was opened with, named here or the config's then, is its for its life, reopened included; no choice is stored as none, so a reopened session takes its config's choice as it is then, and the router's default after it. Server-side only: a device sending it is refused with a 403, because whether a model rules when the agent answers is the app's to decide."`
 	EndOfTurn            any                `json:"end_of_turn,omitempty" hidden:"true"` // refused: floor_control's max_wait_ms replaced it
 	ResumeHistory        *ResumeHistory     `json:"resume_history,omitempty" doc:"How a conversation this session carries on is handed back to the model, over the agent config's and the app's and organization's policy, field by field: a field given here wins, one left out keeps the next level's. The session keeps what it was opened with, so reopening it after it ended reads the conversation the same way. Server-side only: a device sending it is refused with a 403, because what the model is sent is billed to the app."`
 	Navigating           *bool              `json:"navigating,omitempty" doc:"The agent placed this call, so let recordings finish and answer their menus." default:"false"`
-	Phone                *SessionPhone      `json:"phone,omitempty"`
-	ProjectId            *string            `json:"project_id,omitempty" doc:"What the conversation belongs to. Also recorded as the \"project\" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins."`
+	Phone                *SessionPhone      `json:"phone,omitempty" doc:"Server-side only: a device sending it is refused with a 403."`
+	ProjectId            *string            `json:"project_id,omitempty" doc:"What the conversation belongs to. Sent server-side it is also recorded as the \"project\" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in tags, or the agent config's, wins. A device's groups the session and is no cost tag."`
 	ReturnUrl            *string            `json:"return_url,omitempty" doc:"The app's own page a login or step-up the chat asks for goes back to, as createAuthorization's return_url: the launch page takes the handoff only from a page of its origin, and the browser comes back to it with connection_id and status added to its query. The same rules as createAuthorization's return_url apply, and a URL they refuse is answered with a 400 invalid_request naming the rule (an error frame on the session socket). Absent or empty, those consents go back to the dashboard. It is kept with the session, so a chat carried on after it ended and a fork go back to it too. An end user's device may send it: a consent the chat asks for is only ever for the caller's own connection, shown to the caller alone, and bound to the first browser that hands it off, so the URL only decides where the caller's own consent lands."`
-	Search               *string            `json:"search,omitempty" doc:"Omit it and the config decides, or search-fast when there is no config."`
+	Search               *string            `json:"search,omitempty" doc:"Omit it and the config decides, or search-fast when there is no config. Server-side only: a device sending it is refused with a 403."`
 	StartVoice           *bool              `json:"start_voice,omitempty" doc:"Start voice as the session opens, as startSessionVoice does: the agent joins the call named in call, else agent:<session id>, which joining creates, and returns once it is there. Left out, the conversation is held in writing until voice is started." default:"false"`
-	Sts                  *string            `json:"sts,omitempty" doc:"A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides."`
-	Stt                  *string            `json:"stt,omitempty" doc:"Omit it and the config decides, or en-low-latency when there is no config."`
-	Tags                 *map[string]string `json:"tags,omitempty" doc:"Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins."`
+	Sts                  *string            `json:"sts,omitempty" doc:"A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides. Server-side only: a device sending it is refused with a 403."`
+	Stt                  *string            `json:"stt,omitempty" doc:"Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403."`
+	Tags                 *map[string]string `json:"tags,omitempty" doc:"Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins. Server-side only: a device sending it is refused with a 403."`
 	Team                 *string            `json:"team,omitempty" minLength:"1" maxLength:"59" doc:"The team the session's work is counted under, its team spend limits included, as team:<name> is among a token's usage categories: 1 to 59 letters, digits, _ . and -. Left out, the session is counted under the team the caller's token names, else the agent config's team tag. A token naming another team is refused with a 400: the team a token was signed for is not moved. Server-side only: a device sending it is refused with a 403, since its team is the one its token was signed for."`
 	Timezone             *string            `json:"timezone,omitempty" doc:"The end user's IANA timezone, such as Europe/Amsterdam, which a device knows and the router does not. It sets the zone the agent reads dates in for this session and, for a user the caller may name, is remembered as theirs for the scheduled tasks and sessions that follow. An unknown zone is refused with a 400 invalid_timezone."`
 	Title                *string            `json:"title,omitempty" doc:"What to call the conversation, for a list a person reads, until the router names a persistent one for what was said. Never shown to the model: what a conversation is called is a label on it rather than part of it."`
 	ToolTimeoutMs        *int               `json:"tool_timeout_ms,omitempty" doc:"How long the model waits for the result of a tool the caller or a worker runs, in milliseconds. Zero or omitted is 30 seconds. A tool's own timeout_ms replaces it for that tool, which is how one slow tool, such as one that draws a picture, gets longer without every tool waiting as long."`
 	Tools                *[]SessionTool     `json:"tools,omitempty"`
-	Tts                  *string            `json:"tts,omitempty" doc:"Omit it and the config decides, or en-low-latency when there is no config."`
+	Tts                  *string            `json:"tts,omitempty" doc:"Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403."`
 	Ui                   *bool              `json:"ui,omitempty" doc:"Whether the model is told its config's ui_instructions in this session. Left out or true, it is told them after the instructions; false leaves them out, for a client that shows no UI. It is no filter: instructions that teach UI themselves still do, and a UI block the model writes is still split off the reply. Reopening or forking the session keeps it. A device may send it, since it only chooses whether to use what the agent's owner wrote."`
 	UserId               *string            `json:"user_id,omitempty" doc:"The name the agent joins the call as. It is not the owner of the session. The owner is the caller, from its auth. A backend opens a session for one of its end users with the query parameter user_id." default:"vision-agent"`
 	UserName             *string            `json:"user_name,omitempty" default:"Vision Agent"`
 	Video                *SessionVideo      `json:"video,omitempty"`
-	Voice                *string            `json:"voice,omitempty" doc:"The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI."`
+	Voice                *string            `json:"voice,omitempty" doc:"The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI. Server-side only: a device sending it is refused with a 403."`
 }
 
 func (*CreateSessionRequest) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
@@ -725,6 +725,20 @@ func (Modality) Schema(registry huma.Registry) *huma.Schema {
 	return namedEnum(registry, "Modality", "What kind of work was done. The first nine are routed across providers; sts is speech to speech, one native audio model in place of a transcriber, a text model and a voice. decision_model is a decision model: it answers named questions about a piece of text with a typed value and the probability behind it rather than with prose, which is what a guardrail asks before a reply is spoken. image is pictures drawn from a prompt, detection is boxes found in one, and ocr is the text of a page read from a picture of it. Memory, knowledge and phone are recorded but not routed, since there is one memory store, one knowledge base and one vendor per number, so the provider paths do not serve them while the statistics paths do.", "stt", "tts", "llm", "sts", "search", "decision_model", "image", "detection", "ocr", "memory", "knowledge", "phone")
 }
 
+// ModelVoice is a built-in voice a native speech model accepts by ID.
+type ModelVoice struct {
+	Default     *bool   `json:"default,omitempty" doc:"True when this is the model's default voice."`
+	Description *string `json:"description,omitempty" doc:"Short description of the voice's tone, style or accent."`
+	Gender      *string `json:"gender,omitempty" doc:"Voice presentation, such as female, male or neutral."`
+	Id          string  `json:"id" example:"marin" doc:"The voice identifier the provider accepts in its voice field."`
+	Name        string  `json:"name" example:"Marin" doc:"Display name for the voice."`
+}
+
+func (*ModelVoice) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
+	schema.Description = "A built-in voice a native speech model accepts by id."
+	return schema
+}
+
 // Provider is the Provider schema.
 type Provider struct {
 	Benchmark   *ProviderBenchmark `json:"benchmark,omitempty"`
@@ -739,6 +753,7 @@ type Provider struct {
 	Supports    []string           `json:"supports,omitempty" nullable:"false" example:"[\"keyterms\",\"diarize\"]" doc:"The options this model can be asked for, as the terms a request's options turn on: keyterms, diarize, similarity, semantic_turns and the like. A request whose options ask for one the model does not list is never routed to it, and is refused when nothing else could serve it. Left out when the model takes none."`
 	Tier        Tier               `json:"tier"`
 	UsageShare  *float64           `json:"usage_share,omitempty" doc:"This model's share of the modality's requests over the last seven days, across every customer, from 0 to 1. It is how popular the model is, and is 0 when nothing was served or the deployment keeps no statistics."`
+	Voices      []ModelVoice       `json:"voices,omitempty" nullable:"false" doc:"The built-in voices this native speech model accepts by id. Left out for models whose voices come from a voice library or that do not speak."`
 }
 
 // RecordingSource Where the audio to work on comes from. A URL is what every vendor's batch API takes and what anything longer than a clip should use; inline bytes save a caller with a short local file from having to host it somewhere first.
@@ -770,6 +785,7 @@ type RouterConfig struct {
 	Sts       *StsOptions    `json:"sts,omitempty"`
 	Stt       *SttOptions    `json:"stt,omitempty"`
 	Tts       *TtsOptions    `json:"tts,omitempty"`
+	SyncHash  string         `json:"sync_hash,omitempty" readOnly:"true" doc:"The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync."`
 	UpdatedAt time.Time      `json:"updated_at"`
 }
 
@@ -841,6 +857,7 @@ type Session struct {
 	ModelOverwrites  *ModelOverwrites        `json:"model_overwrites,omitempty"`
 	PinnedAt         *time.Time              `json:"pinned_at,omitempty" doc:"When the session was pinned. Absent for one that is not pinned."`
 	ProjectId        *string                 `json:"project_id,omitempty"`
+	Region           *string                 `json:"region,omitempty" readOnly:"true" doc:"The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards."`
 	ReviewNotes      *string                 `json:"review_notes,omitempty" doc:"Why the review scored the conversation as it did. Read by a backend only."`
 	ReviewScore      *int                    `json:"review_score,omitempty" doc:"How well the agent handled the conversation, from 1 to 5, written a few seconds after it ended. Read by a backend only."`
 	State            SessionState            `json:"state"`
@@ -1295,7 +1312,7 @@ type SkillRequest struct {
 	Description  string             `json:"description" doc:"The one line the fast model sees."`
 	Files        *map[string]string `json:"files,omitempty" doc:"The rest of the skill's folder beside SKILL.md, each file's text by its path relative to the folder, such as reference/forms.md or scripts/fill.py. The model reads them one at a time when it needs them. A file that is not .md, .mdx or .txt is a script, run in the sandbox, so a skill with one belongs only to an agent with a sandbox. At most 64 files and 1 MB in all."`
 	Instructions string             `json:"instructions" doc:"The full prompt, which only the subagent sees."`
-	Name         string             `json:"name" doc:"How the config names it, which is unique among that config's own skills."`
+	Name         string             `json:"name" doc:"How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \\ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox."`
 }
 
 // Speech is the Speech schema.

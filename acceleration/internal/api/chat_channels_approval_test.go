@@ -92,6 +92,24 @@ func (s *AppHooksSuite) TestAnApprovalAnsweredOnAnotherNodeReachesTheCall() {
 	s.Equal(http.StatusNotFound, s.approves(s.serverClient.on(other), cid, step, request, true), "answered already")
 }
 
+// In an app that keeps each team's agents to its own users, the writer answers the call in a
+// channel of a type a team's config answers in, whatever their own teams: the Router opened that
+// session for the channel and answers whoever Chat lets write there, so it takes their answer too.
+func (s *AppHooksSuite) TestAWriterAnswersACallInAChannelTypeWhateverTheirTeams() {
+	s.turnTeams(true)
+	s.holdsType("callouts", memberWrites)
+	s.approvingTagged("callouts", map[string]string{session.TeamTag: "red"})
+	anya := s.person("Anya")
+	channel := s.teamChannel("callouts", anya)
+	cid := "callouts:" + channel
+	s.says("callouts", channel, anya, "can you check the crm for my shift?", "")
+	step, request := s.awaitingIn(cid)
+
+	s.Equal(http.StatusNoContent, s.approves(s.data.signedInAs(anya), cid, step, request, false))
+	s.Require().NotNil(s.replyIn(cid), "the reply never finished")
+	s.Equal("cancelled", s.stepIn(cid)["status"])
+}
+
 // ChannelTypeTurnSuite is AppHooksSuite with the ten minutes a held call waits for its
 // person outside a test, so what ends the call is the turn, not the wait.
 type ChannelTypeTurnSuite struct{ AppHooksSuite }
@@ -158,7 +176,7 @@ func (s *ChannelTypeTurnSuite) TestASessionNotOpenedForTheMessageIsNotExpiredWit
 	cid := "callouts:" + channel
 	asked := "can you check the crm for my shift?"
 	written := s.writes("callouts", channel, anya, asked)
-	config, err := s.store.AgentConfig(s.T().Context(), s.customerID(), configID)
+	config, err := s.store.AgentConfigs.Get(s.T().Context(), s.customerID(), configID)
 	s.Require().NoError(err)
 	opened, err := s.router.chatChannelSession(s.T().Context(), hookOrigin{customer: s.customerID(), app: s.appID()},
 		config, cid, messageEvent{ChannelType: "callouts", ChannelID: channel})
@@ -266,16 +284,25 @@ func (s *AppHooksSuite) TestAWriterWhoLeftTheChannelCannotAnswer() {
 // type named, on the model that reaches for crm's echo, whose crm binding is the app's own
 // connection to the suite's fake and holds echo for a person to allow (require_approval).
 func (s *AppHooksSuite) approvingIn(channelType string) string {
+	return s.approvingTagged(channelType, nil)
+}
+
+// approvingTagged is approvingIn with the config's tags, none for nil.
+func (s *AppHooksSuite) approvingTagged(channelType string, tags map[string]string) string {
 	connector := s.customConnector(s.provider)
 	connection, echo := s.bearerConnection(s.token, nil, connector)
-	var created AgentConfig
-	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", map[string]any{
+	request := map[string]any{
 		"name": "rota-" + s.utils.uuid(), "mode": "text", "llm": "connecting/connector-model",
 		"chat_channels": []map[string]any{{"type": channelType}},
 		"connectors": []map[string]any{{"name": "crm", "connector_id": connector,
 			"connection": map[string]any{"type": "fixed", "connection_id": connection},
 			"tools":      []map[string]any{echo}, "require_approval": []string{"echo"}}},
-	}, &created))
+	}
+	if tags != nil {
+		request["tags"] = tags
+	}
+	var created AgentConfig
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", request, &created))
 	return created.Id
 }
 

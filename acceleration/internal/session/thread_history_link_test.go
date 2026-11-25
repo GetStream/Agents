@@ -99,7 +99,7 @@ func (s *EpisodeReadingSuite) TestAThreadSessionWhoseBoundaryCannotBeReadIsRefus
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(broken.Close()) })
 	s.Require().NoError(broken.Migrate(s.ctx))
-	_, err = broken.DB().ExecContext(s.ctx, "DROP TABLE IF EXISTS user_phone_history")
+	_, err = broken.GlobalDB().ExecContext(s.ctx, "DROP TABLE IF EXISTS user_phone_history")
 	s.Require().NoError(err)
 	reachable := s.store
 	s.store = broken

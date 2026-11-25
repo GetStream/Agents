@@ -28,14 +28,6 @@ public struct SessionOptions: Sendable {
     public var projectID: String?
     /// Your own labels, handed back untouched.
     public var custom: [String: RawJSON] = [:]
-    /// What the agent opens the call with.
-    public var greeting: Greeting?
-    public var llm: String?
-    public var stt: String?
-    public var tts: String?
-    /// What to change about the models for this session alone: thinking, temperature, a cap on
-    /// every reply and the rest.
-    public var modelOverwrites: ModelOverwrites?
     /// Has the agent remember the signed-in user: what it learned about them before is recalled
     /// here, and what it learns here is kept for their next session. Nil remembers nothing, and
     /// an incognito session never does.
@@ -49,13 +41,12 @@ public struct SessionOptions: Sendable {
     /// instead, since the router refuses a zone it does not know and the session with it. Set it
     /// to name another zone, which is sent as it is, or to nil to send none.
     public var timezone: String?
-    /// The voice the agent speaks in: a provider's own voice id, or one of your voices by id or by
-    /// the name you gave it. Prefix it with `custom:` to mean only yours.
-    public var voice: String?
     /// Functions of yours the agent may call, answered on this device.
     public var tools: [AgentTool] = []
-    /// Cost labels, carried onto every request the session makes.
-    public var tags: [String: String] = [:]
+    /// Whether to watch the conversation over its socket, which is what answers `tools` and
+    /// reports what the agent is doing as it happens. False opens it with no socket and no
+    /// tools: ask through `responses.create` and read the turn back from `responses`.
+    public var watch = true
     /// Where a sign-in the conversation asks for goes back to. Name your app's own scheme in
     /// reverse domain form, such as `com.example.app:/connected`, and the router hands the web
     /// authentication sheet back to the app. It is kept with the session, so a conversation
@@ -68,8 +59,9 @@ public struct SessionOptions: Sendable {
     /// leaves them in. Reopening the session keeps it.
     public var ui: Bool?
 
-    public init(agent: String? = nil) {
+    public init(agent: String? = nil, tools: [AgentTool] = []) {
         self.init(agent: agent, deviceZone: TimeZone.current.identifier)
+        self.tools = tools
     }
 
     /// Options whose zone starts as `deviceZone` rather than this device's, for a test.
@@ -200,7 +192,9 @@ public struct StreamAgents: Sendable {
     /// Holds a conversation in writing: no call is joined, nothing is transcribed or spoken.
     ///
     /// The replies still come through the model with the same instructions, skills and
-    /// knowledge a call would have had, and arrive as deltas on the session's socket.
+    /// knowledge a call would have had, and arrive as deltas on the session's socket. The
+    /// socket opens on `start()`, so whatever is read from `events()` before it is every event;
+    /// `agent(_:).sessions.create` opens it straight away.
     public func chat(agent: String? = nil, tools: [AgentTool] = []) async throws -> AgentSession {
         var options = SessionOptions(agent: agent)
         options.tools = tools
@@ -211,14 +205,14 @@ public struct StreamAgents: Sendable {
     public func chat(_ options: SessionOptions) async throws -> AgentSession {
         var options = options
         options.startVoice = false
-        let session = try await createSession(options)
-        return await AgentSession(backend: backend, session: session, tools: options.tools)
+        return try await open(options, start: false)
     }
 
     /// Puts an agent on the session's own call, `agent:<session id>`, and follows it.
     ///
     /// The agent joins as soon as this returns. Joining the same call from this device is what
-    /// `VoiceSession` is for; this only starts the agent and gives you the state layer.
+    /// `VoiceSession` is for; this only starts the agent and gives you the state layer, whose
+    /// socket opens on `start()`.
     public func voice(agent: String? = nil, tools: [AgentTool] = []) async throws -> AgentSession {
         var options = SessionOptions(agent: agent)
         options.tools = tools
@@ -229,8 +223,32 @@ public struct StreamAgents: Sendable {
     public func voice(_ options: SessionOptions) async throws -> AgentSession {
         var options = options
         options.startVoice = true
-        let session = try await createSession(options)
-        return await AgentSession(backend: backend, session: session, tools: options.tools)
+        return try await open(options, start: false)
+    }
+
+    /// Opens a session, and with `start` watches it before returning. One whose socket cannot
+    /// open is stopped rather than left with nobody watching it, and the failure thrown.
+    func open(_ options: SessionOptions, start: Bool) async throws -> AgentSession {
+        guard options.watch else {
+            // Unwatched, no tool is run here, so none is declared.
+            var options = options
+            options.tools = []
+            return await AgentSession(
+                backend: backend, session: try await createSession(options), tools: [], watched: false)
+        }
+        let session = await AgentSession(
+            backend: backend, session: try await createSession(options), tools: options.tools)
+        guard start else { return session }
+        await session.start()
+        if Task.isCancelled {
+            await session.close()
+            throw CancellationError()
+        }
+        if let failure = await session.failure {
+            try? await close(sessionID: session.id)
+            throw failure
+        }
+        return session
     }
 
     /// Starts a session without following it, for a caller building its own state layer.
@@ -240,27 +258,20 @@ public struct StreamAgents: Sendable {
             configId: options.configID.flatMap { $0.isEmpty ? nil : $0 },
             custom: options.custom.isEmpty ? nil : options.custom,
             description: options.description,
-            greeting: options.greeting?.schema,
             id: options.id.flatMap { $0.isEmpty ? nil : $0 },
             incognito: options.incognito,
-            llm: options.llm,
             // The router remembers only for a user id, and a device only ever means its own user.
             memory: options.memory.map {
                 SessionMemory(
                     appId: $0.appID, filter: $0.filter.isEmpty ? nil : $0.filter, userId: backend.user?.id)
             },
-            modelOverwrites: options.modelOverwrites?.schema,
             projectId: options.projectID,
             returnUrl: options.returnURL?.absoluteString,
             startVoice: options.startVoice ? true : nil,
-            stt: options.stt,
-            tags: options.tags.isEmpty ? nil : options.tags,
             timezone: options.timezone,
             title: options.title,
             tools: options.tools.map(\.schema),
-            tts: options.tts,
-            ui: options.ui,
-            voice: options.voice)
+            ui: options.ui)
 
         return Session(try await call { try await $0.createSession(createSessionRequest: body) })
     }
@@ -316,7 +327,6 @@ public struct StreamAgents: Sendable {
             description: options.description,
             incognito: options.incognito,
             messages: options.withoutHistory ? false : nil,
-            modelOverwrites: options.modelOverwrites?.schema,
             projectId: options.projectID,
             responseId: options.responseID.flatMap { $0.isEmpty ? nil : $0 },
             title: options.title)
@@ -356,15 +366,16 @@ public struct Sessions: Sendable {
         self.agent = agent
     }
 
-    /// Opens a conversation held in writing: no call is joined, nothing is transcribed or
-    /// spoken.
+    /// Opens a conversation and starts watching it, returning once the router is sending it
+    /// here: the tools in `options` are answered on this device from the first turn. It is held
+    /// in writing unless `options.startVoice` puts the agent on its call.
     ///
-    /// Ask it things with `responses`. Call `start()` on it to watch the reply arrive and to
-    /// answer the tools in `options`, which run on this device.
+    /// Ask it things with `responses`. With `options.watch` false it opens with no socket and
+    /// no tools, and what needs the socket throws, saying so.
     public func create(_ options: SessionOptions = SessionOptions()) async throws -> AgentSession {
         var options = options
         if options.agent == nil { options.agent = agent }
-        return try await agents.chat(options)
+        return try await agents.open(options, start: true)
     }
 
     /// One page of this caller's conversations, the ones that ended included: the ones

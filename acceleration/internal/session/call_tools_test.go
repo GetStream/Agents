@@ -8,9 +8,11 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
 )
@@ -32,7 +34,7 @@ func (s *CallToolsSuite) SetupTest() {
 
 func (s *CallToolsSuite) offered(spec Spec) []string {
 	var names []string
-	for _, tool := range spec.callTools(s.builtin) {
+	for _, tool := range spec.callTools(s.builtin, spec.keepsDialOut(true)) {
 		names = append(names, tool.Name)
 	}
 	return names
@@ -40,6 +42,33 @@ func (s *CallToolsSuite) offered(spec Spec) []string {
 
 func (s *CallToolsSuite) TestAPhoneSessionOnAConfigWithoutCallsOffersTransferAndPress() {
 	names := s.offered(FromConfig(store.AgentConfig{ID: "cfg-1"}))
+
+	s.Contains(names, "transfer")
+	s.Contains(names, "press")
+}
+
+// A backend's session with no config keeps the built-in transfer and press, as it always has.
+func (s *CallToolsSuite) TestABackendsSessionWithoutAConfigOffersTransferAndPress() {
+	names := s.offered(Spec{Caller: routing.Caller{UserID: "alice", ServerSide: true}, CallerKind: auth.KindServer})
+
+	s.Contains(names, "transfer")
+	s.Contains(names, "press")
+}
+
+// A device's session with no config has nobody who chose to let the agent dial out.
+func (s *CallToolsSuite) TestADevicesSessionWithoutAConfigIsNotOfferedTransferOrPress() {
+	s.T().Setenv(deviceToolsSwitch.Env, "true")
+	for _, kind := range []auth.Kind{auth.KindAuthenticated, auth.KindGuest, auth.KindAnonymous} {
+		names := s.offered(Spec{Caller: routing.Caller{UserID: "alice"}, CallerKind: kind})
+
+		s.NotContains(names, "transfer", kind)
+		s.NotContains(names, "press", kind)
+	}
+}
+
+// Until its switch is on, a device's session with no config is offered both, as before.
+func (s *CallToolsSuite) TestWithTheSwitchOffADevicesSessionWithoutAConfigKeepsTransferAndPress() {
+	names := s.offered(Spec{Caller: routing.Caller{UserID: "alice"}, CallerKind: auth.KindAuthenticated})
 
 	s.Contains(names, "transfer")
 	s.Contains(names, "press")
@@ -138,7 +167,7 @@ func (s *SessionSuite) hangsUp(created *Session) {
 	s.hears(created)
 	s.says(created, "that is all, thanks")
 	s.eventually(func() bool {
-		return created.State() == Ended && !s.manager.Running(created.ID())
+		return created.State() == Ended && !s.manager.Running(created.Spec().CustomerID, created.ID())
 	}, "the agent hung up and the session was not closed")
 	s.Equal(EndAgentHangup, created.EndReason())
 }
@@ -267,4 +296,21 @@ func (s *SessionSuite) TestATimeoutKeepsItsReason() {
 
 	s.timedOut(created)
 	s.Equal(TimeoutHangup, created.EndReason())
+}
+
+// A tool the device declared at open is still its own after it is withdrawn: what it
+// returned is still in the conversation.
+func TestADevicesToolStaysItsOwnAfterItIsWithdrawn(t *testing.T) {
+	session := &Session{spec: Spec{Tools: []harness.Tool{{Name: "find_department"}}}}
+
+	session.labelMu.Lock()
+	session.declare(nil)
+	session.labelMu.Unlock()
+
+	if !session.devicesTool("find_department") {
+		t.Fatal("a withdrawn tool of the device's counts as a router tool")
+	}
+	if session.devicesTool("lookup") {
+		t.Fatal("a tool the device never declared counts as the device's")
+	}
 }

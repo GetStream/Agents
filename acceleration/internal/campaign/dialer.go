@@ -46,14 +46,15 @@ func NewPhoneDialer(phone *phone.Service, sessions *session.Manager, store *stor
 }
 
 // Dial places one call and stays on the line until the conversation is over. The agent config
-// is read at each dial, so a change to it reaches the next person rung.
+// is read at each dial, so a change to it reaches the next person rung. How a call that held
+// a session ended is left for the runner to read.
 func (d *phoneDialer) Dial(ctx context.Context, dial Dial) (Dialed, error) {
-	config, err := d.store.AgentConfig(ctx, dial.Campaign.CustomerID, cmp.Or(dial.Step.ConfigID, dial.Campaign.ConfigID))
+	config, err := d.store.AgentConfigs.Get(ctx, dial.Campaign.CustomerID, cmp.Or(dial.Step.ConfigID, dial.Campaign.ConfigID))
 	if errors.Is(err, store.ErrNoAgentConfig) {
 		return Dialed{Result: Paused, Reason: reasonConfigMissing}, nil
 	}
 	if err != nil {
-		return Dialed{}, err
+		return Dialed{Result: DialFailed, Reason: codeDialFailed}, err
 	}
 
 	if !dial.Step.Voicemail.hangsUp() && session.FromConfig(config).Native() {
@@ -73,7 +74,8 @@ func (d *phoneDialer) Dial(ctx context.Context, dial Dial) (Dialed, error) {
 	placed, err := d.phone.Call(ctx, request)
 	if err != nil {
 		dialed := resultOf(err)
-		if dialed.Result == "" {
+		// A failure, as opposed to a refusal, is returned to be logged.
+		if dialed.Result == "" || dialed.Result == DialFailed || dialed.Reason == reasonPlacingFailed {
 			return dialed, err
 		}
 		return dialed, nil
@@ -103,8 +105,7 @@ func (d *phoneDialer) Dial(ctx context.Context, dial Dial) (Dialed, error) {
 	if created.EndReason() == session.EndVoicemail {
 		dialed.Result = Voicemail
 	}
-	dialed.Outcome, err = callOutcome(context.WithoutCancel(ctx), d.store, dial.Campaign.CustomerID, placed.SessionID)
-	return dialed, err
+	return dialed, nil
 }
 
 // hold waits for the conversation to end, and ends it if nothing else does.
@@ -144,13 +145,41 @@ func (d *phoneDialer) close(created *session.Session) {
 	}
 }
 
+// outcomeRetries are the waits between reads of how a call ended. A database blip passes in
+// well under a second, and a read that fails every time leaves the contact leased for the
+// router that takes it over to read again.
+var outcomeRetries = []time.Duration{200 * time.Millisecond, time.Second}
+
+// errOutcomeUnread is a call whose outcome could not be read.
+var errOutcomeUnread = errors.New("campaign: how the call ended could not be read")
+
+// readOutcome is callOutcome, read again after each of outcomeRetries while it fails.
+func readOutcome(ctx context.Context, st *store.Store, customerID, callID string) (outcome.Outcome, error) {
+	read, err := callOutcome(ctx, st, customerID, callID)
+	for _, wait := range outcomeRetries {
+		if err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(wait):
+		}
+		read, err = callOutcome(ctx, st, customerID, callID)
+	}
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", errOutcomeUnread, err)
+	}
+	return read, nil
+}
+
 // callOutcome is how the call placed into callID ended, as the phone keeps it. A phone that
 // joined is completed, which the keeper decides only once its leg ends. One it has not decided
 // yet, from a vendor that never reports or one whose report is late, is unknown.
 func callOutcome(ctx context.Context, st *store.Store, customerID, callID string) (outcome.Outcome, error) {
 	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
-	calls, err := st.PhoneCalls(ctx, customerID, []string{callID})
+	calls, err := st.CallLegs.SelectPlaced(ctx, customerID, []string{callID})
 	if err != nil {
 		return outcome.Unknown, err
 	}

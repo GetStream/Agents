@@ -64,7 +64,7 @@ func NewClient(options rueidis.ClientOption) (rueidis.Client, error) {
 }
 
 // Retry is build, for a test whose setup dials the Redis at address through code that tries
-// once, such as live.New, appconfig.New or a relay subscription: it builds again until Ready's
+// once, such as live.New, store.Open or a relay subscription: it builds again until Ready's
 // minute is up, and fails at once with Ready's error when no Redis answered at address. An
 // empty address skips Ready.
 //

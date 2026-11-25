@@ -52,15 +52,15 @@ func TestAShardedWriterNeverWaitsOnCountingGrants(t *testing.T) {
 		require.NoError(t, db.Migrate(ctx))
 		require.NoError(t, db.Close())
 	}
-	db, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shards: map[string]string{"here": shard}})
+	db, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shard: "here"})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	grant := store.LimitGrant{OrganizationID: "org-" + uuid.NewString(), Subject: usage.SubjectOrganization,
 		AmountMicros: 1_000_000, Reason: "test", Actor: "test"}
-	require.NoError(t, db.AddGrant(ctx, &grant, store.LimitAudit{CustomerID: grant.OrganizationID, Source: store.AuditSourceAPI}))
+	require.NoError(t, db.LimitGrants.Insert(ctx, &grant, store.LimitAudit{CustomerID: grant.OrganizationID, Source: store.AuditSourceAPI}))
 
 	// The shared database cannot count anything: limit_grants is held by another session.
-	locked, err := db.DB().BeginTx(ctx, nil)
+	locked, err := db.GlobalDB().BeginTx(ctx, nil)
 	require.NoError(t, err)
 	defer locked.Rollback() //nolint:errcheck // nothing was written
 	_, err = locked.ExecContext(ctx, "LOCK TABLE limit_grants IN ACCESS EXCLUSIVE MODE")
@@ -90,7 +90,7 @@ func TestAShardedWriterNeverWaitsOnCountingGrants(t *testing.T) {
 	require.NoError(t, locked.Rollback())
 	require.Eventually(t, func() bool { return counted.has(first.request.UsageID) && counted.has(second.request.UsageID) },
 		10*time.Second, 10*time.Millisecond, "counted once the shared database answers")
-	read, err := db.Grant(ctx, "", grant.ID)
+	read, err := db.LimitGrants.Get(ctx, "", grant.ID)
 	require.NoError(t, err)
 	require.EqualValues(t, 50, read.UsedMicros)
 	closing, cancel := context.WithTimeout(ctx, 5*time.Second)

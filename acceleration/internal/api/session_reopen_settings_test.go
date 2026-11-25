@@ -20,7 +20,8 @@ import (
 // SessionReopenSettingsSuite covers what a conversation carried on keeps of what its caller
 // opened it with, the tool_timeout_ms and the declared tools, and what resumeSession says
 // over them. A stopped session is no longer held, so the next request carries it on from its
-// row, as a router that never held it would.
+// row, as a router that never held it would; one that ended here (endHere) is carried on from
+// the spec it ran on. A fork keeps them as a conversation carried on does.
 type SessionReopenSettingsSuite struct {
 	RouterSuite
 }
@@ -177,6 +178,63 @@ func (s *SessionReopenSettingsSuite) TestADeviceDoesNotSetTheToolsOrTimeoutItsBa
 	s.Equal(180_000, held.ToolTimeoutMs)
 }
 
+func (s *SessionReopenSettingsSuite) TestABackendsToolsAreNotCarriedOnByItsUsersDeviceFromAConversationEndedHere() {
+	user := s.data.createUser()
+	request := textSession(nil)
+	request.Tools = s.declared("refund_order")
+	opened := s.serverClient.actingFor(user).createSession(request)
+	s.endHere(opened.Id)
+
+	s.Require().Equal(http.StatusOK,
+		user.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/resume", ResumeSessionRequest{}, nil))
+
+	s.Empty(s.heldSpec(opened.Id).Tools, "the device would answer the backend's tool")
+}
+
+func (s *SessionReopenSettingsSuite) TestADeviceDoesNotSetTheToolsOrTimeoutItsBackendCarriesOnWithFromAConversationEndedHere() {
+	user := s.data.createUser()
+	backend := s.serverClient.actingFor(user)
+	request := textSession(nil)
+	request.ToolTimeoutMs = pointerTo(180_000)
+	request.Tools = s.declared("refund_order")
+	opened := backend.createSession(request)
+	s.endHere(opened.Id)
+	s.Require().Equal(http.StatusOK, user.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/resume",
+		ResumeSessionRequest{ToolTimeoutMs: pointerTo(1)}, nil))
+	s.endHere(opened.Id)
+
+	s.Require().Equal(http.StatusOK,
+		backend.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/resume", ResumeSessionRequest{}, nil))
+
+	held := s.heldSpec(opened.Id)
+	s.Equal(s.harnessTools("refund_order"), held.Tools)
+	s.Equal(180_000, held.ToolTimeoutMs)
+}
+
+func (s *SessionReopenSettingsSuite) TestADeviceCarriesOnAConversationEndedHereWithItsOverwrites() {
+	user := s.data.createUser()
+	request := textSession(nil)
+	request.ModelOverwrites = &ModelOverwrites{Llm: pointerTo("counted/counted-model")}
+	opened := s.serverClient.actingFor(user).createSession(request)
+	s.endHere(opened.Id)
+
+	s.Require().Equal(http.StatusOK,
+		user.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/resume", ResumeSessionRequest{}, nil))
+
+	s.Equal("counted/counted-model", s.heldSpec(opened.Id).ModelOverwrites.LLM)
+}
+
+func (s *SessionReopenSettingsSuite) TestAConversationEndedHereIsCarriedOnWithItsTools() {
+	request := textSession(nil)
+	request.Tools = s.declared("lookup_order")
+	opened := s.serverClient.createSession(request)
+	s.endHere(opened.Id)
+
+	s.resume(opened.Id, ResumeSessionRequest{})
+
+	s.Equal(s.harnessTools("lookup_order"), s.heldSpec(opened.Id).Tools)
+}
+
 func (s *SessionReopenSettingsSuite) TestResumesOfAnEndedSessionAtOnceAllCarryItOn() {
 	ended := s.endedWith(180_000, s.declared("lookup_order"))
 
@@ -223,6 +281,28 @@ func (s *SessionReopenSettingsSuite) TestAForkOfAnEndedSessionStillHasTheDefault
 	s.Zero(s.heldSpec(forked.Id).ToolTimeoutMs)
 }
 
+func (s *SessionReopenSettingsSuite) TestABackendsToolsAreNotForkedByItsUsersDevice() {
+	user := s.data.createUser()
+	request := textSession(nil)
+	request.Tools = s.declared("refund_order")
+	running := s.serverClient.actingFor(user).createSession(request)
+
+	forked := s.fork(user, running.Id)
+
+	s.Empty(s.heldSpec(forked).Tools, "the device would answer the backend's tool")
+}
+
+func (s *SessionReopenSettingsSuite) TestADevicesForkOfItsOwnConversationKeepsItsTools() {
+	user := s.data.createUser()
+	request := textSession(nil)
+	request.Tools = s.declared("share_location")
+	running := user.createSession(request)
+
+	forked := s.fork(user, running.Id)
+
+	s.Equal(s.harnessTools("share_location"), s.heldSpec(forked).Tools)
+}
+
 func (s *SessionReopenSettingsSuite) TestOnlyItsOwnerResumesASession() {
 	owner := s.data.createUser()
 	opened := owner.createSession(textSession(nil))
@@ -240,6 +320,46 @@ func (s *SessionReopenSettingsSuite) TestANegativeToolTimeoutOnAResumeIsRefused(
 
 	s.Equal(http.StatusBadRequest, s.serverClient.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/resume",
 		ResumeSessionRequest{ToolTimeoutMs: pointerTo(-1)}, nil))
+}
+
+// A resume that cannot carry the conversation on for a reason of the request's own, tools that
+// name one tool twice, is the caller's to change: a 400 that says why, not the 500 of a failure
+// that is ours.
+func (s *SessionReopenSettingsSuite) TestAResumeNamingOneToolTwiceIsRefusedAsABadRequest() {
+	ended := s.endedWith(0, nil)
+	twice := append(*s.declared("book_flight"), *s.declared("book_flight")...)
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/sessions/"+ended+"/resume",
+		ResumeSessionRequest{Tools: &twice})
+
+	s.Equal(http.StatusBadRequest, status, string(body))
+	s.Contains(string(body), `"type":"invalid_request"`)
+	s.Contains(string(body), `"code":"invalid_request"`)
+	s.Contains(string(body), "tool book_flight is declared twice")
+}
+
+// A message to a stopped conversation whose agent config can no longer be run is the same: the
+// reopen is refused as a bad request, with the reason.
+func (s *SessionReopenSettingsSuite) TestAMessageToAConversationWhoseConfigCannotRunIsRefusedAsABadRequest() {
+	var config AgentConfig
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs",
+		map[string]any{"name": "reopened-" + s.utils.uuid(), "mode": "text"}, &config))
+	opened := s.serverClient.createSession(CreateSessionRequest{ConfigId: &config.Id})
+	s.Require().Eventually(func() bool { return s.stored(opened.Id) }, settleFor, 20*time.Millisecond,
+		"the row is written")
+	s.serverClient.stopSession(opened.Id)
+	stored, err := s.store.AgentConfigs.Get(context.Background(), s.customerID(), config.Id)
+	s.Require().NoError(err)
+	stored.Harness = "gone"
+	s.Require().NoError(s.store.AgentConfigs.Update(context.Background(), &stored))
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/respond",
+		SayRequest{Text: "where is my order"})
+
+	s.Equal(http.StatusBadRequest, status, string(body))
+	s.Contains(string(body), `"type":"invalid_request"`)
+	s.Contains(string(body), `"code":"invalid_request"`)
+	s.Contains(string(body), `there is no harness called \"gone\"`)
 }
 
 // endedWith is a conversation the backend opened with timeout and tools, whose row was
@@ -300,10 +420,20 @@ func (s *SessionReopenSettingsSuite) respond(id string) {
 		"/v1/agents/sessions/"+id+"/respond", SayRequest{Text: "where is my order"}, nil))
 }
 
-// heldSpec is the spec of the session id this node holds.
+// fork forks the session id as caller, with none of its history, answering the fork's id.
+func (s *SessionReopenSettingsSuite) fork(caller *testClient, id string) string {
+	var forked Session
+	s.Require().Equal(http.StatusCreated, caller.do(http.MethodPost, "/v1/agents/sessions/"+id+"/fork",
+		ForkSessionRequest{Messages: pointerTo(false)}, &forked))
+	return forked.Id
+}
+
+// heldSpec is the spec of the session id this node holds, which is running: one carried on
+// rather than the one that ended under its id.
 func (s *SessionReopenSettingsSuite) heldSpec(id string) session.Spec {
 	held, ok := s.manager.Get(id, session.Owner{CustomerID: s.customerID(), Kind: auth.KindServer})
 	s.Require().True(ok, "session %s is held here", id)
+	s.Require().Equal(session.Live, held.State(), "session %s is running", id)
 	return held.Spec()
 }
 

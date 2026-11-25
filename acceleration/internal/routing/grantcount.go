@@ -109,7 +109,7 @@ func (c *grantCounter) count(job countJob) {
 	delay := retryFirst
 	for {
 		ctx, cancel := context.WithTimeout(c.ctx, c.timeout)
-		_, err := c.store.AddGrantUses(ctx, uses)
+		_, err := c.store.LimitGrantUses.InsertMany(ctx, uses)
 		cancel()
 		if err == nil {
 			if c.counted != nil {

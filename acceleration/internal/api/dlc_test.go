@@ -11,8 +11,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	dlctelnyx "github.com/GetStream/Vision-Agents/acceleration/internal/dlc/telnyx"
@@ -35,7 +38,25 @@ type campaignRegistry struct {
 	mu        sync.Mutex
 	campaigns map[string]string
 	assigned  map[string]string
+	// brandAnswers and campaignAnswers are the statuses an app's next registrations are
+	// answered with, each registered whatever the answer; past them every one is answered 200.
+	// brandsAsked and campaignsAsked count each app's registrations asked for. A poll asks
+	// about every app's use cases, so each test reads its own app's: one known by its
+	// profile's contact email, and a campaign by its brand's app.
+	brandAnswers, campaignAnswers map[string][]int
+	brandsAsked, campaignsAsked   map[string]int
+	// brands are the brand registered for each app and owners the app of each brand, and
+	// listed the campaigns a list of a brand's answers, with the reference each carried.
+	brands, owners map[string]string
+	listed         []listedCampaign
 }
+
+// listedCampaign is a campaign as a list of its brand's names it.
+type listedCampaign struct{ id, brand, reference string }
+
+// campaignRegistryFails is a campaign status no vendor sends: the fake answers a read of a
+// campaign set to it with a 500.
+const campaignRegistryFails = "REGISTRY_FAILS"
 
 func (r *campaignRegistry) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	r.mu.Lock()
@@ -46,15 +67,43 @@ func (r *campaignRegistry) ServeHTTP(w http.ResponseWriter, request *http.Reques
 	path := request.URL.Path
 	switch {
 	case request.Method == http.MethodPost && path == "/v2/10dlc/brand":
-		fmt.Fprintf(w, `{"brandId":%q,"status":"OK","identityStatus":"VERIFIED"}`, uuid.NewString())
+		app := body["email"]
+		r.brandsAsked[app]++
+		if answer := nextAnswer(r.brandAnswers, app); answer != http.StatusOK {
+			w.WriteHeader(answer)
+			return
+		}
+		r.brands[app] = uuid.NewString()
+		r.owners[r.brands[app]] = app
+		fmt.Fprintf(w, `{"brandId":%q,"status":"OK","identityStatus":"VERIFIED"}`, r.brands[app])
 	case request.Method == http.MethodGet && strings.HasPrefix(path, "/v2/10dlc/brand/"):
 		fmt.Fprintf(w, `{"brandId":%q,"status":"OK","identityStatus":"VERIFIED"}`, strings.TrimPrefix(path, "/v2/10dlc/brand/"))
 	case request.Method == http.MethodPost && path == "/v2/10dlc/campaignBuilder":
+		app := r.owners[body["brandId"]]
+		r.campaignsAsked[app]++
 		id := uuid.NewString()
 		r.campaigns[id] = "TCR_PENDING"
+		r.listed = append(r.listed, listedCampaign{id: id, brand: body["brandId"], reference: body["referenceId"]})
+		if answer := nextAnswer(r.campaignAnswers, app); answer != http.StatusOK {
+			w.WriteHeader(answer)
+			return
+		}
 		fmt.Fprintf(w, `{"campaignId":%q,"campaignStatus":"TCR_PENDING"}`, id)
+	case request.Method == http.MethodGet && path == "/v2/10dlc/campaign":
+		var records []string
+		for _, listed := range r.listed {
+			if listed.brand == request.URL.Query().Get("brandId") {
+				records = append(records, fmt.Sprintf(`{"campaignId":%q,"campaignStatus":%q,"referenceId":%q}`,
+					listed.id, r.campaigns[listed.id], listed.reference))
+			}
+		}
+		fmt.Fprintf(w, `{"records":[%s],"page":1,"totalRecords":%d}`, strings.Join(records, ","), len(records))
 	case request.Method == http.MethodGet && strings.HasPrefix(path, "/v2/10dlc/campaign/"):
 		id := strings.TrimPrefix(path, "/v2/10dlc/campaign/")
+		if r.campaigns[id] == campaignRegistryFails {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		fmt.Fprintf(w, `{"campaignId":%q,"campaignStatus":%q}`, id, r.campaigns[id])
 	case request.Method == http.MethodPost && path == "/v2/10dlc/phone_number_campaigns":
 		r.assigned[body["phoneNumber"]] = body["campaignId"]
@@ -62,6 +111,59 @@ func (r *campaignRegistry) ServeHTTP(w http.ResponseWriter, request *http.Reques
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
+}
+
+// nextAnswer takes the first of app's answers, or 200 when there is none.
+func nextAnswer(answers map[string][]int, app string) int {
+	if len(answers[app]) == 0 {
+		return http.StatusOK
+	}
+	answer := answers[app][0]
+	answers[app] = answers[app][1:]
+	return answer
+}
+
+// answer has app's next brand and campaign registrations answered with brands and campaigns,
+// and reports how many of each it asked for so far.
+func (r *campaignRegistry) answer(app string, brands, campaigns []int) (int, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.brandAnswers[app], r.campaignAnswers[app] = brands, campaigns
+	return r.brandsAsked[app], r.campaignsAsked[app]
+}
+
+// asked is how many brand and campaign registrations app asked for so far.
+func (r *campaignRegistry) asked(app string) (int, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.brandsAsked[app], r.campaignsAsked[app]
+}
+
+// campaignFor is the campaign registered with reference, empty when there is none.
+func (r *campaignRegistry) campaignFor(reference string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, listed := range r.listed {
+		if listed.reference == reference {
+			return listed.id
+		}
+	}
+	return ""
+}
+
+// brandOf is the brand registered for app.
+func (r *campaignRegistry) brandOf(app string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.brands[app]
+}
+
+// unlist forgets every campaign registered for app so far, as registrations Telnyx never
+// carried out.
+func (r *campaignRegistry) unlist(app string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.listed = slices.DeleteFunc(r.listed, func(listed listedCampaign) bool { return r.owners[listed.brand] == app })
 }
 
 func (r *campaignRegistry) set(campaignID, status string) {
@@ -95,10 +197,14 @@ type dlcRegistration struct {
 	staff *testClient
 	// logged is what the router logged, at debug and up.
 	logged *lockedLog
+	// holding is whether the test running stored use cases through held.
+	holding bool
 }
 
 func (s *dlcRegistration) SetupSuite() {
-	s.registry = &campaignRegistry{campaigns: map[string]string{}, assigned: map[string]string{}}
+	s.registry = &campaignRegistry{campaigns: map[string]string{}, assigned: map[string]string{},
+		brandAnswers: map[string][]int{}, campaignAnswers: map[string][]int{}, brandsAsked: map[string]int{},
+		campaignsAsked: map[string]int{}, brands: map[string]string{}, owners: map[string]string{}}
 	fake := httptest.NewServer(s.registry)
 	s.T().Cleanup(fake.Close)
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -126,8 +232,14 @@ func (s *dlcRegistration) completeProfile() {
 		LegalBusinessName: "Acme Inc", LegalEntityType: "corporation", OrganizationType: "private",
 		BusinessRegistrationCountry: "US", TaxId: "12-3456789", RegisteredAddress: &address,
 		WebsiteUrl: "https://acme.example", Industry: "technology",
-		AuthorizedContactEmail: "ops@acme.example", AuthorizedContactPhone: "+15551230000",
+		AuthorizedContactEmail: s.contactEmail(), AuthorizedContactPhone: "+15551230000",
 	}, nil))
+}
+
+// contactEmail is the app's profile's contact email, which tells the fake registry its
+// registrations from other apps'.
+func (s *dlcRegistration) contactEmail() string {
+	return "ops+" + s.customerID() + "@acme.example"
 }
 
 func completeUseCase(name string) UseCaseRequest {
@@ -201,7 +313,7 @@ func (s *dlcRegistration) spend(field string, amount int) {
 
 func (s *DLCSuite) TestAUseCaseIsApprovedByStreamAndThenByTheVendor() {
 	number := store.PhoneNumber{CustomerID: s.customerID(), E164: s.utils.number(), Vendor: "telnyx"}
-	s.Require().NoError(s.store.RecordNumber(context.Background(), &number))
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &number))
 	sent := s.submitted()
 	s.Equal(UseCaseStatus(dlc.Submitted), sent.Status)
 
@@ -233,6 +345,175 @@ func (s *DLCSuite) TestAUseCaseIsApprovedByStreamAndThenByTheVendor() {
 	dialed, failure := s.dial("+15559990000")
 	s.Equal(http.StatusBadRequest, dialed, "past the gate, the call fails for want of Stream: "+failure)
 	s.Contains(failure, "no Stream app")
+}
+
+// A brand Telnyx refused registered nothing, and is asked for again. One whose registration was
+// answered with a failure may be registered, and billed, all the same, so it is not asked for
+// again, however often the poller looks.
+func (s *DLCSuite) TestABrandWhoseRegistrationWasNotAnsweredIsNotRegisteredTwice() {
+	brands, _ := s.registry.answer(s.contactEmail(), []int{http.StatusBadRequest, http.StatusInternalServerError}, nil)
+	sent := s.submitted()
+
+	status, reviewed := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.Equal(UseCaseStatus(dlc.VendorPending), reviewed.Status)
+	s.registrar10DLC.Poll(context.Background()) // asks again after the refusal
+	s.registrar10DLC.Poll(context.Background())
+
+	asked, _ := s.registry.asked(s.contactEmail())
+	s.Equal(2, asked-brands, "refused, then asked once more")
+	s.Empty(s.loggedLines("a 10DLC registration was not answered", s.customerID()), "one that may still be registering is not reported lost")
+}
+
+// A brand whose registration was not answered, and still has no answer once it could no longer
+// be running, may be registered and billed at Telnyx, which keeps no reference of ours to find
+// it by: the use case is handed back to the app as vendor_rejected, which it may delete, and the
+// brand is not asked for again until support has looked it up.
+func (s *DLCSuite) TestABrandWhoseAnswerWasLostIsLeftToSupportAndFreesTheUseCase() {
+	brands, _ := s.registry.answer(s.contactEmail(), []int{http.StatusInternalServerError}, nil)
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.backdate("business_profiles", "brand_requested_at", "customer_id", s.customerID())
+
+	s.registrar10DLC.Poll(context.Background())
+	s.registrar10DLC.Poll(context.Background())
+
+	s.Equal(UseCaseStatus(dlc.VendorRejected), s.useCase(sent.Id).Status)
+	asked, _ := s.registry.asked(s.contactEmail())
+	s.Equal(1, asked-brands, "never asked for again")
+	s.Len(s.loggedLines("a 10DLC registration was not answered", s.customerID()), 1)
+	s.Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/phone/use-cases/"+sent.Id, nil, nil))
+}
+
+// A campaign whose registration was not answered is found at Telnyx by the use case it was
+// registered for, and recorded, without asking for a second one.
+func (s *DLCSuite) TestACampaignWhoseAnswerWasLostIsFoundAtTheVendor() {
+	_, campaigns := s.registry.answer(s.contactEmail(), nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+	status, reviewed := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.Require().Nil(reviewed.VendorCampaignId)
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+
+	s.registrar10DLC.Poll(context.Background())
+
+	found := s.useCase(sent.Id)
+	s.Require().NotNil(found.VendorCampaignId)
+	s.Equal(s.registry.campaignFor(sent.Id), *found.VendorCampaignId)
+	_, asked := s.registry.asked(s.contactEmail())
+	s.Equal(1, asked-campaigns)
+}
+
+// A campaign Telnyx does not hold, its registration answered with a failure, was never
+// registered: it is asked for again.
+func (s *DLCSuite) TestACampaignTheVendorNeverRegisteredIsAskedForAgain() {
+	_, campaigns := s.registry.answer(s.contactEmail(), nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.registry.unlist(s.contactEmail())
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+
+	s.registrar10DLC.Poll(context.Background())
+	s.registrar10DLC.Poll(context.Background())
+
+	found := s.useCase(sent.Id)
+	s.Require().NotNil(found.VendorCampaignId)
+	s.Equal(s.registry.campaignFor(sent.Id), *found.VendorCampaignId)
+	_, asked := s.registry.asked(s.contactEmail())
+	s.Equal(2, asked-campaigns)
+}
+
+// A brand Telnyx registered whose id the database would not take is logged with its id, so
+// support can record it, and is not asked for again.
+func (s *DLCSuite) TestABrandRegisteredWhoseIdCouldNotBeSavedIsLoggedWithIt() {
+	s.failQueries(`SET vendor_brand_id = '`)
+	sent := s.submitted()
+
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+
+	s.Require().Equal(http.StatusOK, status)
+	line := s.loggedLine("could not save a brand the vendor registered", s.customerID())
+	s.Contains(line, "level=ERROR")
+	s.Contains(line, "vendor_brand_id="+s.registry.brandOf(s.contactEmail()))
+}
+
+// A campaign Telnyx registered whose save the database failed is logged with its id, and found
+// at Telnyx by the poller once the database is back.
+func (s *DLCSuite) TestACampaignRegisteredWhoseSaveFailedIsFoundAtTheVendorLater() {
+	_, campaigns := s.registry.asked(s.contactEmail())
+	s.failQueries(registeredNote)
+	sent := s.submitted()
+	status, _ := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	line := s.loggedLine("could not save a campaign the vendor registered", sent.Id)
+	s.Contains(line, "level=ERROR")
+	s.Contains(line, "vendor_campaign_id="+s.registry.campaignFor(sent.Id))
+	s.failQueries("no query holds this")
+	s.backdate("dlc_use_cases", "campaign_requested_at", "id", sent.Id)
+
+	s.registrar10DLC.Poll(context.Background())
+
+	found := s.useCase(sent.Id)
+	s.Require().NotNil(found.VendorCampaignId)
+	s.Equal(s.registry.campaignFor(sent.Id), *found.VendorCampaignId)
+	_, asked := s.registry.asked(s.contactEmail())
+	s.Equal(1, asked-campaigns)
+}
+
+// registeredNote begins the review entry a campaign's registration writes.
+const registeredNote = "Registered as campaign "
+
+// backdate moves a registration's request time past the time one may still be running, as if
+// it had been asked for long ago.
+func (s *dlcRegistration) backdate(table, column, key, value string) {
+	_, err := s.store.GlobalDB().NewUpdate().Table(table).
+		Set("? = ? - interval '11 minutes'", bun.Ident(column), bun.Ident(column)).
+		Where("? = ?", bun.Ident(key), value).
+		Exec(context.Background())
+	s.Require().NoError(err)
+}
+
+// loggedLines are the lines logged with message that name about, the suite's tests sharing
+// one log.
+func (s *dlcRegistration) loggedLines(message, about string) []string {
+	var found []string
+	for line := range strings.Lines(s.logged.String()) {
+		if strings.Contains(line, `msg="`+message) && strings.Contains(line, "="+about+" ") {
+			found = append(found, line)
+		}
+	}
+	return found
+}
+
+// loggedLine is the one line logged with message that names about.
+func (s *dlcRegistration) loggedLine(message, about string) string {
+	found := s.loggedLines(message, about)
+	s.Require().Len(found, 1, "one line %q about %s", message, about)
+	return found[0]
+}
+
+// useCase is one of the app's use cases.
+func (s *dlcRegistration) useCase(id string) UseCase {
+	var found UseCase
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/phone/use-cases/"+id, nil, &found))
+	return found
+}
+
+// A campaign whose registration was answered with a failure may be registered, and billed, all
+// the same, so it is not asked for again.
+func (s *DLCSuite) TestACampaignWhoseRegistrationWasNotAnsweredIsNotRegisteredTwice() {
+	_, campaigns := s.registry.answer(s.contactEmail(), nil, []int{http.StatusInternalServerError})
+	sent := s.submitted()
+
+	status, reviewed := s.review(sent.Id, dlc.Approve, "")
+	s.Require().Equal(http.StatusOK, status)
+	s.Nil(reviewed.VendorCampaignId)
+	s.registrar10DLC.Poll(context.Background())
+
+	_, asked := s.registry.asked(s.contactEmail())
+	s.Equal(1, asked-campaigns)
 }
 
 // pendingWithTheVendor is a use case Stream approved and Telnyx holds a campaign for.
@@ -289,6 +570,144 @@ func (s *DLCSuite) TestARejectionThePollerFindsIsCountedOnce() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/phone/use-cases/"+id, nil, &rejected))
 	s.Equal(UseCaseStatus(dlc.VendorRejected), rejected.Status)
 	s.Equal(1.0, campaignsFailed()-before)
+}
+
+// Use cases past the first page of those the vendor holds are still asked about: one Poll
+// reads them all. They are dated before any other test's, so the 55th and the 230th of 250
+// are the 55th and 230th the poll reads, past the 51 a poll once read and past the first page
+// of the poll's own paging. Catches a poll that reads one page and stops, or a cursor that
+// does not carry it to the next.
+func (s *DLCSuite) TestOnePollReachesAUseCasePastTheFirstPage() {
+	held := s.held(s.customerID(), 250, 54, 229)
+
+	s.registrar10DLC.Poll(context.Background())
+
+	for _, i := range []int{54, 229} {
+		var read UseCase
+		s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/phone/use-cases/"+held[i].ID, nil, &read))
+		s.Equal(UseCaseStatus(dlc.Approved), read.Status, "use case %d", i+1)
+	}
+}
+
+// heldSince dates the use cases held stores before any other test's, so a poll reads them first.
+var heldSince = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// held stores n use cases of customerID the vendor holds, a second apart from heldSince on,
+// which the vendor reports as provisioned at the indexes in provisioned and as pending
+// otherwise. Every app's held use cases are polled, so they are deleted when the test ends,
+// and any a killed run left are deleted before the test's first.
+func (s *dlcRegistration) held(customerID string, n int, provisioned ...int) []store.UseCase {
+	ctx := context.Background()
+	forget := func() {
+		_, err := s.store.GlobalDB().NewDelete().Model((*store.UseCase)(nil)).
+			Where("name LIKE 'held %'").Where("created_at < ?", heldSince.AddDate(1, 0, 0)).Exec(context.Background())
+		s.NoError(err)
+	}
+	if !s.holding {
+		forget()
+		s.holding = true
+		s.T().Cleanup(func() {
+			forget()
+			s.holding = false
+		})
+	}
+	useCases := make([]store.UseCase, n)
+	for i := range useCases {
+		campaign := uuid.NewString()
+		status := "TCR_PENDING"
+		if slices.Contains(provisioned, i) {
+			status = "MNO_PROVISIONED"
+		}
+		s.registry.set(campaign, status)
+		at := heldSince.Add(time.Duration(i) * time.Second)
+		useCases[i] = store.UseCase{
+			ID: strings.ReplaceAll(uuid.NewString(), "-", ""), CustomerID: customerID, Name: fmt.Sprintf("held %d", i),
+			Status: dlc.VendorPending, UseCaseType: "CUSTOMER_CARE", MessageSamples: []string{},
+			Vendor: "telnyx", VendorCampaignID: campaign, VendorStatus: "TCR_PENDING", CreatedAt: at, UpdatedAt: at,
+		}
+	}
+	_, err := s.store.GlobalDB().NewInsert().Model(&useCases).Exec(ctx)
+	s.Require().NoError(err)
+	return useCases
+}
+
+// statusOf is where a use case stands now.
+func (s *dlcRegistration) statusOf(useCase store.UseCase) string {
+	read, err := s.store.UseCases.GetByID(context.Background(), useCase.ID)
+	s.Require().NoError(err)
+	return read.Status
+}
+
+// DLCPollSuite pages the poll through the use cases a vendor holds, two at a time and two pages
+// a pass, in a database of its own: a pass that reached the end depends on what else is held.
+type DLCPollSuite struct {
+	dlcRegistration
+}
+
+func TestDLCPollSuite(t *testing.T) {
+	polls := new(DLCPollSuite)
+	polls.database = "dlc_poll"
+	runSuite(t, polls)
+}
+
+// pollingService polls two use cases a page and two pages a pass.
+func (s *DLCPollSuite) pollingService() *dlc.Service {
+	service, err := dlc.NewService(dlc.Options{Store: s.store, Registrar: s.registrar, PollPage: 2, PollPages: 2,
+		Logger: slog.New(slog.DiscardHandler)})
+	s.Require().NoError(err)
+	return service
+}
+
+// A pass the page cap cuts short leaves the next to carry on where it stopped, and a pass that
+// reached the end leaves the next to start from the top. Catches a pass that always starts
+// from the top, so the fifth is never asked about, and a cursor kept past the end.
+func (s *DLCPollSuite) TestAPassCutShortIsCarriedOnAndOneThatEndedStartsAgain() {
+	held := s.held(s.customerID(), 5, 4)
+	service := s.pollingService()
+
+	service.Poll(context.Background())
+	s.Equal(dlc.VendorPending, s.statusOf(held[4]), "the first pass reads four")
+
+	service.Poll(context.Background())
+	s.Equal(dlc.Approved, s.statusOf(held[4]), "the second carries on from the fifth")
+
+	s.registry.set(held[0].VendorCampaignID, "MNO_PROVISIONED")
+	service.Poll(context.Background())
+	s.Equal(dlc.Approved, s.statusOf(held[0]), "the third starts from the top")
+}
+
+// A page that cannot be read ends the pass where it was, so the next carries on from there.
+// Catches a failed read that throws the cursor away, which starts the next pass from the top.
+func (s *DLCPollSuite) TestAPageThatCannotBeReadKeepsTheCursor() {
+	held := s.held(s.customerID(), 5, 4)
+	service := s.pollingService()
+	service.Poll(context.Background())
+
+	// Only a read that carries on from a cursor names one.
+	s.failQueries("(updated_at, id) >")
+	service.Poll(context.Background())
+	s.Equal(dlc.VendorPending, s.statusOf(held[4]))
+	s.failing.value.Store(nil)
+
+	service.Poll(context.Background())
+	s.Equal(dlc.Approved, s.statusOf(held[4]))
+}
+
+// A report on a brand registers what waited on it: the use cases the vendor holds of that
+// brand's app, and no other app's. Catches a report that polls every app's, or none.
+func (s *DLCPollSuite) TestABrandReportRefreshesOnlyItsAppsUseCases() {
+	ctx := context.Background()
+	s.completeProfile()
+	brand := uuid.NewString()
+	s.Require().NoError(s.store.BusinessProfiles.SetBrand(ctx, s.customerID(), brand, "VERIFIED"))
+	held := s.held(s.customerID(), 2, 0, 1)
+	other := s.held("customer-"+uuid.NewString(), 1, 0)
+
+	s.Equal(http.StatusNoContent, s.report(`{"brandId":"`+brand+`"}`, s.signing))
+
+	s.Equal(dlc.Approved, s.statusOf(held[0]))
+	s.Equal(dlc.Approved, s.statusOf(held[1]))
+	s.Equal(dlc.VendorPending, s.statusOf(other[0]), "another app's is left to the poll")
 }
 
 // Telnyx retries a report and the poller reads the same campaign, so several refreshes can
@@ -356,6 +775,79 @@ func (s *DLCSuite) TestAReportNotSignedByTheVendorIsRefused() {
 	s.Require().NoError(err)
 
 	s.Equal(http.StatusUnauthorized, s.report(`{"campaignId":"C1"}`, stranger))
+}
+
+// Why a report is refused can name the deployment's settings: it goes to the log, and the
+// sender, which needs no credential, is told only that the report was refused.
+func (s *DLCSuite) TestARefusedReportIsAnsweredWithoutTheReason() {
+	_, stranger, err := ed25519.GenerateKey(rand.Reader)
+	s.Require().NoError(err)
+	body := `{"campaignId":"C1"}`
+	seconds := strconv.FormatInt(time.Now().Unix(), 10)
+	request, err := http.NewRequest(http.MethodPost, s.server.URL+dlc.HookPath, bytes.NewBufferString(body))
+	s.Require().NoError(err)
+	request.Header.Set("Telnyx-Timestamp", seconds)
+	request.Header.Set("Telnyx-Signature-Ed25519", base64.StdEncoding.EncodeToString(
+		ed25519.Sign(stranger, []byte(seconds+"|"+body))))
+	before := len(s.logged.String())
+
+	response, err := http.DefaultClient.Do(request)
+	s.Require().NoError(err)
+	defer response.Body.Close()
+	answered, err := io.ReadAll(response.Body)
+	s.Require().NoError(err)
+
+	s.Equal(http.StatusUnauthorized, response.StatusCode)
+	var failure ErrorResponse
+	s.Require().NoError(json.Unmarshal(answered, &failure), string(answered))
+	s.Equal("that is not a report from the registrar", failure.Error.Message)
+	s.NotContains(string(answered), "dlc:")
+	s.Contains(s.logged.String()[before:], "dlc: refused", "the operator still learns why")
+}
+
+// A number the app does not hold is the app's to correct, and the answer names it.
+func (s *DLCSuite) TestAUseCaseNamingANumberTheAppDoesNotHoldIsRefusedNamingIt() {
+	held := store.PhoneNumber{CustomerID: s.customerID(), E164: s.utils.number(), Vendor: "telnyx"}
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &held))
+	stranger := s.utils.number()
+	request := completeUseCase("support")
+	request.Numbers = []string{held.E164, stranger}
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/phone/use-cases", request)
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, stranger+" is not a number this app holds")
+	s.NotContains(failure, "store:")
+	s.Empty(s.useCases(), "a refused create leaves no use case")
+}
+
+// useCases are the app's use cases.
+func (s *dlcRegistration) useCases() []UseCase {
+	var page UseCasePage
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/phone/use-cases", nil, &page))
+	return page.Items
+}
+
+// Assigning numbers that the database fails is the router's failure: a 500 that says nothing
+// of the database, not a 400 the app could not act on. The use case is not made without them.
+func (s *DLCSuite) TestAUseCaseWhoseNumbersTheDatabaseFailsIsAnInternalError() {
+	held := store.PhoneNumber{CustomerID: s.customerID(), E164: s.utils.number(), Vendor: "telnyx"}
+	s.Require().NoError(s.store.PhoneNumbers.Insert(context.Background(), &held))
+	request := completeUseCase("support")
+	request.Numbers = []string{held.E164}
+	s.failQueries("SET dlc_use_case_id = '")
+
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/phone/use-cases", request)
+
+	s.Equal(http.StatusInternalServerError, status, string(payload))
+	var failure ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &failure), string(payload))
+	s.Equal("internal_error", failure.Error.Code)
+	s.Equal(somethingWentWrong, failure.Error.Message)
+	for _, internal := range []string{"store:", "dlc:", "deadline", "assign numbers"} {
+		s.NotContains(string(payload), internal)
+	}
+	s.Empty(s.useCases(), "a use case without the numbers it was made with is not left behind")
 }
 
 func (s *DLCSuite) TestOnlyStreamStaffReviewUseCases() {
@@ -427,6 +919,31 @@ func (s *DLCSuite) TestAUseCaseIsHiddenFromOtherApps() {
 	s.assertHiddenFromOtherApps(func(as *testClient) int {
 		return as.do(http.MethodGet, "/v1/phone/use-cases/"+created.Id, nil, nil)
 	})
+}
+
+func (s *DLCSuite) TestAnOptOutNotInE164IsRefused() {
+	for _, recipient := range []string{"15551110000", "+1 555 111 0000", "(555) 111-0000", "+0155511100",
+		"+15551110000x", "+1555111000012345", "ada@example.com"} {
+		status, body := s.serverClient.call(http.MethodPost, "/v1/phone/opt-outs",
+			CreateOptOutRequest{Recipient: recipient, Channel: OptOutChannel(dlc.SMS)})
+		s.Equal(http.StatusBadRequest, status, "%q would never match a text sent", recipient)
+		s.Contains(string(body), `"code":"validation_failed"`, recipient)
+	}
+	s.Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/phone/opt-outs",
+		CreateOptOutRequest{Recipient: "+15551110000", Channel: OptOutChannel(dlc.Voice)}, nil))
+}
+
+func (s *DLCSuite) TestAnIMessageHandlesAddressIsAnOptOutOnIMessageOnly() {
+	for _, channel := range []string{dlc.IMessage, store.OptOutAll} {
+		s.Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/phone/opt-outs",
+			CreateOptOutRequest{Recipient: "ada@example.com", Channel: OptOutChannel(channel)}, nil), channel)
+	}
+	for _, recipient := range []string{"Ada <ada@example.com>", "ada", "15551110000"} {
+		status, body := s.serverClient.call(http.MethodPost, "/v1/phone/opt-outs",
+			CreateOptOutRequest{Recipient: recipient, Channel: OptOutChannel(dlc.IMessage)})
+		s.Equal(http.StatusBadRequest, status, recipient)
+		s.Contains(string(body), `"code":"validation_failed"`, recipient)
+	}
 }
 
 func (s *DLCSuite) TestADialToSomebodyWhoOptedOutIsRefused() {
@@ -542,7 +1059,7 @@ func (s *DLCSuite) TestARegisteredBrandAndCampaignAreBilledOnce() {
 
 func (s *DLCSuite) TestTheThirtyFirstMessageOfADayIsRefused() {
 	ctx := context.Background()
-	s.Require().NoError(s.store.SetSandboxRecipients(ctx, s.customerID(), []string{"+15551110000"}))
+	s.Require().NoError(s.store.SandboxRecipients.Replace(ctx, s.customerID(), []string{"+15551110000"}))
 	s.spend("messages", 29)
 	s.NoError(s.gate.Allow(ctx, s.customerID(), dlc.SMS, "+15551110000"))
 

@@ -1,49 +1,31 @@
 package store
 
 import (
-	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"github.com/uptrace/bun"
 )
 
-// queueable is an inbound message with every field queueing it requires.
-func queueable() ChannelInbound {
-	return ChannelInbound{ChannelID: "thread-one", ProviderMessageID: "1759740000.000100", CustomerID: "acme-app", ConnectorID: "acme", ConfigID: "config-one"}
-}
+func TestChannelInboundValidate(t *testing.T) {
+	valid := func() ChannelInbound {
+		return ChannelInbound{ChannelID: "thread-one", ProviderMessageID: "1759740000.000100", CustomerID: "acme-app", ConnectorID: "acme", ConfigID: "config-one"}
+	}
+	message := valid()
+	require.NoError(t, message.Validate())
 
-func TestQueueingAnInboundMessageWithoutAChannelIsRefused(t *testing.T) {
-	message := queueable()
-	message.ChannelID = ""
-	_, err := acceptChannelInbound(context.Background(), bun.Tx{}, message)
-	require.ErrorContains(t, err, "are required")
-}
-
-func TestQueueingAnInboundMessageWithoutAProviderMessageIDIsRefused(t *testing.T) {
-	message := queueable()
-	message.ProviderMessageID = ""
-	_, err := acceptChannelInbound(context.Background(), bun.Tx{}, message)
-	require.ErrorContains(t, err, "are required")
-}
-
-func TestQueueingAnInboundMessageWithoutACustomerIsRefused(t *testing.T) {
-	message := queueable()
-	message.CustomerID = ""
-	_, err := acceptChannelInbound(context.Background(), bun.Tx{}, message)
-	require.ErrorContains(t, err, "are required")
-}
-
-func TestQueueingAnInboundMessageWithoutAConnectorIsRefused(t *testing.T) {
-	message := queueable()
-	message.ConnectorID = ""
-	_, err := acceptChannelInbound(context.Background(), bun.Tx{}, message)
-	require.ErrorContains(t, err, "are required")
-}
-
-func TestQueueingAnInboundMessageWithoutAnAgentConfigIsRefused(t *testing.T) {
-	message := queueable()
-	message.ConfigID = ""
-	_, err := acceptChannelInbound(context.Background(), bun.Tx{}, message)
-	require.ErrorContains(t, err, "are required")
+	for field, broken := range map[string]func(*ChannelInbound){
+		"channel_id":          func(m *ChannelInbound) { m.ChannelID = "" },
+		"provider_message_id": func(m *ChannelInbound) { m.ProviderMessageID = "" },
+		"customer_id":         func(m *ChannelInbound) { m.CustomerID = "" },
+		"connector_id":        func(m *ChannelInbound) { m.ConnectorID = "" },
+		"config_id":           func(m *ChannelInbound) { m.ConfigID = "" },
+		"state":               func(m *ChannelInbound) { m.State = "written" },
+	} {
+		m := valid()
+		broken(&m)
+		var invalid *ValidationError
+		require.True(t, errors.As(m.Validate(), &invalid), field)
+		require.Equal(t, field, invalid.Field)
+	}
 }

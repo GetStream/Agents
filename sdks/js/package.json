@@ -1,14 +1,14 @@
 {
   "name": "@stream-io/stream-agents",
-  "version": "0.4.3",
+  "version": "0.0.0-development",
   "description": "Stream Agents for JavaScript: the client for agents that run on the Stream acceleration backend, and the conversations they hold.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/GetStream/Vision-Agents.git",
+    "url": "git+https://github.com/GetStream/Agents.git",
     "directory": "sdks/js"
   },
-  "homepage": "https://github.com/GetStream/Vision-Agents/tree/main/sdks/js",
+  "homepage": "https://github.com/GetStream/Agents/tree/main/sdks/js",
   "publishConfig": {
     "access": "public"
   },
@@ -42,6 +42,10 @@
     "./video": {
       "types": "./dist/video.d.ts",
       "default": "./dist/video.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "default": "./dist/react.js"
     }
   },
   "files": [
@@ -54,7 +58,7 @@
     "./dist/video.js"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "vite build && tsc -p tsconfig.build.json --emitDeclarationOnly",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "types": "node scripts/generate.mjs",
     "a2ui": "node scripts/a2ui.mjs",
@@ -63,21 +67,27 @@
     "test:qa": "tsc -p tsconfig.json && node --env-file-if-exists=../../.env --test --test-timeout 180000 \"build/tests/live/hosted.test.js\"",
     "test:integration": "tsc -p tsconfig.json && node --env-file-if-exists=../../.env --test --test-timeout 180000 \"build/tests/live/integration.test.js\"",
     "example": "npm run build && tsc -p tsconfig.json && node",
-    "prepublishOnly": "rm -rf dist && tsc -p tsconfig.build.json"
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "@stream-io/node-sdk": "^0.8.15",
     "@stream-io/video-client": "^1.61.2",
     "@types/node": "^22.10.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@types/ws": "^8.5.13",
     "openapi-typescript": "^7.13.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "stream-chat": "^9.54.0",
     "typescript": "^5.7.0",
+    "vite": "^8.3.6",
     "ws": "^8.18.0",
     "zod": "^4.6.7"
   },
   "peerDependencies": {
     "@stream-io/video-client": "^1.0.0",
+    "react": ">=18",
     "stream-chat": "^9.0.0 || ^10.0.2"
   },
   "peerDependenciesMeta": {
@@ -85,6 +95,9 @@
       "optional": true
     },
     "stream-chat": {
+      "optional": true
+    },
+    "react": {
       "optional": true
     }
   }

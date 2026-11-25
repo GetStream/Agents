@@ -16,7 +16,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GetStream/Vision-Agents/acceleration/internal/appconfig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -43,7 +42,7 @@ func Start(t testing.TB, name string, change ...func(*policy.Settings)) *Money {
 	if dsn == "" {
 		t.Skip("ROUTER_POSTGRES_DSN not set")
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	opened, err := store.Open(testenv.Database(dsn, name))
 	require.NoError(t, err)
 	require.NoError(t, opened.Migrate(ctx))
@@ -52,8 +51,7 @@ func Start(t testing.TB, name string, change ...func(*policy.Settings)) *Money {
 	service := usagetest.Start(t, usagetest.Options{
 		DSN: usagetest.Database(t, "usage_"+name), ManageKey: "manage-" + uuid.NewString(), Logger: discard,
 	})
-	configs, err := appconfig.New(appconfig.Options{Store: opened})
-	require.NoError(t, err)
+	configs := opened
 	client, err := usage.NewClient(usage.ClientOptions{URL: service.URL, Token: service.Token})
 	require.NoError(t, err)
 	settings := policy.Settings{
@@ -67,7 +65,7 @@ func Start(t testing.TB, name string, change ...func(*policy.Settings)) *Money {
 	require.NoError(t, err)
 	t.Cleanup(enforcer.Close)
 	writer := routing.NewWriter(routing.WriterOptions{Store: opened, Logger: discard, Gate: enforcer})
-	t.Cleanup(func() { writer.Close(context.Background()) })
+	t.Cleanup(func() { writer.Close(context.WithoutCancel(t.Context())) })
 	return &Money{Enforcer: enforcer, Usage: service, Store: opened, Writer: writer}
 }
 
@@ -82,12 +80,12 @@ func (m *Money) Owner(t testing.TB, credit int64) routing.Owner {
 	t.Helper()
 	stamp := time.Now().UnixNano()
 	app, organization := fmt.Sprintf("app-%d", stamp), fmt.Sprintf("org-%d", stamp)
-	require.NoError(t, m.Store.JoinOrganization(context.Background(), app, organization))
+	require.NoError(t, m.Store.AppOrganizations.Upsert(t.Context(), &store.AppOrganization{AppID: app, OrganizationID: organization}))
 	if credit > 0 {
 		m.Usage.Credit(t, organization, credit)
 	}
 	owner := routing.Owner{CustomerID: app, Attribution: routing.Attribution{OrganizationID: organization}}
-	m.Enforcer.Join(app, organization, usage.DefaultTier)
+	m.Enforcer.Join(t.Context(), app, organization, usage.DefaultTier)
 	// An account never read admits; once read, holding all of its credit leaves none.
 	probe := uuid.Must(uuid.NewV7())
 	require.Eventually(t, func() bool {
@@ -103,7 +101,7 @@ func (m *Money) Owner(t testing.TB, credit int64) routing.Owner {
 // Spend is why the owner's billable work is refused now, nil when it is not.
 func (m *Money) Spend(t testing.TB, owner routing.Owner) error {
 	t.Helper()
-	admitted, err := m.Enforcer.Admit(context.Background(), owner)
+	admitted, err := m.Enforcer.Admit(t.Context(), owner)
 	require.NoError(t, err)
 	return admitted.Spend
 }

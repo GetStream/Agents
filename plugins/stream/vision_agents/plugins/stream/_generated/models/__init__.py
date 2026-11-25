@@ -7,13 +7,17 @@ from .account_status import AccountStatus
 from .activated_branch import ActivatedBranch
 from .activity_area import ActivityArea
 from .activity_bucket import ActivityBucket
+from .activity_day import ActivityDay
 from .activity_ending import ActivityEnding
 from .activity_granularity import ActivityGranularity
 from .activity_latency import ActivityLatency
 from .activity_meter import ActivityMeter
+from .activity_page import ActivityPage
 from .activity_session import ActivitySession
 from .activity_sessions import ActivitySessions
 from .activity_step import ActivityStep
+from .activity_step_day import ActivityStepDay
+from .activity_step_day_step import ActivityStepDayStep
 from .add_contacts_request import AddContactsRequest
 from .add_contacts_response import AddContactsResponse
 from .add_session_tools_request import AddSessionToolsRequest
@@ -56,7 +60,6 @@ from .agent_review import AgentReview
 from .agent_role import AgentRole
 from .agent_scheduling import AgentScheduling
 from .agent_stats import AgentStats
-from .agent_tools import AgentTools
 from .agent_user import AgentUser
 from .agent_user_request import AgentUserRequest
 from .analyze_reviews_request import AnalyzeReviewsRequest
@@ -218,6 +221,8 @@ from .contact_input import ContactInput
 from .contact_input_variables import ContactInputVariables
 from .contact_page import ContactPage
 from .contact_stage import ContactStage
+from .contact_update_request import ContactUpdateRequest
+from .contact_update_request_variables import ContactUpdateRequestVariables
 from .contact_variables import ContactVariables
 from .cost_source import CostSource
 from .create_opt_out_request import CreateOptOutRequest
@@ -287,6 +292,9 @@ from .get_conversation_messages_response_200 import GetConversationMessagesRespo
 from .granularity import Granularity
 from .greeting import Greeting
 from .greeting_mode import GreetingMode
+from .guardrail_check import GuardrailCheck
+from .guardrail_check_kind import GuardrailCheckKind
+from .guardrail_check_mode import GuardrailCheckMode
 from .guest_user import GuestUser
 from .guest_user_custom import GuestUserCustom
 from .guest_user_request import GuestUserRequest
@@ -365,6 +373,7 @@ from .model_overwrites import ModelOverwrites
 from .model_overwrites_thinking import ModelOverwritesThinking
 from .model_overwrites_verbosity import ModelOverwritesVerbosity
 from .model_tokens import ModelTokens
+from .model_voice import ModelVoice
 from .number_search_result import NumberSearchResult
 from .ocr_error_code import OcrErrorCode
 from .ocr_options import OcrOptions
@@ -380,6 +389,7 @@ from .opt_out import OptOut
 from .opt_out_channel import OptOutChannel
 from .opt_out_page import OptOutPage
 from .organization_activity import OrganizationActivity
+from .organization_progress import OrganizationProgress
 from .phone_capability import PhoneCapability
 from .phone_number import PhoneNumber
 from .phone_number_tags import PhoneNumberTags
@@ -596,6 +606,12 @@ from .timeline_entry import TimelineEntry
 from .tool_approval_answer import ToolApprovalAnswer
 from .tool_approval_command import ToolApprovalCommand
 from .tool_approval_command_type import ToolApprovalCommandType
+from .tool_call_frame_type import ToolCallFrameType
+from .tool_call_state import ToolCallState
+from .tool_call_state_custom import ToolCallStateCustom
+from .tool_call_status import ToolCallStatus
+from .tool_group import ToolGroup
+from .tool_loading import ToolLoading
 from .tool_result_command import ToolResultCommand
 from .tool_result_command_type import ToolResultCommandType
 from .tool_stats import ToolStats
@@ -667,13 +683,17 @@ __all__ = (
     "ActivatedBranch",
     "ActivityArea",
     "ActivityBucket",
+    "ActivityDay",
     "ActivityEnding",
     "ActivityGranularity",
     "ActivityLatency",
     "ActivityMeter",
+    "ActivityPage",
     "ActivitySession",
     "ActivitySessions",
     "ActivityStep",
+    "ActivityStepDay",
+    "ActivityStepDayStep",
     "AddContactsRequest",
     "AddContactsResponse",
     "AddSessionToolsRequest",
@@ -716,7 +736,6 @@ __all__ = (
     "AgentRole",
     "AgentScheduling",
     "AgentStats",
-    "AgentTools",
     "AgentUser",
     "AgentUserRequest",
     "AnalyzeReviewsRequest",
@@ -874,6 +893,8 @@ __all__ = (
     "ContactInputVariables",
     "ContactPage",
     "ContactStage",
+    "ContactUpdateRequest",
+    "ContactUpdateRequestVariables",
     "ContactVariables",
     "CostSource",
     "CreateOptOutRequest",
@@ -941,6 +962,9 @@ __all__ = (
     "Granularity",
     "Greeting",
     "GreetingMode",
+    "GuardrailCheck",
+    "GuardrailCheckKind",
+    "GuardrailCheckMode",
     "GuestUser",
     "GuestUserCustom",
     "GuestUserRequest",
@@ -1019,6 +1043,7 @@ __all__ = (
     "ModelOverwritesThinking",
     "ModelOverwritesVerbosity",
     "ModelTokens",
+    "ModelVoice",
     "NumberSearchResult",
     "OcrErrorCode",
     "OcrOptions",
@@ -1034,6 +1059,7 @@ __all__ = (
     "OptOutChannel",
     "OptOutPage",
     "OrganizationActivity",
+    "OrganizationProgress",
     "PhoneCapability",
     "PhoneNumber",
     "PhoneNumberTags",
@@ -1250,6 +1276,12 @@ __all__ = (
     "ToolApprovalAnswer",
     "ToolApprovalCommand",
     "ToolApprovalCommandType",
+    "ToolCallFrameType",
+    "ToolCallState",
+    "ToolCallStateCustom",
+    "ToolCallStatus",
+    "ToolGroup",
+    "ToolLoading",
     "ToolResultCommand",
     "ToolResultCommandType",
     "ToolStats",

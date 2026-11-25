@@ -14,10 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/providers"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox/daytona/daytonatest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -39,6 +41,8 @@ type ChildAgentsSuite struct {
 	// offeredMu guards offered, the tools each request of offering was offered, by name.
 	offeredMu sync.Mutex
 	offered   [][]string
+	// logged is what the router logs, for the tests about what a refused delegation logs.
+	logged *lockedLog
 }
 
 func TestChildAgentsSuite(t *testing.T) {
@@ -81,7 +85,12 @@ func (s *ChildAgentsSuite) SetupSuite() {
 			return &chainingLLM{}, nil
 		})
 	}
+	s.logged = &lockedLog{}
+	s.logs = s.logged
+	s.daytona = daytonatest.Start(s.T())
 	s.RouterSuite.SetupSuite()
+	// The catalog, for the children that bind its connectors (child_agents_sensitive_test.go).
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *ChildAgentsSuite) SetupTest() {
@@ -160,7 +169,7 @@ func (s *ChildAgentsSuite) TestAChildThatChangedSinceItsParentWasSavedIsAFailedT
 	s.change(gained.Id, func(config *store.AgentConfig) {
 		config.Agents = []store.ChildAgent{{Config: voiced.Name, Tool: "deeper"}}
 	})
-	s.Require().NoError(s.configs.DeleteAgentConfig(ctx, s.customerID(), deleted.Id))
+	s.Require().NoError(s.store.AgentConfigs.Delete(ctx, s.customerID(), deleted.Id))
 
 	run := s.run(CreateRunRequest{ConfigId: parent, Input: "review this"})
 
@@ -372,10 +381,10 @@ func (s *ChildAgentsSuite) TestTwoChildrenCannotShareATool() {
 // change writes a change to a config through the config store, past the API.
 func (s *ChildAgentsSuite) change(id string, edit func(*store.AgentConfig)) {
 	ctx := s.T().Context()
-	config, err := s.configs.AgentConfig(ctx, s.customerID(), id)
+	config, err := s.store.AgentConfigs.Get(ctx, s.customerID(), id)
 	s.Require().NoError(err)
 	edit(&config)
-	s.Require().NoError(s.configs.UpdateAgentConfig(ctx, &config))
+	s.Require().NoError(s.store.AgentConfigs.Update(ctx, &config))
 }
 
 // text is the id of a text agent config of the app answered by model.

@@ -24,7 +24,7 @@ const chatCardTimeout = 30 * time.Second
 // on or record (Spec.WritesCards), has any: off, nothing here reads or writes. A thread channel's episode is the channel bridge's, an
 // omni-channel is where cards are written and never where an episode starts, and a session on
 // a call has its call's card, whose lines a chat episode in the same channel would cut short
-// (store.EpisodeCards, until).
+// (store.Episodes.Cards, until).
 //
 // The episode is the person's only in a channel whose members are that person alone, or that
 // person and the agent, the Stream user the agent writes its replies as: its agent id, which is
@@ -38,9 +38,9 @@ const chatCardTimeout = 30 * time.Second
 // it, so the summary, which reads the lines from the start on (omnichannel.linesOf), holds it:
 // the open comes after it, on the router's clock.
 //
-// Every message calls Open, which keeps the episode open (episode_activity.last_message_at).
+// Every message calls Open, which keeps the episode open (episodes.last_message_at).
 // A message delivered again, by Stream or by the queue's next try, finds the episode its first
-// delivery opened (store.OpenEpisode, episodes_open_thread), so it opens no second one and
+// delivery opened (store.Episodes.Open, episodes_open_thread), so it opens no second one and
 // writes no second card. An episode or a card that fails costs the card, not the answer: it
 // is logged and the message is answered all the same.
 func (s *Server) chatEpisode(ctx context.Context, origin hookOrigin, event messageEvent, answering session.Spec) {
@@ -148,7 +148,7 @@ func (s *Server) retire(found *session.Session) {
 	}
 	go func() {
 		deadline := time.Now().Add(session.RetireWithin)
-		for (s.owing.owes(found.ID()) || found.Busy()) && found.State() != session.Ended && time.Now().Before(deadline) {
+		for (s.owing.owes(found.Key()) || found.Busy()) && found.State() != session.Ended && time.Now().Before(deadline) {
 			time.Sleep(threadTurnPoll)
 		}
 		if _, err := s.sessions.CloseRetired(found); err != nil {
@@ -158,34 +158,34 @@ func (s *Server) retire(found *session.Session) {
 	}()
 }
 
-// owedReplies is, by session id, how many follow-ups were handed to a running session and
-// have not begun yet (followUpMessage). The zero value is empty; an id is kept only while it
+// owedReplies is, by session, how many follow-ups were handed to a running session and have
+// not begun yet (followUpMessage). The zero value is empty; a session is kept only while it
 // owes one.
 type owedReplies struct {
 	mu   sync.Mutex
-	owed map[string]int
+	owed map[session.Key]int
 }
 
 // owe counts one follow-up handed to a session until the func it returns is called.
-func (o *owedReplies) owe(id string) (begun func()) {
+func (o *owedReplies) owe(key session.Key) (begun func()) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.owed == nil {
-		o.owed = map[string]int{}
+		o.owed = map[session.Key]int{}
 	}
-	o.owed[id]++
+	o.owed[key]++
 	return func() {
 		o.mu.Lock()
 		defer o.mu.Unlock()
-		if o.owed[id]--; o.owed[id] <= 0 {
-			delete(o.owed, id)
+		if o.owed[key]--; o.owed[key] <= 0 {
+			delete(o.owed, key)
 		}
 	}
 }
 
 // owes reports whether a follow-up handed to a session has not begun yet.
-func (o *owedReplies) owes(id string) bool {
+func (o *owedReplies) owes(key session.Key) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.owed[id] > 0
+	return o.owed[key] > 0
 }

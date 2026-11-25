@@ -144,6 +144,14 @@ func (s *AuditSuite) TestARouterConfigIsRecordedUnderNoAgent() {
 	s.Empty(entry.AgentID, "a router belongs to no agent")
 }
 
+// Defect: a change made with an SDK that names its release recorded as the API's.
+func (s *AuditSuite) TestAChangeFromAnSDKNamingItsReleaseIsRecordedAsTheSDK() {
+	config := s.createConfigAs(s.serverClient.from("stream-agents-go-v1.2.3", "", ""),
+		map[string]any{"name": "from-the-sdk"})
+
+	s.Equal(AuditSource("sdk"), s.latest(AuditFilter{AgentID: &config.Id}).Source)
+}
+
 func (s *AuditSuite) TestACallerThatNamesNoClientIsRecordedAsTheApi() {
 	config := s.createConfig(map[string]any{"name": "unsigned"})
 

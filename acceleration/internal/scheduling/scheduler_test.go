@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 )
@@ -49,7 +50,7 @@ func (s *SchedulerSuite) SetupSuite() {
 // suite's worker shares would take the tasks made here.
 func (s *SchedulerSuite) TestTheSuiteRunsOnADatabaseOfItsOwn() {
 	var database string
-	s.Require().NoError(s.db.DB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
+	s.Require().NoError(s.db.GlobalDB().QueryRowContext(s.ctx, "SELECT current_database()").Scan(&database))
 
 	s.Contains(database, "_scheduler_test")
 }
@@ -128,10 +129,10 @@ func (s *SchedulerSuite) task(due time.Time, change func(*store.ScheduledTask)) 
 	if change != nil {
 		change(&task)
 	}
-	s.Require().NoError(s.db.CreateScheduledTask(s.ctx, &task, 25))
+	s.Require().NoError(s.db.ScheduledTasks.Insert(s.ctx, &task, 25))
 	t := s.T()
 	t.Cleanup(func() {
-		if err := s.db.DeleteScheduledTask(context.Background(), task.CustomerID, task.ID); err != nil {
+		if err := s.db.ScheduledTasks.Delete(context.Background(), task.CustomerID, task.ID); err != nil {
 			t.Errorf("delete the test's task: %v", err)
 		}
 	})
@@ -140,14 +141,14 @@ func (s *SchedulerSuite) task(due time.Time, change func(*store.ScheduledTask)) 
 
 // read is the task as the store now holds it.
 func (s *SchedulerSuite) read(task store.ScheduledTask) store.ScheduledTask {
-	stored, err := s.db.ScheduledTask(s.ctx, task.CustomerID, task.ID)
+	stored, err := s.db.ScheduledTasks.Get(s.ctx, task.CustomerID, task.ID)
 	s.Require().NoError(err)
 	return stored
 }
 
 // runs is every run the task has, newest first.
 func (s *SchedulerSuite) runs(task store.ScheduledTask) []store.ScheduledTaskRun {
-	runs, err := s.db.ScheduledTaskRuns(s.ctx, task.CustomerID, task.ID, 25, nil)
+	runs, err := s.db.ScheduledTaskRuns.Select(s.ctx, task.CustomerID, store.ScheduledTaskRunFilter{TaskID: task.ID, Limit: 25})
 	s.Require().NoError(err)
 	return runs
 }
@@ -168,6 +169,25 @@ func (s *SchedulerSuite) TestADueTaskIsDeliveredAndCompleted() {
 	s.Require().Len(runs, 1)
 	s.Equal(store.ScheduledTaskRunDelivered, runs[0].State)
 	s.Equal("conversation", runs[0].DeliveredTo)
+}
+
+func (s *SchedulerSuite) TestAWorkerLeavesTheTasksOfAnotherShardToIt() {
+	deliver := &deliverer{}
+	now := time.Now().UTC().Truncate(time.Second)
+	european := s.task(now.Add(-2*time.Minute), func(task *store.ScheduledTask) { task.UserID = "user-" + uuid.NewString() })
+	s.Require().NoError(s.db.Users.Seen(s.ctx, european.CustomerID, european.UserID, store.UserKindAuthenticated))
+	s.Require().NoError(s.db.Users.Served(s.ctx, european.CustomerID, european.UserID, "europe-west4"))
+	anyones := s.task(now.Add(-time.Minute), nil)
+	s.started(deliver.deliver, func(scheduler *Scheduler) {
+		scheduler.SetShard(store.ShardClaim{Shard: "us-east4", Routing: shardmap.Map{Default: "us-east4"},
+			Shards: []string{"europe-west4"}})
+	})
+
+	s.Require().Eventually(func() bool {
+		return s.read(anyones).State == store.ScheduledTaskCompleted
+	}, 10*time.Second, 10*time.Millisecond)
+	s.Empty(deliver.callsFor(european.ID), "claimed with the task due after it")
+	s.Equal(store.ScheduledTaskActive, s.read(european).State)
 }
 
 func (s *SchedulerSuite) TestARecurringTaskAdvancesToItsNextOccurrence() {
@@ -446,7 +466,7 @@ func (s *SchedulerSuite) TestAOneShotWhoseCallMayHaveCarriedItOutIsCompletedNotF
 func (s *SchedulerSuite) settled(task store.ScheduledTask) []store.ScheduledTaskRun {
 	s.Require().Eventually(func() bool {
 		runs := s.runs(task)
-		return len(runs) == 1 && runs[0].State != store.ScheduledTaskRunRunning && s.read(task).ClaimID == ""
+		return len(runs) == 1 && runs[0].State != store.ScheduledTaskRunRunning && s.read(task).LeasedBy == ""
 	}, 10*time.Second, 10*time.Millisecond)
 	return s.runs(task)
 }
@@ -548,6 +568,39 @@ func (s *SchedulerSuite) TestAHeldTaskIsDeliveredWhenTheHoldEnds() {
 	s.Require().NotNil(runs[0].PostponedUntil, "the hold is on the run")
 }
 
+func (s *SchedulerSuite) TestAnOccurrenceHeldAfterAFailedAttemptIsDeliveredAfterTheHoldUnderThatReason() {
+	task := s.task(time.Now().UTC().Add(-time.Minute).Truncate(time.Second), nil)
+	var mu sync.Mutex
+	var calls []store.ClaimedScheduledTask
+	deliver := func(_ context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
+		if claimed.Task.ID != task.ID {
+			return "conversation", claimed.Task.SessionID, nil
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, claimed)
+		switch len(calls) {
+		case 1:
+			return "", "", &Failure{Reason: ReasonOnACall, Err: errors.New("the user is on a call")}
+		case 2:
+			return "", "", &Postponed{Until: time.Now().Add(300 * time.Millisecond)}
+		}
+		return "conversation", claimed.Task.SessionID, nil
+	}
+	s.started(deliver, func(scheduler *Scheduler) {
+		scheduler.retries = []time.Duration{10 * time.Millisecond}
+	})
+
+	s.Require().Eventually(func() bool {
+		return s.read(task).State == store.ScheduledTaskCompleted
+	}, 10*time.Second, 10*time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	s.Require().Len(calls, 3, "failed, held, then delivered after the hold")
+	s.Require().NotNil(calls[2].Run.Error, "the claim after the hold reads why the attempt before it failed")
+	s.Equal(ReasonOnACall, *calls[2].Run.Error)
+}
+
 func (s *SchedulerSuite) TestAHeldOccurrenceIsCountedFromTheHoldAndNotFromWhenItCameDue() {
 	now := time.Now().UTC().Truncate(time.Second)
 	scheduler := NewScheduler(s.db, nil, slog.New(slog.DiscardHandler))
@@ -592,7 +645,7 @@ func (s *SchedulerSuite) TestAnOccurrenceSettledBeforeItsAdvanceIsNotDeliveredAg
 		State: store.ScheduledTaskRunDelivered, DeliveredTo: "conversation",
 		Attempts: 1, StartedAt: &started, FinishedAt: &due,
 	}
-	s.Require().NoError(s.db.InsertScheduledTaskRun(s.ctx, &run))
+	s.Require().NoError(s.db.ScheduledTaskRuns.Insert(s.ctx, &run))
 	s.started(deliver.deliver, nil)
 
 	s.Require().Eventually(func() bool {
@@ -620,7 +673,7 @@ func (s *SchedulerSuite) TestAnOccurrenceSettledAsCalledAlreadyBeforeItsAdvanceK
 		State: store.ScheduledTaskRunFailed, Error: &reason,
 		Attempts: 2, StartedAt: &started, FinishedAt: &due,
 	}
-	s.Require().NoError(s.db.InsertScheduledTaskRun(s.ctx, &run))
+	s.Require().NoError(s.db.ScheduledTaskRuns.Insert(s.ctx, &run))
 	s.started(deliver.deliver, nil)
 
 	s.Require().Eventually(func() bool {
@@ -652,7 +705,7 @@ func (s *SchedulerSuite) TestAOneShotSettledAsCalledAlreadyBeforeItsAdvanceIsCom
 		State: store.ScheduledTaskRunFailed, Error: &reason,
 		Attempts: 2, StartedAt: &started, FinishedAt: &due,
 	}
-	s.Require().NoError(s.db.InsertScheduledTaskRun(s.ctx, &run))
+	s.Require().NoError(s.db.ScheduledTaskRuns.Insert(s.ctx, &run))
 	s.started(deliver.deliver, nil)
 
 	s.Require().Eventually(func() bool {
@@ -697,7 +750,7 @@ func (d *stalling) state() (int, error) {
 func (s *SchedulerSuite) save(task store.ScheduledTask, change func(*store.ScheduledTask)) {
 	stored := s.read(task)
 	change(&stored)
-	s.Require().NoError(s.db.SaveScheduledTask(s.ctx, &stored))
+	s.Require().NoError(s.db.ScheduledTasks.Update(s.ctx, &stored))
 }
 
 func (s *SchedulerSuite) TestPausingATaskStopsItsDeliveryInFlight() {
@@ -975,7 +1028,7 @@ func (s *SchedulerSuite) TestADrainStopsARetryWaitAndLeavesTheRunToItsLease() {
 	// Another router takes the run up once its lease has run out and the run
 	// has sat in running for the store's stale-run time, which the test skips
 	// by dating the run's start back.
-	_, err := s.db.DB().NewUpdate().Model((*store.ScheduledTaskRun)(nil)).
+	_, err := s.db.GlobalDB().NewUpdate().Model((*store.ScheduledTaskRun)(nil)).
 		Set("started_at = now() - interval '1 hour'").
 		Where("id = ?", runs[0].ID).
 		Exec(s.ctx)
@@ -991,6 +1044,97 @@ func (s *SchedulerSuite) TestADrainStopsARetryWaitAndLeavesTheRunToItsLease() {
 	s.Require().Len(runs, 1, "under the same run")
 	s.Equal(store.ScheduledTaskRunDelivered, runs[0].State)
 	s.Len(other.callsFor(task.ID), 1)
+}
+
+// lostDuringItsRetryWait has a worker fail task's first attempt with failure, then stops it while
+// it waits to retry, as a router that crashes or loses its lease leaves the run. Before the
+// failure, first runs with that worker and the attempt's claim. It returns the deliveries a second
+// worker made once the run went stale and it took the run over.
+func (s *SchedulerSuite) lostDuringItsRetryWait(task store.ScheduledTask, failure error, first func(*Scheduler, store.ClaimedScheduledTask)) []store.ClaimedScheduledTask {
+	var lost *Scheduler
+	var attempts atomic.Int32
+	lost = NewScheduler(s.db, func(ctx context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
+		if claimed.Task.ID != task.ID {
+			return "conversation", claimed.Task.SessionID, nil
+		}
+		attempts.Add(1)
+		if first != nil {
+			first(lost, claimed)
+		}
+		return "", "", failure
+	}, slog.New(slog.DiscardHandler))
+	lost.retries = []time.Duration{time.Hour}
+	lost.Start(s.ctx)
+	s.Require().Eventually(func() bool {
+		return attempts.Load() == 1
+	}, 10*time.Second, 10*time.Millisecond, "the first attempt was made")
+	lost.Close()
+	runs := s.runs(task)
+	s.Require().Len(runs, 1)
+	s.Require().Equal(store.ScheduledTaskRunRunning, runs[0].State, "the run is left to its lease")
+
+	// The run ages past the store's stale-run time and its lease lapses, as the stopped worker
+	// leaves them.
+	_, err := s.db.GlobalDB().NewUpdate().Model((*store.ScheduledTaskRun)(nil)).
+		Set("started_at = now() - interval '1 hour'").
+		Where("id = ?", runs[0].ID).
+		Exec(s.ctx)
+	s.Require().NoError(err)
+	_, err = s.db.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+		Set("lease_until = now() - interval '1 second'").
+		Where("customer_id = ?", task.CustomerID).
+		Where("id = ?", task.ID).
+		Exec(s.ctx)
+	s.Require().NoError(err)
+	other := &deliverer{}
+	s.started(other.deliver, nil)
+	s.Require().Eventually(func() bool {
+		return s.read(task).State == store.ScheduledTaskCompleted
+	}, 10*time.Second, 10*time.Millisecond, "another worker delivers the occurrence")
+	s.EqualValues(1, attempts.Load(), "the stopped worker made no retry")
+	calls := other.callsFor(task.ID)
+	s.Require().Len(calls, 1)
+	s.Equal(runs[0].ID, calls[0].Run.ID, "under the same run")
+	return calls
+}
+
+func (s *SchedulerSuite) TestAWorkerTakingARunOverReadsTheReasonItsLastAttemptFailedUnder() {
+	task := s.task(time.Now().UTC().Add(-time.Minute).Truncate(time.Second), nil)
+
+	calls := s.lostDuringItsRetryWait(task, &Failure{Reason: ReasonOnACall, Err: errors.New("the user is on a call")}, nil)
+
+	s.Require().NotNil(calls[0].Run.Error, "the delivery is rebuilt with the reason the last attempt failed under")
+	s.Equal(ReasonOnACall, *calls[0].Run.Error)
+	s.Nil(s.runs(task)[0].Error, "a delivered run says nothing failed")
+}
+
+func (s *SchedulerSuite) TestAWorkerClosedAsItsAttemptFailsStillRecordsTheReason() {
+	task := s.task(time.Now().UTC().Add(-time.Minute).Truncate(time.Second), nil)
+	// The router closes as the attempt fails: what it was given to work under has ended.
+	closing := func(lost *Scheduler, _ store.ClaimedScheduledTask) { lost.cancel() }
+
+	calls := s.lostDuringItsRetryWait(task, &Failure{Reason: ReasonOnACall, Err: errors.New("the user is on a call")}, closing)
+
+	s.Require().NotNil(calls[0].Run.Error, "the reason is recorded after the close")
+	s.Equal(ReasonOnACall, *calls[0].Run.Error)
+}
+
+func (s *SchedulerSuite) TestAWorkerTakingARunOverAfterItsCallReadsHowTheCallEnded() {
+	task := s.task(time.Now().UTC().Add(-time.Minute).Truncate(time.Second), nil)
+	// A [phone, whatsapp] task: nobody answered the call, and WhatsApp failed too. It runs on the
+	// worker's goroutine, so it checks without stopping the test there.
+	called := func(_ *Scheduler, claimed store.ClaimedScheduledTask) {
+		call := "call-" + uuid.NewString()
+		took, _, err := s.db.ScheduledTaskRuns.TakeCall(s.ctx, task.CustomerID, claimed.Run.ID, call)
+		s.NoError(err)
+		s.True(took)
+		s.NoError(s.db.ScheduledTaskRuns.SetCallReason(s.ctx, task.CustomerID, claimed.Run.ID, call, ReasonNotAnswered))
+	}
+
+	calls := s.lostDuringItsRetryWait(task, &Failure{Reason: ReasonUnreachable, Err: errors.New("whatsapp: no window")}, called)
+
+	s.Require().NotNil(calls[0].Run.Error)
+	s.Equal(ReasonNotAnswered, *calls[0].Run.Error, "how the call ended is the run's reason, as before")
 }
 
 func (s *SchedulerSuite) TestADrainLetsARetryAttemptInFlightFinish() {
@@ -1049,7 +1193,7 @@ func (s *SchedulerSuite) TestReplayingAMissedRunKeepsTheFailureStreak() {
 		Trigger: store.ScheduledTaskTriggerSchedule, Prompt: task.Instructions,
 		State: store.ScheduledTaskRunMissed, Attempts: 1, FinishedAt: &due,
 	}
-	s.Require().NoError(s.db.InsertScheduledTaskRun(s.ctx, &run))
+	s.Require().NoError(s.db.ScheduledTaskRuns.Insert(s.ctx, &run))
 	s.started(deliver.deliver, nil)
 
 	s.Require().Eventually(func() bool {
@@ -1068,7 +1212,7 @@ func (s *SchedulerSuite) TestAnOccurrenceWhoseWorkersKeepDyingIsFailedNotDeliver
 	started := time.Now().Add(-time.Hour)
 	stale := store.ScheduledTaskRun{TaskID: task.ID, CustomerID: task.CustomerID, ScheduledFor: due,
 		Attempts: 3, StartedAt: &started}
-	s.Require().NoError(s.db.InsertScheduledTaskRun(s.ctx, &stale))
+	s.Require().NoError(s.db.ScheduledTaskRuns.Insert(s.ctx, &stale))
 	logged := &logBuffer{}
 	s.started(deliver.deliver, func(scheduler *Scheduler) {
 		scheduler.logger = slog.New(slog.NewTextHandler(logged, nil))
@@ -1101,7 +1245,7 @@ func (s *SchedulerSuite) TestACappedOccurrenceWhoseCallMayHaveLandedIsNotCounted
 	started := time.Now().Add(-time.Hour)
 	stale := store.ScheduledTaskRun{TaskID: task.ID, CustomerID: task.CustomerID, ScheduledFor: due,
 		Attempts: 3, StartedAt: &started, SessionID: "call-" + uuid.NewString()}
-	s.Require().NoError(s.db.InsertScheduledTaskRun(s.ctx, &stale))
+	s.Require().NoError(s.db.ScheduledTaskRuns.Insert(s.ctx, &stale))
 	s.started(deliver.deliver, nil)
 
 	s.Require().Eventually(func() bool {
@@ -1134,7 +1278,7 @@ func (s *SchedulerSuite) TestACappedOccurrenceKeepsTheReasonItsCallEndedUnder() 
 	reason := ReasonNotAnswered
 	stale := store.ScheduledTaskRun{TaskID: task.ID, CustomerID: task.CustomerID, ScheduledFor: due,
 		Attempts: 3, StartedAt: &started, SessionID: "call-" + uuid.NewString(), Error: &reason}
-	s.Require().NoError(s.db.InsertScheduledTaskRun(s.ctx, &stale))
+	s.Require().NoError(s.db.ScheduledTaskRuns.Insert(s.ctx, &stale))
 	s.started(deliver.deliver, nil)
 
 	s.Require().Eventually(func() bool {

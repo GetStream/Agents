@@ -23,39 +23,44 @@ func toldTheRouter(connection *websocket.Conn, n int) []map[string]any {
 	return told
 }
 
-func (s *ToolCallSuite) TestAFunctionSaysHowItIsGoing() {
-	heard := make(chan []map[string]any, 1)
+func (s *ToolCallSuite) TestAnUpdateReachesTheRouterBeforeTheResult() {
+	told := make(chan []map[string]any, 1)
 	backend := newRouter(s.T(), func(t *testing.T, connection *websocket.Conn) {
 		if connection.WriteJSON(map[string]any{
-			"type": "tool_call", "id": "call-1", "name": "lookup_order", "arguments": "{}",
+			"type": "tool_call", "id": "call-1", "name": "search_flights", "arguments": "{}",
 		}) != nil {
 			return
 		}
-		heard <- toldTheRouter(connection, 3)
+		told <- toldTheRouter(connection, 4)
 	})
 	pipeline := Accelerated(Config{Backend: Backend{URL: backend.URL, CustomerID: "acme"}})
-	s.Require().NoError(tools.Register(pipeline.Functions(), "lookup_order", "Look an order up",
+	s.Require().NoError(tools.Register(pipeline.Functions(), "search_flights", "Search for flights",
 		func(ctx context.Context, _ struct{}) (any, error) {
-			toolCallContext := tools.ToolCallContextFrom(ctx)
-			if err := toolCallContext.Update(ctx, "Looking up order 7"); err != nil {
+			call := tools.ToolCallContextFrom(ctx)
+			if err := call.Update(ctx, "Comparing 40 flights"); err != nil {
 				return nil, err
 			}
-			if err := toolCallContext.Say(ctx, "One moment."); err != nil {
+			if err := call.SendUpdate(ctx, tools.Update{Title: "Booking the cheapest", Custom: map[string]any{"cheapest": 129}}); err != nil {
 				return nil, err
 			}
-			return "shipped", nil
+			if err := call.SendUpdate(ctx, tools.Update{Custom: map[string]any{"seat": "12A"}}); err != nil {
+				return nil, err
+			}
+			return "found 3", nil
 		}))
 
 	s.join(pipeline)
 
 	select {
-	case told := <-heard:
-		s.Require().Len(told, 3)
-		s.Equal(map[string]any{"type": "tool_update", "tool_call_id": "call-1", "text": "Looking up order 7", "verbatim": false}, told[0])
-		s.Equal(map[string]any{"type": "tool_update", "tool_call_id": "call-1", "text": "One moment.", "verbatim": true}, told[1])
-		s.Equal("tool_result", told[2]["type"])
+	case frames := <-told:
+		s.Require().Len(frames, 4)
+		s.Equal(map[string]any{"type": "tool_update", "tool_call_id": "call-1", "text": "Comparing 40 flights"}, frames[0])
+		s.Equal(map[string]any{"type": "tool_update", "tool_call_id": "call-1", "text": "Booking the cheapest",
+			"custom": map[string]any{"cheapest": float64(129)}}, frames[1])
+		s.Equal(map[string]any{"type": "tool_update", "tool_call_id": "call-1", "custom": map[string]any{"seat": "12A"}}, frames[2])
+		s.Equal("found 3", frames[3]["output"])
 	case <-time.After(3 * time.Second):
-		s.Fail("the router never heard how the call was going")
+		s.Fail("the router never heard the update and the result")
 	}
 }
 
