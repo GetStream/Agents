@@ -24,6 +24,9 @@ const (
 	decisionDeniedAuth = "denied_auth"
 	// decisionDeniedMethod is a method refused on a granted host.
 	decisionDeniedMethod = "denied_method"
+	// decisionDeniedTunnels is a CONNECT of a sandbox that holds as many tunnels open as it may
+	// (429).
+	decisionDeniedTunnels = "denied_tunnels"
 	// decisionDeniedRequest is a request the proxy does not serve: not a CONNECT, a CONNECT
 	// without a host and a port, or an upgrade.
 	decisionDeniedRequest = "denied_request"
