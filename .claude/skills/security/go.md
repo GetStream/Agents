@@ -175,6 +175,9 @@ resolver, so never quote the egress error (`createEventDestination`, AI-3575).
     the deployment has, and the rules that egress, limits and the sandbox network apply.
 - The text shows only what the caller itself set. A device sees no customer settings and no
   deployment settings. A backend sees no deployment settings.
+- No caller sees what only the operator sets or controls: no setting name (such as an
+  environment variable name), no setting value, no part of the router's config, and no rule
+  that the deployment applies because of such a setting.
 - When the caller can correct the error in what it sent, the text tells it what to change.
   This code wrote the full text (`*oauth2code.ManifestError`), with no wrapped cause:
   `fmt.Errorf("%w: %w", ErrInvalid, err)` still contains the store's text.
