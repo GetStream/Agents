@@ -224,6 +224,12 @@ func (s *PolicySuite) TestOfTwoWritesLimitsReadsTheOneAskedLaterIsKept() {
 	land()
 
 	s.ErrorIs(s.admit(enforcer, s.app).Spend, ErrBudgetSpent)
+
+	land = s.holdRead(reads, "limits", func() { enforcer.LimitsChanged(s.ctx, s.org) })
+	released := time.Now()
+	land()
+
+	s.True(limitsReadAt(enforcer, s.org).After(released), "read when it landed, not when it was asked")
 }
 
 // Which read is older goes by when each was asked, not by the clock the windows are counted in,

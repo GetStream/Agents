@@ -178,3 +178,20 @@ func TestALimitsReadAskedWhileAnOlderOneWasUnderWayIsKept(t *testing.T) {
 
 	require.False(t, acct.limited)
 }
+
+func TestAReadThatWasNotKeptMovesNothing(t *testing.T) {
+	acct := &account{}
+	acct.keepGrants([]store.LimitGrant{{ID: 1}}, grantNow)
+	acct.keepGrants(nil, grantNow.Add(-time.Second))
+	acct.keepGrants([]store.LimitGrant{{ID: 2}}, grantNow)
+	require.Len(t, acct.grants, 1)
+	require.EqualValues(t, 2, acct.grants[0].grant.ID)
+	require.Equal(t, grantNow, acct.grantsFrom)
+
+	m := &money{}
+	m.keepLimits(acct, []store.Limit{financeLimit(usage.Daily, 10)}, nil, grantNow, grantNow.Add(time.Second))
+	require.Equal(t, grantNow.Add(time.Second), acct.limitsRead, "read when it landed, not when it was asked")
+	m.keepLimits(acct, []store.Limit{financeLimit(usage.Daily, 10)}, nil, grantNow.Add(-time.Second), grantNow.Add(5*time.Second))
+	m.keepLimits(acct, nil, nil, grantNow.Add(time.Nanosecond), grantNow.Add(6*time.Second))
+	require.False(t, acct.limited)
+}
