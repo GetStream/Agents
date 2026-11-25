@@ -262,7 +262,7 @@ func (s *Service) leave(ctx context.Context, stream *Stream, group store.TrunkGr
 		}
 		i := slices.IndexFunc(trunks, func(t store.StreamTrunk) bool { return t.ID == joined.trunkID })
 		if i < 0 {
-			return stream.DeleteTrunk(ctx, joined.trunkID)
+			return stream.deleteTrunkWithRules(ctx, joined.trunkID, "")
 		}
 		allowedIPs, err := s.allowlistFor(group.Vendor)
 		if err != nil {

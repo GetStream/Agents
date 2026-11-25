@@ -1017,6 +1017,12 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 			gone(w, "sip trunk")
 			return
 		}
+		for _, rule := range db.rules {
+			if on, _ := rule["trunk_ids"].([]any); slices.Contains(on, any(parts[len(parts)-1])) {
+				refuse(w, "the trunk is named by a routing rule")
+				return
+			}
+		}
 		delete(db.trunks, parts[len(parts)-1])
 	case strings.Contains(r.URL.Path, "/sip/inbound_routing_rules/") && r.Method == http.MethodDelete:
 		if _, ok := db.rules[parts[len(parts)-1]]; !ok {

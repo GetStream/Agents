@@ -282,6 +282,30 @@ func (s *Stream) DeleteTrunk(ctx context.Context, id string) error {
 	return nil
 }
 
+// deleteTrunkWithRules removes a SIP trunk, which Stream refuses while a rule still names it: the
+// rules made for one number on that trunk alone then go first, every number's, or with an e164 that
+// number's only. A rule of several numbers or trunks was not made here and is left, so the trunk
+// stays with it.
+func (s *Stream) deleteTrunkWithRules(ctx context.Context, id, e164 string) error {
+	err := s.DeleteTrunk(ctx, id)
+	if !refused(err) {
+		return err
+	}
+	rules, listErr := s.rulesOn(ctx, id)
+	if listErr != nil {
+		return listErr
+	}
+	for rule, number := range rules {
+		if e164 != "" && number != e164 {
+			continue
+		}
+		if err := s.DeleteRoute(ctx, rule); err != nil {
+			return err
+		}
+	}
+	return s.DeleteTrunk(ctx, id)
+}
+
 // DeleteRoute removes an inbound routing rule. An empty id is a no-op, for the same
 // reason as DeleteTrunk.
 func (s *Stream) DeleteRoute(ctx context.Context, id string) error {

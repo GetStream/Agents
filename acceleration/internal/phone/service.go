@@ -282,16 +282,17 @@ func (s *Service) unwire(ctx context.Context, customer string, app int64, routeI
 			"trunk", trunkID, "route", routeID, "error", err)
 		return
 	}
-	s.deleteLines(ctx, stream, routeID, trunkID, why)
+	s.deleteLines(ctx, stream, routeID, trunkID, "", why)
 }
 
-// deleteLines deletes a routing rule and the trunk beside it from a Stream app. It is
+// deleteLines deletes a routing rule and the trunk beside it from a Stream app, with what other
+// rules hold the trunk: the number's, or any number's without one (deleteTrunkWithRules). It is
 // best-effort: a failure is logged, never returned, so it cannot mask what is being undone.
-func (s *Service) deleteLines(ctx context.Context, stream *Stream, routeID, trunkID, why string) {
+func (s *Service) deleteLines(ctx context.Context, stream *Stream, routeID, trunkID, e164, why string) {
 	if err := stream.DeleteRoute(ctx, routeID); err != nil {
 		s.logger.Error("could not delete a routing rule", "why", why, "route", routeID, "error", err)
 	}
-	if err := stream.DeleteTrunk(ctx, trunkID); err != nil {
+	if err := stream.deleteTrunkWithRules(ctx, trunkID, e164); err != nil {
 		s.logger.Error("could not delete a trunk", "why", why, "trunk", trunkID, "error", err)
 	}
 }
@@ -874,11 +875,12 @@ func (s *Service) offTrunk(ctx context.Context, tx *store.TrunkGroupTx, stream *
 			if err := stream.DeleteRoute(ctx, number.StreamRouteID); err != nil {
 				return err
 			}
-			if err := stream.DeleteTrunk(ctx, number.StreamTrunkID); err != nil {
+			// Without a row other numbers may be on the trunk yet, and keep their rules.
+			if err := stream.deleteTrunkWithRules(ctx, number.StreamTrunkID, number.E164); err != nil {
 				return err
 			}
 		case stream != nil:
-			s.deleteLines(ctx, stream, number.StreamRouteID, number.StreamTrunkID, why)
+			s.deleteLines(ctx, stream, number.StreamRouteID, number.StreamTrunkID, number.E164, why)
 		}
 		if i >= 0 {
 			if err := tx.DeleteTrunk(number.StreamTrunkID); err != nil {
@@ -899,7 +901,7 @@ func (s *Service) offTrunk(ctx context.Context, tx *store.TrunkGroupTx, stream *
 	trunk.Numbers = slices.DeleteFunc(slices.Clone(trunk.Numbers), func(n string) bool { return n == number.E164 })
 	if len(trunk.Numbers) == 0 {
 		if stream != nil {
-			if err := stream.DeleteTrunk(ctx, trunk.ID); err != nil {
+			if err := stream.deleteTrunkWithRules(ctx, trunk.ID, ""); err != nil {
 				return err
 			}
 		}
@@ -1082,7 +1084,7 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 		// Roll back what this attach created but did not finish wiring up, so a failed
 		// attach does not leave a billable Stream trunk behind. Best-effort: a cleanup
 		// error is logged, never returned, so it cannot mask the real failure.
-		s.deleteLines(ctx, stream, routeID, trunkID, "rolling back a failed attach")
+		s.deleteLines(ctx, stream, routeID, trunkID, "", "rolling back a failed attach")
 	}()
 
 	// Every caller is a conversation of their own, so each lands in a call named for the
@@ -1442,7 +1444,7 @@ func (s *Service) call(ctx context.Context, request CallRequest, sent *bool) (Pl
 			// Roll back what this call created but never placed, so a call that did not
 			// start does not leave a billable Stream trunk behind. Best-effort: a cleanup
 			// error is logged, never returned, so it cannot mask the real failure.
-			s.deleteLines(ctx, stream, routeID, trunkID, "rolling back a call that did not place")
+			s.deleteLines(ctx, stream, routeID, trunkID, "", "rolling back a call that did not place")
 		}()
 
 		routeID, err = stream.CreateRoute(ctx, Route{
@@ -2003,7 +2005,7 @@ func (s *Service) SweepCallResources(ctx context.Context, before time.Time) (int
 				if err := stream.DeleteRoute(ctx, resource.RouteID); err != nil {
 					s.logger.Error("could not delete a routing rule", "why", "a call never ended", "route", resource.RouteID, "error", err)
 				}
-				err = stream.DeleteTrunk(ctx, resource.TrunkID)
+				err = stream.deleteTrunkWithRules(ctx, resource.TrunkID, "")
 			}
 			if err != nil {
 				s.logger.Error("could not delete the trunk of a call that never ended",
@@ -2144,7 +2146,7 @@ func (s *Service) createTrunk(ctx context.Context, stream *Stream, pin int64, tr
 }
 
 // pastForgottenLines runs put, which puts a number on a trunk, and runs it once more when Stream
-// refused it and lists the number on a trunk a forgotten line may be on. Stream is asked what it lists only
+// refused it and a forgotten line of the number's was taken down. Stream is asked what it lists only
 // then: a number it takes has no such line in its way, so asking first would let a list that
 // fails or hangs stop a call there is nothing to clear for. A list that fails leaves the refusal
 // the answer; a line Stream will not take down is an error of its own.
@@ -2158,13 +2160,16 @@ func (s *Service) pastForgottenLines(ctx context.Context, stream *Stream, pin in
 		s.logger.Error("could not look for a number's forgotten line", "stream_app", pin, "error", err)
 		return refusal
 	}
-	if len(listing) == 0 {
-		return refusal
-	}
+	var cleared bool
 	for _, trunk := range listing {
-		if err := s.clearForgotten(ctx, stream, trunk, e164); err != nil {
+		taken, err := s.clearForgotten(ctx, stream, trunk, e164)
+		if err != nil {
 			return err
 		}
+		cleared = cleared || taken
+	}
+	if !cleared {
+		return refusal
 	}
 	return put()
 }
@@ -2185,12 +2190,13 @@ func (s *Service) sipTrunksListing(ctx context.Context, stream *Stream, pin int6
 }
 
 // clearForgotten deletes a number's rules on a trunk and leaves the trunk with the numbers its
-// rows say, or deletes it, with the rules of any number on it alone, when they are none. A
-// number still held on the trunk is left as it is. A failure leaves the trunk's
+// rows say, or deletes it, with the rules of any number on it alone, when they are none. It answers
+// false for a number still held on the trunk, which it leaves as it is. A failure leaves the trunk's
 // row, to be found again by the next attach or call Stream refuses the number.
-func (s *Service) clearForgotten(ctx context.Context, stream *Stream, trunk store.StreamTrunk, e164 string) error {
+func (s *Service) clearForgotten(ctx context.Context, stream *Stream, trunk store.StreamTrunk, e164 string) (bool, error) {
+	var cleared bool
 	group := store.TrunkGroup{CustomerID: trunk.CustomerID, StreamAppPK: trunk.StreamAppPK, Vendor: trunk.Vendor}
-	return s.inTrunkGroup(ctx, group, func(ctx context.Context, tx *store.TrunkGroupTx) error {
+	err := s.inTrunkGroup(ctx, group, func(ctx context.Context, tx *store.TrunkGroupTx) error {
 		trunks, err := tx.Trunks()
 		if err != nil {
 			return err
@@ -2212,6 +2218,7 @@ func (s *Service) clearForgotten(ctx context.Context, stream *Stream, trunk stor
 				return err
 			}
 		}
+		cleared = true
 		if len(held) == 0 {
 			if err := stream.DeleteTrunk(ctx, trunk.ID); err != nil {
 				return err
@@ -2220,6 +2227,7 @@ func (s *Service) clearForgotten(ctx context.Context, stream *Stream, trunk stor
 		}
 		return stream.UpdateTrunk(ctx, trunk.ID, Trunk{Name: sharedTrunkName(trunk.Vendor, trunk.CustomerID), Numbers: held})
 	})
+	return cleared, err
 }
 
 // evict takes another customer's line for a number down at Stream, and only then forgets it. A
@@ -2403,7 +2411,7 @@ func (s *Service) Transfer(ctx context.Context, request TransferRequest) (Dialed
 			// Roll back what this transfer created but never placed, so a transfer that did
 			// not start does not leave a billable Stream trunk behind. Best-effort: a cleanup
 			// error is logged, never returned, so it cannot mask the real failure.
-			s.deleteLines(ctx, stream, routeID, trunkID, "rolling back a transfer that did not place")
+			s.deleteLines(ctx, stream, routeID, trunkID, "", "rolling back a transfer that did not place")
 		}()
 
 		routeID, err = stream.CreateRoute(ctx, Route{
