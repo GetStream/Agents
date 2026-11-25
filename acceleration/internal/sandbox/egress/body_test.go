@@ -67,7 +67,9 @@ type bodyRead struct {
 	// refuse with a 403.
 	sent     string
 	declared int
-	grant    func()
+	// after is what follows a chunked body's first chunk, such as the start of its trailer.
+	after string
+	grant func()
 	// lfs is a Git LFS API request, refused with an LFS error; streamed is a body the forward reads.
 	lfs, streamed bool
 }
@@ -90,6 +92,8 @@ func (s *ProxySuite) bodyReads() []bodyRead {
 			sent: strings.Repeat("x", 2*keptBody), declared: 3 * keptBody, grant: s.readsUploadPack, streamed: true},
 		{name: "a chunked body that streams", host: "api.github.test", target: "/o/r.git/git-upload-pack",
 			sent: strings.Repeat("x", 2*keptBody), declared: -1, grant: s.readsUploadPack, streamed: true},
+		{name: "a chunked body whose trailer stops arriving", host: "api.github.test", target: "/graphql", contentType: "application/json",
+			sent: query, declared: -1, after: "0\r\nX-A: 1\r\n", grant: func() { s.readGraphQL() }},
 	}
 }
 
@@ -102,7 +106,7 @@ func (s *ProxySuite) stop(credential string, c bodyRead) *tls.Conn {
 	}
 	var err error
 	if c.declared < 0 {
-		_, err = fmt.Fprintf(conn, "%sTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n", head, len(c.sent), c.sent)
+		_, err = fmt.Fprintf(conn, "%sTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n%s", head, len(c.sent), c.sent, c.after)
 	} else {
 		_, err = fmt.Fprintf(conn, "%sContent-Length: %d\r\n\r\n%s", head, c.declared, c.sent)
 	}
@@ -131,7 +135,8 @@ func (s *ProxySuite) cutOff(conn *tls.Conn, c bodyRead) {
 }
 
 // TestABodyThatStopsArrivingIsCutOff: a body no byte of which comes for the body timeout, on every path that reads one
-// (the three checks, resendable, and the forward as the body streams, sized or chunked), gets a 408 that closes the
+// (the three checks, resendable, and the forward as the body streams, sized or chunked; and a chunked body whose trailer
+// stops arriving after its last chunk), gets a 408 that closes the
 // tunnel, no sooner than the timeout, and the tunnel is closed and given back. One cut off before the forward
 // reaches no host and is counted as denied_request; one cut off as it streamed is counted under its decision, token,
 // with its 408. On the base (aa4c2d4d9) no such body got an answer.

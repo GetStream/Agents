@@ -44,15 +44,19 @@ func (p *Proxy) timeBody(w http.ResponseWriter, r *http.Request) *timedBody {
 }
 
 func (b *timedBody) Read(p []byte) (int, error) {
+	var set time.Time
 	b.mu.Lock()
 	if !b.ended {
-		_ = b.deadline(time.Now().Add(b.timeout))
+		set = time.Now().Add(b.timeout)
+		_ = b.deadline(set)
 	}
 	b.mu.Unlock()
 	n, err := b.ReadCloser.Read(p)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if errors.Is(err, os.ErrDeadlineExceeded) {
+	// net/http reports a chunked body's trailer that stops arriving as an error of its own, not as the deadline's
+	// (transfer.go, "suspiciously long trailer"): any error at or after the deadline this read set is a stall.
+	if errors.Is(err, os.ErrDeadlineExceeded) || (err != nil && err != io.EOF && !set.IsZero() && !time.Now().Before(set)) {
 		b.stalled = true
 		return n, errBodyStalled
 	}
