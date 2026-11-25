@@ -211,7 +211,7 @@ func (s *ReplicateRepeatSuite) TestAFirstCopyBringsEverythingAndSavesTheCursor()
 	s.WithinDuration(time.Now(), saved.ReadAt, time.Minute)
 }
 
-// A copy, a page of changes and a full copy each stop at a row that names another app's row here.
+// A page of changes and a full copy each stop at a row that names another app's row here.
 func (s *ReplicateRepeatSuite) TestARunStopsAtARowThatNamesAnotherAppsRowNamingIt() {
 	for _, in := range []*store.Store{s.source, s.target} {
 		_, err := in.GlobalDB().ExecContext(s.ctx, "INSERT INTO agent_sessions (id, customer_id, state) VALUES ('theirs', 'resident', '')")

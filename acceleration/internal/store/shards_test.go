@@ -395,6 +395,22 @@ func (s *ShardedStoreSuite) TestASessionBegunInOneShardIsCountedBesideAnotherCus
 	s.EqualValues(1, buckets[0].Sessions, "no turn of its own says it was carried on")
 }
 
+func (s *ShardedStoreSuite) TestToolUseIsNotOfACarriedSessionBesideAnotherCustomersTurn() {
+	session := s.opened("chat", "app", s.base, nil)
+	s.turned(session, "chat-1", s.base, nil)
+	s.carriedOnAt("chat", s.base)
+	s.turnedThere("chat", "chat-2", "", s.base.Add(time.Minute), nil)
+	s.calledToolThere("chat", "chat-2", "refund", s.base.Add(time.Minute))
+	s.strayTurnThere("stray", "not-here")
+
+	_, tools, err := s.store.CustomerToolUsage(s.ctx, "app", "", s.base, s.base.Add(time.Hour))
+
+	s.Require().NoError(err)
+	s.Require().Len(tools, 1)
+	s.Require().NotNil(tools[0].AvgTurnsBeforeUse)
+	s.InDelta(0.0, *tools[0].AvgTurnsBeforeUse, 0.001)
+}
+
 func (s *ShardedStoreSuite) TestASessionCarriedOnIsCountedOnTheDayItBeganWhateverTheWindow() {
 	dayOne, dayTwo := s.base, s.base.Add(24*time.Hour)
 	session := s.opened("chat", "app", dayOne, nil)

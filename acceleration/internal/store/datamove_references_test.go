@@ -487,20 +487,53 @@ var bareColumns = map[string][]string{
 // bareTexts are the text columns of moved tables that hold an id under another name, by how they are read:
 // forked_from is only answered back, claimed_by is looked up among the customer's users, a
 // channel_thread of another customer's is refused by the delivery, and spend by api_key is read with the app.
-var bareTexts = []string{"api_key", "channel_thread", "claimed_by", "forked_from"}
+var bareTexts = map[string][]string{
+	"agent_sessions":  {"api_key", "forked_from"},
+	"campaigns":       {"api_key"},
+	"requests":        {"api_key"},
+	"scheduled_tasks": {"api_key", "channel_thread"},
+	"users":           {"claimed_by"},
+}
 
-// words are the text columns of moved tables that hold no row's id.
-var words = strings.Fields(`
-	agent_name area assertion auth_scheme call_outcome call_type callback caller_kind caller_stt caller_target caller_tts
-	caller_voice category channel classify_state client client_registration content_type country created_by declared_title
-	default_country delivered_to description direction e164 email end_reason ended error error_code error_message event_type
-	from_number greeting greeting_mode guardrail harness host image instructions judge_target kind label last_error
-	last_refusal_code leased_by leg llm markdown message modality mode model name namespace knowledge_namespace object_key
-	organization_tier outcome owner_type paused_reason price_version project prompt provider purpose reason recipient region
-	result return_url review_instructions review_notes role rrule said sandbox_provider scenario scope search severity sha256
-	ship_error sku source stage state status stream_call_type sts stt subagent summary sync_hash tag_key tag_value team text
-	time_zone timezone title tls_scheme to_number tool_name tools_digest transport trigger tts type ui_instructions url username
-	validation_code validation_error validation_status vendor verdict video_source voice`)
+// words are the text columns of each moved table that hold no row's id.
+var words = map[string]string{
+	"agent_configs":          "greeting greeting_mode guardrail harness image instructions knowledge_namespace llm mode name region review_instructions role sandbox_provider search sts stt subagent sync_hash tts ui_instructions video_source voice",
+	"skills":                 "description instructions name",
+	"connector_definitions":  "category description name",
+	"connector_connections":  "auth_scheme client_registration label last_error owner_type status tls_scheme tools_digest validation_code validation_error validation_status",
+	"router_configs":         "name",
+	"voices":                 "description name",
+	"sip_trunks":             "host name transport username",
+	"phone_numbers":          "country e164 stream_call_type vendor",
+	"knowledge_urls":         "declared_title description error namespace state title url",
+	"knowledge_documents":    "content_type error namespace object_key source state text",
+	"campaigns":              "default_country from_number name paused_reason state type",
+	"campaign_contacts":      "instructions leased_by outcome reason stage time_zone to_number",
+	"campaign_attempts":      "call_outcome classify_state outcome result",
+	"simulations":            "assertion caller_stt caller_target caller_tts caller_voice judge_target mode name scenario",
+	"simulation_runs":        "assertion error judge_target mode scenario state",
+	"simulation_cases":       "ended error scenario state verdict",
+	"users":                  "email kind name timezone",
+	"scheduled_tasks":        "caller_kind created_by instructions leased_by rrule state timezone title",
+	"scheduled_task_runs":    "delivered_to error prompt state trigger",
+	"opt_outs":               "channel recipient source",
+	"recordings":             "callback error modality model provider source status text",
+	"agent_sessions":         "agent_name caller_kind description end_reason modality project return_url state team title",
+	"calls":                  "call_type direction from_number instructions llm review_notes sts stt subagent summary to_number tts voice",
+	"agent_responses":        "error said status",
+	"agent_response_items":   "kind text tool_name",
+	"conversation_documents": "markdown name sha256",
+	"agent_branch_switches":  "kind state",
+	"agent_logs":             "event_type message severity source",
+	"requests":               "error_code error_message modality model organization_tier price_version provider purpose region ship_error sku",
+	"stats_hourly":           "modality model provider",
+	"stats_daily":            "modality model provider",
+	"stats_tags_hourly":      "modality tag_key tag_value",
+	"stats_tags_daily":       "modality tag_key tag_value",
+	"turn_latency_hourly":    "leg",
+	"customer_activity":      "area client last_refusal_code",
+	"policies":               "scope",
+}
 
 // forcedColumns are written by the import itself or left to this deployment, whatever was sent
 // (identity, vouched).
@@ -544,7 +577,7 @@ FROM pg_constraint c WHERE c.conrelid = ?::regclass AND c.contype = 'f'`, table.
 SELECT attname::text FROM pg_attribute WHERE attrelid = ?::regclass AND attnum > 0 AND NOT attisdropped AND attgenerated = ''
 	AND (attname ~ '(_ids?|_pk)$' OR atttypid::regtype::text ~ '^(text|uuid|jsonb?|.*\[\])$')`, table.name).Scan(s.ctx, &columns))
 		for _, column := range columns {
-			known := column == "id" || slices.Contains(bareTexts, column) || slices.Contains(words, column) || column == table.customer || column == "customer_id" || slices.Contains(held, column) ||
+			known := column == "id" || slices.Contains(bareTexts[table.name], column) || slices.Contains(strings.Fields(words[table.name]), column) || column == table.customer || column == "customer_id" || slices.Contains(held, column) ||
 				slices.Contains(bareColumns[table.name], column) || slices.Contains(forcedColumns[table.name], column) ||
 				slices.Contains(table.vouched, column)
 			s.True(known, "%s.%s may name a row of another table: see bareColumns", table.name, column)
@@ -641,6 +674,28 @@ func (s *DataMoveSuite) TestARunOfATaskNotHereIsRefusedByItsKey() {
 	s.ErrorIs(err, ErrInvalidImport)
 	s.ErrorIs(err, ErrNamesNoRow)
 	s.EqualError(err, `store: import scheduled_task_runs:{"id":"run"}: a row names a row that neither the export nor this app holds`)
+}
+
+func (s *DataMoveSuite) TestAUniqueValueIsNotRefusedAsNamingNoRow() {
+	s.execute(s.destination.global, "INSERT INTO campaigns (id, customer_id, name) VALUES ('cp', 'acme', 'c'); INSERT INTO campaign_contacts (id, campaign_id, to_number) VALUES ('held', 'cp', '+15550002222')")
+	var row []byte
+	s.Require().NoError(s.destination.global.NewRaw("SELECT to_jsonb(d) || '{\"id\": \"other\"}' FROM campaign_contacts d").Scan(s.ctx, &row))
+
+	err := s.destination.ImportRow(s.ctx, "acme", "campaign_contacts", row)
+
+	s.Require().ErrorIs(err, ErrInvalidImport)
+	s.NotErrorIs(err, ErrNamesNoRow)
+	s.EqualError(err, "store: import campaign_contacts: a row holds a value, such as a name, that another row here already holds")
+}
+
+func (s *DataMoveSuite) TestADeleteOfATrunkWithANumberIsRefused() {
+	trunk := s.trunkOf(s.destination, "acme").ID
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "acme", "phone_numbers", s.importedNumber("+15550000124", sipTrunkVendor, "sip_trunk_id", trunk)))
+
+	err := s.destination.ApplyChanges(s.ctx, "acme", []DataChange{{Table: "sip_trunks", Op: ChangeDelete, Key: []byte(`{"id": "` + trunk + `"}`)}})
+
+	s.Require().ErrorIs(err, ErrInvalidImport)
+	s.ErrorContains(err, "a row names a row that neither the export nor this app holds")
 }
 
 func (s *DataMoveSuite) TestAnImportOfARowThatNamesAnotherIsTwoQueries() {
