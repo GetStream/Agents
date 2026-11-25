@@ -49,6 +49,7 @@ final class SearchRouter {
 
   /// Answers one question out of what is true now, run as [config] says, or as the app's default
   /// does. How a search is run, and so what it costs, is the app's backend's to choose.
+  /// Each search counts as one message on the device's daily quota.
   Future<SearchAnswer> search(String query) async {
     final answer = await _operations.search(
       body: api.SearchRequest(
