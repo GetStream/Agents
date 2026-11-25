@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
 )
@@ -168,6 +169,25 @@ func (s *SchedulerSuite) TestADueTaskIsDeliveredAndCompleted() {
 	s.Require().Len(runs, 1)
 	s.Equal(store.ScheduledTaskRunDelivered, runs[0].State)
 	s.Equal("conversation", runs[0].DeliveredTo)
+}
+
+func (s *SchedulerSuite) TestAWorkerLeavesTheTasksOfAnotherShardToIt() {
+	deliver := &deliverer{}
+	now := time.Now().UTC().Truncate(time.Second)
+	european := s.task(now.Add(-2*time.Minute), func(task *store.ScheduledTask) { task.UserID = "user-" + uuid.NewString() })
+	s.Require().NoError(s.db.Users.Seen(s.ctx, european.CustomerID, european.UserID, store.UserKindAuthenticated))
+	s.Require().NoError(s.db.Users.Served(s.ctx, european.CustomerID, european.UserID, "europe-west4"))
+	anyones := s.task(now.Add(-time.Minute), nil)
+	s.started(deliver.deliver, func(scheduler *Scheduler) {
+		scheduler.SetShard(store.ShardClaim{Shard: "us-east4", Routing: shardmap.Map{Default: "us-east4"},
+			Shards: []string{"europe-west4"}})
+	})
+
+	s.Require().Eventually(func() bool {
+		return s.read(anyones).State == store.ScheduledTaskCompleted
+	}, 10*time.Second, 10*time.Millisecond)
+	s.Empty(deliver.callsFor(european.ID), "claimed with the task due after it")
+	s.Equal(store.ScheduledTaskActive, s.read(european).State)
 }
 
 func (s *SchedulerSuite) TestARecurringTaskAdvancesToItsNextOccurrence() {

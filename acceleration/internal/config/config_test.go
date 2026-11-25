@@ -1362,6 +1362,30 @@ func (s *ConfigSuite) TestTheTwilioWebhookAuthTokenInAFileReachesTheEnvironment(
 	s.Equal("token-from-file", os.Getenv("TWILIO_WEBHOOK_AUTH_TOKEN"))
 }
 
+func (s *ConfigSuite) TestTheTwilioAccountSIDIsReadFromTheEnvironment() {
+	config, _, err := Load("")
+	s.Require().NoError(err)
+	s.Empty(config.Twilio.AccountSID, "unset, no Twilio call is answered")
+
+	s.T().Setenv("TWILIO_ACCOUNT_SID", "AC-from-env")
+	config, _, err = Load("")
+	s.Require().NoError(err)
+
+	s.Equal("AC-from-env", config.Twilio.AccountSID)
+}
+
+// The Twilio provider reads TWILIO_ACCOUNT_SID itself, so the setting in a file has to reach it.
+func (s *ConfigSuite) TestTheTwilioAccountSIDInAFileReachesTheEnvironment() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte("twilio:\n  account_sid: AC-from-file\n"), 0o600))
+
+	config, _, err := Load(path)
+	s.Require().NoError(err)
+
+	s.Equal("AC-from-file", config.Twilio.AccountSID)
+	s.Equal("AC-from-file", os.Getenv("TWILIO_ACCOUNT_SID"))
+}
+
 func (s *ConfigSuite) TestASingleNodeSetsNoShard() {
 	config, _, err := Load("")
 	s.Require().NoError(err)
@@ -1451,6 +1475,57 @@ func (s *ConfigSuite) TestADeploymentThatSaysNothingKeepsKnowledgeAndSandboxesAs
 	s.Empty(config.CodeSandbox.Targets)
 }
 
+func (s *ConfigSuite) TestShardRoutingIsReadFromAFile() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte(`
+shard_routing:
+  default: us-east4
+  countries:
+    DE: europe-west4
+    NL: europe-west4
+  regions:
+    eu: europe-west4
+`), 0o600))
+
+	config, _, err := Load(path)
+	s.Require().NoError(err)
+
+	s.Equal(ShardRouting{
+		Default:   "us-east4",
+		Countries: map[string]string{"DE": "europe-west4", "NL": "europe-west4"},
+		Regions:   map[string]string{"eu": "europe-west4"},
+	}, config.ShardRouting)
+}
+
+func (s *ConfigSuite) TestShardRoutingIsReadFromTheEnvironmentAndWrittenBack() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_DEFAULT", "us-east4")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_COUNTRIES", "NL=europe-west4, DE=europe-west4")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_REGIONS", "eu=europe-west4")
+
+	config, _, err := Load("")
+	s.Require().NoError(err)
+
+	s.Equal(map[string]string{"DE": "europe-west4", "NL": "europe-west4"}, config.ShardRouting.Countries)
+	s.Equal(map[string]string{"eu": "europe-west4"}, config.ShardRouting.Regions)
+	s.Equal("us-east4", config.ShardRouting.Default)
+	s.Equal("DE=europe-west4,NL=europe-west4", os.Getenv("ROUTER_SHARD_ROUTING_COUNTRIES"), "written back the way it is read")
+}
+
+func (s *ConfigSuite) TestACountryThatIsNoCountryCodeIsRefusedAShard() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_COUNTRIES", "Germany=europe-west4")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `shard_routing.countries (ROUTER_SHARD_ROUTING_COUNTRIES)`)
+}
+
+// The default region's agents follow their users, so a shard for it would pin every agent.
+func (s *ConfigSuite) TestTheDefaultRegionIsRefusedAShard() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_REGIONS", "us=us-east4")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `shard_routing.regions (ROUTER_SHARD_ROUTING_REGIONS)`)
+}
+
 func (s *ConfigSuite) TestARegionMappedToNothingIsRefused() {
 	s.T().Setenv("ROUTER_KNOWLEDGE_REGIONS", "eu=")
 
@@ -1474,12 +1549,112 @@ func (s *ConfigSuite) TestAShardDatabaseWithoutTheSharedOneIsRefused() {
 	s.ErrorContains(err, "set postgres.dsn")
 }
 
+func (s *ConfigSuite) TestNoMigrateDSNIsSetByDefault() {
+	config, _, err := Load("")
+	s.Require().NoError(err)
+
+	s.Empty(config.Postgres.MigrateDSN)
+	s.Empty(config.Postgres.ShardMigrateDSN)
+}
+
+func (s *ConfigSuite) TestTheMigrateDSNsAreReadFromAFileAndExported() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte(`
+postgres:
+  dsn: postgres://global/router
+  migrate_dsn: postgres://owner@global/router
+  shard_dsn: postgres://usw/router
+  shard_migrate_dsn: postgres://owner@usw/router
+`), 0o600))
+
+	config, _, err := Load(path)
+	s.Require().NoError(err)
+
+	s.Equal("postgres://owner@global/router", config.Postgres.MigrateDSN)
+	s.Equal("postgres://owner@usw/router", config.Postgres.ShardMigrateDSN)
+	s.Equal("postgres://owner@global/router", os.Getenv("ROUTER_POSTGRES_MIGRATE_DSN"))
+	s.Equal("postgres://owner@usw/router", os.Getenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN"))
+}
+
+func (s *ConfigSuite) TestTheMigrateDSNsAreReadFromTheEnvironment() {
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
+	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@usw/router")
+
+	config, _, err := Load("")
+	s.Require().NoError(err)
+
+	s.Equal("postgres://owner@global/router", config.Postgres.MigrateDSN)
+	s.Equal("postgres://owner@usw/router", config.Postgres.ShardMigrateDSN)
+}
+
+func (s *ConfigSuite) TestADeploymentOfOneDatabaseNeedsNoShardMigrateDSN() {
+	for _, shard := range []string{"", "postgres://global/router"} {
+		s.T().Setenv("ROUTER_POSTGRES_DSN", "postgres://global/router")
+		s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", shard)
+		s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+
+		_, _, err := Load("")
+		s.NoError(err)
+	}
+}
+
+func (s *ConfigSuite) TestAMigrateDSNWithoutTheDatabaseItMigratesIsRefused() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte("postgres:\n  dsn: \"\"\n  migrate_dsn: postgres://owner@global/router\n"), 0o600))
+
+	_, _, err := Load(path)
+	s.ErrorContains(err, "postgres.migrate_dsn migrates postgres.dsn's database: set postgres.dsn")
+}
+
+func (s *ConfigSuite) TestAShardWithOnlyTheSharedMigrateDSNIsRefused() {
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
+	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "set postgres.shard_migrate_dsn too")
+}
+
+func (s *ConfigSuite) TestAShardMigrateDSNWithoutTheSharedOneIsRefused() {
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@usw/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "set postgres.shard_dsn and postgres.migrate_dsn")
+}
+
+func (s *ConfigSuite) TestAShardMigrateDSNForTheSharedDatabaseIsRefused() {
+	s.T().Setenv("ROUTER_POSTGRES_DSN", "postgres://global/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://global/router")
+	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@global/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "postgres.shard_dsn's own database")
+}
+
+func (s *ConfigSuite) TestAShardMigrateDSNWithoutAShardIsRefused() {
+	s.T().Setenv("ROUTER_POSTGRES_MIGRATE_DSN", "postgres://owner@global/router")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_MIGRATE_DSN", "postgres://owner@usw/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "set postgres.shard_dsn and postgres.migrate_dsn")
+}
+
 func (s *ConfigSuite) TestAShardRedisWithoutTheSharedOneIsRefused() {
 	path := filepath.Join(s.T().TempDir(), "router.yaml")
 	s.Require().NoError(os.WriteFile(path, []byte("redis:\n  addr: \"\"\n  shard:\n    addr: usw:6379\n"), 0o600))
 
 	_, _, err := Load(path)
 	s.ErrorContains(err, "set redis.addr")
+}
+
+func (s *ConfigSuite) TestAShardDatabaseWithoutTheShardListIsRefused() {
+	s.T().Setenv("ROUTER_SHARD", "us-west1")
+	s.T().Setenv("ROUTER_POSTGRES_SHARD_DSN", "postgres://usw/router")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, "set postgres.shards")
 }
 
 func (s *ConfigSuite) TestShardsThatLeaveThisOneOutAreRefused() {

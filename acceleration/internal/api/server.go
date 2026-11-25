@@ -67,6 +67,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/relay"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/simulation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -151,6 +152,10 @@ type Options struct {
 	// only that node can answer is carried to it rather than answered with a 404. Absent
 	// when there is no Redis to keep it in, or no address this node's peers reach it at.
 	Directory *node.Directory
+	// ShardRouting is which shard a hook's work is done in, the same on every router. A hook
+	// meant for another shard than the Directory's is handed to a node there. The zero Map, or
+	// no Directory, keeps every hook where it lands.
+	ShardRouting shardmap.Map
 	// Workers is the deployment's dispatch workers, wherever they are connected: told what
 	// the ones here host, and how a running session's text reaches one elsewhere. Absent
 	// when the Directory or the Relay is.
@@ -234,6 +239,9 @@ type Options struct {
 	// TwilioAuthToken checks that a webhook came from Twilio (TWILIO_WEBHOOK_AUTH_TOKEN).
 	// Without it no Twilio webhook is believed.
 	TwilioAuthToken string
+	// TwilioAccountSID is the Twilio account this router's Twilio numbers are under
+	// (TWILIO_ACCOUNT_SID). A call webhook naming any other is hung up.
+	TwilioAccountSID string
 	// TelnyxConnectionID is the TeXML application this router's Telnyx numbers are on
 	// (TELNYX_CONNECTION_ID). A call webhook for any other is hung up.
 	TelnyxConnectionID string
@@ -357,6 +365,7 @@ type Server struct {
 	sessions           *session.Manager
 	relayed            *relayed
 	directory          *node.Directory
+	shards             shardmap.Map
 	workers            *node.Workers
 	forwarder          *node.Forwarder
 	peerCredentials    [][]byte // what a peer may present: one credential per key of the keyring
@@ -369,6 +378,8 @@ type Server struct {
 	chatInboundKeys    []ed25519.PublicKey
 	twilioAuthToken    string
 	twilioAlertSids    rueidis.Client // nil without Redis: every copy of an alert is counted
+	twilioCallSids     rueidis.Client // nil without Redis: every Twilio call is hung up
+	twilioAccountSID   string
 	telnyxConnectionID string
 	simulations        *simulation.Runner
 	knowledge          *metered.Knowledge
@@ -593,6 +604,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		phone:              options.Phone,
 		sessions:           options.Sessions,
 		directory:          options.Directory,
+		shards:             options.ShardRouting,
 		workers:            options.Workers,
 		streams:            options.Streams,
 		audioFloor:         options.AudioFloor,
@@ -602,6 +614,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		telnyxPublicKey:    options.TelnyxPublicKey,
 		chatInboundKeys:    options.ChatInboundKeys,
 		twilioAuthToken:    options.TwilioAuthToken,
+		twilioAccountSID:   options.TwilioAccountSID,
 		telnyxConnectionID: options.TelnyxConnectionID,
 		simulations:        options.Simulations,
 		knowledge:          options.Knowledge,
@@ -673,6 +686,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		server.runSlots, server.runsPerApp = concurrency.New(options.Live.Redis(), nil), options.RunsPerApp
 		server.newGuests = core.NewLimiter(options.Live.Redis(), nil)
 		server.twilioAlertSids = options.Live.Redis()
+		server.twilioCallSids = options.Live.Redis()
 	}
 	server.imageHTTP = options.ImageHTTP
 	server.documents = options.Documents
@@ -829,6 +843,7 @@ func (s *Server) Handler() http.Handler {
 	handle(mux, "POST "+phone.CallHookPath+"/{app}", "PhoneHook", s.receiveCallEvent)
 	handle(mux, "POST "+telnyxCallHookPath, "ReceiveTelnyxCall", s.receiveTelnyxCall)
 	handle(mux, "POST "+telnyxEventsHookPath, "ReceiveTelnyxEvent", s.receiveTelnyxEvent)
+	handle(mux, "POST "+twilioCallHookPath, "ReceiveTwilioCall", s.receiveTwilioCall)
 	handle(mux, "POST "+twilioEventsHookPath, "ReceiveTwilioEvent", s.receiveTwilioEvent)
 	handle(mux, "POST "+chat.MessageHookPath, "ChatHook", s.receiveMessageEvent)
 	handle(mux, "POST "+chat.MessageHookPath+"/{app}", "ChatHook", s.receiveMessageEvent)
@@ -1440,6 +1455,7 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 			r = r.WithContext(ctx)
 			s.policies.Join(ctx, principal.AppID, principal.OrganizationID, principal.OrganizationTier)
 			s.recordUser(ctx, principal)
+			s.recordShard(ctx, principal)
 			s.recordEmail(ctx, principal)
 			s.keepServerToken(ctx, r, principal.AppID)
 		}
@@ -1530,6 +1546,23 @@ func (s *Server) recordUser(ctx context.Context, principal auth.Principal) {
 	}
 	if err != nil {
 		s.logger.Error("could not record an end user",
+			"customer", principal.AppID, "user", principal.UserID, "error", err)
+	}
+}
+
+// recordShard keeps the shard that served a request the user's own client sent, which the load
+// balancer picked by where they are, so their messages are answered there (userShard). A
+// backend's request says nothing of where its user is, and one a peer handed over was routed to
+// another node. A failure is logged, as recordUser's is.
+func (s *Server) recordShard(ctx context.Context, principal auth.Principal) {
+	if s.store == nil || s.directory == nil || s.directory.Shard() == "" || node.Forwarded(ctx) {
+		return
+	}
+	if principal.Kind != auth.KindAuthenticated && principal.Kind != auth.KindGuest {
+		return
+	}
+	if err := s.store.Users.Served(ctx, principal.AppID, principal.UserID, s.directory.Shard()); err != nil {
+		s.logger.Error("could not record the shard serving an end user",
 			"customer", principal.AppID, "user", principal.UserID, "error", err)
 	}
 }
