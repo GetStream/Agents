@@ -140,7 +140,9 @@ shard_routing:
 | `us_only`, `eu_only`, `canada_only` | The shard the table picks when it is in the geography, else the geography's first shard | The geography's next shard, else 503 `shard_unavailable`. Never outside it |
 
 - **New work** is placed by policy where it arrives: a session over HTTP or the session socket,
-  a run, a placed call, an inbound chat message and an inbound call. The session socket is
+  a run, a placed call (by the agent on its `from` number), an inbound chat message, a thread
+  message (Slack, SMS, WhatsApp, iMessage) and an inbound call. A hook refused under residency
+  is answered 503 and its delivery is not kept as done, so it is delivered again. The session socket is
   placed by its app's policy at the upgrade. An agent whose own residency differs refuses it
   after the start frame, since the socket cannot move by then.
 - **Reminders and campaign dials** are claimed by the same policy, in the claim query. Residency
@@ -148,7 +150,9 @@ shard_routing:
 - **Dispatch workers** register in the home shard: a worker socket that lands elsewhere is
   proxied there, and the other shards reach it over the global work bus. A residency app's
   workers register in its geography instead, and its sessions reach no worker outside it. The
-  socket names no agent, so this follows the app's policy, not an agent's.
+  socket names no agent, so this follows the app's policy, not an agent's. Workers connected
+  before an app switched to a residency policy stay where they are, and its sessions do not
+  reach them until they reconnect.
 - **A geography with no shard** in `shard_routing.residency` cannot be set as a policy on a
   sharded deployment. A deployment of one shard enforces no residency: its work stays put.
 
