@@ -2846,10 +2846,12 @@ By default every start migrates, so the role in `postgres.dsn` owns the schema. 
 role that cannot change it, give `router migrate` a DSN of the owner's:
 
 ```yaml
+shard: us-west1 # a hosted deployment's only, as are shards and the two shard DSNs
+shards: [us-east4, us-west1, europe-west4]
 postgres:
   dsn: postgres://router_serving@global/router
   migrate_dsn: postgres://router_owner@global/router
-  shard_dsn: postgres://router_serving@usw1/router # a hosted deployment's only, listed in shards
+  shard_dsn: postgres://router_serving@usw1/router
   shard_migrate_dsn: postgres://router_owner@usw1/router
 ```
 
