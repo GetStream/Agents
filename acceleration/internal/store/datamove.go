@@ -2444,7 +2444,8 @@ func (change DataChange) Skipped() bool {
 
 // deleteRow removes what a delete change names, scoped to the customer replaying it so a
 // change carrying somebody else's key cannot reach their row. It adds to stale the cached values
-// the row was read through.
+// the row was read through. Of a row of forgottenTables, it empties what this deployment recorded,
+// so a move onward from here hands none of it on.
 func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, change DataChange, stale *[]string) error {
 	if slices.Contains(retiredTables, change.Table) {
 		return nil
@@ -2456,6 +2457,21 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 	shape, err := s.shapeOf(ctx, change.Table)
 	if err != nil {
 		return err
+	}
+
+	if slices.Contains(forgottenTables, spec.name) {
+		// Whether or not the row is still here: a cascade here may have deleted it first.
+		forgotten := forgottenChanges(db, customerID, spec.name)
+		if spec.copied != "" {
+			// Recorded here under this deployment's id: the copied column holds the source's.
+			forgotten = forgotten.Where(fmt.Sprintf("payload->>'%s' = ?::jsonb->>'%s'", spec.copied, shape.keys[0]), string(change.Key))
+		} else {
+			// The customer in the key is the source's, as below.
+			forgotten = forgotten.Where("key - ?::text = ?::jsonb - ?::text", spec.customer, string(change.Key), spec.customer)
+		}
+		if _, err := forgotten.Exec(ctx); err != nil {
+			return fmt.Errorf("store: forget the changes of %s: %w", change.Table, err)
+		}
 	}
 
 	var conditions []string

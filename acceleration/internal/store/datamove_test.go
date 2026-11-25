@@ -5794,6 +5794,101 @@ func (s *DataMoveSuite) TestAReplayedDeleteOfALogRemovesItsCopyAndNotTheLogHoldi
 	s.Equal(map[int64]string{id: "written here"}, s.logsHere("acme"))
 }
 
+// recordedHere is what the destination recorded of the row of a table whose key column holds
+// value: each change as its op and whether it holds the row.
+func (s *DataMoveSuite) recordedHere(customerID, table, column, value string) []string {
+	changes, _, err := s.destination.Changes(s.ctx, customerID, 0, 1000)
+	s.Require().NoError(err)
+	var found []string
+	for _, change := range changes {
+		var key map[string]json.RawMessage
+		s.Require().NoError(json.Unmarshal(change.Key, &key))
+		if change.Table == table && strings.Trim(string(key[column]), `"`) == value {
+			found = append(found, fmt.Sprintf("%s %t", change.Op, len(change.Payload) > 0))
+		}
+	}
+	return found
+}
+
+func (s *DataMoveSuite) TestAFollowerFollowedOnEmptiesWhatItRecordedOfAForgottenProfile() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "initech", time.Hour, time.Second))
+	s.Require().NoError(s.source.Users.Insert(s.ctx, &User{CustomerID: "acme", ID: "anya", Kind: UserKindAuthenticated, Name: "Anya"}))
+	// Under another app id, which the profile's key names.
+	cursor := s.move("acme", "initech")
+	s.Require().NoError(s.source.Users.Insert(s.ctx, &User{CustomerID: "acme", ID: "grace", Kind: UserKindAuthenticated, Name: "Grace"}))
+	_, err := s.source.ForgetUserSettings(s.ctx, "acme", "anya", "forgotten", &AuditEntry{
+		CustomerID: "acme", ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+	})
+	s.Require().NoError(err)
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "initech", changes))
+
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("initech", "users", "id", "anya")))
+	s.Contains(s.recordedHere("initech", "users", "id", "grace"), "insert true", "a profile still here keeps what was recorded of it")
+}
+
+func (s *DataMoveSuite) TestAFollowerFollowedOnEmptiesWhatItRecordedOfADeletedLogsCopy() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	id := s.seedLog("acme", "copied")
+	own := s.exportedLog()
+	own["message"] = "written here"
+	s.placeHere(own)
+	cursor := s.move("acme", "acme")
+	var copied int64
+	for logID, message := range s.logsHere("acme") {
+		if message == "copied" {
+			copied = logID
+		}
+	}
+	s.Require().NotZero(copied)
+	s.Require().NotEqual(id, copied, "the copy is known here by an id of this deployment's")
+
+	_, err := s.source.GlobalDB().ExecContext(s.ctx, "DELETE FROM agent_logs WHERE id = ?", id)
+	s.Require().NoError(err)
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", changes))
+
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("acme", "agent_logs", "id", strconv.FormatInt(copied, 10))))
+	s.Equal([]string{"insert true"}, s.recordedHere("acme", "agent_logs", "id", strconv.FormatInt(id, 10)),
+		"the log here holding the source's id keeps what was recorded of it")
+}
+
+func (s *DataMoveSuite) TestAFollowerFollowedOnEmptiesWhatItRecordedOfADeletedTaskAndItsRuns() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	s.seedScheduledTask("st-1", "acme", ScheduledTaskActive)
+	cursor := s.move("acme", "acme")
+	s.Require().NoError(s.source.ScheduledTasks.Delete(s.ctx, "acme", "st-1"))
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", changes))
+
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("acme", "scheduled_tasks", "id", "st-1")))
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("acme", "scheduled_task_runs", "id", "st-1-run")))
+}
+
+func (s *DataMoveSuite) TestAFollowerFollowedOnEmptiesWhatItRecordedOfADeletedSessionsMessages() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	id := s.pinnedSession("acme", 0)
+	s.Require().NoError(s.source.BranchMessages.UpsertMany(s.ctx, []AgentBranchMessage{{
+		SessionID: id, OriginalMessageID: "message-1", CustomerID: "acme", SwitchID: "switch-1"}}))
+	cursor := s.move("acme", "acme")
+	s.Require().NoError(s.source.Sessions.Delete(s.ctx, "acme", id))
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme", changes))
+
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("acme", "agent_branch_messages", "original_message_id", "message-1")))
+}
+
 func (s *DataMoveSuite) TestACopiedLogIsNumberedUnderTheLockItsAppsLogsAreNumberedUnder() {
 	s.seedLog("acme", "copied")
 	encoded, err := json.Marshal(s.exportedLog())
