@@ -105,6 +105,13 @@ func (s *LargeFrameSuite) TestANameTooLongToBeOneIsNone() {
 	s.Equal(frameNamed{Type: "tool_result"}, s.named(`{"type":"tool_result","id":"`, "a", `call-1"}`))
 }
 
+func (s *LargeFrameSuite) TestANameOfTheMostKeptIsFound() {
+	most := strings.Repeat("n", 1024)
+
+	s.Equal(frameNamed{Type: "tool_result", ID: most}, s.named(`{"id":"`+most+`","output":"`, "a", `","type":"tool_result"}`))
+	s.Equal(frameNamed{Type: "tool_result"}, s.named(`{"id":"`+most+`n","output":"`, "a", `","type":"tool_result"}`))
+}
+
 func (s *LargeFrameSuite) TestABackslashThatIsEscapedDoesNotEscapeTheEndOfItsString() {
 	s.Equal(frameNamed{Type: "tool_result", ID: "call-1"},
 		s.named(`{"output":"`, `\\`, `","type":"tool_result","id":"call-1"}`))

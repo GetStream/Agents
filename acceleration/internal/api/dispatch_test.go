@@ -368,6 +368,16 @@ func (s *DispatchSuite) TestALargeDoneNamedBeforeItsErrorGivesItsRoomBack() {
 	s.givesItsRoomBack(`{"type":"done","work_id":"%s","error":"`, `"}`)
 }
 
+func (s *DispatchSuite) TestALargeFrameOfAnotherTypeGivesNoRoomBack() {
+	worker := s.opensWith("/v1/dispatch?capacity=1&active=1")
+
+	s.Require().NoError(worker.WriteMessage(websocket.TextMessage, s.overTheLimit(`{"type":"load","padding":"`, `"}`)))
+	s.Equal("error", s.next(worker)["type"])
+
+	_, err := s.dispatch.Assign(s.customerID(), dispatch.Call{CallID: "call-1"})
+	s.Error(err, "a worker carrying all it takes was given more")
+}
+
 func (s *DispatchSuite) givesItsRoomBack(opening, closing string) {
 	worker := s.reportingWorker(1)
 	s.assign(dispatch.Call{CallID: "call-1"})
