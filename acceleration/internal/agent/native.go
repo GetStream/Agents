@@ -260,9 +260,13 @@ func (a *Agent) receiveSTS(p *pipeline, source <-chan sts.Event, events chan<- s
 			// A stop is answered by the next reply: the one the server opens for it, or,
 			// when a reply was still open, the one asked for after that reply ends
 			// (openairealtime's owe). On Gemini the open reply takes it, and none follows.
+			// Counted here, in order with the tool calls, so a yes the model gives to these
+			// words finds them counted.
+			drained := !a.waitingForPlayout()
 			a.mu.Lock()
 			a.nativeListening = false
 			a.nativeAnswerDue = !typed.Answered
+			a.heardLocked(drained)
 			a.mu.Unlock()
 		case sts.AudioChunk:
 			a.goodbyeBegan(typed.ResponseID)
@@ -632,6 +636,7 @@ func (a *Agent) replyStarted(started sts.ResponseStarted) {
 	a.speakingTurn = started.ResponseID
 	a.generating = true
 	a.utterances++
+	a.askingLocked(started.ResponseID)
 	participant := a.lastParticipant
 	waiting := a.waitingSince
 	a.waitingSince = time.Time{}
@@ -713,6 +718,7 @@ func (a *Agent) replyComplete(complete sts.ResponseComplete) {
 	}
 	a.generating = false
 	a.saying = ""
+	a.repliedLocked(complete.ResponseID, complete.Interrupted, said != "" || complete.AudioDurationMs > 0)
 	// A goodbye cut short is either the caller talking, which SpeechStarted cancels, or a
 	// lost session, which recoverNative finishes: providers report both as interrupted.
 	if bye := a.goodbye; bye != nil && bye.reply == complete.ResponseID && !complete.Interrupted {

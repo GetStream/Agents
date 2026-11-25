@@ -269,6 +269,7 @@ func (a *Agent) runSpeculation(spec *speculation) {
 // When it is not used, speculated is the id of the speculative replies thrown away on the
 // turn, which the answer asked for instead shares, and empty when nothing was speculated.
 func (a *Agent) adoptSpeculation(ready candidate, note string) (adopted bool, speculated string) {
+	drained := !a.waitingForPlayout()
 	a.mu.Lock()
 	// The turn is answered here, with the reply started for it or another, so whatever is
 	// speculated on next is a turn of its own.
@@ -297,6 +298,7 @@ func (a *Agent) adoptSpeculation(ready candidate, note string) (adopted bool, sp
 	a.lastParticipant = ready.Participant
 	a.lastWriter = writer{}
 	a.heardCaller = true
+	a.heardLocked(drained)
 	a.generatingCancel[ready.ID] = spec.cancel
 	a.mu.Unlock()
 

@@ -341,6 +341,9 @@ type Agent struct {
 	// approvalQuestions are what a cascade owes the caller as written, in place of a reply
 	// to the calls that asked them.
 	approvalQuestions []string
+	// callerTurns counts the turns a caller spoke (approval.go), so a yes runs a call only once
+	// one came after its question played.
+	callerTurns int
 	// approvedRuns is the confirmation each approved call runs under, by the call's own id.
 	approvedRuns map[string]approvedRun
 	// toolsRunning names each tool still running, by call, so a caller left waiting can
@@ -2492,6 +2495,7 @@ func (a *Agent) respondTurn(
 	scheduled bool,
 	speculated string,
 ) error {
+	drained := !a.waitingForPlayout()
 	a.mu.Lock()
 	if a.harness == nil {
 		a.mu.Unlock()
@@ -2525,6 +2529,7 @@ func (a *Agent) respondTurn(
 	a.lastWriter = listened.writer
 	if !listened.typed {
 		a.heardCaller = true
+		a.heardLocked(drained)
 	}
 	// A call opened with a typed instruction ("greet the caller") has nothing to act on
 	// yet, and a model offered tools then logs a summary of the empty call.
