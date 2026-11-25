@@ -304,6 +304,9 @@ func (s *Server) createConnection(ctx context.Context, request *createConnection
 	if !ok {
 		return nil, errMissingCustomer
 	}
+	if failure, refused := refuseReservedActingFor(ctx, "CreateConnection"); refused {
+		return nil, failure
+	}
 	if s.store == nil {
 		return nil, errNoConnections
 	}
@@ -556,7 +559,7 @@ func (s *Server) revokeAtProvider(ctx context.Context, connection store.Connecto
 	revoked, err := s.revokeHeld(ctx, connection, held)
 	if err != nil {
 		s.logger.Error("could not revoke a grant at the provider", "after", after, "connection", connection.ID,
-			"connector", connection.ConnectorID, "error", err)
+			"connector", connection.ConnectorID, "error", core.LoggedError(err))
 	}
 	return revoked
 }

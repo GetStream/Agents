@@ -109,8 +109,9 @@ class CreateSessionRequest:
         navigating (bool | Unset): The agent placed this call, so let recordings finish and answer their menus. Default:
             False.
         phone (SessionPhone | Unset): The number the session acts from, which is what turns transferring on.
-        project_id (str | Unset): What the conversation belongs to. Also recorded as the "project" cost tag, so spend
-            breaks down by project without the caller labelling it twice. A tag spelled out in tags wins.
+        project_id (str | Unset): What the conversation belongs to. Sent server-side it is also recorded as the
+            "project" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in
+            tags, or the agent config's, wins. A device's groups the session and is no cost tag.
         resume_history (ResumeHistory | Unset): How a conversation is handed back to the model when a session carries it
             on.
         return_url (str | Unset): The app's own page a login or step-up the chat asks for goes back to, as

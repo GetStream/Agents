@@ -22,8 +22,8 @@ export STREAM_API_KEY=your_api_key
 export STREAM_API_SECRET=your_api_secret
 ```
 
-It is in us-east4. `STREAM_ACCELERATION_REGION=europe-west4`, or
-`stream.Backend{Region: "europe-west4"}`, is the one in another region.
+By default requests go to the nearest healthy region. `STREAM_ACCELERATION_REGION=europe-west4`, or
+`stream.Backend{Region: "europe-west4"}`, pins them to one region.
 
 This is [examples/quickstart](examples/quickstart): an agent read from its directory,
 `agents/myagent`, with one function the model can call, asked one question in writing. Run it

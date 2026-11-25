@@ -930,10 +930,14 @@ func (s *StoreSuite) TestTheNextWakeIsReadOffItsIndex() {
 	_, _, err := watched.ScheduledTasks.NextDue(s.ctx)
 	s.Require().NoError(err)
 	s.Require().Len(sent.sent, 1)
+	s.Contains(sent.sent[0], "ORDER BY GREATEST(next_run_at, lease_until) ASC LIMIT 1")
 
 	var plan []string
 	err = s.store.global.RunInTx(s.ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+		// On a table this small the planner may read another index and sort: which is cheaper moves
+		// with the statistics other tests leave. With sorts off, one shows only if no index reads
+		// in order.
+		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off; SET LOCAL enable_sort = off"); err != nil {
 			return err
 		}
 		return tx.NewRaw("EXPLAIN "+sent.sent[0]).Scan(ctx, &plan)
@@ -942,6 +946,7 @@ func (s *StoreSuite) TestTheNextWakeIsReadOffItsIndex() {
 	read := strings.Join(plan, "\n")
 	s.Contains(read, "Index Scan using scheduled_tasks_wake_idx", read)
 	s.NotContains(read, "Sort", read)
+	s.NotContains(read, "Filter", "the index holds only the tasks that wake the worker: %s", read)
 }
 
 func (s *StoreSuite) TestDeletingAConfigPausesOnlyItsActiveTasks() {
