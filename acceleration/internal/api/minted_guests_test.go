@@ -155,6 +155,17 @@ func (s *ScheduledTasksSuite) TestACallAMintedGuestsTaskPlacesIsHeldWithThemAsAG
 	s.False(held(s.mintedGuest(), auth.KindServer), "a task their backend made")
 }
 
+func (s *ScheduledTasksSuite) TestACallATaskPlacesIsTheRoutersActingForItsUser() {
+	for _, user := range []*testClient{s.data.createUser(), s.mintedGuest()} {
+		caller := s.router.callSpec(context.Background(), store.AgentConfig{}, scheduledDelivery{
+			CustomerID: s.customerID(), UserID: user.userID, CallerKind: string(auth.KindAuthenticated),
+		}, "agent", phone.Placed{}, "+15550100100", "+15550100101").Caller
+
+		s.True(caller.ServerSide)
+		s.Equal(user.userID, caller.UserID)
+	}
+}
+
 func (s *ScheduledTasksSuite) TestAMintedGuestManagesATaskTheyHaveOverREST() {
 	guest := s.mintedGuest()
 	task := s.guestsTask(guest, s.agentWithScheduling(nil))
@@ -266,11 +277,84 @@ func (s *MintedGuestsSuite) TestAnAppThatAdmitsGuestsServesThemWhileTheirRowCann
 	s.Equal(http.StatusOK, s.lists(guest))
 }
 
-func (s *MintedGuestsSuite) TestAMintedGuestIsServedWhileTheAppsSettingsCannotBeRead() {
+func (s *MintedGuestsSuite) TestWhileSettingsCannotBeReadAnAppTakesGuestsAsItsKeySays() {
 	guest := s.recordedGuest()
+	s.Require().Equal(http.StatusOK, s.lists(s.data.createUser()))
+	s.failQueries(`"ap"."settings"`)
+	s.Equal(http.StatusOK, s.lists(guest))
+
+	s.failing.value.Store(nil)
+	s.closedToGuests()
+	guest = s.recordedGuest()
+	s.Require().Equal(http.StatusOK, s.lists(s.data.createUser()))
+	s.failQueries(`"ap"."settings"`)
+	s.Equal(http.StatusForbidden, s.lists(guest))
+}
+
+func (s *MintedGuestsSuite) TestBehindAProxyAMintedGuestIsAnsweredA500WhileSettingsCannotBeRead() {
+	s.closedToGuests()
+	minted, own := s.recordedGuest().userID, guestPrefix+"app-"+s.utils.uuid()
+	guest, other, backend := s.behindProxy(minted, auth.AuthTypeJWT), s.behindProxy(own, auth.AuthTypeJWT), s.behindProxy(minted, auth.AuthTypeServer)
 	s.failQueries(`"ap"."settings"`)
 
-	s.Equal(http.StatusOK, s.lists(guest))
+	s.Equal(http.StatusInternalServerError, s.lists(guest))
+	s.Equal(http.StatusOK, s.lists(other))
+	s.Equal(http.StatusOK, s.lists(backend))
+
+	s.failing.value.Store(nil)
+	s.Equal(http.StatusForbidden, s.lists(guest), "the failure is not kept")
+}
+
+// admitGuests turns guests back on for the suite's app, and ends the minute-long copies of what
+// it takes, which Redis does itself in production.
+func (s *MintedGuestsSuite) admitGuests() {
+	ctx := context.Background()
+	_, err := s.store.GlobalDB().ExecContext(ctx, "UPDATE apps SET settings = '{}' WHERE id = ?", s.customerID())
+	s.Require().NoError(err)
+	client := s.live.Redis()
+	for _, key := range []string{"appcfg:key:" + s.app.key, "appcfg:app-guests:" + s.customerID()} {
+		left, err := client.Do(ctx, client.B().Pttl().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		s.LessOrEqual(left, int64(60_000), key)
+		s.Require().NoError(client.Do(ctx, client.B().Del().Key(key).Build()).Error())
+	}
+}
+
+func (s *MintedGuestsSuite) TestAnAppThatTurnsGuestsBackOnServesANewOneWithinTheMinute() {
+	s.closedToGuests()
+	_, err := s.configs.Apps.GetSettings(context.Background(), s.customerID())
+	s.Require().NoError(err)
+	s.Require().Equal(http.StatusForbidden, s.lists(s.recordedGuest()))
+
+	s.admitGuests()
+
+	s.Eventually(func() bool { return s.lists(s.mintedGuest()) == http.StatusOK }, settleFor, 20*time.Millisecond)
+}
+
+func (s *MintedGuestsSuite) TestAnAppThatTurnsGuestsBackOnServesANewOneWithinTheMinuteBehindAProxy() {
+	s.closedToGuests()
+	_, err := s.configs.Apps.GetSettings(context.Background(), s.customerID())
+	s.Require().NoError(err)
+	s.Require().Equal(http.StatusForbidden, s.lists(s.behindProxy(s.recordedGuest().userID, auth.AuthTypeJWT)))
+
+	s.admitGuests()
+
+	next := s.behindProxy(s.mintedGuest().userID, auth.AuthTypeJWT)
+	s.Eventually(func() bool { return s.lists(next) == http.StatusOK }, settleFor, 20*time.Millisecond)
+}
+
+func (s *MintedGuestsSuite) TestARefusedGuestOpensNoSession() {
+	s.closedToGuests()
+
+	s.Equal(http.StatusForbidden, s.recordedGuest().do(http.MethodPost, "/v1/agents/sessions", textSession(nil), nil))
+
+	s.Empty(s.serverClient.querySessions(SessionQuery{}).Items)
+}
+
+func (s *MintedGuestsSuite) TestAnAppThatTakesNoGuestsServesAnAnonymousCaller() {
+	s.closedToGuests()
+
+	s.Equal(http.StatusOK, s.lists(s.data.createAnonymous()))
 }
 
 func (s *MintedGuestsSuite) TestWhileNoRowCanBeReadABackendMintsAndClaimsGuests() {

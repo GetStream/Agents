@@ -167,3 +167,70 @@ func (s *StoreSuite) TestWithNoRedisAForgottenOrDeletedGuestIsMintedNoMoreHere()
 	s.False(s.mintedBy(router.Users, app, "guest-1"))
 	s.False(s.mintedBy(router.Users, app, "guest-2"))
 }
+
+func (s *StoreSuite) TestWithNoRedisWhetherAGuestIsMintedIsHeldApartFromWhoWasSeen() {
+	app, users := s.freshApp(), s.usersWithoutRedis(0)
+	s.Require().NoError(users.Seen(s.ctx, app, "guest-1", UserKindAuthenticated))
+	s.False(s.mintedBy(users, app, "guest-1"))
+	s.eraseUser(app, "guest-1")
+
+	s.Require().NoError(users.Seen(s.ctx, app, "guest-1", UserKindAuthenticated))
+
+	_, found := s.userRow(app, "guest-1")
+	s.False(found, "still held as seen")
+}
+
+func (s *StoreSuite) TestWithNoRedisAnAnswerThatAGuestIsNotMintedIsHeld() {
+	app, users := s.freshApp(), s.usersWithoutRedis(0)
+	s.False(s.mintedBy(users, app, "guest-1"))
+
+	// Another router's mint, which nothing tells this one of.
+	s.mintGuest(s.usersWithoutRedis(0), app, "guest-1")
+
+	s.False(s.mintedBy(users, app, "guest-1"))
+}
+
+func (s *StoreSuite) TestWithNoRedisAReadBegunBeforeAMintIsNotKeptAfterIt() {
+	app, users := s.freshApp(), s.usersWithoutRedis(0)
+	before, err := cachedFact(s.ctx, users.store, users.minted, app, "guest-1", "unused", time.Hour, time.Minute,
+		func(ctx context.Context) (bool, error) {
+			s.mintGuest(users, app, "guest-1")
+			return false, nil
+		})
+	s.Require().NoError(err)
+	s.Require().False(before)
+
+	s.True(s.mintedBy(users, app, "guest-1"))
+}
+
+func (s *StoreSuite) TestWhetherAnAppTakesGuestsIsItsOwnAndReadOnce() {
+	closed, open := s.app(), s.app()
+	_, err := s.store.GlobalDB().NewUpdate().Model((*App)(nil)).
+		Set(`settings = '{"allow_guest": false}'`).Where("id = ?", closed.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+	allowed := func(apps *Apps, id string) bool {
+		allowed, err := apps.GuestAllowed(s.ctx, id)
+		s.Require().NoError(err)
+		return allowed
+	}
+	without, err := s.openRouter()
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(without.Close()) })
+	for _, apps := range []*Apps{s.store.Apps, without.Apps} {
+		s.False(allowed(apps, closed.ID))
+		s.True(allowed(apps, open.ID))
+		s.True(allowed(apps, "never-made"))
+	}
+
+	// A change neither is told of is not read until the minute is over.
+	_, err = s.store.GlobalDB().NewUpdate().Model((*App)(nil)).Set("settings = '{}'").Where("id = ?", closed.ID).Exec(s.ctx)
+	s.Require().NoError(err)
+	if s.store.cache != nil {
+		s.False(allowed(s.store.Apps, closed.ID))
+	}
+	s.False(allowed(without.Apps, closed.ID))
+	s.True(without.Apps.guests.Holds(closed.ID, "", "false", time.Now().Add(50*time.Second)))
+	s.False(without.Apps.guests.Holds(closed.ID, "", "false", time.Now().Add(61*time.Second)))
+	_, err = s.store.Apps.GuestAllowed(s.ctx, "")
+	s.Error(err)
+}

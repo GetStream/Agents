@@ -1377,32 +1377,24 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 				Message: strings.TrimPrefix(err.Error(), "auth: ")})
 			return
 		}
-		// A caller that hung up while its credential was checked is no failure of the router's,
-		// and nobody is left to answer. The status is for withMetrics, which counts and times it
-		// as a 4xx: callers giving up on a stalled key store still show there.
-		if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
-			s.logger.Debug("the caller left before its credential was checked", "method", r.Method,
-				"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()))
-			w.WriteHeader(statusClientClosed)
-			return
-		}
-		// A credential that could not be checked (the key store down, a key that would not
-		// unseal) is the router's failure, not a wrong key. It is logged here: withRequestLog
-		// runs after this.
 		if err != nil && !errors.Is(err, auth.ErrUnauthenticated) {
-			s.logger.Error("could not check a credential", "method", r.Method,
-				"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()),
-				"error", err, "stack", stack.Trace(err))
-			writeError(w, internalError())
+			s.refuseUnchecked(w, r, err)
 			return
 		}
 		if err == nil && principal.AppID != "" {
 			guest := s.guestUser(r.Context(), principal.AppID, principal.UserID, principal.Kind)
 			// The authenticator asked whether the app admits a KindGuest. One this router minted
 			// it took for an account, so that is asked here.
-			if guest && principal.Kind != auth.KindGuest && !s.guestAdmitted(r.Context(), principal.AppID) {
-				s.refuseLevel(w, r, principal)
-				return
+			if guest {
+				admitted, err := s.guestAdmitted(r.Context(), principal)
+				if err != nil {
+					s.refuseUnchecked(w, r, err)
+					return
+				}
+				if !admitted {
+					s.refuseLevel(w, r, principal)
+					return
+				}
 			}
 			ctx := context.WithValue(r.Context(), customerContextKey{}, principal.AppID)
 			ctx = context.WithValue(ctx, organizationContextKey{}, principal.OrganizationID)
@@ -1429,6 +1421,27 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 	})
 }
 
+// refuseUnchecked answers a caller whose credential, or whether its app takes it, could not be
+// checked.
+func (s *Server) refuseUnchecked(w http.ResponseWriter, r *http.Request, err error) {
+	// A caller that hung up while its credential was checked is no failure of the router's,
+	// and nobody is left to answer. The status is for withMetrics, which counts and times it
+	// as a 4xx: callers giving up on a stalled key store still show there.
+	if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
+		s.logger.Debug("the caller left before its credential was checked", "method", r.Method,
+			"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()))
+		w.WriteHeader(statusClientClosed)
+		return
+	}
+	// A credential that could not be checked (the key store down, a key that would not
+	// unseal) is the router's failure, not a wrong key. It is logged here: withRequestLog
+	// runs after this.
+	s.logger.Error("could not check a credential", "method", r.Method,
+		"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()),
+		"error", err, "stack", stack.Trace(err))
+	writeError(w, internalError())
+}
+
 // refuseLevel answers a caller whose level the app turns away.
 func (s *Server) refuseLevel(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
 	s.logger.Debug("refused a level of user this app turns away",
@@ -1442,9 +1455,9 @@ func (s *Server) refuseLevel(w http.ResponseWriter, r *http.Request, principal a
 
 // guestUser reports whether a user a credential of that kind named is a guest: by kind, or one
 // this router minted, whose token reads as an account's. A backend naming a guest is a backend.
-// Only an id the router could have minted is looked up. One whose row cannot be read is taken for a guest, so
-// that a database that is down does not make an account of one; nothing but what a guest is not
-// given is lost to a user of the app's own whose id starts the same way.
+// Only an id the router could have minted is looked up. One whose row cannot be read is taken
+// for a guest, so that a database that is down does not make an account of one; nothing but what
+// a guest is not given is lost to a user of the app's own whose id starts the same way.
 func (s *Server) guestUser(ctx context.Context, customerID, userID string, kind auth.Kind) bool {
 	if kind != auth.KindAuthenticated {
 		return kind == auth.KindGuest
@@ -1454,23 +1467,25 @@ func (s *Server) guestUser(ctx context.Context, customerID, userID string, kind 
 	}
 	minted, err := s.store.Users.Minted(ctx, customerID, userID)
 	if err != nil {
-		s.logger.Error("could not read whether a user is a guest, taking them for one",
+		level := slog.LevelError
+		if ctx.Err() != nil {
+			level = slog.LevelDebug
+		}
+		s.logger.Log(ctx, level, "could not read whether a user is a guest, taking them for one",
 			"customer", customerID, "user", userID, "error", err)
 		return true
 	}
 	return minted
 }
 
-// guestAdmitted reports whether the app takes guests. Settings that cannot be read admit, as an
-// app with none does: an outage must not turn the guests of every app away.
-func (s *Server) guestAdmitted(ctx context.Context, customerID string) bool {
-	settings, err := s.store.Apps.GetSettings(ctx, customerID)
-	if err != nil {
-		s.logger.Error("could not read whether an app admits guests, admitting one",
-			"customer", customerID, "error", err)
-		return true
+// guestAdmitted reports whether the caller's app takes guests: as its key's levels say, or behind
+// a proxy, which resolves none, as its settings do. Settings that cannot be read are an error, as
+// a key that cannot be is.
+func (s *Server) guestAdmitted(ctx context.Context, principal auth.Principal) (bool, error) {
+	if s.authMode == auth.Proxy && s.store != nil {
+		return s.store.Apps.GuestAllowed(ctx, principal.AppID)
 	}
-	return settings.GuestAllowed()
+	return principal.Levels.Admits(auth.KindGuest), nil
 }
 
 // attributionOf is who a request's usage is recorded as asked for by. The user is recorded as

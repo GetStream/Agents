@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/redis/rueidis"
-	"github.com/redis/rueidis/rueidisaside"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
@@ -240,29 +238,8 @@ func (r *Users) emailLock(customerID, userID string) *sync.Mutex {
 // router's with no Redis, where nothing tells it of another router's write. One that could
 // become yes (InsertGuest, a moved row) is kept for missTTL, and a failed read is not kept.
 func (r *Users) Minted(ctx context.Context, customerID, userID string) (bool, error) {
-	if customerID == "" || userID == "" {
-		return false, nil
-	}
-	if r.store.cache != nil {
-		return cached(ctx, r.store, mintedKey(customerID, userID), func(ctx context.Context) (bool, error) {
-			minted, err := r.readMinted(ctx, customerID, userID)
-			if err == nil && !minted {
-				rueidisaside.OverrideCacheTTL(ctx, missTTL)
-			}
-			return minted, err
-		})
-	}
-	for _, minted := range []bool{true, false} {
-		if r.minted.Holds(customerID, userID, strconv.FormatBool(minted), time.Now()) {
-			return minted, nil
-		}
-	}
-	minted, err := r.readMinted(ctx, customerID, userID)
-	if err != nil {
-		return false, err
-	}
-	r.minted.Keep(customerID, userID, strconv.FormatBool(minted), time.Now().Add(missTTL))
-	return minted, nil
+	return cachedFact(ctx, r.store, r.minted, customerID, userID, mintedKey(customerID, userID), cacheTTL, missTTL,
+		func(ctx context.Context) (bool, error) { return r.readMinted(ctx, customerID, userID) })
 }
 
 func (r *Users) readMinted(ctx context.Context, customerID, userID string) (bool, error) {
@@ -368,6 +345,8 @@ type seen struct {
 	mu    sync.Mutex
 	order *list.List
 	apps  map[string]map[string]*list.Element
+	// removals counts the users dropped, so a read begun before one is not kept after it.
+	removals uint64
 }
 
 // seenEntry is what one element of the recency list holds, which is enough to find its
@@ -427,7 +406,11 @@ func (s *seen) Holds(app, id, value string, now time.Time) bool {
 func (s *seen) Keep(app, id, value string, expires time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.keep(app, id, value, expires)
+}
 
+// keep is Keep. The caller holds the lock.
+func (s *seen) keep(app, id, value string, expires time.Time) {
 	held := seenEntry{app: app, id: id, value: value, expires: expires}
 	if element, found := s.apps[app][id]; found {
 		element.Value = held
@@ -447,11 +430,29 @@ func (s *seen) Keep(app, id, value string, expires time.Time) {
 	}
 }
 
+// Removals is how many users were dropped so far.
+func (s *seen) Removals() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.removals
+}
+
+// KeepSince is Keep, unless a user was dropped since there were removals of them: the value was
+// read before a write that may have changed it.
+func (s *seen) KeepSince(removals uint64, app, id, value string, expires time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.removals == removals {
+		s.keep(app, id, value, expires)
+	}
+}
+
 // Remove drops a user, for one whose row has changed under them.
 func (s *seen) Remove(app, id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.removals++
 	if element, found := s.apps[app][id]; found {
 		s.evict(element)
 	}

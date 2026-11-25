@@ -312,7 +312,7 @@ type Caller struct {
 	// so it is never held to that user's own quota nor spends their day.
 	Verified bool
 	// Guest is a user with a temporary account: one whose token says the role guest, or one this
-	// router minted (store.Users.Minted), whose token says no role and so reads as an account's.
+	// router minted (store.Users.Minted), whose token may say no role and so read as an account's.
 	// It decides what a session offers them, never what is theirs: that is the caller's kind.
 	Guest bool
 }
