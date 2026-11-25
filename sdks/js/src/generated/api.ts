@@ -12441,7 +12441,7 @@ export interface operations {
     readonly getCallEvents: {
         readonly parameters: {
             readonly query?: {
-                /** @description How many to return, oldest first. */
+                /** @description How many to return, oldest first. Up to the 10000 a call keeps. */
                 readonly limit?: number;
             };
             readonly header?: never;
@@ -18223,6 +18223,7 @@ export interface operations {
     readonly listSimulationRuns: {
         readonly parameters: {
             readonly query?: {
+                /** @description Up to 500. Omitted is 50. */
                 readonly limit?: number;
                 readonly simulation_id?: string;
                 readonly state?: "running" | "passed" | "failed" | "cancelled" | "errored";
