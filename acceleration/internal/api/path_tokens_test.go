@@ -39,7 +39,10 @@ func (s *PathTokensSuite) SetupSuite() {
 	s.logs = s.logged
 	// Installed before the harness: otelhttp takes the provider when the handler is built.
 	s.spans = tracetest.NewSpanRecorder()
-	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(s.spans)))
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(s.spans))
+	otel.SetTracerProvider(provider)
+	// The process keeps the provider, which would record every later suite's spans too.
+	s.T().Cleanup(func() { provider.UnregisterSpanProcessor(s.spans) })
 	s.RouterSuite.SetupSuite()
 }
 

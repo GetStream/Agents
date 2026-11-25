@@ -45,7 +45,10 @@ func (s *PerformanceSuite) SetupSuite() {
 	// Installed before the harness, so the store and the Redis client it opens record
 	// into this recorder rather than into the no-op provider.
 	s.spans = tracetest.NewSpanRecorder()
-	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(s.spans)))
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(s.spans))
+	otel.SetTracerProvider(provider)
+	// The process keeps the provider, which would record every later suite's spans too.
+	s.T().Cleanup(func() { provider.UnregisterSpanProcessor(s.spans) })
 	s.RouterSuite.SetupSuite()
 }
 
