@@ -60,7 +60,7 @@ class VisionAgentsTest {
     fun `naming no router reaches the hosted one`() {
         StreamAgents(apiKey = "key").use { hosted ->
             assertEquals(Backend.DEFAULT_URL, hosted.backend.url)
-            assertEquals("https://accelerate-us-east4.gcp.stream-io-api.com", hosted.backend.url)
+            assertEquals("https://accelerate.gcp.stream-io-api.com", hosted.backend.url)
         }
     }
 

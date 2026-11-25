@@ -972,3 +972,13 @@ func (s *GuestsSuite) underTheName(name string) string {
 	s.Require().NotContains(s.chat.Members(s.transcriptOf(talked)), name)
 	return talked
 }
+
+// A reserved id is never a guest's, so even the backend naming one is minted a new guest
+// rather than a token for that id.
+func (s *GuestsSuite) TestAReservedIDIsTakenAsNamingNoGuest() {
+	for _, caller := range []*testClient{s.serverClient, s.data.createAnonymous()} {
+		minted := s.mint(caller, GuestUserRequest{Id: pointerTo("!anon")})
+
+		s.Contains(minted.Id, guestPrefix, string(caller.kind))
+	}
+}

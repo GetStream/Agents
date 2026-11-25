@@ -312,6 +312,69 @@ func (s *SlackChannelSuite) TestASessionIsNotNamedAfterAThreadChannel() {
 	s.Equal(members, s.chat.Members(channel), "nobody was made a member of the thread")
 }
 
+// TestADeviceNamingItsSessionAfterAThreadChannelIsAnsweredAsForAnUnknownOne: a device's
+// session id in the thread namespace is taken whether or not a thread channel has it, so the
+// answer does not say which ids are threads.
+func (s *SlackChannelSuite) TestADeviceNamingItsSessionAfterAThreadChannelIsAnsweredAsForAnUnknownOne() {
+	s.T().Cleanup(session.ThreadSessionIDsSwitch.EnableForApp(s.customerID()))
+	channel := s.messaged("U0000ALICE", "is the build green?", "1759740000.000100", "")
+	unknown := conversation.ThreadChannelPrefix + s.utils.uuid()
+	shouted := strings.ToUpper(conversation.ThreadChannelPrefix + s.utils.uuid())
+
+	named := s.answerTo(s.client, http.MethodPost, "/v1/agents/sessions", CreateSessionRequest{Agent: &s.config.Name, Id: &channel})
+	guessed := s.answerTo(s.client, http.MethodPost, "/v1/agents/sessions", CreateSessionRequest{Agent: &s.config.Name, Id: &unknown})
+	folded := s.answerTo(s.client, http.MethodPost, "/v1/agents/sessions", CreateSessionRequest{Agent: &s.config.Name, Id: &shouted})
+
+	s.Equal(http.StatusConflict, named.status)
+	s.Equal(named, guessed)
+	s.Equal(named, folded)
+}
+
+// TestADevicesSocketNamingItsSessionAfterAThreadChannelIsAnsweredAsForAnUnknownOne: the same,
+// through the socket's start frame.
+func (s *SlackChannelSuite) TestADevicesSocketNamingItsSessionAfterAThreadChannelIsAnsweredAsForAnUnknownOne() {
+	s.T().Cleanup(session.ThreadSessionIDsSwitch.EnableForApp(s.customerID()))
+	channel := s.messaged("U0000ALICE", "is the build green?", "1759740000.000100", "")
+	unknown := conversation.ThreadChannelPrefix + s.utils.uuid()
+
+	named := s.socketAnswer(map[string]any{"id": channel})
+	guessed := s.socketAnswer(map[string]any{"id": unknown})
+
+	s.Equal("error", named["type"], "the socket answered %v", named)
+	s.Equal(named, guessed)
+}
+
+// TestABackendNamesItsSessionInTheThreadNamespaceWhenNoThreadHasTheID: the backend is
+// answered as before, since it may name a thread channel anyway.
+func (s *SlackChannelSuite) TestABackendNamesItsSessionInTheThreadNamespaceWhenNoThreadHasTheID() {
+	unknown := conversation.ThreadChannelPrefix + s.utils.uuid()
+
+	opened := s.serverClient.createSession(CreateSessionRequest{Agent: &s.config.Name, Id: &unknown})
+
+	s.Equal(unknown, opened.Id)
+}
+
+// TestWithTheSwitchOffADevicesUnknownThreadSessionIDOpensAsBefore: until its switch is on, a
+// device's session id in the thread namespace no thread has opens a session, as it did.
+func (s *SlackChannelSuite) TestWithTheSwitchOffADevicesUnknownThreadSessionIDOpensAsBefore() {
+	unknown := conversation.ThreadChannelPrefix + s.utils.uuid()
+
+	opened := s.client.createSession(CreateSessionRequest{Agent: &s.config.Name, Id: &unknown})
+
+	s.Equal(unknown, opened.Id)
+}
+
+// TestADevicesThreadPrefixedSessionIDThatNoThreadCouldHaveOpens: only the shape of a thread
+// channel's id, thread-<uuid>, is answered as taken; other ids in the namespace open as before.
+func (s *SlackChannelSuite) TestADevicesThreadPrefixedSessionIDThatNoThreadCouldHaveOpens() {
+	s.T().Cleanup(session.ThreadSessionIDsSwitch.EnableForApp(s.customerID()))
+	named := conversation.ThreadChannelPrefix + "support-" + s.utils.uuid()[:8]
+
+	opened := s.client.createSession(CreateSessionRequest{Agent: &s.config.Name, Id: &named})
+
+	s.Equal(named, opened.Id)
+}
+
 // TestABackendOpensAThreadChannelAgainByItsAgentID: the one way in, after a session on it
 // ended.
 func (s *SlackChannelSuite) TestABackendOpensAThreadChannelAgainByItsAgentID() {
@@ -529,6 +592,15 @@ func (s *SlackChannelSuite) socketRefusal(agentID string) map[string]any {
 	var answered map[string]any
 	s.Require().NoError(connection.ReadJSON(&answered))
 	s.Require().Equal("error", answered["type"], "the socket answered %v", answered)
+	return answered
+}
+
+// socketAnswer is the first frame a device's voice socket is answered with for session.
+func (s *SlackChannelSuite) socketAnswer(session map[string]any) map[string]any {
+	connection := s.client.opens("/v1/agents/socket")
+	s.Require().NoError(connection.WriteJSON(map[string]any{"type": "start", "sample_rate": 24_000, "session": session}))
+	var answered map[string]any
+	s.Require().NoError(connection.ReadJSON(&answered))
 	return answered
 }
 
