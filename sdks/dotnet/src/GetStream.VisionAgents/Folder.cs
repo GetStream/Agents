@@ -806,36 +806,49 @@ public sealed class Folder
     {
         var files = new Dictionary<string, string>(StringComparer.Ordinal);
         var skillFile = System.IO.Path.Combine(folder, SkillFile);
-        void Walk(string directory)
+        foreach (var entry in FilesIn(root, folder))
         {
-            Inside(root, directory);
-            foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+            if (entry == skillFile)
             {
-                if (Skipped(System.IO.Path.GetFileName(entry)))
-                {
-                    continue;
-                }
-                if (Directory.Exists(entry))
-                {
-                    Walk(entry);
-                    continue;
-                }
-                if (entry == skillFile)
-                {
-                    continue;
-                }
-                try
-                {
-                    files[System.IO.Path.GetRelativePath(folder, entry).Replace('\\', '/')] = StrictUtf8.GetString(File.ReadAllBytes(Inside(root, entry)));
-                }
-                catch (DecoderFallbackException)
-                {
-                    throw new ConfigurationException($"{entry} is not text, and a skill brings only text files");
-                }
+                continue;
+            }
+            try
+            {
+                files[System.IO.Path.GetRelativePath(folder, entry).Replace('\\', '/')] = StrictUtf8.GetString(File.ReadAllBytes(Inside(root, entry)));
+            }
+            catch (DecoderFallbackException)
+            {
+                throw new ConfigurationException($"{entry} is not text, and a skill brings only text files");
             }
         }
-        Walk(folder);
         return files;
+    }
+
+    /// <summary>
+    /// Every file under <paramref name="directory"/>, nested as deep as they are, but what
+    /// <see cref="Skipped"/> leaves behind. Each folder is checked to be inside the agent directory
+    /// before it is listed, so a linked folder that leads out is refused even when nothing in it
+    /// would be read, and a hidden one is never walked.
+    /// </summary>
+    private static IEnumerable<string> FilesIn(string root, string directory)
+    {
+        Inside(root, directory);
+        foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+        {
+            if (Skipped(System.IO.Path.GetFileName(entry)))
+            {
+                continue;
+            }
+            if (Directory.Exists(entry))
+            {
+                foreach (var file in FilesIn(root, entry))
+                {
+                    yield return file;
+                }
+                continue;
+            }
+            yield return entry;
+        }
     }
 
     /// <summary>
@@ -980,15 +993,13 @@ public sealed class Folder
         {
             return [];
         }
-        Inside(root, path);
         // Only the declaration at the root is not a document; deeper, urls.yaml is one like
         // any other. Hidden files and folders and __pycache__ are left out, as in a skill folder.
         var declaration = System.IO.Path.Combine(path, KnowledgeUrlsFile);
         var documents = new List<Document>();
-        foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+        foreach (var file in FilesIn(root, path))
         {
-            if (!Readable.Contains(System.IO.Path.GetExtension(file).ToLowerInvariant()) || file == declaration
-                || System.IO.Path.GetRelativePath(path, file).Split(Separators).Any(Skipped))
+            if (!Readable.Contains(System.IO.Path.GetExtension(file).ToLowerInvariant()) || file == declaration)
             {
                 continue;
             }

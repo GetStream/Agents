@@ -592,8 +592,10 @@ public sealed class FolderTests : IDisposable
         { "skills/think/reference", "reference", new() { ["reference/notes.txt"] = "Elsewhere.\n" }, new() { ["skills/think/SKILL.md"] = Skill }, "skills/think/reference" },
         { "knowledge", "knowledge", new() { ["knowledge/doc.md"] = "Elsewhere.\n" }, [], "knowledge" },
         { "knowledge/doc.md", "doc.md", new() { ["doc.md"] = "Elsewhere.\n" }, [], "knowledge/doc.md" },
-        // A walk of knowledge/ goes into a linked folder, so what is refused is the first file in it.
-        { "knowledge/loose", "loose", new() { ["loose/doc.md"] = "Elsewhere.\n" }, [], "knowledge/loose/doc.md" },
+        // A walk of knowledge/ checks a linked folder before it lists it, so the folder is refused
+        // whether or not it holds a file that would be read.
+        { "knowledge/loose", "loose", new() { ["loose/doc.md"] = "Elsewhere.\n" }, [], "knowledge/loose" },
+        { "knowledge/loose", "loose", new() { ["loose/doc.bin"] = "Elsewhere.\n" }, [], "knowledge/loose" },
         { "knowledge/urls.yaml", "urls.yaml", new() { ["urls.yaml"] = "- https://example.com/elsewhere\n" }, [], "knowledge/urls.yaml" },
         { "simulations", "simulations", new() { ["simulations/calls.yaml"] = "[]\n" }, [], "simulations" },
         { "simulations/calls.yaml", "calls.yaml", new() { ["calls.yaml"] = "[]\n" }, [], "simulations/calls.yaml" },
@@ -738,6 +740,20 @@ public sealed class FolderTests : IDisposable
         Write("knowledge/guides/.git/notes.md", "Not a document.\n");
 
         Assert.Equal(["guides/setup.md", "pricing.md"], Folder.Load(_root).Knowledge.Select(document => document.Source));
+    }
+
+    [Fact]
+    public void AHiddenLinkedFolderInKnowledgeIsNeverWalked()
+    {
+        Write("agent.yaml", "name: jean\n");
+        Write("knowledge/pricing.md", "A penny.\n");
+        var elsewhere = Path.Combine(Path.GetDirectoryName(_root)!, "elsewhere");
+        Directory.CreateDirectory(elsewhere);
+        File.WriteAllText(Path.Combine(elsewhere, "notes.md"), "Elsewhere.\n");
+        // Walked, it would be refused as leading out, so the load shows it was left unopened.
+        Link("knowledge/.cache", elsewhere);
+
+        Assert.Equal(["pricing.md"], Folder.Load(_root).Knowledge.Select(document => document.Source));
     }
 
     [Fact]
