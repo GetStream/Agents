@@ -171,3 +171,42 @@ func TestDialTellsWhenAReinviteFromTheCustomerIsPassedOn(t *testing.T) {
 		require.Equal(t, "127.0.0.1", mediaOf(t, inv.Body()).Addr)
 	}
 }
+
+// TestDialPointsStreamAtTheTrunkAddressSignallingUses: the customer's SDP names no public address, so
+// Stream is sent RTP at the trunk's checked address, written as IPv4 when it is one and the IPv4 one
+// when the trunk's name has both.
+func TestDialPointsStreamAtTheTrunkAddressSignallingUses(t *testing.T) {
+	for name, tc := range map[string]struct {
+		host     string
+		resolver resolver
+	}{
+		"ipv4-mapped literal": {host: "[::ffff:127.0.0.1]"},
+		"name with ipv6 and ipv4": {
+			host:     "trunk.test",
+			resolver: &answers{byHost: map[string][][]string{"trunk.test": {{"::1", "127.0.0.1"}}}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			customer := startPeer(t, peerOptions{sdp: customerPCMU})
+			stream := startPeer(t, peerOptions{sdp: streamAnswerSDP})
+			var changes atomic.Int32
+			cfg := Config{
+				CustomerTrunk: CustomerTrunk{Host: tc.host, Port: customer.port, Transport: "tcp", Username: "alice", Password: bridgePassword},
+				Stream:        StreamTrunk{URI: fmt.Sprintf("sip:trunk-1@127.0.0.1:%d", stream.port), Username: "bridge", Password: bridgePassword, Transport: "tcp"},
+				Call:          CallParams{From: "+15550002222", To: "+15550001111", RingTimeout: 5 * time.Second},
+				Logger:        slog.New(slog.DiscardHandler),
+				OnChange:      func() { changes.Add(1) },
+				guard:         guard{allow: func(ip netip.Addr) bool { return ip.IsLoopback() }, resolver: tc.resolver},
+			}
+			call, err := Dial(t.Context(), cfg)
+			require.NoError(t, err)
+			t.Cleanup(call.Release)
+
+			customer.sendReinvite(call.State().Customer.CallID, customerPCMA)
+
+			require.Eventually(t, func() bool { return changes.Load() > 0 }, 2*time.Second, 10*time.Millisecond)
+			invites := stream.requests(sip.INVITE, call.State().Stream.CallID)
+			require.Equal(t, "127.0.0.1", mediaOf(t, invites[len(invites)-1].Body()).Addr)
+		})
+	}
+}

@@ -300,3 +300,16 @@ func (s *ResumeSuite) TestAResumeToATrunkTheGuardRefusesSendsNothing() {
 	s.ErrorContains(err, "is not a public address")
 	s.Empty(s.customer.requests(sip.INVITE, customerCallID))
 }
+
+func (s *ResumeSuite) TestAResumedCallPointsStreamAtTheTrunksIPv4Address() {
+	s.cfg.CustomerTrunk.Host = "trunk.test"
+	s.cfg.guard.resolver = &answers{byHost: map[string][][]string{"trunk.test": {{"::1", "127.0.0.1"}}}}
+	s.resume()
+
+	s.customer.sendReinvite(customerCallID, sdpAt("10.0.0.5"))
+
+	s.Eventually(func() bool {
+		invites := s.stream.requests(sip.INVITE, s.state.Stream.CallID)
+		return len(invites) == 2 && string(invites[1].Body()) == string(sdpAt("127.0.0.1"))
+	}, 2*time.Second, 10*time.Millisecond)
+}

@@ -225,6 +225,7 @@ func TestToStreamSendsStreamOnlyToAPublicAddress(t *testing.T) {
 		"hostname":                      {conn: "c=IN IP4 pbx.example.com\r\n", addr: "1.0.0.1", dir: DirSendRecv},
 		"hold sendrecv":                 {conn: "c=IN IP4 0.0.0.0\r\n", addr: "1.0.0.1", dir: "sendonly"},
 		"hold recvonly":                 {conn: "c=IN IP4 0.0.0.0\r\n", media: "m=audio 30000 RTP/AVP 0\r\na=recvonly\r\n", addr: "1.0.0.1", dir: DirInactive},
+		"ipv6 hold sendrecv":            {conn: "c=IN IP6 ::\r\n", addr: "1.0.0.1", dir: "sendonly"},
 		"hold sendonly":                 {conn: "c=IN IP4 0.0.0.0\r\n", media: "m=audio 30000 RTP/AVP 0\r\na=sendonly\r\n", addr: "1.0.0.1", dir: "sendonly"},
 		"private address keeps its dir": {conn: "c=IN IP4 10.1.2.3\r\n", media: "m=audio 30000 RTP/AVP 0\r\na=recvonly\r\n", addr: "1.0.0.1", dir: "recvonly"},
 		"media level beats session":     {conn: "c=IN IP4 10.1.2.3\r\n", media: "m=audio 30000 RTP/AVP 0\r\nc=IN IP4 1.1.1.1\r\n", addr: "1.1.1.1", dir: DirSendRecv},
@@ -305,6 +306,20 @@ func TestAnswerForRejectsTheLinesStreamDidNotSee(t *testing.T) {
 		require.Equal(t, want.port, md.MediaName.Port.Value)
 	}
 	require.Equal(t, []string{"98"}, got.MediaDescriptions[2].MediaName.Formats)
+}
+
+func TestAnswerForGivesEveryLineAnAddressWhenStreamNamesItOnlyOnItsMediaLine(t *testing.T) {
+	offer := offerAt("c=IN IP4 1.1.1.1\r\n", "m=video 30002 RTP/AVP 96\r\nm=audio 30000 RTP/AVP 0\r\n")
+	answer := []byte("v=0\r\no=- 2 1 IN IP4 1.0.0.2\r\ns=-\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\nc=IN IP4 1.0.0.2\r\na=rtpmap:0 PCMU/8000\r\n")
+
+	var got sdp.SessionDescription
+	require.NoError(t, got.Unmarshal(answerFor(offer, answer)))
+
+	require.Len(t, got.MediaDescriptions, 2)
+	for _, md := range got.MediaDescriptions {
+		// The session has no c=, so each m= line needs its own (RFC 8866 §5.7).
+		require.NotNil(t, md.ConnectionInformation, md.MediaName.Media)
+	}
 }
 
 func TestAnswerForPassesOnAnAnswerItDoesNotFit(t *testing.T) {
