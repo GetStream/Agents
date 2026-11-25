@@ -48,6 +48,8 @@ final class SessionPayload: Sendable, Codable, JSONEncodable {
     /// When the session was pinned. Absent for one that is not pinned.
     let pinnedAt: Date?
     let projectId: String?
+    /// The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards.
+    let region: String?
     /// Why the review scored the conversation as it did. Read by a backend only.
     let reviewNotes: String?
     /// How well the agent handled the conversation, from 1 to 5, written a few seconds after it ended. Read by a backend only.
@@ -77,7 +79,7 @@ final class SessionPayload: Sendable, Codable, JSONEncodable {
     /// The voice speaking, in the provider's own terms. It is the provider's default when the session asked for none.
     let voice: String?
 
-    init(agent: String? = nil, agentId: String, callId: String, callOutcome: SessionCallOutcome? = nil, callType: String, closedAt: Date? = nil, configId: String? = nil, contextTruncated: Bool? = nil, conversationId: String? = nil, createdAt: Date, custom: [String: RawJSON]? = nil, description: String? = nil, endFault: SessionEndFault? = nil, endReason: SessionEndReason? = nil, endStage: SessionEndStage? = nil, forkedFrom: String? = nil, id: String, incognito: Bool? = nil, instructions: String? = nil, lastResponseAt: Date? = nil, llm: String? = nil, modality: SessionModality, mode: SessionMode? = nil, modelOverwrites: ModelOverwritesPayload? = nil, pinnedAt: Date? = nil, projectId: String? = nil, reviewNotes: String? = nil, reviewScore: Int? = nil, state: SessionState, sts: String? = nil, stt: String? = nil, subagent: String? = nil, summary: String? = nil, team: String? = nil, text: Bool? = nil, title: String? = nil, tts: String? = nil, usage: CallUsage? = nil, userId: String, video: SessionVideo? = nil, voice: String? = nil) {
+    init(agent: String? = nil, agentId: String, callId: String, callOutcome: SessionCallOutcome? = nil, callType: String, closedAt: Date? = nil, configId: String? = nil, contextTruncated: Bool? = nil, conversationId: String? = nil, createdAt: Date, custom: [String: RawJSON]? = nil, description: String? = nil, endFault: SessionEndFault? = nil, endReason: SessionEndReason? = nil, endStage: SessionEndStage? = nil, forkedFrom: String? = nil, id: String, incognito: Bool? = nil, instructions: String? = nil, lastResponseAt: Date? = nil, llm: String? = nil, modality: SessionModality, mode: SessionMode? = nil, modelOverwrites: ModelOverwritesPayload? = nil, pinnedAt: Date? = nil, projectId: String? = nil, region: String? = nil, reviewNotes: String? = nil, reviewScore: Int? = nil, state: SessionState, sts: String? = nil, stt: String? = nil, subagent: String? = nil, summary: String? = nil, team: String? = nil, text: Bool? = nil, title: String? = nil, tts: String? = nil, usage: CallUsage? = nil, userId: String, video: SessionVideo? = nil, voice: String? = nil) {
         self.agent = agent
         self.agentId = agentId
         self.callId = callId
@@ -104,6 +106,7 @@ final class SessionPayload: Sendable, Codable, JSONEncodable {
         self.modelOverwrites = modelOverwrites
         self.pinnedAt = pinnedAt
         self.projectId = projectId
+        self.region = region
         self.reviewNotes = reviewNotes
         self.reviewScore = reviewScore
         self.state = state
@@ -149,6 +152,7 @@ final class SessionPayload: Sendable, Codable, JSONEncodable {
         self.modelOverwrites = try container.decodeIfPresent(ModelOverwritesPayload.self, forKey: .modelOverwrites)
         self.pinnedAt = try container.decodeIfPresent(Date.self, forKey: .pinnedAt)
         self.projectId = try container.decodeIfPresent(String.self, forKey: .projectId)
+        self.region = try container.decodeIfPresent(String.self, forKey: .region)
         self.reviewNotes = try container.decodeIfPresent(String.self, forKey: .reviewNotes)
         self.reviewScore = try container.decodeIfPresent(Int.self, forKey: .reviewScore)
         self.state = try container.decode(SessionState.self, forKey: .state)
@@ -194,6 +198,7 @@ final class SessionPayload: Sendable, Codable, JSONEncodable {
         try container.encodeIfPresent(modelOverwrites, forKey: .modelOverwrites)
         try container.encodeIfPresent(pinnedAt, forKey: .pinnedAt)
         try container.encodeIfPresent(projectId, forKey: .projectId)
+        try container.encodeIfPresent(region, forKey: .region)
         try container.encodeIfPresent(reviewNotes, forKey: .reviewNotes)
         try container.encodeIfPresent(reviewScore, forKey: .reviewScore)
         try container.encode(state, forKey: .state)
@@ -241,6 +246,7 @@ extension SessionPayload: Hashable {
         lhs.modelOverwrites == rhs.modelOverwrites &&
         lhs.pinnedAt == rhs.pinnedAt &&
         lhs.projectId == rhs.projectId &&
+        lhs.region == rhs.region &&
         lhs.reviewNotes == rhs.reviewNotes &&
         lhs.reviewScore == rhs.reviewScore &&
         lhs.state == rhs.state &&
@@ -285,6 +291,7 @@ extension SessionPayload: Hashable {
         hasher.combine(modelOverwrites)
         hasher.combine(pinnedAt)
         hasher.combine(projectId)
+        hasher.combine(region)
         hasher.combine(reviewNotes)
         hasher.combine(reviewScore)
         hasher.combine(state)
