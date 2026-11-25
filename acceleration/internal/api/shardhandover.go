@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -166,11 +167,11 @@ func (s *Server) carriedToPlace(w http.ResponseWriter, r *http.Request, place pl
 		}
 		address, err := s.directory.NodeInShard(r.Context(), shard)
 		if err == nil && address != "" {
+			carry := s.carryTo
 			if r.Header.Get("Upgrade") != "" {
-				s.proxySocket(w, r, address)
-				return true
+				carry = s.carrySocketTo
 			}
-			if err = s.carryTo(w, r, shard, address, body); err == nil {
+			if err = carry(w, r, shard, address, body); err == nil {
 				return true
 			}
 		}
@@ -200,6 +201,21 @@ func (s *Server) carryTo(w http.ResponseWriter, r *http.Request, shard, address 
 	}
 	if err != nil {
 		s.logger.Error("could not carry new work to a node of the shard it is placed in",
+			"shard", shard, "node", address, "path", loggedPath(s.mux, r), "error", err)
+		writeError(w, unavailable(unreachableNode))
+	}
+	return nil
+}
+
+// carrySocketTo is carryTo for a socket, which has no body. The error is the node never getting
+// the upgrade, its address not dialled; any other failure is answered on w.
+func (s *Server) carrySocketTo(w http.ResponseWriter, r *http.Request, shard, address string, _ []byte) error {
+	err := carrySocket(w, r, address)
+	if dial, ok := errors.AsType[*net.OpError](err); ok && dial.Op == "dial" {
+		return err
+	}
+	if err != nil {
+		s.logger.Error("could not carry a socket to a node of the shard it is placed in",
 			"shard", shard, "node", address, "path", loggedPath(s.mux, r), "error", err)
 		writeError(w, unavailable(unreachableNode))
 	}

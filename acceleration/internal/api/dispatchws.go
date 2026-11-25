@@ -135,35 +135,45 @@ var errWorkerShardDown = APIError{Type: ErrorTypeUnavailable, Code: codeShardUna
 // workerNode is a node of the shard a customer's dispatch worker registers in, empty when that
 // is this node's. Workers register in the home shard, which every other shard carries tool calls
 // and hooks to, unless the app is kept in a geography, whose shards alone may reach its workers
-// (workerShards). With no node of the home shard up, the worker registers here rather than
-// nowhere.
+// (workerShards), tried in their order. With no node of the home shard up, the worker registers
+// here rather than nowhere.
 func (s *Server) workerNode(ctx context.Context, customerID string) (string, error) {
 	policy, err := s.store.Apps.RoutingPolicy(ctx, customerID, "")
 	if err != nil {
 		return "", err
 	}
 	here := s.directory.Shard()
-	shard := cmp.Or(s.shards.Home, here)
+	shards := []string{cmp.Or(s.shards.Home, here)}
 	if policy.Strict() {
-		if shard, err = s.shards.Place(policy, here); err != nil {
+		first, err := s.shards.Place(policy, here)
+		if err != nil {
 			return "", errWorkerShardDown
 		}
+		shards = []string{first}
+		for _, other := range s.shards.Allowed(policy) {
+			if other != first {
+				shards = append(shards, other)
+			}
+		}
 	}
-	if shard == here {
+	for _, shard := range shards {
+		if shard == here {
+			return "", nil
+		}
+		address, err := s.directory.NodeInShard(ctx, shard)
+		switch {
+		case address != "":
+			return address, nil
+		case policy.Strict() && err != nil:
+			return "", stack.Wrap(err)
+		case policy.Strict():
+			continue
+		}
+		s.logger.Warn("no node of the shard dispatch workers register in is up; registering one here",
+			"shard", shard, "customer", customerID, "error", err)
 		return "", nil
 	}
-	address, err := s.directory.NodeInShard(ctx, shard)
-	switch {
-	case address != "":
-		return address, nil
-	case policy.Strict() && err != nil:
-		return "", stack.Wrap(err)
-	case policy.Strict():
-		return "", errWorkerShardDown
-	}
-	s.logger.Warn("no node of the shard dispatch workers register in is up; registering one here",
-		"shard", shard, "customer", customerID, "error", err)
-	return "", nil
+	return "", errWorkerShardDown
 }
 
 // workerShards is the shards a customer's dispatch workers may be reached in, nil for any

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -205,6 +206,33 @@ func (s *RoutingPolicySuite) TestWorkWhoseFirstShardIsDownIsDoneInTheNextShardOf
 	opened := s.serverClient.createSession(policySession(&config))
 
 	s.Equal(s.other.Listener.Addr().String(), s.runningOn(opened.Id))
+}
+
+func (s *RoutingPolicySuite) TestAWorkerOfAnAppWhoseFirstShardIsDownRegistersInTheNextShardOfItsGeography() {
+	s.appPolicy(shardmap.PolicyCanadaOnly)
+
+	s.await(s.serverClient.opens("/v1/dispatch"), "ready")
+
+	s.Len(s.otherWorkers.Workers(s.customerID()), 2, "the worker is not in Canada's second shard")
+	s.Len(s.dispatch.Workers(s.customerID()), 1, "the worker registered outside Canada")
+}
+
+// A node of Canada's first shard is listed, but nothing listens where it says it is.
+func (s *RoutingPolicySuite) TestASocketWhoseFirstShardCannotBeReachedIsServedInTheNextShardOfItsGeography() {
+	s.appPolicy(shardmap.PolicyCanadaOnly)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	s.Require().NoError(listener.Close())
+	gone := httptest.NewUnstartedServer(nil)
+	gone.Listener = listener
+	s.nodeDirectory(gone, nowhere, slog.New(slog.DiscardHandler))
+	connection := s.serverClient.opens("/v1/agents/socket")
+
+	s.Require().NoError(connection.WriteJSON(map[string]any{"type": "start", "session": map[string]any{"incognito": true}}))
+	answered := s.await(connection, "session")
+
+	id, _ := answered["session"].(map[string]any)["id"].(string)
+	s.Equal(s.other.Listener.Addr().String(), s.runningOn(id))
 }
 
 func (s *RoutingPolicySuite) TestWorkKeptInAGeographyWithNoShardIsRefused() {
