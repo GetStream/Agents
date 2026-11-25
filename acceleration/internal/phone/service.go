@@ -2144,7 +2144,7 @@ func (s *Service) createTrunk(ctx context.Context, stream *Stream, pin int64, tr
 }
 
 // pastForgottenLines runs put, which puts a number on a trunk, and runs it once more when Stream
-// refused it and a forgotten line of the number's was taken down. Stream is asked what it lists only
+// refused it and lists the number on a trunk a forgotten line may be on. Stream is asked what it lists only
 // then: a number it takes has no such line in its way, so asking first would let a list that
 // fails or hangs stop a call there is nothing to clear for. A list that fails leaves the refusal
 // the answer; a line Stream will not take down is an error of its own.
@@ -2153,29 +2153,26 @@ func (s *Service) pastForgottenLines(ctx context.Context, stream *Stream, pin in
 	if !refused(refusal) {
 		return refusal
 	}
-	forgotten, err := s.forgottenTrunks(ctx, stream, pin, e164)
+	listing, err := s.sipTrunksListing(ctx, stream, pin, e164)
 	if err != nil {
 		s.logger.Error("could not look for a number's forgotten line", "stream_app", pin, "error", err)
 		return refusal
 	}
-	var cleared bool
-	for _, trunk := range forgotten {
-		taken, err := s.clearForgotten(ctx, stream, trunk, e164)
-		if err != nil {
+	if len(listing) == 0 {
+		return refusal
+	}
+	for _, trunk := range listing {
+		if err := s.clearForgotten(ctx, stream, trunk, e164); err != nil {
 			return err
 		}
-		cleared = cleared || taken
-	}
-	if !cleared {
-		return refusal
 	}
 	return put()
 }
 
-// forgottenTrunks are the trunks made in the app for numbers on customers' own trunks that Stream
+// sipTrunksListing are the trunks made in the app for numbers on customers' own trunks that Stream
 // lists the number on. A data move deletes a number's row, gives it back or makes it another
 // number's without reaching Stream, so only Stream still knows a line it left.
-func (s *Service) forgottenTrunks(ctx context.Context, stream *Stream, pin int64, e164 string) ([]store.StreamTrunk, error) {
+func (s *Service) sipTrunksListing(ctx context.Context, stream *Stream, pin int64, e164 string) ([]store.StreamTrunk, error) {
 	trunks, err := s.store.StreamTrunks.OfSIPTrunks(ctx, pin)
 	if err != nil || len(trunks) == 0 {
 		return nil, err
@@ -2188,13 +2185,12 @@ func (s *Service) forgottenTrunks(ctx context.Context, stream *Stream, pin int64
 }
 
 // clearForgotten deletes a number's rules on a trunk and leaves the trunk with the numbers its
-// rows say, or deletes it, with the rules of any number on it alone, when they are none. It answers
-// false for a number still held on the trunk, which it leaves as it is. A failure leaves the trunk's
+// rows say, or deletes it, with the rules of any number on it alone, when they are none. A
+// number still held on the trunk is left as it is. A failure leaves the trunk's
 // row, to be found again by the next attach or call Stream refuses the number.
-func (s *Service) clearForgotten(ctx context.Context, stream *Stream, trunk store.StreamTrunk, e164 string) (bool, error) {
-	var cleared bool
+func (s *Service) clearForgotten(ctx context.Context, stream *Stream, trunk store.StreamTrunk, e164 string) error {
 	group := store.TrunkGroup{CustomerID: trunk.CustomerID, StreamAppPK: trunk.StreamAppPK, Vendor: trunk.Vendor}
-	err := s.inTrunkGroup(ctx, group, func(ctx context.Context, tx *store.TrunkGroupTx) error {
+	return s.inTrunkGroup(ctx, group, func(ctx context.Context, tx *store.TrunkGroupTx) error {
 		trunks, err := tx.Trunks()
 		if err != nil {
 			return err
@@ -2216,7 +2212,6 @@ func (s *Service) clearForgotten(ctx context.Context, stream *Stream, trunk stor
 				return err
 			}
 		}
-		cleared = true
 		if len(held) == 0 {
 			if err := stream.DeleteTrunk(ctx, trunk.ID); err != nil {
 				return err
@@ -2225,7 +2220,6 @@ func (s *Service) clearForgotten(ctx context.Context, stream *Stream, trunk stor
 		}
 		return stream.UpdateTrunk(ctx, trunk.ID, Trunk{Name: sharedTrunkName(trunk.Vendor, trunk.CustomerID), Numbers: held})
 	})
-	return cleared, err
 }
 
 // evict takes another customer's line for a number down at Stream, and only then forgets it. A

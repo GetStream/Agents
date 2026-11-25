@@ -1951,6 +1951,48 @@ func (s *AppsSuite) TestANumberStreamRefusesIsRefusedWhenItsListsFail() {
 	}
 }
 
+func (s *AppsSuite) TestANumberRefusedInAnAppWithNoTrunkLinesAsksForNoLists() {
+	s.sealed()
+	s.ownApp()
+	s.own.OneTrunkPerNumber()
+	_, _, err := NewStreamFromClient(s.own.Client).CreateTrunk(s.ctx, Trunk{Name: "by hand", Numbers: []string{s.e164}})
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM stream_trunks WHERE stream_app_pk = 4242")
+	s.Require().NoError(err)
+
+	_, err = s.callFrom(s.e164)
+
+	s.ErrorContains(err, "numbers already used by another SIP trunk")
+	for _, request := range s.own.Requests(s.own.Key) {
+		s.False(request.Method == http.MethodGet && strings.Contains(request.Path, "/sip/"), request.Path)
+	}
+}
+
+// Another customer's row still holds the number on the trunk that has it, as one written before a
+// number was held by one customer at a time does.
+func (s *AppsSuite) TestANumberStreamRefusesLeavesALineStillHeld() {
+	e164, squatter, trunk, line := s.squatted()
+	second := "customer-" + uuid.NewString()
+	bought, err := s.store.PhoneNumbers.GetByE164(s.ctx, s.customer, e164)
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "DELETE FROM phone_numbers WHERE id = ?", bought.ID)
+	s.Require().NoError(err)
+	password := trunk.password
+	theirs, err := trunk.service.CreateSIPTrunk(s.ctx, second, SIPTrunkSettings{
+		Name: "main", Host: "trunk.example.com", Username: "trunk-user", Password: &password,
+	})
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &store.PhoneNumber{
+		E164: e164, Vendor: SIPTrunkVendor, Country: "US", CustomerID: second, SIPTrunkID: theirs.ID, PurchasedAt: time.Now().UTC(),
+	}))
+
+	_, err = trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: second}, From: e164, To: "+15550001111"})
+
+	s.ErrorContains(err, "numbers already used by another SIP trunk")
+	s.leftAsItWas(squatter, line, s.deployment)
+	s.NotNil(s.deployment.Rule(line.StreamRouteID))
+}
+
 func (s *AppsSuite) TestAFailureOtherThanARefusalAsksForNoLists() {
 	e164, _, _, line := s.squatted()
 	s.moved(line, "deleted")
