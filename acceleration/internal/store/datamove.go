@@ -204,7 +204,7 @@ var dataTables = []dataTable{
 	{name: "simulations", customer: "customer_id"},
 	{name: "simulation_runs", customer: "customer_id", references: []dataReference{{"simulation_id", "simulations"}}},
 	{name: "simulation_cases", parent: "simulation_runs", parentColumn: "run_id"},
-	{name: "users", customer: "customer_id", vouched: []string{"minted"}},
+	{name: "users", customer: "customer_id", vouched: []string{"minted", "shard"}},
 	{name: "scheduled_tasks", customer: "customer_id"},
 	{name: "scheduled_task_runs", customer: "customer_id"},
 	// Who asked not to be reached: STOP and START at the source carry on here through the changes.
