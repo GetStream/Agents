@@ -866,10 +866,10 @@ func (l *leaves) room(owner string, now time.Time) bool {
 	if most == owner {
 		return false
 	}
-	oldest := ""
+	oldest, oldestAt := "", time.Time{}
 	for host, kept := range l.byHost {
-		if kept.owner == most && (oldest == "" || kept.renewAt.Before(l.byHost[oldest].renewAt)) {
-			oldest = host
+		if kept.owner == most && (oldest == "" || kept.renewAt.Before(oldestAt)) {
+			oldest, oldestAt = host, kept.renewAt
 		}
 	}
 	l.drop(oldest)

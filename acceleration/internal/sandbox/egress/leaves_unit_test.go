@@ -118,20 +118,26 @@ func (s *LeavesSuite) TestAProxyKeepsAtMost1024CertificatesByDefault() {
 	s.Equal(1024, s.newProxy(0).leaves.max)
 }
 
-// TestASandboxThatKeepsFewerTakesTheRoomOfTheOldestOfTheOneThatKeepsTheMost: in a full cache, a
-// sandbox's new host is kept in place of the oldest certificate of the sandbox that keeps the most.
+// TestASandboxThatKeepsFewerTakesTheRoomOfTheOldestOfTheOneThatKeepsTheMost: in a full cache,
+// each new host of a sandbox's is kept in place of the oldest certificate of the sandbox that keeps
+// the most.
 func (s *LeavesSuite) TestASandboxThatKeepsFewerTakesTheRoomOfTheOldestOfTheOneThatKeepsTheMost() {
-	proxy := s.newProxy(4)
-	first := s.keep(proxy, "sandbox-a", hosts("a.test", 4)...)
-	oldest := "h0.a.test"
-	delete(first, oldest)
+	// Sixteen minutes of a's, so none is due for renewal by the end; six of them give room, oldest first.
+	proxy := s.newProxy(16)
+	first := s.keep(proxy, "sandbox-a", hosts("a.test", 16)...)
+	oldest := hosts("a.test", 6)
+	for _, host := range oldest {
+		delete(first, host)
+	}
 
-	other := s.certificate(proxy, "b.test", "sandbox-b")
+	other := s.keep(proxy, "sandbox-b", hosts("b.test", 6)...)
 
-	s.Equal(other, s.certificate(proxy, "b.test", "sandbox-b"), "the new host is kept")
-	s.Empty(s.changed(proxy, "sandbox-a", first), "the other three of a's are kept")
-	s.Equal(map[string]int{"sandbox-a": 3, "sandbox-b": 1}, proxy.leaves.owned)
-	s.NotContains(proxy.leaves.byHost, oldest, "a's oldest gave its room")
+	s.Empty(s.changed(proxy, "sandbox-b", other), "the new hosts are kept")
+	s.Empty(s.changed(proxy, "sandbox-a", first), "the ten newest of a's are kept")
+	s.Equal(map[string]int{"sandbox-a": 10, "sandbox-b": 6}, proxy.leaves.owned)
+	for _, host := range oldest {
+		s.NotContains(proxy.leaves.byHost, host, "one of a's six oldest gave its room")
+	}
 }
 
 // TestTheSandboxThatKeepsTheMostKeepsNoNewHostOnceTheCacheIsFull: its new host is signed for each
