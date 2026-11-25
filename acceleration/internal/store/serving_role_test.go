@@ -263,6 +263,9 @@ func (s *ServingRoleSuite) TestADatabaseALaterReleaseMigratedIsServed() {
 	}
 
 	s.NoError(s.paths.store.CheckMigrated(s.ctx))
+
+	s.exec(s.admin.store.global, "DROP TRIGGER data_changes_recorded ON users")
+	s.ErrorContains(s.paths.store.CheckMigrated(s.ctx), "changes of users are not recorded", "a later release attaches it too")
 }
 
 // ON CONFLICT (usage_id) fails every request written without its index.
