@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -617,11 +618,32 @@ func (s *Service) RunLegSweep(ctx context.Context, every time.Duration) {
 	}
 }
 
+// RunOpenLegsHeal writes this shard's count of each organization's calls up, which other shards
+// place calls against (store.OpenLegs), every interval until ctx ends.
+func (s *Service) RunOpenLegsHeal(ctx context.Context, every time.Duration) {
+	if s.store == nil {
+		return
+	}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.store.OpenLegs.Heal(ctx, s.now().Add(-dlc.RingWindow)); err != nil {
+				s.logger.Error("could not write this shard's count of calls up", "error", err)
+			}
+		}
+	}
+}
+
 // settleLeg bills an ended leg's minutes to whoever it was opened for, and the first time,
-// counts them toward the 10DLC sandbox, which gives them away while it holds the app, and an
-// outbound leg's toward the organization's voice minutes a day. A leg the sweep ended is given
-// away too, and not counted: nothing says how long it really lasted, and four hours of it would
-// use up the sandbox's minutes.
+// counts an outbound leg's toward the 10DLC sandbox, which gives them away while it holds the
+// app, and toward the organization's voice minutes a day. The sandbox limits only whom an app
+// calls and for how long, not who calls it, so an inbound leg is billed whatever the sandbox
+// says. A leg the sweep ended is given away too, and not counted: nothing says how long it
+// really lasted, and four hours of it would use up the sandbox's minutes.
 func (s *Service) settleLeg(ctx context.Context, leg store.CallLeg, first bool) {
 	if first && leg.EndedAt != nil && leg.EndReason != store.LegSwept {
 		s.gate.Talked(ctx, leg.CustomerID, leg.OrganizationID, leg.Direction == store.Outbound, leg.EndedAt.Sub(*leg.StartedAt))
@@ -643,7 +665,7 @@ func (s *Service) settleLeg(ctx context.Context, leg store.CallLeg, first bool) 
 		meter.Free = true
 		meter.Attributes[AttributeEndedBy] = store.LegSwept
 	}
-	if s.sandboxed(ctx, leg.CustomerID) {
+	if leg.Direction == store.Outbound && s.sandboxed(ctx, leg.CustomerID) {
 		meter.Free = true
 		meter.Attributes[AttributeDLCSandbox] = "true"
 	}

@@ -317,6 +317,20 @@ func (e *Enforcer) Close() {
 // it has no decision for has its policies read now, through the store's cache, and its money left to
 // the loops, which admit until they land.
 func (e *Enforcer) Admit(ctx context.Context, owner routing.Owner) (routing.Admission, error) {
+	return e.admit(ctx, owner, false)
+}
+
+// AdmitRunning is Admit for work already running, such as a sandbox, which a refusal stops: its
+// Spend counts what was spent, not what is set aside, so no reservation refuses it, its own
+// lease included. A suspended organization, a balance spent as a warning reads it, and a spend
+// hard limit or a customer's limit whose ledger is reached still do, and what could not be
+// checked is answered as Admit answers it.
+func (e *Enforcer) AdmitRunning(ctx context.Context, owner routing.Owner) (routing.Admission, error) {
+	return e.admit(ctx, owner, true)
+}
+
+// admit is Admit, or with spent AdmitRunning.
+func (e *Enforcer) admit(ctx context.Context, owner routing.Owner, spent bool) (routing.Admission, error) {
 	customerID := owner.CustomerID
 	if e == nil || customerID == "" {
 		return routing.Admission{}, nil
@@ -324,7 +338,7 @@ func (e *Enforcer) Admit(ctx context.Context, owner routing.Owner) (routing.Admi
 	ctx, span := tracer.Start(ctx, "policy.admit")
 	defer span.End()
 	decided := e.decide(ctx, customerID)
-	refusal, spend, grants := e.spendable(ctx, owner, decided)
+	refusal, spend, grants := e.spendable(ctx, owner, decided, spent)
 	limits, tier := e.money.inForce(decided.organization)
 	return routing.Admission{
 		DataPolicy: decided.floor, Models: decided.models, Tags: decided.tags, OrganizationID: decided.organization,

@@ -6,7 +6,7 @@ The `core.CredentialStore` that keeps a connection's credential state in Postgre
 
 ```
 Update(ref, fn)
-  1. lock     pg_try_advisory_lock(839, key(customer, id)) on a pool connection, kept if it
+  1. lock     pg_try_advisory_lock(839, key(customer, id)) on a lock pool connection, kept if it
               got the lock; otherwise the connection goes back, pause 5ms doubling to 100ms, retry
               until ctx is done
   2. load     the live row, on that connection
@@ -20,7 +20,7 @@ Update(ref, fn)
               detached from ctx (2s), commits at once: the lock is session-level, so it stays held
   6. final    changed -> one more CAS like 5 with fn's state
               unchanged but credentials under an older key -> CAS like 5 with the state as stored
-  7. unlock   pg_advisory_unlock, then the connection goes back to the pool
+  7. unlock   pg_advisory_unlock, then the connection goes back to the lock pool
 ```
 
 Nothing waits inside Postgres at 1, so a caller that gives up just stops trying: no wait stays queued on the server and no connection is held while it pauses. A blocking `pg_advisory_lock` cannot promise that, because pgdriver bounds every read by its `ReadTimeout` (10s by default, `newDefaultConfig` in `uptrace/bun/driver/pgdriver` v1.2.18) or the ctx deadline, drops the socket when it passes, and the server "will detect the loss of the connection only at the next interaction with the socket" ([client_connection_check_interval](https://www.postgresql.org/docs/current/runtime-config-connection.html#GUC-CLIENT-CONNECTION-CHECK-INTERVAL)). The cost of trying is that waiters are not served in order. Writes at 5 and 6 run detached from ctx for the same driver reason: a passed deadline is a passed socket deadline, which would drop tokens a provider already rotated.
@@ -55,6 +55,7 @@ The second key is 32 bits because the two-integer form is what buys that separat
 - **A key version the keyring lacks is the keyring's fault, not the connection's.** `Update` returns `auth.ErrKeyVersionUnavailable`, runs no fn and writes nothing, so putting the key back restores the connection. Check: `go test -tags integration -run TestPGSealedSuite/TestAKeyVersionMissing ./internal/connectors/credentialstores/pgsealed`.
 - **Stored credentials under an older key are rewrapped on the next use that returns no error**, at the same revision, and a use that returned changed false has its rewrap written from what was stored, never from fn's edits. Check: `go test -tags integration -run 'TestPGSealedSuite/(TestCredentialsSealedUnder|TestAFailedUse|TestARewrapKeeps)' ./internal/connectors/credentialstores/pgsealed`.
 - **`connected_at` is the caller's.** A commit writes the `ConnectedAt` fn leaves; the store stamps nothing. Whatever begins a grant names when it began: a consent (`api/authorizations.go`), and a credentials write that connects a connection that was not connected (`api/connection_tools.go`). A refresh keeps it, even past its own checkpoint, and so does the resolver's `saveAgain`, which saves a renewal again in an Update that loads the checkpoint's `needs_reauthorization` (AI-3504). `Resolver.Revoke` reads it to leave a grant newer than a provider's signal, and the tool pins of a grant are keyed by it. Check: `go test -tags integration -run 'TestPGSealedSuite/(TestAConnectionCommittedConnected|TestARefreshPastItsCheckpoint|TestWhenAConsentConnected)' ./internal/connectors/credentialstores/pgsealed`.
+- **A lock is held on a connection of the store's lock pool, never of the serving pool.** The lock keeps its connection across the provider round trip, and fn's other statements (the resolver's definition and broken-revision reads, the OAuth client lookup) each borrow a serving connection for one statement. Locks stalled at a provider fill only the lock pool (16, `lockConns` in `internal/store/credential_lock.go`), and a lock past it waits for a lock connection until its ctx ends. One customer's locks, credential and provider app ones together, hold at most 4 of the 16 (`lockConnsPerCustomer`, counted per router process), so a customer that stalls its own refreshes leaves the rest to the others; its fifth waits holding no connection until its ctx ends. Check: `go test -tags integration -run 'TestStoreSuite/(TestCredentialLocksHeldAtOnce|TestClosingTheStoreClosesItsLockPool|TestOneCustomersStalledLocks|TestACustomersLockSlotIsGivenBack)' ./internal/store` and `go test -tags integration -run TestResolverSuite/TestRefreshesStalled ./internal/connectors/resolver`.
 - **fn does not lock the same connection again** (`Update`, `ConnectorConnections.SaveAtRevision`): that is a second pool connection waiting on the first.
 - **Secrets never print.** Stored credentials go into an error or a log only as `core.StoredCredentials`, whose `String`, `GoString` and `LogValue` redact the payload; tests compare blobs with `bytes.Equal`, not `Equal`, so a failure prints no ciphertext.
 - **Every hardcoded value says where it comes from**, beside it.

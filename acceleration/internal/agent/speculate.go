@@ -257,7 +257,18 @@ func (a *Agent) runSpeculation(spec *speculation) {
 	if abandoned || closed {
 		stream.Close()
 	}
-	a.pump(turnID, stream)
+	// A unified reply was ruled on from its first stream's lead; a second stream would be
+	// spoken without a ruling of its own.
+	var again func() (*llm.Stream, error)
+	if !spec.unified {
+		again = func() (*llm.Stream, error) {
+			if err := spec.ctx.Err(); err != nil {
+				return nil, err
+			}
+			return spec.harness.Respond(spec.ctx, spec.turn)
+		}
+	}
+	a.pump(turnID, stream, again)
 }
 
 // adoptSpeculation answers a turn with the reply already started for it, and reports
@@ -269,6 +280,10 @@ func (a *Agent) runSpeculation(spec *speculation) {
 // When it is not used, speculated is the id of the speculative replies thrown away on the
 // turn, which the answer asked for instead shares, and empty when nothing was speculated.
 func (a *Agent) adoptSpeculation(ready candidate, note string) (adopted bool, speculated string) {
+	// Read like at every site that counts a caller turn. No test reaches this with the edge busy:
+	// speculate refuses while the agent speaks and a reply under way makes usable false, so
+	// the edge can fill between the two only by speech that is neither.
+	drained := !a.waitingForPlayout()
 	a.mu.Lock()
 	// The turn is answered here, with the reply started for it or another, so whatever is
 	// speculated on next is a turn of its own.
@@ -286,6 +301,7 @@ func (a *Agent) adoptSpeculation(ready candidate, note string) (adopted bool, sp
 		spec.drop()
 		return false, spec.id
 	}
+	a.heardLocked(drained)
 	a.keepTurnLocked(ready.Participant, ready.Said(), 0, nil, false)
 	a.speakingTurn = ready.ID
 	a.generating = true

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -64,11 +65,24 @@ type ConnectorDefinition struct {
 	Description string        `bun:"description,notnull"`
 	Manifest    core.Manifest `bun:"manifest,type:jsonb,notnull"`
 	// SyncHash is a fingerprint of the file the CLI last synced onto this revision
-	// (20270201001200_connector_router_sync_hash.sql). Empty for a built-in, and for a revision
+	// (20270202000100_connector_router_sync_hash.sql). Empty for a built-in, and for a revision
 	// that was never synced or was written since by anything that is not a sync.
 	SyncHash  string    `bun:"sync_hash,notnull"`
 	CreatedAt time.Time `bun:"created_at,notnull"`
 }
+
+// The limits on a sync hash, which the API's request schema documents (api.CustomConnectorRequest)
+// and an import checks (importableDefinition). Up to 128 characters is a SHA-512 hex digest, well
+// over the 32 of the MD5 hex digest the CLI computes for an agent (Agentrc.Hash in GetStream/cli
+// internal/agentrc/agentrc.go), and printable ASCII without a space holds no NUL, which a Postgres
+// text column refuses.
+const (
+	SyncHashMaxLength   = 128
+	SyncHashPattern     = `^[!-~]*$`
+	SyncHashDescription = "printable ASCII without a space"
+)
+
+var syncHash = regexp.MustCompile(SyncHashPattern)
 
 // Validate refuses a revision the table's checks refuse: a custom id is a customer's and only a
 // customer's (connector_definitions_custom_prefix), and revisions count from 1.

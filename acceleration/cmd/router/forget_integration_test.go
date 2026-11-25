@@ -8,9 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -50,6 +52,8 @@ type ForgetUserSuite struct {
 	// app and organization are this test's own, so their keys are too.
 	app, organization string
 	keys              []string
+	// stopThere stops the worker of the shard there, which runs its part of each job.
+	stopThere func()
 }
 
 func TestForgetUserSuite(t *testing.T) {
@@ -73,15 +77,16 @@ func (s *ForgetUserSuite) SetupSuite() {
 func (s *ForgetUserSuite) SetupTest() {
 	shared := s.emptyDatabase("forget")
 	here, there := s.emptyDatabase("forget_here"), s.emptyDatabase("forget_there")
-	shards := map[string]string{"here": here, "there": there}
+	names := []string{"here", "there"}
 	s.shards = nil
-	for _, shard := range []string{here, there} {
-		router, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shards: shards})
+	for i, shard := range []string{here, there} {
+		router, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shard: names[i], Shards: names})
 		s.Require().NoError(err)
 		s.Require().NoError(router.Migrate(s.ctx))
 		s.T().Cleanup(func() { router.Close() })
 		s.shards = append(s.shards, router)
 	}
+	s.stopThere = s.working()
 	s.service = usagetest.Start(s.T(), usagetest.Options{
 		DSN: s.usageDSN, RedisURL: usagetest.RedisURL(s.T()), ManageKey: "manage-" + uuid.NewString(),
 	})
@@ -90,7 +95,8 @@ func (s *ForgetUserSuite) SetupTest() {
 	s.keys = nil
 
 	s.settings = config.Defaults()
-	s.settings.Postgres = config.Postgres{DSN: shared, ShardDSN: here, Shards: shards}
+	s.settings.Shard, s.settings.Shards = "here", names
+	s.settings.Postgres = config.Postgres{DSN: shared, ShardDSN: here}
 	s.settings.Redis.Addr = os.Getenv("ROUTER_REDIS_ADDR")
 	s.settings.Usage = config.Usage{
 		URL: s.service.URL, Token: s.service.Token, ManageKey: s.service.ManageKey, RedisURL: usagetest.RedisURL(s.T()),
@@ -117,6 +123,13 @@ func (s *ForgetUserSuite) TearDownTest() {
 			s.Require().NoError(client.Do(s.ctx, client.B().Del().Key(key).Build()).Error())
 		}
 	}
+}
+
+// working runs the worker of the shard there, as its routers do, until the test ends or stop.
+func (s *ForgetUserSuite) working() (stop func()) {
+	stop = sync.OnceFunc(startShardJobs(s.ctx, s.shards[1].ShardJobWorker(slog.Default(), 20*time.Millisecond)))
+	s.T().Cleanup(stop)
+	return stop
 }
 
 // emptyDatabase is a database of this suite's own with an empty schema.
@@ -165,8 +178,10 @@ func (s *ForgetUserSuite) shipped(id uuid.UUID, app, user string, cost int64) {
 // stopped is what a run that stopped after its first call to the usage service left: every
 // shard and the service rewritten to replacement, and nothing after.
 func (s *ForgetUserSuite) stopped(replacement string) {
-	_, err := s.shards[0].Requests.RenameUser(s.ctx, s.app, person, replacement)
-	s.Require().NoError(err)
+	for _, shard := range s.shards {
+		_, err := shard.Requests.RenameUser(s.ctx, s.app, person, replacement)
+		s.Require().NoError(err)
+	}
 	manage, err := usageservice.NewClient(usageservice.ClientOptions{URL: s.service.URL, ManageKey: s.service.ManageKey})
 	s.Require().NoError(err)
 	_, err = manage.ForgetUser(s.ctx, "staff@example.com", usageservice.ForgetUser{AppID: s.app, UserID: person, Replacement: replacement})
@@ -393,6 +408,41 @@ func (s *ForgetUserSuite) TestForgettingAUserRewritesEveryShardAndTheUsageServic
 	s.Equal([4]int64{4, 1070, 4, 1070}, before)
 }
 
+func (s *ForgetUserSuite) TestForgettingAUserWaitsForEveryShardToRunItsPart() {
+	s.stopThere()
+	here, there := s.recorded(0, s.app, person, 300), s.recorded(1, s.app, person, 500)
+	var out bytes.Buffer
+	finished := make(chan error, 1)
+	go func() {
+		finished <- s.runForget([]string{"forget-user", "--app", s.app, "--user", person, "--actor", "staff@example.com", "--settle", "0s"}, &out)
+	}()
+
+	s.Never(func() bool { return len(finished) > 0 }, time.Second, 20*time.Millisecond, "it finished before the shard there ran its part")
+	s.Equal(person, s.requests()[there].UserID)
+	s.working()
+	select {
+	case err := <-finished:
+		s.Require().NoError(err)
+	case <-time.After(time.Minute):
+		s.FailNow("it never finished once the shard there ran its part")
+	}
+
+	replacement := s.forgottenAs(out.String())
+	s.Contains(out.String(), "requests: 2 rows rewritten", "both shards' counts")
+	s.Equal(replacement, s.requests()[here].UserID)
+	s.Equal(replacement, s.requests()[there].UserID)
+}
+
+func (s *ForgetUserSuite) TestARunThatWaitedLongerThanItsWaitNamesTheShardBehind() {
+	s.stopThere()
+	s.recorded(1, s.app, person, 500)
+
+	err := s.runForget([]string{"forget-user", "--app", s.app, "--user", person, "--actor", "staff@example.com", "--dry-run", "--wait", "1s"}, &bytes.Buffer{})
+
+	s.Require().Error(err)
+	s.Contains(err.Error(), "waits on shards there")
+}
+
 func (s *ForgetUserSuite) TestForgettingAUserDeletesTheirBranchSnapshotsOnEveryShardAlone() {
 	other := "other-" + s.app
 	s.snapshotted(0, s.app, person)
@@ -456,7 +506,7 @@ func (s *ForgetUserSuite) TestForgettingAUserClearsTheirCountersPolicyAndLimits(
 
 func (s *ForgetUserSuite) TestForgettingAUserDropsTheirPolicyARouterCached() {
 	router, err := store.OpenShards(store.Options{
-		DSN: s.settings.Postgres.DSN, ShardDSN: s.settings.Postgres.ShardDSN, Shards: s.settings.Postgres.Shards,
+		DSN: s.settings.Postgres.DSN, ShardDSN: s.settings.Postgres.ShardDSN, Shard: s.settings.Shard, Shards: s.settings.Shards,
 		Redis: store.Redis{Address: s.settings.Redis.Addr},
 	})
 	s.Require().NoError(err)
@@ -714,6 +764,9 @@ func (s *ForgetUserSuite) namingRows(app, user string) map[string]int {
 		count, err := shard.ShardDB().NewSelect().Model((*store.CallLeg)(nil)).Where("customer_id = ? AND user_id = ?", app, user).Count(s.ctx)
 		s.Require().NoError(err)
 		found["call_legs"] += count
+		logs, err := shard.ShardDB().NewSelect().Model((*store.AgentLog)(nil)).Where("customer_id = ? AND user_id = ?", app, user).Count(s.ctx)
+		s.Require().NoError(err)
+		found["agent_logs"] += logs
 	}
 	for table, where := range map[string]string{
 		"agent_logs": "user_id = ?", "user_phones": "user_id = ?", "channel_links": "user_id = ?", "contact_map": "user_id = ?", "users": "id = ?",
@@ -721,7 +774,7 @@ func (s *ForgetUserSuite) namingRows(app, user string) map[string]int {
 		var count int
 		s.Require().NoError(s.shards[0].GlobalDB().QueryRowContext(s.ctx,
 			"SELECT count(*) FROM "+table+" WHERE customer_id = ? AND "+where, app, user).Scan(&count))
-		found[table] = count
+		found[table] += count
 	}
 	return found
 }

@@ -15,6 +15,7 @@ use Psr\Http\Message\ResponseInterface;
 
 final class RegionTest extends TestCase
 {
+    private const string DEFAULT_HOST = 'accelerate.gcp.stream-io-api.com';
     private const string REGIONAL_HOST = 'accelerate-us-east4.gcp.stream-io-api.com';
 
     /** @var array<string, array{string|false, mixed, mixed}> */
@@ -22,6 +23,8 @@ final class RegionTest extends TestCase
 
     /** @var list<RequestInterface> */
     private array $sent = [];
+
+    private string $expectedHost = self::REGIONAL_HOST;
 
     private ClientInterface $http;
 
@@ -32,13 +35,22 @@ final class RegionTest extends TestCase
         }
         $this->setEnv(Backend::API_KEY_ENV, 'test-key');
         $this->setEnv(Backend::API_SECRET_ENV, 'test-secret');
+        $this->expectedHost = self::REGIONAL_HOST;
 
-        $this->http = new class (function (RequestInterface $request): void {
-            $this->sent[] = $request;
-        }) implements ClientInterface {
-            /** @param \Closure(RequestInterface): void $record */
-            public function __construct(private \Closure $record)
-            {
+        $this->http = new class (
+            function (RequestInterface $request): void {
+                $this->sent[] = $request;
+            },
+            fn (): string => $this->expectedHost,
+        ) implements ClientInterface {
+            /**
+             * @param \Closure(RequestInterface): void $record
+             * @param \Closure(): string $expectedHost
+             */
+            public function __construct(
+                private \Closure $record,
+                private \Closure $expectedHost,
+            ) {
             }
 
             public function sendRequest(RequestInterface $request): ResponseInterface
@@ -47,7 +59,7 @@ final class RegionTest extends TestCase
                 if ($request->getMethod() !== 'GET' || $request->getUri()->getPath() !== '/v1/agents/simulations') {
                     return new Response(404, [], '{"error":"not found"}');
                 }
-                if ($request->getUri()->getHost() !== 'accelerate-us-east4.gcp.stream-io-api.com'
+                if ($request->getUri()->getHost() !== ($this->expectedHost)()
                     || $request->getHeaderLine('api_key') !== 'test-key'
                     || $request->getHeaderLine('stream-auth-type') !== 'jwt'
                     || $request->getHeaderLine('Authorization') === '') {
@@ -78,7 +90,7 @@ final class RegionTest extends TestCase
 
     public function testTheDefaultClientReadsAResource(): void
     {
-        $this->readSimulations(new Backend());
+        $this->readSimulations(new Backend(), host: self::DEFAULT_HOST);
     }
 
     public function testAnExplicitRegionReadsAResource(): void
@@ -112,15 +124,16 @@ final class RegionTest extends TestCase
 
         $user = $client->asUser('jean', 'user-token');
 
-        self::assertSame(Backend::DEFAULT_URL, $user->backend->url);
+        self::assertSame(Backend::regionUrl('us-east4'), $user->backend->url);
         self::assertSame('jean', $user->backend->userId);
         self::assertSame('Bearer user-token', $user->backend->headers()['Authorization']);
         $this->readSimulations($user->backend, $user);
         self::assertSame('Bearer user-token', $this->sent[0]->getHeaderLine('Authorization'));
     }
 
-    private function readSimulations(Backend $backend, ?Client $client = null): void
+    private function readSimulations(Backend $backend, ?Client $client = null, string $host = self::REGIONAL_HOST): void
     {
+        $this->expectedHost = $host;
         $client ??= new Client($backend, $this->http);
 
         self::assertSame([], $client->simulations->list());
@@ -128,7 +141,7 @@ final class RegionTest extends TestCase
         self::assertCount(1, $this->sent);
         $request = $this->sent[0];
         self::assertSame('https', $request->getUri()->getScheme());
-        self::assertSame(self::REGIONAL_HOST, $request->getUri()->getHost());
+        self::assertSame($host, $request->getUri()->getHost());
         self::assertSame('test-key', $request->getHeaderLine('api_key'));
         self::assertSame('jwt', $request->getHeaderLine('stream-auth-type'));
         self::assertNotSame('', $request->getHeaderLine('Authorization'));

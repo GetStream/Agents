@@ -17,6 +17,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/activity"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -44,6 +45,12 @@ const (
 	maxLinkFailures     = 5
 	maxLineLinkFailures = 20
 )
+
+// releaseTimeout bounds giving a counted code back: it runs detached from the message's context,
+// so a router shutting down after the code was counted does not leave it counted to the end of the
+// window, and a database that does not answer cannot hold the turn. The 2 s is that of the
+// store's credentialDetachedTimeout for a single write, unmeasured here.
+const releaseTimeout = 2 * time.Second
 
 // Options configures a Service. Store, Sessions and Secrets are required.
 type Options struct {
@@ -130,16 +137,25 @@ func (s *Service) Close() {
 
 // Challenge answers the GET a provider checks a webhook with before it delivers to it.
 // WhatsApp is the one that does this: it asks for the verify token back along with a
-// challenge to echo, so an URL cannot be pointed at somebody else's router.
+// challenge to echo, so an URL cannot be pointed at somebody else's router. Any other line
+// agrees to none.
 func (s *Service) Challenge(ctx context.Context, token string, query url.Values) Answer {
 	line, _, err := s.line(ctx, token)
 	if err != nil {
 		return s.unread(err)
 	}
-	if query.Get("hub.mode") != "subscribe" || query.Get("hub.verify_token") != line.Challenge {
-		return Answer{Status: http.StatusForbidden, Body: failure("that is not this line's verify token")}
+	return webhookCheck(line, query)
+}
+
+// webhookCheck answers a line's webhook check as the whatsapp connector's events URL answers
+// one, with the line's verify token.
+func webhookCheck(line Account, query url.Values) Answer {
+	rule := core.ChannelRule{Handshake: core.HandshakeHubChallenge}
+	challenge, agreed := rule.AnswerHandshake(query, line.Challenge)
+	if line.Kind != WhatsApp || !agreed {
+		return Answer{Status: http.StatusForbidden, Body: failure("this line does not agree to that webhook check")}
 	}
-	return Answer{Status: http.StatusOK, Text: query.Get("hub.challenge")}
+	return Answer{Status: http.StatusOK, Text: challenge}
 }
 
 // Receive answers one delivery: every message in it that has not been seen before earns a
@@ -410,6 +426,14 @@ func (s *Service) answer(account store.ChannelAccount, line Account, provider Pr
 	if s.keyword(ctx, account, line, provider, message) {
 		return
 	}
+	// The agent answers in the sender's own conversation, with their history and connectors,
+	// and a reply to a group reaches everyone in it. So a group's message is not answered, and
+	// the group does not become the chat the sender's later messages go to (identify). A
+	// keyword above is still confirmed there, as the channel bridge does.
+	if message.Group {
+		logger.Debug("not answering a message in a group chat", "channel", account.Kind, "number", account.E164)
+		return
+	}
 	config, found, err := s.store.ConfigOnChannel(ctx, account.CustomerID, account.Kind, account.E164)
 	if err != nil {
 		logger.Error("could not find the agent on a channel", "channel", account.Kind,
@@ -554,23 +578,28 @@ func (s *Service) identify(ctx context.Context, config store.AgentConfig, accoun
 	}
 	if config.Channels.Lines.Identity == store.ChannelIdentityLink {
 		window := time.Now().UTC().Truncate(LinkValidFor)
-		onLine, fromSender, err := s.store.ChannelLinkFailures.Count(ctx, account.ID, message.From, window)
+		reserved, err := s.store.ChannelLinkFailures.Reserve(ctx, account.ID, message.From, window,
+			window.Add(-LinkValidFor), maxLinkFailures, maxLineLinkFailures)
 		if err != nil {
 			s.logger.Error("could not count the codes texted to a line", "channel", account.Kind, "error", err)
 			return store.ContactMapEntry{}, false
 		}
-		if fromSender >= maxLinkFailures || onLine >= maxLineLinkFailures {
+		if !reserved {
 			s.say(ctx, line, provider, message, Reply{Text: "Too many codes did not match. Try again in a few minutes."},
 				answering(account.CustomerID, ""))
 			return store.ContactMapEntry{}, false
 		}
 		link, err := s.store.ChannelLinks.Claim(ctx, account.CustomerID, config.ID, strings.TrimSpace(message.Text))
-		if err != nil {
-			if errors.Is(err, store.ErrUnknownChannelLink) {
-				if err := s.store.ChannelLinkFailures.Record(ctx, account.ID, message.From, window, window.Add(-LinkValidFor)); err != nil {
-					s.logger.Error("could not count a code texted to a line", "channel", account.Kind, "error", err)
-				}
+		// The code was counted before it was tried, so that codes texted at once are counted one
+		// after the other; only one that matched nothing stays counted.
+		if !errors.Is(err, store.ErrUnknownChannelLink) {
+			release, stop := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+			if err := s.store.ChannelLinkFailures.Release(release, account.ID, message.From, window); err != nil {
+				s.logger.Error("could not give back a code counted on a line", "channel", account.Kind, "error", err)
 			}
+			stop()
+		}
+		if err != nil {
 			s.say(ctx, line, provider, message, Reply{Text: "Send me the code from your account to " +
 				"get started. It ties this number to you, so I can answer about what is yours."},
 				answering(account.CustomerID, ""))

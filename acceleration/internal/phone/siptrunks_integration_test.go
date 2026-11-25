@@ -115,7 +115,7 @@ func (s *SIPTrunkSuite) TestAPasswordIsStoredSealedAndOpensForADial() {
 	s.Equal(1, trunk.PasswordKEKVersion)
 
 	held := s.number("acme", trunk.ID, "+15550000201")
-	provider, opened, err := s.service.dialVendor(s.ctx, held)
+	provider, opened, err := s.service.dialVendor(s.ctx, held, 0)
 	s.Require().NoError(err)
 	s.Same(s.trunks, provider)
 	s.Equal(&SIPTrunk{
@@ -135,7 +135,7 @@ func (s *SIPTrunkSuite) TestUpdatingWithoutAPasswordKeepsTheStoredOne() {
 	s.Equal(trunk.PasswordSealed, updated.PasswordSealed)
 
 	held := s.number("acme", trunk.ID, "+15550000202")
-	_, opened, err := s.service.dialVendor(s.ctx, held)
+	_, opened, err := s.service.dialVendor(s.ctx, held, 0)
 	s.Require().NoError(err)
 	s.Equal(customerTrunkPassword, opened.Password)
 }
@@ -150,7 +150,7 @@ func (s *SIPTrunkSuite) TestANewPasswordReplacesTheOldOne() {
 	s.Require().NoError(err)
 
 	held := s.number("acme", trunk.ID, "+15550000203")
-	_, opened, err := s.service.dialVendor(s.ctx, held)
+	_, opened, err := s.service.dialVendor(s.ctx, held, 0)
 	s.Require().NoError(err)
 	s.Equal("new", opened.Password)
 }
@@ -163,7 +163,7 @@ func (s *SIPTrunkSuite) TestADialRefusesATrunkWithoutAPassword() {
 		"UPDATE sip_trunks SET password_sealed = ''::bytea, password_kek_version = 0 WHERE id = ?", trunk.ID)
 	s.Require().NoError(err)
 
-	_, _, err = s.service.dialVendor(s.ctx, held)
+	_, _, err = s.service.dialVendor(s.ctx, held, 0)
 	s.EqualError(err, "phone: sip trunk "+trunk.ID+" has no password; set one before calling through it")
 	s.ErrorIs(err, ErrInvalid)
 }
@@ -177,7 +177,7 @@ func (s *SIPTrunkSuite) TestADialRefusesAPasswordSealedAtNoKey() {
 		"UPDATE sip_trunks SET password_kek_version = 0 WHERE id = ?", trunk.ID)
 	s.Require().NoError(err)
 
-	_, _, err = s.service.dialVendor(s.ctx, held)
+	_, _, err = s.service.dialVendor(s.ctx, held, 0)
 	s.EqualError(err, "phone: sip trunk "+trunk.ID+" has no password; set one before calling through it")
 }
 
@@ -247,7 +247,7 @@ func (s *SIPTrunkSuite) TestABoughtNumberStillGoesThroughTheRegistry() {
 	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, "acme", "+15550000209")
 	s.Require().NoError(err)
 
-	provider, trunk, err := s.service.dialVendor(s.ctx, held)
+	provider, trunk, err := s.service.dialVendor(s.ctx, held, 0)
 	s.Require().NoError(err)
 	s.Equal("bics", provider.Vendor())
 	s.Nil(trunk)

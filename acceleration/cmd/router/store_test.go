@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"io/fs"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -74,4 +75,81 @@ func (s *OpenStoreSuite) TestARouterStartingOnAnEmptyDatabaseHasTheBuiltInsAtThe
 			s.Equal(revisions[id], definitions[i].Revision)
 		}
 	}
+}
+
+// tables counts the tables of the suite's database.
+func (s *OpenStoreSuite) tables() int {
+	db, err := store.Open(s.settings.Postgres.DSN)
+	s.Require().NoError(err)
+	defer db.Close()
+	var count int
+	s.Require().NoError(db.GlobalDB().QueryRowContext(s.ctx, "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'").Scan(&count))
+	return count
+}
+
+func (s *OpenStoreSuite) TestARouterWithAMigrateDSNNeverMigrates() {
+	s.settings.Postgres.MigrateDSN = s.settings.Postgres.DSN
+
+	_, err := openStore(s.ctx, s.settings)
+
+	s.ErrorContains(err, "run router migrate")
+	s.Zero(s.tables(), "a start changes nothing")
+}
+
+// A start connects with the serving DSN alone, so its migrate DSN may hold no password.
+func (s *OpenStoreSuite) TestARouterStartsOnWhatRouterMigrateLeftWithoutConnectingAsTheOwner() {
+	s.settings.Postgres.MigrateDSN = s.settings.Postgres.DSN
+	s.Require().NoError(dispatchCommand("migrate", nil, s.settings, slog.New(slog.DiscardHandler)))
+
+	s.settings.Postgres.MigrateDSN = "postgres://owner@127.0.0.1:1/router?sslmode=disable"
+	opened, err := openStore(s.ctx, s.settings)
+
+	s.Require().NoError(err)
+	defer opened.Close()
+	definitions, err := opened.ConnectorDefinitions.Select(s.ctx, "acme", store.ConnectorDefinitionFilter{})
+	s.Require().NoError(err)
+	s.Len(definitions, 23, "it seeds the built-ins as any start does")
+}
+
+// The router's own database stays a migration behind while another is brought up to date.
+func (s *OpenStoreSuite) TestRouterMigrateOfAnotherDatabaseThanTheRoutersFails() {
+	behind, err := openStore(s.ctx, s.settings)
+	s.Require().NoError(err)
+	defer behind.Close()
+	_, err = behind.GlobalDB().ExecContext(s.ctx, "DELETE FROM goose_global_version WHERE version_id = 20270128000000")
+	s.Require().NoError(err)
+	s.settings.Postgres.MigrateDSN = testenv.Database(os.Getenv(dsnEnvVar), "openstore_other")
+
+	err = dispatchCommand("migrate", nil, s.settings, slog.New(slog.DiscardHandler))
+
+	s.ErrorContains(err, "has not applied global migration 20270128000000")
+}
+
+func (s *OpenStoreSuite) TestEachDatabaseIsMigratedWithItsOwnMigrateDSN() {
+	shard := testenv.Database(os.Getenv(dsnEnvVar), "openstore_shard")
+	emptied, err := store.Open(shard)
+	s.Require().NoError(err)
+	_, err = emptied.GlobalDB().ExecContext(s.ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+	s.Require().NoError(err)
+	s.Require().NoError(emptied.Close())
+	s.settings.Postgres.ShardDSN = shard
+	s.settings.Postgres.MigrateDSN = s.settings.Postgres.DSN
+	s.settings.Postgres.ShardMigrateDSN = "postgres://owner@127.0.0.1:1/router?sslmode=disable"
+
+	s.ErrorContains(dispatchCommand("migrate", nil, s.settings, slog.New(slog.DiscardHandler)), "store: shard: ")
+
+	s.settings.Postgres.ShardMigrateDSN = shard
+	s.NoError(dispatchCommand("migrate", nil, s.settings, slog.New(slog.DiscardHandler)))
+}
+
+func (s *OpenStoreSuite) TestRouterMigrateWithoutAMigrateDSNMigratesAsTheRouter() {
+	s.Require().NoError(dispatchCommand("migrate", nil, s.settings, slog.New(slog.DiscardHandler)))
+
+	s.NotZero(s.tables())
+}
+
+func (s *OpenStoreSuite) TestRouterMigrateWithoutADatabaseIsRefused() {
+	s.settings.Postgres.DSN = ""
+
+	s.ErrorContains(dispatchCommand("migrate", nil, s.settings, slog.New(slog.DiscardHandler)), "set postgres.dsn")
 }
