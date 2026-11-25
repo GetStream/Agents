@@ -293,10 +293,11 @@ func (e *EndpointError) Unwrap() error {
 	return e.Err
 }
 
-// LoggedError is err as a log line has it: with why its endpoint was refused, when one was.
+// LoggedError is err as a log line has it: with why its endpoint was refused, when one was, and
+// that endpoint kept to its scheme and host.
 func LoggedError(err error) string {
 	if refused, ok := errors.AsType[*EndpointError](err); ok {
-		return err.Error() + ": " + refused.Err.Error()
+		return KeepHosts(err.Error()) + ": " + refused.Err.Error()
 	}
 	return err.Error()
 }

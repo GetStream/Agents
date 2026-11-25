@@ -67,12 +67,14 @@ func (s *ResolverSuite) TestARenewalWhoseEndpointIsRefusedTellsItsCallerOneSente
 	s.f.srv.Use(fakeprovider.ClientCredentials, fakeprovider.IdentityURL)
 	for _, ref := range []core.ConnectionRef{s.salesforceConnection(), s.f.connected()} {
 		s.f.due()
-		s.f.endpointRefused = errors.New("the test's reason for " + ref.ConnectionID)
+		reason := errors.New("the test's reason for " + ref.ConnectionID)
+		s.f.endpointRefused = reason
 
 		_, err := s.f.router(s.f.srv.Client()).Resolve(s.f.ctx, ref, core.CredentialRequest{})
 
 		s.f.endpointRefused = nil
 		s.Require().ErrorContains(err, "is not an https URL of a public host that resolves")
+		s.ErrorIs(err, reason)
 		s.NotContains(err.Error(), "the test's reason")
 		s.Contains(s.f.logs.String(), "is not an https URL of a public host that resolves: the test's reason for "+ref.ConnectionID)
 	}
