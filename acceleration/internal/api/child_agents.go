@@ -144,7 +144,7 @@ func (s *Server) childConfig(ctx context.Context, customerID, named string) (sto
 			return store.AgentConfig{}, false, err
 		}
 	}
-	return found, !teams.refuses(found), nil
+	return found, !teams.refuses(ctx, found), nil
 }
 
 // parentOf is the name of a config of the app, other than self, that hands work to the

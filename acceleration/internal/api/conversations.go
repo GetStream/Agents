@@ -109,6 +109,14 @@ func (s *Server) answerToolApproval(ctx context.Context, req *answerToolApproval
 		if !member {
 			return nil, errNoApprovalHeld
 		}
+		// A session of theirs, which a message of theirs is carried on in, is answered only while
+		// they are in its config's team, as carryOn asks: an answer lets its agent's connector call
+		// go. A channel's session the Router opened is answered as its messages are, by member.
+		if by.Reaches(session.OwnerOf(found.Spec())) {
+			if err := s.refuseOutsideTeam(ctx, customer, found.Spec().ConfigID); err != nil {
+				return nil, unknownOr(err, errUnknownConfig, errNoApprovalHeld)
+			}
+		}
 	}
 	answer := req.Body
 	err := found.AnswerConnectorApproval(answer.ToolCallId, answer.RequestId, answer.Allowed, answer.Summary, by)

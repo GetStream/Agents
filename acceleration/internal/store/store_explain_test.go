@@ -699,6 +699,10 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 				"config_id": "config-7", "agent_id": "agent-7", "session_id": "seeded-session-7", "user_id": "user-7", "source": "agent", "severity": "info", "event_type": "provider_request", "message": "imported", "details": {},
 				"occurred_at": "2026-03-01T10:00:00Z", "ingested_at": "2026-03-01T10:00:00Z"}`))
 		}},
+		{name: "Store.ImportRow of a turn", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
+			return store.ImportRow(ctx, "customer-7", "agent_responses", json.RawMessage(`{"id": "imported-turn", "session_id": "seeded-session-7",
+				"said": "hello", "status": "completed", "error": "", "created_at": "2026-03-01T10:00:00Z"}`))
+		}},
 		{name: "Store.HoldingTable", index: "agent_logs_customer_order", run: func(ctx context.Context, store *Store) error {
 			_, err := store.HoldingTable(ctx, "customer-123")
 			return err

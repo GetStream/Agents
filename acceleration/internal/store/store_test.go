@@ -407,6 +407,26 @@ func (s *StoreSuite) TestANumberAttachedBeforeItsCallWasRecordedIsStillFound() {
 	s.Equal("acme", number.CustomerID)
 }
 
+// Another customer's row for the number on its own trunk, lined in the same app to place calls
+// from it, as one added before a number was held by one customer at a time can be.
+func (s *StoreSuite) TestANumberOnAnotherCustomersOwnTrunkDoesNotMakeACallNamedForTheNumberNobodys() {
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15125551234", Vendor: "twilio", Country: "US",
+		CustomerID: "acme", PurchasedAt: s.base,
+	}))
+	_, err := s.store.global.NewUpdate().Model((*PhoneNumber)(nil)).
+		Set("stream_trunk_id = ?", "trunk-7").
+		Where("e164 = ?", "+15125551234").
+		Exec(s.ctx)
+	s.Require().NoError(err)
+	s.lined(TrunkGroup{CustomerID: "globex", Vendor: sipTrunkVendor}, "+15125551234", "trunk-9")
+
+	number, err := s.store.NumberByCallInApp(s.ctx, AppScope{Unpinned: true}, "default", "phone-+15125551234")
+
+	s.Require().NoError(err)
+	s.Equal("acme", number.CustomerID)
+}
+
 func (s *StoreSuite) TestACallNoNumberReachesIsNotAttributedToAnybody() {
 	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15125551234", Vendor: "twilio", Country: "US",
@@ -554,6 +574,48 @@ func (s *StoreSuite) TestMigrateRebuildsTheSessionLogIndexLeftInvalid() {
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT pg_get_indexdef(to_regclass('agent_logs_session_order'))").Scan(&definition))
 	s.Equal("CREATE INDEX agent_logs_session_order ON public.agent_logs USING btree (customer_id, session_id, id DESC)", definition)
+}
+
+func (s *StoreSuite) TestMigrateRebuildsTheTaskChangesIndexLeftInvalid() {
+	built := func() (valid bool, definition string) {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT indisvalid, pg_get_indexdef(indexrelid) FROM pg_index "+
+			"WHERE indexrelid = to_regclass('data_changes_tasks_idx')").Scan(&valid, &definition))
+		return valid, definition
+	}
+	const want = "CREATE INDEX data_changes_tasks_idx ON public.data_changes USING btree (customer_id, " +
+		"COALESCE((payload ->> 'task_id'::text), (payload ->> 'id'::text)), ((payload ->> 'id'::text))) " +
+		"WHERE ((table_name = ANY (ARRAY['scheduled_tasks'::text, 'scheduled_task_runs'::text])) AND (op <> 'delete'::text))"
+	_, definition := built()
+	s.Equal(want, definition, "as the migration builds it")
+	// As a CONCURRENTLY build that failed leaves it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('data_changes_tasks_idx')")
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	valid, definition := built()
+	s.True(valid, "dropped and built again")
+	s.Equal(want, definition, "built again as the migration builds it")
+}
+
+func (s *StoreSuite) TestMigrateRebuildsTheHeldNumberIndexLeftInvalid() {
+	built := func() (valid bool, definition string) {
+		s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT indisvalid, pg_get_indexdef(indexrelid) FROM pg_index "+
+			"WHERE indexrelid = to_regclass('phone_numbers_e164_held_idx')").Scan(&valid, &definition))
+		return valid, definition
+	}
+	const want = "CREATE INDEX phone_numbers_e164_held_idx ON public.phone_numbers USING btree (e164) WHERE (released_at IS NULL)"
+	_, definition := built()
+	s.Equal(want, definition, "as the migration builds it")
+	// As a CONCURRENTLY build that failed leaves it.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('phone_numbers_e164_held_idx')")
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.store.Migrate(s.ctx))
+
+	valid, definition := built()
+	s.True(valid, "dropped and built again")
+	s.Equal(want, definition, "built again as the migration builds it")
 }
 
 func (s *StoreSuite) TestMigrateRebuildsTheCampaignAttemptIndexLeftInvalid() {
