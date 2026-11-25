@@ -132,6 +132,19 @@ func (s *Stored) learn(ctx context.Context, clients *Clients) (int64, error) {
 
 // For is the identity new work for a customer is done with.
 func (s *Stored) For(ctx context.Context, customer string) (Identity, error) {
+	return s.place(ctx, customer, true)
+}
+
+// Placed is the pin new work for a customer is given, as For answers it, read without acting
+// for the customer: the gateway is asked for no token and no use of the fallback is counted, so
+// one customer's request can ask where another's work goes without it showing as the other's.
+func (s *Stored) Placed(ctx context.Context, customer string) (int64, error) {
+	identity, err := s.place(ctx, customer, false)
+	return identity.StreamApp, err
+}
+
+// place is For when acting, and Placed's read otherwise.
+func (s *Stored) place(ctx context.Context, customer string, acting bool) (Identity, error) {
 	deployment := s.deployment.App()
 	if s.ownsDeploymentApp(customer, deployment) {
 		return s.inDeploymentApp(ctx, customer, deployment)
@@ -140,7 +153,7 @@ func (s *Stored) For(ctx context.Context, customer string) (Identity, error) {
 		// Until the deployment's own app is known, this may be its customer.
 		return Identity{}, ErrDeploymentAppUnknown
 	}
-	if identity, ok, err := s.inForwardedApp(ctx, customer); ok {
+	if identity, ok, err := s.inForwardedApp(ctx, customer, acting); ok {
 		return identity, err
 	}
 	if !s.fallsBack(ctx, customer) {
@@ -150,7 +163,9 @@ func (s *Stored) For(ctx context.Context, customer string) (Identity, error) {
 		// Falling back names the deployment's app, which has to be known to be named.
 		return Identity{}, ErrDeploymentAppUnknown
 	}
-	s.fellBack(ctx, customer)
+	if acting {
+		s.fellBack(ctx, customer)
+	}
 	return s.inDeploymentApp(ctx, customer, deployment)
 }
 
@@ -181,7 +196,7 @@ func (s *Stored) forApp(ctx context.Context, customer string, app int64) (Identi
 		return s.legacy(ctx, customer, app, deployment)
 	}
 	if customer == CustomerOf(app) {
-		if identity, ok, err := s.inForwardedApp(ctx, customer); ok {
+		if identity, ok, err := s.inForwardedApp(ctx, customer, true); ok {
 			return identity, false, err
 		}
 	}
@@ -193,13 +208,13 @@ func (s *Stored) forApp(ctx context.Context, customer string, app int64) (Identi
 }
 
 // inForwardedApp is a customer's own app acted in with the token the gateway forwarded for
-// it, and false when there is no such token to act with.
-func (s *Stored) inForwardedApp(ctx context.Context, customer string) (Identity, bool, error) {
+// it, and false when there is no such token to act with. Only acting refreshes the token.
+func (s *Stored) inForwardedApp(ctx context.Context, customer string, acting bool) (Identity, bool, error) {
 	app, couldBe := ParseAppID(customer)
 	if s.forwarded == nil || !couldBe {
 		return Identity{}, false, nil
 	}
-	identity, err := s.forwarded.identity(ctx, customer, app)
+	identity, err := s.forwarded.identity(ctx, customer, app, acting)
 	if errors.Is(err, ErrNoIdentity) {
 		return Identity{}, false, nil
 	}

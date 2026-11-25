@@ -244,8 +244,18 @@ func (s *StoreSuite) TestPhoneNumberQueryBudgets() {
 	s.Equal(1, s.countQueries(func() {
 		bought, err := s.store.PhoneNumbers.BoughtElsewhere(s.ctx, "acme", "+15125550198")
 		s.Require().NoError(err)
-		s.False(bought)
+		s.Empty(bought)
 	}), "BoughtElsewhere")
+	s.Equal(1, s.countQueries(func() {
+		held, err := s.store.PhoneNumbers.Holders(s.ctx, "+15125550198")
+		s.Require().NoError(err)
+		s.Equal([]string{"acme"}, held)
+	}), "Holders")
+	s.Equal(1, s.countQueries(func() {
+		lines, err := s.store.PhoneNumbers.TrunkLinesElsewhere(s.ctx, "other", "+15125550198", 0)
+		s.Require().NoError(err)
+		s.Empty(lines)
+	}), "TrunkLinesElsewhere")
 	// A write to a number is a transaction, BEGIN to COMMIT, that waits on the row as long as a
 	// trunk group may hold it.
 	s.Equal(4, s.countQueries(func() {
@@ -276,4 +286,56 @@ func (s *StoreSuite) TestPhoneNumberQueryBudgets() {
 		s.Require().NoError(err)
 		s.Len(held, 7)
 	}), "HeldSince")
+}
+
+// lineOn is a number on a customer's own trunk with a line made for it in the app pinned.
+func (s *StoreSuite) lineOn(customerID, e164 string, app int64) {
+	s.lined(TrunkGroup{CustomerID: customerID, StreamAppPK: app, Vendor: sipTrunkVendor}, e164, "trunk-"+customerID)
+}
+
+func (s *StoreSuite) TestTheTrunkLinesElsewhereAreOtherCustomersLinesForTheNumberInTheApp() {
+	s.lineOn("globex", "+15125557001", 0)
+	s.lineOn("acme", "+15125557001", 0)
+	s.lineOn("initech", "+15125557002", 0)
+	s.lineOn("umbrella", "+15125557001", 77)
+	s.lined(TrunkGroup{CustomerID: "hooli", Vendor: "telnyx"}, "+15125557001", "trunk-hooli")
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15125557001", Vendor: sipTrunkVendor, Country: "US", CustomerID: "soylent", PurchasedAt: s.base,
+	}))
+	s.lineOn("wayne", "+15125557001", 0)
+	s.Require().NoError(giveBack(s.ctx, s.store, "wayne", "+15125557001", time.Time{}))
+
+	lines, err := s.store.PhoneNumbers.TrunkLinesElsewhere(s.ctx, "acme", "+15125557001", 0)
+
+	s.Require().NoError(err)
+	s.Require().Len(lines, 1, "acme's own, another number, another app, a bought number, one with no line and one given back are left")
+	s.Equal("globex", lines[0].CustomerID)
+	s.Equal("trunk-globex", lines[0].StreamTrunkID)
+}
+
+// A line made in the deployment's own app before lines were pinned has no pin; one made since
+// has its id.
+func (s *StoreSuite) TestATrunkLineInTheDeploymentsAppIsFoundByItsIdOrNoPin() {
+	s.store.SetStreamPins(StreamPins{Deployment: func() int64 { return 1 }})
+	s.T().Cleanup(func() { s.store.SetStreamPins(StreamPins{}) })
+	s.lineOn("globex", "+15125557003", 0)
+	s.lineOn("initech", "+15125557003", 1)
+	s.lineOn("umbrella", "+15125557003", 77)
+
+	for _, app := range []int64{0, 1} {
+		lines, err := s.store.PhoneNumbers.TrunkLinesElsewhere(s.ctx, "acme", "+15125557003", app)
+		s.Require().NoError(err)
+		s.ElementsMatch([]string{"globex", "initech"}, customersHolding(lines), "app %d", app)
+	}
+	lines, err := s.store.PhoneNumbers.TrunkLinesElsewhere(s.ctx, "acme", "+15125557003", 77)
+	s.Require().NoError(err)
+	s.Equal([]string{"umbrella"}, customersHolding(lines))
+}
+
+func customersHolding(numbers []PhoneNumber) []string {
+	customers := make([]string, 0, len(numbers))
+	for _, number := range numbers {
+		customers = append(customers, number.CustomerID)
+	}
+	return customers
 }

@@ -181,12 +181,13 @@ func insertNumber(ctx context.Context, db bun.IDB, number *PhoneNumber) error {
 // on a trunk, would make which one a call goes through an accident. That is refused here;
 // the unique index only covers numbers on trunks.
 //
-// Nor may it be a number another customer holds, anywhere. Nothing here proves a number on a
-// trunk is the customer's, and Stream lists a number on one trunk per app: lined first, in the
-// app the other's line is made in, it would leave the other unable to attach the number or call
-// from it. A number's app is only known once a call is placed from it, and moves with its
-// customer, so the two cannot be told apart by app here.
-func (r *PhoneNumbers) InsertOnSIPTrunk(ctx context.Context, number *PhoneNumber) error {
+// Nor may it be a number another customer holds, bought or on a trunk of its own, in the Stream
+// app this customer's lines are made in. Nothing here proves a number on a trunk is the
+// customer's, and Stream lists a number on one trunk per app: lined there first, it would leave
+// the other unable to attach the number or call from it. Which app a customer's lines are made
+// in is the phone service's to say, so apart names the holders it read (Holders) whose lines are
+// made in another app. Any other holder refuses the number, one that came since among them.
+func (r *PhoneNumbers) InsertOnSIPTrunk(ctx context.Context, number *PhoneNumber, apart []string) error {
 	number.Vendor = sipTrunkVendor
 	if err := number.Validate(); err != nil {
 		return stack.Wrap(err)
@@ -202,8 +203,10 @@ func (r *PhoneNumbers) InsertOnSIPTrunk(ctx context.Context, number *PhoneNumber
 		if slices.Contains(held, number.CustomerID) {
 			return stack.Wrap(ErrNumberHeld)
 		}
-		if len(held) > 0 {
-			return stack.Wrap(ErrNumberHeldElsewhere)
+		for _, holder := range held {
+			if !slices.Contains(apart, holder) {
+				return stack.Wrap(ErrNumberHeldElsewhere)
+			}
 		}
 		return insertNumber(ctx, tx, number)
 	})
@@ -347,22 +350,51 @@ func (r *PhoneNumbers) GetByE164(ctx context.Context, customerID, e164 string) (
 	return heldNumber(ctx, r.store.global.NewSelect(), customerID, e164)
 }
 
-// BoughtElsewhere says whether a customer other than customerID holds the number bought at a
+// BoughtElsewhere are the customers other than customerID holding the number bought at a
 // vendor, which sold it as theirs.
-func (r *PhoneNumbers) BoughtElsewhere(ctx context.Context, customerID, e164 string) (bool, error) {
+func (r *PhoneNumbers) BoughtElsewhere(ctx context.Context, customerID, e164 string) ([]string, error) {
 	if customerID == "" || e164 == "" {
-		return false, stack.Wrap(errors.New("store: a customer and a number are required"))
+		return nil, stack.Wrap(errors.New("store: a customer and a number are required"))
 	}
-	bought, err := r.store.global.NewSelect().Model((*PhoneNumber)(nil)).
+	var buyers []string
+	err := r.store.global.NewSelect().Model((*PhoneNumber)(nil)).Column("customer_id").
 		Where("e164 = ?", e164).
 		Where("vendor <> ?", sipTrunkVendor).
 		Where("customer_id <> ?", customerID).
 		Where("released_at IS NULL").
-		Exists(ctx)
+		Scan(ctx, &buyers)
 	if err != nil {
-		return false, stack.Wrap(fmt.Errorf("store: number bought elsewhere: %w", err))
+		return nil, stack.Wrap(fmt.Errorf("store: number bought elsewhere: %w", err))
 	}
-	return bought, nil
+	return buyers, nil
+}
+
+// TrunkLinesElsewhere are the lines customers other than customerID made for a number on their
+// own trunks, in the Stream app the pin names, as rows on those trunks. The deployment's own app
+// is its id or no pin, which a line made there before lines were pinned has.
+func (r *PhoneNumbers) TrunkLinesElsewhere(ctx context.Context, customerID, e164 string, app int64) ([]PhoneNumber, error) {
+	if customerID == "" || e164 == "" {
+		return nil, stack.Wrap(errors.New("store: a customer and a number are required"))
+	}
+	var lines []PhoneNumber
+	err := r.store.global.NewSelect().Model(&lines).
+		Where("e164 = ?", e164).
+		Where("vendor = ?", sipTrunkVendor).
+		Where("customer_id <> ?", customerID).
+		Where("released_at IS NULL").
+		Where("stream_trunk_id IS NOT NULL").
+		ApplyQueryBuilder(r.store.pinnedTo(app).where).
+		Scan(ctx)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: trunk lines of a number elsewhere: %w", err))
+	}
+	return lines, nil
+}
+
+// Holders are the customers holding a number now, bought or on a trunk of their own, as they
+// stand: InsertOnSIPTrunk reads them again under its lock.
+func (r *PhoneNumbers) Holders(ctx context.Context, e164 string) ([]string, error) {
+	return heldBy(ctx, r.store.global, e164)
 }
 
 // numberHoldersLockSeed keeps the lock holders reads under apart from other advisory locks
@@ -376,8 +408,13 @@ func holders(ctx context.Context, tx bun.IDB, e164 string) ([]string, error) {
 	if err := lockUntilCommit(ctx, tx, e164, numberHoldersLockSeed); err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: lock the holders of a number: %w", err))
 	}
+	return heldBy(ctx, tx, e164)
+}
+
+// heldBy are the customers holding a number now, read in db.
+func heldBy(ctx context.Context, db bun.IDB, e164 string) ([]string, error) {
 	var customers []string
-	err := tx.NewSelect().Model((*PhoneNumber)(nil)).Column("customer_id").
+	err := db.NewSelect().Model((*PhoneNumber)(nil)).Column("customer_id").
 		Where("e164 = ?", e164).
 		Where("released_at IS NULL").
 		Scan(ctx, &customers)

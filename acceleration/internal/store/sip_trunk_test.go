@@ -3,6 +3,8 @@
 package store
 
 import (
+	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -20,7 +22,7 @@ func (s *StoreSuite) trunk(customerID string) *SIPTrunk {
 func (s *StoreSuite) trunkNumber(customerID, trunkID, e164 string) error {
 	return s.store.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: e164, Vendor: "sip_trunk", Country: "US", CustomerID: customerID, SIPTrunkID: trunkID,
-	})
+	}, nil)
 }
 
 func (s *StoreSuite) TestATrunkIsReadBackWhole() {
@@ -101,6 +103,68 @@ func (s *StoreSuite) TestANumberOnAnotherCustomersTrunkCannotBeAddedToATrunk() {
 	s.Equal(acme.ID, held.SIPTrunkID)
 }
 
+// The phone service read acme's lines as made in another Stream app than other's, where the
+// number on other's trunk cannot block acme's.
+func (s *StoreSuite) TestANumberAHolderInAnotherAppHoldsCanBeAddedToATrunk() {
+	acme, other := s.trunk("acme"), s.trunk("other")
+	s.Require().NoError(s.trunkNumber("acme", acme.ID, "+15550000122"))
+
+	s.Require().NoError(s.store.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
+		E164: "+15550000122", Country: "US", CustomerID: "other", SIPTrunkID: other.ID,
+	}, []string{"acme"}))
+
+	held, err := s.store.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000122")
+	s.Require().NoError(err)
+	s.Equal(other.ID, held.SIPTrunkID)
+}
+
+// globex bought the number after the phone service read who held it, or was not read: only the
+// holders it read in another app let the number through.
+func (s *StoreSuite) TestAHolderNotReadInAnotherAppRefusesTheNumber() {
+	acme, other := s.trunk("acme"), s.trunk("other")
+	s.Require().NoError(s.trunkNumber("acme", acme.ID, "+15550000123"))
+	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
+		E164: "+15550000123", Vendor: "twilio", Country: "US", CustomerID: "globex",
+	}))
+
+	err := s.store.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
+		E164: "+15550000123", Country: "US", CustomerID: "other", SIPTrunkID: other.ID,
+	}, []string{"acme"})
+
+	s.ErrorIs(err, ErrNumberHeldElsewhere)
+	_, err = s.store.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000123")
+	s.ErrorIs(err, ErrNoNumber)
+}
+
+// With shards a batch of changes is written as two, the shared database's and then this shard's:
+// a number left out of the first does not keep the second from being written.
+func (s *StoreSuite) TestAChangeToARecordingIsWrittenPastANumberLeftOutOfItsBatch() {
+	acme, other := s.trunk("acme"), s.trunk("other")
+	s.Require().NoError(s.trunkNumber("acme", acme.ID, "+15550000128"))
+	number, err := json.Marshal(map[string]any{
+		"id": 1 << 40, "e164": "+15550000128", "vendor": sipTrunkVendor, "country": "US", "capabilities": []string{"voice"},
+		"customer_id": "other", "tags": map[string]string{}, "purchased_at": s.base, "sip_trunk_id": other.ID,
+	})
+	s.Require().NoError(err)
+	id := "recording-" + newID()
+	recording, err := json.Marshal(map[string]any{
+		"id": id, "customer_id": "other", "modality": "stt", "status": "completed", "created_at": s.base, "updated_at": s.base,
+		"stt": map[string]any{}, "tts": map[string]any{}, "tags": map[string]string{},
+	})
+	s.Require().NoError(err)
+
+	err = s.store.ApplyChanges(s.ctx, "other", []DataChange{
+		{Table: "phone_numbers", Op: ChangeInsert, Payload: number},
+		{Table: "recordings", Op: ChangeInsert, Payload: recording},
+	})
+
+	left, ok := errors.AsType[*NumbersLeftOutError](err)
+	s.Require().True(ok, "%v", err)
+	s.Equal([]string{"+15550000128"}, left.Numbers)
+	_, err = s.store.Recordings.Get(s.ctx, "other", id)
+	s.NoError(err)
+}
+
 func (s *StoreSuite) TestANumberAnotherCustomerBoughtCannotBeAddedToATrunk() {
 	s.Require().NoError(s.store.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000110", Vendor: "twilio", Country: "US", CustomerID: "acme",
@@ -163,10 +227,10 @@ func (s *StoreSuite) TestANumberOnATrunkDoesNotStopAnotherCustomerBuyingIt() {
 
 	bought, err := s.store.PhoneNumbers.BoughtElsewhere(s.ctx, "acme", "+15550000113")
 	s.Require().NoError(err)
-	s.True(bought, "the trunk's customer is told another bought it")
+	s.Equal([]string{"other"}, bought, "the trunk's customer is told who else bought it")
 	bought, err = s.store.PhoneNumbers.BoughtElsewhere(s.ctx, "other", "+15550000113")
 	s.Require().NoError(err)
-	s.False(bought, "the buyer's own number is not another's")
+	s.Empty(bought, "the buyer's own number is not another's")
 }
 
 func (s *StoreSuite) TestANumberGivenBackIsNotBoughtElsewhere() {
@@ -179,7 +243,7 @@ func (s *StoreSuite) TestANumberGivenBackIsNotBoughtElsewhere() {
 
 	bought, err := s.store.PhoneNumbers.BoughtElsewhere(s.ctx, "acme", "+15550000114")
 	s.Require().NoError(err)
-	s.False(bought)
+	s.Empty(bought)
 }
 
 // Two customers' rows on their own trunks, as one written before a number was held by one
@@ -194,7 +258,7 @@ func (s *StoreSuite) TestANumberOnAnotherCustomersTrunkIsNotBoughtElsewhere() {
 
 	bought, err := s.store.PhoneNumbers.BoughtElsewhere(s.ctx, "acme", "+15550000115")
 	s.Require().NoError(err)
-	s.False(bought)
+	s.Empty(bought)
 }
 
 func (s *StoreSuite) TestACustomerCannotAddANumberTwice() {

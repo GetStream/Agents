@@ -160,6 +160,34 @@ func (s *StoredSuite) TestATokenAboutToExpireIsRefreshedAtTheGateway() {
 	s.Equal(forwardedKey, asked[0]["api_key"])
 }
 
+func (s *StoredSuite) TestAskingWhereAnAppWithATokenAboutToExpireActsAsksTheGatewayNothing() {
+	mint := s.gateway()
+	forwarded := s.forwarded(mint)
+	_, err := forwarded.Keep(s.ctx, s.customer, forwardedKey, s.serverToken(30*time.Minute))
+	s.Require().NoError(err)
+
+	app, err := NewClients(s.forwardedSource(forwarded), ClientsOptions{}).Placed(s.ctx, s.customer)
+
+	s.Require().NoError(err)
+	s.Equal(s.app, app, "its own app, as For answers")
+	s.Empty(mint.requests())
+}
+
+// Read without acting, a token that has run out is taken to be one the gateway will not replace:
+// where the app's work goes then is the fallback's, which shares the deployment's app.
+func (s *StoredSuite) TestAskingWhereAnAppWhoseTokenRanOutActsAnswersAsThoughTheGatewayRefused() {
+	mint := s.gateway()
+	forwarded := s.forwarded(mint)
+	_, err := forwarded.Keep(s.ctx, s.customer, forwardedKey, s.serverToken(time.Hour+time.Minute))
+	s.Require().NoError(err)
+	s.clock.Advance(2 * time.Hour)
+
+	_, err = NewClients(s.forwardedSource(forwarded), ClientsOptions{}).Placed(s.ctx, s.customer)
+
+	s.ErrorIs(err, ErrNoIdentity, "no fallback here")
+	s.Empty(mint.requests())
+}
+
 func (s *StoredSuite) TestAnExpiredTokenTheGatewayWillNotReplaceActsNowhere() {
 	forwarded := s.forwarded(nil)
 	_, err := forwarded.Keep(s.ctx, s.customer, forwardedKey, s.serverToken(time.Hour+time.Minute))

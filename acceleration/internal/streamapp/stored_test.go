@@ -193,6 +193,16 @@ func (s *StoredSuite) TestTheFallbackIsRecordedAtMostOnceAMinute() {
 	s.Equal(int64(4), s.usesOf(s.customer), "uses in between are counted when next written")
 }
 
+// Another customer's request asks where a customer's work goes, which is not a use of the
+// fallback by that customer.
+func (s *StoredSuite) TestAskingWhereAFallingBackCustomersWorkGoesCountsNoUseOfTheFallback() {
+	app, err := NewClients(s.source(true), ClientsOptions{}).Placed(s.ctx, s.customer)
+
+	s.Require().NoError(err)
+	s.Equal(int64(1), app, "the deployment's app, as For answers")
+	s.Equal(int64(0), s.usesOf(s.customer))
+}
+
 func (s *StoredSuite) TestForwardedTokensAreNotKeptWithoutAKeyring() {
 	_, err := NewForwarded(ForwardedOptions{Store: s.store})
 

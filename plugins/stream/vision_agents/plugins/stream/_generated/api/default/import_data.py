@@ -126,6 +126,8 @@ def sync_detailed(
     importing the same export twice that way leaves what importing it once would. Changes are applied
     whatever the app holds. An import that stopped partway is run again with `full=true`, since the app
     then holds its first rows.
+    A number on the app's own SIP trunk that another app holds here is not written, nor counted in
+    `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
     An app runs one import at a time on a router, and a router runs at most four imports at once. An
     import ends with a 504 `timeout` when a line has taken a minute to arrive.
     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
@@ -174,6 +176,8 @@ def sync(
     importing the same export twice that way leaves what importing it once would. Changes are applied
     whatever the app holds. An import that stopped partway is run again with `full=true`, since the app
     then holds its first rows.
+    A number on the app's own SIP trunk that another app holds here is not written, nor counted in
+    `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
     An app runs one import at a time on a router, and a router runs at most four imports at once. An
     import ends with a 504 `timeout` when a line has taken a minute to arrive.
     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
@@ -217,6 +221,8 @@ async def asyncio_detailed(
     importing the same export twice that way leaves what importing it once would. Changes are applied
     whatever the app holds. An import that stopped partway is run again with `full=true`, since the app
     then holds its first rows.
+    A number on the app's own SIP trunk that another app holds here is not written, nor counted in
+    `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
     An app runs one import at a time on a router, and a router runs at most four imports at once. An
     import ends with a 504 `timeout` when a line has taken a minute to arrive.
     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
@@ -263,6 +269,8 @@ async def asyncio(
     importing the same export twice that way leaves what importing it once would. Changes are applied
     whatever the app holds. An import that stopped partway is run again with `full=true`, since the app
     then holds its first rows.
+    A number on the app's own SIP trunk that another app holds here is not written, nor counted in
+    `rows`, and the import carries on: add it to a trunk with `addTrunkNumber` once the move is over.
     An app runs one import at a time on a router, and a router runs at most four imports at once. An
     import ends with a 504 `timeout` when a line has taken a minute to arrive.
     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.

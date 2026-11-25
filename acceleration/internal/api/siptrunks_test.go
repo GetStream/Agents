@@ -211,7 +211,8 @@ func (s *SIPTrunksSuite) TestANumberAnotherAppHoldsIsAConflictThatNamesNoApp() {
 	s.Equal(http.StatusConflict, status, string(payload))
 	var answered ErrorResponse
 	s.Require().NoError(json.Unmarshal(payload, &answered))
-	s.Equal("store: another app holds this number", answered.Error.Message)
+	s.Equal(codePhoneNumberHeldElsewhere, answered.Error.Code)
+	s.Equal(errNumberHeldElsewhere.Message, answered.Error.Message)
 	for _, named := range []string{holder.app.ID, holder.app.Name, holder.organization.ID, theirs.Id} {
 		s.NotContains(string(payload), named)
 	}

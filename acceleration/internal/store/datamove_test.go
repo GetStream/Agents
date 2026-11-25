@@ -4840,7 +4840,7 @@ func (s *DataMoveSuite) TestCopyingAgainDoesNotKeepTheLineOfANumberTheSourceGave
 func (s *DataMoveSuite) ownNumber(e164 string) {
 	s.Require().NoError(s.source.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: e164, Country: "US", CustomerID: "acme", SIPTrunkID: s.trunkOf(s.source, "acme").ID,
-	}))
+	}, nil))
 }
 
 // numberAttachedHere is a number the source holds on acme's own trunk, copied here and attached
@@ -4947,30 +4947,86 @@ func (s *DataMoveSuite) TestANumberOnItsOwnTrunkIsImportedOnceWhoHeldItHereGaveI
 	s.NoError(err)
 }
 
-func (s *DataMoveSuite) TestANumberAnotherCustomerHoldsHereIsNotImportedOntoATrunk() {
+func (s *DataMoveSuite) TestANumberAnotherCustomerHoldsHereIsLeftOutOfAnImport() {
 	s.Require().NoError(s.destination.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: "+15550000116", Country: "US", CustomerID: "acme", SIPTrunkID: s.trunkOf(s.destination, "acme").ID,
-	}))
+	}, nil))
 	s.Require().NoError(s.destination.PhoneNumbers.Insert(s.ctx, &PhoneNumber{
 		E164: "+15550000117", Vendor: "plivo", Country: "US", CustomerID: "acme",
 	}))
 
 	trunk := s.trunkOf(s.destination, "other").ID
 	for _, e164 := range []string{"+15550000116", "+15550000117"} {
-		row := s.importedNumber(e164, sipTrunkVendor, "sip_trunk_id", trunk)
-		for _, err := range []error{
-			s.destination.ImportRow(s.ctx, "other", "phone_numbers", row),
-			s.destination.ApplyChanges(s.ctx, "other", []DataChange{{Table: "phone_numbers", Op: ChangeInsert, Payload: row}}),
-		} {
-			s.ErrorIs(err, ErrNumberHeldElsewhere, e164)
-			s.ErrorIs(err, ErrInvalidImport, e164)
-			s.NotContains(err.Error(), "acme", e164)
-		}
+		err := s.destination.ImportRow(s.ctx, "other", "phone_numbers", s.importedNumber(e164, sipTrunkVendor, "sip_trunk_id", trunk))
+
+		left, ok := errors.AsType[*NumbersLeftOutError](err)
+		s.Require().True(ok, "%s: %v", e164, err)
+		s.Equal([]string{e164}, left.Numbers)
+		s.ErrorIs(err, ErrNumberHeldElsewhere, e164)
+		s.NotErrorIs(err, ErrInvalidImport, "the import carries on past it")
+		s.NotContains(err.Error(), "acme", e164)
 	}
 
 	held, err := s.destination.PhoneNumbers.Select(s.ctx, "other", PhoneNumberFilter{IncludeReleased: true})
 	s.Require().NoError(err)
 	s.Empty(held)
+}
+
+// The source sends the number with every change to its row, so a batch refused for it would be
+// refused on every run after it, and the move would never get past it.
+func (s *DataMoveSuite) TestABatchOfChangesWritesEverythingButANumberAnotherCustomerHoldsHere() {
+	s.Require().NoError(s.destination.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
+		E164: "+15550000124", Country: "US", CustomerID: "acme", SIPTrunkID: s.trunkOf(s.destination, "acme").ID,
+	}, nil))
+	trunk := s.trunkOf(s.destination, "other").ID
+
+	err := s.destination.ApplyChanges(s.ctx, "other", []DataChange{
+		{Table: "phone_numbers", Op: ChangeInsert, Payload: s.importedNumber("+15550000124", sipTrunkVendor, "sip_trunk_id", trunk)},
+		{Table: "phone_numbers", Op: ChangeInsert, Payload: s.importedNumber("+15550000125", sipTrunkVendor, "sip_trunk_id", trunk)},
+	})
+
+	left, ok := errors.AsType[*NumbersLeftOutError](err)
+	s.Require().True(ok, "%v", err)
+	s.Equal([]string{"+15550000124"}, left.Numbers)
+	_, err = s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000125")
+	s.NoError(err, "the change after it is written")
+	_, err = s.destination.PhoneNumbers.GetByE164(s.ctx, "other", "+15550000124")
+	s.ErrorIs(err, ErrNoNumber)
+}
+
+// Another batch holds the lock of the number that sorts first and waits, uncommitted. A batch
+// naming the other number first takes no lock of the two before it has the first: taken in the
+// batch's order, it would hold the second while it waited, and a batch waiting on that second
+// one would deadlock with it.
+func (s *DataMoveSuite) TestABatchOfChangesTakesItsNumbersLocksInOneOrder() {
+	trunk := s.trunkOf(s.destination, "other").ID
+	tx, err := s.destination.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = holders(s.ctx, tx, "+15550000126")
+	s.Require().NoError(err)
+
+	applied := make(chan error, 1)
+	go func() {
+		applied <- s.destination.ApplyChanges(s.ctx, "other", []DataChange{
+			{Table: "phone_numbers", Op: ChangeInsert, Payload: s.importedNumber("+15550000127", sipTrunkVendor, "sip_trunk_id", trunk)},
+			{Table: "phone_numbers", Op: ChangeInsert, Payload: s.importedNumber("+15550000126", sipTrunkVendor, "sip_trunk_id", trunk)},
+		})
+	}()
+	s.Require().Eventually(func() bool {
+		var waiting int
+		s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx, `
+SELECT count(*) FROM pg_locks
+WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&waiting))
+		return waiting > 0
+	}, 5*time.Second, 10*time.Millisecond)
+
+	var free bool
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT pg_try_advisory_xact_lock(hashtextextended(?, ?))", "+15550000127", numberHoldersLockSeed).Scan(&free))
+	s.True(free, "the number that sorts second is not held while the first is waited for")
+	s.Require().NoError(tx.Commit())
+	s.NoError(<-applied)
 }
 
 // A number given back at the source is only its bill's history, which moves whoever holds the
@@ -5044,7 +5100,7 @@ WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&count))
 	go func() {
 		added <- s.destination.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 			E164: "+15550000121", Country: "US", CustomerID: "acme", SIPTrunkID: ours.ID,
-		})
+		}, nil)
 	}()
 	s.Require().Eventually(waiting(2), 5*time.Second, 10*time.Millisecond)
 	s.Require().NoError(tx.Commit())
@@ -5079,7 +5135,7 @@ func (s *DataMoveSuite) TestAnImportedNumberCannotPointAtAnotherCustomersTrunk()
 	own := s.trunkOf(s.source, "acme")
 	s.Require().NoError(s.source.PhoneNumbers.InsertOnSIPTrunk(s.ctx, &PhoneNumber{
 		E164: "+15550000109", Country: "US", CustomerID: "acme", SIPTrunkID: own.ID,
-	}))
+	}, nil))
 	numbers := s.export("acme").of("phone_numbers")
 	s.Require().Len(numbers, 1)
 	numbers[0]["sip_trunk_id"] = trunk.ID

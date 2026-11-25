@@ -56,6 +56,16 @@ func (s *Store) streamPins() StreamPins {
 	return StreamPins{}
 }
 
+// pinnedTo is the rows pinned to the Stream app a pin names. The deployment's own app is its id
+// or no pin at all, which everything written there before pins were has.
+func (s *Store) pinnedTo(pin int64) AppScope {
+	deployment := s.streamPins().deployment()
+	if pin == 0 || pin == deployment {
+		return AppScope{App: deployment, Unpinned: true}
+	}
+	return AppScope{App: pin}
+}
+
 func (p StreamPins) deployment() int64 {
 	if p.Deployment == nil {
 		return 0
