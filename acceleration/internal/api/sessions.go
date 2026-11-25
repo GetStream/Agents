@@ -1,7 +1,6 @@
 package api
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"net/http"
@@ -202,14 +201,6 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 	}
 	spec.CustomerID = customerID
 	spec.NameProject(body.ProjectId, KindFrom(ctx))
-	// Its usage is under the key and the user that asked for it. A running parent's categories go on
-	// when the request names none, and its team unless the request's categories name one.
-	spec.Team = cmp.Or(spec.Team, spec.Attribution.Team())
-	categories := spec.Attribution.UsageCategories
-	spec.Attribution = routing.AttributionFrom(ctx)
-	if len(spec.Attribution.UsageCategories) == 0 {
-		spec.Attribution.UsageCategories = categories
-	}
 	// A voice fork is keyed under the call it joins, which the request names.
 	ctx = s.threadConversation(ctx, customerID, &spec)
 	spec.Caller = CallerFrom(ctx)

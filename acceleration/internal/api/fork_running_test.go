@@ -68,8 +68,7 @@ func (s *ForkRunningSuite) TestASessionCarriedOnIsForkedAtAMessage() {
 func (s *ForkRunningSuite) TestASessionCarriedOnIsForkedOntoAnotherConfig() {
 	var config AgentConfig
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs",
-		map[string]any{"name": "other-" + s.utils.uuid(), "mode": "text", "llm": "echo/echo-model",
-			"tags": map[string]string{"team": "legal"}}, &config))
+		map[string]any{"name": "other-" + s.utils.uuid(), "mode": "text", "llm": "echo/echo-model"}, &config))
 	owner := s.data.createUser()
 	parent := owner.createSession(textSession(nil))
 	s.carryOn(owner, parent.Id, s.ends()["stopped"])
@@ -77,7 +76,6 @@ func (s *ForkRunningSuite) TestASessionCarriedOnIsForkedOntoAnotherConfig() {
 	forked := s.fork(owner, parent.Id, ForkSessionRequest{ConfigId: &config.Id})
 
 	s.Equal("echo/echo-model", value(forked.Llm))
-	s.Equal([]string{"team:legal"}, s.specOf(forked.Id).Attribution.UsageCategories)
 }
 
 func (s *ForkRunningSuite) TestASessionCarriedOnIsForkedOnAnotherNode() {
@@ -138,48 +136,22 @@ func (s *ForkRunningSuite) TestAForkDoesNotAnswerItsParentsHandOut() {
 	s.Empty(forked.HandedOutBy)
 }
 
-func (s *ForkRunningSuite) TestAForksUsageIsUnderTheKeyAndUserThatAskedForIt() {
-	owner := s.data.createUser()
-	spec := s.backendSpec()
-	spec.Caller, spec.CallerKind = routing.Caller{UserID: owner.userID}, auth.KindAuthenticated
-	spec.Attribution = routing.Attribution{APIKey: routing.OriginPhoneInbound, UserID: "ann",
-		UsageCategories: []string{"project:outreach", "team:finance"}}
-	spec.Team = "finance"
-	parent := s.running(spec)
-	for name, tried := range map[string]struct {
-		sent string
-		want []string
-	}{
-		"naming none":       {"", []string{"project:outreach", "team:finance"}},
-		"naming a category": {"project:support", []string{"project:support", "team:finance"}},
-		"naming a team":     {"team:legal", []string{"team:legal"}},
+// A running parent's usage categories are its fork's, as many as a request may name.
+func (s *ForkRunningSuite) TestAForkOfASessionOfTenCategoriesIsMade() {
+	parent := s.serverClient.with(auth.UsageCategoriesHeader, "a:1,a:2,a:3,a:4,a:5,a:6,a:7,a:8,a:9,team:legal").
+		createSession(textSession(nil))
+	want := []string{"a:1", "a:2", "a:3", "a:4", "a:5", "a:6", "a:7", "a:8", "a:9", "team:legal"}
+	s.Require().Equal(want, s.specOf(parent.Id).Attribution.UsageCategories)
+	for name, asking := range map[string]*testClient{
+		"naming none": s.serverClient, "naming a project": s.serverClient.with(auth.UsageCategoriesHeader, "project:support"),
+		"naming ten": s.serverClient.with(auth.UsageCategoriesHeader, "b:1,b:2,b:3,b:4,b:5,b:6,b:7,b:8,b:9,b:10"),
 	} {
 		s.Run(name, func() {
-			asking := s.serverClient.actingFor(owner).with(auth.UsageCategoriesHeader, tried.sent)
-
-			forked := s.fork(asking, parent, ForkSessionRequest{Messages: pointerTo(false)})
-			respondIn(&s.RouterSuite, asking, forked.Id, "hello")
-
-			for _, row := range sessionRowsOf(&s.RouterSuite, forked.Id, 1) {
-				s.Equal(s.app.key, row.APIKey)
-				s.Equal(owner.userID, row.UserID)
-				s.Equal(tried.want, row.UsageCategories)
-			}
+			s.Equal(want, s.specOf(s.fork(asking, parent.Id, ForkSessionRequest{}).Id).Attribution.UsageCategories)
 		})
 	}
-}
-
-func (s *ForkRunningSuite) TestAForkOfASessionCarriedOnKeepsItsConfigsTeam() {
-	var config AgentConfig
-	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", map[string]any{
-		"name": "teamed-" + s.utils.uuid(), "mode": "text", "tags": map[string]string{"team": "finance"}}, &config))
-	parent := s.serverClient.createSession(CreateSessionRequest{ConfigId: &config.Id})
 	s.carryOn(s.serverClient, parent.Id, s.ends()["stopped"])
-	asking := s.serverClient.with(auth.UsageCategoriesHeader, "project:support")
-
-	forked := s.fork(asking, parent.Id, ForkSessionRequest{})
-
-	s.Equal([]string{"project:support", "team:finance"}, s.specOf(forked.Id).Attribution.UsageCategories)
+	s.Equal(want, s.specOf(s.fork(s.serverClient, parent.Id, ForkSessionRequest{}).Id).Attribution.UsageCategories)
 }
 
 func (s *ForkRunningSuite) TestAForkWithoutMessagesTakesNoneOfTheHistoryItsParentWasHanded() {
@@ -190,6 +162,9 @@ func (s *ForkRunningSuite) TestAForkWithoutMessagesTakesNoneOfTheHistoryItsParen
 	s.Empty(s.specOf(s.fork(s.serverClient, parent.Id, ForkSessionRequest{Messages: pointerTo(false)}).Id).History)
 	s.Len(s.specOf(s.fork(s.serverClient, parent.Id, ForkSessionRequest{}).Id).History, 1)
 	s.Len(s.specOf(s.fork(s.serverClient, parent.Id, ForkSessionRequest{Messages: pointerTo(true)}).Id).History, 1)
+	var bare Session
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/sessions/"+parent.Id+"/fork", nil, &bare))
+	s.Len(s.specOf(bare.Id).History, 1, "a fork with no body carries its messages")
 }
 
 // ends are the ways a session ends before it is carried on: stopped, so it is carried on from
