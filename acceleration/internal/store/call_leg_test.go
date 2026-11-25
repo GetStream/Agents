@@ -1284,3 +1284,36 @@ func (s *StoreSuite) TestMoreNamedCallsThanThePoolHasConnectionsAreAllPlaced() {
 		s.NoError(err)
 	}
 }
+
+// Named calls of one organization placed at once are kept to the calls it may have at once, in
+// this shard's own transaction, and each is found by its token.
+func (s *StoreSuite) TestNamedCallsPlacedAtOnceKeepToTheOrganizationsLimit() {
+	on := NamedCall{Scope: AppScope{Unpinned: true}}
+	organization := newID()
+	tokens := make([]string, 12)
+	errs := make([]error, len(tokens))
+	var wg sync.WaitGroup
+	for i := range tokens {
+		tokens[i] = newID()
+		wg.Go(func() {
+			placed := time.Now()
+			errs[i] = s.store.CallLegs.PlaceOn(s.ctx, &CallLeg{Token: tokens[i], CustomerID: "app", OrganizationID: organization, CallType: "agent",
+				CallID: fmt.Sprintf("call-%d", i), Vendor: "telnyx", Direction: Outbound, LocalNumber: "+15125550150", RemoteNumber: "+15125550151",
+				PlacedAt: &placed}, on, &CallsAtOnce{Limit: 3, Ringing: time.Hour})
+		})
+	}
+	wg.Wait()
+
+	kept := 0
+	for i, err := range errs {
+		if err != nil {
+			s.ErrorIs(err, ErrCallsAtOnce)
+			continue
+		}
+		kept++
+		leg, err := s.store.CallLegs.GetByToken(s.ctx, tokens[i])
+		s.Require().NoError(err)
+		s.Equal(fmt.Sprintf("call-%d", i), leg.CallID)
+	}
+	s.Equal(3, kept)
+}

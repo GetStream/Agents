@@ -859,10 +859,10 @@ func (r *CallLegs) PlaceOn(ctx context.Context, leg *CallLeg, on NamedCall, atOn
 		}
 		return r.store.CallHomes.recordWith(ctx, global, leg.CustomerID, leg.StreamAppPK, leg.CallType, leg.CallID)
 	})
-	if err == nil || errors.Is(err, ErrCallTaken) || errors.Is(err, ErrCallUnchecked) || errors.Is(err, ErrCallsAtOnce) {
-		return err
+	if err != nil {
+		return r.unkeep(ctx, leg, err)
 	}
-	return r.unkeep(ctx, leg, err)
+	return nil
 }
 
 // keep inserts a placed leg with db, within what atOnce leaves room for when it is set. db is a
