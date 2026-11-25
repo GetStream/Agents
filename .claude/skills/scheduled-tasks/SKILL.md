@@ -186,7 +186,7 @@ Read the task, then its runs, then the logs, in that order.
 | Old history gone | a completed or failed task 404, or old runs missing | A daily job deletes runs finished over 90 days ago, and completed or failed tasks over 90 days old (`ScheduledTasksKept`); active and paused tasks stay. It redacts the changes recorded of what it deletes (`ScheduledTasks.Prune`), and deleting a task redacts those of it and its runs (`ScheduledTasks.Delete`) |
 | Session deleted | task 404 | Deleting a session deletes the tasks made in it or following up in it, with their runs, and redacts the changes recorded of them (`DeleteForSession`) |
 | User forgotten | task 404, its runs gone | `router usage forget-user` deleted every task of that user in the app, with its runs, and redacted the changes recorded of them (`ForgetUserTasks`) |
-| Team left | a device's task 404, missing from its list | In an app with `agent_teams`, a task on a config of a team the user is no longer in is not there to their device, nor one on a deleted config, except to pause or delete it; their backend still reaches it. A router holds a user's teams for 30 s, so a removal is seen within that |
+| Team left | a device's task 404, missing from its list | In an app with `agent_teams`, a task on a config of a team the user is no longer in is not there to their device, nor one on a deleted config, except to pause or delete it; their backend still reaches it. A router holds a user's teams for 30 s, so a removal is seen within that; held teams that refuse ask Stream again first, so an addition is seen within a second |
 
 Run `error` codes (`internal/scheduling/scheduler.go:105`):
 

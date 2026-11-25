@@ -360,7 +360,8 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   or opened, on every path (live here, on a peer, reopened, opened). A task the backend made through
   the API is not checked, nor one the agent made on a thread, which the Router's own session
   answers. Teams Stream could not read fail the attempt, retried. A router holds a user's teams for
-  30 s (`teamsFor`), so a removal is seen within that.
+  30 s (`teamsFor`), so a removal is seen within that. Held teams that refuse ask Stream again
+  first, at most once a second per user (`teamsRecheck`), so an addition is seen at the next fire.
   `TestScheduledTasksSuite/TestATaskOfATeamTheUserLeftIsAnsweredAsATaskThatDoesNotExist`,
   `TestScheduledTasksSuite/TestAUserWhoLeftATasksTeamStillPausesAndDeletesIt`,
   `TestScheduledTasksSuite/TestAUserStillInATasksTeamReachesItByEveryOperation`,
