@@ -39,7 +39,7 @@ type RouterConfig struct {
 	UpdatedAt time.Time      `bun:"updated_at,notnull"`
 	DeletedAt *time.Time     `bun:"deleted_at"`
 	// SyncHash is a fingerprint of the file the CLI last synced onto this config
-	// (20270201001200_connector_router_sync_hash.sql), as AgentConfig.SyncHash is for a
+	// (20270202000100_connector_router_sync_hash.sql), as AgentConfig.SyncHash is for a
 	// directory. Empty if it was never synced, or was written since by anything that is not a
 	// sync.
 	SyncHash string `bun:"sync_hash,notnull"`
