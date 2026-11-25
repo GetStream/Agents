@@ -3,8 +3,10 @@ package agent
 import (
 	"fmt"
 	"syscall"
+	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
 
 // reset is a provider's stream dropped under it, which asked again may succeed.
@@ -60,4 +62,19 @@ func (s *AgentSuite) TestAReplyThatFailsTwiceIsReportedFailed() {
 
 	s.eventually(func() bool { return countOf[Error](s.reported()) == 1 }, "the second failure was never reported")
 	s.Equal(2, s.handedCount(), "a reply was asked more than twice")
+}
+
+func (s *AgentSuite) TestAUnifiedReplyWhoseStreamDropsBeforeItBeganIsNotAskedAgain() {
+	s.unified = true
+	s.join(true)
+	s.model.reply = nil
+	participant := stt.Participant{ID: "alice"}
+	s.speak(participant)
+
+	s.says(participant, "hello")
+	s.eventually(func() bool { return len(s.model.requests()) == 1 }, "the reply was never asked for")
+	s.model.opened(s.model.requests()[0].ID).Fail(reset, "read")
+
+	s.Never(func() bool { return s.handedCount() > 1 }, 200*time.Millisecond, 10*time.Millisecond,
+		"a unified reply was asked again without a ruling on what it opens with")
 }
