@@ -1821,6 +1821,43 @@ func (s *DataMoveSuite) TestADeletedTaskIsReplayedUnderTheIDTheAppMovedTo() {
 	s.Equal([]string{"kept"}, left)
 }
 
+// The changes of a task deleted, or pruned, before its follower read them are deletes, which
+// replayed, twice too, leave the follower neither the task nor its run, and the rest as it was.
+func (s *DataMoveSuite) TestAFollowerThatHasNotReadATaskDeletedOrPrunedReplaysItsDelete() {
+	s.capture("acme")
+	s.seedScheduledTask("kept", "acme", ScheduledTaskActive)
+	s.seedScheduledTask("moved", "acme", ScheduledTaskCompleted)
+	cursor := s.move("acme", "moved")
+	s.seedScheduledTask("unread", "acme", ScheduledTaskCompleted)
+	s.seedScheduledTask("deleted", "acme", ScheduledTaskActive)
+	_, err := s.source.GlobalDB().ExecContext(s.ctx,
+		"UPDATE scheduled_task_runs SET prompt = 'words', finished_at = now() - interval '91 days' WHERE task_id <> 'kept'")
+	s.Require().NoError(err)
+	_, err = s.source.GlobalDB().ExecContext(s.ctx,
+		"UPDATE scheduled_tasks SET updated_at = now() - interval '91 days' WHERE state = 'completed'")
+	s.Require().NoError(err)
+	s.Require().NoError(s.source.ScheduledTasks.Delete(s.ctx, "acme", "deleted"))
+	_, tasks, err := s.source.ScheduledTasks.Prune(s.ctx)
+	s.Require().NoError(err)
+	s.Require().EqualValues(2, tasks)
+
+	for range 2 {
+		s.replay(s.destination, "acme", "moved", cursor)
+
+		var left []string
+		s.Require().NoError(s.destination.GlobalDB().NewRaw(
+			"SELECT id FROM scheduled_tasks UNION ALL SELECT id FROM scheduled_task_runs").Scan(s.ctx, &left))
+		s.Equal([]string{"kept", "kept-run"}, left)
+	}
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 1000)
+	s.Require().NoError(err)
+	s.Require().NotEmpty(changes)
+	for _, change := range changes {
+		s.Equal(ChangeDelete, change.Op, string(change.Key))
+		s.Empty(change.Payload)
+	}
+}
+
 // An organization's policy is recorded under its id, which can be an app's too.
 func (s *DataMoveSuite) TestAnOrganizationsPolicyIsNotReplayedOverTheAppsOfTheSameID() {
 	s.capture("acme")
@@ -2172,6 +2209,25 @@ func (s *DataMoveSuite) TestAReplayedRouterConfigChangeIsServedRightAfterIt() {
 	config, err := destination.RouterConfigs.Get(s.ctx, app, id)
 	s.Require().NoError(err)
 	s.Equal("slow", config.Name)
+}
+
+// TestARouterConfigFromAReleaseBeforeSyncHashesImportsWithNone: an export from before
+// sync_hash has no such key, and its row written over one synced here leaves no hash a sync
+// did not write.
+func (s *DataMoveSuite) TestARouterConfigFromAReleaseBeforeSyncHashesImportsWithNone() {
+	id := newID()
+	_, err := s.destination.GlobalDB().ExecContext(s.ctx,
+		"INSERT INTO router_configs (id, customer_id, name, sync_hash) VALUES (?, 'moved', ?, 'hash-one')", id, "synced-"+id[:8])
+	s.Require().NoError(err)
+	row := `{"id": "` + id + `", "customer_id": "moved", "name": "old-` + id[:8] + `", "stt": {}, "tts": {}, "llm": {}, "sts": {}, "search": {},
+	  "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z"}`
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", "router_configs", json.RawMessage(row)))
+
+	config, err := s.destination.RouterConfigs.Get(s.ctx, "moved", id)
+	s.Require().NoError(err)
+	s.Equal("old-"+id[:8], config.Name)
+	s.Empty(config.SyncHash)
 }
 
 func (s *DataMoveSuite) TestASkillMovedByAReplayLeavesItsOldConfig() {
@@ -2950,6 +3006,18 @@ func (s *DataMoveSuite) TestAChangeCarryingADefinitionTheAPIWouldRefuseIsRefused
 
 	s.ErrorIs(err, ErrNotACustomConnector)
 	s.Zero(s.definitionsNamed(id))
+}
+
+// A change recorded by a release before sync hashes carries no sync_hash key.
+func (s *DataMoveSuite) TestADefinitionChangeFromAReleaseBeforeSyncHashesApplies() {
+	id := "custom_" + newID()
+	manifest := strings.Replace(customAcme, "custom_acme", id, 1)
+
+	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: "connector_definitions", Op: ChangeInsert,
+		Payload: json.RawMessage(`{"id": "` + id + `", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + manifest + `}`)}})
+
+	s.Require().NoError(err)
+	s.Equal(1, s.definitionsNamed(id))
 }
 
 // customAcme is a manifest the API stores for a custom connector custom_acme: an MCP server

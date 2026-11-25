@@ -32,7 +32,8 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
-// maxConns is how many Postgres connections one router holds at most.
+// maxConns is how many Postgres connections one router's serving pool holds at most: every
+// query but those on the connection a credential or provider app lock is held on (lockConns).
 const maxConns = 40
 
 // Store reads and writes router statistics.
@@ -44,6 +45,11 @@ type Store struct {
 	global *bun.DB
 	shard  *bun.DB
 	peers  []*bun.DB
+	// locks is the shared database again, in a pool of its own that credential and provider
+	// app locks are held on (tryCredentialLock).
+	locks *bun.DB
+	// lockSlots caps how many of locks' connections one customer's locks hold.
+	lockSlots lockSlots
 	// globalDSN and shardDSN are what global and shard were opened with, for the pool a
 	// migration runs on.
 	globalDSN, shardDSN string
@@ -257,7 +263,7 @@ func (s *Store) Close() error {
 	s.stop()
 	s.retrying.Wait()
 	s.closeRedis()
-	return errors.Join(s.closeShards(), s.global.Close())
+	return errors.Join(s.closeShards(), s.locks.Close(), s.global.Close())
 }
 
 // Ping verifies the shared database and this shard's are usable. Another shard being down
@@ -294,7 +300,7 @@ func (s *Store) CustomerActivity(
 	// rows that carry it on count nothing, and what was said in them is counted as messages.
 	originOnly := ""
 	if len(s.peers) > 0 {
-		originOnly = " AND NOT " + carriedIn("sess.id")
+		originOnly = " AND NOT " + carriedIn("sess.id", "sess.customer_id")
 	}
 	// Who was seen is read apart from the counts: a person is one person however many shards
 	// they talked to in a bucket, and a guest who signed up is the account they became, which
@@ -441,21 +447,21 @@ LEFT JOIN call_counts AS c ON c.bucket = b.bucket`, unit, originOnly)
 	return buckets, nil
 }
 
-// answersAfterAnotherShard is the SQL condition, on a session id column, that the session has a
+// answersAfterAnotherShard is the SQL condition, on a session id and its customer's, that the session has a
 // response here answered after one this shard does not hold: it was carried on here from
 // another shard, whose newest response a reopened session answers after (Responses.ActiveLeaf).
-func answersAfterAnotherShard(id string) string {
+func answersAfterAnotherShard(id, customer string) string {
 	return fmt.Sprintf(`EXISTS (SELECT 1 FROM agent_responses AS carried
-    WHERE carried.session_id = %[1]s AND carried.parent_response_id IS NOT NULL
-        AND NOT EXISTS (SELECT 1 FROM agent_responses AS parent WHERE parent.id = carried.parent_response_id))`, id)
+    WHERE carried.session_id = %[1]s AND carried.customer_id = %[2]s AND carried.parent_response_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM agent_responses AS parent WHERE parent.id = carried.parent_response_id AND parent.customer_id = carried.customer_id))`, id, customer)
 }
 
-// carriedIn is the SQL condition, on a session id column, that this shard's row only carries
+// carriedIn is the SQL condition, on a session id and its customer's, that this shard's row only carries
 // the session on: its first turn, a response with no parent, is elsewhere. A carried row with
 // no response yet cannot be told from the one it began in.
-func carriedIn(id string) string {
-	return fmt.Sprintf(`(%[2]s AND NOT EXISTS (SELECT 1 FROM agent_responses AS began
-    WHERE began.session_id = %[1]s AND began.parent_response_id IS NULL))`, id, answersAfterAnotherShard(id))
+func carriedIn(id, customer string) string {
+	return fmt.Sprintf(`(%[3]s AND NOT EXISTS (SELECT 1 FROM agent_responses AS began
+    WHERE began.session_id = %[1]s AND began.customer_id = %[2]s AND began.parent_response_id IS NULL))`, id, customer, answersAfterAnotherShard(id, customer))
 }
 
 // CustomerConcurrencyPeak returns the most sessions one customer had open at the same time
@@ -614,7 +620,7 @@ func (s *Store) CustomerToolUsage(ctx context.Context, customerID, configID stri
     array_agg(CASE WHEN c.session_id IS NULL THEN '' ELSE u.session_id END ORDER BY u.session_id) AS first_carriers`
 		carriers = `
 carriers AS (
-    SELECT DISTINCT session_id FROM first_use WHERE ` + answersAfterAnotherShard("first_use.session_id") + `
+    SELECT DISTINCT session_id FROM first_use WHERE ` + answersAfterAnotherShard("first_use.session_id", "?3") + `
 ),`
 		carriedJoin = "\n    LEFT JOIN carriers AS c ON c.session_id = u.session_id"
 	}

@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -1005,10 +1006,17 @@ func (s *StreamsSuite) refused() *websocket.Conn {
 
 // start opens a modality socket and sends its start frame.
 func (s *StreamsSuite) start(path string, opening frame) *websocket.Conn {
-	connection := s.serverClient.opens(path)
+	connection, _ := s.startNamed(path, opening)
+	return connection
+}
+
+// startNamed is start under a request id of its own, which names the socket's access line.
+func (s *StreamsSuite) startNamed(path string, opening frame) (*websocket.Conn, string) {
+	id := rand.Text()
+	connection := s.serverClient.withRequestID(id).opens(path)
 	opening["type"] = "start"
 	s.Require().NoError(connection.WriteJSON(opening))
-	return connection
+	return connection, id
 }
 
 // converse opens a speech-to-speech socket and returns the model it landed on, so a test

@@ -284,6 +284,86 @@ func (s *AdmissionSuite) TestASuspendedAccountIsForbidden() {
 	}, 10*time.Second, 50*time.Millisecond, "restored, it is admitted again")
 }
 
+func (s *AdmissionSuite) TestASuspendedOrganizationMintsNoGuest() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	s.usage.Suspend(s.T(), s.organization(), "fraud review "+s.utils.uuid())
+	s.refused(http.MethodPost, "/v1/agents/runs", s.run("echo/local-model"))
+
+	status, payload := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Require().Equal(http.StatusForbidden, status, string(payload))
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(payload, &answered))
+	s.Equal("account_suspended", answered.Error.Code)
+}
+
+func (s *AdmissionSuite) TestASuspendedOrganizationRefreshesNoGuest() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	var held GuestUser
+	s.Require().Equal(http.StatusCreated,
+		s.data.createAnonymous().do(http.MethodPost, "/v1/agents/guests", GuestUserRequest{}, &held))
+	s.usage.Suspend(s.T(), s.organization(), "fraud review "+s.utils.uuid())
+	s.refused(http.MethodPost, "/v1/agents/runs", s.run("echo/local-model"))
+
+	status, _ := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests",
+		GuestUserRequest{Id: &held.Id, RefreshSecret: held.RefreshSecret})
+	s.Equal(http.StatusForbidden, status, "the guest's own secret")
+
+	status, _ = s.serverClient.call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{Id: &held.Id})
+	s.Equal(http.StatusForbidden, status, "the backend")
+}
+
+func (s *AdmissionSuite) TestAnOrganizationWithNoCreditStillMintsAGuest() {
+	// A guest costs nothing, and the models that cost nothing still answer them.
+	s.refused(http.MethodPost, "/v1/agents/runs", s.run("echo/echo-model"))
+
+	status, payload := s.data.createAnonymous().call(http.MethodPost, "/v1/agents/guests", GuestUserRequest{})
+
+	s.Equal(http.StatusCreated, status, string(payload))
+}
+
+// recordedVoice is a voice of the app's with one recording, prepared with elevenlabs.
+func (s *AdmissionSuite) recordedVoice() string {
+	var created Voice
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/voices",
+		map[string]any{"name": "founder"}, &created))
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/voices/"+created.Id+"/samples",
+		map[string]any{"audio": []byte("speech"), "filename": "clip.wav"}, nil))
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/voices/"+created.Id+"/prepare",
+		map[string]any{}, nil))
+	return created.Id
+}
+
+func (s *AdmissionSuite) TestHearingAVoiceWithNoCreditIsAPaymentRequired() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	voice := s.recordedVoice()
+	s.usage.Credit(s.T(), s.organization(), -10_000_000)
+
+	status, failure := s.refused(http.MethodPost, "/v1/agents/voices/"+voice+"/preview", map[string]any{"provider": "elevenlabs"})
+
+	s.Equal(http.StatusPaymentRequired, status)
+	s.Equal(codeInsufficientCredits, failure.Code)
+}
+
+func (s *AdmissionSuite) TestASuspendedAccountsVoicesAreForbidden() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	voice := s.recordedVoice()
+	s.usage.Suspend(s.T(), s.organization(), "review "+s.utils.uuid())
+	s.refused(http.MethodPost, "/v1/agents/runs", s.run("echo/local-model"))
+
+	for path, body := range map[string]any{
+		"/samples": map[string]any{"audio": []byte("speech"), "filename": "clip.wav"},
+		"/prepare": map[string]any{},
+		"/preview": map[string]any{"provider": "elevenlabs"},
+	} {
+		status, failure := s.refused(http.MethodPost, "/v1/agents/voices/"+voice+path, body)
+		s.Equal(http.StatusForbidden, status, path)
+		s.Equal(codeAccountSuspended, failure.Code, path)
+	}
+	s.Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/voices/"+voice, nil, nil),
+		"a voice can always be removed")
+}
+
 func (s *AdmissionSuite) TestASpentLimitIsAPaymentRequiredNotAServerError() {
 	s.usage.Credit(s.T(), s.organization(), 10_000_000)
 	s.limitApp(usage.Daily, 10_000)
@@ -880,6 +960,30 @@ func (s *AdmissionSuite) TestAKnowledgeIngestWithNoCreditIsAPaymentRequiredAndWr
 	s.Require().NoError(json.Unmarshal(payload, &answered))
 	s.Equal(codeInsufficientCredits, answered.Error.Code)
 	s.Empty(s.documents(namespace))
+}
+
+func (s *AdmissionSuite) TestAKnowledgeDocumentsPassagesNeedCredit() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	namespace := "namespace-" + s.utils.uuid()
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/knowledge",
+		s.knowledgeRequest(namespace, "refunds.md"), nil))
+	listed := s.documents(namespace)
+	s.Require().Len(listed, 1)
+	passages := "/v1/agents/knowledge/documents/" + listed[0].Id + "/passages"
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, passages, nil, nil))
+	s.usage.Credit(s.T(), s.organization(), -10_000_000)
+
+	status, failure := s.refused(http.MethodGet, passages, nil)
+
+	s.Equal(http.StatusPaymentRequired, status)
+	s.Equal(codeInsufficientCredits, failure.Code)
+
+	s.usage.Suspend(s.T(), s.organization(), "review "+s.utils.uuid())
+	s.Eventually(func() bool {
+		status, failure = s.refused(http.MethodGet, passages, nil)
+		return status == http.StatusForbidden
+	}, 10*time.Second, 50*time.Millisecond)
+	s.Equal(codeAccountSuspended, failure.Code)
 }
 
 func (s *AdmissionSuite) TestAKnowledgeIngestForASuspendedAccountIsForbidden() {

@@ -706,7 +706,7 @@ func (s *StoreSuite) TestDeletingAUsersConnectionsDeletesTheirEventSubscriptions
 		s.eventSubscription("acme-app", app.ID, "config-1", "key-1"),
 		s.eventSubscription("other-app", elsewhere.ID, "config-1", "key-1"),
 		// A row of another customer that names her connection's id: the customer is part of the match.
-		s.eventSubscription("other-app", first.ID, "config-2", "key-1"),
+		s.strayEventSubscription("other-app", first.ID),
 	}
 
 	_, err := s.store.ConnectorConnections.DeleteUser(s.ctx, "acme-app", "alice")
@@ -749,6 +749,75 @@ func (s *StoreSuite) TestAUserDeleteThatFailsKeepsTheirEventSubscriptions() {
 	s.Require().NoError(err, "the connection stays")
 	_, err = s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
 	s.NoError(err, "so does its subscription")
+}
+
+// TestDeletingAConnectionDeletesItsEventSubscriptions: a forced and an unforced delete each take
+// the connection's subscriptions, with their sealed secrets and callback tokens, and leave another
+// connection's and another customer's.
+func (s *StoreSuite) TestDeletingAConnectionDeletesItsEventSubscriptions() {
+	forced := s.connection("acme-app", nil)
+	unbound := s.connection("acme-app", nil)
+	kept := s.connection("acme-app", nil)
+	elsewhere := s.connection("other-app", nil)
+	gone := []ConnectionEventSubscription{
+		s.eventSubscription("acme-app", forced.ID, "config-1", "key-1"),
+		s.eventSubscription("acme-app", forced.ID, "config-1", "key-2"),
+		s.eventSubscription("acme-app", unbound.ID, "config-1", "key-1"),
+	}
+	stay := []ConnectionEventSubscription{
+		s.eventSubscription("acme-app", kept.ID, "config-1", "key-1"),
+		s.eventSubscription("other-app", elsewhere.ID, "config-1", "key-1"),
+		// A row of another customer that names the deleted connection's id: the customer is part
+		// of the match.
+		s.strayEventSubscription("other-app", forced.ID),
+	}
+
+	s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", forced.ID))
+	s.Require().NoError(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", unbound.ID))
+
+	for _, sub := range gone {
+		_, err := s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
+		s.ErrorIs(err, ErrNoConnectionEventSubscription, "subscription %s is gone", sub.Token)
+	}
+	for _, sub := range stay {
+		got, err := s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
+		s.Require().NoError(err, "subscription %s stays", sub.Token)
+		s.Equal(sub.ID, got.ID)
+	}
+}
+
+// TestAConnectionDeleteThatFailsKeepsItsEventSubscriptions: the subscriptions go in the delete's
+// transaction, so a delete that fails dropping them leaves the connection live with them.
+func (s *StoreSuite) TestAConnectionDeleteThatFailsKeepsItsEventSubscriptions() {
+	connection := s.connection("acme-app", nil)
+	sub := s.eventSubscription("acme-app", connection.ID, "config-1", "key-1")
+	// Another transaction holds the subscription, so the delete waits for it until its deadline.
+	holder := s.begin()
+	_, err := holder.ExecContext(s.ctx, "SELECT 1 FROM connection_event_subscriptions WHERE id = ? FOR UPDATE", sub.ID)
+	s.Require().NoError(err)
+	ctx, cancel := context.WithTimeout(s.ctx, 500*time.Millisecond)
+	defer cancel()
+
+	err = s.store.ConnectorConnections.Delete(ctx, "acme-app", connection.ID)
+
+	s.Require().ErrorContains(err, "delete connection event subscriptions")
+	s.Require().NoError(holder.Rollback())
+	_, err = s.store.ConnectorConnections.Get(s.ctx, "acme-app", connection.ID)
+	s.Require().NoError(err, "the connection stays")
+	_, err = s.store.ConnectionEventSubscriptions.GetByToken(s.ctx, sub.Token)
+	s.NoError(err, "so does its subscription")
+}
+
+// strayEventSubscription stores a subscription of customer's that names connectionID, a
+// connection of another customer's, which Insert refuses: the row a delete must leave alone.
+func (s *StoreSuite) strayEventSubscription(customerID, connectionID string) ConnectionEventSubscription {
+	sub := s.subscriptionOf(customerID, connectionID)
+	// Another config, so its owner's row of the connection does not take its key.
+	sub.ConfigID = "config-stray"
+	sub.ID, sub.Arguments, sub.CreatedAt, sub.UpdatedAt = newID(), map[string]any{}, s.base, s.base
+	_, err := s.store.GlobalDB().NewInsert().Model(&sub).Exec(s.ctx)
+	s.Require().NoError(err)
+	return sub
 }
 
 // TestDeletingAUsersConnectionsUnlinksTheirAuditFromTheUser: the rows stay, with no id that
@@ -1032,10 +1101,12 @@ func (s *StoreSuite) TestConnectorConnectionQueryBudgets() {
 		_, err := s.store.ConnectorConnections.SelectByIdentity(s.ctx, "acme", map[string]string{"workspace": "acme"}, nil)
 		s.Require().NoError(err)
 	}), "SelectByIdentity")
-	s.Equal(1, s.countQueries(func() {
+	// BEGIN, the soft delete, the event subscriptions' delete, COMMIT.
+	s.Equal(4, s.countQueries(func() {
 		s.Require().NoError(s.store.ConnectorConnections.Delete(s.ctx, "acme-app", connections[1].ID))
 	}), "Delete")
-	s.Equal(4, s.countQueries(func() {
+	// And the lock before the soft delete.
+	s.Equal(5, s.countQueries(func() {
 		s.Require().NoError(s.store.ConnectorConnections.DeleteUnbound(s.ctx, "acme-app", connections[2].ID))
 	}), "DeleteUnbound")
 	s.Equal(7, s.countQueries(func() {

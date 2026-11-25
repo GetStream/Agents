@@ -922,7 +922,10 @@ func (s *Server) completeConsent(ctx context.Context, row store.ConnectorAuthori
 		if err == nil {
 			err = s.mcpEvents.Reconcile(ctx, connected)
 		}
-		if err != nil {
+		if errors.Is(err, store.ErrNoConnectorConnection) {
+			s.logger.Info("a connection was deleted while its consent finished, so its MCP events were not subscribed", "connection", row.ConnectionID,
+				"connector", sealed.ConnectorID)
+		} else if err != nil {
 			s.logger.Error("could not subscribe a reconnected connection's MCP events", "connection", row.ConnectionID, "error", err)
 		}
 	}
