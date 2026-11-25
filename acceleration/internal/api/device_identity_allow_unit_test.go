@@ -17,12 +17,13 @@ func TestDeviceIdentityAllowReadsEachEntryExactly(t *testing.T) {
 		setting string
 		want    DeviceIdentityAllow
 	}{
-		"empty":      {"", nil},
-		"blank":      {" \n", nil},
-		"one entry":  {"app-1|docs|u1|Docs: AI", DeviceIdentityAllow{{"app-1", "docs", "u1", "Docs: AI"}}},
-		"no user":    {"app-1|docs||", DeviceIdentityAllow{{"app-1", "docs", "", ""}}},
-		"two apps":   {"app-1|a|u|n;app-2|b|v|m", DeviceIdentityAllow{{"app-1", "a", "u", "n"}, {"app-2", "b", "v", "m"}}},
-		"whitespace": {" app-1|a|u|Name With Spaces \n", DeviceIdentityAllow{{"app-1", "a", "u", "Name With Spaces"}}},
+		"empty":                   {"", nil},
+		"blank":                   {" \n", nil},
+		"one entry":               {"app-1|docs|u1|Docs: AI", DeviceIdentityAllow{{"app-1", "docs", "u1", "Docs: AI"}}},
+		"no user":                 {"app-1|docs||", DeviceIdentityAllow{{"app-1", "docs", "", ""}}},
+		"two apps":                {"app-1|a|u|n;app-2|b|v|m", DeviceIdentityAllow{{"app-1", "a", "u", "n"}, {"app-2", "b", "v", "m"}}},
+		"whitespace":              {" app-1|a|u|Name With Spaces \n", DeviceIdentityAllow{{"app-1", "a", "u", "Name With Spaces"}}},
+		"space after a separator": {"app-1|a|u|n;\n app-2|b|v|m", DeviceIdentityAllow{{"app-1", "a", "u", "n"}, {"app-2", "b", "v", "m"}}},
 	}
 	for name, read := range good {
 		t.Run(name, func(t *testing.T) {
