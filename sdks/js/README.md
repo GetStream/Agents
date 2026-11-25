@@ -46,7 +46,7 @@ string is the only one there is, so a 401 with it is final.
 Search is the one routed modality a page may reach: `api.router({ config: "healthcare" }).search("what changed in the pricing page")`.
 
 `url` falls back to `STREAM_ACCELERATION_URL`, then Stream's hosted router, so it is only
-passed for a self-hosted or local one. The hosted router is us-east4's; for another region,
+passed for a self-hosted or local one. The hosted router routes to the nearest healthy region; to pin one region,
 pass `region: "europe-west4"` or set `STREAM_ACCELERATION_REGION` instead. `customerId`, `apiKey` and `apiSecret` fall back to
 `STREAM_ACCELERATION_CUSTOMER_ID`, `STREAM_API_KEY` and `STREAM_API_SECRET`.
 
