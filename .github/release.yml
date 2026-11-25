@@ -1,0 +1,64 @@
+# Groups GitHub's generated release notes by area. The area labels come from
+# .github/labeler.yml; the labeler workflow adds area:cross-sdk on its own.
+# GitHub lists a PR once, in the first category whose labels it carries, so the
+# cross-cutting areas (skills, CI, docs) come last.
+changelog:
+  exclude:
+    labels:
+      - "skip-release-notes"
+    authors:
+      - "dependabot"
+      - "dependabot[bot]"
+      - "github-actions[bot]"
+  categories:
+    - title: Across SDKs
+      labels:
+        - "area:cross-sdk"
+    - title: Router
+      labels:
+        - "area:router"
+    - title: Python
+      labels:
+        - "area:python"
+    - title: JavaScript
+      labels:
+        - "area:js"
+    - title: Swift
+      labels:
+        - "area:swift"
+    - title: Android
+      labels:
+        - "area:android"
+    - title: Flutter
+      labels:
+        - "area:flutter"
+    - title: Go
+      labels:
+        - "area:go"
+    - title: .NET
+      labels:
+        - "area:dotnet"
+    - title: Ruby
+      labels:
+        - "area:ruby"
+    - title: Rust
+      labels:
+        - "area:rust"
+    - title: PHP
+      labels:
+        - "area:php"
+    - title: Examples
+      labels:
+        - "area:examples"
+    - title: Agent skills
+      labels:
+        - "area:skills"
+    - title: CI
+      labels:
+        - "area:ci"
+    - title: Docs
+      labels:
+        - "area:docs"
+    - title: Other Changes
+      labels:
+        - "*"
