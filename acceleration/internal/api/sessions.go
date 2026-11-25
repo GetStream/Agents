@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net/http"
@@ -201,6 +202,14 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 	}
 	spec.CustomerID = customerID
 	spec.NameProject(body.ProjectId, KindFrom(ctx))
+	// Its usage is under the key and the user that asked for it. A running parent's categories go on
+	// when the request names none, and its team unless the request's categories name one.
+	spec.Team = cmp.Or(spec.Team, spec.Attribution.Team())
+	categories := spec.Attribution.UsageCategories
+	spec.Attribution = routing.AttributionFrom(ctx)
+	if len(spec.Attribution.UsageCategories) == 0 {
+		spec.Attribution.UsageCategories = categories
+	}
 	// A voice fork is keyed under the call it joins, which the request names.
 	ctx = s.threadConversation(ctx, customerID, &spec)
 	spec.Caller = CallerFrom(ctx)
@@ -1381,6 +1390,12 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 		// The fork's own call is agent:<fork id>, never the call the parent was on.
 		spec = parent.Live.Spec().Written().Holding(session.Call{})
 		spec.Phone, spec.Edge = nil, nil
+		// Nor what the parent was as one conversation: the placed call it was, the hand-out it
+		// answered, and when it first opened if it was carried on.
+		spec.Voicemail, spec.Navigating = nil, false
+		spec.CampaignID, spec.ContactID = "", ""
+		spec.Dispatched, spec.HandedOutBy = false, ""
+		spec.Reopened = time.Time{}
 		parentID = parent.Live.ID()
 		if spec.Incognito {
 			return session.Spec{}, stack.Wrap(errors.New(
@@ -1465,6 +1480,10 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 	if recall != nil && (request.Messages == nil || *request.Messages) {
 		spec.PersistConversation = true
 		spec.Recall = recall
+	}
+	// Nothing said before the parent opened comes across either.
+	if request.Messages != nil && !*request.Messages {
+		spec.History = nil
 	}
 	return spec, nil
 }
