@@ -63,8 +63,17 @@ func (s *ReplicateRepeatSuite) TestAPageThatEndsWithinTheSensitiveRuleIsApplied(
 // A connector defined earlier in the page is weighed as the page defines it.
 func (s *ReplicateRepeatSuite) TestAPageIsWeighedWithTheConnectorsItDefines() {
 	parent, child := s.copiedParentAndChild(nil)
-	manifest, err := core.ParseManifest([]byte("id: custom_crm\nrevision: 1\nname: CRM\nendpoints:\n  mcp: https://crm.example/mcp\n" +
-		"schemes: [bearer]\nsources:\n  - kind: mcp\n    endpoint: mcp\n"))
+	manifest, err := core.ParseManifest([]byte(`
+id: custom_crm
+revision: 1
+name: CRM
+endpoints:
+  mcp: https://crm.example/mcp
+schemes: [bearer]
+sources:
+  - kind: mcp
+    endpoint: mcp
+`))
 	s.Require().NoError(err)
 	_, err = s.source.ConnectorDefinitions.Revise(s.ctx, "acme", manifest)
 	s.Require().NoError(err)
