@@ -641,9 +641,9 @@ func (s *StoreSuite) TestRequestQueryBudgets() {
 	}
 
 	// The rows, the grants they used, their calls read, the log rows under the customers' lock, and
-	// the transactions around them: the same for one row as for a batch.
-	s.Equal(8, s.countQueries(func() { s.Require().NoError(insertRequest(s.ctx, s.store, &single)) }), "InsertMany of one row")
-	s.Equal(8, s.countQueries(func() {
+	// the one transaction around them: the same for one row as for a batch.
+	s.Equal(6, s.countQueries(func() { s.Require().NoError(insertRequest(s.ctx, s.store, &single)) }), "InsertMany of one row")
+	s.Equal(6, s.countQueries(func() {
 		_, err := s.store.Requests.InsertMany(s.ctx, batch)
 		s.Require().NoError(err)
 	}), "InsertMany")

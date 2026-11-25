@@ -20,8 +20,8 @@ type Request struct {
 	ID string
 	// Text is what to say, or the next piece of it.
 	Text string
-	// Voice overrides the session's voice. Providers that bind a voice per connection
-	// report an error rather than quietly saying it in the wrong one.
+	// Voice is the session's own voice, or empty. The session refuses any other voice
+	// before a provider is asked, so a provider never receives one that differs.
 	Voice string
 	// Language overrides the session's language. Empty lets the model infer it.
 	Language string

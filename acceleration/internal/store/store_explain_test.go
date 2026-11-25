@@ -659,11 +659,11 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			return err
 		}},
 		{name: "AgentLogs.Select of a config", index: "agent_logs_config_order", run: func(ctx context.Context, store *Store) error {
-			_, err := store.AgentLogs.Select(ctx, "customer-7", AgentLogFilter{ConfigID: "config-7", Before: 90000})
+			_, err := store.AgentLogs.Select(ctx, "customer-7", AgentLogFilter{ConfigID: "config-7", Before: AgentLogMark{0: 90000}})
 			return err
 		}},
 		{name: "AgentLogs.Select errors", index: "agent_logs_error_order", run: func(ctx context.Context, store *Store) error {
-			_, err := store.AgentLogs.Select(ctx, "customer-7", AgentLogFilter{Severity: "error", After: 1000, Forward: true})
+			_, err := store.AgentLogs.Select(ctx, "customer-7", AgentLogFilter{Severity: "error", After: AgentLogMark{0: 1000}, Forward: true})
 			return err
 		}},
 		{name: "AgentLogs.Select of a session", index: "agent_logs_session_order", run: func(ctx context.Context, store *Store) error {
