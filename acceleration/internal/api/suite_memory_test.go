@@ -22,15 +22,15 @@ type SuiteMemorySuite struct {
 
 func TestSuiteMemorySuite(t *testing.T) { suite.Run(t, new(SuiteMemorySuite)) }
 
-// closedOver is a suite its own cleanups close over, as RouterSuite's do.
+// closedOver is a suite its own cleanups close over, as RouterSuite's do: with runSuite's, they
+// fill the 256 that maxSuiteCleanups writes over.
 type closedOver struct {
 	suite.Suite
-	ran int
 }
 
 func (s *closedOver) SetupSuite() {
-	for range 100 {
-		s.T().Cleanup(func() { s.ran++ })
+	for range 255 {
+		s.T().Cleanup(func() { runtime.KeepAlive(s) })
 	}
 }
 
