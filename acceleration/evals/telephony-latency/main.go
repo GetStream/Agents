@@ -402,14 +402,11 @@ func serveTwilioHook(listen string, host netip.Addr, bridges map[string]phone.Br
 	if token == "" {
 		return "", nil, errors.New(twiliosig.AuthTokenEnvVar + " is required: twilio numbers ask the bench's webhook where calls go")
 	}
-	port, err := listenPort(listen)
-	if err != nil {
-		return "", nil, err
-	}
 	listener, err := net.Listen("tcp", listen)
 	if err != nil {
 		return "", nil, fmt.Errorf("serve twilio's call webhook on %s: %w", listen, err)
 	}
+	port := listener.Addr().(*net.TCPAddr).Port
 	publicURL := "http://" + net.JoinHostPort(host.String(), strconv.Itoa(port))
 	server := &http.Server{
 		Handler:           &TwilioHook{Token: token, PublicURL: publicURL, Bridges: bridges, Log: log},

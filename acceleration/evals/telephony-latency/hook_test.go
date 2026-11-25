@@ -106,7 +106,7 @@ func (s *TwilioHookSuite) TestACallNotSignedOverTheBenchsURLIsRefused() {
 func (s *TwilioHookSuite) TestABodyThatIsNoFormOrTooLargeIsRefused() {
 	for name, body := range map[string]string{
 		"no form":   "To=%zz",
-		"too large": "To=" + strings.Repeat("1", hookLimit),
+		"too large": "To=" + strings.Repeat("1", 64<<10),
 	} {
 		s.Run(name, func() {
 			status, _ := s.post(body, "")
@@ -127,7 +127,7 @@ func (s *TwilioHookSuite) TestTheBenchServesTheHookWhereItSaysUntilClosed() {
 
 	s.T().Setenv(twiliosig.AuthTokenEnvVar, "bench-token")
 	_, _, err = serveTwilioHook("127.0.0.1", host, bridges, log)
-	s.Error(err, "an address with no port")
+	s.ErrorContains(err, "missing port", "an address with no port")
 	taken, err := net.Listen("tcp", "127.0.0.1:0")
 	s.Require().NoError(err)
 	defer taken.Close()
