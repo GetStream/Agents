@@ -23,7 +23,10 @@ export interface SessionSpec
    * the wire's `return_url`, which this wins over when both are given.
    */
   returnUrl?: string;
-  /** What to change about the models for this conversation alone. */
+  /**
+   * What to change about the models for this conversation alone. Server side only: a device
+   * sending it is refused with a 403.
+   */
   modelOverwrites?: Schemas["ModelOverwrites"];
   /**
    * The person's IANA zone, such as `Europe/Lisbon`. The agent tells the date and the hour in

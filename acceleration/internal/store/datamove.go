@@ -858,6 +858,10 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 	columns := spec.written(shape)
 	quoted := strings.Join(columns, ", ")
 	picked := slices.Clone(columns)
+	if i := slices.Index(columns, "sync_hash"); i >= 0 {
+		// A row from a release before sync hashes carries none, and no sync wrote it here.
+		picked[i] = "COALESCE(r.sync_hash, '')"
+	}
 	if i := slices.Index(columns, "usage_id"); spec.name == "requests" && i >= 0 {
 		// The usage id is this deployment's, made from the one the row had where it was first
 		// recorded, or from the source's id for a row from before usage ids. A usage id names a

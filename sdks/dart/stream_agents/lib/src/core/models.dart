@@ -394,19 +394,12 @@ final class SessionOptions {
     this.agent,
     this.configId,
     this.startVoice = false,
-    this.greeting,
-    this.llm,
-    this.stt,
-    this.tts,
-    this.voice,
     this.title,
     this.description,
     this.projectId,
     this.custom,
     this.incognito,
-    this.modelOverwrites,
     this.tools = const [],
-    this.tags = const {},
     this.returnUrl,
     this.memory,
     this.timezone,
@@ -428,16 +421,6 @@ final class SessionOptions {
   /// False holds the conversation in writing until [AgentSession.startVoice] starts it.
   final bool startVoice;
 
-  /// What the agent opens the call with.
-  final Greeting? greeting;
-  final String? llm;
-  final String? stt;
-  final String? tts;
-
-  /// The voice the agent speaks in: a provider's own voice id, or one of your voices by id or by
-  /// the name you gave it. Prefix it with `custom:` to mean only yours.
-  final String? voice;
-
   /// What to call the conversation, for a list a person reads. Never shown to the model.
   final String? title;
   final String? description;
@@ -451,13 +434,9 @@ final class SessionOptions {
   /// Hold the conversation and record nothing about it. It cannot be found, rewound or
   /// forked afterwards, which is the point.
   final bool? incognito;
-  final ModelOverwrites? modelOverwrites;
 
   /// Functions of yours the agent may call, answered on this device.
   final List<AgentTool> tools;
-
-  /// Cost labels, carried onto every request the session makes.
-  final Map<String, String> tags;
 
   /// Where a sign-in the conversation asks for goes back to. Name the app's own scheme in
   /// reverse domain form, such as `com.example.app:/connected`, and the router hands the
@@ -497,25 +476,6 @@ final class SessionMemory {
 
   /// Separates two of your apps sharing one memory account.
   final String? appId;
-}
-
-/// What the agent says as it joins a call, before anyone speaks.
-final class Greeting {
-  const Greeting(this.text, {this.mode});
-
-  /// Empty means the agent waits to be spoken to.
-  final String text;
-
-  /// Null says it word for word, as [GreetingMode.exact] does.
-  final GreetingMode? mode;
-}
-
-enum GreetingMode {
-  /// Word for word.
-  exact,
-
-  /// The model rewords it on every call, so callers do not hear the same opening.
-  variation,
 }
 
 /// What to change about a conversation while continuing it as a new one.

@@ -5766,6 +5766,9 @@ type Connector struct {
 
 	// Setup What a person does at the provider before the first consent.
 	Setup *ConnectorSetup `json:"setup,omitempty"`
+
+	// SyncHash The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
+	SyncHash *string `json:"sync_hash,omitempty"`
 }
 
 // ConnectorAuditAction grant_created: a consent or a credentials write gave the connection a grant. grant_refreshed: the router renewed its credential. grant_revoked: the grant ended, because the provider refused or revoked it or the connection was deleted. token_export: the app's backend exported its access credential. proxy_call: a direct call went to the provider through the connection. tool_reapproved: the app's backend approved tools at the schema the provider lists now (POST .../tools/approve); tools names them.
@@ -6509,6 +6512,9 @@ type CustomConnectorRequest struct {
 
 	// Scopes The scopes a consent asks for, each an RFC 6749 scope token.
 	Scopes *[]string `json:"scopes,omitempty"`
+
+	// SyncHash The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one.
+	SyncHash *string `json:"sync_hash,omitempty"`
 }
 
 // CustomModel defines model for CustomModel.
@@ -8104,6 +8110,9 @@ type OrganizationActivity struct {
 
 // OrganizationProgress defines model for OrganizationProgress.
 type OrganizationProgress struct {
+	// Funded The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the credit granted minus the trial credit is above zero. Spending the credit does not lower it. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer.
+	Funded *bool `json:"funded,omitempty"`
+
 	// FurthestStep The furthest an organization got: none, dashboard_reads, agent_setup, workers, conversations, voice_video, phone_sms, then steady_use, which is conversations or model calls answered on three UTC days or more. A step counts only answered requests: an area whose every request was refused was tried, not reached.
 	FurthestStep ActivityStep `json:"furthest_step"`
 
@@ -9106,6 +9115,9 @@ type RouterConfig struct {
 	// Stt How this config transcribes, live or from a recording. A field that only means something on one of the two forms says so: a recording has no endpointing to do, and a socket has no file to write subtitles from. A provider that cannot express a term refuses the request rather than dropping it silently.
 	Stt *SttOptions `json:"stt,omitempty"`
 
+	// SyncHash The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync.
+	SyncHash *string `json:"sync_hash,omitempty"`
+
 	// Tts How this config speaks. A provider that cannot express a term refuses the request rather than dropping it silently, since a voice asked to sound urgent and speaking flatly is worse than one that says it cannot.
 	Tts       *TtsOptions `json:"tts,omitempty"`
 	UpdatedAt time.Time   `json:"updated_at"`
@@ -9127,6 +9139,9 @@ type RouterConfigRequest struct {
 
 	// Stt How this config transcribes, live or from a recording. A field that only means something on one of the two forms says so: a recording has no endpointing to do, and a socket has no file to write subtitles from. A provider that cannot express a term refuses the request rather than dropping it silently.
 	Stt *SttOptions `json:"stt,omitempty"`
+
+	// SyncHash The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing.
+	SyncHash *string `json:"sync_hash,omitempty"`
 
 	// Tts How this config speaks. A provider that cannot express a term refuses the request rather than dropping it silently, since a voice asked to sound urgent and speaking flatly is worse than one that says it cannot.
 	Tts *TtsOptions `json:"tts,omitempty"`
@@ -15642,7 +15657,7 @@ type ClientInterface interface {
 	//
 	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
 	// An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
-	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
+	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 	// Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 	//
 	// Takes any type of body and a specified content type.
@@ -21421,7 +21436,7 @@ func (c *Client) ExportData(ctx context.Context, reqEditors ...RequestEditorFn) 
 //
 // Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
 // An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
-// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
+// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 // Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 //
 // Takes any type of body and a specified content type.
@@ -39093,7 +39108,7 @@ type ClientWithResponsesInterface interface {
 	//
 	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
 	// An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
-	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
+	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 	// Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -59224,6 +59239,8 @@ type ImportDataResponse struct {
 	JSON500 *InternalError
 	// JSON503 the response for an HTTP 503 `application/json` response
 	JSON503 *ErrorResponse
+	// JSON504 the response for an HTTP 504 `application/json` response
+	JSON504 *ErrorResponse
 	// Headers200 the parsed response headers for an HTTP 200 response
 	Headers200 *ImportDataResponse200Headers
 	// Headers402 the parsed response headers for an HTTP 402 response
@@ -59273,6 +59290,11 @@ func (r ImportDataResponse) GetJSON500() *InternalError {
 // GetJSON503 returns the response for an HTTP 503 `application/json` response
 func (r ImportDataResponse) GetJSON503() *ErrorResponse {
 	return r.JSON503
+}
+
+// GetJSON504 returns the response for an HTTP 504 `application/json` response
+func (r ImportDataResponse) GetJSON504() *ErrorResponse {
+	return r.JSON504
 }
 
 // GetBody returns the raw response body bytes
@@ -71859,7 +71881,7 @@ func (c *ClientWithResponses) ExportDataWithResponse(ctx context.Context, reqEdi
 //
 // Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
 // An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
-// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
+// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 // Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -95894,6 +95916,13 @@ func ParseImportDataResponse(rsp *http.Response) (*ImportDataResponse, error) {
 			return nil, err
 		}
 		response.JSON503 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 504:
+		var dest ErrorResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON504 = &dest
 
 	}
 

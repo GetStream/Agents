@@ -2118,7 +2118,7 @@ export type paths = {
          *     On a voice call, a call to a tool declared with an `approval` is asked about out loud instead, and sent only once the caller said yes, with `approved` true; a watcher does not ask again. In writing, a call to a tool declared with an `approval` waits for a person. The client reports their answer with `tool_approval` (`tool_call_id`, `request_id`, `turn_id`, `allowed`, and optionally a `summary` shown when they declined), before it answers the call with `tool_result`. A connector call waiting for the person to sign in (`awaiting_authorization`) is declined with `tool_approval` too, naming only its `tool_call_id` with `allowed` false: the router answers that call itself. A connector call whose binding sets `require_approval` waits on its step (`awaiting_approval`) for the session's user, and the router sends it only once they allow it: `tool_approval` with its `tool_call_id`, the `request_id` of the command it answers and `allowed`, from that user or their backend, `turn_id` left out or not. Declined, or not answered in 10 minutes, it is not sent and the model is told so. It needs no `tool_result`. A `tool_approval` no call waits for (answered already, stopped, or naming another `request_id` or `turn_id`) is answered with `tool_approval_ignored`: the `tool_call_id`, `request_id` and `turn_id` it was sent with, each left out when it was, and `reason`, a sentence saying why; the socket stays open. Every watcher is sent it. The call of a durable command answered with its `request_id` and no `turn_id` is answered so too, its `reason` naming the missing `turn_id`. A call outside a durable command waits for its `tool_result`, so an approval sent before it without a `request_id` gets no answer.
          *     `tool_result.output` is a string, or an array of parts `[{type: text|image_url, ...}]`. An image has an `image_url` object containing `url` (HTTP(S) or data URI), optionally with `detail` of `auto`, `low` or `high`. One socket message is at most 5 MB.
          *     `respond` may carry `images: [{url, detail}]`. These schedule the vision skill; the conversation receives the question and later the findings, without raw images. Video capture uses task-correlated `get_video_frames` tool requests and `tool_result` replies. Frames are never attached automatically to conversational turns.
-         *     A watcher that may lose its connection, such as to the router restarting, asks for a resumable socket with `resumable=true`. Its first frame is `resumed`, and every frame after it except `hearing` carries a `cursor`. To reconnect, open the socket again with the same credentials and `cursor` set to the last one received: the frames sent after it are sent again, then the live ones. A session keeps its last 256 frames for this, for as long as it is held: a persistent text session until 5 minutes after its last watcher left, a call until it ends. `resumed` carries `cursor`, where the stream now carries on from, and `complete`, false when some frames after the cursor asked from are gone, because the router restarted, the conversation was reopened, or the watcher missed more than 256: read what was missed back from the conversation then. `request_id` names a command the watcher was waiting on, and `resumed.command` is its receipt. A command whose reply the router stopped on its way down is `interrupted`: it is never run again, so a client that still wants the answer asks once more under a new request id. A session the router stopped on its way down closes a resumable socket with 1012 (service restart) rather than 1000, which is the cue to reconnect. A socket that does not ask to resume is sent the frames and the close it always was.
+         *     A watcher that may lose its connection, such as to the router restarting, asks for a resumable socket with `resumable=true`. Its first frame is `resumed`, and every frame after it except `hearing` carries a `cursor`. To reconnect, open the socket again with the same credentials and `cursor` set to the last one received: the frames sent after it are sent again, then the live ones. A session keeps its last 256 frames for this, for as long as it is held: a persistent text session until 5 minutes after its last watcher left, a call until it ends. `resumed` carries `cursor`, where the stream now carries on from, and `complete`, false when some frames after the cursor asked from are gone, because the router restarted, the conversation was reopened, or the watcher missed more than 256: read what was missed back from the conversation then. `request_id` names a command the watcher was waiting on, and `resumed.command` is its receipt. A command whose reply the router stopped on its way down is `interrupted`: it is never run again, so a client that still wants the answer asks once more under a new request id. A session the router stopped on its way down closes a resumable socket with 1012 (service restart) rather than 1000, which is the cue to reconnect. A socket relayed from another node closes with 1011 (the relay to the session ended) when the watcher the node running the session held for it is given back while the session goes on: a resumable socket can reconnect to go on watching. A socket that does not ask to resume is sent the frames and the close it always was.
          */
         readonly get: operations["watchSession"];
         readonly put?: never;
@@ -3233,7 +3233,7 @@ export type paths = {
          * Write an export, or a batch of changes, into this deployment
          * @description Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
          *     An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
-         *     An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
+         *     An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
          *     Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
          */
         readonly post: operations["importData"];
@@ -6581,6 +6581,8 @@ export type components = {
             readonly scopes: readonly string[] | null;
             /** @description What a person does at the provider before the first consent, such as registering an OAuth client. Absent when the manifest says nothing. */
             readonly setup?: components["schemas"]["ConnectorSetup"];
+            /** @description The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync. */
+            readonly sync_hash?: string;
         };
         /**
          * @description grant_created: a consent or a credentials write gave the connection a grant. grant_refreshed: the router renewed its credential. grant_revoked: the grant ended, because the provider refused or revoked it or the connection was deleted. token_export: the app's backend exported its access credential. proxy_call: a direct call went to the provider through the connection. tool_reapproved: the app's backend approved tools at the schema the provider lists now (POST .../tools/approve); tools names them.
@@ -7217,6 +7219,8 @@ export type components = {
             readonly schemes: readonly string[] | null;
             /** @description The scopes a consent asks for, each an RFC 6749 scope token. */
             readonly scopes?: readonly string[] | null;
+            /** @description The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one. */
+            readonly sync_hash?: string;
         };
         readonly CustomModel: {
             readonly base_url: string;
@@ -8698,6 +8702,8 @@ export type components = {
             readonly steps: readonly components["schemas"]["ActivityStepDay"][] | null;
         };
         readonly OrganizationProgress: {
+            /** @description The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the credit granted minus the trial credit is above zero. Spending the credit does not lower it. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer. */
+            readonly funded?: boolean;
             /** @description The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since. */
             readonly furthest_step: components["schemas"]["ActivityStep"];
             /** @description The organization. */
@@ -9594,6 +9600,8 @@ export type components = {
             readonly search?: components["schemas"]["SearchOptions"];
             readonly sts?: components["schemas"]["StsOptions"];
             readonly stt?: components["schemas"]["SttOptions"];
+            /** @description The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync. */
+            readonly sync_hash?: string;
             readonly tts?: components["schemas"]["TtsOptions"];
             /** Format: date-time */
             readonly updated_at: string;
@@ -9605,6 +9613,8 @@ export type components = {
             readonly search?: components["schemas"]["SearchOptions"];
             readonly sts?: components["schemas"]["StsOptions"];
             readonly stt?: components["schemas"]["SttOptions"];
+            /** @description The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing. */
+            readonly sync_hash?: string;
             readonly tts?: components["schemas"]["TtsOptions"];
         };
         readonly Run: {
@@ -19751,6 +19761,15 @@ export interface operations {
             readonly 500: components["responses"]["InternalError"];
             /** @description This deployment has no database to import into, or this router is running as many imports as it takes at once: try again. */
             readonly 503: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description A line of the file took more than a minute to arrive. What came before it may be written. */
+            readonly 504: {
                 headers: {
                     readonly [name: string]: unknown;
                 };
