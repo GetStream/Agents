@@ -166,6 +166,20 @@ func (s *DataMoveSuite) TestAnImportedDeletedAgentThatBreaksTheRuleIsWritten() {
 	s.True(deleted)
 }
 
+// A child the app deleted runs nothing, so a parent naming it is not weighed with it.
+func (s *DataMoveSuite) TestAnImportedParentIsNotWeighedWithADeletedAgentOfItsChildsName() {
+	template := s.agentTemplate()
+	s.useInternalApp()
+	writer := s.textAgent(map[string]any{"connectors": []map[string]any{sessionGitHubGranting("code", "create_issue")}})
+	s.Require().Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/configs/"+writer.Id, nil, nil))
+	parent, id := s.importedAgent(template, map[string]any{"connectors": []map[string]any{sessionNessy("customers")},
+		"agents": []map[string]any{{"config": writer.Name, "tool": "ask_writer"}}})
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{parent}), nil))
+
+	s.True(s.holds(id))
+}
+
 // A parent's children are the configs of its own app by those names, not another app's.
 func (s *DataMoveSuite) TestAnImportedParentIsNotWeighedWithAnotherAppsAgentOfItsChildsName() {
 	template := s.agentTemplate()
