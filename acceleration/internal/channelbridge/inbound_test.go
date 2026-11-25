@@ -23,6 +23,7 @@ import (
 	getstream "github.com/GetStream/getstream-go/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
+	"github.com/uptrace/bun"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
@@ -654,8 +655,20 @@ func (s *InboundSuite) TestAMessageALeaseHeldIsWrittenWhenTheLeaseRunsOut() {
 // An idle worker waits a lease between looks; a message queued meanwhile is written when the
 // worker is woken, not then.
 func (s *InboundSuite) TestAWakeWritesAMessageQueuedIntoAnIdleQueue() {
-	bridge := s.bridge(nil)
-	time.Sleep(50 * time.Millisecond) // the worker's first look found nothing and it waits a lease
+	own, err := store.Open(testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "bridge"))
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.Require().NoError(own.Close()) })
+	looks := &lookCount{}
+	own.GlobalDB().AddQueryHook(looks)
+	bridge, err := New(Options{
+		Store: own, Stream: s.stream, Transports: s.transports, Resolver: s.resolver,
+		Logger: slog.New(slog.NewTextHandler(s.logs, nil)), InboundPoll: 10 * time.Millisecond,
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(bridge.Close)
+	bridge.Start(s.ctx, nil)
+	// The look at start ends with the query for when the next message is due, which finds none.
+	s.Require().Eventually(func() bool { return looks.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
 	thread := s.thread("fake_line")
 	s.queue(thread, "m-1", "hello", nil)
 
@@ -1285,6 +1298,17 @@ func isClosed(done <-chan struct{}) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// lookCount counts the worker's queries for when the next message is due, the last of its look.
+type lookCount struct{ atomic.Int32 }
+
+func (*lookCount) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context { return ctx }
+
+func (l *lookCount) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if strings.HasPrefix(event.Query, "SELECT") && strings.Contains(event.Query, "next_attempt_at") {
+		l.Add(1)
 	}
 }
 
