@@ -114,13 +114,15 @@ func (s *Store) detachedWrite(ctx context.Context, write func(context.Context, b
 func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Context, bun.Tx) error, keys func() []string) (told bool, err error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.writeTimeout)
 	defer cancel()
-	return s.cachedWrite(ctx, s.global, write, keys)
+	return s.cachedWrite(ctx, s.global, write, keys, func() bool { return true })
 }
 
 // cachedWrite is detachedWriteTold on ctx itself, for a write too long for the write timeout. ctx
-// ending before the COMMIT is sent rolls the transaction back. db may be another than the shared
-// database only for a write whose keys name nothing: a lost commit is asked about there (ended).
-func (s *Store) cachedWrite(ctx context.Context, db *bun.DB, write func(context.Context, bun.Tx) error, keys func() []string) (told bool, err error) {
+// ending before the COMMIT is sent rolls the transaction back. cached is asked in the transaction
+// whether there is a key to drop, which keys may take a query of its own to say (Policies.keys). db
+// may be another than the shared database only for a write that has none: a lost commit is asked
+// about there (ended).
+func (s *Store) cachedWrite(ctx context.Context, db *bun.DB, write func(context.Context, bun.Tx) error, keys func() []string, cached func() bool) (told bool, err error) {
 	var committing bool
 	var xid sql.NullInt64
 	err = db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
@@ -130,7 +132,7 @@ func (s *Store) cachedWrite(ctx context.Context, db *bun.DB, write func(context.
 		// The transaction's id, for asking Postgres later whether a COMMIT whose answer was
 		// lost has landed. Without a cache there is nothing to drop again, and a write that
 		// changed nothing has no id, so nothing to wait for either.
-		if s.cache != nil {
+		if s.cache != nil && cached() {
 			if err := tx.NewSelect().ColumnExpr("pg_current_xact_id_if_assigned()").Scan(ctx, &xid); err != nil {
 				return err
 			}

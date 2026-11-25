@@ -354,9 +354,8 @@ func (s *StoreSuite) TestACachedRowIsForgottenOnceRedisTakesTheDeletionAgain() {
 
 // pgProxy stands between a store and the suite's Postgres and does one thing to the first
 // COMMIT a client sends through it: drops every answer after it, as a network that fails then
-// does, holds it until let, as a COMMIT slow to reach the server does, or hangs up without sending
-// it on. Once frozen, it passes
-// no answer on, with every connection still open.
+// does, holds it until let, as a COMMIT slow to reach the server does, or hangs up without
+// sending it on. Once frozen, it passes no answer on, with every connection still open.
 type pgProxy struct {
 	listener net.Listener
 	target   string
@@ -676,16 +675,47 @@ func (s *StoreSuite) TestAReplayedPageMayTakeLongerThanTheWriteTimeout() {
 	s.Equal("slow", s.configName(id))
 }
 
-func (s *StoreSuite) TestAnImportThatGivesUpFinishesItsRowAndAReplayDropsItsPage() {
+func (s *StoreSuite) TestAnImportThatGivesUpWaitingOnARowIsServedOnceTheRowLands() {
+	id, renamed := s.exportedConfig()
+	holding, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = holding.Rollback() }()
+	_, err = holding.NewSelect().Model((*RouterConfig)(nil)).Where("id = ?", id).For("UPDATE").Exec(s.ctx)
+	s.Require().NoError(err)
+	gone, cancel := context.WithTimeout(s.ctx, 300*time.Millisecond)
+	defer cancel()
+
+	imported := make(chan error, 1)
+	go func() { imported <- s.store.ImportRow(gone, "acme-app", "router_configs", renamed) }()
+	s.Require().Eventually(func() bool {
+		waiting, err := s.store.global.NewSelect().TableExpr("pg_stat_activity").
+			Where("datname = current_database() AND wait_event_type = 'Lock'").Exists(s.ctx)
+		s.Require().NoError(err)
+		return waiting
+	}, 2*time.Second, 5*time.Millisecond, "the write waits on the row")
+	// Past the end of its context, and so past whatever an import that heeds it does then.
+	for deadline := time.Now().Add(700 * time.Millisecond); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		s.Require().Equal("fast", s.configName(id))
+	}
+	s.Require().Error(gone.Err())
+	s.Require().NoError(holding.Rollback())
+
+	s.Eventually(func() bool { return s.configName(id) == "slow" }, 3*time.Second, 10*time.Millisecond, "the row lands, and the old copy is dropped")
+	s.NoError(<-imported)
+}
+
+func (s *StoreSuite) TestAnImportOrAReplayThatHasEndedWritesNothing() {
 	id, renamed := s.exportedConfig()
 	gone, cancel := context.WithCancel(s.ctx)
 	cancel()
 
+	s.Require().ErrorIs(s.store.ImportRow(gone, "acme-app", "router_configs", renamed), context.Canceled)
 	s.Require().ErrorIs(s.store.ApplyChanges(gone, "acme-app", renamingPage(renamed)), context.Canceled)
-	s.Equal("fast", s.configName(id))
 
-	s.Require().NoError(s.store.ImportRow(gone, "acme-app", "router_configs", renamed))
-	s.Equal("slow", s.configName(id))
+	s.Equal("fast", s.configName(id))
+	var name string
+	s.Require().NoError(s.store.global.NewSelect().Model((*RouterConfig)(nil)).Column("name").Where("id = ?", id).Scan(s.ctx, &name))
+	s.Equal("fast", name)
 }
 
 func (s *StoreSuite) TestARefusedRowIsAnsweredTheSameFromItsTransaction() {
@@ -705,6 +735,25 @@ func (s *StoreSuite) TestAnImportedRowOfATableNoCacheHoldsTakesNoTransaction() {
 	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.ImportRow(s.ctx, "acme-app", "customer_activity", row))
 	}))
+}
+
+func (s *StoreSuite) TestAReplayedPageWithNoCachedRowReadsNoTransactionID() {
+	row := json.RawMessage(`{"app_id":"acme-app","organization_id":"org-1","area":"llm","client":"curl","day":"2026-01-02","requests":1,"refused":0,"first_at":"2026-01-02T00:00:00Z","last_at":"2026-01-02T00:00:00Z"}`)
+	page := []DataChange{{Table: "customer_activity", Op: ChangeInsert, Payload: row}}
+	s.Require().NoError(s.store.ApplyChanges(s.ctx, "acme-app", page))
+
+	s.Equal(3, s.countQueries(func() {
+		s.Require().NoError(s.store.ApplyChanges(s.ctx, "acme-app", page))
+	}), "begin, the write and commit")
+}
+
+func (s *StoreSuite) TestAnImportedUserCostsATransactionAndItsID() {
+	row := json.RawMessage(`{"customer_id":"acme-app","id":"alice","kind":"guest","name":"Guest","custom":{},"created_at":"2026-01-02T00:00:00Z"}`)
+	s.Require().NoError(s.store.ImportRow(s.ctx, "acme-app", "users", row))
+
+	s.Equal(3+s.redisTrips(1), s.countQueries(func() {
+		s.Require().NoError(s.store.ImportRow(s.ctx, "acme-app", "users", row))
+	}), "begin, the write, its transaction's id when there is a cache, and commit")
 }
 
 // A router with no Redis holds who it recorded in its memory alone.

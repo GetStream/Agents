@@ -788,6 +788,10 @@ func (t dataTable) selectRows(customerID string, secrets []string) (string, []an
 // It upserts, so importing the same export twice is the same as importing it once, which
 // is what lets a move be resumed after it was interrupted.
 func (s *Store) ImportRow(ctx context.Context, customerID, table string, row json.RawMessage) error {
+	// A cached row's write outlives ctx, so an import that has ended stops here.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	spec, _ := dataTableByName(table)
 	var stale []string
 	// Most rows of an export have no keys to drop and pay for no transaction.
@@ -2195,7 +2199,7 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 			}
 		}
 		return nil
-	}, func() []string { return stale })
+	}, func() []string { return stale }, func() bool { return len(stale) > 0 })
 	s.Users.forgetKeys(stale)
 	return err
 }
