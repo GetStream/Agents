@@ -1128,7 +1128,12 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	// Said after the session is here to be found, so a peer that forwards a request on
 	// the strength of it has somewhere to forward it to.
 	if m.options.Directory != nil {
-		m.options.Directory.Hold(ctx, spec.CustomerID, spec.StreamApp, created.id, spec.AgentID, spec.ConversationID)
+		agentID := spec.AgentID
+		// TEMPORARY (AI-3959): claimed by no agent id, as ByAgentWhere finds it by none.
+		if spec.ListedIdentity {
+			agentID = ""
+		}
+		m.options.Directory.Hold(ctx, spec.CustomerID, spec.StreamApp, created.id, agentID, spec.ConversationID)
 	}
 	// Asked again now the session is held: a status that came while the call was being
 	// joined found no session to end, and one that comes after this finds it. The session
@@ -1452,12 +1457,12 @@ func (m *Manager) ByAgent(agentID string) (*Session, bool) {
 
 // ByAgentWhere is ByAgent among the sessions a test admits, by their customer and the Stream
 // app they act in. An agent id is the caller's to choose, so two customers' sessions may
-// share one, each in its own app.
+// share one, each in its own app. A session of Spec.ListedIdentity is never found by it.
 func (m *Manager) ByAgentWhere(agentID string, admits func(customer string, app int64) bool) (*Session, bool) {
 	if agentID == "" {
 		return nil, false
 	}
-	return m.newest(func(spec Spec) bool { return spec.AgentID == agentID }, admits)
+	return m.newest(func(spec Spec) bool { return spec.AgentID == agentID && !spec.ListedIdentity }, admits)
 }
 
 // ByConversationWhere is the newest running session holding the conversation cid, among the

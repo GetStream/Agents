@@ -61,6 +61,12 @@ type Spec struct {
 	// was written in, which the worker's session answers (Manager.handedOut). The person writes
 	// there themselves, so the session writes only its replies. No request sets it.
 	Dispatched bool
+	// ListedIdentity is set on a device's session whose agent identity only
+	// ROUTER_DEVICE_IDENTITY_ALLOW let through (TEMPORARY, AI-3959). Every device of the app may
+	// hold the same agent id, so no lookup by agent id reaches the session (Manager.ByAgentWhere,
+	// the directory's claim on the agent): its conversation is on a channel of its own. No
+	// request sets it.
+	ListedIdentity bool
 	// HandedOutBy is the Stream user who wrote the message handed out (Manager.HandOut) on a
 	// Dispatched session, the person whose episode cards it may read (callCards.read). Empty
 	// for a hand-out that names nobody. No request sets it.

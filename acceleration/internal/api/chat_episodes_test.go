@@ -835,6 +835,82 @@ func (s *ChatEpisodesSuite) TestTheUsersOwnTokenOpensASessionThatReadsTheirChatC
 	}
 }
 
+// listDevices has the router let a device of the suite's app name agentID, as
+// ROUTER_DEVICE_IDENTITY_ALLOW does (TEMPORARY, AI-3959), until the test is done.
+func (s *ChatEpisodesSuite) listDevices(agentID string) {
+	s.router.deviceIdentities = DeviceIdentityAllow{{App: s.customerID(), AgentID: agentID}}
+	s.T().Cleanup(func() { s.router.deviceIdentities = nil })
+}
+
+// Defect (AI-3959 S1.1): every device of a listed app may hold the listed agent id, so a session
+// found by it is anybody's. Bob's message in agent:<listed id> retired Anya's session, which reads
+// her cards, and closed it. It is handed out instead, and her session goes on reading her cards.
+func (s *ChatEpisodesSuite) TestAMessageInTheListedAgentsChannelLeavesADevicesSessionAlone() {
+	worker := s.worker()
+	config := s.config(true, "noted/noted-model")
+	s.says(config.ID, "my appointment is Friday at 3", worker)
+	s.cards(s.omniChannel(), 1)
+	listed := "docs-" + s.utils.uuid()
+	s.listDevices(listed)
+	anya := s.data.signedInAs(s.user)
+	opened := anya.createSession(CreateSessionRequest{ConfigId: &config.ID, AgentId: &listed})
+	s.Require().Equal(listed, opened.AgentId)
+
+	s.channelID, s.user = listed, "bob-"+s.utils.uuid()
+	bobs := s.says(config.ID, "hi "+s.utils.uuid(), worker)
+
+	s.Equal(s.user, bobs.UserID)
+	held, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), Kind: auth.KindServer})
+	s.Require().True(running)
+	s.False(held.Retiring(), "Bob's message retires Anya's session")
+	text := "when is my appointment? " + s.utils.uuid()
+	s.Require().Equal(http.StatusAccepted, anya.do(http.MethodPost, "/v1/agents/sessions/"+opened.Id+"/responses",
+		CreateResponseRequest{Text: text, RequestId: pointerTo(s.utils.uuid())}, nil))
+	s.True(carded(s.askedWith(text)), "her session reads her card")
+	var read Session
+	s.Require().Equal(http.StatusOK, anya.do(http.MethodGet, "/v1/agents/sessions/"+opened.Id, nil, &read))
+	s.Nil(read.ClosedAt, "Anya's session closed")
+}
+
+// Defect (AI-3959 S1.1): with no cards, a device's session holding the listed agent id keeps its
+// conversation, so a message in agent:<listed id> found it and was settled unanswered. Bob's
+// message there is handed out while Anya's session runs.
+func (s *ChatEpisodesSuite) TestAMessageInTheListedAgentsChannelIsHandedOutWhileADevicesSessionRuns() {
+	worker := s.worker()
+	config := s.config(false, "noted/noted-model")
+	listed := "docs-" + s.utils.uuid()
+	s.listDevices(listed)
+	opened := s.data.signedInAs(s.user).createSession(CreateSessionRequest{AgentId: &listed})
+	s.Require().Equal(listed, opened.AgentId)
+
+	s.channelID, s.user = listed, "bob-"+s.utils.uuid()
+	hello := "hello " + s.utils.uuid()
+
+	s.Equal(hello, s.says(config.ID, hello, worker).Text)
+}
+
+// Defect (AI-3959 S1.1): the directory's claim on the listed agent id sends a message in
+// agent:<listed id> that another node took to the node of a device's session (forwardedMessage).
+// A device's session claims no agent there; a backend's under the same id still does.
+func (s *ChatEpisodesSuite) TestADevicesSessionWithTheListedAgentIDClaimsNoAgentInTheDirectory() {
+	ctx := context.Background()
+	listed := "docs-" + s.utils.uuid()
+	s.listDevices(listed)
+	opened := s.data.signedInAs(s.user).createSession(CreateSessionRequest{AgentId: &listed})
+	held, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), Kind: auth.KindServer})
+	s.Require().True(running)
+	app := held.Spec().StreamApp
+
+	node, err := s.router.directory.NodeByAgent(ctx, s.customerID(), app, listed)
+	s.Require().NoError(err)
+	s.Empty(node, "the device's session is claimed by the listed agent id")
+
+	s.serverClient.createSession(CreateSessionRequest{AgentId: &listed})
+	node, err = s.router.directory.NodeByAgent(ctx, s.customerID(), app, listed)
+	s.Require().NoError(err)
+	s.Equal(s.router.directory.Address(), node, "control: a backend's session is claimed by its agent id")
+}
+
 // slow has every reply of the "noted" models opened so far take d.
 func (s *ChatEpisodesSuite) slow(d time.Duration) {
 	s.notedMu.Lock()

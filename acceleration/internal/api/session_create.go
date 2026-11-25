@@ -49,6 +49,8 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	}
 
 	spec := specOf(*request.Body, customerID, config)
+	// TEMPORARY (AI-3959): what the refusal without the list refuses, the list let through.
+	_, spec.ListedIdentity = refuseDeviceAgentIdentity(ctx, *request.Body, nil)
 	keyDeviceAgent(ctx, &spec)
 	ctx = s.threadConversation(ctx, customerID, &spec)
 	// Who asked comes from the credential rather than from specOf, which merges the request
