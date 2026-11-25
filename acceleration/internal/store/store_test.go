@@ -176,11 +176,11 @@ func (s *StoreSuite) emptyTables(db bun.IDB) {
 	}))
 }
 
-// SetupTest closes the suite's idle connections (closeIdle), then empties the tables one time in
+// SetupTest closes most of the suite's idle connections (trimIdle), then empties the tables one time in
 // each database, and the store's keys in Redis. With one database, the shard database and the
 // shared database are the same database.
 func (s *StoreSuite) SetupTest() {
-	closeIdle(s.store)
+	trimIdle(s.store)
 	s.emptyTables(s.store.shard)
 	if s.store.Sharded() {
 		s.emptyTables(s.store.global)
@@ -190,20 +190,25 @@ func (s *StoreSuite) SetupTest() {
 
 func (s *ShardedStoreSuite) SetupTest() {
 	s.StoreSuite.SetupTest()
-	closeIdle(s.other)
+	trimIdle(s.other)
 	s.emptyTables(s.other.shard)
 }
 
-// closeIdle closes the connections store's pools keep idle, and keeps the pools as large as
-// connect made them. connect keeps as many idle connections as a pool may open, for 5 minutes,
-// so after a test that ran many statements at once the suite's stores hold them into every later
-// test: 40 of the shared pool's when TestProviderAppLocksOnOneAppNeverOverlapAcrossRouters
-// started in the sharded suite, beside the 3 each of its 8 routers opens, and CI's Postgres keeps
-// the default max_connections of 100 (AI-3960). Each test starts instead from the connections it
-// opens itself.
-func closeIdle(store *Store) {
+// keptIdle is how many idle connections trimIdle leaves in each pool: as many as most tests use,
+// so a test does not dial Postgres again for the statements every test runs. Closing all of them
+// made 176 tests of the sharded suite take twice as long on a local Postgres (AI-3960).
+const keptIdle = 2
+
+// trimIdle closes the idle connections each of store's pools keeps past keptIdle, and keeps the
+// pools as large as connect made them. connect keeps as many idle connections as a pool may open,
+// for 5 minutes, so after a test that ran many statements at once the suite's stores hold them
+// into every later test: 40 of the shared pool's when
+// TestProviderAppLocksOnOneAppNeverOverlapAcrossRouters started in the sharded suite, beside the
+// 3 each of its 8 routers opens, and CI's Postgres keeps the default max_connections of 100
+// (AI-3960).
+func trimIdle(store *Store) {
 	for _, db := range []*bun.DB{store.global, store.shard, store.locks} {
-		db.SetMaxIdleConns(0)
+		db.SetMaxIdleConns(keptIdle)
 		db.SetMaxIdleConns(db.Stats().MaxOpenConnections)
 	}
 }
@@ -230,9 +235,9 @@ func (s *StoreSuite) TestATestStartsWithoutTheIdleConnectionsAnEarlierOneLeft() 
 
 	s.SetupTest()
 
-	s.LessOrEqual(s.store.global.Stats().OpenConnections, 1, "only the one emptying the tables")
-	s.LessOrEqual(s.store.shard.Stats().OpenConnections, 1, "only the one emptying the tables")
-	s.Zero(s.store.locks.Stats().OpenConnections)
+	s.LessOrEqual(s.store.global.Stats().OpenConnections, 2, "keptIdle")
+	s.LessOrEqual(s.store.shard.Stats().OpenConnections, 2, "keptIdle")
+	s.LessOrEqual(s.store.locks.Stats().OpenConnections, 2, "keptIdle")
 	s.warm(s.store, 8)
 	s.Equal(8, s.store.locks.Stats().Idle, "and keeps them again, up to its size")
 	s.Equal(lockConns, s.store.locks.Stats().MaxOpenConnections)
@@ -244,9 +249,9 @@ func (s *ShardedStoreSuite) TestATestStartsWithoutTheIdleConnectionsAnEarlierOne
 
 	s.SetupTest()
 
-	s.Zero(s.other.global.Stats().OpenConnections)
-	s.LessOrEqual(s.other.shard.Stats().OpenConnections, 1, "only the one emptying the tables")
-	s.Zero(s.other.locks.Stats().OpenConnections)
+	s.LessOrEqual(s.other.global.Stats().OpenConnections, 2, "keptIdle")
+	s.LessOrEqual(s.other.shard.Stats().OpenConnections, 2, "keptIdle")
+	s.LessOrEqual(s.other.locks.Stats().OpenConnections, 2, "keptIdle")
 }
 
 func (s *StoreSuite) TestMigrateIsIdempotent() {
