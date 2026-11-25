@@ -89,6 +89,39 @@ func (s *ConfigsSuite) TestAnAgentIdentityNamingAnIdStreamKeepsIsRefused() {
 		"only an id starting with ! is Stream's, and a name is not an id")
 }
 
+// Defect (R1.2): a config took a user id no conversation opens as, and every session naming it was
+// then refused "invalid voice transcript author", while the owner was told it was saved. It is
+// refused at write instead, by the rule a conversation opens with.
+func (s *ConfigsSuite) TestAnAgentIdentityUserNoSessionOpensAsIsRefused() {
+	created := s.createConfig(map[string]any{"name": "support"})
+	for _, userID := range []string{"support@example.com", "support bot", strings.Repeat("a", 129)} {
+		for _, write := range []struct{ method, path string }{
+			{http.MethodPost, "/v1/agents/configs"},
+			{http.MethodPut, "/v1/agents/configs/" + created.Id},
+			{http.MethodPatch, "/v1/agents/configs/" + created.Id},
+		} {
+			body := map[string]any{"identity": map[string]any{"user_id": userID}}
+			if write.method != http.MethodPatch {
+				body["name"] = "support-" + s.utils.uuid()
+			}
+			status, code, message := s.refusedWith(s.serverClient, write.method, write.path, body)
+
+			s.Equal(http.StatusBadRequest, status, "%s %q", write.method, userID)
+			s.Equal("invalid_request", code, "%s %q", write.method, userID)
+			s.True(strings.HasPrefix(message, "identity.user_id"), "%s %q: %s", write.method, userID, message)
+		}
+	}
+	s.Nil(s.read(created.Id).Identity)
+
+	for _, userID := range []string{"support-bot.1", strings.Repeat("a", 128)} {
+		name := "support-" + s.utils.uuid()
+		s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs",
+			map[string]any{"name": name, "identity": map[string]any{"user_id": userID}}, nil), userID)
+		s.Equal(userID, s.data.createGuest().createSession(CreateSessionRequest{Agent: &name}).UserId,
+			"a session naming the config opens as its user")
+	}
+}
+
 func (s *ConfigsSuite) TestAnAgentIdentityFieldNobodyKnowsIsRefused() {
 	created := s.createConfig(map[string]any{"name": "support"})
 

@@ -204,6 +204,10 @@ func readBack(id string) bool { return strings.HasPrefix(id, ReadBackPrefix) }
 
 var validAuthorID = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
 
+// ValidAuthor reports whether id is a user a session's agent may join a call and write as: a
+// conversation opened with any other is refused (open).
+func ValidAuthor(id string) bool { return validAuthorID.MatchString(id) }
+
 // maxCommandText is the most text one command carries, in bytes.
 const maxCommandText = 1024 * 1024
 

@@ -794,7 +794,9 @@ func configComplaint(ctx context.Context, request AgentConfigRequest) (string, b
 }
 
 // identityComplaint reports an agent identity naming an id Stream keeps for itself, refused as a
-// session's agent_id and user_id are (refuseReservedUserID).
+// session's agent_id and user_id are (refuseReservedUserID), or a user no session can open its
+// conversation as (conversation.ValidAuthor): stored, it would have every session naming the
+// config refused, while its owner was told it was saved.
 func identityComplaint(identity *AgentIdentity) (string, bool) {
 	if identity == nil {
 		return "", true
@@ -803,6 +805,9 @@ func identityComplaint(identity *AgentIdentity) (string, bool) {
 		if failure, refused := refuseReservedUserID(named[0], named[1]); refused {
 			return failure.Message, false
 		}
+	}
+	if identity.UserId != "" && !conversation.ValidAuthor(identity.UserId) {
+		return "identity.user_id may hold only letters, digits, _, . and -, up to 128 of them", false
 	}
 	return "", true
 }
