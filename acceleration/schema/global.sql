@@ -1384,6 +1384,7 @@ TABLE users
     minted boolean NOT NULL DEFAULT false
     name text NOT NULL DEFAULT ''::text
     refresh_secret_hash bytea
+    shard text
     timezone text
     CONSTRAINT users_pkey PRIMARY KEY (customer_id, id)
     CREATE INDEX users_claimed_idx ON public.users USING btree (customer_id, claimed_by) WHERE (claimed_by IS NOT NULL)

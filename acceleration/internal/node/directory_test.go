@@ -55,7 +55,7 @@ func (s *DirectorySuite) SetupTest() {
 func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	directory, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: "node-a:1", Shard: "eu", Prefix: s.prefix})
 	s.Require().NoError(err)
-	directory.Close()
+	defer directory.Close()
 	for _, session := range []string{"s1", "s2", "s3"} {
 		directory.Hold(s.ctx, "acme", 7, session, "agent-"+session, "messaging:"+session)
 	}
@@ -68,7 +68,7 @@ func (s *DirectorySuite) TestARenewalIsOneRoundTrip() {
 	s.Require().NoError(err)
 	// Each session: itself and its conversation, each under its customer and under its id alone,
 	// and its agent by app and customer, by customer, and by its id alone. And the call of one.
-	s.Require().Len(keys, 3*7+1+2+2+1)
+	s.Require().Len(keys, 3*7+1+2+2+2)
 	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Del().Key(keys...).Build()).Error())
 
 	before := s.roundTrips.sent.Load()
@@ -512,6 +512,45 @@ func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhereOnACluster() {
 		s.Require().NoError(err)
 		s.Zero(exists, "%s is still held", key)
 	}
+}
+
+// The shard's index names the nodes saying they are in it now: not a node of another shard,
+// nor one whose claim lapsed because it stopped renewing.
+func (s *DirectorySuite) TestANodeInAShardIsALiveNodeOfThatShard() {
+	for _, node := range []struct{ address, shard string }{{"eu-a:1", "eu"}, {"us-a:1", "us"}} {
+		directory, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: node.address, Shard: node.shard, Prefix: s.prefix})
+		s.Require().NoError(err)
+		defer directory.Close()
+	}
+	lapsed := float64(time.Now().Add(-time.Second).UnixMilli())
+	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Zadd().Key(s.prefix+":inshard:eu").ScoreMember().
+		ScoreMember(lapsed, "eu-gone:1").Build()).Error())
+	asking, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: "us-b:1", Shard: "us", Prefix: s.prefix})
+	s.Require().NoError(err)
+	asking.Close()
+
+	for range 20 {
+		found, err := asking.NodeInShard(s.ctx, "eu")
+		s.Require().NoError(err)
+		s.Equal("eu-a:1", found)
+	}
+	none, err := asking.NodeInShard(s.ctx, "asia")
+	s.Require().NoError(err)
+	s.Empty(none, "a shard no node is in has a node")
+}
+
+func (s *DirectorySuite) TestANodeThatClosedIsNoNodeOfItsShard() {
+	leaving, err := NewDirectory(DirectoryOptions{Redis: s.client, Address: "eu-a:1", Shard: "eu", Prefix: s.prefix})
+	s.Require().NoError(err)
+	found, err := leaving.NodeInShard(s.ctx, "eu")
+	s.Require().NoError(err)
+	s.Require().Equal("eu-a:1", found)
+
+	leaving.Close()
+
+	found, err = leaving.NodeInShard(s.ctx, "eu")
+	s.Require().NoError(err)
+	s.Empty(found, "a node that closed is still handed its shard's work")
 }
 
 // directoryAt is a node's directory at address, renewing nothing for the test's length.

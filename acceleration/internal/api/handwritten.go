@@ -786,6 +786,27 @@ func documentHandWritten(api huma.API) {
 		},
 	})
 	document.AddOperation(&huma.Operation{
+		OperationID: "receiveTwilioCall",
+		Method:      http.MethodPost,
+		Path:        twilioCallHookPath,
+		Summary:     "Receive a Twilio call",
+		Description: "Where Twilio asks what to do with a call to one of this router's Twilio numbers. " +
+			"Unauthenticated because Twilio is not a customer: each call is checked against " +
+			"X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this " +
+			"path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call " +
+			"passes, and the answer dials that number's own trunk and no other, or rejects or hangs " +
+			"up the call. A deployment with no Twilio webhook token or no public URL answers 404, so " +
+			"the path never hands out trunk credentials unsigned.",
+		Security: []map[string][]string{},
+		Responses: map[string]*huma.Response{
+			"200": {Description: "TwiML dialling the number's trunk, rejecting the call, or hanging up", Content: map[string]*huma.MediaType{"application/xml": {Schema: &huma.Schema{Type: huma.TypeString}}}},
+			"400": {Description: "The body is not a form"},
+			"401": {Description: "The call is not signed by Twilio"},
+			"404": {Description: "Twilio calls are not configured"},
+			"413": {Description: "The call is over 64 KiB"},
+		},
+	})
+	document.AddOperation(&huma.Operation{
 		OperationID: "receiveTwilioEvent",
 		Method:      http.MethodPost,
 		Path:        twilioEventsHookPath,
@@ -1105,7 +1126,9 @@ type DataChangePage struct {
 
 // DataImport is the DataImport schema.
 type DataImport struct {
-	Cursor *int64            `json:"cursor,omitempty" doc:"The cursor the export named, to ask the other deployment for changes from."`
-	Rows   int64             `json:"rows" doc:"How many rows were written."`
-	Tables *map[string]int64 `json:"tables,omitempty" doc:"How many of them went into each table."`
+	Cursor      *int64            `json:"cursor,omitempty" doc:"The cursor the export named, to ask the other deployment for changes from."`
+	Rows        int64             `json:"rows" doc:"How many rows were written."`
+	Skipped     []string          `json:"skipped,omitempty" nullable:"false" doc:"The rows left out rather than written, by table and primary key, as connector_definitions:{\"id\":\"custom_crm\",\"revision\":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set."`
+	SkippedMore int64             `json:"skipped_more,omitempty" doc:"How many more rows were left out than skipped names, which holds the first 100."`
+	Tables      *map[string]int64 `json:"tables,omitempty" doc:"How many of them went into each table."`
 }

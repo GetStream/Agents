@@ -147,6 +147,7 @@ the other commands that read them there.
 | `ROUTER_MOCK_PROVIDERS` | `true` adds `mock/mock-stt`, `mock/mock-tts` and `mock/mock-llm`, which answer from nothing, reach no vendor and bill nothing, for load testing the router itself (see `performance_benchmark/`). No capability alias routes to one, so a session only gets a mock by naming it. Off by default |
 | `ROUTER_TRUSTED_PROXIES` | CIDR ranges your own proxies sit in, comma separated, e.g. `10.0.0.0/8`. Decides how much of `X-Forwarded-For` is believed. Unset means none of it is, and the connection's address is used |
 | `ROUTER_DATA_MOVE_RETENTION` | How long recorded changes are kept while a customer moves between deployments, defaults to `168h`. See [Moving a customer](#moving-a-customer) |
+| `ROUTER_SHARD_ROUTING_DEFAULT`, `ROUTER_SHARD_ROUTING_COUNTRIES`, `ROUTER_SHARD_ROUTING_REGIONS` | Which shard a hook's work is done in (`shard_routing`): the shard for a country not listed, a dialled number's country to its shard (`DE=europe-west4,US=us-east4`), and an agent region other than `us` to its shard (`eu=europe-west4`). Every router of a deployment holds the same. Unset: every hook is done where it lands. See [Shards](#shards) |
 | `ROUTER_LOG_LEVEL`      | `debug`, `info` (default), `warn` or `error`               |
 | `HARNESS_SKILLS`        | Path to a skill set; defaults to the built-in one          |
 | `MEM0_API_KEY`          | mem0 credentials. Without it the agent remembers nothing   |
@@ -155,10 +156,10 @@ the other commands that read them there.
 | `EXA_API_KEY`           | Exa credentials. Also what reads a URL into a knowledge base |
 | `PERPLEXITY_API_KEY`    | Perplexity credentials, for the ranked index and for Sonar |
 | `DAYTONA_API_KEY`       | Daytona credentials. Without it a session cannot ask for a sandbox |
-| `TWILIO_ACCOUNT_SID`    | Twilio credentials, for buying and operating numbers       |
+| `TWILIO_ACCOUNT_SID`    | Twilio credentials, for buying and operating numbers. A call to `/v1/phone/hooks/twilio` that names another account is hung up |
 | `TWILIO_AUTH_TOKEN`     | Twilio credentials. With `TWILIO_API_KEY_SID` set, that key's secret |
 | `TWILIO_API_KEY_SID`    | Optional Twilio API key (SK...). Requests are signed with it instead of the account SID |
-| `TWILIO_WEBHOOK_AUTH_TOKEN` | Auth Token of the Twilio account whose webhooks the router checks (`X-Twilio-Signature`). It only checks signatures: those of the Monitor alerts and usage-trigger callbacks sent to `/v1/phone/hooks/twilio/events`, signed over `ROUTER_PUBLIC_URL` and the path. Without it, or without `ROUTER_PUBLIC_URL`, that route answers 404. A token with whitespace in it stops the router at start |
+| `TWILIO_WEBHOOK_AUTH_TOKEN` | Auth Token of the Twilio account whose webhooks the router checks (`X-Twilio-Signature`). It only checks signatures: those of the Monitor alerts and usage-trigger callbacks sent to `/v1/phone/hooks/twilio/events`, and the calls sent to `/v1/phone/hooks/twilio`, each signed over `ROUTER_PUBLIC_URL` and the path. Without it, or without `ROUTER_PUBLIC_URL`, both routes answer 404. A call is answered once per `CallSid`, marked in Redis for a week: a copy of it is hung up, unless the first answer did not reach Twilio, and without Redis every call is hung up. A token with whitespace in it stops the router at start |
 | `TELNYX_API_KEY`        | Telnyx credentials                                         |
 | `TELNYX_CONNECTION_ID`  | The Telnyx TeXML application numbers and calls are on. Calls to the webhook from any other application are hung up |
 | `TELNYX_PUBLIC_KEY`     | Telnyx's public key (base64), to check the calls it sends to `/v1/phone/hooks/telnyx` and the account events it sends to `/v1/phone/hooks/telnyx/events`. Without it Telnyx numbers are not answered and the events route answers 404. Telnyx numbers also need a key encryption keyring (`ROUTER_DEV_KEK` locally, `ROUTER_AUTH_KEK_V<n>_WRAPPED` hosted): without one they cannot be attached |
@@ -1720,6 +1721,15 @@ count rather than recomputed. A router with shards cannot be a move's source: it
 tables record no changes after an export, so `GET /v1/data/export` and `GET /v1/data/changes`
 answer 400 `not_configured` there (see [Moving a customer](#moving-a-customer)). It can be a move's target.
 
+Stream sends a hook to whichever router its load balancer picks, so with `shard_routing` set a
+router hands it to a node of the shard where its work belongs. A call follows the dialled
+number's country. A message follows the agent's region when that is not the default, and
+otherwise the shard that last served its writer's own client, which each router keeps in
+`users.shard` (a backend's request and a forwarded one keep nothing). A conversation already
+running stays on its node, and a hook a peer handed over is never handed on to another shard.
+With no node of that shard up, the work is done where it landed and counted in
+`router_shard_handover_fallbacks_total`, which an alert should watch.
+
 ## Agents that are configured rather than spelled out
 
 A session can be created from a stored configuration instead of a caller repeating the
@@ -2968,6 +2978,16 @@ A row refused because another tenant here holds its key stops the move, and the 
 row by table and primary key, as `agent_configs:{"id":"config-1"}`. `router replicate` prints why.
 `POST /v1/data/import` answers 400 and says only that the row cannot be written here: pass the row
 to the operator of this deployment.
+
+A custom connector definition arrives only if the API would store it: it is held to the same id
+pattern, lengths, scope tokens and client rules, and a row that breaks one stops the move with a
+400 naming its id. Its endpoint is not resolved on the way in: a connection to it still dials only a public address.
+One rule is not a refusal: a definition with `oauth2_client_credentials`, which a custom connector
+could have before it lost that scheme, is left out and the move goes on, since no connection could
+use it. `POST /v1/data/import` names each one in `skipped`, as
+`connector_definitions:{"id":"custom_crm","revision":1}`, and `router replicate` logs it. `skipped` names the first 100, and `skipped_more` counts the rest. A row is named only if its id
+is a custom id and its revision a positive number; any other such row is refused as above. Recreate
+such a connector with another scheme where it arrives.
 
 Key rows, sealed secrets, OAuth access and refresh tokens, organizations and apps are not
 exported. A moved deployment mints its own keys and re-authorizes its plugin connections.
