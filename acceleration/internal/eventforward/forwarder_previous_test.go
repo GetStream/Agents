@@ -76,7 +76,8 @@ func (s *ForwarderSuite) TestAForwardWhosePreviousSecretDoesNotOpenIsSignedWithT
 		"it is bound to another destination":         s.boundToAnother(),
 		"its ciphertext is corrupt":                  s.corrupt(),
 		"it is shorter than a nonce":                 s.truncated(),
-		"it is empty":                                s.empty(),
+		"it is empty":                                s.holding("whsec_"),
+		"it is not base64":                           s.holding("whsec_!!"),
 	}
 	for name, previous := range cases {
 		s.Run(name, func() {
@@ -280,7 +281,7 @@ func (s *ForwarderSuite) TestACurrentSecretThatDoesNotOpenIsLeftToAnotherRouterT
 	s.Run("given up at once when it is empty", func() {
 		target, arrived := s.receiver()
 		router := s.routerOn(s.sealer, target, &logLines{}, Options{})
-		destination := s.rotated(target.URL, s.under(s.sealer), s.empty(), time.Now().Add(time.Hour))
+		destination := s.rotated(target.URL, s.under(s.sealer), s.holding("whsec_"), time.Now().Add(time.Hour))
 
 		s.Require().NoError(s.send(router, destination, `{"n":1}`))
 
@@ -402,9 +403,9 @@ func (s *ForwarderSuite) boundToAnother() seal {
 	}
 }
 
-// empty seals a secret that holds no key.
-func (s *ForwarderSuite) empty() seal {
-	return func(_ string, aad []byte) ([]byte, int) { return s.under(s.sealer)("whsec_", aad) }
+// holding seals secret in place of the destination's own.
+func (s *ForwarderSuite) holding(secret string) seal {
+	return func(_ string, aad []byte) ([]byte, int) { return s.under(s.sealer)(secret, aad) }
 }
 
 // corrupt seals with this suite's key and flips a bit of the ciphertext.

@@ -161,6 +161,22 @@ func (s *KnowledgeFilesSuite) TestUploadingTheSameSourceAgainReplacesTheDocument
 	s.Len(s.listed(), 1)
 }
 
+func (s *KnowledgeFilesSuite) TestAFirstUploadNamedByDotsLeavesRoomForTheNext() {
+	// The customer is new, so the first upload makes its place in the bucket. All are sent
+	// before any is read, since a file read is deleted.
+	var uploaded []IndexedKnowledgeDocument
+	for _, source := range []string{"..", `menus\..`, "menus/..", "menu.pdf", "...", ".."} {
+		status, sent, answer := s.upload("scanned.pdf", extractFixture(s.T(), "scanned.pdf"), source)
+		s.Require().Equal(http.StatusAccepted, status, "%s: %s", source, answer)
+
+		s.Equal(source, sent.Source)
+		uploaded = append(uploaded, sent)
+	}
+	for _, sent := range uploaded {
+		s.Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State, sent.Source)
+	}
+}
+
 func (s *KnowledgeFilesSuite) TestADocumentRemovedBeforeItsFileIsReadLeavesNothing() {
 	_, sent, _ := s.upload("removed.pdf", extractFixture(s.T(), "manual.pdf"), "")
 

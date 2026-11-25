@@ -337,8 +337,6 @@ func (s *DocumentsSuite) TestAFileThatCannotBeScreenedIsRefusedRatherThanRead() 
 	s.never(question)
 }
 
-// opening is a text conversation of as's, kept in Chat, under an agent config on a model the
-// suite notes: a conversation reopened from its row is on its config's model.
 func (s *DocumentsSuite) TestAFileNamedByDotsAloneIsCalledDocument() {
 	for _, name := range []string{"..", "shifts/..", `shifts\..`, " .. "} {
 		s.Equal("document", s.nameRead(s.docx(name, "the night shift "+s.utils.uuid())), name)
@@ -393,6 +391,8 @@ func (s *DocumentsSuite) nameRead(file FileSource) string {
 	return name
 }
 
+// opening is a text conversation of as's, kept in Chat, under an agent config on a model the
+// suite notes: a conversation reopened from its row is on its config's model.
 func (s *DocumentsSuite) opening(as *testClient) Session {
 	var config AgentConfig
 	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", AgentConfigRequest{
