@@ -4,7 +4,7 @@ const sdkVersion = '0.7.0';
 /// This SDK and its release, as the router reads it: any client named stream-agents- is an SDK.
 const streamClient = 'stream-agents-dart-v$sdkVersion';
 
-/// This SDK and its release again, for the router's request log, in place of dart:io's own.
+/// This SDK and its release again, for the router's request log, in place of the HTTP client's own.
 ///
 /// Null in a browser, which names its own: neither the router's nor the proxy's CORS list
 /// allows `User-Agent`, so a page that set it would be refused at the preflight.

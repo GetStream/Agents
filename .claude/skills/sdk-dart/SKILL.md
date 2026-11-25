@@ -103,8 +103,9 @@ stream property. Answering a tool call does not depend on anybody listening: it 
   anything else throws `SocketClosedException` with the code.
 - A frame that cannot be decoded is skipped, not fatal.
 - Closing is idempotent and sends 1000.
-- A handshake carries no headers, neither `X-Stream-Client` nor `User-Agent`:
-  `package:web_socket` takes a URL only, so a socket's credentials are all in its query.
+- A handshake carries none of the SDK's headers, neither `X-Stream-Client` nor `User-Agent`
+  (off the web, dart:io sends its own `Dart/<version>`): `package:web_socket` takes no headers,
+  so a socket's credentials are all in its query.
 - **No automatic reconnection.** `respond` and `tool_result` are not idempotent and the protocol
   has nothing to resume from. `AgentSession.connection` reports `Disconnected(failure)` and the
   caller decides.
