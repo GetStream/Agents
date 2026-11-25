@@ -90,6 +90,11 @@ func (s *HTTPSourceSuite) TestAValidHTTPSourceIsAccepted() {
 		"a parameter merely holding method":   withTool(func(t *HTTPTool) { t.Parameters["http_method_name"] = HTTPParameter{Type: "string"} }),
 		"a header that is no override":        withSource(func(r *SourceRule) { r.Headers = map[string]string{"X-Api-Version": "2"} }),
 		"outbound true":                       withSource(func(r *SourceRule) { r.Outbound = new(true) }),
+		"a base_url of 2048 bytes": func() Manifest {
+			m := httpManifest(forecast())
+			m.Endpoints[SourceKindHTTP] = "https://api.example.com/" + strings.Repeat("a", 2024)
+			return m
+		}(),
 		"an mcp source with an override header": {ID: "example", Revision: 1, Name: "Example", Schemes: []string{"bearer"},
 			Endpoints: map[string]string{SourceKindMCP: "https://api.example.com/mcp"},
 			Sources:   []SourceRule{{Kind: SourceKindMCP, Endpoint: SourceKindMCP, Headers: map[string]string{"X-HTTP-Method-Override": "POST"}}}},

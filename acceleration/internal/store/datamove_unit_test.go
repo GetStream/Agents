@@ -30,7 +30,9 @@ const importedHTTP = `{"id": "custom_crm", "revision": 1, "name": "CRM", "endpoi
 func (s *ImportableDefinitionSuite) TestAnHTTPConnectorAndAnMCPOneAreKept() {
 	mcp := `{"id": "custom_crm", "revision": 1, "name": "CRM", "endpoints": {"mcp": "https://mcp.crm.example/mcp"},
 		"schemes": ["bearer"], "sources": [{"kind": "mcp", "endpoint": "mcp"}]}`
-	for _, manifest := range []string{importedHTTP, mcp} {
+	// 2048 bytes, the cap itself: pins the cap as maxHTTPPath, not one under it.
+	atTheCap := strings.Replace(importedHTTP, "https://8.8.8.8/api", "https://8.8.8.8/"+strings.Repeat("a", 2032), 1)
+	for _, manifest := range []string{importedHTTP, mcp, atTheCap} {
 		row, err := importableDefinition(context.Background(), json.RawMessage(`{"id": "custom_crm", "manifest": `+manifest+`}`))
 
 		s.Require().NoError(err)
