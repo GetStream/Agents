@@ -50,15 +50,17 @@ func (s *Service) claim(ctx context.Context, account store.ChannelAccount, messa
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), keywordTimeout)
 	defer cancel()
+	// The sender's number in E.164, read in the line's own country when it came without one.
+	recipient := store.OptOutRecipient(message.From, account.E164)
 	var fresh bool
 	var err error
 	if stop {
 		fresh, err = s.store.ChannelDeliveries.ClaimStop(ctx, account.ID, message.ID, message.From, &store.OptOut{
-			CustomerID: account.CustomerID, Recipient: message.From, Channel: account.Kind, Source: "keyword",
+			CustomerID: account.CustomerID, Recipient: recipient, Channel: account.Kind, Source: "keyword",
 		})
 	} else {
 		fresh, err = s.store.ChannelDeliveries.ClaimStart(ctx, account.ID, message.ID, message.From,
-			account.CustomerID, message.From, account.Kind)
+			account.CustomerID, recipient, account.Kind)
 	}
 	if err != nil {
 		s.logger.Error("could not record a keyword", "keyword", word, "channel", account.Kind,

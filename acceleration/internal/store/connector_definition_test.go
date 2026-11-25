@@ -1065,7 +1065,7 @@ func (s *StoreSuite) TestADeleteWaitsForAConnectionInProgressAndIsRefused() {
 	created := make(chan error, 1)
 	connection := &ConnectorConnection{CustomerID: "acme-app", ConnectorID: id, DefinitionRevision: 1, OwnerType: OwnerApp, AuthScheme: "test_key"}
 	go func() { created <- creator.ConnectorConnections.Insert(s.ctx, testSchemes, connection) }()
-	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credentials_test.go).
+	// The two seconds and the ten milliseconds are assertTheWaitEnded's (credential_lock_test.go).
 	s.Require().Eventually(func() bool { return s.waitingForTable("connector_connections") == 1 },
 		2*time.Second, 10*time.Millisecond, "the create waits at its INSERT")
 	deleter := s.router()
@@ -1458,8 +1458,8 @@ func (s *StoreSuite) TestACustomDefinitionIsInternalRevisionByRevision() {
 }
 
 // An app without the flag, or a customer with no app row, sees the catalog it saw before the flag
-// existed: every embedded built-in that is not internal, each found by LatestConnectorDefinition
-// and ConnectorDefinition at its latest revision. An app with the flag sees the internal ones too.
+// existed: every embedded built-in that is not internal, each found by ConnectorDefinitions.Latest
+// and ConnectorDefinitions.Get at its latest revision. An app with the flag sees the internal ones too.
 func (s *StoreSuite) TestWithoutTheFlagEveryAppSeesTheCatalogItSawBefore() {
 	s.Require().NoError(s.store.ConnectorDefinitions.Seed(s.ctx, providers.FS))
 	files, err := fs.ReadDir(providers.FS, ".")

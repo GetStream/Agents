@@ -406,9 +406,8 @@ func waitSeconds(wait time.Duration) string {
 }
 
 // auditProxyCall records one direct call the connection's client sent (T44): the provider's
-// status, nil when no answer came, the time to its answer and the host it reached
-// (20261007170000_connector_invocations_and_audit.sql). The call happened whatever the row
-// does, so a row that cannot be written is logged.
+// status, nil when no answer came, the time to its answer and the host it reached. The call
+// happened whatever the row does, so a row that cannot be written is logged.
 func (s *Server) auditProxyCall(ctx context.Context, connection store.ConnectorConnection, host string, status *int, latency int64) {
 	ctx, cancel := detachedWrite(ctx)
 	defer cancel()

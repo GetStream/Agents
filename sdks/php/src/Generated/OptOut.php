@@ -18,7 +18,7 @@ final readonly class OptOut
         public OptOutChannel|string $channel,
         public \DateTimeImmutable $createdAt,
         public string $id,
-        // The number, in E.164.
+        // The number in E.164, or an iMessage handle's email address.
         public string $recipient,
         // keyword when they texted STOP, campaign when they asked a campaign call not to call again, otherwise api or...
         public string $source,

@@ -250,7 +250,7 @@ func (r *Registry) Open(name string) (Provider, error) {
 
 	provider, err := factory()
 	if err != nil {
-		return nil, stack.Wrap(err)
+		return nil, stack.Wrap(lastingError{err})
 	}
 
 	r.mu.Lock()

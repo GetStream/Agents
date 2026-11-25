@@ -78,8 +78,10 @@ func (p callParticipant) phone() bool {
 // Every outcome short of something that did not come from Stream is a 200. Stream retries a
 // non-2xx, and none of the reasons this cannot place a call — no worker waiting, a call
 // belonging to nobody — get better on a second delivery, while the caller is on the line for
-// the whole of it. The one exception is a phone's join or leave the database could not take:
-// its minutes are lost unless Stream delivers it again, so it is answered 503.
+// the whole of it. There are two exceptions, each answered 503. A phone's join or leave the
+// database could not take: its minutes are lost unless Stream delivers it again. And a call
+// that arrived moments ago which a shard that did not answer may have placed
+// (arrivingCallRetryFor): dispatching it could put a second agent on the call.
 func (s *Server) receiveCallEvent(w http.ResponseWriter, r *http.Request) {
 	if !s.hooksConfigured() {
 		// Refusing is the only safe answer: without the secret there is no way to tell
@@ -115,7 +117,9 @@ func (s *Server) receiveCallEvent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, invalidRequest("could not read that call event"))
 			return
 		}
-		s.dispatchArrivingCall(w, r, origin, event, payload)
+		if !s.dispatchArrivingCall(w, r, origin, event, payload) {
+			return
+		}
 
 	case getstream.EventTypeCallSessionEnded:
 		var event callEvent
@@ -149,28 +153,45 @@ func (s *Server) receiveCallEvent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// arrivingCallRetryFor is how long after Stream made a call.session_started a delivery whose
+// call cannot yet be told apart from one the router placed is answered for Stream to deliver
+// again. A caller left ringing rarely holds on past it, so a delivery later than that would
+// put a worker on a call nobody is on. An event whose time cannot be read is not retried.
+const arrivingCallRetryFor = 45 * time.Second
+
 // dispatchArrivingCall works out whose call it is and hands it to one of their workers. A call
 // it refuses is still answered 200, so the refusal's code is noted on w for the activity record.
-func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, origin hookOrigin, event callEvent, payload []byte) {
+// False is a call it could not yet tell what to do with, answered on w for Stream to deliver
+// again.
+func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, origin hookOrigin, event callEvent, payload []byte) bool {
 	callType, callID, split := strings.Cut(event.CallCid, ":")
 	if !split {
 		s.logger.Debug("a call event named no call", "cid", event.CallCid)
-		return
+		return true
 	}
 	if s.store == nil {
-		return
+		return true
 	}
 
 	// A call the router placed has its own worker already. Its leg comes in through the
 	// number's routing rule, which names the number too, so it would look like a call to dial.
 	placed, err := s.store.CallResources.Select(r.Context(), origin.scope(), callType, callID)
 	if err != nil {
-		s.logger.Error("could not tell whether the router placed a call", "cid", event.CallCid, "error", err)
-		return
+		// A shard that did not answer may have placed it, and dispatching it would put a second
+		// agent on it. While the caller may still be ringing, Stream is told to deliver it again,
+		// and nothing has been acted on yet. Past that, a delivery that lands once the shard is
+		// back would send a worker to a call its caller has left, so it is dropped as before.
+		if at := eventTime(event.CreatedAt); !at.IsZero() && time.Since(at) <= arrivingCallRetryFor {
+			s.logger.Warn("could not tell whether the router placed a call, asking for it again", "cid", event.CallCid, "error", err)
+			writeError(w, unavailable("could not tell whose call this is"))
+			return false
+		}
+		s.logger.Error("dropped an arriving call: could not tell whether the router placed it", "cid", event.CallCid, "error", err)
+		return true
 	}
 	if len(placed) > 0 {
 		s.logger.Debug("not dispatching a call the router placed", "cid", event.CallCid)
-		return
+		return true
 	}
 
 	// Only a call one of the numbers reaches is a phone call. Every video call in the app
@@ -203,7 +224,7 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 		}
 		s.logger.Log(r.Context(), level, "no number reaches an arriving call",
 			"call", event.CallCid, "stream_app", origin.app, "error", err)
-		return
+		return true
 	}
 	// In deployment mode the number is what says whose call it is.
 	activity.NoteCustomer(r.Context(), number.CustomerID, activity.AreaHooksIn)
@@ -232,7 +253,7 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 		noteRefusal(w, codeTelephonySuspended)
 		s.refuseArrivingCall(r.Context(), number, callType, callID, event.SessionID, "refused an arriving call to a suspended app",
 			"call", event.CallCid, "customer", number.CustomerID, "error", err)
-		return
+		return true
 	}
 	// The vendor bills the minutes of a call an agent answers, and the agent is billed work,
 	// so an organization that may not pay has nobody answer.
@@ -241,12 +262,12 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 		noteRefusal(w, answer.Code)
 		s.refuseArrivingCall(r.Context(), number, callType, callID, event.SessionID, "refused an arriving call to an organization that may not pay for it",
 			"call", event.CallCid, "customer", number.CustomerID, "code", answer.Code)
-		return
+		return true
 	}
 	// Only a call that rings a number is worth recording as delivered: every video call in
 	// the app arrives here too.
 	if !s.acting(r.Context(), origin, getstream.EventTypeCallSessionStarted, payload) {
-		return
+		return true
 	}
 	// A number with an agent never goes to a worker, even one waiting: the router answers
 	// it on this node.
@@ -255,18 +276,18 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 			noteRefusal(w, errNoSessions.Code)
 			s.refuseArrivingCall(r.Context(), number, callType, callID, event.SessionID, "refused an arriving call to a number with an agent on a router that runs no sessions",
 				"call", event.CallCid, "customer", number.CustomerID, "number", number.E164, "config", number.ConfigID)
-			return
+			return true
 		}
 		// The agent joins before it is answering, which can outlast Stream's wait for the
 		// hook: answered late, Stream delivers again while the agent joins.
 		go s.answerWithAgent(context.WithoutCancel(r.Context()), s.sessions, origin, event, number, callType, callID)
-		return
+		return true
 	}
 	if s.dispatch == nil {
-		return
+		return true
 	}
 	if elsewhere, _ := s.forwardedToWorkers(r.Context(), s.replayed(r, payload), number.CustomerID, dispatch.Calls); elsewhere {
-		return
+		return true
 	}
 
 	call := dispatch.Call{
@@ -291,7 +312,7 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 		noteRefusal(w, unavailable("").Code)
 		s.refuseArrivingCall(r.Context(), number, callType, callID, event.SessionID, "refused an arriving call no worker could take",
 			"call", event.CallCid, "customer", number.CustomerID, "number", number.E164)
-		return
+		return true
 	}
 	s.pinHook(origin, number.CustomerID, event.CallCid)
 	s.logger.Info("handed an arriving call to a worker",
@@ -302,6 +323,7 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 		arrived = append(arrived, "session_id", call.SessionID)
 	}
 	s.logger.Info("arriving call sites", arrived...)
+	return true
 }
 
 // answerWithAgent opens a session of the number's agent on the arriving call. It ends on its

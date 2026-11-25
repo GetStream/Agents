@@ -234,8 +234,8 @@ WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '
 		s.taskChanges("acme"), "the write's change names them no more")
 }
 
-// forgetWaiting reports whether a ForgetUserTasks is waiting on a lock: a row, or an advisory one
-// a test holds.
+// forgetWaiting reports whether a ForgetUserTasks or a DeleteForSession is waiting on a lock: a
+// row, or an advisory one a test holds.
 func (s *StoreSuite) forgetWaiting() bool {
 	var waiting bool
 	s.Require().NoError(s.store.global.NewRaw(`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
@@ -270,6 +270,101 @@ func (s *StoreSuite) TestARunWriteTheForgetWaitsOnIsRedactedToo() {
 		"scheduled_tasks delete reminder", "scheduled_tasks delete reminder", "scheduled_tasks delete reminder",
 		"scheduled_task_runs delete ", "scheduled_task_runs delete ", "scheduled_task_runs delete ",
 	}, s.taskChanges("acme"), "the run write's change, which holds the task's instructions, names them no more")
+}
+
+func (s *StoreSuite) TestDeletingASessionRedactsTheChangesRecordedOfItsTasks() {
+	for _, customer := range []string{"acme", "globex"} {
+		s.Require().NoError(s.store.StartDataCapture(s.ctx, customer, time.Hour, time.Second))
+	}
+	due := s.base.Add(-time.Minute)
+	// Followed up in the session only once its first occurrence opened it, so its earlier
+	// changes do not name the session.
+	s.task("followup", func(task *ScheduledTask) { task.NextRunAt = &due })
+	// Made in the session, following up in another.
+	s.task("origin", func(task *ScheduledTask) { task.OriginSessionID = "session-1"; task.NextRunAt = &due })
+	s.task("other", func(task *ScheduledTask) { task.SessionID = "session-2"; task.NextRunAt = &due })
+	s.task("followup", func(task *ScheduledTask) {
+		task.CustomerID = "globex"
+		task.SessionID = "session-1"
+		task.NextRunAt = nil
+	})
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	s.Require().NoError(s.store.ScheduledTasks.SetSession(s.ctx, "acme", "followup", "session-1"))
+	s.Require().NoError(s.store.ScheduledTasks.SetSession(s.ctx, "acme", "origin", "session-9"))
+
+	s.Require().NoError(s.store.ScheduledTasks.DeleteForSession(s.ctx, "acme", "session-1"))
+
+	_, err = s.store.ScheduledTasks.Get(s.ctx, "acme", "other")
+	s.Require().NoError(err, "another session's task stays")
+	s.ElementsMatch([]string{
+		"scheduled_tasks insert other", "scheduled_tasks update other", "scheduled_task_runs insert other",
+		"scheduled_tasks delete followup", "scheduled_tasks delete followup", "scheduled_tasks delete followup",
+		"scheduled_tasks delete followup", "scheduled_task_runs delete ", "scheduled_task_runs delete ",
+		"scheduled_tasks delete origin", "scheduled_tasks delete origin", "scheduled_tasks delete origin",
+		"scheduled_tasks delete origin", "scheduled_task_runs delete ", "scheduled_task_runs delete ",
+	}, s.taskChanges("acme"), "each change of the session's tasks and their runs is a delete, and another session's keep theirs")
+	s.Equal([]string{"scheduled_tasks insert followup"}, s.taskChanges("globex"), "another app's session by the same id keeps its task's")
+}
+
+func (s *StoreSuite) TestARunWriteTheSessionDeleteWaitsOnIsRedactedToo() {
+	s.Require().NoError(s.store.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	due := s.base.Add(-time.Minute)
+	s.task("reminder", func(task *ScheduledTask) { task.SessionID = "session-1"; task.NextRunAt = &due })
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	// As TakeCall writes it: the run's row alone, not its task's.
+	writing, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer writing.Rollback() //nolint:errcheck // committed below; this only ends a failed test's transaction
+	_, err = writing.ExecContext(s.ctx, "UPDATE scheduled_task_runs SET session_id = 'call' WHERE customer_id = 'acme' AND task_id = 'reminder'")
+	s.Require().NoError(err)
+
+	deleted := make(chan error, 1)
+	go func() { deleted <- s.store.ScheduledTasks.DeleteForSession(s.ctx, "acme", "session-1") }()
+	s.Require().Eventually(s.forgetWaiting, 10*time.Second, 10*time.Millisecond, "the delete waits on the run's row")
+	s.Require().NoError(writing.Commit())
+	s.Require().NoError(<-deleted)
+
+	s.ElementsMatch([]string{
+		"scheduled_tasks delete reminder", "scheduled_tasks delete reminder", "scheduled_tasks delete reminder",
+		"scheduled_task_runs delete ", "scheduled_task_runs delete ", "scheduled_task_runs delete ",
+	}, s.taskChanges("acme"), "the run write's change, which holds the task's instructions, is emptied too")
+}
+
+func (s *StoreSuite) TestATaskMovedIntoTheSessionWhileItsDeleteWaitsIsKept() {
+	s.Require().NoError(s.store.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
+	due := s.base.Add(-time.Minute)
+	s.task("reminder", func(task *ScheduledTask) { task.SessionID = "session-1"; task.NextRunAt = &due })
+	s.task("later", func(task *ScheduledTask) { task.NextRunAt = nil })
+	_, err := s.store.ScheduledTasks.Claim(s.ctx, 16, time.Minute)
+	s.Require().NoError(err)
+	// The delete waits on the session's run once it has locked the session's tasks.
+	writing, err := s.store.global.BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer writing.Rollback() //nolint:errcheck // committed below; this only ends a failed test's transaction
+	_, err = writing.ExecContext(s.ctx, "UPDATE scheduled_task_runs SET session_id = 'call' WHERE customer_id = 'acme' AND task_id = 'reminder'")
+	s.Require().NoError(err)
+
+	deleted := make(chan error, 1)
+	go func() { deleted <- s.store.ScheduledTasks.DeleteForSession(s.ctx, "acme", "session-1") }()
+	s.Require().Eventually(s.forgetWaiting, 10*time.Second, 10*time.Millisecond, "the delete waits on the run's row")
+	s.Require().NoError(s.store.ScheduledTasks.SetSession(s.ctx, "acme", "later", "session-1"))
+	s.Require().NoError(writing.Commit())
+	s.Require().NoError(<-deleted)
+
+	_, err = s.store.ScheduledTasks.Get(s.ctx, "acme", "later")
+	s.Require().NoError(err, "a task the delete did not lock is not deleted")
+	s.Contains(s.taskChanges("acme"), "scheduled_tasks insert later", "and keeps its changes")
+}
+
+func (s *StoreSuite) TestDeletingTheTasksOfNoSessionDeletesNone() {
+	s.task("reminder", func(task *ScheduledTask) { task.NextRunAt = nil })
+
+	s.Require().NoError(s.store.ScheduledTasks.DeleteForSession(s.ctx, "acme", ""))
+
+	_, err := s.store.ScheduledTasks.Get(s.ctx, "acme", "reminder")
+	s.Require().NoError(err, "a task that follows up in no session is not one of an empty session id's")
 }
 
 func (s *StoreSuite) TestATaskOfTheUsersMadeWhileTheForgetRedactsIsKeptWithItsChanges() {
@@ -347,25 +442,52 @@ func (s *StoreSuite) TestForgettingAUserKeepsTheChangesOfOtherTablesThatNameThem
 	}), "the session stays, and so does its change")
 }
 
-func (s *StoreSuite) TestEveryTableWithAUserIDIsForgottenOrKeptForAReason() {
+// forgottenUserColumns are the columns naming an end user that forgetting a user reaches: the
+// requests and call legs of every shard (Requests.RenameUser, CallLegs.RenameUser), the tasks
+// ForgetUserTasks deletes, the logs AgentLogs.DeleteUser deletes and the rows ForgetUserSettings
+// deletes or rewrites.
+var forgottenUserColumns = []string{
+	"requests.user_id", "call_legs.user_id", "scheduled_tasks.user_id", "agent_logs.user_id",
+	"limits.user_id", "usage_resets.user_id", "limit_grants.user_id", "campaigns.user_id",
+	"user_phones.user_id", "user_phone_history.user_id", "contact_map.user_id", "channel_links.user_id",
+	"users.id", "users.claimed_by",
+}
+
+// keptUserColumns are the columns naming an end user that forgetting a user leaves as they are,
+// each with why.
+var keptUserColumns = map[string]string{
+	"agent_sessions.user_id": "the user's conversations, which the app deletes one by one (DELETE /v1/agents/sessions/{id}), " +
+		"their tasks with them and the changes recorded of those tasks and their runs emptied (DeleteForSession)",
+	"conversation_documents.owner_user_id": "the files read into one of the user's conversations, deleted with it (Sessions.Delete)",
+	"agent_branch_messages.author_id": "copies of messages a rewind hid, deleted with their session: those of the user's sessions " +
+		"by forget (BranchMessages.DeleteUser), one they wrote in another user's session with that session",
+	"connector_connections.owner_id": "the user's own connections to a provider, which the app deletes (ConnectorConnections.DeleteUser)",
+	"channel_thread_inbound.author_id": "the provider's sender of a message queued for a thread channel, not an end user id, " +
+		"kept until written or for channelInboundFailedKeep",
+	"channel_thread_waiting.author_id": "the provider's sender of a message waiting for its thread to link, not an end user id, " +
+		"kept for channelWaitingKeep",
+}
+
+func (s *StoreSuite) TestEveryColumnNamingAUserIsForgottenOrKeptForAReason() {
 	var found []string
 	for _, db := range []*bun.DB{s.store.global, s.store.shard} {
-		var tables []string
-		s.Require().NoError(db.NewRaw(`SELECT c.relname FROM pg_attribute AS a
+		var columns []string
+		s.Require().NoError(db.NewRaw(`SELECT c.relname || '.' || a.attname FROM pg_attribute AS a
 JOIN pg_class AS c ON c.oid = a.attrelid
-WHERE a.attname = 'user_id' AND NOT a.attisdropped AND c.relkind IN ('r', 'p') AND NOT c.relispartition
-	AND c.relnamespace = current_schema()::regnamespace`).Scan(s.ctx, &tables))
-		found = append(found, tables...)
+WHERE (a.attname IN ('user_id', 'owner_user_id', 'owner_id', 'claimed_by', 'author_id') OR c.relname = 'users' AND a.attname = 'id')
+	AND NOT a.attisdropped AND c.relkind IN ('r', 'p') AND NOT c.relispartition
+	AND c.relnamespace = current_schema()::regnamespace`).Scan(s.ctx, &columns))
+		found = append(found, columns...)
 	}
 	slices.Sort(found)
 	found = slices.Compact(found)
 
-	for table, reason := range keptUserTables {
-		s.NotEmpty(reason, table)
-		s.NotContains(forgottenUserTables, table, "a table is forgotten or kept, not both")
+	for column, reason := range keptUserColumns {
+		s.NotEmpty(reason, column)
+		s.NotContains(forgottenUserColumns, column, "a column is forgotten or kept, not both")
 	}
-	listed := slices.Sorted(slices.Values(append(slices.Clone(forgottenUserTables), slices.Collect(maps.Keys(keptUserTables))...)))
-	s.Equal(found, listed, "a table with a user_id column goes in forgottenUserTables or keptUserTables")
+	listed := slices.Sorted(slices.Values(append(slices.Clone(forgottenUserColumns), slices.Collect(maps.Keys(keptUserColumns))...)))
+	s.Equal(found, listed, "a column naming an end user goes in forgottenUserColumns or keptUserColumns")
 }
 
 // tasksOn counts a customer's scheduled tasks and runs on a deployment.

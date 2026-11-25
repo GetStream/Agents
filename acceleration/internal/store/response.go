@@ -141,7 +141,9 @@ func (r *Responses) Insert(ctx context.Context, response *AgentResponse) error {
 	if response.QuestionResponseID == "" {
 		response.QuestionResponseID = response.ID
 	}
-	response.Said = SafeLogText(response.Said)
+	// What was asked is the conversation, read back to the model when it is carried on, so it
+	// is kept whole, up to maxTurnText.
+	response.Said = turnText(response.Said)
 
 	// The update sets nothing new: it tells a retry, which matches its own row, from an id
 	// another customer's row has, which matches none.
@@ -591,18 +593,13 @@ func (r *Responses) BranchTail(ctx context.Context, customerID, sessionID, fromR
 	return path, nil
 }
 
-// MoveActivePath makes the path ending at leafResponseID the session's conversation. The
+// MoveActivePathUntil makes the path ending at leafResponseID the session's conversation. The
 // responses after the point where it leaves the current conversation are rewound at at, and
 // the ones on the new path after that point are brought back. An empty leafResponseID is a
 // conversation with nothing in it yet, as the first question asked again leaves it: every
-// response is rewound. Running it again changes nothing.
-func (r *Responses) MoveActivePath(ctx context.Context, customerID, sessionID, leafResponseID string, at time.Time) error {
-	return r.MoveActivePathUntil(ctx, customerID, sessionID, leafResponseID, at, time.Time{})
-}
-
-// MoveActivePathUntil is MoveActivePath taking off the conversation only responses created at
-// or before until, the zero time for every one: a switch finished after the person carried on
-// leaves the turns asked since it began where they are.
+// response is rewound. Running it again changes nothing. It takes off the conversation only
+// responses created at or before until, the zero time for every one: a switch finished after
+// the person carried on leaves the turns asked since it began where they are.
 func (r *Responses) MoveActivePathUntil(ctx context.Context, customerID, sessionID, leafResponseID string, at, until time.Time) error {
 	if customerID == "" || sessionID == "" {
 		return stack.Wrap(errors.New("store: a customer and a session id are required"))
