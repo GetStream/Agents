@@ -904,15 +904,16 @@ func documentHandWritten(api huma.API) {
 			{Name: "q", In: "query", Schema: &huma.Schema{Type: huma.TypeString, MaxLength: itemLimit(256)}},
 			{Name: "from", In: "query", Schema: &huma.Schema{Type: huma.TypeString, Format: "date-time"}},
 			{Name: "to", In: "query", Schema: &huma.Schema{Type: huma.TypeString, Format: "date-time"}},
+			{Name: "region", In: "query", Description: "The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering; session_id reads the session's region instead.", Schema: &huma.Schema{Type: huma.TypeString}},
 			{Name: "cursor", In: "query", Schema: &huma.Schema{Type: huma.TypeString}},
 			{Name: "limit", In: "query", Schema: &huma.Schema{Type: huma.TypeInteger, Minimum: bound(1), Maximum: bound(250), Default: 250}},
 		},
 		Responses: map[string]*huma.Response{
-			"200": {Description: "Newest first; resume cursor marks the history/live handoff.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[AgentLogPage](), true, "")}}},
+			"200": {Headers: map[string]*huma.Param{shardHeader: {Description: "The region that answered. Absent on a deployment of one region.", Schema: &huma.Schema{Type: huma.TypeString}}}, Description: "Newest first; resume cursor marks the history/live handoff.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[AgentLogPage](), true, "")}}},
 			"400": {Ref: "#/components/responses/BadRequest"},
 			"401": {Ref: "#/components/responses/Unauthorized"},
 			"403": {Ref: "#/components/responses/Forbidden"},
-			"503": {Description: "Log storage is unavailable.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"503": {Description: "Log storage is unavailable, or the region asked for, or the session's, could not be reached (shard_unavailable).", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 		},
 	})
 	document.AddOperation(&huma.Operation{
@@ -922,12 +923,14 @@ func documentHandWritten(api huma.API) {
 		Summary:     "Redacted structured log details scoped to the customer",
 		Parameters: []*huma.Param{
 			{Name: "id", In: "path", Required: true, Schema: &huma.Schema{Type: huma.TypeString}},
+			{Name: "region", In: "query", Description: "The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering.", Schema: &huma.Schema{Type: huma.TypeString}},
 		},
 		Responses: map[string]*huma.Response{
-			"200": {Description: "One log with full safe metadata.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[AgentLog](), true, "")}}},
+			"200": {Headers: map[string]*huma.Param{shardHeader: {Description: "The region that answered. Absent on a deployment of one region.", Schema: &huma.Schema{Type: huma.TypeString}}}, Description: "One log with full safe metadata.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[AgentLog](), true, "")}}},
+			"400": {Ref: "#/components/responses/BadRequest"},
 			"401": {Ref: "#/components/responses/Unauthorized"},
 			"403": {Ref: "#/components/responses/Forbidden"},
-			"503": {Description: "Log storage is unavailable.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"503": {Description: "Log storage is unavailable, or the region asked for could not be reached (shard_unavailable).", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 			"404": {Ref: "#/components/responses/NotFound"},
 		},
 	})
@@ -948,15 +951,16 @@ func documentHandWritten(api huma.API) {
 			{Name: "q", In: "query", Schema: &huma.Schema{Type: huma.TypeString, MaxLength: itemLimit(256)}},
 			{Name: "from", In: "query", Schema: &huma.Schema{Type: huma.TypeString, Format: "date-time"}},
 			{Name: "to", In: "query", Schema: &huma.Schema{Type: huma.TypeString, Format: "date-time"}},
+			{Name: "region", In: "query", Description: "The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering; session_id reads the session's region instead.", Schema: &huma.Schema{Type: huma.TypeString}},
 			{Name: "cursor", In: "query", Schema: &huma.Schema{Type: huma.TypeString}},
 			{Name: "Last-Event-ID", In: "header", Schema: &huma.Schema{Type: huma.TypeString}},
 		},
 		Responses: map[string]*huma.Response{
-			"200": {Description: "SSE events logs, checkpoint and reset.", Content: map[string]*huma.MediaType{"text/event-stream": {Schema: &huma.Schema{Type: huma.TypeString}}}},
+			"200": {Headers: map[string]*huma.Param{shardHeader: {Description: "The region that answered. Absent on a deployment of one region.", Schema: &huma.Schema{Type: huma.TypeString}}}, Description: "SSE events logs, checkpoint and reset.", Content: map[string]*huma.MediaType{"text/event-stream": {Schema: &huma.Schema{Type: huma.TypeString}}}},
 			"400": {Ref: "#/components/responses/BadRequest"},
 			"401": {Ref: "#/components/responses/Unauthorized"},
 			"403": {Ref: "#/components/responses/Forbidden"},
-			"503": {Description: "Log storage is unavailable.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"503": {Description: "Log storage is unavailable, or the region asked for, or the session's, could not be reached (shard_unavailable).", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 		},
 	})
 	document.AddOperation(&huma.Operation{

@@ -2385,6 +2385,9 @@ pub struct Call {
     pub llm_used: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub mode: ::std::option::Option<SessionMode>,
+    ///The shard the call is kept in. Set on a listed call of a deployment with shards.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub region: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub review_notes: ::std::option::Option<::std::string::String>,
     ///How well the agent handled it, from 1 to 5.
@@ -9115,7 +9118,7 @@ pub struct OrganizationActivity {
     pub organization_id: ::std::string::String,
     ///The sessions the organization's apps opened from since on, from the shards listed in shards.
     pub sessions: ActivitySessions,
-    ///The names of the shards whose requests the meters sum, this one's first. A deployment that sets no postgres.shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
+    ///The names of the shards whose requests the meters sum, this one's first. A deployment that sets no shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
     pub shards: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
     ///The start of what was read. Areas are kept by UTC day, so they count the whole day it falls on.
@@ -11452,6 +11455,9 @@ pub struct Session {
     pub pinned_at: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub project_id: ::std::option::Option<::std::string::String>,
+    ///The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub region: ::std::option::Option<::std::string::String>,
     ///Why the review scored the conversation as it did. Read by a backend only.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub review_notes: ::std::option::Option<::std::string::String>,
@@ -13038,7 +13044,7 @@ pub struct SkillRequest {
     pub files: ::std::collections::BTreeMap<::std::string::String, ::std::string::String>,
     ///The full prompt, which only the subagent sees.
     pub instructions: ::std::string::String,
-    ///How the config names it, which is unique among that config's own skills.
+    ///How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox.
     pub name: ::std::string::String,
 }
 ///`SkippedVendor`

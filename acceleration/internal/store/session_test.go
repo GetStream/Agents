@@ -530,62 +530,6 @@ func (s *StoreSuite) TestACarriedOnRowFromBeforeIsGivenItsProjectTag() {
 	s.Equal("alpha", *found.ProjectTag)
 }
 
-// A read of a session asks no other shard for its project tag, whenever the row was written: a
-// router writes when it opened a few microseconds after when it was created.
-func (s *StoreSuite) TestASilentShardDoesNotHoldASessionsRead() {
-	if s.store.Sharded() {
-		s.T().Skip("the silent shard stands beside a deployment of one database")
-	}
-	down := s.withAShardThatNeverAnswers()
-	for id, opened := range map[string]time.Duration{"once": 3 * time.Microsecond, "carried": time.Hour} {
-		s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: id, CustomerID: "app", Project: "alpha",
-			CallerKind: "server", CreatedAt: s.base, OpenedAt: s.base.Add(opened)}))
-
-		began := time.Now()
-		_, err := down.Sessions.Get(s.ctx, "app", id)
-
-		s.Require().NoError(err)
-		s.Less(time.Since(began), time.Second, id)
-	}
-}
-
-// Asked for its tag, a row that does not say it waits out a silent shard no longer than its
-// bound, and is given none: that shard may say another. One with no project has none to ask for.
-func (s *StoreSuite) TestASilentShardLeavesAProjectTagUnreadWithinItsBound() {
-	if s.store.Sharded() {
-		s.T().Skip("the silent shard stands beside a deployment of one database")
-	}
-	down := s.withAShardThatNeverAnswers()
-	row := AgentSession{ID: "one", CustomerID: "app", Project: "alpha", CallerKind: "server"}
-
-	began := time.Now()
-	s.ErrorIs(down.Sessions.ReadProjectTag(s.ctx, &row), ErrProjectTagUnread)
-	s.Less(time.Since(began), 3*time.Second)
-	s.Nil(row.ProjectTag)
-
-	began = time.Now()
-	for _, known := range []AgentSession{{Project: "alpha", ProjectTag: new("beta")}, {ID: "none", CustomerID: "app", CallerKind: "server"}} {
-		s.Require().NoError(down.Sessions.ReadProjectTag(s.ctx, &known))
-	}
-	s.Less(time.Since(began), time.Second)
-}
-
-func (s *StoreSuite) TestAProjectTagIsFoundWithoutWaitingOnASilentShard() {
-	if s.store.Sharded() {
-		s.T().Skip("the silent shard stands beside a deployment of one database")
-	}
-	down := s.withAShardThatNeverAnswers()
-	s.opened("one", "app", s.base, func(session *AgentSession) { session.ProjectTag = new("beta") })
-	// As read before the row said its tag.
-	row := AgentSession{ID: "one", CustomerID: "app", Project: "alpha"}
-
-	began := time.Now()
-	s.Require().NoError(down.Sessions.ReadProjectTag(s.ctx, &row))
-
-	s.Equal("beta", row.TaggedProject())
-	s.Less(time.Since(began), time.Second)
-}
-
 // A router of the release before opens a session without saying its project tag, so the kind of
 // caller that opened it says, unless it is a fork.
 func (s *StoreSuite) TestASessionOpenedByTheReleaseBeforeIsTaggedByWhoOpenedIt() {
@@ -1232,6 +1176,7 @@ func (s *StoreSuite) TestARedactedToolCallStillCountsInToolUsage() {
 	s.toolItems("one", "app", "first", &due)
 	_, err := s.store.ResponseItems.Redact(s.ctx, due, 100)
 	s.Require().NoError(err)
+	s.shipStats(s.base.Add(24 * time.Hour))
 
 	overall, tools, err := s.store.CustomerToolUsage(s.ctx, "app", "", s.base, s.base.Add(24*time.Hour))
 	s.Require().NoError(err)
@@ -1294,16 +1239,34 @@ func sessionIDs(sessions []AgentSession) []string {
 // queryBudget is one repository call and the statements it may send.
 type queryBudget struct {
 	name string
-	// fixed statements are sent once, and perShard ones to every shard the store reads.
+	// fixed statements are sent once, and perShard ones to this shard.
 	fixed, perShard int
 	run             func() error
+}
+
+// homeWrites is the statements writing a session's home sends: one to the shared database in a
+// deployment with shards.
+func (s *StoreSuite) homeWrites() int {
+	if s.store.homed {
+		return 1
+	}
+	return 0
+}
+
+// indexReads is the statements a list sends to the shared copy of every shard's rows besides
+// this shard's own: one in a deployment with shards.
+func (s *StoreSuite) indexReads() int {
+	if s.store.Indexed() {
+		return 1
+	}
+	return 0
 }
 
 // withinQueryBudgets runs each call in turn, checking it succeeds in the statements it is allowed.
 func (s *StoreSuite) withinQueryBudgets(budgets []queryBudget) {
 	for _, one := range budgets {
 		var err error
-		s.Equal(one.fixed+one.perShard*len(s.store.shards()), s.countQueries(func() { err = one.run() }), one.name)
+		s.Equal(one.fixed+one.perShard, s.countQueries(func() { err = one.run() }), one.name)
 		s.Require().NoError(err, one.name)
 	}
 }
@@ -1322,31 +1285,33 @@ func (s *StoreSuite) TestSessionQueryBudgets() {
 		s.Len(listed, 11, "a page and the row that says there is another")
 		return err
 	}
+	s.shipIndex()
 	s.withinQueryBudgets([]queryBudget{
-		{"Upsert", 1, 0, func() error { return s.store.Sessions.Upsert(s.ctx, row) }},
+		{"Upsert", 1 + s.homeWrites(), 0, func() error { return s.store.Sessions.Upsert(s.ctx, row) }},
 		// The insert finds the row, which the update writes.
-		{"Upsert again", 2, 0, func() error { return s.store.Sessions.Upsert(s.ctx, row) }},
+		{"Upsert again", 2 + s.homeWrites(), 0, func() error { return s.store.Sessions.Upsert(s.ctx, row) }},
 		// The update writes nothing, so the row is read to find it is the customer's own.
 		{"Upsert of a run opened before", 3, 0, func() error { return s.store.Sessions.Upsert(s.ctx, &late) }},
-		{"Supersede", 0, 1, func() error { return s.store.Sessions.Supersede(s.ctx, "app", row.ID, row.OpenedAt) }},
 		{"SetToolTimeout", 1, 0, func() error { return s.store.Sessions.SetToolTimeout(s.ctx, row.CustomerID, row.ID, "http", 900) }},
 		{"SawVideo", 1, 0, func() error { return s.store.Sessions.SawVideo(s.ctx, row.CustomerID, row.ID) }},
 		{"Voiced", 1, 0, func() error { return s.store.Sessions.Voiced(s.ctx, row.CustomerID, row.ID) }},
-		{"Describe", 0, 1, func() error { return s.store.Sessions.Describe(s.ctx, "app", row.ID, "Title", "About", nil) }},
-		{"ChooseConnection", 0, 1, func() error {
+		{"Describe", 1, 0, func() error { return s.store.Sessions.Describe(s.ctx, "app", row.ID, "Title", "About", nil) }},
+		{"ChooseConnection", 1, 0, func() error {
 			return s.store.Sessions.ChooseConnection(s.ctx, "app", row.ID, "crm", "connection")
 		}},
 		{"Exists", 1, 0, func() error { _, err := s.store.Sessions.Exists(s.ctx, row.ID); return err }},
 		{"Get", 1, 0, func() error { _, err := s.store.Sessions.Get(s.ctx, "app", row.ID); return err }},
-		{"ConversationPin", 0, 1, func() error {
+		{"ConversationPin", 1, 0, func() error {
 			_, _, err := s.store.Sessions.ConversationPin(s.ctx, "app", "conversation")
 			return err
 		}},
-		{"Select", 0, 1, func() error { return pages(s.store.Sessions.Select(s.ctx, "app", SessionFilter{Limit: 10})) }},
-		{"Search", 0, 1, func() error { return pages(s.store.Sessions.Search(s.ctx, "app", "docs", SessionFilter{Limit: 10})) }},
-		{"Pin", 0, 1, func() error { _, err := s.store.Sessions.Pin(s.ctx, "app", row.ID, true, at); return err }},
-		{"Endings", 0, 1, func() error { _, err := s.store.Sessions.Endings(s.ctx, []string{"app"}, at); return err }},
-		{"Latest", 0, 1, func() error {
+		{"Select", s.indexReads(), 1, func() error { return pages(s.store.Sessions.Select(s.ctx, "app", SessionFilter{Limit: 10})) }},
+		{"Search", s.indexReads(), 1, func() error {
+			return pages(s.store.Sessions.Search(s.ctx, "app", "docs", SessionFilter{Limit: 10}))
+		}},
+		{"Pin", 1, 0, func() error { _, err := s.store.Sessions.Pin(s.ctx, "app", row.ID, true, at); return err }},
+		{"Endings", 1, 0, func() error { _, err := s.store.Sessions.Endings(s.ctx, []string{"app"}, at); return err }},
+		{"Latest", 1, 0, func() error {
 			latest, err := s.store.Sessions.Latest(s.ctx, []string{"app"}, at, 10)
 			s.Len(latest, 10)
 			return err
@@ -1360,7 +1325,8 @@ func (s *StoreSuite) TestSessionQueryBudgets() {
 		}},
 		{"SessionTools.Upsert", 1, 0, func() error { return s.store.SessionTools.Upsert(s.ctx, row.CustomerID, row.ID, tools) }},
 		{"SessionTools.Get", 1, 0, func() error { _, err := s.store.SessionTools.Get(s.ctx, row.CustomerID, row.ID); return err }},
-		{"Delete", 0, 2, func() error { return s.store.Sessions.Delete(s.ctx, "app", row.ID) }},
+		// The session and its tools, and with shards its home and its row in the shared list.
+		{"Delete", 2 + 2*s.homeWrites(), 0, func() error { return s.store.Sessions.Delete(s.ctx, "app", row.ID) }},
 	})
 
 	// Run twice: only a read by the id alone would tell another customer's row from the

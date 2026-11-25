@@ -317,7 +317,8 @@ func newRouter(t *testing.T) *router {
 	mux.HandleFunc("GET /v1/agents/calls", func(w http.ResponseWriter, r *http.Request) {
 		backend.record(r)
 		calls := []acceleration.Call{}
-		if r.URL.Query().Get("session_id") == "session-1" {
+		switch r.URL.Query().Get("session_id") {
+		case "session-1":
 			calls = []acceleration.Call{{Id: "call-2", SessionId: ptr("session-1")}, {Id: "call-1", SessionId: ptr("session-1")}}
 		}
 		answer(w, http.StatusOK, calls)

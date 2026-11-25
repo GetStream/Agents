@@ -16,6 +16,7 @@ def _get_kwargs(
     *,
     limit: int | Unset = UNSET,
     cursor: str | Unset = UNSET,
+    region: str | Unset = UNSET,
 ) -> dict[str, Any]:
 
     params: dict[str, Any] = {}
@@ -23,6 +24,8 @@ def _get_kwargs(
     params["limit"] = limit
 
     params["cursor"] = cursor
+
+    params["region"] = region
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -103,6 +106,7 @@ def sync_detailed(
     client: AuthenticatedClient | Client,
     limit: int | Unset = UNSET,
     cursor: str | Unset = UNSET,
+    region: str | Unset = UNSET,
 ) -> Response[ConnectionInvocationPage | ErrorResponse]:
     """List a connection's tool calls
 
@@ -117,6 +121,8 @@ def sync_detailed(
         id (str): The connection, as returned when it was created.
         limit (int | Unset): Up to 200. Omitted is 25.
         cursor (str | Unset): The next_cursor of the previous page. Omitted is the first page.
+        region (str | Unset): The region whose calls to list, as X-Shard or a session's region
+            names it. Each region keeps the calls it ran. Omitted is the region answering.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -130,6 +136,7 @@ def sync_detailed(
         id=id,
         limit=limit,
         cursor=cursor,
+        region=region,
     )
 
     response = client.get_httpx_client().request(
@@ -145,6 +152,7 @@ def sync(
     client: AuthenticatedClient | Client,
     limit: int | Unset = UNSET,
     cursor: str | Unset = UNSET,
+    region: str | Unset = UNSET,
 ) -> ConnectionInvocationPage | ErrorResponse | None:
     """List a connection's tool calls
 
@@ -159,6 +167,8 @@ def sync(
         id (str): The connection, as returned when it was created.
         limit (int | Unset): Up to 200. Omitted is 25.
         cursor (str | Unset): The next_cursor of the previous page. Omitted is the first page.
+        region (str | Unset): The region whose calls to list, as X-Shard or a session's region
+            names it. Each region keeps the calls it ran. Omitted is the region answering.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -173,6 +183,7 @@ def sync(
         client=client,
         limit=limit,
         cursor=cursor,
+        region=region,
     ).parsed
 
 
@@ -182,6 +193,7 @@ async def asyncio_detailed(
     client: AuthenticatedClient | Client,
     limit: int | Unset = UNSET,
     cursor: str | Unset = UNSET,
+    region: str | Unset = UNSET,
 ) -> Response[ConnectionInvocationPage | ErrorResponse]:
     """List a connection's tool calls
 
@@ -196,6 +208,8 @@ async def asyncio_detailed(
         id (str): The connection, as returned when it was created.
         limit (int | Unset): Up to 200. Omitted is 25.
         cursor (str | Unset): The next_cursor of the previous page. Omitted is the first page.
+        region (str | Unset): The region whose calls to list, as X-Shard or a session's region
+            names it. Each region keeps the calls it ran. Omitted is the region answering.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -209,6 +223,7 @@ async def asyncio_detailed(
         id=id,
         limit=limit,
         cursor=cursor,
+        region=region,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -222,6 +237,7 @@ async def asyncio(
     client: AuthenticatedClient | Client,
     limit: int | Unset = UNSET,
     cursor: str | Unset = UNSET,
+    region: str | Unset = UNSET,
 ) -> ConnectionInvocationPage | ErrorResponse | None:
     """List a connection's tool calls
 
@@ -236,6 +252,8 @@ async def asyncio(
         id (str): The connection, as returned when it was created.
         limit (int | Unset): Up to 200. Omitted is 25.
         cursor (str | Unset): The next_cursor of the previous page. Omitted is the first page.
+        region (str | Unset): The region whose calls to list, as X-Shard or a session's region
+            names it. Each region keeps the calls it ran. Omitted is the region answering.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -251,5 +269,6 @@ async def asyncio(
             client=client,
             limit=limit,
             cursor=cursor,
+            region=region,
         )
     ).parsed

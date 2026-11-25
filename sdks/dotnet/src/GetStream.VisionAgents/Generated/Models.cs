@@ -2994,6 +2994,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("mode")]
         public string? Mode { get; set; } = default!;
 
+        /// <summary>
+        /// The shard the call is kept in. Set on a listed call of a deployment with shards.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("region")]
+        public string? Region { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("review_notes")]
         public string? ReviewNotes { get; set; } = default!;
 
@@ -10673,7 +10679,7 @@ namespace GetStream.VisionAgents.Models
         public ActivitySessions Sessions { get; set; } = new ActivitySessions();
 
         /// <summary>
-        /// The names of the shards whose requests the meters sum, this one's first. A deployment that sets no postgres.shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
+        /// The names of the shards whose requests the meters sum, this one's first. A deployment that sets no shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("shards")]
         public System.Collections.Generic.List<string>? Shards { get; set; } = default!;
@@ -13884,6 +13890,12 @@ namespace GetStream.VisionAgents.Models
         public string? ProjectId { get; set; } = default!;
 
         /// <summary>
+        /// The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("region")]
+        public string? Region { get; set; } = default!;
+
+        /// <summary>
         /// Why the review scored the conversation as it did. Read by a backend only.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("review_notes")]
@@ -15189,7 +15201,7 @@ namespace GetStream.VisionAgents.Models
         public string Instructions { get; set; } = default!;
 
         /// <summary>
-        /// How the config names it, which is unique among that config's own skills.
+        /// How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("name")]
         public string Name { get; set; } = default!;

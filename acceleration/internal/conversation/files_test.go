@@ -475,3 +475,23 @@ func TestARetriedFollowUpNobodyReadsBackKeepsNoCopyAcrossRestart(t *testing.T) {
 	_, text, known := c.FollowUpReply("thread_message")
 	require.Equal(t, []any{"", true}, []any{text, known})
 }
+
+func TestAFileNamedByDotsAloneIsRefusedForItsName(t *testing.T) {
+	db, client := newChat(t)
+	s := NewForChat(client)
+	defer s.Close()
+	c, _, _, err := s.Open(context.Background(), "customer", "artist", "")
+	require.NoError(t, err)
+
+	for _, name := range []string{".", "..", "/tmp/.."} {
+		_, err = c.Publish(context.Background(), sandbox.File{Name: name, MIME: "text/plain", Data: []byte("x")})
+
+		require.ErrorContains(t, err, "needs a name", name)
+	}
+
+	_, err = c.Publish(context.Background(), sandbox.File{Name: "..txt", MIME: "text/plain", Data: []byte("x")})
+	require.NoError(t, err)
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	require.Len(t, db.uploads, 1)
+}

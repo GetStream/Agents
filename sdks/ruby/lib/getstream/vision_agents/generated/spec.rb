@@ -508,7 +508,7 @@ module GetStream
         }.freeze,
         "getAgentLog" => {
           method: :get, path: "/v1/agents/logs/{id}",
-          path_params: %w[id].freeze, query: [].freeze,
+          path_params: %w[id].freeze, query: %w[region].freeze,
           body: nil, body_required: false,
           socket: false, client_accessible: false
         }.freeze,
@@ -910,7 +910,7 @@ module GetStream
         }.freeze,
         "listAgentLogs" => {
           method: :get, path: "/v1/agents/logs",
-          path_params: [].freeze, query: %w[config_id session_id user_id severity source q from to cursor limit].freeze,
+          path_params: [].freeze, query: %w[config_id session_id user_id severity source q from to region cursor limit].freeze,
           body: nil, body_required: false,
           socket: false, client_accessible: false
         }.freeze,
@@ -940,7 +940,7 @@ module GetStream
         }.freeze,
         "listConnectionInvocations" => {
           method: :get, path: "/v1/agents/connections/{id}/invocations",
-          path_params: %w[id].freeze, query: %w[limit cursor].freeze,
+          path_params: %w[id].freeze, query: %w[limit cursor region].freeze,
           body: nil, body_required: false,
           socket: false, client_accessible: false
         }.freeze,
@@ -1654,7 +1654,7 @@ module GetStream
         }.freeze,
         "streamAgentLogs" => {
           method: :get, path: "/v1/agents/logs/stream",
-          path_params: [].freeze, query: %w[config_id session_id user_id severity source q from to cursor].freeze,
+          path_params: [].freeze, query: %w[config_id session_id user_id severity source q from to region cursor].freeze,
           body: nil, body_required: false,
           socket: false, client_accessible: false
         }.freeze,
@@ -2070,7 +2070,7 @@ module GetStream
           required: %w[e164 vendor].freeze, open: false
         }.freeze,
         "Call" => {
-          properties: %w[agent_id call_id campaign_id contact_id direction ended_at from_number id instructions llm llm_used mode review_notes review_score session_id skills started_at sts sts_used stt stt_used subagent subagent_used summary tags to_number tts tts_used usage voice voice_used].freeze,
+          properties: %w[agent_id call_id campaign_id contact_id direction ended_at from_number id instructions llm llm_used mode region review_notes review_score session_id skills started_at sts sts_used stt stt_used subagent subagent_used summary tags to_number tts tts_used usage voice voice_used].freeze,
           required: %w[agent_id call_id direction id started_at].freeze, open: false
         }.freeze,
         "CallEvent" => {
@@ -3070,7 +3070,7 @@ module GetStream
           required: %w[url].freeze, open: false
         }.freeze,
         "Session" => {
-          properties: %w[agent agent_id call_id call_outcome call_type closed_at config_id context_truncated conversation_id created_at custom description end_fault end_reason end_stage forked_from id incognito instructions last_response_at llm modality mode model_overwrites pinned_at project_id review_notes review_score state sts stt subagent summary team text title tts usage user_id video voice].freeze,
+          properties: %w[agent agent_id call_id call_outcome call_type closed_at config_id context_truncated conversation_id created_at custom description end_fault end_reason end_stage forked_from id incognito instructions last_response_at llm modality mode model_overwrites pinned_at project_id region review_notes review_score state sts stt subagent summary team text title tts usage user_id video voice].freeze,
           required: %w[agent_id call_id call_type created_at id modality state user_id].freeze, open: false
         }.freeze,
         "SessionCall" => {

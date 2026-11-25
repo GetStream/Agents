@@ -7,8 +7,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -44,7 +42,7 @@ func (k *Keeper) Placed(ctx context.Context, call Call) (string, error) {
 func (k *Keeper) PlacedWithin(ctx context.Context, call Call, organization string, atOnce *store.CallsAtOnce) (string, error) {
 	placed := k.now()
 	row := store.CallLeg{
-		Token:        uuid.NewString(),
+		Token:        k.store.MintToken(),
 		CustomerID:   call.CustomerID,
 		StreamAppPK:  call.StreamAppPK,
 		CallType:     call.CallType,
