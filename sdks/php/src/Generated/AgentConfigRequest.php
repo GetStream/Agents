@@ -95,6 +95,8 @@ final readonly class AgentConfigRequest
         public ?string $image = null,
         // What teaches the agent's model to answer with UI, such as the section the SDK compiles from agent.yaml's ui...
         public ?string $uiInstructions = null,
+        // Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's...
+        public RoutingPolicy|string|null $routingPolicy = null,
         // Who the agent is in Stream Chat in a session that names nobody: the agent id a new conversation is kept und...
         public ?AgentIdentity $identity = null,
     ) {
@@ -147,6 +149,7 @@ final readonly class AgentConfigRequest
             agents: array_key_exists('agents', $data) && $data['agents'] !== null ? array_map(ChildAgent::fromArray(...), Json::objects($data, 'agents')) : null,
             image: array_key_exists('image', $data) && $data['image'] !== null ? Json::string($data, 'image') : null,
             uiInstructions: array_key_exists('ui_instructions', $data) && $data['ui_instructions'] !== null ? Json::string($data, 'ui_instructions') : null,
+            routingPolicy: array_key_exists('routing_policy', $data) && $data['routing_policy'] !== null ? Json::enum($data, 'routing_policy', RoutingPolicy::class) : null,
             identity: array_key_exists('identity', $data) && $data['identity'] !== null ? AgentIdentity::fromArray(Json::object($data, 'identity')) : null,
         );
     }
@@ -279,6 +282,9 @@ final readonly class AgentConfigRequest
         }
         if ($this->uiInstructions !== null) {
             $out['ui_instructions'] = $this->uiInstructions;
+        }
+        if ($this->routingPolicy !== null) {
+            $out['routing_policy'] = Json::enumValue($this->routingPolicy);
         }
         if ($this->identity !== null) {
             $out['identity'] = $this->identity->toArray();

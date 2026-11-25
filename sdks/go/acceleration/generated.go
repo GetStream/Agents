@@ -2347,6 +2347,36 @@ func (e ReviewDecision) Valid() bool {
 	}
 }
 
+// Defines values for RoutingPolicy.
+const (
+	RoutingPolicyCanadaOnly RoutingPolicy = "canada_only"
+	RoutingPolicyClosest    RoutingPolicy = "closest"
+	RoutingPolicyEUOnly     RoutingPolicy = "eu_only"
+	RoutingPolicyUSEast     RoutingPolicy = "us_east"
+	RoutingPolicyUSOnly     RoutingPolicy = "us_only"
+	RoutingPolicyUnset      RoutingPolicy = ""
+)
+
+// Valid indicates whether the value is a known member of the RoutingPolicy enum.
+func (e RoutingPolicy) Valid() bool {
+	switch e {
+	case RoutingPolicyCanadaOnly:
+		return true
+	case RoutingPolicyClosest:
+		return true
+	case RoutingPolicyEUOnly:
+		return true
+	case RoutingPolicyUSEast:
+		return true
+	case RoutingPolicyUSOnly:
+		return true
+	case RoutingPolicyUnset:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for Sandbox.
 const (
 	Daytona Sandbox = "daytona"
@@ -3898,6 +3928,9 @@ type AgentConfig struct {
 	// Role What the agent is for in the app, beyond answering people. agent_moderator is the app's moderator agent, which reviews flagged messages. One live agent per app holds a role: giving it to a second is refused, and a test copy (tagged draft_of) may share the role of the agent it copies. Left out on an update or a sync, the stored role stays. Omit it for an ordinary agent.
 	Role *AgentRole `json:"role,omitempty"`
 
+	// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
+	RoutingPolicy *RoutingPolicy `json:"routing_policy,omitempty"`
+
 	// Sandbox Where the agent may run code it writes. A text agent runs it itself; a voice agent hands it to the subagent, since running code takes seconds a call has none of. Omit it and the agent works everything out in its head.
 	Sandbox *Sandbox `json:"sandbox,omitempty"`
 
@@ -4011,6 +4044,9 @@ type AgentConfigPatch struct {
 
 	// Role What the agent is for in the app, beyond answering people. agent_moderator is the app's moderator agent, which reviews flagged messages. One live agent per app holds a role: giving it to a second is refused, and a test copy (tagged draft_of) may share the role of the agent it copies. Left out on an update or a sync, the stored role stays. Omit it for an ordinary agent.
 	Role *AgentRole `json:"role,omitempty"`
+
+	// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
+	RoutingPolicy *RoutingPolicy `json:"routing_policy,omitempty"`
 
 	// Sandbox Where the agent may run code it writes. A text agent runs it itself; a voice agent hands it to the subagent, since running code takes seconds a call has none of. Omit it and the agent works everything out in its head.
 	Sandbox *Sandbox `json:"sandbox,omitempty"`
@@ -4143,6 +4179,9 @@ type AgentConfigRequest struct {
 
 	// Role What the agent is for in the app, beyond answering people. agent_moderator is the app's moderator agent, which reviews flagged messages. One live agent per app holds a role: giving it to a second is refused, and a test copy (tagged draft_of) may share the role of the agent it copies. Left out on an update or a sync, the stored role stays. Omit it for an ordinary agent.
 	Role *AgentRole `json:"role,omitempty"`
+
+	// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
+	RoutingPolicy *RoutingPolicy `json:"routing_policy,omitempty"`
 
 	// Sandbox Where the agent may run code it writes. A text agent runs it itself; a voice agent hands it to the subagent, since running code takes seconds a call has none of. Omit it and the agent works everything out in its head.
 	Sandbox *Sandbox `json:"sandbox,omitempty"`
@@ -4455,6 +4494,9 @@ type AnalyzeReviewsRequest struct {
 
 // AppSettings What the router does for the calling app. It never carries a secret.
 type AppSettings struct {
+	// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
+	RoutingPolicy RoutingPolicy `json:"routing_policy"`
+
 	// Stream Which Stream app the router writes the calling app's conversations, transcripts, calls and phone lines into, and whether that app holds the types they need.
 	Stream StreamSettings `json:"stream"`
 }
@@ -9177,6 +9219,9 @@ type RouterConfigRequest struct {
 	Tts *TtsOptions `json:"tts,omitempty"`
 }
 
+// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
+type RoutingPolicy string
+
 // Run defines model for Run.
 type Run struct {
 	// Children What the runs of the child agents it called spent, by the tool each was called by. Absent when it called none.
@@ -11225,6 +11270,12 @@ type UpcomingPriceEntry struct {
 	Withdrawn *bool `json:"withdrawn,omitempty"`
 }
 
+// UpdateAppSettings defines model for UpdateAppSettings.
+type UpdateAppSettings struct {
+	// RoutingPolicy Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number's country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app's own on an agent config, and closest on the app.
+	RoutingPolicy *RoutingPolicy `json:"routing_policy,omitempty"`
+}
+
 // UpdateScheduledTaskRequest defines model for UpdateScheduledTaskRequest.
 type UpdateScheduledTaskRequest struct {
 	// DeliverTo Replaces where an occurrence is delivered, in order. An empty list is the conversation alone.
@@ -12724,6 +12775,9 @@ type UpdateRouterConfigJSONRequestBody = RouterConfigRequest
 
 // SearchJSONRequestBody defines body for Search for application/json ContentType.
 type SearchJSONRequestBody = SearchRequest
+
+// UpdateAppSettingsJSONRequestBody defines body for UpdateAppSettings for application/json ContentType.
+type UpdateAppSettingsJSONRequestBody = UpdateAppSettings
 
 // CreateLimitJSONRequestBody defines body for CreateLimit for application/json ContentType.
 type CreateLimitJSONRequestBody = LimitInput
@@ -16429,12 +16483,34 @@ type ClientInterface interface {
 
 	// GetAppSettings What the router does for the calling app
 	//
-	// Which Stream app the router writes the calling app's conversations and calls into, and whether that app holds the agent channel and call types. Stream is asked at most once a minute.
+	// Which Stream app the router writes the calling app's conversations and calls into, and whether that app holds the agent channel and call types. Stream is asked at most once a minute. Also which regions the app's work may be placed in.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
 	// Corresponds with GET /v1/settings/app (the `GetAppSettings` operationId).
 	GetAppSettings(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateAppSettingsWithBody Change the calling app's settings
+	//
+	// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
+	//
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Takes any type of body and a specified content type.
+	//
+	// Corresponds with PATCH /v1/settings/app (the `UpdateAppSettings` operationId).
+	UpdateAppSettingsWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateAppSettings Change the calling app's settings
+	//
+	// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
+	//
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Takes a body of the `application/json` content type.
+	//
+	// Corresponds with PATCH /v1/settings/app (the `UpdateAppSettings` operationId).
+	UpdateAppSettings(ctx context.Context, body UpdateAppSettingsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListLimits List the organization's spend limits
 	//
@@ -23028,13 +23104,55 @@ func (c *Client) Search(ctx context.Context, body SearchJSONRequestBody, reqEdit
 
 // GetAppSettings What the router does for the calling app
 //
-// Which Stream app the router writes the calling app's conversations and calls into, and whether that app holds the agent channel and call types. Stream is asked at most once a minute.
+// Which Stream app the router writes the calling app's conversations and calls into, and whether that app holds the agent channel and call types. Stream is asked at most once a minute. Also which regions the app's work may be placed in.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
 // Corresponds with GET /v1/settings/app (the `GetAppSettings` operationId).
 func (c *Client) GetAppSettings(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetAppSettingsRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// UpdateAppSettingsWithBody Change the calling app's settings
+//
+// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
+//
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Takes any type of body and a specified content type.
+//
+// Corresponds with PATCH /v1/settings/app (the `UpdateAppSettings` operationId).
+func (c *Client) UpdateAppSettingsWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateAppSettingsRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// UpdateAppSettings Change the calling app's settings
+//
+// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
+//
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Takes a body of the `application/json` content type.
+//
+// Corresponds with PATCH /v1/settings/app (the `UpdateAppSettings` operationId).
+func (c *Client) UpdateAppSettings(ctx context.Context, body UpdateAppSettingsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateAppSettingsRequest(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -34773,6 +34891,46 @@ func NewGetAppSettingsRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewUpdateAppSettingsRequest calls the generic UpdateAppSettings builder with application/json body
+func NewUpdateAppSettingsRequest(server string, body UpdateAppSettingsJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUpdateAppSettingsRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewUpdateAppSettingsRequestWithBody constructs an http.Request for the UpdateAppSettings method, with any body, and a specified content type
+func NewUpdateAppSettingsRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/settings/app")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPatch, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewListLimitsRequest constructs an http.Request for the ListLimits method
 func NewListLimitsRequest(server string, params *ListLimitsParams) (*http.Request, error) {
 	var err error
@@ -40068,7 +40226,7 @@ type ClientWithResponsesInterface interface {
 
 	// GetAppSettingsWithResponse What the router does for the calling app
 	//
-	// Which Stream app the router writes the calling app's conversations and calls into, and whether that app holds the agent channel and call types. Stream is asked at most once a minute.
+	// Which Stream app the router writes the calling app's conversations and calls into, and whether that app holds the agent channel and call types. Stream is asked at most once a minute. Also which regions the app's work may be placed in.
 	//
 	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 	//
@@ -40076,6 +40234,28 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with GET /v1/settings/app (the `GetAppSettings` operationId).
 	GetAppSettingsWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetAppSettingsResponse, error)
+
+	// UpdateAppSettingsWithBodyWithResponse Change the calling app's settings
+	//
+	// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
+	//
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PATCH /v1/settings/app (the `UpdateAppSettings` operationId).
+	UpdateAppSettingsWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateAppSettingsResponse, error)
+
+	// UpdateAppSettingsWithResponse Change the calling app's settings
+	//
+	// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
+	//
+	// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+	//
+	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with PATCH /v1/settings/app (the `UpdateAppSettings` operationId).
+	UpdateAppSettingsWithResponse(ctx context.Context, body UpdateAppSettingsJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateAppSettingsResponse, error)
 
 	// ListLimitsWithResponse List the organization's spend limits
 	//
@@ -65230,6 +65410,114 @@ func (r GetAppSettingsResponse) ContentType() string {
 	return ""
 }
 
+// UpdateAppSettingsResponse200Headers the declared response headers of an HTTP 200 response for UpdateAppSettings
+type UpdateAppSettingsResponse200Headers struct {
+	XStreamBalanceMicros  *int64
+	XStreamBalanceWarning *string
+	XStreamCostEstimated  *string
+	XStreamCostMicros     *int64
+}
+
+// UpdateAppSettingsResponse402Headers the declared response headers of an HTTP 402 response for UpdateAppSettings
+type UpdateAppSettingsResponse402Headers struct {
+	XStreamBalanceMicros  *int64
+	XStreamBalanceWarning *string
+}
+
+type UpdateAppSettingsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *AppSettings
+	// JSON400 the response for an HTTP 400 `application/json` response
+	JSON400 *BadRequest
+	// JSON401 the response for an HTTP 401 `application/json` response
+	JSON401 *Unauthorized
+	// JSON402 the response for an HTTP 402 `application/json` response
+	JSON402 *PaymentRequired
+	// JSON403 the response for an HTTP 403 `application/json` response
+	JSON403 *Forbidden
+	// JSON404 the response for an HTTP 404 `application/json` response
+	JSON404 *NotFound
+	// JSON500 the response for an HTTP 500 `application/json` response
+	JSON500 *InternalError
+	// JSON503 the response for an HTTP 503 `application/json` response
+	JSON503 *Unavailable
+	// Headers200 the parsed response headers for an HTTP 200 response
+	Headers200 *UpdateAppSettingsResponse200Headers
+	// Headers402 the parsed response headers for an HTTP 402 response
+	Headers402 *UpdateAppSettingsResponse402Headers
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r UpdateAppSettingsResponse) GetJSON200() *AppSettings {
+	return r.JSON200
+}
+
+// GetJSON400 returns the response for an HTTP 400 `application/json` response
+func (r UpdateAppSettingsResponse) GetJSON400() *BadRequest {
+	return r.JSON400
+}
+
+// GetJSON401 returns the response for an HTTP 401 `application/json` response
+func (r UpdateAppSettingsResponse) GetJSON401() *Unauthorized {
+	return r.JSON401
+}
+
+// GetJSON402 returns the response for an HTTP 402 `application/json` response
+func (r UpdateAppSettingsResponse) GetJSON402() *PaymentRequired {
+	return r.JSON402
+}
+
+// GetJSON403 returns the response for an HTTP 403 `application/json` response
+func (r UpdateAppSettingsResponse) GetJSON403() *Forbidden {
+	return r.JSON403
+}
+
+// GetJSON404 returns the response for an HTTP 404 `application/json` response
+func (r UpdateAppSettingsResponse) GetJSON404() *NotFound {
+	return r.JSON404
+}
+
+// GetJSON500 returns the response for an HTTP 500 `application/json` response
+func (r UpdateAppSettingsResponse) GetJSON500() *InternalError {
+	return r.JSON500
+}
+
+// GetJSON503 returns the response for an HTTP 503 `application/json` response
+func (r UpdateAppSettingsResponse) GetJSON503() *Unavailable {
+	return r.JSON503
+}
+
+// GetBody returns the raw response body bytes
+func (r UpdateAppSettingsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r UpdateAppSettingsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UpdateAppSettingsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r UpdateAppSettingsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 // ListLimitsResponse200Headers the declared response headers of an HTTP 200 response for ListLimits
 type ListLimitsResponse200Headers struct {
 	XStreamBalanceMicros  *int64
@@ -73426,7 +73714,7 @@ func (c *ClientWithResponses) SearchWithResponse(ctx context.Context, body Searc
 
 // GetAppSettingsWithResponse What the router does for the calling app
 //
-// Which Stream app the router writes the calling app's conversations and calls into, and whether that app holds the agent channel and call types. Stream is asked at most once a minute.
+// Which Stream app the router writes the calling app's conversations and calls into, and whether that app holds the agent channel and call types. Stream is asked at most once a minute. Also which regions the app's work may be placed in.
 //
 // Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 //
@@ -73439,6 +73727,40 @@ func (c *ClientWithResponses) GetAppSettingsWithResponse(ctx context.Context, re
 		return nil, err
 	}
 	return ParseGetAppSettingsResponse(rsp)
+}
+
+// UpdateAppSettingsWithBodyWithResponse Change the calling app's settings
+//
+// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
+//
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PATCH /v1/settings/app (the `UpdateAppSettings` operationId).
+func (c *ClientWithResponses) UpdateAppSettingsWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateAppSettingsResponse, error) {
+	rsp, err := c.UpdateAppSettingsWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateAppSettingsResponse(rsp)
+}
+
+// UpdateAppSettingsWithResponse Change the calling app's settings
+//
+// Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
+//
+// Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+//
+// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
+//
+// Corresponds with PATCH /v1/settings/app (the `UpdateAppSettings` operationId).
+func (c *ClientWithResponses) UpdateAppSettingsWithResponse(ctx context.Context, body UpdateAppSettingsJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateAppSettingsResponse, error) {
+	rsp, err := c.UpdateAppSettings(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateAppSettingsResponse(rsp)
 }
 
 // ListLimitsWithResponse List the organization's spend limits
@@ -102920,6 +103242,132 @@ func ParseGetAppSettingsResponse(rsp *http.Response) (*GetAppSettingsResponse, e
 		response.Headers200 = &headers
 	case rsp.StatusCode == 402:
 		var headers GetAppSettingsResponse402Headers
+		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
+			var value int64
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceMicros = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Balance-Warning"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Warning", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceWarning = &value
+		}
+		response.Headers402 = &headers
+	}
+
+	return response, nil
+}
+
+// ParseUpdateAppSettingsResponse parses an HTTP response from a UpdateAppSettingsWithResponse call
+func ParseUpdateAppSettingsResponse(rsp *http.Response) (*UpdateAppSettingsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UpdateAppSettingsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AppSettings
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest BadRequest
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 402:
+		var dest PaymentRequired
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON402 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest Forbidden
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest NotFound
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest InternalError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest Unavailable
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON503 = &dest
+
+	}
+
+	switch {
+	case rsp.StatusCode == 200:
+		var headers UpdateAppSettingsResponse200Headers
+		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
+			var value int64
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceMicros = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Balance-Warning"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Warning", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XStreamBalanceWarning = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Cost-Estimated"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Cost-Estimated", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XStreamCostEstimated = &value
+		}
+		if values := rsp.Header.Values("X-Stream-Cost-Micros"); len(values) > 0 {
+			var value int64
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Cost-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			}
+			headers.XStreamCostMicros = &value
+		}
+		response.Headers200 = &headers
+	case rsp.StatusCode == 402:
+		var headers UpdateAppSettingsResponse402Headers
 		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
 			var value int64
 			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {

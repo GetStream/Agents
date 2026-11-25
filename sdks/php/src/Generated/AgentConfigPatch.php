@@ -88,6 +88,8 @@ final readonly class AgentConfigPatch
         public ?string $uiInstructions = null,
         // The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict whe...
         public ?\DateTimeImmutable $updatedAt = null,
+        // Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's.
+        public RoutingPolicy|string|null $routingPolicy = null,
         // Replaces the identity whole. An empty object removes it.
         public ?AgentIdentity $identity = null,
     ) {
@@ -141,6 +143,7 @@ final readonly class AgentConfigPatch
             image: array_key_exists('image', $data) && $data['image'] !== null ? Json::string($data, 'image') : null,
             uiInstructions: array_key_exists('ui_instructions', $data) && $data['ui_instructions'] !== null ? Json::string($data, 'ui_instructions') : null,
             updatedAt: array_key_exists('updated_at', $data) && $data['updated_at'] !== null ? Json::date($data, 'updated_at') : null,
+            routingPolicy: array_key_exists('routing_policy', $data) && $data['routing_policy'] !== null ? Json::enum($data, 'routing_policy', RoutingPolicy::class) : null,
             identity: array_key_exists('identity', $data) && $data['identity'] !== null ? AgentIdentity::fromArray(Json::object($data, 'identity')) : null,
         );
     }
@@ -278,6 +281,9 @@ final readonly class AgentConfigPatch
         }
         if ($this->updatedAt !== null) {
             $out['updated_at'] = Json::dateValue($this->updatedAt);
+        }
+        if ($this->routingPolicy !== null) {
+            $out['routing_policy'] = Json::enumValue($this->routingPolicy);
         }
         if ($this->identity !== null) {
             $out['identity'] = $this->identity->toArray();

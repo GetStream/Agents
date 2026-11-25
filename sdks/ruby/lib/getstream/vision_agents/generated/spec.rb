@@ -1718,6 +1718,12 @@ module GetStream
           body: "Policy", body_required: true,
           socket: false, client_accessible: false
         }.freeze,
+        "updateAppSettings" => {
+          method: :patch, path: "/v1/settings/app",
+          path_params: [].freeze, query: [].freeze,
+          body: "UpdateAppSettings", body_required: true,
+          socket: false, client_accessible: false
+        }.freeze,
         "updateCampaign" => {
           method: :patch, path: "/v1/agents/campaigns/{id}",
           path_params: %w[id].freeze, query: [].freeze,
@@ -1922,15 +1928,15 @@ module GetStream
           required: %w[type].freeze, open: false
         }.freeze,
         "AgentConfig" => {
-          properties: %w[agents calls channels chat_channels connectors created_at dispatch episode_cards floor_control greeting guardrail harness id identity image instructions keyterms knowledge_namespace left_out_connectors llm llm_fallbacks mode name region resume_history review role sandbox sandbox_options scheduling search skills sts stt subagent sync_hash tags tools tts ui_instructions updated_at video visible_tools voice].freeze,
+          properties: %w[agents calls channels chat_channels connectors created_at dispatch episode_cards floor_control greeting guardrail harness id identity image instructions keyterms knowledge_namespace left_out_connectors llm llm_fallbacks mode name region resume_history review role routing_policy sandbox sandbox_options scheduling search skills sts stt subagent sync_hash tags tools tts ui_instructions updated_at video visible_tools voice].freeze,
           required: %w[created_at id mode name region updated_at].freeze, open: false
         }.freeze,
         "AgentConfigPatch" => {
-          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness identity image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins region resume_history review role sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions updated_at video visible_tools voice].freeze,
+          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness identity image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins region resume_history review role routing_policy sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions updated_at video visible_tools voice].freeze,
           required: [].freeze, open: false
         }.freeze,
         "AgentConfigRequest" => {
-          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness identity image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins region resume_history review role sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions video visible_tools voice].freeze,
+          properties: %w[agents calls channels chat_channels connectors dispatch episode_cards floor_control greeting guardrail harness identity image instructions keyterms knowledge_namespace llm llm_fallbacks mcp_servers mode name plugin_events plugins region resume_history review role routing_policy sandbox sandbox_options scheduling search skills sts stt subagent tags tools tts ui_instructions video visible_tools voice].freeze,
           required: %w[name].freeze, open: false
         }.freeze,
         "AgentConnectorBinding" => {
@@ -1998,8 +2004,8 @@ module GetStream
           required: %w[from to].freeze, open: false
         }.freeze,
         "AppSettings" => {
-          properties: %w[stream].freeze,
-          required: %w[stream].freeze, open: false
+          properties: %w[routing_policy stream].freeze,
+          required: %w[stream routing_policy].freeze, open: false
         }.freeze,
         "ApprovedConnectionTool" => {
           properties: %w[name previous_schema_digest schema_digest].freeze,
@@ -3336,6 +3342,10 @@ module GetStream
         "UpcomingPriceEntry" => {
           properties: %w[byok effective_at free local modality model price_tiers prices provider rates reason region sku tiers version when withdrawn].freeze,
           required: %w[reason modality provider model region].freeze, open: false
+        }.freeze,
+        "UpdateAppSettings" => {
+          properties: %w[routing_policy].freeze,
+          required: [].freeze, open: false
         }.freeze,
         "UpdateScheduledTaskRequest" => {
           properties: %w[deliver_to instructions next quiet_hours schedule title].freeze,
