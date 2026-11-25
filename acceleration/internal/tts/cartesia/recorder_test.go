@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // sent is one request the stub /tts/bytes was sent.
@@ -84,48 +85,64 @@ func (s *RecorderSuite) arrived() bool {
 }
 
 func (s *RecorderSuite) TestARecordingThatAsksForNothingIsAnMp3OfTheRecordersVoice() {
-	recorded, request := s.record(RecorderOptions{VoiceID: "v1", Model: "sonic-preview", Language: "en"}, tts.Recording{})
+	recorded, request := s.record(RecorderOptions{VoiceID: "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4", Model: "sonic-preview", Language: "en"}, tts.Recording{})
 
 	s.Equal("/tts/bytes", request.path)
 	s.Equal("Bearer k", request.header.Get("Authorization"))
 	s.Equal("2026-08-14", request.header.Get("Cartesia-Version"))
 	s.Equal("application/json", request.header.Get("Content-Type"))
-	s.JSONEq(`{"model_id":"sonic-preview","transcript":"hello","voice":{"id":"v1"},"language":"en",
+	s.JSONEq(`{"model_id":"sonic-preview","transcript":"hello","voice":{"id":"db6b0ed5-d5d3-463d-ae85-518a07d3c2b4"},"language":"en",
 		"output_format":{"container":"mp3","sample_rate":44100,"bit_rate":128000}}`, request.body)
 	s.Equal(tts.Recorded{Audio: []byte("audio"), Format: "mp3_44100_128", Characters: 5}, recorded)
+}
+
+// An overwrite skips the resolver, so the recorder refuses a spelling voiceid refuses, in its
+// options and in a recording, before the stub is asked.
+func (s *RecorderSuite) TestAVoiceThatIsNoCartesiaIdIsNeitherRecordedNorBuilt() {
+	const id = "a0e99841-438c-4a64-b679-ae501e7d6091"
+	for _, voice := range []string{"a0e99841438c4a64b679ae501e7d6091", "{" + id + "}", "urn:uuid:" + id, "v1"} {
+		_, err := NewRecorder(RecorderOptions{APIKey: "k", VoiceID: voice})
+		s.ErrorIs(err, ErrRefused, voice)
+		s.ErrorIs(err, voiceid.ErrInvalid, voice)
+
+		_, err = s.newRecorder(RecorderOptions{VoiceID: id}).Record(context.Background(),
+			tts.Recording{Text: "hello", Voice: voice})
+		s.ErrorIs(err, ErrRefused, voice)
+		s.False(s.arrived(), voice)
+	}
 }
 
 func (s *RecorderSuite) TestAVoiceIdInUpperCaseIsSentInLowercase() {
 	const id = "a0e99841-438c-4a64-b679-ae501e7d6091"
 	_, fromRecorder := s.record(RecorderOptions{VoiceID: "A0E99841-438C-4A64-B679-AE501E7D6091"}, tts.Recording{})
-	_, fromRecording := s.record(RecorderOptions{VoiceID: "v1"}, tts.Recording{Voice: "A0E99841-438C-4A64-B679-AE501E7D6091"})
+	_, fromRecording := s.record(RecorderOptions{VoiceID: "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4"}, tts.Recording{Voice: "A0E99841-438C-4A64-B679-AE501E7D6091"})
 
 	s.Contains(fromRecorder.body, `"voice":{"id":"`+id+`"}`)
 	s.Contains(fromRecording.body, `"voice":{"id":"`+id+`"}`)
 }
 
 func (s *RecorderSuite) TestTheVoiceAndLanguageARecordingNamesWinOverTheRecorders() {
-	_, request := s.record(RecorderOptions{VoiceID: "v1", Language: "en"}, tts.Recording{Voice: "v2", Language: "de"})
+	_, request := s.record(RecorderOptions{VoiceID: "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4", Language: "en"}, tts.Recording{Voice: "a0e99841-438c-4a64-b679-ae501e7d6091", Language: "de"})
 
-	s.JSONEq(`{"model_id":"sonic-preview","transcript":"hello","voice":{"id":"v2"},"language":"de",
+	s.JSONEq(`{"model_id":"sonic-preview","transcript":"hello","voice":{"id":"a0e99841-438c-4a64-b679-ae501e7d6091"},"language":"de",
 		"output_format":{"container":"mp3","sample_rate":44100,"bit_rate":128000}}`, request.body)
 }
 
 func (s *RecorderSuite) TestALanguageIsSentInLowerCaseWhoseverNamedIt() {
-	_, fromRecording := s.record(RecorderOptions{VoiceID: "v1"}, tts.Recording{Language: "FR"})
-	_, fromRecorder := s.record(RecorderOptions{VoiceID: "v1", Language: "DE"}, tts.Recording{})
+	_, fromRecording := s.record(RecorderOptions{VoiceID: "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4"}, tts.Recording{Language: "FR"})
+	_, fromRecorder := s.record(RecorderOptions{VoiceID: "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4", Language: "DE"}, tts.Recording{})
 
 	s.Contains(fromRecording.body, `"language":"fr"`)
 	s.Contains(fromRecorder.body, `"language":"de"`)
 }
 
 func (s *RecorderSuite) TestARecorderNamingNoVoiceSpeaksInTheVoiceOfTheEnvironment() {
-	s.T().Setenv("CARTESIA_VOICE_ID", "env-voice")
+	s.T().Setenv("CARTESIA_VOICE_ID", "79a125e8-cd45-4c13-8a67-188112f4dd22")
 
 	recorded, request := s.record(RecorderOptions{}, tts.Recording{})
 
-	s.Equal("env-voice", s.newRecorder(RecorderOptions{}).Voice())
-	s.Contains(request.body, `"voice":{"id":"env-voice"}`)
+	s.Equal("79a125e8-cd45-4c13-8a67-188112f4dd22", s.newRecorder(RecorderOptions{}).Voice())
+	s.Contains(request.body, `"voice":{"id":"79a125e8-cd45-4c13-8a67-188112f4dd22"}`)
 	s.Equal("mp3_44100_128", recorded.Format)
 }
 
@@ -144,9 +161,9 @@ func (s *RecorderSuite) TestEachFormatIsAskedOfCartesiaAsTheFileItNames() {
 		"alaw_8000":    `{"container":"raw","encoding":"pcm_alaw","sample_rate":8000}`,
 	} {
 		s.Run(format, func() {
-			recorded, request := s.record(RecorderOptions{VoiceID: "v1", Format: format}, tts.Recording{Format: format})
+			recorded, request := s.record(RecorderOptions{VoiceID: "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4", Format: format}, tts.Recording{Format: format})
 
-			s.JSONEq(`{"model_id":"sonic-preview","transcript":"hello","voice":{"id":"v1"},"output_format":`+want+`}`,
+			s.JSONEq(`{"model_id":"sonic-preview","transcript":"hello","voice":{"id":"db6b0ed5-d5d3-463d-ae85-518a07d3c2b4"},"output_format":`+want+`}`,
 				request.body)
 			s.Equal(format, recorded.Format)
 		})

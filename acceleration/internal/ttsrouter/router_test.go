@@ -146,6 +146,32 @@ func (s *TTSRouterSuite) newRouterOverRealElevenLabs(built *[]string) *Router {
 	return router
 }
 
+// newRouterOverRealCartesia is newRouterOverRealElevenLabs for Cartesia, resolving voices as the
+// deployment does.
+func (s *TTSRouterSuite) newRouterOverRealCartesia() *Router {
+	s.T().Setenv("CARTESIA_API_KEY", "test-key")
+	config, err := routing.DefaultConfig()
+	s.Require().NoError(err)
+
+	vendor := DefaultRegistry()
+	registry := routing.NewRegistry[tts.TTS]()
+	for _, provider := range config[routing.TTS].Providers {
+		registry.Register(provider.Provider, func(spec routing.Spec) (tts.TTS, error) {
+			if provider.Provider == "cartesia" {
+				if _, err := vendor.Build("cartesia", spec); err != nil {
+					return nil, err
+				}
+			}
+			return newStubTTS(), nil
+		})
+	}
+
+	router, err := New(Options{Config: config[routing.TTS], Registry: registry, Voices: voices.NewResolver(nil, nil)})
+	s.Require().NoError(err)
+	s.T().Cleanup(router.Close)
+	return router
+}
+
 // newSession returns a session over a stub provider, so event handling is the only thing
 // under test.
 func (s *TTSRouterSuite) newSession() (*Session, *stubTTS) {
@@ -1352,5 +1378,40 @@ func (s *TTSRouterSuite) TestElevenLabsRefusesAnIdThatIsNotItsOwnAsTheCallers() 
 
 		s.ErrorIs(err, routing.ErrRequest)
 		s.ErrorIs(err, voiceid.ErrInvalid)
+	}
+}
+
+// An overwrite's voice_id makes the resolver skip its shape refusal, so Cartesia's own factory
+// refuses a spelling of an id it does not take, wherever the voice came from: the id the
+// ownership check compared is then the one it was handed.
+func (s *TTSRouterSuite) TestCartesiaRefusesAnIdThatIsNotItsOwnAsTheCallersWhateverReplacesTheVoice() {
+	other := `{"voice_id":"` + cartesiaVoice + `"}`
+	for _, voice := range []string{
+		strings.ReplaceAll(cartesiaVoice, "-", ""), "{" + cartesiaVoice + "}", "urn:uuid:" + cartesiaVoice,
+	} {
+		for name, request := range map[string]Request{
+			"top level beside an overwrite": {CustomerID: "globex", Voice: voice,
+				Options: options.TTS{Overwrites: map[string]json.RawMessage{"cartesia": json.RawMessage(other)}}},
+			"only in the overwrite": {CustomerID: "globex",
+				Options: options.TTS{Overwrites: map[string]json.RawMessage{
+					"cartesia": json.RawMessage(`{"voice_id":"` + voice + `"}`)}}},
+		} {
+			request.Options.Providers = []string{"cartesia"}
+
+			_, err := s.newRouterOverRealCartesia().Start(s.ctx, request)
+
+			s.ErrorIs(err, routing.ErrRequest, name+" "+voice)
+			s.ErrorIs(err, voiceid.ErrInvalid, name+" "+voice)
+		}
+	}
+}
+
+func (s *TTSRouterSuite) TestCartesiaRecorderRefusesAnIdThatIsNotItsOwnAsTheCallers() {
+	s.T().Setenv("CARTESIA_API_KEY", "test-key")
+	for _, voice := range []string{strings.ReplaceAll(cartesiaVoice, "-", ""), "{" + cartesiaVoice + "}"} {
+		_, err := DefaultRecorderRegistry().Build("cartesia", routing.Spec{Model: "sonic-preview", Voice: voice})
+
+		s.ErrorIs(err, routing.ErrRequest, voice)
+		s.ErrorIs(err, voiceid.ErrInvalid, voice)
 	}
 }
