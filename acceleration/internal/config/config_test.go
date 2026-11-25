@@ -1547,6 +1547,102 @@ func (s *ConfigSuite) TestShardRoutingIsReadFromTheEnvironmentAndWrittenBack() {
 	s.Equal("DE=europe-west4,NL=europe-west4", os.Getenv("ROUTER_SHARD_ROUTING_COUNTRIES"), "written back the way it is read")
 }
 
+func (s *ConfigSuite) TestTheHomeAndResidencyAreReadFromAFile() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte(`
+shard_routing:
+  home: us-east4
+  residency:
+    us: [us-east4, us-west1]
+    ca: [northamerica-northeast1]
+`), 0o600))
+
+	config, _, err := Load(path)
+	s.Require().NoError(err)
+
+	s.Equal("us-east4", config.ShardRouting.Home)
+	s.Equal(map[string][]string{"us": {"us-east4", "us-west1"}, "ca": {"northamerica-northeast1"}},
+		config.ShardRouting.Residency)
+}
+
+func (s *ConfigSuite) TestTheHomeAndResidencyAreReadFromTheEnvironmentInOrderAndWrittenBack() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_HOME", "us-east4")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_RESIDENCY", "us=us-west1 | us-east4, eu=europe-west4,ca=northamerica-northeast1")
+
+	config, _, err := Load("")
+	s.Require().NoError(err)
+
+	s.Equal("us-east4", config.ShardRouting.Home)
+	s.Equal(map[string][]string{"us": {"us-west1", "us-east4"}, "eu": {"europe-west4"}, "ca": {"northamerica-northeast1"}},
+		config.ShardRouting.Residency)
+	s.Equal("ca=northamerica-northeast1,eu=europe-west4,us=us-west1|us-east4", os.Getenv("ROUTER_SHARD_ROUTING_RESIDENCY"),
+		"written back the way it is read")
+}
+
+func (s *ConfigSuite) TestAResidencyOfAGeographyOtherThanUSEUOrCanadaIsRefused() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_RESIDENCY", "asia=asia-east1")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `shard_routing.residency (ROUTER_SHARD_ROUTING_RESIDENCY)`)
+	s.ErrorContains(err, `got asia="asia-east1"`)
+}
+
+func (s *ConfigSuite) TestAResidencyOfNoShardIsRefused() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_RESIDENCY", "eu=")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `shard_routing.residency (ROUTER_SHARD_ROUTING_RESIDENCY)`)
+}
+
+func (s *ConfigSuite) TestAResidencyShardThatCannotBeAShardNameIsRefused() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_RESIDENCY", "eu=europe-west4|Europe West")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `shard_routing.residency (ROUTER_SHARD_ROUTING_RESIDENCY)`)
+}
+
+func (s *ConfigSuite) TestAHomeThatCannotBeAShardNameIsRefused() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_HOME", "US East")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `shard_routing.home (ROUTER_SHARD_ROUTING_HOME)`)
+}
+
+func (s *ConfigSuite) TestAResidencyShardTheShardsDoNotListIsRefused() {
+	s.T().Setenv("ROUTER_SHARD", "us-east4")
+	s.T().Setenv("ROUTER_SHARDS", "us-east4,europe-west4")
+	s.T().Setenv("ROUTER_USAGE_URL", "http://usage:8070")
+	s.T().Setenv("ROUTER_USAGE_TOKEN", "ingest")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_HOME", "us-east4")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_RESIDENCY", "eu=europe-west4,ca=northamerica-northeast1")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `does not list "northamerica-northeast1"`)
+}
+
+func (s *ConfigSuite) TestAHomeTheShardsDoNotListIsRefused() {
+	s.T().Setenv("ROUTER_SHARD", "us-west1")
+	s.T().Setenv("ROUTER_SHARDS", "us-west1")
+	s.T().Setenv("ROUTER_USAGE_URL", "http://usage:8070")
+	s.T().Setenv("ROUTER_USAGE_TOKEN", "ingest")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_HOME", "us-east4")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `does not list "us-east4"`)
+}
+
+func (s *ConfigSuite) TestAHomeAndResidencyTheShardsListAreTaken() {
+	s.T().Setenv("ROUTER_SHARD", "us-east4")
+	s.T().Setenv("ROUTER_SHARDS", "us-east4,europe-west4")
+	s.T().Setenv("ROUTER_USAGE_URL", "http://usage:8070")
+	s.T().Setenv("ROUTER_USAGE_TOKEN", "ingest")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_HOME", "us-east4")
+	s.T().Setenv("ROUTER_SHARD_ROUTING_RESIDENCY", "us=us-east4,eu=europe-west4")
+
+	_, _, err := Load("")
+	s.NoError(err)
+}
+
 func (s *ConfigSuite) TestACountryThatIsNoCountryCodeIsRefusedAShard() {
 	s.T().Setenv("ROUTER_SHARD_ROUTING_COUNTRIES", "Germany=europe-west4")
 
