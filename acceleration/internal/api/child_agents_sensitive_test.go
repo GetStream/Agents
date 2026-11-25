@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -22,12 +23,10 @@ func (s *ChildAgentsSuite) TestADelegationIsRefusedWhenTheParentIsSensitiveAndAC
 
 	run := s.run(CreateRunRequest{ConfigId: parent.Id, Input: "review this"})
 
-	s.Contains(run.FinalText, "tool: That did not work: ask_a was not run: the agent "+strconv.Quote(parent.Name)+
+	s.refusedAll(run)
+	s.Contains(s.refusals(parent), strconv.Quote(parent.Name)+
 		`'s connector binding "customers" binds "nessy", whose tools read private data, and connector binding "code" `+
 		"of the agent "+strconv.Quote(writer.Name)+" can send data out with no person's approval")
-	s.Contains(run.FinalText, "or add to each binding's require_approval its tools that do not only read: the agent "+
-		strconv.Quote(writer.Name)+`'s "code" create_issue`)
-	s.refusedAll(run)
 }
 
 func (s *ChildAgentsSuite) TestADelegationIsRefusedWhenAChildIsSensitiveAndTheParentSendsOut() {
@@ -38,10 +37,9 @@ func (s *ChildAgentsSuite) TestADelegationIsRefusedWhenAChildIsSensitiveAndThePa
 
 	run := s.run(CreateRunRequest{ConfigId: parent.Id, Input: "review this"})
 
-	s.Contains(run.FinalText, "tool: That did not work: ask_b was not run: the agent "+strconv.Quote(reader.Name)+
-		`'s connector binding "customers" binds "nessy"`)
-	s.Contains(run.FinalText, `and connector binding "code" of the agent `+strconv.Quote(parent.Name)+" can send data out")
 	s.refusedAll(run)
+	s.Contains(s.refusals(parent), strconv.Quote(reader.Name)+`'s connector binding "customers" binds "nessy"`)
+	s.Contains(s.refusals(parent), `and connector binding "code" of the agent `+strconv.Quote(parent.Name)+" can send data out")
 }
 
 // Neither child alone breaks the rule, nor does the parent: the parent hands one child's
@@ -55,10 +53,10 @@ func (s *ChildAgentsSuite) TestADelegationIsRefusedWhenOneChildIsSensitiveAndASi
 
 	run := s.run(CreateRunRequest{ConfigId: parent.Id, Input: "review this"})
 
-	s.Contains(run.FinalText, "tool: That did not work: ask_a was not run: the agent "+strconv.Quote(reader.Name)+
+	s.refusedAll(run)
+	s.Contains(s.refusals(reader), strconv.Quote(reader.Name)+
 		`'s connector binding "customers" binds "nessy", whose tools read private data, and connector binding "code" `+
 		"of the agent "+strconv.Quote(writer.Name)+" can send data out")
-	s.refusedAll(run)
 }
 
 func (s *ChildAgentsSuite) TestADelegationIsRefusedWhenAChildsSandboxReachesTheNetworkBesideASensitiveParent() {
@@ -69,11 +67,26 @@ func (s *ChildAgentsSuite) TestADelegationIsRefusedWhenAChildsSandboxReachesTheN
 
 	run := s.run(CreateRunRequest{ConfigId: parent.Id, Input: "review this"})
 
-	s.Contains(run.FinalText, "tool: That did not work: ask_c was not run: the agent "+strconv.Quote(parent.Name)+
+	s.refusedAll(run)
+	s.Contains(s.refusals(coder), strconv.Quote(parent.Name)+
 		`'s connector binding "customers" binds "nessy", whose tools read private data, and the sandbox's network `+
 		"access of the agent "+strconv.Quote(coder.Name)+" can send data out")
-	s.NotContains(run.FinalText, "require_approval", "a sandbox has no tool a require_approval could hold")
+	s.NotContains(s.refusals(coder), "require_approval", "a sandbox has no tool a require_approval could hold")
+}
+
+// The parent's own sandbox is part of the graph: it can send out what a sensitive child answered.
+func (s *ChildAgentsSuite) TestADelegationIsRefusedWhenTheParentsSandboxReachesTheNetworkBesideASensitiveChild() {
+	s.useInternalApp()
+	parent := s.agentWith("fanning/fanning-model", map[string]any{"sandbox": "daytona", "sandbox_options": map[string]any{"network": true}})
+	reader := s.agentWith("echo/echo-model", map[string]any{"connectors": []map[string]any{sessionNessy("customers")}})
+	s.delegate(parent, map[string]AgentConfig{"ask_a": reader})
+
+	run := s.run(CreateRunRequest{ConfigId: parent.Id, Input: "review this"})
+
 	s.refusedAll(run)
+	s.Contains(s.refusals(parent), strconv.Quote(reader.Name)+
+		`'s connector binding "customers" binds "nessy", whose tools read private data, and the sandbox's network `+
+		"access of the agent "+strconv.Quote(parent.Name)+" can send data out")
 }
 
 // The false-positive side: a write tool a person must allow first sends nothing out unasked.
@@ -158,10 +171,27 @@ func (s *ChildAgentsSuite) delegate(parent AgentConfig, children map[string]Agen
 	s.change(parent.Id, func(config *store.AgentConfig) { config.Agents = agents })
 }
 
-// refusedAll requires every delegation of the run refused, and the parent to have answered.
+// refusals is the log's lines about a refused delegation that name config, with what the tool error leaves out.
+func (s *ChildAgentsSuite) refusals(config AgentConfig) string {
+	var lines []string
+	for line := range strings.SplitSeq(s.logged.String(), "\n") {
+		if strings.Contains(line, "a delegation was refused") && strings.Contains(line, config.Name) {
+			lines = append(lines, line)
+		}
+	}
+	// The text handler quotes the complaint, and its own quotes with it.
+	return strings.ReplaceAll(strings.Join(lines, "\n"), `\`, "")
+}
+
+// refusedAll requires every delegation of the run refused, and the parent to have answered. What
+// the model and the end user read names no binding, connector or tool: the log has the complaint.
 func (s *ChildAgentsSuite) refusedAll(run Run) {
 	for _, tool := range fanned {
-		s.Contains(run.FinalText, "tool: That did not work: "+tool+" was not run: ", "the graph breaks the rule whichever child is called")
+		s.Contains(run.FinalText, "tool: That did not work: "+tool+" was not run: the agents it works with together read private data and can send data out",
+			"the graph breaks the rule whichever child is called")
 	}
 	s.NotContains(run.FinalText, "tool: be brief", "no child ran")
+	for _, name := range []string{"nessy", "customers", "create_issue", "binding", "connector", "sandbox", "require_approval"} {
+		s.NotContains(run.FinalText, name, "the tool error names nothing of a server-side config")
+	}
 }

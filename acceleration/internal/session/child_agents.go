@@ -134,7 +134,11 @@ func (r *childRunner) Run(ctx context.Context, call llm.ToolCall) ([]llm.Content
 	if message, ok, err := r.sensitiveComplaint(ctx, config); err != nil {
 		return nil, err
 	} else if !ok {
-		return nil, fmt.Errorf("%s was not run: %s", call.Name, message)
+		// The complaint names bindings, connectors and tools of server-side configs: the log
+		// has it, and the model, whose words the end user reads, gets a sentence that names none.
+		r.manager.logger.Warn("a delegation was refused: the agent and its children break the sensitive connector rule",
+			"config", r.spec.ConfigID, "tool", call.Name, "complaint", message)
+		return nil, fmt.Errorf("%s was not run: the agents it works with together read private data and can send data out", call.Name)
 	}
 
 	spec := FromConfig(config)
