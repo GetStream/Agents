@@ -73,6 +73,6 @@ func (s *RefusalAlertsSuite) TestAMem0RefusalAndARefusedKeyAlert() {
 	pool.QuotaExceeded(key)
 	stop()
 
-	s.Contains(s.fingerprints(), "usage_mem0_refused:search/429")
+	s.Contains(s.fingerprints(), "usage_mem0_refused:development:search/429")
 	s.Contains(s.fingerprints(), "usage_key_refused:development:"+keyVar+"/quota_exceeded")
 }

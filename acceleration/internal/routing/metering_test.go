@@ -126,12 +126,14 @@ func (s *MeteringAlertTextSuite) TestUsageMismatchHelpSaysItRunsEitherWay() {
 }
 
 // The fingerprints are what the alerts sent before they had a description, read on the base
-// commit: a change in one is a new Sentry issue for the rules and the people who muted the old.
+// commit, with the environment after the alert's name (these tests' Sentry client names none, so
+// it is "development"): a change in one is a new Sentry issue for the rules and the people who
+// muted the old.
 func (s *MeteringAlertTextSuite) TestEveryAlertKeepsItsSentryIssue() {
 	s.each(func(r meteringRow, item string, events map[string]*sentry.Event) {
 		s.Require().Len(events, 1, "a row raises only its own alert")
 		s.Require().Contains(events, r.alert)
-		s.Equal([]string{"usage_" + r.alert + ":" + item + r.suffix}, events[r.alert].Fingerprint)
+		s.Equal([]string{"usage_" + r.alert + ":development:" + item + r.suffix}, events[r.alert].Fingerprint)
 	})
 }
 

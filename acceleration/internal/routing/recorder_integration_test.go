@@ -283,7 +283,7 @@ func (s *RecorderSuite) TestEachItemTheRecorderCountedIsAnAlertOfItsOwn() {
 			fingerprints = append(fingerprints, event.Fingerprint...)
 		}
 	}
-	s.Equal([]string{"usage_missing:llm/vendor/alarmed"}, fingerprints,
+	s.Equal([]string{"usage_missing:development:llm/vendor/alarmed"}, fingerprints,
 		"two rows of one item are one alert, and a response cut short is none")
 }
 
