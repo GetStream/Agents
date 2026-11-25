@@ -173,19 +173,21 @@ func (s *StoredSuite) TestAskingWhereAnAppWithATokenAboutToExpireActsAsksTheGate
 	s.Empty(mint.requests())
 }
 
-// Read without acting, a token that has run out is taken to be one the gateway will not replace:
-// where the app's work goes then is the fallback's, which shares the deployment's app.
-func (s *StoredSuite) TestAskingWhereAnAppWhoseTokenRanOutActsAnswersAsThoughTheGatewayRefused() {
+// With no fallback an app's work is made in its own app or nowhere, so a token that has run out
+// leaves it there. Catches an app that stopped acting read as sharing the deployment's app, which
+// would let it hold a number against every app on the deployment.
+func (s *StoredSuite) TestAskingWhereAnAppWhoseTokenRanOutActsAnswersItsOwnApp() {
 	mint := s.gateway()
 	forwarded := s.forwarded(mint)
 	_, err := forwarded.Keep(s.ctx, s.customer, forwardedKey, s.serverToken(time.Hour+time.Minute))
 	s.Require().NoError(err)
 	s.clock.Advance(2 * time.Hour)
 
-	_, err = NewClients(s.forwardedSource(forwarded), ClientsOptions{}).Placed(s.ctx, s.customer)
+	app, err := NewClients(s.forwardedSource(forwarded), ClientsOptions{}).Placed(s.ctx, s.customer)
 
-	s.ErrorIs(err, ErrNoIdentity, "no fallback here")
-	s.Empty(mint.requests())
+	s.Require().NoError(err)
+	s.Equal(s.app, app)
+	s.Empty(mint.requests(), "asking where is not acting")
 }
 
 func (s *StoredSuite) TestAnExpiredTokenTheGatewayWillNotReplaceActsNowhere() {

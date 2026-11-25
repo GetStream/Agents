@@ -157,6 +157,11 @@ func (s *Stored) place(ctx context.Context, customer string, acting bool) (Ident
 		return identity, err
 	}
 	if !s.fallsBack(ctx, customer) {
+		// With no fallback, an app's work is made in its own app or nowhere. Read without
+		// acting, a token that has run out is the gateway's to replace, not another app.
+		if app, couldBe := ParseAppID(customer); couldBe && !acting {
+			return Identity{CustomerID: customer, StreamApp: app}, nil
+		}
 		return Identity{}, ErrNoIdentity
 	}
 	if deployment == 0 {
