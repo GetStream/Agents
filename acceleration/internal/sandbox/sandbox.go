@@ -39,6 +39,11 @@ const OutputCut = "\n[output cut: the code printed more than 1 MiB; print less, 
 // MaxTimeout is the longest one run of code may be allowed.
 const MaxTimeout = 30 * time.Minute
 
+// MaxCheckTimeout is the longest the checks a provider runs before a run's code may take
+// together: the egress record's lifetime (egress.runMargin) counts on it, so a provider bounds
+// them by it.
+const MaxCheckTimeout = time.Minute
+
 // DefaultRunTimeout is how long one run of code may take when its config names no timeout.
 const DefaultRunTimeout = 30 * time.Second
 

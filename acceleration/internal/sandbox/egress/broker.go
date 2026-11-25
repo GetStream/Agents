@@ -45,14 +45,14 @@ const recordTTL = sandbox.MaxTimeout + time.Minute
 
 // runMargin is how much longer than its run timeout a run's record lasts when the broker is told
 // it (BrokerOptions.RunTimeout). Daytona's provider runs the checks of Mount.EachRun after
-// BeforeRun and before the code, bounded at 60 s together (daytona.go: check, at most
-// defaultTimeout); the second minute covers what remains: the run's call waits 5 s past the run
+// BeforeRun and before the code, bounded at sandbox.MaxCheckTimeout together (daytona.go:
+// check); the extra minute covers what remains: the run's call waits 5 s past the run
 // timeout (daytona.go, and sdk-go v0.211.2 process.go executeTimeoutBuffer), the toolbox is
 // sent the timeout rounded up to whole seconds (process.go timeoutSeconds), and the request
 // reaches it after the record is stored. Redis keeps the expiry as an absolute time on its own
 // clock, from when the SET arrives, to within 1 ms (https://redis.io/docs/latest/commands/expire/,
 // «Appendix: Redis expires»), so the router's clock does not move it.
-const runMargin = 2 * time.Minute
+const runMargin = sandbox.MaxCheckTimeout + time.Minute
 
 // bundleEnv are the env vars that point OpenSSL, Python requests, curl and git at the roots they
 // trust instead of the system's, so they name the bundle: the ones Daytona's netleash sets (live

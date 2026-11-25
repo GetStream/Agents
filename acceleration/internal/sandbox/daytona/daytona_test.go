@@ -710,6 +710,15 @@ func (s *DaytonaSuite) TestFailedDeletionRetainsIdentity() {
 	s.Len(s.platform.sandboxes(), 1)
 }
 
+// TestTheChecksBeforeARunTakeAtMostTheBoundTheRecordsLifetimeCountsOn: whatever the sandbox's
+// timeout, the checks before a run are bounded by sandbox.MaxCheckTimeout, which the egress
+// record's lifetime adds to the run timeout.
+func (s *DaytonaSuite) TestTheChecksBeforeARunTakeAtMostTheBoundTheRecordsLifetimeCountsOn() {
+	for _, options := range []Options{{}, {Config: sandbox.Config{CPU: 1}}, {Timeout: time.Hour}} {
+		s.LessOrEqual(s.configured(options).check, sandbox.MaxCheckTimeout, options)
+	}
+}
+
 func (s *DaytonaSuite) configured(config Options) *Sandbox {
 	config.APIKey = "key-1"
 	config.APIURL = s.platform.server.URL + "/api"
@@ -1078,11 +1087,11 @@ func (s *DaytonaSuite) TestACallerGivingUpDuringAWriteEndsIt() {
 
 // TestAHungDownloadIsCutAtTheChecksTimeout: a run's downloads hold the gate, and a built
 // sandbox's timeout is the 20 minutes a build may take, so a download Daytona never answers is
-// cut at defaultTimeout, the file is missing, and the next run gets in.
+// cut at sandbox.MaxCheckTimeout, the file is missing, and the next run gets in.
 func (s *DaytonaSuite) TestAHungDownloadIsCutAtTheChecksTimeout() {
 	box := s.configured(Options{Config: sandbox.Config{CPU: 1}})
 	s.Require().Equal(buildTimeout, box.timeout, "a built sandbox")
-	s.Equal(defaultTimeout, box.check)
+	s.Equal(sandbox.MaxCheckTimeout, box.check)
 	box.check = 2 * time.Second // defaultTimeout, shorter in tests
 	s.platform.holds("/tmp/report.csv", []byte("a,b"))
 	s.platform.mu.Lock()

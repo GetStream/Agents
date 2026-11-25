@@ -164,7 +164,7 @@ type Sandbox struct {
 	closed              atomic.Bool
 	timeout, runTimeout time.Duration
 	// check bounds the checks before each run, the broker's calls, a write and a run's
-	// downloads: the timeout, but at most defaultTimeout, as a built sandbox's timeout is
+	// downloads: the timeout, but at most sandbox.MaxCheckTimeout, as a built sandbox's timeout is
 	// buildTimeout and a hung call holds the gate, so every other run of the session waits.
 	// Shorter in tests.
 	check time.Duration
@@ -250,7 +250,7 @@ func New(o Options) (*Sandbox, error) {
 		return nil, stack.Wrap(err)
 	}
 	return &Sandbox{client: c, gate: make(chan struct{}, 1), timeout: o.Timeout, runTimeout: o.RunTimeout, config: o.Config,
-		check: min(o.Timeout, defaultTimeout), state: stateTimeout,
+		check: min(o.Timeout, sandbox.MaxCheckTimeout), state: stateTimeout,
 		grants: o.Grants, broker: o.Broker, labels: maps.Clone(o.Labels), lifecycle: o.Lifecycle, meter: o.Meter,
 		slots: o.Slots, logger: o.Logger, admit: o.Admit, admitEvery: o.AdmitEvery, grace: stopGrace}, nil
 }
