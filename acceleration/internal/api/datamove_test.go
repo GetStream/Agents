@@ -195,7 +195,7 @@ func (s *DataMoveSuite) TestImportingAnExportWritesTheRowsItCarried() {
 // a custom connector, an import refuses too, so the operator's client is never sent to a token
 // endpoint the file names. A connector the API would create imports as it is.
 func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientIsRefused() {
-	refused, taken := "custom_"+store.NewID(), "custom_"+store.NewID()
+	refused, taken := "custom_a"+store.NewID(), "custom_a"+store.NewID()
 
 	// full=true, so the first line's refusal is all that differs between the two imports: the
 	// second would otherwise be a 409 for an app that holds data here.
@@ -215,7 +215,7 @@ func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientIsRefused
 
 // The operator rule reads the whole registration list, not its first entry.
 func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientAfterAnotherIsRefused() {
-	refused := "custom_" + store.NewID()
+	refused := "custom_a" + store.NewID()
 
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
 		s.importedConnector(refused, `"client": {"registration": ["customer", "operator"], "env": "GOOGLE"}, "schemes": ["oauth2_code"],
@@ -226,9 +226,45 @@ func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientAfterAnot
 	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+refused, nil, nil))
 }
 
+// A definition with oauth2_client_credentials, from before custom connectors lost it, is left out
+// and named, an export row and a change alike; every other line is written.
+func (s *DataMoveSuite) TestAnImportNamesTheClientCredentialsDefinitionsItLeftOut() {
+	skipped, changed, taken := "custom_a"+store.NewID(), "custom_a"+store.NewID(), "custom_a"+store.NewID()
+	change := s.importedConnector(changed, `"schemes": ["oauth2_client_credentials"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`)
+
+	var written struct {
+		Rows    int64            `json:"rows"`
+		Tables  map[string]int64 `json:"tables"`
+		Skipped []string         `json:"skipped"`
+	}
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
+		s.importedConnector(skipped, `"schemes": ["oauth2_client_credentials"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`),
+		s.importedConnector(taken, `"schemes": ["bearer"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`),
+		{Change: &store.DataChange{Table: change.Table, Op: store.ChangeInsert, Payload: change.Row}},
+	}), &written))
+
+	s.Equal([]string{`connector_definitions:{"id":"` + skipped + `","revision":1}`, `connector_definitions:{"id":"` + changed + `","revision":1}`},
+		written.Skipped)
+	s.Equal(int64(1), written.Rows)
+	s.Equal(map[string]int64{"connector_definitions": 1}, written.Tables)
+	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+skipped, nil, nil))
+	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+changed, nil, nil))
+	s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+taken, nil, nil))
+}
+
+// An import that leaves nothing out says so with an empty list.
+func (s *DataMoveSuite) TestAnImportThatLeftNothingOutNamesNone() {
+	var written map[string]any
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
+		s.importedConnector("custom_a"+store.NewID(), `"schemes": ["bearer"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`),
+	}), &written))
+
+	s.Equal([]any{}, written["skipped"])
+}
+
 // A database that fails is the router's failure, and its text names the database's address.
 func (s *DataMoveSuite) TestAnImportTheDatabaseCannotWriteIsAFailureWithNoDatabaseText() {
-	id := "custom_" + store.NewID()
+	id := "custom_a" + store.NewID()
 	s.failQueries(id)
 
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
