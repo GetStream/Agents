@@ -136,6 +136,36 @@ func (s *StoreSuite) TestARolledBackVersionWithNoFileIsNotRefused() {
 	s.Require().NoError(db.Migrate(s.ctx))
 }
 
+// Staging's global version was 20270202000000 before the sync_hash columns merged, and a build refuses to start
+// on a database with a migration older than its newest applied one. So the migration sorts after that version,
+// and a database that ran it under its first version, 20270201001200, applies it again as a no-op.
+func (s *StoreSuite) TestTheSyncHashMigrationSortsAfterAGlobalVersionStagingHad() {
+	db, err := Open(s.emptyDatabase("sync_hash_slot"))
+	s.Require().NoError(err)
+	defer db.Close()
+	hasColumns := func() (hasColumn bool) {
+		s.Require().NoError(db.global.QueryRowContext(s.ctx, `SELECT count(*) = 2 FROM information_schema.columns
+			WHERE column_name = 'sync_hash' AND table_name IN ('connector_definitions', 'router_configs')`).Scan(&hasColumn))
+		return hasColumn
+	}
+
+	s.upTo(db, globalSet, 20270202000000)
+	s.False(hasColumns(), "a database at 20270202000000 has not run the sync_hash migration")
+	for _, table := range []string{"connector_definitions", "router_configs"} {
+		_, err = db.global.ExecContext(s.ctx, "ALTER TABLE ? ADD COLUMN sync_hash TEXT NOT NULL DEFAULT ''", bun.Ident(table))
+		s.Require().NoError(err)
+	}
+	_, err = db.global.ExecContext(s.ctx, "INSERT INTO ? (version_id, is_applied) VALUES (20270201001200, true)", bun.Ident(globalSet.table))
+	s.Require().NoError(err)
+
+	s.Require().NoError(db.Migrate(s.ctx))
+	s.True(hasColumns())
+	var recorded bool
+	s.Require().NoError(db.global.QueryRowContext(s.ctx, "SELECT EXISTS (SELECT 1 FROM ? WHERE version_id = 20270202000100 AND is_applied)",
+		bun.Ident(globalSet.table)).Scan(&recorded))
+	s.True(recorded, "the migration is recorded under its new version")
+}
+
 // A database a later release migrated holds versions this one has no file for, after the
 // squashed history and before any of it is recorded once the cleanup has run: rolling back to
 // this release starts on it.
