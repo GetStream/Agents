@@ -712,7 +712,7 @@ Every reply the agent abandons logs one INFO line, `the agent was interrupted`, 
 
 ### The Kotlin, Swift and Dart SDKs no longer choose a session's models, voice, greeting or cost labels
 
-`SessionOptions` loses `llm`, `stt`, `tts`, `voice`, `greeting`, `tags` and `modelOverwrites`, and `Greeting` is gone with it. The router refuses a device that sends any of them with a 403 (AI-3726, AI-3728), so a session a device opens runs on its agent config's models, voice, greeting and tags: set them there, or open the session from a backend. A fork is refused the same way for its models, so `ForkOptions` loses `modelOverwrites` too, and with no option left to take it, `ModelOverwrites` is gone (Dart's `Thinking` and `Verbosity` with it). In the JavaScript SDK, which a backend uses too, `modelOverwrites` on a session and on a fork is documented as server side only.
+`SessionOptions` loses `llm`, `stt`, `tts`, `voice`, `greeting`, `tags` and `modelOverwrites`, and `Greeting` is gone with it. The router refuses a device that sends any of them with a 403 (AI-3726, AI-3728), so a session a device opens runs on its agent config's models, voice, greeting and tags: set them there, or open the session from a backend. A fork is refused the same way for its models, so `ForkOptions` loses `modelOverwrites` too, and with no option left to take it, `ModelOverwrites` is gone (Dart's `Thinking` and `Verbosity` with it). In the JavaScript SDK, which a backend uses too, `modelOverwrites` is documented as server side only.
 
 ### The Go SDK reads no items for a turn with no id
 
