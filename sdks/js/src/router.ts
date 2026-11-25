@@ -44,7 +44,11 @@ export class Router {
     return this.client.get("/v1/{modality}/routes", { path: { modality } });
   }
 
-  /** Answers one question out of what is true now. */
+  /**
+   * Answers one question out of what is true now. `options` are server side only: a device
+   * sending them is refused with a 403, and its search runs as the config names. Each search a
+   * device makes counts as one message on its daily quota.
+   */
   search(query: string, options?: Schemas["SearchOptions"]): Promise<Schemas["SearchAnswer"]> {
     const { config, tags } = this.options;
     return this.client.post("/v1/search", {
