@@ -156,7 +156,8 @@ func parseAudio(body []byte) (Media, *sdp.SessionDescription, int, error) {
 		}
 	}
 
-	for _, attr := range md.Attributes {
+	// A direction at session level holds for every m= line without one of its own (RFC 8866 §6.7).
+	for _, attr := range slices.Concat(sd.Attributes, md.Attributes) {
 		switch attr.Key {
 		case "sendrecv", "sendonly", "recvonly", "inactive":
 			m.Direction = attr.Key

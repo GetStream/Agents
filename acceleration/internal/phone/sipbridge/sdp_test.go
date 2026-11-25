@@ -229,6 +229,11 @@ func TestToStreamSendsStreamOnlyToAPublicAddress(t *testing.T) {
 		"private address keeps its dir": {conn: "c=IN IP4 10.1.2.3\r\n", media: "m=audio 30000 RTP/AVP 0\r\na=recvonly\r\n", addr: "1.0.0.1", dir: "recvonly"},
 		"media level beats session":     {conn: "c=IN IP4 10.1.2.3\r\n", media: "m=audio 30000 RTP/AVP 0\r\nc=IN IP4 1.1.1.1\r\n", addr: "1.1.1.1", dir: DirSendRecv},
 		"private media level":           {conn: "c=IN IP4 1.1.1.1\r\n", media: "m=audio 30000 RTP/AVP 0\r\nc=IN IP4 10.1.2.3\r\n", addr: "1.0.0.1", dir: DirSendRecv},
+		"session sendonly":              {conn: "c=IN IP4 1.1.1.1\r\n", media: "a=sendonly\r\nm=audio 30000 RTP/AVP 0\r\n", addr: "1.1.1.1", dir: "sendonly"},
+		"session recvonly":              {conn: "c=IN IP4 1.1.1.1\r\n", media: "a=recvonly\r\nm=audio 30000 RTP/AVP 0\r\n", addr: "1.1.1.1", dir: "recvonly"},
+		"session inactive":              {conn: "c=IN IP4 1.1.1.1\r\n", media: "a=inactive\r\nm=audio 30000 RTP/AVP 0\r\n", addr: "1.1.1.1", dir: DirInactive},
+		"session hold sendonly":         {conn: "c=IN IP4 0.0.0.0\r\n", media: "a=sendonly\r\nm=audio 30000 RTP/AVP 0\r\n", addr: "1.0.0.1", dir: "sendonly"},
+		"media direction beats session": {conn: "c=IN IP4 1.1.1.1\r\n", media: "a=inactive\r\nm=audio 30000 RTP/AVP 0\r\na=sendrecv\r\n", addr: "1.1.1.1", dir: DirSendRecv},
 		"first audio of several":        {conn: "c=IN IP4 1.1.1.1\r\n", media: "m=video 30002 RTP/AVP 96\r\nc=IN IP4 10.9.9.9\r\nm=audio 30000 RTP/AVP 0\r\nm=audio 30004 RTP/AVP 8\r\n", addr: "1.1.1.1", dir: DirSendRecv},
 	} {
 		t.Run(name, func(t *testing.T) {
