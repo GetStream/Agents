@@ -303,6 +303,9 @@ const beingPosted = "(object_key LIKE '" + postKey + "%' AND state = '" + Knowle
 // removal may have met since its read began to write them, so the read writes them again.
 const readAgain = "The file could not be read yet, and is tried again."
 
+// writtenOver is the error of a document whose passages a read of a removed one may have met.
+const writtenOver = "The passages may not all be its own: send the document again or delete it."
+
 // BeingRemoved is whether a removal holds the document.
 func (k *KnowledgeDocument) BeingRemoved() bool { return strings.HasPrefix(k.ObjectKey, removalKey) }
 
@@ -361,12 +364,16 @@ func (r *KnowledgeDocuments) FailRemoval(ctx context.Context, customerID, id str
 
 // Interrupt counts the passages a read of the source wrote after it was overtaken, on the document
 // the source has now. A removal it is under takes its passages away again, and a post or a newer
-// file's read that has not finished writes them again. It is false when the source has none.
-func (r *KnowledgeDocuments) Interrupt(ctx context.Context, customerID, namespace, source string, passages int) (bool, error) {
+// file's read that has not finished writes them again. One made since the read's, id, was removed
+// and already finished is failed, as it must not be found by a removed document's text. It is
+// false when the source has none.
+func (r *KnowledgeDocuments) Interrupt(ctx context.Context, customerID, id, namespace, source string, passages int) (bool, error) {
 	result, err := r.store.global.NewUpdate().Model((*KnowledgeDocument)(nil)).
 		Set("object_key = CASE WHEN object_key LIKE ? OR "+beingPosted+" THEN ? ELSE object_key END",
 			removalKey+"%", removalKey+newID()).
-		Set("error = CASE WHEN "+waitsForFile+" THEN ? ELSE error END", readAgain).
+		Set("error = CASE WHEN "+waitsForFile+" THEN ? WHEN id <> ? AND state = ? THEN ? ELSE error END",
+			readAgain, id, KnowledgeDocumentIndexed, writtenOver).
+		Set("state = CASE WHEN id <> ? AND state = ? THEN ? ELSE state END", id, KnowledgeDocumentIndexed, KnowledgeDocumentFailed).
 		Set("passages = GREATEST(passages, ?)", passages).
 		Where("customer_id = ?", customerID).
 		Where("namespace = ?", namespace).

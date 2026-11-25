@@ -521,7 +521,7 @@ func (s *Service) write(
 func (s *Service) overtaken(
 	ctx context.Context, owned metered.OwnedKnowledge, payload readPayload, now store.KnowledgeDocument, read *store.KnowledgeDocument, passages int,
 ) error {
-	kept, err := s.store.KnowledgeDocuments.Interrupt(ctx, payload.CustomerID, read.Namespace, read.Source, passages)
+	kept, err := s.store.KnowledgeDocuments.Interrupt(ctx, payload.CustomerID, payload.ID, read.Namespace, read.Source, passages)
 	if kept {
 		return errOvertaken
 	}
@@ -531,7 +531,7 @@ func (s *Service) overtaken(
 	if err := owned.Delete(ctx, read.Namespace, ingest.IDs(read.Source, 0, passages)); err != nil {
 		return fmt.Errorf("files: take back what was read for a document removed meanwhile: %w", err)
 	}
-	if _, err := s.store.KnowledgeDocuments.Interrupt(ctx, payload.CustomerID, read.Namespace, read.Source, passages); err != nil {
+	if _, err := s.store.KnowledgeDocuments.Interrupt(ctx, payload.CustomerID, payload.ID, read.Namespace, read.Source, passages); err != nil {
 		return err
 	}
 	return errOvertaken

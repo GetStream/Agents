@@ -976,18 +976,67 @@ func (s *KnowledgeFilesSuite) TestAPostAnOlderReadWroteOverIsWrittenAgain() {
 }
 
 // The document of a read was removed and its source posted before the read wrote.
-func (s *KnowledgeFilesSuite) TestAReadLeavesADocumentMadeOfItsSourceSinceItsPassages() {
+func (s *KnowledgeFilesSuite) TestADocumentAReadOfARemovedOneWroteOverIsNotShownAsFound() {
 	writing, write := s.holdWrite()
-	_, sent, _ := s.upload("since.md", []byte(sections(3)), "")
+	_, sent, _ := s.upload("since.md", []byte("# Section 0\n\nThe removed file's.\n\n"+sections(3)), "")
 	s.reached(writing, "the read never wrote")
 	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
 	s.Require().Equal(http.StatusOK, s.post("since.md", 2))
 	write()
-
 	s.everyFileRead()
-	s.indexedWith("since.md", 3)
+
+	listed := s.listed()
+	s.Require().Len(listed, 1)
+	s.Equal(KnowledgeDocumentStateFailed, listed[0].State)
+	s.Require().NotNil(listed[0].Error)
+	s.Equal("The passages may not all be its own: send the document again or delete it.", *listed[0].Error)
+	s.Require().Equal(http.StatusOK, s.post("since.md", 2))
+	s.indexedWith("since.md", 2)
+	s.passageContaining("What section 0 says.")
 	s.Require().Equal(http.StatusNoContent, s.remove(s.listed()[0].Id))
 	s.nothingLeft("since.md")
+}
+
+// The base's last look at its rows is held in its transaction until the post goes to finish.
+func (s *KnowledgeFilesSuite) TestAPostFinishedWhileItsBasesDeleteCommitsIsStored() {
+	ctx := context.Background()
+	lock, err := s.store.GlobalDB().Conn(ctx)
+	s.Require().NoError(err)
+	defer func() {
+		_, err := lock.ExecContext(ctx, "SELECT pg_advisory_unlock_all()")
+		s.NoError(err)
+		s.NoError(lock.Close())
+	}()
+	_, err = lock.ExecContext(ctx, "SELECT pg_advisory_lock(3771)")
+	s.Require().NoError(err)
+	s.Require().Equal(http.StatusOK, s.post("other.md", 1))
+	s.trigger("hold_base_look", "knowledge_documents", "UPDATE", "OLD.customer_id = '"+s.customerID()+
+		"' AND OLD.source = 'look.md' AND OLD.object_key LIKE 'posting:%' AND NEW.object_key LIKE 'removing:%'", "PERFORM pg_advisory_xact_lock(3771);")
+	began, posted := make(chan func(), 1), make(chan chan int, 1)
+	s.knowledge.onceAfterDrop(func() {
+		finish, answered := s.postWritten("look.md", 3)
+		s.forgetStored("look.md")
+		began <- finish
+		posted <- answered
+	})
+	deleted := make(chan int, 1)
+	go func() { deleted <- s.dropBase() }()
+	waiter := func(query string, args ...any) (pid int) {
+		s.Require().Eventually(func() bool {
+			return lock.QueryRowContext(ctx, query, args...).Scan(&pid) == nil
+		}, 30*time.Second, 5*time.Millisecond)
+		return pid
+	}
+	deleting := waiter("SELECT l.pid FROM pg_locks l JOIN pg_database d ON d.oid = l.database " +
+		"WHERE d.datname = current_database() AND l.locktype = 'advisory' AND l.objid = 3771 AND NOT l.granted")
+	(<-began)()
+	waiter("SELECT pid FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid)) LIMIT 1", deleting)
+	_, err = lock.ExecContext(ctx, "SELECT pg_advisory_unlock(3771)")
+	s.Require().NoError(err)
+
+	s.Equal(http.StatusNoContent, s.answer(deleted))
+	s.Equal(http.StatusOK, s.answer(<-posted))
+	s.indexedWith("look.md", 3)
 }
 
 func (s *KnowledgeFilesSuite) TestAPostThatMeetsWhatAReadTakesBackIsStored() {

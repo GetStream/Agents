@@ -24,7 +24,7 @@ func (s *StoreSuite) TestAKnowledgeDocumentIsOnlyItsOwnCustomers() {
 	s.ErrorIs(err, ErrNoKnowledgeDocument)
 	key, _, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
 	s.Require().NoError(err)
-	interrupted, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "other-app", mine.Namespace, mine.Source, 9)
+	interrupted, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "other-app", mine.ID, mine.Namespace, mine.Source, 9)
 	s.Require().NoError(err)
 	s.True(interrupted, "it has a document of the source too")
 	untouched, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
@@ -162,7 +162,7 @@ func (s *StoreSuite) TestDeletingAKnowledgeBaseLeavesTheDocumentsItNoLongerHolds
 	s.knowledgeDocument("acme-app", "docs", "posted.md")
 	upload := KnowledgeDocument{CustomerID: "acme-app", Namespace: "docs", Source: "uploaded.md", ObjectKey: "acme-app/one/uploaded.md"}
 	s.Require().NoError(s.store.KnowledgeDocuments.Pend(s.ctx, &upload))
-	_, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", "docs", "read.md", 3)
+	_, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", newID(), "docs", "read.md", 3)
 	s.Require().NoError(err)
 
 	later := s.knowledgeDocument("acme-app", "docs", "later.md")
@@ -231,6 +231,25 @@ func (s *StoreSuite) TestAPostThatLeavesAnotherKeyIsNotFinishedOver() {
 	s.False(finished)
 }
 
+func (s *StoreSuite) TestOnlyADocumentMadeSinceAReadsWasRemovedIsFailedByTheRead() {
+	mine, other := s.knowledgeDocument("acme-app", "docs", "faq.md"), s.knowledgeDocument("acme-app", "docs", "hours.md")
+	_, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, "docs", "faq.md", 8)
+	s.Require().NoError(err)
+	its, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	s.Equal("indexed", its.State)
+
+	_, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", newID(), "docs", "faq.md", 8)
+	s.Require().NoError(err)
+	failed, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	s.Equal("failed", failed.State)
+	s.Equal("The passages may not all be its own: send the document again or delete it.", failed.Error)
+	untouched, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", other.ID)
+	s.Require().NoError(err)
+	s.Equal("indexed", untouched.State)
+}
+
 // A post that failed says why on the row another post of its source shares.
 func (s *StoreSuite) TestAPostFinishesOverTheErrorOfAnother() {
 	failing := KnowledgeDocument{CustomerID: "acme-app", Namespace: "docs", Source: "faq.md", State: KnowledgeDocumentFailed, Error: "why"}
@@ -246,7 +265,7 @@ func (s *StoreSuite) TestAPostFinishesOverTheErrorOfAnother() {
 func (s *StoreSuite) TestAPostAnOvertakenReadWroteOverDoesNotFinish() {
 	post := KnowledgeDocument{CustomerID: "acme-app", Namespace: "docs", Source: "faq.md", Passages: 2, State: KnowledgeDocumentPending}
 	s.Require().NoError(s.store.KnowledgeDocuments.Upsert(s.ctx, &post))
-	_, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", "docs", "faq.md", 8)
+	_, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", newID(), "docs", "faq.md", 8)
 	s.Require().NoError(err)
 
 	finished, err := s.store.KnowledgeDocuments.Finish(s.ctx, &post, post.ObjectKey)
@@ -269,7 +288,7 @@ func (s *StoreSuite) TestAFileWhosePassagesWereMetDoesNotFinishUntilTheyAreWritt
 			return s.store.KnowledgeDocuments.FailRemoval(s.ctx, "acme-app", document.ID)
 		},
 		"an older read": func(document KnowledgeDocument) error {
-			_, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", "docs", document.Source, 2)
+			_, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", newID(), "docs", document.Source, 2)
 			return err
 		},
 	}
@@ -349,7 +368,7 @@ func (s *StoreSuite) TestARemovalDeletesOnlyTheDocumentItStillHolds() {
 	s.Require().NoError(err)
 	s.Equal(KnowledgeDocumentIndexed, untouched.State)
 
-	interrupted, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.Namespace, mine.Source, 3)
+	interrupted, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, mine.Namespace, mine.Source, 3)
 	s.Require().NoError(err)
 	s.True(interrupted)
 	deleted, err = s.store.KnowledgeDocuments.Delete(s.ctx, "acme-app", mine.ID, key)
@@ -477,7 +496,7 @@ func (s *StoreSuite) TestAnInterruptedRemovalCountsThePassagesWritten() {
 	for _, written := range []int{8, 2} {
 		_, _, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
 		s.Require().NoError(err)
-		interrupted, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.Namespace, mine.Source, written)
+		interrupted, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, mine.Namespace, mine.Source, written)
 		s.Require().NoError(err)
 		s.True(interrupted)
 	}
@@ -491,7 +510,7 @@ func (s *StoreSuite) TestAnInterruptedRemovalCountsThePassagesWritten() {
 func (s *StoreSuite) TestAnOvertakenReadsPassagesAreCountedOnItsDocumentOnly() {
 	elsewhere := s.knowledgeDocument("acme-app", "other-docs", "faq.md")
 	mine, other := s.knowledgeDocument("acme-app", "docs", "faq.md"), s.knowledgeDocument("acme-app", "docs", "hours.md")
-	kept, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.Namespace, mine.Source, 8)
+	kept, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, mine.Namespace, mine.Source, 8)
 	s.Require().NoError(err)
 	s.True(kept)
 
@@ -505,7 +524,7 @@ func (s *StoreSuite) TestAnOvertakenReadsPassagesAreCountedOnItsDocumentOnly() {
 		s.Require().NoError(err)
 		s.Equal(3, untouched.Passages)
 	}
-	kept, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", "docs", "gone.md", 8)
+	kept, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, "docs", "gone.md", 8)
 	s.Require().NoError(err)
 	s.False(kept, "it is gone")
 }
@@ -516,7 +535,7 @@ func (s *StoreSuite) TestAnOvertakenReadIsCountedWhateverHoldsItsDocument() {
 		_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE knowledge_documents SET object_key = ?, passages = 3 WHERE id = ?", key, mine.ID)
 		s.Require().NoError(err)
 
-		kept, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.Namespace, mine.Source, 8)
+		kept, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, mine.Namespace, mine.Source, 8)
 		s.Require().NoError(err)
 		s.True(kept, key)
 		counted, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
@@ -530,11 +549,11 @@ func (s *StoreSuite) TestEachInterruptHoldsTheDocumentUnderAnotherKey() {
 	mine := s.knowledgeDocument("acme-app", "docs", "faq.md")
 	_, _, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
 	s.Require().NoError(err)
-	_, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.Namespace, mine.Source, 3)
+	_, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, mine.Namespace, mine.Source, 3)
 	s.Require().NoError(err)
 	key, _, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
 	s.Require().NoError(err)
-	_, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.Namespace, mine.Source, 3)
+	_, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, mine.Namespace, mine.Source, 3)
 	s.Require().NoError(err)
 
 	deleted, err := s.store.KnowledgeDocuments.Delete(s.ctx, "acme-app", mine.ID, key)
