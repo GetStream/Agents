@@ -18,6 +18,9 @@ type Attribution struct {
 	// OrganizationTier is the organization's tier as the request carried it, an opaque string.
 	// The gate's, when it knows one, replaces it on the row: it is the newest Stream sent.
 	OrganizationTier string
+	// OrganizationKYC is whether the organization passed identity verification, as the
+	// request carried it. Not recorded on the row: it decides what the organization may buy.
+	OrganizationKYC string
 	// APIKey is the public key the work was started with, never its secret, or the origin of
 	// work no key started (OriginHookChat and the rest). A row without one is a site that
 	// forgot to say, written as Unattributed.

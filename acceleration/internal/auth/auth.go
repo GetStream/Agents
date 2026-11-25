@@ -118,6 +118,9 @@ const (
 	APIKeyIDHeader        = "X-Stream-Api-Key-Id"
 	TierHeader            = "X-Stream-Organization-Tier"
 	UsageCategoriesHeader = "X-Stream-Usage-Categories"
+	// KYCHeader is whether the organization passed identity verification, as the proxy
+	// names it: "verified" or "not-verified". Not read in APIKey mode.
+	KYCHeader = "X-Stream-Organization-KYC"
 )
 
 // NoAuthKey is the key every request in NoAuth mode is recorded under, since none is presented.
@@ -216,6 +219,9 @@ type Principal struct {
 	// OrganizationTier is the organization's tier as the proxy named it. Empty in every other
 	// mode, where the organization's last known tier applies.
 	OrganizationTier string
+	// OrganizationKYC is whether the organization passed identity verification, as the proxy
+	// named it (KYCHeader). Empty in every other mode.
+	OrganizationKYC string
 	// UsageCategories are what the customer counts the request's usage under, sorted, each
 	// once, the user's team among them as team:<name>. Nil names none.
 	UsageCategories []string
@@ -388,7 +394,7 @@ func (p proxied) Authenticate(_ context.Context, r *http.Request) (Principal, er
 	if named == "" && (!p.declares || kind == KindServer) {
 		named = strings.TrimSpace(r.URL.Query().Get(UserParam))
 	}
-	// The key, the tier and the categories are believed as the app id is: the proxy writes
+	// The key, the tier, KYC and the categories are believed as the app id is: the proxy writes
 	// them for the caller it authenticated and deletes a caller's own.
 	categories, err := headerCategories(r)
 	if err != nil {
@@ -402,6 +408,7 @@ func (p proxied) Authenticate(_ context.Context, r *http.Request) (Principal, er
 		ServerSide:       kind == KindServer,
 		APIKey:           strings.TrimSpace(r.Header.Get(APIKeyIDHeader)),
 		OrganizationTier: strings.TrimSpace(r.Header.Get(TierHeader)),
+		OrganizationKYC:  strings.TrimSpace(r.Header.Get(KYCHeader)),
 		UsageCategories:  categories,
 	}
 	if principal.ServerSide {

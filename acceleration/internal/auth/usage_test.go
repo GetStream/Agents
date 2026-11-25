@@ -38,6 +38,7 @@ func proxiedRequest(categories string) *http.Request {
 	r.Header.Set(UserHeader, "user-1")
 	r.Header.Set(APIKeyIDHeader, "key-a")
 	r.Header.Set(TierHeader, "tier-a")
+	r.Header.Set(KYCHeader, "verified")
 	if categories != "" {
 		r.Header.Set(UsageCategoriesHeader, categories)
 	}
@@ -51,6 +52,7 @@ func TestTheProxyNamesTheKeyTierAndCategories(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "key-a", principal.APIKey)
 	require.Equal(t, "tier-a", principal.OrganizationTier)
+	require.Equal(t, "verified", principal.OrganizationKYC)
 	require.Equal(t, []string{"project:onboarding", "team:finance"}, principal.UsageCategories)
 }
 
@@ -67,6 +69,7 @@ func TestAKeyedRequestNamesItsKey(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, usageKey, principal.APIKey)
 	require.Empty(t, principal.OrganizationTier, "only the proxy names a tier")
+	require.Empty(t, principal.OrganizationKYC, "only the proxy names KYC")
 }
 
 func TestATokensCategoriesAndTeamAreRead(t *testing.T) {

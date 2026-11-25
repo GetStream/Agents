@@ -1463,6 +1463,7 @@ func attributionOf(principal auth.Principal) routing.Attribution {
 	attribution := routing.Attribution{
 		OrganizationID:   principal.OrganizationID,
 		OrganizationTier: principal.OrganizationTier,
+		OrganizationKYC:  principal.OrganizationKYC,
 		APIKey:           principal.APIKey,
 		UsageCategories:  principal.UsageCategories,
 	}
