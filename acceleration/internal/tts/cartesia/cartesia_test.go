@@ -549,6 +549,10 @@ func (s *CartesiaSuite) TestAVoiceThatIsNoCartesiaIdIsRefusedWhereverItComesFrom
 		provider, _ := s.connect(fake, Options{VoiceID: id})
 		err = provider.Synthesize(tts.Request{ID: "u1", Text: "hello", Voice: voice, Final: true})
 		s.ErrorIs(err, ErrRefused, voice)
+
+		s.Require().NoError(provider.Synthesize(tts.Request{ID: "u2", Text: "hello", Final: false}))
+		err = provider.Synthesize(tts.Request{ID: "u2", Text: " again", Voice: voice, Final: true})
+		s.ErrorIs(err, ErrRefused, "an utterance already open: "+voice)
 		provider.Close()
 		fake.close()
 	}
