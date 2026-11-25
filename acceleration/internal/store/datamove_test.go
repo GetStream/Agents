@@ -2702,6 +2702,80 @@ func (s *DataMoveSuite) TestAnImportedRowCannotChooseItsStreamApp() {
 	s.Equal(ForeignStreamApp, *s.pinOnDestination(unpinned), "an unpinned row was in somebody's deployment app, not this customer's")
 }
 
+// A session's project tag moves with it, there and back, as a row and as a change. A row of a
+// source from before it was kept arrives not knowing.
+func (s *DataMoveSuite) TestASessionsProjectTagMovesWithIt() {
+	for id, tag := range map[string]*string{"backends": new("alpha"), "devices": new(""), "before": nil} {
+		s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{
+			ID: id, CustomerID: "acme", Project: "alpha", ProjectTag: tag, AgentID: "agent", UserID: "user",
+		}))
+	}
+
+	s.capture("acme")
+	cursor := s.move("acme", "acme")
+	s.assertProjectTags(s.destination)
+	_, err := s.source.shard.NewUpdate().Model((*AgentSession)(nil)).
+		Set("title = 'renamed'").Where("customer_id = 'acme'").Exec(s.ctx)
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "acme", cursor)
+	s.assertProjectTags(s.destination)
+	for _, row := range s.exportFrom(s.destination, "acme").of("agent_sessions") {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+		s.Require().NoError(s.source.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
+	}
+	s.assertProjectTags(s.source)
+
+	s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "acme", Project: "alpha", ProjectTag: new("alpha")}))
+	s.Require().NoError(s.destination.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "acme", ProjectTag: new("")}))
+	s.move("acme", "acme")
+	moved, err := s.destination.Sessions.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Equal(new("alpha"), moved.ProjectTag, "the tag that arrives stands over the one here")
+
+	older := s.export("acme").of("agent_sessions")[0]
+	delete(older, "project_tag")
+	older["id"], older["caller_kind"] = "older", "server"
+	encoded, err := json.Marshal(older)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
+	arrived, err := s.destination.Sessions.Get(s.ctx, "acme", "older")
+	s.Require().NoError(err)
+	s.Nil(arrived.ProjectTag)
+	s.Equal("alpha", arrived.TaggedProject())
+}
+
+// A session carried on in another shard is exported as a row of each shard, under one id. The one
+// that does not say its project tag takes it from neither the copy nor the change of the one that does.
+func (s *DataMoveSuite) TestASessionsTwoRowsArriveWithTheProjectTagOneSays() {
+	s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "acme", Project: "alpha", CallerKind: "server"}))
+	row := s.export("acme").of("agent_sessions")[0]
+	for id, tags := range map[string][]any{"said first": {"", nil}, "said last": {nil, ""}} {
+		for _, tag := range tags {
+			row["id"], row["project_tag"] = id, tag
+			encoded, err := json.Marshal(row)
+			s.Require().NoError(err)
+			s.Require().NoError(s.destination.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
+			s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme",
+				[]DataChange{{Table: "agent_sessions", Op: "update", Payload: encoded}}))
+		}
+
+		arrived, err := s.destination.Sessions.Get(s.ctx, "acme", id)
+		s.Require().NoError(err)
+		s.Equal(new(""), arrived.ProjectTag, id)
+	}
+}
+
+func (s *DataMoveSuite) assertProjectTags(store *Store) {
+	for id, want := range map[string]string{"backends": `"alpha"`, "devices": `""`, "before": "null"} {
+		row, err := store.Sessions.Get(s.ctx, "acme", id)
+		s.Require().NoError(err)
+		got, err := json.Marshal(row.ProjectTag)
+		s.Require().NoError(err)
+		s.Equal(want, string(got), id)
+	}
+}
+
 func (s *DataMoveSuite) TestAnExportNamesTheAppANullPinMeant() {
 	// NULL is the app of whichever deployment wrote it, which means nothing elsewhere.
 	s.source.SetStreamPins(StreamPins{Deployment: func() int64 { return 1 }})
@@ -2997,7 +3071,7 @@ func (s *DataMoveSuite) TestAnImportedDefinitionWhoseIDIsNoStringIsRefused() {
 }
 
 func (s *DataMoveSuite) TestAChangeCarryingADefinitionTheAPIWouldRefuseIsRefused() {
-	id := "custom_" + newID()
+	id := "custom_a" + newID()
 	manifest := strings.Replace(customManifestWith(`"client": {"registration": ["operator"], "env": "GOOGLE"}, "schemes": ["oauth2_code"]`),
 		"custom_acme", id, 1)
 
@@ -3010,7 +3084,7 @@ func (s *DataMoveSuite) TestAChangeCarryingADefinitionTheAPIWouldRefuseIsRefused
 
 // A change recorded by a release before sync hashes carries no sync_hash key.
 func (s *DataMoveSuite) TestADefinitionChangeFromAReleaseBeforeSyncHashesApplies() {
-	id := "custom_" + newID()
+	id := "custom_a" + newID()
 	manifest := strings.Replace(customAcme, "custom_acme", id, 1)
 
 	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: "connector_definitions", Op: ChangeInsert,
@@ -3018,6 +3092,63 @@ func (s *DataMoveSuite) TestADefinitionChangeFromAReleaseBeforeSyncHashesApplies
 
 	s.Require().NoError(err)
 	s.Equal(1, s.definitionsNamed(id))
+}
+
+// An export from before custom connectors lost oauth2_client_credentials may hold a definition
+// with it, which no connection could use: the import skips it and writes every other row.
+func (s *DataMoveSuite) TestAnImportSkipsAClientCredentialsDefinitionAndWritesTheRest() {
+	skipped, err := s.importDefinition(customManifestWith(`"schemes": ["oauth2_client_credentials"]`))
+	s.Require().NoError(err)
+	written, err := s.importDefinition(customAcme)
+	s.Require().NoError(err)
+
+	s.Zero(s.definitionsNamed(skipped))
+	s.Equal(1, s.definitionsNamed(written))
+}
+
+// A page of changes holding such a definition applies, all but that row.
+func (s *DataMoveSuite) TestAChangePageWithAClientCredentialsDefinitionAppliesTheRest() {
+	change := func(manifest string) (string, DataChange) {
+		id := "custom_a" + newID()
+		manifest = strings.Replace(manifest, "custom_acme", id, 1)
+		return id, DataChange{Table: "connector_definitions", Op: ChangeInsert, Payload: json.RawMessage(`{"id": "` + id +
+			`", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + manifest + `}`)}
+	}
+	before, first := change(customAcme)
+	skipped, second := change(customManifestWith(`"schemes": ["oauth2_code", "oauth2_client_credentials"], "client": {"registration": ["customer"]}`))
+	after, third := change(customAcme)
+
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "moved", []DataChange{first, second, third}))
+
+	s.Equal(1, s.definitionsNamed(before))
+	s.Zero(s.definitionsNamed(skipped))
+	s.Equal(1, s.definitionsNamed(after))
+}
+
+// The API's limits hold for an imported definition, which is refused naming its id.
+func (s *DataMoveSuite) TestAnImportedDefinitionPastAnAPILimitIsRefused() {
+	id, err := s.importDefinition(customManifestWith(`"name": "` + strings.Repeat("a", 121) + `"`))
+
+	s.ErrorIs(err, ErrNotACustomConnector)
+	s.ErrorContains(err, id)
+	s.Zero(s.definitionsNamed(id))
+}
+
+// A definition at every limit imports: 64 characters of id, 120 of name in two-byte characters,
+// a scope of each edge of RFC 6749's scope-token and a sync hash of 128.
+func (s *DataMoveSuite) TestAnImportedDefinitionAtTheAPIsLimitsImports() {
+	id := "custom_a" + strings.Repeat("b", 56)
+	name := strings.Repeat("é", 120)
+	row := `{"id": "` + id + `", "revision": 1, "name": "` + name + `", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z",
+		"sync_hash": "` + strings.Repeat("!~", 64) + `", "manifest": ` + strings.Replace(customManifestWith(`"name": "`+name+`", "scopes": {"list": ["!", "#", "[", "]", "~"]}`),
+		"custom_acme", id, 1) + `}`
+
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "moved", "connector_definitions", json.RawMessage(row)))
+
+	definition, err := s.destination.ConnectorDefinitions.Latest(s.ctx, "moved", id)
+	s.Require().NoError(err)
+	s.Equal(name, definition.Name)
+	s.Equal(strings.Repeat("!~", 64), definition.SyncHash)
 }
 
 // customAcme is a manifest the API stores for a custom connector custom_acme: an MCP server
@@ -3044,7 +3175,7 @@ func (s *DataMoveSuite) importDefinitionRow(manifest string) (string, error) {
 }
 
 func (s *DataMoveSuite) importDefinitionWith(manifest func(id string) string) (string, error) {
-	id := "custom_" + newID()
+	id := "custom_a" + newID()
 	row := `{"customer_id": "moved", "id": "` + id + `", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", ` + manifest(id) + `}`
 	return id, s.destination.ImportRow(s.ctx, "moved", "connector_definitions", json.RawMessage(row))
 }
@@ -4277,14 +4408,14 @@ func (s *DataMoveSuite) TestAContactMidCallIsSettledHereFromItsCallOnceTheMoveIs
 	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
 		"SELECT EXTRACT(EPOCH FROM lease_until - now()) FROM campaign_contacts WHERE campaign_id = ? AND to_number = ?", campaign, "+15550000001").Scan(&left))
 	s.Less(left, -(24 * time.Hour).Seconds(), "ended on Postgres's clock, also when the clock of this router is ahead")
-	taken, err := s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", time.Hour, 10)
+	taken, err := s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", ShardClaim{}, time.Hour, 10)
 	s.Require().NoError(err)
 	s.Empty(taken, "the source is still ringing it until the cut-over")
 	_, campaigns := s.resume("moved")
 	s.Require().Equal([]string{campaign}, campaigns)
 	s.Require().NoError(s.destination.Campaigns.Resume(s.ctx, "moved", campaign))
 
-	taken, err = s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", time.Hour, 10)
+	taken, err = s.destination.CampaignContacts.TakeOverExpired(s.ctx, "router-b", ShardClaim{}, time.Hour, 10)
 	s.Require().NoError(err)
 	s.Require().Len(taken, 1, "settled from its call rather than rung again at once")
 	ada := taken[0].Contact
@@ -4391,7 +4522,7 @@ func (s *DataMoveSuite) dueOnSource() string {
 // ringOnSource rings the source's next due contact, as a runner there does, and returns it in
 // a call.
 func (s *DataMoveSuite) ringOnSource() Contact {
-	claimed, err := s.source.CampaignContacts.Claim(s.ctx, "router-a", time.Now(), time.Hour, 1)
+	claimed, err := s.source.CampaignContacts.Claim(s.ctx, "router-a", ShardClaim{}, time.Now(), time.Hour, 1)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 	return claimed[0].Contact
@@ -4406,7 +4537,7 @@ func (s *DataMoveSuite) hangUpOnSource(contact Contact) {
 // there rings first.
 func (s *DataMoveSuite) resumeHere(campaign string) []Contact {
 	s.Require().NoError(s.destination.Campaigns.Resume(s.ctx, "moved", campaign))
-	claimed, err := s.destination.CampaignContacts.Claim(s.ctx, "router-b", time.Now().Add(time.Minute), time.Hour, 10)
+	claimed, err := s.destination.CampaignContacts.Claim(s.ctx, "router-b", ShardClaim{}, time.Now().Add(time.Minute), time.Hour, 10)
 	s.Require().NoError(err)
 	contacts := make([]Contact, 0, len(claimed))
 	for _, claim := range claimed {

@@ -142,9 +142,7 @@ func (s *Server) receiveChannelMessage(w http.ResponseWriter, r *http.Request) {
 func writeChannelAnswer(w http.ResponseWriter, answer channels.Answer) {
 	noteAnswered(w, answer.Status)
 	if answer.Text != "" {
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(answer.Status)
-		_, _ = w.Write([]byte(answer.Text))
+		writeChallenge(w, answer.Text)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

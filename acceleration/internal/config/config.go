@@ -99,7 +99,11 @@ type Config struct {
 	// Shard names the part of a deployment this router is in, when its calls are kept apart
 	// from what every part shares (see Postgres.ShardDSN and Redis.Shard). Empty is a
 	// deployment of one part.
-	Shard      string     `koanf:"shard"`
+	Shard string `koanf:"shard"`
+	// Shards names every shard of the deployment, this one's included. No shard opens
+	// another's database: they agree on the list (node:shards) and each runs its part of the
+	// work queued for all of them.
+	Shards     []string   `koanf:"shards"`
 	Postgres   Postgres   `koanf:"postgres"`
 	Redis      Redis      `koanf:"redis"`
 	Node       Node       `koanf:"node"`
@@ -123,6 +127,9 @@ type Config struct {
 	Usage       Usage       `koanf:"usage"`
 	Knowledge   Knowledge   `koanf:"knowledge"`
 	Limits      Limits      `koanf:"limits"`
+	// ShardRouting is which shard does work for a place, the same on every router of the
+	// deployment. Unset, work stays on the router that received it.
+	ShardRouting ShardRouting `koanf:"shard_routing"`
 	// Retired says, of each setting the deployment set that is no longer read, what took its
 	// place. The router warns of each once at start, and neither refuses to start over one
 	// nor acts on it.
@@ -149,6 +156,18 @@ const (
 	minOverlapTimeout = 100 * time.Millisecond
 	maxOverlapTimeout = 450 * time.Millisecond
 )
+
+// ShardRouting sends a hook to the shard nearest the person it is for (shardmap.Map). A
+// call goes by the country of the number dialled, a chat message by the shard that last served
+// its user's own client, or the shard of its agent's region when that is not the default.
+type ShardRouting struct {
+	// Default is the shard of a country Countries does not list, such as us-east4.
+	Default string `koanf:"default"`
+	// Countries maps an ISO 3166-1 alpha-2 country code to its shard, such as DE=europe-west4.
+	Countries map[string]string `koanf:"countries"`
+	// Regions maps an agent region other than us to its shard, such as eu=europe-west4.
+	Regions map[string]string `koanf:"regions"`
+}
 
 // Knowledge is the knowledge store's settings.
 type Knowledge struct {
@@ -235,9 +254,12 @@ type Postgres struct {
 	// ShardDSN is where this shard writes the calls, sessions and requests it runs. Empty
 	// writes them to DSN.
 	ShardDSN string `koanf:"shard_dsn"`
-	// Shards is every shard's DSN by name, this one's included, which reads of calls,
-	// sessions and requests cover. Empty reads this shard's alone.
-	Shards map[string]string `koanf:"shards"`
+	// MigrateDSN is DSN's database as the role that owns its schema, which router migrate
+	// connects with. Set, every other command checks the schema and never changes it. Empty
+	// migrates with DSN on every start.
+	MigrateDSN string `koanf:"migrate_dsn"`
+	// ShardMigrateDSN is the same for ShardDSN's database.
+	ShardMigrateDSN string `koanf:"shard_migrate_dsn"`
 }
 
 // Redis holds live provider health and the daily counters. An empty address is a router
@@ -569,8 +591,11 @@ type Telnyx struct {
 }
 
 // Twilio is what the router checks Twilio's webhooks with. The Twilio provider reads its own
-// credentials, TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN.
+// credentials, TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN, which export writes back.
 type Twilio struct {
+	// AccountSID is the account the router's Twilio numbers are under. A call webhook naming
+	// any other is hung up.
+	AccountSID string `koanf:"account_sid"`
 	// WebhookAuthToken is the Auth Token of the account whose webhooks are checked. It only
 	// checks signatures: nothing calls Twilio with it.
 	WebhookAuthToken string `koanf:"webhook_auth_token"`
@@ -594,12 +619,15 @@ var variables = map[string]string{
 	"pprof_addr":           "ROUTER_PPROF_ADDR",
 	"metrics_addr":         "ROUTER_METRICS_ADDR",
 	"shard":                "ROUTER_SHARD",
+	"shards":               "ROUTER_SHARDS",
 	"postgres.dsn":         "ROUTER_POSTGRES_DSN",
 	"postgres.shard_dsn":   "ROUTER_POSTGRES_SHARD_DSN",
-	"postgres.shards":      "ROUTER_POSTGRES_SHARDS",
 	"redis.addr":           "ROUTER_REDIS_ADDR",
 	"redis.username":       "ROUTER_REDIS_USERNAME",
 	"redis.password":       "ROUTER_REDIS_PASSWORD",
+
+	"postgres.migrate_dsn":       "ROUTER_POSTGRES_MIGRATE_DSN",
+	"postgres.shard_migrate_dsn": "ROUTER_POSTGRES_SHARD_MIGRATE_DSN",
 
 	"redis.shard.addr":           "ROUTER_REDIS_SHARD_ADDR",
 	"redis.shard.username":       "ROUTER_REDIS_SHARD_USERNAME",
@@ -673,6 +701,7 @@ var variables = map[string]string{
 	"telnyx.connection_id": "TELNYX_CONNECTION_ID",
 	"telnyx.public_key":    "TELNYX_PUBLIC_KEY",
 
+	"twilio.account_sid":        "TWILIO_ACCOUNT_SID",
 	"twilio.webhook_auth_token": "TWILIO_WEBHOOK_AUTH_TOKEN",
 
 	"usage.url":        "ROUTER_USAGE_URL",
@@ -689,14 +718,22 @@ var variables = map[string]string{
 	"knowledge.min_chunk":   "ROUTER_KNOWLEDGE_MIN_CHUNK",
 	"knowledge.max_heading": "ROUTER_KNOWLEDGE_MAX_HEADING",
 	"knowledge.regions":     "ROUTER_KNOWLEDGE_REGIONS",
+
+	"shard_routing.default":   "ROUTER_SHARD_ROUTING_DEFAULT",
+	"shard_routing.countries": "ROUTER_SHARD_ROUTING_COUNTRIES",
+	"shard_routing.regions":   "ROUTER_SHARD_ROUTING_REGIONS",
 }
 
 // lists are the settings written as a comma-separated variable and as a sequence in YAML.
-var lists = map[string]bool{"trusted_proxies": true, "chat.inbound_keys": true}
+var lists = map[string]bool{"trusted_proxies": true, "chat.inbound_keys": true, "shards": true}
 
 // pairs are the settings written as a comma-separated variable of name=value and as a
 // mapping in YAML.
-var pairs = map[string]bool{"postgres.shards": true, "knowledge.regions": true, "code_sandbox.targets": true}
+var pairs = map[string]bool{"knowledge.regions": true, "code_sandbox.targets": true,
+	"shard_routing.countries": true, "shard_routing.regions": true}
+
+// countryCode is an ISO 3166-1 alpha-2 country code, as phone_numbers.country holds it.
+var countryCode = regexp.MustCompile(`^[A-Z]{2}$`)
 
 // providerRegion is what a turbopuffer region or a Daytona target may be called: part of a
 // host name, or a value Daytona takes.
@@ -813,6 +850,12 @@ func Load(path string) (Config, string, error) {
 	if k.Exists("auth.kek") {
 		return Config{}, "", fmt.Errorf("config: %s: auth.kek is no longer read: set ROUTER_DEV_KEK on a laptop "+
 			"or in CI, or ROUTER_AUTH_KEK_V1_WRAPPED with auth.kms_key on a hosted router", name)
+	}
+	// A router that still reads it would open every other shard's database.
+	if os.Getenv("ROUTER_POSTGRES_SHARDS") != "" || k.Exists("postgres.shards") {
+		return Config{}, "", fmt.Errorf("config: %s: postgres.shards (ROUTER_POSTGRES_SHARDS) is no longer read, since no shard "+
+			"opens another's database: set shards (ROUTER_SHARDS) to every shard's name, this one's included, such as "+
+			"us-east4,europe-west4, and keep this shard's own DSN in postgres.shard_dsn (ROUTER_POSTGRES_SHARD_DSN)", name)
 	}
 	if os.Getenv("ROUTER_CHORUS_ASR_MODE") != "" || k.Exists("agent.chorus_asr_mode") {
 		config.Retired = append(config.Retired, chorusASRModeRetired)
@@ -1033,6 +1076,9 @@ func (c Config) validate() error {
 			}
 		}
 	}
+	if err := c.ShardRouting.validate(); err != nil {
+		return err
+	}
 	switch c.Limits.Mode {
 	case LimitsEnforce, LimitsShadow, LimitsOff:
 	default:
@@ -1070,6 +1116,27 @@ func (a Auth) validateActivityKeys() error {
 				return fmt.Errorf("config: %s is the same as %s: the activity key reads activity only, so it "+
 					"is a key of its own", activity.setting, staff.setting)
 			}
+		}
+	}
+	return nil
+}
+
+// validate refuses a shard routing naming a country, a region or a shard that cannot be one.
+// A shard is named as ROUTER_SHARD names it, a lowercase word such as europe-west4.
+func (r ShardRouting) validate() error {
+	if r.Default != "" && !providerRegion.MatchString(r.Default) {
+		return fmt.Errorf("config: shard_routing.default (ROUTER_SHARD_ROUTING_DEFAULT) is a shard such as us-east4, got %q", r.Default)
+	}
+	for _, country := range slices.Sorted(maps.Keys(r.Countries)) {
+		if !countryCode.MatchString(country) || !providerRegion.MatchString(r.Countries[country]) {
+			return fmt.Errorf("config: shard_routing.countries (ROUTER_SHARD_ROUTING_COUNTRIES) maps a country code to its shard, "+
+				"such as DE=europe-west4, got %s=%q", country, r.Countries[country])
+		}
+	}
+	for _, region := range slices.Sorted(maps.Keys(r.Regions)) {
+		if !pricing.ValidRegion(region) || region == pricing.DefaultRegion || !providerRegion.MatchString(r.Regions[region]) {
+			return fmt.Errorf("config: shard_routing.regions (ROUTER_SHARD_ROUTING_REGIONS) maps an agent region other than %s "+
+				"to its shard, such as eu=europe-west4, got %s=%q", pricing.DefaultRegion, region, r.Regions[region])
 		}
 	}
 	return nil
@@ -1158,21 +1225,36 @@ func (c Config) validateShard() error {
 	if c.Postgres.ShardDSN != "" && c.Postgres.DSN == "" {
 		return errors.New("config: postgres.shard_dsn is a shard's half of postgres.dsn: set postgres.dsn")
 	}
+	if c.Postgres.MigrateDSN != "" && c.Postgres.DSN == "" {
+		return errors.New("config: postgres.migrate_dsn migrates postgres.dsn's database: set postgres.dsn")
+	}
+	if c.Postgres.ShardMigrateDSN != "" && (c.Postgres.MigrateDSN == "" || c.Postgres.ShardDSN == "" || c.Postgres.ShardDSN == c.Postgres.DSN) {
+		return errors.New("config: postgres.shard_migrate_dsn migrates postgres.shard_dsn's own database: set postgres.shard_dsn and postgres.migrate_dsn")
+	}
+	if c.Postgres.MigrateDSN != "" && c.Postgres.ShardMigrateDSN == "" &&
+		c.Postgres.ShardDSN != "" && c.Postgres.ShardDSN != c.Postgres.DSN {
+		return errors.New("config: postgres.migrate_dsn migrates the shared database alone: set postgres.shard_migrate_dsn too")
+	}
 	if c.Redis.Shard.Addr != "" && c.Redis.Addr == "" {
 		return errors.New("config: redis.shard.addr is a shard's half of redis.addr: set redis.addr")
 	}
-	if len(c.Postgres.Shards) == 0 {
+	if len(c.Shards) == 0 {
+		if c.Postgres.ShardDSN != "" {
+			return errors.New("config: postgres.shard_dsn keeps this shard's calls apart, and every shard runs its part of " +
+				"the work queued for all of them only if shards lists it: set shards (ROUTER_SHARDS) to every shard's name, " +
+				"this one's included")
+		}
 		return nil
 	}
 	if c.Shard == "" {
-		return errors.New("config: postgres.shards names every shard: set shard to this one's name")
+		return errors.New("config: shards (ROUTER_SHARDS) names every shard: set shard (ROUTER_SHARD) to this one's name")
 	}
-	own, listed := c.Postgres.Shards[c.Shard]
-	if !listed {
-		return fmt.Errorf("config: postgres.shards does not list this shard, %q", c.Shard)
+	if !slices.Contains(c.Shards, c.Shard) {
+		return fmt.Errorf("config: shards (ROUTER_SHARDS) does not list this shard, %q", c.Shard)
 	}
-	if own != c.Postgres.ShardDSN {
-		return fmt.Errorf("config: postgres.shards lists shard %q at another DSN than postgres.shard_dsn", c.Shard)
+	if c.Usage.URL == "" {
+		return errors.New("config: a deployment of shards counts spend against limits in the usage service, " +
+			"since no shard reads another's requests: set usage.url (ROUTER_USAGE_URL)")
 	}
 	return nil
 }
@@ -1224,9 +1306,11 @@ func (c Config) export() error {
 		"pprof_addr":                    c.PprofAddr,
 		"metrics_addr":                  c.MetricsAddr,
 		"shard":                         c.Shard,
+		"shards":                        strings.Join(c.Shards, ","),
 		"postgres.dsn":                  c.Postgres.DSN,
 		"postgres.shard_dsn":            c.Postgres.ShardDSN,
-		"postgres.shards":               joinPairs(c.Postgres.Shards),
+		"postgres.migrate_dsn":          c.Postgres.MigrateDSN,
+		"postgres.shard_migrate_dsn":    c.Postgres.ShardMigrateDSN,
 		"redis.addr":                    c.Redis.Addr,
 		"redis.username":                c.Redis.Username,
 		"redis.password":                c.Redis.Password,
@@ -1289,6 +1373,7 @@ func (c Config) export() error {
 		"telnyx.connection_id": c.Telnyx.ConnectionID,
 		"telnyx.public_key":    c.Telnyx.PublicKey,
 
+		"twilio.account_sid":        c.Twilio.AccountSID,
 		"twilio.webhook_auth_token": c.Twilio.WebhookAuthToken,
 
 		"usage.url":        c.Usage.URL,
@@ -1305,6 +1390,10 @@ func (c Config) export() error {
 		"knowledge.min_chunk":   fmt.Sprint(c.Knowledge.MinChunk),
 		"knowledge.max_heading": fmt.Sprint(c.Knowledge.MaxHeading),
 		"knowledge.regions":     joinPairs(c.Knowledge.Regions),
+
+		"shard_routing.default":   c.ShardRouting.Default,
+		"shard_routing.countries": joinPairs(c.ShardRouting.Countries),
+		"shard_routing.regions":   joinPairs(c.ShardRouting.Regions),
 	}
 	for key, value := range values {
 		if value == "" {

@@ -19,6 +19,14 @@ func (s *StoreSuite) timePasses(table string, d time.Duration) {
 	s.Require().NoError(err)
 }
 
+// databaseNow is Postgres's now(): a due time stamped on this process's clock, then moved by
+// timePasses, may still be ahead of the claim's.
+func (s *StoreSuite) databaseNow() time.Time {
+	var now time.Time
+	s.Require().NoError(s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT now()").Scan(&now))
+	return now
+}
+
 // leasesPass moves each lease_until in table back by d, as timePasses does for next_attempt_at.
 func (s *StoreSuite) leasesPass(table string, d time.Duration) {
 	_, err := s.store.GlobalDB().ExecContext(s.ctx,

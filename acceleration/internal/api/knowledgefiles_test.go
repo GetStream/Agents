@@ -161,6 +161,22 @@ func (s *KnowledgeFilesSuite) TestUploadingTheSameSourceAgainReplacesTheDocument
 	s.Len(s.listed(), 1)
 }
 
+func (s *KnowledgeFilesSuite) TestAFirstUploadNamedByDotsLeavesRoomForTheNext() {
+	// The customer is new, so the first upload makes its place in the bucket. All are sent
+	// before any is read, since a file read is deleted.
+	var uploaded []IndexedKnowledgeDocument
+	for _, source := range []string{"..", `menus\..`, "menus/..", "menu.pdf", "...", ".."} {
+		status, sent, answer := s.upload("scanned.pdf", extractFixture(s.T(), "scanned.pdf"), source)
+		s.Require().Equal(http.StatusAccepted, status, "%s: %s", source, answer)
+
+		s.Equal(source, sent.Source)
+		uploaded = append(uploaded, sent)
+	}
+	for _, sent := range uploaded {
+		s.Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State, sent.Source)
+	}
+}
+
 func (s *KnowledgeFilesSuite) TestADocumentRemovedBeforeItsFileIsReadLeavesNothing() {
 	_, sent, _ := s.upload("removed.pdf", extractFixture(s.T(), "manual.pdf"), "")
 
@@ -980,8 +996,16 @@ func (s *KnowledgeFilesSuite) TestAReadCancelledInItsWriteTakesItBackOnceItsDocu
 	s.reached(s.knowledge.writeCancelled(), "the read was never cancelled")
 
 	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+	kept := make(chan struct{})
+	s.knowledge.onceAfterWrite(func() error { close(kept); return nil })
 	write()
 
+	// The queue lets go of a cancelled task at once, and its retry finds the document gone and ends,
+	// while the read that was cancelled is still to write and to take its write back. It is the
+	// read's own write that is waited for, then the passages it left being taken back.
+	s.reached(kept, "the cancelled read never wrote")
+	s.Eventually(func() bool { return s.passagesOf("cancelled.md") == 0 }, 30*time.Second, 5*time.Millisecond,
+		"the cancelled read's passages were never taken back")
 	s.everyFileRead()
 	s.Zero(s.passagesOf("cancelled.md"))
 	s.Empty(s.listed())
@@ -1085,6 +1109,22 @@ func (s *KnowledgeFilesSuite) TestANamespaceIsRequired() {
 	status, _ := s.postKnowledgeFile(s.serverClient, body, contentType, url.Values{})
 
 	s.Equal(http.StatusBadRequest, status)
+}
+
+func (s *KnowledgeFilesSuite) TestADeploymentThatTakesNoFilesIsRefusedInFixedWords() {
+	service := s.router.knowledgeFiles
+	s.T().Cleanup(func() { s.router.knowledgeFiles = service })
+	s.router.knowledgeFiles = nil
+	body, contentType := formWith("notes.md", []byte("# Notes"))
+
+	status, refusal := s.postKnowledgeFile(s.serverClient, body, contentType, url.Values{"namespace": {s.namespace}})
+
+	s.Equal(http.StatusBadRequest, status)
+	var answered ErrorResponse
+	s.Require().NoError(json.Unmarshal(refusal, &answered), string(refusal))
+	s.Equal(codeNotConfigured, answered.Error.Code)
+	s.Equal("this deployment is not set up to take files for knowledge", answered.Error.Message,
+		"nothing of the components the deployment has")
 }
 
 func (s *KnowledgeFilesSuite) TestOnlyTheCustomersOwnBackendMayUpload() {

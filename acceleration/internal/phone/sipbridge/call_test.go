@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 func newTestCall(t *testing.T) (*Call, *fakeLeg, *fakeLeg) {
 	customer, stream := &fakeLeg{}, &fakeLeg{}
 	c := newCall(t.Context(), customer, stream, slog.New(slog.DiscardHandler))
+	c.trunkAddr = testTrunkAddr
 	c.establish()
 	return c, customer, stream
 }
@@ -78,16 +80,66 @@ func TestAFailedByeStillEndsTheCall(t *testing.T) {
 	requireEnded(t, c)
 }
 
-func TestReinviteIsForwardedToTheOtherLeg(t *testing.T) {
-	c, _, stream := newTestCall(t)
-	stream.reinviteAnswer = []byte("answer")
+func TestReinviteFromStreamReachesTheCustomerAsItCameAndItsAnswerRebuilt(t *testing.T) {
+	c, customer, _ := newTestCall(t)
+	customer.reinviteAnswer = []byte("v=0\r\no=- 5 2 IN IP4 10.0.0.5\r\ns=-\r\nc=IN IP4 10.0.0.5\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\na=candidate:1 1 UDP 2130706431 10.0.0.5 30000 typ host\r\n")
 
-	got, err := c.onReinvite(t.Context(), customerSide, []byte("offer"))
+	got, err := c.onReinvite(t.Context(), streamSide, streamAnswerSDP)
 
 	require.NoError(t, err)
-	require.Equal(t, []byte("answer"), got)
+	require.Equal(t, []string{"reinvite"}, customer.calls())
+	require.Equal(t, streamAnswerSDP, customer.body(0))
+	require.Equal(t, Media{Addr: "1.0.0.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, got))
+	require.NotContains(t, string(got), "10.0.0.5")
+}
+
+func TestReinviteFromStreamFailsWhenTheCustomerAnswerCannotBeRead(t *testing.T) {
+	c, customer, _ := newTestCall(t)
+	customer.reinviteAnswer = []byte("answer")
+
+	_, err := c.onReinvite(t.Context(), streamSide, streamAnswerSDP)
+
+	require.ErrorContains(t, err, "parse sdp")
+}
+
+func TestReinviteFromTheCustomerReachesStreamRebuilt(t *testing.T) {
+	c, _, stream := newTestCall(t)
+	stream.reinviteAnswer = streamAnswerSDP
+	offer := "v=0\r\no=- 9 3 IN IP4 192.168.1.20\r\ns=-\r\nc=IN IP4 192.168.1.20\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\na=rtcp:30001 IN IP4 169.254.169.254\r\na=sendrecv\r\n" +
+		"m=video 30002 RTP/AVP 96\r\na=rtpmap:96 VP8/90000\r\n"
+
+	got, err := c.onReinvite(t.Context(), customerSide, []byte(offer))
+
+	require.NoError(t, err)
+	sent := string(stream.body(0))
+	require.Equal(t, Media{Addr: "1.0.0.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, []byte(sent)))
+	require.Contains(t, sent, "o=- 9 3 IN IP4 1.0.0.1\r\n")
+	require.NotContains(t, sent, "169.254.169.254")
+	require.NotContains(t, sent, "video")
+	require.Regexp(t, `(?s)m=audio 20000 .*m=video 0 RTP/AVP 96\r\n`, string(got))
+}
+
+func TestReinviteFromTheCustomerThatCannotBeReadIsRefused(t *testing.T) {
+	c, _, stream := newTestCall(t)
+
+	_, err := c.onReinvite(t.Context(), customerSide, []byte("offer"))
+
+	require.ErrorContains(t, err, "parse sdp")
+	require.Empty(t, stream.calls())
+}
+
+func TestReinviteFromTheCustomerWithoutAnOfferAsksStreamForOne(t *testing.T) {
+	c, _, stream := newTestCall(t)
+	stream.reinviteAnswer = streamAnswerSDP
+
+	got, err := c.onReinvite(t.Context(), customerSide, nil)
+
+	require.NoError(t, err)
+	require.Equal(t, streamAnswerSDP, got)
 	require.Equal(t, []string{"reinvite"}, stream.calls())
-	require.Equal(t, []byte("offer"), stream.body(0))
+	require.Empty(t, stream.body(0))
 }
 
 func TestInfoIsForwardedToTheOtherLeg(t *testing.T) {
@@ -238,6 +290,7 @@ func TestAReinviteLogsTheAddressesBothWays(t *testing.T) {
 	customer := &fakeLeg{}
 	stream := &fakeLeg{reinviteAnswer: sdpAt("198.51.100.20")}
 	c := newCall(t.Context(), customer, stream, slog.New(slog.NewJSONHandler(&buf, nil)))
+	c.trunkAddr = testTrunkAddr
 	c.establish()
 
 	_, err := c.onReinvite(t.Context(), customerSide, sdpAt("203.0.113.10"))
@@ -297,4 +350,63 @@ func TestACallStateHasBothLegsAndTheMedia(t *testing.T) {
 	require.Equal(t, "c", got.Customer.CallID)
 	require.Equal(t, "s", got.Stream.CallID)
 	require.Equal(t, MediaAddrs{Customer: "203.0.113.10", Stream: "198.51.100.20"}, got.Media)
+}
+
+func TestReinviteFromTheCustomerWithAFaxLineReachesStreamAudioOnly(t *testing.T) {
+	c, _, stream := newTestCall(t)
+	stream.reinviteAnswer = streamAnswerSDP
+	offer := "v=0\r\no=- 9 3 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\n" + t38Line
+
+	got, err := c.onReinvite(t.Context(), customerSide, []byte(offer))
+
+	require.NoError(t, err)
+	require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+	require.NotContains(t, string(stream.body(0)), "image")
+	require.Regexp(t, `(?s)m=audio 20000 .*m=image 0 udptl t38\r\n`, string(got))
+}
+
+func TestReinviteFromStreamAnsweredWithAFaxLineReachesStreamAudioOnly(t *testing.T) {
+	c, customer, _ := newTestCall(t)
+	customer.reinviteAnswer = []byte("v=0\r\no=- 5 2 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" +
+		"m=audio 30000 RTP/AVP 0\r\n" + t38Line)
+
+	got, err := c.onReinvite(t.Context(), streamSide, streamAnswerSDP)
+
+	require.NoError(t, err)
+	require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, got))
+	require.NotContains(t, string(got), "image")
+}
+
+func TestReinviteFromTheCustomerIsAnsweredWhateverItsLineEndings(t *testing.T) {
+	for name, offer := range lineEndings {
+		t.Run(name, func(t *testing.T) {
+			c, _, stream := newTestCall(t)
+			stream.reinviteAnswer = streamAnswerSDP
+
+			var got []byte
+			var err error
+			require.NotPanics(t, func() { got, err = c.onReinvite(t.Context(), customerSide, []byte(offer)) })
+
+			require.NoError(t, err)
+			require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+			requireAudioThenRejectedVideo(t, got)
+		})
+	}
+}
+
+func TestReinviteFromTheCustomerWithALineTheParserRefusesReachesStreamAudioOnly(t *testing.T) {
+	for name, line := range otherLines {
+		t.Run(name, func(t *testing.T) {
+			c, _, stream := newTestCall(t)
+			stream.reinviteAnswer = streamAnswerSDP
+			offer := "v=0\r\no=- 9 3 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n" + line
+
+			got, err := c.onReinvite(t.Context(), customerSide, []byte(offer))
+
+			require.NoError(t, err)
+			require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+			require.Equal(t, 2, strings.Count(string(got), "m="))
+		})
+	}
 }

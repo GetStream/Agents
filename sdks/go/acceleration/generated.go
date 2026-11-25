@@ -4803,8 +4803,11 @@ type Call struct {
 	LlmUsed *string `json:"llm_used,omitempty"`
 
 	// Mode How the session hears and speaks: a transcriber, a conversation model and a voice; one speech-to-speech model; or in writing.
-	Mode        *SessionMode `json:"mode,omitempty"`
-	ReviewNotes *string      `json:"review_notes,omitempty"`
+	Mode *SessionMode `json:"mode,omitempty"`
+
+	// Region The shard the call is kept in. Set on a listed call of a deployment with shards.
+	Region      *string `json:"region,omitempty"`
+	ReviewNotes *string `json:"review_notes,omitempty"`
 
 	// ReviewScore How well the agent handled it, from 1 to 5.
 	ReviewScore *int `json:"review_score,omitempty"`
@@ -6391,7 +6394,7 @@ type CreateSessionRequest struct {
 	// Phone The number the session acts from, which is what turns transferring on.
 	Phone *SessionPhone `json:"phone,omitempty"`
 
-	// ProjectId What the conversation belongs to. Also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins.
+	// ProjectId What the conversation belongs to. Sent server-side it is also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in tags, or the agent config's, wins. A device's groups the session and is no cost tag.
 	ProjectId *string `json:"project_id,omitempty"`
 
 	// ResumeHistory How a conversation is handed back to the model when a session carries it on.
@@ -6637,6 +6640,12 @@ type DataImport struct {
 
 	// Rows How many rows were written.
 	Rows int64 `json:"rows"`
+
+	// Skipped The rows left out rather than written, by table and primary key, as connector_definitions:{"id":"custom_crm","revision":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set.
+	Skipped *[]string `json:"skipped,omitempty"`
+
+	// SkippedMore How many more rows were left out than skipped names, which holds the first 100.
+	SkippedMore *int64 `json:"skipped_more,omitempty"`
 
 	// Tables How many of them went into each table.
 	Tables *map[string]int64 `json:"tables,omitempty"`
@@ -6936,7 +6945,9 @@ type ForkSessionRequest struct {
 	// ModelOverwrites What to change about the models for one session, over whatever its agent config decided.
 	// It is one object rather than a dozen fields at the top level because it is one idea: everything here overrides the config, and a caller reading a session back wants to see what they changed in one place rather than diffed against a config they would have to fetch. Only the safe knobs are here. Instructions and tools are not, because a caller able to rewrite those could make a session impersonate a different agent. A backend sets one session's instructions with the instructions of CreateSessionRequest instead, which a device may not send.
 	ModelOverwrites *ModelOverwrites `json:"model_overwrites,omitempty"`
-	ProjectId       *string          `json:"project_id,omitempty"`
+
+	// ProjectId What the fork belongs to. Omitted, the parent's is kept. Sent server-side it is also the "project" cost tag, as on createSession; a device's groups the fork, whose cost tag stays the project a backend named for its parent. A tag spelled out in a running parent's tags, or the agent config's, wins.
+	ProjectId *string `json:"project_id,omitempty"`
 
 	// ResponseId Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false.
 	ResponseId *string `json:"response_id,omitempty"`
@@ -8099,7 +8110,7 @@ type OrganizationActivity struct {
 	OrganizationId string           `json:"organization_id"`
 	Sessions       ActivitySessions `json:"sessions"`
 
-	// Shards The names of the shards whose requests the meters sum, this one's first. A deployment that sets no postgres.shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
+	// Shards The names of the shards whose requests the meters sum, this one's first. A deployment that sets no shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
 	Shards *[]string `json:"shards"`
 
 	// Since The start of what was read. Areas are kept by UTC day, so they count the whole day it falls on.
@@ -9520,6 +9531,9 @@ type Session struct {
 	PinnedAt  *time.Time `json:"pinned_at,omitempty"`
 	ProjectId *string    `json:"project_id,omitempty"`
 
+	// Region The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards.
+	Region *string `json:"region,omitempty"`
+
 	// ReviewNotes Why the review scored the conversation as it did. Read by a backend only.
 	ReviewNotes *string `json:"review_notes,omitempty"`
 
@@ -10085,7 +10099,7 @@ type SkillRequest struct {
 	// Instructions The full prompt, which only the subagent sees.
 	Instructions string `json:"instructions"`
 
-	// Name How the config names it, which is unique among that config's own skills.
+	// Name How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox.
 	Name string `json:"name"`
 }
 
@@ -11770,7 +11784,7 @@ type ListCallsParams struct {
 
 // GetCallEventsParams defines parameters for GetCallEvents.
 type GetCallEventsParams struct {
-	// Limit How many to return, oldest first.
+	// Limit How many to return, oldest first. Up to the 10000 a call keeps.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
@@ -11845,6 +11859,9 @@ type ListConnectionInvocationsParams struct {
 
 	// Cursor The next_cursor of the previous page. Omitted is the first page.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Region The region whose calls to list, as X-Shard or a session's region names it. Each region keeps the calls it ran. Omitted is the region answering.
+	Region *string `form:"region,omitempty" json:"region,omitempty"`
 }
 
 // ListConnectorAuditParams defines parameters for ListConnectorAudit.
@@ -11952,8 +11969,11 @@ type ListAgentLogsParams struct {
 	Q      *string    `form:"q,omitempty" json:"q,omitempty"`
 	From   *time.Time `form:"from,omitempty" json:"from,omitempty"`
 	To     *time.Time `form:"to,omitempty" json:"to,omitempty"`
-	Cursor *string    `form:"cursor,omitempty" json:"cursor,omitempty"`
-	Limit  *int       `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Region The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering; session_id reads the session's region instead.
+	Region *string `form:"region,omitempty" json:"region,omitempty"`
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // ListAgentLogsParamsSeverity defines parameters for ListAgentLogs.
@@ -11969,16 +11989,25 @@ type StreamAgentLogsParams struct {
 	Severity *StreamAgentLogsParamsSeverity `form:"severity,omitempty" json:"severity,omitempty"`
 
 	// Source Comma-separated user/agent/tool/system sources.
-	Source      *string    `form:"source,omitempty" json:"source,omitempty"`
-	Q           *string    `form:"q,omitempty" json:"q,omitempty"`
-	From        *time.Time `form:"from,omitempty" json:"from,omitempty"`
-	To          *time.Time `form:"to,omitempty" json:"to,omitempty"`
-	Cursor      *string    `form:"cursor,omitempty" json:"cursor,omitempty"`
-	LastEventID *string    `json:"Last-Event-ID,omitempty"`
+	Source *string    `form:"source,omitempty" json:"source,omitempty"`
+	Q      *string    `form:"q,omitempty" json:"q,omitempty"`
+	From   *time.Time `form:"from,omitempty" json:"from,omitempty"`
+	To     *time.Time `form:"to,omitempty" json:"to,omitempty"`
+
+	// Region The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering; session_id reads the session's region instead.
+	Region      *string `form:"region,omitempty" json:"region,omitempty"`
+	Cursor      *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	LastEventID *string `json:"Last-Event-ID,omitempty"`
 }
 
 // StreamAgentLogsParamsSeverity defines parameters for StreamAgentLogs.
 type StreamAgentLogsParamsSeverity string
+
+// GetAgentLogParams defines parameters for GetAgentLog.
+type GetAgentLogParams struct {
+	// Region The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering.
+	Region *string `form:"region,omitempty" json:"region,omitempty"`
+}
 
 // ListCustomModelsParams defines parameters for ListCustomModels.
 type ListCustomModelsParams struct {
@@ -12089,7 +12118,9 @@ type ListResponseSiblingsParamsOf string
 type ListSimulationRunsParams struct {
 	SimulationId *string                        `form:"simulation_id,omitempty" json:"simulation_id,omitempty"`
 	State        *ListSimulationRunsParamsState `form:"state,omitempty" json:"state,omitempty"`
-	Limit        *int                           `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Limit Up to 500. Omitted is 50.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // ListSimulationRunsParamsState defines parameters for ListSimulationRuns.
@@ -14509,7 +14540,7 @@ type ClientInterface interface {
 	// GetAgentLog Redacted structured log details scoped to the customer
 	//
 	// Corresponds with GET /v1/agents/logs/{id} (the `GetAgentLog` operationId).
-	GetAgentLog(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	GetAgentLog(ctx context.Context, id string, params *GetAgentLogParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListCustomModels The language models the calling customer serves themselves
 	//
@@ -15841,6 +15872,13 @@ type ClientInterface interface {
 	//
 	// Corresponds with POST /v1/phone/hooks/telnyx/events (the `ReceiveTelnyxEvent` operationId).
 	ReceiveTelnyxEvent(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ReceiveTwilioCall Receive a Twilio call
+	//
+	// Where Twilio asks what to do with a call to one of this router's Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number's own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.
+	//
+	// Corresponds with POST /v1/phone/hooks/twilio (the `ReceiveTwilioCall` operationId).
+	ReceiveTwilioCall(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ReceiveTwilioEvent Receive a Twilio account event
 	//
@@ -19131,8 +19169,8 @@ func (c *Client) StreamAgentLogs(ctx context.Context, params *StreamAgentLogsPar
 // GetAgentLog Redacted structured log details scoped to the customer
 //
 // Corresponds with GET /v1/agents/logs/{id} (the `GetAgentLog` operationId).
-func (c *Client) GetAgentLog(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetAgentLogRequest(c.Server, id)
+func (c *Client) GetAgentLog(ctx context.Context, id string, params *GetAgentLogParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetAgentLogRequest(c.Server, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -21804,6 +21842,23 @@ func (c *Client) ReceiveTelnyxCall(ctx context.Context, reqEditors ...RequestEdi
 // Corresponds with POST /v1/phone/hooks/telnyx/events (the `ReceiveTelnyxEvent` operationId).
 func (c *Client) ReceiveTelnyxEvent(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewReceiveTelnyxEventRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ReceiveTwilioCall Receive a Twilio call
+//
+// Where Twilio asks what to do with a call to one of this router's Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number's own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.
+//
+// Corresponds with POST /v1/phone/hooks/twilio (the `ReceiveTwilioCall` operationId).
+func (c *Client) ReceiveTwilioCall(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReceiveTwilioCallRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -26006,6 +26061,18 @@ func NewListConnectionInvocationsRequest(server string, id string, params *ListC
 
 		}
 
+		if params.Region != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "region", *params.Region, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
 		if encoded := queryValues.Encode(); encoded != "" {
 			rawQueryFragments = append(rawQueryFragments, encoded)
 		}
@@ -28198,6 +28265,18 @@ func NewListAgentLogsRequest(server string, params *ListAgentLogsParams) (*http.
 
 		}
 
+		if params.Region != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "region", *params.Region, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
 		if params.Cursor != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
@@ -28360,6 +28439,18 @@ func NewStreamAgentLogsRequest(server string, params *StreamAgentLogsParams) (*h
 
 		}
 
+		if params.Region != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "region", *params.Region, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
 		if params.Cursor != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
@@ -28402,7 +28493,7 @@ func NewStreamAgentLogsRequest(server string, params *StreamAgentLogsParams) (*h
 }
 
 // NewGetAgentLogRequest constructs an http.Request for the GetAgentLog method
-func NewGetAgentLogRequest(server string, id string) (*http.Request, error) {
+func NewGetAgentLogRequest(server string, id string, params *GetAgentLogParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -28425,6 +28516,33 @@ func NewGetAgentLogRequest(server string, id string) (*http.Request, error) {
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Region != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "region", *params.Region, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
 	}
 
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
@@ -32632,6 +32750,33 @@ func NewReceiveTelnyxEventRequest(server string) (*http.Request, error) {
 	}
 
 	operationPath := fmt.Sprintf("/v1/phone/hooks/telnyx/events")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewReceiveTwilioCallRequest constructs an http.Request for the ReceiveTwilioCall method
+func NewReceiveTwilioCallRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/phone/hooks/twilio")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -37860,7 +38005,7 @@ type ClientWithResponsesInterface interface {
 	// Returns a wrapper object for the known response body format(s).
 	//
 	// Corresponds with GET /v1/agents/logs/{id} (the `GetAgentLog` operationId).
-	GetAgentLogWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*GetAgentLogResponse, error)
+	GetAgentLogWithResponse(ctx context.Context, id string, params *GetAgentLogParams, reqEditors ...RequestEditorFn) (*GetAgentLogResponse, error)
 
 	// ListCustomModelsWithResponse The language models the calling customer serves themselves
 	//
@@ -39306,6 +39451,15 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /v1/phone/hooks/telnyx/events (the `ReceiveTelnyxEvent` operationId).
 	ReceiveTelnyxEventWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ReceiveTelnyxEventResponse, error)
+
+	// ReceiveTwilioCallWithResponse Receive a Twilio call
+	//
+	// Where Twilio asks what to do with a call to one of this router's Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number's own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /v1/phone/hooks/twilio (the `ReceiveTwilioCall` operationId).
+	ReceiveTwilioCallWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ReceiveTwilioCallResponse, error)
 
 	// ReceiveTwilioEventWithResponse Receive a Twilio account event
 	//
@@ -45444,6 +45598,7 @@ func (r PutConnectionCredentialsResponse) ContentType() string {
 
 // ListConnectionInvocationsResponse200Headers the declared response headers of an HTTP 200 response for ListConnectionInvocations
 type ListConnectionInvocationsResponse200Headers struct {
+	XShard                *string
 	XStreamBalanceMicros  *int64
 	XStreamBalanceWarning *string
 	XStreamCostEstimated  *string
@@ -50228,6 +50383,7 @@ func (r ListKnowledgeUrlPassagesResponse) ContentType() string {
 
 // ListAgentLogsResponse200Headers the declared response headers of an HTTP 200 response for ListAgentLogs
 type ListAgentLogsResponse200Headers struct {
+	XShard                *string
 	XStreamBalanceMicros  *int64
 	XStreamBalanceWarning *string
 	XStreamCostEstimated  *string
@@ -50329,6 +50485,7 @@ func (r ListAgentLogsResponse) ContentType() string {
 
 // StreamAgentLogsResponse200Headers the declared response headers of an HTTP 200 response for StreamAgentLogs
 type StreamAgentLogsResponse200Headers struct {
+	XShard                *string
 	XStreamBalanceMicros  *int64
 	XStreamBalanceWarning *string
 	XStreamCostEstimated  *string
@@ -50423,6 +50580,7 @@ func (r StreamAgentLogsResponse) ContentType() string {
 
 // GetAgentLogResponse200Headers the declared response headers of an HTTP 200 response for GetAgentLog
 type GetAgentLogResponse200Headers struct {
+	XShard                *string
 	XStreamBalanceMicros  *int64
 	XStreamBalanceWarning *string
 	XStreamCostEstimated  *string
@@ -50440,6 +50598,8 @@ type GetAgentLogResponse struct {
 	HTTPResponse *http.Response
 	// JSON200 the response for an HTTP 200 `application/json` response
 	JSON200 *AgentLog
+	// JSON400 the response for an HTTP 400 `application/json` response
+	JSON400 *BadRequest
 	// JSON401 the response for an HTTP 401 `application/json` response
 	JSON401 *Unauthorized
 	// JSON402 the response for an HTTP 402 `application/json` response
@@ -50461,6 +50621,11 @@ type GetAgentLogResponse struct {
 // GetJSON200 returns the response for an HTTP 200 `application/json` response
 func (r GetAgentLogResponse) GetJSON200() *AgentLog {
 	return r.JSON200
+}
+
+// GetJSON400 returns the response for an HTTP 400 `application/json` response
+func (r GetAgentLogResponse) GetJSON400() *BadRequest {
+	return r.JSON400
 }
 
 // GetJSON401 returns the response for an HTTP 401 `application/json` response
@@ -60354,6 +60519,54 @@ func (r ReceiveTelnyxEventResponse) ContentType() string {
 	return ""
 }
 
+type ReceiveTwilioCallResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// XML200 the response for an HTTP 200 `application/xml` response
+	XML200 *string
+	// JSON500 the response for an HTTP 500 `application/json` response
+	JSON500 *InternalError
+}
+
+// GetXML200 returns the response for an HTTP 200 `application/xml` response
+func (r ReceiveTwilioCallResponse) GetXML200() *string {
+	return r.XML200
+}
+
+// GetJSON500 returns the response for an HTTP 500 `application/json` response
+func (r ReceiveTwilioCallResponse) GetJSON500() *InternalError {
+	return r.JSON500
+}
+
+// GetBody returns the raw response body bytes
+func (r ReceiveTwilioCallResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ReceiveTwilioCallResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ReceiveTwilioCallResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ReceiveTwilioCallResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type ReceiveTwilioEventResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -69968,8 +70181,8 @@ func (c *ClientWithResponses) StreamAgentLogsWithResponse(ctx context.Context, p
 // Returns a wrapper object for the known response body format(s).
 //
 // Corresponds with GET /v1/agents/logs/{id} (the `GetAgentLog` operationId).
-func (c *ClientWithResponses) GetAgentLogWithResponse(ctx context.Context, id string, reqEditors ...RequestEditorFn) (*GetAgentLogResponse, error) {
-	rsp, err := c.GetAgentLog(ctx, id, reqEditors...)
+func (c *ClientWithResponses) GetAgentLogWithResponse(ctx context.Context, id string, params *GetAgentLogParams, reqEditors ...RequestEditorFn) (*GetAgentLogResponse, error) {
+	rsp, err := c.GetAgentLog(ctx, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -72223,6 +72436,21 @@ func (c *ClientWithResponses) ReceiveTelnyxEventWithResponse(ctx context.Context
 		return nil, err
 	}
 	return ParseReceiveTelnyxEventResponse(rsp)
+}
+
+// ReceiveTwilioCallWithResponse Receive a Twilio call
+//
+// Where Twilio asks what to do with a call to one of this router's Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number's own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /v1/phone/hooks/twilio (the `ReceiveTwilioCall` operationId).
+func (c *ClientWithResponses) ReceiveTwilioCallWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ReceiveTwilioCallResponse, error) {
+	rsp, err := c.ReceiveTwilioCall(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReceiveTwilioCallResponse(rsp)
 }
 
 // ReceiveTwilioEventWithResponse Receive a Twilio account event
@@ -79823,6 +80051,13 @@ func ParseListConnectionInvocationsResponse(rsp *http.Response) (*ListConnection
 	switch {
 	case rsp.StatusCode == 200:
 		var headers ListConnectionInvocationsResponse200Headers
+		if values := rsp.Header.Values("X-Shard"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Shard", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XShard = &value
+		}
 		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
 			var value int64
 			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
@@ -85404,6 +85639,13 @@ func ParseListAgentLogsResponse(rsp *http.Response) (*ListAgentLogsResponse, err
 	switch {
 	case rsp.StatusCode == 200:
 		var headers ListAgentLogsResponse200Headers
+		if values := rsp.Header.Values("X-Shard"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Shard", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XShard = &value
+		}
 		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
 			var value int64
 			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
@@ -85516,6 +85758,13 @@ func ParseStreamAgentLogsResponse(rsp *http.Response) (*StreamAgentLogsResponse,
 	switch {
 	case rsp.StatusCode == 200:
 		var headers StreamAgentLogsResponse200Headers
+		if values := rsp.Header.Values("X-Shard"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Shard", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XShard = &value
+		}
 		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
 			var value int64
 			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
@@ -85588,6 +85837,13 @@ func ParseGetAgentLogResponse(rsp *http.Response) (*GetAgentLogResponse, error) 
 		}
 		response.JSON200 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest BadRequest
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
 		var dest Unauthorized
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -85635,6 +85891,13 @@ func ParseGetAgentLogResponse(rsp *http.Response) (*GetAgentLogResponse, error) 
 	switch {
 	case rsp.StatusCode == 200:
 		var headers GetAgentLogResponse200Headers
+		if values := rsp.Header.Values("X-Shard"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "X-Shard", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.XShard = &value
+		}
 		if values := rsp.Header.Values("X-Stream-Balance-Micros"); len(values) > 0 {
 			var value int64
 			if err := runtime.BindStyledParameterWithOptions("simple", "X-Stream-Balance-Micros", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "integer", Format: "int64"}); err != nil {
@@ -97152,6 +97415,51 @@ func ParseReceiveTelnyxEventResponse(rsp *http.Response) (*ReceiveTelnyxEventRes
 	switch {
 	case rsp.StatusCode == 204:
 		break // No content-type
+
+	case rsp.StatusCode == 400:
+		break // No content-type
+
+	case rsp.StatusCode == 401:
+		break // No content-type
+
+	case rsp.StatusCode == 404:
+		break // No content-type
+
+	case rsp.StatusCode == 413:
+		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest InternalError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON500 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseReceiveTwilioCallResponse parses an HTTP response from a ReceiveTwilioCallWithResponse call
+func ParseReceiveTwilioCallResponse(rsp *http.Response) (*ReceiveTwilioCallResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ReceiveTwilioCallResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "xml") && rsp.StatusCode == 200:
+		var dest string
+		if err := xml.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.XML200 = &dest
 
 	case rsp.StatusCode == 400:
 		break // No content-type

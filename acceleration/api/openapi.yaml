@@ -2026,6 +2026,10 @@ components:
           type: string
         mode:
           $ref: '#/components/schemas/SessionMode'
+        region:
+          description: The shard the call is kept in. Set on a listed call of a deployment with shards.
+          readOnly: true
+          type: string
         review_notes:
           type: string
         review_score:
@@ -4519,7 +4523,7 @@ components:
           $ref: '#/components/schemas/SessionPhone'
           description: 'Server-side only: a device sending it is refused with a 403.'
         project_id:
-          description: What the conversation belongs to. Also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins.
+          description: What the conversation belongs to. Sent server-side it is also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in tags, or the agent config's, wins. A device's groups the session and is no cost tag.
           type: string
         resume_history:
           $ref: '#/components/schemas/ResumeHistory'
@@ -4900,6 +4904,15 @@ components:
           type: integer
         rows:
           description: How many rows were written.
+          format: int64
+          type: integer
+        skipped:
+          description: 'The rows left out rather than written, by table and primary key, as connector_definitions:{"id":"custom_crm","revision":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set.'
+          items:
+            type: string
+          type: array
+        skipped_more:
+          description: How many more rows were left out than skipped names, which holds the first 100.
           format: int64
           type: integer
         tables:
@@ -5360,6 +5373,7 @@ components:
           $ref: '#/components/schemas/ModelOverwrites'
           description: 'Server-side only: a device sending it is refused with a 403.'
         project_id:
+          description: What the fork belongs to. Omitted, the parent's is kept. Sent server-side it is also the "project" cost tag, as on createSession; a device's groups the fork, whose cost tag stays the project a backend named for its parent. A tag spelled out in a running parent's tags, or the agent config's, wins.
           type: string
         response_id:
           description: Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false.
@@ -7161,7 +7175,7 @@ components:
           $ref: '#/components/schemas/ActivitySessions'
           description: The sessions the organization's apps opened from since on, from the shards listed in shards.
         shards:
-          description: The names of the shards whose requests the meters sum, this one's first. A deployment that sets no postgres.shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
+          description: The names of the shards whose requests the meters sum, this one's first. A deployment that sets no shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
           items:
             type: string
           nullable: true
@@ -9316,6 +9330,10 @@ components:
           type: string
         project_id:
           type: string
+        region:
+          description: The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards.
+          readOnly: true
+          type: string
         review_notes:
           description: Why the review scored the conversation as it did. Read by a backend only.
           type: string
@@ -10190,7 +10208,7 @@ components:
           description: The full prompt, which only the subagent sees.
           type: string
         name:
-          description: How the config names it, which is unique among that config's own skills.
+          description: How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox.
           type: string
       required:
         - config_id
@@ -13347,11 +13365,13 @@ paths:
       description: 'A timeline says what a call cost the caller in waiting. This says why the call went the way it did: why the agent waited rather than answering, why it read something as not meant for it, why it stopped mid-sentence. Read in order they are the reasoning behind the conversation, which is the only thing that explains a call that surprised somebody. They are kept for an hour. A call still running reports the same decisions live on the session socket.'
       operationId: getCallEvents
       parameters:
-        - description: How many to return, oldest first.
+        - description: How many to return, oldest first. Up to the 10000 a call keeps.
           in: query
           name: limit
           schema:
             default: 1000
+            maximum: 10000
+            minimum: 1
             type: integer
         - description: The resource, as returned when it was created.
           in: path
@@ -14736,7 +14756,7 @@ paths:
                 type: string
           description: The challenge, echoed
         "403":
-          description: That is not this line's verify token
+          description: 'The query is not this line''s check: another mode or verify token, a challenge that is not digits, or a line that is not WhatsApp''s'
         "410":
           description: No line is connected at this address
         "500":
@@ -15550,6 +15570,13 @@ paths:
           schema:
             description: The next_cursor of the previous page. Omitted is the first page.
             type: string
+        - description: The region whose calls to list, as X-Shard or a session's region names it. Each region keeps the calls it ran. Omitted is the region answering.
+          explode: false
+          in: query
+          name: region
+          schema:
+            description: The region whose calls to list, as X-Shard or a session's region names it. Each region keeps the calls it ran. Omitted is the region answering.
+            type: string
       responses:
         "200":
           content:
@@ -15558,6 +15585,10 @@ paths:
                 $ref: '#/components/schemas/ConnectionInvocationPage'
           description: A page of tool calls
           headers:
+            X-Shard:
+              schema:
+                description: The region that answered. Absent on a deployment of one region.
+                type: string
             X-Stream-Balance-Micros:
               $ref: '#/components/headers/X-Stream-Balance-Micros'
             X-Stream-Balance-Warning:
@@ -17945,6 +17976,11 @@ paths:
           schema:
             format: date-time
             type: string
+        - description: The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering; session_id reads the session's region instead.
+          in: query
+          name: region
+          schema:
+            type: string
         - in: query
           name: cursor
           schema:
@@ -17964,6 +18000,10 @@ paths:
                 $ref: '#/components/schemas/AgentLogPage'
           description: Newest first; resume cursor marks the history/live handoff.
           headers:
+            X-Shard:
+              description: The region that answered. Absent on a deployment of one region.
+              schema:
+                type: string
             X-Stream-Balance-Micros:
               $ref: '#/components/headers/X-Stream-Balance-Micros'
             X-Stream-Balance-Warning:
@@ -17987,7 +18027,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Log storage is unavailable.
+          description: Log storage is unavailable, or the region asked for, or the session's, could not be reached (shard_unavailable).
       summary: Latest structured agent logs, with backward cursor pagination
   /v1/agents/logs/{id}:
     get:
@@ -17998,6 +18038,11 @@ paths:
           required: true
           schema:
             type: string
+        - description: The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering.
+          in: query
+          name: region
+          schema:
+            type: string
       responses:
         "200":
           content:
@@ -18006,6 +18051,10 @@ paths:
                 $ref: '#/components/schemas/AgentLog'
           description: One log with full safe metadata.
           headers:
+            X-Shard:
+              description: The region that answered. Absent on a deployment of one region.
+              schema:
+                type: string
             X-Stream-Balance-Micros:
               $ref: '#/components/headers/X-Stream-Balance-Micros'
             X-Stream-Balance-Warning:
@@ -18014,6 +18063,8 @@ paths:
               $ref: '#/components/headers/X-Stream-Cost-Estimated'
             X-Stream-Cost-Micros:
               $ref: '#/components/headers/X-Stream-Cost-Micros'
+        "400":
+          $ref: '#/components/responses/BadRequest'
         "401":
           $ref: '#/components/responses/Unauthorized'
         "402":
@@ -18029,7 +18080,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Log storage is unavailable.
+          description: Log storage is unavailable, or the region asked for could not be reached (shard_unavailable).
       summary: Redacted structured log details scoped to the customer
   /v1/agents/logs/stream:
     get:
@@ -18077,6 +18128,11 @@ paths:
           schema:
             format: date-time
             type: string
+        - description: The region whose logs to read, as X-Shard or a session's region names it. Each region keeps the logs of what ran there. Omitted is the region answering; session_id reads the session's region instead.
+          in: query
+          name: region
+          schema:
+            type: string
         - in: query
           name: cursor
           schema:
@@ -18093,6 +18149,10 @@ paths:
                 type: string
           description: SSE events logs, checkpoint and reset.
           headers:
+            X-Shard:
+              description: The region that answered. Absent on a deployment of one region.
+              schema:
+                type: string
             X-Stream-Balance-Micros:
               $ref: '#/components/headers/X-Stream-Balance-Micros'
             X-Stream-Balance-Warning:
@@ -18116,7 +18176,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: Log storage is unavailable.
+          description: Log storage is unavailable, or the region asked for, or the session's, could not be reached (shard_unavailable).
       summary: Read-only SSE of durable logs with replay
   /v1/agents/models:
     get:
@@ -19108,7 +19168,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-          description: A session with that id already exists, or the call placed for this phone session ended without an answer (call_unanswered)
+          description: A session with that id already exists, another session holds the conversation it names open, or the call placed for this phone session ended without an answer (call_unanswered)
         "500":
           $ref: '#/components/responses/InternalError'
         "503":
@@ -20695,10 +20755,14 @@ paths:
               - cancelled
               - errored
             type: string
-        - explode: false
+        - description: Up to 500. Omitted is 50.
+          explode: false
           in: query
           name: limit
           schema:
+            description: Up to 500. Omitted is 50.
+            maximum: 500
+            minimum: 1
             type: integer
       responses:
         "200":
@@ -24008,7 +24072,7 @@ paths:
   /v1/ops/orgs/{org_id}/activity:
     get:
       description: |-
-        Whether an organization tried Agents, how far it got and how much it used: what its apps did in each area of the API, from each client, and what their work came to by modality, summed over every shard in postgres.shards, which the answer names, with the sessions they opened, how those ended and how long their turns took. An organization with nothing recorded is answered with empty lists and furthest_step none. Every area and client is one item, so the lists are short and have no cursor. Areas, first_seen, last_seen, furthest_step and steps come from counts kept since they were first recorded, while meters come from every request, so an organization whose use is older than the counts can read furthest_step none with meters that show use. steps lists every step reached, not only the furthest, with the UTC day each was first answered: an organization that only texts reaches conversations and never voice_video.
+        Whether an organization tried Agents, how far it got and how much it used: what its apps did in each area of the API, from each client, and what their work came to by modality, summed over every shard the shards setting lists, which the answer names, with the sessions they opened, how those ended and how long their turns took. An organization with nothing recorded is answered with empty lists and furthest_step none. Every area and client is one item, so the lists are short and have no cursor. Areas, first_seen, last_seen, furthest_step and steps come from counts kept since they were first recorded, while meters come from every request, so an organization whose use is older than the counts can read furthest_step none with meters that show use. steps lists every step reached, not only the furthest, with the UTC day each was first answered: an organization that only texts reaches conversations and never voice_video.
 
         Stream staff only: it needs the ops key or the activity key.
       operationId: getOrganizationActivity
@@ -24492,6 +24556,29 @@ paths:
           $ref: '#/components/responses/InternalError'
       security: []
       summary: Receive a Telnyx account event
+  /v1/phone/hooks/twilio:
+    post:
+      description: 'Where Twilio asks what to do with a call to one of this router''s Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account''s Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number''s own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.'
+      operationId: receiveTwilioCall
+      responses:
+        "200":
+          content:
+            application/xml:
+              schema:
+                type: string
+          description: TwiML dialling the number's trunk, rejecting the call, or hanging up
+        "400":
+          description: The body is not a form
+        "401":
+          description: The call is not signed by Twilio
+        "404":
+          description: Twilio calls are not configured
+        "413":
+          description: The call is over 64 KiB
+        "500":
+          $ref: '#/components/responses/InternalError'
+      security: []
+      summary: Receive a Twilio call
   /v1/phone/hooks/twilio/events:
     post:
       description: 'Where the Twilio account sends its Monitor alerts (the Debugger webhook) and its usage triggers'' callbacks, as form posts. Unauthenticated because Twilio is not a customer: each event is checked against X-Twilio-Signature, made with the account''s Auth Token over ROUTER_PUBLIC_URL and this path, then logged and counted in vendor_account_events_total by its error code or usage category and its level. An alert whose Sid was counted in the last hour is answered 204 and not counted again. A deployment with no Twilio webhook token or no public URL answers 404, so nobody else can raise the count.'

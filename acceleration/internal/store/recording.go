@@ -137,15 +137,12 @@ func (r *Recordings) Get(ctx context.Context, customerID, id string) (Recording,
 		return Recording{}, stack.Wrap(errors.New("store: a customer and a recording id are required"))
 	}
 
-	recording, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (Recording, error) {
-		var recording Recording
-		err := db.NewSelect().Model(&recording).
-			Where("id = ?", id).
-			Where("customer_id = ?", customerID).
-			Limit(1).
-			Scan(ctx)
-		return recording, err
-	})
+	var recording Recording
+	err := r.store.shard.NewSelect().Model(&recording).
+		Where("id = ?", id).
+		Where("customer_id = ?", customerID).
+		Limit(1).
+		Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Recording{}, stack.Wrap(fmt.Errorf("%w %s", ErrNoRecording, id))
 	}

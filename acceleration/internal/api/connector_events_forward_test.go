@@ -478,6 +478,8 @@ func (s *EventForwardingSuite) TestAMessageOfADeliveryGivenUpAfterItsForwardWasS
 func (s *EventForwardingSuite) TestAMessageARouterQueuedBeforeItStoppedIsWrittenByAnother() {
 	s.answering(s.connectedBot())
 	stopped := s.anotherRouter()
+	// It is due as it is queued, on the clock a claim judges it by.
+	s.trigger("due_on_another_clock", "channel_thread_inbound", "INSERT", "NEW.customer_id = '"+s.customerID()+"' AND NEW.next_attempt_at <> NEW.created_at", "RAISE EXCEPTION 'due on another clock';")
 
 	answered, err := stopped.Deliver(context.Background(), s.app, []core.InboundMessage{s.inbound("1759740000.000100")}, nil)
 	stopped.Close()

@@ -225,6 +225,25 @@ func (s *SocketSessionSuite) TestADeviceMayNotHandTheSocketAServerSideField() {
 	}
 }
 
+// A start frame naming a conversation another session holds open is told so, as createSession is.
+func (s *SocketSessionSuite) TestAStartFrameForAConversationHeldOpenIsAConflict() {
+	alice := s.data.createUser()
+	opened := alice.createSession(textSession(nil))
+	s.Require().NotNil(opened.ConversationId)
+
+	connection := s.serverClient.actingFor(s.data.createUser()).opens("/v1/agents/socket")
+	watching := alice.opens("/v1/agents/sessions/" + opened.Id + "/events")
+	defer func() { _ = watching.Close() }()
+	s.Require().NoError(connection.WriteJSON(map[string]any{
+		"type": "start", "session": map[string]any{"conversation_id": *opened.ConversationId, "agent_id": opened.AgentId},
+	}))
+	refused := s.readFrame(connection)
+
+	s.Equal("error", refused["type"], "the socket answered %v", refused)
+	s.Equal("conversation is already open", refused["error"])
+	s.True(s.manager.Running(s.customerID(), opened.Id))
+}
+
 // The router's credentials act as whoever a session names the agent, so neither createSession
 // nor the socket lets a device name another user, an agent id or a display name for it.
 func (s *SocketSessionSuite) TestADeviceMayNotHandTheSocketAnotherAgentIdentity() {

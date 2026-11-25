@@ -161,6 +161,12 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 		if err := currentConfig(); err != nil {
 			return nil, err
 		}
+		// A backend naming the fork's project names its tag (Spec.NameProject), whatever the parent's.
+		if body.ProjectId == nil || KindFrom(ctx) != auth.KindServer {
+			if err := s.readProjectTag(ctx, parent.Stored); err != nil {
+				return nil, err
+			}
+		}
 	}
 	spec, err := forkSpec(parent, body, config, current, thread)
 	if err != nil {
@@ -194,6 +200,7 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 		spec.Recall = &session.Recall{Messages: recalled}
 	}
 	spec.CustomerID = customerID
+	spec.NameProject(body.ProjectId, KindFrom(ctx))
 	// A voice fork is keyed under the call it joins, which the request names.
 	ctx = s.threadConversation(ctx, customerID, &spec)
 	spec.Caller = CallerFrom(ctx)
@@ -216,7 +223,7 @@ func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (
 		return nil, err
 	}
 	if err != nil {
-		s.logUnkept(customerID, err)
+		s.logNotConfigured(ctx, customerID, err)
 		return nil, refusedRequest(err)
 	}
 	return &forkSessionResponse{Body: sessionOf(ctx, created)}, nil
@@ -702,6 +709,9 @@ func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) erro
 			}
 		}
 	case errors.Is(failure, errUnknownSession):
+		if failure = s.refuseHomedElsewhere(ctx, id); failure != nil {
+			return nil, nil, failure
+		}
 		if spec, failure = s.reopenedFromRow(ctx, id); failure != nil {
 			return nil, nil, failure
 		}
@@ -737,6 +747,26 @@ func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) erro
 	return reopened, func() { go holdUntilAnswered(reopened, events, detach) }, nil
 }
 
+// errSessionElsewhere is a session carried on outside the shard it lives in, which has its
+// rows. onOwningNode sends a request about one there; what reaches here did not come that way.
+var errSessionElsewhere = conflict("this session lives in another region and is carried on there")
+
+// refuseHomedElsewhere refuses to carry on a session that lives in another shard.
+func (s *Server) refuseHomedElsewhere(ctx context.Context, id string) error {
+	if s.store == nil {
+		return nil
+	}
+	customer, _ := CustomerFrom(ctx)
+	home, err := s.store.SessionHomes.Elsewhere(ctx, customer, id)
+	if err != nil {
+		return err
+	}
+	if home != "" {
+		return errSessionElsewhere
+	}
+	return nil
+}
+
 // toolsFromRow gives spec, ended here and last carried on by another kind of caller, the tools
 // and timeout its row keeps. The row keeps them for the kind of caller that opened it
 // (Sessions.Upsert), so a device carrying on its backend's conversation leaves the backend
@@ -757,6 +787,23 @@ func (s *Server) toolsFromRow(ctx context.Context, spec *session.Spec) error {
 	}
 	rowTools(ctx, spec, row)
 	return nil
+}
+
+// errProjectTagUnread refuses to carry on or fork a session whose project tag a shard that did
+// not answer may say.
+var errProjectTagUnread = unavailable("what the session's usage is tagged with could not be read; try again shortly")
+
+// readProjectTag gives row the project tag its usage has (store.Sessions.ReadProjectTag).
+func (s *Server) readProjectTag(ctx context.Context, row *store.AgentSession) error {
+	err := s.store.Sessions.ReadProjectTag(ctx, row)
+	if errors.Is(err, store.ErrProjectTagUnread) {
+		// A caller that hung up cuts the read off, which says nothing of a shard.
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			s.logger.Error("could not read a session's project tag", "session", row.ID, "error", err)
+		}
+		return errProjectTagUnread
+	}
+	return err
 }
 
 // rowTools gives spec the caller's tools and how long they are waited for, as row keeps them.
@@ -821,7 +868,11 @@ func (s *Server) reopenedFromRow(ctx context.Context, id string) (session.Spec, 
 	spec.Text = true
 	spec.PersistConversation = true
 	spec.ConversationID = row.ConversationID
-	spec.Title, spec.Description, spec.Project = row.Title, row.Description, row.Project
+	spec.Title, spec.Description = row.Title, row.Description
+	if err := s.readProjectTag(ctx, row); err != nil {
+		return session.Spec{}, err
+	}
+	spec.KeepProject(*row)
 	spec.Custom = row.Custom
 	spec.ModelOverwrites = row.ModelOverwrites
 	if row.ResumeHistory != (store.ResumeHistory{}) {
@@ -973,7 +1024,6 @@ func specOf(request CreateSessionRequest, customerID string, config *store.Agent
 	spec.NoUI = request.Ui != nil && !*request.Ui
 	spec.Title = override(spec.Title, request.Title)
 	spec.Description = override(spec.Description, request.Description)
-	spec.Project = override(spec.Project, request.ProjectId)
 	if request.Custom != nil {
 		spec.Custom = *request.Custom
 	}
@@ -1196,6 +1246,7 @@ func storedSessionOf(row store.AgentSession, call store.Call) Session {
 	if row.State == store.SessionClosed {
 		rendered.State = Ended
 	}
+	rendered.Region = optional(row.Region)
 	// A session whose latest call had no Stream call was held in writing.
 	if call.CallID == "" {
 		text := true
@@ -1354,6 +1405,12 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 		// The fork's own call is agent:<fork id>, never the call the parent was on.
 		spec = parent.Live.Spec().Written().Holding(session.Call{})
 		spec.Phone, spec.Edge = nil, nil
+		// Nor what the parent was as one conversation: the placed call it was, the hand-out it
+		// answered, and when it first opened if it was carried on.
+		spec.Voicemail, spec.Navigating = nil, false
+		spec.CampaignID, spec.ContactID = "", ""
+		spec.Dispatched, spec.HandedOutBy = false, ""
+		spec.Reopened = time.Time{}
 		parentID = parent.Live.ID()
 		if spec.Incognito {
 			return session.Spec{}, stack.Wrap(errors.New(
@@ -1375,7 +1432,8 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 		// The conversation goes on after its history, which a greeting would interrupt:
 		// a reopen says none either (sessionToAnswer).
 		spec.Greeting = ""
-		spec.Title, spec.Description, spec.Project = row.Title, row.Description, row.Project
+		spec.Title, spec.Description = row.Title, row.Description
+		spec.KeepProject(*row)
 		spec.Custom, spec.ModelOverwrites = row.Custom, row.ModelOverwrites
 		spec.ConnectorSelections = selectionsOf(*row)
 		spec.ReturnURL = row.ReturnURL
@@ -1402,7 +1460,7 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 		fresh := session.FromConfig(*config)
 		fresh.Text = true
 		fresh.Title, fresh.Description = spec.Title, spec.Description
-		fresh.Project, fresh.Custom = spec.Project, spec.Custom
+		fresh.Project, fresh.ProjectTag, fresh.Custom = spec.Project, spec.ProjectTag, spec.Custom
 		fresh.ConnectorSelections = spec.ConnectorSelections
 		fresh.ReturnURL = spec.ReturnURL
 		fresh.NoUI = spec.NoUI
@@ -1413,7 +1471,6 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 	spec.ForkedFrom = parentID
 	spec.Title = override(spec.Title, request.Title)
 	spec.Description = override(spec.Description, request.Description)
-	spec.Project = override(spec.Project, request.ProjectId)
 	spec.ToolTimeoutMs = override(spec.ToolTimeoutMs, request.ToolTimeoutMs)
 	spec.Incognito = value(request.Incognito)
 	if request.Custom != nil {
@@ -1438,6 +1495,10 @@ func forkSpec(parent session.Found, request ForkSessionRequest, config, current 
 	if recall != nil && (request.Messages == nil || *request.Messages) {
 		spec.PersistConversation = true
 		spec.Recall = recall
+	}
+	// Nothing said before the parent opened comes across either.
+	if request.Messages != nil && !*request.Messages {
+		spec.History = nil
 	}
 	return spec, nil
 }
@@ -1814,7 +1875,7 @@ type ForkSessionRequest struct {
 	ToolTimeoutMs   *int                    `json:"tool_timeout_ms,omitempty" doc:"How long the fork's model waits for the result of a tool the caller or a worker runs, in milliseconds, as on createSession. Omitted keeps a running parent's; a fork of a conversation that ended has 30 seconds. Zero is 30 seconds, as on createSession."`
 	Messages        *bool                   `json:"messages,omitempty" doc:"Carry the parent's history into the fork, so the new conversation continues from what was already said. False starts the same configuration over from nothing, which is what comparing two answers to the same opening question wants." default:"true"`
 	ModelOverwrites *ModelOverwrites        `json:"model_overwrites,omitempty" doc:"Server-side only: a device sending it is refused with a 403."`
-	ProjectId       *string                 `json:"project_id,omitempty"`
+	ProjectId       *string                 `json:"project_id,omitempty" doc:"What the fork belongs to. Omitted, the parent's is kept. Sent server-side it is also the \"project\" cost tag, as on createSession; a device's groups the fork, whose cost tag stays the project a backend named for its parent. A tag spelled out in a running parent's tags, or the agent config's, wins."`
 	ResponseId      *string                 `json:"response_id,omitempty" doc:"Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false."`
 	Title           *string                 `json:"title,omitempty"`
 }

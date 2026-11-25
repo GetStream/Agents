@@ -67,7 +67,7 @@ func DefaultRecorderRegistry() *Recorders {
 		})
 		// A format Cartesia cannot produce is the caller's to change, and says nothing
 		// about the model's health.
-		if errors.Is(err, cartesia.ErrFormat) {
+		if errors.Is(err, cartesia.ErrFormat) || errors.Is(err, cartesia.ErrRefused) {
 			return nil, routing.Refused(err)
 		}
 		return recorder, err

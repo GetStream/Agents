@@ -126,7 +126,7 @@ func (s *RunnerSuite) TestADialTheRouterDidNotPlaceAsItStopsIsNotCounted() {
 	stop()
 	s.Require().NoError(runner.Start(stopped))
 	s.Require().Eventually(runner.stopping, 5*time.Second, 10*time.Millisecond)
-	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-counting", s.clock.now(), lease, 10)
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-counting", store.ShardClaim{}, s.clock.now(), lease, 10)
 	s.Require().NoError(err)
 	s.Require().Len(claimed, 1)
 

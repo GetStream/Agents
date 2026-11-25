@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -126,6 +127,67 @@ func (s *TelnyxUnpaidSuite) settledByTheWorkerAfter(task store.ScheduledTask, be
 		runs, err := s.store.ScheduledTaskRuns.Select(context.Background(), task.CustomerID, store.ScheduledTaskRunFilter{TaskID: task.ID, Limit: 25})
 		s.Require().NoError(err)
 		if len(runs) == 0 || runs[0].State == store.ScheduledTaskRunRunning {
+			return false
+		}
+		settled = runs[0]
+		return true
+	}, deliveryWait, 20*time.Millisecond, "the task's run never settled")
+	return settled, attempts.Load()
+}
+
+// takenOver makes task due and has a worker fail its first attempt, then stops that worker while
+// it waits to retry, as a router that crashes or loses its lease leaves the run. between runs
+// next; then the run goes stale and a second worker, retrying at once, takes it over. It returns
+// the settled run and how many attempts the second worker made.
+func (s *TelnyxUnpaidSuite) takenOver(task store.ScheduledTask, between func()) (store.ScheduledTaskRun, int32) {
+	var failed atomic.Int32
+	lost := scheduling.NewScheduler(s.store, func(ctx context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
+		deliveredTo, sessionID, err := s.router.DeliverScheduledTask(ctx, claimed)
+		if err != nil {
+			failed.Add(1)
+		}
+		return deliveredTo, sessionID, err
+	}, slog.New(slog.NewTextHandler(s.logged, nil)))
+	lost.SetRetries([]time.Duration{time.Hour})
+	past := time.Now().Add(-time.Minute)
+	task.NextRunAt = &past
+	s.Require().NoError(s.store.ScheduledTasks.Update(context.Background(), &task))
+	lost.Start(context.Background())
+	lost.Kick()
+	s.Require().Eventually(func() bool {
+		return failed.Load() == 1 && lost.Running() == 1
+	}, deliveryWait, 20*time.Millisecond, "the first attempt failed and the delivery waits to retry")
+	lost.Close()
+	if between != nil {
+		between()
+	}
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTaskRun)(nil)).
+		Set("started_at = now() - interval '1 hour'").
+		Where("task_id = ?", task.ID).
+		Where("state = ?", store.ScheduledTaskRunRunning).
+		Exec(context.Background())
+	s.Require().NoError(err)
+	_, err = s.store.GlobalDB().NewUpdate().Model((*store.ScheduledTask)(nil)).
+		Set("lease_until = now() - interval '1 second'").
+		Where("customer_id = ?", task.CustomerID).
+		Where("id = ?", task.ID).
+		Exec(context.Background())
+	s.Require().NoError(err)
+
+	s.retryAtOnce()
+	var attempts atomic.Int32
+	worker := s.newScheduler(func(ctx context.Context, claimed store.ClaimedScheduledTask) (string, string, error) {
+		attempts.Add(1)
+		return s.router.DeliverScheduledTask(ctx, claimed)
+	}, slog.New(slog.NewTextHandler(s.logged, nil)))
+	worker.Start(context.Background())
+	defer worker.Close()
+	worker.Kick()
+	var settled store.ScheduledTaskRun
+	s.Require().Eventually(func() bool {
+		runs, err := s.store.ScheduledTaskRuns.Select(context.Background(), task.CustomerID, store.ScheduledTaskRunFilter{TaskID: task.ID, Limit: 25})
+		s.Require().NoError(err)
+		if len(runs) != 1 || runs[0].State == store.ScheduledTaskRunRunning {
 			return false
 		}
 		settled = runs[0]
@@ -431,6 +493,13 @@ func (s *TelnyxUnpaidSuite) TestATextRefusedAtItsReservationWhileMoneyCannotBeCh
 	s.False(failure.Final, "the check passes again on its own")
 }
 
+// ownerContext is the context of the delivery, as its task's owner's.
+func (s *TelnyxUnpaidSuite) ownerContext(ctx context.Context, delivery scheduledDelivery) context.Context {
+	ctx, err := s.router.scheduledOwnerContext(ctx, delivery)
+	s.NoError(err)
+	return ctx
+}
+
 // refusedTurn is the follow-up of a task due in the session opened before the credit ran out,
 // captured as a text channel captures it once the gate let the send through: the money changed
 // after it did, so the turn is what the organization's money refuses.
@@ -440,7 +509,7 @@ func (s *TelnyxUnpaidSuite) refusedTurn(user *testClient, opened Session) error 
 	s.Require().True(running)
 	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: user.userID,
 		CallerKind: "authenticated", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
-	_, _, err := s.router.captureReply(scheduledOwnerContext(context.Background(), delivery), found, delivery)
+	_, _, err := s.router.captureReply(s.ownerContext(context.Background(), delivery), found, delivery)
 	return err
 }
 
@@ -503,7 +572,7 @@ func (s *TelnyxUnpaidSuite) conversationTurn(user *testClient, opened Session) e
 	s.Require().True(running)
 	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: user.userID,
 		CallerKind: "authenticated", TaskID: "task", RunID: "run", CommandID: "st_run", Text: "stretch"}
-	_, _, err := s.router.deliverOn(scheduledOwnerContext(context.Background(), delivery), delivery, found,
+	_, _, err := s.router.deliverOn(s.ownerContext(context.Background(), delivery), delivery, found,
 		store.ScheduledTaskDeliveredConversation)
 	return err
 }
@@ -663,6 +732,66 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedOnAnotherRouterRunsAgain
 	s.NotEmpty(said, "the user got a reply")
 }
 
+// A conversation task whose turn is refused because the money cannot be checked, and whose worker
+// stops while it waits to retry, runs its turn again on the worker that takes the run over once the
+// check passes: that worker reads the refusal from the run, and the user gets the reply.
+func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedWhileMoneyCannotBeCheckedRunsAgainForTheWorkerTakingItOver() {
+	user, opened := s.uncheckableAfterOpening()
+	task := s.userTask(user, opened.Id, "conversation")
+
+	run, attempts := s.takenOver(task, s.sharedAgain)
+
+	s.Equal(store.ScheduledTaskRunDelivered, run.State)
+	s.Equal(store.ScheduledTaskDeliveredConversation, run.DeliveredTo)
+	s.Nil(run.Error)
+	s.Equal(int32(1), attempts)
+	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
+	s.Require().True(running)
+	refused, _, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID)
+	s.Equal("failed", refused, "the first turn was refused")
+	state, said, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID + rerunSuffix)
+	s.Equal("completed", state, "the worker taking over ran the turn again")
+	s.NotEmpty(said, "the user got a reply")
+}
+
+// A conversation task whose session another router holds, whose turn there is refused because the
+// money cannot be checked and whose worker stops while it waits to retry: the worker taking the run
+// over hands that router the refusal, and the turn runs again there.
+func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedOnAnotherRouterRunsAgainThereForTheWorkerTakingItOver() {
+	other, _, sessions := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler))
+	user, opened := s.uncheckableAfterOpeningOn(other)
+	task := s.userTask(user, opened.Id, "conversation")
+
+	run, attempts := s.takenOver(task, s.sharedAgain)
+
+	s.Equal(store.ScheduledTaskRunDelivered, run.State)
+	s.Equal(int32(1), attempts)
+	found, running := sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
+	s.Require().True(running, "the session is the other router's")
+	state, said, _ := found.FollowUpReply(conversation.ReadBackPrefix + run.ID + rerunSuffix)
+	s.Equal("completed", state, "the turn ran again on the router holding the session")
+	s.NotEmpty(said, "the user got a reply")
+}
+
+// A text task whose turn fails for a reason that is not money, and whose worker stops while it
+// waits to retry, reads that reply back on the worker that takes the run over, as on its own
+// retries: the turn is not run again, and the run fails as a reply that failed.
+func (s *TelnyxUnpaidSuite) TestATextTurnFailedNotForMoneyIsNotRunAgainByTheWorkerTakingItOver() {
+	user, opened := s.creditedOpening("failing/failing-model")
+	task := s.userTask(user, opened.Id, "sms")
+
+	run, attempts := s.takenOver(task, nil)
+
+	s.Equal(store.ScheduledTaskRunFailed, run.State)
+	s.Require().NotNil(run.Error)
+	s.Equal(scheduling.ReasonReplyFailed, *run.Error)
+	s.Equal(int32(1+len(s.retries)), attempts)
+	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
+	s.Require().True(running)
+	_, _, rerun := found.FollowUpReply(conversation.ReadBackPrefix + run.ID + rerunSuffix)
+	s.False(rerun, "a reply that failed not for money is not run again")
+}
+
 // A thread task whose reply failed, retried after a refusal for money, runs its turn again in the
 // thread under the rerun's command id, as the conversation and the text channels do.
 func (s *TelnyxUnpaidSuite) TestAThreadRetryAfterARefusalForMoneyRunsTheTurnAgain() {
@@ -675,7 +804,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadRetryAfterARefusalForMoneyRunsTheTurnAgai
 	task := s.threadTask(channel)
 	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: task.UserID,
 		CallerKind: "server", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
-	ctx := scheduledOwnerContext(context.Background(), delivery)
+	ctx := s.ownerContext(context.Background(), delivery)
 	_, _, err := s.router.deliverOnThread(ctx, delivery, channel)
 	s.Require().Error(err)
 	state, _, _ := found.FollowUpReply("st_run")
@@ -699,7 +828,7 @@ func (s *TelnyxUnpaidSuite) TestATextTurnRefusedWhileMoneyCannotBeCheckedRunsAga
 	s.Require().True(running)
 	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: user.userID,
 		CallerKind: "authenticated", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
-	ctx := scheduledOwnerContext(context.Background(), delivery)
+	ctx := s.ownerContext(context.Background(), delivery)
 	var failure *scheduling.Failure
 	_, _, err := s.router.captureReply(ctx, found, delivery)
 	s.Require().ErrorAs(err, &failure)
@@ -729,7 +858,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadTurnRefusedTwiceFailsUnderTheMoney() {
 	task := s.threadTask(channel)
 	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: task.UserID,
 		CallerKind: "server", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
-	ctx := scheduledOwnerContext(context.Background(), delivery)
+	ctx := s.ownerContext(context.Background(), delivery)
 
 	var reasons []string
 	for range 3 {
@@ -754,7 +883,7 @@ func (s *TelnyxUnpaidSuite) TestATextTurnRefusedTwiceFailsUnderTheMoney() {
 	s.Require().True(running)
 	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: user.userID,
 		CallerKind: "authenticated", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
-	ctx := scheduledOwnerContext(context.Background(), delivery)
+	ctx := s.ownerContext(context.Background(), delivery)
 
 	var reasons []string
 	for range 3 {
@@ -786,6 +915,200 @@ func (s *TelnyxUnpaidSuite) TestATextTurnFailedNotForMoneyIsNotRunAgainOnItsRetr
 	s.Equal("failed", state)
 	_, _, rerun := found.FollowUpReply(conversation.ReadBackPrefix + run.ID + rerunSuffix)
 	s.False(rerun, "a reply that failed not for money is not run again")
+}
+
+// followUpIn is the session opened, and the delivery of a task of user's on channel due in it,
+// on its first attempt: the attempt before it, if any, recorded no reason about money.
+func (s *TelnyxUnpaidSuite) followUpIn(user *testClient, opened Session, channel string) (*session.Session, scheduledDelivery) {
+	task := s.userTask(user, opened.Id, channel)
+	found, running := s.router.sessions.Get(opened.Id, session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated})
+	s.Require().True(running)
+	return found, scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: user.userID,
+		CallerKind: "authenticated", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
+}
+
+// failedBefore runs delivery's turn in found as an attempt cut short once it began the turn
+// does, such as one whose context is cancelled, and waits until the turn's reply has failed. The
+// attempt after it, in the same open session, watches none of the turn's events: it can only read
+// how the turn ended.
+func (s *TelnyxUnpaidSuite) failedBefore(found *session.Session, delivery scheduledDelivery) {
+	s.Require().NoError(s.router.followUpWithin(s.ownerContext(context.Background(), delivery), found, delivery))
+	s.Require().Eventually(func() bool {
+		state, _, _ := found.FollowUpReply(delivery.CommandID)
+		return state == "failed"
+	}, deliveryWait, 10*time.Millisecond, "the turn never failed")
+}
+
+// A conversation task whose turn the model refused for money while no attempt watched it fails
+// under the refusal's code on the attempt after, and is not tried again: how the turn ended is
+// the conversation's to say, not an event the attempt may never have been sent (AI-3594).
+func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedForMoneyUnwatchedFailsUnderTheMoney() {
+	user, opened := s.spentAfterOpening()
+	found, delivery := s.followUpIn(user, opened, "conversation")
+	s.failedBefore(found, delivery)
+
+	_, _, err := s.router.deliverOn(s.ownerContext(context.Background(), delivery), delivery, found,
+		store.ScheduledTaskDeliveredConversation)
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(err, &failure, "the turn the user got nothing from is not delivered")
+	s.Equal(codeInsufficientCredits, failure.Reason)
+	s.True(failure.Final, "spent credit outlasts every retry of the run")
+}
+
+// A conversation task whose turn was refused, while no attempt watched it, because the money
+// could not be checked is tried again (AI-3594).
+func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedUncheckedUnwatchedIsRetried() {
+	user, opened := s.uncheckableAfterOpening()
+	found, delivery := s.followUpIn(user, opened, "conversation")
+	s.failedBefore(found, delivery)
+
+	_, _, err := s.router.deliverOn(s.ownerContext(context.Background(), delivery), delivery, found,
+		store.ScheduledTaskDeliveredConversation)
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(err, &failure)
+	s.Equal(codeSpendCheckUnavailable, failure.Reason)
+	s.False(failure.Final, "the check passes again on its own")
+}
+
+// A text channel's turn the model refused for money while no attempt watched it fails under the
+// refusal's code on the attempt after, not as a reply that failed (AI-3594).
+func (s *TelnyxUnpaidSuite) TestATextTurnRefusedForMoneyUnwatchedFailsUnderTheMoney() {
+	user, opened := s.spentAfterOpening()
+	found, delivery := s.followUpIn(user, opened, "sms")
+	s.failedBefore(found, delivery)
+
+	_, _, err := s.router.captureReply(s.ownerContext(context.Background(), delivery), found, delivery)
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(err, &failure)
+	s.Equal(codeInsufficientCredits, failure.Reason)
+	s.True(failure.Final, "spent credit outlasts every retry of the run")
+	s.True(refusedTurn(err), "the next text channel would only read the same turn back")
+}
+
+// A text channel's turn refused, while no attempt watched it, because the money could not be
+// checked is tried again, and its retry runs the turn again (replyCommand) (AI-3594).
+func (s *TelnyxUnpaidSuite) TestATextTurnRefusedUncheckedUnwatchedIsRetried() {
+	user, opened := s.uncheckableAfterOpening()
+	found, delivery := s.followUpIn(user, opened, "sms")
+	s.failedBefore(found, delivery)
+
+	_, _, err := s.router.captureReply(s.ownerContext(context.Background(), delivery), found, delivery)
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(err, &failure)
+	s.Equal(codeSpendCheckUnavailable, failure.Reason)
+	s.False(failure.Final, "the check passes again on its own")
+}
+
+// A thread task whose turn the model refused for money while no attempt watched it fails under
+// the refusal's code on the attempt after, not as a reply that failed (AI-3594).
+func (s *TelnyxUnpaidSuite) TestAThreadTurnRefusedForMoneyUnwatchedFailsUnderTheMoney() {
+	person := "+1347" + digits(s.utils.uuid())
+	s.teamed()
+	channel := s.creditedThread(person)
+	s.serverClient.createSession(CreateSessionRequest{Agent: &s.config.Name, AgentId: &channel})
+	found, running := s.router.sessions.ByConversationWhere(chatlog.ChannelType+":"+channel, func(string, int64) bool { return true })
+	s.Require().True(running)
+	s.teamSpent(person)
+	task := s.threadTask(channel)
+	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: task.UserID,
+		CallerKind: "server", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
+	s.failedBefore(found, delivery)
+
+	_, _, err := s.router.deliverOnThread(s.ownerContext(context.Background(), delivery), delivery, channel)
+
+	var failure *scheduling.Failure
+	s.Require().ErrorAs(err, &failure)
+	s.Equal(codeSpendLimitReached, failure.Reason)
+	s.True(failure.Final, "a spent team limit outlasts every retry of the run")
+}
+
+// A refusal for money the session reports to its watchers that ended no turn of the delivery's,
+// such as a person's own command refused on the socket, leaves the delivery's turn to end on its
+// own: the conversation channel delivers the reply once it does (AI-3594).
+func (s *TelnyxUnpaidSuite) TestAConversationTurnOutlivesARefusalReportedForAnotherCommand() {
+	found, done := s.heldConversationTurn(context.Background())
+	found.Report(fmt.Errorf("the command was refused: %w", policy.ErrNoCredits), "command")
+
+	s.Never(func() bool { return len(done) > 0 }, time.Second, 20*time.Millisecond, "settled on another command's refusal")
+	s.holding.answers()
+	select {
+	case err := <-done:
+		s.NoError(err)
+	case <-time.After(deliveryWait):
+		s.Fail("the delivery never settled once the turn ended")
+	}
+}
+
+// A text channel's reply that waited behind another turn of the session carries only its own
+// words, not the words of the turn it waited for (AI-3594 R1.2).
+func (s *TelnyxUnpaidSuite) TestATextReplyCarriesOnlyItsOwnTurnsWords() {
+	s.saying("Words of the earlier turn.")
+	found, done := s.heldConversationTurn(context.Background())
+	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: found.Spec().Caller.UserID,
+		CallerKind: "authenticated", TaskID: "task2", RunID: "run2", CommandID: "st_run2", Text: "drink water"}
+	type reply struct {
+		text string
+		err  error
+	}
+	captured := make(chan reply, 1)
+	go func() {
+		text, _, err := s.router.captureReply(s.ownerContext(context.Background(), delivery), found, delivery)
+		captured <- reply{text, err}
+	}()
+	s.Never(func() bool { return len(captured) > 0 }, time.Second, 20*time.Millisecond, "the reply did not wait behind the busy turn")
+	s.saying("The scheduled words.")
+	s.holding.answers()
+	s.Require().NoError(<-done)
+
+	select {
+	case got := <-captured:
+		s.Require().NoError(got.err)
+		s.Equal("The scheduled words.", got.text)
+	case <-time.After(deliveryWait):
+		s.Fail("the reply never came")
+	}
+}
+
+// A text channel's reply with no other turn ahead of it is texted as it always was, word for
+// word, and as soon as its turn ends, not at the end of the reply window (AI-3594 R1.2, R1.3).
+func (s *TelnyxUnpaidSuite) TestATextReplyIsTextedAsItWasOnceItsTurnEnds() {
+	user, opened := s.creditedOpening("recites/recites-model")
+	found, delivery := s.followUpIn(user, opened, "sms")
+	type reply struct {
+		text string
+		err  error
+	}
+	captured := make(chan reply, 1)
+	go func() {
+		text, _, err := s.router.captureReply(s.ownerContext(context.Background(), delivery), found, delivery)
+		captured <- reply{text, err}
+	}()
+
+	select {
+	case got := <-captured:
+		s.Require().NoError(got.err)
+		s.Equal("user: stretch", got.text, "what the reciting model was handed: the follow-up alone")
+	case <-time.After(deliveryWait):
+		s.Fail("the reply waited out the window though its turn had ended")
+	}
+}
+
+// saying has the holding model answer every turn it begins from now with text, until the test
+// ends.
+func (s *TelnyxUnpaidSuite) saying(text string) {
+	s.holding.mu.Lock()
+	defer s.holding.mu.Unlock()
+	before := s.holding.reply
+	s.holding.reply = text
+	s.T().Cleanup(func() {
+		s.holding.mu.Lock()
+		defer s.holding.mu.Unlock()
+		s.holding.reply = before
+	})
 }
 
 // creditedOpening is a user who texts the agent's SMS line, on model, and a session they opened on
@@ -858,7 +1181,7 @@ func (s *TelnyxUnpaidSuite) heldConversationTurn(ctx context.Context) (*session.
 	s.T().Cleanup(model.answers)
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := s.router.deliverOn(scheduledOwnerContext(ctx, delivery), delivery, found,
+		_, _, err := s.router.deliverOn(s.ownerContext(ctx, delivery), delivery, found,
 			store.ScheduledTaskDeliveredConversation)
 		done <- err
 	}()
@@ -916,6 +1239,66 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnCutShortIsNotDelivered() {
 	case <-time.After(deliveryWait):
 		s.Fail("the delivery never stopped")
 	}
+}
+
+// The retry of a conversation delivery cut short while its turn runs waits that turn out, as the
+// attempt it follows did, rather than settling delivered on a turn that may still be refused
+// (AI-3594 R1.1).
+func (s *TelnyxUnpaidSuite) TestAConversationRetryWaitsOutTheTurnAnEarlierAttemptBegan() {
+	ctx, cancel := context.WithCancel(context.Background())
+	found, done := s.heldConversationTurn(ctx)
+	cancel()
+	s.Require().ErrorIs(<-done, context.Canceled)
+	delivery := scheduledDelivery{CustomerID: s.customerID(), ConfigID: s.config.ID, UserID: found.Spec().Caller.UserID,
+		CallerKind: "authenticated", TaskID: "task", RunID: "run", CommandID: "st_run", Text: "stretch"}
+	retried := make(chan error, 1)
+	go func() {
+		_, _, err := s.router.deliverOn(s.ownerContext(context.Background(), delivery), delivery, found,
+			store.ScheduledTaskDeliveredConversation)
+		retried <- err
+	}()
+
+	s.Never(func() bool { return len(retried) > 0 }, time.Second, 20*time.Millisecond, "settled while the turn ran")
+	s.holding.answers()
+	select {
+	case err := <-retried:
+		s.NoError(err)
+		state, _, _ := found.FollowUpReply("st_run")
+		s.Equal("completed", state, "settled before the turn ended")
+	case <-time.After(deliveryWait):
+		s.Fail("the retry never settled once the turn ended")
+	}
+}
+
+// A conversation follow-up the session refuses to run, such as one with nothing to answer, fails
+// the attempt: no turn ran, so nothing is delivered once the reply window passes (AI-3594 R1.3).
+func (s *TelnyxUnpaidSuite) TestAConversationFollowUpTheSessionRefusesIsNotDelivered() {
+	window := s.router.replyWindow
+	s.router.replyWindow = 2 * time.Second
+	s.T().Cleanup(func() { s.router.replyWindow = window })
+	user, opened := s.creditedOpening("holding/holding-model")
+	found, delivery := s.followUpIn(user, opened, "conversation")
+	delivery.Text = ""
+
+	_, _, err := s.router.deliverOn(s.ownerContext(context.Background(), delivery), delivery, found,
+		store.ScheduledTaskDeliveredConversation)
+
+	s.ErrorContains(err, "there is nothing to answer")
+}
+
+// A text channel's follow-up the session refuses to run fails the attempt with why, not as a
+// reply nobody wrote once the reply window passes (AI-3594 R1.2).
+func (s *TelnyxUnpaidSuite) TestATextFollowUpTheSessionRefusesFailsWithWhy() {
+	window := s.router.replyWindow
+	s.router.replyWindow = 2 * time.Second
+	s.T().Cleanup(func() { s.router.replyWindow = window })
+	user, opened := s.creditedOpening("holding/holding-model")
+	found, delivery := s.followUpIn(user, opened, "sms")
+	delivery.Text = ""
+
+	_, _, err := s.router.captureReply(s.ownerContext(context.Background(), delivery), found, delivery)
+
+	s.ErrorContains(err, "there is nothing to answer")
 }
 
 // A conversation turn whose session ends while it runs is delivered, as it always was: nothing
@@ -1012,7 +1395,7 @@ func (s *TelnyxUnpaidSuite) TestATurnThatReportsAFailureNotAboutMoneyStillCarrie
 	}
 	done := make(chan result, 1)
 	go func() {
-		text, _, err := s.router.captureReply(scheduledOwnerContext(context.Background(), delivery), found, delivery)
+		text, _, err := s.router.captureReply(s.ownerContext(context.Background(), delivery), found, delivery)
 		done <- result{text, err}
 	}()
 	s.Require().Eventually(func() bool {
@@ -1231,7 +1614,9 @@ func (s *TelnyxUnpaidSuite) callOn(model string) ringing {
 // takeCall is call with a call of its own taken on its run, as deliverByPhone takes one before
 // it rings: the run must have none taken.
 func (s *TelnyxUnpaidSuite) takeCall(call ringing) ringing {
-	call.spec = callSpec(s.config, call.delivery, call.agentID, phone.Placed{SessionID: s.utils.uuid()}, call.line, call.writer)
+	caller, err := s.router.scheduledCaller(context.Background(), call.delivery)
+	s.Require().NoError(err)
+	call.spec = callSpec(s.config, call.delivery, caller, call.agentID, phone.Placed{SessionID: s.utils.uuid()}, call.line, call.writer)
 	took, _, err := s.store.ScheduledTaskRuns.TakeCall(context.Background(), call.task.CustomerID, call.run.ID, call.spec.ID)
 	s.Require().NoError(err)
 	s.Require().True(took, "the call is taken on the run before it is placed")
@@ -1248,7 +1633,7 @@ func (s *TelnyxUnpaidSuite) dial(call ringing) ringing {
 	done := make(chan callOutcome, 1)
 	call.done = done
 	go func() {
-		deliveredTo, sessionID, err := s.router.carryOutOnCall(scheduledOwnerContext(context.Background(), call.delivery), call.delivery, call.spec)
+		deliveredTo, sessionID, err := s.router.carryOutOnCall(s.ownerContext(context.Background(), call.delivery), call.delivery, call.spec)
 		done <- callOutcome{deliveredTo: deliveredTo, sessionID: sessionID, err: err}
 	}()
 	return call
@@ -1500,7 +1885,7 @@ func (s *TelnyxUnpaidSuite) TestACallWhoseLaterTurnIsRefusedForMoneyIsDelivered(
 	s.usage.Credit(s.T(), s.RouterSuite.app.organization.ID, -10_000_000)
 	s.refusedForMoney(call.writer)
 	refusal := s.gate.Allow(context.Background(), s.customerID(), dlc.SMS, call.writer)
-	s.Require().NotNil(turnRefusal(agent.Error{Context: "llm", Err: refusal}), "the gate's refusal is one for money: %v", refusal)
+	s.Require().NotNil(moneyRefusal(refusal), "the gate's refusal is one for money: %v", refusal)
 	held, live := s.router.sessions.Get(call.spec.ID, session.OwnerOf(call.spec))
 	s.Require().True(live)
 

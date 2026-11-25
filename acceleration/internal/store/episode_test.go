@@ -628,6 +628,7 @@ func (s *StoreSuite) TestACallsEpisodesAreFoundByTheirCall() {
 
 	s.Require().NoError(err)
 	s.Contains(strings.Join(plan, "\n"), "episodes_open_call")
+	s.Contains(strings.Join(plan, "\n"), "Index Cond: (call_id = ", "the plan seeks the call rather than reading every open one")
 }
 
 // The sweep runs every minute, and episodes keeps a row for every thread episode there was,

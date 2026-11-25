@@ -116,6 +116,25 @@ func (s *RouterConfigsSuite) TestAConfigWithOverwritesForAVoiceNobodyOffersIsRef
 	s.Contains(failure, "no voice for")
 }
 
+func (s *RouterConfigsSuite) TestAConfigWhoseOverwriteVoiceIdIsNotTheVendorsIsRefusedNamingIt() {
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/router/configs",
+		map[string]any{"name": "clinic", "tts": map[string]any{
+			"overwrites": map[string]any{"elevenlabs": map[string]any{"voice_id": "a/../../v1/user"}},
+		}})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "overwrites.elevenlabs.voice_id")
+
+	status, failure = s.serverClient.failure(http.MethodPost, "/v1/router/configs",
+		map[string]any{"name": "clinic", "tts": map[string]any{
+			"overwrites": map[string]any{"elevenlabs": map[string]any{"voice_id": "21m00Tcm4TlvDq8ikWAM"}},
+		}})
+	// This deployment has no ElevenLabs voice, which is the only thing a voice it hands out
+	// is refused for.
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal(`there are overwrites for "elevenlabs", which this deployment has no voice for`, failure)
+}
+
 func (s *RouterConfigsSuite) TestAConfigAskingAVoiceForARetentionNothingCanBeComparedAgainstIsRefused() {
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/router/configs",
 		map[string]any{"name": "clinic", "tts": map[string]any{

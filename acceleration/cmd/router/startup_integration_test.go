@@ -31,6 +31,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/config"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	dlctelnyx "github.com/GetStream/Vision-Agents/acceleration/internal/dlc/telnyx"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
@@ -479,6 +480,39 @@ func (s *RouterStartSuite) TestAStartingRouterWithNoTwilioTokenHasNoTwilioEvents
 	s.Equal(http.StatusNotFound, s.postTwilioAlert(settings.Addr, form, signature))
 }
 
+// The router run builds from its settings hands TWILIO_ACCOUNT_SID to the Twilio call route; unwired,
+// every call Twilio signs for the account is hung up as naming another.
+func (s *RouterStartSuite) TestAStartingRouterTakesATwilioCallOnItsOwnAccount() {
+	settings := s.settings
+	settings.Addr = freeAddress(s.T())
+	settings.PublicURL = "https://router.example.test"
+	settings.Twilio.WebhookAuthToken = rand.Text()
+	settings.Twilio.AccountSID = "AC" + strings.Repeat("0", 31) + "1"
+	stop, logs := s.startLogged(settings)
+
+	form := url.Values{"AccountSid": {settings.Twilio.AccountSID}, "Direction": {"inbound"}, "To": {"+15125550100"}}
+	signature := twiliosig.Sign(settings.Twilio.WebhookAuthToken, settings.PublicURL+"/v1/phone/hooks/twilio", form)
+	request, err := http.NewRequest(http.MethodPost, "http://"+settings.Addr+"/v1/phone/hooks/twilio",
+		strings.NewReader(form.Encode()))
+	s.Require().NoError(err)
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set(twiliosig.SignatureHeader, signature)
+	response, err := http.DefaultClient.Do(request)
+	s.Require().NoError(err)
+	s.Require().NoError(response.Body.Close())
+	s.Require().NoError(stop())
+
+	s.Equal(http.StatusOK, response.StatusCode)
+	var hungUp []string
+	for _, warning := range logs.warned() {
+		if strings.HasPrefix(warning, "hung up a twilio call") {
+			hungUp = append(hungUp, warning)
+		}
+	}
+	s.Require().Len(hungUp, 1, "warnings: %q", logs.warned())
+	s.NotContains(hungUp[0], "TWILIO_ACCOUNT_SID", "the call names the router's own account")
+}
+
 func (s *RouterStartSuite) postTwilioAlert(address string, form url.Values, signature string) int {
 	request, err := http.NewRequest(http.MethodPost, "http://"+address+"/v1/phone/hooks/twilio/events",
 		strings.NewReader(form.Encode()))
@@ -675,6 +709,38 @@ func (s *RouterStartSuite) TestARunningRouterSaysItTakesTrunkCallsOverUntilItSto
 	}, 10*time.Second, 20*time.Millisecond, "the running router does not say it takes trunk calls over")
 	s.Require().NoError(stop())
 	s.NotContains(s.takingTrunkCalls(client), node, "the stopped router still says it takes trunk calls over")
+}
+
+// Defect: the router serves without agreeing on the shard list, so one missing a shard
+// writes calls where the others never read.
+func (s *RouterStartSuite) TestARouterKnowingOtherShardsThanTheRunningOnesRefusesToStart() {
+	address := os.Getenv("ROUTER_REDIS_ADDR")
+	if address == "" {
+		s.T().Skip("ROUTER_REDIS_ADDR not set")
+	}
+	client, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{address}, DisableCache: true})
+	s.Require().NoError(err)
+	s.T().Cleanup(client.Close)
+	s.Require().NoError(client.Do(s.ctx, client.B().Set().Key(node.ShardsKey).Value("us-east4,us-west1").Ex(time.Minute).Build()).Error())
+	s.T().Cleanup(func() { s.NoError(client.Do(s.ctx, client.B().Del().Key(node.ShardsKey).Build()).Error()) })
+	settings := s.settings
+	settings.Addr = freeAddress(s.T())
+	settings.Redis.Addr = address
+
+	stopped := make(chan struct{})
+	var runErr error
+	go func() {
+		runErr = run(settings, slog.New(slog.DiscardHandler))
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		s.ErrorIs(runErr, node.ErrShardsDisagree)
+	case <-time.After(15 * time.Second):
+		s.NoError(syscall.Kill(os.Getpid(), syscall.SIGTERM))
+		<-stopped
+		s.Fail("the router started with another shard list than the running routers'")
+	}
 }
 
 // takingTrunkCalls is every node that says now that it takes trunk calls over.

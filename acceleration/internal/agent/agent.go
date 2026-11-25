@@ -162,6 +162,10 @@ type Options struct {
 	// Telephony is what the agent may do to the call itself. Without it the agent can
 	// only talk, which is what a call that is not on a phone network can do.
 	Telephony Telephony
+	// CallersTool reports whether the tool called name is one an end user's device declared
+	// and runs itself. Its result is the caller's own word, so it gives no number to transfer
+	// to. Nil means no tool is.
+	CallersTool func(name string) bool
 	// Destinations, when set, are the only places a transfer may go, asked for by name:
 	// a number the model supplies is never dialled.
 	Destinations []Destination
@@ -341,6 +345,9 @@ type Agent struct {
 	// approvalQuestions are what a cascade owes the caller as written, in place of a reply
 	// to the calls that asked them.
 	approvalQuestions []string
+	// callerTurns counts the turns a caller spoke (approval.go), so a yes runs a call only once
+	// one came after its question played.
+	callerTurns int
 	// approvedRuns is the confirmation each approved call runs under, by the call's own id.
 	approvedRuns map[string]approvedRun
 	// toolsRunning names each tool still running, by call, so a caller left waiting can
@@ -2492,10 +2499,16 @@ func (a *Agent) respondTurn(
 	scheduled bool,
 	speculated string,
 ) error {
+	drained := !a.waitingForPlayout()
 	a.mu.Lock()
 	if a.harness == nil {
 		a.mu.Unlock()
 		return stack.Wrap(errNotJoined)
+	}
+	// A spoken turn, or one the caller typed, is counted before its reply starts, so that reply
+	// is not taken for a question still playing.
+	if !listened.typed || callerTyped(sender, scheduled) {
+		a.heardLocked(drained)
 	}
 	said := participant
 	switch {

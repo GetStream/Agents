@@ -84,7 +84,9 @@ type ChatInbounds struct {
 const chatInboundColumns = "cd.seq, cd.stream_app_pk, cd.message_id, cd.customer_id, cd.deployment, cd.api_key, cd.body, " +
 	"cd.state, cd.attempts, cd.next_attempt_at, cd.finished_at, cd.heard"
 
-// Queue queues delivery to be answered, due at delivery.NextAttemptAt. A message already
+// Queue queues delivery to be answered, due at delivery.NextAttemptAt, or now when that is zero.
+// Now is Postgres's, which claim judges it by: stamped on a router's clock a little ahead of it, a
+// message would not be due yet for the claim its router makes at once. A message already
 // queued under the same app and id, answered or given up within its keep, is not queued again:
 // queued is false.
 func (r *ChatInbounds) Queue(ctx context.Context, delivery ChatInbound) (queued bool, err error) {
@@ -97,9 +99,9 @@ func queueChatInbound(ctx context.Context, db bun.IDB, delivery ChatInbound) (bo
 	if err := delivery.Validate(); err != nil {
 		return false, stack.Wrap(err)
 	}
-	delivery.NextAttemptAt = delivery.NextAttemptAt.UTC()
 	result, err := db.NewInsert().Model(&delivery).
 		Column("stream_app_pk", "message_id", "customer_id", "deployment", "api_key", "body", "next_attempt_at").
+		Value("next_attempt_at", "COALESCE(?::timestamptz, now())", bun.NullTime{Time: delivery.NextAttemptAt.UTC()}).
 		On("CONFLICT (stream_app_pk, message_id) DO NOTHING").
 		Exec(ctx)
 	if err != nil {
