@@ -241,12 +241,38 @@ func (d *Directory) Hold(ctx context.Context, customerID string, app int64, sess
 
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	d.write(ctx, key, held)
+	_, err := inTime(ctx, func() (struct{}, error) { return struct{}{}, d.write(ctx, key, held) })
+	if err != nil {
+		d.logger.Warn("could not say this node is running a session",
+			"customer", customerID, "session", sessionID, "error", err)
+	}
 }
 
 // callTimeout bounds saying a session is here, and asking or saying whose its call is: a session
 // waits for each to open.
 const callTimeout = time.Second
+
+// inTime is what do answers, or ctx's error once that ends. A client redialling Redis has every
+// caller on the connection wait for the dial of the one that began it, whatever their own context
+// says: do is left to wait on its own, and that dial ends it.
+func inTime[T any](ctx context.Context, do func() (T, error)) (T, error) {
+	type answer struct {
+		answered T
+		err      error
+	}
+	answers := make(chan answer, 1)
+	go func() {
+		answered, err := do()
+		answers <- answer{answered, err}
+	}()
+	select {
+	case got := <-answers:
+		return got.answered, got.err
+	case <-ctx.Done():
+		var none T
+		return none, ctx.Err()
+	}
+}
 
 // A call is a hash, a field for each session on it, which says when it lapses, since a hash cannot
 // expire its fields one at a time, then its customer. liveCall walks the fields, passes over those
@@ -290,7 +316,7 @@ func (d *Directory) HoldCall(ctx context.Context, customerID string, app int64, 
 	d.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	held, err := d.redis.Do(ctx, d.holdCall(call)).AsInt64()
+	held, err := inTime(ctx, func() (int64, error) { return d.redis.Do(ctx, d.holdCall(call)).AsInt64() })
 	if err == nil && held == 0 {
 		d.mu.Lock()
 		delete(d.onCalls, call)
@@ -307,7 +333,10 @@ func (d *Directory) releaseCall(ctx context.Context, call heldCall) {
 	d.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	if err := d.redis.Do(ctx, d.redis.B().Hdel().Key(call.key).Field(call.field).Build()).Error(); err != nil {
+	_, err := inTime(ctx, func() (int64, error) {
+		return d.redis.Do(ctx, d.redis.B().Hdel().Key(call.key).Field(call.field).Build()).AsInt64()
+	})
+	if err != nil {
 		d.logger.Warn("could not take back a session's hold on a call", "customer", call.customerID, "call", call.key, "error", err)
 	}
 }
@@ -317,7 +346,9 @@ func (d *Directory) releaseCall(ctx context.Context, call heldCall) {
 func (d *Directory) CallHolder(ctx context.Context, app int64, id string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	return d.redis.Do(ctx, d.redis.B().Eval().Script(callHolderScript).Numkeys(1).Key(d.callKey(app, id)).Build()).ToString()
+	return inTime(ctx, func() (string, error) {
+		return d.redis.Do(ctx, d.redis.B().Eval().Script(callHolderScript).Numkeys(1).Key(d.callKey(app, id)).Build()).ToString()
+	})
 }
 
 // callKey is where a call is held: node:call:<app>:<id>.
@@ -605,14 +636,13 @@ func (d *Directory) answeringKey(customerID, conversationID string) string {
 }
 
 // write says this node holds a session, for holdFor.
-func (d *Directory) write(ctx context.Context, key heldSession, held claim) {
+func (d *Directory) write(ctx context.Context, key heldSession, held claim) error {
 	for _, result := range d.redis.DoMulti(ctx, d.writeCommands(key, held)...) {
 		if err := result.Error(); err != nil {
-			d.logger.Warn("could not say this node is running a session",
-				"customer", key.customerID, "session", key.sessionID, "error", err)
-			return
+			return err
 		}
 	}
+	return nil
 }
 
 // writeCommands hold the session, its agent and its conversation under its customer, and under
@@ -737,7 +767,9 @@ func (d *Directory) renewAll(ctx context.Context) {
 	for key, claimed := range held {
 		commands = append(commands, d.writeCommands(key, claimed)...)
 	}
+	renewed := map[int]heldCall{}
 	for call := range onCalls {
+		renewed[len(commands)] = call
 		commands = append(commands, d.holdCall(call))
 	}
 	for customerID := range waiting {
@@ -754,10 +786,18 @@ func (d *Directory) renewAll(ctx context.Context) {
 	if len(commands) == 0 {
 		return
 	}
-	for _, result := range d.redis.DoMulti(ctx, commands...) {
+	for i, result := range d.redis.DoMulti(ctx, commands...) {
 		if err := result.Error(); err != nil {
 			d.logger.Warn("could not renew what this node holds", "error", err)
 			return
+		}
+		call, ok := renewed[i]
+		if !ok {
+			continue
+		}
+		if held, err := result.AsInt64(); err == nil && held == 0 {
+			d.logger.Warn("the call of a session here is another customer's: its hold is not renewed",
+				"customer", call.customerID, "call", call.key)
 		}
 	}
 }

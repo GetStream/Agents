@@ -442,6 +442,7 @@ func (s *Server) placePhoneCall(ctx context.Context, request *placePhoneCallRequ
 		return nil, errSessionTaken
 	}
 	if errors.Is(err, store.ErrCallUnchecked) {
+		s.logger.Warn("refused a phone call: could not tell whose its call is", "session", call.SessionID, "customer", customerID, "error", err)
 		return nil, errCallUnchecked
 	}
 	if errors.Is(err, dlc.ErrRefused) || errors.Is(err, phone.ErrDestinationRefused) {

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +24,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	persistent "github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/guardrail"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/imagejobs"
@@ -233,6 +235,8 @@ type Manager struct {
 	// makes or changes a task (SetSchedulerKick); nil where no worker runs.
 	kickScheduler func()
 	closed        bool
+	// stopping is set as Shutdown starts.
+	stopping atomic.Bool
 	// closing counts the sessions taken off the map whose Close has not returned. They are
 	// still writing how they ended, so a draining router waits on them and Shutdown keeps
 	// the recorders open for them (ended).
@@ -713,7 +717,15 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	}()
 	created := m.newSession(ctx, spec, conv, skills, opening, runtime)
 	created.loading = loading
-	created.closers = append(created.closers, releaseCall)
+	created.closers = append(created.closers, func() {
+		// Sessions are closed one after another as the router stops, and a Redis that does not
+		// answer would have each wait. A hold not taken back lapses.
+		if m.stopping.Load() {
+			goroutine.Go(context.WithoutCancel(ctx), releaseCall)
+			return
+		}
+		releaseCall()
+	})
 	// A session held ends where it closes (Session.counted); one never held ends here,
 	// unless it was turned away for a router shutting down or for a session already held
 	// under its id (a redelivered hook): neither is a session that failed.
@@ -2117,6 +2129,7 @@ func forgetting(ctx context.Context, customerID string) routing.Owner {
 // Shutdown ends every session, which is what a router does on its way down rather than
 // dropping calls by exiting.
 func (m *Manager) Shutdown() error {
+	m.stopping.Store(true)
 	m.mu.Lock()
 	m.closed = true
 	running := make([]*Session, 0, len(m.sessions))
@@ -2341,6 +2354,9 @@ func (m *Manager) claimCall(ctx context.Context, spec Spec, named bool) (func(),
 		return release, nil
 	}
 	release()
+	if errors.Is(err, store.ErrCallUnchecked) {
+		m.logger.Warn("refused a session: could not tell whose its call is", "session", spec.ID, "customer", spec.CustomerID, "error", err)
+	}
 	if errors.Is(err, store.ErrCallTaken) {
 		err = stack.Wrap(ErrSessionExists)
 	}

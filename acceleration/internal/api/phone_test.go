@@ -1718,6 +1718,7 @@ func (s *CallStatusSuite) TestADirectoryThatDoesNotAnswerHoldsUpNoSession() {
 	began := time.Now()
 	err = heldOn(sessions, s.customerID(), s.utils.uuid())
 	s.ErrorIs(err, store.ErrCallUnchecked)
+	s.Contains(s.logged.String(), "refused a session: could not tell whose its call is")
 	s.Less(time.Since(began), 2900*time.Millisecond, "asked for a second, not for as long as the claim has")
 	var answer APIError
 	s.Require().ErrorAs(refusedRequest(err), &answer)
@@ -1743,11 +1744,12 @@ func (s *CallStatusSuite) TestADirectoryThatDoesNotAnswerHoldsUpNoSession() {
 	s.Less(time.Since(began), 2900*time.Millisecond)
 	s.Equal(http.StatusServiceUnavailable, status, payload)
 	s.Contains(payload, "could not tell whose call")
+	s.Contains(s.logged.String(), "refused a phone call: could not tell whose its call is")
 }
 
 // sessionsWith is a node's sessions, said to be there by directory.
 func (s *CallStatusSuite) sessionsWith(directory *node.Directory) *session.Manager {
-	logger := slog.New(slog.DiscardHandler)
+	logger := slog.New(slog.NewTextHandler(s.logged, nil))
 	sessions, err := session.NewManager(session.ManagerOptions{
 		LLM: s.streams.LLM, Conversations: s.conversations, Stream: s.stream, Store: s.store, Directory: directory, Logger: logger,
 		Writer: s.routerWriter(s.store, s.live, nil, logger),
@@ -1797,4 +1799,23 @@ func (s *CallStatusSuite) TestASessionRefusedAfterItHeldItsCallLeavesIt() {
 	s.Require().ErrorIs(heldOn(s.sessionsWith(directory), "customer-"+s.utils.uuid(), id), store.ErrCallUnchecked)
 
 	s.NoError(heldOn(s.manager, s.customerID(), id))
+}
+
+// Sessions closed as the router stops do not each wait for a directory that does not answer.
+func (s *CallStatusSuite) TestARouterStopsThoughTheDirectoryDoesNotAnswer() {
+	s.useApp(s.data.createApp())
+	var deaf atomic.Bool
+	directory, err := node.NewDirectory(node.DirectoryOptions{Redis: s.deafRedis(&deaf), Address: "node-deaf:4", Prefix: s.relayPrefix})
+	s.Require().NoError(err)
+	s.T().Cleanup(directory.Close)
+	sessions := s.sessionsWith(directory)
+	for range 5 {
+		s.Require().NoError(heldOn(sessions, s.customerID(), s.utils.uuid()))
+	}
+	deaf.Store(true)
+
+	began := time.Now()
+	s.NoError(sessions.Shutdown())
+
+	s.Less(time.Since(began), 2900*time.Millisecond)
 }

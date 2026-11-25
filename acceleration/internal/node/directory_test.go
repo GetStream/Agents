@@ -5,7 +5,9 @@ package node
 import (
 	"bytes"
 	"context"
+	"io"
 	"log/slog"
+	"net"
 	"os"
 	"slices"
 	"strconv"
@@ -382,6 +384,100 @@ func (s *DirectorySuite) TestACallAnotherCustomerHoldsStaysItsOwn() {
 	s.Equal("globex", s.holder(7, "order-42"))
 	release()
 	s.Equal("globex", s.holder(7, "order-42"))
+}
+
+// A renewal another customer's hold refuses is said, and no other is.
+func (s *DirectorySuite) TestARenewalAnotherCustomersHoldRefusesIsLogged() {
+	var logged bytes.Buffer
+	directory, err := NewDirectory(DirectoryOptions{
+		Redis: s.client, Address: "node-a:1", Prefix: s.prefix,
+		Logger: slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	s.Require().NoError(err)
+	directory.Close()
+	s.callOf(directory, "acme")
+	_, err = directory.HoldCall(s.ctx, "acme", 7, "order-43")
+	s.Require().NoError(err)
+	directory.renewAll(s.ctx)
+	s.Empty(logged.String())
+	s.lapsed()
+	s.callOf(s.directoryAt("node-b:1"), "globex")
+
+	directory.renewAll(s.ctx)
+
+	s.Equal(1, strings.Count(logged.String(), "its hold is not renewed"))
+	s.Contains(logged.String(), "level=WARN")
+	s.Contains(logged.String(), "customer=acme")
+	s.Contains(logged.String(), s.prefix+":call:7:order-42")
+}
+
+// A client redialling a Redis that does not answer keeps every caller on the connection waiting
+// for the dial of another: one with less time is answered in its own all the same.
+func (s *DirectorySuite) TestACallerIsAnsweredInTimeBesideAnothersRedial() {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	s.Require().NoError(err)
+	defer listener.Close()
+	dialled := make(chan struct{}, 8)
+	var hung atomic.Bool
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			if hung.Load() {
+				dialled <- struct{}{}
+				defer conn.Close()
+				continue
+			}
+			upstream, err := net.Dial("tcp", os.Getenv("ROUTER_REDIS_ADDR"))
+			if err != nil {
+				_ = conn.Close()
+				return
+			}
+			go func() { _, _ = io.Copy(upstream, conn); _ = upstream.Close() }()
+			go func() { _, _ = io.Copy(conn, upstream) }()
+			s.T().Cleanup(func() { _ = conn.Close() })
+			go func() {
+				for !hung.Load() {
+					time.Sleep(5 * time.Millisecond)
+				}
+				_ = conn.Close()
+			}()
+		}
+	}()
+	client, err := rueidis.NewClient(rueidis.ClientOption{InitAddress: []string{listener.Addr().String()}, DisableCache: true, ForceSingleClient: true})
+	s.Require().NoError(err)
+	s.T().Cleanup(client.Close)
+	directory, err := NewDirectory(DirectoryOptions{Redis: client, Address: "node-a:1", Prefix: s.prefix})
+	s.Require().NoError(err)
+	directory.Close()
+	hung.Store(true)
+	redialling, stop := context.WithTimeout(s.ctx, 20*time.Second)
+	defer stop()
+	go func() {
+		for redialling.Err() == nil {
+			_, _ = directory.Node(redialling, "acme", "order-42")
+		}
+	}()
+	select {
+	case <-dialled:
+	case <-time.After(10 * time.Second):
+		s.FailNow("nobody redialled")
+	}
+
+	for what, call := range map[string]func(){
+		"asking":  func() { _, _ = directory.CallHolder(s.ctx, 7, "order-42") },
+		"holding": func() { _, _ = directory.HoldCall(s.ctx, "acme", 7, "order-42") },
+		"letting go": func() {
+			directory.releaseCall(s.ctx, heldCall{"acme", directory.callKey(7, "order-42"), "field"})
+		},
+		"saying": func() { directory.Hold(s.ctx, "acme", 7, "order-42", "", "") },
+	} {
+		began := time.Now()
+		call()
+		s.Less(time.Since(began), 1500*time.Millisecond, what)
+	}
 }
 
 // A customer's sessions on one call, here and on another node, each hold it until the last is gone.

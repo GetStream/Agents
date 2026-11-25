@@ -1038,3 +1038,49 @@ func (s *StoreSuite) TestACallWhoseHolderDoesNotAnswerTakesNoPlace() {
 	s.ErrorIs(legs.Claim(s.ctx, "app", "agent", "call", on, func(context.Context) error { return nil }), ErrCallUnchecked)
 	s.Less(time.Since(began), time.Second, "it waits for no place to be told so")
 }
+
+// A named call waiting on its call's lock holds no lock of its organization's: another placement
+// of the organization goes ahead meanwhile.
+func (s *StoreSuite) TestANamedCallWaitingOnItsCallHoldsUpNoOtherPlacementOfItsOrganization() {
+	router := s.ownRouter()
+	unpinned := NamedCall{Scope: AppScope{Unpinned: true}}
+	leg := func(call string) *CallLeg {
+		at := time.Now()
+		return &CallLeg{Token: newID(), CustomerID: "app", OrganizationID: "org", CallType: "agent", CallID: call, Vendor: "telnyx",
+			Direction: Outbound, LocalNumber: "+15125550150", RemoteNumber: "+15125550151", PlacedAt: &at}
+	}
+	atOnce := CallsAtOnce{Limit: 9, Ringing: time.Hour}
+	claimed, release := make(chan struct{}), make(chan struct{})
+	held := make(chan error, 1)
+	go func() {
+		held <- router.CallLegs.Claim(s.ctx, "app", "agent", "call", unpinned, func(ctx context.Context) error {
+			close(claimed)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return nil
+		})
+	}()
+	select {
+	case <-claimed:
+	case <-time.After(10 * time.Second):
+		s.FailNow("the call was never claimed")
+	}
+	waiting := make(chan error, 1)
+	go func() { waiting <- router.CallLegs.PlaceOn(s.ctx, leg("call"), unpinned, &atOnce) }()
+	s.Require().Eventually(func() bool {
+		var blocked int
+		err := s.store.global.QueryRowContext(s.ctx, "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted "+
+			"AND database = (SELECT oid FROM pg_database WHERE datname = current_database())").Scan(&blocked)
+		return err == nil && blocked > 0
+	}, 5*time.Second, 10*time.Millisecond)
+
+	began := time.Now()
+	s.Require().NoError(s.store.CallLegs.PlaceWithin(s.ctx, leg("other"), atOnce))
+	s.Less(time.Since(began), time.Second)
+
+	close(release)
+	s.NoError(<-held)
+	s.NoError(<-waiting)
+}
