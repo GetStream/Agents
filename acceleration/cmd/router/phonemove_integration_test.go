@@ -342,6 +342,22 @@ func (s *PhoneMoveSuite) TestAttachingAgainNeverFailsOverTheMove() {
 	s.Equal(moveTestOldURL, s.twilio.voiceURL(number))
 }
 
+// A run whose attached numbers cannot be read fails saying so, rather than reporting none to move.
+func (s *PhoneMoveSuite) TestARunWhoseNumbersCannotBeReadFails() {
+	s.attachedEarlier()
+	settings := config.Defaults()
+	settings.Postgres.DSN = testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "phone_move")
+	closed, err := openStore(s.ctx, settings)
+	s.Require().NoError(err)
+	s.Require().NoError(closed.Close())
+
+	var out bytes.Buffer
+	err = moveTwilioNumbers(s.ctx, []string{"--apply"}, s.serviceOn(closed, s.ready()), &out)
+
+	s.ErrorContains(err, "attached numbers")
+	s.Empty(s.twilio.asked())
+}
+
 // The command is built from the router's config: without a keyring it refuses, and with one it
 // gets as far as the public URL, which this config lacks.
 func (s *PhoneMoveSuite) TestTheCommandRunsTheChecksOnTheRoutersConfig() {
@@ -401,6 +417,11 @@ func (m moverSettings) with(change func(*moverSettings)) moverSettings {
 
 // service is a phone service with Twilio and Telnyx at the suite's fakes and the settings given.
 func (s *PhoneMoveSuite) service(settings moverSettings) *phone.Service {
+	return s.serviceOn(s.store, settings)
+}
+
+// serviceOn is service on the store given.
+func (s *PhoneMoveSuite) serviceOn(db *store.Store, settings moverSettings) *phone.Service {
 	vendorConfig, err := phone.DefaultConfig()
 	s.Require().NoError(err)
 	for i := range vendorConfig.Vendors {
@@ -425,7 +446,7 @@ func (s *PhoneMoveSuite) service(settings moverSettings) *phone.Service {
 		logger = slog.New(slog.NewTextHandler(settings.logs, &slog.HandlerOptions{Level: slog.LevelError}))
 	}
 	service, err := phone.NewService(phone.ServiceOptions{
-		Registry: registry, Store: s.store, Stream: phone.NewStreamFromClient(s.chat.Client), Sealer: sealer,
+		Registry: registry, Store: db, Stream: phone.NewStreamFromClient(s.chat.Client), Sealer: sealer,
 		PublicURL: settings.publicURL, Logger: logger,
 	})
 	s.Require().NoError(err)
