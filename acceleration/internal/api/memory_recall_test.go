@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"os"
@@ -47,6 +48,9 @@ type MemorySuite struct {
 	// known is a user of the standard app who told the agent they are allergic to peanuts,
 	// under the label company=acme. Tests read what is known about them and add nothing.
 	known *testClient
+	// noting and echoing are the standard app's configs, by the model a session under one is
+	// answered by: a device names no model, so a session takes its config's.
+	noting, echoing string
 	// mem0Log is the mem0 client's log, which names the event each exchange was queued as.
 	mem0Log *lockedLog
 	// mem0 is the client sessions remember through, whose HTTP client asks mem0 about events.
@@ -79,9 +83,10 @@ func (s *MemorySuite) SetupSuite() {
 	s.RouterSuite.SetupSuite()
 
 	s.useFixture("standard")
+	s.noting, s.echoing = s.answeredBy(s.serverClient, "noted/noted-model"), s.answeredBy(s.serverClient, "echo/echo-model")
 	s.known = s.data.createUser()
-	s.tell(s.known, remembering(s.known.userID, acme()), "I am allergic to peanuts.")
-	s.learns(s.known, remembering(s.known.userID, acme()), "peanut")
+	s.tell(s.known, s.remembering(s.known.userID, acme()), "I am allergic to peanuts.")
+	s.learns(s.known, s.remembering(s.known.userID, acme()), "peanut")
 }
 
 func (s *MemorySuite) SetupTest() {
@@ -92,18 +97,18 @@ func (s *MemorySuite) SetupTest() {
 func (s *MemorySuite) TestWhatAUserToldThreeSessionsIsKnownInTheFourth() {
 	owner := s.data.createUser()
 
-	s.tell(owner, remembering(owner.userID, nil), "I am allergic to peanuts.")
-	s.tell(owner, remembering(owner.userID, nil), "I live in Amsterdam.")
-	s.tell(owner, remembering(owner.userID, nil), "My dog is called Rex.")
+	s.tell(owner, s.remembering(owner.userID, nil), "I am allergic to peanuts.")
+	s.tell(owner, s.remembering(owner.userID, nil), "I live in Amsterdam.")
+	s.tell(owner, s.remembering(owner.userID, nil), "My dog is called Rex.")
 
-	s.learns(owner, remembering(owner.userID, nil), "peanut", "amsterdam", "rex")
+	s.learns(owner, s.remembering(owner.userID, nil), "peanut", "amsterdam", "rex")
 }
 
 func (s *MemorySuite) TestNothingIsRememberedAboutAnAnonymousCaller() {
 	name := s.anonymousClient.userID
 
 	// Refusing the session and keeping nothing from it are both an answer.
-	opened, admitted := s.tries(s.anonymousClient, remembering(name, nil))
+	opened, admitted := s.tries(s.anonymousClient, s.remembering(name, nil))
 	if !admitted {
 		return
 	}
@@ -120,16 +125,17 @@ func (s *MemorySuite) TestNothingIsRememberedAboutAnAnonymousCaller() {
 }
 
 func (s *MemorySuite) TestAnotherAppRecallsNothingAboutTheSameUser() {
-	stranger := s.data.backendOfAnotherApp().actingFor(s.known)
+	backend := s.data.backendOfAnotherApp()
+	request := s.remembering(s.known.userID, nil)
 
-	s.NotContains(s.recalled(stranger, remembering(s.known.userID, nil)), "peanut")
+	s.NotContains(s.recalledUnder(s.answeredBy(backend, "echo/echo-model"), backend.actingFor(s.known), request), "peanut")
 }
 
 func (s *MemorySuite) TestAUserCannotRecallAnotherUsersMemories() {
 	stranger := s.data.createUser()
 
 	// Refusing the session and opening it knowing nothing are both an answer.
-	opened, admitted := s.tries(stranger, asking(remembering(s.known.userID, nil)))
+	opened, admitted := s.tries(stranger, s.asking(s.remembering(s.known.userID, nil)))
 	if !admitted {
 		return
 	}
@@ -138,7 +144,7 @@ func (s *MemorySuite) TestAUserCannotRecallAnotherUsersMemories() {
 }
 
 func (s *MemorySuite) TestAFilterNarrowsWhatIsRecalled() {
-	elsewhere := remembering(s.known.userID, map[string]string{"company": "globex"})
+	elsewhere := s.remembering(s.known.userID, map[string]string{"company": "globex"})
 
 	s.NotContains(s.recalled(s.known, elsewhere), "peanut")
 }
@@ -146,33 +152,33 @@ func (s *MemorySuite) TestAFilterNarrowsWhatIsRecalled() {
 func (s *MemorySuite) TestAFilterMatchingAnotherUsersLabelsRecallsNothingOfTheirs() {
 	stranger := s.data.createUser()
 
-	s.NotContains(s.recalled(stranger, remembering(stranger.userID, acme())), "peanut")
+	s.NotContains(s.recalled(stranger, s.remembering(stranger.userID, acme())), "peanut")
 }
 
 func (s *MemorySuite) TestAFilterNamingAnotherUserRecallsNothingOfTheirs() {
 	stranger := s.data.createUser()
 	impersonating := map[string]string{"user_id": s.known.userID, "app_id": s.customerID()}
 
-	s.NotContains(s.recalled(stranger, remembering(stranger.userID, impersonating)), "peanut")
+	s.NotContains(s.recalled(stranger, s.remembering(stranger.userID, impersonating)), "peanut")
 }
 
 func (s *MemorySuite) TestAFilterNamingAnotherAppRecallsNothingOfItsMemories() {
-	stranger := s.data.backendOfAnotherApp().actingFor(s.known)
-	request := remembering(s.known.userID, map[string]string{"app_id": s.customerID(), "company": "acme"})
+	backend := s.data.backendOfAnotherApp()
+	request := s.remembering(s.known.userID, map[string]string{"app_id": s.customerID(), "company": "acme"})
 	request.Memory.AppId = pointerTo(s.customerID())
 
-	s.NotContains(s.recalled(stranger, request), "peanut")
+	s.NotContains(s.recalledUnder(s.answeredBy(backend, "echo/echo-model"), backend.actingFor(s.known), request), "peanut")
 }
 
 func (s *MemorySuite) TestDeletingASessionForgetsWhatItLearnedAndNothingElse() {
 	owner := s.data.createUser()
-	first := s.tell(owner, remembering(owner.userID, nil), "I am allergic to peanuts.")
-	s.tell(owner, remembering(owner.userID, nil), "My dog is called Rex.")
-	s.learns(owner, remembering(owner.userID, nil), "peanut", "rex")
+	first := s.tell(owner, s.remembering(owner.userID, nil), "I am allergic to peanuts.")
+	s.tell(owner, s.remembering(owner.userID, nil), "My dog is called Rex.")
+	s.learns(owner, s.remembering(owner.userID, nil), "peanut", "rex")
 
 	owner.deleteSession(first)
 
-	recalled := s.recalled(owner, remembering(owner.userID, nil))
+	recalled := s.recalled(owner, s.remembering(owner.userID, nil))
 	s.NotContains(recalled, "peanut")
 	s.Contains(recalled, "rex")
 }
@@ -181,14 +187,14 @@ func (s *MemorySuite) TestAClaimedGuestsMemoriesMoveToTheUserWhoClaimedThem() {
 	guest := s.data.createGuest()
 	s.Require().NoError(s.store.Users.InsertGuest(context.Background(),
 		&store.User{ID: guest.userID, CustomerID: s.customerID()}))
-	s.tell(guest, remembering(guest.userID, nil), "I am allergic to peanuts.")
-	s.learns(guest, remembering(guest.userID, nil), "peanut")
+	s.tell(guest, s.remembering(guest.userID, nil), "I am allergic to peanuts.")
+	s.learns(guest, s.remembering(guest.userID, nil), "peanut")
 	account := s.data.createUser()
 
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/guests/claim",
 		ClaimGuestRequest{GuestId: guest.userID, UserId: account.userID}, nil))
 
-	s.learns(account, remembering(account.userID, nil), "peanut")
+	s.learns(account, s.remembering(account.userID, nil), "peanut")
 }
 
 // tell says something in a session of its own and ends it, returning the session's id.
@@ -241,20 +247,39 @@ func (s *MemorySuite) extraction() mem0Extraction {
 // recalled is what a session opened with request knew about the person before they said
 // anything. The session writes nothing down, so asking does not teach mem0 the answer.
 func (s *MemorySuite) recalled(as *testClient, request CreateSessionRequest) string {
-	opened := as.createSession(asking(request))
+	return s.recalledUnder(s.echoing, as, request)
+}
+
+// recalledUnder is recalled in a session under the config given, which is the echo stub's in
+// an app other than the standard one.
+func (s *MemorySuite) recalledUnder(config string, as *testClient, request CreateSessionRequest) string {
+	request = s.asking(request)
+	request.ConfigId = &config
+	opened := as.createSession(request)
 	defer as.stopSession(opened.Id)
 	return s.ask(as, opened, "What do you know about me?")
 }
 
-// tries opens a session the router may refuse, reporting whether it was opened.
+// tries opens a session the router may refuse for the memory it asks for, reporting whether it
+// was opened. A refusal of anything else is not an answer about memory.
 func (s *MemorySuite) tries(as *testClient, request CreateSessionRequest) (Session, bool) {
 	var opened Session
-	status := as.do(http.MethodPost, "/v1/agents/sessions", request, &opened)
+	status, body := as.call(http.MethodPost, "/v1/agents/sessions", request)
 	if status == http.StatusBadRequest || status == http.StatusForbidden {
+		s.Require().Contains(answered(s.T(), body).Message, "memory")
 		return opened, false
 	}
-	s.Require().Equal(http.StatusCreated, status)
+	s.Require().Equal(http.StatusCreated, status, string(body))
+	s.Require().NoError(json.Unmarshal(body, &opened))
 	return opened, true
+}
+
+// answeredBy is the id of an agent config of the backend's app answered by model.
+func (s *MemorySuite) answeredBy(backend *testClient, model string) string {
+	var created AgentConfig
+	s.Require().Equal(http.StatusCreated, backend.do(http.MethodPost, "/v1/agents/configs",
+		AgentConfigRequest{Name: "agent-" + s.utils.uuid(), Llm: &model}, &created))
+	return created.Id
 }
 
 // ask says something in a session over its socket, the way a device does, and returns what
@@ -282,9 +307,9 @@ func (s *MemorySuite) ask(as *testClient, opened Session, text string) string {
 
 // remembering is a conversation in writing whose memories are about userID, narrowed by
 // filter. Its model answers every turn, since only an exchange with an answer is kept.
-func remembering(userID string, filter map[string]string) CreateSessionRequest {
+func (s *MemorySuite) remembering(userID string, filter map[string]string) CreateSessionRequest {
 	request := textSession(nil)
-	request.Llm = pointerTo("noted/noted-model")
+	request.ConfigId = &s.noting
 	request.Memory = &SessionMemory{UserId: &userID}
 	if filter != nil {
 		request.Memory.Filter = &filter
@@ -294,8 +319,8 @@ func remembering(userID string, filter map[string]string) CreateSessionRequest {
 
 // asking is request as a session that recalls and keeps nothing, answered by the echo
 // stub, which says what it was told before the conversation started.
-func asking(request CreateSessionRequest) CreateSessionRequest {
-	request.Llm = pointerTo("echo/echo-model")
+func (s *MemorySuite) asking(request CreateSessionRequest) CreateSessionRequest {
+	request.ConfigId = &s.echoing
 	request.Incognito = pointerTo(true)
 	return request
 }

@@ -1066,6 +1066,8 @@ func (s *AgentSuite) TestALineWrittenForAWaitThatEndedIsNotSaid() {
 	s.says(participant, "where is my order")
 
 	s.eventually(func() bool { return s.spokenText("ships tomorrow") }, "the answer never came")
+	// The hold line is asked for from its own goroutine, which can run after the answer is said.
+	s.eventually(func() bool { return len(s.model.composeRequests()) > 0 }, "no hold line was asked for")
 	s.Require().Len(s.model.composeRequests(), 1)
 	close(written)
 	s.eventually(func() bool { return !s.agent.floor().Composing }, "the line was never settled")
