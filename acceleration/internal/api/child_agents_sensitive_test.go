@@ -139,6 +139,23 @@ func (s *ChildAgentsSuite) TestADelegationWithNoSensitiveConnectorRuns() {
 	s.Contains(run.FinalText, "tool: be brief")
 }
 
+// A config stored past the config writes' check opens no session while it breaks the rule
+// alone. Its nessy alone opens one (TestADelegationIsRefusedWhenTheParentIsSensitiveAndAChildSendsOut).
+func (s *ChildAgentsSuite) TestASessionOfAConfigThatBreaksTheRuleAloneIsRefused() {
+	s.useInternalApp()
+	agent := s.agentWith("echo/echo-model", map[string]any{"connectors": []map[string]any{sessionNessy("customers")}})
+	s.change(agent.Id, func(config *store.AgentConfig) {
+		config.Connectors = append(config.Connectors, store.ConnectorBinding{Name: "code", ConnectorID: "github",
+			Connection: store.ConnectionBinding{Type: "session"}, Tools: []store.ToolGrant{{Name: "create_issue"}}})
+	})
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/sessions", CreateSessionRequest{ConfigId: &agent.Id})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, `session: connector binding "customers" binds "nessy", whose tools read private data, `+
+		`and connector binding "code" can send data out with no person's approval`)
+}
+
 // useInternalApp gives the test an app Stream marks internal, the only kind that sees nessy.
 func (s *ChildAgentsSuite) useInternalApp() {
 	s.useApp(s.data.createAppAdmitting(store.AppSettings{InternalConnectors: new(true)}))
