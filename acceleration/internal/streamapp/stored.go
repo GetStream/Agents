@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -73,24 +74,33 @@ func (s *Stored) SetFloor(floor Floor) {
 }
 
 // fallsBack reports whether a customer may be written into the deployment's app for want of
-// an app of its own: only while the fallback allows it, and its policies do not forbid it.
+// an app of its own: only while the fallback allows it, and its policies do not forbid it. A
+// policy that could not be read forbids it.
 func (s *Stored) fallsBack(ctx context.Context, customer string) bool {
+	falls, err := s.readFallsBack(ctx, customer)
+	if err != nil {
+		s.logger.Warn("stream: could not read whether a customer must act in its own app, so it may not fall back",
+			"customer_id", customer, "error", err)
+	}
+	return falls
+}
+
+// readFallsBack is fallsBack with a policy that could not be read returned, and false.
+func (s *Stored) readFallsBack(ctx context.Context, customer string) (bool, error) {
 	if !s.fallback {
-		return false
+		return false, nil
 	}
 	s.mu.Lock()
 	floor := s.floor
 	s.mu.Unlock()
 	if floor == nil {
-		return true
+		return true, nil
 	}
 	required, err := floor(ctx, customer)
 	if err != nil {
-		s.logger.Warn("stream: could not read whether a customer must act in its own app, so it may not fall back",
-			"customer_id", customer, "error", err)
-		return false
+		return false, fmt.Errorf("streamapp: read whether a customer must act in its own app: %w", err)
 	}
-	return !required
+	return !required, nil
 }
 
 // tally is the fallback uses of one customer not written down yet.
@@ -132,6 +142,19 @@ func (s *Stored) learn(ctx context.Context, clients *Clients) (int64, error) {
 
 // For is the identity new work for a customer is done with.
 func (s *Stored) For(ctx context.Context, customer string) (Identity, error) {
+	return s.place(ctx, customer, true)
+}
+
+// Placed is the pin new work for a customer is given, as For answers it, read without acting
+// for the customer: the gateway is asked for no token and no use of the fallback is counted, so
+// one customer's request can ask where another's work goes without it showing as the other's.
+func (s *Stored) Placed(ctx context.Context, customer string) (int64, error) {
+	identity, err := s.place(ctx, customer, false)
+	return identity.StreamApp, err
+}
+
+// place is For when acting, and Placed's read otherwise.
+func (s *Stored) place(ctx context.Context, customer string, acting bool) (Identity, error) {
 	deployment := s.deployment.App()
 	if s.ownsDeploymentApp(customer, deployment) {
 		return s.inDeploymentApp(ctx, customer, deployment)
@@ -140,17 +163,37 @@ func (s *Stored) For(ctx context.Context, customer string) (Identity, error) {
 		// Until the deployment's own app is known, this may be its customer.
 		return Identity{}, ErrDeploymentAppUnknown
 	}
-	if identity, ok, err := s.inForwardedApp(ctx, customer); ok {
+	if identity, ok, err := s.inForwardedApp(ctx, customer, acting); ok {
 		return identity, err
 	}
-	if !s.fallsBack(ctx, customer) {
+	var falls bool
+	if acting {
+		falls = s.fallsBack(ctx, customer)
+	} else {
+		var err error
+		// Read without acting, a policy that could not be read is a read to try again: taken to
+		// forbid the fallback, it would answer ErrNoIdentity, which says how the customer stands.
+		if falls, err = s.readFallsBack(ctx, customer); err != nil {
+			return Identity{}, err
+		}
+	}
+	if !falls {
+		// With no fallback, or a policy that requires an app of its own, an app's work is made
+		// in its own app or nowhere. Read without acting, a token that has run out is the
+		// gateway's to replace, not another app. Acting, a policy that could not be read places
+		// nothing.
+		if app, couldBe := ParseAppID(customer); couldBe && !acting {
+			return Identity{CustomerID: customer, StreamApp: app}, nil
+		}
 		return Identity{}, ErrNoIdentity
 	}
 	if deployment == 0 {
 		// Falling back names the deployment's app, which has to be known to be named.
 		return Identity{}, ErrDeploymentAppUnknown
 	}
-	s.fellBack(ctx, customer)
+	if acting {
+		s.fellBack(ctx, customer)
+	}
 	return s.inDeploymentApp(ctx, customer, deployment)
 }
 
@@ -181,7 +224,7 @@ func (s *Stored) forApp(ctx context.Context, customer string, app int64) (Identi
 		return s.legacy(ctx, customer, app, deployment)
 	}
 	if customer == CustomerOf(app) {
-		if identity, ok, err := s.inForwardedApp(ctx, customer); ok {
+		if identity, ok, err := s.inForwardedApp(ctx, customer, true); ok {
 			return identity, false, err
 		}
 	}
@@ -193,13 +236,13 @@ func (s *Stored) forApp(ctx context.Context, customer string, app int64) (Identi
 }
 
 // inForwardedApp is a customer's own app acted in with the token the gateway forwarded for
-// it, and false when there is no such token to act with.
-func (s *Stored) inForwardedApp(ctx context.Context, customer string) (Identity, bool, error) {
+// it, and false when there is no such token to act with. Only acting refreshes the token.
+func (s *Stored) inForwardedApp(ctx context.Context, customer string, acting bool) (Identity, bool, error) {
 	app, couldBe := ParseAppID(customer)
 	if s.forwarded == nil || !couldBe {
 		return Identity{}, false, nil
 	}
-	identity, err := s.forwarded.identity(ctx, customer, app)
+	identity, err := s.forwarded.identity(ctx, customer, app, acting)
 	if errors.Is(err, ErrNoIdentity) {
 		return Identity{}, false, nil
 	}

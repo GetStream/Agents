@@ -1425,6 +1425,18 @@ again, up to four rounds and always inside the skill's own deadline. The subagen
 first. One sandbox is created the first time code actually runs and released when the session
 ends.
 
+A sandbox is admitted as a model call is: before it is created, before it is started again after
+it stopped, and before each run. A suspended organization's is refused, and so is one whose
+organization has no credit left or has reached its spend hard limit or one of its own spend
+limits, unless the price list makes sandboxes free; the refusal is the tool result. One in the
+customer's own Daytona organization is refused alike, as a model on their own key is, since its
+BYOK fee is billed. A running sandbox is admitted again every minute, idle or running code, and
+stopped once it is refused, which ends the run in it and bills its disk alone until a run its
+organization may pay for starts it again; a run that had finished keeps its result. It is refused
+for money spent, not for money set aside: credit that other work, or its own lease, holds does
+not stop it. Money that only could not be checked, such as a balance unread for too long,
+refuses a new or stopped sandbox and leaves a running one running.
+
 `sandbox_options` on the config, or in `agent.yaml`, says how that sandbox is built and how
 long code may run in it: an `image` with Python to start from, `setup` commands run on top of
 it once, `timeout_ms` for one run (30 seconds by default, at most 30 minutes), and `cpu`,
@@ -2676,7 +2688,12 @@ them without buying anything here. `POST /v1/phone/trunks` stores the trunk (hos
 transport, username, codecs, and whether it accepts an INVITE without SDP); the password is
 sealed under the deployment's key encryption key and never returned, and without such a key
 the trunk paths answer 400 `not_configured`. `POST /v1/phone/trunks/{id}/numbers` records a number on it with
-vendor `sip_trunk`. A call from that number is then placed by the router itself: it opens one
+vendor `sip_trunk`. A number another app holds, bought or on its own trunk, in the Stream app this
+app's lines are made in is refused with 409 `phone_number_held_elsewhere`, and so is a call or
+transfer from a trunk number another app there has since bought: Stream lists a number on one trunk
+per app, so the line made for one app's calls would take the other's. A bought number attached or
+called from takes down first the lines other apps' trunks hold it on in that Stream app, and fails
+rather than forget one Stream would not let go. A call from that number is then placed by the router itself: it opens one
 SIP dialog to the customer's trunk and one to the Stream trunk made for the call, and copies
 SDP between them, so the audio goes from the carrier to Stream directly. `POST
 /v1/phone/calls` answers `queued` at once, as with every vendor. A wrong password, host or
@@ -2947,7 +2964,9 @@ the bucket is the operator's.
 
 Only a phone number on the app's own SIP trunk (vendor `sip_trunk`) moves, in E.164 form
 (`+15551234567`), and it arrives detached: its trunk, route, call and 10DLC use case stay
-behind, so it is attached again where it arrives. A number bought at a vendor does not move,
+behind, so it is attached again where it arrives. One that another app holds where it moves to is
+left out, unless the moving app holds it there too, and the move carries on: `router replicate`
+logs how many, and the import does not count them in `rows`. A number bought at a vendor does not move,
 held or given back; its bills move with the requests. The app keeps it by buying or porting
 it where it moves to.
 

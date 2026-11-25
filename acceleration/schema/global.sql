@@ -1035,6 +1035,7 @@ TABLE phone_numbers
     CONSTRAINT phone_numbers_pkey PRIMARY KEY (id)
     CREATE INDEX phone_numbers_call_idx ON public.phone_numbers USING btree (stream_call_type, stream_call_id) WHERE (released_at IS NULL)
     CREATE INDEX phone_numbers_customer_idx ON public.phone_numbers USING btree (customer_id, purchased_at DESC)
+    CREATE INDEX phone_numbers_e164_held_idx ON public.phone_numbers USING btree (e164) WHERE (released_at IS NULL)
     CREATE UNIQUE INDEX phone_numbers_held_idx ON public.phone_numbers USING btree (vendor, e164) WHERE ((released_at IS NULL) AND (vendor <> 'sip_trunk'::text))
     CREATE INDEX phone_numbers_tags_idx ON public.phone_numbers USING gin (tags)
     CREATE UNIQUE INDEX phone_numbers_trunk_held_idx ON public.phone_numbers USING btree (customer_id, e164) WHERE ((released_at IS NULL) AND (vendor = 'sip_trunk'::text))

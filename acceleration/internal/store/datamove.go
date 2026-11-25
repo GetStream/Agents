@@ -40,6 +40,20 @@ var ErrInvalidImport = errors.New("store: the export cannot be imported")
 // invalidImport marks err as ErrInvalidImport without changing its message.
 func invalidImport(err error) error { return marked{err, ErrInvalidImport} }
 
+// NumbersLeftOutError is the numbers on the customer's own trunk an import did not write, because
+// another customer holds them here (importableNumber). It is not the import's failure: the rest
+// of the row's import, or of the batch of changes, is written, and the caller counts the numbers
+// and goes on.
+type NumbersLeftOutError struct {
+	Numbers []string
+}
+
+func (e *NumbersLeftOutError) Error() string {
+	return fmt.Sprintf("store: %d numbers on the app's own trunk were left out: another app holds them here", len(e.Numbers))
+}
+
+func (e *NumbersLeftOutError) Unwrap() error { return ErrNumberHeldElsewhere }
+
 // marked is err that is also kind, with err's own message.
 type marked struct{ err, kind error }
 
@@ -787,10 +801,23 @@ func (t dataTable) selectRows(customerID string, secrets []string) (string, []an
 //
 // It upserts, so importing the same export twice is the same as importing it once, which
 // is what lets a move be resumed after it was interrupted.
+//
+// A number on the customer's own trunk that another customer holds here is not written:
+// *NumbersLeftOutError.
 func (s *Store) ImportRow(ctx context.Context, customerID, table string, row json.RawMessage) error {
 	spec, _ := dataTableByName(table)
 	var stale []string
-	if err := s.importRow(ctx, s.sideOf(spec), customerID, table, row, &stale); err != nil {
+	var err error
+	if table == "phone_numbers" {
+		// A number is checked against who else holds it under a lock its write has to keep
+		// (holders), and only a transaction keeps one.
+		err = s.sideOf(spec).RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+			return s.importRow(ctx, tx, customerID, table, row, &stale)
+		})
+	} else {
+		err = s.importRow(ctx, s.sideOf(spec), customerID, table, row, &stale)
+	}
+	if err != nil {
 		return err
 	}
 	s.forget(ctx, stale...)
@@ -1830,14 +1857,23 @@ func resumeMovedTasks(ctx context.Context, tx bun.Tx, customerID string, holders
 // case, and its bills move in its requests: written here it would be billed again (Rentals)
 // and given back at this deployment's vendor account. So it is not written, and the customer
 // keeps it by buying or porting it here.
+//
+// A number on the customer's own trunk that another customer holds here is left out
+// (*NumbersLeftOutError), unless the customer holds it here too: a row the customer wrote before
+// that rule is still its own to write again. One given back is only its bill's history. Whether
+// the two would share a Stream app is not known here, where the router acts in none, so this is
+// stricter than adding it to a trunk (PhoneNumbers.InsertOnSIPTrunk), which the customer can do
+// once the move is over. Refused rather than left out, the number would stop the whole move, and
+// every run after it, on a row another app's number decides.
 func importableNumber(ctx context.Context, db bun.IDB, customerID string, row json.RawMessage) (bool, error) {
 	// Read the way the insert reads it, by exact column name: a JSON decoder also matches a
 	// key in another case, which the insert then leaves out.
 	var e164, vendor sql.NullString
 	var cost sql.NullInt64
+	var released bool
 	if err := db.QueryRowContext(ctx,
-		"SELECT e164, vendor, monthly_cost_micros FROM jsonb_populate_record(NULL::phone_numbers, ?::jsonb)",
-		string(row)).Scan(&e164, &vendor, &cost); err != nil {
+		"SELECT e164, vendor, monthly_cost_micros, released_at IS NOT NULL FROM jsonb_populate_record(NULL::phone_numbers, ?::jsonb)",
+		string(row)).Scan(&e164, &vendor, &cost, &released); err != nil {
 		if refused := refusedRow("phone_numbers", err); refused != nil {
 			return false, refused
 		}
@@ -1849,6 +1885,16 @@ func importableNumber(ctx context.Context, db bun.IDB, customerID string, row js
 	number := PhoneNumber{CustomerID: customerID, E164: e164.String, Vendor: vendor.String, MonthlyCostMicros: cost.Int64}
 	if err := number.Validate(); err != nil {
 		return false, stack.Wrap(err)
+	}
+	if released {
+		return true, nil
+	}
+	held, err := holders(ctx, db, number.E164)
+	if err != nil {
+		return false, err
+	}
+	if len(held) > 0 && !slices.Contains(held, customerID) {
+		return false, stack.Wrap(&NumbersLeftOutError{Numbers: []string{number.E164}})
 	}
 	return true, nil
 }
@@ -2143,7 +2189,8 @@ LIMIT ?`, customerID, after, mark, limit)
 
 // ApplyChanges replays changes onto this deployment, in one transaction so a batch either
 // arrives or does not. With shards there is one for the shared tables and one for this
-// shard's, each replayed in order, as no row of one points at a row of the other.
+// shard's, each replayed in order, as no row of one points at a row of the other. A number
+// left out (*NumbersLeftOutError) is answered once the rest has been written.
 func (s *Store) ApplyChanges(ctx context.Context, customerID string, changes []DataChange) error {
 	if customerID == "" {
 		return errors.New("store: a customer id is required")
@@ -2159,18 +2206,25 @@ func (s *Store) ApplyChanges(ctx context.Context, customerID string, changes []D
 			shared = append(shared, change)
 		}
 	}
-	if err := s.applyChanges(ctx, s.global, customerID, shared); err != nil {
+	left := s.applyChanges(ctx, s.global, customerID, shared)
+	if _, ok := errors.AsType[*NumbersLeftOutError](left); left != nil && !ok {
+		return left
+	}
+	if err := s.applyChanges(ctx, s.shard, customerID, sharded); err != nil {
 		return err
 	}
-	return s.applyChanges(ctx, s.shard, customerID, sharded)
+	return left
 }
 
 func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string, changes []DataChange) error {
 	if len(changes) == 0 {
 		return nil
 	}
-	var stale []string
+	var stale, left []string
 	err := db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := lockNumbers(ctx, tx, changes); err != nil {
+			return err
+		}
 		for _, change := range changes {
 			if change.Skipped() {
 				continue
@@ -2181,7 +2235,12 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 					return err
 				}
 			default:
-				if err := s.importRow(ctx, tx, customerID, change.Table, change.Payload, &stale); err != nil {
+				err := s.importRow(ctx, tx, customerID, change.Table, change.Payload, &stale)
+				if leftOut, ok := errors.AsType[*NumbersLeftOutError](err); ok {
+					left = append(left, leftOut.Numbers...)
+					continue
+				}
+				if err != nil {
 					return err
 				}
 			}
@@ -2193,6 +2252,42 @@ func (s *Store) applyChanges(ctx context.Context, db *bun.DB, customerID string,
 	}
 	s.forget(ctx, stale...)
 	s.Users.forgetKeys(stale)
+	if len(left) > 0 {
+		return stack.Wrap(&NumbersLeftOutError{Numbers: left})
+	}
+	return nil
+}
+
+// lockNumbers takes, up front and in one order, the lock under which each number the changes
+// write is checked against who else holds it (holders), which importRow then takes again. Taken
+// one change at a time, in the changes' order, two batches naming two numbers in opposite orders
+// would each wait for the other until Postgres aborted one. A number is read by its exact key,
+// as the insert reads it.
+func lockNumbers(ctx context.Context, tx bun.Tx, changes []DataChange) error {
+	var numbers []string
+	for _, change := range changes {
+		if change.Table != "phone_numbers" || change.Op == ChangeDelete {
+			continue
+		}
+		var fields map[string]json.RawMessage
+		var e164 string
+		if json.Unmarshal(change.Payload, &fields) != nil || json.Unmarshal(fields["e164"], &e164) != nil || e164 == "" {
+			// A row that does not read is refused by importRow, which reads it again.
+			continue
+		}
+		numbers = append(numbers, e164)
+	}
+	if len(numbers) == 0 {
+		return nil
+	}
+	slices.Sort(numbers)
+	numbers = slices.Compact(numbers)
+	// unnest reads the array in order, so the locks are taken in it.
+	if _, err := tx.ExecContext(ctx,
+		"SELECT pg_advisory_xact_lock(hashtextextended(number, ?)) FROM unnest(?::text[]) AS number",
+		numberHoldersLockSeed, pgdialect.Array(numbers)); err != nil {
+		return stack.Wrap(fmt.Errorf("store: lock the holders of numbers: %w", err))
+	}
 	return nil
 }
 

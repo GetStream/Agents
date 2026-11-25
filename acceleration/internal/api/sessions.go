@@ -54,7 +54,7 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 		if err != nil {
 			return nil, unknownOr(err, store.ErrNoAgentConfig, errUnknownConfig)
 		}
-		if teams.refuses(found) {
+		if teams.refuses(ctx, found) {
 			return nil, errUnknownConfig
 		}
 		return &found, nil
@@ -70,7 +70,7 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 	if err != nil {
 		return nil, err
 	}
-	if teams.refuses(found) {
+	if teams.refuses(ctx, found) {
 		return nil, notFound("there is no agent called " + named)
 	}
 	return &found, nil
@@ -675,6 +675,13 @@ func (r resumed) onto(ctx context.Context, running *session.Session) {
 // itself, to tell money that may not be paid from money that could not be checked (unpaid).
 func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) error, over resumed) (*session.Session, func(), error) {
 	found, failure := s.session(ctx, id)
+	// Only for an end user still in its config's team, running or ended here, as one carried on
+	// from its row is.
+	if failure == nil {
+		if failure = s.refuseOutsideTeam(ctx, found.Spec().CustomerID, found.Spec().ConfigID); failure != nil {
+			return nil, nil, failure
+		}
+	}
 	var spec session.Spec
 	switch {
 	case failure == nil && (found.State() != session.Ended || !found.Spec().PersistConversation):
@@ -686,10 +693,6 @@ func (s *Server) carryOn(ctx context.Context, id string, refuse func(error) erro
 		// Ended here, so the spec it ran on is still at hand, tools and instructions included.
 		// It is carried on in writing, whether or not it ended on a call.
 		spec = found.Spec().Written()
-		// Only for an end user still in its config's team, as one carried on from its row is.
-		if failure = s.refuseOutsideTeam(ctx, spec.CustomerID, spec.ConfigID); failure != nil {
-			return nil, nil, failure
-		}
 		spec.Phone, spec.Edge = nil, nil
 		spec.Reopened = found.CreatedAt()
 		// Its spec has the tools and timeout of whoever carried it on last. Another kind of
