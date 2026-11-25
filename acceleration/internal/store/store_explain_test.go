@@ -62,11 +62,17 @@ func (s *StoreSuite) seededDatabase() string {
 			}
 		}
 		// Statistics read off every row rather than a sample, so the planner breaks a tie
-		// between two indexes the same way every run.
-		_, err := tx.ExecContext(ctx, "SET LOCAL default_statistics_target = 1000; "+
-			"ANALYZE agent_sessions, calls, call_legs, requests, agent_logs, image_jobs, session_homes, call_homes, session_index, call_index, "+
-			"shard_spend_hourly, shard_activity_hourly, shard_people_hourly, shard_session_turns_hourly, shard_tool_hourly, "+
-			"shard_tool_sessions_hourly, shard_concurrency_minute")
+		// between two indexes the same way every run. Autovacuum would analyze the tables again
+		// once the seed commits, on a sample, and replace them mid-run: off for these tables.
+		tables := []string{"agent_sessions", "calls", "call_legs", "requests", "agent_logs", "image_jobs", "session_homes",
+			"call_homes", "session_index", "call_index", "shard_spend_hourly", "shard_activity_hourly", "shard_people_hourly",
+			"shard_session_turns_hourly", "shard_tool_hourly", "shard_tool_sessions_hourly", "shard_concurrency_minute"}
+		for _, table := range tables {
+			if _, err := tx.ExecContext(ctx, "ALTER TABLE "+table+" SET (autovacuum_enabled = off)"); err != nil {
+				return err
+			}
+		}
+		_, err := tx.ExecContext(ctx, "SET LOCAL default_statistics_target = 1000; ANALYZE "+strings.Join(tables, ", "))
 		return err
 	}))
 	s.seededDSN = dsn
