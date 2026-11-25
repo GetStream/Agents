@@ -4904,6 +4904,10 @@ components:
           items:
             type: string
           type: array
+        skipped_more:
+          description: How many more rows were left out than skipped names, which holds the first 100.
+          format: int64
+          type: integer
         tables:
           additionalProperties:
             format: int64

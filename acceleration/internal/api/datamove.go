@@ -59,6 +59,10 @@ const maxImportLine = 64 << 20
 // or more an import at its largest line, so four hold over half a GiB.
 const maxImports = 4
 
+// maxSkippedNamed is how many left-out rows an import's answer names, the rest being counted,
+// so the answer does not grow with the body. 100 is the most a page of the API's lists holds.
+const maxSkippedNamed = 100
+
 // importLineWait bounds the read of one line of an import, which holds one of maxImports and
 // its app's place until it ends, so a client that stops sending lets go of them after this. A
 // line of maxImportLine arrives within it at over a megabyte a second.
@@ -236,6 +240,15 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 	rows := int64(0)
 	tables := map[string]int64{}
 	skipped := []string{}
+	skippedMore := int64(0)
+	// leaveOut names a row the import left out, up to maxSkippedNamed of them, and counts the rest.
+	leaveOut := func(key string) {
+		if len(skipped) < maxSkippedNamed {
+			skipped = append(skipped, key)
+			return
+		}
+		skippedMore++
+	}
 
 	scanner := bufio.NewScanner(r.Body)
 	scanner.Buffer(nil, maxImportLine)
@@ -263,10 +276,14 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 				writeImportFailure(w, r, err)
 				return
 			}
-			// A delete carries no payload, so it is never one of these.
-			switch key := store.SkippedRow(line.Change.Table, line.Change.Payload); {
+			// A delete removes a row, so it leaves none out, whatever payload it carries.
+			key := ""
+			if line.Change.Op != store.ChangeDelete {
+				key = store.SkippedRow(line.Change.Table, line.Change.Payload)
+			}
+			switch {
 			case key != "":
-				skipped = append(skipped, key)
+				leaveOut(key)
 			case !line.Change.Skipped():
 				rows++
 				tables[line.Change.Table]++
@@ -291,7 +308,7 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if key := store.SkippedRow(line.Table, line.Row); key != "" {
-				skipped = append(skipped, key)
+				leaveOut(key)
 				continue
 			}
 			rows++
@@ -309,8 +326,12 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("imported a customer", "customer", customerID, "rows", rows, "skipped", len(skipped))
-	writeJSON(w, map[string]any{"rows": rows, "tables": tables, "skipped": skipped, "cursor": cursor})
+	s.logger.Info("imported a customer", "customer", customerID, "rows", rows, "skipped", int64(len(skipped))+skippedMore)
+	answer := map[string]any{"rows": rows, "tables": tables, "skipped": skipped, "cursor": cursor}
+	if skippedMore > 0 {
+		answer["skipped_more"] = skippedMore
+	}
+	writeJSON(w, answer)
 }
 
 // writeImportFailure answers a line the store did not write: an export the caller can correct

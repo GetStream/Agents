@@ -252,6 +252,64 @@ func (s *DataMoveSuite) TestAnImportNamesTheClientCredentialsDefinitionsItLeftOu
 	s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+taken, nil, nil))
 }
 
+// A client-credentials definition is left out only when it is a row the API could have stored:
+// one with a built-in id, or an id past its pattern, is refused as before, and an oversized id
+// is not kept for an answer.
+func (s *DataMoveSuite) TestAClientCredentialsDefinitionWithAnIDTheAPIRefusesIsRefused() {
+	cc := `"schemes": ["oauth2_client_credentials"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`
+	for _, id := range []string{"github", "custom_", "custom_A" + store.NewID()} {
+		status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{s.importedConnector(id, cc)}))
+		s.Equal(http.StatusBadRequest, status, id)
+	}
+
+	big := "custom_a" + strings.Repeat("x", 1<<20)
+	lines := []dataLine{}
+	for range 8 {
+		lines = append(lines, s.importedConnector(big, cc))
+	}
+	status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson(lines))
+	s.Equal(http.StatusBadRequest, status, "not a 200 holding every id")
+}
+
+// The answer names the first 100 rows an import left out and counts the rest, so it does not
+// grow with the body.
+func (s *DataMoveSuite) TestAnImportNamesAtMostAHundredOfTheRowsItLeftOut() {
+	lines := []dataLine{}
+	for range 103 {
+		lines = append(lines, s.importedConnector("custom_a"+store.NewID(), `"schemes": ["oauth2_client_credentials"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`))
+	}
+	var written struct {
+		Rows        int64    `json:"rows"`
+		Skipped     []string `json:"skipped"`
+		SkippedMore int64    `json:"skipped_more"`
+	}
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import?full=true", ndjson(lines), &written))
+
+	s.Len(written.Skipped, 100)
+	s.Equal(int64(3), written.SkippedMore)
+	s.Zero(written.Rows)
+}
+
+// A delete removes a row whatever its payload holds, so it left nothing out.
+func (s *DataMoveSuite) TestADeleteThatCarriesAClientCredentialsDefinitionLeftNothingOut() {
+	id := "custom_a" + store.NewID()
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
+		s.importedConnector(id, `"schemes": ["bearer"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`),
+	}), nil))
+	cc := s.importedConnector(id, `"schemes": ["oauth2_client_credentials"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`)
+	var written struct {
+		Skipped []string `json:"skipped"`
+	}
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{
+		{Change: &store.DataChange{Table: cc.Table, Op: store.ChangeDelete,
+			Key: json.RawMessage(`{"id":"` + id + `","revision":1}`), Payload: cc.Row}},
+	}), &written))
+
+	s.Empty(written.Skipped)
+	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+id, nil, nil))
+}
+
 // An import that leaves nothing out says so with an empty list.
 func (s *DataMoveSuite) TestAnImportThatLeftNothingOutNamesNone() {
 	var written map[string]any

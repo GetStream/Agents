@@ -1101,8 +1101,9 @@ type DataChangePage struct {
 
 // DataImport is the DataImport schema.
 type DataImport struct {
-	Cursor  *int64            `json:"cursor,omitempty" doc:"The cursor the export named, to ask the other deployment for changes from."`
-	Rows    int64             `json:"rows" doc:"How many rows were written."`
-	Skipped []string          `json:"skipped,omitempty" nullable:"false" doc:"The rows left out rather than written, by table and primary key, as connector_definitions:{\"id\":\"custom_crm\",\"revision\":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set."`
-	Tables  *map[string]int64 `json:"tables,omitempty" doc:"How many of them went into each table."`
+	Cursor      *int64            `json:"cursor,omitempty" doc:"The cursor the export named, to ask the other deployment for changes from."`
+	Rows        int64             `json:"rows" doc:"How many rows were written."`
+	Skipped     []string          `json:"skipped,omitempty" nullable:"false" doc:"The rows left out rather than written, by table and primary key, as connector_definitions:{\"id\":\"custom_crm\",\"revision\":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set."`
+	SkippedMore int64             `json:"skipped_more,omitempty" doc:"How many more rows were left out than skipped names, which holds the first 100."`
+	Tables      *map[string]int64 `json:"tables,omitempty" doc:"How many of them went into each table."`
 }
