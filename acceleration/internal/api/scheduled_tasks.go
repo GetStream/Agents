@@ -192,6 +192,9 @@ func (s *Server) createScheduledTask(ctx context.Context, request *createSchedul
 	if failure != nil {
 		return nil, failure
 	}
+	if failure, refused := refuseReservedActingFor(ctx, "CreateScheduledTask"); refused {
+		return nil, failure
+	}
 	if request.Body == nil {
 		return nil, invalidRequest("a request body is required")
 	}

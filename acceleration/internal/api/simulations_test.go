@@ -169,6 +169,25 @@ func (s *SimulationsSuite) TestTheLogOfRunsIsNotOneOfTheRuns() {
 	s.Nil(log[0].Conversations, "a log of fifty runs is not fifty transcripts")
 }
 
+func (s *SimulationsSuite) TestAListOfRunsIsAskedForUpToFiveHundred() {
+	created := s.createSimulation(s.against(s.data.createAgentConfig()))
+	s.run(created.Id)
+	newest := s.run(created.Id)
+
+	for limit, held := range map[string]int{"1": 1, "500": 2} {
+		var log []SimulationRun
+		s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
+			"/v1/agents/simulation-runs?simulation_id="+created.Id+"&limit="+limit, nil, &log))
+		s.Require().Len(log, held, limit)
+		s.Equal(newest.Id, log[0].Id, "newest first")
+	}
+	for _, limit := range []string{"0", "-1", "501", "1000000000"} {
+		status, answered := s.serverClient.failure(http.MethodGet, "/v1/agents/simulation-runs?limit="+limit, nil)
+		s.Equal(http.StatusBadRequest, status, limit)
+		s.Contains(answered, "limit", limit)
+	}
+}
+
 func (s *SimulationsSuite) TestARunNobodyStartedIsNotFound() {
 	status, _ := s.serverClient.call(http.MethodGet, "/v1/agents/simulation-runs/"+s.utils.uuid(), nil)
 

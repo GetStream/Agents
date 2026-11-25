@@ -594,7 +594,7 @@ type runSimulationResponse struct {
 type listSimulationRunsRequest struct {
 	SimulationId optionalParam[string]                        `query:"simulation_id"`
 	State        optionalParam[ListSimulationRunsParamsState] `query:"state" enum:"running,passed,failed,cancelled,errored"`
-	Limit        optionalParam[int]                           `query:"limit"`
+	Limit        optionalParam[int]                           `query:"limit" doc:"Up to 500. Omitted is 50." minimum:"1" maximum:"500"`
 }
 
 type listSimulationRunsResponse struct {
