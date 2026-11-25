@@ -178,10 +178,10 @@ resolver, so never quote the egress error (`createEventDestination`, AI-3575).
 - When the caller can correct the error in what it sent, the text tells it what to change.
   This code wrote the full text (`*oauth2code.ManifestError`), with no wrapped cause:
   `fmt.Errorf("%w: %w", ErrInvalid, err)` still contains the store's text.
-- When only a level above the caller can correct the error, the text tells which level in
-  fixed words ("the agent config of this app", "this deployment"), with the error `code`. The
-  caller sends the `code` and the `X-Request-Id` to that level. The router logs the full
-  cause with `request_id` where it makes the error.
+- When only a level above the caller can correct the error, the text says in fixed words
+  that the caller cannot correct it, with the error `code`. The caller sends the `code` and
+  the `X-Request-Id` to whoever supports it. The router logs the full cause with
+  `request_id` where it makes the error.
 - The text never contains the text of a store, vendor, network or DNS error (it shows hosts,
   ports, SQL, constraint names, URLs, bodies and the cluster's DNS server), the rule of a
   security control that refused the request (rule 6 for refused URLs), or internal
