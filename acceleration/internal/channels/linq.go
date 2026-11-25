@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/channelbridge"
 )
 
 // linqURL is Linq's partner API.
@@ -114,9 +116,10 @@ func (p *linqProvider) Parse(body []byte) ([]Message, error) {
 		ID:   data.ID,
 		From: data.SenderHandle.Handle,
 		To:   data.Chat.OwnerHandle.Handle,
-		// A reply is posted to the chat rather than to a person, which is also what makes a
-		// group chat answerable.
+		// A reply is posted to the chat rather than to a person, so in a group it reaches
+		// everyone in it.
 		Thread: data.Chat.ID,
+		Group:  !channelbridge.LinqOneToOne(body),
 		Name:   data.SenderHandle.Name,
 		Text:   text,
 	}}, nil

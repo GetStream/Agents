@@ -58,6 +58,7 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	// for it is matched against.
 	spec.Caller = CallerFrom(ctx)
 	spec.CallerKind = KindFrom(ctx)
+	spec.NameProject(request.Body.ProjectId, spec.CallerKind)
 	created, err := s.sessions.Create(ctx, spec)
 	if errors.Is(err, session.ErrSessionExists) {
 		return nil, conflict(err.Error())
@@ -72,7 +73,7 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 		return nil, err
 	}
 	if err != nil {
-		s.logUnkept(customerID, err)
+		s.logNotConfigured(ctx, customerID, err)
 		// Everything that can go wrong here is the caller's spec, a provider that would not
 		// start, or a refusal about money, and each is worth reading rather than a 500 with
 		// the detail in a log the caller cannot see.
@@ -82,14 +83,31 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	return &createSessionResponse{Body: sessionOf(ctx, created)}, nil
 }
 
-// logUnkept logs what Stream or the router said for a session refused because its Stream app is
-// missing or refuses its keys: Stream's own answer is the operator's to read, never the caller's.
-func (s *Server) logUnkept(customerID string, err error) {
+// logNotConfigured logs why a session was refused for a setting of this deployment, under the
+// request id the caller is told to send: the session's error, which names the setting, and
+// Stream's own answer for a Stream app that is missing or refuses its keys. The caller is
+// answered in fixed words (refusedRequest).
+func (s *Server) logNotConfigured(ctx context.Context, customerID string, err error) {
 	if found, ok := errors.AsType[*session.UnkeptError](err); ok {
-		s.logger.Warn("a session that is not incognito has no Stream app to be kept in",
-			"customer", customerID, "error", err, "cause", found.Cause)
+		s.logger.WarnContext(ctx, "a session that is not incognito has no Stream app to be kept in",
+			"customer", customerID, "request_id", RequestIDFrom(ctx), "error", err, "cause", found.Cause)
+		return
+	}
+	if errors.Is(err, session.ErrNotConfigured) {
+		s.logger.WarnContext(ctx, "a session lacks a setting of this deployment",
+			"customer", customerID, "request_id", RequestIDFrom(ctx), "error", err)
 	}
 }
+
+// errUnkept is the answer for a session that is not incognito, on a deployment whose Stream app
+// is missing or refuses its keys. The keys are the operator's, so the caller is not told which
+// of the two it is: the log says (logNotConfigured).
+var errUnkept = notConfigured("a session that is not incognito cannot be opened on this deployment: " +
+	"open the session with incognito: true")
+
+// errSessionNotConfigured is the answer for session.ErrNotConfigured, whose text names a
+// setting of the deployment: the log has it (logNotConfigured).
+var errSessionNotConfigured = notConfigured("this deployment is not set up for this session")
 
 // unkeptAnswer is the answer for a session refused because the deployment's Stream app is
 // missing or refuses its keys: a setting of the deployment rather than anything in the
@@ -97,7 +115,7 @@ func (s *Server) logUnkept(customerID string, err error) {
 func unkeptAnswer(err error) (APIError, bool) {
 	for _, refusal := range []error{session.ErrNoStreamKeys, session.ErrStreamKeysRejected} {
 		if errors.Is(err, refusal) {
-			return notConfigured(strings.TrimPrefix(refusal.Error(), "session: ")), true
+			return errUnkept, true
 		}
 	}
 	return APIError{}, false
@@ -236,6 +254,9 @@ var errAnonymousConversation = forbidden("conversation_id needs a verified calle
 // anything is made for it. createSession and the session socket both call it, so a request one
 // of them refuses the other refuses too, with the same error.
 func refuseSessionRequest(ctx context.Context, request CreateSessionRequest) (APIError, bool) {
+	if failure, refused := refuseReservedActingFor(ctx, "CreateSession"); refused {
+		return failure, true
+	}
 	if failure, refused := refuseServerSideFields(ctx, request); refused {
 		return failure, true
 	}
@@ -266,6 +287,9 @@ func refuseSessionRequest(ctx context.Context, request CreateSessionRequest) (AP
 		if failure, refused := refuseReservedUserID(named[0], named[1]); refused {
 			return failure, true
 		}
+	}
+	if failure, refused := refuseReservedNewly(ctx, "CreateSession", "call.id", callAgentID(request)); refused {
+		return failure, true
 	}
 	// A zone nobody knows is refused where it is named, rather than at the first task
 	// that would have run in it.
@@ -403,6 +427,15 @@ func refuseServerSideFields(ctx context.Context, request CreateSessionRequest) (
 	return APIError{}, false
 }
 
+// callAgentID is the call id a voice session is keyed under as its agent id, when it names no
+// agent id of its own (Spec.KeyedAgentID), and empty otherwise.
+func callAgentID(request CreateSessionRequest) string {
+	if request.Call == nil || value(request.AgentId) != "" {
+		return ""
+	}
+	return request.Call.Id
+}
+
 // memoryUserID is the user id a session's memory names, empty when it names none.
 func memoryUserID(memory *SessionMemory) string {
 	if memory == nil {
@@ -428,7 +461,7 @@ func (s *Server) registerSessionCreate(api huma.API) {
 		DefaultStatus: http.StatusCreated,
 		Responses: map[string]*huma.Response{
 			"201": {Description: "The agent is in the call"},
-			"409": errorResponse("A session with that id already exists, or the call placed for this phone session ended without an answer (call_unanswered)"),
+			"409": errorResponse("A session with that id already exists, another session holds the conversation it names open, or the call placed for this phone session ended without an answer (call_unanswered)"),
 		},
 		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
 	}, s.createSession)

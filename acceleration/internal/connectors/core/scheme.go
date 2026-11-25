@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -273,4 +275,29 @@ func (e *OutcomeError) Error() string {
 
 func (e *OutcomeError) Unwrap() error {
 	return e.Err
+}
+
+// EndpointError is an endpoint the router refused to call. It says the same whatever refused
+// it, for a caller to read: Err tells a name that does not resolve from one that resolves to a
+// private address, and is for logs (LoggedError).
+type EndpointError struct {
+	Endpoint string
+	Err      error
+}
+
+func (e *EndpointError) Error() string {
+	return fmt.Sprintf("endpoint %q is not an https URL of a public host that resolves", e.Endpoint)
+}
+
+func (e *EndpointError) Unwrap() error {
+	return e.Err
+}
+
+// LoggedError is err as a log line has it: with why its endpoint was refused, when one was, and
+// that endpoint kept to its scheme and host.
+func LoggedError(err error) string {
+	if refused, ok := errors.AsType[*EndpointError](err); ok {
+		return KeepHosts(err.Error()) + ": " + refused.Err.Error()
+	}
+	return err.Error()
 }

@@ -545,7 +545,7 @@ func (d *dispatcher) beginConsent(ctx context.Context, l *login) (Consent, bool)
 		UserID: d.spec.Caller.UserID, ConnectionID: l.connectionID, ReturnURL: d.spec.ReturnURL,
 	})
 	if err != nil {
-		d.logins.logger.Warn("could not begin a consent in the conversation", "connector", l.binding.Name, "error", err)
+		d.logins.logger.Warn("could not begin a consent in the conversation", "connector", l.binding.Name, "error", core.LoggedError(err))
 		return Consent{}, false
 	}
 	shown := d.logins.ask != nil && d.logins.ask(d.spec.Caller.UserID, persistent.ConnectorAuthorization{

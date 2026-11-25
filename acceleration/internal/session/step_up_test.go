@@ -3,6 +3,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -193,6 +194,21 @@ func (s *StepUpSuite) TestWithoutConsentsAScopeChallengeFailsAsBefore() {
 	s.Nil(parts)
 	s.Empty(s.events)
 	s.Equal(store.ConnectionConnected, s.status(mine))
+}
+
+func (s *StepUpSuite) TestAStepUpWhoseEndpointIsRefusedLogsWhy() {
+	mine := s.connection("alice", "primary")
+	d := s.attachWithStepUps(s.spec(s.config(s.chosen("crm", "guarded")), "alice", map[string]string{"crm": mine}))
+	var logged bytes.Buffer
+	d.stepUps = newStepUps(func(context.Context, ConsentRequest) (Consent, error) {
+		return Consent{}, &core.EndpointError{Endpoint: "https://crm.example/token", Err: errors.New("the test's reason")}
+	}, s.notify, slog.New(slog.NewTextHandler(&logged, nil)))
+
+	_, err := d.Run(s.ctx, s.toolCall("crm__guarded", `{"scope":"crm:write"}`))
+
+	s.Require().Error(err)
+	s.NotContains(err.Error(), "the test's reason")
+	s.Contains(logged.String(), "that resolves: the test's reason")
 }
 
 // TestAStepUpThatCannotBeBegunFailsAsBefore: the router could not begin the consent, so the

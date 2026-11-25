@@ -67,12 +67,18 @@ var ErrCannotMint = errors.New("streamapp: nothing can mint a user token in this
 // while the identity holds whichever key's server token was forwarded last. Empty, for
 // work no request asked for, is the identity's own key.
 func (c *Clients) MintUserToken(ctx context.Context, bound Bound, apiKey, userID string, ttl time.Duration) (token, key string, err error) {
+	return c.MintUserTokenAs(ctx, bound, apiKey, userID, "", ttl)
+}
+
+// MintUserTokenAs is MintUserToken of a token that says the user's role, none for "". The
+// gateway signs no role, so only an identity with a secret mints one.
+func (c *Clients) MintUserTokenAs(ctx context.Context, bound Bound, apiKey, userID, role string, ttl time.Duration) (token, key string, err error) {
 	if !bound.Identity.Secret.Empty() {
-		token, err := bound.Client.CreateToken(userID, getstream.WithExpiration(ttl))
+		token, err := bound.Client.CreateToken(userID, getstream.WithExpiration(ttl), getstream.WithClaims(getstream.Claims{Role: role}))
 		return token, bound.Identity.APIKey, err
 	}
 	forwarded, ok := c.Forwarded()
-	if !ok || forwarded.Mint() == nil || bound.Identity.Token.Empty() {
+	if role != "" || !ok || forwarded.Mint() == nil || bound.Identity.Token.Empty() {
 		return "", "", ErrCannotMint
 	}
 	key = cmp.Or(apiKey, bound.Identity.APIKey)
