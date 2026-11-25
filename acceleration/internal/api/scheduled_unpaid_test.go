@@ -932,7 +932,7 @@ func (s *TelnyxUnpaidSuite) followUpIn(user *testClient, opened Session, channel
 // attempt after it, in the same open session, watches none of the turn's events: it can only read
 // how the turn ended.
 func (s *TelnyxUnpaidSuite) failedBefore(found *session.Session, delivery scheduledDelivery) {
-	s.Require().NoError(s.router.followUpWithin(scheduledOwnerContext(context.Background(), delivery), found, delivery))
+	s.Require().NoError(s.router.followUpWithin(s.ownerContext(context.Background(), delivery), found, delivery))
 	s.Require().Eventually(func() bool {
 		state, _, _ := found.FollowUpReply(delivery.CommandID)
 		return state == "failed"
@@ -947,7 +947,7 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedForMoneyUnwatchedFailsUn
 	found, delivery := s.followUpIn(user, opened, "conversation")
 	s.failedBefore(found, delivery)
 
-	_, _, err := s.router.deliverOn(scheduledOwnerContext(context.Background(), delivery), delivery, found,
+	_, _, err := s.router.deliverOn(s.ownerContext(context.Background(), delivery), delivery, found,
 		store.ScheduledTaskDeliveredConversation)
 
 	var failure *scheduling.Failure
@@ -963,7 +963,7 @@ func (s *TelnyxUnpaidSuite) TestAConversationTurnRefusedUncheckedUnwatchedIsRetr
 	found, delivery := s.followUpIn(user, opened, "conversation")
 	s.failedBefore(found, delivery)
 
-	_, _, err := s.router.deliverOn(scheduledOwnerContext(context.Background(), delivery), delivery, found,
+	_, _, err := s.router.deliverOn(s.ownerContext(context.Background(), delivery), delivery, found,
 		store.ScheduledTaskDeliveredConversation)
 
 	var failure *scheduling.Failure
@@ -979,7 +979,7 @@ func (s *TelnyxUnpaidSuite) TestATextTurnRefusedForMoneyUnwatchedFailsUnderTheMo
 	found, delivery := s.followUpIn(user, opened, "sms")
 	s.failedBefore(found, delivery)
 
-	_, _, err := s.router.captureReply(scheduledOwnerContext(context.Background(), delivery), found, delivery)
+	_, _, err := s.router.captureReply(s.ownerContext(context.Background(), delivery), found, delivery)
 
 	var failure *scheduling.Failure
 	s.Require().ErrorAs(err, &failure)
@@ -995,7 +995,7 @@ func (s *TelnyxUnpaidSuite) TestATextTurnRefusedUncheckedUnwatchedIsRetried() {
 	found, delivery := s.followUpIn(user, opened, "sms")
 	s.failedBefore(found, delivery)
 
-	_, _, err := s.router.captureReply(scheduledOwnerContext(context.Background(), delivery), found, delivery)
+	_, _, err := s.router.captureReply(s.ownerContext(context.Background(), delivery), found, delivery)
 
 	var failure *scheduling.Failure
 	s.Require().ErrorAs(err, &failure)
@@ -1018,7 +1018,7 @@ func (s *TelnyxUnpaidSuite) TestAThreadTurnRefusedForMoneyUnwatchedFailsUnderThe
 		CallerKind: "server", TaskID: task.ID, RunID: "run", CommandID: "st_run", Text: "stretch"}
 	s.failedBefore(found, delivery)
 
-	_, _, err := s.router.deliverOnThread(scheduledOwnerContext(context.Background(), delivery), delivery, channel)
+	_, _, err := s.router.deliverOnThread(s.ownerContext(context.Background(), delivery), delivery, channel)
 
 	var failure *scheduling.Failure
 	s.Require().ErrorAs(err, &failure)
@@ -1056,7 +1056,7 @@ func (s *TelnyxUnpaidSuite) TestATextReplyCarriesOnlyItsOwnTurnsWords() {
 	}
 	captured := make(chan reply, 1)
 	go func() {
-		text, _, err := s.router.captureReply(scheduledOwnerContext(context.Background(), delivery), found, delivery)
+		text, _, err := s.router.captureReply(s.ownerContext(context.Background(), delivery), found, delivery)
 		captured <- reply{text, err}
 	}()
 	s.Never(func() bool { return len(captured) > 0 }, time.Second, 20*time.Millisecond, "the reply did not wait behind the busy turn")
@@ -1084,7 +1084,7 @@ func (s *TelnyxUnpaidSuite) TestATextReplyIsTextedAsItWasOnceItsTurnEnds() {
 	}
 	captured := make(chan reply, 1)
 	go func() {
-		text, _, err := s.router.captureReply(scheduledOwnerContext(context.Background(), delivery), found, delivery)
+		text, _, err := s.router.captureReply(s.ownerContext(context.Background(), delivery), found, delivery)
 		captured <- reply{text, err}
 	}()
 
@@ -1253,7 +1253,7 @@ func (s *TelnyxUnpaidSuite) TestAConversationRetryWaitsOutTheTurnAnEarlierAttemp
 		CallerKind: "authenticated", TaskID: "task", RunID: "run", CommandID: "st_run", Text: "stretch"}
 	retried := make(chan error, 1)
 	go func() {
-		_, _, err := s.router.deliverOn(scheduledOwnerContext(context.Background(), delivery), delivery, found,
+		_, _, err := s.router.deliverOn(s.ownerContext(context.Background(), delivery), delivery, found,
 			store.ScheduledTaskDeliveredConversation)
 		retried <- err
 	}()
@@ -1280,7 +1280,7 @@ func (s *TelnyxUnpaidSuite) TestAConversationFollowUpTheSessionRefusesIsNotDeliv
 	found, delivery := s.followUpIn(user, opened, "conversation")
 	delivery.Text = ""
 
-	_, _, err := s.router.deliverOn(scheduledOwnerContext(context.Background(), delivery), delivery, found,
+	_, _, err := s.router.deliverOn(s.ownerContext(context.Background(), delivery), delivery, found,
 		store.ScheduledTaskDeliveredConversation)
 
 	s.ErrorContains(err, "there is nothing to answer")
@@ -1296,7 +1296,7 @@ func (s *TelnyxUnpaidSuite) TestATextFollowUpTheSessionRefusesFailsWithWhy() {
 	found, delivery := s.followUpIn(user, opened, "sms")
 	delivery.Text = ""
 
-	_, _, err := s.router.captureReply(scheduledOwnerContext(context.Background(), delivery), found, delivery)
+	_, _, err := s.router.captureReply(s.ownerContext(context.Background(), delivery), found, delivery)
 
 	s.ErrorContains(err, "there is nothing to answer")
 }
