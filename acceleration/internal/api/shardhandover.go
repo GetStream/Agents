@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -33,8 +34,95 @@ var shardFallbacks = promauto.NewCounterVec(prometheus.CounterOpts{
 // a peer handed over. Two routers disagreeing on where a request belongs would otherwise pass
 // it back and forth.
 func (s *Server) routesByShard(ctx context.Context) bool {
-	return s.shards.Enabled() && s.directory != nil && s.forwarder != nil && s.directory.Shard() != "" &&
-		!node.Forwarded(ctx)
+	return s.shards.Enabled() && s.reachesShards(ctx)
+}
+
+// reachesShards reports whether this node hands work to the shard it lives in: it knows its own
+// shard and can reach its peers, and the request is not one a peer handed over.
+func (s *Server) reachesShards(ctx context.Context) bool {
+	return s.directory != nil && s.forwarder != nil && s.directory.Shard() != "" && !node.Forwarded(ctx)
+}
+
+// inTokenShard hands a vendor's call back about a placed call to a node of the shard that placed
+// it, which the call's token names (store.SplitToken): the call's rows are there alone. A token
+// that names no shard was minted before tokens named one, and is answered here. what is what the
+// vendor posts, read as the node that answers reads it (readVendorPost), empty when that node reads
+// nothing.
+func (s *Server) inTokenShard(what string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		shard, _ := store.SplitToken(r.PathValue("token"))
+		if shard == "" || !s.reachesShards(r.Context()) || shard == s.directory.Shard() {
+			next(w, r)
+			return
+		}
+		address, err := s.directory.NodeInShard(r.Context(), shard)
+		if err != nil {
+			s.logger.Error("could not find a node of the shard a call lives in", "shard", shard, "error", err)
+			writeError(w, internalError())
+			return
+		}
+		if address == "" {
+			writeError(w, errCallShardDown)
+			return
+		}
+		var body []byte
+		if what != "" {
+			var read bool
+			if body, read = readVendorPost(w, r, what); !read {
+				return
+			}
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), s.forwardTimeout)
+		defer cancel()
+		if err := s.forwarder.Forward(ctx, address, w, r, body); err != nil {
+			s.logger.Error("could not reach a node of the shard a call lives in", "shard", shard, "node", address, "error", err)
+			writeError(w, errCallShardDown)
+		}
+	}
+}
+
+// handedHome hands a call event to a node of the shard the call lives in (store.CallHomes),
+// and answers w with what that node answered, reporting whether it did. An event no node of
+// that shard can take is answered 503 for Stream to deliver again: the call's legs and lines
+// are there alone.
+func (s *Server) handedHome(w http.ResponseWriter, r *http.Request, origin hookOrigin, event callEvent, payload []byte) bool {
+	callType, callID, split := strings.Cut(event.CallCid, ":")
+	if !split || s.store == nil || !s.reachesShards(r.Context()) {
+		return false
+	}
+	home, err := s.store.CallHomes.Elsewhere(r.Context(), origin.scope(), callType, callID)
+	if err != nil {
+		s.logger.Warn("could not read the shard a call lives in", "call", event.CallCid, "error", err)
+		writeError(w, unavailable("could not tell where this call lives"))
+		return true
+	}
+	if home == "" {
+		return false
+	}
+	address, err := s.directory.NodeInShard(r.Context(), home)
+	if err != nil || address == "" {
+		s.logger.Error("no node of the shard a call lives in could take its event", "call", event.CallCid,
+			"shard", home, "error", err)
+		writeError(w, errCallShardDown)
+		return true
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), s.forwardTimeout)
+	defer cancel()
+	answer, err := s.forwarder.Ask(node.ToShard(ctx, home), address, r, payload)
+	if err != nil {
+		s.logger.Error("could not hand a call event to the shard the call lives in", "call", event.CallCid,
+			"shard", home, "node", address, "error", err)
+		writeError(w, errCallShardDown)
+		return true
+	}
+	for _, header := range answer.GetHeaders() {
+		for _, value := range header.GetValues() {
+			w.Header().Add(header.GetName(), value)
+		}
+	}
+	w.WriteHeader(int(answer.GetStatus()))
+	_, _ = w.Write(answer.GetBody()) // the hook's sender has gone if this fails
+	return true
 }
 
 // handedToShard hands what arrived to a node of shard when the work is meant there and this

@@ -118,7 +118,7 @@ func (c *Conversation) upload(ctx context.Context, file sandbox.File, uploader s
 // type is image/*, and returns where Chat's CDN serves it. The channel must exist.
 func Upload(ctx context.Context, client *getstream.Stream, channelType, channelID string, file sandbox.File, uploader string) (sandbox.Attachment, error) {
 	name := filepath.Base(file.Name)
-	if name == "." || name == string(filepath.Separator) || len(file.Data) == 0 {
+	if name == "." || name == ".." || name == string(filepath.Separator) || len(file.Data) == 0 {
 		return sandbox.Attachment{}, errors.New("conversation: a file needs a name and something in it")
 	}
 	// The Chat client uploads from a path, and names the upload after it.

@@ -114,7 +114,8 @@ func NewClient(timeout time.Duration, wrap func(http.RoundTripper) http.RoundTri
 }
 
 // NewUnpooledClient is NewClient for a caller that forwards requests it cannot replay, such as the
-// sandbox egress proxy, whose bodies are never rewindable. A request net/http would not send twice
+// sandbox egress proxy, whose bodies are not rewindable unless they are small enough for it to keep (a
+// GetBody, AI-3463). A request net/http would not send twice
 // (a POST, or a body it cannot rewind) goes on a new HTTP/1.1 connection, so it never meets a
 // kept-alive connection the origin is closing. It costs a TCP and TLS handshake per such request:
 // every other caller uses NewClient.

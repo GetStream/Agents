@@ -626,6 +626,14 @@ type arrived struct {
 // heldByANodeThatAnswers has the directory say a node that answers 418 after taking runs a
 // session, and tells of each request carried there.
 func (s *ForwardedSessionSuite) heldByANodeThatAnswers(taking time.Duration) (string, <-chan arrived) {
+	owner, carried := s.nodeThatAnswers(taking)
+	id := s.utils.uuid()
+	s.nodeDirectory(owner, s.shard, slog.New(slog.DiscardHandler)).Hold(s.T().Context(), s.customerID(), 0, id, "", "")
+	return id, carried
+}
+
+// nodeThatAnswers is a node that answers 418 after taking, and tells of each request carried there.
+func (s *RouterSuite) nodeThatAnswers(taking time.Duration) (*httptest.Server, <-chan arrived) {
 	carried := make(chan arrived, 4)
 	_, accepted := s.sealer.Derive(node.CredentialPurpose)
 	owner := httptest.NewServer(node.Serve(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -635,13 +643,11 @@ func (s *ForwardedSessionSuite) heldByANodeThatAnswers(taking time.Duration) (st
 		w.WriteHeader(http.StatusTeapot)
 	}), accepted))
 	s.T().Cleanup(owner.Close)
-	id := s.utils.uuid()
-	s.nodeDirectory(owner, s.shard, slog.New(slog.DiscardHandler)).Hold(s.T().Context(), s.customerID(), 0, id, "", "")
-	return id, carried
+	return owner, carried
 }
 
 // carried is the next request a node that answers was carried.
-func (s *ForwardedSessionSuite) carried(by <-chan arrived) arrived {
+func (s *RouterSuite) carried(by <-chan arrived) arrived {
 	select {
 	case next := <-by:
 		return next

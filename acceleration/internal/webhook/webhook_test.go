@@ -46,9 +46,39 @@ func (s *WebhookSuite) TestASecretIsThirtyTwoRandomBytesAfterWhsec() {
 }
 
 func (s *WebhookSuite) TestASecretThatIsNotBase64SignsNothing() {
-	_, err := Sign("whsec_!!", "msg_1", time.Now(), nil)
+	for _, secret := range []string{"whsec_!!", "whsec_AAAA!!"} {
+		_, err := Sign(secret, "msg_1", time.Now(), nil)
 
-	s.Error(err)
+		s.Error(err, secret)
+	}
+}
+
+func (s *WebhookSuite) TestAnEmptySecretSignsNothing() {
+	for _, secret := range []string{"", "whsec_"} {
+		signature, err := Sign(secret, "msg_1", time.Now(), []byte(`{}`))
+
+		s.Error(err, "%q", secret)
+		s.Empty(signature)
+	}
+}
+
+func (s *WebhookSuite) TestNoDeliveryIsAcceptedUnderAnEmptySecret() {
+	// What HMAC-SHA256 gives for msg_1.1761100000.{} under a key of no bytes.
+	header := http.Header{}
+	header.Set("webhook-id", "msg_1")
+	header.Set("webhook-timestamp", "1761100000")
+	header.Set("webhook-signature", "v1,4Pz+d/qCt5vCr1j3oJvLU/P2+sTxEpvw3NWXNxgdJ94=")
+
+	s.Error(Verify("", header, []byte(`{}`), time.Unix(1761100000, 0)))
+	s.Error(Verify("whsec_", header, []byte(`{}`), time.Unix(1761100000, 0)))
+}
+
+func (s *WebhookSuite) TestASecretOfOneByteOrWithoutThePrefixStillSigns() {
+	body := []byte(`{}`)
+	unprefixed := strings.TrimPrefix(s.secret, "whsec_")
+
+	s.NoError(Verify("whsec_AA==", s.signed("evt_1", time.Now(), body, "whsec_AA=="), body, time.Now()))
+	s.NoError(Verify(s.secret, s.signed("evt_1", time.Now(), body, unprefixed), body, time.Now()))
 }
 
 func (s *WebhookSuite) TestADeliverySignedWithTheSecretIsAccepted() {

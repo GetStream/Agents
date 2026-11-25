@@ -51,6 +51,11 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.migrate(ctx, s.shardDSN, shardSet); err != nil {
 		return fmt.Errorf("store: shard: %w", err)
 	}
+	if s.Sharded() {
+		if err := s.rangeLogIDs(ctx); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -330,6 +335,17 @@ var usageIndexes = []struct{ set, name, create string }{
 	// The leg digits are pressed on.
 	{"shard", "call_legs_vendor_call_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_vendor_call_idx ON call_legs (vendor_call_id) " +
 		"WHERE vendor_call_id IS NOT NULL"},
+	// The sessions and calls the index shipper reads, changed since its mark.
+	{"shard", "agent_sessions_changed_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_sessions_changed_idx ON agent_sessions (changed_at, customer_id, id)"},
+	{"shard", "calls_changed_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS calls_changed_idx ON calls (changed_at, customer_id, id)"},
+	// What the stats shipper reads of every customer in an hour.
+	{"shard", "agent_sessions_created_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_sessions_created_idx ON agent_sessions (created_at)"},
+	{"shard", "agent_sessions_open_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_sessions_open_idx ON agent_sessions (created_at) WHERE closed_at IS NULL"},
+	{"shard", "agent_sessions_closed_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_sessions_closed_idx ON agent_sessions (closed_at)"},
+	{"shard", "agent_responses_created_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_responses_created_idx ON agent_responses (created_at)"},
+	{"shard", "agent_response_items_tool_result_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS agent_response_items_tool_result_idx ON agent_response_items (at) " +
+		"WHERE kind = 'tool_result'"},
+	{"shard", "calls_started_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS calls_started_idx ON calls (started_at)"},
 	// The legs a join delivered after its call ended revives.
 	{"shard", "call_legs_unanswered_idx", "CREATE INDEX CONCURRENTLY IF NOT EXISTS call_legs_unanswered_idx ON call_legs (call_type, call_id) " +
 		"WHERE direction = 'outbound' AND end_reason = 'unanswered'"},

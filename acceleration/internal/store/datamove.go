@@ -114,6 +114,9 @@ type dataTable struct {
 	order string
 	// shard is a table kept in the shards rather than the shared database.
 	shard bool
+	// moving is a shard table that was kept in the shared database, where its older rows are
+	// until they are copied over: an export reads them there too.
+	moving bool
 	// across is the column a row is known by in every deployment, for a table whose primary
 	// key each deployment draws from a sequence of its own, so the same id is two rows in
 	// two deployments. Such a row is imported without its id, and is written once: importing
@@ -136,12 +139,6 @@ type dataReference struct{ column, table string }
 
 // ofSession is the reference of a row that names its session.
 var ofSession = []dataReference{{"session_id", "agent_sessions"}}
-
-// rollup is a table of counts per key that every shard keeps its own rows of, so an export of
-// several shards folds the rows of one key into one.
-func (t dataTable) rollup() bool {
-	return strings.HasPrefix(t.name, "stats_") || strings.HasPrefix(t.name, "turn_")
-}
 
 // dataTables is everything that belongs to a customer, parents first.
 //
@@ -176,7 +173,8 @@ func (t dataTable) rollup() bool {
 // like a knowledge file's, neither means anything where the customer moves. A voice arrives
 // with its name and description, to be given a recording and prepared again. And
 // phone_number_orders: a purchase or release in flight at this deployment's vendor accounts,
-// which only this deployment's sweep can settle.
+// which only this deployment's sweep can settle. And the shard_ copies of the rollups, with
+// shard_stats_shipped: each shard ships them from its own rows (Store.ShipStats), which move.
 var dataTables = []dataTable{
 	{name: "agent_configs", customer: "customer_id"},
 	{name: "skills", customer: "customer_id"},
@@ -212,10 +210,10 @@ var dataTables = []dataTable{
 	// row that replaced it arrives, rather than after the import skipped that row beside it.
 	{name: "opt_outs", customer: "customer_id", order: "revoked_at IS NULL"},
 	{name: "recordings", customer: "customer_id", shard: true},
-	{name: "agent_sessions", customer: "customer_id", shard: true},
+	{name: "agent_sessions", customer: "customer_id", shard: true, vouched: []string{"changed_at"}},
 	{name: "agent_session_tools", customer: "customer_id", parent: "agent_sessions", parentColumn: "session_id", shard: true},
 	// After the sessions their session_id points at.
-	{name: "calls", customer: "customer_id", shard: true, references: ofSession},
+	{name: "calls", customer: "customer_id", shard: true, vouched: []string{"changed_at"}, references: ofSession},
 	{name: "agent_responses", customer: "customer_id", shard: true, references: ofSession},
 	{name: "agent_response_items", parent: "agent_responses", parentColumn: "response_id", shard: true},
 	{name: "conversation_documents", customer: "customer_id", shard: true},
@@ -223,8 +221,10 @@ var dataTables = []dataTable{
 	// they hid and the switches that hid it go with their session.
 	{name: "agent_branch_switches", customer: "customer_id", shard: true, references: ofSession},
 	{name: "agent_branch_messages", customer: "customer_id", shard: true, references: ofSession},
-	// Nothing points at a log's id, so a copied log is given one of this deployment's.
-	{name: "agent_logs", customer: "customer_id", copied: "source_id"},
+	// Nothing points at a log's id, so a copied log is given one of this deployment's
+	// (20261206120000_agent_logs_source_id.sql). Every database draws ids of its own range
+	// (logRangeBits), so the source's id names one row however many databases it read.
+	{name: "agent_logs", customer: "customer_id", copied: "source_id", shard: true, moving: true},
 	// No foreign key points at a request's id. An agent log row names it as text, and
 	// AgentLogs.Get only takes a request's error by that number from a row that carries none of
 	// its own and whose time and agent are the request's, so a moved row cannot show the error
@@ -503,19 +503,15 @@ func (s *Store) ExportCustomer(ctx context.Context, customerID string, write fun
 		return cursor, nil
 	}
 
-	// Every shard is read at one moment of its own. No table of the shared database points at
-	// a shard's, so writing the shared tables first still writes every parent first.
-	var shards []bun.Tx
-	for _, db := range s.shards() {
-		shardTx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
-		if err != nil {
-			return 0, fmt.Errorf("store: export: shard: %w", err)
-		}
-		defer shardTx.Rollback() //nolint:errcheck // read-only, and the error on the way out says nothing
-		if err := boundTransaction(ctx, shardTx, exportLimit, lockTimeout, exportLimit); err != nil {
-			return 0, fmt.Errorf("store: export: shard: %w", err)
-		}
-		shards = append(shards, shardTx)
+	// The shard is read at one moment of its own. No table of the shared database points at a
+	// shard's, so writing the shared tables first still writes every parent first.
+	shardTx, err := s.shard.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return 0, fmt.Errorf("store: export: shard: %w", err)
+	}
+	defer shardTx.Rollback() //nolint:errcheck // read-only, and the error on the way out says nothing
+	if err := boundTransaction(ctx, shardTx, exportLimit, lockTimeout, exportLimit); err != nil {
+		return 0, fmt.Errorf("store: export: shard: %w", err)
 	}
 	for _, table := range dataTables {
 		if !table.shard {
@@ -528,128 +524,16 @@ func (s *Store) ExportCustomer(ctx context.Context, customerID string, write fun
 		if !table.shard {
 			continue
 		}
-		if table.rollup() {
-			if err := s.exportRollup(ctx, shards, table, customerID, write); err != nil {
-				return 0, err
-			}
-			continue
+		if err := s.exportTable(ctx, shardTx, table, customerID, write); err != nil {
+			return 0, err
 		}
-		for _, shardTx := range shards {
-			if err := s.exportTable(ctx, shardTx, table, customerID, write); err != nil {
+		if table.moving && s.Sharded() {
+			if err := s.exportTable(ctx, tx, table, customerID, write); err != nil {
 				return 0, err
 			}
 		}
 	}
 	return cursor, nil
-}
-
-// exportRollup writes a rollup table's rows of every shard as one row per key: counts and
-// totals summed, a percentile weighted by the requests or turns behind it, as the dashboard
-// merges them, and uptime left for the importing side to work out again.
-func (s *Store) exportRollup(ctx context.Context, shards []bun.Tx, table dataTable, customerID string, write func(string, json.RawMessage) error) error {
-	shape, err := s.shapeOf(ctx, table.name)
-	if err != nil {
-		return err
-	}
-	// row is the first shard's row of a key, the others folded into it; weights are the
-	// requests or turns behind each percentile so far.
-	type keyed struct {
-		row     map[string]any
-		weights map[string]float64
-	}
-	var order []string
-	byKey := map[string]*keyed{}
-	for _, shardTx := range shards {
-		err := s.exportTable(ctx, shardTx, table, customerID, func(_ string, raw json.RawMessage) error {
-			decoder := json.NewDecoder(bytes.NewReader(raw))
-			decoder.UseNumber()
-			var row map[string]any
-			if err := decoder.Decode(&row); err != nil {
-				return fmt.Errorf("store: export %s: %w", table.name, err)
-			}
-			delete(row, "uptime")
-			var key strings.Builder
-			for _, column := range shape.keys {
-				fmt.Fprintf(&key, "%v\x00", row[column])
-			}
-			weight := rollupWeight(row)
-			into := byKey[key.String()]
-			if into == nil {
-				into = &keyed{row: row, weights: map[string]float64{}}
-				for column, value := range row {
-					if _, ok := value.(json.Number); ok && isPercentile(column) {
-						into.weights[column] = weight
-					}
-				}
-				byKey[key.String()] = into
-				order = append(order, key.String())
-				return nil
-			}
-			for column, value := range row {
-				number, ok := value.(json.Number)
-				if !ok || slices.Contains(shape.keys, column) {
-					continue
-				}
-				if !isPercentile(column) {
-					was, _ := into.row[column].(json.Number)
-					into.row[column] = addNumbers(was, number)
-					continue
-				}
-				before := into.weights[column]
-				if before+weight > 0 {
-					was, _ := into.row[column].(json.Number)
-					x, _ := was.Float64()
-					y, _ := number.Float64()
-					into.row[column] = json.Number(strconv.FormatFloat((x*before+y*weight)/(before+weight), 'f', -1, 64))
-				}
-				into.weights[column] = before + weight
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-	}
-	for _, key := range order {
-		encoded, err := json.Marshal(byKey[key].row)
-		if err != nil {
-			return fmt.Errorf("store: export %s: %w", table.name, err)
-		}
-		if err := write(table.name, encoded); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// rollupWeight is how many requests or turns a rollup row counts.
-func rollupWeight(row map[string]any) float64 {
-	for _, column := range []string{"request_count", "turn_count", "count"} {
-		if number, ok := row[column].(json.Number); ok {
-			weight, _ := number.Float64()
-			return weight
-		}
-	}
-	return 0
-}
-
-func isPercentile(column string) bool {
-	return strings.Contains(column, "_p50_") || strings.Contains(column, "_p95_") || strings.Contains(column, "_p99_")
-}
-
-// addNumbers sums two numbers, as integers while both are.
-func addNumbers(a, b json.Number) json.Number {
-	if a == "" {
-		return b
-	}
-	x, errX := a.Int64()
-	y, errY := b.Int64()
-	if errX == nil && errY == nil {
-		return json.Number(strconv.FormatInt(x+y, 10))
-	}
-	fx, _ := a.Float64()
-	fy, _ := b.Float64()
-	return json.Number(strconv.FormatFloat(fx+fy, 'f', -1, 64))
 }
 
 // changeWatermark is a sequence number every change at or below has ended: committed and
@@ -1272,7 +1156,7 @@ func cachedKeys(customerID, table string, row []byte) []string {
 		}
 		return keys
 	case "users":
-		return []string{userKey(customerID, text("id"))}
+		return []string{userKey(customerID, text("id")), mintedKey(customerID, text("id"))}
 	}
 	return []string{skillsKey(customerID, text("config_id"))}
 }
@@ -2715,7 +2599,7 @@ func dataTableByName(name string) (dataTable, bool) {
 // an export would write over.
 func (s *Store) HoldingTable(ctx context.Context, customerID string) (string, error) {
 	for _, table := range dataTables {
-		if table.customer == "" || table.shard || table.name == "opt_outs" {
+		if table.customer == "" || (table.shard && !table.moving) || table.name == "opt_outs" {
 			continue
 		}
 		where := table.customer + " = ?"
