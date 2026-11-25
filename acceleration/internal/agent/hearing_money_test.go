@@ -328,6 +328,25 @@ func (s *AgentSuite) TestATranscriberThatEndsRefusedAsItsParticipantLeavesIsNotK
 	})
 }
 
+func (s *AgentSuite) TestATranscriberThatEndsRefusedAfterItsParticipantIsBackIsNotKept() {
+	s.hearsOn(func(gate *gatetest.Answers) {
+		s.talks(1)
+		gate.Refuse(policy.ErrNoCredits)
+		s.talks(40)
+		s.agent.mu.Lock()
+		listener := s.agent.listeners["alice"]
+		s.agent.mu.Unlock()
+		s.leavesCall("alice")
+		s.joinsCall("alice")
+
+		s.agent.keepRefusals("alice", listener)
+
+		s.agent.mu.Lock()
+		defer s.agent.mu.Unlock()
+		s.Empty(s.agent.unheardCallers)
+	})
+}
+
 func (s *AgentSuite) TestACallEndsWhenTheOnlyOtherTranscriberIsRefusedToo() {
 	s.hearsOn(func(gate *gatetest.Answers) {
 		s.talks(1)
