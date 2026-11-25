@@ -56,8 +56,8 @@ func Forwarded(ctx context.Context) bool {
 //
 // One port rather than two because a second listener is a second thing to open between
 // nodes, and the only traffic here is between a deployment's own processes. gRPC wants
-// HTTP/2, which a peer speaks without TLS by prior knowledge, so h2c sits outside: an
-// HTTP/1.1 request passes through it untouched, sockets included.
+// HTTP/2, which a peer speaks without TLS by prior knowledge alone, so h2c takes the connection
+// preface: an HTTP/1.1 request, sockets included, never reaches it.
 //
 // Anyone who reaches that port can speak gRPC to it, so every call must carry one of the
 // accepted credentials, which only the deployment's own nodes can derive. With none
@@ -70,7 +70,7 @@ func Serve(api http.Handler, accepted [][]byte) http.Handler {
 	server := grpc.NewServer(grpc.MaxRecvMsgSize(maxForward))
 	RegisterNodeServer(server, &forwarded{api: api})
 
-	return h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	served := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
 			// Here rather than in an interceptor, which runs once the whole call has been read.
 			if !check.allows(r.Header.Values(credentialKey)) {
@@ -83,7 +83,21 @@ func Serve(api http.Handler, accepted [][]byte) http.Handler {
 			return
 		}
 		api.ServeHTTP(w, r)
-	}), &http2.Server{})
+	})
+	prior := h2c.NewHandler(served, &http2.Server{})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// What an HTTP/2 connection opens with (RFC 9113 section 3.4).
+		if r.Method == "PRI" && len(r.Header) == 0 {
+			prior.ServeHTTP(w, r)
+			return
+		}
+		// An offer to upgrade to HTTP/2 is not taken up, so the request is an ordinary one: the
+		// h2c handler would read its body whole, with no limit, before the handler runs.
+		if strings.EqualFold(r.Header.Get("Upgrade"), "h2c") {
+			r.Header.Del("Upgrade")
+		}
+		served.ServeHTTP(w, r)
+	})
 }
 
 // Address is where this node's peers reach it, given where it listens.
@@ -174,7 +188,13 @@ func (f *Forwarder) Ask(
 		return nil, err
 	}
 
-	headers := headersOf(r.Header)
+	sent := r.Header
+	if sent.Get("Content-Length") != "" {
+		// What is carried may not be the body as it arrived: inflated, or left out.
+		sent = sent.Clone()
+		sent.Set("Content-Length", strconv.Itoa(len(body)))
+	}
+	headers := headersOf(sent)
 	// Carried as a header because it is one, and because the request is rebuilt on the
 	// other side from nothing but these: a handler reading the host it was reached at
 	// would otherwise see none.

@@ -322,7 +322,7 @@ func (s *ForwardedSessionSuite) TestABodyNotSentInTimeIsRefusedAsTheOwnerRefuses
 	s.Equal(owner, answered)
 }
 
-func (s *ForwardedSessionSuite) TestABodySentToAnOperationThatTakesNoneIsNotRead() {
+func (s *ForwardedSessionSuite) TestABodySentToAReadDoesNotRefuseIt() {
 	opened := s.onTheOtherNode(CreateSessionRequest{})
 	path := "/v1/agents/sessions/" + opened.Id
 
@@ -331,6 +331,110 @@ func (s *ForwardedSessionSuite) TestABodySentToAnOperationThatTakesNoneIsNotRead
 
 	s.Equal(http.StatusOK, owner)
 	s.Equal(http.StatusOK, status, answered)
+}
+
+func (s *ForwardedSessionSuite) TestABodySentToAReadThatDoesNotArriveInTimeDoesNotRefuseIt() {
+	id, carried := s.heldByANodeThatAnswers(0)
+
+	status, _ := s.sent(s.serverClient, http.MethodGet, "/v1/agents/sessions/"+id, s.slowly(9*time.Second, false))
+
+	s.Equal(http.StatusTeapot, status)
+	s.Equal(arrived{}, s.carried(carried))
+}
+
+// A body over the default bound to an operation that takes none is left out whole, and so is its
+// length.
+func (s *ForwardedSessionSuite) TestABodyLeftOutIsNotSaidToBeThere() {
+	id, carried := s.heldByANodeThatAnswers(0)
+
+	s.sent(s.serverClient, http.MethodGet, "/v1/agents/sessions/"+id, strings.NewReader(strings.Repeat(" ", 2<<20)))
+
+	s.Equal(arrived{declared: "0"}, s.carried(carried))
+}
+
+func (s *ForwardedSessionSuite) TestAnOperationThisNodeDoesNotHaveIsCarriedWithItsBody() {
+	s.carriesItsBody(http.MethodPost, "/newop")
+}
+
+func (s *ForwardedSessionSuite) TestAMethodThisNodeDoesNotServeIsCarriedWithItsBody() {
+	s.carriesItsBody(http.MethodPut, "/say")
+}
+
+func (s *ForwardedSessionSuite) TestATrailingSlashIsCarriedWithItsBody() {
+	s.carriesItsBody(http.MethodPost, "/say/")
+}
+
+func (s *ForwardedSessionSuite) TestAnOperationThatTakesNoBodyHereIsCarriedWithTheOneSent() {
+	s.carriesItsBody(http.MethodPost, "/interrupt")
+}
+
+func (s *ForwardedSessionSuite) TestAnOperationThisNodeDoesNotHaveIsHeldToTheDefaultLimit() {
+	id, carried := s.heldByANodeThatAnswers(0)
+	path := "/v1/agents/sessions/" + id + "/newop"
+
+	most, _ := s.sentOfSize(path, 1<<20-1)
+	over, _ := s.sentOfSize(path, 1<<20)
+
+	s.Equal(http.StatusTeapot, most)
+	s.Equal(http.StatusRequestEntityTooLarge, over)
+	s.Equal(arrived{declared: "1048575", bytes: 1<<20 - 1}, s.carried(carried))
+}
+
+func (s *ForwardedSessionSuite) TestAnOperationThisNodeDoesNotHaveWaitsForItsBodyForTheDefaultTime() {
+	id, _ := s.heldByANodeThatAnswers(0)
+
+	status, _ := s.sent(s.serverClient, http.MethodPost, "/v1/agents/sessions/"+id+"/newop", s.slowly(9*time.Second, false))
+
+	s.Equal(http.StatusBadRequest, status)
+}
+
+// carriesItsBody checks a request of 16 bytes to operation arrives whole at the other node.
+func (s *ForwardedSessionSuite) carriesItsBody(method, operation string) {
+	id, carried := s.heldByANodeThatAnswers(0)
+
+	status, answered := s.sent(s.serverClient, method, "/v1/agents/sessions/"+id+operation, strings.NewReader(`{"text":"hello"}`))
+
+	s.Equal(http.StatusTeapot, status, answered)
+	s.Equal(arrived{declared: "16", bytes: 16}, s.carried(carried))
+}
+
+// A question is given its own operation's time to arrive, which is longer than the default.
+func (s *ForwardedSessionSuite) TestAQuestionThatArrivesSlowlyIsCarried() {
+	id, _ := s.heldByANodeThatAnswers(0)
+
+	status, answered := s.sent(s.serverClient, http.MethodPost, "/v1/agents/sessions/"+id+"/respond", s.slowly(9*time.Second, true))
+
+	s.Equal(http.StatusTeapot, status, answered)
+}
+
+// The other node is given its time from when the body is read.
+func (s *ForwardedSessionSuite) TestABodySlowerThanTheOtherNodesTimeIsCarried() {
+	s.router.forwardTimeout = 2 * time.Second
+	s.T().Cleanup(func() { s.router.forwardTimeout = forwardTimeout })
+	id, _ := s.heldByANodeThatAnswers(0)
+
+	status, answered := s.sent(s.serverClient, http.MethodPost, "/v1/agents/sessions/"+id+"/respond", s.slowly(4*time.Second, true))
+
+	s.Equal(http.StatusTeapot, status, answered)
+}
+
+// slowly is a body of 1 KiB a second for as long, that ends then or, when it does not, is cut off.
+func (s *ForwardedSessionSuite) slowly(taking time.Duration, ends bool) io.Reader {
+	reader, writer := io.Pipe()
+	go func() {
+		for until := time.Now().Add(taking); time.Now().Before(until); time.Sleep(time.Second) {
+			if _, err := writer.Write(make([]byte, 1<<10)); err != nil {
+				return
+			}
+		}
+		if ends {
+			_ = writer.Close()
+			return
+		}
+		_ = writer.CloseWithError(io.ErrUnexpectedEOF)
+	}()
+	s.T().Cleanup(func() { _ = reader.Close() })
+	return reader
 }
 
 func (s *ForwardedSessionSuite) TestAChangeToASessionIsCarriedWithItsBody() {
@@ -363,7 +467,7 @@ func (s *ForwardedSessionSuite) TestABodyCutShortIsNotCarried() {
 
 	s.Require().NoError(err)
 	s.Contains(string(answered), "500 Internal Server Error")
-	s.Zero(carried.Load())
+	s.Empty(carried)
 }
 
 // The time a body is given to arrive does not end a request the other node is longer about.
@@ -374,16 +478,23 @@ func (s *ForwardedSessionSuite) TestARequestTheOtherNodeIsLongAboutIsAnswered() 
 	status, _ := s.sent(s.serverClient, http.MethodPost, "/v1/agents/sessions/"+id+"/say", http.NoBody)
 
 	s.Equal(http.StatusTeapot, status)
-	s.EqualValues(1, carried.Load())
+	s.Len(carried, 1)
+}
+
+// arrived is the body a request was carried with: its stated length and what was read.
+type arrived struct {
+	declared string
+	bytes    int
 }
 
 // heldByANodeThatAnswers has the directory say a node that answers 418 after taking runs a
-// session, and counts the requests carried there.
-func (s *ForwardedSessionSuite) heldByANodeThatAnswers(taking time.Duration) (string, *atomic.Int64) {
-	carried := &atomic.Int64{}
+// session, and tells of each request carried there.
+func (s *ForwardedSessionSuite) heldByANodeThatAnswers(taking time.Duration) (string, <-chan arrived) {
+	carried := make(chan arrived, 4)
 	_, accepted := s.sealer.Derive(node.CredentialPurpose)
-	owner := httptest.NewServer(node.Serve(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		carried.Add(1)
+	owner := httptest.NewServer(node.Serve(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		carried <- arrived{declared: r.Header.Get("Content-Length"), bytes: len(body)}
 		time.Sleep(taking)
 		w.WriteHeader(http.StatusTeapot)
 	}), accepted))
@@ -391,6 +502,17 @@ func (s *ForwardedSessionSuite) heldByANodeThatAnswers(taking time.Duration) (st
 	id := s.utils.uuid()
 	s.nodeDirectory(owner, s.shard, slog.New(slog.DiscardHandler)).Hold(s.T().Context(), s.customerID(), id, "", "")
 	return id, carried
+}
+
+// carried is the next request a node that answers was carried.
+func (s *ForwardedSessionSuite) carried(by <-chan arrived) arrived {
+	select {
+	case next := <-by:
+		return next
+	case <-time.After(settleFor):
+		s.FailNow("nothing was carried")
+		return arrived{}
+	}
 }
 
 // refusedAsTooLarge checks a body of size sent to path is refused with the node running the

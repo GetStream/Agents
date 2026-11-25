@@ -61,7 +61,12 @@ func (s *Server) onOwningNode(next http.Handler) http.Handler {
 			})).ServeHTTP(w, r)
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), forwardTimeout)
+		carried := r.Context()
+		if carried.Err() != nil {
+			// net/http ends it when a read of the body fails, and one left out is still answered.
+			carried = context.WithoutCancel(carried)
+		}
+		ctx, cancel := context.WithTimeout(carried, s.forwardTimeout)
 		defer cancel()
 		if err := s.forwarder.Forward(ctx, address, w, r, body); err != nil {
 			s.logger.Error("could not reach the node running a session",
@@ -71,19 +76,32 @@ func (s *Server) onOwningNode(next http.Handler) http.Handler {
 	})
 }
 
+// What an operation that names neither reads a body with (ensureMaxBodyBytes and
+// ensureBodyReadTimeout in huma.go, v2.39.1).
+const (
+	defaultMaxBody     = 1 << 20
+	defaultBodyTimeout = 5 * time.Second
+)
+
 // forwardedBody reads the body of a request another node answers, as that node's operation reads
 // one (readBody in huma.go, v2.39.1): up to its limit, for as long as it waits, refused as it
-// refuses, and not at all when it takes no body.
+// refuses. An operation this node does not have, which a newer node may, is read with the
+// defaults. So is one that takes no body here, which a newer node's may, but its body is refused
+// for nothing: what does not arrive within them is left out.
 func (s *Server) forwardedBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
-	operation := s.operations[r.Method+" "+findRoute(s.mux, r, r.Method)]
+	operation, known := s.operations[r.Method+" "+findRoute(s.mux, r, r.Method)]
+	ignored := known && operation.maxBody == 0
 	if operation.maxBody == 0 {
-		return nil, nil
+		operation.maxBody, operation.bodyTimeout = defaultMaxBody, defaultBodyTimeout
 	}
 	// A writer that cannot take a deadline still reads the body, only without one.
 	controller := http.NewResponseController(w)
 	_ = controller.SetReadDeadline(time.Now().Add(operation.bodyTimeout))
 	// Huma refuses a body of the limit itself.
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, operation.maxBody-1))
+	if err != nil && ignored {
+		return nil, nil
+	}
 	if tooLarge := (*http.MaxBytesError)(nil); errors.As(err, &tooLarge) {
 		return nil, payloadTooLarge(fmt.Sprintf("request body is too large limit=%d bytes", operation.maxBody))
 	}
@@ -245,7 +263,7 @@ func (s *Server) forwardedMessage(ctx context.Context, origin hookOrigin, event 
 		return false, false
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, forwardTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.forwardTimeout)
 	defer cancel()
 	answer, err := origin.handOver(ctx, address)
 	switch {
@@ -326,7 +344,7 @@ func (s *Server) forwardedToWorkers(ctx context.Context, handOver func(context.C
 	}
 	address := addresses[rand.IntN(len(addresses))]
 
-	ctx, cancel := context.WithTimeout(ctx, forwardTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.forwardTimeout)
 	defer cancel()
 	answer, err := handOver(ctx, address)
 	switch {

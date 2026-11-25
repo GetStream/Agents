@@ -395,6 +395,7 @@ type Server struct {
 	exportWritesWait   time.Duration
 	exportLineWait     time.Duration
 	importLineWait     time.Duration
+	forwardTimeout     time.Duration
 	exportWait         time.Duration
 	quota              *quota.Limiter
 	policies           *policy.Enforcer
@@ -624,6 +625,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		exportWritesWait:   exportWritesWait,
 		exportLineWait:     exportLineWait,
 		importLineWait:     importLineWait,
+		forwardTimeout:     forwardTimeout,
 		exportWait:         exportWait,
 		exports:            make(chan struct{}, maxExports),
 		imports:            make(chan struct{}, maxImports),
