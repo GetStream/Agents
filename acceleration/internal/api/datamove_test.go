@@ -283,6 +283,16 @@ func (s *DataMoveSuite) TestAClientCredentialsDefinitionWithAnIDTheAPIRefusesIsR
 	s.Equal(http.StatusBadRequest, status, "not a 200 holding every id")
 }
 
+// A refused id comes back once in the answer, not once for the check and again for the row it
+// names, so a refused 1 MiB id does not double the body.
+func (s *DataMoveSuite) TestARefusedImportedIDIsInTheAnswerAtMostOnce() {
+	big := "custom_a" + strings.Repeat("x", 1<<20)
+	line := s.importedConnector(big, `"schemes": ["oauth2_code"], "endpoints": {"mcp": "https://mcp.acme.example/mcp"}`)
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{line}))
+	s.Equal(http.StatusBadRequest, status)
+	s.LessOrEqual(strings.Count(failure, big), 1)
+}
+
 // The answer names the first 100 rows an import left out and counts the rest, so it does not
 // grow with the body.
 func (s *DataMoveSuite) TestAnImportNamesAtMostAHundredOfTheRowsItLeftOut() {

@@ -58,7 +58,7 @@ var (
 // checkLimits refuses a custom connector past one of the limits above.
 func (c CustomConnector) checkLimits() error {
 	if !customID.MatchString(c.ID) {
-		return stack.Wrap(fmt.Errorf("id %q is not %s", c.ID, CustomIDPatternDescription))
+		return stack.Wrap(fmt.Errorf("id is not %s", CustomIDPatternDescription))
 	}
 	for _, limit := range []struct {
 		field, value string
