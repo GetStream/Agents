@@ -14,8 +14,14 @@ import (
 	"testing"
 	"time"
 
+	getstream "github.com/GetStream/getstream-go/v5"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/channelbridge"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/chatlog"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/dispatch"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/node"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
@@ -99,6 +105,63 @@ func (s *routingPolicyHarness) numberOf(configID string) string {
 	return arrivingCall("default:" + callID)
 }
 
+// thread is a Slack thread of the test's app whose line an agent under policy answers on the
+// held model, so the session a turn opens on the thread channel stays open while it is held.
+func (s *routingPolicyHarness) thread(policy shardmap.Policy) store.ChannelThread {
+	ctx := context.Background()
+	connection := "connection-" + s.utils.uuid()
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(), Mode: store.AgentModeText,
+		Models: store.AgentModels{LLM: "holding/holding-model"}, RoutingPolicy: string(policy)}
+	s.Require().NoError(s.store.AgentConfigs.Insert(ctx, &config))
+	// A save refuses a binding of a connection nobody made; the line needs only its id.
+	_, err := s.store.GlobalDB().NewUpdate().Model((*store.AgentConfig)(nil)).
+		Set(`connectors = jsonb_build_array(jsonb_build_object('name', 'slack', 'connector_id', 'slack_bot',
+			'connection', jsonb_build_object('type', 'fixed', 'connection_id', ?::text)))`, connection).
+		Where("id = ?", config.ID).Exec(ctx)
+	s.Require().NoError(err)
+	thread := store.ChannelThread{ChannelID: conversation.ThreadChannelPrefix + s.utils.uuid(), CustomerID: s.customerID(),
+		ConnectorID: "slack_bot", ProviderUnitID: "T0000TEAM", ThreadKey: "C0000CHAN:" + s.utils.uuid(),
+		ConnectionID: connection, ThreadParts: map[string]string{"channel": "C0000CHAN"}}
+	created, err := s.store.ChannelThreads.Link(ctx, &thread)
+	s.Require().NoError(err)
+	s.Require().True(created)
+	// The bridge opens the thread channel before it writes into it (channelbridge openThread).
+	_, err = s.chat.Client.Chat().GetOrCreateChannel(ctx, chatlog.ChannelType, thread.ChannelID,
+		&getstream.GetOrCreateChannelRequest{Data: &getstream.ChannelInput{CreatedByID: pointerTo(thread.ChannelID),
+			Custom: map[string]any{conversation.CustomerField: s.customerID(), "support_agent_id": thread.ChannelID}}})
+	s.Require().NoError(err)
+	s.holding.holds()
+	s.T().Cleanup(s.holding.answers)
+	return thread
+}
+
+// threadMessage is Stream's message.new for a person writing in a thread channel.
+func threadMessage(thread store.ChannelThread) string {
+	return fmt.Sprintf(`{"type": "message.new", "channel_id": %q, "channel_type": "agent",
+  "message": {"id": %q, "text": "is anybody there?", "user": {"id": "sam", "name": "Sam"}}}`, thread.ChannelID, "message-"+thread.ChannelID)
+}
+
+// written is a message the channel bridge wrote into a thread channel.
+func (s *routingPolicyHarness) written() channelbridge.Written {
+	return channelbridge.Written{ID: "message-" + s.utils.uuid(), Text: "is anybody there?", Author: "sam"}
+}
+
+// answersIn waits for manager to run a session on a thread channel.
+func (s *routingPolicyHarness) answersIn(manager *session.Manager, thread store.ChannelThread, where string) {
+	s.Require().Eventually(func() bool {
+		_, running := manager.ByConversationWhere(chatlog.ChannelType+":"+thread.ChannelID, nil)
+		return running
+	}, settleFor, 10*time.Millisecond, "the thread was never answered "+where)
+}
+
+// answersNothingIn checks that manager runs no session on a thread channel.
+func (s *routingPolicyHarness) answersNothingIn(manager *session.Manager, thread store.ChannelThread, complaint string) {
+	s.Never(func() bool {
+		_, running := manager.ByConversationWhere(chatlog.ChannelType+":"+thread.ChannelID, nil)
+		return running
+	}, dropped, 10*time.Millisecond, complaint)
+}
+
 // runningOn is the address of the node the deployment's register says runs a session.
 func (s *routingPolicyHarness) runningOn(id string) string {
 	directory, err := node.NewDirectory(node.DirectoryOptions{Redis: s.live.Redis(), Address: "observer",
@@ -126,9 +189,10 @@ func (s *routingPolicyHarness) idle(worker *dispatch.Worker, complaint string) {
 type RoutingPolicySuite struct {
 	routingPolicyHarness
 
-	other        *httptest.Server
-	otherWorkers *dispatch.Pool
-	there        *dispatch.Worker
+	other         *httptest.Server
+	otherWorkers  *dispatch.Pool
+	otherSessions *session.Manager
+	there         *dispatch.Worker
 }
 
 func TestRoutingPolicySuite(t *testing.T) {
@@ -138,7 +202,7 @@ func TestRoutingPolicySuite(t *testing.T) {
 func (s *RoutingPolicySuite) SetupSuite() {
 	s.setUp()
 	s.otherWorkers = dispatch.NewPool()
-	s.other = s.otherNodeDispatching(s.otherWorkers)
+	s.other, _, s.otherSessions = s.otherNodeHolding(s.otherWorkers, s.sealer, slog.New(slog.DiscardHandler))
 }
 
 func (s *RoutingPolicySuite) SetupTest() {
@@ -328,6 +392,35 @@ func (s *RoutingPolicySuite) TestAMessageToAClosestAgentIsAnsweredWhereItLands()
 	s.idle(s.there, "a message to a closest agent was handed to another shard")
 }
 
+func (s *RoutingPolicySuite) TestAThreadMessageToAnAgentKeptInTheEUIsAnsweredInTheEUShard() {
+	thread := s.thread(shardmap.PolicyEUOnly)
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/chat/hooks/stream", threadMessage(thread)))
+
+	s.answersIn(s.otherSessions, thread, "in the EU shard")
+	s.answersNothingIn(s.manager, thread, "a thread kept in the EU was answered outside it")
+}
+
+func (s *RoutingPolicySuite) TestAMessageTheBridgeWroteIntoAThreadKeptInTheEUIsAnsweredInTheEUShard() {
+	thread := s.thread(shardmap.PolicyEUOnly)
+
+	turn, err := s.router.AnswerQueued(context.Background(), thread, s.written())
+
+	s.Require().NoError(err)
+	s.Nil(turn, "the turn is taken in the EU, not here")
+	s.answersIn(s.otherSessions, thread, "in the EU shard")
+	s.answersNothingIn(s.manager, thread, "a thread kept in the EU was answered outside it")
+}
+
+func (s *RoutingPolicySuite) TestAThreadMessageToAClosestAgentIsAnsweredWhereItLands() {
+	thread := s.thread("")
+
+	s.Require().Equal(http.StatusOK, s.signedly("/v1/chat/hooks/stream", threadMessage(thread)))
+
+	s.answersIn(s.manager, thread, "where it landed")
+	s.answersNothingIn(s.otherSessions, thread, "a thread of a closest agent was handed to another shard")
+}
+
 func (s *RoutingPolicySuite) TestACallToAnAppKeptInUSEastIsAnsweredInTheHomeShard() {
 	s.appPolicy(shardmap.PolicyUSEast)
 
@@ -424,6 +517,34 @@ func (s *RoutingPolicyShardDownSuite) TestAMessageKeptInTheEUIsAnswered503AndNot
 		arrivingMessage("chat-"+s.utils.uuid(), s.agent(shardmap.PolicyEUOnly))))
 
 	s.idle(s.here, "a message kept in the EU was answered outside it")
+}
+
+// Stream delivers a 503 again, by when the EU may be back.
+func (s *RoutingPolicyShardDownSuite) TestAThreadMessageKeptInTheEUIsAnswered503AndNotAnsweredHere() {
+	thread := s.thread(shardmap.PolicyEUOnly)
+
+	s.Require().Equal(http.StatusServiceUnavailable, s.signedly("/v1/chat/hooks/stream", threadMessage(thread)))
+
+	s.answersNothingIn(s.manager, thread, "a thread kept in the EU was answered outside it")
+}
+
+// The bridge's worker tries a message again after an error. The first try took no turn, so the
+// one made once the EU is back is answered there.
+func (s *RoutingPolicyShardDownSuite) TestAMessageTheBridgeWroteIntoAThreadKeptInTheEUIsTriedAgainOnceTheEUIsUp() {
+	thread := s.thread(shardmap.PolicyEUOnly)
+	written := s.written()
+
+	turn, err := s.router.AnswerQueued(context.Background(), thread, written)
+
+	s.Require().Error(err, "nothing took the message, so the worker tries it again")
+	s.Nil(turn)
+	s.answersNothingIn(s.manager, thread, "a thread kept in the EU was answered outside it")
+
+	_, _, sessions := s.otherNodeHolding(dispatch.NewPool(), s.sealer, slog.New(slog.DiscardHandler))
+	turn, err = s.router.AnswerQueued(context.Background(), thread, written)
+	s.Require().NoError(err)
+	s.Nil(turn)
+	s.answersIn(sessions, thread, "in the EU once it was up")
 }
 
 // Stream delivers a 503 again, by when the EU may be back.

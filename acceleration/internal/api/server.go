@@ -837,6 +837,7 @@ func (s *Server) Handler() http.Handler {
 	handle(mux, "GET /v1/data/changes", "ListDataChanges", s.listDataChanges)
 	handle(mux, "POST "+scheduledPeerPath, "ScheduledTaskDeliver", s.deliverScheduledForPeer)
 	handle(mux, "POST "+chatInboundPeerPath, "ChatInboundAnswer", s.answerChatInboundForPeer)
+	handle(mux, "POST "+threadTurnPeerPath, "ThreadTurnAnswer", s.answerThreadTurnForPeer)
 	handle(mux, "POST "+unansweredPeerPath, "PhoneEndUnanswered", s.endUnansweredForPeer)
 	handle(mux, "POST "+machinePeerPath, "PhoneMachine", s.tellMachineForPeer)
 	handle(mux, "GET /v1/agents/sessions/{id}/events", "WatchSession", s.watchSession)

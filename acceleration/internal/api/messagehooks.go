@@ -318,6 +318,12 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 		if strings.TrimSpace(event.Message.Text) == "" && len(event.photos()) == 0 {
 			return true
 		}
+		if elsewhere, taken, failure := s.threadElsewhere(ctx, origin.handOver, thread); elsewhere {
+			if failure.Code != "" {
+				origin.refuse(failure)
+			}
+			return taken
+		}
 		origin.answer(func() { s.answerThread(context.WithoutCancel(ctx), origin, thread, event) })
 		return true
 	}
