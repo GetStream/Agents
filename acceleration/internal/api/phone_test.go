@@ -1644,7 +1644,7 @@ func (s *CallStatusSuite) TestASessionOfAMintedIdOrReopenedIsAskedNothing() {
 // deafRedis is the suite's Redis until deaf is set: from then on it takes what is sent it and
 // answers nothing, as a Redis cut off by the network does.
 //
-// It goes deaf by itself on being sent any of deafTo.
+// A connection it is sent any of deafTo on goes deaf by itself.
 func (s *CallStatusSuite) deafRedis(deaf *atomic.Bool, deafTo ...string) rueidis.Client {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	s.Require().NoError(err)
@@ -1660,6 +1660,7 @@ func (s *CallStatusSuite) deafRedis(deaf *atomic.Bool, deafTo ...string) rueidis
 				_ = conn.Close()
 				continue
 			}
+			var cut atomic.Bool
 			go func() {
 				defer upstream.Close()
 				buffer := make([]byte, 64<<10)
@@ -1670,7 +1671,7 @@ func (s *CallStatusSuite) deafRedis(deaf *atomic.Bool, deafTo ...string) rueidis
 					}
 					for _, word := range deafTo {
 						if strings.Contains(string(buffer[:n]), word) {
-							deaf.Store(true)
+							cut.Store(true)
 						}
 					}
 					if _, err := upstream.Write(buffer[:n]); err != nil {
@@ -1685,7 +1686,7 @@ func (s *CallStatusSuite) deafRedis(deaf *atomic.Bool, deafTo ...string) rueidis
 					if err != nil {
 						return
 					}
-					if deaf.Load() {
+					if deaf.Load() || cut.Load() {
 						continue
 					}
 					if _, err := conn.Write(buffer[:n]); err != nil {
