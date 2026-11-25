@@ -1442,10 +1442,13 @@ func (m *Manager) Get(id string, owner Owner) (*Session, bool) {
 //
 // No customer is asked for, unlike Get, because the callers that need this have no customer
 // to ask with: an arriving message names a channel and nothing else, and the session running
-// on it is what says whose it is. An agent id names one session at a time, because a second
-// session on the same one would be two agents writing into one conversation.
+// on it is what says whose it is. Several sessions may share an agent id: every session an
+// agent config's identity names it for does, each in a conversation of its own
+// (agent:<session id>).
 //
-// The newest wins if that ever happens, which is the one a person writing there is watching.
+// The newest wins, which is the one a person writing there is watching. A message hook hands a
+// message to, or retires, only one a worker opened on the channel or one keeping no
+// conversation of its own (api's routeArrivingMessage).
 func (m *Manager) ByAgent(agentID string) (*Session, bool) {
 	return m.ByAgentWhere(agentID, nil)
 }
