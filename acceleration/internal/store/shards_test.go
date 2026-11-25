@@ -509,6 +509,72 @@ func (s *ShardedStoreSuite) TestASessionCarriedOnInAnotherShardIsOneSessionOfIts
 	s.EqualValues(1, buckets[0].ActiveUsers)
 }
 
+// The turn a carried-on session answers after is its own customer's, so another customer's of that
+// id in the shard it went on in is not taken for it.
+func (s *ShardedStoreSuite) TestASessionCarriedOnBesideAnotherCustomersTurnIsOneSession() {
+	session := s.opened("chat", "app", s.base, nil)
+	s.turned(session, "chat-1", s.base, nil)
+	theirs := &AgentSession{ID: "theirs", CustomerID: "globex", AgentName: "docs", UserID: "sam", CallerKind: "user", CreatedAt: s.base}
+	s.Require().NoError(s.other.Sessions.Upsert(s.ctx, theirs))
+	s.Require().NoError(s.other.Responses.Insert(s.ctx, &AgentResponse{ID: "chat-1", SessionID: "theirs", CustomerID: "globex", CreatedAt: s.base}))
+	s.carriedOnAt("chat", s.base.Add(time.Minute))
+	s.turnedThere("chat", "chat-2", "chat-1", s.base.Add(time.Minute), nil)
+
+	buckets, err := s.store.CustomerActivity(s.ctx, "app", ActivityDaily, s.base, s.base.Add(24*time.Hour))
+
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 1)
+	s.EqualValues(1, buckets[0].Sessions)
+}
+
+// strayTurnThere records another customer's turn naming a session of "app", in the other shard.
+func (s *ShardedStoreSuite) strayTurnThere(id, parent string) {
+	_, err := s.other.shard.ExecContext(s.ctx, "INSERT INTO agent_responses (id, session_id, customer_id, parent_response_id, created_at)"+
+		" VALUES (?, 'chat', 'globex', NULLIF(?, ''), ?)", id, parent, s.base)
+	s.Require().NoError(err)
+}
+
+func (s *ShardedStoreSuite) TestASessionCarriedOnIsOneSessionBesideAnotherCustomersFirstTurn() {
+	session := s.opened("chat", "app", s.base, nil)
+	s.turned(session, "chat-1", s.base, nil)
+	s.carriedOnAt("chat", s.base.Add(time.Minute))
+	s.turnedThere("chat", "chat-2", "chat-1", s.base.Add(time.Minute), nil)
+	s.strayTurnThere("stray", "")
+
+	buckets, err := s.store.CustomerActivity(s.ctx, "app", ActivityDaily, s.base, s.base.Add(24*time.Hour))
+
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 1)
+	s.EqualValues(1, buckets[0].Sessions, "it began in the other shard")
+}
+
+func (s *ShardedStoreSuite) TestASessionBegunInOneShardIsCountedBesideAnotherCustomersTurn() {
+	s.carriedOnAt("chat", s.base)
+	s.strayTurnThere("stray", "not-here")
+
+	buckets, err := s.store.CustomerActivity(s.ctx, "app", ActivityDaily, s.base, s.base.Add(24*time.Hour))
+
+	s.Require().NoError(err)
+	s.Require().Len(buckets, 1)
+	s.EqualValues(1, buckets[0].Sessions, "no turn of its own says it was carried on")
+}
+
+func (s *ShardedStoreSuite) TestToolUseIsNotOfACarriedSessionBesideAnotherCustomersTurn() {
+	session := s.opened("chat", "app", s.base, nil)
+	s.turned(session, "chat-1", s.base, nil)
+	s.carriedOnAt("chat", s.base)
+	s.turnedThere("chat", "chat-2", "", s.base.Add(time.Minute), nil)
+	s.calledToolThere("chat", "chat-2", "refund", s.base.Add(time.Minute))
+	s.strayTurnThere("stray", "not-here")
+
+	_, tools, err := s.store.CustomerToolUsage(s.ctx, "app", "", s.base, s.base.Add(time.Hour))
+
+	s.Require().NoError(err)
+	s.Require().Len(tools, 1)
+	s.Require().NotNil(tools[0].AvgTurnsBeforeUse)
+	s.InDelta(0.0, *tools[0].AvgTurnsBeforeUse, 0.001)
+}
+
 func (s *ShardedStoreSuite) TestASessionCarriedOnIsCountedOnTheDayItBeganWhateverTheWindow() {
 	dayOne, dayTwo := s.base, s.base.Add(24*time.Hour)
 	session := s.opened("chat", "app", dayOne, nil)

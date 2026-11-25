@@ -977,7 +977,8 @@ func documentHandWritten(api huma.API) {
 			"same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app " +
 			"whatever the file says, so an export from one app cannot be imported into another's " +
 			"rows, and rows belonging to a customer through a parent are only written where that " +
-			"parent is the caller's.\n" +
+			"parent is the caller's. A row that refers to a session, simulation, contact, task or trunk the caller does " +
+			"not hold here is refused with 400.\n" +
 			"An export's rows are written as the source had them, so an export is refused with 409 " +
 			"`conflict`, before any of its rows is written, for an app that already has a row here in a " +
 			"table of the shared database: it would undo what was done here since. `full=true` writes it " +
