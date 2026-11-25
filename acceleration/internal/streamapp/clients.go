@@ -155,6 +155,21 @@ func (c *Clients) Pin(ctx context.Context, customer string) (int64, error) {
 	return bound.Identity.StreamApp, err
 }
 
+// Placed is the pin new work for a customer is given, as For answers it, read without acting
+// for the customer, so one customer's request can ask where another's work goes: app mode's
+// source refreshes no token and counts no use of the fallback for it (Stored.Placed). Any other
+// source is asked For, which for deployment mode's acts on nothing. Nothing is kept: For's
+// answer moves with the customer's app.
+func (c *Clients) Placed(ctx context.Context, customer string) (int64, error) {
+	if placer, ok := c.source.(interface {
+		Placed(context.Context, string) (int64, error)
+	}); ok {
+		return placer.Placed(ctx, customer)
+	}
+	identity, err := c.source.For(ctx, customer)
+	return identity.StreamApp, err
+}
+
 // HTTPClient is the transport every Stream client shares, for anything else that talks to
 // Stream on the router's behalf, such as a voice edge.
 func (c *Clients) HTTPClient() *http.Client { return c.http }

@@ -129,7 +129,6 @@ public data class ForkOptions(
     val description: String? = null,
     val projectId: String? = null,
     val custom: JsonObject? = null,
-    val modelOverwrites: ModelOverwrites? = null,
     /** Keep the fork off the record. */
     val incognito: Boolean? = null,
     /**

@@ -1495,20 +1495,17 @@ void main() {
         }),
       );
 
-      final found = await agents
-          .router(config: 'healthcare')
-          .search('antibiotic guidance', const SearchOptions(depth: SearchDepth.fast, results: 3));
+      final found = await agents.router(config: 'healthcare').search('antibiotic guidance');
 
       expect(found.answer, 'Cefazolin.');
       expect(found.results.single.score, 0.5);
       expect(router.last('POST /v1/search').json, {
         'config_id': 'healthcare',
         'query': 'antibiotic guidance',
-        'options': {'depth': 'fast', 'results': 3},
       });
     });
 
-    test('sends no options at all when none were asked for', () async {
+    test('sends only the query when no config or tags are named', () async {
       router.answer(
         'POST /v1/search',
         const Answer(200, {'provider': 'exa', 'model': 'm', 'results': []}),
