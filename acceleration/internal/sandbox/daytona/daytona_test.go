@@ -51,7 +51,7 @@ type platform struct {
 	// failing are the files whose download answers a part named error of that many bytes of x.
 	failing map[string]int
 	// refuseUpload answers every file written into the sandbox with a 400, and refusal, when set,
-	// with that many bytes of x after it, counted in served under "upload".
+	// with that many bytes of x after it.
 	refuseUpload bool
 	refusal      int
 	// commands are every shell command run in the sandbox, with how many runs came before,
@@ -215,9 +215,7 @@ func (p *platform) serve(w http.ResponseWriter, r *http.Request) {
 		file, _, err := r.FormFile("file")
 		if err != nil || p.refuseUpload {
 			w.WriteHeader(http.StatusBadRequest)
-			wire := &counted{Writer: w}
-			_, _ = io.Copy(wire, io.LimitReader(filler{}, int64(p.refusal)))
-			p.served["upload"] += wire.n
+			_, _ = io.Copy(w, io.LimitReader(filler{}, int64(p.refusal)))
 			return
 		}
 		if r.Context().Err() != nil {
