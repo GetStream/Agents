@@ -567,7 +567,9 @@ func (s *AppsSuite) TestReattachingAfterRegistrationMovesTheTrunk() {
 func (s *AppsSuite) TestReattachingInAnotherAppKeepsTheNumbersAgent() {
 	_, err := s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: s.e164})
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.PhoneNumbers.SetAgent(s.ctx, s.customer, s.e164, "config-1"))
+	config := &store.AgentConfig{CustomerID: s.customer, Name: "answering"}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, config))
+	s.Require().NoError(s.store.PhoneNumbers.SetAgent(s.ctx, s.customer, s.e164, config.ID))
 	s.ownApp()
 
 	_, err = s.service.Attach(s.ctx, Attachment{CustomerID: s.customer, E164: s.e164})
@@ -575,7 +577,7 @@ func (s *AppsSuite) TestReattachingInAnotherAppKeepsTheNumbersAgent() {
 
 	held := s.number()
 	s.Equal(int64(4242), held.StreamAppPK)
-	s.Equal("config-1", held.ConfigID, "moving the number to another app took its agent away")
+	s.Equal(config.ID, held.ConfigID, "moving the number to another app took its agent away")
 }
 
 func (s *AppsSuite) TestDetachingKeepsTheNumberOnItsTrunk() {
@@ -2658,7 +2660,7 @@ func (s *AppsSuite) TestReleasingANumberLinedSinceItWasReadTakesItOffItsTrunk() 
 	lined, err := s.lineFor(s.customer, s.e164)
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.service.unline(s.ctx, stale, "released a number", true))
+	s.Require().NoError(s.service.unline(s.ctx, stale, "released a number", time.Now().UTC()))
 
 	s.Equal([]string{second}, s.own.TrunkNumbers(lined.TrunkID))
 	s.Equal([]string{other.RouteID}, s.own.Rules())

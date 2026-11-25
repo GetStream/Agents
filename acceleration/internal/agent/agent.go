@@ -26,6 +26,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audio"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/decisionrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/guardrail"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
@@ -891,7 +892,11 @@ func (a *Agent) Join(ctx context.Context) error {
 	}
 	// Everything the agent opens from here on is owned by the session's attribution, whoever's
 	// context it joined with.
-	a.ctx, a.cancel = context.WithCancel(routing.WithAttribution(ctx, a.options.Attribution))
+	//
+	// A panic in a goroutine that starts under this context stops this call. The other calls
+	// on the router continue.
+	call := goroutine.WithEnd(routing.WithAttribution(ctx, a.options.Attribution), a.logger, func() { _ = a.Close() })
+	a.ctx, a.cancel = context.WithCancel(call)
 	a.turns.within(a.ctx)
 	a.joined = true
 	a.mu.Unlock()
@@ -936,7 +941,7 @@ func (a *Agent) Join(ctx context.Context) error {
 		}
 		startup.JoinEnded(time.Now())
 		a.running.Add(1)
-		go a.consumeEdge()
+		goroutine.Go(a.ctx, a.consumeEdge)
 
 		// Only a transport with other people in it can answer this, so it is asked for
 		// rather than required. Without it nothing is reported and the agent behaves as
@@ -949,7 +954,7 @@ func (a *Agent) Join(ctx context.Context) error {
 				a.attend(<-roster.Attendance())
 			}
 			a.running.Add(1)
-			go a.consumeRoster(roster)
+			goroutine.Go(a.ctx, func() { a.consumeRoster(roster) })
 		}
 	}
 
@@ -1349,7 +1354,7 @@ func (a *Agent) Say(ctx context.Context, text string) error {
 
 // sayFor says words as they are, for purpose: PurposeGreeting, or empty for any other line.
 func (a *Agent) sayFor(text, purpose string) error {
-	turnID := fmt.Sprintf("%s%d", sayPrefix, time.Now().UnixNano())
+	turnID := sayPrefix + turnStamp()
 
 	// A conversation in writing has no voice to say it with, so it is reported as said
 	// instead: what a caller would have heard is what a reader reads.
@@ -1701,10 +1706,10 @@ func (a *Agent) attend(attendance Attendance) {
 		// Closing waits on the final transcript, so it must not hold up the next roster event.
 		a.forgetListener(attendance.Participant.ID, listener)
 		a.running.Add(1)
-		go func() {
+		goroutine.Go(a.ctx, func() {
 			defer a.running.Done()
 			a.closeListener(listener)
-		}()
+		})
 	}
 	a.logger.Debug("a participant left", "participant", attendance.Participant.UserID)
 	a.emitter.Send(ParticipantLeft{
@@ -1772,7 +1777,7 @@ func (a *Agent) listen(participant stt.Participant) (*sttrouter.Session, error) 
 
 	session, err := a.startListener(target)
 	if err != nil {
-		return nil, fmt.Errorf("agent: start stt for %s: %w", participant.ID, err)
+		return nil, fmt.Errorf("agent: start stt: %w", err)
 	}
 	// A new transcriber numbers the participant's utterances from one again: a stop ruled
 	// in one of the last one's is spent, and is forgotten before this one can rule another.
@@ -1808,17 +1813,17 @@ func (a *Agent) listen(participant stt.Participant) (*sttrouter.Session, error) 
 		a.running.Add(1)
 		a.mu.Unlock()
 		a.audioFloor.drop(participant.ID, floor)
-		go func() {
+		goroutine.Go(a.ctx, func() {
 			defer a.running.Done()
 			a.closeListener(session)
-		}()
+		})
 		return nil, errDeparted
 	}
 	a.listeners[participant.ID] = session
 	a.mu.Unlock()
 
 	a.running.Add(1)
-	go a.consumeSTT(participant.ID, session, floor)
+	goroutine.Go(a.ctx, func() { a.consumeSTT(participant.ID, session, floor) })
 	return session, nil
 }
 
@@ -1866,7 +1871,7 @@ func (a *Agent) consumeSTT(participantID string, session *sttrouter.Session, flo
 	if floor != nil {
 		defer a.audioFloor.drop(participantID, floor)
 		a.running.Add(1)
-		go a.consumeFloor(participantID, floor)
+		goroutine.Go(a.ctx, func() { a.consumeFloor(participantID, floor) })
 	}
 
 	tally := a.heardFrom(participantID)
@@ -2354,9 +2359,25 @@ var requests = []string{
 	"could you", "can you", "may i have", "go ahead with your",
 }
 
-// turnStamp names a turn. The clock is enough: a conversation cannot produce two turns
-// in the same nanosecond.
-func turnStamp() string { return strconv.FormatInt(time.Now().UnixNano(), 10) }
+// lastStamp is the last turn stamp handed out.
+var lastStamp atomic.Int64
+
+// turnStamp names a turn: the time in nanoseconds, moved past the last stamp handed out.
+// Why: the clock alone can name two turns alike. A clock that ticks in microseconds (macOS)
+// or not at all until every goroutine waits (a test's fake clock) starts the follow-up to an
+// answer in the same instant as the reply before it. Each sentence's synthesis is named
+// after its turn, so the follow-up's would then be the earlier reply's, already finished:
+// never recorded as being said, a voice lost under it took nothing the caller was owed.
+func turnStamp() string {
+	now := time.Now().UnixNano()
+	for {
+		last := lastStamp.Load()
+		next := max(now, last+1)
+		if lastStamp.CompareAndSwap(last, next) {
+			return strconv.FormatInt(next, 10)
+		}
+	}
+}
 
 // respond asks the harness to reply to a turn.
 func (a *Agent) respond(participant stt.Participant, text string, listened heard, images []llm.ImagePart) error {
@@ -2823,7 +2844,7 @@ func (a *Agent) checkIn(participant stt.Participant, purpose string) {
 	a.mu.Unlock()
 
 	asked := time.Now()
-	go func() {
+	goroutine.Go(a.ctx, func() {
 		defer func() {
 			a.mu.Lock()
 			a.composing = false
@@ -2835,7 +2856,7 @@ func (a *Agent) checkIn(participant stt.Participant, purpose string) {
 			return
 		}
 		a.sayComposed(participant, line, purpose, asked)
-	}()
+	})
 }
 
 // sayComposed says a line compose wrote for purpose, asked for at asked, unless the moment
@@ -3033,7 +3054,7 @@ func (a *Agent) generate(turn harness.Turn, screen string) error {
 	a.pumps.Add(1)
 	a.mu.Unlock()
 
-	go a.startReply(current, model, turn, ctx, screen)
+	goroutine.Go(a.ctx, func() { a.startReply(current, model, turn, ctx, screen) })
 	return nil
 }
 
@@ -3249,7 +3270,7 @@ func (a *Agent) screening(ctx context.Context, turnID, text string, history []ll
 		decided:  make(chan checked, 1),
 	}
 
-	go func() {
+	goroutine.Go(a.ctx, func() {
 		asked := time.Now()
 		decided, err := a.options.Guardrail.Check(ctx, turnID, text, conversation)
 		latencyMs := routing.MsSince(asked)
@@ -3269,7 +3290,7 @@ func (a *Agent) screening(ctx context.Context, turnID, text string, history []ll
 			decided = guardrail.Verdict{Allowed: true}
 		}
 		started.decided <- checked{verdict: decided, check: check}
-	}()
+	})
 
 	return started
 }
@@ -4007,10 +4028,10 @@ func (a *Agent) consumeHarness(current *harness.Harness, drained chan struct{}) 
 			a.running.Add(1)
 			a.mu.Unlock()
 			ctx, cancel := a.prepareTool(typed)
-			go func() {
+			goroutine.Go(a.ctx, func() {
 				defer a.running.Done()
 				a.executeTool(ctx, cancel, typed)
-			}()
+			})
 
 		case harness.ToolDropped:
 			a.dropTool(typed.Name)
@@ -4689,14 +4710,14 @@ func (a *Agent) shorten(participant stt.Participant, turnID string, why interrup
 	unfinished := func(speaking string) bool {
 		return speaking == turnID && (a.generating || a.audioOutstandingLocked(turnID))
 	}
-	go func() {
+	goroutine.Go(a.ctx, func() {
 		defer a.running.Done()
 		select {
 		case <-time.After(shortenTail):
 			a.abandonReply(participant, unfinished, why)
 		case <-ctx.Done():
 		}
-	}()
+	})
 }
 
 // actsOnChorusASR says the agent keeps the loop's contract (README, "The loop's contract"): it

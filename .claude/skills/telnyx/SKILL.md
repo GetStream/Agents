@@ -194,11 +194,13 @@ ticket comments (AI-1842, AI-1843).
 - **STOP, START and HELP never reach the agent** (`internal/channelbridge/keywords.go`).
   Telnyx answers them itself and says so in `data.payload.autoresponse_type`. The bridge
   answers only the rest, such as REVOKE and OPT OUT. STOP writes an opt-out. A person with an
-  opt-out reaches no agent and gets no reply.
+  opt-out reaches no agent and gets no reply. An opt-out is kept and matched with its number
+  in E.164, a national number read in the line's own country; a number with no one valid
+  reading stays as written. One stored before that is rewritten by `router opt-outs normalize`.
 - **The sandbox gate** (`dlc.Gate`) can hold back a text or a reply on a line that is not
   registered for 10DLC. A text it refuses reaches no agent.
 - **A webhook older than 5 minutes is refused** (`Telnyx-Timestamp`, `max_age: 5m` in the
-  manifest). Telnyx may send a webhook twice. The bridge claims each message once (`store.ClaimChannelThreadMessage`), so a retried delivery is dropped.
+  manifest). Telnyx may send a webhook twice. The bridge claims each message once (`store.ChannelThreadMessages.Claim`), so a retried delivery is dropped.
 - **The line's current binding answers.** A text on an existing thread is answered by the
   config bound to the line now, the same one the bridge picks (oldest binding first). The
   history stays in the thread channel, so a newly bound config sees the earlier messages.

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -143,10 +144,11 @@ func organization() string {
 // spent writes organization's spend on the day daysAgo days before today, at noon.
 func (s *AnomalySuite) spent(organization string, daysAgo int, cost int64) {
 	day := time.Date(today.Year(), today.Month(), today.Day(), 12, 0, 0, 0, time.UTC).AddDate(0, 0, -daysAgo)
-	s.Require().NoError(s.db.Requests.Insert(s.ctx, &store.Request{
-		Modality: "llm", CustomerID: "app-" + organization, OrganizationID: organization, Provider: "openai", Model: "m",
-		StartedAt: day, CostMicros: cost, Billable: true, Success: true,
-	}))
+	_, err := s.db.Requests.InsertMany(s.ctx, []store.Request{{
+		UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "app-" + organization, OrganizationID: organization,
+		Provider: "openai", Model: "m", StartedAt: day, CostMicros: cost, Billable: true, Success: true,
+	}})
+	s.Require().NoError(err)
 }
 
 // steady gives organization the same spend on each of the baseline's days.

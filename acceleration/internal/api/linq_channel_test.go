@@ -194,7 +194,7 @@ func (s *LinqChannelSuite) TestAPhotoWithoutACaptionIsAnswered() {
 }
 
 // A photo whose URL answers 404, such as one Linq deleted, is answered with a short reply
-// that it could not be opened (api.threadPhotos), not left in silence.
+// that it could not be opened (api.messagePhotos), not left in silence.
 func (s *LinqChannelSuite) TestAPhotoLinqNoLongerServesIsAnsweredThatItCouldNotBeOpened() {
 	s.answersWith("vision/vision-model")
 	chat, asked := s.utils.uuid(), len(s.vision.replies())

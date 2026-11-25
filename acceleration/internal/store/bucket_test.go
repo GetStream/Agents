@@ -49,7 +49,7 @@ func (s *StoreSuite) TestRollupSplitsHoursAndKeepsProvidersApart() {
 		AudioMs:    4000,
 		Success:    true,
 	}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, other))
+	s.Require().NoError(insertRequest(s.ctx, s.store, other))
 
 	_, err := s.store.Buckets.Rollup(s.ctx, Hourly, s.base, s.base.Add(3*time.Hour))
 	s.Require().NoError(err)
@@ -80,7 +80,7 @@ func (s *StoreSuite) TestModalitiesAreAggregatedSeparately() {
 		CostMicros: 4200,
 		Success:    true,
 	}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, spoken))
+	s.Require().NoError(insertRequest(s.ctx, s.store, spoken))
 
 	_, err := s.store.Buckets.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
 	s.Require().NoError(err)
@@ -404,7 +404,7 @@ func (s *StoreSuite) TestStatsIncludeNewRequestsWithoutRollups() {
 
 // recordCancelled stores a request its caller gave up on after it had generated something.
 func (s *StoreSuite) recordCancelled(at time.Time, latencyMs *float64) {
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "stt", CustomerID: "acme", Provider: "deepgram", Model: "flux-general-en",
 		Tags: map[string]string{"project": "support"}, StartedAt: at,
 		AudioMs: 700, CostMicros: 50, LatencyMs: latencyMs,
@@ -414,14 +414,14 @@ func (s *StoreSuite) recordCancelled(at time.Time, latencyMs *float64) {
 
 func (s *StoreSuite) TestACancelledRequestIsSpendButNeitherAnErrorNorALatency() {
 	for index, latency := range []float64{100, 200} {
-		s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+		s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 			Modality: "stt", CustomerID: "acme", Provider: "deepgram", Model: "flux-general-en",
 			Tags: map[string]string{"project": "support"}, StartedAt: s.base.Add(time.Duration(index+1) * time.Minute),
 			AudioMs: 1000, CostMicros: 100, LatencyMs: &latency, Success: true,
 		}))
 	}
 	failedLatency := 900.0
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "stt", CustomerID: "acme", Provider: "deepgram", Model: "flux-general-en",
 		Tags: map[string]string{"project": "support"}, StartedAt: s.base.Add(3 * time.Minute),
 		AudioMs: 500, CostMicros: 60, LatencyMs: &failedLatency, Success: false, ErrorCode: "upstream_error",
@@ -480,7 +480,7 @@ func (s *StoreSuite) TestARefusedRequestIsSpendButNeitherAnErrorNorALatency() {
 		request.Tags = map[string]string{"project": "support"}
 		request.StartedAt = s.base.Add(time.Duration(index+1) * time.Minute)
 		request.OutputTokens, request.CostMicros = 10, 25
-		s.Require().NoError(s.store.Requests.Insert(s.ctx, &request))
+		s.Require().NoError(insertRequest(s.ctx, s.store, &request))
 	}
 	_, err := s.store.Buckets.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
 	s.Require().NoError(err)
@@ -520,6 +520,11 @@ func (s *StoreSuite) TestBucketQueryBudgets() {
 	// A router rolls up its own shard: one statement for the table and one for its labels'.
 	s.Equal(2, s.countQueries(func() {
 		_, err := s.store.Buckets.Rollup(s.ctx, Hourly, s.base, s.base.Add(time.Hour))
+		s.Require().NoError(err)
+	}))
+	// A wider window is the same two a bucket at a time, so no statement covers all of it.
+	s.Equal(6, s.countQueries(func() {
+		_, err := s.store.Buckets.Rollup(s.ctx, Hourly, s.base.Add(30*time.Minute), s.base.Add(3*time.Hour))
 		s.Require().NoError(err)
 	}))
 	s.Equal(len(s.store.shards()), s.countQueries(func() {

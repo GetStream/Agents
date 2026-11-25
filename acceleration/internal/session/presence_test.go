@@ -95,7 +95,7 @@ func (s *SessionSuite) settles(created *Session) {
 func (s *SessionSuite) outlivesPhoneTimeouts(created *Session) {
 	time.Sleep(outboundStartTimeout + testTimeout)
 	s.Equal(Live, created.State(), "the session ended")
-	s.True(s.manager.Running(created.ID()), "the session was taken off")
+	s.True(s.manager.Running(created.Spec().CustomerID, created.ID()), "the session was taken off")
 }
 
 func (s *SessionSuite) TestAPhoneSessionEndsAfterTheLastPersonLeaves() {
@@ -352,7 +352,7 @@ func (s *SessionSuite) TestASocketSessionWithPhoneGetsNoTimeout() {
 // stillRuns checks the session was left running.
 func (s *SessionSuite) stillRuns(created *Session) {
 	s.Equal(Live, created.State(), "the session ended")
-	s.True(s.manager.Running(created.ID()), "the session was taken off")
+	s.True(s.manager.Running(created.Spec().CustomerID, created.ID()), "the session was taken off")
 }
 
 func (s *SessionSuite) TestAnUnansweredOutboundSessionEndsAtOnce() {
@@ -363,7 +363,7 @@ func (s *SessionSuite) TestAnUnansweredOutboundSessionEndsAtOnce() {
 	s.True(s.manager.EndUnanswered("acme", created.ID()))
 
 	s.Equal(Ended, created.State(), "the session waits for its start timeout")
-	s.False(s.manager.Running(created.ID()), "the session is still held")
+	s.False(s.manager.Running(created.Spec().CustomerID, created.ID()), "the session is still held")
 }
 
 func (s *SessionSuite) TestAnUnansweredOutcomeLeavesASessionWhoseCallerJoined() {

@@ -535,9 +535,27 @@ func (s *SelfHostedAccountSuite) TestNoUsageServiceAnswersNotEnabled() {
 	}
 }
 
+// An organization's teams are its apps' work's, not an app's whose id is the organization's,
+// which is another customer's.
+func (s *SelfHostedAccountSuite) TestTeamsLeaveOutAnAppWhoseIdIsTheOrganizations() {
+	for app, team := range map[string]string{s.customerID(): "finance", s.app.organization.ID: "stranger"} {
+		s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
+			Modality: "llm", CustomerID: app, APIKey: "key_a", Provider: "stub", Model: "stub-llm",
+			StartedAt: time.Now(), CostMicros: 500_000, Billable: true, Success: true, UsageCategories: []string{"team:" + team},
+		}))
+	}
+
+	var teams []Team
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/teams", nil, &teams))
+
+	s.Require().Len(teams, 1, "%+v", teams)
+	s.Equal("finance", teams[0].Name)
+	s.Equal([]string{s.customerID()}, teams[0].Apps)
+}
+
 func (s *SelfHostedAccountSuite) TestTeamsSumTheRequestsThisMonth() {
 	record := func(at time.Time, micros int64, team string) {
-		s.Require().NoError(s.store.Requests.Insert(context.Background(), &store.Request{
+		s.Require().NoError(insertRequest(context.Background(), s.store, &store.Request{
 			Modality: "llm", CustomerID: s.customerID(), OrganizationID: s.app.organization.ID, Provider: "stub", Model: "stub-llm",
 			StartedAt: at, CostMicros: micros, Billable: true, Success: true, UsageCategories: []string{"support", "team:" + team},
 		}))

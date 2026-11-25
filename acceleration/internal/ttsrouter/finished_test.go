@@ -1,6 +1,7 @@
 package ttsrouter
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"testing"
@@ -9,7 +10,7 @@ import (
 )
 
 func TestASessionRemembersOnlyItsLastSettledUtterances(t *testing.T) {
-	session := newSession(newStubTTS(), routing.ProviderConfig{Provider: "stub", Model: "stub-model"},
+	session := newSession(context.Background(), newStubTTS(), routing.ProviderConfig{Provider: "stub", Model: "stub-model"},
 		routing.Owner{CustomerID: "acme"}, routing.NewRecorder(routing.TTS, nil, nil, nil, slog.New(slog.DiscardHandler)),
 		slog.New(slog.DiscardHandler))
 	defer session.Close()

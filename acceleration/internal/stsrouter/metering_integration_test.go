@@ -185,7 +185,7 @@ func (s *MeteringSuite) session(provider sts.STS, name string) (*Session, *routi
 	customer := uuid.NewString()
 	recorder := routing.NewRecorder(routing.STS, s.store, s.live, s.prices, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	owner := routing.Owner{CustomerID: customer, AgentID: agentID, Attribution: attributed}
-	return newSession(provider, s.builtIn(name), owner, recorder, recorder.For(routing.LLM)), recorder, customer
+	return newSession(context.Background(), provider, s.builtIn(name), owner, recorder, recorder.For(routing.LLM), nil), recorder, customer
 }
 
 // attributed is who every session here is billed to and asked for by, which every row it

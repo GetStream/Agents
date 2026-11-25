@@ -74,9 +74,9 @@ func (r *heldRecorder) Voiced(string, string) {}
 
 func (r *heldRecorder) Flush(context.Context) error { return nil }
 
-func (r *heldRecorder) Opened(store.AgentSession, []store.ToolDefinition) {}
+func (r *heldRecorder) Opened(store.AgentSession, []store.ToolDefinition, func()) {}
 
-func (r *heldRecorder) CarriedOn(store.AgentSession, []store.ToolDefinition) {}
+func (r *heldRecorder) CarriedOn(store.AgentSession, []store.ToolDefinition, func()) {}
 
 func (r *heldRecorder) Closed(string, string, time.Time, time.Time, EndReason) {}
 

@@ -102,11 +102,16 @@ func (g *Gate) overTier(ctx context.Context, organization, tier, channel, to str
 		// The leg being transferred is one of the call's.
 		up -= min(inCall, 1)
 		if up >= *limits.Concurrent {
-			return refused(codeConcurrent, stack.Wrap(fmt.Errorf("%w: %s tier allows %d calls at once, and that many are up",
-				ErrRefused, tier, *limits.Concurrent))), codeConcurrent
+			return tooManyAtOnce(tier, *limits.Concurrent), codeConcurrent
 		}
 	}
 	return nil, ""
+}
+
+// tooManyAtOnce refuses a call the tier's limit of calls at once leaves no room for.
+func tooManyAtOnce(tier string, limit int) error {
+	return refused(codeConcurrent, stack.Wrap(fmt.Errorf("%w: %s tier allows %d calls at once, and that many are up",
+		ErrRefused, tier, limit)))
 }
 
 // channelDay is what an organization sent on one channel today, as Redis last said.

@@ -54,6 +54,8 @@ type Store struct {
 	// shardNames names each of shards(), as Options.Shards does, for what is kept per shard
 	// in the shared database.
 	shardNames []string
+	// shardsDown is when each shard that did not answer was last logged (settledWithout).
+	shardsDown shardWarnings
 	// globalIsShard says the shared database is also some shard's own, so its calls are not
 	// strays to drop.
 	globalIsShard bool
@@ -63,10 +65,14 @@ type Store struct {
 	shapes tableShapes
 	// pins says how Stream app pins cross between deployments, once the router has said.
 	pins pinsHolder
-	// retries holds a slot for each deletion forgetLater is trying again. stop ends them
+	// retries holds a slot for each deletion forgetLater is trying again, and lost one for each
+	// lost commit it is waiting on, which it can do for longer; polls bounds how many of those
+	// ask Postgres at once. stop ends them
 	// when the store closes, and retrying is what Close waits on. retryMu guards closed, so no
 	// retry starts once Close is waiting.
 	retries  chan struct{}
+	lost     chan struct{}
+	polls    chan struct{}
 	closing  context.Context
 	stop     context.CancelFunc
 	retrying sync.WaitGroup
@@ -90,7 +96,8 @@ const writeTimeout = 10 * time.Second
 // keys is read once write has run, and names nothing when write found no row.
 //
 // A COMMIT whose answer was lost may land after the deletion, so its keys are dropped again
-// shortly after it (forgetLater).
+// on each of the next few attempts, which Close lets run, and once more when Postgres says the
+// transaction has ended, which Close does not wait for (forgetLater).
 func (s *Store) detachedWrite(ctx context.Context, write func(context.Context, bun.Tx) error, keys func() []string) error {
 	_, err := s.detachedWriteTold(ctx, write, keys)
 	return err
@@ -102,9 +109,18 @@ func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Contex
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.writeTimeout)
 	defer cancel()
 	var committing bool
+	var xid sql.NullInt64
 	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := write(ctx, tx); err != nil {
 			return err
+		}
+		// The transaction's id, for asking Postgres later whether a COMMIT whose answer was
+		// lost has landed. Without a cache there is nothing to drop again, and a write that
+		// changed nothing has no id, so nothing to wait for either.
+		if s.cache != nil {
+			if err := tx.NewSelect().ColumnExpr("pg_current_xact_id_if_assigned()").Scan(ctx, &xid); err != nil {
+				return err
+			}
 		}
 		committing = true
 		return nil
@@ -112,8 +128,8 @@ func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Contex
 	names := keys()
 	told = s.forget(ctx, names...)
 	var answered pgdriver.Error
-	if err != nil && committing && !errors.As(err, &answered) && s.cache != nil && len(names) > 0 {
-		s.forgetLater(names, err)
+	if err != nil && committing && !errors.As(err, &answered) && xid.Valid && len(names) > 0 {
+		s.forgetLater(names, err, xid.Int64)
 	}
 	return told, err
 }
@@ -122,6 +138,68 @@ func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Contex
 // postgres://user:pass@localhost:5432/router?sslmode=disable.
 func Open(dsn string) (*Store, error) {
 	return OpenShards(Options{DSN: dsn})
+}
+
+// The server's own limits on what a serving connection runs. pgdriver gives up on a read
+// after 10 s and drops the socket, but the server runs the statement to its end and commits
+// it, so a write the caller was told failed would still land. statementTimeout ends the
+// statement on the server first, and stays below the driver's read timeout for that.
+// lockTimeout bounds a wait on another session's lock, and idleInTransactionTimeout how long
+// a transaction whose router went quiet keeps its locks. Work that legitimately takes longer
+// raises them for its own transaction (boundTransaction).
+const (
+	statementTimeout         = 8 * time.Second
+	lockTimeout              = 3 * time.Second
+	idleInTransactionTimeout = 30 * time.Second
+)
+
+// sessionDefaults sets the limits above, and UTC as the time zone days and hours are cut in,
+// on every connection, leaving any of them the DSN sets itself.
+func sessionDefaults(conf *pgdriver.Config) {
+	defaults := map[string]any{
+		"statement_timeout":                   fmt.Sprintf("%dms", statementTimeout.Milliseconds()),
+		"lock_timeout":                        fmt.Sprintf("%dms", lockTimeout.Milliseconds()),
+		"idle_in_transaction_session_timeout": fmt.Sprintf("%dms", idleInTransactionTimeout.Milliseconds()),
+		"timezone":                            "UTC",
+	}
+	// Postgres reads a parameter's name in any case, so a DSN's TimeZone is timezone here.
+	for name, value := range conf.ConnParams {
+		defaults[strings.ToLower(name)] = value
+	}
+	conf.ConnParams = defaults
+}
+
+// boundTransaction gives the rest of tx statement, lock and idle limits of its own, for work
+// known to take longer than the serving defaults allow.
+func boundTransaction(ctx context.Context, tx bun.Tx, statement, lock, idle time.Duration) error {
+	_, err := tx.ExecContext(ctx, "SELECT set_config('statement_timeout', ?, true), set_config('lock_timeout', ?, true), "+
+		"set_config('idle_in_transaction_session_timeout', ?, true)",
+		fmt.Sprintf("%dms", statement.Milliseconds()), fmt.Sprintf("%dms", lock.Milliseconds()), fmt.Sprintf("%dms", idle.Milliseconds()))
+	return err
+}
+
+// writeBatch is how many rows one statement of a prune or a rename touches. A backlog is
+// worked through in statements of this many, each well inside the statement limit: one
+// statement over all of it would run out of time and roll back, every time, while the backlog
+// grew.
+var writeBatch = 5000
+
+// deleteInBatches deletes the rows of table that where matches, writeBatch of them per
+// statement, and returns how many it deleted.
+func deleteInBatches(ctx context.Context, db bun.IDB, table, where string, args ...any) (int64, error) {
+	var deleted int64
+	for {
+		batch := db.NewSelect().TableExpr(table).Column("ctid").Where(where, args...).Limit(writeBatch)
+		result, err := db.NewDelete().TableExpr(table).Where("ctid IN (?)", batch).Exec(ctx)
+		if err != nil {
+			return deleted, err
+		}
+		n, err := result.RowsAffected()
+		deleted += n
+		if err != nil || n < int64(writeBatch) {
+			return deleted, err
+		}
+	}
 }
 
 // connect opens a pool of at most conns connections.
@@ -133,7 +211,7 @@ func connect(dsn string, conns int) (_ *bun.DB, err error) {
 			err = stack.Wrap(errors.New("store: the database DSN does not parse"))
 		}
 	}()
-	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn)))
+	sqldb := sql.OpenDB(primaryOnly{pgdriver.NewConnector(pgdriver.WithDSN(dsn), sessionDefaults)})
 	// database/sql keeps two idle connections by default, so every burst of writes past two
 	// dials Postgres and shakes hands over TLS again, and under load those handshakes are
 	// what times out. The pool is kept instead, and bounded so that two pods, each running
@@ -161,11 +239,21 @@ func (s *Store) Server(ctx context.Context) (database, address string, err error
 	return database, server.String, nil
 }
 
-// Close releases the connection pools.
+// Close releases the connection pools, once the deletions forgetLater holds have run, or
+// forgetGrace has passed and the rest have stopped.
 func (s *Store) Close() error {
 	s.retryMu.Lock()
 	s.closed = true
 	s.retryMu.Unlock()
+	retried := make(chan struct{})
+	go func() {
+		s.retrying.Wait()
+		close(retried)
+	}()
+	select {
+	case <-retried:
+	case <-time.After(forgetGrace):
+	}
 	s.stop()
 	s.retrying.Wait()
 	s.closeRedis()
@@ -197,7 +285,7 @@ func (s *Store) CustomerActivity(
 		return nil, stack.Wrap(fmt.Errorf("store: unknown activity granularity %q", granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	unit := granularity.truncateUnit()
@@ -219,7 +307,7 @@ SELECT DISTINCT bucket, user_id FROM (
     UNION ALL
     SELECT date_trunc('%[1]s', a.created_at, 'UTC') AS bucket, s.user_id, s.caller_kind
     FROM agent_responses AS a
-    JOIN agent_sessions AS s ON s.id = a.session_id
+    JOIN agent_sessions AS s ON s.customer_id = a.customer_id AND s.id = a.session_id
     WHERE a.customer_id = ? AND a.created_at >= ? AND a.created_at < ?
 ) AS seen
 WHERE user_id <> '' AND caller_kind <> 'anonymous'`, unit, originOnly)
@@ -376,7 +464,7 @@ func carriedIn(id string) string {
 // and is one session while both are open.
 func (s *Store) CustomerConcurrencyPeak(ctx context.Context, customerID string, from, to time.Time) (ConcurrencyPeak, error) {
 	if customerID == "" {
-		return ConcurrencyPeak{}, stack.Wrap(errors.New("store: customer id is required"))
+		return ConcurrencyPeak{}, stack.Wrap(errCustomerRequired)
 	}
 
 	const spans = `
@@ -481,7 +569,7 @@ func (s *Store) peakAcrossShards(ctx context.Context, spans, customerID string, 
 // response when it comes back while the turn is open, and as a turn of its own after.
 func (s *Store) CustomerToolUsage(ctx context.Context, customerID, configID string, from, to time.Time) (ToolUsage, []ToolUsage, error) {
 	if customerID == "" {
-		return ToolUsage{}, nil, stack.Wrap(errors.New("store: customer id is required"))
+		return ToolUsage{}, nil, stack.Wrap(errCustomerRequired)
 	}
 
 	type usageRow struct {
@@ -540,7 +628,7 @@ WITH turns AS (
         a.created_at,
         ROW_NUMBER() OVER (PARTITION BY a.session_id ORDER BY a.created_at, a.id COLLATE "C") - 1 AS before
     FROM agent_responses AS a
-    JOIN agent_sessions AS s ON s.id = a.session_id
+    JOIN agent_sessions AS s ON s.customer_id = a.customer_id AND s.id = a.session_id
     WHERE a.customer_id = ?3 AND (?6 = '' OR s.config_id = ?6) AND a.created_at < ?5
         AND a.rewound_at IS NULL
 ),
@@ -561,7 +649,7 @@ ran AS (
         (started.payload->>'definition_tokens')::bigint AS definition_tokens,
         (started.payload->>'summary_tokens')::bigint AS summary_tokens
     FROM agent_responses AS a
-    JOIN agent_sessions AS s ON s.id = a.session_id
+    JOIN agent_sessions AS s ON s.customer_id = a.customer_id AND s.id = a.session_id
     JOIN agent_response_items AS r ON r.response_id = a.id AND r.kind = ?1
     LEFT JOIN turns AS t ON t.id = a.id
     LEFT JOIN LATERAL (
@@ -816,7 +904,7 @@ GROUP BY x.session_id, x.turn_id`,
 // A configID keeps to the sessions of that agent config, and empty is every one.
 func (s *Store) CustomerTurns(ctx context.Context, customerID, configID string, from, to time.Time) (SessionTurns, error) {
 	if customerID == "" {
-		return SessionTurns{}, stack.Wrap(errors.New("store: customer id is required"))
+		return SessionTurns{}, stack.Wrap(errCustomerRequired)
 	}
 	type shardTurns struct {
 		SessionTurns
@@ -833,7 +921,7 @@ func (s *Store) CustomerTurns(ctx context.Context, customerID, configID string, 
 		q := db.NewSelect().Model((*AgentResponse)(nil)).
 			ColumnExpr("COUNT(DISTINCT ars.session_id) AS sessions, COUNT(*) AS turns").
 			ColumnExpr(sessionHashes+" AS session_hashes").
-			Join("JOIN agent_sessions AS asn ON asn.id = ars.session_id").
+			Join("JOIN agent_sessions AS asn ON asn.customer_id = ars.customer_id AND asn.id = ars.session_id").
 			Where("ars.customer_id = ?", customerID).
 			Where("ars.created_at >= ? AND ars.created_at < ?", from, to).
 			Where("ars.rewound_at IS NULL")
@@ -884,8 +972,10 @@ func lockUntilCommit(ctx context.Context, tx bun.IDB, key string, seed int64) er
 	return err
 }
 
-// databaseNow is the database's clock, which routers whose clocks disagree still share.
-func databaseNow(ctx context.Context, db bun.IDB) (time.Time, error) {
+// transactionStart is when db's transaction started, by the database's clock, which routers
+// whose clocks disagree still share. It is not when it is asked: every call in one transaction
+// gets the same answer, and outside a transaction it is when the statement started.
+func transactionStart(ctx context.Context, db bun.IDB) (time.Time, error) {
 	var now time.Time
 	err := db.QueryRowContext(ctx, "SELECT now()").Scan(&now)
 	return now, err

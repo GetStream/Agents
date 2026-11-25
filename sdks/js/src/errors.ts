@@ -60,6 +60,24 @@ export class SocketClosedError extends Error {
 }
 
 /**
+ * A session's timeline or decisions were asked for, and it has no call to read them from.
+ *
+ * A session starts a new call each time voice is started or stopped on it, and the timeline
+ * and decisions are its newest call's. A session held only in writing, an incognito one, or
+ * one the router does not know has none.
+ */
+export class NoCallError extends Error {
+  /** The session that has no call. */
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(`the session has no call: ${sessionId}`);
+    this.name = "NoCallError";
+    this.sessionId = sessionId;
+  }
+}
+
+/**
  * The router would not run a worker's hosted tools for an agent.
  *
  * Kept apart from RouterError because no request failed: the socket is fine, and asking
@@ -73,6 +91,28 @@ export class HostingRefusedError extends Error {
     super(`the router refused to host tools: ${reason}`);
     this.name = "HostingRefusedError";
     this.reason = reason;
+  }
+}
+
+/**
+ * What the items of a turn with no id answer.
+ *
+ * The router names no turn for a session that records nothing (incognito), for a
+ * speech-to-speech session, whose model decides what a turn is, and for the retry of a
+ * `request_id` it already took. Reading that turn's items would read every turn in the
+ * session instead, so nothing is asked: an incognito session's answer is on
+ * `session.events()` alone, and the other two record theirs, which `session.responses.items`
+ * reads.
+ */
+export class UnnamedTurnError extends Error {
+  constructor() {
+    super(
+      "the turn has no id, so it has no items of its own to read: the router names no turn for an " +
+        "incognito session, a speech-to-speech session or the retry of a request_id already taken; " +
+        "follow the answer on session.events(), or read session.responses.items for a session that " +
+        "records its turns",
+    );
+    this.name = "UnnamedTurnError";
   }
 }
 

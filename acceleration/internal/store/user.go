@@ -50,8 +50,8 @@ const seenCapacity = 10_000
 //
 // A deployment with no Redis keeps the LRU and writes to Postgres on a miss, and so does
 // one whose Redis is unreachable. Nothing here fails a request because a cache is missing,
-// and nothing here fails a request at all: recording who called is not what the caller
-// asked for.
+// and recording who called fails no request at all: it is not what the caller asked for.
+// A guest's row, secret and claim are here too, and those do answer with their errors.
 //
 // The email a backend says its user signs in with is said on every request too, and is
 // held in an LRU of its own, by user and address, for emailTTL: a changed address is written
@@ -116,11 +116,13 @@ func (r *Users) record(ctx context.Context, customerID, userID, sighting string)
 		// Read through the client-side cache, which is what puts the key under Redis's
 		// tracking: a later claim deleting it drops this entry on every replica holding
 		// one. A Redis that cannot be reached is a slow deployment and not a broken one,
-		// so the answer there is the same as a miss.
-		found, err := redis.DoCache(ctx, redis.B().Get().Key(name).Cache(), userTTL).ToString()
+		// so the answer there is the same as a miss, within cacheWait.
+		read, cancel := context.WithTimeout(ctx, cacheWait)
+		found, err := redis.DoCache(read, redis.B().Get().Key(name).Cache(), userTTL).ToString()
+		cancel()
 		switch {
 		case err == nil && found != "" && settles(found, sighting):
-			r.seen.Keep(customerID, userID, found, time.Time{})
+			r.hold(ctx, customerID, userID, found)
 			return nil
 		case err != nil && !rueidis.IsRedisNil(err):
 			slog.Default().Error("could not read a user from redis, writing postgres",
@@ -131,25 +133,55 @@ func (r *Users) record(ctx context.Context, customerID, userID, sighting string)
 	var err error
 	switch sighting {
 	case UserKindAuthenticated:
-		err = r.store.RecordAccount(ctx, customerID, userID)
+		err = r.RecordAccount(ctx, customerID, userID)
 	case namedUser:
-		err = r.store.RecordUser(ctx, &User{CustomerID: customerID, ID: userID, Kind: UserKindAuthenticated})
+		err = r.Insert(ctx, &User{CustomerID: customerID, ID: userID, Kind: UserKindAuthenticated})
 	default:
-		err = r.store.RecordUser(ctx, &User{CustomerID: customerID, ID: userID, Kind: sighting})
+		err = r.Insert(ctx, &User{CustomerID: customerID, ID: userID, Kind: sighting})
 	}
 	if err != nil {
 		return err
 	}
 
 	if redis != nil {
+		// Writing the key ends this process's tracking of it, which the read in hold starts again.
+		// Redis sends this process the invalidation of its own copy after the SET's reply. Once
+		// the EXISTS after it is answered that has been applied (as in Store.forget), so hold does
+		// not read the old copy and drop the user.
 		set := redis.B().Set().Key(name).Value(sighting).Ex(userTTL).Build()
-		if err := redis.Do(ctx, set).Error(); err != nil {
-			slog.Default().Error("could not cache a user in redis",
-				"customer", customerID, "user", userID, "error", err)
+		write, cancel := context.WithTimeout(ctx, cacheWait)
+		err := redis.DoMulti(write, set, redis.B().Exists().Key(name).Build())[0].Error()
+		cancel()
+		if err == nil {
+			r.hold(ctx, customerID, userID, sighting)
+			return nil
 		}
+		slog.Default().Error("could not cache a user in redis",
+			"customer", customerID, "user", userID, "error", err)
 	}
 	r.seen.Keep(customerID, userID, sighting, time.Time{})
 	return nil
+}
+
+// hold holds a user with what Redis holds for them, unless it no longer holds that.
+//
+// The user is held before the read that tracks the key: held after it, an invalidation sent in
+// between would find nothing to drop. A read answered by this process's own copy needs no round
+// trip, and is safe: the copy is dropped before the user is (invalidate).
+func (r *Users) hold(ctx context.Context, customerID, userID, value string) {
+	r.seen.Keep(customerID, userID, value, time.Time{})
+	redis := r.store.sharedRedis()
+	read, cancel := context.WithTimeout(ctx, cacheWait)
+	defer cancel()
+	found, err := redis.DoCache(read, redis.B().Get().Key(userKey(customerID, userID)).Cache(), userTTL).ToString()
+	if err == nil && found == value {
+		return
+	}
+	r.seen.Remove(customerID, userID)
+	if err != nil && !rueidis.IsRedisNil(err) {
+		slog.Default().Error("could not read a user back from redis",
+			"customer", customerID, "user", userID, "error", err)
+	}
 }
 
 // settles reports whether a user held with held needs no write for sighting. Only a user's
@@ -159,7 +191,7 @@ func settles(held, sighting string) bool {
 	return sighting != UserKindAuthenticated || held == UserKindAuthenticated
 }
 
-// Email records the address a backend said a user signs in with (SetUserEmail), and does
+// Email records the address a backend said a user signs in with (SetEmail), and does
 // nothing for the address this process last wrote for them within emailTTL. A backend may
 // say it on every request. A changed address is written at once; one another replica wrote
 // under this one is written again here once emailTTL ends, so a row lags for at most that
@@ -177,7 +209,7 @@ func (r *Users) Email(ctx context.Context, customerID, userID, email string) err
 	lock.Lock()
 	defer lock.Unlock()
 	now := time.Now()
-	if err := r.store.SetUserEmail(ctx, customerID, userID, email); err != nil {
+	if err := r.SetEmail(ctx, customerID, userID, email); err != nil {
 		return err
 	}
 	r.emails.Keep(customerID, userID, email, now.Add(r.emailTTL))
@@ -203,6 +235,16 @@ func (r *Users) Forget(ctx context.Context, customerID, userID string) {
 	if err := redis.Do(ctx, redis.B().Del().Key(userKey(customerID, userID)).Build()).Error(); err != nil {
 		slog.Default().Error("could not drop a cached user",
 			"customer", customerID, "user", userID, "error", err)
+	}
+}
+
+// forgetKeys drops from this process the users named among keys a write has just deleted
+// (Store.forget), at once, as Forget does; with no Redis, nothing else would.
+func (r *Users) forgetKeys(names []string) {
+	for _, name := range names {
+		if customerID, userID, named := splitUserKey(name); named {
+			r.seen.Remove(customerID, userID)
+		}
 	}
 }
 
@@ -282,11 +324,6 @@ func newSeen(capacity int) *seen {
 	}
 }
 
-// Get reports whether a user is held, and marks them as the most recently used.
-func (s *seen) Get(app, id string) bool {
-	return s.Holds(app, id, "", time.Time{})
-}
-
 // Value returns what a user is held with, and marks them as the most recently used.
 func (s *seen) Value(app, id string) (string, bool) {
 	s.mu.Lock()
@@ -298,12 +335,6 @@ func (s *seen) Value(app, id string) (string, bool) {
 	}
 	s.order.MoveToFront(element)
 	return element.Value.(seenEntry).value, true
-}
-
-// Add holds a user, evicting the least recently used one across every app when the cache
-// is full.
-func (s *seen) Add(app, id string) {
-	s.Keep(app, id, "", time.Time{})
 }
 
 // Holds reports whether a user is held with value and their hold has not expired by now,
@@ -367,14 +398,6 @@ func (s *seen) Clear() {
 
 	s.order.Init()
 	s.apps = map[string]map[string]*list.Element{}
-}
-
-// Len is how many users are held across every app.
-func (s *seen) Len() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.order.Len()
 }
 
 // evict removes one element and the partition it empties. The caller holds the lock.

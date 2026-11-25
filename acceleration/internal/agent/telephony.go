@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -592,6 +593,15 @@ func (a *Agent) prepareTool(requested harness.ToolRequested) (context.Context, c
 	if requester := a.requesterLocked(); requester != (Requester{}) {
 		parent = WithRequester(parent, requester)
 	}
+	// A call is the scheduled task's when its reply is known to be (scheduledReply), or when
+	// the last thing is a scheduled turn and the call's reply is not known to be the one that
+	// answered the caller (answerReply).
+	known := requested.TurnID != ""
+	scheduled := a.scheduled && !(known && requested.TurnID == a.answerReply) ||
+		known && requested.TurnID == a.scheduledReply
+	if scheduled {
+		parent = WithScheduledCall(parent)
+	}
 	ctx, cancel := context.WithCancel(parent)
 	if a.toolCancels == nil {
 		a.toolCancels = map[string]context.CancelFunc{}
@@ -608,12 +618,7 @@ func (a *Agent) prepareTool(requested harness.ToolRequested) (context.Context, c
 	if a.toolScheduled == nil {
 		a.toolScheduled = map[string]bool{}
 	}
-	// A call is the scheduled task's when its reply is known to be (scheduledReply), or when
-	// the last thing is a scheduled turn and the call's reply is not known to be the one that
-	// answered the caller (answerReply).
-	known := requested.TurnID != ""
-	a.toolScheduled[requested.Call.ID] = a.scheduled && !(known && requested.TurnID == a.answerReply) ||
-		known && requested.TurnID == a.scheduledReply
+	a.toolScheduled[requested.Call.ID] = scheduled
 	if a.toolsRunning == nil {
 		a.toolsRunning = map[string]string{}
 	}
@@ -781,7 +786,7 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 			if err == nil {
 				a.askedApproval(requested.Call.ID)
 				if bye := a.goodbyeOf(requested.Call.ID, false); bye != nil {
-					go a.hangUpAfter(bye)
+					goroutine.Go(a.ctx, func() { a.hangUpAfter(bye) })
 				}
 			} else {
 				a.goodbyeOf(requested.Call.ID, true)
@@ -801,11 +806,11 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 			a.goodbyeOf(requested.Call.ID, true)
 		}
 		if left {
-			go func() {
+			goroutine.Go(a.ctx, func() {
 				if err := a.Close(); err != nil {
 					a.logger.Error("could not leave after transferring", "error", err)
 				}
-			}()
+			})
 		}
 		return
 	}
@@ -826,11 +831,11 @@ func (a *Agent) executeTool(ctx context.Context, cancel context.CancelFunc, requ
 	}
 	// Closing waits for the goroutine this is running on, so the agent cannot end its own
 	// call from inside the loop handling the request to end it.
-	go func() {
+	goroutine.Go(a.ctx, func() {
 		if err := a.Close(); err != nil {
 			a.logger.Error("could not leave after transferring", "error", err)
 		}
-	}()
+	})
 }
 
 // loggedTool is what "a tool call came back" says beside the agent logger's customer, session and

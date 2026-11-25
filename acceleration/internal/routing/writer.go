@@ -647,16 +647,20 @@ func (w *Writer) lose(rows []store.Request, reason string, cause error) {
 	}
 }
 
+// MaskedUser starts the user id of a lost row whose id the log masks, before the masked id.
+const MaskedUser = "masked:"
+
 // loggable is a row as the log may hold it. Its text can hold what a customer, a caller or a
-// provider wrote: a phone: user id (an SMS or WhatsApp sender), a sip- session or call id, a
-// number or a key in a tag, a category, an attribute or the error. Each is redacted and masked
-// as the log does a value, under its own name. A user id that changes is left off instead, so
-// the replayed row is billed to its app without that user, as RecordedUser leaves one. What
-// the row is billed by is kept as is: CustomerID, OrganizationID, APIKey (which names a key and
-// never holds its secret), UsageID and the quantities.
+// provider wrote: an email user id or a phone: one (an SMS or WhatsApp sender), a sip- session
+// or call id, a number or a key in a tag, a category, an attribute or the error. Each is redacted and masked
+// as the log does a value, under its own name. A user id that changes is logged masked after
+// MaskedUser, which router usage replay reads to give the row back the user of its session
+// when that user masks alike. What the row is billed by is kept as is: CustomerID,
+// OrganizationID, APIKey (which names a key and never holds its secret), UsageID and the
+// quantities.
 func loggable(request store.Request) store.Request {
-	if redactLogged("user_id", request.UserID) != request.UserID {
-		request.UserID = ""
+	if masked := redactLogged("user_id", request.UserID); masked != request.UserID {
+		request.UserID = MaskedUser + masked
 	}
 	for name, text := range map[string]*string{
 		"modality": &request.Modality, "organization_tier": &request.OrganizationTier,

@@ -340,6 +340,19 @@ func (s *OpsActivitySuite) TestOnlyTheOpsKeyListsEveryOrganizationsActivity() {
 	s.Equal(http.StatusOK, s.staff.do(http.MethodGet, path, nil, nil))
 }
 
+// Defect: a router that never set an activity key reading activity for an X-Activity-Key, an
+// empty one above all, which an unset key would equal.
+func (s *OpsActivitySuite) TestAnUnsetActivityKeyReadsNothing() {
+	paths := []string{activityPath(daysAgo(1, 0), daysAgo(1, 0), 1), "/v1/ops/orgs/" + s.app.organization.ID + "/activity"}
+	for _, key := range []string{"", "suite-activity-key"} {
+		caller := &testClient{suite: &s.RouterSuite, header: http.Header{activityKeyHeader: {key}}, kind: noCredential}
+		for _, path := range paths {
+			s.Equal(http.StatusUnauthorized, caller.do(http.MethodGet, path, nil, nil), path)
+		}
+	}
+	s.Equal(http.StatusOK, s.staff.do(http.MethodGet, paths[0], nil, nil), "the ops key alone still reads it")
+}
+
 // listedOf is the app, area and client of every item of pages, and the organizations they tell.
 func listedOf(pages []ActivityPage) (items []string, organizations []OrganizationProgress) {
 	for _, page := range pages {
