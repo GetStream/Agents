@@ -4033,6 +4033,8 @@ pub struct Connector {
     ///What a person does at the provider before the first consent, such as registering an OAuth client. Absent when the manifest says nothing.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub setup: ::std::option::Option<ConnectorSetup>,
+    ///How the connector's tools are reached, one entry per source, by kind only: never a URL, a path or a credential. A custom connector made from an endpoint is mcp, one made from http is http.
+    pub sources: ::std::vec::Vec<ConnectorSource>,
     ///The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub sync_hash: ::std::option::Option<::std::string::String>,
@@ -4674,6 +4676,58 @@ pub struct ConnectorSetup {
 pub struct ConnectorSetupStep {
     pub description: ::std::string::String,
     pub title: ::std::string::String,
+}
+///One way a connector's tools are reached. Only its kind is shown.
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorSource {
+    pub kind: ConnectorSourceKind,
+}
+///mcp is an MCP server that lists the tools, http an HTTP API whose tools the manifest lists.
+#[derive(
+    ::serde::Deserialize, ::serde::Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd,
+)]
+pub enum ConnectorSourceKind {
+    #[serde(rename = "mcp")]
+    Mcp,
+    #[serde(rename = "http")]
+    Http,
+    /// A value this SDK's spec does not list, as the router sent it.
+    #[serde(untagged)]
+    Unlisted(::std::string::String),
+}
+impl ::std::fmt::Display for ConnectorSourceKind {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::Mcp => f.write_str("mcp"),
+            Self::Http => f.write_str("http"),
+            Self::Unlisted(ref value) => f.write_str(value),
+        }
+    }
+}
+impl ::std::str::FromStr for ConnectorSourceKind {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "mcp" => Ok(Self::Mcp),
+            "http" => Ok(Self::Http),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for ConnectorSourceKind {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for ConnectorSourceKind {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
 }
 ///One tool a binding allows.
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]

@@ -213,6 +213,8 @@ from .connector_provider_app_request import ConnectorProviderAppRequest
 from .connector_sandbox import ConnectorSandbox
 from .connector_setup import ConnectorSetup
 from .connector_setup_step import ConnectorSetupStep
+from .connector_source import ConnectorSource
+from .connector_source_kind import ConnectorSourceKind
 from .connector_tool_grant import ConnectorToolGrant
 from .contact import Contact
 from .contact_attempt import ContactAttempt
@@ -891,6 +893,8 @@ __all__ = (
     "ConnectorSandbox",
     "ConnectorSetup",
     "ConnectorSetupStep",
+    "ConnectorSource",
+    "ConnectorSourceKind",
     "ConnectorToolGrant",
     "Contact",
     "ContactAttempt",

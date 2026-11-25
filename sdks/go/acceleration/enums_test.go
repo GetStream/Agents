@@ -60,3 +60,17 @@ func TestCustomHTTPToolMethodNamesItsConstants(t *testing.T) {
 		}
 	}
 }
+
+// TestConnectorSourceKindNamesItsConstants pins prefixed names for the source kinds, so the next
+// enum with mcp or http in it renames nothing callers already use.
+func TestConnectorSourceKindNamesItsConstants(t *testing.T) {
+	named := map[acceleration.ConnectorSourceKind]string{
+		acceleration.ConnectorSourceKindMCP:  "mcp",
+		acceleration.ConnectorSourceKindHTTP: "http",
+	}
+	for constant, value := range named {
+		if string(constant) != value {
+			t.Errorf("%q is spelled %q", value, constant)
+		}
+	}
+}

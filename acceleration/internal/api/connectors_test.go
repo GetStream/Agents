@@ -185,10 +185,12 @@ func (s *ConnectorsSuite) TestWhatTheRouterReadsToConnectIsNeverShown() {
 	s.Require().NoError(json.Unmarshal(raw, &shown))
 	for _, withheld := range []string{
 		"endpoints", "vars", "authorize_params", "token_params", "identity", "capture",
-		"refresh", "rate_limit", "sources", "hooks", "manifest",
+		"refresh", "rate_limit", "hooks", "manifest",
 	} {
 		s.NotContains(shown, withheld)
 	}
+	// The sources are shown by kind alone (TestAConnectorShowsItsSourceKindAndNoAddress).
+	s.Equal([]any{map[string]any{"kind": "mcp"}}, shown["sources"])
 	// The manifest's channel block stays withheld; AI-1053 shows only whether there is one.
 	s.IsType(false, shown["channel"])
 	client, ok := shown["client"].(map[string]any)
@@ -212,8 +214,8 @@ func (s *ConnectorsSuite) TestACustomConnectorsEndpointIsNeverShown() {
 
 // TestABuiltInReadsAsBeforeOnARouterWithoutAPublicURL is the control for AI-1046 and AI-1047:
 // the keys a built-in is answered with are the ones accelerate at 26051062 answered with,
-// probed there with this suite (pr-w7/author-1.md), plus channel (AI-1053). Without ROUTER_PUBLIC_URL there is no
-// redirect URI.
+// probed there with this suite (pr-w7/author-1.md), plus channel (AI-1053) and sources
+// (AI-3871). Without ROUTER_PUBLIC_URL there is no redirect URI.
 func (s *ConnectorsSuite) TestABuiltInReadsAsBeforeOnARouterWithoutAPublicURL() {
 	for _, id := range []string{"slack", "linear", "telnyx"} {
 		status, raw := s.serverClient.call(http.MethodGet, "/v1/agents/connectors/"+id, nil)
@@ -221,7 +223,7 @@ func (s *ConnectorsSuite) TestABuiltInReadsAsBeforeOnARouterWithoutAPublicURL() 
 		var shown map[string]any
 		s.Require().NoError(json.Unmarshal(raw, &shown))
 		s.Equal([]string{"category", "channel", "client", "created_at", "custom", "description", "duration", "id", "inputs",
-			"name", "revision", "schemes", "scopes"}, slices.Sorted(maps.Keys(shown)), id)
+			"name", "revision", "schemes", "scopes", "sources"}, slices.Sorted(maps.Keys(shown)), id)
 	}
 }
 
@@ -892,7 +894,8 @@ WHERE datname = current_database() AND wait_event_type = 'Lock'
 
 // TestAnMCPConnectorIsAnsweredAsBefore is the control for AI-3676: a custom MCP connector's
 // create, and the refusals of its endpoint, answer as on 5a798ad5d, probed there with this
-// request (AI-3676/base-probe.txt): the same keys and values, and the same messages.
+// request (AI-3676/base-probe.txt): the same keys and values, and the same messages. The one
+// change is AI-3871's sources.
 func (s *ConnectorsSuite) TestAnMCPConnectorIsAnsweredAsBefore() {
 	id := s.customID()
 	status, raw := s.serverClient.call(http.MethodPost, "/v1/agents/connectors", s.customConnector(id))
@@ -900,13 +903,14 @@ func (s *ConnectorsSuite) TestAnMCPConnectorIsAnsweredAsBefore() {
 	s.Require().Equal(http.StatusOK, status)
 	var shown map[string]any
 	s.Require().NoError(json.Unmarshal(raw, &shown))
-	s.Equal([]string{"channel", "client", "created_at", "custom", "duration", "id", "inputs", "name", "revision", "schemes", "scopes"},
+	s.Equal([]string{"channel", "client", "created_at", "custom", "duration", "id", "inputs", "name", "revision", "schemes", "scopes", "sources"},
 		slices.Sorted(maps.Keys(shown)))
 	for _, key := range []string{"created_at", "duration"} {
 		delete(shown, key)
 	}
 	s.Equal(map[string]any{"channel": false, "client": map[string]any{"registration": []any{"dcr"}}, "custom": true, "id": id,
-		"inputs": []any{}, "name": "Our CRM", "revision": float64(1), "schemes": []any{"oauth2_code"}, "scopes": []any{}}, shown)
+		"inputs": []any{}, "name": "Our CRM", "revision": float64(1), "schemes": []any{"oauth2_code"}, "scopes": []any{},
+		"sources": []any{map[string]any{"kind": "mcp"}}}, shown)
 
 	for endpoint, message := range map[string]string{
 		"https://10.0.0.7/mcp":    "endpoint must be a public https URL without userinfo, query or fragment",
@@ -950,7 +954,7 @@ func (s *ConnectorsSuite) TestACustomHTTPConnectorIsStoredAndItsAPIIsNeverShown(
 		status, raw := s.serverClient.call(http.MethodGet, path, nil)
 		s.Require().Equal(http.StatusOK, status)
 		s.Contains(string(raw), id, path)
-		for _, hidden := range []string{"8.8.8.8", "base_url", `"http"`, "/v1/forecast", "get_forecast"} {
+		for _, hidden := range []string{"8.8.8.8", "base_url", `"http":`, "/v1/forecast", "get_forecast"} {
 			s.NotContains(string(raw), hidden, path)
 		}
 	}
@@ -1173,6 +1177,47 @@ func (s *ConnectorsSuite) httpConnector(id string) map[string]any {
 			}},
 		},
 	}
+}
+
+// TestAConnectorShowsItsSourceKindAndNoAddress is AC of AI-3871: an http custom connector reads
+// sources [{kind: http}] and an MCP one [{kind: mcp}], in the create's answer, the read and
+// the list, and none of them shows a URL, a path or a tool. A built-in shows its kind too.
+func (s *ConnectorsSuite) TestAConnectorShowsItsSourceKindAndNoAddress() {
+	httpID, mcpID := s.customID(), s.customID()
+	created := map[string]string{}
+	for id, sent := range map[string]map[string]any{httpID: s.httpConnector(httpID), mcpID: s.customConnector(mcpID)} {
+		status, raw := s.serverClient.call(http.MethodPost, "/v1/agents/connectors", sent)
+		s.Require().Equal(http.StatusOK, status, string(raw))
+		created[id] = string(raw)
+	}
+	read := func(id string) string {
+		status, raw := s.serverClient.call(http.MethodGet, "/v1/agents/connectors/"+id, nil)
+		s.Require().Equal(http.StatusOK, status, string(raw))
+		return string(raw)
+	}
+	sourcesOf := func(raw string) any {
+		var shown map[string]any
+		s.Require().NoError(json.Unmarshal([]byte(raw), &shown), raw)
+		return shown["sources"]
+	}
+	httpKind, mcpKind := []any{map[string]any{"kind": "http"}}, []any{map[string]any{"kind": "mcp"}}
+
+	for id, want := range map[string][]any{httpID: httpKind, mcpID: mcpKind} {
+		s.Equal(want, sourcesOf(created[id]), "created "+id)
+		s.Equal(want, sourcesOf(read(id)), "read "+id)
+		for _, raw := range []string{created[id], read(id)} {
+			for _, address := range []string{"base_url", "endpoint", "8.8.8.8", "/v1/forecast", "get_forecast", "http_tools"} {
+				s.NotContains(raw, address, id)
+			}
+		}
+	}
+	listed := map[string][]ConnectorSource{}
+	for _, item := range s.list("").Items {
+		listed[item.ID] = item.Sources
+	}
+	s.Equal([]ConnectorSource{{Kind: "http"}}, listed[httpID])
+	s.Equal([]ConnectorSource{{Kind: "mcp"}}, listed[mcpID])
+	s.Equal([]ConnectorSource{{Kind: "mcp"}}, listed["slack"])
 }
 
 // customConnector is a custom MCP connector the router accepts. Its endpoint is a public IP
