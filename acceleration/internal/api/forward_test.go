@@ -3,11 +3,14 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -270,6 +273,59 @@ func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredHereInTime
 		settleFor, 10*time.Millisecond, "the session where the message landed was asked nothing")
 }
 
+// The same while the node's renewals and its other reads of the directory, which have no limit,
+// dial the connection the read waits for.
+func (s *ForwardedSessionSuite) TestMessagesNamingNoCustomerAreAnsweredHereInTimeWhileOthersDialTheHungDirectory() {
+	channel := "chat-" + s.utils.uuid()
+	proxy, redis := newRedisProxy(s.T())
+	directory := s.directoryOver(redis, "here")
+	unread, _, _ := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler),
+		func(options *Options) { options.Directory = directory })
+	unread.Client().Timeout = 10 * time.Second
+	s.serverClient.on(unread).createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+	// Held, so the directory has something to renew.
+	directory.Hold(s.T().Context(), "another-customer", 0, s.utils.uuid(), "", "")
+	proxy.hung.Store(true)
+
+	reading, stop := context.WithCancel(s.T().Context())
+	var others, messages sync.WaitGroup
+	others.Go(func() {
+		for reading.Err() == nil {
+			others.Go(func() { _, _ = directory.Node(reading, "another-customer", "no-session") })
+			select {
+			case <-reading.Done():
+			case <-time.After(3 * time.Second):
+			}
+		}
+	})
+	target, err := url.Parse(unread.URL + "/v1/chat/hooks/stream")
+	s.Require().NoError(err)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for i := range 40 {
+		body := strings.Replace(writtenTo(channel, `{}`, "is anybody there?"),
+			"message-"+channel, fmt.Sprintf("message-%d-%s", i, channel), 1)
+		request := s.request(target.Path, body, sign(body, suiteStreamSecret))
+		request.URL, request.Host = target, target.Host
+		messages.Go(func() {
+			started := time.Now()
+			response, err := unread.Client().Do(request)
+			took := time.Since(started)
+			if s.NoError(err) {
+				s.Equal(http.StatusOK, response.StatusCode)
+				s.NoError(response.Body.Close())
+			}
+			s.Less(took, 2*time.Second, "message %d", i)
+		})
+		<-ticker.C
+	}
+	messages.Wait()
+	stop()
+	others.Wait()
+}
+
 // A directory that is slow to answer is waited for: the other customer's session it names still
 // keeps the one here from answering.
 func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredByNeitherThoughTheDirectoryIsSlow() {
@@ -281,7 +337,7 @@ func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredByNeitherT
 	s.serverClient.on(slow).createSession(CreateSessionRequest{
 		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
 	})
-	proxy.lag.Store(int64(300 * time.Millisecond))
+	proxy.lag.Store(int64(700 * time.Millisecond))
 
 	s.Require().Equal(http.StatusOK, s.signedlyOn(slow, "/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
 
