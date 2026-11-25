@@ -354,6 +354,7 @@ func (s *FloorControlWithoutChorusASRSuite) TestAFloorControlThatOptsInIsRefused
 		s.Equal(http.StatusBadRequest, status, "%s %s", write.method, write.path)
 		s.Equal(codeNotConfigured, code, "%s %s", write.method, write.path)
 		s.Equal(errNoChorusASR.Message, message)
+		s.NotContains(message, "ROUTER_CHORUS_ASR_URL", "only the operator sets it")
 	}
 	configs, err := s.store.AgentConfigs.Select(context.Background(), s.customerID())
 	s.Require().NoError(err)

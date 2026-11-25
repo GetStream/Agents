@@ -98,6 +98,19 @@ func (s *ConnectorProviderAppsSuite) TestOnlyTheAppsBackendMayCreateTheProviderA
 	})
 }
 
+func (s *ConnectorProviderAppsSuite) TestAPublicURLThatIsNotHTTPSIsRefusedNamingNoSetting() {
+	public := s.router.publicURL
+	s.T().Cleanup(func() { s.router.publicURL = public })
+	s.router.publicURL = "http://router.example"
+
+	status, failure := s.serverClient.failure(http.MethodPut, providerAppPath("slack_bot"), s.withToken("Acme"))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "provider apps cannot be created")
+	s.NotContains(failure, "ROUTER_PUBLIC_URL", "only the operator sets it")
+	s.NotContains(failure, "public_url")
+}
+
 func (s *ConnectorProviderAppsSuite) TestOnlyTheAppsBackendMayDeleteTheProviderApp() {
 	s.assertPosture(serverOnly, func(as *testClient) int {
 		// Created by the first call, kept by the ones a caller was refused.

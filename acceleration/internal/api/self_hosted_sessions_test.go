@@ -42,8 +42,9 @@ func (s *SelfHostedSessionsSuite) TestASessionOnKeysStreamRefusesNamesTheKeysAnd
 	s.Equal(http.StatusBadRequest, status)
 	s.Equal(codeNotConfigured, failure.Code)
 	s.Contains(failure.Message, "Stream refused this deployment's Stream app keys")
-	s.Contains(failure.Message, "STREAM_API_KEY")
 	s.Contains(failure.Message, "incognito: true")
+	s.NotContains(body, "STREAM_API_KEY", "only the operator sets it")
+	s.NotContains(body, "stream.api_key")
 	s.NotContains(body, "api_key not valid", "Stream's own words stay in the log")
 }
 
@@ -60,6 +61,7 @@ func (s *SelfHostedSessionsSuite) TestAForkOnKeysStreamRefusesNamesTheKeysWithNo
 	s.Equal("not_configured", failure.Code, "the same refusal as a create's")
 	s.Contains(failure.Message, "Stream refused this deployment's Stream app keys")
 	s.Contains(failure.Message, "incognito: true")
+	s.NotContains(body, "STREAM_API_KEY", "only the operator sets it")
 	s.NotContains(body, "api_key not valid", "Stream's own words stay in the log")
 }
 
@@ -83,8 +85,9 @@ func (s *SelfHostedSessionsSuite) TestASessionOnADeploymentWithNoStreamAppNamesT
 	s.Equal(http.StatusBadRequest, status)
 	s.Equal(codeNotConfigured, failure.Code)
 	s.Contains(failure.Message, "this deployment has no Stream app")
-	s.Contains(failure.Message, "STREAM_API_KEY")
 	s.Contains(failure.Message, "incognito: true")
+	s.NotContains(body, "STREAM_API_KEY", "only the operator sets it")
+	s.NotContains(body, "stream.api_key")
 	s.NotContains(body, "streamapp:", "the internal error stays in the log")
 }
 

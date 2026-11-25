@@ -211,8 +211,10 @@ func (m *Manager) broker(spec Spec, d *dispatcher) (sandbox.CredentialBroker, er
 		return egress.NewBroker(options)
 	}
 	if m.options.SandboxSecretPrefix == "" {
+		m.logger.Warn("a connector binding sets sandbox, and this router has no prefix for the names of sandbox secrets",
+			"setting", "code_sandbox.secret_prefix (ROUTER_CODE_SANDBOX_SECRET_PREFIX)")
 		return nil, stack.Wrap(notConfigured(errors.New("session: a connector binding sets sandbox, and this router has no " +
-			"code_sandbox.secret_prefix (ROUTER_CODE_SANDBOX_SECRET_PREFIX) to name its secrets with")))
+			"prefix for the names of sandbox secrets")))
 	}
 	if m.options.SandboxBroker != metered.SandboxSecretsBroker {
 		return nil, stack.Wrap(notConfigured(fmt.Errorf("session: there is no sandbox broker called %q", m.options.SandboxBroker)))

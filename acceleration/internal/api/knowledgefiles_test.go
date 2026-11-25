@@ -1087,6 +1087,20 @@ func (s *KnowledgeFilesSuite) TestANamespaceIsRequired() {
 	s.Equal(http.StatusBadRequest, status)
 }
 
+func (s *KnowledgeFilesSuite) TestADeploymentThatTakesNoFilesNamesNoSetting() {
+	service := s.router.knowledgeFiles
+	s.T().Cleanup(func() { s.router.knowledgeFiles = service })
+	s.router.knowledgeFiles = nil
+	body, contentType := formWith("notes.md", []byte("# Notes"))
+
+	status, refusal := s.postKnowledgeFile(s.serverClient, body, contentType, url.Values{"namespace": {s.namespace}})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(string(refusal), `"code":"not_configured"`)
+	s.NotContains(string(refusal), "ROUTER_KNOWLEDGE_BUCKET_URL", "only the operator sets it")
+	s.NotContains(string(refusal), "knowledge_bucket_url")
+}
+
 func (s *KnowledgeFilesSuite) TestOnlyTheCustomersOwnBackendMayUpload() {
 	s.assertPosture(serverOnly, func(as *testClient) int {
 		body, contentType := formWith("notes.md", []byte("# Notes"))

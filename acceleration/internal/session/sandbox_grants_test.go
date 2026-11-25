@@ -530,7 +530,11 @@ func (s *SandboxGrantsSuite) boxed(options sandbox.Config) error {
 func (s *SandboxGrantsSuite) TestASandboxBindingNeedsTheSecretPrefix() {
 	s.manager.options.SandboxSecretPrefix = ""
 
-	s.ErrorContains(s.boxed(sandbox.Config{}), "ROUTER_CODE_SANDBOX_SECRET_PREFIX")
+	err := s.boxed(sandbox.Config{})
+
+	s.Require().ErrorIs(err, ErrNotConfigured)
+	s.NotContains(err.Error(), "ROUTER_CODE_SANDBOX_SECRET_PREFIX", "the caller gets this text, and only the operator sets it")
+	s.NotContains(err.Error(), "code_sandbox.secret_prefix")
 }
 
 func (s *SandboxGrantsSuite) TestASandboxBindingNeedsABrokerThereIs() {

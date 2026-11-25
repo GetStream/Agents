@@ -92,14 +92,26 @@ func (s *Server) logUnkept(customerID string, err error) {
 	}
 }
 
+// errUnkeptNoKeys and errUnkeptKeysRejected are the messages a caller gets for
+// session.ErrNoStreamKeys and session.ErrStreamKeysRejected. They do not show a setting name:
+// only the operator sets the keys, and the session error that shows the names goes to the log
+// (logUnkept).
+var (
+	errUnkeptNoKeys = notConfigured("this deployment has no Stream app, and a session that is not incognito " +
+		"is kept in Stream Chat: open the session with incognito: true, or tell the operator to set the keys of a Stream app")
+	errUnkeptKeysRejected = notConfigured("Stream refused this deployment's Stream app keys, and a session that is " +
+		"not incognito is kept in Stream Chat: open the session with incognito: true, or tell the operator to set the correct keys")
+)
+
 // unkeptAnswer is the answer for a session refused because the deployment's Stream app is
 // missing or refuses its keys: a setting of the deployment rather than anything in the
 // request, so not_configured, in words of our own. False for any other error.
 func unkeptAnswer(err error) (APIError, bool) {
-	for _, refusal := range []error{session.ErrNoStreamKeys, session.ErrStreamKeysRejected} {
-		if errors.Is(err, refusal) {
-			return notConfigured(strings.TrimPrefix(refusal.Error(), "session: ")), true
-		}
+	switch {
+	case errors.Is(err, session.ErrNoStreamKeys):
+		return errUnkeptNoKeys, true
+	case errors.Is(err, session.ErrStreamKeysRejected):
+		return errUnkeptKeysRejected, true
 	}
 	return APIError{}, false
 }
