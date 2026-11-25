@@ -280,6 +280,33 @@ func (s *CustomConnectorSuite) TestAScopeListedTwiceIsRefused() {
 	s.ErrorContains(s.manifest(func(c *CustomConnector) { c.Scopes = []string{"read", "write", "read"} }), `scopes[2] "read" is listed twice`)
 }
 
+// An http connector meets the same limits as an MCP one: CustomManifest checks them before it tells the two apart.
+func (s *CustomConnectorSuite) TestAnHTTPConnectorMeetsTheLimitsOfAnMCPOne() {
+	for name, test := range map[string]struct {
+		edit func(*CustomConnector)
+		err  string
+	}{
+		"an id":                {func(c *CustomConnector) { c.ID = "custom_9weather" }, "is not custom_ then a lowercase letter"},
+		"a name":               {func(c *CustomConnector) { c.Name = strings.Repeat("é", 121) }, "name is longer than 120 characters"},
+		"a category":           {func(c *CustomConnector) { c.Category = strings.Repeat("é", 81) }, "category is longer than 80 characters"},
+		"a description":        {func(c *CustomConnector) { c.Description = strings.Repeat("é", 1001) }, "description is longer than 1000 characters"},
+		"a scope with a space": {func(c *CustomConnector) { c.Scopes = []string{"a b"} }, "scopes[0] is not an RFC 6749 scope token"},
+		"a scope listed twice": {func(c *CustomConnector) { c.Scopes = []string{"a", "a"} }, "is listed twice"},
+	} {
+		connector := httpCustom()
+		test.edit(&connector)
+
+		_, err := CustomManifest(connector)
+
+		s.ErrorContains(err, test.err, name)
+	}
+
+	connector := httpCustom()
+	connector.Name, connector.Description = strings.Repeat("é", 120), strings.Repeat("é", 1000)
+	_, err := CustomManifest(connector)
+	s.NoError(err, "at the limits")
+}
+
 // An imported manifest reaches the limits through AsCustom.
 func (s *CustomConnectorSuite) TestAManifestPastALimitIsNoCustomOne() {
 	manifest, err := CustomManifest(CustomConnector{ID: "custom_acme", Name: "Acme", Endpoint: "https://mcp.acme.example/mcp", Schemes: []string{"bearer"}})
