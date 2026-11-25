@@ -5312,6 +5312,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("setup")]
         public ConnectorSetup? Setup { get; set; } = default!;
 
+        /// <summary>
+        /// The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
+        public string? SyncHash { get; set; } = default!;
+
         private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
 
         [System.Text.Json.Serialization.JsonExtensionData]
@@ -7058,6 +7064,12 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("scopes")]
         public System.Collections.Generic.List<string>? Scopes { get; set; } = default!;
+
+        /// <summary>
+        /// The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
+        public string? SyncHash { get; set; } = default!;
 
     }
 
@@ -10565,6 +10577,12 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
+        /// The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the credit granted minus the trial credit is above zero. Spending the credit does not lower it. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("funded")]
+        public bool? Funded { get; set; } = default!;
+
+        /// <summary>
         /// The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("furthest_step")]
@@ -12170,7 +12188,7 @@ namespace GetStream.VisionAgents.Models
     }
 
     /// <summary>
-    /// What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user &lt;id&gt;, every user of app &lt;id&gt;, every user of organization &lt;id&gt;), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+    /// What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user &lt;id&gt;, every user of app &lt;id&gt;, every user of organization &lt;id&gt;), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
     /// </summary>
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class Quota
@@ -12877,6 +12895,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("stt")]
         public SttOptions? Stt { get; set; } = default!;
 
+        /// <summary>
+        /// The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
+        public string? SyncHash { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("tts")]
         public TtsOptions? Tts { get; set; } = default!;
 
@@ -12915,6 +12939,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("stt")]
         public SttOptions? Stt { get; set; } = default!;
+
+        /// <summary>
+        /// The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
+        public string? SyncHash { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("tts")]
         public TtsOptions? Tts { get; set; } = default!;
@@ -13286,7 +13316,7 @@ namespace GetStream.VisionAgents.Models
         public string DeliveredTo { get; set; } = default!;
 
         /// <summary>
-        /// Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
+        /// Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), not_in_team (in an app that keeps each team's agents to its own users, the user who made the task is no longer in its agent's team, so the agent is not run; not tried again), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("error")]
         public string? Error { get; set; } = default!;

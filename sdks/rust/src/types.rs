@@ -4033,6 +4033,9 @@ pub struct Connector {
     ///What a person does at the provider before the first consent, such as registering an OAuth client. Absent when the manifest says nothing.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub setup: ::std::option::Option<ConnectorSetup>,
+    ///The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub sync_hash: ::std::option::Option<::std::string::String>,
 }
 ///grant_created: a consent or a credentials write gave the connection a grant. grant_refreshed: the router renewed its credential. grant_revoked: the grant ended, because the provider refused or revoked it or the connection was deleted. token_export: the app's backend exported its access credential. proxy_call: a direct call went to the provider through the connection. tool_reapproved: the app's backend approved tools at the schema the provider lists now (POST .../tools/approve); tools names them.
 #[derive(
@@ -5300,6 +5303,9 @@ pub struct CustomConnectorRequest {
     ///The scopes a consent asks for, each an RFC 6749 scope token.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub scopes: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
+    ///The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub sync_hash: ::std::option::Option<::std::string::String>,
 }
 ///`CustomModel`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq, Default)]
@@ -8897,6 +8903,9 @@ pub struct OrganizationActivity {
 ///`OrganizationProgress`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
 pub struct OrganizationProgress {
+    ///The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the credit granted minus the trial credit is above zero. Spending the credit does not lower it. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub funded: ::std::option::Option<bool>,
     ///The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since.
     pub furthest_step: ActivityStep,
     ///The organization.
@@ -9879,7 +9888,7 @@ pub struct ProviderPrice {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub per_million_output_tokens: ::std::option::Option<f64>,
 }
-///What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+///What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user <id>, every user of app <id>, every user of organization <id>), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
 pub struct Quota {
     ///How many responses one end user may ask for in a UTC day. 0 is no cap. Left out, the next level's applies: the app's, then the organization's, then the router's default.
@@ -10467,6 +10476,9 @@ pub struct RouterConfig {
     pub sts: ::std::option::Option<StsOptions>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub stt: ::std::option::Option<SttOptions>,
+    ///The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub sync_hash: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub tts: ::std::option::Option<TtsOptions>,
     pub updated_at: ::std::string::String,
@@ -10484,6 +10496,9 @@ pub struct RouterConfigRequest {
     pub sts: ::std::option::Option<StsOptions>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub stt: ::std::option::Option<SttOptions>,
+    ///The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub sync_hash: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub tts: ::std::option::Option<TtsOptions>,
 }
@@ -10767,7 +10782,7 @@ pub struct ScheduledTaskRun {
     pub attempts: i64,
     ///Where the follow-up landed: conversation, sms, whatsapp, imessage or phone. Empty until it lands.
     pub delivered_to: ::std::string::String,
-    ///Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
+    ///Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), not_in_team (in an app that keeps each team's agents to its own users, the user who made the task is no longer in its agent's team, so the agent is not run; not tried again), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
     pub error: ::std::option::Option<::std::string::String>,
     #[serde(deserialize_with = "::std::option::Option::deserialize")]

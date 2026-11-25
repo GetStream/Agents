@@ -828,7 +828,7 @@ func (s *MeteringSuite) TestALegThatCannotBeWrittenAfterTheSweepStoppedIsLogged(
 	s.Empty(s.openLegs(), "nothing was kept to write")
 }
 
-func (s *MeteringSuite) TestEveryLegOfAnEndedCallCountsTowardTheSandboxsMinutes() {
+func (s *MeteringSuite) TestEveryPlacedLegOfAnEndedCallCountsTowardTheSandboxsMinutes() {
 	s.withSandbox(dlc.Sandbox{Enabled: true})
 	s.Require().NoError(s.service.gate.SetRecipients(s.ctx, s.customer, []string{"+15125550123", "+15125550124"}))
 	placed := s.place()

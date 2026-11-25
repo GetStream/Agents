@@ -465,7 +465,8 @@ token is counted on their day. In a session the user opened, every turn is count
 
 Each is counted against two buckets: the `user_id` the caller's token names, scoped
 to the customer who minted it, and the address the request came from, scoped to the
-customer too, since each has its own limit. Both matter.
+customer too, since each has its own limit. Both matter. An IPv6 address is counted by its
+/64, which one device may hold whole, and an IPv4-mapped one by the IPv4 address it carries.
 A user id is the honest answer to who is asking, and the address is the answer that
 still holds when a backend mints a fresh user id per request.
 
@@ -1432,6 +1433,18 @@ again, up to four rounds and always inside the skill's own deadline. The subagen
 first. One sandbox is created the first time code actually runs and released when the session
 ends.
 
+A sandbox is admitted as a model call is: before it is created, before it is started again after
+it stopped, and before each run. A suspended organization's is refused, and so is one whose
+organization has no credit left or has reached its spend hard limit or one of its own spend
+limits, unless the price list makes sandboxes free; the refusal is the tool result. One in the
+customer's own Daytona organization is refused alike, as a model on their own key is, since its
+BYOK fee is billed. A running sandbox is admitted again every minute, idle or running code, and
+stopped once it is refused, which ends the run in it and bills its disk alone until a run its
+organization may pay for starts it again; a run that had finished keeps its result. It is refused
+for money spent, not for money set aside: credit that other work, or its own lease, holds does
+not stop it. Money that only could not be checked, such as a balance unread for too long,
+refuses a new or stopped sandbox and leaves a running one running.
+
 `sandbox_options` on the config, or in `agent.yaml`, says how that sandbox is built and how
 long code may run in it: an `image` with Python to start from, `setup` commands run on top of
 it once, `timeout_ms` for one run (30 seconds by default, at most 30 minutes), and `cpu`,
@@ -2093,8 +2106,10 @@ number's offer when the purchase names none; with neither, as work with no price
 was bought in under the buyer's key and each after it by `router usage numbers` under
 `job:number_rental`. A 10DLC brand, a campaign's review and its first three months are billed when
 it is registered, and each month after by `router usage dlc` under `job:dlc_fees`. While the 10DLC
-sandbox holds an app, its texts and minutes are priced and given away (`dlc_sandbox = "true"`); a
-leg the sweep ended does not count toward its minutes.
+sandbox holds an app, the texts it sends and the minutes of the calls it places are priced and given
+away (`dlc_sandbox = "true"`), and only those minutes count toward the sandbox's minutes a day. The
+sandbox limits nothing that arrives, so a text the app receives and a call to its number are billed
+as for any app; a leg the sweep ended does not count toward its minutes.
 
 **The audit log holds configuration, not traffic.** `audit_log` keeps one row per change to
 an agent config, skill, knowledge document, knowledge url, router config, plugin or policy:
@@ -2142,23 +2157,24 @@ is left out when the request has none:
 | `request_size` | The request's `Content-Length`. None for a chunked body |
 | `user_id` | The end user of a request from a user's device, cut to 256 bytes. None for a backend's request, even one that names a user |
 | `build_version` | The release the router was built from. None in a local build |
-| `close_reason` | Why a session socket closed: the events socket (`/v1/agents/sessions/{id}/events`) and `/v1/agents/socket`. None for any other request or socket. The values are below |
+| `close_reason` | Why a socket closed: the events socket (`/v1/agents/sessions/{id}/events`), `/v1/agents/socket`, `/v1/dispatch` and `/v1/{modality}/stream`. None for any other request or socket. The values are below |
 | `close_code` | The code of the close frame the caller sent, or of the one the router sent. None for `client_gone` and `timeout` |
-| `end_reason` | Why the session ended, as its row keeps it (`closed`, `agent_hangup` and the rest), with `session_ended` only. None on a socket relayed from another node: the node running the session keeps it |
+| `end_reason` | Why the session ended, as its row keeps it (`closed`, `agent_hangup` and the rest), with `session_ended` only. None on a socket relayed from another node: the node running the session keeps it. None on `/v1/dispatch` and `/v1/{modality}/stream`, which hold no session |
 
 A socket is logged once, when it closes, so its `duration` is how long the connection lived
-rather than a time to respond and its status is the `101` of the upgrade. A session socket's
+rather than a time to respond and its status is the `101` of the upgrade. A socket's
 `close_reason` is one of these:
 
 | `close_reason` | When |
 | --- | --- |
 | `client_closed` | The caller sent a close frame, or a `close` command (a `stop` on `/v1/agents/socket`) that ended the session. A command sent once the session had ended is not counted: the line says `session_ended` |
 | `client_gone` | The connection broke with no close frame, or a write to the caller failed |
-| `timeout` | The caller answered no ping in time, or sent no start frame in time on `/v1/agents/socket` |
-| `session_ended` | The session ended for another reason. `end_reason` says which |
-| `refused` | The router refused the caller: a start frame it would not take, a session it would not open, a frame it could not read (`1008`) or one past the size limit (`1009`) |
-| `server_error` | `/v1/agents/socket` could not open the session for a failure of the router's own, such as a database read. The caller is sent `1008` |
-| `shutdown` | The router stopped a resumable socket's session on its way down (`1012`) |
+| `timeout` | The caller answered no ping in time, or sent no start frame in time on `/v1/agents/socket` and `/v1/{modality}/stream` |
+| `session_ended` | The session ended for another reason. `end_reason` says which. Session sockets only |
+| `relay_ended` | A socket relayed from another node lost the watcher the node running the session held for it, such as one given back for a socket it had not heard from in time, while the session went on (`1011`). A resumable socket's caller reconnects to go on watching (the Go SDK does, for a text session); the other clients see their socket fail with that code; the session still runs. Events socket only |
+| `refused` | The router refused the caller: a start frame it would not take, a session it would not open, a frame it could not read (`1008`) or one past the size limit (`1009`). A stream socket closes a refused start frame with the code it always has (`1011`, or `1008` for an unknown target, a setting the model cannot take or a refusal about money), and a frame it cannot read after the start (`tts`, `llm`) with `1000` |
+| `server_error` | A failure that is not the caller's: `/v1/agents/socket` could not open the session for a failure of the router's own, such as a database read (`1008`), or a stream socket could not read the config it names or start a provider (`1011`) |
+| `shutdown` | The router stopped a resumable socket's session on its way down (`1012`), or sent a dispatch worker to reconnect elsewhere (`1001`) |
 
 A `5xx` is logged
 at error instead, because an access log at a busy deployment is the one stream nobody reads
@@ -2171,6 +2187,14 @@ string is never logged: a socket names its customer there and a telephony vendor
 The routes under `/v1/ops` are Stream staff's: they take the ops key (`ROUTER_AUTH_OPS_KEY`) in
 `X-Ops-Key` and no app's credentials. An app's key, even its backend's, is answered 401, and so
 is every call on a deployment with no ops key. They are tagged `Staff` in the spec.
+
+The two activity routes also take the activity key (`ROUTER_AUTH_ACTIVITY_KEY`) in
+`X-Activity-Key`, for a job that reads activity every day. It reaches those two routes and no
+other: on any other route it is answered 401. To rotate it, set the new key in
+`ROUTER_AUTH_ACTIVITY_KEY` and the old one in `ROUTER_AUTH_ACTIVITY_KEY_PREVIOUS`; both work until
+you unset the old one. Unset, there is no activity key and the ops key still reads both routes. The
+router does not start when either activity key is under 32 bytes, has a space at either end, or is
+the ops key or the manage key. `openssl rand -hex 32` prints a key it takes.
 
 | Route | What it is for |
 | ----- | -------------- |
@@ -2194,12 +2218,15 @@ Every organization's activity is a list by cursor of `customer_activity`'s rows 
 also tells `furthest_step` (from `from` to `to`) and `steps` (every day) for the organizations
 on it. `org_id` and `app_id` narrow the items to one organization, one app or both; with
 `app_id`, `furthest_step` and `steps` are still the organization's, of all its apps. A cursor is
-refused with other `from`, `to`, `org_id` or `app_id` than its page's. Its description holds the
+refused with other `from`, `to`, `org_id` or `app_id` than its page's. Each organization also tells `funded`: whether it has credit that is not trial
+credit, read live from the usage service when the page is read. It is absent on every organization of the page when
+the deployment has no usage service or it did not answer. Its description holds the
 definitions of tried, API calls, production and churned:
 
 ```bash
 printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-01"
 printf 'X-Ops-Key: %s\n' "$ROUTER_AUTH_OPS_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-07&org_id=$ORG_ID"
+printf 'X-Activity-Key: %s\n' "$ROUTER_AUTH_ACTIVITY_KEY" | curl -H @- "localhost:8080/v1/ops/activity?from=2026-11-01&to=2026-11-01"
 ```
 
 `areas` is one item per area and client, `meters` one per modality (requests, tokens, audio,
@@ -2252,7 +2279,7 @@ What each organization did with Agents lives in three places:
 | ----- | ---- | ---- |
 | `customer_activity` (Postgres) | One row per app, area, client and UTC day: requests, refusals, the last refusal's code | 400 days |
 | `GET /v1/ops/orgs/{org_id}/activity` | One organization: areas, `furthest_step`, `steps`, meters, sessions, latency | What the table keeps |
-| `GET /v1/ops/activity` | Every organization: one item per app, area, client and day from `from` to `to`, with each organization's `furthest_step` and `steps`, by cursor | What the table keeps |
+| `GET /v1/ops/activity` | Every organization: one item per app, area, client and day from `from` to `to`, with each organization's `furthest_step`, `steps` and `funded` (read live from the usage service), by cursor | What the table keeps |
 | The activity digest (Slack, `ROUTER_LIMITS_SLACK_CHANNEL`) | Every organization, the UTC day before; `activity_digests` holds the days posted | 400 days |
 
 The router keeps activity for 400 days (`ActivityKeepDays` in `internal/store/activity.go`).
@@ -2426,6 +2453,8 @@ arriving late warns (other producers ship late by design and are not measured), 
 a batch sent without the ingest token (`batch_unauthorized`, a 401): a misconfigured
 producer, or no producer at all. `usage_batches_refused_total{status}` counts both kinds of
 refusal.
+Each alert's Sentry message follows its name with a plain-words line of what it means and what to
+check first; the line is not in the fingerprint, so rewording it keeps the alert's Sentry issue.
 
 Each alerts loop, the router's two and the service's, adds to the counter
 `router_alert_holds_total{alert,level}` on its process's `/metrics` at every check (every 15 s),
@@ -2664,7 +2693,12 @@ them without buying anything here. `POST /v1/phone/trunks` stores the trunk (hos
 transport, username, codecs, and whether it accepts an INVITE without SDP); the password is
 sealed under the deployment's key encryption key and never returned, and without such a key
 the trunk paths answer 400 `not_configured`. `POST /v1/phone/trunks/{id}/numbers` records a number on it with
-vendor `sip_trunk`. A call from that number is then placed by the router itself: it opens one
+vendor `sip_trunk`. A number another app holds, bought or on its own trunk, in the Stream app this
+app's lines are made in is refused with 409 `phone_number_held_elsewhere`, and so is a call or
+transfer from a trunk number another app there has since bought: Stream lists a number on one trunk
+per app, so the line made for one app's calls would take the other's. A bought number attached or
+called from takes down first the lines other apps' trunks hold it on in that Stream app, and fails
+rather than forget one Stream would not let go. A call from that number is then placed by the router itself: it opens one
 SIP dialog to the customer's trunk and one to the Stream trunk made for the call, and copies
 SDP between them, so the audio goes from the carrier to Stream directly. `POST
 /v1/phone/calls` answers `queued` at once, as with every vendor. A wrong password, host or
@@ -2836,7 +2870,7 @@ and then saves the cursor.
 `POST /v1/data/import` refuses an export the same way: an app this deployment already holds gets a 409 before
 any of the export's rows is written, unless the request asks `?full=true`; a batch of changes is always applied. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
 An app runs one import at a time on a router: a second one is answered 409 `import_running` until the first ends. A router runs
-at most four imports at once, and one more is answered 503. An import ends when a line has taken a minute to arrive.
+at most four imports at once, and one more is answered 503. An import ends with a 504 `timeout` when a line has taken a minute to arrive.
 
 The default `--source-auth jwt` is for a source behind Stream's gateway, such as the hosted router.
 `--source-auth server` is for a source router reached directly.
@@ -2911,7 +2945,10 @@ The customer is always the authenticated caller, never anything in the body or t
 so an export is the caller's own data and an import lands under the caller's own app
 however the file was edited on the way. An import upserts and refuses a row whose primary
 key belongs to another tenant, so replaying the same change twice lands where applying it
-once would and a guessed id overwrites nothing. A request row is the exception: each
+once would and a guessed id overwrites nothing. A session's call, turn or branch, a simulation's
+run and a campaign's attempt name only a session, simulation or contact the app holds here. A row that
+names another is refused, whoever holds that one: `replicate` stops at it and names it, and
+`POST /v1/data/import` answers 400 and says only that the row cannot be written here. A request row is the exception: each
 deployment numbers its own, so it is imported with an id the destination gives it, under a
 `usage_id` made from the importing app and the `usage_id` the row had where it was first
 recorded (its source id, for a row from before usage ids), and written once. It keeps that
@@ -2932,7 +2969,9 @@ the bucket is the operator's.
 
 Only a phone number on the app's own SIP trunk (vendor `sip_trunk`) moves, in E.164 form
 (`+15551234567`), and it arrives detached: its trunk, route, call and 10DLC use case stay
-behind, so it is attached again where it arrives. A number bought at a vendor does not move,
+behind, so it is attached again where it arrives. One that another app holds where it moves to is
+left out, unless the moving app holds it there too, and the move carries on: `router replicate`
+logs how many, and the import does not count them in `rows`. A number bought at a vendor does not move,
 held or given back; its bills move with the requests. The app keeps it by buying or porting
 it where it moves to.
 

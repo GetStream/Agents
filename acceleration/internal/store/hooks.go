@@ -79,8 +79,10 @@ func (s *Store) NumberByCallInApp(ctx context.Context, scope AppScope, callType,
 		if !named {
 			return PhoneNumber{}, numberNotHeld{fmt.Sprintf("store: no number reaches call %s:%s", callType, callID)}
 		}
+		// A number on a customer's own trunk is lined for its calls out alone, which are known by
+		// their resources before this is asked, and never answers a call.
 		if err := s.global.NewSelect().Model(&held).ColumnExpr("pn.*").ColumnExpr(trunkURI).
-			Where("e164 = ?", e164).Where("stream_trunk_id IS NOT NULL").
+			Where("e164 = ?", e164).Where("stream_trunk_id IS NOT NULL").Where("vendor <> ?", sipTrunkVendor).
 			Where("released_at IS NULL").ApplyQueryBuilder(scope.where).Limit(20).Scan(ctx); err != nil {
 			return PhoneNumber{}, fmt.Errorf("store: number by call: %w", err)
 		}

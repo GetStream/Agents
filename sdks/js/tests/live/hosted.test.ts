@@ -201,7 +201,6 @@ describe(
       const session = await agentOf(page).sessions.create({
         title,
         project_id: "qa",
-        llm: model,
         watch: false,
       });
       opened.push({ api: page, id: session.id });
@@ -251,7 +250,7 @@ describe(
 
       // Unwatched, so that when this stops being a todo it reports what it is about. Held as
       // a page it failed on the socket instead, which is a different limitation entirely.
-      const session = await agentOf(mine).sessions.create({ llm: model, watch: false });
+      const session = await agentOf(mine).sessions.create({ watch: false });
       opened.push({ api: mine, id: session.id });
 
       const listed = await agentOf(theirs).sessions.query();
@@ -280,10 +279,7 @@ describe(
       // What Backend.socketURL builds: credentials in the query string, because that is
       // all a browser has.
       const page = await asUser(uniqueId("browser"));
-      const session = await Session.open(page, {
-        agent_id: uniqueId("conv"),
-        llm: model,
-      });
+      const session = await Session.open(page, agentName ? { agent: agentName } : {});
       opened.push({ api: page, id: session.id });
       await session.close();
     });

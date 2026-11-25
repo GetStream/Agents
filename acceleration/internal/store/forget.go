@@ -315,7 +315,7 @@ func deleteTasks(ctx context.Context, db bun.IDB, appID string, tasks func(bun.Q
 		// One statement, so the delete and the redaction read one snapshot: a task that commits
 		// between two statements would be deleted with its changes kept. The redaction's reads of
 		// the live tasks read that snapshot, from before the delete.
-		redacted := tx.NewUpdate().Model((*dataChange)(nil)).Set("op = ?", ChangeDelete).Set("payload = NULL").
+		redacted := forgottenChanges(tx, appID, "scheduled_tasks", "scheduled_task_runs").
 			Where(changes, args...).Returning("1")
 		deleted := tx.NewDelete().Model((*ScheduledTask)(nil)).Where("customer_id = ?", appID).Returning("id")
 		if onlyLocked {

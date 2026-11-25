@@ -3,6 +3,7 @@
 package streamapp
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -158,6 +159,59 @@ func (s *StoredSuite) TestATokenAboutToExpireIsRefreshedAtTheGateway() {
 	s.Require().Len(asked, 1)
 	s.Equal("/internal/v1/apps/"+s.customer+"/server-token", asked[0]["path"])
 	s.Equal(forwardedKey, asked[0]["api_key"])
+}
+
+func (s *StoredSuite) TestAskingWhereAnAppWithATokenAboutToExpireActsAsksTheGatewayNothing() {
+	mint := s.gateway()
+	forwarded := s.forwarded(mint)
+	_, err := forwarded.Keep(s.ctx, s.customer, forwardedKey, s.serverToken(30*time.Minute))
+	s.Require().NoError(err)
+
+	app, err := NewClients(s.forwardedSource(forwarded), ClientsOptions{}).Placed(s.ctx, s.customer)
+
+	s.Require().NoError(err)
+	s.Equal(s.app, app, "its own app, as For answers")
+	s.Empty(mint.requests())
+}
+
+// With no fallback an app's work is made in its own app or nowhere, so a token that has run out
+// leaves it there. Catches an app that stopped acting read as sharing the deployment's app, which
+// would let it hold a number against every app on the deployment.
+func (s *StoredSuite) TestAskingWhereAnAppWhoseTokenRanOutActsAnswersItsOwnApp() {
+	mint := s.gateway()
+	forwarded := s.forwarded(mint)
+	_, err := forwarded.Keep(s.ctx, s.customer, forwardedKey, s.serverToken(time.Hour+time.Minute))
+	s.Require().NoError(err)
+	s.clock.Advance(2 * time.Hour)
+
+	app, err := NewClients(s.forwardedSource(forwarded), ClientsOptions{}).Placed(s.ctx, s.customer)
+
+	s.Require().NoError(err)
+	s.Equal(s.app, app)
+	s.Empty(mint.requests(), "asking where is not acting")
+}
+
+// An app whose policy requires an app of its own is in the same place with the fallback on.
+// Catches it answered as ErrNoIdentity, a settled answer that reads as sharing every app, which
+// would refuse a trunk owner's calls from a number this app bought.
+func (s *StoredSuite) TestAskingWhereAnAppThatMustActInItsOwnAndWhoseTokenRanOutActsAnswersItsOwnApp() {
+	mint := s.gateway()
+	forwarded := s.forwarded(mint)
+	_, err := forwarded.Keep(s.ctx, s.customer, forwardedKey, s.serverToken(time.Hour+time.Minute))
+	s.Require().NoError(err)
+	s.clock.Advance(2 * time.Hour)
+	source, err := NewStored(StoredOptions{
+		Store: s.store, Deployment: s.deployment, Forwarded: forwarded, Now: s.clock.Now,
+		FallbackToDeployment: true,
+	})
+	s.Require().NoError(err)
+	source.SetFloor(func(context.Context, string) (bool, error) { return true, nil })
+
+	app, err := NewClients(source, ClientsOptions{}).Placed(s.ctx, s.customer)
+
+	s.Require().NoError(err)
+	s.Equal(s.app, app)
+	s.Empty(mint.requests(), "asking where is not acting")
 }
 
 func (s *StoredSuite) TestAnExpiredTokenTheGatewayWillNotReplaceActsNowhere() {

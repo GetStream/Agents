@@ -210,9 +210,17 @@ func (d *Directory) Release(ctx context.Context, customerID, sessionID string) {
 		return
 	}
 
-	if err := d.redis.Do(ctx, d.redis.B().Del().Key(d.sessionKey(key), d.sessions+sessionID).Build()).Error(); err != nil {
-		d.logger.Warn("could not take back this node's claim on a session",
-			"customer", customerID, "session", sessionID, "error", err)
+	// One DEL a key: on a Redis Cluster the two keys are in different hash slots, and one DEL over
+	// both is refused before it is sent.
+	deletes := []rueidis.Completed{
+		d.redis.B().Del().Key(d.sessionKey(key)).Build(),
+		d.redis.B().Del().Key(d.sessions + sessionID).Build(),
+	}
+	for _, result := range d.redis.DoMulti(ctx, deletes...) {
+		if err := result.Error(); err != nil {
+			d.logger.Warn("could not take back this node's claim on a session",
+				"customer", customerID, "session", sessionID, "error", err)
+		}
 	}
 }
 

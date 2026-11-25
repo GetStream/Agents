@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/live"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/options"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 )
 
@@ -19,7 +21,14 @@ type VoicesSuite struct {
 }
 
 func TestVoicesSuite(t *testing.T) {
-	runSuite(t, new(VoicesSuite))
+	suite := new(VoicesSuite)
+	// The cloner's own model, reached by name only, so what it claims decides who may hold a voice.
+	suite.ttsConfig = routableConfig()
+	suite.ttsConfig.Providers = append(suite.ttsConfig.Providers, routing.ProviderConfig{
+		Provider: "elevenlabs", Model: "eleven_flash_v2_5", Languages: []string{"la"},
+		DataPolicy: options.DataHandling{TrainsOnData: options.ClaimYes, Retention: options.RetentionNone},
+	})
+	runSuite(t, suite)
 }
 
 // SetupTest gives every test an app of its own, because the voices listed are everything
@@ -154,6 +163,44 @@ func (s *VoicesSuite) TestAVoiceWithNothingRecordedCannotBePrepared() {
 
 	s.Equal(http.StatusBadRequest, status)
 	s.Contains(failure, "add a recording")
+}
+
+func (s *VoicesSuite) TestAVoiceThePolicyAllowsNoModelForIsTheCallersToChange() {
+	created := s.createVoice(map[string]any{"name": "founder"})
+	s.record(created.Id, map[string]any{
+		"audio":    base64.StdEncoding.EncodeToString([]byte("pretend this is speech")),
+		"filename": "clip.wav",
+	})
+	s.prepare(created.Id)
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/policies/app",
+		map[string]any{"allowed_models": []string{}}, nil))
+
+	for path, body := range map[string]any{
+		"/prepare": map[string]any{},
+		"/preview": map[string]any{"provider": "elevenlabs"},
+	} {
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/voices/"+created.Id+path, body)
+		s.Equal(http.StatusBadRequest, status, path)
+		s.Contains(failure, "your policy does not allow this model", path)
+	}
+}
+
+func (s *VoicesSuite) TestAVoiceNoProviderMayHoldIsTheCallersToChange() {
+	created := s.createVoice(map[string]any{"name": "founder"})
+	s.record(created.Id, map[string]any{
+		"audio":    base64.StdEncoding.EncodeToString([]byte("pretend this is speech")),
+		"filename": "clip.wav",
+	})
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/policies/app",
+		map[string]any{"data_policy": map[string]any{"retention": "none"}}, nil))
+	s.prepare(created.Id)
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/policies/app",
+		map[string]any{"data_policy": map[string]any{"allow_training": false}}, nil))
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/voices/"+created.Id+"/prepare", map[string]any{})
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "no provider meets your data policy")
 }
 
 func (s *VoicesSuite) TestAVoiceNeedsAName() {

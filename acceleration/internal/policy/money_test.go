@@ -388,6 +388,81 @@ func (s *PolicySuite) TestAHoldCountsAgainstTheSpendHardLimit() {
 	s.ErrorIs(s.admit(enforcer.Enforcer, s.app).Spend, ErrSystemLimit, "with no write and no read")
 }
 
+// admitRunning is AdmitRunning for the suite's owner, which must refuse nothing outright.
+func (s *PolicySuite) admitRunning(enforcer *Enforcer) routing.Admission {
+	admitted, err := enforcer.AdmitRunning(s.ctx, s.owner())
+	s.Require().NoError(err)
+	return admitted
+}
+
+func (s *PolicySuite) TestWorkAlreadyRunningIsNotRefusedForCreditOtherWorkSetsAside() {
+	enforcer := s.billed()
+	s.usage().Credit(s.T(), s.org, 1_000_000)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
+	s.read(enforcer.Enforcer, s.org)
+
+	s.Require().NoError(enforcer.Reserve(s.owner(), newID(), 1_500_000, time.Minute))
+
+	s.ErrorIs(s.admit(enforcer.Enforcer, s.app).Spend, ErrNoCredits, "new work is refused for what is set aside")
+	s.NoError(s.admitRunning(enforcer.Enforcer).Spend, "what runs goes on: $1.00 of credit is left")
+}
+
+func (s *PolicySuite) TestWorkAlreadyRunningIsRefusedOnceItsCreditIsSpent() {
+	enforcer := s.billed()
+	s.usage().Credit(s.T(), s.org, 1_000_000)
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
+	s.read(enforcer.Enforcer, s.org)
+	s.Require().NoError(s.admitRunning(enforcer.Enforcer).Spend)
+
+	enforcer.Settle(s.owner(), newID(), 1_000_000)
+
+	s.ErrorIs(s.admitRunning(enforcer.Enforcer).Spend, ErrNoCredits, "spent here, before the usage service has the row")
+}
+
+func (s *PolicySuite) TestWorkAlreadyRunningIsRefusedAtTheSpendHardLimitOnlyOnceItIsSpent() {
+	enforcer := s.billed()
+	s.usage().Credit(s.T(), s.org, 100_000_000)
+	s.usage().SetLimits(s.T(), s.org, spendHardLimit(new(int64(1_000_000)), nil))
+	enforcer.Join(s.T().Context(), s.app, s.org, openTier)
+	s.read(enforcer.Enforcer, s.org)
+	s.Require().NoError(enforcer.Reserve(s.owner(), newID(), 1_500_000, time.Minute))
+	s.Require().ErrorIs(s.admit(enforcer.Enforcer, s.app).Spend, ErrSystemLimit, "new work is refused for what is set aside")
+	s.Require().NoError(s.admitRunning(enforcer.Enforcer).Spend, "what runs is not")
+
+	s.usage().Spend(s.T(), s.org, 1_000_000)
+
+	s.eventually(func() bool { return errors.Is(s.admitRunning(enforcer.Enforcer).Spend, ErrSystemLimit) }, 5*time.Second,
+		10*time.Millisecond, "refused once the limit is spent")
+}
+
+func (s *PolicySuite) TestWorkAlreadyRunningIsRefusedAtACustomersLimitOnlyOnceItIsSpent() {
+	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
+	s.Require().NoError(s.enforcer.Reserve(s.owner(), newID(), 1_500_000, time.Minute))
+	s.spendRefused(s.enforcer, s.app, ErrBudgetSpent)
+	s.Require().NoError(s.admitRunning(s.enforcer).Spend, "what runs is not refused for what is set aside")
+
+	s.spend(s.app, 1_000_000)
+
+	s.eventually(func() bool { return errors.Is(s.admitRunning(s.enforcer).Spend, ErrBudgetSpent) }, 5*time.Second,
+		10*time.Millisecond, "refused once the limit is spent")
+}
+
+func (s *PolicySuite) TestWorkAlreadyRunningLeavesTheGrantsItsWorkIsRecordedOn() {
+	s.limit(store.Limit{Subject: usage.SubjectApp, Level: store.LevelApp, OrganizationID: s.org, AppID: s.app, LimitMicros: 1_000_000})
+	grant := store.LimitGrant{OrganizationID: s.org, Subject: usage.SubjectApp, AppID: s.app, AmountMicros: 2_000_000, Reason: "launch", Actor: "test"}
+	s.Require().NoError(s.store.LimitGrants.Insert(s.ctx, &grant, store.LimitAudit{CustomerID: s.app, Source: store.AuditSourceAPI}))
+	s.Require().NoError(s.enforcer.Reserve(s.owner(), newID(), 1_500_000, time.Minute))
+	s.eventually(func() bool {
+		admitted, err := s.enforcer.Admit(s.ctx, s.owner())
+		return err == nil && admitted.Spend == nil && len(admitted.Grants) == 1
+	}, 5*time.Second, 10*time.Millisecond, "admitted on the grant past the limit its hold spent")
+	s.Require().NoError(s.admitRunning(s.enforcer).Spend)
+
+	drawn := s.enforcer.Settle(s.owner(), newID(), 100_000)
+
+	s.Equal([]int64{grant.ID}, drawn, "the row names what its admission chose, not what the check of running work saw")
+}
+
 func (s *PolicySuite) TestTheSpendHardLimitStartsAgainAtMidnightUTC() {
 	var clock atomic.Pointer[time.Time]
 	enforcer := s.billed(func(settings *Settings) {
