@@ -263,6 +263,48 @@ func (s *AdmissionSuite) TestAnOrganizationWithNoCreditStillMintsAGuest() {
 	s.Equal(http.StatusCreated, status, string(payload))
 }
 
+// recordedVoice is a voice of the app's with one recording, prepared with elevenlabs.
+func (s *AdmissionSuite) recordedVoice() string {
+	var created Voice
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/voices",
+		map[string]any{"name": "founder"}, &created))
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/voices/"+created.Id+"/samples",
+		map[string]any{"audio": []byte("speech"), "filename": "clip.wav"}, nil))
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/voices/"+created.Id+"/prepare",
+		map[string]any{}, nil))
+	return created.Id
+}
+
+func (s *AdmissionSuite) TestHearingAVoiceWithNoCreditIsAPaymentRequired() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	voice := s.recordedVoice()
+	s.usage.Credit(s.T(), s.organization(), -10_000_000)
+
+	status, failure := s.refused(http.MethodPost, "/v1/agents/voices/"+voice+"/preview", map[string]any{"provider": "elevenlabs"})
+
+	s.Equal(http.StatusPaymentRequired, status)
+	s.Equal(codeInsufficientCredits, failure.Code)
+}
+
+func (s *AdmissionSuite) TestASuspendedAccountsVoicesAreForbidden() {
+	s.usage.Credit(s.T(), s.organization(), 10_000_000)
+	voice := s.recordedVoice()
+	s.usage.Suspend(s.T(), s.organization(), "review "+s.utils.uuid())
+	s.refused(http.MethodPost, "/v1/agents/runs", s.run("echo/local-model"))
+
+	for path, body := range map[string]any{
+		"/samples": map[string]any{"audio": []byte("speech"), "filename": "clip.wav"},
+		"/prepare": map[string]any{},
+		"/preview": map[string]any{"provider": "elevenlabs"},
+	} {
+		status, failure := s.refused(http.MethodPost, "/v1/agents/voices/"+voice+path, body)
+		s.Equal(http.StatusForbidden, status, path)
+		s.Equal(codeAccountSuspended, failure.Code, path)
+	}
+	s.Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/voices/"+voice, nil, nil),
+		"a voice can always be removed")
+}
+
 func (s *AdmissionSuite) TestASpentLimitIsAPaymentRequiredNotAServerError() {
 	s.usage.Credit(s.T(), s.organization(), 10_000_000)
 	s.limitApp(usage.Daily, 10_000)

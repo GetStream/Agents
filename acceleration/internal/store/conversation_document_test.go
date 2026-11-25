@@ -83,6 +83,20 @@ func (s *StoreSuite) TestADocumentSentWithARewoundTurnIsNotRead() {
 	s.Equal([]string{"kept"}, s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey"}))
 }
 
+func (s *StoreSuite) TestARewindToAnotherCustomersTurnRewindsNothing() {
+	s.opened("one", "app", s.base, nil)
+	s.responded("one", "first", "read this", s.base)
+	s.opened("theirs", "somebody-else", s.base, nil)
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{ID: "their-turn", SessionID: "theirs", CustomerID: "somebody-else",
+		CreatedAt: s.base.Add(-time.Hour)}))
+
+	s.Require().NoError(s.store.Responses.Rewind(s.ctx, "app", "one", "their-turn", s.base.Add(time.Hour)))
+
+	first, err := s.store.Responses.Get(s.ctx, "app", "one", "first")
+	s.Require().NoError(err)
+	s.Nil(first.RewoundAt)
+}
+
 func (s *StoreSuite) TestAForkStoppingAtATurnReadsOnlyTheDocumentsSentUpToIt() {
 	s.opened("one", "app", s.base, nil)
 	s.responded("one", "first", "read this", s.base)
@@ -93,6 +107,22 @@ func (s *StoreSuite) TestAForkStoppingAtATurnReadsOnlyTheDocumentsSentUpToIt() {
 	s.attached("with-second", "one", "", "jlahey", "second", s.base.Add(time.Hour+time.Second))
 
 	s.Equal([]string{"carried", "with-first"}, s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey", UntilResponse: "first"}))
+}
+
+func (s *StoreSuite) TestADocumentIsReadBesideOnlyItsCustomersTurns() {
+	s.opened("one", "app", s.base, nil)
+	s.responded("one", "first", "read this", s.base)
+	s.opened("theirs", "somebody-else", s.base, nil)
+	for _, id := range []string{"rewound", "kept"} {
+		s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{ID: "their-" + id, SessionID: "theirs", CustomerID: "somebody-else",
+			Said: "hello", CreatedAt: s.base.Add(-time.Hour)}))
+		s.attached(id, "one", "", "jlahey", "their-"+id, s.base)
+	}
+	_, err := s.store.shard.ExecContext(s.ctx, "UPDATE agent_responses SET rewound_at = now() WHERE id = 'their-rewound'")
+	s.Require().NoError(err)
+
+	s.Equal([]string{"kept", "rewound"}, s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey"}))
+	s.Empty(s.documentIDs(DocumentScope{SessionID: "one", Owner: "jlahey", UntilResponse: "first"}))
 }
 
 func (s *StoreSuite) TestAForkStoppingAtATurnThatIsNotThereIsRefused() {

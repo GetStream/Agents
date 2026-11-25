@@ -340,10 +340,13 @@ func writeImportFailure(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, refusal)
 		return
 	}
-	if errors.Is(err, store.ErrAnotherCustomersRow) {
-		// Who holds the key is the operator's to know, so a caller is told only which row it is.
-		writeError(w, invalidRequest(strings.Replace(err.Error(), store.ErrAnotherCustomersRow.Error(), "this row cannot be written here", 1)))
-		return
+	for _, refused := range []error{store.ErrAnotherCustomersRow, store.ErrNamesNoRow} {
+		if errors.Is(err, refused) {
+			// Who holds the key, or what it names, is the operator's to know, so a caller is told
+			// only which row it is.
+			writeError(w, invalidRequest(strings.Replace(err.Error(), refused.Error(), "this row cannot be written here", 1)))
+			return
+		}
 	}
 	var invalid *store.ValidationError
 	if errors.Is(err, store.ErrInvalidImport) || errors.Is(err, store.ErrNotACustomConnector) || errors.As(err, &invalid) {

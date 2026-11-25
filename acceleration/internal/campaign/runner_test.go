@@ -407,6 +407,27 @@ func (s *RunnerSuite) TestAContactClaimedBeforeItWasEverDialedGoesBackUnused() {
 	s.Empty(attempts)
 }
 
+func (s *RunnerSuite) TestATakeOverReadsOnlyTheDialsOfTheContactsCampaign() {
+	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
+	claimed, err := s.store.CampaignContacts.Claim(s.ctx, "router-dead", s.clock.now(), lease, 10)
+	s.Require().NoError(err)
+	s.Require().Len(claimed, 1)
+	other := store.Campaign{CustomerID: uuid.NewString(), Name: "other", ConfigID: "config-1", FromNumber: "+15550100000", Concurrency: 1}
+	s.Require().NoError(s.store.Campaigns.Insert(s.ctx, &other))
+	stray := store.CampaignAttempt{CampaignID: other.ID, ContactID: claimed[0].Contact.ID, StepID: "step_1", Attempt: 1, Dial: 1,
+		CallID: "another-call", StartedAt: s.clock.now(), CallOutcome: "no_answer"}
+	s.Require().NoError(s.store.CampaignAttempts.Insert(s.ctx, &stray))
+	s.leasesPass(lease + time.Minute)
+
+	s.runner.takeOver(s.ctx)
+
+	contact, attempts := s.contact(campaign, "+15550000001")
+	s.Equal(store.Enrolled, contact.Stage)
+	s.Equal(0, contact.Attempt)
+	s.Empty(contact.CallID)
+	s.Empty(attempts)
+}
+
 func (s *RunnerSuite) TestATakeOverOfAnAttemptNeverDialedLeavesItUnused() {
 	campaign := s.launched(s.single(), 1, "UTC", "+15550000001")
 	s.tick(s.runner)
