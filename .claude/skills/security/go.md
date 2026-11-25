@@ -180,9 +180,11 @@ resolver, so never quote the egress error (`createEventDestination`, AI-3575).
   setting name (such as an environment variable name), no setting value, no part of the
   router's config, no component, and no rule that the deployment uses because of such a
   setting.
-- When the caller can correct the error in a level that it sets, the text tells it what to
-  change. The router's code writes all of the text (`*oauth2code.ManifestError`), with no
-  wrapped cause: `fmt.Errorf("%w: %w", ErrInvalid, err)` still contains the store's text.
+- When the caller can correct the error in a level that it sets, the text tells only what to
+  change in that level: the field, and why the router does not accept its value. All other
+  bullets of this rule still apply: the text contains no data from a level that the caller
+  does not set, and no text of another error. `fmt.Errorf("%w: %w", ErrInvalid, err)`
+  contains all of the text of `err`.
 - When only a level that the caller does not set can correct the error, the text says in
   fixed words that the caller cannot correct it, with the error `code`. The caller sends the
   `code` and the `X-Request-Id` to the team that helps it. For a stored field, it sends the
@@ -195,8 +197,8 @@ resolver, so never quote the egress error (`createEventDestination`, AI-3575).
   security control that refused the request (rule 6 for refused URLs), or internal
   components and hosts.
 - Flag `invalidRequest(err.Error())`, `"...: " + err.Error()`, `fmt.Sprintf("...: %v", err)`
-  and a stored `err.Error()`, unless the router's code wrote all of the error's text for the
-  caller to correct. Flag a session error (`session.ErrInvalid`, `session.ErrNotConfigured`)
+  and a stored `err.Error()`, unless the error's text obeys the bullet above for errors that
+  the caller can correct. Flag a session error (`session.ErrInvalid`, `session.ErrNotConfigured`)
   that shows deployment settings to a caller, or customer settings to a device. How to
   translate an error is in [errors.md «HTTP»](../go/errors.md#http).
 - Refused outbound URLs: see rule 6.
