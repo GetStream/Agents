@@ -505,6 +505,22 @@ func (s *StoreSuite) TestEveryHotTableIsReadByIndex() {
 			_, _, err := store.Sessions.ConversationPin(ctx, "customer-7", "conversation-7")
 			return err
 		}},
+		{name: "Sessions.HeldConversations", index: "agent_sessions_conversation_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.Sessions.HeldConversations(ctx, "customer-7", HeldConversation{}, 500)
+			return err
+		}},
+		{name: "Sessions.HeldConversations of every customer", index: "agent_sessions_conversation_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.Sessions.HeldConversations(ctx, "", HeldConversation{CustomerID: "customer-7"}, 500)
+			return err
+		}},
+		{name: "Sessions.CallerKinds", index: "agent_sessions_user_last_message_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.Sessions.CallerKinds(ctx, "customer-7", "conversation-7", "user-7")
+			return err
+		}},
+		{name: "Sessions.HeldAsGuest", index: "agent_sessions_user_last_message_idx", run: func(ctx context.Context, store *Store) error {
+			_, err := store.Sessions.HeldAsGuest(ctx, "customer-7", "user-7")
+			return err
+		}},
 		{name: "Sessions.Delete", index: "agent_sessions_pkey", run: func(ctx context.Context, store *Store) error {
 			return store.Sessions.Delete(ctx, "customer-199", "seeded-session-99999")
 		}},
