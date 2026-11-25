@@ -964,7 +964,8 @@ var ErrNoSealerToCall = errors.New("phone: no key to seal the trunk password the
 // vendor, with a rule of its own, and tells the vendor to send calls there. This is what
 // turns a bought number into one that reaches an agent. Without a key to seal the trunk's
 // password, the number gets a trunk of its own. Attaching a number already attached in this
-// app changes nothing and answers what it has.
+// app creates nothing and answers what it has; a Twilio number still on its old voice URL is
+// pointed at the router's call webhook.
 func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, error) {
 	if s.store == nil {
 		return Attached{}, stack.Wrap(errors.New("phone: attaching a number needs a database to know who holds it"))
