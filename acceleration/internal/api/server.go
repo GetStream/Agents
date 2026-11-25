@@ -156,6 +156,9 @@ type Options struct {
 	// meant for another shard than the Directory's is handed to a node there. The zero Map, or
 	// no Directory, keeps every hook where it lands.
 	ShardRouting shardmap.Map
+	// Shards names every shard of the deployment, this one's included: the regions a read of
+	// rows one shard keeps may ask for. Empty is this shard alone.
+	Shards []string
 	// Workers is the deployment's dispatch workers, wherever they are connected: told what
 	// the ones here host, and how a running session's text reaches one elsewhere. Absent
 	// when the Directory or the Relay is.
@@ -366,6 +369,7 @@ type Server struct {
 	relayed            *relayed
 	directory          *node.Directory
 	shards             shardmap.Map
+	shardNames         []string
 	workers            *node.Workers
 	forwarder          *node.Forwarder
 	peerCredentials    [][]byte // what a peer may present: one credential per key of the keyring
@@ -605,6 +609,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		sessions:           options.Sessions,
 		directory:          options.Directory,
 		shards:             options.ShardRouting,
+		shardNames:         options.Shards,
 		workers:            options.Workers,
 		streams:            options.Streams,
 		audioFloor:         options.AudioFloor,
@@ -835,10 +840,10 @@ func (s *Server) Handler() http.Handler {
 	handle(mux, "GET /v1/agents/socket", "OpenSocketSession", s.openSocketSession)
 	handle(mux, "GET /v1/{modality}/stream", "StreamModality", s.streamModality)
 	handle(mux, "GET /v1/dispatch", "DispatchCalls", s.dispatchCalls)
-	handle(mux, "GET /v1/phone/answer/{token}", "PhoneAnswer", s.answerPhoneCall)
-	handle(mux, "POST /v1/phone/answer/{token}", "PhoneAnswer", s.answerPhoneCall)
-	handle(mux, "POST /v1/phone/status/{token}", "ReceiveCallStatus", s.receiveCallStatus)
-	handle(mux, "POST /v1/phone/machine/{token}", "ReceiveCallMachine", s.receiveCallMachine)
+	handle(mux, "GET /v1/phone/answer/{token}", "PhoneAnswer", s.inTokenShard(s.answerPhoneCall))
+	handle(mux, "POST /v1/phone/answer/{token}", "PhoneAnswer", s.inTokenShard(s.answerPhoneCall))
+	handle(mux, "POST /v1/phone/status/{token}", "ReceiveCallStatus", s.inTokenShard(s.receiveCallStatus))
+	handle(mux, "POST /v1/phone/machine/{token}", "ReceiveCallMachine", s.inTokenShard(s.receiveCallMachine))
 	handle(mux, "POST "+phone.CallHookPath, "PhoneHook", s.receiveCallEvent)
 	handle(mux, "POST "+phone.CallHookPath+"/{app}", "PhoneHook", s.receiveCallEvent)
 	handle(mux, "POST "+telnyxCallHookPath, "ReceiveTelnyxCall", s.receiveTelnyxCall)
@@ -1660,7 +1665,7 @@ const corsMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
 
 // corsExposedHeaders are the response headers a page's script may read.
 const corsExposedHeaders = "Server-Timing, " + RequestIDHeader + ", " + quotaLimitHeader + ", " +
-	quotaRemainingHeader + ", " + quotaResetHeader + ", Retry-After, " + unreachableShardsHeader
+	quotaRemainingHeader + ", " + quotaResetHeader + ", Retry-After, " + shardHeader
 
 // withCORS lets a browser at the API from the origins originAllowed accepts.
 //
@@ -2006,9 +2011,8 @@ func (s *Server) getStats(ctx context.Context, request *getStatsRequest) (*getSt
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	// A rollup keeps no request's labels, so a label filter reads the requests of every shard.
 	read := s.store.Buckets.Select
-	if s.store.StatsShipped() && len(tags) == 0 {
+	if s.store.StatsShipped() {
 		read = s.store.Buckets.Shipped
 	}
 	buckets, err := read(ctx, customerID, store.BucketFilter{

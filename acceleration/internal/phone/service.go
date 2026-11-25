@@ -735,7 +735,7 @@ func (s *Service) recordBought(ctx context.Context, order store.PhoneNumberOrder
 		CustomerID: order.CustomerID, Tags: order.Tags, VendorID: vendorID, PurchasedAt: order.CreatedAt,
 	}
 	month := numberMonth(number, number.PurchasedAt).UsageID
-	billed, err := s.store.RecordedUsage(ctx, []uuid.UUID{month})
+	unbilled, err := s.store.UsageToBill(ctx, []uuid.UUID{month})
 	if err != nil {
 		return err
 	}
@@ -748,7 +748,7 @@ func (s *Service) recordBought(ctx context.Context, order store.PhoneNumberOrder
 	}
 	s.logger.Warn("recorded a number bought whose row was not written", "order", order.ID, "vendor", order.Vendor,
 		"vendor_id", vendorID, "customer", order.CustomerID)
-	if !billed[month] {
+	if unbilled[month] {
 		s.billMonth(number, routing.Owner{
 			CustomerID: number.CustomerID, Attribution: routing.Attribution{APIKey: OriginNumberRental}, Tags: number.Tags,
 		}, number.PurchasedAt)
@@ -1717,7 +1717,7 @@ func (s *Service) park(
 				"public url to fetch it from, and none is configured", vendor)))
 	}
 
-	token := uuid.NewString()
+	token := s.store.MintToken()
 	bridge := &store.CallBridge{
 		Token:         token,
 		CustomerID:    customerID,
@@ -1866,7 +1866,8 @@ func (s *Service) callOfToken(ctx context.Context, token string) (outcome.Call, 
 	}
 	// The endpoint is public: a token not shaped like the ones made in Place never reaches the
 	// database.
-	if id, err := uuid.Parse(token); err != nil || id.String() != token {
+	_, random := store.SplitToken(token)
+	if id, err := uuid.Parse(random); err != nil || id.String() != random {
 		return outcome.Call{}, stack.Wrap(ErrUnknownStatus)
 	}
 	call, err := s.outcomes.ByToken(ctx, token)

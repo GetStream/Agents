@@ -157,19 +157,13 @@ func (r *TurnBuckets) Shipped(ctx context.Context, customerID string, f TurnBuck
 	return r.selected(ctx, customerID, f, true)
 }
 
-// turnTables reads every shard's turn tables, or with shipped their copies in the shared
+// turnTables reads this shard's turn tables, or with shipped their copies in the shared
 // database, where one read sums every shard's rows.
-func turnTables[T any](ctx context.Context, s *Store, shipped bool, read func(ctx context.Context, db bun.IDB, counts, bins string) (T, error)) ([]T, error) {
+func turnTables[T any](ctx context.Context, s *Store, shipped bool, read func(ctx context.Context, db bun.IDB, counts, bins string) (T, error)) (T, error) {
 	if shipped {
-		found, err := read(ctx, s.global, shippedTurns.name, shippedLatency.name)
-		if err != nil {
-			return nil, err
-		}
-		return []T{found}, nil
+		return read(ctx, s.global, shippedTurns.name, shippedLatency.name)
 	}
-	return everyShard(ctx, s, func(ctx context.Context, db bun.IDB) (T, error) {
-		return read(ctx, db, "turn_stats_hourly", "turn_latency_hourly")
-	})
+	return read(ctx, s.shard, "turn_stats_hourly", "turn_latency_hourly")
 }
 
 func (r *TurnBuckets) selected(ctx context.Context, customerID string, f TurnBucketFilter, shipped bool) ([]TurnBucket, error) {
@@ -193,7 +187,7 @@ func (r *TurnBuckets) selected(ctx context.Context, customerID string, f TurnBuc
 		buckets []TurnBucket
 		bins    []binRow
 	}
-	answers, err := turnTables(ctx, r.store, shipped, func(ctx context.Context, db bun.IDB, countsTable, binsTable string) (shardRows, error) {
+	answer, err := turnTables(ctx, r.store, shipped, func(ctx context.Context, db bun.IDB, countsTable, binsTable string) (shardRows, error) {
 		counts := db.NewSelect().
 			Table(countsTable).
 			ColumnExpr("customer_id, agent_id").
@@ -231,38 +225,7 @@ func (r *TurnBuckets) selected(ctx context.Context, customerID string, f TurnBuc
 		return nil, stack.Wrap(err)
 	}
 
-	// Each shard's buckets are summed into one per agent and bucket, and its bins kept in
-	// ascending order, where a bin two shards both counted is two entries side by side.
-	buckets := answers[0].buckets
-	counted := answers[0].bins
-	if len(answers) > 1 {
-		type bucketKey struct {
-			agentID string
-			bucket  int64
-		}
-		sums := map[bucketKey]*TurnBucket{}
-		buckets, counted = nil, nil
-		for _, answer := range answers {
-			for _, b := range answer.buckets {
-				key := bucketKey{b.AgentID, b.Bucket.Unix()}
-				if sum := sums[key]; sum != nil {
-					sum.TurnCount += b.TurnCount
-					sum.InterruptedCount += b.InterruptedCount
-					sum.AudioOutMsTotal += b.AudioOutMsTotal
-					continue
-				}
-				sums[key] = &b
-			}
-			counted = append(counted, answer.bins...)
-		}
-		for _, sum := range sums {
-			buckets = append(buckets, *sum)
-		}
-		slices.SortFunc(buckets, func(a, b TurnBucket) int {
-			return cmp.Or(a.Bucket.Compare(b.Bucket), strings.Compare(a.AgentID, b.AgentID))
-		})
-		slices.SortStableFunc(counted, func(a, b binRow) int { return cmp.Compare(a.Bin, b.Bin) })
-	}
+	buckets, counted := answer.buckets, answer.bins
 
 	type histogramKey struct {
 		agentID, leg string
@@ -305,7 +268,7 @@ type LegLatency struct {
 }
 
 // Latency is how long the turns apps started from the hour of since on took, every agent of
-// theirs and every shard summed, one per leg in the order of turnLegs.
+// theirs summed in this shard, one per leg in the order of turnLegs.
 func (r *TurnBuckets) Latency(ctx context.Context, apps []string, since time.Time) ([]LegLatency, error) {
 	return r.latency(ctx, apps, since, false)
 }
@@ -322,7 +285,7 @@ func (r *TurnBuckets) latency(ctx context.Context, apps []string, since time.Tim
 		Bin   int    `bun:"bin"`
 		Count int64  `bun:"count"`
 	}
-	lists, err := turnTables(ctx, r.store, shipped, func(ctx context.Context, db bun.IDB, _, binsTable string) ([]binRow, error) {
+	counted, err := turnTables(ctx, r.store, shipped, func(ctx context.Context, db bun.IDB, _, binsTable string) ([]binRow, error) {
 		var bins []binRow
 		err := db.NewSelect().
 			Table(binsTable).
@@ -336,12 +299,7 @@ func (r *TurnBuckets) latency(ctx context.Context, apps []string, since time.Tim
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: turn latency: %w", err))
 	}
-	// A histogram takes its bins in ascending order, where a bin two shards both counted is
-	// two entries side by side.
-	var counted []binRow
-	for _, list := range lists {
-		counted = append(counted, list...)
-	}
+	// A histogram takes its bins in ascending order.
 	slices.SortStableFunc(counted, func(a, b binRow) int { return cmp.Compare(a.Bin, b.Bin) })
 	histograms := map[string]*histogram{}
 	for _, row := range counted {

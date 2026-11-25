@@ -16,7 +16,7 @@ func (s *StoreSuite) TestResponseItemQueryBudgets() {
 	}
 	s.withinQueryBudgets([]queryBudget{
 		{"InsertMany", 1, 0, func() error { return s.store.ResponseItems.InsertMany(s.ctx, items) }},
-		{"Select", 0, 1, func() error {
+		{"Select", 1, 0, func() error {
 			listed, err := s.store.ResponseItems.Select(s.ctx, "app", "itemised", ItemFilter{Limit: 10})
 			s.Len(listed, 11)
 			return err

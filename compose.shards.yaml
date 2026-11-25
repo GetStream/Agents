@@ -4,8 +4,8 @@
 # each shard has its own beside it.
 #
 # Toxiproxy sits on the links that cross a region in production: the EU router's global
-# Postgres and Redis, and each router's reads of the other shard's database. They pass
-# through untouched until a latency toxic is added: acceleration/dev/shards.sh latency 100.
+# Postgres and Redis. No router opens the other shard's database. The links pass through
+# untouched until a latency toxic is added: acceleration/dev/shards.sh latency 100.
 #
 #   acceleration/dev/shards.sh up
 services:
@@ -44,8 +44,6 @@ services:
       - "127.0.0.1:8474:8474"
       - "127.0.0.1:15432:15432"
       - "127.0.0.1:16379:16379"
-      - "127.0.0.1:25432:25432"
-      - "127.0.0.1:25433:25433"
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,9 +53,8 @@ services:
   router:
     environment:
       ROUTER_SHARD: us
+      ROUTER_SHARDS: us,eu
       ROUTER_POSTGRES_SHARD_DSN: postgres://postgres:postgres@postgres:5432/router_us?sslmode=disable
-      ROUTER_POSTGRES_SHARDS: >-
-        us=postgres://postgres:postgres@postgres:5432/router_us?sslmode=disable,eu=postgres://postgres:postgres@toxiproxy:25432/router_eu?sslmode=disable
       ROUTER_REDIS_SHARD_ADDR: redis-us:6379
       ROUTER_NODE_ADVERTISE: router:8080
     depends_on:
@@ -78,9 +75,8 @@ services:
       ROUTER_PUBLIC_URL: http://localhost:8081
       ROUTER_SHARD: eu
       ROUTER_POSTGRES_DSN: postgres://postgres:postgres@toxiproxy:15432/model_router?sslmode=disable
+      ROUTER_SHARDS: us,eu
       ROUTER_POSTGRES_SHARD_DSN: postgres://postgres:postgres@postgres:5432/router_eu?sslmode=disable
-      ROUTER_POSTGRES_SHARDS: >-
-        eu=postgres://postgres:postgres@postgres:5432/router_eu?sslmode=disable,us=postgres://postgres:postgres@toxiproxy:25433/router_us?sslmode=disable
       ROUTER_REDIS_ADDR: toxiproxy:16379
       ROUTER_REDIS_SHARD_ADDR: redis-eu:6379
       ROUTER_NODE_ADVERTISE: router-eu:8080

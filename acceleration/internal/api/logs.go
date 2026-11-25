@@ -79,6 +79,9 @@ func (s *Server) logFilter(w http.ResponseWriter, r *http.Request) (string, stor
 		}
 		f.Limit = v
 	}
+	if shard := s.answeringShard(); shard != "" {
+		w.Header().Set(shardHeader, shard)
+	}
 	return customer, f, true
 }
 func logJSON(w http.ResponseWriter, value any) {

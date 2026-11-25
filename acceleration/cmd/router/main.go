@@ -754,8 +754,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		// the calls it carries to its shard.
 		agreed, stopAgreeing := context.WithCancel(context.WithoutCancel(ctx))
 		defer stopAgreeing()
-		shards := slices.Collect(maps.Keys(settings.Postgres.Shards))
-		if err := node.AgreeOnShards(agreed, liveClient.Redis(), node.ShardsKey, shards, logger); err != nil {
+		if err := node.AgreeOnShards(agreed, liveClient.Redis(), node.ShardsKey, settings.Shards, logger); err != nil {
 			return err
 		}
 	} else {
@@ -868,8 +867,21 @@ func run(settings config.Config, logger *slog.Logger) error {
 	// shared database, so that one shard down leaves its own stats behind rather than failing
 	// everybody's.
 	if pgStore != nil && pgStore.StatsShipped() {
-		stopStats := startStatsShipper(ctx, pgStore, logger)
+		stopStats := startShipper(ctx, pgStore.StatsShipper(logger, 0))
 		defer stopStats()
+	}
+	// Where each session lives and the rows the session and call lists read are shipped to the
+	// shared database too, a few seconds behind, so no router reads another shard's.
+	if pgStore != nil && pgStore.Indexed() {
+		stopIndex := startShipper(ctx, pgStore.IndexShipper(logger, 0))
+		defer stopIndex()
+	}
+
+	// Every router runs its shard's part of the jobs every shard runs on its own rows, such as
+	// forgetting a user.
+	if pgStore != nil {
+		stopJobs := startShardJobs(ctx, pgStore.ShardJobWorker(logger, 0))
+		defer stopJobs()
 	}
 
 	// One router of the deployment checks every organization's spend for a jump each hour, posts
@@ -1230,6 +1242,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		// leg whose row was lost is recorded again. Months of numbers and of 10DLC campaigns are
 		// billed by jobs of their own (router usage numbers, router usage dlc).
 		go telephony.RunLegSweep(ctx, legSweepEvery)
+		go telephony.RunOpenLegsHeal(ctx, store.HealOpenLegsEvery)
 		// Deferred here, it runs after the drain and sessions.Shutdown, so the legs a webhook or
 		// a session still kept get their last write, and before the usage writer closes.
 		defer func() {
@@ -1498,7 +1511,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 	shardRouting := shardmap.Map{Default: settings.ShardRouting.Default,
 		Countries: settings.ShardRouting.Countries, Regions: settings.ShardRouting.Regions}
 	shardClaim := store.ShardClaim{Shard: settings.Shard, Routing: shardRouting,
-		Shards: slices.Collect(maps.Keys(settings.Postgres.Shards))}
+		Shards: settings.Shards}
 	options := api.Options{
 		Documents:             documents,
 		Routers:               routers,
@@ -1517,6 +1530,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		Relay:                 sessionRelay,
 		Directory:             directory,
 		ShardRouting:          shardRouting,
+		Shards:                settings.Shards,
 		Workers:               everyWorker,
 		Streams:               streams,
 		AudioFloor:            floor,
@@ -2142,9 +2156,10 @@ func openShards(settings config.Config) (*store.Store, error) {
 		return nil, errors.New("this needs a database: set postgres.dsn")
 	}
 	return store.OpenShards(store.Options{
+		Shard:           settings.Shard,
 		DSN:             settings.Postgres.DSN,
 		ShardDSN:        settings.Postgres.ShardDSN,
-		Shards:          settings.Postgres.Shards,
+		Shards:          settings.Shards,
 		MigrateDSN:      settings.Postgres.MigrateDSN,
 		ShardMigrateDSN: settings.Postgres.ShardMigrateDSN,
 		Redis:           store.Redis{Address: settings.Redis.Addr, Username: settings.Redis.Username, Password: settings.Redis.Password},

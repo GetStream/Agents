@@ -187,7 +187,7 @@ func (s *Store) rangeLogIDs(ctx context.Context) error {
 	}
 	defer shard.Close() //nolint:errcheck // a pool the migration is done with
 
-	numbered := &shardNumber{Name: s.shardNames[0]}
+	numbered := &shardNumber{Name: s.shardName}
 	err = global.NewInsert().Model(numbered).Column("name").
 		On("CONFLICT (name) DO UPDATE").Set("name = EXCLUDED.name").
 		Returning("number").Scan(ctx)
@@ -423,11 +423,17 @@ func (r *AgentLogs) Get(ctx context.Context, customerID string, id int64) (Agent
 	if customerID == "" {
 		return AgentLog{}, stack.Wrap(fmt.Errorf("%w: %d", ErrNoAgentLog, id))
 	}
-	row, err := whicheverHolder(ctx, r.store, func(ctx context.Context, db bun.IDB) (AgentLog, error) {
-		var row AgentLog
-		err := db.NewSelect().Model(&row).Where("customer_id = ? AND id = ?", customerID, id).Scan(ctx)
-		return row, err
-	})
+	var row AgentLog
+	err := sql.ErrNoRows
+	for _, db := range r.store.holders() {
+		err = db.NewSelect().Model(&row).Where("customer_id = ? AND id = ?", customerID, id).Scan(ctx)
+		if absentTable(err) {
+			err = sql.ErrNoRows
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			break
+		}
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return AgentLog{}, stack.Wrap(fmt.Errorf("%w: %d", ErrNoAgentLog, id))
 	}
@@ -465,60 +471,44 @@ func (r *AgentLogs) Get(ctx context.Context, customerID string, id int64) (Agent
 	return row, nil
 }
 
-// DeleteUser deletes an app's logs that name one of its end users across every shard and the
-// shared database, whose message and details hold what they said and did, writeBatch of them
-// per statement, and then makes the changes recorded of the logs naming them, deleted ones'
-// included, deletes with no payload (forgottenChanges). It answers how many logs it deleted.
-// A log written after the last batch stays, for a run again to delete.
+// DeleteUser deletes an app's logs that name one of its end users, whose message and details
+// hold what they said and did, writeBatch of them per statement, and then makes the changes
+// recorded of the logs naming them, deleted ones' included, deletes with no payload
+// (forgottenChanges), on this shard. It answers how many logs it deleted. A log written after
+// the last batch stays, for a run again to delete.
 func (r *AgentLogs) DeleteUser(ctx context.Context, appID, userID string) (int64, error) {
 	if appID == "" || userID == "" {
 		return 0, stack.Wrap(errors.New("store: an app and a user id are required"))
 	}
-	counts, err := everyHolder(ctx, r.store, func(ctx context.Context, db bun.IDB) (int64, error) {
-		var deleted int64
-		for {
-			batch := db.NewSelect().Model((*AgentLog)(nil)).Column("id").
-				Where("customer_id = ? AND user_id = ?", appID, userID).Limit(writeBatch)
-			result, err := db.NewDelete().Model((*AgentLog)(nil)).Where("customer_id = ? AND id IN (?)", appID, batch).Exec(ctx)
-			if err != nil {
-				return deleted, err
-			}
-			n, err := result.RowsAffected()
-			if err != nil {
-				return deleted, err
-			}
-			deleted += n
-			if n < int64(writeBatch) {
-				break
-			}
-		}
-		if _, err := forgottenChanges(db, appID, "agent_logs").Where("payload->>'user_id' = ?", userID).Exec(ctx); err != nil {
-			return deleted, fmt.Errorf("changes: %w", err)
-		}
-		return deleted, nil
-	})
+	db := r.store.shard
 	var deleted int64
-	for _, count := range counts {
-		deleted += count
+	for {
+		batch := db.NewSelect().Model((*AgentLog)(nil)).Column("id").
+			Where("customer_id = ? AND user_id = ?", appID, userID).Limit(writeBatch)
+		result, err := db.NewDelete().Model((*AgentLog)(nil)).Where("customer_id = ? AND id IN (?)", appID, batch).Exec(ctx)
+		if err != nil {
+			return deleted, stack.Wrap(fmt.Errorf("store: delete user logs: %w", err))
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return deleted, stack.Wrap(fmt.Errorf("store: delete user logs: %w", err))
+		}
+		deleted += n
+		if n < int64(writeBatch) {
+			break
+		}
 	}
-	if err != nil {
-		return deleted, stack.Wrap(fmt.Errorf("store: delete user logs: %w", err))
+	if _, err := forgottenChanges(db, appID, "agent_logs").Where("payload->>'user_id' = ?", userID).Exec(ctx); err != nil {
+		return deleted, stack.Wrap(fmt.Errorf("store: delete user logs: changes: %w", err))
 	}
 	return deleted, nil
 }
 
-// CountUser counts what DeleteUser would delete across every shard and the shared database.
+// CountUser counts what DeleteUser would delete, on this shard.
 func (r *AgentLogs) CountUser(ctx context.Context, appID, userID string) (int64, error) {
-	counts, err := everyHolder(ctx, r.store, func(ctx context.Context, db bun.IDB) (int64, error) {
-		count, err := db.NewSelect().Model((*AgentLog)(nil)).Where("customer_id = ? AND user_id = ?", appID, userID).Count(ctx)
-		return int64(count), err
-	})
+	count, err := r.store.shard.NewSelect().Model((*AgentLog)(nil)).Where("customer_id = ? AND user_id = ?", appID, userID).Count(ctx)
 	if err != nil {
 		return 0, stack.Wrap(fmt.Errorf("store: count user logs: %w", err))
 	}
-	var total int64
-	for _, count := range counts {
-		total += count
-	}
-	return total, nil
+	return int64(count), nil
 }

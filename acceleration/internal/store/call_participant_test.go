@@ -5,7 +5,6 @@ package store
 import "time"
 
 func (s *StoreSuite) TestCallParticipantQueryBudgets() {
-	shards := len(s.store.shards())
 	scope := AppScope{App: 7}
 	joined, left := s.base, s.base.Add(time.Minute)
 	for _, session := range []string{"phone-1", "phone-2", "phone-3"} {
@@ -20,18 +19,18 @@ func (s *StoreSuite) TestCallParticipantQueryBudgets() {
 		s.Require().NoError(s.store.CallParticipants.RecordHeard(s.ctx, scope, "default", "call-1", s.base))
 	}), "RecordHeard")
 
-	s.Equal(shards, s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		heard, err := s.store.CallParticipants.Heard(s.ctx, scope, "default", "call-1")
 		s.Require().NoError(err)
 		s.True(heard)
 	}), "Heard")
-	s.Equal(shards, s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		at, err := s.store.CallParticipants.Left(s.ctx, scope, "default", "call-1", "phone-1")
 		s.Require().NoError(err)
 		s.Require().NotNil(at)
 		s.True(left.Equal(*at))
 	}), "Left")
-	s.Equal(shards, s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		s.Require().NoError(s.store.CallParticipants.Forget(s.ctx, scope, "default", "call-1", "phone-2", nil))
 	}), "Forget")
 	s.Equal(1, s.countQueries(func() {

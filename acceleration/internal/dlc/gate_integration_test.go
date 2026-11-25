@@ -488,17 +488,22 @@ func (s *GateSuite) TestASandboxWhoseCountersCannotBeReadRefuses() {
 
 func (s *GateSuite) TestACallLimitWhoseCallsUpCannotBeCountedRefuses() {
 	s.limit(map[string]usage.ChannelLimits{dlc.Voice: {Concurrent: new(100)}})
-	// Every shard holds calls, and one that does not answer leaves the calls up uncounted.
+	// Every shard counts the calls up in it into Redis, and one that cannot be read leaves the
+	// other shards' calls uncounted.
+	redis, _ := policytest.SharedHolds(s.T())
 	split, err := store.OpenShards(store.Options{
-		DSN:    testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "dlc_gate"),
-		Shards: map[string]string{"gone": "postgres://postgres:postgres@127.0.0.1:1/gone?sslmode=disable"},
+		DSN:   testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "dlc_gate"),
+		Shard: "here",
+		Redis: store.Redis{Address: redis.Address},
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { _ = split.Close() })
 	gate := dlc.NewGate(split, s.redis, dlc.Sandbox{}, nil).Charging(s.money.Enforcer).Limiting(config.LimitsEnforce)
+	s.Require().NoError(gate.Allow(s.ctx, s.app(), dlc.Voice, "+15125550123"))
+
+	redis.Stop()
 
 	err = gate.Allow(s.shortly(), s.app(), dlc.Voice, "+15125550123")
-
 	s.Error(err)
 	s.NotErrorIs(err, dlc.ErrRefused, "the limit was not reached, it could not be read")
 	s.NoError(gate.Allow(s.ctx, s.app(), dlc.SMS, "+15125550123"), "a text counts no calls")

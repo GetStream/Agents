@@ -1502,11 +1502,10 @@ func (s *DataMoveSuite) TestARouterWithAShardOfItsOwnRefusesToBeTheSource() {
 	s.refusesToBeTheSource(store.Options{DSN: s.sharedDSN(), ShardDSN: s.shardDSN()})
 }
 
-// A router writing its calls in the shared database still reads the other shards' calls, whose
-// writes no change records either.
-func (s *DataMoveSuite) TestARouterReadingOtherShardsRefusesToBeTheSource() {
-	shared := s.sharedDSN()
-	s.refusesToBeTheSource(store.Options{DSN: shared, Shards: map[string]string{"here": shared, "there": s.shardDSN()}})
+// A router writing its calls in the shared database is one shard of several, whose others' writes
+// no change records either.
+func (s *DataMoveSuite) TestARouterBesideOtherShardsRefusesToBeTheSource() {
+	s.refusesToBeTheSource(store.Options{DSN: s.sharedDSN(), Shard: "here", Shards: []string{"here", "there"}})
 }
 
 // refusesToBeTheSource asserts a router on the databases options names refuses the export and the

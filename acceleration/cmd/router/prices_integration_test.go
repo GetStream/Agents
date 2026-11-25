@@ -546,38 +546,43 @@ func (s *PriceSyncSuite) directChanges(dsn string) []store.PriceChange {
 	return s.changes(direct)
 }
 
-func (s *PriceSyncSuite) TestDriftReadsEveryShard() {
+// Drift is run in each region: it reads its own shard's rows and opens no other shard's database.
+func (s *PriceSyncSuite) TestDriftReadsOnlyItsOwnShard() {
 	shared := s.settings.Postgres.DSN
 	here, there := s.emptyDatabase("pricedrift_here"), s.emptyDatabase("pricedrift_there")
-	shards := map[string]string{"here": here, "there": there}
-	for _, shard := range []string{here, there} {
-		router, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shards: shards})
+	names := []string{"here", "there"}
+	routers := map[string]*store.Store{}
+	for i, shard := range []string{here, there} {
+		router, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: shard, Shard: names[i], Shards: names})
 		s.Require().NoError(err)
 		s.Require().NoError(router.Migrate(s.ctx))
 		s.T().Cleanup(func() { router.Close() })
-		// One model 5% under what xAI said it charged on every shard, the other within a
-		// rounding difference.
-		s.recordWithVendorCost(router, "grok-4.7", 950, 1_000)
-		s.recordWithVendorCost(router, "grok-4.7", 1_900, 2_000)
-		s.recordWithVendorCost(router, "grok-4.7-mini", 1_001, 1_000)
+		routers[names[i]] = router
 	}
-	s.settings.Postgres = config.Postgres{DSN: shared, ShardDSN: here, Shards: shards}
+	// One model 5% under what xAI said it charged here, the other within a rounding difference.
+	s.recordWithVendorCost(routers["here"], "grok-4.7", 950, 1_000)
+	s.recordWithVendorCost(routers["here"], "grok-4.7", 1_900, 2_000)
+	s.recordWithVendorCost(routers["here"], "grok-4.7-mini", 1_001, 1_000)
+	s.recordWithVendorCost(routers["there"], "grok-4.7", 500, 1_000)
+	s.recordWithVendorCost(routers["there"], "grok-4.8", 500, 1_000)
+	s.settings.Shard, s.settings.Shards = "here", names
+	s.settings.Postgres = config.Postgres{DSN: shared, ShardDSN: here}
 	var out bytes.Buffer
 
 	s.Require().NoError(runPricesDrift(s.ctx, []string{"--json"}, s.settings, &out))
 
 	var models []driftedModel
 	s.Require().NoError(json.Unmarshal(out.Bytes(), &models))
-	s.Require().Len(models, 2)
+	s.Require().Len(models, 2, "no model only the other shard served")
 	s.Equal("grok-4.7", models[0].Model)
 	s.Equal("drift", models[0].Status)
-	s.Equal(4, models[0].Rows, "two rows on each shard")
+	s.Equal(2, models[0].Rows, "the other shard's row is not read")
 	s.InDelta(-0.05, models[0].MedianGap, 1e-9)
-	s.Len(models[0].Examples, 4)
+	s.Len(models[0].Examples, 2)
 	s.EqualValues(1_000, models[0].Examples[0].VendorCostMicros)
 	s.Equal("grok-4.7-mini", models[1].Model)
 	s.Equal("ok", models[1].Status)
-	s.Equal(2, models[1].Rows)
+	s.Equal(1, models[1].Rows)
 }
 
 // TestDriftNamesARowByItsUsageIDWhereItHasOne: requests carry a usage id, so each example row
