@@ -17,6 +17,9 @@ import (
 // redisAddressVar is where the tests look for a Redis to run against.
 const redisAddressVar = "ROUTER_REDIS_ADDR"
 
+// redisFamilies are the prefixes of every key the store keeps in Redis.
+var redisFamilies = []string{"appcfg:", "turns:", "call_events:", "floor_checks:", refusedPrefix, usersPrefix}
+
 // redis is the Redis the suite's store caches in, or none when the tests have none.
 func (s *StoreSuite) redis() Redis {
 	return Redis{Address: os.Getenv(redisAddressVar)}
@@ -54,6 +57,18 @@ func (q *queryCount) AfterQuery(context.Context, *bun.QueryEvent)               
 func (s *StoreSuite) countQueries(run func()) int {
 	before := s.queries.sent.Load()
 	run()
+	return int(s.queries.sent.Load() - before)
+}
+
+// countSettledReads is countQueries for a read one shard's answer settles (answeringShards).
+// The reads that answer cut off are not waited for and finish after run returns, so it waits,
+// up to a deadline, until every shard's statement is in before it counts.
+func (s *StoreSuite) countSettledReads(run func()) int {
+	before := s.queries.sent.Load()
+	run()
+	shards := int64(len(s.store.shards()))
+	s.Eventually(func() bool { return s.queries.sent.Load()-before >= shards }, 5*time.Second, time.Millisecond,
+		"a statement from every shard")
 	return int(s.queries.sent.Load() - before)
 }
 

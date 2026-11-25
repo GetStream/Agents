@@ -280,7 +280,8 @@ func documentHandWritten(api huma.API) {
 			"`invalid_request`. `call_id` may be left out: the router makes " +
 			"one up for the records. A `text` session is refused, because the socket carries audio. " +
 			"A field that `createSession` refuses from an end user's device is refused here too: " +
-			"`history` and `call` are server-side only. A `call` is refused from a backend too, " +
+			"`history`, `instructions`, `call`, `phone`, the models and limits, `greeting` and `tags` are " +
+			"server-side only. A `call` is refused from a backend too, " +
 			"with an `error` frame carrying `code` and `error_type`: the socket carries the audio, " +
 			"so the session joins no Stream call.\n" +
 			"The server answers `session`, with the `Session` and the `sample_rate` in use. Then " +
@@ -294,6 +295,8 @@ func documentHandWritten(api huma.API) {
 			"and so does a session refused for money: `account_suspended` (`permission`), or " +
 			"`insufficient_credits`, `system_limit_reached` or `spend_limit_reached` " +
 			"(`payment_required`).\n" +
+			"A caller who has spent their daily quota is refused the handshake with 429 and " +
+			"`Retry-After`, and a speech-to-speech conversation that spends it closes.\n" +
 			"The session lasts as long as the socket. Closing the socket, or sending `stop`, ends " +
 			"the conversation. A conversation that ends closes the socket.",
 		Responses: map[string]*huma.Response{
@@ -978,6 +981,8 @@ func documentHandWritten(api huma.API) {
 			"over them anyway, and importing the same export twice that way leaves what importing it once " +
 			"would. Changes are applied whatever the app holds. An import that stopped partway is run again " +
 			"with `full=true`, since the app then holds its first rows.\n" +
+			"An app runs one import at a time on a router, and a router runs at most four imports at once. " +
+			"An import ends when a line has taken a minute to arrive.\n" +
 			"Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.",
 		Parameters: []*huma.Param{
 			{Name: "full", In: "query", Description: "Write an export's rows over what an app that already has data here holds.", Schema: &huma.Schema{Type: huma.TypeBoolean, Default: false}},
@@ -993,9 +998,9 @@ func documentHandWritten(api huma.API) {
 			"400": {Ref: "#/components/responses/BadRequest"},
 			"401": {Ref: "#/components/responses/Unauthorized"},
 			"403": {Ref: "#/components/responses/Forbidden"},
-			"409": {Description: "The file carries an export's rows, the app already has data here and `full` is not true.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"409": {Description: "`import_running`: an import of this app is already running on this router, which runs one at a time. Or `conflict`: the file carries an export's rows, the app already has data here and `full` is not true.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 			"413": {Description: "A line of the file is over 64 MiB.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
-			"503": {Description: "This deployment has no database to import into.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"503": {Description: "This deployment has no database to import into, or this router is running as many imports as it takes at once: try again.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 		},
 	})
 	document.AddOperation(&huma.Operation{

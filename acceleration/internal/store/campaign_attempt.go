@@ -32,7 +32,6 @@ type CampaignAttempt struct {
 	// happening, and for a dial that placed none.
 	CallOutcome string `bun:"call_outcome,nullzero"`
 	Outcome     string `bun:"outcome,notnull"`
-	Converted   bool   `bun:"converted,notnull"`
 	// ClassifyState is empty, pending, done or abandoned: whether an answered call's outcome
 	// is still to be read from its transcript. Abandoned is one whose contact settled before
 	// it was read.
@@ -83,7 +82,9 @@ func (r *CampaignAttempts) Insert(ctx context.Context, attempt *CampaignAttempt)
 
 // End records how a dial ended: its result, and callOutcome, the phone outcome of the call
 // it placed, empty for none. A classifyAfter marks an answered call whose outcome is to be read
-// from its transcript once it is written. A dial deleted with its campaign is nothing to end.
+// from its transcript once it is written. A dial deleted with its campaign is nothing to end,
+// and one already ended is left as it is: a router whose call outlived its lease ends its dial
+// after the router that took the contact over ended and settled it.
 func (r *CampaignAttempts) End(ctx context.Context, customerID, id string, result, callOutcome, callID, vendorCallID string, endedAt time.Time, classifyAfter *time.Time) error {
 	if customerID == "" || id == "" {
 		return stack.Wrap(errors.New("store: a customer and a dial id are required"))
@@ -101,6 +102,7 @@ func (r *CampaignAttempts) End(ctx context.Context, customerID, id string, resul
 		Set("classify_state = ?", classify).
 		Set("classify_after = ?", classifyAfter).
 		Where("id = ?", id).
+		Where("ended_at IS NULL").
 		// A dial has no customer of its own: it is its campaign's.
 		Where("campaign_id IN (SELECT id FROM campaigns WHERE customer_id = ?)", customerID).
 		Exec(ctx)
@@ -108,6 +110,19 @@ func (r *CampaignAttempts) End(ctx context.Context, customerID, id string, resul
 		return stack.Wrap(fmt.Errorf("store: end dial: %w", err))
 	}
 	return nil
+}
+
+// CountResult counts a contact's dials of one attempt that ended with result.
+func (r *CampaignAttempts) CountResult(ctx context.Context, contactID string, attempt int, result string) (int, error) {
+	count, err := r.store.global.NewSelect().Model((*CampaignAttempt)(nil)).
+		Where("contact_id = ?", contactID).
+		Where("attempt = ?", attempt).
+		Where("result = ?", result).
+		Count(ctx)
+	if err != nil {
+		return 0, stack.Wrap(fmt.Errorf("store: count dials: %w", err))
+	}
+	return count, nil
 }
 
 // Latest returns a contact's most recent dial, and false when it was never dialed.
@@ -139,7 +154,9 @@ type Classifying struct {
 // by now. Each is put off by lease, so another runner retries it if this one dies, and its
 // contact is leased to owner so owner can settle it. Only a contact's latest answered dial is
 // read, and not while another runner holds the contact, nor while a data move's source still
-// reads it (move_paused).
+// reads it (move_paused). Postgres's clock sets the lease of the contact, and the claim compares
+// the lease with the same clock. Thus a runner with a clock that is ahead does not read a dial
+// that another runner reads at the same time.
 func (r *CampaignAttempts) ClaimClassifications(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]Classifying, error) {
 	if owner == "" {
 		return nil, stack.Wrap(errors.New("store: a claim needs an owner"))
@@ -155,7 +172,7 @@ func (r *CampaignAttempts) ClaimClassifications(ctx context.Context, owner strin
 	SELECT ca.id FROM campaign_attempts ca
 	JOIN campaign_contacts cc ON cc.id = ca.contact_id
 	WHERE ca.classify_state = ? AND ca.classify_after <= ? AND cc.stage = ?
-		AND (cc.leased_by = '' OR cc.lease_until IS NULL OR cc.lease_until < ?)
+		AND (cc.leased_by = '' OR cc.lease_until IS NULL OR cc.lease_until < now())
 		AND NOT EXISTS (SELECT 1 FROM campaigns cp WHERE cp.id = cc.campaign_id AND cp.move_paused)
 		AND NOT EXISTS (SELECT 1 FROM campaign_attempts newer
 			WHERE newer.contact_id = ca.contact_id AND newer.classify_state = ca.classify_state
@@ -166,7 +183,7 @@ func (r *CampaignAttempts) ClaimClassifications(ctx context.Context, owner strin
 )
 UPDATE campaign_attempts ca SET classify_after = ?, classify_tries = ca.classify_tries + 1
 FROM due WHERE ca.id = due.id
-RETURNING ca.*`, classifyPending, now, AwaitingOutcome, now, limit, now.Add(lease)).Scan(ctx, &attempts)
+RETURNING ca.*`, classifyPending, now, AwaitingOutcome, limit, now.Add(lease)).Scan(ctx, &attempts)
 		if err != nil {
 			return fmt.Errorf("store: claim classifications: %w", err)
 		}
@@ -181,7 +198,7 @@ RETURNING ca.*`, classifyPending, now, AwaitingOutcome, now, limit, now.Add(leas
 		var contacts []Contact
 		err = tx.NewUpdate().Model(&contacts).
 			Set("leased_by = ?", owner).
-			Set("lease_until = ?", now.Add(lease)).
+			Set("lease_until = now() + make_interval(secs => ?)", lease.Seconds()).
 			Where("id IN (?)", bun.In(contactIDs)).
 			Returning("*").
 			Scan(ctx)
@@ -243,23 +260,6 @@ func (r *CampaignAttempts) PutOff(ctx context.Context, owner, attemptID string, 
 	}
 	if released == 0 {
 		return stack.Wrap(ErrNotLeaseHolder)
-	}
-	return nil
-}
-
-// Classified records an answered dial's outcome. A dial deleted with its campaign, or no longer
-// pending because another runner read it or its contact settled, is nothing to record.
-func (r *CampaignAttempts) Classified(ctx context.Context, attemptID, outcome string, converted bool) error {
-	_, err := r.store.global.NewUpdate().Model((*CampaignAttempt)(nil)).
-		Set("classify_state = ?", classifyDone).
-		Set("classify_after = NULL").
-		Set("outcome = ?", outcome).
-		Set("converted = ?", converted).
-		Where("id = ?", attemptID).
-		Where("classify_state = ?", classifyPending).
-		Exec(ctx)
-	if err != nil {
-		return stack.Wrap(fmt.Errorf("store: classified: %w", err))
 	}
 	return nil
 }

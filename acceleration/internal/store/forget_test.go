@@ -102,7 +102,7 @@ func (s *StoreSuite) TestForgettingAUserRenamesThemInTheChangesOfTheRequestsRewr
 	s.Require().NoError(s.store.StartDataCapture(s.ctx, "app", time.Hour, time.Second))
 	request := func(user string) *Request {
 		recorded := &Request{Modality: "stt", CustomerID: "app", UserID: user, Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true}
-		s.Require().NoError(s.store.Requests.Insert(s.ctx, recorded))
+		s.Require().NoError(insertRequest(s.ctx, s.store, recorded))
 		return recorded
 	}
 	request("jlahey")
@@ -150,7 +150,7 @@ func (s *StoreSuite) TestRenamingAUserRenamesThemInTheChangesOfARequestDeletedBe
 	}
 	s.Require().NoError(s.store.StartDataCapture(s.ctx, "app", time.Hour, time.Second))
 	gone := &Request{Modality: "stt", CustomerID: "app", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, gone))
+	s.Require().NoError(insertRequest(s.ctx, s.store, gone))
 	_, err := s.store.shard.ExecContext(s.ctx, "DELETE FROM requests WHERE usage_id = ?", gone.UsageID)
 	s.Require().NoError(err)
 	s.Require().NotEmpty(s.payloadsNaming("app", "jlahey"), "the request's insert was recorded")
@@ -159,4 +159,47 @@ func (s *StoreSuite) TestRenamingAUserRenamesThemInTheChangesOfARequestDeletedBe
 	s.Require().NoError(err)
 
 	s.Empty(s.payloadsNaming("app", "jlahey"))
+}
+
+func (s *StoreSuite) TestAUsersPolicyForgottenByACommitThatLandsAfterItGaveUpIsForgottenAgain() {
+	proxy, dsn := s.pgProxy(true)
+	slow, err := OpenShards(Options{DSN: dsn, ShardDSN: s.shardDSN, Redis: s.redis(), writeTimeout: 300 * time.Millisecond})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(slow.Close()) })
+	app := "app-" + newID()
+	user := UserScopeID(app, "jlahey")
+	yes := true
+	s.Require().NoError(s.store.Policies.Upsert(s.ctx, &Policy{Scope: ScopeUser, ScopeID: user, Document: PolicyDocument{PromptInjection: &yes}}))
+
+	_, err = slow.ForgetUserSettings(s.ctx, app, "jlahey", "forgotten", &AuditEntry{
+		CustomerID: app, ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+	})
+	s.Require().Error(err, "the COMMIT is held past the read timeout")
+	document, err := s.store.Policies.Get(s.ctx, ScopeUser, user)
+	s.Require().NoError(err)
+	s.Require().NotNil(document.PromptInjection, "the policy is still there while the COMMIT is held")
+	has, err := s.store.Policies.HasUsers(s.ctx, app)
+	s.Require().NoError(err)
+	s.Require().True(has, "and the app still has a user with a policy")
+	// Past the first deletion that follows, so the COMMIT lands between two of them.
+	for deadline := time.Now().Add(2 * forgetBackoff); time.Now().Before(deadline); {
+		document, err := s.store.Policies.Get(s.ctx, ScopeUser, user)
+		s.Require().NoError(err)
+		s.Require().NotNil(document.PromptInjection, "the policy is still there while the COMMIT is held")
+	}
+	proxy.let()
+	s.Require().Eventually(func() bool {
+		held, err := s.store.global.NewSelect().Model((*Policy)(nil)).
+			Where("scope = ? AND scope_id = ?", ScopeUser, user).Exists(s.ctx)
+		s.Require().NoError(err)
+		return !held
+	}, 5*time.Second, 10*time.Millisecond, "the held COMMIT lands")
+
+	s.Eventually(func() bool {
+		document, err := s.store.Policies.Get(s.ctx, ScopeUser, user)
+		s.Require().NoError(err)
+		has, err := s.store.Policies.HasUsers(s.ctx, app)
+		s.Require().NoError(err)
+		return document.PromptInjection == nil && !has
+	}, 5*time.Second, 10*time.Millisecond, "the copies cached before the COMMIT landed are dropped again")
 }

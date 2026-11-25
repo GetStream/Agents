@@ -5001,7 +5001,7 @@ type Campaign struct {
 	LaunchedAt *time.Time `json:"launched_at,omitempty"`
 	Name       string     `json:"name"`
 
-	// PausedReason Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it.
+	// PausedReason Why the router paused the campaign itself: the code of what refused its next call, for example telephony_suspended, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached, user_limit_reached or spend_check_unavailable, stream_app_disconnected or stream_app_moved when the app's Stream app was disconnected or moved, config_missing when its agent config was deleted, session_refused when its agent config makes a session that cannot open, or voicemail_needs_exact_words when its step leaves a voicemail message and its agent config became speech-to-speech. The contact that call was for is rung once the campaign is resumed. Absent for a campaign somebody paused, and cleared by resuming it.
 	PausedReason *string          `json:"paused_reason,omitempty"`
 	Sequence     CampaignSequence `json:"sequence"`
 
@@ -5046,7 +5046,7 @@ type CampaignAnalytics struct {
 
 // CampaignAttempt defines model for CampaignAttempt.
 type CampaignAttempt struct {
-	// DelayMinutes Minutes after the previous attempt started, pushed into the calling hours.
+	// DelayMinutes Minutes after the previous attempt started, pushed into the calling hours. At most 43200 (30 days).
 	DelayMinutes int64 `json:"delay_minutes"`
 }
 
@@ -6133,7 +6133,7 @@ type ContactAttempt struct {
 	// Outcome The outcome an answered call was read as: no_response when nobody but the agent spoke.
 	Outcome *string `json:"outcome,omitempty"`
 
-	// Result Why the dial placed no call: invalid_number, refused, deferred, paused or not_placed (the router stopped before the call went out). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says.
+	// Result Why the dial placed no call: invalid_number, refused, deferred, paused, not_placed (the router stopped before the call went out) or dial_failed (it failed before anything rang, and is tried again shortly). voicemail for a call an answering machine took. Empty for any other call, whose end call_outcome says.
 	Result    string    `json:"result"`
 	StartedAt time.Time `json:"started_at"`
 }
@@ -6216,7 +6216,7 @@ type CreateOptOutRequest struct {
 	// Channel The channel a recipient opted out of, or all of them.
 	Channel OptOutChannel `json:"channel"`
 
-	// Recipient The number, in E.164.
+	// Recipient The number in E.164, or an iMessage handle's email address, for channel imessage or all.
 	Recipient string `json:"recipient"`
 
 	// Source Omitted is api.
@@ -6363,11 +6363,13 @@ type CreateSessionRequest struct {
 	// Languages Language hints, which narrow the candidates in every modality.
 	Languages *[]string `json:"languages,omitempty"`
 
-	// Llm A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured.
-	Llm       *string `json:"llm,omitempty"`
-	MaxTokens *int    `json:"max_tokens,omitempty"`
+	// Llm A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured. Server-side only: a device sending it is refused with a 403.
+	Llm *string `json:"llm,omitempty"`
 
-	// MaxToolRounds The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups.
+	// MaxTokens Server-side only: a device sending it is refused with a 403.
+	MaxTokens *int `json:"max_tokens,omitempty"`
+
+	// MaxToolRounds The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups. Server-side only: a device sending it is refused with a 403.
 	MaxToolRounds *int `json:"max_tool_rounds,omitempty"`
 
 	// Memory Who the session's memories are about. Without a user id nothing is recalled or stored, which is the case for a call with nobody identified on it.
@@ -6395,19 +6397,19 @@ type CreateSessionRequest struct {
 	// ReturnUrl The app's own page a login or step-up the chat asks for goes back to, as createAuthorization's return_url: the launch page takes the handoff only from a page of its origin, and the browser comes back to it with connection_id and status added to its query. The same rules as createAuthorization's return_url apply, and a URL they refuse is answered with a 400 invalid_request naming the rule (an error frame on the session socket). Absent or empty, those consents go back to the dashboard. It is kept with the session, so a chat carried on after it ended and a fork go back to it too. An end user's device may send it: a consent the chat asks for is only ever for the caller's own connection, shown to the caller alone, and bound to the first browser that hands it off, so the URL only decides where the caller's own consent lands.
 	ReturnUrl *string `json:"return_url,omitempty"`
 
-	// Search Omit it and the config decides, or search-fast when there is no config.
+	// Search Omit it and the config decides, or search-fast when there is no config. Server-side only: a device sending it is refused with a 403.
 	Search *string `json:"search,omitempty"`
 
 	// StartVoice Start voice as the session opens, as startSessionVoice does: the agent joins the call named in call, else agent:<session id>, which joining creates, and returns once it is there. Left out, the conversation is held in writing until voice is started.
 	StartVoice *bool `json:"start_voice,omitempty"`
 
-	// Sts A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides.
+	// Sts A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides. Server-side only: a device sending it is refused with a 403.
 	Sts *string `json:"sts,omitempty"`
 
-	// Stt Omit it and the config decides, or en-low-latency when there is no config.
+	// Stt Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.
 	Stt *string `json:"stt,omitempty"`
 
-	// Tags Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins.
+	// Tags Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins. Server-side only: a device sending it is refused with a 403.
 	Tags *map[string]string `json:"tags,omitempty"`
 
 	// Team The team the session's work is counted under, its team spend limits included, as team:<name> is among a token's usage categories: 1 to 59 letters, digits, _ . and -. Left out, the session is counted under the team the caller's token names, else the agent config's team tag. A token naming another team is refused with a 400: the team a token was signed for is not moved. Server-side only: a device sending it is refused with a 403, since its team is the one its token was signed for.
@@ -6423,7 +6425,7 @@ type CreateSessionRequest struct {
 	ToolTimeoutMs *int           `json:"tool_timeout_ms,omitempty"`
 	Tools         *[]SessionTool `json:"tools,omitempty"`
 
-	// Tts Omit it and the config decides, or en-low-latency when there is no config.
+	// Tts Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.
 	Tts *string `json:"tts,omitempty"`
 
 	// Ui Whether the model is told its config's ui_instructions in this session. Left out or true, it is told them after the instructions; false leaves them out, for a client that shows no UI. It is no filter: instructions that teach UI themselves still do, and a UI block the model writes is still split off the reply. Reopening or forking the session keeps it. A device may send it, since it only chooses whether to use what the agent's owner wrote.
@@ -6434,7 +6436,7 @@ type CreateSessionRequest struct {
 	UserName *string       `json:"user_name,omitempty"`
 	Video    *SessionVideo `json:"video,omitempty"`
 
-	// Voice The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI.
+	// Voice The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI. Server-side only: a device sending it is refused with a 403.
 	Voice *string `json:"voice,omitempty"`
 }
 
@@ -6687,7 +6689,7 @@ type DetectionOptions struct {
 	// MinConfidence Drop boxes scored below this. Only a model that scores its boxes is asked.
 	MinConfidence *float64 `json:"min_confidence,omitempty"`
 
-	// Overwrites Settings for one provider that the options above have no word for, keyed by provider. roboflow takes workspace and workflow_id, or specification, for the roboflow/workflow model. An overwrite for a provider that is not a candidate is refused.
+	// Overwrites Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it and the next candidate is asked without it. One naming a provider that is not a candidate is refused.
 	Overwrites *map[string]interface{} `json:"overwrites,omitempty"`
 
 	// Providers A priority list of where to try, in the order given, which wins over target when it holds anything.
@@ -6814,7 +6816,7 @@ type EqualsOrIn1 struct {
 
 // ErrorDetail defines model for ErrorDetail.
 type ErrorDetail struct {
-	// Code What went wrong, for a program to branch on. Every type has a code of its own name (invalid_request, unauthenticated, forbidden, payment_required, not_found, method_not_allowed, not_acceptable, conflict, gone, payload_too_large, unsupported_media_type, rate_limited, internal_error, unavailable, timeout) that a failure has when nothing names it better. The others are validation_failed, missing_customer, missing_organization, server_side_only, not_configured (this deployment does not offer the feature), modality_not_routed, unsynced_changes (a sync asked to check would write over somebody's edits), name_taken (a 409: another agent config, router config or voice, or another skill of the same agent config, already has the name, so another name will do), channel_connection_taken (a 409: another live agent config binds the channel connection as fixed, and one agent answers a channel connection's messages, so the message names that config), call_unanswered (a 409: the call placed for a phone session ended with nobody answering, and the message names how: busy, no_answer, failed or canceled. Opening the session is refused, or, when the status came while the agent was joining the call, the session is ended at once and kept as ended), no_oauth_client (a 400: a consent found no OAuth client for the connector, and the message names each way the connector lets the app give it one), invalid_config (a 400: an agent config a run names does not start a session), tool_not_configured (a 400: a session under an agent config was declared or given a function that none of the config's tool groups names, and the message names it), insufficient_credits (a 402: the organization's credit is spent, so work that costs money is refused until credit is added; a model that costs nothing is still served), system_limit_reached (a 402: the organization's spend hard limit for the day or the month is reached, whatever its credit, and the message names the interval, the amount and when it resets), spend_limit_reached (a 402: one of the organization's own spend limits is spent, on the organization, an app, a key, a usage category or a team, and the message says which and when it resets, so retrying before then is refused again), user_limit_reached (a 429: a spend limit on the one end user the request is for is spent, which stops that user and no one else, and Retry-After says when its window ends), spend_check_unavailable (a 503: the router could not share what the organization is spending with the other routers for a while, so work that costs money is refused until it can; a model that costs nothing is still served, and Retry-After says to try again in a few seconds), budget_moved (a 400: a policy sent a budget, which spend limits replaced), limit_above_parent (a 400: a spend limit is above a limit of its parent in the same interval, and the message names the parent's limit), limit_exists (a 409: the subject already has a limit at that level and interval, and the message names its id), no_limit (a 404: the subject has no spend limit to reset or grant past), use_team (a 400: a category starting team: was sent, where the team field names a team), invalid_expiry (a 400: a grant's expires_at is not in the future, or is more than 366 days away), too_many_grants (a 409: the organization has 20 live grants, as many as it may), tier_limit_reached (the organization's tier limits refuse the work, and limit says which: a 403 for a call or a transfer, to a country the tier does not reach, past its minutes or recipients of the day, or past its calls at once; a 400 for an agent config whose sandbox is bigger or more open than the organization's sandbox limits allow. The message names the tier and the limit), account_suspended (a 403: the organization is suspended, and every request is refused, one for a model that costs nothing included, until it is restored; the message says to contact support), concurrency_limited (a 429: the app has as many runs in flight as it may, and Retry-After says when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input does not fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG, WebP or GIF, which retrying the same image does not fix), document_too_large (a 413: a file sent with a response has more pages or text than one may, alone or with the files the conversation already holds, and the message names the limit), document_unreadable (a 400: a file sent with a response could not be read, such as one with a password, one that is damaged or one with no text in it, which retrying the same file does not fix), invalid_usage_categories (a 400: the usage categories the request names, in the token's usage_categories and team claims or in X-Stream-Usage-Categories, are more than 10, one is not 1 to 64 characters of A-Z, a-z, 0-9, _ . : -, more than one names a team, or the team is over 59 characters), memory_unavailable (a 503: the memory store could not delete what was asked, so nothing that waits on it was deleted either, and the same request later can succeed), billing_not_enabled (a 404: this deployment bills nobody, or the caller's app is in no organization it bills, so there is no account to read), provider_takes_no_key (a 400: a key was put for a provider whose work is never routed on a customer's own key here, and the message names the ones that are), campaign_locked (a 409: the campaign's state does not allow the change, such as a launched campaign's sequence, or resuming one that is running), campaign_not_ready (a 400: a launch found the campaign missing what it needs to ring anybody, and the message says what), consent_required (a 400: a launch did not say the people on the campaign agreed to be called), branch_limit_reached (a 409: the conversation has as many edit and regenerate points as Stream Chat keeps for it, 100, so a regenerate or an edit is refused and the conversation is continued in a new chat; asking and reading are unaffected), branch_too_long (a 409: the branch an activation would bring back is more than 100 messages to send again, so it is continued in a new chat), branch_unavailable (a 410: the copies of a hidden branch were deleted, as a memory truncate deletes them, so it can be neither read nor brought back), switch_unfinished (a 409: a regenerate, an edit or an activation of the session failed after Stream Chat may have rewound, and finishing it still fails because Stream Chat does not answer, so the session's questions, regenerates, edits and activations are refused meanwhile; try again: each one tries to finish it first, so it clears once Stream Chat answers), and <resource>_not_found for agent_config, call, campaign, channel_account, command, connection, grant, knowledge_document, knowledge_url, limit, provider_key, router_config, scheduled_task, session, simulation, simulation_run, skill and voice. A scheduled task also has invalid_schedule (a schedule that does not read: at and in both or neither, a date, time or duration that does not parse, or until without repeat), schedule_in_past, schedule_too_far (a one-shot, or an in, more than a year ahead), invalid_timezone, timezone_unknown (no zone was given and neither the user nor the config has one), invalid_repeat, interval_too_short (a run moved to less than 15 minutes from now and earlier than the run it replaces), too_many_tasks (a 409: the user is at their active-task limit) and task_changed (a 409: the task changed between the request's read and its save, by another edit or pause or by a delivery; nothing was saved, and reading it again and retrying can succeed). More may be added, so a client should expect one it does not know.
+	// Code What went wrong, for a program to branch on. Every type has a code of its own name (invalid_request, unauthenticated, forbidden, payment_required, not_found, method_not_allowed, not_acceptable, conflict, gone, payload_too_large, unsupported_media_type, rate_limited, internal_error, unavailable, timeout) that a failure has when nothing names it better. The others are validation_failed, missing_customer, missing_organization, server_side_only, not_configured (this deployment does not offer the feature), modality_not_routed, unsynced_changes (a sync asked to check would write over somebody's edits), name_taken (a 409: another agent config, router config or voice, or another skill of the same agent config, already has the name, so another name will do), import_running (a 409: an import of the app is already running on this router, which runs one at a time, so the same import once it ends can succeed), channel_connection_taken (a 409: another live agent config binds the channel connection as fixed, and one agent answers a channel connection's messages, so the message names that config), call_unanswered (a 409: the call placed for a phone session ended with nobody answering, and the message names how: busy, no_answer, failed or canceled. Opening the session is refused, or, when the status came while the agent was joining the call, the session is ended at once and kept as ended), no_oauth_client (a 400: a consent found no OAuth client for the connector, and the message names each way the connector lets the app give it one), invalid_config (a 400: an agent config a run names does not start a session), tool_not_configured (a 400: a session under an agent config was declared or given a function that none of the config's tool groups names, and the message names it), insufficient_credits (a 402: the organization's credit is spent, so work that costs money is refused until credit is added; a model that costs nothing is still served), system_limit_reached (a 402: the organization's spend hard limit for the day or the month is reached, whatever its credit, and the message names the interval, the amount and when it resets), spend_limit_reached (a 402: one of the organization's own spend limits is spent, on the organization, an app, a key, a usage category or a team, and the message says which and when it resets, so retrying before then is refused again), user_limit_reached (a 429: a spend limit on the one end user the request is for is spent, which stops that user and no one else, and Retry-After says when its window ends), spend_check_unavailable (a 503: the router could not share what the organization is spending with the other routers for a while, so work that costs money is refused until it can; a model that costs nothing is still served, and Retry-After says to try again in a few seconds), budget_moved (a 400: a policy sent a budget, which spend limits replaced), limit_above_parent (a 400: a spend limit is above a limit of its parent in the same interval, and the message names the parent's limit), limit_exists (a 409: the subject already has a limit at that level and interval, and the message names its id), no_limit (a 404: the subject has no spend limit to reset or grant past), use_team (a 400: a category starting team: was sent, where the team field names a team), invalid_expiry (a 400: a grant's expires_at is not in the future, or is more than 366 days away), too_many_grants (a 409: the organization has 20 live grants, as many as it may), tier_limit_reached (the organization's tier limits refuse the work, and limit says which: a 403 for a call or a transfer, to a country the tier does not reach, past its minutes or recipients of the day, or past its calls at once; a 400 for an agent config whose sandbox is bigger or more open than the organization's sandbox limits allow. The message names the tier and the limit), account_suspended (a 403: the organization is suspended, and every request is refused, one for a model that costs nothing included, until it is restored; the message says to contact support), concurrency_limited (a 429: the app has as many runs in flight as it may, and Retry-After says when to try again), model_failed (a 503: the model failed or gave no answer), prompt_injection (a 400: the prompt injection screen refused the input of a run or a tool result it read, which retrying an unchanged input does not fix), image_unavailable (a 400: an image a run was handed could not be fetched or is not a JPEG, PNG, WebP or GIF, which retrying the same image does not fix), document_too_large (a 413: a file sent with a response has more pages or text than one may, alone or with the files the conversation already holds, and the message names the limit), document_unreadable (a 400: a file sent with a response could not be read, such as one with a password, one that is damaged or one with no text in it, which retrying the same file does not fix), invalid_usage_categories (a 400: the usage categories the request names, in the token's usage_categories and team claims or in X-Stream-Usage-Categories, are more than 10, one is not 1 to 64 characters of A-Z, a-z, 0-9, _ . : -, more than one names a team, or the team is over 59 characters), memory_unavailable (a 503: the memory store could not delete what was asked, so nothing that waits on it was deleted either, and the same request later can succeed), billing_not_enabled (a 404: this deployment bills nobody, or the caller's app is in no organization it bills, so there is no account to read), provider_takes_no_key (a 400: a key was put for a provider whose work is never routed on a customer's own key here, and the message names the ones that are), campaign_locked (a 409: the campaign's state does not allow the change, such as a launched campaign's sequence, or resuming one that is running), campaign_not_ready (a 400: a launch found the campaign missing what it needs to ring anybody, and the message says what), consent_required (a 400: a launch did not say the people on the campaign agreed to be called), branch_limit_reached (a 409: the conversation has as many edit and regenerate points as Stream Chat keeps for it, 100, so a regenerate or an edit is refused and the conversation is continued in a new chat; asking and reading are unaffected), branch_too_long (a 409: the branch an activation would bring back is more than 100 messages to send again, so it is continued in a new chat), branch_unavailable (a 410: the copies of a hidden branch were deleted, as a memory truncate deletes them, so it can be neither read nor brought back), switch_unfinished (a 409: a regenerate, an edit or an activation of the session failed after Stream Chat may have rewound, and finishing it still fails because Stream Chat does not answer, so the session's questions, regenerates, edits and activations are refused meanwhile; try again: each one tries to finish it first, so it clears once Stream Chat answers), and <resource>_not_found for agent_config, call, campaign, channel_account, command, connection, grant, knowledge_document, knowledge_url, limit, provider_key, router_config, scheduled_task, session, simulation, simulation_run, skill and voice. A scheduled task also has invalid_schedule (a schedule that does not read: at and in both or neither, a date, time or duration that does not parse, or until without repeat), schedule_in_past, schedule_too_far (a one-shot, or an in, more than a year ahead), invalid_timezone, timezone_unknown (no zone was given and neither the user nor the config has one), invalid_repeat, interval_too_short (a run moved to less than 15 minutes from now and earlier than the run it replaces), too_many_tasks (a 409: the user is at their active-task limit) and task_changed (a 409: the task changed between the request's read and its save, by another edit or pause or by a delivery; nothing was saved, and reading it again and retrying can succeed). More may be added, so a client should expect one it does not know.
 	Code string `json:"code"`
 
 	// DocUrl Where the code is explained.
@@ -8045,7 +8047,7 @@ type OptOut struct {
 	CreatedAt time.Time     `json:"created_at"`
 	Id        string        `json:"id"`
 
-	// Recipient The number, in E.164.
+	// Recipient The number in E.164, or an iMessage handle's email address.
 	Recipient string `json:"recipient"`
 
 	// Source keyword when they texted STOP, campaign when they asked a campaign call not to call again, otherwise api or dashboard.
@@ -10131,9 +10133,12 @@ type SpendBucket struct {
 
 	// CostMicrosTotal Millionths of a dollar, priced from the configured rates.
 	CostMicrosTotal int64 `json:"cost_micros_total"`
-	RequestCount    int64 `json:"request_count"`
 
-	// Value The modality or label value this row is for. "other" is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
+	// Other True on the row that is everything outside the biggest few, summed. Its value is "other", which a label can also have: a label of that value is a row of its own, without other.
+	Other        *bool `json:"other,omitempty"`
+	RequestCount int64 `json:"request_count"`
+
+	// Value The modality or label value this row is for. "other" with other true is everything outside the biggest few, and the empty string is spend carrying no such label at all, so a customer that labels only part of its traffic can see which part.
 	//
 	// Example: support
 	Value string `json:"value"`
@@ -14887,7 +14892,7 @@ type ClientInterface interface {
 
 	// ForkSessionWithBody Continue a conversation as a new one
 	//
-	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with.
+	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 	// The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 	//
 	// Takes any type of body and a specified content type.
@@ -14897,7 +14902,7 @@ type ClientInterface interface {
 
 	// ForkSession Continue a conversation as a new one
 	//
-	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with.
+	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 	// The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 	//
 	// Takes a body of the `application/json` content type.
@@ -15635,6 +15640,7 @@ type ClientInterface interface {
 	//
 	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
 	// An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
+	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
 	// Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 	//
 	// Takes any type of body and a specified content type.
@@ -16327,6 +16333,7 @@ type ClientInterface interface {
 	// SearchWithBody Answer a question out of what is true now
 	//
 	// The fourth routed modality, reachable on its own rather than only as a tool an agent reaches for. One question, one answer: routed, failed over and billed like the rest, and with no socket because nothing arrives in pieces.
+	// An end user's device may name a `config_id` but not send `options`, which is refused with 403: how a search is run is the customer's to decide. Each search counts as one message on the caller's daily quota.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -16336,6 +16343,7 @@ type ClientInterface interface {
 	// Search Answer a question out of what is true now
 	//
 	// The fourth routed modality, reachable on its own rather than only as a tool an agent reaches for. One question, one answer: routed, failed over and billed like the rest, and with no socket because nothing arrives in pieces.
+	// An end user's device may name a `config_id` but not send `options`, which is refused with 403: how a search is run is the customer's to decide. Each search counts as one message on the caller's daily quota.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -16549,7 +16557,7 @@ type ClientInterface interface {
 	//
 	// Spend across every modality at once, which is what a bill is. group_by decides what the series are: "modality" for where the money went, who asked for it ("who:app", "who:origin", "who:user", "who:team" or "who:category"), or a cost label for what it was spent on. "who:origin" groups by the key the work was started with, or the origin of work no key started, such as hook:chat. A label key holds no ':', so a label named app is still grouped by as group_by=app. "who:team" groups by the team the user's token named, work with none under the empty value; "who:category" by the other usage categories, and a request carrying several counts once in each, so those rows add up to more than the total.
 	// scope=organization counts every app of the caller's organization rather than the caller's app alone; grouped by "who:user" the value is then <app_id>/<user_id>, since a user id is only unique within its app.
-	// Only the biggest values keep a series of their own, because a label such as customer_id has as many values as the customer has customers. The rest are summed into "other", and spend carrying no such label at all into the empty value, so the rows still add up to the total.
+	// Only the biggest values keep a series of their own, because a label such as customer_id has as many values as the customer has customers. The rest are summed into a row marked other, whose value is "other", and spend carrying no such label at all into the empty value, so the rows still add up to the total.
 	// Reads the request rows rather than the rollups, so today's spend is there without a rollup having run.
 	//
 	// Corresponds with GET /v1/stats/spend (the `GetSpend` operationId).
@@ -19853,7 +19861,7 @@ func (c *Client) InterruptSessionCommand(ctx context.Context, id string, request
 
 // ForkSessionWithBody Continue a conversation as a new one
 //
-// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with.
+// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 // The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 //
 // Takes any type of body and a specified content type.
@@ -19873,7 +19881,7 @@ func (c *Client) ForkSessionWithBody(ctx context.Context, id string, contentType
 
 // ForkSession Continue a conversation as a new one
 //
-// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with.
+// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 // The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 //
 // Takes a body of the `application/json` content type.
@@ -21411,6 +21419,7 @@ func (c *Client) ExportData(ctx context.Context, reqEditors ...RequestEditorFn) 
 //
 // Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
 // An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
+// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
 // Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 //
 // Takes any type of body and a specified content type.
@@ -22883,6 +22892,7 @@ func (c *Client) UpdateRouterConfig(ctx context.Context, id string, body UpdateR
 // SearchWithBody Answer a question out of what is true now
 //
 // The fourth routed modality, reachable on its own rather than only as a tool an agent reaches for. One question, one answer: routed, failed over and billed like the rest, and with no socket because nothing arrives in pieces.
+// An end user's device may name a `config_id` but not send `options`, which is refused with 403: how a search is run is the customer's to decide. Each search counts as one message on the caller's daily quota.
 //
 // Takes any type of body and a specified content type.
 //
@@ -22902,6 +22912,7 @@ func (c *Client) SearchWithBody(ctx context.Context, contentType string, body io
 // Search Answer a question out of what is true now
 //
 // The fourth routed modality, reachable on its own rather than only as a tool an agent reaches for. One question, one answer: routed, failed over and billed like the rest, and with no socket because nothing arrives in pieces.
+// An end user's device may name a `config_id` but not send `options`, which is refused with 403: how a search is run is the customer's to decide. Each search counts as one message on the caller's daily quota.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -23325,7 +23336,7 @@ func (c *Client) GetAgentStats(ctx context.Context, params *GetAgentStatsParams,
 //
 // Spend across every modality at once, which is what a bill is. group_by decides what the series are: "modality" for where the money went, who asked for it ("who:app", "who:origin", "who:user", "who:team" or "who:category"), or a cost label for what it was spent on. "who:origin" groups by the key the work was started with, or the origin of work no key started, such as hook:chat. A label key holds no ':', so a label named app is still grouped by as group_by=app. "who:team" groups by the team the user's token named, work with none under the empty value; "who:category" by the other usage categories, and a request carrying several counts once in each, so those rows add up to more than the total.
 // scope=organization counts every app of the caller's organization rather than the caller's app alone; grouped by "who:user" the value is then <app_id>/<user_id>, since a user id is only unique within its app.
-// Only the biggest values keep a series of their own, because a label such as customer_id has as many values as the customer has customers. The rest are summed into "other", and spend carrying no such label at all into the empty value, so the rows still add up to the total.
+// Only the biggest values keep a series of their own, because a label such as customer_id has as many values as the customer has customers. The rest are summed into a row marked other, whose value is "other", and spend carrying no such label at all into the empty value, so the rows still add up to the total.
 // Reads the request rows rather than the rollups, so today's spend is there without a rollup having run.
 //
 // Corresponds with GET /v1/stats/spend (the `GetSpend` operationId).
@@ -38258,7 +38269,7 @@ type ClientWithResponsesInterface interface {
 
 	// ForkSessionWithBodyWithResponse Continue a conversation as a new one
 	//
-	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with.
+	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 	// The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -38268,7 +38279,7 @@ type ClientWithResponsesInterface interface {
 
 	// ForkSessionWithResponse Continue a conversation as a new one
 	//
-	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with.
+	// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 	// The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
@@ -39080,6 +39091,7 @@ type ClientWithResponsesInterface interface {
 	//
 	// Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
 	// An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
+	// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
 	// Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -39838,6 +39850,7 @@ type ClientWithResponsesInterface interface {
 	// SearchWithBodyWithResponse Answer a question out of what is true now
 	//
 	// The fourth routed modality, reachable on its own rather than only as a tool an agent reaches for. One question, one answer: routed, failed over and billed like the rest, and with no socket because nothing arrives in pieces.
+	// An end user's device may name a `config_id` but not send `options`, which is refused with 403: how a search is run is the customer's to decide. Each search counts as one message on the caller's daily quota.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -39847,6 +39860,7 @@ type ClientWithResponsesInterface interface {
 	// SearchWithResponse Answer a question out of what is true now
 	//
 	// The fourth routed modality, reachable on its own rather than only as a tool an agent reaches for. One question, one answer: routed, failed over and billed like the rest, and with no socket because nothing arrives in pieces.
+	// An end user's device may name a `config_id` but not send `options`, which is refused with 403: how a search is run is the customer's to decide. Each search counts as one message on the caller's daily quota.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -40076,7 +40090,7 @@ type ClientWithResponsesInterface interface {
 	//
 	// Spend across every modality at once, which is what a bill is. group_by decides what the series are: "modality" for where the money went, who asked for it ("who:app", "who:origin", "who:user", "who:team" or "who:category"), or a cost label for what it was spent on. "who:origin" groups by the key the work was started with, or the origin of work no key started, such as hook:chat. A label key holds no ':', so a label named app is still grouped by as group_by=app. "who:team" groups by the team the user's token named, work with none under the empty value; "who:category" by the other usage categories, and a request carrying several counts once in each, so those rows add up to more than the total.
 	// scope=organization counts every app of the caller's organization rather than the caller's app alone; grouped by "who:user" the value is then <app_id>/<user_id>, since a user id is only unique within its app.
-	// Only the biggest values keep a series of their own, because a label such as customer_id has as many values as the customer has customers. The rest are summed into "other", and spend carrying no such label at all into the empty value, so the rows still add up to the total.
+	// Only the biggest values keep a series of their own, because a label such as customer_id has as many values as the customer has customers. The rest are summed into a row marked other, whose value is "other", and spend carrying no such label at all into the empty value, so the rows still add up to the total.
 	// Reads the request rows rather than the rollups, so today's spend is there without a rollup having run.
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -64746,6 +64760,8 @@ type SearchResponse struct {
 	JSON401 *Unauthorized
 	// JSON402 the response for an HTTP 402 `application/json` response
 	JSON402 *PaymentRequired
+	// JSON403 the response for an HTTP 403 `application/json` response
+	JSON403 *Forbidden
 	// JSON404 the response for an HTTP 404 `application/json` response
 	JSON404 *NotFound
 	// JSON500 the response for an HTTP 500 `application/json` response
@@ -64776,6 +64792,11 @@ func (r SearchResponse) GetJSON401() *Unauthorized {
 // GetJSON402 returns the response for an HTTP 402 `application/json` response
 func (r SearchResponse) GetJSON402() *PaymentRequired {
 	return r.JSON402
+}
+
+// GetJSON403 returns the response for an HTTP 403 `application/json` response
+func (r SearchResponse) GetJSON403() *Forbidden {
+	return r.JSON403
 }
 
 // GetJSON404 returns the response for an HTTP 404 `application/json` response
@@ -70528,7 +70549,7 @@ func (c *ClientWithResponses) InterruptSessionCommandWithResponse(ctx context.Co
 
 // ForkSessionWithBodyWithResponse Continue a conversation as a new one
 //
-// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with.
+// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 // The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -70544,7 +70565,7 @@ func (c *ClientWithResponses) ForkSessionWithBodyWithResponse(ctx context.Contex
 
 // ForkSessionWithResponse Continue a conversation as a new one
 //
-// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with.
+// Opens a session from another's spec, carrying its history across by default, and records where it came from. The usual reason is to ask the same question of a different model without losing the original answer, which is why anything in the request is written over what the parent was opened with. Models are the backend's to change: a device sending `model_overwrites` is refused with a 403, and its fork keeps the parent's overwrites, or runs on the config it names.
 // The parent is untouched and keeps running if it was running. Forking an incognito session is refused rather than answered with an empty conversation: there is nothing recorded to fork from, and pretending otherwise would hand back a session that quietly lost everything the caller thought they were continuing.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
@@ -71836,6 +71857,7 @@ func (c *ClientWithResponses) ExportDataWithResponse(ctx context.Context, reqEdi
 //
 // Takes what `exportData` produced, one JSON object per line of at most 64 MiB, and the same lines with a `change` in place of a `row` for what `listDataChanges` returned. Every row is written under the calling app whatever the file says, so an export from one app cannot be imported into another's rows, and rows belonging to a customer through a parent are only written where that parent is the caller's.
 // An export's rows are written as the source had them, so an export is refused with 409 `conflict`, before any of its rows is written, for an app that already has a row here in a table of the shared database: it would undo what was done here since. `full=true` writes it over them anyway, and importing the same export twice that way leaves what importing it once would. Changes are applied whatever the app holds. An import that stopped partway is run again with `full=true`, since the app then holds its first rows.
+// An app runs one import at a time on a router, and a router runs at most four imports at once. An import ends when a line has taken a minute to arrive.
 // Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
@@ -73062,6 +73084,7 @@ func (c *ClientWithResponses) UpdateRouterConfigWithResponse(ctx context.Context
 // SearchWithBodyWithResponse Answer a question out of what is true now
 //
 // The fourth routed modality, reachable on its own rather than only as a tool an agent reaches for. One question, one answer: routed, failed over and billed like the rest, and with no socket because nothing arrives in pieces.
+// An end user's device may name a `config_id` but not send `options`, which is refused with 403: how a search is run is the customer's to decide. Each search counts as one message on the caller's daily quota.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -73077,6 +73100,7 @@ func (c *ClientWithResponses) SearchWithBodyWithResponse(ctx context.Context, co
 // SearchWithResponse Answer a question out of what is true now
 //
 // The fourth routed modality, reachable on its own rather than only as a tool an agent reaches for. One question, one answer: routed, failed over and billed like the rest, and with no socket because nothing arrives in pieces.
+// An end user's device may name a `config_id` but not send `options`, which is refused with 403: how a search is run is the customer's to decide. Each search counts as one message on the caller's daily quota.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //
@@ -73432,7 +73456,7 @@ func (c *ClientWithResponses) GetAgentStatsWithResponse(ctx context.Context, par
 //
 // Spend across every modality at once, which is what a bill is. group_by decides what the series are: "modality" for where the money went, who asked for it ("who:app", "who:origin", "who:user", "who:team" or "who:category"), or a cost label for what it was spent on. "who:origin" groups by the key the work was started with, or the origin of work no key started, such as hook:chat. A label key holds no ':', so a label named app is still grouped by as group_by=app. "who:team" groups by the team the user's token named, work with none under the empty value; "who:category" by the other usage categories, and a request carrying several counts once in each, so those rows add up to more than the total.
 // scope=organization counts every app of the caller's organization rather than the caller's app alone; grouped by "who:user" the value is then <app_id>/<user_id>, since a user id is only unique within its app.
-// Only the biggest values keep a series of their own, because a label such as customer_id has as many values as the customer has customers. The rest are summed into "other", and spend carrying no such label at all into the empty value, so the rows still add up to the total.
+// Only the biggest values keep a series of their own, because a label such as customer_id has as many values as the customer has customers. The rest are summed into a row marked other, whose value is "other", and spend carrying no such label at all into the empty value, so the rows still add up to the total.
 // Reads the request rows rather than the rollups, so today's spend is there without a rollup having run.
 //
 // Returns a wrapper object for the known response body format(s).
@@ -102293,6 +102317,13 @@ func ParseSearchResponse(rsp *http.Response) (*SearchResponse, error) {
 			return nil, err
 		}
 		response.JSON402 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest Forbidden
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON403 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
 		var dest NotFound

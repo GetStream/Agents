@@ -14,7 +14,8 @@ T = TypeVar("T", bound="CampaignAttempt")
 class CampaignAttempt:
     """
     Attributes:
-        delay_minutes (int): Minutes after the previous attempt started, pushed into the calling hours.
+        delay_minutes (int): Minutes after the previous attempt started, pushed into the calling hours. At most 43200
+            (30 days).
     """
 
     delay_minutes: int

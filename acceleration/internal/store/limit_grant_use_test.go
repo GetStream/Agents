@@ -28,7 +28,7 @@ func (s *StoreSuite) grantRow(store *Store, grants []int64, cost int64, billable
 }
 
 // writeAsTheWriter writes the rows and counts the ones written toward their grants, as the
-// writer does: RecordRequests counts them with one database, the writer's grant counter apart
+// writer does: Requests.InsertMany counts them with one database, the writer's grant counter apart
 // with shards.
 func (s *StoreSuite) writeAsTheWriter(store *Store, rows ...Request) {
 	written, err := store.Requests.InsertMany(s.ctx, rows)
