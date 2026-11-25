@@ -159,19 +159,21 @@ func (s *VoicesSuite) TestALibraryVoiceIdThatIsNotTheVendorsIsRefusedNamingTheFi
 // A Cartesia id is a UUID, the same voice in any case: an upper case copy of another
 // customer's id is as much theirs as the id, and the owner may still preview with either.
 func (s *VoicesSuite) TestAnUpperCaseCopyOfAnotherCustomersCartesiaIdIsNotTheirsToHear() {
-	s.library.Register("cartesia", accountVoices{{Provider: "cartesia", ID: cartesiaVoice, Name: "Barbershop Man"}})
+	// An id of its own: the bindings outlive the test, and another test previews cartesiaVoice.
+	bound := s.utils.uuid()
+	s.library.Register("cartesia", accountVoices{{Provider: "cartesia", ID: bound, Name: "Barbershop Man"}})
 	created := s.createVoice(map[string]any{"name": "founder"})
 	s.Require().NoError(s.store.VoiceBindings.Upsert(context.Background(), &store.VoiceBinding{
-		VoiceID: created.Id, Provider: "cartesia", ExternalID: cartesiaVoice, State: store.VoiceReady,
+		VoiceID: created.Id, Provider: "cartesia", ExternalID: bound, State: store.VoiceReady,
 	}))
-	for _, spelled := range []string{cartesiaVoice, strings.ToUpper(cartesiaVoice)} {
+	for _, spelled := range []string{bound, strings.ToUpper(bound)} {
 		s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet,
 			"/v1/agents/voices/library/cartesia/"+spelled+"/preview", nil, nil), "its owner, "+spelled)
 	}
 
 	s.useApp(s.data.createApp())
 
-	for _, spelled := range []string{cartesiaVoice, strings.ToUpper(cartesiaVoice)} {
+	for _, spelled := range []string{bound, strings.ToUpper(bound)} {
 		status, _ := s.serverClient.failure(http.MethodGet,
 			"/v1/agents/voices/library/cartesia/"+spelled+"/preview", nil)
 		s.Equal(http.StatusNotFound, status, "another customer, "+spelled)
