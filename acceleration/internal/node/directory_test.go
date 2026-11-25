@@ -255,17 +255,22 @@ func (s *DirectorySuite) TestACallAnotherCustomerHoldsStaysItsOwn() {
 	first, second := s.directoryAt("node-a:1"), s.directoryAt("node-b:1")
 	s.Require().NoError(first.HoldCall(s.ctx, "acme", 7, "order-42"))
 
-	s.Error(second.HoldCall(s.ctx, "acm", 7, "order-42"))
+	s.ErrorIs(second.HoldCall(s.ctx, "acm", 7, "order-42"), ErrCallHeld)
 	s.Equal("acme", s.holder(7, "order-42"))
 	second.renewAll(s.ctx)
 	s.Equal("acme", s.holder(7, "order-42"))
-	second.ReleaseCall(s.ctx, "acm", 7, "order-42")
-	s.Equal("acme", s.holder(7, "order-42"))
+	// A hold refused is not renewed once the call is free.
+	s.lapsed()
+	second.renewAll(s.ctx)
+	s.Empty(s.holder(7, "order-42"))
+	first.renewAll(s.ctx)
 
 	// A claim that lapsed and was taken is not renewed over.
 	s.lapsed()
 	s.Require().NoError(second.HoldCall(s.ctx, "globex", 7, "order-42"))
 	first.renewAll(s.ctx)
+	s.Equal("globex", s.holder(7, "order-42"))
+	first.ReleaseCall(s.ctx, "acme", 7, "order-42")
 	s.Equal("globex", s.holder(7, "order-42"))
 }
 

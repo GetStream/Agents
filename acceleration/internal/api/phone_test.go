@@ -1715,4 +1715,11 @@ func (s *CallStatusSuite) TestADirectoryThatDoesNotAnswerHoldsUpNoSession() {
 		Incognito: true, Attribution: routing.Attribution{APIKey: "key"}})
 	s.NoError(err)
 	s.Less(time.Since(began), 10*time.Second)
+
+	answering := s.router.directory
+	s.router.directory = directory
+	s.T().Cleanup(func() { s.router.directory = answering })
+	status, payload := s.callInto(s.utils.uuid())
+	s.Equal(http.StatusServiceUnavailable, status, payload)
+	s.Contains(payload, "could not tell whose call")
 }

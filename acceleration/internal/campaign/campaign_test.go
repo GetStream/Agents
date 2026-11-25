@@ -68,6 +68,7 @@ func (s *CampaignSuite) TestACampaignSessionJoinsTheCallItRang() {
 
 	s.Equal("0b9f2a52-5c1e-4d7a-9a3e-0f6b8f1c2d3e", spec.CallID)
 	s.Equal("agent", spec.CallType)
+	s.True(spec.MintedID)
 	s.False(spec.Text)
 }
 

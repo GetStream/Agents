@@ -2279,10 +2279,15 @@ func (m *Manager) claimCall(ctx context.Context, spec Spec, named bool) (func(),
 	hold := func(context.Context) error { return nil }
 	release := func() {}
 	if directory != nil {
-		on.Holder = func(ctx context.Context) (string, error) { return directory.CallHolder(ctx, app, spec.ID) }
 		hold = func(ctx context.Context) error {
-			release = sync.OnceFunc(func() { directory.ReleaseCall(context.WithoutCancel(ctx), spec.CustomerID, app, spec.ID) })
-			return directory.HoldCall(ctx, spec.CustomerID, app, spec.ID)
+			err := directory.HoldCall(ctx, spec.CustomerID, app, spec.ID)
+			if errors.Is(err, node.ErrCallHeld) {
+				return store.ErrCallTaken
+			}
+			if err == nil {
+				release = sync.OnceFunc(func() { directory.ReleaseCall(context.WithoutCancel(ctx), spec.CustomerID, app, spec.ID) })
+			}
+			return err
 		}
 	}
 	if !named || m.options.Store == nil {

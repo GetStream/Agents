@@ -224,12 +224,12 @@ return ARGV[1]`
 // releaseCallScript takes back what this node said of a call, and nothing said since.
 const releaseCallScript = `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0`
 
-// errCallHeld is a call another customer's session holds.
-var errCallHeld = errors.New("node: the call is another customer's")
+// ErrCallHeld is a call another customer's session holds.
+var ErrCallHeld = errors.New("node: the call is another customer's")
 
 // HoldCall says a customer's session is on the call agent:<id> in a Stream app, 0 for the
-// deployment's own, and goes on saying so until ReleaseCall, which every HoldCall is followed by.
-// A call another customer's session holds stays its own, which is an error.
+// deployment's own, and goes on saying so until ReleaseCall. A call another
+// customer's session holds stays its own, and is ErrCallHeld. One that failed says nothing more.
 func (d *Directory) HoldCall(ctx context.Context, customerID string, app int64, id string) error {
 	call := heldCall{customerID, app, id}
 	d.mu.Lock()
@@ -238,26 +238,31 @@ func (d *Directory) HoldCall(ctx context.Context, customerID string, app int64, 
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	said, err := d.redis.Do(ctx, d.holdCall(call, customerOf(d.onCall(call)))).ToString()
+	if err == nil && said != d.onCall(call) {
+		err = ErrCallHeld
+	}
 	if err != nil {
-		return err
+		d.leaveCall(call)
 	}
-	if customerOf(said) != customerOf(d.onCall(call)) {
-		return errCallHeld
+	return err
+}
+
+// leaveCall is one session here fewer on a call, and true for the last.
+func (d *Directory) leaveCall(call heldCall) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.onCalls[call]--
+	if d.onCalls[call] > 0 {
+		return false
 	}
-	return nil
+	delete(d.onCalls, call)
+	return true
 }
 
 // ReleaseCall says a session HoldCall said was on a call is not any more.
 func (d *Directory) ReleaseCall(ctx context.Context, customerID string, app int64, id string) {
 	call := heldCall{customerID, app, id}
-	d.mu.Lock()
-	d.onCalls[call]--
-	last := d.onCalls[call] <= 0
-	if last {
-		delete(d.onCalls, call)
-	}
-	d.mu.Unlock()
-	if !last {
+	if !d.leaveCall(call) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
