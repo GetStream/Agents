@@ -28,6 +28,7 @@ type ClonerSuite struct {
 type received struct {
 	method string
 	path   string
+	uri    string
 	query  string
 	header http.Header
 	fields map[string][]string
@@ -49,6 +50,7 @@ func (s *ClonerSuite) SetupTest() {
 		s.seen = received{
 			method: r.Method,
 			path:   r.URL.Path,
+			uri:    r.URL.EscapedPath(),
 			query:  r.URL.RawQuery,
 			header: r.Header.Clone(),
 			fields: map[string][]string{},
@@ -170,6 +172,16 @@ func (s *ClonerSuite) TestAVoiceThatIsAlreadyGoneCountsAsDeleted() {
 	s.NoError(cloner.Delete(s.ctx, "el-77"), "the caller wanted it gone, and it is gone")
 	s.Equal(http.MethodDelete, s.seen.method)
 	s.Equal("/v1/voices/el-77", s.seen.path)
+}
+
+func (s *ClonerSuite) TestFishDeleteKeepsAnIdInTheOneSegmentItNames() {
+	cloner, err := NewFish(FishOptions{APIKey: "secret", BaseURL: s.server.URL})
+	s.Require().NoError(err)
+
+	s.NoError(cloner.Delete(s.ctx, "a/../b?c#d"))
+
+	s.Equal(http.MethodDelete, s.seen.method)
+	s.Equal("/model/a%2F..%2Fb%3Fc%23d", s.seen.uri)
 }
 
 func (s *ClonerSuite) TestElevenLabsSpeaksInTheClonedVoice() {
