@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -390,6 +391,22 @@ func TestReinviteFromTheCustomerIsAnsweredWhateverItsLineEndings(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
 			requireAudioThenRejectedVideo(t, got)
+		})
+	}
+}
+
+func TestReinviteFromTheCustomerWithALineTheParserRefusesReachesStreamAudioOnly(t *testing.T) {
+	for name, line := range otherLines {
+		t.Run(name, func(t *testing.T) {
+			c, _, stream := newTestCall(t)
+			stream.reinviteAnswer = streamAnswerSDP
+			offer := "v=0\r\no=- 9 3 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n" + line
+
+			got, err := c.onReinvite(t.Context(), customerSide, []byte(offer))
+
+			require.NoError(t, err)
+			require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+			require.Equal(t, 2, strings.Count(string(got), "m="))
 		})
 	}
 }

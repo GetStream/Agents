@@ -422,3 +422,29 @@ func TestFlowAConnectsAnOfferWhateverItsLineEndings(t *testing.T) {
 		})
 	}
 }
+
+// otherLines are m= lines next to the audio that the SDP parser refuses on its own, by type, port or
+// protocol. A call must still connect with audio only.
+var otherLines = map[string]string{
+	"application over udp": "m=application 30004 udp wb\r\n",
+	"image over udptl":     "m=image 30002 udptl t38\r\n",
+	"video port range":     "m=video 30002/x RTP/AVP 96\r\n",
+}
+
+func TestFlowAConnectsAnOfferWithALineTheParserRefusesAudioOnly(t *testing.T) {
+	for name, line := range otherLines {
+		t.Run(name, func(t *testing.T) {
+			offer := "v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n" + line
+			customer := &fakeLeg{inviteAnswer: []byte(offer)}
+			stream := &fakeLeg{inviteAnswer: streamAnswerSDP}
+
+			_, err := flowA(t.Context(), flowConfig(), customer, stream)
+
+			require.NoError(t, err)
+			require.Equal(t, Media{Addr: "1.1.1.1", Port: 30000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, mediaOf(t, stream.body(0)))
+			fields := strings.Fields(strings.TrimPrefix(line, "m="))
+			rejected := "m=" + fields[0] + " 0 " + strings.Join(fields[2:], " ") + "\r\n"
+			require.Regexp(t, `(?s)m=audio 20000 RTP/AVP 0 101\r\n.*`+regexp.QuoteMeta(rejected), string(customer.body(1)))
+		})
+	}
+}

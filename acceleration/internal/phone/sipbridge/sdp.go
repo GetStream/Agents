@@ -166,14 +166,11 @@ func parseAudio(body []byte) (Media, *sdp.SessionDescription, int, error) {
 	return m, sd, at, nil
 }
 
-// pionMedia are the media types the SDP parser accepts in an m= line (RFC 8866 §8 lists more).
-var pionMedia = []string{"audio", "video", "text", "application", "message"}
-
 // parseSDP unmarshals body, and also returns each m= line as written, without the "m=". The parser
-// refuses a type it does not know, such as m=image (T.38 fax), or formats that are not numbers, which
-// would fail a call that has a usable audio line next to it. Such a line is read as an empty
-// m=application line, and the lines returned tell what it was, so an answer can still reject it by its
-// own type, protocol and formats.
+// refuses a media type or protocol it does not list, such as m=image (T.38 fax) or a line over plain
+// udp, which would fail a call that has a usable audio line next to it. Every m= line but audio is
+// therefore read as an empty m=application line, and the lines returned tell what it was, so an answer
+// can still reject it by its own type, protocol and formats.
 //
 // The parser ends some lines at a bare CR as well as at LF, so body is split at either and rejoined
 // with CRLF before it is parsed: the parser then sees exactly the m= lines returned, one each.
@@ -186,7 +183,7 @@ func parseSDP(body []byte) (*sdp.SessionDescription, []string, error) {
 			continue
 		}
 		mLines = append(mLines, rest)
-		if name, _, _ := strings.Cut(rest, " "); !slices.Contains(pionMedia, name) {
+		if name, _, _ := strings.Cut(rest, " "); name != "audio" {
 			lines[i] = "m=application 0 RTP/AVP 0"
 		}
 	}
