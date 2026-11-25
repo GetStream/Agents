@@ -1069,7 +1069,10 @@ func ownsTask(handOff scheduledHandOff, task store.ScheduledTask) bool {
 // the way a message to an ended chat holds one — until it has answered,
 // then left to end unwatched — and never closed by the deliverer.
 func (s *Server) deliverChainReopened(ctx context.Context, delivery scheduledDelivery) (string, string, error) {
-	ctx = s.scheduledOwnerContext(ctx, delivery)
+	ctx, err := s.scheduledOwnerContext(ctx, delivery)
+	if err != nil {
+		return "", "", err
+	}
 	if delivery.SessionID == "" {
 		created, err := s.openTaskSession(ctx, delivery)
 		if err != nil {
@@ -1088,8 +1091,9 @@ func (s *Server) deliverChainReopened(ctx context.Context, delivery scheduledDel
 }
 
 // openTaskSession opens the session a task's first occurrence follows up
-// in, on the task's config, as its user, and records it on the task so
-// every later occurrence finds the same conversation.
+// in, on the task's config, as its user, whom ctx names (scheduledOwnerContext),
+// and records it on the task so every later occurrence finds the same
+// conversation.
 func (s *Server) openTaskSession(ctx context.Context, delivery scheduledDelivery) (*session.Session, error) {
 	if s.store == nil {
 		return nil, errors.New("this router has no store to open a scheduled task's session from")
@@ -1102,7 +1106,7 @@ func (s *Server) openTaskSession(ctx context.Context, delivery scheduledDelivery
 	spec.Text = true
 	spec.PersistConversation = true
 	spec.Greeting = ""
-	spec.Caller = s.scheduledCaller(ctx, delivery)
+	spec.Caller = CallerFrom(ctx)
 	spec.CallerKind = auth.Kind(delivery.CallerKind)
 	spec.Attribution = delivery.attribution()
 	spec.Timezone = delivery.Timezone
@@ -1179,6 +1183,11 @@ func (s *Server) placeCall(ctx context.Context, delivery scheduledDelivery, foun
 	if err != nil {
 		return session.Spec{}, err
 	}
+	// Read before the phone rings: a failure after it would have the next attempt ring again.
+	caller, err := s.scheduledCaller(ctx, delivery)
+	if err != nil {
+		return session.Spec{}, err
+	}
 	to, err := s.callableNumber(ctx, delivery)
 	if err != nil {
 		return session.Spec{}, err
@@ -1199,13 +1208,13 @@ func (s *Server) placeCall(ctx context.Context, delivery scheduledDelivery, foun
 	if err != nil {
 		return session.Spec{}, unpaid(overTier(err))
 	}
-	return s.callSpec(ctx, config, delivery, found.Spec().AgentID, placed, from, to), nil
+	return callSpec(config, delivery, caller, found.Spec().AgentID, placed, from, to), nil
 }
 
 // callSpec is the session a call a task placed is held in: the config as it
 // is, on the call, in the task's conversation, told that it placed the call.
 // The task is not in its instructions: it is the call's first turn.
-func (s *Server) callSpec(ctx context.Context, config store.AgentConfig, delivery scheduledDelivery, agentID string, placed phone.Placed, from, to string) session.Spec {
+func callSpec(config store.AgentConfig, delivery scheduledDelivery, caller routing.Caller, agentID string, placed phone.Placed, from, to string) session.Spec {
 	spec := session.FromConfig(config)
 	spec.ID = placed.SessionID
 	// A call is given an agent id of its own unless told one, and the
@@ -1214,7 +1223,7 @@ func (s *Server) callSpec(ctx context.Context, config store.AgentConfig, deliver
 	spec.Text = false
 	spec.PersistConversation = true
 	spec.ConversationID = delivery.ConversationID
-	spec.Caller = s.scheduledCaller(ctx, delivery)
+	spec.Caller = caller
 	spec.CallerKind = auth.Kind(delivery.CallerKind)
 	spec.Attribution = delivery.attribution()
 	spec.Timezone = delivery.Timezone
@@ -1395,18 +1404,22 @@ func tagScheduled(custom *map[string]any, delivery scheduledDelivery) {
 // customer, the user, and the sort of caller they are, server-side because
 // the router is acting, not the user's device. Reopening reads all of it
 // (OwnerFrom, CallerFrom) to find and carry on the right conversation.
-func (s *Server) scheduledOwnerContext(ctx context.Context, delivery scheduledDelivery) context.Context {
+func (s *Server) scheduledOwnerContext(ctx context.Context, delivery scheduledDelivery) (context.Context, error) {
+	caller, err := s.scheduledCaller(ctx, delivery)
+	if err != nil {
+		return nil, err
+	}
 	ctx = context.WithValue(ctx, customerContextKey{}, delivery.CustomerID)
 	ctx = context.WithValue(ctx, serverSideContextKey{}, true)
 	ctx = context.WithValue(ctx, kindContextKey{}, auth.Kind(delivery.CallerKind))
-	ctx = routing.WithCaller(ctx, s.scheduledCaller(ctx, delivery))
+	ctx = routing.WithCaller(ctx, caller)
 	ctx = routing.WithAttribution(ctx, delivery.attribution())
-	return routing.WithScheduledTurn(ctx)
+	return routing.WithScheduledTurn(ctx), nil
 }
 
 // scheduledCaller is who a delivery's session is for: the task's user, whom the router acts for,
 // as the guest they are in a session of their own.
-func (s *Server) scheduledCaller(ctx context.Context, delivery scheduledDelivery) routing.Caller {
-	return routing.Caller{UserID: delivery.UserID, ServerSide: true,
-		Guest: s.guestUser(ctx, delivery.CustomerID, delivery.UserID, auth.Kind(delivery.CallerKind))}
+func (s *Server) scheduledCaller(ctx context.Context, delivery scheduledDelivery) (routing.Caller, error) {
+	guest, err := s.guestUser(ctx, delivery.CustomerID, delivery.UserID, auth.Kind(delivery.CallerKind))
+	return routing.Caller{UserID: delivery.UserID, ServerSide: true, Guest: guest}, err
 }

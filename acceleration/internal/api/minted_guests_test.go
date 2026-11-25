@@ -4,16 +4,18 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
-	"github.com/GetStream/Vision-Agents/acceleration/internal/phone"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/scheduling"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
@@ -88,17 +90,36 @@ func (s *ScheduledTasksSuite) TestAForkAMintedGuestMakesOffersNoSchedulingTools(
 	s.NotContains(s.model().toolsOffered(), "schedule_task")
 }
 
-func (s *ScheduledTasksSuite) TestWhileAGuestsRowCannotBeReadAnIdAGuestCouldHaveIsOfferedNoSchedulingTools() {
+func (s *ScheduledTasksSuite) TestWhileAGuestsRowCannotBeReadTheirSessionsAreAnsweredA500() {
 	config, guest, own, other := s.agentWithScheduling(nil), s.mintedGuest(), s.appsOwnUser(), s.data.createUser()
 	s.failQueries("(minted)")
 
-	s.NotContains(s.offeredTo(guest, config), "schedule_task")
-	s.NotContains(s.offeredTo(own, config), "schedule_task")
+	for _, unread := range []*testClient{guest, own} {
+		status, body := unread.call(http.MethodPost, "/v1/agents/sessions", CreateSessionRequest{ConfigId: &config})
+		s.Equal(http.StatusInternalServerError, status)
+		s.Contains(string(body), "something went wrong")
+	}
+	s.Empty(s.serverClient.actingFor(guest).querySessions(SessionQuery{}).Items, "none was opened")
 	s.Contains(s.offeredTo(other, config), "schedule_task", "no other id is looked up")
 
 	s.failing.value.Store(nil)
 	s.Contains(s.offeredTo(own, config), "schedule_task", "the failure is not kept")
 	s.NotContains(s.offeredTo(guest, config), "schedule_task")
+}
+
+func (s *ScheduledTasksSuite) TestAMintedGuestsSessionDoesNotRunInTheirStoredTimezone() {
+	config := s.agentWithScheduling(nil)
+	zone := func(user *testClient, kind string) string {
+		s.Require().NoError(s.store.Users.SetTimezone(context.Background(), s.customerID(), user.userID, kind, "Asia/Tokyo"))
+		opened := s.openScheduling(user, config, nil)
+		owner := session.Owner{CustomerID: s.customerID(), UserID: user.userID, Kind: auth.KindAuthenticated}
+		live, running := s.router.sessions.Get(opened.Id, owner)
+		s.Require().True(running)
+		return live.Spec().Timezone
+	}
+
+	s.Equal("Asia/Tokyo", zone(s.data.createUser(), "authenticated"))
+	s.Empty(zone(s.mintedGuest(), "guest"))
 }
 
 // guestsTask is a task of the guest's, scheduled before minted guests stopped being offered the
@@ -142,28 +163,99 @@ func (s *ScheduledTasksSuite) TestAMintedGuestsTaskStillRunsInSessionsThatOfferT
 	s.NotContains(s.model().toolsOffered(), "schedule_task", "in the session a later run carried on")
 }
 
-func (s *ScheduledTasksSuite) TestACallAMintedGuestsTaskPlacesIsHeldWithThemAsAGuest() {
-	held := func(user *testClient, kind auth.Kind) bool {
-		return s.router.callSpec(context.Background(), store.AgentConfig{}, scheduledDelivery{
-			CustomerID: s.customerID(), UserID: user.userID, CallerKind: string(kind),
-		}, "agent", phone.Placed{}, "+15550100100", "+15550100101").Caller.Guest
-	}
-
-	s.True(held(s.mintedGuest(), auth.KindAuthenticated))
-	s.True(held(s.data.createUser(), auth.KindGuest))
-	s.False(held(s.data.createUser(), auth.KindAuthenticated))
-	s.False(held(s.mintedGuest(), auth.KindServer), "a task their backend made")
+// unreadMinted makes whether the user is minted unreadable, and unknown to the router again.
+func (s *ScheduledTasksSuite) unreadMinted(user *testClient) {
+	client := s.live.Redis()
+	key := "appcfg:minted-guest:" + s.customerID() + ":" + user.userID
+	s.Require().NoError(client.Do(context.Background(), client.B().Del().Key(key).Build()).Error())
+	s.failQueries("(minted)")
+	s.Require().Eventually(func() bool {
+		_, err := s.store.Users.Minted(context.Background(), s.customerID(), user.userID)
+		return err != nil
+	}, settleFor, 10*time.Millisecond)
 }
 
-func (s *ScheduledTasksSuite) TestACallATaskPlacesIsTheRoutersActingForItsUser() {
-	for _, user := range []*testClient{s.data.createUser(), s.mintedGuest()} {
-		caller := s.router.callSpec(context.Background(), store.AgentConfig{}, scheduledDelivery{
-			CustomerID: s.customerID(), UserID: user.userID, CallerKind: string(auth.KindAuthenticated),
-		}, "agent", phone.Placed{}, "+15550100100", "+15550100101").Caller
+func (s *ScheduledTasksSuite) TestARunIsTriedAgainWhileItsUsersRowCannotBeRead() {
+	s.retryAtOnce()
+	own := s.appsOwnUser()
+	task := s.guestsTask(own, s.agentWithScheduling(nil))
+	s.failFirstQueries("(minted)", 1)
+	s.runWorker()
 
-		s.True(caller.ServerSide)
+	s.makeDue(task)
+
+	s.delivered(task)
+	s.Len(s.runsOf(task), 1)
+	s.Equal(int32(2), s.attempts.Load())
+}
+
+func (s *ScheduledTasksSuite) TestARunOpensNoSessionWhileItsUsersRowCannotBeRead() {
+	guest := s.mintedGuest()
+	task := s.guestsTask(guest, s.agentWithScheduling(nil))
+	s.failQueries("(minted)")
+
+	_, err := s.deliverNow(task, time.Now(), "")
+
+	s.Require().Error(err)
+	var failure *scheduling.Failure
+	var missed *scheduling.Missed
+	s.False(errors.As(err, &failure) || errors.As(err, &missed), "%v", err)
+	s.Empty(s.taskReloaded(task).SessionID)
+	s.Empty(s.serverClient.actingFor(guest).querySessions(SessionQuery{}).Items)
+}
+
+func (s *ScheduledTasksSuite) TestACallIsNotPlacedWhileItsUsersRowCannotBeRead() {
+	s.placingCalls()
+	own := s.appsOwnUser()
+	task := s.phoneTask(own, []string{"phone"}, time.Now())
+	s.unreadMinted(own)
+
+	run, err := s.deliverNow(task, time.Now(), "")
+
+	s.False(s.failure(err).Final)
+	s.Empty(s.sink.to(s.numberRungFor(task)), "nobody was rung")
+	s.Empty(run.SessionID, "a later attempt may ring")
+
+	s.failing.value.Store(nil)
+	_, _, err = s.router.DeliverScheduledTask(context.Background(), store.ClaimedScheduledTask{Task: task, Run: run})
+	// The suite's sessions have no telephony, so the call's session cannot open.
+	s.True(s.failure(err).Final)
+	s.Len(s.sink.to(s.numberRungFor(task)), 1, "the later attempt rang once")
+}
+
+func (s *ScheduledTasksSuite) TestACallAMintedGuestsTaskPlacesIsHeldWithThemAsAGuest() {
+	s.placingCalls()
+	placed := func(user *testClient) session.Spec {
+		task := s.phoneTask(user, []string{"phone"}, time.Now())
+		delivery := taskDelivery(task, s.utils.uuid(), "stretch", time.Now())
+		found, live := s.router.sessions.Get(task.SessionID, delivery.owner())
+		s.Require().True(live)
+		spec, err := s.router.placeCall(context.Background(), delivery, found, s.utils.uuid())
+		s.Require().NoError(err)
+		return spec
+	}
+	for _, user := range []*testClient{s.mintedGuest(), s.data.createUser()} {
+		caller := placed(user).Caller
+
+		s.Equal(strings.HasPrefix(user.userID, "guest-"), caller.Guest)
+		s.True(caller.ServerSide, "the router's, acting for its user")
 		s.Equal(user.userID, caller.UserID)
 	}
+}
+
+func (s *ScheduledTasksSuite) TestATasksUserIsAGuestByItsRowOrTheKindItWasMadeBy() {
+	guest := func(user *testClient, kind auth.Kind) bool {
+		caller, err := s.router.scheduledCaller(context.Background(), scheduledDelivery{
+			CustomerID: s.customerID(), UserID: user.userID, CallerKind: string(kind),
+		})
+		s.Require().NoError(err)
+		return caller.Guest
+	}
+
+	s.True(guest(s.mintedGuest(), auth.KindAuthenticated))
+	s.True(guest(s.data.createUser(), auth.KindGuest))
+	s.False(guest(s.data.createUser(), auth.KindAuthenticated))
+	s.False(guest(s.mintedGuest(), auth.KindServer), "a task their backend made")
 }
 
 func (s *ScheduledTasksSuite) TestAMintedGuestManagesATaskTheyHaveOverREST() {
@@ -255,23 +347,41 @@ func (s *MintedGuestsSuite) TestAClaimedGuestsTokenIsStillAGuests() {
 	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/guests/claim",
 		ClaimGuestRequest{GuestId: guest.userID, UserId: s.utils.uuid()}, nil))
 
-	s.True(s.router.guestUser(context.Background(), s.customerID(), guest.userID, auth.KindAuthenticated))
+	isGuest, err := s.router.guestUser(context.Background(), s.customerID(), guest.userID, auth.KindAuthenticated)
+	s.Require().NoError(err)
+	s.True(isGuest)
 }
 
-func (s *MintedGuestsSuite) TestWhileAGuestsRowCannotBeReadAnAppThatTakesNoGuestsRefusesTheId() {
+func (s *MintedGuestsSuite) TestWhileAGuestsRowCannotBeReadAnAppThatTakesNoGuestsAnswersTheIdA500() {
 	s.closedToGuests()
 	own, account := s.appsOwnUser(), s.data.createUser()
 	s.failQueries("(minted)")
 
-	s.Equal(http.StatusForbidden, s.lists(own))
+	status, body := own.call(http.MethodPost, "/v1/agents/sessions/query", SessionQuery{})
+	s.Equal(http.StatusInternalServerError, status)
+	s.Contains(string(body), "something went wrong")
+	s.NotContains(string(body), "level of user")
 	s.Equal(http.StatusOK, s.lists(account))
 
 	s.failing.value.Store(nil)
 	s.Equal(http.StatusOK, s.lists(own), "the failure is not kept")
 }
 
-func (s *MintedGuestsSuite) TestAnAppThatAdmitsGuestsServesThemWhileTheirRowCannotBeRead() {
+func (s *MintedGuestsSuite) TestWhileAGuestsRowCannotBeReadAnAppThatAdmitsGuestsAnswersThemA500() {
 	guest := s.mintedGuest()
+	s.failQueries("(minted)")
+
+	s.Equal(http.StatusInternalServerError, s.lists(guest))
+	s.Equal(http.StatusInternalServerError, s.lists(s.behindProxy(guest.userID, auth.AuthTypeJWT)))
+	s.Equal(http.StatusOK, s.lists(s.behindProxy(guest.userID, auth.AuthTypeServer)))
+
+	s.failing.value.Store(nil)
+	s.Equal(http.StatusOK, s.lists(guest))
+}
+
+func (s *MintedGuestsSuite) TestAGuestWhoseRowWasReadIsServedWhileItCannotBeReadAgain() {
+	guest := s.mintedGuest()
+	s.Require().Equal(http.StatusOK, s.lists(guest))
 	s.failQueries("(minted)")
 
 	s.Equal(http.StatusOK, s.lists(guest))
@@ -450,4 +560,23 @@ func (s *RouterOpenedConnectorsSuite) TestAMintedGuestUsesNoConnectionOfTheirOwn
 
 	owner.createSession(CreateSessionRequest{ConfigId: &required})
 	s.serverClient.actingFor(guest).createSession(CreateSessionRequest{ConfigId: &required})
+}
+
+func (s *RouterOpenedConnectorsSuite) TestWhileAUsersRowCannotBeReadARequiredConnectorIsNotTheReason() {
+	connector := s.connector()
+	own := s.appsOwnUser()
+	bound := binding(connector, s.grant(s.userConnection(connector, own.userID)))
+	bound[0]["required"] = true
+	var config AgentConfig
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/configs", map[string]any{
+		"name": "bound-" + s.utils.uuid(), "mode": "text", "llm": "logging-in/login-model", "connectors": bound,
+	}, &config))
+	s.failQueries("(minted)")
+
+	status, body := own.call(http.MethodPost, "/v1/agents/sessions", CreateSessionRequest{ConfigId: &config.Id})
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(body), "caller_unverified")
+
+	s.failing.value.Store(nil)
+	own.createSession(CreateSessionRequest{ConfigId: &config.Id})
 }

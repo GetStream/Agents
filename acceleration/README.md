@@ -378,7 +378,8 @@ A guest the router mints (`POST /v1/agents/guests`) holds a token that names no 
 kind is `authenticated` and its sessions are kept as such. The router knows it by its row in
 `users` instead, in `api_key` and `proxy` mode alike. `allow_guest` is asked on each of its
 requests, from a copy at most a minute old; behind a proxy, one whose app's settings cannot be
-read is answered 500. As for a guest by role, it is offered no scheduling tools, uses no
+read is answered 500. A user whose id starts `guest-` is answered 500 while their row cannot be
+read. As for a guest by role, it is offered no scheduling tools, uses no
 connection of its own (a required one fails the session, or the scheduled run), does not run in
 its stored timezone, and the sessions its own device opens read no episode cards.
 

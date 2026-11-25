@@ -1402,7 +1402,11 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 			return
 		}
 		if err == nil && principal.AppID != "" {
-			guest := s.guestUser(r.Context(), principal.AppID, principal.UserID, principal.Kind)
+			guest, err := s.guestUser(r.Context(), principal.AppID, principal.UserID, principal.Kind)
+			if err != nil {
+				s.refuseUnchecked(w, r, err)
+				return
+			}
 			// The authenticator asked whether the app admits a KindGuest. One this router minted
 			// it took for an account, so that is asked here.
 			if guest {
@@ -1441,8 +1445,8 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 	})
 }
 
-// refuseUnchecked answers a caller whose credential, or whether its app takes it, could not be
-// checked.
+// refuseUnchecked answers a caller whose credential, whether it is a guest, or whether its app
+// takes it, could not be checked.
 func (s *Server) refuseUnchecked(w http.ResponseWriter, r *http.Request, err error) {
 	// A caller that hung up while its credential was checked is no failure of the router's,
 	// and nobody is left to answer. The status is for withMetrics, which counts and times it
@@ -1475,27 +1479,16 @@ func (s *Server) refuseLevel(w http.ResponseWriter, r *http.Request, principal a
 
 // guestUser reports whether a user a credential of that kind named is a guest: by kind, or one
 // this router minted, whose token reads as an account's. A backend naming a guest is a backend.
-// Only an id the router could have minted is looked up. One whose row cannot be read is taken
-// for a guest, so that a database that is down does not make an account of one; nothing but what
-// a guest is not given is lost to a user of the app's own whose id starts the same way.
-func (s *Server) guestUser(ctx context.Context, customerID, userID string, kind auth.Kind) bool {
+// Only an id the router could have minted is looked up. A row that cannot be read is an error: it
+// makes a guest of no account, and an account of no guest.
+func (s *Server) guestUser(ctx context.Context, customerID, userID string, kind auth.Kind) (bool, error) {
 	if kind != auth.KindAuthenticated {
-		return kind == auth.KindGuest
+		return kind == auth.KindGuest, nil
 	}
 	if s.store == nil || !strings.HasPrefix(userID, guestPrefix) {
-		return false
+		return false, nil
 	}
-	minted, err := s.store.Users.Minted(ctx, customerID, userID)
-	if err != nil {
-		level := slog.LevelError
-		if ctx.Err() != nil {
-			level = slog.LevelDebug
-		}
-		s.logger.Log(ctx, level, "could not read whether a user is a guest, taking them for one",
-			"customer", customerID, "user", userID, "error", err)
-		return true
-	}
-	return minted
+	return s.store.Users.Minted(ctx, customerID, userID)
 }
 
 // guestAdmitted reports whether the caller's app takes guests: as its key's levels say, or behind
