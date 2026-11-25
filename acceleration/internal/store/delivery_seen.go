@@ -64,6 +64,15 @@ func (r *DeliveriesSeen) First(ctx context.Context, scope, key string) (bool, er
 	return firstSeen(ctx, r.store.global, scope, key)
 }
 
+// Forget drops the record of a delivery not acted on after all, so a retry of it is.
+func (r *DeliveriesSeen) Forget(ctx context.Context, scope, key string) error {
+	_, err := r.store.global.NewDelete().Model((*DeliverySeen)(nil)).Where("scope = ?", scope).Where("key = ?", key).Exec(ctx)
+	if err != nil {
+		return stack.Wrap(fmt.Errorf("store: forget delivery: %w", err))
+	}
+	return nil
+}
+
 // prune deletes the deliveries older than a day, at most once every deliveriesPrunedEvery.
 func (r *DeliveriesSeen) prune(ctx context.Context) error {
 	now := time.Now().UTC()

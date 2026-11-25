@@ -171,6 +171,10 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 		refuse(refusal, refusalCode(failure), store.RedactLogText(failure.Error()))
 		return
 	}
+	if failure, refused := s.refuseSocketElsewhere(ctx, customerID, config); refused {
+		refuseWith(refusedByRouter, failure)
+		return
+	}
 	if failure, refused := s.sessionFloorRefusal(ctx, start.Session); refused {
 		refuseWith(refusedByRouter, failure)
 		return

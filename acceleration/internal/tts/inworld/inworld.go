@@ -548,7 +548,7 @@ func (t *TTS) readLoop(conn *websocket.Conn) {
 		}
 		if refusesKey(message.Error) && !refused {
 			refused = true
-			t.keys.InvalidKey()
+			t.keys.InvalidKey(t.call)
 		}
 		t.handleMessage(message)
 	}

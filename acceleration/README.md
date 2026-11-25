@@ -149,6 +149,7 @@ the other commands that read them there.
 | `ROUTER_TRUSTED_PROXIES` | CIDR ranges your own proxies sit in, comma separated, e.g. `10.0.0.0/8`. Decides how much of `X-Forwarded-For` is believed. Unset means none of it is, and the connection's address is used |
 | `ROUTER_DATA_MOVE_RETENTION` | How long recorded changes are kept while a customer moves between deployments, defaults to `168h`. See [Moving a customer](#moving-a-customer) |
 | `ROUTER_SHARD_ROUTING_DEFAULT`, `ROUTER_SHARD_ROUTING_COUNTRIES`, `ROUTER_SHARD_ROUTING_REGIONS` | Which shard a hook's work is done in (`shard_routing`): the shard for a country not listed, a dialled number's country to its shard (`DE=europe-west4,US=us-east4`), and an agent region other than `us` to its shard (`eu=europe-west4`). Every router of a deployment holds the same. Unset: every hook is done where it lands. See [Shards](#shards) |
+| `ROUTER_SHARD_ROUTING_HOME`, `ROUTER_SHARD_ROUTING_RESIDENCY` | Where an app's or agent's `routing_policy` places its work: the shard holding the configs, which `us_east` sends everything to (`us-east4`), and each geography `us`, `eu` or `ca` to its shards in order of preference, which `us_only`, `eu_only` and `canada_only` keep work in and never leave (`us=us-east4\|us-west1,eu=europe-west4,ca=northamerica-northeast1`). Every shard named must be in `ROUTER_SHARDS` |
 | `ROUTER_LOG_LEVEL`      | `debug`, `info` (default), `warn` or `error`               |
 | `HARNESS_SKILLS`        | Path to a skill set; defaults to the built-in one          |
 | `MEM0_API_KEY`          | mem0 credentials. Without it the agent remembers nothing   |
@@ -2487,7 +2488,7 @@ apart: `phone:` and a number anywhere in a line, everything before an email's `@
 logged path a route's `{user_id}` segment and the `{id}` of a customer's policy. Any other id, a bare number or an email logged under
 another name among them, stays until log retention ends.
 
-The service checks its own alerts, sends them to Sentry (`usage_alert:<name>`) and logs them.
+The service checks its own alerts, sends them to Sentry (`usage_alert:<env>:<name>`) and logs them.
 A rejected event, a batch refused whole for what it holds (`batch_refused`: a 400, 413 or 422,
 any 4xx but a 401), ingest failing and Redis refusing the totals page. A router's events
 arriving late warns (other producers ship late by design and are not measured), and so does
@@ -2728,6 +2729,18 @@ operations and a number is not bought from it for an agent that has to call peop
 Only Twilio and Telnyx also `attach`, which is the inbound direction: pointing a number at a
 trunk so calling it reaches an agent. For the other five that is a per-vendor application
 rather than a property of the number, and it is declared missing rather than half-done.
+
+A Twilio number attached before the router answered its calls itself still has its old voice URL.
+`router phone move-twilio` points those numbers at `/v1/phone/hooks/twilio`, as an attach does now;
+attaching such a number again does the same for that one number. Run it from the image the router
+runs (the same tag), with the router's own config: it opens the database as the router does, which
+migrates it unless a migrate DSN is set, so a newer image would migrate the shared database. Run
+it first with no flag, which only lists each number and what it would do; then with `--apply
+--one <e164>`, and call that number; then with `--apply` for the rest (`--app <id>` keeps one Stream
+app's). A number already on the webhook is left alone, and so is one whose trunk credentials were
+not kept (`no stored bridge`): it needs a detach and an attach. It refuses before it asks Twilio
+anything when the webhook token, an https `ROUTER_PUBLIC_URL`, the Twilio account or the keyring
+is missing.
 
 A customer who already has numbers and a SIP trunk at their own carrier can call out from
 them without buying anything here. `POST /v1/phone/trunks` stores the trunk (host, port,

@@ -167,6 +167,7 @@ func (s *LogAppSuite) TestTheAccessLineOfARouteWithNoOperationNamesItsLogOnlyNam
 	for path, want := range map[string]string{
 		scheduledPeerPath:   "ScheduledTaskDeliver",
 		chatInboundPeerPath: "ChatInboundAnswer",
+		threadTurnPeerPath:  "ThreadTurnAnswer",
 		unansweredPeerPath:  "PhoneEndUnanswered",
 		machinePeerPath:     "PhoneMachine",
 	} {

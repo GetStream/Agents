@@ -994,6 +994,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("role")]
         public string? Role { get; set; } = default!;
 
+        /// <summary>
+        /// Which regions the agent's work may be placed in, over the app's own routing_policy. Absent when the agent follows the app's.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("sandbox")]
         public string? Sandbox { get; set; } = default!;
 
@@ -1197,6 +1203,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("role")]
         public string? Role { get; set; } = default!;
+
+        /// <summary>
+        /// Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("sandbox")]
         public string? Sandbox { get; set; } = default!;
@@ -1410,6 +1422,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("role")]
         public string? Role { get; set; } = default!;
+
+        /// <summary>
+        /// Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's. Left out, a new agent follows the app's and an update keeps the stored policy.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("sandbox")]
         public string? Sandbox { get; set; } = default!;
@@ -2132,6 +2150,12 @@ namespace GetStream.VisionAgents.Models
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class AppSettings
     {
+
+        /// <summary>
+        /// Which regions the app's work may be placed in, unless its agent config sets its own routing_policy. closest when the app never set one.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string RoutingPolicy { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("stream")]
         public StreamSettings Stream { get; set; } = new StreamSettings();
@@ -2993,6 +3017,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("mode")]
         public string? Mode { get; set; } = default!;
+
+        /// <summary>
+        /// The shard the call is kept in. Set on a listed call of a deployment with shards.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("region")]
+        public string? Region { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("review_notes")]
         public string? ReviewNotes { get; set; } = default!;
@@ -10559,7 +10589,7 @@ namespace GetStream.VisionAgents.Models
         public ActivitySessions Sessions { get; set; } = new ActivitySessions();
 
         /// <summary>
-        /// The names of the shards whose requests the meters sum, this one's first. A deployment that sets no postgres.shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
+        /// The names of the shards whose requests the meters sum, this one's first. A deployment that sets no shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("shards")]
         public System.Collections.Generic.List<string>? Shards { get; set; } = default!;
@@ -13768,6 +13798,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("project_id")]
         public string? ProjectId { get; set; } = default!;
+
+        /// <summary>
+        /// The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("region")]
+        public string? Region { get; set; } = default!;
 
         /// <summary>
         /// Why the review scored the conversation as it did. Read by a backend only.
@@ -17489,6 +17525,27 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("withdrawn")]
         public bool? Withdrawn { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class UpdateAppSettings
+    {
+
+        /// <summary>
+        /// Which regions the app's work may be placed in, unless its agent config sets its own. Empty is closest.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
 
         private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
 

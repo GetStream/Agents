@@ -154,7 +154,7 @@ func (s *Server) createRun(ctx context.Context, request *createRunRequest) (*cre
 	if notStarted := (session.NotStarted{}); errors.As(err, &notStarted) {
 		// Only a refusal of the config is told: the rest, such as a database that did not
 		// answer, is the router's.
-		if errors.Is(err, routing.ErrRequest) || errors.Is(err, session.ErrToolNotConfigured) ||
+		if errors.Is(err, routing.ErrRequest) || errors.Is(err, session.ErrToolNotConfigured) || errors.Is(err, session.ErrInvalid) ||
 			errors.Is(err, session.ErrNoMemory) || errors.Is(err, session.ErrMemoryRegion) {
 			return nil, runFailed(ctx, err, APIError{Type: ErrorTypeInvalidRequest, Code: codeInvalidConfig, Message: err.Error()})
 		}
