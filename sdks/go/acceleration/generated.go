@@ -6391,7 +6391,7 @@ type CreateSessionRequest struct {
 	// Phone The number the session acts from, which is what turns transferring on.
 	Phone *SessionPhone `json:"phone,omitempty"`
 
-	// ProjectId What the conversation belongs to. Also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins.
+	// ProjectId What the conversation belongs to. Sent server-side it is also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in tags, or the agent config's, wins. A device's groups the session and is no cost tag.
 	ProjectId *string `json:"project_id,omitempty"`
 
 	// ResumeHistory How a conversation is handed back to the model when a session carries it on.
@@ -6933,7 +6933,9 @@ type ForkSessionRequest struct {
 	// ModelOverwrites What to change about the models for one session, over whatever its agent config decided.
 	// It is one object rather than a dozen fields at the top level because it is one idea: everything here overrides the config, and a caller reading a session back wants to see what they changed in one place rather than diffed against a config they would have to fetch. Only the safe knobs are here. Instructions and tools are not, because a caller able to rewrite those could make a session impersonate a different agent. A backend sets one session's instructions with the instructions of CreateSessionRequest instead, which a device may not send.
 	ModelOverwrites *ModelOverwrites `json:"model_overwrites,omitempty"`
-	ProjectId       *string          `json:"project_id,omitempty"`
+
+	// ProjectId What the fork belongs to. Omitted, the parent's is kept. Sent server-side it is also the "project" cost tag, as on createSession; a device's groups the fork, whose cost tag stays the project a backend named for its parent. A tag spelled out in a running parent's tags, or the agent config's, wins.
+	ProjectId *string `json:"project_id,omitempty"`
 
 	// ResponseId Carry the parent's history only up to the end of this response, so the fork continues from that point rather than from where the parent is now. The history is read from what the parent recorded, which also lets a parent that kept no Chat transcript be forked with its history. Cannot be combined with messages false.
 	ResponseId *string `json:"response_id,omitempty"`
@@ -11764,7 +11766,7 @@ type ListCallsParams struct {
 
 // GetCallEventsParams defines parameters for GetCallEvents.
 type GetCallEventsParams struct {
-	// Limit How many to return, oldest first.
+	// Limit How many to return, oldest first. Up to the 10000 a call keeps.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
@@ -12083,7 +12085,9 @@ type ListResponseSiblingsParamsOf string
 type ListSimulationRunsParams struct {
 	SimulationId *string                        `form:"simulation_id,omitempty" json:"simulation_id,omitempty"`
 	State        *ListSimulationRunsParamsState `form:"state,omitempty" json:"state,omitempty"`
-	Limit        *int                           `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Limit Up to 500. Omitted is 50.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // ListSimulationRunsParamsState defines parameters for ListSimulationRuns.
