@@ -115,6 +115,43 @@ region, read a global copy or forward the request; do not loop over shards.
 `shardmap.Map` holds that routing, and every router has the same copy, so whichever router a
 hook lands on picks the same shard.
 
+## Routing policies
+
+An app picks a routing policy, and an agent may override it: `routing_policy` on
+`PATCH /v1/settings/app` and on agent configs. An agent left empty follows its app, and an app
+left empty is `closest`. `Apps.RoutingPolicy` resolves it, cached, and only a sharded router
+reads it.
+
+The deployment names its home shard and the shards of each geography:
+
+```yaml
+shard_routing:
+  home: us-east4                 # ROUTER_SHARD_ROUTING_HOME
+  residency:                     # ROUTER_SHARD_ROUTING_RESIDENCY=us=us-east4|us-west1,eu=europe-west4
+    us: [us-east4, us-west1]
+    eu: [europe-west4]
+    ca: [northamerica-northeast1]
+```
+
+| Policy        | Where new work goes (`Map.Place`)                         | Its shard is down |
+| ------------- | --------------------------------------------------------- | ----------------- |
+| `closest`     | The table above, unchanged                                | Done where it landed |
+| `us_east`     | The home shard                                            | Done where it landed |
+| `us_only`, `eu_only`, `canada_only` | The shard the table picks when it is in the geography, else the geography's first shard | The geography's next shard, else 503 `shard_unavailable`. Never outside it |
+
+- **New work** is placed by policy where it arrives: a session over HTTP or the session socket,
+  a run, a placed call, an inbound chat message and an inbound call. The session socket is
+  placed by its app's policy at the upgrade. An agent whose own residency differs refuses it
+  after the start frame, since the socket cannot move by then.
+- **Reminders and campaign dials** are claimed by the same policy, in the claim query. Residency
+  work overdue by 5 minutes is taken only by another shard of its geography.
+- **Dispatch workers** register in the home shard: a worker socket that lands elsewhere is
+  proxied there, and the other shards reach it over the global work bus. A residency app's
+  workers register in its geography instead, and its sessions reach no worker outside it. The
+  socket names no agent, so this follows the app's policy, not an agent's.
+- **A geography with no shard** in `shard_routing.residency` cannot be set as a policy on a
+  sharded deployment. A deployment of one shard enforces no residency: its work stays put.
+
 ## Edge cases
 
 ### The dashboard opens a session or a call
@@ -152,7 +189,8 @@ The dashboard talks to one URL, which may be in any region.
 4. Every later event for the call (`handedHome`) goes to that shard, wherever Stream sends it.
 5. If no router of the chosen shard answers, the call is taken where it landed, not dropped,
    and counted in `shardFallbacks` for an alert. A caller on the line matters more than
-   residency.
+   placement. Under a residency policy it is answered 503 instead, for Stream to deliver
+   again, and the delivery is not kept as done.
 
 ### Vendor callbacks for a call this shard placed
 
@@ -179,7 +217,8 @@ history stays in one database, so a session never splits across shards.
 ### Scheduled work
 
 A reminder or a dial meant for a shard is claimed there. If it is unclaimed after 5 minutes
-(`claimOverdue`), any shard takes it, so a down region does not hold up reminders.
+(`claimOverdue`), any shard takes it, so a down region does not hold up reminders. Under a
+residency policy only a shard of its geography does.
 
 ### A region is down
 
@@ -188,6 +227,8 @@ A reminder or a dial meant for a shard is claimed there. If it is unclaimed afte
 | Lists, stats, spend                      | Answered from global, with the down region's last shipped rows |
 | A session or call that lives there       | 503 `shard_unavailable`              |
 | A new call to a number routed there      | Answered in the region it landed in  |
+| New work of a residency app, its geography down | 503 `shard_unavailable`       |
+| A residency app's dispatch worker, its geography down | Refused 503 `shard_unavailable` |
 | Requests in every other region           | Unaffected                           |
 
 Global Postgres being down still stops every region: configs, numbers and customers live
@@ -307,3 +348,9 @@ a working `STREAM_API_KEY` and `STREAM_API_SECRET`.
 - **Finding where a session lives costs three trips to global** before the forward. A session
   id that names its shard, as call tokens do, would make it one.
 - **The voice ramp** across regions has not run (see Results).
+- **Residency covers placement, not every byte.** Global still holds inbound message bodies,
+  task instructions, knowledge, contacts and voice samples; the global index gets session
+  metadata; models run on the same provider endpoints in every region.
+- **An agent's residency for dispatch**: a worker names no agent when it connects, so its
+  placement follows the app's policy.
+- **`agent.yaml` sync** does not carry `routing_policy`; it is set through the API.
