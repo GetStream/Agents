@@ -534,7 +534,10 @@ window ends; the usage records are untouched. An origin (`hook:chat` and the res
 limit counts, and a user id the usage records leave off is no user.
 
 They are written through `/v1/spend/limits`, server-side only: one server-side credential of
-any app manages every limit of its organization (an app seen in no organization is its own).
+any app manages every limit of its organization (an app seen in no organization is its own). An
+app in no organization whose id is also an organization's, one another app was last seen under or
+is registered under, gets a 403 `forbidden` from every operation on limits, usage, grants and
+teams: staff manage its limits.
 
 | Operation | Path | What it does |
 | --------- | ---- | ------------ |
@@ -1981,6 +1984,9 @@ dimension: a request tagged `{project, environment}` is unrolled into both break
 what drives spend with `GET /v1/{modality}/stats/tags?key=project`, or narrow the ordinary
 stats with a repeatable `tag=project:support`. Filtering reads the raw request rows, since a
 rollup bucket has already forgotten which labels its requests carried.
+
+A session's `project_id` is also its `project` tag when a backend sent it. An end user's device
+may send one too, which groups and filters its sessions and is no tag.
 
 **A turn is not a request.** A request row measures one provider call. A turn measures what
 the caller felt: the gap between finishing a sentence and hearing the answer start, which

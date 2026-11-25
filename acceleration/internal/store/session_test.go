@@ -500,6 +500,109 @@ func (s *StoreSuite) TestAReopenedSessionHasNotEnded() {
 	s.Empty(found.EndReason, "a reopened session shows why its last run ended")
 }
 
+// The project a session is tagged with is written as it opens. A router of the release before,
+// which carries it on during a deploy or after a rollback, names no column for it, and a later
+// write of this release's does not change it.
+func (s *StoreSuite) TestACarriedOnSessionKeepsItsProjectTag() {
+	for id, tag := range map[string]string{"backends": "alpha", "devices": ""} {
+		s.opened(id, "app", s.base, func(session *AgentSession) { session.ProjectTag = &tag })
+
+		s.Require().NoError(s.savedAsBefore(s.ctx, &AgentSession{ID: id, CustomerID: "app"}))
+		s.opened(id, "app", s.base, func(session *AgentSession) { session.ProjectTag = new("beta") })
+
+		found, err := s.store.Sessions.Get(s.ctx, "app", id)
+		s.Require().NoError(err)
+		s.Require().NotNil(found.ProjectTag)
+		s.Equal(tag, *found.ProjectTag)
+	}
+}
+
+// A row from before the project tag was kept is given it once, as the session is carried on.
+func (s *StoreSuite) TestACarriedOnRowFromBeforeIsGivenItsProjectTag() {
+	s.Require().NoError(s.savedAsBefore(s.ctx, &AgentSession{ID: "one", CustomerID: "app", Project: "alpha"}))
+
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.ProjectTag = new("alpha") })
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.ProjectTag = new("beta") })
+
+	found, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Require().NotNil(found.ProjectTag)
+	s.Equal("alpha", *found.ProjectTag)
+}
+
+// A read of a session asks no other shard for its project tag, whenever the row was written: a
+// router writes when it opened a few microseconds after when it was created.
+func (s *StoreSuite) TestASilentShardDoesNotHoldASessionsRead() {
+	if s.store.Sharded() {
+		s.T().Skip("the silent shard stands beside a deployment of one database")
+	}
+	down := s.withAShardThatNeverAnswers()
+	for id, opened := range map[string]time.Duration{"once": 3 * time.Microsecond, "carried": time.Hour} {
+		s.Require().NoError(s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: id, CustomerID: "app", Project: "alpha",
+			CallerKind: "server", CreatedAt: s.base, OpenedAt: s.base.Add(opened)}))
+
+		began := time.Now()
+		_, err := down.Sessions.Get(s.ctx, "app", id)
+
+		s.Require().NoError(err)
+		s.Less(time.Since(began), time.Second, id)
+	}
+}
+
+// Asked for its tag, a row that does not say it waits out a silent shard no longer than its
+// bound, and is given none: that shard may say another. One with no project has none to ask for.
+func (s *StoreSuite) TestASilentShardLeavesAProjectTagUnreadWithinItsBound() {
+	if s.store.Sharded() {
+		s.T().Skip("the silent shard stands beside a deployment of one database")
+	}
+	down := s.withAShardThatNeverAnswers()
+	row := AgentSession{ID: "one", CustomerID: "app", Project: "alpha", CallerKind: "server"}
+
+	began := time.Now()
+	s.ErrorIs(down.Sessions.ReadProjectTag(s.ctx, &row), ErrProjectTagUnread)
+	s.Less(time.Since(began), 3*time.Second)
+	s.Nil(row.ProjectTag)
+
+	began = time.Now()
+	for _, known := range []AgentSession{{Project: "alpha", ProjectTag: new("beta")}, {ID: "none", CustomerID: "app", CallerKind: "server"}} {
+		s.Require().NoError(down.Sessions.ReadProjectTag(s.ctx, &known))
+	}
+	s.Less(time.Since(began), time.Second)
+}
+
+func (s *StoreSuite) TestAProjectTagIsFoundWithoutWaitingOnASilentShard() {
+	if s.store.Sharded() {
+		s.T().Skip("the silent shard stands beside a deployment of one database")
+	}
+	down := s.withAShardThatNeverAnswers()
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.ProjectTag = new("beta") })
+	// As read before the row said its tag.
+	row := AgentSession{ID: "one", CustomerID: "app", Project: "alpha"}
+
+	began := time.Now()
+	s.Require().NoError(down.Sessions.ReadProjectTag(s.ctx, &row))
+
+	s.Equal("beta", row.TaggedProject())
+	s.Less(time.Since(began), time.Second)
+}
+
+// A router of the release before opens a session without saying its project tag, so the kind of
+// caller that opened it says, unless it is a fork.
+func (s *StoreSuite) TestASessionOpenedByTheReleaseBeforeIsTaggedByWhoOpenedIt() {
+	for id, opened := range map[string]AgentSession{
+		"backend": {CallerKind: "server"}, "user": {CallerKind: "authenticated"}, "guest": {CallerKind: "guest"},
+		"anonymous": {CallerKind: "anonymous"}, "fork": {CallerKind: "server", ForkedFrom: "backend"},
+	} {
+		opened.ID, opened.CustomerID, opened.Project = id, "app", "alpha"
+		s.Require().NoError(s.savedAsBefore(s.ctx, &opened))
+
+		found, err := s.store.Sessions.Get(s.ctx, "app", id)
+		s.Require().NoError(err)
+		s.Nil(found.ProjectTag)
+		s.Equal(map[string]string{"backend": "alpha"}[id], found.TaggedProject(), id)
+	}
+}
+
 func (s *StoreSuite) TestACloseFromTheRouterThatHeldASessionBeforeItWasReopenedLeavesItOpen() {
 	first, again := s.base, s.base.Add(time.Hour)
 	s.opened("one", "app", s.base, func(session *AgentSession) { session.OpenedAt = first })

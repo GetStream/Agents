@@ -2702,6 +2702,80 @@ func (s *DataMoveSuite) TestAnImportedRowCannotChooseItsStreamApp() {
 	s.Equal(ForeignStreamApp, *s.pinOnDestination(unpinned), "an unpinned row was in somebody's deployment app, not this customer's")
 }
 
+// A session's project tag moves with it, there and back, as a row and as a change. A row of a
+// source from before it was kept arrives not knowing.
+func (s *DataMoveSuite) TestASessionsProjectTagMovesWithIt() {
+	for id, tag := range map[string]*string{"backends": new("alpha"), "devices": new(""), "before": nil} {
+		s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{
+			ID: id, CustomerID: "acme", Project: "alpha", ProjectTag: tag, AgentID: "agent", UserID: "user",
+		}))
+	}
+
+	s.capture("acme")
+	cursor := s.move("acme", "acme")
+	s.assertProjectTags(s.destination)
+	_, err := s.source.shard.NewUpdate().Model((*AgentSession)(nil)).
+		Set("title = 'renamed'").Where("customer_id = 'acme'").Exec(s.ctx)
+	s.Require().NoError(err)
+	s.replay(s.destination, "acme", "acme", cursor)
+	s.assertProjectTags(s.destination)
+	for _, row := range s.exportFrom(s.destination, "acme").of("agent_sessions") {
+		encoded, err := json.Marshal(row)
+		s.Require().NoError(err)
+		s.Require().NoError(s.source.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
+	}
+	s.assertProjectTags(s.source)
+
+	s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "acme", Project: "alpha", ProjectTag: new("alpha")}))
+	s.Require().NoError(s.destination.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "acme", ProjectTag: new("")}))
+	s.move("acme", "acme")
+	moved, err := s.destination.Sessions.Get(s.ctx, "acme", "one")
+	s.Require().NoError(err)
+	s.Equal(new("alpha"), moved.ProjectTag, "the tag that arrives stands over the one here")
+
+	older := s.export("acme").of("agent_sessions")[0]
+	delete(older, "project_tag")
+	older["id"], older["caller_kind"] = "older", "server"
+	encoded, err := json.Marshal(older)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
+	arrived, err := s.destination.Sessions.Get(s.ctx, "acme", "older")
+	s.Require().NoError(err)
+	s.Nil(arrived.ProjectTag)
+	s.Equal("alpha", arrived.TaggedProject())
+}
+
+// A session carried on in another shard is exported as a row of each shard, under one id. The one
+// that does not say its project tag takes it from neither the copy nor the change of the one that does.
+func (s *DataMoveSuite) TestASessionsTwoRowsArriveWithTheProjectTagOneSays() {
+	s.Require().NoError(s.source.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: "acme", Project: "alpha", CallerKind: "server"}))
+	row := s.export("acme").of("agent_sessions")[0]
+	for id, tags := range map[string][]any{"said first": {"", nil}, "said last": {nil, ""}} {
+		for _, tag := range tags {
+			row["id"], row["project_tag"] = id, tag
+			encoded, err := json.Marshal(row)
+			s.Require().NoError(err)
+			s.Require().NoError(s.destination.ImportRow(s.ctx, "acme", "agent_sessions", encoded))
+			s.Require().NoError(s.destination.ApplyChanges(s.ctx, "acme",
+				[]DataChange{{Table: "agent_sessions", Op: "update", Payload: encoded}}))
+		}
+
+		arrived, err := s.destination.Sessions.Get(s.ctx, "acme", id)
+		s.Require().NoError(err)
+		s.Equal(new(""), arrived.ProjectTag, id)
+	}
+}
+
+func (s *DataMoveSuite) assertProjectTags(store *Store) {
+	for id, want := range map[string]string{"backends": `"alpha"`, "devices": `""`, "before": "null"} {
+		row, err := store.Sessions.Get(s.ctx, "acme", id)
+		s.Require().NoError(err)
+		got, err := json.Marshal(row.ProjectTag)
+		s.Require().NoError(err)
+		s.Equal(want, string(got), id)
+	}
+}
+
 func (s *DataMoveSuite) TestAnExportNamesTheAppANullPinMeant() {
 	// NULL is the app of whichever deployment wrote it, which means nothing elsewhere.
 	s.source.SetStreamPins(StreamPins{Deployment: func() int64 { return 1 }})
