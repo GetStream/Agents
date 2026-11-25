@@ -196,6 +196,26 @@ func (s *DataMoveSuite) TestAnImportedParentIsNotWeighedWithAnotherAppsAgentOfIt
 	s.True(s.holds(id))
 }
 
+// A child's parents are the configs of its own app calling its name, not another app's, and
+// a refusal never names that app's agents.
+func (s *DataMoveSuite) TestAnImportedChildIsNotWeighedWithAnotherAppsParentOfItsName() {
+	template := s.agentTemplate()
+	s.useInternalApp()
+	name := "helper-" + s.utils.uuid()
+	s.textAgent(map[string]any{"name": name})
+	theirs := s.textAgent(map[string]any{"connectors": []map[string]any{sessionNessy("customers")},
+		"agents": []map[string]any{{"config": name, "tool": "ask_helper"}}})
+	s.useInternalApp()
+	child, id := s.importedAgent(template, map[string]any{"name": name,
+		"connectors": []map[string]any{sessionGitHubGranting("code", "create_issue")}})
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{child}))
+
+	s.Equal(http.StatusOK, status, failure)
+	s.NotContains(failure, theirs.Name)
+	s.True(s.holds(id))
+}
+
 // An export carries agent configs before connector definitions, so a config binding a custom
 // connector beside a sensitive one is weighed again once the definition is written.
 func (s *DataMoveSuite) TestAnImportedConnectorAnAgentBindsBesideASensitiveOneIsRefused() {
