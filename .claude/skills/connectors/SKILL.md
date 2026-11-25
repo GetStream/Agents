@@ -173,7 +173,9 @@ run, a shared chat, an MCP event's) refuses the call at once. In a channel of a 
 `chat_channels` names, the call asks the writer of the message the reply answers, who answers
 with their own user token through `POST /v1/agents/conversations/{cid}/tool_approvals` while a
 member of the channel. The hook names the writer by id alone, so any verified token of that id
-answers for them; the backend may answer any (`api/conversations.go`, AI-3154). There the
+answers for them, unless they are the session's own user (a session opened through the API
+answering in the channel), who is asked as the kind of caller that opened it; the backend may
+answer any (`api/conversations.go`, AI-3154). There the
 writer has two minutes, not ten, when the Router opened the session for the message, as it does
 unless a session opened through the API answers in the channel: it answers one message for at
 most two minutes (`askTimeout`, `api/messagehooks.go`) and then closes that session, which stops

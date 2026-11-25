@@ -158,9 +158,10 @@ func (a *approvals) tell(event agent.Event) {
 }
 
 // askedAs is the person a call is held for, as whoever answers it has to reach them
-// (Owner.Reaches): the session's own user as the kind of caller that opened it, and the writer of
-// the message the reply answers as a backend names a user. The hook that brought their message
-// says who wrote it and not what proved it, so any verified caller of their id answers for them.
+// (Owner.Reaches): the session's own user as the kind of caller that opened it, even when they
+// wrote the message the reply answers, and any other writer as a backend names a user. The hook
+// that brought such a writer's message says who wrote it and not what proved it, so any verified
+// caller of their id answers for them.
 func (d *dispatcher) askedAs(person string) Owner {
 	kind := auth.KindServer
 	if person == d.spec.Caller.UserID {
