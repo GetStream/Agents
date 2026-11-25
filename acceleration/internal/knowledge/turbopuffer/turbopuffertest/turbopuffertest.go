@@ -15,10 +15,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
-)
 
-// MinimumQueried is what turbopuffer bills a query on a namespace smaller than it: 1.28 GB.
-const MinimumQueried = 1_280_000_000
+	"github.com/GetStream/Vision-Agents/acceleration/internal/knowledge/turbopuffer"
+)
 
 // Server is a turbopuffer in process.
 type Server struct {
@@ -201,7 +200,7 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request, namespace string)
 	answer(w, map[string]any{
 		"rows": answered,
 		"billing": map[string]int64{
-			"billable_logical_bytes_queried":  max(size, MinimumQueried),
+			"billable_logical_bytes_queried":  max(size, turbopuffer.MinimumQueried),
 			"billable_logical_bytes_returned": returned,
 		},
 		"performance": map[string]any{"cache_temperature": "hot", "server_total_ms": 3, "approx_namespace_size": len(rows)},
