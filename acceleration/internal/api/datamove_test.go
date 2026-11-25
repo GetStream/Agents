@@ -224,6 +224,28 @@ func (s *DataMoveSuite) TestAnImportedConnectorNamingTheOperatorsClientAfterAnot
 	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+refused, nil, nil))
 }
 
+// TestAnImportedHTTPConnectorIsCheckedAsTheAPIChecksIt: POST /v1/data/import takes an http
+// connector the API would create (AI-3676), and refuses one whose API is on a private address
+// with the create's own message, storing nothing.
+func (s *DataMoveSuite) TestAnImportedHTTPConnectorIsCheckedAsTheAPIChecksIt() {
+	refused, taken := "custom_"+store.NewID(), "custom_"+store.NewID()
+	line := func(id, base string) dataLine {
+		return dataLine{Table: "connector_definitions", Row: json.RawMessage(`{"id": "` + id + `", "revision": 1, "name": "Acme",
+			"category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": {"id": "` + id + `", "revision": 1,
+			"name": "Acme", "schemes": ["api_key"], "endpoints": {"http": "` + base + `"}, "sources": [{"kind": "http", "endpoint": "http",
+			"http_tools": [{"name": "get_item", "description": "Reads an item.", "method": "GET", "path": "/items", "read_only": true}]}]}}`)}
+	}
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{line(refused, "https://10.0.0.1")}))
+	taking := s.serverClient.do(http.MethodPost, "/v1/data/import?full=true", ndjson([]dataLine{line(taken, "https://8.8.8.8")}), nil)
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, "base_url must be a public https URL without userinfo, query or fragment")
+	s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+refused, nil, nil))
+	s.Equal(http.StatusOK, taking)
+	s.Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+taken, nil, nil))
+}
+
 // A database that fails is the router's failure, and its text names the database's address.
 func (s *DataMoveSuite) TestAnImportTheDatabaseCannotWriteIsAFailureWithNoDatabaseText() {
 	id := "custom_" + store.NewID()

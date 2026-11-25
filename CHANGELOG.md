@@ -710,6 +710,15 @@ Every reply the agent abandons logs one INFO line, `the agent was interrupted`, 
 
 ## Breaking Changes
 
+### `CustomConnectorRequest`'s endpoint is optional in the Go, Rust, PHP and Python SDKs
+
+`POST /v1/agents/connectors` now takes either an MCP `endpoint` or an `http` block with a `base_url` and its tools, so `endpoint` is optional in every generated `CustomConnectorRequest` (AI-3676):
+
+- Go: `CustomConnectorRequest.Endpoint` is now `*string`. Set it with a pointer (for example `Endpoint: &url`); a caller that set a plain string no longer compiles.
+- Rust: `CustomConnectorRequest.endpoint` is now `Option<String>`. Set it with `Some(url)`; a struct literal with a plain `String`, or a read of one, no longer compiles.
+- PHP: the `CustomConnectorRequest` constructor takes `$endpoint` after `$schemes`, not first. A positional call no longer matches; named arguments work as before.
+- Python (`plugins/stream`): the generated `CustomConnectorRequest` takes `endpoint` after `schemes`, not first. A positional call no longer matches; keyword arguments work as before.
+
 ### The Go SDK reads no items for a turn with no id
 
 `AgentResponse.Items`, on the handle `Responses.Create` returns, fails with `client.ErrUnnamedTurn` when the turn has no id: the router names none for an incognito session, a speech-to-speech session or the retry of a `request_id` already taken. It used to read every turn in the session instead, passed off as this turn's; a caller that relied on that now gets the error, and reads `Session.Responses.Items` for the whole session or follows `Session.Events` (AI-3571).

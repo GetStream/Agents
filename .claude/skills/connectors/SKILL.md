@@ -65,7 +65,7 @@ The same with the API (operations in `acceleration/api/openapi.yaml`):
 |---|---|
 | The catalog | `GET /v1/agents/connectors` |
 | The app's own OAuth client | `PUT /v1/agents/connectors/{id}/oauth-client` |
-| A custom MCP connector | `POST /v1/agents/connectors` (`id` starts with `custom_`) |
+| A custom MCP or HTTP API connector | `POST /v1/agents/connectors` (`id` starts with `custom_`; `endpoint` or `http`) |
 | A connection | `POST /v1/agents/connections` (`connector_id`, `owner`, `auth_scheme`) |
 | OAuth consent | `POST /v1/agents/connections/{id}/authorizations` → open `launch_url` in a popup |
 | A token or key | `PUT /v1/agents/connections/{id}/credentials` |

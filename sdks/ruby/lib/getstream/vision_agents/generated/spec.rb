@@ -2432,8 +2432,20 @@ module GetStream
           required: %w[items has_more].freeze, open: false
         }.freeze,
         "CustomConnectorRequest" => {
-          properties: %w[category client description endpoint id name schemes scopes].freeze,
-          required: %w[id name endpoint schemes].freeze, open: false
+          properties: %w[category client description endpoint http id name schemes scopes].freeze,
+          required: %w[id name schemes].freeze, open: false
+        }.freeze,
+        "CustomHTTPAPI" => {
+          properties: %w[base_url tools].freeze,
+          required: %w[base_url tools].freeze, open: false
+        }.freeze,
+        "CustomHTTPParameter" => {
+          properties: %w[description required type].freeze,
+          required: %w[type].freeze, open: false
+        }.freeze,
+        "CustomHTTPTool" => {
+          properties: %w[description method name parameters path read_only].freeze,
+          required: %w[name description method path].freeze, open: false
         }.freeze,
         "CustomModel" => {
           properties: %w[base_url context_window created_at has_api_key id input_modalities model name per_million_input_tokens per_million_output_tokens retention target trains_on_data updated_at].freeze,

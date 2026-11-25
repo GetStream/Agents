@@ -832,6 +832,10 @@ func (m Manifest) Validate() error {
 				fail(field+".kind", "is http a second time: a manifest has at most one http source")
 			}
 			checkHTTPSource(fail, field, source)
+			// An import has no request schema to cap it (maxLength on CustomHTTPAPI.base_url).
+			if endpoint := m.Endpoints[source.Endpoint]; len(endpoint) > maxHTTPPath {
+				fail("endpoints."+source.Endpoint, "is over %d bytes", maxHTTPPath)
+			}
 		} else if len(source.HTTPTools) > 0 {
 			fail(field+".http_tools", "is set only on a source of kind %s", SourceKindHTTP)
 		}

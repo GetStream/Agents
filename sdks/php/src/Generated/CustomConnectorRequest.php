@@ -9,26 +9,28 @@ namespace GetStream\VisionAgents\Generated;
 use GetStream\VisionAgents\Json;
 
 /**
- * A custom MCP server for the app's agents to connect to. An unknown field is refused rather
- * than ignored.
+ * A custom MCP server or HTTP API for the app's agents to connect to. An unknown field is
+ * refused rather than ignored.
  */
 final readonly class CustomConnectorRequest
 {
     public function __construct(
-        // The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on...
-        public string $endpoint,
         // Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id...
         public string $id,
         public string $name,
         // How a connection may authenticate. Each must be a scheme this deployment has, except oauth2_client_credenti...
         /** @var list<string> */
         public array $schemes,
+        // The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on...
+        public ?string $endpoint = null,
         public ?string $category = null,
         public ?ConnectorClient $client = null,
         public ?string $description = null,
         // The scopes a consent asks for, each an RFC 6749 scope token.
         /** @var list<string>|null */
         public ?array $scopes = null,
+        // An HTTP API whose tools the connector lists itself, in place of an MCP server. Set this or endpoint, not both.
+        public ?CustomHTTPAPI $http = null,
     ) {
     }
 
@@ -38,14 +40,15 @@ final readonly class CustomConnectorRequest
     public static function fromArray(array $data): self
     {
         return new self(
-            endpoint: Json::string($data, 'endpoint'),
             id: Json::string($data, 'id'),
             name: Json::string($data, 'name'),
             schemes: Json::strings($data, 'schemes'),
+            endpoint: array_key_exists('endpoint', $data) && $data['endpoint'] !== null ? Json::string($data, 'endpoint') : null,
             category: array_key_exists('category', $data) && $data['category'] !== null ? Json::string($data, 'category') : null,
             client: array_key_exists('client', $data) && $data['client'] !== null ? ConnectorClient::fromArray(Json::object($data, 'client')) : null,
             description: array_key_exists('description', $data) && $data['description'] !== null ? Json::string($data, 'description') : null,
             scopes: array_key_exists('scopes', $data) && $data['scopes'] !== null ? Json::strings($data, 'scopes') : null,
+            http: array_key_exists('http', $data) && $data['http'] !== null ? CustomHTTPAPI::fromArray(Json::object($data, 'http')) : null,
         );
     }
 
@@ -57,10 +60,12 @@ final readonly class CustomConnectorRequest
     public function toArray(): array
     {
         $out = [];
-        $out['endpoint'] = $this->endpoint;
         $out['id'] = $this->id;
         $out['name'] = $this->name;
         $out['schemes'] = $this->schemes;
+        if ($this->endpoint !== null) {
+            $out['endpoint'] = $this->endpoint;
+        }
         if ($this->category !== null) {
             $out['category'] = $this->category;
         }
@@ -72,6 +77,9 @@ final readonly class CustomConnectorRequest
         }
         if ($this->scopes !== null) {
             $out['scopes'] = $this->scopes;
+        }
+        if ($this->http !== null) {
+            $out['http'] = $this->http->toArray();
         }
         return $out;
     }

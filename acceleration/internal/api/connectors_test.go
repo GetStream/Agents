@@ -16,6 +16,8 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/core"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/providers"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/schemes/none"
+	httpsource "github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sources/http"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -29,14 +31,16 @@ func TestConnectorsSuite(t *testing.T) {
 	runSuite(t, new(ConnectorsSuite))
 }
 
-// SetupSuite registers the scheme the built-ins name, and seeds the built-ins as a router
-// start does. Seeding is idempotent, so suites running beside this one see the same rows.
+// SetupSuite registers the scheme the built-ins name, none and the http source, for a
+// connection to an http connector, and seeds the built-ins as a router start does. Seeding is
+// idempotent, so suites running beside this one see the same rows.
 func (s *ConnectorsSuite) SetupSuite() {
 	s.connectors = core.Registry{Schemes: map[string]core.Scheme{
 		"oauth2_code":               namedScheme("oauth2_code"),
 		"oauth2_client_credentials": namedScheme("oauth2_client_credentials"),
 		"api_key":                   namedScheme("api_key"),
-	}}
+		none.Name:                   none.New(),
+	}, ToolSources: map[string]core.ToolSource{httpsource.Kind: httpsource.New()}}
 	s.RouterSuite.SetupSuite()
 	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
@@ -755,6 +759,291 @@ SELECT count(*) FROM pg_stat_activity
 WHERE datname = current_database() AND wait_event_type = 'Lock'
   AND strpos(query, ?) > 0 AND strpos(query, ?) > 0`, statement, id).Scan(&count))
 	return count
+}
+
+// TestAnMCPConnectorIsAnsweredAsBefore is the control for AI-3676: a custom MCP connector's
+// create, and the refusals of its endpoint, answer as on 5a798ad5d, probed there with this
+// request (AI-3676/base-probe.txt): the same keys and values, and the same messages.
+func (s *ConnectorsSuite) TestAnMCPConnectorIsAnsweredAsBefore() {
+	id := s.customID()
+	status, raw := s.serverClient.call(http.MethodPost, "/v1/agents/connectors", s.customConnector(id))
+
+	s.Require().Equal(http.StatusOK, status)
+	var shown map[string]any
+	s.Require().NoError(json.Unmarshal(raw, &shown))
+	s.Equal([]string{"channel", "client", "created_at", "custom", "duration", "id", "inputs", "name", "revision", "schemes", "scopes"},
+		slices.Sorted(maps.Keys(shown)))
+	for _, key := range []string{"created_at", "duration"} {
+		delete(shown, key)
+	}
+	s.Equal(map[string]any{"channel": false, "client": map[string]any{"registration": []any{"dcr"}}, "custom": true, "id": id,
+		"inputs": []any{}, "name": "Our CRM", "revision": float64(1), "schemes": []any{"oauth2_code"}, "scopes": []any{}}, shown)
+
+	for endpoint, message := range map[string]string{
+		"https://10.0.0.7/mcp":    "endpoint must be a public https URL without userinfo, query or fragment",
+		"https://8.8.8.8/mcp?x=1": "endpoint must be a public https URL without userinfo, query or fragment",
+		"http://8.8.8.8/mcp":      `manifest "%s": endpoints.mcp: "http://8.8.8.8/mcp" does not start with https:// or a placeholder`,
+	} {
+		sent := s.customConnector(s.customID())
+		sent["endpoint"] = endpoint
+
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/connectors", sent)
+
+		s.Equal(http.StatusBadRequest, status, endpoint)
+		s.Equal(strings.ReplaceAll(message, "%s", sent["id"].(string)), failure, endpoint)
+	}
+}
+
+// TestACustomHTTPConnectorIsStoredAndItsAPIIsNeverShown is AC-1 of AI-3669 through the API:
+// open_meteo's file as the CLI posts it is stored at revision 1 as the manifest the http
+// source runs, and no answer shows its base URL or its tools.
+func (s *ConnectorsSuite) TestACustomHTTPConnectorIsStoredAndItsAPIIsNeverShown() {
+	id := s.customID()
+
+	created := s.create(s.httpConnector(id))
+
+	s.Equal(id, created.ID)
+	s.Equal(1, created.Revision)
+	s.True(created.Custom)
+	s.Equal([]string{none.Name}, created.Schemes)
+	s.Equal(created, s.get(id), "the answer to the create is the stored row")
+	stored, err := s.store.ConnectorDefinitions.Latest(context.Background(), s.customerID(), id)
+	s.Require().NoError(err)
+	s.Equal(map[string]string{core.SourceKindHTTP: "https://8.8.8.8"}, stored.Manifest.Endpoints)
+	s.Equal([]core.SourceRule{{Kind: core.SourceKindHTTP, Endpoint: core.SourceKindHTTP, HTTPTools: []core.HTTPTool{{
+		Name: "get_forecast", Description: "The weather at a place.", Method: http.MethodGet, Path: "/v1/forecast", ReadOnly: true,
+		Parameters: map[string]core.HTTPParameter{
+			"latitude":  {Type: "number", Description: "Degrees north.", Required: true},
+			"longitude": {Type: "number", Description: "Degrees east.", Required: true},
+			"current":   {Type: "string"},
+		}}}}}, stored.Manifest.Sources)
+	for _, path := range []string{"/v1/agents/connectors/" + id, "/v1/agents/connectors?limit=200"} {
+		status, raw := s.serverClient.call(http.MethodGet, path, nil)
+		s.Require().Equal(http.StatusOK, status)
+		s.Contains(string(raw), id, path)
+		for _, hidden := range []string{"8.8.8.8", "base_url", `"http"`, "/v1/forecast", "get_forecast"} {
+			s.NotContains(string(raw), hidden, path)
+		}
+	}
+}
+
+// TestAConnectionToAnHTTPConnectorListsItsReadOnlyTool is AC-2 of AI-3669 through the API: a
+// connection with scheme none validates as connected, and its tools listing says the GET
+// tool only reads. Discover sends nothing (internal/connectors/sources/http), so the API at
+// the public address is never called.
+func (s *ConnectorsSuite) TestAConnectionToAnHTTPConnectorListsItsReadOnlyTool() {
+	id := s.customID()
+	sent := s.httpConnector(id)
+	tools := sent["http"].(map[string]any)["tools"].([]map[string]any)
+	sent["http"].(map[string]any)["tools"] = append(tools, map[string]any{
+		"name": "add_note", "description": "Adds a note.", "method": "POST", "path": "/v1/notes",
+		"parameters": map[string]any{"text": map[string]any{"type": "string", "required": true}}},
+		// A GET tool is read-only only when the file says so.
+		map[string]any{"name": "list_notes", "description": "Lists the notes.", "method": "GET", "path": "/v1/notes"})
+	s.create(sent)
+	var created Connection
+	s.Require().Equal(http.StatusCreated, s.serverClient.do(http.MethodPost, "/v1/agents/connections", appOwned(id), &created))
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPut, "/v1/agents/connections/"+created.ID+"/credentials",
+		map[string]any{"expected_revision": 1}, nil))
+
+	var validation ConnectionValidation
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodPost, "/v1/agents/connections/"+created.ID+"/validate", nil, &validation))
+	var listed ConnectionTools
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/connections/"+created.ID+"/tools", nil, &listed))
+
+	s.Equal(validationConnected, string(validation.Status), validation.Error)
+	readOnly := map[string]bool{}
+	for _, tool := range listed.Tools {
+		readOnly[tool.Name] = tool.ReadOnly
+	}
+	s.Equal(map[string]bool{"get_forecast": true, "add_note": false, "list_notes": false}, readOnly)
+}
+
+// TestAReadOnlyToolThatWritesIsRefusedNamingIt is AC-5 of AI-3669 through the API: a POST or
+// a DELETE tool saying read_only is a 400 naming the tool, and nothing is stored.
+func (s *ConnectorsSuite) TestAReadOnlyToolThatWritesIsRefusedNamingIt() {
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		id := s.customID()
+		sent := s.httpConnector(id)
+		tool := sent["http"].(map[string]any)["tools"].([]map[string]any)[0]
+		tool["name"], tool["method"] = "remove_forecast", method
+
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/connectors", sent)
+
+		s.Equal(http.StatusBadRequest, status, method)
+		s.Contains(failure, fmt.Sprintf(`a read-only tool must be GET or HEAD, and "remove_forecast" is %s`, method))
+		s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+id, nil, nil), method)
+	}
+}
+
+// TestAnHTTPConnectorWhoseAPIIsNotPublicHTTPSIsRefused is AC-7 of AI-3669 through the API,
+// with AI-3674 S1.5's addresses and a few more: each is a 400 with one fixed message, so a
+// caller cannot tell a name that does not resolve from a private one, and nothing is stored.
+func (s *ConnectorsSuite) TestAnHTTPConnectorWhoseAPIIsNotPublicHTTPSIsRefused() {
+	for _, base := range []string{
+		"https://127.0.0.1",             // loopback
+		"https://10.0.0.1",              // private-use, RFC 1918
+		"https://169.254.169.254",       // link-local, where cloud metadata servers answer
+		"http://api.open-meteo.com",     // not https
+		"https://[::1]",                 // IPv6 loopback
+		"https://router-probe.invalid",  // .invalid never resolves, RFC 6761 section 6.4
+		"https://8.8.8.8/v1?key=secret", // a query
+		"https://user:secret@8.8.8.8",   // userinfo
+		"https://8.8.8.8/v1#top",        // a fragment
+		"HTTPS://8.8.8.8",               // public to egress, which reads the scheme in any case, not to the manifest's rules
+		"https://8.8.8.8/{x}",           // a {name} the manifest's rules refuse, since a custom connector declares no input
+	} {
+		id := s.customID()
+		sent := s.httpConnector(id)
+		sent["http"].(map[string]any)["base_url"] = base
+
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/connectors", sent)
+
+		s.Equal(http.StatusBadRequest, status, base)
+		s.Equal("base_url must be a public https URL without userinfo, query or fragment", failure, base)
+		s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+id, nil, nil), base)
+	}
+}
+
+// TestANewRevisionOfAnHTTPConnectorIsCheckedAgain: AI-3674 S1.5, the base URL is checked on
+// every revision as on the first. A refused one leaves the stored revision as it was.
+func (s *ConnectorsSuite) TestANewRevisionOfAnHTTPConnectorIsCheckedAgain() {
+	id := s.customID()
+	s.Equal(1, s.create(s.httpConnector(id)).Revision)
+	private := s.httpConnector(id)
+	private["http"].(map[string]any)["base_url"] = "https://169.254.169.254/v1"
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/connectors", private)
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal("base_url must be a public https URL without userinfo, query or fragment", failure)
+	stored, err := s.store.ConnectorDefinitions.Latest(context.Background(), s.customerID(), id)
+	s.Require().NoError(err)
+	s.Equal(1, stored.Revision)
+	s.Equal("https://8.8.8.8", stored.Manifest.Endpoints[core.SourceKindHTTP])
+	moved := s.httpConnector(id)
+	moved["http"].(map[string]any)["base_url"] = "https://1.1.1.1"
+	s.Equal(2, s.create(moved).Revision)
+}
+
+// TestAConnectorWithBothOrNeitherOfEndpointAndHTTPIsRefused: a custom connector is an MCP
+// server or an http API, so one naming both or neither is refused and nothing is stored.
+func (s *ConnectorsSuite) TestAConnectorWithBothOrNeitherOfEndpointAndHTTPIsRefused() {
+	both := s.httpConnector(s.customID())
+	both["endpoint"] = "https://8.8.8.8/mcp"
+	neither := s.customConnector(s.customID())
+	delete(neither, "endpoint")
+	empty := s.customConnector(s.customID())
+	empty["endpoint"] = ""
+	for name, sent := range map[string]map[string]any{"both": both, "neither": neither, "an empty endpoint": empty} {
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/connectors", sent)
+
+		s.Equal(http.StatusBadRequest, status, name)
+		s.Equal("a custom connector has an MCP endpoint or an http API, and exactly one of them", failure, name)
+		s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+sent["id"].(string), nil, nil), name)
+	}
+}
+
+// TestAnHTTPConnectorTheManifestRefusesIsRefusedWithItsReason: an http block the schema takes
+// but the manifest's rules refuse is a 400 with core's reason, and nothing is stored.
+func (s *ConnectorsSuite) TestAnHTTPConnectorTheManifestRefusesIsRefusedWithItsReason() {
+	for name, test := range map[string]struct {
+		change func(sent, api map[string]any)
+		reason string
+	}{
+		"oauth2_code": {func(sent, _ map[string]any) {
+			sent["schemes"], sent["client"] = []string{"oauth2_code"}, map[string]any{"registration": []string{"dcr"}}
+		}, "oauth2_code is not available for an http custom connector"},
+		"a method override parameter": {func(_, api map[string]any) {
+			api["tools"].([]map[string]any)[0]["parameters"].(map[string]any)["_method"] = map[string]any{"type": "string"}
+		}, "parameters._method: names a method override"},
+	} {
+		id := s.customID()
+		sent := s.httpConnector(id)
+		test.change(sent, sent["http"].(map[string]any))
+
+		status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/connectors", sent)
+
+		s.Equal(http.StatusBadRequest, status, name)
+		s.Contains(failure, test.reason, name)
+		s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+id, nil, nil), name)
+	}
+}
+
+// TestAnHTTPToolTheSchemaRefusesIsAValidationFailure: what the request's schema says of an
+// http block (CustomHTTPAPI) is held before any rule of the manifest, an unknown field included.
+func (s *ConnectorsSuite) TestAnHTTPToolTheSchemaRefusesIsAValidationFailure() {
+	for name, change := range map[string]func(api, tool, parameter map[string]any){
+		"a method that is not one of the six": func(_, tool, _ map[string]any) { tool["method"] = "TRACE" },
+		"a lowercase method":                  func(_, tool, _ map[string]any) { tool["method"] = "get" },
+		"a parameter type that is no scalar":  func(_, _, parameter map[string]any) { parameter["type"] = "object" },
+		"a base_url over 2048":                func(api, _, _ map[string]any) { api["base_url"] = "https://8.8.8.8/" + strings.Repeat("a", 2033) },
+		"a header on a tool": func(_, tool, _ map[string]any) {
+			tool["headers"] = map[string]string{"X-HTTP-Method-Override": "DELETE"}
+		},
+		"an unknown field of the api":     func(api, _, _ map[string]any) { api["headers"] = map[string]string{"X-HTTP-Method-Override": "DELETE"} },
+		"an unknown field of a parameter": func(_, _, parameter map[string]any) { parameter["in"] = "header" },
+		"no base_url":                     func(api, _, _ map[string]any) { delete(api, "base_url") },
+		"tools null":                      func(api, _, _ map[string]any) { api["tools"] = nil },
+		"a parameter with no type":        func(_, _, parameter map[string]any) { delete(parameter, "type") },
+		// AI-3676 R1.4: core's caps and tool name pattern, which the schema carries.
+		"no tool": func(api, _, _ map[string]any) { api["tools"] = []any{} },
+		"129 tools": func(api, tool, _ map[string]any) {
+			tools := make([]map[string]any, 129)
+			for i := range tools {
+				tools[i] = maps.Clone(tool)
+				tools[i]["name"] = fmt.Sprintf("tool_%d", i)
+			}
+			api["tools"] = tools
+		},
+		"a name of 64":                      func(_, tool, _ map[string]any) { tool["name"] = strings.Repeat("n", 64) },
+		"a name with a dot":                 func(_, tool, _ map[string]any) { tool["name"] = "get.forecast" },
+		"a description over 1000":           func(_, tool, _ map[string]any) { tool["description"] = strings.Repeat("d", 1001) },
+		"a path over 2048":                  func(_, tool, _ map[string]any) { tool["path"] = "/" + strings.Repeat("p", 2048) },
+		"a parameter description over 1000": func(_, _, parameter map[string]any) { parameter["description"] = strings.Repeat("d", 1001) },
+		"65 parameters": func(_, tool, _ map[string]any) {
+			parameters := tool["parameters"].(map[string]any)
+			for i := len(parameters); i < 65; i++ {
+				parameters[fmt.Sprintf("p%d", i)] = map[string]any{"type": "string"}
+			}
+		},
+	} {
+		id := s.customID()
+		sent := s.httpConnector(id)
+		api := sent["http"].(map[string]any)
+		tool := api["tools"].([]map[string]any)[0]
+		change(api, tool, tool["parameters"].(map[string]any)["latitude"].(map[string]any))
+
+		status, raw := s.serverClient.call(http.MethodPost, "/v1/agents/connectors", sent)
+
+		s.Equal(http.StatusBadRequest, status, name)
+		var answered ErrorResponse
+		s.Require().NoError(json.Unmarshal(raw, &answered), name)
+		s.Equal("validation_failed", answered.Error.Code, "%s: %s", name, raw)
+		s.Equal(http.StatusNotFound, s.serverClient.do(http.MethodGet, "/v1/agents/connectors/"+id, nil, nil), name)
+	}
+}
+
+// httpConnector is AC-1 of AI-3669's open_meteo as the CLI posts it, scheme none, at a public
+// IP literal, so checking it resolves nothing.
+func (s *ConnectorsSuite) httpConnector(id string) map[string]any {
+	return map[string]any{
+		"id":      id,
+		"name":    "Open-Meteo",
+		"schemes": []string{none.Name},
+		"http": map[string]any{
+			"base_url": "https://8.8.8.8",
+			"tools": []map[string]any{{
+				"name": "get_forecast", "description": "The weather at a place.", "method": "GET", "path": "/v1/forecast",
+				"read_only": true,
+				"parameters": map[string]any{
+					"latitude":  map[string]any{"type": "number", "description": "Degrees north.", "required": true},
+					"longitude": map[string]any{"type": "number", "description": "Degrees east.", "required": true},
+					"current":   map[string]any{"type": "string"},
+				},
+			}},
+		},
+	}
 }
 
 // customConnector is a custom MCP connector the router accepts. Its endpoint is a public IP

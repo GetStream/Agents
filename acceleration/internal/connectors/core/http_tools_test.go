@@ -90,6 +90,11 @@ func (s *HTTPSourceSuite) TestAValidHTTPSourceIsAccepted() {
 		"a parameter merely holding method":   withTool(func(t *HTTPTool) { t.Parameters["http_method_name"] = HTTPParameter{Type: "string"} }),
 		"a header that is no override":        withSource(func(r *SourceRule) { r.Headers = map[string]string{"X-Api-Version": "2"} }),
 		"outbound true":                       withSource(func(r *SourceRule) { r.Outbound = new(true) }),
+		"a base_url of 2048 bytes": func() Manifest {
+			m := httpManifest(forecast())
+			m.Endpoints[SourceKindHTTP] = "https://api.example.com/" + strings.Repeat("a", 2024)
+			return m
+		}(),
 		"an mcp source with an override header": {ID: "example", Revision: 1, Name: "Example", Schemes: []string{"bearer"},
 			Endpoints: map[string]string{SourceKindMCP: "https://api.example.com/mcp"},
 			Sources:   []SourceRule{{Kind: SourceKindMCP, Endpoint: SourceKindMCP, Headers: map[string]string{"X-HTTP-Method-Override": "POST"}}}},
@@ -149,7 +154,20 @@ func (s *HTTPSourceSuite) TestAnHTTPSourceBreakingARuleIsRefused() {
 		"a brace":           {withTool(func(t *HTTPTool) { t.Parameters["a}b"] = HTTPParameter{Type: "string"} }), `"a}b" is not 1 to 64`},
 		"an empty name":     {withTool(func(t *HTTPTool) { t.Parameters[""] = HTTPParameter{Type: "string"} }), `"" is not 1 to 64`},
 		"a name of 65":      {withTool(func(t *HTTPTool) { t.Parameters[strings.Repeat("p", 65)] = HTTPParameter{Type: "string"} }), `is not 1 to 64`},
-		"65 parameters":     {withTool(func(t *HTTPTool) { t.Parameters = parameters(65) }), `http_tools[0].parameters: has 65 parameters, over 64`},
+		"a parameter description over 1000": {withTool(func(t *HTTPTool) {
+			t.Parameters["days"] = HTTPParameter{Type: "integer", Description: strings.Repeat("d", 1001)}
+		}), `http_tools[0].parameters.days.description: is over 1000 bytes`},
+		"a base_url of 2049": {func() Manifest {
+			m := httpManifest(forecast())
+			m.Endpoints[SourceKindHTTP] = "https://api.example.com/" + strings.Repeat("a", 2025)
+			return m
+		}(), `endpoints.http: is over 2048 bytes`},
+		"a base_url over 2048": {func() Manifest {
+			m := httpManifest(forecast())
+			m.Endpoints[SourceKindHTTP] = "https://api.example.com/" + strings.Repeat("a", 2048)
+			return m
+		}(), `endpoints.http: is over 2048 bytes`},
+		"65 parameters": {withTool(func(t *HTTPTool) { t.Parameters = parameters(65) }), `http_tools[0].parameters: has 65 parameters, over 64`},
 		"an override header": {withSource(func(r *SourceRule) { r.Headers = map[string]string{"x-HTTP-method-OVERRIDE": "POST"} }),
 			`sources[0].headers.x-HTTP-method-OVERRIDE: names a method override`},
 		"read_only_tools":   {withSource(func(r *SourceRule) { r.ReadOnlyTools = []string{"get_forecast"} }), `sources[0].read_only_tools: is not set on an http source`},
