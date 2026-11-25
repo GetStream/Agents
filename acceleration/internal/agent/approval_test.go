@@ -360,10 +360,55 @@ func (s *AgentSuite) TestAYesBeforeTheCallerSpokeRunsNothingAndTheCallWaits() {
 		s.confirmationSays("call-2", "has not spoken since they were asked about lookup_order")
 		s.Empty(s.runner.asked(), "a yes the caller did not speak ran the call")
 
-		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+		// The caller's yes counts for the model's next turn, after the question's wait began.
+		s.model.mu.Lock()
+		s.model.then = []string{"Let me check."}
+		s.model.mu.Unlock()
 		s.says(stt.Participant{ID: "alice"}, "yes please")
+		s.eventually(func() bool { return s.spokenText("Let me check.") }, "the caller's yes was never answered")
+		time.Sleep(time.Second)
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+		_, err = s.agent.RespondTo(s.ctx, "go ahead", nil, options.LLM{})
+		s.Require().NoError(err)
 
 		s.eventually(func() bool { return len(s.runner.asked()) == 1 }, "the caller's own yes never ran the call")
+	})
+}
+
+// A question asked later takes nothing from one asked before: the caller cutting off the second
+// leaves their yes to the first standing.
+func (s *AgentSuite) TestCuttingOffASecondQuestionLeavesTheFirstStanding() {
+	s.onFakeClock(func() {
+		s.askedToApprove()
+		time.Sleep(time.Second)
+		s.model.mu.Lock()
+		s.model.calls = []llm.ToolCall{{ID: "call-3", Name: "lookup_order", Arguments: `{"order":"13"}`}}
+		s.model.callsOn = len(s.model.asked) + 1
+		s.model.mu.Unlock()
+		s.voice.mu.Lock()
+		s.voice.silent = true
+		s.voice.mu.Unlock()
+		s.says(stt.Participant{ID: "alice"}, "and order 13 too")
+		s.eventually(func() bool { return s.spokenText("Book order 13?") }, "the second question was never said")
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "yes to the first")
+
+		s.eventually(func() bool { return len(s.runner.asked()) == 1 }, "the yes to the first question never ran it")
+		s.Equal("call-1", s.runner.asked()[0].ID)
+	})
+}
+
+// A turn answered with the reply speculated for it is one the caller spoke.
+func (s *AgentSuite) TestAYesInAReplySpeculatedForTheCallersTurnRunsTheCall() {
+	s.onFakeClock(func() {
+		s.speculates = true
+		s.askedToApprove()
+		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
+
+		s.says(stt.Participant{ID: "alice"}, "yes please")
+
+		s.eventually(func() bool { return len(s.runner.asked()) == 1 }, "the caller's yes never ran the call")
 	})
 }
 

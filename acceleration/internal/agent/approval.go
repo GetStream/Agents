@@ -63,9 +63,9 @@ type approval struct {
 	asked bool
 	// turn is the turn a cascade says the question in, as written.
 	turn string
-	// said is set once the question was said: handed to a cascade's voice, or a native model's
+	// said is set once the question was said: given to a cascade's voice, or a native model's
 	// reply after it was told to ask spoke. cut is set once the caller talked over it, or the
-	// voice failed, before it finished playing.
+	// voice failed, before it finished playing (Agent.interrupted).
 	said, cut bool
 	// played is set once the question finished playing, with heard the caller's turns then: a
 	// yes counts only in reply to a turn they spoke after it.
@@ -191,18 +191,11 @@ func (a *Agent) askApproval(call llm.ToolCall, question string) []llm.ContentPar
 	return llm.TextParts(fmt.Sprintf(answer, call.Name, question, call.ID, call.Name))
 }
 
-// heardLocked counts a turn the caller spoke, first marking as played each question that had
-// finished before it; drained is whether the edge has no speech left to play. The caller holds
-// the lock.
+// heardLocked counts a turn the caller spoke, first marking as played each question said before
+// it when drained: the edge has no speech left to play. The caller holds the lock.
 func (a *Agent) heardLocked(drained bool) {
-	a.playedLocked(drained && a.quietLocked())
+	a.playedLocked(drained)
 	a.callerTurns++
-}
-
-// quietLocked reports whether the agent says nothing and is writing nothing. The caller holds
-// the lock.
-func (a *Agent) quietLocked() bool {
-	return !a.generating && a.utterances == 0 && !a.nativeAwaiting
 }
 
 // playedLocked marks each question said as played, when quiet. The caller holds the lock.
@@ -272,7 +265,7 @@ func (a *Agent) askLocked(turnID, question string) error {
 	a.saying = question
 	for _, waiting := range a.approvals {
 		if waiting.turn == "" {
-			waiting.turn = turnID
+			waiting.turn, waiting.said = turnID, true
 		}
 	}
 	said := llm.Message{Role: llm.Assistant, Content: question}
@@ -289,7 +282,6 @@ func (a *Agent) askLocked(turnID, question string) error {
 	a.mu.Lock()
 	for _, waiting := range a.approvals {
 		waiting.asked = true
-		waiting.said = waiting.said || waiting.turn == turnID && err == nil
 	}
 	a.mu.Unlock()
 	if err != nil {
@@ -430,7 +422,7 @@ func (a *Agent) tickApprovals() {
 		wait = approvalWait
 	}
 	a.mu.Lock()
-	quiet = quiet && a.quietLocked()
+	quiet = quiet && !a.generating && a.utterances == 0 && !a.nativeAwaiting
 	a.playedLocked(quiet)
 	var lapsed []*approval
 	for id, waiting := range a.approvals {
