@@ -279,6 +279,9 @@ func (s *SimulationsSuite) TestAnAppHasFourRunsAtOnceWhenItAsksForManyTogether()
 		s.NotContains(failed.Error.Message, "simulation:")
 	}
 	s.Equal(4, going)
+	var written []SimulationRun
+	s.Require().Equal(http.StatusOK, s.serverClient.do(http.MethodGet, "/v1/agents/simulation-runs", nil, &written))
+	s.Len(written, 4, "a run refused is not written")
 }
 
 func (s *SimulationsSuite) TestAnAppsRunsLeaveRoomForAnotherApps() {
