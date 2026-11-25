@@ -4,11 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/pion/sdp/v3"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
 
@@ -102,16 +105,25 @@ func (m Media) hasDTMF() bool {
 	return false
 }
 
-// ParseMedia reads the first m= line of body.
+// ParseMedia reads the first audio m= line of body.
 func ParseMedia(body []byte) (Media, error) {
+	m, _, _, err := parseAudio(body)
+	return m, err
+}
+
+// parseAudio is ParseMedia that also returns the whole body and the index of the m= line it read.
+func parseAudio(body []byte) (Media, *sdp.SessionDescription, int, error) {
 	var sd sdp.SessionDescription
 	if err := sd.Unmarshal(body); err != nil {
-		return Media{}, stack.Wrap(fmt.Errorf("parse sdp: %w", err))
+		return Media{}, nil, 0, stack.Wrap(fmt.Errorf("parse sdp: %w", err))
 	}
-	if len(sd.MediaDescriptions) == 0 {
-		return Media{}, stack.Wrap(errors.New("sdp has no media"))
+	at := slices.IndexFunc(sd.MediaDescriptions, func(md *sdp.MediaDescription) bool {
+		return md.MediaName.Media == "audio"
+	})
+	if at < 0 {
+		return Media{}, nil, 0, stack.Wrap(errors.New("sdp has no media of type audio"))
 	}
-	md := sd.MediaDescriptions[0]
+	md := sd.MediaDescriptions[at]
 
 	m := Media{Port: md.MediaName.Port.Value, Direction: DirSendRecv}
 	switch {
@@ -120,13 +132,13 @@ func ParseMedia(body []byte) (Media, error) {
 	case sd.ConnectionInformation != nil && sd.ConnectionInformation.Address != nil:
 		m.Addr = sd.ConnectionInformation.Address.Address
 	default:
-		return Media{}, stack.Wrap(errors.New("sdp has no connection address"))
+		return Media{}, nil, 0, stack.Wrap(errors.New("sdp has no connection address"))
 	}
 
 	for _, format := range md.MediaName.Formats {
 		pt, err := strconv.ParseUint(format, 10, 8)
 		if err != nil {
-			return Media{}, stack.Wrap(fmt.Errorf("sdp payload type %q: %w", format, err))
+			return Media{}, nil, 0, stack.Wrap(fmt.Errorf("sdp payload type %q: %w", format, err))
 		}
 		if codec, err := sd.GetCodecForPayloadType(uint8(pt)); err == nil {
 			name := codec.Name
@@ -150,7 +162,7 @@ func ParseMedia(body []byte) (Media, error) {
 			m.Direction = attr.Key
 		}
 	}
-	return m, nil
+	return m, &sd, at, nil
 }
 
 func buildSDP(m Media, sessionID, version uint64) []byte {
@@ -159,11 +171,15 @@ func buildSDP(m Media, sessionID, version uint64) []byte {
 		pts = append(pts, strconv.Itoa(int(codec.PayloadType)))
 	}
 
+	family := "IP4"
+	if addr, err := netip.ParseAddr(m.Addr); err == nil && addr.Is6() {
+		family = "IP6"
+	}
 	var b strings.Builder
 	b.WriteString("v=0\r\n")
-	fmt.Fprintf(&b, "o=- %d %d IN IP4 %s\r\n", sessionID, version, m.Addr)
+	fmt.Fprintf(&b, "o=- %d %d IN %s %s\r\n", sessionID, version, family, m.Addr)
 	b.WriteString("s=sipbridge\r\n")
-	fmt.Fprintf(&b, "c=IN IP4 %s\r\n", m.Addr)
+	fmt.Fprintf(&b, "c=IN %s %s\r\n", family, m.Addr)
 	b.WriteString("t=0 0\r\n")
 	fmt.Fprintf(&b, "m=audio %d RTP/AVP %s\r\n", m.Port, strings.Join(pts, " "))
 	for _, codec := range m.Codecs {
@@ -243,4 +259,81 @@ func rejectAnswer(offer Media) Media {
 		codecs = []Codec{staticCodecs["PCMU"]}
 	}
 	return Media{Addr: rejectAddr, Port: 0, Codecs: codecs, Direction: DirInactive}
+}
+
+// streamOffer rebuilds an offer from the customer leg into the one Stream gets. Only what buildSDP
+// writes reaches Stream: the first audio stream, the codecs Stream accepts and an address Stream may
+// send RTP to. The customer's other attributes (a=rtcp, ICE candidates) and other m= lines are dropped.
+// The o= line keeps the customer's session id and version, as the offer passed on unchanged did, so a
+// re-INVITE that changes nothing still says so (RFC 3264 §8).
+func streamOffer(body []byte, trunk netip.Addr) ([]byte, error) {
+	m, sd, _, err := parseAudio(body)
+	if err != nil {
+		return nil, err
+	}
+	m.Codecs = slices.DeleteFunc(m.Codecs, func(c Codec) bool {
+		_, ok := staticCodecs[c.Name]
+		return !ok && c.Name != dtmfCodec.Name
+	})
+	if _, ok := m.audioCodec(); !ok {
+		return nil, stack.Wrap(errors.New("customer offered no codec Stream accepts"))
+	}
+	return buildSDP(reachable(m, trunk), sd.Origin.SessionID, sd.Origin.SessionVersion), nil
+}
+
+// reachable returns m with an address Stream may send RTP to. A trunk behind NAT often names its
+// private address while its RTP comes from a public one, so a c= that is not a public IP address is
+// replaced with the trunk's, which the guard checked, rather than failing the call. c=0.0.0.0 asks the
+// other side not to send (RFC 3264 §8.4); once the address is replaced, the direction says so.
+func reachable(m Media, trunk netip.Addr) Media {
+	addr, err := netip.ParseAddr(m.Addr)
+	if err == nil && egress.IsPublic(addr) {
+		m.Addr = addr.Unmap().String()
+		return m
+	}
+	m.Addr = trunk.String()
+	if err == nil && addr.Unmap().IsUnspecified() {
+		switch m.Direction {
+		case DirSendRecv:
+			m.Direction = "sendonly"
+		case "recvonly":
+			m.Direction = DirInactive
+		}
+	}
+	return m
+}
+
+// answerFor fits Stream's answer to an offer from the customer leg, which may hold more m= lines than
+// the one Stream saw. An answer has one m= line per offered line, in order (RFC 3264 §6): Stream's audio
+// goes where the customer's first audio line was, and every other line is rejected with port 0. An answer
+// that is not one stream is passed on as it came, as every answer was before offers were rebuilt.
+func answerFor(offer, answer []byte) []byte {
+	_, o, at, err := parseAudio(offer)
+	if err != nil || len(o.MediaDescriptions) == 1 {
+		return answer
+	}
+	var a sdp.SessionDescription
+	if err := a.Unmarshal(answer); err != nil || len(a.MediaDescriptions) != 1 {
+		return answer
+	}
+	audio := a.MediaDescriptions[0]
+	lines := make([]*sdp.MediaDescription, len(o.MediaDescriptions))
+	for i, md := range o.MediaDescriptions {
+		if i == at {
+			lines[i] = audio
+			continue
+		}
+		lines[i] = &sdp.MediaDescription{
+			MediaName: sdp.MediaName{
+				Media: md.MediaName.Media, Protos: md.MediaName.Protos, Formats: md.MediaName.Formats,
+			},
+			ConnectionInformation: audio.ConnectionInformation,
+		}
+	}
+	a.MediaDescriptions = lines
+	out, err := a.Marshal()
+	if err != nil {
+		return answer
+	}
+	return out
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 
@@ -32,6 +33,9 @@ type Call struct {
 	media MediaAddrs
 	// onChange is told when a passed-on re-INVITE changed what either leg last sent.
 	onChange func()
+	// trunkAddr is Config.trunkAddr, where Stream is sent RTP when a customer re-INVITE names no
+	// public address.
+	trunkAddr netip.Addr
 
 	established atomic.Bool
 	ending      atomic.Bool
@@ -132,9 +136,21 @@ func (c *Call) onReinvite(ctx context.Context, from side, offer []byte) ([]byte,
 		return nil, stack.Wrap(errNotEstablished)
 	}
 	c.log.Info("re-INVITE received, passing it on", media(from, offer)...)
-	answer, err := c.other(from).Reinvite(ctx, offer)
+	// Stream gets only an offer rebuilt from the customer's. An empty one asks Stream to offer, and
+	// what Stream offers is Stream's to pick.
+	sent := offer
+	if from == customerSide && len(offer) > 0 {
+		var err error
+		if sent, err = streamOffer(offer, c.trunkAddr); err != nil {
+			return nil, err
+		}
+	}
+	answer, err := c.other(from).Reinvite(ctx, sent)
 	if err != nil {
 		return nil, err
+	}
+	if from == customerSide {
+		answer = answerFor(offer, answer)
 	}
 	c.log.Info("re-INVITE answered", media(1-from, answer)...)
 	c.changed()

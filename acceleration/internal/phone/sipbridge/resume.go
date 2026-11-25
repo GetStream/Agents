@@ -76,7 +76,8 @@ func Resume(ctx context.Context, cfg ResumeConfig, state CallState) (*Call, erro
 	var streamURI sip.Uri
 	_ = sip.ParseUri(cfg.Stream.URI, &streamURI)
 	guard := cfg.guard.withDefaults()
-	if _, err := guard.addrs(ctx, cfg.CustomerTrunk.Host); err != nil {
+	trunkIPs, err := guard.addrs(ctx, cfg.CustomerTrunk.Host)
+	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("sipbridge: customer trunk: %w", err))
 	}
 
@@ -106,6 +107,7 @@ func Resume(ctx context.Context, cfg ResumeConfig, state CallState) (*Call, erro
 	call := newCall(ctx, customer, stream, cfg.Logger)
 	call.onChange = cfg.OnChange
 	call.media = state.Media
+	call.trunkAddr = preferIPv4(trunkIPs).Unmap()
 	for _, srv := range srvs {
 		handle(srv, reg, call)
 	}
