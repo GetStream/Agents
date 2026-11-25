@@ -64,7 +64,8 @@ func (s *ResumeSuite) setup(customer, stream peerOptions) {
 			LocalCSeq:    22180,
 			RemoteTarget: "sip:stream-sip@10.9.9.9:5060;alias=10.0.0.7~5060~1",
 			RouteSet:     []string{fmt.Sprintf("<sip:127.0.0.1:%d;transport=tcp;lr;did=1.2>", s.stream.port)},
-			LastSDP:      []byte("v=0 to stream\r\n"),
+			// What this build sends Stream: a body toStream leaves as it is.
+			LastSDP: sdpAt("127.0.0.1"),
 		},
 	}
 	s.cfg = ResumeConfig{
@@ -312,4 +313,26 @@ func (s *ResumeSuite) TestAResumedCallPointsStreamAtTheTrunksIPv4Address() {
 		invites := s.stream.requests(sip.INVITE, s.state.Stream.CallID)
 		return len(invites) == 2 && string(invites[1].Body()) == string(sdpAt("127.0.0.1"))
 	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func (s *ResumeSuite) TestAResumeSendsStreamTheSDPAnOlderBuildStoredRebuilt() {
+	s.state.Stream.LastSDP = []byte("v=0\r\no=- 7 3 IN IP4 10.0.0.5\r\ns=-\r\nc=IN IP4 10.0.0.5\r\nt=0 0\r\n" +
+		"m=audio 40000 RTP/AVP 0\r\na=candidate:1 1 UDP 2130706431 10.0.0.5 40000 typ host\r\nm=video 40002 RTP/AVP 96\r\n")
+
+	s.resume()
+
+	invites := s.stream.requests(sip.INVITE, streamCallID)
+	s.Require().Len(invites, 1)
+	want := buildSDP(Media{Addr: "127.0.0.1", Port: 40000, Codecs: []Codec{pcmu}, Direction: DirSendRecv}, 7, 3)
+	s.Equal(string(want), string(invites[0].Body()))
+}
+
+func (s *ResumeSuite) TestAResumeWithAStoredStreamSDPItCannotRebuildSendsNothing() {
+	s.state.Stream.LastSDP = []byte("v=0 to stream\r\n")
+
+	_, err := Resume(s.T().Context(), s.cfg, s.state)
+
+	s.ErrorContains(err, "stream leg sdp")
+	s.Empty(s.customer.requests(sip.INVITE, customerCallID))
+	s.Empty(s.stream.requests(sip.INVITE, streamCallID))
 }
