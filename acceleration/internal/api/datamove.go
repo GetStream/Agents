@@ -235,6 +235,7 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 	var cursor *int64
 	rows := int64(0)
 	tables := map[string]int64{}
+	skipped := []string{}
 
 	scanner := bufio.NewScanner(r.Body)
 	scanner.Buffer(nil, maxImportLine)
@@ -262,7 +263,10 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 				writeImportFailure(w, r, err)
 				return
 			}
-			if !line.Change.Skipped() {
+			switch key := store.SkippedRow(line.Change.Table, line.Change.Payload); {
+			case key != "" && line.Change.Op != store.ChangeDelete:
+				skipped = append(skipped, key)
+			case !line.Change.Skipped():
 				rows++
 				tables[line.Change.Table]++
 			}
@@ -285,6 +289,10 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 				writeImportFailure(w, r, err)
 				return
 			}
+			if key := store.SkippedRow(line.Table, line.Row); key != "" {
+				skipped = append(skipped, key)
+				continue
+			}
 			rows++
 			tables[line.Table]++
 		case line.Cursor != nil:
@@ -300,8 +308,8 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.Info("imported a customer", "customer", customerID, "rows", rows)
-	writeJSON(w, map[string]any{"rows": rows, "tables": tables, "cursor": cursor})
+	s.logger.Info("imported a customer", "customer", customerID, "rows", rows, "skipped", len(skipped))
+	writeJSON(w, map[string]any{"rows": rows, "tables": tables, "skipped": skipped, "cursor": cursor})
 }
 
 // writeImportFailure answers a line the store did not write: an export the caller can correct
