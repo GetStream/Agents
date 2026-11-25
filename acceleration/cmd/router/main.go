@@ -863,6 +863,13 @@ func run(settings config.Config, logger *slog.Logger) error {
 		stopSweeper := startUsageSweeper(ctx, routing.SweeperOptions{Store: pgStore, Usage: usageClient, Source: source, Logger: logger, Shipped: shipped})
 		defer stopSweeper()
 	}
+	// The stats pages of a deployment with other shards read what each shard ships to the
+	// shared database, so that one shard down leaves its own stats behind rather than failing
+	// everybody's.
+	if pgStore != nil && pgStore.StatsShipped() {
+		stopStats := startStatsShipper(ctx, pgStore, logger)
+		defer stopStats()
+	}
 
 	// One router of the deployment checks every organization's spend for a jump each hour, posts
 	// the day before's activity digest each day, and deletes the activity past its keep each day.

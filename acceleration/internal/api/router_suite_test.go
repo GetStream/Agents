@@ -105,6 +105,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/ttsrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/twiliosig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage/usagetest"
 	"github.com/GetStream/Vision-Agents/acceleration/prices"
@@ -1728,6 +1729,8 @@ func (s *RouterSuite) forgetPhoneVendors() {
 			s.Require().NoError(os.Unsetenv(name))
 		}
 	}
+	// The Twilio provider reads it too, to point numbers at the call webhook.
+	s.Require().NoError(os.Unsetenv(twiliosig.AuthTokenEnvVar))
 }
 
 // telephony serves the phone paths against the real vendor registry with no credentials
@@ -1987,6 +1990,28 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 // store; nil is a node with no store. Its sessions keep the suite's.
 func (s *RouterSuite) otherNodeServingFrom(served *store.Store, workers *dispatch.Pool, keyring *auth.Sealer, logger *slog.Logger) (*httptest.Server, *Server, *session.Manager) {
 	return s.otherNodeHolding(workers, keyring, logger, func(o *Options) { o.Store = served })
+}
+
+// unreachableShardDSN is a DSN no Postgres answers on.
+const unreachableShardDSN = "postgres://postgres:postgres@127.0.0.1:1/down?sslmode=disable&dial_timeout=1s"
+
+// onAShardDown is the app's client on a node of the suite's databases, shard "here", whose
+// other shard, "there", does not answer; and the store that node reads.
+func (s *RouterSuite) onAShardDown() (*testClient, *store.Store) {
+	shared := testDatabase(s.T(), os.Getenv("ROUTER_POSTGRES_DSN"))
+	if s.database != "" {
+		shared = testenv.Database(shared, s.database)
+	}
+	own := shared
+	if shardDSN := os.Getenv("ROUTER_POSTGRES_SHARD_DSN"); shardDSN != "" {
+		own = testDatabase(s.T(), shardDSN)
+	}
+	served, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: own,
+		Shards: map[string]string{"here": own, "there": unreachableShardDSN}})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(served.Close()) })
+	other, _, _ := s.otherNodeServingFrom(served, nil, s.sealer, slog.New(slog.DiscardHandler))
+	return s.serverClient.on(other), served
 }
 
 // deploymentWorkers is one node's view of the dispatch workers across the deployment.
@@ -2349,7 +2374,7 @@ func (c *testClient) raw(method, path string, body any) *http.Response {
 		require.NoError(err)
 		payload = bytes.NewReader(encoded)
 	}
-	request, err := http.NewRequest(method, c.suite.server.URL+path, payload)
+	request, err := http.NewRequest(method, c.base()+path, payload)
 	require.NoError(err)
 	request.Header = c.header.Clone()
 	request.Header.Set("Content-Type", "application/json")

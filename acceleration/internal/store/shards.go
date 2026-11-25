@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -129,10 +130,22 @@ func (s *Store) shards() []bun.IDB {
 }
 
 // everyShard reads every shard's database at once and returns what each answered, this
-// shard's first. One shard failing fails the read: a page that silently left a shard out
-// would be a list of calls missing some.
+// shard's first. One shard failing fails the read, with a *ShardsFailed naming it: a page
+// that silently left a shard out would be a list of calls missing some.
 func everyShard[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) ([]T, error) {
-	return onEach(ctx, s.shards(), read)
+	all := s.shards()
+	if len(all) == 1 {
+		found, err := read(ctx, all[0])
+		if err != nil {
+			return nil, err
+		}
+		return []T{found}, nil
+	}
+	found, failed := readShards(ctx, all, read)
+	if missed := s.failedShards(failed); missed != nil {
+		return nil, missed
+	}
+	return found, nil
 }
 
 // onEach reads every database of all at once and returns what each answered, in their order.
@@ -145,6 +158,33 @@ func onEach[T any](ctx context.Context, all []bun.IDB, read func(context.Context
 		}
 		return []T{found}, nil
 	}
+	found, failed := readShards(ctx, all, read)
+	if err := errors.Join(failed...); err != nil {
+		return nil, err
+	}
+	return found, nil
+}
+
+// reachableShards is everyShard for a page that says which shards it left out rather than
+// failing: another shard's answer is left out when it fails, and named in the *ShardsFailed
+// returned beside what the others answered. This shard failing still fails the read, its
+// database being this router's own.
+func reachableShards[T any](ctx context.Context, s *Store, read func(context.Context, bun.IDB) (T, error)) ([]T, *ShardsFailed, error) {
+	all := s.shards()
+	found, failed := readShards(ctx, all, read)
+	if failed[0] != nil {
+		return nil, nil, failed[0]
+	}
+	var answered []T
+	for i := range all {
+		if failed[i] == nil {
+			answered = append(answered, found[i])
+		}
+	}
+	return answered, s.failedShards(failed), nil
+}
+
+func readShards[T any](ctx context.Context, all []bun.IDB, read func(context.Context, bun.IDB) (T, error)) ([]T, []error) {
 	found := make([]T, len(all))
 	failed := make([]error, len(all))
 	var wg sync.WaitGroup
@@ -152,11 +192,39 @@ func onEach[T any](ctx context.Context, all []bun.IDB, read func(context.Context
 		wg.Go(func() { found[i], failed[i] = read(ctx, db) })
 	}
 	wg.Wait()
-	if err := errors.Join(failed...); err != nil {
-		return nil, err
-	}
-	return found, nil
+	return found, failed
 }
+
+// ShardsFailed is a read of every shard that some of them did not answer, by name.
+type ShardsFailed struct {
+	names  []string
+	errors []error
+}
+
+// failedShards names the shards of failed, as shards() orders them, that failed, or is nil
+// when none did.
+func (s *Store) failedShards(failed []error) *ShardsFailed {
+	var shards ShardsFailed
+	for i, err := range failed {
+		if err != nil {
+			shards.names = append(shards.names, s.shardNames[i])
+			shards.errors = append(shards.errors, err)
+		}
+	}
+	if len(shards.names) == 0 {
+		return nil
+	}
+	return &shards
+}
+
+// Shards names the shards that did not answer.
+func (e *ShardsFailed) Shards() []string { return e.names }
+
+func (e *ShardsFailed) Error() string {
+	return "store: shards " + strings.Join(e.names, ", ") + " did not answer: " + errors.Join(e.errors...).Error()
+}
+
+func (e *ShardsFailed) Unwrap() []error { return e.errors }
 
 // ErrShardUnanswered is a read no shard that answered could settle while another did not: the
 // row may be on that one, so asking again once it answers may find it.

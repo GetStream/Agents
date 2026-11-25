@@ -455,6 +455,9 @@ func (s *Sessions) newestCall(ctx context.Context, id string) (string, error) {
 	if got.JSON200 == nil {
 		return "", failure("reading the calls of "+id, got.HTTPResponse, got.Body)
 	}
+	if got.Headers200 != nil && got.Headers200.XUnreachableShards != nil {
+		return "", fmt.Errorf("client: reading the calls of %s: shards %s did not answer", id, *got.Headers200.XUnreachableShards)
+	}
 	if len(*got.JSON200) == 0 {
 		return "", fmt.Errorf("%w: %s", ErrNoCall, id)
 	}

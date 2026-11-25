@@ -1402,13 +1402,7 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 		principal, err := s.authenticator.Authenticate(ctx, r)
 		span.End()
 		if errors.Is(err, auth.ErrLevelRefused) {
-			s.logger.Debug("refused a level of user this app turns away",
-				"method", r.Method, "path", loggedPath(s.mux, r), "kind", principal.Kind)
-			// The caller proved which app it is of, so its lines name the app, though it is
-			// no customer here: nothing it asked for is counted under the app.
-			r = r.WithContext(WithLoggedApp(r.Context(), principal.AppID, principal.APIKey))
-			s.refuseLogged(w, r, forbidden("this app does not accept "+
-				"requests from this level of user"))
+			s.refuseLevel(w, r, principal)
 			return
 		}
 		// The categories are what the request's usage is counted under, so a request naming
@@ -1418,26 +1412,29 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 				Message: strings.TrimPrefix(err.Error(), "auth: ")})
 			return
 		}
-		// A caller that hung up while its credential was checked is no failure of the router's,
-		// and nobody is left to answer. The status is for withMetrics, which counts and times it
-		// as a 4xx: callers giving up on a stalled key store still show there.
-		if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
-			s.logger.Debug("the caller left before its credential was checked", "method", r.Method,
-				"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()))
-			w.WriteHeader(statusClientClosed)
-			return
-		}
-		// A credential that could not be checked (the key store down, a key that would not
-		// unseal) is the router's failure, not a wrong key. It is logged here: withRequestLog
-		// runs after this.
 		if err != nil && !errors.Is(err, auth.ErrUnauthenticated) {
-			s.logger.Error("could not check a credential", "method", r.Method,
-				"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()),
-				"error", err, "stack", stack.Trace(err))
-			writeError(w, internalError())
+			s.refuseUnchecked(w, r, err)
 			return
 		}
 		if err == nil && principal.AppID != "" {
+			guest, err := s.guestUser(r.Context(), principal.AppID, principal.UserID, principal.Kind)
+			if err != nil {
+				s.refuseUnchecked(w, r, err)
+				return
+			}
+			// The authenticator asked whether the app admits a KindGuest. One this router minted
+			// it took for an account, so that is asked here.
+			if guest {
+				admitted, err := s.guestAdmitted(r.Context(), principal)
+				if err != nil {
+					s.refuseUnchecked(w, r, err)
+					return
+				}
+				if !admitted {
+					s.refuseLevel(w, r, principal)
+					return
+				}
+			}
 			ctx := context.WithValue(r.Context(), customerContextKey{}, principal.AppID)
 			ctx = context.WithValue(ctx, organizationContextKey{}, principal.OrganizationID)
 			ctx = context.WithValue(ctx, serverSideContextKey{}, principal.ServerSide)
@@ -1449,6 +1446,7 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 				IP:         s.callerIP(r, principal.UserID),
 				ServerSide: principal.ServerSide,
 				Verified:   principal.UserID != "" && principal.Kind.Verified(),
+				Guest:      guest,
 			})
 			ctx = context.WithValue(ctx, actorContextKey{}, actorOf(r, principal.ServerSide))
 			ctx = routing.WithAttribution(ctx, attributionOf(principal))
@@ -1461,6 +1459,62 @@ func (s *Server) withCustomer(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// refuseUnchecked answers a caller whose credential, whether it is a guest, or whether its app
+// takes it, could not be checked.
+func (s *Server) refuseUnchecked(w http.ResponseWriter, r *http.Request, err error) {
+	// A caller that hung up while its credential was checked is no failure of the router's,
+	// and nobody is left to answer. The status is for withMetrics, which counts and times it
+	// as a 4xx: callers giving up on a stalled key store still show there.
+	if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
+		s.logger.Debug("the caller left before its credential was checked", "method", r.Method,
+			"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()))
+		w.WriteHeader(statusClientClosed)
+		return
+	}
+	// A credential that could not be checked (the key store down, a key that would not
+	// unseal) is the router's failure, not a wrong key. It is logged here: withRequestLog
+	// runs after this.
+	s.logger.Error("could not check a credential", "method", r.Method,
+		"path", loggedPath(s.mux, r), "request_id", RequestIDFrom(r.Context()),
+		"error", err, "stack", stack.Trace(err))
+	writeError(w, internalError())
+}
+
+// refuseLevel answers a caller whose level the app turns away.
+func (s *Server) refuseLevel(w http.ResponseWriter, r *http.Request, principal auth.Principal) {
+	s.logger.Debug("refused a level of user this app turns away",
+		"method", r.Method, "path", loggedPath(s.mux, r), "kind", principal.Kind)
+	// The caller proved which app it is of, so its lines name the app, though it is
+	// no customer here: nothing it asked for is counted under the app.
+	r = r.WithContext(WithLoggedApp(r.Context(), principal.AppID, principal.APIKey))
+	s.refuseLogged(w, r, forbidden("this app does not accept "+
+		"requests from this level of user"))
+}
+
+// guestUser reports whether a user a credential of that kind named is a guest: by kind, or one
+// this router minted, whose token reads as an account's. A backend naming a guest is a backend.
+// Only an id the router could have minted is looked up. A row that cannot be read is an error: it
+// makes a guest of no account, and an account of no guest.
+func (s *Server) guestUser(ctx context.Context, customerID, userID string, kind auth.Kind) (bool, error) {
+	if kind != auth.KindAuthenticated {
+		return kind == auth.KindGuest, nil
+	}
+	if s.store == nil || !strings.HasPrefix(userID, guestPrefix) {
+		return false, nil
+	}
+	return s.store.Users.Minted(ctx, customerID, userID)
+}
+
+// guestAdmitted reports whether the caller's app takes guests: as its key's levels say, or behind
+// a proxy, which resolves none, as its settings do. Settings that cannot be read are an error, as
+// a key that cannot be is.
+func (s *Server) guestAdmitted(ctx context.Context, principal auth.Principal) (bool, error) {
+	if s.authMode == auth.Proxy && s.store != nil {
+		return s.store.Apps.GuestAllowed(ctx, principal.AppID)
+	}
+	return principal.Levels.Admits(auth.KindGuest), nil
 }
 
 // attributionOf is who a request's usage is recorded as asked for by. The user is recorded as
@@ -1606,7 +1660,7 @@ const corsMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
 
 // corsExposedHeaders are the response headers a page's script may read.
 const corsExposedHeaders = "Server-Timing, " + RequestIDHeader + ", " + quotaLimitHeader + ", " +
-	quotaRemainingHeader + ", " + quotaResetHeader + ", Retry-After"
+	quotaRemainingHeader + ", " + quotaResetHeader + ", Retry-After, " + unreachableShardsHeader
 
 // withCORS lets a browser at the API from the origins originAllowed accepts.
 //
@@ -1952,7 +2006,12 @@ func (s *Server) getStats(ctx context.Context, request *getStatsRequest) (*getSt
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.Buckets.Select(ctx, customerID, store.BucketFilter{
+	// A rollup keeps no request's labels, so a label filter reads the requests of every shard.
+	read := s.store.Buckets.Select
+	if s.store.StatsShipped() && len(tags) == 0 {
+		read = s.store.Buckets.Shipped
+	}
+	buckets, err := read(ctx, customerID, store.BucketFilter{
 		Modality: string(request.Modality), Granularity: granularity, From: request.From, To: request.To, Tags: tags})
 	if err != nil {
 		return nil, err
@@ -1995,7 +2054,11 @@ func (s *Server) getTagStats(ctx context.Context, request *getTagStatsRequest) (
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.TagBuckets.Select(ctx, customerID, store.TagBucketFilter{
+	read := s.store.TagBuckets.Select
+	if s.store.StatsShipped() {
+		read = s.store.TagBuckets.Shipped
+	}
+	buckets, err := read(ctx, customerID, store.TagBucketFilter{
 		Modality: string(request.Modality), Key: request.Key, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
 		return nil, err
@@ -2043,7 +2106,11 @@ func (s *Server) getTurnStats(ctx context.Context, request *getTurnStatsRequest)
 	}
 
 	granularity := granularityOf(request.Granularity.ptr())
-	buckets, err := s.store.TurnBuckets.Select(ctx, customerID, store.TurnBucketFilter{
+	read := s.store.TurnBuckets.Select
+	if s.store.StatsShipped() {
+		read = s.store.TurnBuckets.Shipped
+	}
+	buckets, err := read(ctx, customerID, store.TurnBucketFilter{
 		AgentID: agentID, Granularity: granularity, From: request.From, To: request.To})
 	if err != nil {
 		return nil, err
