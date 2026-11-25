@@ -13533,7 +13533,7 @@ export interface operations {
                     readonly "text/plain": string;
                 };
             };
-            /** @description That is not this line's verify token */
+            /** @description The query is not this line's check: another mode or verify token, a challenge that is not digits, or a line that is not WhatsApp's */
             readonly 403: {
                 headers: {
                     readonly [name: string]: unknown;
