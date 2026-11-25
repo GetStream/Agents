@@ -28,6 +28,9 @@ type KnowledgeDocument struct {
 	// Passages covers every passage that may be stored for the document: while its passages
 	// are written, and after that write failed, both the old version's and the new one's.
 	Passages int `bun:"passages,notnull"`
+	// Covered is how many passages the row counts once a post took it (Upsert): the post's own
+	// and every other that may be stored.
+	Covered int `bun:"-"`
 	// Text is the document as it was posted, or as its file was read. Listings leave it out.
 	Text string `bun:"text,notnull"`
 	// State is pending while an uploaded file waits to be read or posted text is written,
@@ -109,8 +112,8 @@ func NewPost() string { return postKey + newID() }
 // share a key, which an upload and a removal change. A source the knowledge base already has
 // is updated in place and keeps its id, since posting it again replaced the same passages
 // rather than adding a second copy, and its count still covers the passages it had. The row
-// takes the state and error the caller sets. The document comes back with the passages the row
-// counts when this post took the row, and its own when it shares the row with another's.
+// takes the state and error the caller sets. The document comes back with what the row counts in
+// Covered.
 func (r *KnowledgeDocuments) Upsert(ctx context.Context, document *KnowledgeDocument) error {
 	if err := document.Validate(); err != nil {
 		return stack.Wrap(err)
@@ -120,8 +123,8 @@ func (r *KnowledgeDocuments) Upsert(ctx context.Context, document *KnowledgeDocu
 	now := time.Now().UTC()
 	document.CreatedAt = now
 	document.UpdatedAt = now
-	key, passages := NewPost(), document.Passages
-	document.ObjectKey = key
+	passages := document.Passages
+	document.ObjectKey = NewPost()
 
 	// Text posted over a file still waiting to be read is the newer of the two, so the row
 	// lets go of the file and the read that finds it gone leaves the row alone.
@@ -141,9 +144,7 @@ func (r *KnowledgeDocuments) Upsert(ctx context.Context, document *KnowledgeDocu
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: save knowledge document: %w", err))
 	}
-	if document.ObjectKey != key {
-		document.Passages = passages
-	}
+	document.Covered, document.Passages = document.Passages, passages
 	return nil
 }
 
@@ -404,23 +405,31 @@ func (r *KnowledgeDocuments) Delete(ctx context.Context, customerID, id, key str
 	return updatedOne(result, "delete knowledge document")
 }
 
-// TakeBase begins the removal of every document of a knowledge base, as Take does of one, and
-// returns the keys it holds them under: one for all but those a removal already held.
+// knowledgeBaseLockSeed seeds the advisory lock of a knowledge base's delete. Two deletes of one
+// base each change its rows in an order of their own, so they take turns.
+const knowledgeBaseLockSeed = 3771
+
+// TakeBase begins the removal of every document of a knowledge base, and returns the keys it
+// holds them under: one for all but those a removal already held and those that wait for a file.
+// They are listed as they were, since a base the provider does not drop keeps its passages. A post
+// that has not finished writes them again.
 func (r *KnowledgeDocuments) TakeBase(ctx context.Context, customerID, namespace string) ([]string, error) {
 	if customerID == "" || namespace == "" {
 		return nil, stack.Wrap(errors.New("store: a customer and a namespace are required"))
 	}
 
 	var held []string
-	err := r.store.global.NewUpdate().Model((*KnowledgeDocument)(nil)).
-		Set("object_key = CASE WHEN object_key LIKE ? THEN object_key ELSE ? END", removalKey+"%", removalKey+newID()).
-		Set("state = ?", KnowledgeDocumentFailed).
-		Set("error = ?", removalUnfinished).
-		Set("updated_at = ?", time.Now().UTC()).
-		Where("customer_id = ?", customerID).
-		Where("namespace = ?", namespace).
-		Returning("object_key").
-		Scan(ctx, &held)
+	err := r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := lockUntilCommit(ctx, tx, customerID+"/"+namespace, knowledgeBaseLockSeed); err != nil {
+			return err
+		}
+		return tx.NewUpdate().Model((*KnowledgeDocument)(nil)).
+			Set("object_key = CASE WHEN "+waitsForFile+" OR object_key LIKE ? THEN object_key ELSE ? END", removalKey+"%", removalKey+newID()).
+			Where("customer_id = ?", customerID).
+			Where("namespace = ?", namespace).
+			Returning("object_key").
+			Scan(ctx, &held)
+	})
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: take knowledge base: %w", err))
 	}
@@ -428,18 +437,19 @@ func (r *KnowledgeDocuments) TakeBase(ctx context.Context, customerID, namespace
 	return slices.Compact(held), nil
 }
 
-// DeleteBase forgets every document of one knowledge base a removal holds under keys, marks every
-// page of it as gone, and returns how many of each there were. Their passages are the caller's to
-// remove first, since they are not in this database, and of a document written since some may have
-// gone with them. One not finished is written again, and left is whether there are others, which
-// say their removal did not finish. The pages are another repository's rows, written here so the
-// two go in one transaction.
-func (r *KnowledgeDocuments) DeleteBase(ctx context.Context, customerID, namespace string, keys []string) (documents, pages int64, left bool, err error) {
+// DeleteBase forgets every document of one knowledge base still held under keys, and returns how
+// many there were. Their passages are the caller's to remove first, since they are not in this
+// database, and of a document written since some may have gone with them. One not finished is
+// written again, and left is whether there are others, which say their removal did not finish.
+func (r *KnowledgeDocuments) DeleteBase(ctx context.Context, customerID, namespace string, keys []string) (documents int64, left bool, err error) {
 	if customerID == "" || namespace == "" {
-		return 0, 0, false, stack.Wrap(errors.New("store: a customer and a namespace are required"))
+		return 0, false, stack.Wrap(errors.New("store: a customer and a namespace are required"))
 	}
 
 	err = r.store.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if err := lockUntilCommit(ctx, tx, customerID+"/"+namespace, knowledgeBaseLockSeed); err != nil {
+			return err
+		}
 		deleted, err := tx.NewDelete().Model((*KnowledgeDocument)(nil)).
 			Where("customer_id = ?", customerID).
 			Where("namespace = ?", namespace).
@@ -449,18 +459,6 @@ func (r *KnowledgeDocuments) DeleteBase(ctx context.Context, customerID, namespa
 			return err
 		}
 		if documents, err = deleted.RowsAffected(); err != nil {
-			return err
-		}
-		marked, err := tx.NewUpdate().Model((*KnowledgeURL)(nil)).
-			Set("deleted_at = ?", time.Now().UTC()).
-			Where("customer_id = ?", customerID).
-			Where("namespace = ?", namespace).
-			Where("deleted_at IS NULL").
-			Exec(ctx)
-		if err != nil {
-			return err
-		}
-		if pages, err = marked.RowsAffected(); err != nil {
 			return err
 		}
 		var states []string
@@ -476,9 +474,9 @@ func (r *KnowledgeDocuments) DeleteBase(ctx context.Context, customerID, namespa
 		return err
 	})
 	if err != nil {
-		return 0, 0, false, stack.Wrap(fmt.Errorf("store: delete knowledge base: %w", err))
+		return 0, false, stack.Wrap(fmt.Errorf("store: delete knowledge base: %w", err))
 	}
-	return documents, pages, left, nil
+	return documents, left, nil
 }
 
 // updatedOne is whether result changed exactly one row.

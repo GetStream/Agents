@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -883,7 +884,7 @@ func (s *KnowledgeFilesSuite) TestDeletingABaseWrittenAgainAndAgainIsAConflict()
 	var again func()
 	again = func() {
 		drops++
-		s.Equal(http.StatusOK, s.post("busy.md", 2))
+		s.Equal(http.StatusOK, s.post("busy.md", 2+drops))
 		s.knowledge.onceAfterDrop(again)
 	}
 	s.knowledge.onceAfterDrop(again)
@@ -892,6 +893,7 @@ func (s *KnowledgeFilesSuite) TestDeletingABaseWrittenAgainAndAgainIsAConflict()
 	s.knowledge.onceAfterDrop(nil)
 
 	s.Equal(5, drops)
+	s.Equal(1, s.removals(s.namespace), "what was deleted is recorded")
 	listed := s.listed()
 	s.Require().Len(listed, 1)
 	s.Equal(KnowledgeDocumentStateFailed, listed[0].State, "its passages may be gone, so it is not shown as found")
@@ -1143,6 +1145,163 @@ func (s *KnowledgeFilesSuite) TestAPostThatCannotFinishItsSecondDocumentKeepsThe
 	}
 	s.Equal(map[string]KnowledgeDocumentState{"first.md": "indexed", "second.md": "failed"}, states)
 	s.Equal(2, s.passagesOf("first.md"))
+}
+
+// A base the provider does not drop keeps its passages, so its documents stay as they were.
+func (s *KnowledgeFilesSuite) TestABaseThatIsNotDroppedKeepsItsDocumentsAndUploads() {
+	s.Require().Equal(http.StatusOK, s.post("kept.md", 2))
+	writing, write := s.holdWrite()
+	_, sent, _ := s.upload("waiting.md", []byte(sections(3)), "")
+	s.reached(writing, "the read never wrote")
+	s.knowledge.failWrites(true)
+	s.T().Cleanup(func() { s.knowledge.failWrites(false) })
+
+	s.Require().Equal(http.StatusInternalServerError, s.dropBase())
+	s.knowledge.failWrites(false)
+	write()
+
+	s.Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	listed := s.listed()
+	s.Len(listed, 2)
+	for _, document := range listed {
+		s.Equal(KnowledgeDocumentStateIndexed, document.State, document.Source)
+		s.Nil(document.Error)
+		s.Equal(document.Passages, s.passagesOf(document.Source))
+	}
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+	s.Zero(s.passagesOf("waiting.md"))
+	s.Require().Equal(http.StatusNoContent, s.dropBase())
+	s.nothingLeft("kept.md")
+}
+
+// A read that cannot tell the base's delete it wrote leaves the document's passages alone.
+func (s *KnowledgeFilesSuite) TestAReadOvertakenOfABaseThatIsNotDroppedLeavesItsPassages() {
+	writing, write := s.holdWrite()
+	_, sent, _ := s.upload("untold.md", []byte(sections(2)), "")
+	s.reached(writing, "the read never wrote")
+	s.Require().Equal(http.StatusOK, s.post("untold.md", 2))
+	_, err := s.store.KnowledgeDocuments.TakeBase(context.Background(), s.customerID(), s.namespace)
+	s.Require().NoError(err)
+	s.refuseInterrupts()
+	write()
+
+	s.everyFileRead()
+	s.indexedWith("untold.md", 2)
+	s.NotEmpty(sent.Id)
+}
+
+// The base went though another removal took the document the first round left.
+func (s *KnowledgeFilesSuite) TestABaseWhoseLastDocumentAnotherRemovalTookIsDeleted() {
+	s.Require().Equal(http.StatusOK, s.post("first.md", 1))
+	_, err := s.store.GlobalDB().ExecContext(context.Background(), "DELETE FROM knowledge_documents WHERE customer_id = ?", s.customerID())
+	s.Require().NoError(err)
+	s.knowledge.onceAfterDrop(func() {
+		s.Equal(http.StatusOK, s.post("left.md", 1))
+		id := s.listed()[0].Id
+		s.knowledge.mu.Lock()
+		delete(s.knowledge.passages, knowledge.Scoped(s.customerID(), s.namespace))
+		s.knowledge.mu.Unlock()
+		s.knowledge.onceAfterDrop(func() {
+			_, err := s.store.GlobalDB().ExecContext(context.Background(), "DELETE FROM knowledge_documents WHERE id = ?", id)
+			s.NoError(err)
+		})
+	})
+
+	s.Equal(http.StatusNoContent, s.dropBase())
+}
+
+// metAt uploads a newer version whose read is held in deleting the tail of the one before.
+func (s *KnowledgeFilesSuite) metAt(source string) (id string, finish func()) {
+	_, sent, _ := s.upload(source, []byte(sections(8)), "")
+	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	return sent.Id, s.holdTail(source)
+}
+
+func (s *KnowledgeFilesSuite) TestAPostWhoseTailAnOlderReadDeletedIsWrittenAgain() {
+	_, tail := s.metAt("tail.md")
+	finish, posted := s.postWritten("tail.md", 8)
+	tail()
+	s.everyFileRead()
+	finish()
+
+	s.Equal(http.StatusOK, s.answer(posted))
+	s.indexedWith("tail.md", 8)
+}
+
+func (s *KnowledgeFilesSuite) TestAnUploadWhoseTailAnOlderReadDeletedIsWrittenAgain() {
+	id, tail := s.metAt("tail.md")
+	wrote, finish := s.holdAfterWrite()
+	_, _, _ = s.upload("tail.md", []byte(sections(8)), "")
+	s.reached(wrote, "the newer file was never read")
+	tail()
+	s.Eventually(func() bool {
+		document, err := s.store.KnowledgeDocuments.Get(context.Background(), s.customerID(), id)
+		return err == nil && document.Error != ""
+	}, 30*time.Second, 10*time.Millisecond, "the older read did not say it deleted")
+	finish()
+
+	s.everyFileRead()
+	s.indexedWith("tail.md", 8)
+}
+
+func (s *KnowledgeFilesSuite) TestAPostOfARemovedSourceWhoseTailAReadDeletedIsWrittenAgain() {
+	id, tail := s.metAt("tail.md")
+	s.Require().Equal(http.StatusNoContent, s.remove(id))
+	finish, posted := s.postWritten("tail.md", 8)
+	tail()
+	s.everyFileRead()
+	finish()
+
+	s.Equal(http.StatusOK, s.answer(posted))
+	s.indexedWith("tail.md", 8)
+}
+
+// The delete answers an error once it took what the post wrote.
+func (s *KnowledgeFilesSuite) TestAPostWhoseTailAReadsFailedDeleteTookIsWrittenAgain() {
+	_, sent, _ := s.upload("tail.md", []byte(sections(8)), "")
+	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	deleting, release := make(chan struct{}), make(chan struct{})
+	s.knowledge.onceBeforeDelete(func() error {
+		close(deleting)
+		<-release
+		s.forgetStored("tail.md")
+		return errors.New("down")
+	})
+	_, _, _ = s.upload("tail.md", []byte(sections(3)), "")
+	s.reached(deleting, "the read never deleted its tail")
+	finish, posted := s.postWritten("tail.md", 8)
+	close(release)
+	s.everyFileRead()
+	finish()
+
+	s.Equal(http.StatusOK, s.answer(posted))
+	s.indexedWith("tail.md", 8)
+}
+
+// A read writes its passages 3 times before its file is read, and billed, again.
+func (s *KnowledgeFilesSuite) TestAFileIsReadAgainOnceItsPassagesWereMetThreeTimes() {
+	for met, reads := range map[int]int{2: 1, 3: 2} {
+		source, since := "met"+strconv.Itoa(met)+".pdf", time.Now().UTC()
+		writes := 0
+		var meet func() error
+		meet = func() error {
+			if writes++; writes <= met {
+				for _, document := range s.listed() {
+					if document.Source == source {
+						s.NoError(s.store.KnowledgeDocuments.FailRemoval(context.Background(), s.customerID(), document.Id))
+					}
+				}
+				s.knowledge.onceAfterWrite(meet)
+			}
+			return nil
+		}
+		s.knowledge.onceAfterWrite(meet)
+		_, sent, _ := s.upload(source, extractFixture(s.T(), "scanned.pdf"), "")
+
+		s.Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+		s.Equal(met+1, writes)
+		s.meteredRows(routing.OCR, since, reads)
+	}
 }
 
 // refuseInterrupts fails a read's word to the removal that it wrote after it, and nothing else.

@@ -504,12 +504,22 @@ func (s *Service) write(
 	}
 	// A file that got shorter would otherwise leave its old tail behind, still findable
 	// and no longer in the file it claims to come from.
-	if err := owned.Delete(ctx, document.Namespace, ingest.IDs(document.Source, len(passages), current.Passages)); err != nil {
-		return false, err
+	failed = owned.Delete(ctx, document.Namespace, ingest.IDs(document.Source, len(passages), current.Passages))
+	if failed == nil {
+		document.Passages = len(passages)
+		finished, err := s.store.KnowledgeDocuments.Finish(ctx, document, payload.ObjectKey)
+		if finished {
+			return true, nil
+		}
+		failed = err
 	}
-
-	document.Passages = len(passages)
-	return s.store.KnowledgeDocuments.Finish(ctx, document, payload.ObjectKey)
+	// What was deleted may be a newer write's, also by a delete that failed.
+	last, stop := context.WithTimeout(context.WithoutCancel(ctx), overtakenTimeout)
+	defer stop()
+	if now, err := s.waiting(last, payload); errors.Is(err, errOvertaken) {
+		return false, s.overtaken(last, owned, payload, now, document, len(passages))
+	}
+	return false, failed
 }
 
 // overtaken ends a read that wrote passages and then found the row, seen as now, no longer
@@ -525,7 +535,8 @@ func (s *Service) overtaken(
 	if kept {
 		return errOvertaken
 	}
-	if err != nil && !now.BeingRemoved() {
+	// A base's delete holds documents that are found until the base is dropped.
+	if err != nil && (!now.BeingRemoved() || now.State == store.KnowledgeDocumentIndexed) {
 		return err
 	}
 	if err := owned.Delete(ctx, read.Namespace, ingest.IDs(read.Source, 0, passages)); err != nil {

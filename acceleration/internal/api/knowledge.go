@@ -182,15 +182,17 @@ func (s *Server) deleteKnowledge(ctx context.Context, request *deleteKnowledgeRe
 	}
 
 	// The provider's copy goes first: a delete that failed there leaves the documents and pages
-	// listed, so the base can be deleted again. A page read whose write lands after the drop
-	// finds its page gone once the rows are, and takes the write back. A document
+	// listed as they were, so the base can be deleted again. A page read whose write lands after
+	// the drop finds its page gone once the rows are, and takes the write back. A document
 	// finished meanwhile may have lost its passages to the drop, so it is deleted too.
 	owned := s.knowledgeFor(ctx, customerID, "")
 	existed, left := false, true
 	var documents, pages int64
+	var refused error
 	for attempt := 0; left; attempt++ {
 		if attempt == removeAttempts {
-			return nil, conflict("the knowledge base is being written while it is deleted: delete it again")
+			refused = conflict("the knowledge base is being written while it is deleted: delete it again")
+			break
 		}
 		keys, err := s.store.KnowledgeDocuments.TakeBase(ctx, customerID, namespace)
 		if err != nil {
@@ -200,11 +202,17 @@ func (s *Server) deleteKnowledge(ctx context.Context, request *deleteKnowledgeRe
 		if err != nil {
 			return nil, err
 		}
-		var deleted, marked int64
-		if deleted, marked, left, err = s.store.KnowledgeDocuments.DeleteBase(ctx, customerID, namespace, keys); err != nil {
+		existed = existed || dropped
+		marked, err := s.store.KnowledgeURLs.DeleteBase(ctx, customerID, namespace)
+		if err != nil {
 			return nil, err
 		}
-		existed, documents, pages = existed || dropped, documents+deleted, pages+marked
+		pages += marked
+		var deleted int64
+		if deleted, left, err = s.store.KnowledgeDocuments.DeleteBase(ctx, customerID, namespace, keys); err != nil {
+			return nil, err
+		}
+		documents += deleted
 	}
 	if !existed && documents == 0 && pages == 0 {
 		return nil, errUnknownKnowledgeBase
@@ -216,7 +224,7 @@ func (s *Server) deleteKnowledge(ctx context.Context, request *deleteKnowledgeRe
 		Action:  store.AuditDeleted,
 		Changes: auditDiff(map[string]any{"namespace": namespace, "documents": documents, "urls": pages}, nil),
 	})
-	return nil, nil
+	return nil, refused
 }
 
 // listKnowledgeDocumentPassages reads back what a document was cut into.
@@ -396,14 +404,13 @@ func (s *Server) writeKnowledge(
 	for i := range documents {
 		document := &documents[i].KnowledgeDocument
 		was, had := before[document.Source]
-		// What the base had, and what was written since by an upload this post took the row from.
-		key, stored := document.ObjectKey, max(was.Passages, document.Passages)
-		stale := ingest.IDs(document.Source, len(documents[i].passages), stored)
-		if stored > max(was.Passages, len(documents[i].passages)) {
+		// What the base had, and what others wrote since.
+		key, stored := document.ObjectKey, max(was.Passages, document.Covered)
+		stale := ingest.IDs(document.Source, document.Passages, stored)
+		if stored > max(was.Passages, document.Passages) {
 			// A post it shares the row with may have written some of them.
 			document.ObjectKey = store.NewPost()
 		}
-		document.Passages = len(documents[i].passages)
 		if err := writer.Delete(ctx, namespace, stale); err != nil {
 			return append(overtaken, documents[i:]...), err
 		}
@@ -758,7 +765,7 @@ type IndexedKnowledgeDocument struct {
 	Bytes       int64                  `json:"bytes" doc:"The size of the file uploaded, or of the text posted. 0 for a document written before sizes were kept."`
 	ContentType string                 `json:"content_type" doc:"The type the file was uploaded as, or text/markdown for text posted. Empty for a document written before types were kept." example:"application/pdf"`
 	CreatedAt   time.Time              `json:"created_at"`
-	Error       *string                `json:"error,omitempty" doc:"Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good."`
+	Error       *string                `json:"error,omitempty" doc:"Why the uploaded file could not be read, why the passages of posted text could not all be written, that the document's removal did not finish, or that a read of a removed document of its source may have written over its passages, written for whoever sent it. Set while a read that failed is tried again or the file's passages are written again because another write or a removal met them, and once it has failed for good."`
 	Id          string                 `json:"id"`
 	Namespace   string                 `json:"namespace"`
 	Pages       int                    `json:"pages" doc:"How many pages the uploaded file has. 0 for text, and for a file without pages, such as a spreadsheet."`
@@ -775,7 +782,7 @@ func (*IndexedKnowledgeDocument) TransformSchema(_ huma.Registry, schema *huma.S
 	return schema
 }
 
-// KnowledgeDocumentState Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
+// KnowledgeDocumentState Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, a document whose removal did not finish, or one whose passages a read of a removed document of its source may have written over, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.
 type KnowledgeDocumentState string
 
 // Defines values for KnowledgeDocumentState.
@@ -796,7 +803,7 @@ func (e KnowledgeDocumentState) Valid() bool {
 }
 
 func (KnowledgeDocumentState) Schema(registry huma.Registry) *huma.Schema {
-	return namedEnum(registry, "KnowledgeDocumentState", "Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, or a document whose removal did not finish, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.", "pending", "indexed", "failed")
+	return namedEnum(registry, "KnowledgeDocumentState", "Where the document has got to. Pending is an uploaded file waiting to be read or being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by posting it again. Failed is a file that could not be read, posted text whose write stopped part way, a document whose removal did not finish, or one whose passages a read of a removed document of its source may have written over, and error says why: the passages still stored can be looked up, and posting or uploading the document again or deleting it fixes it.", "pending", "indexed", "failed")
 }
 
 // IngestKnowledgeRequest is the IngestKnowledgeRequest schema.

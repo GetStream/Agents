@@ -2,6 +2,8 @@
 
 package store
 
+import "time"
+
 // knowledgeDocument records text posted to a customer's knowledge base.
 func (s *StoreSuite) knowledgeDocument(customerID, namespace, source string) KnowledgeDocument {
 	document := KnowledgeDocument{CustomerID: customerID, Namespace: namespace, Source: source, Text: "the text of " + source,
@@ -112,12 +114,14 @@ func (s *StoreSuite) TestDeletingAKnowledgeBaseForgetsItsDocumentsAndPages() {
 
 	var documents, pages int64
 	var left bool
-	s.Equal(6, s.countQueries(func() {
+	s.Equal(10, s.countQueries(func() {
 		keys, err := s.store.KnowledgeDocuments.TakeBase(s.ctx, "acme-app", "docs")
 		s.Require().NoError(err)
-		documents, pages, left, err = s.store.KnowledgeDocuments.DeleteBase(s.ctx, "acme-app", "docs", keys)
+		pages, err = s.store.KnowledgeURLs.DeleteBase(s.ctx, "acme-app", "docs")
 		s.Require().NoError(err)
-	}), "the take, begin, both writes, the look and commit")
+		documents, left, err = s.store.KnowledgeDocuments.DeleteBase(s.ctx, "acme-app", "docs", keys)
+		s.Require().NoError(err)
+	}), "begin, lock, take and commit, the pages, begin, lock, delete, look and commit")
 	s.False(left)
 	s.Equal(int64(2), documents)
 	s.Equal(int64(1), pages)
@@ -136,6 +140,8 @@ func (s *StoreSuite) TestDeletingAKnowledgeBaseLeavesTheDocumentsItNoLongerHolds
 	for _, source := range []string{"gone.md", "posted.md", "uploaded.md", "read.md", "removed.md"} {
 		s.knowledgeDocument("acme-app", "docs", source)
 	}
+	waiting := KnowledgeDocument{CustomerID: "acme-app", Namespace: "docs", Source: "waiting.md", ObjectKey: "acme-app/one/waiting.md"}
+	s.Require().NoError(s.store.KnowledgeDocuments.Pend(s.ctx, &waiting))
 	other, elsewhere := s.knowledgeDocument("other-app", "docs", "gone.md"), s.knowledgeDocument("acme-app", "other-docs", "gone.md")
 	removed := s.knowledgeDocument("acme-app", "docs", "removed.md")
 	removal, _, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", removed.ID)
@@ -143,15 +149,17 @@ func (s *StoreSuite) TestDeletingAKnowledgeBaseLeavesTheDocumentsItNoLongerHolds
 
 	keys, err := s.store.KnowledgeDocuments.TakeBase(s.ctx, "acme-app", "docs")
 	s.Require().NoError(err)
-	s.Len(keys, 2)
+	s.Len(keys, 3)
 	s.Contains(keys, removal)
+	s.Contains(keys, "acme-app/one/waiting.md")
 	taken, err := s.store.KnowledgeDocuments.Select(s.ctx, "acme-app", KnowledgeDocumentFilter{Namespace: "docs"})
 	s.Require().NoError(err)
-	s.Len(taken, 5)
+	listed := map[string]string{}
 	for _, document := range taken {
-		s.Equal("failed", document.State)
-		s.Equal("Its removal did not finish. Delete it again.", document.Error)
+		listed[document.Source] = document.State + " " + document.Error
 	}
+	s.Equal(map[string]string{"gone.md": "indexed ", "posted.md": "indexed ", "uploaded.md": "indexed ", "read.md": "indexed ",
+		"waiting.md": "pending ", "removed.md": "failed Its removal did not finish. Delete it again."}, listed)
 	for _, document := range []KnowledgeDocument{other, elsewhere} {
 		untouched, err := s.store.KnowledgeDocuments.Get(s.ctx, document.CustomerID, document.ID)
 		s.Require().NoError(err)
@@ -171,9 +179,12 @@ func (s *StoreSuite) TestDeletingAKnowledgeBaseLeavesTheDocumentsItNoLongerHolds
 	posting := KnowledgeDocument{CustomerID: "acme-app", Namespace: "docs", Source: "posting.md", Passages: 2, State: KnowledgeDocumentPending}
 	s.Require().NoError(s.store.KnowledgeDocuments.Upsert(s.ctx, &posting))
 
-	documents, _, left, err := s.store.KnowledgeDocuments.DeleteBase(s.ctx, "acme-app", "docs", keys)
+	failing := KnowledgeDocument{CustomerID: "acme-app", Namespace: "docs", Source: "failing.md", State: KnowledgeDocumentFailed, Error: "why"}
+	s.Require().NoError(s.store.KnowledgeDocuments.Upsert(s.ctx, &failing))
+
+	documents, left, err := s.store.KnowledgeDocuments.DeleteBase(s.ctx, "acme-app", "docs", keys)
 	s.Require().NoError(err)
-	s.Equal(int64(2), documents)
+	s.Equal(int64(3), documents)
 	s.True(left)
 	kept, err := s.store.KnowledgeDocuments.Select(s.ctx, "acme-app", KnowledgeDocumentFilter{Namespace: "docs"})
 	s.Require().NoError(err)
@@ -182,13 +193,13 @@ func (s *StoreSuite) TestDeletingAKnowledgeBaseLeavesTheDocumentsItNoLongerHolds
 		states[document.Source], errs[document.Source] = document.State, document.Error
 	}
 	s.Equal(map[string]string{"posted.md": "failed", "uploaded.md": "pending", "read.md": "failed", "posting.md": "pending",
-		"later.md": "failed"}, states)
+		"later.md": "failed", "failing.md": "failed"}, states)
 	later, err = s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", later.ID)
 	s.Require().NoError(err)
 	s.Equal(held, later.ObjectKey, "the removal that took it still holds it")
 	s.Equal(map[string]string{
 		"posted.md": "Its removal did not finish. Delete it again.", "read.md": "Its removal did not finish. Delete it again.",
-		"later.md":    "Its removal did not finish. Delete it again.",
+		"later.md": "Its removal did not finish. Delete it again.", "failing.md": "Its removal did not finish. Delete it again.",
 		"uploaded.md": "The file could not be read yet, and is tried again.", "posting.md": "",
 	}, errs)
 	finished, err := s.store.KnowledgeDocuments.Finish(s.ctx, &posting, posting.ObjectKey)
@@ -212,10 +223,100 @@ func (s *StoreSuite) TestAKnowledgeBaseIsDeletedOnceOnlyUnfinishedDocumentsAreLe
 	upload := KnowledgeDocument{CustomerID: "acme-app", Namespace: "docs", Source: "faq.pdf", ObjectKey: "acme-app/one/faq.pdf"}
 	s.Require().NoError(s.store.KnowledgeDocuments.Pend(s.ctx, &upload))
 
-	documents, _, left, err := s.store.KnowledgeDocuments.DeleteBase(s.ctx, "acme-app", "docs", nil)
+	documents, left, err := s.store.KnowledgeDocuments.DeleteBase(s.ctx, "acme-app", "docs", nil)
 	s.Require().NoError(err)
 	s.Zero(documents)
 	s.False(left)
+}
+
+// Each delete of a base changes its rows in an order of its own, so they take turns.
+func (s *StoreSuite) TestTwoDeletesOfAKnowledgeBaseAtOnceBothFinish() {
+	a, b := s.knowledgeDocument("acme-app", "docs", "a.md"), s.knowledgeDocument("acme-app", "docs", "b.md")
+	keys := []string{"removing:one", "removing:two"}
+	for i, document := range []KnowledgeDocument{a, b} {
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE knowledge_documents SET object_key = ? WHERE id = ?", keys[i], document.ID)
+		s.Require().NoError(err)
+	}
+	// The delete of one key keeps its row until the other's is deleted too, which then each
+	// want the row the other holds.
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, `CREATE FUNCTION meet() RETURNS trigger AS $$ BEGIN PERFORM pg_sleep(1); RETURN OLD; END $$ LANGUAGE plpgsql`)
+	s.Require().NoError(err)
+	defer func() {
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, "DROP FUNCTION meet() CASCADE")
+		s.NoError(err)
+	}()
+	_, err = s.store.GlobalDB().ExecContext(s.ctx, "CREATE TRIGGER meet AFTER DELETE ON knowledge_documents FOR EACH ROW EXECUTE FUNCTION meet()")
+	s.Require().NoError(err)
+
+	deleted := make(chan error, 2)
+	for _, key := range keys {
+		go func() {
+			_, _, err := s.store.KnowledgeDocuments.DeleteBase(s.ctx, "acme-app", "docs", []string{key})
+			deleted <- err
+		}()
+	}
+
+	s.NoError(<-deleted)
+	s.NoError(<-deleted)
+	left, err := s.store.KnowledgeDocuments.Select(s.ctx, "acme-app", KnowledgeDocumentFilter{})
+	s.Require().NoError(err)
+	s.Empty(left)
+}
+
+// A take that meets a delete holding a later row waits for it before it holds an earlier one.
+func (s *StoreSuite) TestATakeOfAKnowledgeBaseWaitsForItsDelete() {
+	s.knowledgeDocument("acme-app", "docs", "a.md")
+	tx, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	_, err = tx.ExecContext(s.ctx, "SELECT pg_advisory_xact_lock(hashtextextended('acme-app/docs', 3771))")
+	s.Require().NoError(err)
+	taken := make(chan error, 1)
+	go func() {
+		_, err := s.store.KnowledgeDocuments.TakeBase(s.ctx, "acme-app", "docs")
+		taken <- err
+	}()
+	s.Eventually(func() bool {
+		var waiting bool
+		err := s.store.GlobalDB().QueryRowContext(s.ctx, "SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database "+
+			"WHERE d.datname = current_database() AND l.locktype = 'advisory' AND NOT l.granted)").Scan(&waiting)
+		return err == nil && waiting
+	}, 10*time.Second, 5*time.Millisecond)
+	s.Require().NoError(tx.Rollback())
+	s.NoError(<-taken)
+}
+
+func (s *StoreSuite) TestAKnowledgeBaseIsTakenAndDeletedByItsCustomerAndName() {
+	for _, named := range [][2]string{{"", "docs"}, {"acme-app", ""}} {
+		_, err := s.store.KnowledgeDocuments.TakeBase(s.ctx, named[0], named[1])
+		s.Error(err)
+		_, _, err = s.store.KnowledgeDocuments.DeleteBase(s.ctx, named[0], named[1], nil)
+		s.Error(err)
+		_, err = s.store.KnowledgeURLs.DeleteBase(s.ctx, named[0], named[1])
+		s.Error(err)
+	}
+}
+
+func (s *StoreSuite) TestOnlyTheListedPagesOfAKnowledgeBaseGoWithIt() {
+	for _, page := range []KnowledgeURL{
+		{CustomerID: "acme-app", Namespace: "docs", URL: "https://acme.example/faq"},
+		{CustomerID: "acme-app", Namespace: "docs", URL: "https://acme.example/gone"},
+		{CustomerID: "acme-app", Namespace: "other-docs", URL: "https://acme.example/faq"},
+		{CustomerID: "other-app", Namespace: "docs", URL: "https://acme.example/faq"},
+	} {
+		s.Require().NoError(s.store.KnowledgeURLs.Insert(s.ctx, &page))
+		if page.URL == "https://acme.example/gone" {
+			s.Require().NoError(s.store.KnowledgeURLs.Delete(s.ctx, "acme-app", page.ID))
+		}
+	}
+
+	marked, err := s.store.KnowledgeURLs.DeleteBase(s.ctx, "acme-app", "docs")
+	s.Require().NoError(err)
+	s.Equal(int64(1), marked)
+	for customer, kept := range map[string]int{"acme-app": 1, "other-app": 1} {
+		pages, err := s.store.KnowledgeURLs.Select(s.ctx, customer, KnowledgeURLFilter{})
+		s.Require().NoError(err)
+		s.Len(pages, kept, customer)
+	}
 }
 
 func (s *StoreSuite) TestAPostThatLeavesAnotherKeyIsNotFinishedOver() {
@@ -273,10 +374,12 @@ func (s *StoreSuite) TestAPostAnOvertakenReadWroteOverDoesNotFinish() {
 	s.False(finished)
 	again := KnowledgeDocument{CustomerID: "acme-app", Namespace: "docs", Source: "faq.md", Passages: 2, State: KnowledgeDocumentPending}
 	s.Require().NoError(s.store.KnowledgeDocuments.Upsert(s.ctx, &again))
-	s.Equal(8, again.Passages, "the read's are the post's to remove")
+	s.Equal(8, again.Covered, "the read's are the post's to remove")
+	s.Equal(2, again.Passages)
 	shared := KnowledgeDocument{CustomerID: "acme-app", Namespace: "docs", Source: "faq.md", Passages: 2, State: KnowledgeDocumentPending}
 	s.Require().NoError(s.store.KnowledgeDocuments.Upsert(s.ctx, &shared))
-	s.Equal(2, shared.Passages, "the post it shares the document with may have written the rest")
+	s.Equal(8, shared.Covered)
+	s.Equal(2, shared.Passages)
 	finished, err = s.store.KnowledgeDocuments.Finish(s.ctx, &again, again.ObjectKey)
 	s.Require().NoError(err)
 	s.True(finished)
