@@ -16,6 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klippa-app/go-pdfium"
+	"github.com/klippa-app/go-pdfium/requests"
+	"github.com/klippa-app/go-pdfium/responses"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -200,6 +203,80 @@ func (s *ExtractSuite) TestReadingStopsAtTheDeadline() {
 	_, err := hurried.Extract(context.Background(), "manual.pdf", s.fixture("manual.pdf"))
 
 	s.Require().ErrorIs(err, context.DeadlineExceeded)
+}
+
+// A context cancelled before the read starts kills the worker while the read opens the
+// document, and the open that fails then closes the worker. Run under -race, as CI does, a
+// close while the kill is still going on is a data race in PDFium's instance. The kill runs in
+// a goroutine of its own, so a read can also finish before it and return no error.
+func (s *ExtractSuite) TestAReadCancelledBeforeItStartsKillsItsWorkerBeforeClosingIt() {
+	data := s.fixture("manual.pdf")
+	for range 200 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err := s.extractor.Extract(ctx, "manual.pdf", data)
+
+		if err != nil {
+			s.Require().ErrorIs(err, context.Canceled)
+		}
+	}
+}
+
+// A deadline that passes after the document opened kills the worker while the read closes it.
+// Run under -race, a close that does not wait for the kill is a data race in PDFium's
+// instance. Such a close can also leave the pool's lock held, so the next open never returns:
+// each open and close gets half a minute, on an extractor of the test's own whose engine has
+// started already.
+func (s *ExtractSuite) TestClosingAReadWaitsForAKillThatBeganAfterTheDocumentOpened() {
+	extractor := New(Options{})
+	_, err := extractor.engine()
+	s.Require().NoError(err)
+	data := s.fixture("manual.pdf")
+	for range 200 {
+		closed := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			session, err := extractor.open(ctx, data)
+			if err == nil {
+				cancel()
+				session.close()
+			}
+			closed <- err
+		}()
+
+		select {
+		case err := <-closed:
+			s.Require().NoError(err)
+		case <-time.After(30 * time.Second):
+			s.FailNow("an open has waited half a minute for a worker")
+		}
+	}
+	s.Require().NoError(extractor.Close())
+}
+
+// A deadline that passes while a page's objects are walked kills the worker between two of
+// its calls. The read then fails on the next call, whichever of the walk's calls it is.
+func (s *ExtractSuite) TestAWorkerKilledWhileAPageIsWalkedFailsTheRead() {
+	data := s.fixture("figures.pdf")
+	for _, call := range []string{"FPDFPage_CountObjects", "FPDFPage_GetObject", "FPDFFormObj_CountObjects", "FPDFFormObj_GetObject"} {
+		session, err := s.extractor.open(context.Background(), data)
+		s.Require().NoError(err, call)
+		killed := &killedAt{Pdfium: session.instance, call: call}
+		session.instance = killed
+
+		var readErr error
+		s.Require().NotPanics(func() {
+			for index := 0; readErr == nil; index++ {
+				_, readErr = session.read(index)
+			}
+		}, call)
+		session.close()
+
+		s.Require().True(killed.done, "%s: the read reached the call", call)
+		s.Require().ErrorContains(readErr, "instance is closed", call)
+	}
 }
 
 func (s *ExtractSuite) TestReadingEveryFormatStopsAtTheDeadline() {
@@ -562,4 +639,39 @@ func (s *ExtractSuite) TestAPictureTooSmallToBeAFigureOrInNoFormatAModelReadsIsN
 	s.Empty(kept.keep(small.Bytes()))
 	s.Empty(kept.keep([]byte("\x01\x00\x00\x00 an EMF drawing")))
 	s.Empty(kept.kept)
+}
+
+// killedAt is a PDF worker that is killed as a read reaches call, the way a deadline that
+// passes during the read kills it.
+type killedAt struct {
+	pdfium.Pdfium
+	call string
+	done bool
+}
+
+func (k *killedAt) reach(call string) {
+	if call == k.call && !k.done {
+		k.done = true
+		_ = k.Kill()
+	}
+}
+
+func (k *killedAt) FPDFPage_CountObjects(request *requests.FPDFPage_CountObjects) (*responses.FPDFPage_CountObjects, error) {
+	k.reach("FPDFPage_CountObjects")
+	return k.Pdfium.FPDFPage_CountObjects(request)
+}
+
+func (k *killedAt) FPDFPage_GetObject(request *requests.FPDFPage_GetObject) (*responses.FPDFPage_GetObject, error) {
+	k.reach("FPDFPage_GetObject")
+	return k.Pdfium.FPDFPage_GetObject(request)
+}
+
+func (k *killedAt) FPDFFormObj_CountObjects(request *requests.FPDFFormObj_CountObjects) (*responses.FPDFFormObj_CountObjects, error) {
+	k.reach("FPDFFormObj_CountObjects")
+	return k.Pdfium.FPDFFormObj_CountObjects(request)
+}
+
+func (k *killedAt) FPDFFormObj_GetObject(request *requests.FPDFFormObj_GetObject) (*responses.FPDFFormObj_GetObject, error) {
+	k.reach("FPDFFormObj_GetObject")
+	return k.Pdfium.FPDFFormObj_GetObject(request)
 }
