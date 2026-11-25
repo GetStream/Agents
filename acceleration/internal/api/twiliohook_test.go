@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -341,6 +342,55 @@ func (s *TwilioHookSuite) TestACallAnsweredOnceIsHungUpWithoutItsPasswordWhenSen
 		s.router.twilioCallSids.B().Ttl().Key("phone:twilio:call:"+form.Get("CallSid")).Build()).AsInt64()
 	s.Require().NoError(err)
 	s.InDelta(7*24*60*60, remembered, 60, "a copy is refused for a week, written out so a changed TTL cannot pass")
+}
+
+// Eight copies of one signed call arrive at once: exactly one is answered with the password.
+// A mark checked first and written after lets several copies pass the check together.
+func (s *TwilioHookSuite) TestCopiesOfOneCallSentAtOnceAreAnsweredOnlyOnce() {
+	s.line.attach(s.e164, "sip:"+s.e164+"@trunk.sip.example.test", "trunk-user", "parallel-password")
+	for round := range 20 {
+		form := s.line.call(s.e164)
+		signature := s.line.sign(form)
+		bodies := make([]string, 8)
+		errs := make([]error, len(bodies))
+		var wg sync.WaitGroup
+		for i := range bodies {
+			wg.Go(func() {
+				response, err := http.DefaultClient.Do(s.line.request(context.Background(), form, signature))
+				if err != nil {
+					errs[i] = err
+					return
+				}
+				defer response.Body.Close()
+				answered, err := io.ReadAll(response.Body)
+				bodies[i], errs[i] = string(answered), err
+			})
+		}
+		wg.Wait()
+		answered := 0
+		for i, body := range bodies {
+			s.Require().NoError(errs[i])
+			if strings.Contains(body, "parallel-password") {
+				answered++
+			}
+		}
+		s.Equal(1, answered, "round %d: copies answered with the password", round)
+	}
+}
+
+// Twilio names the number it rang in To; Called is the same number on a plain call, but a
+// forwarded one names the original number there, and the credentials are those of To.
+func (s *TwilioHookSuite) TestACallIsAnsweredForToWhateverCalledNames() {
+	other := s.utils.number()
+	s.line.attach(s.e164, "sip:"+s.e164+"@trunk.sip.example.test", "trunk-user", "to-password")
+	s.line.attach(other, "sip:"+other+"@trunk.sip.example.test", "other-user", "other-password")
+	form := s.line.call(s.e164)
+	form.Set("Called", other)
+
+	_, _, body := s.line.deliver(form, s.line.sign(form))
+
+	s.Contains(body, `password="to-password"`)
+	s.NotContains(body, "other-password")
 }
 
 // Twilio sends a call again when its answer never reached Twilio
