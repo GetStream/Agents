@@ -78,6 +78,9 @@ func (s *Server) configFor(ctx context.Context, customerID string, configID, nam
 
 // resumeSession carries a conversation on with what the caller says about its tools.
 func (s *Server) resumeSession(ctx context.Context, request *resumeSessionRequest) (*getSessionResponse, error) {
+	if failure, refused := refuseReservedActingFor(ctx, "ResumeSession"); refused {
+		return nil, failure
+	}
 	var over resumed
 	if body := request.Body; body != nil {
 		over.toolTimeoutMs = body.ToolTimeoutMs
@@ -101,6 +104,9 @@ func (s *Server) resumeSession(ctx context.Context, request *resumeSessionReques
 
 // forkSession continues a conversation as a new one.
 func (s *Server) forkSession(ctx context.Context, request *forkSessionRequest) (*forkSessionResponse, error) {
+	if failure, refused := refuseReservedActingFor(ctx, "ForkSession"); refused {
+		return nil, failure
+	}
 	customerID, ok := CustomerFrom(ctx)
 	if !ok {
 		return nil, errMissingCustomer
