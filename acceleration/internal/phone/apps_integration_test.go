@@ -1963,9 +1963,14 @@ func (s *AppsSuite) TestANumberRefusedInAnAppWithNoTrunkLinesAsksForNoLists() {
 	_, err = s.callFrom(s.e164)
 
 	s.ErrorContains(err, "numbers already used by another SIP trunk")
+	made := 0
 	for _, request := range s.own.Requests(s.own.Key) {
 		s.False(request.Method == http.MethodGet && strings.Contains(request.Path, "/sip/"), request.Path)
+		if request.Method == http.MethodPost && strings.HasSuffix(request.Path, "/sip/inbound_trunks") {
+			made++
+		}
 	}
+	s.Equal(2, made, "the one by hand, and the call's, which is not tried again")
 }
 
 // Another customer's row still holds the number on the trunk that has it, as one written before a
