@@ -152,26 +152,40 @@ func (r *Apps) readSettings(ctx context.Context, appID string) (AppSettings, err
 }
 
 // SetRoutingPolicy writes an app's routing policy, empty for shardmap.PolicyClosest, and leaves
-// the rest of its settings as they are. ErrNoApp is an app with no row.
+// the rest of its settings as they are, dropping what every replica had cached of them
+// (detachedWrite). ErrNoApp is an app with no row.
 func (r *Apps) SetRoutingPolicy(ctx context.Context, appID string, policy shardmap.Policy) error {
 	if err := validate("app").check(policy == "" || policy.Valid(), "routing_policy", "is not a routing policy").done(); err != nil {
 		return stack.Wrap(err)
 	}
-	update := r.store.global.NewUpdate().Model((*App)(nil)).Where("id = ?", appID)
-	// A change of the one key, so a concurrent write of another setting is kept.
-	if policy == "" {
-		update.Set("settings = settings - 'routing_policy'")
-	} else {
-		update.Set("settings = settings || jsonb_build_object('routing_policy', ?::text)", string(policy))
-	}
-	result, err := update.Exec(ctx)
+	var found bool
+	err := r.store.detachedWrite(ctx, func(ctx context.Context, tx bun.Tx) error {
+		update := tx.NewUpdate().Model((*App)(nil)).Where("id = ?", appID)
+		// A change of the one key, so a concurrent write of another setting is kept.
+		if policy == "" {
+			update.Set("settings = settings - 'routing_policy'")
+		} else {
+			update.Set("settings = settings || jsonb_build_object('routing_policy', ?::text)", string(policy))
+		}
+		result, err := update.Exec(ctx)
+		if err != nil {
+			return err
+		}
+		updated, err := result.RowsAffected()
+		found = updated > 0
+		return err
+	}, func() []string {
+		if !found {
+			return nil
+		}
+		return []string{cacheKey("app-settings", appID)}
+	})
 	if err != nil {
 		return stack.Wrap(fmt.Errorf("store: app routing policy: %w", err))
 	}
-	if updated, err := result.RowsAffected(); err == nil && updated == 0 {
+	if !found {
 		return stack.Wrap(ErrNoApp)
 	}
-	r.store.forget(ctx, cacheKey("app-settings", appID))
 	return nil
 }
 

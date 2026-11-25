@@ -116,6 +116,22 @@ func (s *StoreSuite) TestAnAppsRoutingPolicyIsReadBackAtOnceAfterACachedRead() {
 	s.Equal(shardmap.PolicyUSEast, after)
 }
 
+func (s *StoreSuite) TestAnAppsRoutingPolicyWhoseCommitAnswerIsLostIsReadBackAtOnce() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
+	app := s.app()
+	_, err := s.store.Apps.RoutingPolicy(s.ctx, app.ID, "")
+	s.Require().NoError(err)
+	_, lossy := s.lossyStore(false)
+
+	s.Require().Error(lossy.Apps.SetRoutingPolicy(s.ctx, app.ID, shardmap.PolicyEUOnly), "the COMMIT's answer never comes")
+
+	policy, err := s.store.Apps.RoutingPolicy(s.ctx, app.ID, "")
+	s.Require().NoError(err)
+	s.Equal(shardmap.PolicyEUOnly, policy, "the COMMIT landed, and the cached settings were dropped with no answer to it")
+}
+
 func (s *StoreSuite) TestClearingAnAppsRoutingPolicyMakesItClosest() {
 	app := s.app()
 	s.Require().NoError(s.store.Apps.SetRoutingPolicy(s.ctx, app.ID, shardmap.PolicyUSOnly))
