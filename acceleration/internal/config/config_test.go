@@ -1601,6 +1601,15 @@ func (s *ConfigSuite) TestAResidencyShardThatCannotBeAShardNameIsRefused() {
 	s.ErrorContains(err, `shard_routing.residency (ROUTER_SHARD_ROUTING_RESIDENCY)`)
 }
 
+// Work kept in one geography would be done in the other.
+func (s *ConfigSuite) TestAResidencyShardInTwoGeographiesIsRefused() {
+	s.T().Setenv("ROUTER_SHARD_ROUTING_RESIDENCY", "us=northamerica-northeast1,ca=northamerica-northeast1")
+
+	_, _, err := Load("")
+	s.ErrorContains(err, `shard_routing.residency (ROUTER_SHARD_ROUTING_RESIDENCY)`)
+	s.ErrorContains(err, `"northamerica-northeast1" in both ca and us`)
+}
+
 func (s *ConfigSuite) TestAHomeThatCannotBeAShardNameIsRefused() {
 	s.T().Setenv("ROUTER_SHARD_ROUTING_HOME", "US East")
 

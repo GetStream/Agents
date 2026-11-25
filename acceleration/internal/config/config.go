@@ -1159,6 +1159,7 @@ func (r ShardRouting) validate() error {
 	if r.Home != "" && !providerRegion.MatchString(r.Home) {
 		return fmt.Errorf("config: shard_routing.home (ROUTER_SHARD_ROUTING_HOME) is a shard such as us-east4, got %q", r.Home)
 	}
+	geographyOf := map[string]string{}
 	for _, geography := range slices.Sorted(maps.Keys(r.Residency)) {
 		shards := r.Residency[geography]
 		known := slices.Contains([]string{shardmap.GeographyUS, shardmap.GeographyEU, shardmap.GeographyCanada}, geography)
@@ -1166,6 +1167,13 @@ func (r ShardRouting) validate() error {
 		if !known || len(shards) == 0 || unnamed {
 			return fmt.Errorf("config: shard_routing.residency (ROUTER_SHARD_ROUTING_RESIDENCY) maps us, eu or ca to its shards "+
 				"in order of preference, such as us=us-east4|us-west1, got %s=%q", geography, strings.Join(shards, "|"))
+		}
+		for _, shard := range shards {
+			if other, ok := geographyOf[shard]; ok && other != geography {
+				return fmt.Errorf("config: shard_routing.residency (ROUTER_SHARD_ROUTING_RESIDENCY) puts a shard in one geography, "+
+					"got %q in both %s and %s", shard, other, geography)
+			}
+			geographyOf[shard] = geography
 		}
 	}
 	return nil
