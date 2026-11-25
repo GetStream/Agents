@@ -985,7 +985,7 @@ func documentHandWritten(api huma.API) {
 			"would. Changes are applied whatever the app holds. An import that stopped partway is run again " +
 			"with `full=true`, since the app then holds its first rows.\n" +
 			"An app runs one import at a time on a router, and a router runs at most four imports at once. " +
-			"An import ends when a line has taken a minute to arrive.\n" +
+			"An import ends with a 504 `timeout` when a line has taken a minute to arrive.\n" +
 			"Server-side only, and refused when the router runs with ROUTER_AUTH_MODE=noauth.",
 		Parameters: []*huma.Param{
 			{Name: "full", In: "query", Description: "Write an export's rows over what an app that already has data here holds.", Schema: &huma.Schema{Type: huma.TypeBoolean, Default: false}},
@@ -1004,6 +1004,7 @@ func documentHandWritten(api huma.API) {
 			"409": {Description: "`import_running`: an import of this app is already running on this router, which runs one at a time. Or `conflict`: the file carries an export's rows, the app already has data here and `full` is not true.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 			"413": {Description: "A line of the file is over 64 MiB.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 			"503": {Description: "This deployment has no database to import into, or this router is running as many imports as it takes at once: try again.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
+			"504": {Description: "A line of the file took more than a minute to arrive. What came before it may be written.", Content: map[string]*huma.MediaType{"application/json": {Schema: registry.Schema(reflect.TypeFor[ErrorResponse](), true, "")}}},
 		},
 	})
 	document.AddOperation(&huma.Operation{
