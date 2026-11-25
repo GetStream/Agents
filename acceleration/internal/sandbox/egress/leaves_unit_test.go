@@ -194,13 +194,13 @@ func (s *LeavesSuite) TestSandboxesThatKeepAsManyTakeNoRoomFromEachOther() {
 // handshake, in a cache with room, is no longer the first sandbox's.
 func (s *LeavesSuite) TestARenewedCertificateCountsToTheSandboxThatRenewedIt() {
 	proxy := s.newProxy(4)
-	s.keep(proxy, "ended-run", "api.test")
+	s.keep(proxy, "sandbox-a", "api.test")
 	s.advance(halfOfLeafValidity)
 
-	s.certificate(proxy, "api.test", "next-run")
+	s.certificate(proxy, "api.test", "sandbox-b")
 
-	s.Equal(map[string]int{"next-run": 1}, proxy.leaves.owned)
-	s.Equal("next-run", proxy.leaves.byHost["api.test"].owner)
+	s.Equal(map[string]int{"sandbox-b": 1}, proxy.leaves.owned)
+	s.Equal("sandbox-b", proxy.leaves.byHost["api.test"].owner)
 }
 
 // TestCertificatesDueForRenewalMakeRoomBeforeAnyOtherIsDropped: in a full cache, a new host takes
@@ -275,27 +275,27 @@ func (s *LeavesSuite) TestACacheWithRoomKeepsCertificatesDueForRenewalUntilItIsF
 // halfOfLeafValidity is when a kept certificate is due for renewal.
 const halfOfLeafValidity = leafValidity / 2
 
-// TestASandboxWhoseCertificatesAreGoneLeavesTheCount: a sandbox whose run ended is counted only
+// TestASandboxWhoseCertificatesAreGoneLeavesTheCount: a sandbox is counted only
 // while a certificate its handshake kept is: one renewed for another sandbox's handshake, one that
 // gave its room, or one dropped as due for renewal is no longer the first sandbox's.
 func (s *LeavesSuite) TestASandboxWhoseCertificatesAreGoneLeavesTheCount() {
 	proxy := s.newProxy(3)
-	s.keep(proxy, "ended-run", "api.test")
-	s.keep(proxy, "evicted-run", "h0.e.test", "h1.e.test")
+	s.keep(proxy, "sandbox-a", "api.test")
+	s.keep(proxy, "sandbox-c", "h0.e.test", "h1.e.test")
 	// api.test is due for renewal, the two others are not.
 	s.advance(halfOfLeafValidity - 3*time.Minute)
 
-	s.certificate(proxy, "api.test", "next-run")
+	s.certificate(proxy, "api.test", "sandbox-b")
 	renewed := maps.Clone(proxy.leaves.owned)
-	s.certificate(proxy, "x.test", "another-run")
+	s.certificate(proxy, "x.test", "sandbox-d")
 	evicted := maps.Clone(proxy.leaves.owned)
 	// h1.e.test is due for renewal now, and the cache is full.
 	s.advance(2 * time.Minute)
-	s.certificate(proxy, "y.test", "another-run")
+	s.certificate(proxy, "y.test", "sandbox-d")
 
-	s.Equal(map[string]int{"evicted-run": 2, "next-run": 1}, renewed)
-	s.Equal(map[string]int{"evicted-run": 1, "next-run": 1, "another-run": 1}, evicted)
-	s.Equal(map[string]int{"next-run": 1, "another-run": 2}, proxy.leaves.owned)
+	s.Equal(map[string]int{"sandbox-c": 2, "sandbox-b": 1}, renewed)
+	s.Equal(map[string]int{"sandbox-c": 1, "sandbox-b": 1, "sandbox-d": 1}, evicted)
+	s.Equal(map[string]int{"sandbox-b": 1, "sandbox-d": 2}, proxy.leaves.owned)
 	s.Len(proxy.leaves.byHost, 3)
 }
 
