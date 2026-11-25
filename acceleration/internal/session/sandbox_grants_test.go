@@ -530,7 +530,10 @@ func (s *SandboxGrantsSuite) boxed(options sandbox.Config) error {
 func (s *SandboxGrantsSuite) TestASandboxBindingNeedsTheSecretPrefix() {
 	s.manager.options.SandboxSecretPrefix = ""
 
-	s.ErrorContains(s.boxed(sandbox.Config{}), "ROUTER_CODE_SANDBOX_SECRET_PREFIX")
+	err := s.boxed(sandbox.Config{})
+
+	s.Require().ErrorIs(err, ErrNotConfigured, "so the caller is answered in fixed words")
+	s.ErrorContains(err, "ROUTER_CODE_SANDBOX_SECRET_PREFIX", "the log names the setting the operator adds")
 }
 
 func (s *SandboxGrantsSuite) TestASandboxBindingNeedsABrokerThereIs() {
@@ -634,9 +637,11 @@ func (s *SandboxGrantsSuite) TestTheProxyBrokerRefusesAConfigItCannotServe() {
 	s.manager.options.SandboxProxy = egress.BrokerOptions{Store: &egress.Store{}, URL: "http://203.0.113.7:8091", CACert: []byte(proxyCA)}
 
 	err := s.boxed(open)
-	s.ErrorContains(err, "sandbox_options.network is true")
-	s.ErrorContains(err, "code_sandbox.broker is proxy")
-	s.ErrorContains(s.boxed(ranges), "sandbox_options.network_allow_list is set")
+	s.Require().ErrorContains(err, "sandbox_options.network is true")
+	s.NotContains(err.Error(), "proxy", "the caller gets this text, and only the operator chooses the broker")
+	err = s.boxed(ranges)
+	s.Require().ErrorContains(err, "sandbox_options.network_allow_list is set")
+	s.NotContains(err.Error(), "proxy")
 	s.ErrorContains(s.boxed(sandbox.Config{Network: true, NetworkAllowList: []string{"10.0.0.0/8"}}), "sandbox_options.network_allow_list is set")
 	s.NoError(s.boxed(sandbox.Config{Network: true, AllowedDomains: []string{"pypi.org"}}))
 	s.NoError(s.boxed(sandbox.Config{}))

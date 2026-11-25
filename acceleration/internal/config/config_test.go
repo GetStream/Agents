@@ -1362,6 +1362,30 @@ func (s *ConfigSuite) TestTheTwilioWebhookAuthTokenInAFileReachesTheEnvironment(
 	s.Equal("token-from-file", os.Getenv("TWILIO_WEBHOOK_AUTH_TOKEN"))
 }
 
+func (s *ConfigSuite) TestTheTwilioAccountSIDIsReadFromTheEnvironment() {
+	config, _, err := Load("")
+	s.Require().NoError(err)
+	s.Empty(config.Twilio.AccountSID, "unset, no Twilio call is answered")
+
+	s.T().Setenv("TWILIO_ACCOUNT_SID", "AC-from-env")
+	config, _, err = Load("")
+	s.Require().NoError(err)
+
+	s.Equal("AC-from-env", config.Twilio.AccountSID)
+}
+
+// The Twilio provider reads TWILIO_ACCOUNT_SID itself, so the setting in a file has to reach it.
+func (s *ConfigSuite) TestTheTwilioAccountSIDInAFileReachesTheEnvironment() {
+	path := filepath.Join(s.T().TempDir(), "router.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte("twilio:\n  account_sid: AC-from-file\n"), 0o600))
+
+	config, _, err := Load(path)
+	s.Require().NoError(err)
+
+	s.Equal("AC-from-file", config.Twilio.AccountSID)
+	s.Equal("AC-from-file", os.Getenv("TWILIO_ACCOUNT_SID"))
+}
+
 func (s *ConfigSuite) TestASingleNodeSetsNoShard() {
 	config, _, err := Load("")
 	s.Require().NoError(err)

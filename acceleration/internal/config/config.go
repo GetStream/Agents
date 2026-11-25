@@ -569,8 +569,11 @@ type Telnyx struct {
 }
 
 // Twilio is what the router checks Twilio's webhooks with. The Twilio provider reads its own
-// credentials, TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN.
+// credentials, TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN, which export writes back.
 type Twilio struct {
+	// AccountSID is the account the router's Twilio numbers are under. A call webhook naming
+	// any other is hung up.
+	AccountSID string `koanf:"account_sid"`
 	// WebhookAuthToken is the Auth Token of the account whose webhooks are checked. It only
 	// checks signatures: nothing calls Twilio with it.
 	WebhookAuthToken string `koanf:"webhook_auth_token"`
@@ -673,6 +676,7 @@ var variables = map[string]string{
 	"telnyx.connection_id": "TELNYX_CONNECTION_ID",
 	"telnyx.public_key":    "TELNYX_PUBLIC_KEY",
 
+	"twilio.account_sid":        "TWILIO_ACCOUNT_SID",
 	"twilio.webhook_auth_token": "TWILIO_WEBHOOK_AUTH_TOKEN",
 
 	"usage.url":        "ROUTER_USAGE_URL",
@@ -1289,6 +1293,7 @@ func (c Config) export() error {
 		"telnyx.connection_id": c.Telnyx.ConnectionID,
 		"telnyx.public_key":    c.Telnyx.PublicKey,
 
+		"twilio.account_sid":        c.Twilio.AccountSID,
 		"twilio.webhook_auth_token": c.Twilio.WebhookAuthToken,
 
 		"usage.url":        c.Usage.URL,
