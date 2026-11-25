@@ -105,8 +105,9 @@ func (s *RecorderSuite) TestAVoiceIdThatIsNotElevenLabsIsRefusedBeforeAnyRequest
 		s.ErrorIs(err, voiceid.ErrInvalid, "%q", id)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.Equal(recorded{}, s.last, "nothing was sent")
+	sent := s.last
+	s.mu.Unlock()
+	s.Equal(recorded{}, sent, "nothing was sent")
 
 	s.Equal("/21m00Tcm4TlvDq8ikWAM",
 		s.record(RecorderOptions{VoiceID: "v1"}, tts.Recording{Voice: "21m00Tcm4TlvDq8ikWAM"}).path)

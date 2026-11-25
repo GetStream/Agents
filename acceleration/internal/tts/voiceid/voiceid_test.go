@@ -26,9 +26,9 @@ func (s *VoiceIDSuite) TestRealIdsPass() {
 		"21m00Tcm4TlvDq8ikWAM", // the docs' example
 		"cVOjvbxC2c4mOyGcx3AH", // a Voice Library voice
 		"pNInz6obpgDQGcFmaJgB",
-		"el-77",       // the clone ids our fakes answer with
-		"a_b",         // '_' is unreserved
-		"Rachel",      // a name still goes to ElevenLabs, which refuses it as before
+		"el-77",  // the clone ids our fakes answer with
+		"a_b",    // '_' is unreserved
+		"Rachel", // a name still goes to ElevenLabs, which refuses it as before
 		strings.Repeat("a", 128),
 	} {
 		s.NoError(voiceid.Check(elevenlabs.ProviderName, id), id)
