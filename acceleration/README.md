@@ -2838,7 +2838,7 @@ role that cannot change it, give `router migrate` a DSN of the owner's:
 postgres:
   dsn: postgres://router_serving@global/router
   migrate_dsn: postgres://router_owner@global/router
-  shard_dsn: postgres://router_serving@usw1/router # a hosted deployment's only
+  shard_dsn: postgres://router_serving@usw1/router # a hosted deployment's only, listed in shards
   shard_migrate_dsn: postgres://router_owner@usw1/router
 ```
 
