@@ -23,6 +23,7 @@ import (
 	"github.com/daytona/clients/sdk-go/pkg/options"
 	"github.com/daytona/clients/sdk-go/pkg/types"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/goroutine"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
 )
@@ -454,7 +455,7 @@ func (s *Sandbox) watched(call func(context.Context) error) func(context.Context
 		defer cut(nil)
 		over, done := make(chan struct{}), make(chan struct{})
 		var refusal error
-		go func() {
+		goroutine.Go(ctx, func() {
 			defer close(done)
 			ticks := time.NewTicker(s.admitEvery)
 			defer ticks.Stop()
@@ -469,7 +470,7 @@ func (s *Sandbox) watched(call func(context.Context) error) func(context.Context
 					}
 				}
 			}
-		}()
+		})
 		err := call(ctx)
 		close(over)
 		<-done
