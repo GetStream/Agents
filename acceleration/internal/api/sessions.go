@@ -989,7 +989,10 @@ func sessionsOf(ctx context.Context, found []session.Found, calls map[string]sto
 // names it once on the config. A user_id or user_name at its default counts as naming none:
 // generated clients send the schema defaults, and Huma fills them in for a request that left
 // them out. A session carrying on a conversation is given no agent id: opening the conversation
-// refuses any but the one it was kept under, which the conversation supplies.
+// refuses any but the one it was kept under, which the conversation supplies. Nor is an
+// incognito session, which keeps no conversation: a message hook hands a message in
+// agent:<agent id> to the newest session under that id that keeps none (routeArrivingMessage),
+// so one shared agent id would hand any Chat user's message to the newest visitor's session.
 func identifyAs(spec *session.Spec, identity store.AgentIdentity) {
 	if identity.UserID != "" && (spec.UserID == "" || spec.UserID == session.DefaultUserID) {
 		spec.UserID = identity.UserID
@@ -997,7 +1000,7 @@ func identifyAs(spec *session.Spec, identity store.AgentIdentity) {
 	if identity.UserName != "" && (spec.UserName == "" || spec.UserName == session.DefaultUserName) {
 		spec.UserName = identity.UserName
 	}
-	if identity.AgentID != "" && spec.AgentID == "" && spec.ConversationID == "" {
+	if identity.AgentID != "" && spec.AgentID == "" && spec.ConversationID == "" && !spec.Incognito {
 		spec.AgentID = identity.AgentID
 	}
 }

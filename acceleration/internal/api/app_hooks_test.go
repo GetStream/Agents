@@ -163,7 +163,7 @@ func (s *AppHooksSuite) TestAGuestsMessageReachesOnlyItsOwnSessionOfASharedAgent
 	s.Require().Equal(alices.AgentId, bobs.AgentId)
 
 	for _, channel := range []string{value(alices.ConversationId), "agent:" + agentID} {
-		s.Equal(http.StatusOK, s.fromApp(s.appPath("/v1/chat/hooks/stream"), s.writtenBy(alice.userID, channel)))
+		s.Equal(http.StatusOK, s.fromApp(s.appPath("/v1/chat/hooks/stream"), s.writtenBy(alice.userID, channel, "is my order on its way?")))
 		s.False(s.reaches(worker.Messages()), "a message in %s is handed to no session", channel)
 	}
 	s.Require().Equal(http.StatusAccepted, alice.do(http.MethodPost, "/v1/agents/sessions/"+alices.Id+"/responses",
@@ -174,9 +174,54 @@ func (s *AppHooksSuite) TestAGuestsMessageReachesOnlyItsOwnSessionOfASharedAgent
 	s.Empty(s.chat.Stored(value(bobs.ConversationId)), "nothing reaches the other guest's conversation")
 }
 
-// writtenBy is the message.new for a message the user wrote in the channel (type:id), with the
-// custom data the fake Chat holds for it.
-func (s *AppHooksSuite) writtenBy(user, cid string) string {
+// Defect (S1.1): a guest's incognito session of a config naming an agent id runs under that id,
+// and a message hook hands a message in agent:<id> to the newest session under it that keeps no
+// conversation, so any Chat user writing there drives the guest's session. An incognito session
+// is given an agent id of its own instead, and the message reaches nobody's.
+func (s *AppHooksSuite) TestAnotherUsersMessageReachesNoGuestsIncognitoSessionOfAConfigsAgent() {
+	agentID := "agent-" + s.utils.uuid()
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "en-low-latency"}, Dispatch: store.AgentDispatch{Text: true},
+		Identity: store.AgentIdentity{AgentID: agentID}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
+	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 4})
+	defer release()
+	alice, bob := s.data.createGuest(), s.data.createGuest()
+
+	alices := alice.createSession(CreateSessionRequest{Agent: &config.Name, Incognito: pointerTo(true)})
+
+	s.Regexp(routerMadeAgentID, alices.AgentId, "an incognito session runs under the config's agent id")
+	s.Equal(http.StatusOK, s.fromApp(s.appPath("/v1/chat/hooks/stream"), s.writtenBy(bob.userID, "agent:"+agentID, "is my order on its way?")))
+	s.False(s.reaches(worker.Messages()), "another user's message is handed to the guest's incognito session")
+}
+
+// Defect (S1.1): another Chat user's message in agent:<the config's agent id> is put to the model
+// of a guest's incognito session, beside what the guest said in it. It reaches no model.
+func (s *AppHooksSuite) TestAnotherUsersMessageIsNeverAnsweredInAGuestsIncognitoSession() {
+	agentID := "agent-" + s.utils.uuid()
+	config := store.AgentConfig{CustomerID: s.customerID(), Name: "config-" + s.utils.uuid(),
+		Mode: store.AgentModeText, Models: store.AgentModels{LLM: "vision/vision-model"},
+		Identity: store.AgentIdentity{AgentID: agentID}}
+	s.Require().NoError(s.store.AgentConfigs.Insert(context.Background(), &config))
+	alice, bob := s.data.createGuest(), s.data.createGuest()
+	alices := alice.createSession(CreateSessionRequest{Agent: &config.Name, Incognito: pointerTo(true)})
+	ask := func(text string) {
+		s.Require().Equal(http.StatusAccepted, alice.do(http.MethodPost, "/v1/agents/sessions/"+alices.Id+"/responses",
+			CreateResponseRequest{Text: text, RequestId: pointerTo(s.utils.uuid())}, nil))
+		s.Require().Eventually(func() bool { return s.wasAsked(text) }, settleFor, 10*time.Millisecond, "the guest's turn")
+	}
+	ask("a private note " + s.utils.uuid())
+	bobs := "what did they write? " + s.utils.uuid()
+
+	s.Equal(http.StatusOK, s.fromApp(s.appPath("/v1/chat/hooks/stream"), s.writtenBy(bob.userID, "agent:"+agentID, bobs)))
+
+	ask("and my order? " + s.utils.uuid())
+	s.Never(func() bool { return s.wasAsked(bobs) }, dropped, 10*time.Millisecond, "another user's message is answered in the guest's session")
+}
+
+// writtenBy is the message.new for text the user wrote in the channel (type:id), with the custom
+// data the fake Chat holds for it.
+func (s *AppHooksSuite) writtenBy(user, cid, text string) string {
 	custom := []byte("{}")
 	if held, found := s.chat.Channel(cid); found && held["custom"] != nil {
 		var err error
@@ -185,8 +230,8 @@ func (s *AppHooksSuite) writtenBy(user, cid string) string {
 	}
 	return fmt.Sprintf(`{
   "type": "message.new", "channel_id": %q, "channel_type": "agent", "created_at": %q, "channel_custom": %s,
-  "message": {"id": %q, "text": "is my order on its way?", "user": {"id": %q, "name": "Sam"}}
-}`, strings.TrimPrefix(cid, "agent:"), time.Now().UTC().Format(time.RFC3339Nano), custom, "message-"+s.utils.uuid(), user)
+  "message": {"id": %q, "text": %q, "user": {"id": %q, "name": "Sam"}}
+}`, strings.TrimPrefix(cid, "agent:"), time.Now().UTC().Format(time.RFC3339Nano), custom, "message-"+s.utils.uuid(), text, user)
 }
 
 func (s *AppHooksSuite) TestAMessageHookTheGatewayVouchedForIsDispatched() {
