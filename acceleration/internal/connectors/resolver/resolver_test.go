@@ -4,7 +4,9 @@ package resolver_test
 
 import (
 	"context"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -69,6 +71,56 @@ func (s *ResolverSuite) TestAConnectedConnectionResolvesToACredentialTheProvider
 	s.False(credential.ExpiresAt.IsZero())
 	s.True(credential.ExpiresAt.Equal(*s.f.stored(ref).ExpiresAt), "the first resolve writes the expiry the consent left unknown")
 	s.Equal(0, s.f.srv.Refreshes())
+}
+
+func (s *ResolverSuite) TestRefreshesStalledAtTheTokenEndpointLeaveTheRouterItsServingConnections() {
+	// More refreshes than the router's serving pool has connections: held locks that took
+	// their connections from it would take all of it. 4 is as many as one customer's locks
+	// hold at once (lockConnsPerCustomer in internal/store).
+	const refreshes, serving = 4, 2
+	refs := make([]core.ConnectionRef, refreshes)
+	for i := range refs {
+		refs[i] = s.f.connected()
+	}
+	s.f.due()
+	var stalled atomic.Int32
+	release := make(chan struct{})
+	unstall := sync.OnceFunc(func() { close(release) })
+	defer unstall()
+	db := s.f.open()
+	db.GlobalDB().SetMaxOpenConns(serving)
+	r := s.f.routerOn(db, s.f.interposed(func() {
+		stalled.Add(1)
+		<-release
+	}), slog.New(slog.NewTextHandler(s.f.logs, nil)))
+	type result struct {
+		credential core.AccessCredential
+		err        error
+	}
+	results := make(chan result, refreshes)
+	resolving, stop := context.WithTimeout(s.f.ctx, 30*time.Second)
+	defer stop()
+	for _, ref := range refs {
+		go func() {
+			credential, err := r.Resolve(resolving, ref, core.CredentialRequest{})
+			results <- result{credential, err}
+		}()
+	}
+	s.Require().Eventually(func() bool { return stalled.Load() == refreshes }, 5*time.Second, 10*time.Millisecond,
+		"every refresh reaches the token endpoint and waits there, under its lock")
+
+	ctx, cancel := context.WithTimeout(s.f.ctx, 2*time.Second)
+	defer cancel()
+	_, err := db.ConnectorConnections.Get(ctx, customer, refs[0].ConnectionID)
+	s.Require().NoError(err, "a query outside the locks gets a serving connection while every refresh is stalled")
+
+	unstall()
+	for range refreshes {
+		got := <-results
+		s.Require().NoError(got.err)
+		s.True(s.f.works(got.credential))
+	}
+	s.Equal(refreshes, s.f.srv.Refreshes())
 }
 
 func (s *ResolverSuite) TestACachedCredentialIsHandedOutWhileAnotherRouterHoldsTheLock() {
