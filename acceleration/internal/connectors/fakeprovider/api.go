@@ -43,7 +43,8 @@ func (s *Server) APIRequests() []APIRequest {
 //	/rest/echo-credential   403 whose body says the APIKeyHeader and Authorization it got, as an
 //	                        API that echoes the request's credential in its error does; with
 //	                        ?status=200, the same body as a 200, as one that echoes it in an
-//	                        answer does
+//	                        answer does; both are application/json, so a browser never reads the
+//	                        echoed request as HTML
 //	anything else           200 "ok"
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
@@ -71,6 +72,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("status") == "200" {
 			status = http.StatusOK
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = io.WriteString(w, `{"error":"key `+r.Header.Get(APIKeyHeader)+` and `+r.Header.Get("Authorization")+` may not read this"}`)
 		return
