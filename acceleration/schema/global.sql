@@ -25,6 +25,9 @@ TABLE agent_configs
     guardrail text NOT NULL DEFAULT ''::text
     harness text NOT NULL DEFAULT 'default'::text
     id text NOT NULL
+    identity_agent_id text NOT NULL DEFAULT ''::text
+    identity_user_id text NOT NULL DEFAULT ''::text
+    identity_user_name text NOT NULL DEFAULT ''::text
     image text NOT NULL DEFAULT ''::text
     instructions text NOT NULL DEFAULT ''::text
     keyterms jsonb NOT NULL DEFAULT '[]'::jsonb

@@ -983,6 +983,25 @@ func sessionsOf(ctx context.Context, found []session.Found, calls map[string]sto
 	return listed
 }
 
+// identifyAs gives a new session the identity its config sets wherever the request named none.
+//
+// Why: a device may not name who the agent is (refuseDeviceAgentIdentity), so the app's backend
+// names it once on the config. A user_id or user_name at its default counts as naming none:
+// generated clients send the schema defaults, and Huma fills them in for a request that left
+// them out. A session carrying on a conversation is given no agent id: opening the conversation
+// refuses any but the one it was kept under, which the conversation supplies.
+func identifyAs(spec *session.Spec, identity store.AgentIdentity) {
+	if identity.UserID != "" && (spec.UserID == "" || spec.UserID == session.DefaultUserID) {
+		spec.UserID = identity.UserID
+	}
+	if identity.UserName != "" && (spec.UserName == "" || spec.UserName == session.DefaultUserName) {
+		spec.UserName = identity.UserName
+	}
+	if identity.AgentID != "" && spec.AgentID == "" && spec.ConversationID == "" {
+		spec.AgentID = identity.AgentID
+	}
+}
+
 // specOf turns a request into what the session package needs, over whatever config it
 // named. The customer comes from the trusted header rather than the body: a caller naming
 // its own would be billing somebody else.
@@ -1037,6 +1056,9 @@ func specOf(request CreateSessionRequest, customerID string, config *store.Agent
 	spec.UserID = override(spec.UserID, request.UserId)
 	spec.UserName = override(spec.UserName, request.UserName)
 	spec.AgentID = override(spec.AgentID, request.AgentId)
+	if config != nil {
+		identifyAs(&spec, config.Identity)
+	}
 	if request.Greeting != nil {
 		var mode string
 		spec.Greeting, mode = greetingOf(request.Greeting)
