@@ -636,7 +636,6 @@ func (a *Agent) replyStarted(started sts.ResponseStarted) {
 	a.speakingTurn = started.ResponseID
 	a.generating = true
 	a.utterances++
-	a.askingLocked(started.ResponseID)
 	participant := a.lastParticipant
 	waiting := a.waitingSince
 	a.waitingSince = time.Time{}

@@ -61,11 +61,11 @@ type approval struct {
 	question string
 	// asked is set once the question was handed to whatever says it.
 	asked bool
-	// turn is the turn the question is said in: a cascade's line as written, or a native model's
-	// first reply after it was told to ask. Empty until one is.
+	// turn is the turn a cascade says the question in, as written.
 	turn string
-	// said is set once that turn said it, and cut once the caller talked over it, or the voice
-	// failed, before it finished playing.
+	// said is set once the question was said: handed to a cascade's voice, or a native model's
+	// reply after it was told to ask spoke. cut is set once the caller talked over it, or the
+	// voice failed, before it finished playing.
 	said, cut bool
 	// played is set once the question finished playing, with heard the caller's turns then: a
 	// yes counts only in reply to a turn they spoke after it.
@@ -205,52 +205,40 @@ func (a *Agent) quietLocked() bool {
 	return !a.generating && a.utterances == 0 && !a.nativeAwaiting
 }
 
-// playedLocked marks each question said and not talked over as played, when quiet. The caller
-// holds the lock.
+// playedLocked marks each question said as played, when quiet. The caller holds the lock.
 func (a *Agent) playedLocked(quiet bool) {
 	if !quiet {
 		return
 	}
 	for _, waiting := range a.approvals {
-		if waiting.said && !waiting.cut && !waiting.played {
+		if waiting.said && !waiting.played {
 			waiting.played, waiting.heard = true, a.callerTurns
 		}
 	}
 }
 
-// cutLocked marks the questions said in a turn that was cut off before they finished playing.
-// The caller holds the lock.
+// cutLocked marks the questions a cascade said in a turn that was cut off. The caller holds the
+// lock.
 func (a *Agent) cutLocked(turnID string) {
 	for _, waiting := range a.approvals {
-		if waiting.turn == turnID && !waiting.played {
+		if waiting.turn == turnID {
 			waiting.cut = true
 		}
 	}
 }
 
-// repliedLocked settles the questions a native model's reply was to say: cut when the caller
-// talked over it, said when it spoke, and left for the next reply when it said nothing. The
-// caller holds the lock.
+// repliedLocked settles the questions a native model holds and has not finished playing, as a
+// reply other than the one that made the call ends: cut when the caller talked over it, said
+// when it spoke. Any later reply is one the model began once told to ask, which can come back
+// before the router has marked the question asked. The caller holds the lock.
 func (a *Agent) repliedLocked(responseID string, interrupted, spoke bool) {
 	for _, waiting := range a.approvals {
 		switch {
-		case waiting.turn != responseID:
+		case waiting.played || waiting.call.TurnID == responseID:
 		case interrupted:
 			waiting.cut = true
 		case spoke:
 			waiting.said = true
-		default:
-			waiting.turn = ""
-		}
-	}
-}
-
-// askingLocked gives each question a native model was told to ask the reply that started,
-// unless that is the reply that made the call. The caller holds the lock.
-func (a *Agent) askingLocked(responseID string) {
-	for _, waiting := range a.approvals {
-		if waiting.asked && waiting.turn == "" && waiting.call.TurnID != responseID {
-			waiting.turn = responseID
 		}
 	}
 }
@@ -449,7 +437,7 @@ func (a *Agent) tickApprovals() {
 	}
 	a.mu.Lock()
 	quiet = quiet && a.quietLocked()
-	a.playedLocked(quiet && !a.nativeListening)
+	a.playedLocked(quiet)
 	var lapsed []*approval
 	for id, waiting := range a.approvals {
 		switch {

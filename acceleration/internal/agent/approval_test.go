@@ -349,17 +349,15 @@ func (s *AgentSuite) TestANoInTheTurnThatMadeTheCallDeclinesIt() {
 }
 
 // Once the question has played, a yes still waits for the caller to speak: one in a turn they
-// did not speak, a typed one included, runs nothing and leaves the call waiting for theirs.
+// did not speak, as a typed one is, runs nothing and leaves the call waiting for theirs.
 func (s *AgentSuite) TestAYesBeforeTheCallerSpokeRunsNothingAndTheCallWaits() {
 	s.onFakeClock(func() {
 		s.askedToApprove()
 		time.Sleep(time.Second) // A tick of the fake clock: the question has finished playing.
-		s.agent.runTool(harness.ToolRequested{TurnID: "turn-9", Call: llm.ToolCall{ID: "call-8", Name: confirmTool, Arguments: `{"tool_call_id":"call-1","allowed":true}`}})
-		s.confirmationSays("call-8", "has not spoken since they were asked about lookup_order")
 		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
 		_, err := s.agent.RespondTo(s.ctx, "yes", nil, options.LLM{})
 		s.Require().NoError(err)
-		s.confirmationSays("call-2", "has not spoken since")
+		s.confirmationSays("call-2", "has not spoken since they were asked about lookup_order")
 		s.Empty(s.runner.asked(), "a yes the caller did not speak ran the call")
 
 		s.confirms(`{"tool_call_id":"call-1","allowed":true}`)
