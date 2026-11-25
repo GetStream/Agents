@@ -291,3 +291,12 @@ func (s *ResumeSuite) TestAResumedCallTellsWhenAPassedOnReinviteChangedWhatEachL
 		return state != nil && string(state.Customer.LastSDP) == string(answer) && string(state.Stream.LastSDP) == string(sdpAt("127.0.0.1"))
 	}, 2*time.Second, 10*time.Millisecond, "last change notice must see both legs' new SDP")
 }
+
+func (s *ResumeSuite) TestAResumeToATrunkTheGuardRefusesSendsNothing() {
+	s.cfg.CustomerTrunk.Host = "10.0.0.5"
+
+	_, err := Resume(s.T().Context(), s.cfg, s.state)
+
+	s.ErrorContains(err, "is not a public address")
+	s.Empty(s.customer.requests(sip.INVITE, customerCallID))
+}
