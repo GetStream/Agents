@@ -278,6 +278,26 @@ func (s *ServiceSuite) TestAnotherCustomersPreparedVoiceIsRefusedByItsProviderID
 	s.Equal("el-1", resolved, "its owner may still name it by the provider's id")
 }
 
+// A UUID is the same voice in any case, so an upper case copy of another customer's Cartesia
+// id must meet the same refusal as the id itself, and the owner's own copy must still work.
+func (s *ServiceSuite) TestACartesiaIdInAnotherCaseIsStillAnotherCustomersVoice() {
+	const bound = "a0e99841-438c-4a64-b679-ae501e7d6091"
+	voice := s.recorded()
+	s.Require().NoError(s.store.VoiceBindings.Upsert(s.ctx, &store.VoiceBinding{
+		VoiceID: voice.ID, Provider: "cartesia", ExternalID: bound, State: store.VoiceReady,
+	}))
+
+	for _, asked := range []string{bound, strings.ToUpper(bound), "A0e99841-438c-4a64-b679-aE501e7d6091"} {
+		_, err := s.resolver.ResolveVoice(s.ctx, "globex", "cartesia", asked)
+		s.Require().ErrorIs(err, routing.ErrRequest, asked)
+		s.Contains(err.Error(), "not one of this customer's voices", asked)
+
+		resolved, err := s.resolver.ResolveVoice(s.ctx, "acme", "cartesia", asked)
+		s.Require().NoError(err, asked)
+		s.Equal(bound, resolved, "its owner is handed the one spelling")
+	}
+}
+
 func (s *ServiceSuite) TestADeletedVoiceIsStillRefusedToAnotherCustomer() {
 	voice := s.recorded()
 	s.Require().NoError(s.service.Prepare(s.ctx, "acme", voice.ID, nil))

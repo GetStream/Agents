@@ -18,6 +18,7 @@ import (
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voiceid"
 )
 
 // Term is one optional thing a request asks a provider for beyond a target and a
@@ -534,6 +535,15 @@ func (o TTS) Validate() error {
 		}
 		if !json.Valid(block) {
 			return stack.Wrap(fmt.Errorf("options: the overwrites for %s are not valid JSON", provider))
+		}
+		// The voice_id the router hands the vendor (routing.Router.overwriteVoice reads it so).
+		var named struct {
+			VoiceID string `json:"voice_id"`
+		}
+		if json.Unmarshal(block, &named) == nil && named.VoiceID != "" {
+			if err := voiceid.Check(provider, named.VoiceID); err != nil {
+				return stack.Wrap(fmt.Errorf("options: overwrites.%s.voice_id: %w", provider, err))
+			}
 		}
 	}
 	return nil

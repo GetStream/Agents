@@ -403,6 +403,11 @@ func (r *Resolver) retrieve(ctx context.Context, ref core.ConnectionRef, connect
 				return nil
 			},
 		})
+		if _, refused := errors.AsType[*core.EndpointError](err); refused {
+			// What the resolver returns is read by callers, who are not told why.
+			r.logger.Warn("a connector endpoint was refused", "connection", ref.ConnectionID, "connector", connection.ConnectorID,
+				"error", core.LoggedError(err))
+		}
 		var outcome *core.OutcomeError
 		switch {
 		case err == nil:

@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -58,6 +59,8 @@ type AuthorizationsSuite struct {
 	scheme   *oauth2code.Scheme
 	// logged is what the router logged, for the lines a consent that ends otherwise leaves.
 	logged *lockedLog
+	// endpointRefused, when set, is why the scheme refuses every endpoint.
+	endpointRefused atomic.Pointer[error]
 }
 
 func TestAuthorizationsSuite(t *testing.T) {
@@ -79,7 +82,12 @@ func (s *AuthorizationsSuite) SetupSuite() {
 		Clients: func(ctx context.Context, ref core.ConnectionRef, m core.ResolvedManifest, registration core.ClientRegistrationMethod) (oauth2code.Client, bool, error) {
 			return ConnectorClients(s.store, s.sealer, func(name string) string { return environment[name] })(ctx, ref, m, registration)
 		},
-		PublicEndpoint: loopbackOrPublic,
+		PublicEndpoint: func(ctx context.Context, raw string) error {
+			if refused := s.endpointRefused.Load(); refused != nil {
+				return *refused
+			}
+			return loopbackOrPublic(ctx, raw)
+		},
 	})
 	s.Require().NoError(err)
 	s.scheme = scheme
@@ -111,6 +119,36 @@ func (s *AuthorizationsSuite) TestOnlyTheAppsBackendMayStartAConsent() {
 		id := s.connection("")
 		return as.do(http.MethodPost, "/v1/agents/connections/"+id+"/authorizations", nil, nil)
 	})
+}
+
+// refuseEndpoints has the scheme refuse every endpoint, for the reason it returns, until the
+// test ends.
+func (s *AuthorizationsSuite) refuseEndpoints() string {
+	reason := errors.New("the test's reason " + s.utils.uuid())
+	s.endpointRefused.Store(&reason)
+	s.T().Cleanup(func() { s.endpointRefused.Store(nil) })
+	return reason.Error()
+}
+
+func (s *AuthorizationsSuite) TestAConsentWhoseEndpointIsRefusedLogsWhy() {
+	id := s.connection("")
+	reason := s.refuseEndpoints()
+
+	status, body := s.serverClient.call(http.MethodPost, "/v1/agents/connections/"+id+"/authorizations", nil)
+
+	s.Equal(http.StatusInternalServerError, status)
+	s.NotContains(string(body), reason)
+	s.Contains(s.logged.String(), "is not an https URL of a public host that resolves: "+reason)
+}
+
+func (s *AuthorizationsSuite) TestARevokeWhoseEndpointIsRefusedLogsWhy() {
+	id := s.revokingConnection(s.provider.URL+fakeprovider.PathRevoke, optInRevoke)
+	s.connect(id)
+	reason := s.refuseEndpoints()
+
+	s.Equal(http.StatusNoContent, s.serverClient.do(http.MethodDelete, "/v1/agents/connections/"+id, nil, nil))
+
+	s.Contains(s.logged.line(s.T(), revokeFailed, id), "is not an https URL of a public host that resolves: "+reason)
 }
 
 func (s *AuthorizationsSuite) TestAliceCannotStartAConsentForBobsConnection() {

@@ -63,9 +63,14 @@ func flowA(ctx context.Context, cfg Config, customer, stream leg) (MediaAddrs, e
 	}
 	log.Info("customer answered", media(customerSide, offer)...)
 
+	sent, err := toStream(offer, cfg.trunkAddr)
+	if err != nil {
+		rejectCustomer(ctx, log, customer, offer)
+		return MediaAddrs{}, err
+	}
 	streamCtx, cancelStream := context.WithTimeout(ctx, cfg.Call.RingTimeout)
 	defer cancelStream()
-	answer, err := stream.Invite(streamCtx, offer)
+	answer, err := stream.Invite(streamCtx, sent)
 	if err != nil {
 		rejectCustomer(ctx, log, customer, offer)
 		return MediaAddrs{}, stack.Wrap(fmt.Errorf("stream leg: %w", err))
@@ -77,7 +82,7 @@ func flowA(ctx context.Context, cfg Config, customer, stream leg) (MediaAddrs, e
 		hangUp(ctx, log, nil, stream)
 		return MediaAddrs{}, stack.Wrap(fmt.Errorf("stream leg ack: %w", err))
 	}
-	if err := customer.Ack(ctx, answer); err != nil {
+	if err := customer.Ack(ctx, answerFor(offer, answer)); err != nil {
 		hangUp(ctx, log, customer, stream)
 		return MediaAddrs{}, stack.Wrap(fmt.Errorf("customer leg ack: %w", err))
 	}
@@ -163,7 +168,7 @@ func flowB(ctx context.Context, cfg Config, customer, stream leg) (MediaAddrs, e
 	var reanswer []byte
 	if err == nil {
 		var final Media
-		if final, err = retargetOffer(answered, toCustomer); err == nil {
+		if final, err = retargetOffer(reachable(answered, cfg.trunkAddr), toCustomer); err == nil {
 			reanswer, err = stream.Reinvite(ctx, streamSDP.build(final))
 		}
 	}

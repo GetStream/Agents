@@ -14,10 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/providers"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox/daytona/daytonatest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -39,6 +41,8 @@ type ChildAgentsSuite struct {
 	// offeredMu guards offered, the tools each request of offering was offered, by name.
 	offeredMu sync.Mutex
 	offered   [][]string
+	// logged is what the router logs, for the tests about what a refused delegation logs.
+	logged *lockedLog
 }
 
 func TestChildAgentsSuite(t *testing.T) {
@@ -81,7 +85,12 @@ func (s *ChildAgentsSuite) SetupSuite() {
 			return &chainingLLM{}, nil
 		})
 	}
+	s.logged = &lockedLog{}
+	s.logs = s.logged
+	s.daytona = daytonatest.Start(s.T())
 	s.RouterSuite.SetupSuite()
+	// The catalog, for the children that bind its connectors (child_agents_sensitive_test.go).
+	s.Require().NoError(s.store.ConnectorDefinitions.Seed(context.Background(), providers.FS))
 }
 
 func (s *ChildAgentsSuite) SetupTest() {
