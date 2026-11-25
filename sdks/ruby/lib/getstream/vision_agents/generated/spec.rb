@@ -2288,8 +2288,8 @@ module GetStream
           required: [].freeze, open: false
         }.freeze,
         "Connector" => {
-          properties: %w[category channel client created_at custom description id inputs name redirect_uri revision sandbox schemes scopes setup sync_hash].freeze,
-          required: %w[id revision name custom schemes inputs scopes client channel created_at].freeze, open: false
+          properties: %w[category channel client created_at custom description id inputs name redirect_uri revision sandbox schemes scopes setup sources sync_hash].freeze,
+          required: %w[id revision name custom schemes inputs scopes sources client channel created_at].freeze, open: false
         }.freeze,
         "ConnectorAuditCredential" => {
           properties: %w[access_expires_at access_fingerprint previous_access_fingerprint previous_refresh_fingerprint refresh_expires_at refresh_fingerprint rotated].freeze,
@@ -2366,6 +2366,10 @@ module GetStream
         "ConnectorSetupStep" => {
           properties: %w[description title].freeze,
           required: %w[title description].freeze, open: false
+        }.freeze,
+        "ConnectorSource" => {
+          properties: %w[kind].freeze,
+          required: %w[kind].freeze, open: false
         }.freeze,
         "ConnectorToolGrant" => {
           properties: %w[name schema_digest].freeze,

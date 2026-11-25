@@ -6581,6 +6581,8 @@ export type components = {
             readonly scopes: readonly string[] | null;
             /** @description What a person does at the provider before the first consent, such as registering an OAuth client. Absent when the manifest says nothing. */
             readonly setup?: components["schemas"]["ConnectorSetup"];
+            /** @description How the connector's tools are reached, one entry per source, by kind only: never a URL, a path or a credential. A custom connector made from an endpoint is mcp, one made from http is http. */
+            readonly sources: readonly components["schemas"]["ConnectorSource"][];
             /** @description The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync. */
             readonly sync_hash?: string;
         };
@@ -6842,6 +6844,15 @@ export type components = {
             readonly description: string;
             readonly title: string;
         };
+        /** @description One way a connector's tools are reached. Only its kind is shown. */
+        readonly ConnectorSource: {
+            readonly kind: components["schemas"]["ConnectorSourceKind"];
+        };
+        /**
+         * @description mcp is an MCP server that lists the tools, http an HTTP API whose tools the manifest lists.
+         * @enum {string}
+         */
+        readonly ConnectorSourceKind: "mcp" | "http";
         /** @description One tool a binding allows. */
         readonly ConnectorToolGrant: {
             /** @description The tool as the connector names it. */

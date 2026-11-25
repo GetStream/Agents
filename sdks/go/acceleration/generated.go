@@ -1018,6 +1018,24 @@ func (e ConnectorOnInterrupt) Valid() bool {
 	}
 }
 
+// Defines values for ConnectorSourceKind.
+const (
+	ConnectorSourceKindHTTP ConnectorSourceKind = "http"
+	ConnectorSourceKindMCP  ConnectorSourceKind = "mcp"
+)
+
+// Valid indicates whether the value is a known member of the ConnectorSourceKind enum.
+func (e ConnectorSourceKind) Valid() bool {
+	switch e {
+	case ConnectorSourceKindHTTP:
+		return true
+	case ConnectorSourceKindMCP:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ContactStage.
 const (
 	ContactStageCompleted  ContactStage = "completed"
@@ -5821,6 +5839,9 @@ type Connector struct {
 	// Setup What a person does at the provider before the first consent.
 	Setup *ConnectorSetup `json:"setup,omitempty"`
 
+	// Sources How the connector's tools are reached, one entry per source, by kind only: never a URL, a path or a credential. A custom connector made from an endpoint is mcp, one made from http is http.
+	Sources []ConnectorSource `json:"sources"`
+
 	// SyncHash The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
 	SyncHash *string `json:"sync_hash,omitempty"`
 }
@@ -6114,6 +6135,15 @@ type ConnectorSetupStep struct {
 	Description string `json:"description"`
 	Title       string `json:"title"`
 }
+
+// ConnectorSource One way a connector's tools are reached. Only its kind is shown.
+type ConnectorSource struct {
+	// Kind mcp is an MCP server that lists the tools, http an HTTP API whose tools the manifest lists.
+	Kind ConnectorSourceKind `json:"kind"`
+}
+
+// ConnectorSourceKind mcp is an MCP server that lists the tools, http an HTTP API whose tools the manifest lists.
+type ConnectorSourceKind string
 
 // ConnectorToolGrant One tool a binding allows.
 type ConnectorToolGrant struct {

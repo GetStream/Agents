@@ -32,10 +32,11 @@ const usesNamed = 10
 // Connector is one connector as the catalog shows it and a connection is created from: the
 // revision of its definition (store.ConnectorDefinition) the request read. It is the
 // non-secret part of the manifest: what a caller chooses between (schemes, inputs, scopes,
-// who owns the OAuth client). Everything the router reads to connect is left out: a built-in's
-// endpoints, vars, authorize and token parameters, capture and identity rules, refresh and
-// rate limits, sources, hooks and the operator's client variables. A custom connector's
-// endpoint is left out too: an MCP URL can carry a secret in its path (AI-837).
+// who owns the OAuth client, how it is reached). Everything the router reads to connect is left
+// out: a built-in's endpoints, vars, authorize and token parameters, capture and identity rules,
+// refresh and rate limits, the sources' endpoints, headers and tools, hooks and the operator's
+// client variables. A custom connector's endpoint is left out too: an MCP URL can carry a
+// secret in its path (AI-837), and an http API's base URL can.
 type Connector struct {
 	ID          string            `json:"id" doc:"Unique among the built-ins and the app's own. A custom definition's starts with custom_, and a built-in's never does."`
 	Revision    int               `json:"revision" readOnly:"true" doc:"The manifest's revision. A connection is created from the newest one and keeps reading it until it is reconnected."`
@@ -46,6 +47,7 @@ type Connector struct {
 	Schemes     []string          `json:"schemes" doc:"How a connection may authenticate, such as oauth2_code."`
 	Inputs      []ConnectorInput  `json:"inputs" doc:"What a connection is created with, such as a region or a shop."`
 	Scopes      []string          `json:"scopes" doc:"The scopes a consent asks for."`
+	Sources     []ConnectorSource `json:"sources" nullable:"false" doc:"How the connector's tools are reached, one entry per source, by kind only: never a URL, a path or a credential. A custom connector made from an endpoint is mcp, one made from http is http."`
 	Client      ConnectorClient   `json:"client"`
 	Setup       *ConnectorSetup   `json:"setup,omitempty" doc:"What a person does at the provider before the first consent, such as registering an OAuth client. Absent when the manifest says nothing."`
 	RedirectURI string            `json:"redirect_uri,omitempty" readOnly:"true" format:"uri" doc:"The redirect URI an OAuth client registered for this connector has to list: where every consent of this deployment sends the browser back to, ROUTER_PUBLIC_URL followed by /v1/agents/connectors/oauth/callback. Only on a connector that connects with oauth2_code, and absent when ROUTER_PUBLIC_URL is not set, since no consent can start then."`
@@ -53,6 +55,33 @@ type Connector struct {
 	Sandbox     *ConnectorSandbox `json:"sandbox,omitempty" readOnly:"true" doc:"How code in an agent's sandbox calls the provider's API with a connection's credential without holding it. Absent when the connector offers no such access."`
 	SyncHash    string            `json:"sync_hash,omitempty" readOnly:"true" doc:"The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync."`
 	CreatedAt   time.Time         `json:"created_at" readOnly:"true" doc:"When this revision was stored."`
+}
+
+// ConnectorSource is one source of a connector's tools, as the catalog shows it.
+type ConnectorSource struct {
+	Kind ConnectorSourceKind `json:"kind"`
+}
+
+func (*ConnectorSource) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
+	schema.Description = "One way a connector's tools are reached. Only its kind is shown."
+	schema.AdditionalProperties = false
+	return schema
+}
+
+// ConnectorSourceKind is how a source reaches a connector's tools (core.SourceKindMCP and
+// core.SourceKindHTTP).
+type ConnectorSourceKind string
+
+func (ConnectorSourceKind) Schema(registry huma.Registry) *huma.Schema {
+	ref := namedEnum(registry, "ConnectorSourceKind",
+		"mcp is an MCP server that lists the tools, http an HTTP API whose tools the manifest lists.",
+		core.SourceKindMCP, core.SourceKindHTTP)
+	// Named, so a later enum with mcp or http in it renames nothing in the Go SDK, as
+	// ConnectionOwnerType's constants are.
+	registry.Map()["ConnectorSourceKind"].Extensions = map[string]any{
+		"x-enum-varnames": []string{"ConnectorSourceKindMCP", "ConnectorSourceKindHTTP"},
+	}
+	return ref
 }
 
 // ConnectorSandbox is the manifest's sandbox block as the catalog shows it.
@@ -563,6 +592,10 @@ func connectorOf(definition store.ConnectorDefinition, publicURL string) Connect
 	if slices.Contains(manifest.Schemes, oauth2code.Name) {
 		redirectURI = connectorCallbackURL(publicURL)
 	}
+	sources := make([]ConnectorSource, 0, len(manifest.Sources))
+	for _, source := range manifest.Sources {
+		sources = append(sources, ConnectorSource{Kind: ConnectorSourceKind(source.Kind)})
+	}
 	var sandbox *ConnectorSandbox
 	if manifest.Sandbox != nil {
 		sandbox = &ConnectorSandbox{Env: manifest.Sandbox.Env, Hosts: slices.Clone(manifest.Sandbox.Hosts)}
@@ -581,6 +614,7 @@ func connectorOf(definition store.ConnectorDefinition, publicURL string) Connect
 		Schemes:     append([]string{}, manifest.Schemes...),
 		Inputs:      inputs,
 		Scopes:      append([]string{}, manifest.Scopes.List...),
+		Sources:     sources,
 		Client: ConnectorClient{
 			Registration: registrations,
 			AuthMethod:   ConnectorClientAuthMethod(manifest.Client.AuthMethod),

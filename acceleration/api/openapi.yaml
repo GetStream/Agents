@@ -3552,6 +3552,11 @@ components:
         setup:
           $ref: '#/components/schemas/ConnectorSetup'
           description: What a person does at the provider before the first consent, such as registering an OAuth client. Absent when the manifest says nothing.
+        sources:
+          description: 'How the connector''s tools are reached, one entry per source, by kind only: never a URL, a path or a credential. A custom connector made from an endpoint is mcp, one made from http is http.'
+          items:
+            $ref: '#/components/schemas/ConnectorSource'
+          type: array
         sync_hash:
           description: The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
           readOnly: true
@@ -3564,6 +3569,7 @@ components:
         - schemes
         - inputs
         - scopes
+        - sources
         - client
         - channel
         - created_at
@@ -4055,6 +4061,24 @@ components:
         - title
         - description
       type: object
+    ConnectorSource:
+      additionalProperties: false
+      description: One way a connector's tools are reached. Only its kind is shown.
+      properties:
+        kind:
+          $ref: '#/components/schemas/ConnectorSourceKind'
+      required:
+        - kind
+      type: object
+    ConnectorSourceKind:
+      description: mcp is an MCP server that lists the tools, http an HTTP API whose tools the manifest lists.
+      enum:
+        - mcp
+        - http
+      type: string
+      x-enum-varnames:
+        - ConnectorSourceKindMCP
+        - ConnectorSourceKindHTTP
     ConnectorToolGrant:
       description: One tool a binding allows.
       properties:

@@ -5313,6 +5313,12 @@ namespace GetStream.VisionAgents.Models
         public ConnectorSetup? Setup { get; set; } = default!;
 
         /// <summary>
+        /// How the connector's tools are reached, one entry per source, by kind only: never a URL, a path or a credential. A custom connector made from an endpoint is mcp, one made from http is http.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sources")]
+        public System.Collections.Generic.List<ConnectorSource> Sources { get; set; } = new System.Collections.Generic.List<ConnectorSource>();
+
+        /// <summary>
         /// The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
@@ -6009,6 +6015,18 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("title")]
         public string Title { get; set; } = default!;
+
+    }
+
+    /// <summary>
+    /// One way a connector's tools are reached. Only its kind is shown.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class ConnectorSource
+    {
+
+        [System.Text.Json.Serialization.JsonPropertyName("kind")]
+        public string Kind { get; set; } = default!;
 
     }
 
