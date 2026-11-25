@@ -434,7 +434,7 @@ func (s *TelnyxUnpaidSuite) TestATextRefusedAtItsReservationWhileMoneyCannotBeCh
 // ownerContext is the context of the delivery, as its task's owner's.
 func (s *TelnyxUnpaidSuite) ownerContext(ctx context.Context, delivery scheduledDelivery) context.Context {
 	ctx, err := s.router.scheduledOwnerContext(ctx, delivery)
-	s.Require().NoError(err)
+	s.NoError(err)
 	return ctx
 }
 
