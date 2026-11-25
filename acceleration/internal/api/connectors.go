@@ -210,6 +210,11 @@ type CustomHTTPTool struct {
 func (*CustomHTTPTool) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
 	schema.Description = "One tool of an http connector: one request, whose method and path are fixed."
 	schema.AdditionalProperties = false
+	// Named, so the next enum with one of these values does not rename the Go SDK's constants,
+	// as ConnectionOwnerType's are (connections.go).
+	schema.Properties["method"].Extensions = map[string]any{"x-enum-varnames": []string{"CustomHTTPToolMethodGET",
+		"CustomHTTPToolMethodHEAD", "CustomHTTPToolMethodPOST", "CustomHTTPToolMethodPUT", "CustomHTTPToolMethodPATCH",
+		"CustomHTTPToolMethodDELETE"}}
 	return schema
 }
 
@@ -223,6 +228,10 @@ type CustomHTTPParameter struct {
 func (*CustomHTTPParameter) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
 	schema.Description = "One value the model gives an http tool."
 	schema.AdditionalProperties = false
+	// InvocationArgumentType has string, number and boolean too: unnamed, oapi-codegen would
+	// prefix both enums' constants (enumsConflict), renaming the Go SDK's String, Number and the rest.
+	schema.Properties["type"].Extensions = map[string]any{"x-enum-varnames": []string{"CustomHTTPParameterTypeString",
+		"CustomHTTPParameterTypeNumber", "CustomHTTPParameterTypeInteger", "CustomHTTPParameterTypeBoolean"}}
 	return schema
 }
 

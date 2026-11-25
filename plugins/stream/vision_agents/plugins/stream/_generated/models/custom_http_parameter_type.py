@@ -2,10 +2,10 @@ from enum import StrEnum
 
 
 class CustomHTTPParameterType(StrEnum):
-    BOOLEAN = "boolean"
-    INTEGER = "integer"
-    NUMBER = "number"
-    STRING = "string"
+    CUSTOM_HTTP_PARAMETER_TYPE_BOOLEAN = "boolean"
+    CUSTOM_HTTP_PARAMETER_TYPE_INTEGER = "integer"
+    CUSTOM_HTTP_PARAMETER_TYPE_NUMBER = "number"
+    CUSTOM_HTTP_PARAMETER_TYPE_STRING = "string"
 
     def __str__(self) -> str:
         return str(self.value)

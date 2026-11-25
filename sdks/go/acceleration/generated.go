@@ -1125,28 +1125,28 @@ func (e CustomHTTPParameterType) Valid() bool {
 
 // Defines values for CustomHTTPToolMethod.
 const (
-	DELETE CustomHTTPToolMethod = "DELETE"
-	GET    CustomHTTPToolMethod = "GET"
-	HEAD   CustomHTTPToolMethod = "HEAD"
-	PATCH  CustomHTTPToolMethod = "PATCH"
-	POST   CustomHTTPToolMethod = "POST"
-	PUT    CustomHTTPToolMethod = "PUT"
+	CustomHTTPToolMethodDELETE CustomHTTPToolMethod = "DELETE"
+	CustomHTTPToolMethodGET    CustomHTTPToolMethod = "GET"
+	CustomHTTPToolMethodHEAD   CustomHTTPToolMethod = "HEAD"
+	CustomHTTPToolMethodPATCH  CustomHTTPToolMethod = "PATCH"
+	CustomHTTPToolMethodPOST   CustomHTTPToolMethod = "POST"
+	CustomHTTPToolMethodPUT    CustomHTTPToolMethod = "PUT"
 )
 
 // Valid indicates whether the value is a known member of the CustomHTTPToolMethod enum.
 func (e CustomHTTPToolMethod) Valid() bool {
 	switch e {
-	case DELETE:
+	case CustomHTTPToolMethodDELETE:
 		return true
-	case GET:
+	case CustomHTTPToolMethodGET:
 		return true
-	case HEAD:
+	case CustomHTTPToolMethodHEAD:
 		return true
-	case PATCH:
+	case CustomHTTPToolMethodPATCH:
 		return true
-	case POST:
+	case CustomHTTPToolMethodPOST:
 		return true
-	case PUT:
+	case CustomHTTPToolMethodPUT:
 		return true
 	default:
 		return false
@@ -1686,28 +1686,28 @@ func (e ImageSourceDetail) Valid() bool {
 
 // Defines values for InvocationArgumentType.
 const (
-	InvocationArgumentTypeArray   InvocationArgumentType = "array"
-	InvocationArgumentTypeBoolean InvocationArgumentType = "boolean"
-	InvocationArgumentTypeNull    InvocationArgumentType = "null"
-	InvocationArgumentTypeNumber  InvocationArgumentType = "number"
-	InvocationArgumentTypeObject  InvocationArgumentType = "object"
-	InvocationArgumentTypeString  InvocationArgumentType = "string"
+	Array   InvocationArgumentType = "array"
+	Boolean InvocationArgumentType = "boolean"
+	Null    InvocationArgumentType = "null"
+	Number  InvocationArgumentType = "number"
+	Object  InvocationArgumentType = "object"
+	String  InvocationArgumentType = "string"
 )
 
 // Valid indicates whether the value is a known member of the InvocationArgumentType enum.
 func (e InvocationArgumentType) Valid() bool {
 	switch e {
-	case InvocationArgumentTypeArray:
+	case Array:
 		return true
-	case InvocationArgumentTypeBoolean:
+	case Boolean:
 		return true
-	case InvocationArgumentTypeNull:
+	case Null:
 		return true
-	case InvocationArgumentTypeNumber:
+	case Number:
 		return true
-	case InvocationArgumentTypeObject:
+	case Object:
 		return true
-	case InvocationArgumentTypeString:
+	case String:
 		return true
 	default:
 		return false

@@ -4733,6 +4733,11 @@ components:
             - integer
             - boolean
           type: string
+          x-enum-varnames:
+            - CustomHTTPParameterTypeString
+            - CustomHTTPParameterTypeNumber
+            - CustomHTTPParameterTypeInteger
+            - CustomHTTPParameterTypeBoolean
       required:
         - type
       type: object
@@ -4752,6 +4757,13 @@ components:
             - PATCH
             - DELETE
           type: string
+          x-enum-varnames:
+            - CustomHTTPToolMethodGET
+            - CustomHTTPToolMethodHEAD
+            - CustomHTTPToolMethodPOST
+            - CustomHTTPToolMethodPUT
+            - CustomHTTPToolMethodPATCH
+            - CustomHTTPToolMethodDELETE
         name:
           description: 1 to 63 letters, digits, _ or -. The model is offered it after the binding's name and __.
           type: string

@@ -2,12 +2,12 @@ from enum import StrEnum
 
 
 class CustomHTTPToolMethod(StrEnum):
-    DELETE = "DELETE"
-    GET = "GET"
-    HEAD = "HEAD"
-    PATCH = "PATCH"
-    POST = "POST"
-    PUT = "PUT"
+    CUSTOM_HTTP_TOOL_METHOD_DELETE = "DELETE"
+    CUSTOM_HTTP_TOOL_METHOD_GET = "GET"
+    CUSTOM_HTTP_TOOL_METHOD_HEAD = "HEAD"
+    CUSTOM_HTTP_TOOL_METHOD_PATCH = "PATCH"
+    CUSTOM_HTTP_TOOL_METHOD_POST = "POST"
+    CUSTOM_HTTP_TOOL_METHOD_PUT = "PUT"
 
     def __str__(self) -> str:
         return str(self.value)
