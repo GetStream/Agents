@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from ..models.agent_config_request_tags import AgentConfigRequestTags
     from ..models.agent_connector_binding import AgentConnectorBinding
     from ..models.agent_dispatch import AgentDispatch
+    from ..models.agent_identity import AgentIdentity
     from ..models.agent_review import AgentReview
     from ..models.agent_scheduling import AgentScheduling
     from ..models.child_agent import ChildAgent
@@ -189,6 +190,8 @@ class AgentConfigRequest:
         ui_instructions (str | Unset): What teaches the agent's model to answer with UI, such as the section the SDK
             compiles from agent.yaml's ui key. Every session is told them after the instructions, unless it was opened with
             ui false. Empty teaches none. Left out on an update, the stored ones stay.
+        identity (AgentIdentity | Unset): Who an agent config's agent is in Stream Chat, set by the app's backend. An
+            unknown field is refused rather than ignored.
     """
 
     name: str
@@ -232,6 +235,7 @@ class AgentConfigRequest:
     agents: list[ChildAgent] | Unset = UNSET
     image: str | Unset = UNSET
     ui_instructions: str | Unset = UNSET
+    identity: AgentIdentity | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -400,6 +404,10 @@ class AgentConfigRequest:
 
         ui_instructions = self.ui_instructions
 
+        identity: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.identity, Unset):
+            identity = self.identity.to_dict()
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -487,6 +495,8 @@ class AgentConfigRequest:
             field_dict["image"] = image
         if ui_instructions is not UNSET:
             field_dict["ui_instructions"] = ui_instructions
+        if identity is not UNSET:
+            field_dict["identity"] = identity
 
         return field_dict
 
@@ -507,6 +517,7 @@ class AgentConfigRequest:
         from ..models.agent_config_request_tags import AgentConfigRequestTags
         from ..models.agent_connector_binding import AgentConnectorBinding
         from ..models.agent_dispatch import AgentDispatch
+        from ..models.agent_identity import AgentIdentity
         from ..models.agent_review import AgentReview
         from ..models.agent_scheduling import AgentScheduling
         from ..models.child_agent import ChildAgent
@@ -749,6 +760,13 @@ class AgentConfigRequest:
 
         ui_instructions = d.pop("ui_instructions", UNSET)
 
+        _identity = d.pop("identity", UNSET)
+        identity: AgentIdentity | Unset
+        if isinstance(_identity, Unset):
+            identity = UNSET
+        else:
+            identity = AgentIdentity.from_dict(_identity)
+
         agent_config_request = cls(
             name=name,
             calls=calls,
@@ -791,6 +809,7 @@ class AgentConfigRequest:
             agents=agents,
             image=image,
             ui_instructions=ui_instructions,
+            identity=identity,
         )
 
         agent_config_request.additional_properties = d

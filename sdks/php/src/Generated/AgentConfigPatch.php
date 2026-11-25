@@ -88,6 +88,8 @@ final readonly class AgentConfigPatch
         public ?string $uiInstructions = null,
         // The updated_at of the config this change was made from. Sent, the change is refused with a 409 conflict whe...
         public ?\DateTimeImmutable $updatedAt = null,
+        // Replaces the identity whole. An empty object removes it.
+        public ?AgentIdentity $identity = null,
     ) {
     }
 
@@ -139,6 +141,7 @@ final readonly class AgentConfigPatch
             image: array_key_exists('image', $data) && $data['image'] !== null ? Json::string($data, 'image') : null,
             uiInstructions: array_key_exists('ui_instructions', $data) && $data['ui_instructions'] !== null ? Json::string($data, 'ui_instructions') : null,
             updatedAt: array_key_exists('updated_at', $data) && $data['updated_at'] !== null ? Json::date($data, 'updated_at') : null,
+            identity: array_key_exists('identity', $data) && $data['identity'] !== null ? AgentIdentity::fromArray(Json::object($data, 'identity')) : null,
         );
     }
 
@@ -275,6 +278,9 @@ final readonly class AgentConfigPatch
         }
         if ($this->updatedAt !== null) {
             $out['updated_at'] = Json::dateValue($this->updatedAt);
+        }
+        if ($this->identity !== null) {
+            $out['identity'] = $this->identity->toArray();
         }
         return $out;
     }

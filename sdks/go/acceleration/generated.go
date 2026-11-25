@@ -3863,12 +3863,15 @@ type AgentConfig struct {
 	Guardrail *string   `json:"guardrail,omitempty"`
 
 	// Harness Which harness the agent's sessions run: what hands work to the subagent, loads skills, compacts the conversation and starts the sandbox. Set on the agent, never on a session. Omit it for the default, the only one there is.
-	Harness            *Harness  `json:"harness,omitempty"`
-	Id                 string    `json:"id"`
-	Image              *string   `json:"image,omitempty"`
-	Instructions       *string   `json:"instructions,omitempty"`
-	Keyterms           *[]string `json:"keyterms,omitempty"`
-	KnowledgeNamespace *string   `json:"knowledge_namespace,omitempty"`
+	Harness *Harness `json:"harness,omitempty"`
+	Id      string   `json:"id"`
+
+	// Identity Who an agent config's agent is in Stream Chat, set by the app's backend. An unknown field is refused rather than ignored.
+	Identity           *AgentIdentity `json:"identity,omitempty"`
+	Image              *string        `json:"image,omitempty"`
+	Instructions       *string        `json:"instructions,omitempty"`
+	Keyterms           *[]string      `json:"keyterms,omitempty"`
+	KnowledgeNamespace *string        `json:"knowledge_namespace,omitempty"`
 
 	// LeftOutConnectors The connectors agent.yaml names that the last sync left out, because the app has no connection by the id or label they name: an agent that runs without them until the connection exists and it syncs again. Only a sync writes them. Absent when there are none.
 	LeftOutConnectors *[]LeftOutConnector `json:"left_out_connectors,omitempty"`
@@ -3963,6 +3966,9 @@ type AgentConfigPatch struct {
 
 	// Harness Which harness the agent's sessions run: what hands work to the subagent, loads skills, compacts the conversation and starts the sandbox. Set on the agent, never on a session. Omit it for the default, the only one there is.
 	Harness *Harness `json:"harness,omitempty"`
+
+	// Identity Who an agent config's agent is in Stream Chat, set by the app's backend. An unknown field is refused rather than ignored.
+	Identity *AgentIdentity `json:"identity,omitempty"`
 
 	// Image An empty string removes it, and the agent stops being offered generate_image.
 	Image              *string   `json:"image,omitempty"`
@@ -4086,6 +4092,9 @@ type AgentConfigRequest struct {
 
 	// Harness Which harness the agent's sessions run: what hands work to the subagent, loads skills, compacts the conversation and starts the sandbox. Set on the agent, never on a session. Omit it for the default, the only one there is.
 	Harness *Harness `json:"harness,omitempty"`
+
+	// Identity Who an agent config's agent is in Stream Chat, set by the app's backend. An unknown field is refused rather than ignored.
+	Identity *AgentIdentity `json:"identity,omitempty"`
 
 	// Image What the agent draws pictures with, as a provider/model or a capability shortcut such as image-fast. Naming one offers a text agent with a Chat channel the generate_image tool, whose pictures are drawn after the turn and posted into the conversation when ready, billed like POST /v1/image/generations. Empty offers no such tool: unlike search there is no default.
 	Image        *string `json:"image,omitempty"`
@@ -4251,6 +4260,18 @@ type AgentDispatch struct {
 
 	// Text Whether this kind of work is left to the customer's own dispatch worker.
 	Text *DispatchSetting `json:"text,omitempty"`
+}
+
+// AgentIdentity Who an agent config's agent is in Stream Chat, set by the app's backend. An unknown field is refused rather than ignored.
+type AgentIdentity struct {
+	// AgentId The agent id a new conversation is kept under, as a session's agent_id. It may not start with !.
+	AgentId *string `json:"agent_id,omitempty"`
+
+	// UserId The Stream user the agent joins a call and writes Chat messages as, as a session's user_id. It may not start with !.
+	UserId *string `json:"user_id,omitempty"`
+
+	// UserName That user's display name, as a session's user_name.
+	UserName *string `json:"user_name,omitempty"`
 }
 
 // AgentLog defines model for AgentLog.

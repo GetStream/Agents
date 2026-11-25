@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from ..models.agent_config_patch_tags import AgentConfigPatchTags
     from ..models.agent_connector_binding import AgentConnectorBinding
     from ..models.agent_dispatch import AgentDispatch
+    from ..models.agent_identity import AgentIdentity
     from ..models.agent_review import AgentReview
     from ..models.agent_scheduling import AgentScheduling
     from ..models.child_agent import ChildAgent
@@ -142,6 +143,8 @@ class AgentConfigPatch:
                 is refused with a 409 conflict when the config was saved after it, so an edit made from an old copy does not
                 write over a newer one: read the config again and make the change on that. Left out, the change is made on the
                 config as it now is, and every field it does not send keeps what is stored.
+            identity (AgentIdentity | Unset): Who an agent config's agent is in Stream Chat, set by the app's backend. An
+                unknown field is refused rather than ignored.
     """
 
     calls: AgentCalls | Unset = UNSET
@@ -186,6 +189,7 @@ class AgentConfigPatch:
     image: str | Unset = UNSET
     ui_instructions: str | Unset = UNSET
     updated_at: datetime.datetime | Unset = UNSET
+    identity: AgentIdentity | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.agent_config_patch_plugins_item_type_1 import (
@@ -357,6 +361,10 @@ class AgentConfigPatch:
         if not isinstance(self.updated_at, Unset):
             updated_at = self.updated_at.isoformat()
 
+        identity: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.identity, Unset):
+            identity = self.identity.to_dict()
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update({})
@@ -444,6 +452,8 @@ class AgentConfigPatch:
             field_dict["ui_instructions"] = ui_instructions
         if updated_at is not UNSET:
             field_dict["updated_at"] = updated_at
+        if identity is not UNSET:
+            field_dict["identity"] = identity
 
         return field_dict
 
@@ -464,6 +474,7 @@ class AgentConfigPatch:
         from ..models.agent_config_patch_tags import AgentConfigPatchTags
         from ..models.agent_connector_binding import AgentConnectorBinding
         from ..models.agent_dispatch import AgentDispatch
+        from ..models.agent_identity import AgentIdentity
         from ..models.agent_review import AgentReview
         from ..models.agent_scheduling import AgentScheduling
         from ..models.child_agent import ChildAgent
@@ -713,6 +724,13 @@ class AgentConfigPatch:
         else:
             updated_at = datetime.datetime.fromisoformat(_updated_at)
 
+        _identity = d.pop("identity", UNSET)
+        identity: AgentIdentity | Unset
+        if isinstance(_identity, Unset):
+            identity = UNSET
+        else:
+            identity = AgentIdentity.from_dict(_identity)
+
         agent_config_patch = cls(
             calls=calls,
             channels=channels,
@@ -756,6 +774,7 @@ class AgentConfigPatch:
             image=image,
             ui_instructions=ui_instructions,
             updated_at=updated_at,
+            identity=identity,
         )
 
         return agent_config_patch

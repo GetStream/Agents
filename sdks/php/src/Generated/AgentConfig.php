@@ -78,6 +78,8 @@ final readonly class AgentConfig
         public ?string $image = null,
         // Absent when the agent is taught no UI.
         public ?string $uiInstructions = null,
+        // Who the agent is in Stream Chat in a session that names nobody. Absent when the config sets none.
+        public ?AgentIdentity $identity = null,
     ) {
     }
 
@@ -130,6 +132,7 @@ final readonly class AgentConfig
             agents: array_key_exists('agents', $data) && $data['agents'] !== null ? array_map(ChildAgent::fromArray(...), Json::objects($data, 'agents')) : null,
             image: array_key_exists('image', $data) && $data['image'] !== null ? Json::string($data, 'image') : null,
             uiInstructions: array_key_exists('ui_instructions', $data) && $data['ui_instructions'] !== null ? Json::string($data, 'ui_instructions') : null,
+            identity: array_key_exists('identity', $data) && $data['identity'] !== null ? AgentIdentity::fromArray(Json::object($data, 'identity')) : null,
         );
     }
 
@@ -257,6 +260,9 @@ final readonly class AgentConfig
         }
         if ($this->uiInstructions !== null) {
             $out['ui_instructions'] = $this->uiInstructions;
+        }
+        if ($this->identity !== null) {
+            $out['identity'] = $this->identity->toArray();
         }
         return $out;
     }

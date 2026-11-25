@@ -647,6 +647,9 @@ pub struct AgentConfig {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub harness: ::std::option::Option<Harness>,
     pub id: ::std::string::String,
+    ///Who the agent is in Stream Chat in a session that names nobody. Absent when the config sets none.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub identity: ::std::option::Option<AgentIdentity>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub image: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
@@ -748,6 +751,9 @@ pub struct AgentConfigPatch {
     pub guardrail: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub harness: ::std::option::Option<Harness>,
+    ///Replaces the identity whole. An empty object removes it.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub identity: ::std::option::Option<AgentIdentity>,
     ///An empty string removes it, and the agent stops being offered generate_image.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub image: ::std::option::Option<::std::string::String>,
@@ -878,6 +884,9 @@ pub struct AgentConfigRequest {
     pub guardrail: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub harness: ::std::option::Option<Harness>,
+    ///Who the agent is in Stream Chat in a session that names nobody: the agent id a new conversation is kept under, and the user the agent joins a call and writes as, with that user's name. A session that names this config uses each one set, from an end user's device or the app's backend alike, unless its request names its own agent_id, user_id or user_name: one at its default counts as naming none. A session carrying on a conversation_id keeps the agent id that conversation was kept under. Each visitor's conversation stays theirs when every session shares one agent id. Left out or null on an update, the stored identity stays; an empty object removes it.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub identity: ::std::option::Option<AgentIdentity>,
     ///What the agent draws pictures with, as a provider/model or a capability shortcut such as image-fast. Naming one offers a text agent with a Chat channel the generate_image tool, whose pictures are drawn after the turn and posted into the conversation when ready, billed like POST /v1/image/generations. Empty offers no such tool: unlike search there is no default.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub image: ::std::option::Option<::std::string::String>,
@@ -1084,6 +1093,20 @@ pub struct AgentDispatch {
     ///An end user's message is handed to a dispatch worker, with the session it was written to, instead of being answered by the model. The worker answers by creating a response on that session with a server-side credential, passing the message's request_id when it has one; that is the only text the model answers.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub text: ::std::option::Option<DispatchSetting>,
+}
+///Who an agent config's agent is in Stream Chat, set by the app's backend. An unknown field is refused rather than ignored.
+#[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentIdentity {
+    ///The agent id a new conversation is kept under, as a session's agent_id. It may not start with !.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub agent_id: ::std::option::Option<::std::string::String>,
+    ///The Stream user the agent joins a call and writes Chat messages as, as a session's user_id. It may not start with !.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub user_id: ::std::option::Option<::std::string::String>,
+    ///That user's display name, as a session's user_name.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub user_name: ::std::option::Option<::std::string::String>,
 }
 ///`AgentLog`
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
@@ -2385,6 +2408,9 @@ pub struct Call {
     pub llm_used: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub mode: ::std::option::Option<SessionMode>,
+    ///The shard the call is kept in. Set on a listed call of a deployment with shards.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub region: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub review_notes: ::std::option::Option<::std::string::String>,
     ///How well the agent handled it, from 1 to 5.
@@ -8898,7 +8924,7 @@ pub struct OrganizationActivity {
     pub organization_id: ::std::string::String,
     ///The sessions the organization's apps opened from since on, from the shards listed in shards.
     pub sessions: ActivitySessions,
-    ///The names of the shards whose requests the meters sum, this one's first. A deployment that sets no postgres.shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
+    ///The names of the shards whose requests the meters sum, this one's first. A deployment that sets no shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
     pub shards: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
     ///The start of what was read. Areas are kept by UTC day, so they count the whole day it falls on.
@@ -11235,6 +11261,9 @@ pub struct Session {
     pub pinned_at: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub project_id: ::std::option::Option<::std::string::String>,
+    ///The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards.
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub region: ::std::option::Option<::std::string::String>,
     ///Why the review scored the conversation as it did. Read by a backend only.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub review_notes: ::std::option::Option<::std::string::String>,
