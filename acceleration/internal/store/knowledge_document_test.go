@@ -331,6 +331,38 @@ func (s *StoreSuite) TestAnOvertakenReadsPassagesAreCountedOnItsDocumentOnly() {
 	s.False(kept, "it is gone")
 }
 
+func (s *StoreSuite) TestAnOvertakenReadIsCountedWhateverHoldsItsDocument() {
+	for _, key := range []string{"", "acme-app/one/faq.md", "posting:x"} {
+		mine := s.knowledgeDocument("acme-app", "docs", "faq.md")
+		_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE knowledge_documents SET object_key = ?, passages = 3 WHERE id = ?", key, mine.ID)
+		s.Require().NoError(err)
+
+		kept, err := s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, 8)
+		s.Require().NoError(err)
+		s.True(kept, key)
+		counted, err := s.store.KnowledgeDocuments.Get(s.ctx, "acme-app", mine.ID)
+		s.Require().NoError(err)
+		s.Equal(8, counted.Passages, key)
+		s.Equal(key, counted.ObjectKey)
+	}
+}
+
+func (s *StoreSuite) TestEachInterruptHoldsTheDocumentUnderAnotherKey() {
+	mine := s.knowledgeDocument("acme-app", "docs", "faq.md")
+	_, _, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	_, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, 3)
+	s.Require().NoError(err)
+	key, _, err := s.store.KnowledgeDocuments.Take(s.ctx, "acme-app", mine.ID)
+	s.Require().NoError(err)
+	_, err = s.store.KnowledgeDocuments.Interrupt(s.ctx, "acme-app", mine.ID, 3)
+	s.Require().NoError(err)
+
+	deleted, err := s.store.KnowledgeDocuments.Delete(s.ctx, "acme-app", mine.ID, key)
+	s.Require().NoError(err)
+	s.False(deleted)
+}
+
 func (s *StoreSuite) TestOnlyAnUploadedDocumentWaitsForAFile() {
 	mine := s.knowledgeDocument("acme-app", "docs", "faq.md")
 	s.False(mine.WaitsForFile())

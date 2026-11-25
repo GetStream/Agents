@@ -739,7 +739,7 @@ type IndexedKnowledgeDocument struct {
 	Id          string                 `json:"id"`
 	Namespace   string                 `json:"namespace"`
 	Pages       int                    `json:"pages" doc:"How many pages the uploaded file has. 0 for text, and for a file without pages, such as a spreadsheet."`
-	Passages    int                    `json:"passages" doc:"How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote."`
+	Passages    int                    `json:"passages" doc:"How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote. An indexed one whose file was still being read when newer text or a newer file replaced it can count more than it was cut into, for the same reason, until it is written again."`
 	Source      string                 `json:"source" doc:"What the document was posted as, and what its passages are keyed by." example:"pricing.md"`
 	State       KnowledgeDocumentState `json:"state"`
 	Text        *string                `json:"text,omitempty" doc:"The document as it was last posted, or as its file was read: Markdown, each page of a file opening with an <!-- page N --> comment. Only reading one document fills it in, and one written before its text was kept has none."`

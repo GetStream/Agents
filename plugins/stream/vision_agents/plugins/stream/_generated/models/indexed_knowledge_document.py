@@ -29,7 +29,9 @@ class IndexedKnowledgeDocument:
             spreadsheet.
         passages (int): How many passages it was last cut into. A file uploaded again keeps its old passages, which are
             still looked up, until the new file has been read. A document that is pending or failed can also count the
-            passages of the version before, so that deleting it removes every passage either version wrote.
+            passages of the version before, so that deleting it removes every passage either version wrote. An indexed one
+            whose file was still being read when newer text or a newer file replaced it can count more than it was cut into,
+            for the same reason, until it is written again.
         source (str): What the document was posted as, and what its passages are keyed by. Example: pricing.md.
         state (KnowledgeDocumentState): Where the document has got to. Pending is an uploaded file waiting to be read or
             being read, or posted text whose passages are being written; text that stays pending was cut off and is fixed by

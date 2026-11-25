@@ -7208,7 +7208,7 @@ type IndexedKnowledgeDocument struct {
 	// Pages How many pages the uploaded file has. 0 for text, and for a file without pages, such as a spreadsheet.
 	Pages int `json:"pages"`
 
-	// Passages How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote.
+	// Passages How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote. An indexed one whose file was still being read when newer text or a newer file replaced it can count more than it was cut into, for the same reason, until it is written again.
 	Passages int `json:"passages"`
 
 	// Source What the document was posted as, and what its passages are keyed by.

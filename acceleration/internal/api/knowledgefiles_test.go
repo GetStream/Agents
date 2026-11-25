@@ -803,17 +803,17 @@ func (s *KnowledgeFilesSuite) TestAPostWrittenWhileItsBaseIsDeletedIsADocumentOf
 	go func() {
 		deleted <- s.serverClient.do(http.MethodDelete, "/v1/agents/knowledge?namespace="+s.namespace, nil, nil)
 	}()
-	waits := func(event string) {
+	// Other tests' backends wait in this database too, so only these two are looked for.
+	waiter := func(query string, args ...any) (pid int) {
 		s.Require().Eventually(func() bool {
-			var waiting int
-			err := lock.QueryRowContext(ctx, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event = ?",
-				event).Scan(&waiting)
-			return err == nil && waiting > 0
+			return lock.QueryRowContext(ctx, query, args...).Scan(&pid) == nil
 		}, 30*time.Second, 5*time.Millisecond)
+		return pid
 	}
-	waits("advisory")
+	deleting := waiter("SELECT l.pid FROM pg_locks l JOIN pg_database d ON d.oid = l.database " +
+		"WHERE d.datname = current_database() AND l.locktype = 'advisory' AND l.objid = 2380 AND NOT l.granted")
 	write()
-	waits("transactionid")
+	waiter("SELECT pid FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid)) LIMIT 1", deleting)
 	_, err = lock.ExecContext(ctx, "SELECT pg_advisory_unlock(2380)")
 	s.Require().NoError(err)
 
@@ -905,6 +905,39 @@ func (s *KnowledgeFilesSuite) TestRemovingPostedTextAsksNothingOfTheBucket() {
 	kept, err := s.knowledgeBucket.Read(context.Background(), document.ObjectKey)
 	s.Require().NoError(err)
 	s.Equal("kept", string(kept))
+}
+
+// The upload was read while the first read's write was held, and is not the first's to take.
+func (s *KnowledgeFilesSuite) TestAReadOvertakenByALaterUploadLeavesItsPassages() {
+	writing, write := s.holdWrite()
+	_, sent, _ := s.upload("later-upload.md", []byte(sections(3)), "")
+	s.reached(writing, "the read never wrote")
+	status, _, _ := s.upload("later-upload.md", []byte(sections(3)), "")
+	s.Require().Equal(http.StatusAccepted, status)
+	s.Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	write()
+
+	s.everyFileRead()
+	s.indexedWith("later-upload.md", 3)
+}
+
+// A count an overtaken read raised makes the same text be written again, once.
+func (s *KnowledgeFilesSuite) TestAPostAfterAnOvertakenReadIsWrittenAgainOnce() {
+	writing, write := s.holdWrite()
+	_, _, _ = s.upload("counted.md", []byte(sections(8)), "")
+	s.reached(writing, "the read never wrote")
+	s.Require().Equal(http.StatusOK, s.post("counted.md", 2))
+	write()
+	s.everyFileRead()
+	writes := 0
+	s.knowledge.onceBeforeWrite(func() { writes++ })
+
+	s.Equal(http.StatusOK, s.post("counted.md", 2))
+	s.indexedWith("counted.md", 2)
+	s.Equal(1, writes)
+	s.knowledge.onceBeforeWrite(func() { writes++ })
+	s.Equal(http.StatusOK, s.post("counted.md", 2))
+	s.Equal(1, writes, "unchanged: not written again")
 }
 
 // What it was overtaken by is a post, whose passages are not the read's to take.
