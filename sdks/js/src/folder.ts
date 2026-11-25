@@ -139,6 +139,7 @@ async function loadSimulations(
     const extension = extname(entry.name).toLowerCase();
     const file = join(path, entry.name);
     if (
+      skipped(entry.name) ||
       (!entry.isFile() && !entry.isSymbolicLink()) ||
       (extension !== ".yaml" && extension !== ".yml") ||
       !(await syncedFile(root, file, entry))
@@ -253,9 +254,9 @@ async function loadSkillFiles(path: string, root: string): Promise<Record<string
 }
 
 /**
- * Whether a file or folder in a skill or knowledge folder is left behind: hidden ones such as
- * .DS_Store, .git or a .env, and what running a skill's scripts locally leaves, __pycache__ and
- * node_modules.
+ * Whether a file or folder in skills/, a skill folder, knowledge/ or simulations/ is left behind:
+ * hidden ones such as .DS_Store, .git, a .env or an editor's lock file, and what running a
+ * skill's scripts locally leaves, __pycache__ and node_modules.
  */
 function skipped(name: string): boolean {
   return name.startsWith(".") || name === "__pycache__" || name === "node_modules";

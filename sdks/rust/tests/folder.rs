@@ -899,6 +899,9 @@ fn hidden_files_are_left_out_of_knowledge() {
     write(&root, "knowledge/.draft.md", "Not yet.\n");
     write(&root, "knowledge/.git/notes.md", "Not a document.\n");
     write(&root, "knowledge/__pycache__/notes.md", "Not a document.\n");
+    write(&root, "knowledge/guides/setup.md", "Plug it in.\n");
+    write(&root, "knowledge/guides/.draft.md", "Not yet.\n");
+    write(&root, "knowledge/guides/.git/notes.md", "Not a document.\n");
 
     let folder = Folder::load(&root).unwrap();
 
@@ -907,7 +910,7 @@ fn hidden_files_are_left_out_of_knowledge() {
         .iter()
         .map(|document| document.source.as_str())
         .collect();
-    assert_eq!(sources, ["pricing.md"]);
+    assert_eq!(sources, ["guides/setup.md", "pricing.md"]);
 }
 
 /// What an agent directory syncs is what it holds: a link out of it is refused wherever it is.
@@ -1169,5 +1172,52 @@ mod links {
             }
         }
         assert!(read.is_empty(), "{read:#?}");
+    }
+
+    #[test]
+    fn an_editors_lock_file_in_skills_and_simulations_is_left_out() {
+        let lunch = "- name: lunch\n  scenario: Order lunch.\n  assertion: Lunch is ordered.\n";
+        let (_temporary, root) = directory("jean");
+        write(&root, "agent.yaml", "name: jean\n");
+        write(&root, "instructions.md", "Be brief.\n");
+        write(&root, "skills/think.md", SKILL);
+        write(&root, "skills/.draft.md", SKILL);
+        write(&root, "knowledge/pricing.md", "A penny.\n");
+        write(&root, "simulations/calls.yaml", lunch);
+        write(
+            &root,
+            "simulations/.draft.yaml",
+            lunch.replacen("lunch", "draft", 1),
+        );
+        // What Emacs leaves beside a file with unsaved edits: a link to who is editing it.
+        link(&root, "skills/.#think.md", "jean@laptop.4242:1732500000");
+        link(
+            &root,
+            "simulations/.#calls.yaml",
+            "jean@laptop.4242:1732500000",
+        );
+
+        let folder = Folder::load(&root).unwrap();
+
+        assert_eq!(folder.instructions, "Be brief.");
+        let skills: Vec<_> = folder
+            .skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect();
+        assert_eq!(skills, ["think"]);
+        let knowledge: Vec<_> = folder
+            .knowledge
+            .iter()
+            .map(|document| document.source.as_str())
+            .collect();
+        assert_eq!(knowledge, ["pricing.md"]);
+        let simulations: Vec<_> = folder
+            .simulations
+            .iter()
+            .flatten()
+            .map(|simulation| simulation.name.as_str())
+            .collect();
+        assert_eq!(simulations, ["lunch"]);
     }
 }

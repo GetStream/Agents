@@ -861,6 +861,9 @@ fn load_skills(agent: &Path, path: &Path) -> Result<Vec<Skill>> {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
+        if skipped(&entry_name) {
+            continue;
+        }
         // Before the checks below, which take a link going round in a loop for nothing there.
         inside(agent, &entry)?;
         let (name, file) = if entry.is_dir() {
@@ -936,8 +939,9 @@ fn load_skill_files(
     Ok(())
 }
 
-/// Whether a file or folder in a skill folder is left behind: hidden ones such as
-/// .DS_Store, and the __pycache__ running a skill's Python scripts locally leaves.
+/// Whether a file or folder in skills/, a skill folder, knowledge/ or simulations/ is left
+/// behind: hidden ones such as .DS_Store or an editor's lock file, and the __pycache__ running a
+/// skill's Python scripts locally leaves.
 fn skipped(name: &str) -> bool {
     name.starts_with('.') || name == "__pycache__"
 }
@@ -1188,12 +1192,15 @@ fn load_simulations(agent: &Path, path: &Path) -> Result<Option<Vec<Simulation>>
         .flatten()
         .map(|entry| entry.path())
         .filter(|file| {
-            file.extension().is_some_and(|extension| {
-                matches!(
-                    extension.to_string_lossy().to_lowercase().as_str(),
-                    "yaml" | "yml"
-                )
-            })
+            !file
+                .file_name()
+                .is_some_and(|name| skipped(&name.to_string_lossy()))
+                && file.extension().is_some_and(|extension| {
+                    matches!(
+                        extension.to_string_lossy().to_lowercase().as_str(),
+                        "yaml" | "yml"
+                    )
+                })
         })
         .collect();
     files.sort();

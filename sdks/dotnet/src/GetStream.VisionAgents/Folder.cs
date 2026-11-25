@@ -755,6 +755,10 @@ public sealed class Folder
         foreach (var entry in Directory.GetFileSystemEntries(path).Order(StringComparer.Ordinal))
         {
             var entryName = System.IO.Path.GetFileName(entry);
+            if (Skipped(entryName))
+            {
+                continue;
+            }
             Inside(root, entry);
             var isFolder = Directory.Exists(entry);
             string name, file;
@@ -835,8 +839,9 @@ public sealed class Folder
     }
 
     /// <summary>
-    /// Whether a file or folder in a skill folder is left behind: hidden ones such as
-    /// .DS_Store, and the __pycache__ that running a skill's Python scripts locally leaves.
+    /// Whether a file or folder in skills/, a skill folder, knowledge/ or simulations/ is left
+    /// behind: hidden ones such as .DS_Store or an editor's lock file, and the __pycache__ that
+    /// running a skill's Python scripts locally leaves.
     /// </summary>
     private static bool Skipped(string name) => name.StartsWith('.') || name == "__pycache__";
 
@@ -1095,7 +1100,7 @@ public sealed class Folder
         var simulations = new List<SimulationDeclaration>();
         var named = new Dictionary<string, string>(StringComparer.Ordinal);
         var files = Directory.GetFiles(path)
-            .Where(file => System.IO.Path.GetExtension(file).ToLowerInvariant() is ".yaml" or ".yml")
+            .Where(file => !Skipped(System.IO.Path.GetFileName(file)) && System.IO.Path.GetExtension(file).ToLowerInvariant() is ".yaml" or ".yml")
             .Order(StringComparer.Ordinal);
         foreach (var file in files)
         {

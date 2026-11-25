@@ -219,6 +219,9 @@ final readonly class Folder
         $skills = [];
         $declared = [];
         foreach (self::entries($path) as $entry) {
+            if (str_starts_with($entry, '.') || $entry === '__pycache__') {
+                continue;
+            }
             $name = $entry;
             $file = $path . '/' . $entry;
             // Before the checks below, which take a link going round in a loop for nothing there.
@@ -497,10 +500,13 @@ final readonly class Folder
     }
 
     /**
-     * What $file says, or nothing when it is not there.
+     * What $file says, or nothing when it is not there, as a link to nothing is not.
      */
     private static function optional(string $root, string $file): string
     {
+        if (is_link($file) && self::dangles($file)) {
+            return '';
+        }
         return self::inside($root, $file) !== null && is_file($file) ? self::read($root, $file) : '';
     }
 
@@ -515,9 +521,29 @@ final readonly class Folder
         if ($real === false && !is_link($path)) {
             return null;
         }
+        if ($real === false && self::dangles($path)) {
+            throw new ConfigurationException("{$path} is a link to nothing");
+        }
         if ($real === false || ($real !== $root && !str_starts_with($real, $root . DIRECTORY_SEPARATOR))) {
             throw new ConfigurationException("{$path} links outside the agent directory");
         }
         return $real;
+    }
+
+    /**
+     * Whether the link $path ends at nothing rather than going round in a loop, which realpath()
+     * fails on alike. Each link is followed from the folder it is in, as the system would.
+     */
+    private static function dangles(string $path): bool
+    {
+        // As many as Linux follows before it gives up on a path.
+        for ($links = 0; is_link($path); $links++) {
+            $target = readlink($path);
+            if ($target === false || $links === 40) {
+                return false;
+            }
+            $path = str_starts_with($target, '/') ? $target : dirname($path) . '/' . $target;
+        }
+        return !file_exists($path);
     }
 }

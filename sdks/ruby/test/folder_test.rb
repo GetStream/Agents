@@ -529,7 +529,31 @@ class TestFolder < Minitest::Test
     write("knowledge/.draft.md", "Not yet.\n")
     write("knowledge/.git/notes.md", "Not a document.\n")
     write("knowledge/__pycache__/notes.md", "Not a document.\n")
+    write("knowledge/guides/setup.md", "Plug it in.\n")
+    write("knowledge/guides/.draft.md", "Not yet.\n")
+    write("knowledge/guides/.git/notes.md", "Not a document.\n")
 
-    assert_equal ["pricing.md"], VA::Folder.load(@root).knowledge.map(&:source)
+    assert_equal ["guides/setup.md", "pricing.md"], VA::Folder.load(@root).knowledge.map(&:source)
+  end
+
+  def test_an_editors_lock_file_in_skills_and_simulations_is_left_out
+    lunch = "- name: lunch\n  scenario: Order lunch.\n  assertion: Lunch is ordered.\n"
+    write("agent.yaml", "name: jean\n")
+    write("instructions.md", "Be brief.\n")
+    write("skills/think.md", SKILL)
+    write("skills/.draft.md", SKILL)
+    write("knowledge/pricing.md", "A penny.\n")
+    write("simulations/calls.yaml", lunch)
+    write("simulations/.draft.yaml", lunch.sub("lunch", "draft"))
+    # What Emacs leaves beside a file with unsaved edits: a link to who is editing it.
+    link("skills/.#think.md", "jean@laptop.4242:1732500000")
+    link("simulations/.#calls.yaml", "jean@laptop.4242:1732500000")
+
+    folder = VA::Folder.load(@root)
+
+    assert_equal "Be brief.", folder.instructions
+    assert_equal ["think"], folder.skills.map(&:name)
+    assert_equal ["pricing.md"], folder.knowledge.map(&:source)
+    assert_equal ["lunch"], folder.simulations.map(&:name)
   end
 end

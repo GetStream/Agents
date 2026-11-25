@@ -574,8 +574,62 @@ final class FolderTest extends TestCase
         $this->write('knowledge/.draft.md', "Not yet.\n");
         $this->write('knowledge/.git/notes.md', "Not a document.\n");
         $this->write('knowledge/__pycache__/notes.md', "Not a document.\n");
+        $this->write('knowledge/guides/setup.md', "Plug it in.\n");
+        $this->write('knowledge/guides/.draft.md', "Not yet.\n");
+        $this->write('knowledge/guides/.git/notes.md', "Not a document.\n");
 
-        self::assertSame(['pricing.md'], array_map(static fn ($document) => $document->source, Folder::load($this->dir)->knowledge));
+        self::assertSame(['guides/setup.md', 'pricing.md'], array_map(static fn ($document) => $document->source, Folder::load($this->dir)->knowledge));
+    }
+
+    public function testAnEditorsLockFileInSkillsAndSimulationsIsLeftOut(): void
+    {
+        $this->write('skills/.draft.md', "---\ndescription: Not yet\n---\nLater.\n");
+        $this->write('simulations/calls.yaml', "- name: lunch\n  scenario: Order lunch.\n  assertion: Lunch is ordered.\n");
+        $this->write('simulations/.draft.yaml', "- name: draft\n  scenario: Order lunch.\n  assertion: Lunch is ordered.\n");
+        // What Emacs leaves beside a file with unsaved edits: a link to who is editing it.
+        $this->link('skills/.#think.md', 'jean@laptop.4242:1732500000');
+        $this->link('simulations/.#calls.yaml', 'jean@laptop.4242:1732500000');
+
+        $folder = Folder::load($this->dir);
+
+        self::assertSame('You are Jean.', $folder->instructions);
+        self::assertSame(['think'], array_map(static fn ($skill) => $skill->name, $folder->skills));
+        self::assertSame(['pricing.md'], array_map(static fn ($document) => $document->source, $folder->knowledge));
+        self::assertSame(['lunch'], array_map(static fn ($simulation) => $simulation->name, $folder->simulations ?? []));
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function linksToNothing(): iterable
+    {
+        yield 'skill file' => ['skills/old.md'];
+        yield 'file in a skill folder' => ['skills/report/old.txt'];
+        yield 'knowledge document' => ['knowledge/old.md'];
+        yield 'simulation file' => ['simulations/old.yaml'];
+    }
+
+    #[DataProvider('linksToNothing')]
+    public function testALinkToNothingInAFolderIsRefusedAsOne(string $linked): void
+    {
+        $this->write('skills/report/SKILL.md', "---\ndescription: Write the report\n---\nWrite it.\n");
+        $this->link($linked, 'gone');
+
+        $this->expectException(ConfigurationException::class);
+        $this->expectExceptionMessage("{$linked} is a link to nothing");
+        Folder::load($this->dir);
+    }
+
+    public function testATopLevelFileLinkedToNothingIsNotThere(): void
+    {
+        $this->link('instructions.md', 'gone.md');
+        $this->link('guardrail.md', 'gone.md');
+        $this->link('knowledge/urls.yaml', 'gone.yaml');
+
+        $folder = Folder::load($this->dir);
+
+        self::assertSame(['', '', []], [$folder->instructions, $folder->guardrail, $folder->knowledgeUrls]);
+        self::assertSame(['think'], array_map(static fn ($skill) => $skill->name, $folder->skills));
     }
 
     /**

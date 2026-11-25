@@ -592,6 +592,8 @@ module GetStream
         inside(directory)
         declared = {}
         Dir.children(directory).sort.filter_map do |entry|
+          next if skipped?(entry)
+
           folder = File.join(directory, entry)
           # Before the checks below, which take a link going round in a loop for nothing there.
           inside(folder)
@@ -637,8 +639,8 @@ module GetStream
         end
       end
 
-      # Hidden files such as .DS_Store, and the __pycache__ running a skill's Python scripts
-      # locally leaves, are not part of a skill.
+      # Hidden files such as .DS_Store or an editor's lock file, and the __pycache__ running a
+      # skill's Python scripts locally leaves, are not part of an agent.
       def skipped?(name)
         name.start_with?(".") || name == "__pycache__"
       end
@@ -689,6 +691,8 @@ module GetStream
         inside(directory)
         named = {}
         Dir.children(directory).sort.flat_map do |entry|
+          next [] if skipped?(entry)
+
           file = File.join(directory, entry)
           next [] unless %w[.yaml .yml].include?(File.extname(entry).downcase) && inside(file) && File.file?(file)
 

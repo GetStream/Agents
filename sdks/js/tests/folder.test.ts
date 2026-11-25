@@ -707,6 +707,28 @@ describe("loadFolder", () => {
     });
   }
 
+  it("loads beside an editor's lock file, a hidden link to nothing, in skills/ and simulations/", async () => {
+    const lunch = "- name: lunch\n  scenario: Order lunch.\n  assertion: Lunch is ordered.\n";
+    const path = await agentDir({
+      "instructions.md": "Be brief.\n",
+      "skills/think.md": skill,
+      "skills/.draft.md": skill,
+      "knowledge/pricing.md": "A penny.\n",
+      "simulations/calls.yaml": lunch,
+      "simulations/.draft.yaml": lunch.replace("lunch", "draft"),
+    });
+    // What Emacs leaves beside a file with unsaved edits: a link to who is editing it.
+    await link(path, "skills/.#think.md", "jean@laptop.4242:1732500000");
+    await link(path, "simulations/.#calls.yaml", "jean@laptop.4242:1732500000");
+
+    const folder = await loadFolder(path);
+
+    assert.equal(folder.instructions, "Be brief.");
+    assert.deepEqual(folder.skills.map((each) => each.name), ["think"]);
+    assert.deepEqual(folder.knowledge.map((document) => document.source), ["pricing.md"]);
+    assert.deepEqual(folder.simulations?.map((each) => each.name), ["lunch"]);
+  });
+
   it("reads skills in name order", async () => {
     const path = await agentDir({
       "skills/recall.md": "---\ndescription: Remember\n---\nLook back.",

@@ -733,8 +733,33 @@ public sealed class FolderTests : IDisposable
         Write("knowledge/.draft.md", "Not yet.\n");
         Write("knowledge/.git/notes.md", "Not a document.\n");
         Write("knowledge/__pycache__/notes.md", "Not a document.\n");
+        Write("knowledge/guides/setup.md", "Plug it in.\n");
+        Write("knowledge/guides/.draft.md", "Not yet.\n");
+        Write("knowledge/guides/.git/notes.md", "Not a document.\n");
 
-        Assert.Equal("pricing.md", Assert.Single(Folder.Load(_root).Knowledge).Source);
+        Assert.Equal(["guides/setup.md", "pricing.md"], Folder.Load(_root).Knowledge.Select(document => document.Source));
+    }
+
+    [Fact]
+    public void AnEditorsLockFileInSkillsAndSimulationsIsLeftOut()
+    {
+        Write("agent.yaml", "name: jean\n");
+        Write("instructions.md", "Be brief.\n");
+        Write("skills/think.md", Skill);
+        Write("skills/.draft.md", Skill);
+        Write("knowledge/pricing.md", "A penny.\n");
+        Write("simulations/calls.yaml", "- name: lunch\n  scenario: Order lunch.\n  assertion: Lunch is ordered.\n");
+        Write("simulations/.draft.yaml", "- name: draft\n  scenario: Order lunch.\n  assertion: Lunch is ordered.\n");
+        // What Emacs leaves beside a file with unsaved edits: a link to who is editing it.
+        Link("skills/.#think.md", "jean@laptop.4242:1732500000");
+        Link("simulations/.#calls.yaml", "jean@laptop.4242:1732500000");
+
+        var folder = Folder.Load(_root);
+
+        Assert.Equal("Be brief.", folder.Instructions);
+        Assert.Equal(["think"], folder.Skills.Select(skill => skill.Name));
+        Assert.Equal(["pricing.md"], folder.Knowledge.Select(document => document.Source));
+        Assert.Equal(["lunch"], folder.Simulations!.Select(simulation => simulation.Name));
     }
 
     /// <summary>Points <paramref name="name"/>, under the agent directory, at <paramref name="target"/>.</summary>
