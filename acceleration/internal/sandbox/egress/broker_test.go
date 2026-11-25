@@ -490,6 +490,59 @@ func (s *BrokerSuite) TestARecordLastsNoLongerThanARunMayTakeAndAMinute() {
 	}
 }
 
+// TestARecordLastsTheRunTimeoutItIsGivenAndTwoMinutes: with the default run timeout and with
+// the longest a config may name, every run's record outlasts the run and the 60 s of checks and
+// 5 s of call buffer before and after it (runMargin), and ends two minutes after the run's
+// timeout.
+func (s *BrokerSuite) TestARecordLastsTheRunTimeoutItIsGivenAndTwoMinutes() {
+	for _, timeout := range []time.Duration{sandbox.DefaultRunTimeout, sandbox.MaxTimeout} {
+		broker, mount := s.timed(timeout)
+		for range 2 {
+			ttl := s.ttl(mount)
+			s.Greater(ttl, timeout+time.Minute+5*time.Second, timeout)
+			s.Greater(ttl, timeout+2*time.Minute-10*time.Second, timeout)
+			s.LessOrEqual(ttl, timeout+2*time.Minute, timeout)
+			s.Require().NoError(broker.AfterRun(s.ctx))
+			mount = s.run(broker, mount)
+		}
+	}
+}
+
+// TestARunsEndTheStoreRefusedLeavesTheRecordNoLongerThanItsRunTimeoutAndTwoMinutes: a record
+// nothing could delete ends on its own soon after the run, not after the longest run any config
+// may name.
+func (s *BrokerSuite) TestARunsEndTheStoreRefusedLeavesTheRecordNoLongerThanItsRunTimeoutAndTwoMinutes() {
+	broker, mount := s.timed(sandbox.DefaultRunTimeout)
+	s.rig.gate.shut(true)
+
+	s.Require().Error(broker.AfterRun(s.ctx))
+
+	ttl := s.ttl(mount)
+	s.Greater(ttl, sandbox.DefaultRunTimeout+time.Minute+5*time.Second)
+	s.LessOrEqual(ttl, sandbox.DefaultRunTimeout+2*time.Minute)
+	s.rig.recover()
+	s.Require().NoError(broker.Close(s.ctx))
+}
+
+// timed is a broker for the github grant told that a run may take timeout, and the mount of its
+// first run.
+func (s *BrokerSuite) timed(timeout time.Duration) (*egress.Broker, sandbox.Mount) {
+	broker, err := egress.NewBroker(egress.BrokerOptions{Store: s.rig.store, URL: publicURL, CACert: s.rig.caCert,
+		Session: "session-timed/" + s.rig.run, Tokens: s.tokens, RunTimeout: timeout})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = broker.Close(context.Background()) })
+	mount, err := broker.Prepare(s.ctx, []sandbox.Grant{github})
+	s.Require().NoError(err)
+	return broker, s.run(broker, mount)
+}
+
+// ttl is how long the record of mount's run has left, read past the gate.
+func (s *BrokerSuite) ttl(mount sandbox.Mount) time.Duration {
+	ms, err := s.rig.redis.Do(s.ctx, s.rig.redis.B().Pttl().Key(key(credentialOf(mount))).Build()).AsInt64()
+	s.Require().NoError(err)
+	return time.Duration(ms) * time.Millisecond
+}
+
 // TestAPrepareThatCannotEndTheLastCredentialFails: a sandbox created again after its first
 // creation failed, while the store refuses, is not told it has no grants while the record
 // of the first stays.

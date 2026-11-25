@@ -809,6 +809,28 @@ func (s *DaytonaSuite) TestARunMayTakeAsLongAsTheConfigAllows() {
 	s.EqualValues(300, s.platform.executed()[0]["timeout"], "Daytona is asked for five minutes, in seconds")
 }
 
+// TestTheConfigsTimeoutWinsOverRunTimeoutAndRunTimeoutOverTheDefault: the order the session's
+// broker reads too (sandbox.Config.RunTimeout), so a run's proxy credential outlasts the run.
+func (s *DaytonaSuite) TestTheConfigsTimeoutWinsOverRunTimeoutAndRunTimeoutOverTheDefault() {
+	for _, c := range []struct {
+		options Options
+		seconds float64
+	}{
+		{Options{RunTimeout: 2 * time.Minute, Config: sandbox.Config{TimeoutMs: 300_000}}, 300},
+		{Options{RunTimeout: 2 * time.Minute}, 120},
+		{Options{}, sandbox.DefaultRunTimeout.Seconds()},
+		{Options{Config: sandbox.Config{TimeoutMs: -1}}, sandbox.DefaultRunTimeout.Seconds()},
+	} {
+		box := s.configured(c.options)
+
+		_, err := box.Run(s.ctx, "render()", nil)
+
+		s.Require().NoError(err)
+		executed := s.platform.executed()
+		s.EqualValues(c.seconds, executed[len(executed)-1]["timeout"], "%+v", c.options)
+	}
+}
+
 func (s *DaytonaSuite) TestNoRunMayTakeLongerThanTheCeiling() {
 	box := s.configured(Options{Config: sandbox.Config{TimeoutMs: 24 * 3600 * 1000}})
 
