@@ -507,6 +507,11 @@ func (s *Scheduler) deliverWithRetries(ctx, draining context.Context, claim stor
 		if err == nil || errors.As(err, &held) || final(err) {
 			return deliveredTo, sessionID, err
 		}
+		// The next attempt reads the reason this one failed under as the run's, as a worker
+		// taking the run over reads how its call ended (store.ScheduledTaskRuns.TakeCall). The
+		// row keeps it too, for a worker that takes the run over during the wait.
+		reason := ReasonOf(err)
+		s.keepReason(claim, reason)
 		timer := time.NewTimer(wait)
 		select {
 		case <-draining.Done():
@@ -518,14 +523,24 @@ func (s *Scheduler) deliverWithRetries(ctx, draining context.Context, claim stor
 		case <-timer.C:
 		}
 		earlier := err
-		// The next attempt reads the reason this one failed under as the run's, as a worker
-		// taking the run over reads how its call ended (store.ScheduledTaskRuns.TakeCall).
-		reason := ReasonOf(earlier)
 		claim.Run.Error = &reason
 		deliveredTo, sessionID, err = s.deliver(ctx, claim)
 		err = rungEarlier(earlier, err)
 	}
 	return deliveredTo, sessionID, err
+}
+
+// keepReason records on claim's run the reason its attempt failed under, before the wait for the
+// next attempt: a router that stops or loses the lease meanwhile leaves the run to another worker,
+// which rebuilds the delivery from the row. A write that fails leaves that worker no reason, as
+// before the write was made, and this worker's next attempt reads it from memory still.
+func (s *Scheduler) keepReason(claim store.ClaimedScheduledTask, reason string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 15*time.Second)
+	defer cancel()
+	if err := s.store.ScheduledTaskRuns.SetAttemptReason(ctx, claim.Task.CustomerID, claim.Run.ID, claim.LeasedBy, reason); err != nil {
+		s.logger.Error("could not record why a scheduled task's attempt failed",
+			"task", claim.Task.ID, "run", claim.Run.ID, "customer", claim.Task.CustomerID, "error", err)
+	}
 }
 
 // rungEarlier is a later attempt's failure, kept under the reason the earlier
