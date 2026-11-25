@@ -1255,10 +1255,16 @@ func (s *Store) refuseImportedConfigs(ctx context.Context, db bun.IDB, customerI
 	}
 	definitions := definitionsOn{db}
 	for _, row := range rows {
+		id, err := importedID("agent_configs", row)
+		if err != nil {
+			return err
+		}
+		// Only what the rule reads: a row near the import's line limit is all instructions.
 		var written AgentConfig
-		err := db.NewSelect().Model(&written).
+		err = db.NewSelect().Model(&written).
+			Column("id", "name", "connectors", "agents", "sandbox_provider", "sandbox_options").
 			Where("customer_id = ?", customerID).
-			Where("id = ?::jsonb ->> 'id'", string(row)).
+			Where("id = ?", id).
 			Where("deleted_at IS NULL").
 			Scan(ctx)
 		// A config deleted at the source runs nothing.
@@ -1373,6 +1379,23 @@ func importedGraphComplaint(ctx context.Context, db bun.IDB, definitions Definit
 		}
 	}
 	return "", true, nil
+}
+
+// importedID is the id an imported row of table gives under the exact key "id", which is the
+// one the insert reads (jsonb_populate_record): a JSON decode into a struct also matches a key
+// in another case, and the last one it meets wins.
+func importedID(table string, row json.RawMessage) (string, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(row, &fields); err != nil {
+		return "", invalidImport(fmt.Errorf("store: import %s: %w", table, err))
+	}
+	var id string
+	if raw, ok := fields["id"]; ok {
+		if err := json.Unmarshal(raw, &id); err != nil {
+			return "", invalidImport(fmt.Errorf("store: import %s: id: %w", table, err))
+		}
+	}
+	return id, nil
 }
 
 // definitionsOn reads the connector definitions a customer can see on db.

@@ -41,6 +41,21 @@ func (s *DataMoveSuite) TestAnImportedAgentWhoseOutboundToolsNeedApprovalBesideA
 	s.True(s.holds(id))
 }
 
+// The rule weighs an imported config's sandbox too, read back with the rest it weighs.
+func (s *DataMoveSuite) TestAnImportedAgentWhoseSandboxReachesTheNetworkBesideASensitiveConnectorIsRefused() {
+	template := s.agentTemplate()
+	s.useInternalApp()
+	line, id := s.importedAgent(template, map[string]any{"connectors": []map[string]any{sessionNessy("customers")},
+		"sandbox_provider": "daytona", "sandbox_options": map[string]any{"network": true}})
+
+	status, failure := s.serverClient.failure(http.MethodPost, "/v1/data/import", ndjson([]dataLine{line}))
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Contains(failure, `store: import agent_configs:{"id":"`+id+`"}: connector binding "customers" binds "nessy", `+
+		`whose tools read private data, and the sandbox's network access can send data out with no person's approval`)
+	s.False(s.holds(id))
+}
+
 // Each row is written on its own, so the one refused is whichever of the two comes second.
 func (s *DataMoveSuite) TestAnImportedParentAndChildThatBreakTheRuleTogetherAreRefusedInEitherOrder() {
 	template := s.agentTemplate()
