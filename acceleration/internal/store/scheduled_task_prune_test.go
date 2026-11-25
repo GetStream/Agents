@@ -305,6 +305,16 @@ func (s *StoreSuite) TestPruneLeavesTheRowsAnotherPruneHoldsAndDoesNotWait() {
 // condition, not a filter on a scan of the whole index. Sequential scans are off so the plan
 // shows which index the planner can use: the tables of a test are too small for it to prefer one.
 func (s *StoreSuite) TestPruneReadsItsIndexes() {
+	// Tasks and runs the prune keeps: on tables nearly empty, which index is cheapest moves with
+	// the statistics other tests leave.
+	_, err := s.store.global.ExecContext(s.ctx, `
+		INSERT INTO scheduled_tasks (id, customer_id, user_id, title, instructions, start_local, timezone, state)
+		SELECT 'kept-' || n, 'acme', 'user', '', '', now(), 'UTC', CASE WHEN n % 2 = 0 THEN 'active' ELSE 'completed' END
+		FROM generate_series(1, 1000) AS n;
+		INSERT INTO scheduled_task_runs (id, customer_id, task_id, scheduled_for, state, finished_at)
+		SELECT 'kept-' || n, 'acme', 'kept-' || n, now(), 'delivered', now() FROM generate_series(1, 1000) AS n;
+		ANALYZE scheduled_tasks, scheduled_task_runs`)
+	s.Require().NoError(err)
 	for _, c := range []struct {
 		name, query string
 		batch       int
