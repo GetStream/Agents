@@ -2274,6 +2274,9 @@ func (s *Store) deleteRow(ctx context.Context, db bun.IDB, customerID string, ch
 	if !cachedByID(change.Table) {
 		result, err := db.ExecContext(ctx, query, args...)
 		if err != nil {
+			if isViolation(err, foreignKeyViolation) {
+				return stack.Wrap(invalidImport(marked{fmt.Errorf("store: delete %s: another row here still names this row", change.Table), err}))
+			}
 			if refused := refusedRow(change.Table, err); refused != nil {
 				return refused
 			}

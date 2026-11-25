@@ -499,9 +499,9 @@ var bareTexts = map[string][]string{
 var words = map[string]string{
 	"agent_configs":          "greeting greeting_mode guardrail harness image instructions knowledge_namespace llm mode name region review_instructions role sandbox_provider search sts stt subagent sync_hash tts ui_instructions video_source voice",
 	"skills":                 "description instructions name",
-	"connector_definitions":  "category description name",
+	"connector_definitions":  "category description name sync_hash",
 	"connector_connections":  "auth_scheme client_registration label last_error owner_type status tls_scheme tools_digest validation_code validation_error validation_status",
-	"router_configs":         "name",
+	"router_configs":         "name sync_hash",
 	"voices":                 "description name",
 	"sip_trunks":             "host name transport username",
 	"phone_numbers":          "country e164 stream_call_type vendor",
@@ -695,7 +695,8 @@ func (s *DataMoveSuite) TestADeleteOfATrunkWithANumberIsRefused() {
 	err := s.destination.ApplyChanges(s.ctx, "acme", []DataChange{{Table: "sip_trunks", Op: ChangeDelete, Key: []byte(`{"id": "` + trunk + `"}`)}})
 
 	s.Require().ErrorIs(err, ErrInvalidImport)
-	s.ErrorContains(err, "a row names a row that neither the export nor this app holds")
+	s.NotErrorIs(err, ErrNamesNoRow)
+	s.ErrorContains(err, "store: delete sip_trunks: another row here still names this row")
 }
 
 func (s *DataMoveSuite) TestAnImportOfARowThatNamesAnotherIsTwoQueries() {

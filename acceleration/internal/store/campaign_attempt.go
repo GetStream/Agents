@@ -113,8 +113,8 @@ func (r *CampaignAttempts) End(ctx context.Context, customerID, id string, resul
 }
 
 // ofItsContactsCampaign is the condition that a dial is of the campaign its contact is of, as every
-// dial a runner places is.
-const ofItsContactsCampaign = "campaign_id = (SELECT cc.campaign_id FROM campaign_contacts AS cc WHERE cc.id = contact_id)"
+// dial a runner places is. It names the dial by CampaignAttempt's alias.
+const ofItsContactsCampaign = "ca.campaign_id = (SELECT cc.campaign_id FROM campaign_contacts AS cc WHERE cc.id = ca.contact_id)"
 
 // CountResult counts a contact's dials of one attempt that ended with result.
 func (r *CampaignAttempts) CountResult(ctx context.Context, contactID string, attempt int, result string) (int, error) {
@@ -282,7 +282,7 @@ func (r *CampaignAttempts) Made(ctx context.Context, contactIDs []string) (map[s
 		Made      int
 	}
 	err := r.store.global.NewRaw(`SELECT contact_id, count(DISTINCT (step_id, attempt)) AS made
-FROM campaign_attempts WHERE contact_id IN (?) AND `+ofItsContactsCampaign+` AND `+placedDial+`
+FROM campaign_attempts AS ca WHERE contact_id IN (?) AND `+ofItsContactsCampaign+` AND `+placedDial+`
 GROUP BY contact_id`, bun.In(contactIDs)).Scan(ctx, &rows)
 	if err != nil {
 		return nil, stack.Wrap(fmt.Errorf("store: count attempts made: %w", err))
