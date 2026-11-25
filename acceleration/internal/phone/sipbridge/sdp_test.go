@@ -269,7 +269,7 @@ func TestToStreamRefusesWhatItCannotRebuild(t *testing.T) {
 		"no c= line":      {body: offerAt("", ""), err: "no connection address"},
 		"no audio":        {body: offerAt("c=IN IP4 1.1.1.1\r\n", "m=video 30002 RTP/AVP 96\r\n"), err: "no media"},
 		"only dtmf":       {body: offerAt("c=IN IP4 1.1.1.1\r\n", "m=audio 30000 RTP/AVP 101\r\na=rtpmap:101 telephone-event/8000\r\n"), err: "no codec Stream accepts"},
-		"only opus":       {body: offerAt("c=IN IP4 1.1.1.1\r\n", "m=audio 30000 RTP/AVP 111\r\na=rtpmap:111 opus/48000/2\r\n"), err: "no codec Stream accepts"},
+		"only amr":        {body: offerAt("c=IN IP4 1.1.1.1\r\n", "m=audio 30000 RTP/AVP 97\r\na=rtpmap:97 AMR/8000\r\n"), err: "no codec Stream accepts"},
 		"unknown dynamic": {body: offerAt("c=IN IP4 1.1.1.1\r\n", "m=audio 30000 RTP/AVP 98\r\n"), err: "no codec Stream accepts"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -308,12 +308,13 @@ func TestToStreamReadsTheAudioCodecsFromTheAudioLineOnly(t *testing.T) {
 }
 
 func TestToStreamKeepsOnlyTheCodecsStreamAccepts(t *testing.T) {
-	media := "m=audio 30000 RTP/AVP 111 9 8 0 101\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:101 telephone-event/8000\r\n"
+	media := "m=audio 30000 RTP/AVP 111 97 9 8 0 101\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:97 AMR/8000\r\na=rtpmap:101 telephone-event/8000\r\n"
 
 	got, err := toStream(offerAt("c=IN IP4 1.1.1.1\r\n", media), netip.MustParseAddr("1.0.0.1"))
 	require.NoError(t, err)
 
-	require.Equal(t, []Codec{staticCodecs["G722"], pcma, pcmu, dtmfCodec}, mediaOf(t, got).Codecs)
+	opus := Codec{Name: "OPUS", PayloadType: 111, ClockRate: 48000, Channels: 2}
+	require.Equal(t, []Codec{opus, staticCodecs["G722"], pcma, pcmu, dtmfCodec}, mediaOf(t, got).Codecs)
 }
 
 func TestAnswerForRejectsTheLinesStreamDidNotSee(t *testing.T) {

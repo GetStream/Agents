@@ -65,7 +65,7 @@ func TestFlowAConnectsCustomerOfferToStream(t *testing.T) {
 func TestFlowAStreamGetsTheCustomerOfferRebuilt(t *testing.T) {
 	offer := "v=0\r\no=- 4242 7 IN IP4 10.0.0.5\r\ns=-\r\nc=IN IP4 10.0.0.5\r\nt=0 0\r\n" +
 		"m=video 30002 RTP/AVP 96\r\na=rtpmap:96 VP8/90000\r\n" +
-		"m=audio 30000 RTP/AVP 111 0 101\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:0 PCMU/8000\r\n" +
+		"m=audio 30000 RTP/AVP 111 97 0 101\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:97 AMR/8000\r\na=rtpmap:0 PCMU/8000\r\n" +
 		"a=rtpmap:101 telephone-event/8000\r\na=rtcp:30001 IN IP4 10.0.0.5\r\n" +
 		"a=candidate:1 1 UDP 2130706431 10.0.0.5 30000 typ host\r\na=x-extra:1\r\na=sendrecv\r\n"
 	customer := &fakeLeg{inviteAnswer: []byte(offer)}
@@ -75,8 +75,8 @@ func TestFlowAStreamGetsTheCustomerOfferRebuilt(t *testing.T) {
 	require.NoError(t, err)
 
 	want := "v=0\r\no=- 4242 7 IN IP4 1.0.0.1\r\ns=sipbridge\r\nc=IN IP4 1.0.0.1\r\nt=0 0\r\n" +
-		"m=audio 30000 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\n" +
-		"a=fmtp:101 0-16\r\na=ptime:20\r\na=sendrecv\r\n"
+		"m=audio 30000 RTP/AVP 111 0 101\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:0 PCMU/8000\r\n" +
+		"a=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\na=ptime:20\r\na=sendrecv\r\n"
 	require.Equal(t, want, string(stream.body(0)))
 	// The customer offered two streams, so its answer has two m= lines: the video one rejected.
 	ack := string(customer.body(1))
@@ -86,7 +86,7 @@ func TestFlowAStreamGetsTheCustomerOfferRebuilt(t *testing.T) {
 
 func TestFlowARefusesAnOfferStreamCannotSpeak(t *testing.T) {
 	offer := "v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" +
-		"m=audio 30000 RTP/AVP 111 101\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:101 telephone-event/8000\r\n"
+		"m=audio 30000 RTP/AVP 97 101\r\na=rtpmap:97 AMR/8000\r\na=rtpmap:101 telephone-event/8000\r\n"
 	customer := &fakeLeg{inviteAnswer: []byte(offer)}
 	stream := &fakeLeg{inviteAnswer: streamAnswerSDP}
 
@@ -445,6 +445,47 @@ func TestFlowAConnectsAnOfferWithALineTheParserRefusesAudioOnly(t *testing.T) {
 			fields := strings.Fields(strings.TrimPrefix(line, "m="))
 			rejected := "m=" + fields[0] + " 0 " + strings.Join(fields[2:], " ") + "\r\n"
 			require.Regexp(t, `(?s)m=audio 20000 RTP/AVP 0 101\r\n.*`+regexp.QuoteMeta(rejected), string(customer.body(1)))
+		})
+	}
+}
+
+func TestFlowAPassesOnAnOpusOrG729OfferRebuilt(t *testing.T) {
+	const tail = "a=ptime:20\r\na=sendrecv\r\n"
+	for name, tc := range map[string]struct{ media, want string }{
+		"opus": {
+			media: "m=audio 30000 RTP/AVP 111 101\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 minptime=10;useinbandfec=1\r\n" +
+				"a=rtpmap:101 telephone-event/48000\r\n",
+			want: "m=audio 30000 RTP/AVP 111 101\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 minptime=10;useinbandfec=1\r\n" +
+				"a=rtpmap:101 telephone-event/48000\r\na=fmtp:101 0-16\r\n" + tail,
+		},
+		"g729": {
+			media: "m=audio 30000 RTP/AVP 18 101\r\na=rtpmap:18 G729/8000\r\na=fmtp:18 annexb=no\r\na=rtpmap:101 telephone-event/8000\r\n",
+			want: "m=audio 30000 RTP/AVP 18 101\r\na=rtpmap:18 G729/8000\r\na=fmtp:18 annexb=no\r\n" +
+				"a=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\n" + tail,
+		},
+		"g729 by its static payload type": {
+			media: "m=audio 30000 RTP/AVP 18\r\n",
+			want:  "m=audio 30000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\n" + tail,
+		},
+		"g729 by its static payload type with fmtp": {
+			media: "m=audio 30000 RTP/AVP 18\r\na=fmtp:18 annexb=no\r\n",
+			want:  "m=audio 30000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\na=fmtp:18 annexb=no\r\n" + tail,
+		},
+		"fmtp Stream is not given": {
+			media: "m=audio 30000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\na=fmtp:18 annexb=no\"<x>\r\n",
+			want:  "m=audio 30000 RTP/AVP 18\r\na=rtpmap:18 G729/8000\r\n" + tail,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			offer := "v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=-\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" + tc.media
+			customer := &fakeLeg{inviteAnswer: []byte(offer)}
+			stream := &fakeLeg{inviteAnswer: streamAnswerSDP}
+
+			_, err := flowA(t.Context(), flowConfig(), customer, stream)
+
+			require.NoError(t, err)
+			want := "v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\ns=sipbridge\r\nc=IN IP4 1.1.1.1\r\nt=0 0\r\n" + tc.want
+			require.Equal(t, want, string(stream.body(0)))
 		})
 	}
 }

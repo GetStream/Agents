@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/netip"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,6 +37,12 @@ type Codec struct {
 	Name        string
 	PayloadType uint8
 	ClockRate   uint32
+	// Channels is the channel count an a=rtpmap line names after the clock rate (RFC 8866 §6.6), 0
+	// when it names none.
+	Channels uint8
+	// Fmtp is the format's a=fmtp parameters. telephone-event keeps none: buildSDP writes its event
+	// range.
+	Fmtp string
 }
 
 // staticCodecs are the audio codecs both Stream and this package accept, keyed by name.
@@ -47,6 +54,22 @@ var staticCodecs = map[string]Codec{
 }
 
 var dtmfCodec = Codec{Name: "telephone-event", PayloadType: 101, ClockRate: 8000}
+
+// g729Codec is G729's static payload type (RFC 3551 §6, table 4), which the SDP parser does not know
+// without an a=rtpmap line. It is passed on to Stream but cannot be dialled with.
+var g729Codec = Codec{Name: "G729", PayloadType: 18, ClockRate: 8000}
+
+// streamCodecs are the codecs toStream passes on to Stream, keyed by the name parseAudio gives them,
+// with the encoding name buildSDP writes for each. Every name is in IANA's RTP Payload Format media
+// types registry (rtp-parameters): PCMU, PCMA, G722 and G729 are RFC 3551's, opus is RFC 7587's
+// (written opus/48000/2) and telephone-event is RFC 4733's.
+var streamCodecs = map[string]string{
+	"PCMU": "PCMU", "PCMA": "PCMA", "G722": "G722", "G729": "G729", "OPUS": "opus", dtmfCodec.Name: dtmfCodec.Name,
+}
+
+// safeFmtp is what a=fmtp parameters passed on to Stream may hold: the names, numbers and separators
+// of RFC 7587 and RFC 4855 parameters such as "minptime=10;useinbandfec=1" or "annexb=no".
+var safeFmtp = regexp.MustCompile(`^[A-Za-z0-9=;,.\- ]{1,200}$`)
 
 func codecsFromNames(names []string) ([]Codec, error) {
 	if len(names) == 0 {
@@ -75,6 +98,9 @@ func staticCodecByPayloadType(pt uint8) (Codec, bool) {
 		if codec.PayloadType == pt {
 			return codec, true
 		}
+	}
+	if pt == g729Codec.PayloadType {
+		return g729Codec, true
 	}
 	return Codec{}, false
 }
@@ -146,20 +172,27 @@ func parseAudio(body []byte) (Media, *sdp.SessionDescription, int, error) {
 		if err != nil {
 			return Media{}, nil, 0, stack.Wrap(fmt.Errorf("sdp payload type %q: %w", format, err))
 		}
-		if codec, err := own.GetCodecForPayloadType(uint8(pt)); err == nil {
-			name := codec.Name
-			// Normalize codec names: telephone-event variants -> "telephone-event", others -> uppercase
-			if strings.EqualFold(name, "telephone-event") {
-				name = dtmfCodec.Name
-			} else {
-				name = strings.ToUpper(name)
+		codec, err := own.GetCodecForPayloadType(uint8(pt))
+		if err != nil || codec.Name == "" {
+			// No a=rtpmap line, which a static payload type may leave out; an a=fmtp line alone still counts.
+			static, ok := staticCodecByPayloadType(uint8(pt))
+			if !ok {
+				continue
 			}
-			m.Codecs = append(m.Codecs, Codec{Name: name, PayloadType: uint8(pt), ClockRate: codec.ClockRate})
-			continue
+			codec.Name, codec.ClockRate = static.Name, static.ClockRate
 		}
-		if codec, ok := staticCodecByPayloadType(uint8(pt)); ok {
-			m.Codecs = append(m.Codecs, codec)
+		// Normalize codec names: telephone-event variants -> "telephone-event", others -> uppercase
+		got := Codec{Name: dtmfCodec.Name, PayloadType: uint8(pt), ClockRate: codec.ClockRate}
+		if !strings.EqualFold(codec.Name, "telephone-event") {
+			got.Name = strings.ToUpper(codec.Name)
+			if channels, err := strconv.ParseUint(codec.EncodingParameters, 10, 8); err == nil {
+				got.Channels = uint8(channels)
+			}
+			if safeFmtp.MatchString(codec.Fmtp) {
+				got.Fmtp = codec.Fmtp
+			}
 		}
+		m.Codecs = append(m.Codecs, got)
 	}
 
 	// A direction at session level holds for every m= line without one of its own (RFC 8866 §6.7).
@@ -221,9 +254,16 @@ func buildSDP(m Media, sessionID, version uint64) []byte {
 	b.WriteString("t=0 0\r\n")
 	fmt.Fprintf(&b, "m=audio %d RTP/AVP %s\r\n", m.Port, strings.Join(pts, " "))
 	for _, codec := range m.Codecs {
-		fmt.Fprintf(&b, "a=rtpmap:%d %s/%d\r\n", codec.PayloadType, codec.Name, codec.ClockRate)
-		if codec.Name == dtmfCodec.Name {
+		fmt.Fprintf(&b, "a=rtpmap:%d %s/%d", codec.PayloadType, codec.Name, codec.ClockRate)
+		if codec.Channels > 0 {
+			fmt.Fprintf(&b, "/%d", codec.Channels)
+		}
+		b.WriteString("\r\n")
+		switch {
+		case codec.Name == dtmfCodec.Name:
 			fmt.Fprintf(&b, "a=fmtp:%d 0-16\r\n", codec.PayloadType)
+		case codec.Fmtp != "":
+			fmt.Fprintf(&b, "a=fmtp:%d %s\r\n", codec.PayloadType, codec.Fmtp)
 		}
 	}
 	ptime := 20
@@ -307,7 +347,7 @@ func rejectAnswer(offer Media) Media {
 }
 
 // toStream rebuilds an SDP body from the customer leg, offer or answer, into the one Stream gets. Only
-// what buildSDP writes reaches Stream: the first audio stream, the codecs Stream accepts and an address
+// what buildSDP writes reaches Stream: the first audio stream, its streamCodecs and an address
 // Stream may send RTP to. The customer's other attributes (a=rtcp, ICE candidates) and other m= lines are
 // dropped. The o= line keeps the customer's session id and version, as the body passed on unchanged did,
 // so a re-INVITE that changes nothing still says so (RFC 3264 §8).
@@ -318,10 +358,14 @@ func toStream(body []byte, trunk netip.Addr) ([]byte, error) {
 	}
 	m.Ptime = millis(sd.MediaDescriptions[at], "ptime")
 	m.MaxPtime = millis(sd.MediaDescriptions[at], "maxptime")
-	m.Codecs = slices.DeleteFunc(m.Codecs, func(c Codec) bool {
-		_, ok := staticCodecs[c.Name]
-		return !ok && c.Name != dtmfCodec.Name
-	})
+	kept := m.Codecs[:0]
+	for _, c := range m.Codecs {
+		if name, ok := streamCodecs[c.Name]; ok {
+			c.Name = name
+			kept = append(kept, c)
+		}
+	}
+	m.Codecs = kept
 	if _, ok := m.audioCodec(); !ok {
 		return nil, stack.Wrap(errors.New("the customer's sdp has no codec Stream accepts"))
 	}
