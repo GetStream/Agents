@@ -173,19 +173,19 @@ resolver, so never quote the egress error (`createEventDestination`, AI-3575).
   - **Deployment settings:** what the operator sets: the router's config and environment
     (`ROUTER_*`, `STREAM_API_*`, `code_sandbox.*`), and what they control: which components
     the deployment has, and the rules that egress, limits and the sandbox network use.
-- A device sets the request. A backend sets the request and the customer settings. The text
-  shows only the levels that the caller sets: a device sees no customer settings and no
-  deployment settings.
+- The text shows only data that the caller itself sent or wrote. A device sends the request,
+  so it sees only data from the request. The customer's backend also writes the customer
+  settings, so it sees data from the request and from the customer settings.
 - No caller sees the deployment settings, which only the operator sets or controls: no
   setting name (such as an environment variable name), no setting value, no part of the
   router's config, no component, and no rule that the deployment uses because of such a
   setting.
-- When the caller can correct the error in a level that it sets, the text tells only what to
-  change in that level: the field, and why the router does not accept its value. All other
-  bullets of this rule still apply: the text contains no data from a level that the caller
-  does not set, and no text of another error. `fmt.Errorf("%w: %w", ErrInvalid, err)`
+- When the caller can correct the error in data that it sent or wrote, the text tells only
+  what to change: the field, and why the router does not accept its value. All other bullets
+  of this rule still apply: the text contains no data that the caller did not send or write,
+  and no text of another error. `fmt.Errorf("%w: %w", ErrInvalid, err)`
   contains all of the text of `err`.
-- When only a level that the caller does not set can correct the error, the text says in
+- When the caller cannot correct the error in data that it sent or wrote, the text says in
   fixed words that the caller cannot correct it, with the error `code`. The caller sends the
   `code` and the `X-Request-Id` to the team that helps it. For a stored field, it sends the
   id of the resource that holds the field. The router logs the full cause one time, with the
