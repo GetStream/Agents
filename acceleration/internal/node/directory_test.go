@@ -3,7 +3,9 @@
 package node
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -217,6 +219,67 @@ func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhere() {
 	exists, err := s.client.Do(s.ctx, s.client.B().Exists().Key(s.prefix+":session:order-42").Build()).AsInt64()
 	s.Require().NoError(err)
 	s.Zero(exists, "a router of the release before would still forward to it")
+}
+
+// Each claim that cannot be taken back is said, so a Redis that refuses one of the two leaves the
+// other's failure in the log too.
+func (s *DirectorySuite) TestEachClaimThatCannotBeTakenBackIsLogged() {
+	var logged bytes.Buffer
+	directory, err := NewDirectory(DirectoryOptions{
+		Redis: s.client, Address: "node-a:1", Prefix: s.prefix,
+		Logger: slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+	s.Require().NoError(err)
+	directory.Close()
+	directory.Hold(s.ctx, "acme", "order-42", "", "")
+	gone, cancel := context.WithCancel(s.ctx)
+	cancel()
+
+	directory.Release(gone, "acme", "order-42")
+
+	s.Equal(2, strings.Count(logged.String(), "could not take back this node's claim on a session"))
+}
+
+// clusterAddressVar names a node of a Redis Cluster with more than one shard, which CI does not
+// run. Three `redis-server --cluster-enabled yes` joined by `redis-cli --cluster create` make one.
+const clusterAddressVar = "ROUTER_TEST_REDIS_CLUSTER_ADDR"
+
+// On a cluster, a command naming keys of different hash slots panics in the client before it is
+// sent, and a session's key under its customer and under its id alone are in different slots.
+// Closing a session must drop both.
+func (s *DirectorySuite) TestAReleasedSessionIsFoundNowhereOnACluster() {
+	address := os.Getenv(clusterAddressVar)
+	if address == "" {
+		s.T().Skipf("%s not set", clusterAddressVar)
+	}
+	cluster, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{address}, DisableCache: true})
+	s.Require().NoError(err)
+	s.T().Cleanup(cluster.Close)
+	directory, err := NewDirectory(DirectoryOptions{Redis: cluster, Address: "node-a:1", Prefix: s.prefix})
+	s.Require().NoError(err)
+	directory.Close()
+	keys := []string{directory.sessionKey(heldSession{"acme", "order-42"}), s.prefix + ":session:order-42"}
+	slots := map[int64]bool{}
+	for _, key := range keys {
+		slot, err := cluster.Do(s.ctx, cluster.B().ClusterKeyslot().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		slots[slot] = true
+	}
+	s.Require().Len(slots, 2, "the two keys of a session sit in different slots")
+	directory.Hold(s.ctx, "acme", "order-42", "", "")
+	for _, key := range keys {
+		exists, err := cluster.Do(s.ctx, cluster.B().Exists().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		s.Require().EqualValues(1, exists, "%s is held", key)
+	}
+
+	directory.Release(s.ctx, "acme", "order-42")
+
+	for _, key := range keys {
+		exists, err := cluster.Do(s.ctx, cluster.B().Exists().Key(key).Build()).AsInt64()
+		s.Require().NoError(err)
+		s.Zero(exists, "%s is still held", key)
+	}
 }
 
 // directoryAt is a node's directory at address, renewing nothing for the test's length.
