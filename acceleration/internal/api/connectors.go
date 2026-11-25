@@ -184,35 +184,37 @@ type ConnectorPage struct {
 
 // CustomConnectorRequest is a custom MCP server or HTTP API for the app's agents to connect to.
 //
-// The limits on name, category and description are the prototype's
-// (CreateConnectorDefinitionRequest in api/openapi.yaml on codex/connector-support at
-// cf62af0d). The id is its pattern without the hyphen, which core.Manifest.Validate refuses
-// in an id: custom_ and up to 57 more characters, 64 in all. The prototype set no length on
-// the endpoint; 2048 is a guess at a URL nobody needs to exceed, not a measured one. 100
-// scopes is well over the longest list shipped, Slack's 29 (providers/slack.yaml), and is
-// not measured either. A scope is RFC 6749 section 3.3's scope-token, %x21 / %x23-5B /
-// %x5D-7E, so it can hold neither a space nor a quote. The schemes have no count: each must
-// be a registered one and none may repeat, which bounds them. A sync hash is up to 128
-// characters, a SHA-512 hex digest, well over the 32 of the MD5 hex digest the CLI computes
-// for an agent (Agentrc.Hash in GetStream/cli internal/agentrc/agentrc.go), and printable
-// ASCII without a space, so it holds no NUL, which a Postgres text column refuses.
+// Its limits are core's (core.CustomIDPattern and the rest) and the store's for the sync hash,
+// which TransformSchema writes into the schema, so an imported definition is held to the same
+// ones. The schemes have no count: each must be a registered one and none may repeat, which
+// bounds them.
 type CustomConnectorRequest struct {
-	ID          string           `json:"id" pattern:"^custom_[a-z][a-z0-9_]{0,56}$" patternDescription:"custom_ then a lowercase letter, then up to 56 lowercase letters, digits or underscores" doc:"Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same."`
-	Name        string           `json:"name" minLength:"1" maxLength:"120"`
-	Category    string           `json:"category,omitempty" maxLength:"80"`
-	Description string           `json:"description,omitempty" maxLength:"1000"`
-	Endpoint    string           `json:"endpoint,omitempty" maxLength:"2048" doc:"The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Set this or http, not both."`
+	ID          string           `json:"id" doc:"Starts with custom_, which no built-in does, so a custom definition never stands in for one. Creating an id that exists stores the next revision, unless the newest already says the same."`
+	Name        string           `json:"name" minLength:"1"`
+	Category    string           `json:"category,omitempty"`
+	Description string           `json:"description,omitempty"`
+	Endpoint    string           `json:"endpoint,omitempty" doc:"The MCP server, over Streamable HTTP: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Set this or http, not both."`
 	HTTP        *CustomHTTPAPI   `json:"http,omitempty" doc:"An HTTP API whose tools the connector lists itself, in place of an MCP server. Set this or endpoint, not both."`
 	Schemes     []string         `json:"schemes" minItems:"1" doc:"How a connection may authenticate. Each must be a scheme this deployment has, except oauth2_client_credentials, which a custom connector cannot use: it needs a token endpoint a custom connector cannot set."`
-	Scopes      []string         `json:"scopes,omitempty" maxItems:"100" uniqueItems:"true" pattern:"^[!#-\\[\\]-~]+$" patternDescription:"an RFC 6749 scope token" doc:"The scopes a consent asks for, each an RFC 6749 scope token."`
+	Scopes      []string         `json:"scopes,omitempty" uniqueItems:"true" doc:"The scopes a consent asks for, each an RFC 6749 scope token."`
 	Client      *ConnectorClient `json:"client,omitempty"`
-	SyncHash    string           `json:"sync_hash,omitempty" maxLength:"128" pattern:"^[!-~]*$" patternDescription:"printable ASCII without a space" doc:"The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one."`
+	SyncHash    string           `json:"sync_hash,omitempty" doc:"The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one."`
 }
 
 func (*CustomConnectorRequest) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
 	schema.Description = "A custom MCP server or HTTP API for the app's agents to connect to. An unknown " +
 		"field is refused rather than ignored."
 	schema.AdditionalProperties = false
+	properties := schema.Properties
+	properties["id"].Pattern, properties["id"].PatternDescription = core.CustomIDPattern, core.CustomIDPatternDescription
+	properties["name"].MaxLength = new(core.CustomNameMaxLength)
+	properties["category"].MaxLength = new(core.CustomCategoryMaxLength)
+	properties["description"].MaxLength = new(core.CustomDescriptionMaxLength)
+	properties["endpoint"].MaxLength = new(core.CustomEndpointMaxLength)
+	properties["scopes"].MaxItems = new(core.CustomScopesMaxItems)
+	properties["scopes"].Items.Pattern, properties["scopes"].Items.PatternDescription = core.ScopeTokenPattern, core.ScopeTokenDescription
+	properties["sync_hash"].MaxLength = new(store.SyncHashMaxLength)
+	properties["sync_hash"].Pattern, properties["sync_hash"].PatternDescription = store.SyncHashPattern, store.SyncHashDescription
 	return schema
 }
 

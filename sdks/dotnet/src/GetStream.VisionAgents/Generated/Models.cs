@@ -7452,6 +7452,18 @@ namespace GetStream.VisionAgents.Models
         public long Rows { get; set; } = default!;
 
         /// <summary>
+        /// The rows left out rather than written, by table and primary key, as connector_definitions:{"id":"custom_crm","revision":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("skipped")]
+        public System.Collections.Generic.List<string>? Skipped { get; set; } = default!;
+
+        /// <summary>
+        /// How many more rows were left out than skipped names, which holds the first 100.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("skipped_more")]
+        public long? SkippedMore { get; set; } = default!;
+
+        /// <summary>
         /// How many of them went into each table.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("tables")]

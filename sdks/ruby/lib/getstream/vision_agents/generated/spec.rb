@@ -1442,6 +1442,12 @@ module GetStream
           body: nil, body_required: false,
           socket: false, client_accessible: false
         }.freeze,
+        "receiveTwilioCall" => {
+          method: :post, path: "/v1/phone/hooks/twilio",
+          path_params: [].freeze, query: [].freeze,
+          body: nil, body_required: false,
+          socket: false, client_accessible: false
+        }.freeze,
         "receiveTwilioEvent" => {
           method: :post, path: "/v1/phone/hooks/twilio/events",
           path_params: [].freeze, query: [].freeze,
@@ -2472,7 +2478,7 @@ module GetStream
           required: %w[changes cursor].freeze, open: false
         }.freeze,
         "DataImport" => {
-          properties: %w[cursor rows tables].freeze,
+          properties: %w[cursor rows skipped skipped_more tables].freeze,
           required: %w[rows].freeze, open: false
         }.freeze,
         "DataPolicy" => {

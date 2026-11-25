@@ -332,13 +332,18 @@ func (l telnyxRinger) deliver(form url.Values, signed bool) (int, string, string
 }
 
 // attach holds the number at Telnyx for the suite's app and attaches it on a trunk of its
-// own, as the phone service does, its trunk password sealed under the service's key. An empty
-// uri is a number attached before trunks were kept.
+// own, as attachOwnTrunk does.
 func (l telnyxRinger) attach(e164, uri, username, password string) {
-	s := l.suite
+	attachOwnTrunk(l.suite, "telnyx", e164, uri, username, password)
+}
+
+// attachOwnTrunk holds the number at the vendor for the suite's app and attaches it on a trunk
+// of its own, as the phone service does, its trunk password sealed under the service's key. An
+// empty uri is a number attached before trunks were kept.
+func attachOwnTrunk(s *RouterSuite, vendor, e164, uri, username, password string) {
 	ctx := context.Background()
 	s.Require().NoError(s.store.PhoneNumbers.Insert(ctx, &store.PhoneNumber{
-		E164: e164, Vendor: "telnyx", Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
+		E164: e164, Vendor: vendor, Country: "US", CustomerID: s.customerID(), PurchasedAt: time.Now().UTC(),
 	}))
 	attachment := store.NumberAttachment{TrunkID: "trunk-" + s.utils.uuid(), CallType: "default"}
 	if uri == "" {
@@ -349,7 +354,7 @@ func (l telnyxRinger) attach(e164, uri, username, password string) {
 	s.Require().NoError(err)
 	sealed, err := sealer.SealWithAAD(password, []byte("phone_numbers/"+s.customerID()+"/"+e164))
 	s.Require().NoError(err)
-	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: "telnyx"}
+	group := store.TrunkGroup{CustomerID: s.customerID(), Vendor: vendor}
 	s.Require().NoError(s.store.StreamTrunks.InGroup(ctx, group, func(_ context.Context, tx *store.TrunkGroupTx) error {
 		err := tx.SaveTrunk(store.StreamTrunk{
 			ID: attachment.TrunkID, BridgeURI: uri, BridgeUsername: username,

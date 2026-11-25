@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/egress"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stack"
@@ -48,6 +51,67 @@ func CheckBaseURL(ctx context.Context, baseURL string) error {
 	return nil
 }
 
+// The limits on a custom connector, which the API's request schema documents
+// (api.CustomConnectorRequest) and CustomManifest enforces, so a definition an import carries is
+// held to them too. A length is in characters, as JSON Schema's maxLength counts them.
+//
+// The limits on name, category and description are the prototype's
+// (CreateConnectorDefinitionRequest in api/openapi.yaml on codex/connector-support at
+// cf62af0d). The id is its pattern without the hyphen, which Manifest.Validate refuses in an
+// id: custom_ and up to 57 more characters, 64 in all. The prototype set no length on the
+// endpoint; 2048 is a guess at a URL nobody needs to exceed, not a measured one. 100 scopes is
+// well over the longest list shipped, Slack's 29 (providers/slack.yaml), and is not measured
+// either. A scope is RFC 6749 section 3.3's scope-token, %x21 / %x23-5B / %x5D-7E, so it can
+// hold neither a space nor a quote.
+const (
+	CustomIDPattern            = `^custom_[a-z][a-z0-9_]{0,56}$`
+	CustomIDPatternDescription = "custom_ then a lowercase letter, then up to 56 lowercase letters, digits or underscores"
+	CustomNameMaxLength        = 120
+	CustomCategoryMaxLength    = 80
+	CustomDescriptionMaxLength = 1000
+	CustomEndpointMaxLength    = 2048
+	CustomScopesMaxItems       = 100
+	ScopeTokenPattern          = `^[!#-\[\]-~]+$`
+	ScopeTokenDescription      = "an RFC 6749 scope token"
+)
+
+var (
+	customID   = regexp.MustCompile(CustomIDPattern)
+	scopeToken = regexp.MustCompile(ScopeTokenPattern)
+)
+
+// checkLimits refuses a custom connector past one of the limits above.
+func (c CustomConnector) checkLimits() error {
+	if !customID.MatchString(c.ID) {
+		return stack.Wrap(fmt.Errorf("id is not %s", CustomIDPatternDescription))
+	}
+	for _, limit := range []struct {
+		field, value string
+		max          int
+	}{
+		{"name", c.Name, CustomNameMaxLength},
+		{"category", c.Category, CustomCategoryMaxLength},
+		{"description", c.Description, CustomDescriptionMaxLength},
+		{"endpoint", c.Endpoint, CustomEndpointMaxLength},
+	} {
+		if utf8.RuneCountInString(limit.value) > limit.max {
+			return stack.Wrap(fmt.Errorf("%s is longer than %d characters", limit.field, limit.max))
+		}
+	}
+	if len(c.Scopes) > CustomScopesMaxItems {
+		return stack.Wrap(fmt.Errorf("scopes holds more than %d", CustomScopesMaxItems))
+	}
+	for i, scope := range c.Scopes {
+		if !scopeToken.MatchString(scope) {
+			return stack.Wrap(fmt.Errorf("scopes[%d] is not %s", i, ScopeTokenDescription))
+		}
+		if slices.Index(c.Scopes, scope) != i {
+			return stack.Wrap(fmt.Errorf("scopes[%d] %q is listed twice", i, scope))
+		}
+	}
+	return nil
+}
+
 // CustomManifest is the manifest a custom connector is stored as, or why it cannot be: one MCP
 // source at Endpoint, or one http source at BaseURL with Tools, and of the client only its
 // registration, auth_method and alg. Which schemes the deployment has and whether Endpoint or
@@ -59,6 +123,9 @@ func CheckBaseURL(ctx context.Context, baseURL string) error {
 // api_base, which a connection's direct call goes to (proxyBase, internal/api/connection_proxy.go),
 // so an http connector takes no direct call, as an MCP one takes none.
 func CustomManifest(c CustomConnector) (Manifest, error) {
+	if err := c.checkLimits(); err != nil {
+		return Manifest{}, err
+	}
 	// An operator client is the deployment's own, read from the variables a built-in's
 	// client.env names, and the deployment has none registered with an app's own server.
 	if slices.Contains(c.Client.Registration, ClientOperator) {

@@ -204,6 +204,7 @@ func (s *Server) openSocketSession(w http.ResponseWriter, r *http.Request) {
 			refuseWith(serverFailed, internalError())
 			return
 		}
+		s.logNotConfigured(ctx, customerID, err)
 		refuse(refusal, answer.Code, store.RedactLogText(answer.Message))
 		return
 	}

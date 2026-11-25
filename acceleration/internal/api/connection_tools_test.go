@@ -201,6 +201,33 @@ func (s *ConnectionToolsSuite) TestAClientCredentialsConnectionIsSetUpWithItsCli
 	s.Equal(validationConnected, string(s.validate(id).Status))
 }
 
+func (s *ConnectionToolsSuite) TestCredentialsWhoseEndpointIsRefusedAreToldTheSameAndTheLogSaysWhy() {
+	for endpoint, cause := range map[string]string{
+		"https://tokens.invalid/token": "egress: endpoint host could not be resolved",
+		"https://localhost/token":      "egress: endpoint host resolved to a non-public address",
+		"https://10.0.0.1/token":       "egress: endpoint host is not publicly routable",
+	} {
+		id := "custom_tools" + strings.ReplaceAll(s.utils.uuid(), "-", "")
+		manifest, err := core.ParseManifest([]byte(s.manifest(id, 1, oauth2cc.Name, "")))
+		s.Require().NoError(err)
+		manifest.Endpoints["token"] = endpoint
+		_, err = s.store.ConnectorDefinitions.Revise(context.Background(), s.customerID(), manifest)
+		s.Require().NoError(err)
+
+		status, body := s.serverClient.call(http.MethodPut, "/v1/agents/connections/"+s.connectionTo(id)+"/credentials",
+			map[string]any{"expected_revision": 1, "values": map[string]string{
+				oauth2cc.SuppliedClientID: s.provider.ClientID, oauth2cc.SuppliedClientSecret: s.provider.ClientSecret,
+			}})
+
+		s.Equal(http.StatusBadRequest, status)
+		var failure struct{ Error APIError }
+		s.Require().NoError(json.Unmarshal(body, &failure))
+		s.Equal("the credentials were refused: transient: oauth2cc: token: oauth2code: the request was not sent: "+
+			`oauth2code: endpoint "`+endpoint+`" is not an https URL of a public host that resolves`, failure.Error.Message)
+		s.Contains(s.logged.String(), "is not an https URL of a public host that resolves: "+cause)
+	}
+}
+
 // TestAnImportedGrantConnectsWithTheConnectorsEndpoints: the grant names no endpoint and no
 // client; the scheme takes both from the manifest and the operator's environment.
 func (s *ConnectionToolsSuite) TestAnImportedGrantConnectsWithTheConnectorsEndpoints() {

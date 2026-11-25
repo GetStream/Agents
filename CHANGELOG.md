@@ -893,6 +893,10 @@ A `recipient` that is neither an E.164 number nor, for channel `imessage` or `al
 
 ## Bug Fixes
 
+### The JavaScript SDK's channel stops the agent's reply from the default stop button
+
+The default stop button of stream-chat-react's composer, `StopAIGenerationButton`, calls the channel's `stopAIResponse()`, as React Native's composer does, which only sent `ai_indicator.stop`, an event the agent does not act on, so the reply went on and apps replaced the button with one calling `session.interrupt()`. On the channel `session.chat()` opens, `stopAIResponse()` now interrupts the session's reply first and still sends the event, so the default button works and the override can go. The channel gets Stream Chat's own back when the session is closed.
+
 ### A scheduled task whose turn is refused for money in an open conversation fails its run
 
 A task delivered in a conversation whose session is open settled its run `delivered` as soon as the agent was asked, even when the model then refused the turn for money and the user got nothing. The conversation channel now waits for the turn to end: refused for money, the run fails under the refusal's code, such as `insufficient_credits` or `spend_limit_reached`, and is not tried again, as on the text channels; `spend_check_unavailable` is still tried again, and the first retry now runs the turn once more, in the conversation or on a text channel, also when another router holds the session, or in a thread, so the user gets the reply once the money can be checked. A conversation turn refused again on that retry fails the run under `spend_check_unavailable` once its retries are spent, never `delivered`. A turn that ends any other way, failed for another reason included, is still `delivered` (AI-3183).
