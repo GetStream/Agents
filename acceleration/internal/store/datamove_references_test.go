@@ -495,9 +495,11 @@ var bareTexts = map[string][]string{
 	"users":           {"claimed_by"},
 }
 
-// words are the text columns of each moved table that hold no row's id.
+// words are the text columns of each moved table that hold no row's id. The identity_* columns of
+// agent_configs name a Chat user of the customer's app and a display name: no moved table holds
+// that user, so the move carries them as they are.
 var words = map[string]string{
-	"agent_configs":          "greeting greeting_mode guardrail harness image instructions knowledge_namespace llm mode name region review_instructions role sandbox_provider search sts stt subagent sync_hash tts ui_instructions video_source",
+	"agent_configs":          "greeting greeting_mode guardrail harness image identity_agent_id identity_user_id identity_user_name instructions knowledge_namespace llm mode name region review_instructions role sandbox_provider search sts stt subagent sync_hash tts ui_instructions video_source",
 	"skills":                 "description instructions name",
 	"connector_definitions":  "category description name sync_hash",
 	"connector_connections":  "auth_scheme client_registration label last_error owner_type status tls_scheme tools_digest validation_code validation_error validation_status",
