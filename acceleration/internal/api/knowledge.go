@@ -608,6 +608,7 @@ func (s *Server) registerKnowledge(api huma.API) {
 			"again after editing it replaces that document's passages rather than leaving two " +
 			"versions of them to be found. A namespace is never shared between agents, and the " +
 			"caller names it.\n" +
+			"A document that is removed again and again while it is written is refused with a 409: post it again.\n" +
 			"Server-side only: it needs a server-side token, so it cannot be reached from an end " +
 			"user's device.",
 		Responses: map[string]*huma.Response{

@@ -40,7 +40,6 @@ func TestKnowledgeFilesSuite(t *testing.T) {
 func (s *KnowledgeFilesSuite) SetupTest() {
 	s.useApp(s.data.createApp())
 	s.namespace = "files-" + uuid.NewString()
-	s.knowledge.forget()
 	s.T().Cleanup(func() {
 		s.knowledge.onceBeforeWrite(nil)
 		s.knowledge.onceAfterWrite(nil)
@@ -669,17 +668,13 @@ func (s *KnowledgeFilesSuite) TestOnlyTheDocumentOfAPostThatWasRemovedIsWrittenA
 	go func() { posted <- s.postBoth() }()
 	s.reached(writing, "the post never wrote")
 	s.removeSource("second.md")
-	// Gone from the base, it is there again only if the second write holds it.
-	s.knowledge.onceAfterWrite(func() error {
-		s.knowledge.onceBeforeWrite(func() { s.forgetStored("first.md") })
-		return nil
-	})
 	write()
 
 	s.Equal(http.StatusOK, s.answer(posted))
 	s.Len(s.listed(), 2)
-	s.Zero(s.passagesOf("first.md"), "it was not removed, so it is not written again")
+	s.Equal(2, s.passagesOf("first.md"))
 	s.Equal(3, s.passagesOf("second.md"))
+	s.Len(s.knowledge.lastWrite(), 3, "the document that was not removed is not written again")
 	for _, document := range s.listed() {
 		s.Equal(KnowledgeDocumentStateIndexed, document.State)
 	}
@@ -1070,11 +1065,10 @@ func (s *KnowledgeFilesSuite) indexedWith(source string, n int) {
 func (s *KnowledgeFilesSuite) forgetStored(source string) {
 	s.knowledge.mu.Lock()
 	defer s.knowledge.mu.Unlock()
-	for _, passages := range s.knowledge.passages {
-		for id, passage := range passages {
-			if strings.HasPrefix(passage.Source, source+" > ") {
-				delete(passages, id)
-			}
+	passages := s.knowledge.passages[knowledge.Scoped(s.customerID(), s.namespace)]
+	for id, passage := range passages {
+		if strings.HasPrefix(passage.Source, source+" > ") {
+			delete(passages, id)
 		}
 	}
 }
@@ -1148,9 +1142,10 @@ func (s *KnowledgeFilesSuite) listed() []IndexedKnowledgeDocument {
 
 // passagesOf is how many stored passages belong to source.
 func (s *KnowledgeFilesSuite) passagesOf(source string) int {
-	_, passages := s.knowledge.stored()
+	s.knowledge.mu.Lock()
+	defer s.knowledge.mu.Unlock()
 	count := 0
-	for _, passage := range passages {
+	for _, passage := range s.knowledge.passages[knowledge.Scoped(s.customerID(), s.namespace)] {
 		if passage.Source == source || strings.HasPrefix(passage.Source, source+" > ") {
 			count++
 		}

@@ -17333,6 +17333,7 @@ paths:
       description: |-
         The writing half of the lookup a config's knowledge_namespace gives an agent. Each document is cut into passages here rather than by the caller, so a file read off disk by the command and one posted by an SDK are cut the same way and can replace each other.
         Passages are keyed by the source and the position they came from, so posting a document again after editing it replaces that document's passages rather than leaving two versions of them to be found. A namespace is never shared between agents, and the caller names it.
+        A document that is removed again and again while it is written is refused with a 409: post it again.
         Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
       operationId: ingestKnowledge
       requestBody:

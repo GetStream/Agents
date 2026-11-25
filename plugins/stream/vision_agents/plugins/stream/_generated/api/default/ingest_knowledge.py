@@ -103,6 +103,7 @@ def sync_detailed(
     Passages are keyed by the source and the position they came from, so posting a document again after
     editing it replaces that document's passages rather than leaving two versions of them to be found. A
     namespace is never shared between agents, and the caller names it.
+    A document that is removed again and again while it is written is refused with a 409: post it again.
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:
@@ -140,6 +141,7 @@ def sync(
     Passages are keyed by the source and the position they came from, so posting a document again after
     editing it replaces that document's passages rather than leaving two versions of them to be found. A
     namespace is never shared between agents, and the caller names it.
+    A document that is removed again and again while it is written is refused with a 409: post it again.
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:
@@ -172,6 +174,7 @@ async def asyncio_detailed(
     Passages are keyed by the source and the position they came from, so posting a document again after
     editing it replaces that document's passages rather than leaving two versions of them to be found. A
     namespace is never shared between agents, and the caller names it.
+    A document that is removed again and again while it is written is refused with a 409: post it again.
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:
@@ -207,6 +210,7 @@ async def asyncio(
     Passages are keyed by the source and the position they came from, so posting a document again after
     editing it replaces that document's passages rather than leaving two versions of them to be found. A
     namespace is never shared between agents, and the caller names it.
+    A document that is removed again and again while it is written is refused with a 409: post it again.
     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
 
     Args:

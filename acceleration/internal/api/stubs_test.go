@@ -1026,13 +1026,6 @@ type knowledgeBase struct {
 	afterDelete  func()
 }
 
-// forget empties every base.
-func (b *knowledgeBase) forget() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	clear(b.passages)
-}
-
 // onceBeforeWrite runs hook before the next write.
 func (b *knowledgeBase) onceBeforeWrite(hook func()) {
 	b.mu.Lock()
@@ -1045,6 +1038,13 @@ func (b *knowledgeBase) onceAfterWrite(hook func() error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.afterWrite = hook
+}
+
+// lastWrite is what the last write kept.
+func (b *knowledgeBase) lastWrite() []knowledge.Document {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.wrote
 }
 
 // writeCancelled is closed once the last write's caller gave up on it.
@@ -1129,7 +1129,7 @@ func (b *knowledgeBase) keep(namespace string, documents []knowledge.Document) (
 	if b.down {
 		return knowledge.Billed{}, fmt.Errorf("turbopuffer: write to %s: 503 Service Unavailable", namespace)
 	}
-	b.namespace = namespace
+	b.namespace, b.wrote = namespace, documents
 	if b.passages[namespace] == nil {
 		b.passages[namespace] = map[string]knowledge.Document{}
 	}
