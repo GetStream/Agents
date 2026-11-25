@@ -326,9 +326,10 @@ func (s *StoreSuite) TestAgentConfigQueryBudgets() {
 		s.Require().NoError(err)
 	}))
 	s.Equal(1, s.countQueries(func() {
-		parent, err := s.store.AgentConfigs.NameCalling(s.ctx, "acme-app", "child", "")
+		parents, err := s.store.AgentConfigs.Calling(s.ctx, "acme-app", "child", "")
 		s.Require().NoError(err)
-		s.Equal("moderator", parent)
+		s.Require().Len(parents, 1)
+		s.Equal("moderator", parents[0].Name)
 	}))
 	s.Equal(1, s.countQueries(func() {
 		_, err := s.store.AgentConfigs.GetUnscoped(s.ctx, config.ID)
