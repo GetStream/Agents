@@ -46,7 +46,9 @@ func (s *ImportableDefinitionSuite) TestAnHTTPConnectorWhoseAPIIsNotPublicIsRefu
 	for _, base := range []string{"https://127.0.0.1", "https://10.0.0.1", "https://169.254.169.254", "https://[::1]",
 		"https://router-probe.invalid",
 		// S1.2: refused by core's rules too, which would answer each in their own words.
-		"http://8.8.8.8/api", "HTTPS://8.8.8.8/api", "https://8.8.8.8/{x}", "https://8.8.8.8/" + strings.Repeat("a", 2048)} {
+		"http://8.8.8.8/api", "HTTPS://8.8.8.8/api", "https://8.8.8.8/{x}", "https://8.8.8.8/" + strings.Repeat("a", 2048),
+		// 2049 bytes, one over the cap: pins the cap as maxHTTPPath, not maxHTTPPath+1.
+		"https://8.8.8.8/" + strings.Repeat("a", 2033)} {
 		manifest := strings.Replace(importedHTTP, "https://8.8.8.8/api", base, 1)
 
 		_, err := importableDefinition(context.Background(), json.RawMessage(`{"id": "custom_crm", "manifest": `+manifest+`}`))

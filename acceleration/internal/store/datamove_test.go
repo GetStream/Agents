@@ -2466,6 +2466,25 @@ func (s *DataMoveSuite) TestAChangesDefinitionsAreCheckedBeforeItsTransactionOpe
 	s.Zero(s.definitionsNamed(id))
 }
 
+// TestAChangesDefinitionArrivesWithoutAFieldThisReleaseDoesNotRead: a change set's definition is
+// stored as the API would store it, as an import's is: the check before the transaction hands
+// its normalized row on (applyChanges).
+func (s *DataMoveSuite) TestAChangesDefinitionArrivesWithoutAFieldThisReleaseDoesNotRead() {
+	id := "custom_" + newID()
+	manifest := strings.Replace(customManifestWith(`"later": {"env": "GOOGLE"}`), "custom_acme", id, 1)
+
+	err := s.destination.ApplyChanges(s.ctx, "moved", []DataChange{{Table: "connector_definitions", Op: ChangeInsert,
+		Payload: json.RawMessage(`{"id": "` + id + `", "revision": 1, "name": "Acme", "category": "", "description": "", "created_at": "2026-11-01T00:00:00Z", "manifest": ` + manifest + `}`)}})
+
+	s.Require().NoError(err)
+	var stored string
+	s.Require().NoError(s.destination.GlobalDB().QueryRowContext(s.ctx,
+		"SELECT manifest FROM connector_definitions WHERE customer_id = 'moved' AND id = ?", id).Scan(&stored))
+	var manifestStored map[string]any
+	s.Require().NoError(json.Unmarshal([]byte(stored), &manifestStored))
+	s.NotContains(manifestStored, "later")
+}
+
 // TestAnImportedHTTPDefinitionWhoseReadOnlyToolWritesIsRefused: the http tool rules
 // (core.Manifest.Validate) hold for an import as for the API.
 func (s *DataMoveSuite) TestAnImportedHTTPDefinitionWhoseReadOnlyToolWritesIsRefused() {

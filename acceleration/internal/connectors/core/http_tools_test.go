@@ -152,6 +152,11 @@ func (s *HTTPSourceSuite) TestAnHTTPSourceBreakingARuleIsRefused() {
 		"a parameter description over 1000": {withTool(func(t *HTTPTool) {
 			t.Parameters["days"] = HTTPParameter{Type: "integer", Description: strings.Repeat("d", 1001)}
 		}), `http_tools[0].parameters.days.description: is over 1000 bytes`},
+		"a base_url of 2049": {func() Manifest {
+			m := httpManifest(forecast())
+			m.Endpoints[SourceKindHTTP] = "https://api.example.com/" + strings.Repeat("a", 2025)
+			return m
+		}(), `endpoints.http: is over 2048 bytes`},
 		"a base_url over 2048": {func() Manifest {
 			m := httpManifest(forecast())
 			m.Endpoints[SourceKindHTTP] = "https://api.example.com/" + strings.Repeat("a", 2048)
