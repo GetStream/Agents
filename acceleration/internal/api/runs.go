@@ -73,6 +73,9 @@ func (s *Server) createRun(ctx context.Context, request *createRunRequest) (*cre
 	if !ok {
 		return nil, errMissingCustomer
 	}
+	if failure, refused := refuseReservedActingFor(ctx, "CreateRun"); refused {
+		return nil, failure
+	}
 	if s.sessions == nil {
 		return nil, errNoSessions
 	}

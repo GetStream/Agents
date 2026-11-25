@@ -55,7 +55,7 @@ await voice.join()
 let channel = try await session.chat()
 ```
 
-`StreamAgents(apiKey:)` reaches Stream's hosted router in us-east4; pass `url:` for another router. For another
+`StreamAgents(apiKey:)` reaches Stream's hosted router in the nearest healthy region; pass `url:` for another router. To pin one
 region, pass `url: try Backend.regionURL("europe-west4")`. The token
 comes from a closure because your backend mints it and it expires: it is asked for once, then
 again after a 401. The key goes in the query string and the token in the `Authorization`

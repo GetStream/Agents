@@ -464,6 +464,28 @@ func (s *SocketCloseLogSuite) TestAVoiceSocketNamingACallIsARefusal() {
 	s.Contains(s.closeLine(id), " close_reason=refused close_code=1008 ")
 }
 
+// Catches a caller naming a conversation another session holds open logged as a failure of the
+// router's own.
+func (s *SocketCloseLogSuite) TestAVoiceSocketForAConversationHeldOpenIsARefusal() {
+	alice := s.data.createUser()
+	opened := alice.createSession(textSession(nil))
+	s.Require().NotNil(opened.ConversationId)
+	watching := alice.opens("/v1/agents/sessions/" + opened.Id + "/events")
+	defer func() { _ = watching.Close() }()
+	before := len(s.logged.String())
+	id := rand.Text()
+	connection := s.serverClient.actingFor(s.data.createUser()).withRequestID(id).opens("/v1/agents/socket")
+
+	s.Require().NoError(connection.WriteJSON(map[string]any{
+		"type": "start", "session": map[string]any{"conversation_id": *opened.ConversationId, "agent_id": opened.AgentId},
+	}))
+	s.Equal("conversation is already open", s.await(connection, "error")["error"])
+	_, _ = s.socketEnd(connection)
+
+	s.Contains(s.closeLine(id), " close_reason=refused close_code=1008 ")
+	s.NotContains(s.logged.String()[before:], "could not open a socket session")
+}
+
 // worker opens /v1/dispatch on node (nil for the suite's own) and waits for its ready frame,
 // named by a request id of its own.
 func (s *SocketCloseLogSuite) worker(node *httptest.Server) (*websocket.Conn, string) {

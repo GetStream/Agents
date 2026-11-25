@@ -185,6 +185,17 @@ func (s *Server) Channel(id string) (map[string]any, bool) {
 	return data, ok
 }
 
+// ForgetCustom drops fields from a channel's custom data, as a channel made before they were
+// written has none of them.
+func (s *Server) ForgetCustom(id string, fields ...string) {
+	s.db.mu.Lock()
+	defer s.db.mu.Unlock()
+	custom, _ := s.db.channels[cidOf(id)]["custom"].(map[string]any)
+	for _, field := range fields {
+		delete(custom, field)
+	}
+}
+
 // cidOf is the cid a test names a channel by: a cid as it is, or an agent channel's id alone.
 // Channels are held by cid, as Chat holds them: one id under two types is two channels.
 func cidOf(id string) string {
@@ -1042,6 +1053,15 @@ func (db *store) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		set, _ := body["set"].(map[string]any)
 		maps.Copy(data, set)
+		// Chat reads a field set this way back among the channel's custom data. A set of custom
+		// itself, as a test may send, is the custom data.
+		if custom, ok := data["custom"].(map[string]any); ok {
+			for key, value := range set {
+				if key != "custom" {
+					custom[key] = value
+				}
+			}
+		}
 		result["channel"] = data
 	case r.Method == http.MethodPost && len(parts) >= 3 && parts[len(parts)-3] == "channels":
 		// An update adds the members it names to the channel, which is how a reader comes

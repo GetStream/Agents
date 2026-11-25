@@ -648,6 +648,7 @@ func (c *Conversation) readUpTo(ctx context.Context, client *getstream.Stream, b
 	c.mu.Lock()
 	hidden := maps.Clone(c.hidden)
 	customer, agentID, cid, owner, voiceAgent := c.data.Customer, c.data.Agent, c.data.CID, c.data.Owner, c.voiceAgent
+	ctx = WithCallerKind(ctx, c.data.OwnerKind)
 	c.mu.Unlock()
 	maps.Copy(hidden, tail)
 	page, err := c.service.readPage(ctx, client, customer, agentID, cid, before, owner, nil, hidden, nil, voiceAgent)

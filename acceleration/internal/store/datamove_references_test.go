@@ -518,7 +518,7 @@ var words = map[string]string{
 	"scheduled_task_runs":    "delivered_to error prompt state trigger",
 	"opt_outs":               "channel recipient source",
 	"recordings":             "callback error modality model provider source status text",
-	"agent_sessions":         "agent_name caller_kind description end_reason modality project return_url state team title",
+	"agent_sessions":         "agent_name caller_kind description end_reason modality project project_tag return_url state team title",
 	"calls":                  "call_type direction from_number instructions llm review_notes sts stt subagent summary to_number tts voice",
 	"agent_responses":        "error said status",
 	"agent_response_items":   "kind text tool_name",

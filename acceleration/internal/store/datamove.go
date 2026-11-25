@@ -940,6 +940,10 @@ func (s *Store) importRow(ctx context.Context, db bun.IDB, customerID, table str
 			}
 			assignments = append(assignments, fmt.Sprintf(
 				"%[1]s = CASE WHEN %[2]s AND EXCLUDED.released_at IS NULL AND EXCLUDED.e164 = phone_numbers.e164 THEN phone_numbers.%[1]s ELSE EXCLUDED.%[1]s END", column, kept))
+		case spec.name == "agent_sessions" && column == "project_tag":
+			// A session carried on in another shard is a row in each, and arrives as one: the row
+			// that does not say the tag leaves the one that does, whichever arrives last.
+			assignments = append(assignments, "project_tag = COALESCE(EXCLUDED.project_tag, agent_sessions.project_tag)")
 		default:
 			assignments = append(assignments, column+" = EXCLUDED."+column)
 		}
