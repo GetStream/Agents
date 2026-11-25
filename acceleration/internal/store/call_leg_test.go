@@ -918,14 +918,18 @@ func (s *StoreSuite) TestACallIsLockedWhileItIsClaimed() {
 func (s *StoreSuite) TestACallWhoseLegsCannotBeReadIsNotClaimed() {
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
-	held := false
+	held, asked := false, 0
 	on := NamedCall{Scope: AppScope{Unpinned: true}, Holder: func(context.Context) (string, error) {
-		cancel()
+		// Asked again under the call's lock, just before its legs are read.
+		if asked++; asked == 2 {
+			cancel()
+		}
 		return "", nil
 	}}
 
 	s.Error(s.store.CallLegs.Claim(ctx, "mine", "agent", "call", on, func(context.Context) error { held = true; return nil }))
 
+	s.Equal(2, asked)
 	s.False(held)
 }
 
