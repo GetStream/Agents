@@ -769,9 +769,6 @@ func unsourcedTransfer(history []llm.Message, call llm.ToolCall, told string, ca
 				names[made.ID] = made.Name
 			}
 		case llm.ToolResult:
-			if callers != nil && callers(names[message.ToolCallID]) {
-				continue
-			}
 			// A refusal quotes the value refused: "56305" refused let 5630 through.
 			if failedResult(message.Content) || !gives(message.Content) || asked[message.ToolCallID].echoes(message.Content, written) {
 				continue
@@ -780,6 +777,11 @@ func unsourcedTransfer(history []llm.Message, call llm.ToolCall, told string, ca
 				rest := held.cut(line, sent, written)
 				return gives(rest)
 			}) {
+				// Asked last, of a result that would give the number, so a caller counting
+				// what it changes counts only that.
+				if callers != nil && callers(names[message.ToolCallID]) {
+					continue
+				}
 				return "", false
 			}
 		}

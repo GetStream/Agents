@@ -34,7 +34,7 @@ func (s *CallToolsSuite) SetupTest() {
 
 func (s *CallToolsSuite) offered(spec Spec) []string {
 	var names []string
-	for _, tool := range spec.callTools(s.builtin) {
+	for _, tool := range spec.callTools(s.builtin, spec.keepsDialOut(true)) {
 		names = append(names, tool.Name)
 	}
 	return names
