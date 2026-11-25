@@ -971,7 +971,11 @@ func (s *StoreSuite) TestNamedCallsOfNoOrganizationArePlacedBesideEachOther() {
 	}
 	first := make(chan error, 1)
 	go func() { first <- place("one", waits) }()
-	<-asking
+	select {
+	case <-asking:
+	case <-time.After(10 * time.Second):
+		s.FailNow("nobody was asked who is on the first call")
+	}
 
 	s.NoError(place("two", NamedCall{Scope: AppScope{Unpinned: true}}))
 
@@ -981,13 +985,17 @@ func (s *StoreSuite) TestNamedCallsOfNoOrganizationArePlacedBesideEachOther() {
 
 // Named calls whose hold is not answered give up, and hold up no other placement meanwhile.
 func (s *StoreSuite) TestNamedCallsNotAnsweredHoldUpNoOtherPlacement() {
+	// A router of its own, closed here: the connections it opens are not the suite's to keep.
+	router, err := s.openRouter()
+	s.Require().NoError(err)
+	defer func() { s.NoError(router.Close()) }()
 	on := NamedCall{Scope: AppScope{Unpinned: true}}
 	var holding atomic.Int64
 	var wg sync.WaitGroup
 	began := time.Now()
 	for i := range 64 {
 		wg.Go(func() {
-			s.ErrorIs(s.store.CallLegs.Claim(s.ctx, "app", "agent", fmt.Sprintf("call-%d", i), on, func(ctx context.Context) error {
+			s.ErrorIs(router.CallLegs.Claim(s.ctx, "app", "agent", fmt.Sprintf("call-%d", i), on, func(ctx context.Context) error {
 				holding.Add(1)
 				select {
 				case <-ctx.Done():
@@ -1001,7 +1009,7 @@ func (s *StoreSuite) TestNamedCallsNotAnsweredHoldUpNoOtherPlacement() {
 	s.Require().Eventually(func() bool { return holding.Load() >= 8 }, 5*time.Second, 5*time.Millisecond)
 
 	at := time.Now()
-	s.Require().NoError(s.store.CallLegs.PlaceWithin(s.ctx, &CallLeg{Token: newID(), CustomerID: "other", OrganizationID: "org", CallType: "agent",
+	s.Require().NoError(router.CallLegs.PlaceWithin(s.ctx, &CallLeg{Token: newID(), CustomerID: "other", OrganizationID: "org", CallType: "agent",
 		CallID: "unrelated", Vendor: "telnyx", Direction: Outbound, LocalNumber: "+15125550150", RemoteNumber: "+15125550151", PlacedAt: &at},
 		CallsAtOnce{Limit: 9, Ringing: time.Hour}))
 	s.Less(time.Since(at), time.Second)

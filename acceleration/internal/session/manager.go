@@ -511,6 +511,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	if stream.Client == nil && m.options.Stream != nil && m.options.Stream.PerApp() {
 		spec.StreamApp = store.ForeignStreamApp
 	}
+
 	var remembering *metered.Memory
 	if spec.Memory.UserID != "" {
 		if m.options.Memory == nil {
@@ -2258,11 +2259,11 @@ func (m *Manager) stream(ctx context.Context, spec Spec, newCall bool) (streamap
 }
 
 // claimCall says the session's customer is on the call it is named after, agent:<id> in the
-// Stream app it acts in, until the func it returns is called. Of a named session it is refused with ErrSessionExists
-// when the call is another customer's, by its legs or by a session some node runs, and with
-// store.ErrCallUnchecked when that cannot be told. An id the router made names nobody else's call,
-// and a reopened session's is its own, so theirs is only said. A session of no Stream app has no
-// call.
+// Stream app it acts in, until the func it returns is called. Of a named session it is refused
+// with ErrSessionExists when the call is another customer's, by its legs or by a session some node
+// runs, and with store.ErrCallUnchecked when that cannot be told. An id the router made names
+// nobody else's call, and a reopened session's is its own, so theirs is only said. A session of no
+// Stream app has no call.
 func (m *Manager) claimCall(ctx context.Context, spec Spec, named bool) (func(), error) {
 	if spec.StreamApp == store.ForeignStreamApp {
 		return func() {}, nil

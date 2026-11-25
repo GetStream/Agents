@@ -324,6 +324,18 @@ func (s *DirectorySuite) TestACallIsHeldUntilTheLastSessionOnItIsGone() {
 	s.Empty(s.holder(7, "order-42"))
 }
 
+// Two nodes' first holds of one customer's call are each their own.
+func (s *DirectorySuite) TestACallTwoNodesHoldFirstIsHeldUntilBothAreGone() {
+	here, there := s.callOf(s.directoryAt("node-a:1"), "acme"), s.callOf(s.directoryAt("node-b:1"), "acme")
+
+	there()
+	s.Equal("acme", s.holder(7, "order-42"))
+	_, err := s.directoryAt("node-c:1").HoldCall(s.ctx, "globex", 7, "order-42")
+	s.ErrorIs(err, ErrCallHeld)
+	here()
+	s.Empty(s.holder(7, "order-42"))
+}
+
 // A hold Redis did not take is said with the next renewal, until it is released.
 func (s *DirectorySuite) TestAHoldThatWasNotSaidIsSaidWithTheNextRenewal() {
 	directory := s.directoryAt("node-a:1")

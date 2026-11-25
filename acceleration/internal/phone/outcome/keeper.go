@@ -40,8 +40,9 @@ func (k *Keeper) Placed(ctx context.Context, call Call) (string, error) {
 }
 
 // PlacedWithin is Placed for a call whose leg counts among organization's calls, refused with
-// store.ErrCallsAtOnce when atOnce, if set, leaves no room for it (store.CallLegs.PlaceWithin), and with store.ErrCallTaken when on, set for a call
-// whose id somebody chose, finds it another customer's (store.CallLegs.PlaceOn).
+// store.ErrCallsAtOnce when atOnce, if set, leaves no room for it (store.CallLegs.PlaceWithin), and
+// with store.ErrCallTaken when on, set for a call whose id somebody chose, finds it another
+// customer's (store.CallLegs.PlaceOn).
 func (k *Keeper) PlacedWithin(ctx context.Context, call Call, organization string, atOnce *store.CallsAtOnce, on *store.NamedCall) (string, error) {
 	placed := k.now()
 	row := store.CallLeg{
