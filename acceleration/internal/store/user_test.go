@@ -659,3 +659,46 @@ func (s *StoreSuite) TestAnEmailWaitsForAWriteInFlightForTheSameUser() {
 	s.Require().NoError(<-done)
 	s.Equal("jim@fake.example", s.userEmail(app, "jlahey"))
 }
+
+func (s *StoreSuite) TestTheShardThatServedAUserIsReadBack() {
+	app := s.freshApp()
+	s.Require().NoError(s.store.Users.Seen(s.ctx, app, "jlahey", UserKindAuthenticated))
+
+	s.Require().NoError(s.store.Users.Served(s.ctx, app, "jlahey", "europe-west4"))
+
+	shard, err := s.store.Users.Shard(s.ctx, app, "jlahey")
+	s.Require().NoError(err)
+	s.Equal("europe-west4", shard)
+}
+
+func (s *StoreSuite) TestTheSameShardServingAUserAgainWritesNothing() {
+	app := s.freshApp()
+	s.Require().NoError(s.store.Users.Seen(s.ctx, app, "jlahey", UserKindAuthenticated))
+	s.Require().NoError(s.store.Users.Served(s.ctx, app, "jlahey", "europe-west4"))
+	_, err := s.store.Users.Shard(s.ctx, app, "jlahey")
+	s.Require().NoError(err)
+	before := s.userVersion(app, "jlahey")
+
+	queries := s.countQueries(func() {
+		s.Require().NoError(s.store.Users.Served(s.ctx, app, "jlahey", "europe-west4"))
+	})
+
+	s.Zero(queries, "the held shard is read from the cache")
+	s.Equal(before, s.userVersion(app, "jlahey"), "the row was written again")
+}
+
+func (s *StoreSuite) TestAnotherShardServingAUserIsWrittenAndReadOnEveryReplica() {
+	app, other := s.freshApp(), s.replicaUsers()
+	s.Require().NoError(s.store.Users.Seen(s.ctx, app, "jlahey", UserKindAuthenticated))
+	s.Require().NoError(s.store.Users.Served(s.ctx, app, "jlahey", "us-east4"))
+	held, err := other.Shard(s.ctx, app, "jlahey")
+	s.Require().NoError(err)
+	s.Require().Equal("us-east4", held)
+
+	s.Require().NoError(s.store.Users.Served(s.ctx, app, "jlahey", "europe-west4"))
+
+	s.Eventually(func() bool {
+		shard, err := other.Shard(s.ctx, app, "jlahey")
+		return err == nil && shard == "europe-west4"
+	}, settleFor, 10*time.Millisecond, "the other replica still reads the shard it cached")
+}

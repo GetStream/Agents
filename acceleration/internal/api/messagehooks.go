@@ -425,6 +425,11 @@ func (s *Server) routeArrivingMessage(ctx context.Context, origin hookOrigin, ev
 		return true
 	}
 
+	// Nothing runs the conversation yet, so it starts in the shard nearest the person writing.
+	if elsewhere, taken := s.handedToShard(ctx, origin.handOver,
+		s.configShard(ctx, customerID, configID, event.Message.User.ID), shardWorkMessage); elsewhere {
+		return taken
+	}
 	if elsewhere, taken := s.forwardedToWorkers(ctx, origin.handOver, customerID, dispatch.Messages); elsewhere {
 		return taken
 	}
