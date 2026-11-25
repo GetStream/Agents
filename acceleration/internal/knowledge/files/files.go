@@ -467,12 +467,13 @@ func (s *Service) read(ctx context.Context, owned metered.OwnedKnowledge, payloa
 	}
 	// A write that failed may have written some of them.
 	failed := owned.Upsert(ctx, document.Namespace, passages)
-	current, err := s.waiting(ctx, payload)
+	// Looked at whatever ended the write, the read's time running out included: a retry no
+	// longer knows what was written.
+	after, cancel := context.WithTimeout(context.WithoutCancel(ctx), overtakenTimeout)
+	defer cancel()
+	current, err := s.waiting(after, payload)
 	if errors.Is(err, errOvertaken) {
-		// Its time may be what ran out, and a retry no longer knows what was written.
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), overtakenTimeout)
-		defer cancel()
-		return s.overtaken(ctx, owned, payload, current, document, len(passages))
+		return s.overtaken(after, owned, payload, current, document, len(passages))
 	}
 	if failed != nil {
 		return failed

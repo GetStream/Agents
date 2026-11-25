@@ -805,6 +805,26 @@ func (s *KnowledgeFilesSuite) TestAReadWhoseWriteFailedAfterItsDocumentIsGoneTak
 	s.Empty(s.listed())
 }
 
+// The read is cancelled as it is when its time runs out.
+func (s *KnowledgeFilesSuite) TestAReadCancelledInItsWriteTakesItBackOnceItsDocumentIsGone() {
+	writing, write := s.holdWrite()
+	_, sent, _ := s.upload("cancelled.md", []byte(sections(8)), "")
+	s.reached(writing, "the read never wrote")
+	document, err := s.store.KnowledgeDocuments.Get(context.Background(), s.customerID(), sent.Id)
+	s.Require().NoError(err)
+	inspector := asynq.NewInspector(s.knowledgeRedis)
+	defer func() { s.NoError(inspector.Close()) }()
+	s.Require().NoError(inspector.CancelProcessing(document.ObjectKey))
+	s.reached(s.knowledge.writeCancelled(), "the read was never cancelled")
+
+	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
+	write()
+
+	s.everyFileRead()
+	s.Zero(s.passagesOf("cancelled.md"))
+	s.Empty(s.listed())
+}
+
 func (s *KnowledgeFilesSuite) TestAReadWhoseWriteFailsIsTriedAgain() {
 	s.knowledge.onceAfterWrite(func() error { return errors.New("down") })
 	_, sent, _ := s.upload("tried.md", []byte(sections(3)), "")

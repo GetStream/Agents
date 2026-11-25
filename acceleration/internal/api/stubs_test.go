@@ -1020,6 +1020,8 @@ type knowledgeBase struct {
 	// afterWrite's write is kept whatever it answers.
 	beforeWrite  func()
 	afterWrite   func() error
+	// writing is the context of the last write.
+	writing context.Context
 	beforeDelete func() error
 	afterDelete  func()
 }
@@ -1036,6 +1038,13 @@ func (b *knowledgeBase) onceAfterWrite(hook func() error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.afterWrite = hook
+}
+
+// writeCancelled is closed once the last write's caller gave up on it.
+func (b *knowledgeBase) writeCancelled() <-chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.writing.Done()
 }
 
 // onceBeforeDelete runs hook before the next delete, which fails with the hook's error.
@@ -1080,10 +1089,11 @@ func passageBytes(document knowledge.Document) int64 {
 	return int64(len(document.ID) + len(document.Text) + len(document.Source))
 }
 
-func (b *knowledgeBase) Upsert(_ context.Context, namespace string, documents []knowledge.Document) (knowledge.Billed, error) {
+func (b *knowledgeBase) Upsert(ctx context.Context, namespace string, documents []knowledge.Document) (knowledge.Billed, error) {
 	b.mu.Lock()
 	before := b.beforeWrite
 	b.beforeWrite = nil
+	b.writing = ctx
 	b.mu.Unlock()
 	if before != nil {
 		before()
