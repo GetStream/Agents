@@ -16,6 +16,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/relay"
 )
 
 // RelayedSessionSuite covers the events socket when it does not land on the node running
@@ -258,6 +261,36 @@ func (s *RelayedSessionSuite) TestClosingANodeEndsItsRelaySubscriptionsAndItsWat
 	s.Require().NoError(node.Close(ctx))
 
 	s.Zero(s.relayGoroutines(label), "the node's background work outlived Close")
+}
+
+// An attach the node running the session cannot answer leaves nothing of it there, though the
+// node that asked may be gone before it says it gave up.
+func (s *RelayedSessionSuite) TestAnAttachThatCannotBeAnsweredLeavesNothingPending() {
+	opened := s.inWriting(CreateSessionRequest{})
+	bus, unanswerable, answered := s.router.relayed.bus, s.utils.uuid(), s.utils.uuid()
+	asking := func(watcher, cursor string) relay.Request {
+		return relay.Request{
+			Type: relay.Attach, Node: "gone-" + s.utils.uuid(), Session: opened.Id, Watcher: watcher,
+			Owner:     relay.Owner{CustomerID: s.customerID(), Kind: string(auth.KindServer)},
+			Resumable: cursor != "", Cursor: cursor,
+		}
+	}
+
+	s.Require().NoError(bus.Publish(s.T().Context(), bus.Commands(), asking(unanswerable, "not-a-cursor")))
+	s.Require().NoError(bus.Publish(s.T().Context(), bus.Commands(), asking(answered, "")))
+
+	// Taken in order on the one subscription: once the second is held, the first was answered.
+	s.Require().Eventually(func() bool {
+		s.router.relayed.mu.Lock()
+		defer s.router.relayed.mu.Unlock()
+		_, held := s.router.relayed.proxies[answered]
+		return held
+	}, settleFor, 10*time.Millisecond, "the second attach was never held")
+	s.router.relayed.mu.Lock()
+	_, pending := s.router.relayed.pending[unanswerable]
+	s.router.relayed.mu.Unlock()
+	s.False(pending, "the attach it could not answer is still pending")
+	s.router.relayed.dropProxy(answered)
 }
 
 // relayGoroutines counts the goroutines labelled node=label that run the api or relay

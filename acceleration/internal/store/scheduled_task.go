@@ -167,7 +167,9 @@ type ScheduledTaskFilter struct {
 	State     string
 	ConfigID  string
 	SessionID string
-	Limit     int
+	// Configs narrows the list to the tasks on these configs and those on none, when not nil.
+	Configs *[]string
+	Limit   int
 	// After is the last task of the previous page.
 	After *ScheduledTaskPosition
 }
@@ -360,12 +362,15 @@ func (r *ScheduledTasks) Select(ctx context.Context, customerID string, filter S
 		return nil, stack.Wrap(errCustomerRequired)
 	}
 	var tasks []ScheduledTask
-	query := r.store.global.NewSelect().Model(&tasks).Where("customer_id = ?", customerID)
-	if filter.Scope.UserID != "" {
-		query = query.Where("user_id = ?", filter.Scope.UserID)
-		if len(filter.Scope.Kinds) > 0 {
-			query = query.Where("caller_kind IN (?)", bun.In(filter.Scope.Kinds))
-		}
+	query := scopedTasks(r.store.global.NewSelect().Model(&tasks).Where("customer_id = ?", customerID), filter.Scope)
+	if filter.Configs != nil {
+		query = query.WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			q = q.Where("config_id = ''")
+			if len(*filter.Configs) > 0 {
+				q = q.WhereOr("config_id IN (?)", bun.In(*filter.Configs))
+			}
+			return q
+		})
 	}
 	if filter.State != "" {
 		query = query.Where("state = ?", filter.State)
@@ -384,6 +389,38 @@ func (r *ScheduledTasks) Select(ctx context.Context, customerID string, filter S
 		return nil, stack.Wrap(fmt.Errorf("store: scheduled tasks: %w", err))
 	}
 	return tasks, nil
+}
+
+// Configs are the live agent configs the tasks in scope are on, each once, with their tags:
+// what a list narrowed to the configs a user may reach (ScheduledTaskFilter.Configs) is
+// decided by.
+func (r *ScheduledTasks) Configs(ctx context.Context, customerID string, scope ScheduledTaskScope) ([]AgentConfig, error) {
+	if customerID == "" {
+		return nil, stack.Wrap(errCustomerRequired)
+	}
+	tasks := scopedTasks(r.store.global.NewSelect().Model((*ScheduledTask)(nil)).Column("config_id").
+		Where("customer_id = ?", customerID), scope)
+	var configs []AgentConfig
+	err := r.store.global.NewSelect().Model(&configs).Column("id", "tags").
+		Where("customer_id = ?", customerID).
+		Where("id IN (?)", tasks).
+		Where("deleted_at IS NULL").
+		Scan(ctx)
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: scheduled task configs: %w", err))
+	}
+	return configs, nil
+}
+
+// scopedTasks narrows a query of tasks to scope's.
+func scopedTasks(query *bun.SelectQuery, scope ScheduledTaskScope) *bun.SelectQuery {
+	if scope.UserID != "" {
+		query = query.Where("user_id = ?", scope.UserID)
+		if len(scope.Kinds) > 0 {
+			query = query.Where("caller_kind IN (?)", bun.In(scope.Kinds))
+		}
+	}
+	return query
 }
 
 // Update replaces a task's editable fields and clears any claim, so
