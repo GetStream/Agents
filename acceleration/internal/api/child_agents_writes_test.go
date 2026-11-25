@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
@@ -181,6 +182,9 @@ func (s *ChildAgentsSuite) TestAWriteIsHeldToTheSensitiveConnectorRuleOverTheAge
 				s.Equal(http.StatusBadRequest, status, answered)
 				for _, said := range says {
 					s.Contains(s.failureMessage(answered), said)
+				}
+				if !strings.Contains(says[0], "one level deep") {
+					s.Contains(s.failureMessage(answered), "change them first and save this one after")
 				}
 			})
 		}

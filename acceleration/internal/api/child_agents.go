@@ -154,6 +154,9 @@ func (s *Server) sensitiveGraphComplaint(ctx context.Context, customerID string,
 			configs = append(configs, found)
 		}
 		if message, ok, err := sensitive.GraphComplaint(ctx, s.store.ConnectorDefinitions, customerID, configs); err != nil || !ok {
+			if !ok {
+				message += ". The other agents in these are weighed as stored: if you mean to change them too, change them first and save this one after"
+			}
 			return message, ok, err
 		}
 	}
