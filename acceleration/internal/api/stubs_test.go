@@ -1018,10 +1018,10 @@ type knowledgeBase struct {
 	// beforeWrite, beforeDelete and afterDelete each run once around the next such call,
 	// without the lock held. An error from beforeDelete fails its delete.
 	// afterWrite's write is kept whatever it answers.
-	beforeWrite  func()
-	afterWrite   func() error
+	beforeWrite func()
+	afterWrite  func() error
 	// writing is the context of the last write.
-	writing context.Context
+	writing      context.Context
 	beforeDelete func() error
 	afterDelete  func()
 }

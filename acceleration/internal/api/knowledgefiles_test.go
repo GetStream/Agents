@@ -493,7 +493,7 @@ func (s *KnowledgeFilesSuite) TestAPostWrittenWhileItsDocumentIsRemovedIsNotList
 
 	s.Require().Equal(http.StatusNoContent, s.remove(id))
 	close(release)
-	s.Equal(http.StatusOK, <-posted)
+	s.Equal(http.StatusOK, s.answer(posted))
 
 	s.indexedWith("p.md", 3)
 }
@@ -516,7 +516,7 @@ func (s *KnowledgeFilesSuite) TestAPostThatWritesAfterItsDocumentIsGoneIsADocume
 	s.Empty(s.listed())
 	write()
 
-	s.Equal(http.StatusOK, <-posted)
+	s.Equal(http.StatusOK, s.answer(posted))
 	s.indexedWith("own.md", 3)
 }
 
@@ -527,7 +527,7 @@ func (s *KnowledgeFilesSuite) TestAPostDoneWhileItsDocumentIsRemovedIsRemoved() 
 	write, posted := s.postHeld("done.md", 8)
 	s.knowledge.onceAfterDelete(func() {
 		write()
-		s.Equal(http.StatusOK, <-posted)
+		s.Equal(http.StatusOK, s.answer(posted))
 	})
 
 	s.Require().Equal(http.StatusNoContent, s.remove(id))
@@ -568,7 +568,7 @@ func (s *KnowledgeFilesSuite) TestAPostThatMeetsARemovalThatFailsIsStored() {
 	s.Equal(KnowledgeDocumentStateFailed, s.listed()[0].State)
 	close(release)
 
-	s.Equal(http.StatusOK, <-posted)
+	s.Equal(http.StatusOK, s.answer(posted))
 	s.indexedWith("half.md", 3)
 }
 
@@ -582,7 +582,7 @@ func (s *KnowledgeFilesSuite) TestAPostThatFailsOnceItsDocumentIsGoneIsListedAsF
 	s.Require().Equal(http.StatusNoContent, s.remove(id))
 	write()
 
-	s.Equal(http.StatusInternalServerError, <-posted)
+	s.Equal(http.StatusInternalServerError, s.answer(posted))
 	s.Equal(3, s.passagesOf("part.md"))
 	listed := s.listed()
 	s.Require().Len(listed, 1)
@@ -617,7 +617,7 @@ func (s *KnowledgeFilesSuite) TestOnlyTheDocumentOfAPostThatWasRemovedIsWrittenA
 	})
 	write()
 
-	s.Equal(http.StatusOK, <-posted)
+	s.Equal(http.StatusOK, s.answer(posted))
 	s.Len(s.listed(), 2)
 	s.Zero(s.passagesOf("first.md"), "it was not removed, so it is not written again")
 	s.Equal(3, s.passagesOf("second.md"))
@@ -638,7 +638,7 @@ func (s *KnowledgeFilesSuite) TestTwoPostsOfASourceAtOnceAreEachWrittenOnce() {
 	})
 	write()
 
-	s.Equal(http.StatusOK, <-posted)
+	s.Equal(http.StatusOK, s.answer(posted))
 	s.Zero(writes)
 	s.indexedWith("both.md", 6)
 }
@@ -650,7 +650,7 @@ func (s *KnowledgeFilesSuite) TestAPostWrittenOverAnUploadThatBeganMeanwhileIsKe
 	s.settled(sent.Id)
 	write()
 
-	s.Equal(http.StatusOK, <-posted)
+	s.Equal(http.StatusOK, s.answer(posted))
 	s.everyFileRead()
 	s.indexedWith("over.md", 3)
 }
@@ -672,12 +672,21 @@ func (s *KnowledgeFilesSuite) TestAPostOutlastsARemovalThatKeepsMeetingIt() {
 	s.knowledge.onceBeforeWrite(hold)
 	posted := make(chan int, 1)
 	go func() { posted <- s.post("outlasts.md", 8) }()
-	write := <-held
+	next := func() func() {
+		select {
+		case write := <-held:
+			return write
+		case <-time.After(10 * time.Second):
+			s.Fail("the post did not write again")
+			return func() {}
+		}
+	}
+	write := next()
 	var meet func() error
 	meet = func() error {
 		s.knowledge.onceBeforeDelete(nil)
 		write()
-		write = <-held
+		write = next()
 		s.knowledge.onceBeforeDelete(meet)
 		return nil
 	}
@@ -686,9 +695,9 @@ func (s *KnowledgeFilesSuite) TestAPostOutlastsARemovalThatKeepsMeetingIt() {
 	s.Equal(http.StatusConflict, s.remove(id))
 	s.knowledge.onceBeforeDelete(nil)
 	write()
-	(<-held)()
+	next()()
 
-	s.Equal(http.StatusOK, <-posted)
+	s.Equal(http.StatusOK, s.answer(posted))
 	s.Equal(7, writes)
 	s.indexedWith("outlasts.md", 8)
 }
@@ -726,7 +735,11 @@ func (s *KnowledgeFilesSuite) TestAPostWrittenWhileItsBaseIsDeletedIsADocumentOf
 	ctx := context.Background()
 	lock, err := s.store.GlobalDB().Conn(ctx)
 	s.Require().NoError(err)
-	defer func() { s.NoError(lock.Close()) }()
+	defer func() {
+		_, err := lock.ExecContext(ctx, "SELECT pg_advisory_unlock_all()")
+		s.NoError(err)
+		s.NoError(lock.Close())
+	}()
 	_, err = lock.ExecContext(ctx, "SELECT pg_advisory_lock(2380)")
 	s.Require().NoError(err)
 	s.trigger("hold_base_delete", "knowledge_documents", "DELETE", "OLD.customer_id = '"+s.customerID()+"'",
@@ -750,8 +763,8 @@ func (s *KnowledgeFilesSuite) TestAPostWrittenWhileItsBaseIsDeletedIsADocumentOf
 	_, err = lock.ExecContext(ctx, "SELECT pg_advisory_unlock(2380)")
 	s.Require().NoError(err)
 
-	s.Equal(http.StatusNoContent, <-deleted)
-	s.Equal(http.StatusOK, <-posted)
+	s.Equal(http.StatusNoContent, s.answer(deleted))
+	s.Equal(http.StatusOK, s.answer(posted))
 	s.indexedWith("base.md", 3)
 }
 
@@ -1014,6 +1027,17 @@ func (s *KnowledgeFilesSuite) recorded() int {
 		Count(context.Background())
 	s.Require().NoError(err)
 	return count
+}
+
+// answer is the status a request made meanwhile came back with.
+func (s *KnowledgeFilesSuite) answer(status <-chan int) int {
+	select {
+	case answered := <-status:
+		return answered
+	case <-time.After(30 * time.Second):
+		s.Fail("the request was never answered")
+		return 0
+	}
 }
 
 // holdWrite holds the next write to the base until write is called, and closes writing once
