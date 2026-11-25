@@ -305,10 +305,8 @@ void main() {
         const SessionOptions(
           id: 'order-1042',
           agent: 'docs',
-          greeting: Greeting('Hello.', mode: GreetingMode.variation),
           title: 'Billing',
           projectId: 'Health',
-          modelOverwrites: ModelOverwrites(thinking: Thinking.high),
           returnUrl: 'com.example.app:/connected',
         ),
       );
@@ -316,10 +314,8 @@ void main() {
       expect(router.last('POST /v1/agents/sessions').json, {
         'id': 'order-1042',
         'agent': 'docs',
-        'greeting': {'text': 'Hello.', 'mode': 'variation'},
         'title': 'Billing',
         'project_id': 'Health',
-        'model_overwrites': {'thinking': 'high'},
         'return_url': 'com.example.app:/connected',
       });
       expect(session.id, 's1');

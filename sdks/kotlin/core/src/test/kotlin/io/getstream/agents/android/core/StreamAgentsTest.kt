@@ -174,8 +174,6 @@ class VisionAgentsTest {
                 projectId = "Health",
                 incognito = false,
                 custom = buildJsonObject { put("tenant", "acme") },
-                modelOverwrites = ModelOverwrites(thinking = ModelOverwrites.Thinking.High, temperature = 0.0),
-                greeting = Greeting("Hello.", Greeting.Mode.Variation),
                 returnUrl = "com.example.app:/connected",
                 watch = false,
             ),
@@ -184,16 +182,13 @@ class VisionAgentsTest {
         val body = Json.parseToJsonElement(router.requests.single().body).jsonObject
         assertEquals(
             setOf(
-                "id", "agent", "title", "project_id", "incognito", "custom", "model_overwrites", "greeting",
-                "return_url",
+                "id", "agent", "title", "project_id", "incognito", "custom", "return_url",
             ),
             body.keys,
         )
         assertEquals(JsonPrimitive("com.example.app:/connected"), body["return_url"])
         assertEquals(JsonPrimitive("order-1042"), body["id"])
         assertEquals(JsonPrimitive("docs"), body["agent"])
-        assertEquals("""{"temperature":0.0,"thinking":"high"}""", body["model_overwrites"].toString())
-        assertEquals("""{"text":"Hello.","mode":"variation"}""", body["greeting"].toString())
         assertEquals("s1", session.id)
         assertEquals("Billing", session.title)
         assertEquals("Health", session.projectId)

@@ -28,14 +28,6 @@ public struct SessionOptions: Sendable {
     public var projectID: String?
     /// Your own labels, handed back untouched.
     public var custom: [String: RawJSON] = [:]
-    /// What the agent opens the call with.
-    public var greeting: Greeting?
-    public var llm: String?
-    public var stt: String?
-    public var tts: String?
-    /// What to change about the models for this session alone: thinking, temperature, a cap on
-    /// every reply and the rest.
-    public var modelOverwrites: ModelOverwrites?
     /// Has the agent remember the signed-in user: what it learned about them before is recalled
     /// here, and what it learns here is kept for their next session. Nil remembers nothing, and
     /// an incognito session never does.
@@ -49,17 +41,12 @@ public struct SessionOptions: Sendable {
     /// instead, since the router refuses a zone it does not know and the session with it. Set it
     /// to name another zone, which is sent as it is, or to nil to send none.
     public var timezone: String?
-    /// The voice the agent speaks in: a provider's own voice id, or one of your voices by id or by
-    /// the name you gave it. Prefix it with `custom:` to mean only yours.
-    public var voice: String?
     /// Functions of yours the agent may call, answered on this device.
     public var tools: [AgentTool] = []
     /// Whether to watch the conversation over its socket, which is what answers `tools` and
     /// reports what the agent is doing as it happens. False opens it with no socket and no
     /// tools: ask through `responses.create` and read the turn back from `responses`.
     public var watch = true
-    /// Cost labels, carried onto every request the session makes.
-    public var tags: [String: String] = [:]
     /// Where a sign-in the conversation asks for goes back to. Name your app's own scheme in
     /// reverse domain form, such as `com.example.app:/connected`, and the router hands the web
     /// authentication sheet back to the app. It is kept with the session, so a conversation
@@ -271,27 +258,20 @@ public struct StreamAgents: Sendable {
             configId: options.configID.flatMap { $0.isEmpty ? nil : $0 },
             custom: options.custom.isEmpty ? nil : options.custom,
             description: options.description,
-            greeting: options.greeting?.schema,
             id: options.id.flatMap { $0.isEmpty ? nil : $0 },
             incognito: options.incognito,
-            llm: options.llm,
             // The router remembers only for a user id, and a device only ever means its own user.
             memory: options.memory.map {
                 SessionMemory(
                     appId: $0.appID, filter: $0.filter.isEmpty ? nil : $0.filter, userId: backend.user?.id)
             },
-            modelOverwrites: options.modelOverwrites?.schema,
             projectId: options.projectID,
             returnUrl: options.returnURL?.absoluteString,
             startVoice: options.startVoice ? true : nil,
-            stt: options.stt,
-            tags: options.tags.isEmpty ? nil : options.tags,
             timezone: options.timezone,
             title: options.title,
             tools: options.tools.map(\.schema),
-            tts: options.tts,
-            ui: options.ui,
-            voice: options.voice)
+            ui: options.ui)
 
         return Session(try await call { try await $0.createSession(createSessionRequest: body) })
     }

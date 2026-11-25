@@ -11,7 +11,10 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
+	"net/http/httptrace"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -568,14 +571,211 @@ func (s *DataMoveSuite) TestAnImportRefusedAtTheRoutersCapLeavesItsAppFree() {
 }
 
 func (s *DataMoveSuite) TestAnImportWhoseBodyStallsLetsGoOfItsPlace() {
-	s.withImportLineWait(500 * time.Millisecond)
-	s.heldImport()
+	s.withImportLineWait(2 * time.Second)
+	// A declared length is longer than what is sent, and small enough that net/http reads the
+	// rest of it before answering, so the answer needs the stalled read to stay bounded.
+	const chunked, declared = -1, 100
+	for _, stall := range []struct {
+		name   string
+		sent   string
+		length int64
+	}{
+		{"after a line, chunked", "{\"cursor\":1}\n", chunked},
+		{"after a line, declared length", "{\"cursor\":1}\n", declared},
+		{"after a blank line, chunked", "{\"cursor\":1}\n\n", chunked},
+		{"after a blank line, declared length", "{\"cursor\":1}\n\n", declared},
+		{"inside a line, chunked", "{\"cursor\":1}\n{\"cur", chunked},
+		{"inside a line, declared length", "{\"cursor\":1}\n{\"cur", declared},
+		{"inside the first line, chunked", "{\"cur", chunked},
+		{"inside the first line, declared length", "{\"cur", declared},
+		{"before a line's end, declared length", "{\"table\":\"nope\",\"row\":{}}", declared},
+	} {
+		s.Run(stall.name, func() {
+			status, payload, took, _ := s.stalledImport(stall.sent, stall.length)
 
-	s.Eventually(func() bool {
-		status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
-		return status == http.StatusOK
-	}, letGoWithin, 10*time.Millisecond, "the import whose body stalled still holds its places")
-	s.Zero(len(s.router.imports))
+			s.Less(took, 4*time.Second, "answered after one wait for the line, not two")
+			s.Require().Equal(http.StatusGatewayTimeout, status, payload)
+			var failure ErrorResponse
+			s.Require().NoError(json.Unmarshal([]byte(payload), &failure))
+			s.Equal(ErrorType("timeout"), failure.Error.Type)
+			s.Equal("timeout", failure.Error.Code)
+			s.Equal("the import's next line did not arrive in time: send the body without pausing", failure.Error.Message)
+			s.Eventually(func() bool {
+				status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+				return status == http.StatusOK
+			}, letGoWithin, 10*time.Millisecond, "the import whose body stalled still holds its places")
+			s.Zero(len(s.router.imports))
+		})
+	}
+}
+
+// A body that breaks for another reason than the wait is the caller's to correct, whether what
+// broke it is its length, its framing or a line cut short.
+func (s *DataMoveSuite) TestAnImportWhoseBodyBreaksIsRefusedAsNotAnExport() {
+	for _, broken := range []struct{ name, head, body, says string }{
+		{"cut short after a line", "Content-Length: 100", "{\"cursor\":1}\n", "unexpected EOF"},
+		{"cut short inside a line", "Content-Length: 100", "{\"cursor\":1}\n{\"cur", "unexpected EOF"},
+		{"a chunk of no size", "Transfer-Encoding: chunked", "zz\r\n", "invalid byte in chunk length"},
+	} {
+		s.Run(broken.name, func() {
+			base, err := url.Parse(s.serverClient.base())
+			s.Require().NoError(err)
+			conn, err := net.Dial("tcp", base.Host)
+			s.Require().NoError(err)
+			defer conn.Close()
+			s.Require().NoError(conn.SetDeadline(time.Now().Add(10 * time.Second)))
+			var head strings.Builder
+			s.Require().NoError(s.serverClient.header.Write(&head))
+			_, err = io.WriteString(conn, "POST /v1/data/import HTTP/1.1\r\nHost: "+base.Host+"\r\n"+head.String()+broken.head+"\r\n\r\n"+broken.body)
+			s.Require().NoError(err)
+			s.Require().NoError(conn.(*net.TCPConn).CloseWrite())
+
+			response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+
+			s.Require().NoError(err)
+			defer response.Body.Close()
+			payload, err := io.ReadAll(response.Body)
+			s.Require().NoError(err)
+			s.Require().Equal(http.StatusBadRequest, response.StatusCode, string(payload))
+			var failure ErrorResponse
+			s.Require().NoError(json.Unmarshal(payload, &failure))
+			s.Equal("invalid_request", failure.Error.Code)
+			s.Equal("this is not an export: "+broken.says, failure.Error.Message)
+		})
+	}
+}
+
+// net/http reads the rest of a body before the first of the answer is sent, which is inside the
+// handler for an answer over its buffer of 2 KiB and after it for a shorter one.
+func (s *DataMoveSuite) TestAnImportRefusedAtALineLetsGoOfItsConnectionWhenTheBodyStalls() {
+	s.withImportLineWait(500 * time.Millisecond)
+	long := strings.Repeat("1", 3000)
+	for _, refused := range []struct {
+		name   string
+		sent   string
+		length int64
+	}{
+		{"a short answer, declared length", "{\"cursor\":1}\nnot an export\n", 200},
+		{"a short answer, chunked", "{\"cursor\":1}\nnot an export\n", -1},
+		{"a long number, declared length", "{\"cursor\":" + long + "}\n", 100000},
+		{"a long number, chunked", "{\"cursor\":" + long + "}\n", -1},
+		{"a long table name, declared length", "{\"change\":{\"table\":\"" + long + "\",\"op\":\"insert\",\"id\":1,\"row\":{}}}\n", 100000},
+		{"a long table name, chunked", "{\"change\":{\"table\":\"" + long + "\",\"op\":\"insert\",\"id\":1,\"row\":{}}}\n", -1},
+	} {
+		s.Run(refused.name, func() {
+			status, payload, took, closed := s.stalledImport(refused.sent, refused.length)
+
+			s.Equal(http.StatusBadRequest, status, payload)
+			s.Contains(payload, "invalid_request")
+			s.True(closed, "the connection is kept, with the rest of its body unread")
+			s.Less(took, 5*time.Second, "answered only once the client gave up")
+			s.Eventually(func() bool {
+				status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+				return status == http.StatusOK
+			}, settleFor, 10*time.Millisecond, "the refused import still holds its places")
+			s.Zero(len(s.router.imports))
+		})
+	}
+}
+
+func (s *DataMoveSuite) TestAnImportWhoseLinesKeepArrivingOutlastsTheLineWait() {
+	s.withImportLineWait(time.Second)
+	body, writer := io.Pipe()
+	go func() {
+		// Blank lines count: three in a row outlast the wait the line before them began.
+		for _, line := range []string{"{\"cursor\":1}\n", "{\"cursor\":1}\n", "\n", "\n", "\n", "{\"cursor\":1}\n"} {
+			time.Sleep(400 * time.Millisecond)
+			_, _ = writer.Write([]byte(line))
+		}
+		_ = writer.Close()
+	}()
+	request, err := http.NewRequest(http.MethodPost, s.serverClient.base()+"/v1/data/import", body)
+	s.Require().NoError(err)
+	request.Header = s.serverClient.header.Clone()
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+
+	response, err := (&http.Client{Transport: transport}).Do(request)
+
+	s.Require().NoError(err)
+	defer response.Body.Close()
+	payload, _ := io.ReadAll(response.Body)
+	s.Equal(http.StatusOK, response.StatusCode, "each line arrived inside the wait: %s", payload)
+}
+
+// A body read whole before its rows are written: the wait for a line is not a wait for a
+// row's write, nor for the request after it on the same connection.
+func (s *DataMoveSuite) TestARowWrittenPastTheLineWaitKeepsItsConnection() {
+	s.skipOnARouterWithShards()
+	id := s.data.createAgentConfig().Id
+	exported := s.export()
+	lines := []dataLine{exported[len(exported)-1]}
+	for _, line := range exported {
+		if line.Table == "agent_configs" {
+			lines = append(lines, line, line)
+		}
+	}
+	s.withImportLineWait(500 * time.Millisecond)
+	tx, err := s.store.GlobalDB().BeginTx(context.Background(), nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(context.Background(), "SELECT 1 FROM agent_configs WHERE id = ? FOR UPDATE", id)
+	s.Require().NoError(err)
+	timer := time.AfterFunc(2*time.Second, func() { _ = tx.Rollback() })
+	defer timer.Stop()
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+	send := func(body string, reused *bool) (int, string) {
+		ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) { *reused = info.Reused },
+		})
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverClient.base()+"/v1/data/import?full=true", strings.NewReader(body))
+		s.Require().NoError(err)
+		request.Header = s.serverClient.header.Clone()
+		response, err := client.Do(request)
+		s.Require().NoError(err)
+		defer response.Body.Close()
+		payload, err := io.ReadAll(response.Body)
+		s.Require().NoError(err)
+		return response.StatusCode, string(payload)
+	}
+
+	var first, second bool
+	status, payload := send(ndjson(lines), &first)
+	s.Equal(http.StatusOK, status, "the import whose row waited on a lock: %s", payload)
+	status, payload = send(ndjson(lines), &second)
+
+	s.Equal(http.StatusOK, status, "the request after it on the same connection: %s", payload)
+	s.True(second, "the second request went on a new connection")
+}
+
+func (s *DataMoveSuite) TestAFifthImportIsRefusedAndAFourthIsNot() {
+	for range 4 {
+		s.useApp(s.data.createApp())
+		s.heldImport()
+	}
+	s.useApp(s.data.createApp())
+
+	status, _ := s.serverClient.failure(http.MethodPost, "/v1/data/import", emptyImport)
+
+	s.Equal(http.StatusServiceUnavailable, status)
+}
+
+func (s *DataMoveSuite) TestALineIsWaitedForAMinute() {
+	s.Equal(time.Minute, s.router.importLineWait)
+}
+
+func (s *DataMoveSuite) TestASecondImportOfAnAppIsToldSoAtTheRoutersCap() {
+	for range 4 {
+		s.useApp(s.data.createApp())
+		s.heldImport()
+	}
+
+	status, payload := s.serverClient.call(http.MethodPost, "/v1/data/import", emptyImport)
+
+	s.Require().Equal(http.StatusConflict, status, string(payload))
+	s.Contains(string(payload), "import_running")
 }
 
 func (s *DataMoveSuite) TestAnImportIsServedWhileItsAppsExportRuns() {
@@ -656,6 +856,32 @@ func (s *DataMoveSuite) withImportLineWait(wait time.Duration) {
 
 // emptyImport is an import with no rows, which is written at once.
 const emptyImport = `{"cursor":1}`
+
+// stalledImport sends the start of an import's body and no more of it, and returns the answer,
+// how long it took, and whether the router closes the connection.
+func (s *DataMoveSuite) stalledImport(sent string, length int64) (int, string, time.Duration, bool) {
+	body, writer := io.Pipe()
+	defer writer.Close()
+	go func() { _, _ = writer.Write([]byte(sent)) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// The client's send waits on the body, which only closing it ends.
+	context.AfterFunc(ctx, func() { _ = writer.Close() })
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverClient.base()+"/v1/data/import", body)
+	s.Require().NoError(err)
+	request.Header = s.serverClient.header.Clone()
+	request.ContentLength = length
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+	began := time.Now()
+	response, err := (&http.Client{Transport: transport}).Do(request)
+	s.Require().NoError(err, "the stalled import was never answered")
+	took := time.Since(began)
+	defer response.Body.Close()
+	payload, err := io.ReadAll(response.Body)
+	s.Require().NoError(err)
+	return response.StatusCode, string(payload), took, response.Close
+}
 
 // heldImport starts an import of the app whose body never ends, waits until it holds one of
 // the router's places, and returns what hangs up on it.
