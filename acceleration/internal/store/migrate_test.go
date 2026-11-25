@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pressly/goose/v3"
@@ -150,6 +151,39 @@ func (s *StoreSuite) TestADatabaseALaterReleaseMigratedStartsAfterTheCleanup() {
 	}
 
 	s.Require().NoError(db.Migrate(s.ctx))
+}
+
+// Goose refuses a migration older than the newest one a database ran, so a migration added with
+// a version below one already deployed stops every router started on that database. A database
+// at the last version before the sync hash columns, that has not run their migration, takes it.
+func (s *StoreSuite) TestADatabaseAtTheVersionBeforeTheSyncHashColumnsMigratesThem() {
+	const deployed = 20270202000000
+	opened, err := Open(s.emptyDatabase("sync_hash_slot"))
+	s.Require().NoError(err)
+	defer opened.Close()
+	versions, err := database.NewStore(database.DialectPostgres, globalSet.table)
+	s.Require().NoError(err)
+	provider, err := goose.NewProvider("", opened.global.DB, globalSet.files, goose.WithStore(versions))
+	s.Require().NoError(err)
+	var skipped bool
+	for _, source := range provider.ListSources() {
+		if strings.HasSuffix(source.Path, "_connector_router_sync_hash.sql") {
+			skipped = true
+			continue
+		}
+		if source.Version <= deployed {
+			_, err := provider.ApplyVersion(s.ctx, source.Version, true)
+			s.Require().NoError(err)
+		}
+	}
+	s.Require().True(skipped, "the sync hash migration is a file of the global set")
+
+	s.Require().NoError(opened.Migrate(s.ctx))
+
+	var columns int
+	s.Require().NoError(opened.global.QueryRowContext(s.ctx, `SELECT count(*) FROM information_schema.columns
+		WHERE column_name = 'sync_hash' AND table_name IN ('connector_definitions', 'router_configs')`).Scan(&columns))
+	s.Equal(2, columns)
 }
 
 // shardTo opens an empty database of the suite's own with the shared set applied and the shard
