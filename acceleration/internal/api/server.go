@@ -676,13 +676,13 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 	server.documents = options.Documents
 	if server.imageHTTP == nil {
 		// No proxy, which would dial on the client's behalf where the check cannot see.
-		// The body has as long as its request does; only the wait for it to begin is bounded, as
-		// for a video (video.publicClient). The idle limits are http.DefaultTransport's.
+		// A host may take as long to begin its answer as the longest fetch may take in all. The
+		// TLS limit and the idle limits are http.DefaultTransport's.
 		server.imageHTTP = &http.Client{Transport: &http.Transport{
 			Proxy:                 nil,
 			DialContext:           egress.DialPublic,
 			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 20 * time.Second,
+			ResponseHeaderTimeout: inlineDeadline,
 			MaxIdleConns:          100,
 			IdleConnTimeout:       90 * time.Second,
 		}}

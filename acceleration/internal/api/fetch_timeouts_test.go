@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 )
 
@@ -82,26 +83,41 @@ func (s *FetchTimeoutsSuite) get(client *http.Client, address string) (string, e
 	return string(body), err
 }
 
-func (s *FetchTimeoutsSuite) TestAHostThatNeverAnswersIsGivenUpOnAfterTwentySeconds() {
+func (s *FetchTimeoutsSuite) TestAHostThatNeverAnswersIsGivenUpOnAfterNinetySeconds() {
 	s.hosted(func(net.Conn, *http.Request) {}, func(client *http.Client) {
 		started := time.Now()
-		client.Timeout = 80 * time.Second
+		client.Timeout = 300 * time.Second
 
 		_, err := s.get(client, "http://host.example/file")
 
 		s.Require().Error(err)
-		s.Equal(20*time.Second, time.Since(started))
+		s.Equal(90*time.Second, time.Since(started))
+	})
+}
+
+func (s *FetchTimeoutsSuite) TestAnImageIsGivenUpOnAfterItsOwnFifteenSeconds() {
+	s.hosted(func(net.Conn, *http.Request) {}, func(client *http.Client) {
+		started := time.Now()
+
+		err := fetchImages(context.Background(), client, []llm.ImagePart{{URL: "http://host.example/photo.png"}})
+
+		s.Require().Error(err)
+		s.Equal(15*time.Second, time.Since(started))
 	})
 }
 
 func (s *FetchTimeoutsSuite) TestATLSHandshakeThatNeverEndsIsGivenUpOnAfterTenSeconds() {
 	synctest.Test(s.T(), func(t *testing.T) {
+		dialled := make(chan net.Conn, 1)
 		transport := s.transport()
 		transport.DialContext = func(context.Context, string, string) (net.Conn, error) {
 			client, server := net.Pipe()
 			go func() { _, _ = io.Copy(io.Discard, server) }()
+			dialled <- server
 			return client, nil
 		}
+		// Closed whatever the client still waits for, so the bubble can end.
+		defer func() { _ = (<-dialled).Close() }()
 		started := time.Now()
 
 		_, err := s.get(&http.Client{Transport: transport, Timeout: 80 * time.Second}, "https://host.example/file")
@@ -111,14 +127,18 @@ func (s *FetchTimeoutsSuite) TestATLSHandshakeThatNeverEndsIsGivenUpOnAfterTenSe
 	})
 }
 
-func (s *FetchTimeoutsSuite) TestAHostThatTakesNineteenSecondsToAnswerIsRead() {
+func (s *FetchTimeoutsSuite) TestADocumentWhoseHostTakesEightyFiveSecondsToAnswerIsRead() {
 	s.hosted(func(conn net.Conn, request *http.Request) {
-		time.Sleep(19 * time.Second)
+		time.Sleep(85 * time.Second)
 		answerHi(conn, request)
 	}, func(client *http.Client) {
-		body, err := s.get(client, "http://host.example/file")
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+
+		data, _, err := (&Server{imageHTTP: client}).fetchDocument(ctx, FileSource{Url: "http://host.example/file"})
+
 		s.Require().NoError(err)
-		s.Equal("hi", body)
+		s.Equal("hi", string(data))
 	})
 }
 
