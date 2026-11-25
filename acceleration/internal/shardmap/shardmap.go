@@ -7,6 +7,8 @@
 package shardmap
 
 import (
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/pricing"
@@ -53,4 +55,16 @@ func (m Map) ForUser(agentRegion, userShard string) string {
 		}
 	}
 	return userShard
+}
+
+// Shards is every shard the map sends work to, sorted, each once.
+func (m Map) Shards() []string {
+	var shards []string
+	if m.Default != "" {
+		shards = append(shards, m.Default)
+	}
+	shards = append(shards, slices.Collect(maps.Values(m.Countries))...)
+	shards = append(shards, slices.Collect(maps.Values(m.Regions))...)
+	slices.Sort(shards)
+	return slices.Compact(shards)
 }

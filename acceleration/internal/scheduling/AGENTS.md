@@ -83,6 +83,15 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestSchedulerSuite/TestTwoWorkersDeliverAnOccurrenceOnce`,
   `TestStoreSuite/TestClaimingGivesEachDueTaskToOneWorker`,
   `TestStoreSuite/TestAClaimInsertsOneRunPerOccurrence`.
+- **A task is claimed in its user's shard.** With `shard_routing` set, a worker claims a task
+  only when its agent's region's shard, or else its user's `users.shard`, is its own or no shard
+  of the deployment (`store.ShardClaim`, `Scheduler.SetShard`); a task claimable for more than
+  `claimOverdue` (5 min, from `GREATEST(next_run_at, lease_until)`) is any shard's.
+  `TestSchedulerSuite/TestAWorkerLeavesTheTasksOfAnotherShardToIt`,
+  `TestStoreSuite/TestATaskOfAUserServedInEuropeIsClaimedThereAndNotInTheUS`,
+  `TestStoreSuite/TestATaskOfAnAgentKeptInTheEUIsClaimedInEuropeWhereverItsUserWasServed`,
+  `TestStoreSuite/TestATaskLeftUnclaimedInItsShardPastTheOverdueTimeIsClaimedByAnother`,
+  `TestStoreSuite/TestATaskWhoseHoldEndedJustNowIsLeftToItsShardHoweverLongAgoItWasDue`.
 - **Every write after a claim goes through its `leased_by`.** A finish, renewal or hold under a
   claim a pause, edit or delete took changes nothing on the task.
   `TestStoreSuite/TestAFinishUnderAStolenClaimDoesNotAdvanceTheTask`,

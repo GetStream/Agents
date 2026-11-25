@@ -551,7 +551,7 @@ func BenchmarkScheduledTasksClaim(b *testing.B) {
 		return err
 	}
 	h.run(b, due, func(int) error {
-		_, err := h.store.ScheduledTasks.Claim(h.ctx, 10, time.Minute)
+		_, err := h.store.ScheduledTasks.Claim(h.ctx, 10, time.Minute, ShardClaim{})
 		return err
 	})
 }

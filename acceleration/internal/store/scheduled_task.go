@@ -669,10 +669,10 @@ type ClaimedScheduledTask struct {
 	WorkersLost    bool
 }
 
-// Claim claims up to limit due tasks under a lease of the
+// Claim claims up to limit due tasks of shard under a lease of the
 // given length, in one transaction, comparing against the database's own
 // clock. Each claim inserts the occurrence's run, or takes over a stale one.
-func (r *ScheduledTasks) Claim(ctx context.Context, limit int, lease time.Duration) ([]ClaimedScheduledTask, error) {
+func (r *ScheduledTasks) Claim(ctx context.Context, limit int, lease time.Duration, shard ShardClaim) ([]ClaimedScheduledTask, error) {
 	if limit < 1 {
 		limit = 1
 	}
@@ -683,10 +683,15 @@ func (r *ScheduledTasks) Claim(ctx context.Context, limit int, lease time.Durati
 			return fmt.Errorf("store: claim scheduled tasks: %w", err)
 		}
 		var tasks []ScheduledTask
-		err = tx.NewSelect().Model(&tasks).
+		due := tx.NewSelect().Model(&tasks).
 			Where("state = ?", ScheduledTaskActive).
 			Where("next_run_at <= now()").
-			Where("(lease_until IS NULL OR lease_until < now())").
+			Where("(lease_until IS NULL OR lease_until < now())")
+		if shard.filtered() {
+			claimable, args := shard.scheduledTaskClaimable()
+			due = due.Where(claimable, args...)
+		}
+		err = due.
 			Order("next_run_at ASC").
 			Limit(limit).
 			For("UPDATE SKIP LOCKED").
