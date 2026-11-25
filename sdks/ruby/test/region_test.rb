@@ -21,6 +21,7 @@ end
 Net::HTTP.singleton_class.prepend(RegionalRedirect)
 
 class TestRegion < LocalRouterTest
+  DEFAULT_HOST = "accelerate.gcp.stream-io-api.com"
   REGIONAL_HOST = "accelerate-us-east4.gcp.stream-io-api.com"
   CLEARED = [VA::Backend::URL_ENV, VA::Backend::REGION_ENV, VA::Backend::CUSTOMER_ENV,
              VA::Backend::AUTHENTICATE_ENV].freeze
@@ -42,19 +43,19 @@ class TestRegion < LocalRouterTest
     super
   end
 
-  def assert_reads_simulations(api)
+  def assert_reads_simulations(api, host: REGIONAL_HOST)
     assert_equal [{ "id" => "sim_1" }], api.simulations.list
 
-    assert_equal [REGIONAL_HOST], RegionalRedirect.hosts
+    assert_equal [host], RegionalRedirect.hosts
     request = @router.last(:get, "/v1/agents/simulations")
-    assert_equal REGIONAL_HOST, request.headers["host"]
+    assert_equal host, request.headers["host"]
     assert_equal "test-key", request.headers["api_key"]
     assert_equal "jwt", request.headers["stream-auth-type"]
     refute_empty request.headers["authorization"].to_s
   end
 
   def test_the_default_client_reads_simulations
-    assert_reads_simulations(VA::Client.new)
+    assert_reads_simulations(VA::Client.new, host: DEFAULT_HOST)
   end
 
   def test_an_explicit_region_reads_simulations
@@ -80,7 +81,7 @@ class TestRegion < LocalRouterTest
   def test_a_regional_client_can_act_for_a_user
     user = VA::Client.new(region: "us-east4").as_user("jean", "user-token")
 
-    assert_equal VA::Backend::DEFAULT_URL, user.backend.url
+    assert_equal VA::Backend.region_url("us-east4"), user.backend.url
     assert_equal "jean", user.backend.user_id
     assert_reads_simulations(user)
     assert_equal "Bearer user-token", @router.last(:get, "/v1/agents/simulations").headers["authorization"]

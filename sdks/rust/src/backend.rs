@@ -16,8 +16,9 @@ pub const API_KEY_ENV: &str = "STREAM_API_KEY";
 pub const API_SECRET_ENV: &str = "STREAM_API_SECRET";
 pub const AUTHENTICATE_ENV: &str = "STREAM_ACCELERATION_AUTHENTICATE";
 
-/// Stream's hosted router, which is where a client goes when nothing says otherwise.
-pub const DEFAULT_URL: &str = "https://accelerate-us-east4.gcp.stream-io-api.com";
+/// Stream's hosted router in the nearest healthy region, which is where a client goes when
+/// nothing says otherwise.
+pub const DEFAULT_URL: &str = "https://accelerate.gcp.stream-io-api.com";
 
 /// How long a token minted here lasts. Short, because one is minted per request.
 pub const TOKEN_VALIDITY_SECONDS: u64 = 60 * 60;
@@ -127,9 +128,12 @@ fn is_region(name: &str) -> bool {
     lowercase(area) && lowercase(place) && place.len() < rest.len()
 }
 
-/// Whether `url` is the hosted router in some region, which is always behind the
+/// Whether `url` is the hosted router, nearest or in some region, which is always behind the
 /// proxy.
 fn hosted(url: &str) -> bool {
+    if url == DEFAULT_URL {
+        return true;
+    }
     url.strip_prefix("https://accelerate-")
         .and_then(|rest| rest.strip_suffix(".gcp.stream-io-api.com"))
         .is_some_and(is_region)
@@ -451,6 +455,23 @@ mod tests {
         (API_KEY_ENV, "ntv9"),
         (API_SECRET_ENV, "shh"),
     ];
+
+    #[test]
+    fn the_nearest_hosted_router_is_authenticated() {
+        for url in [None, Some(format!("{DEFAULT_URL}/"))] {
+            let backend = Backend::with_env(
+                &ClientOptions {
+                    url,
+                    ..Default::default()
+                },
+                environment(&CREDENTIAL),
+            )
+            .unwrap();
+
+            assert_eq!(backend.url, "https://accelerate.gcp.stream-io-api.com");
+            assert!(backend.authenticate);
+        }
+    }
 
     #[test]
     fn a_region_is_the_hosted_router_there() {
