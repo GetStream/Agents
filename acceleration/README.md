@@ -2422,6 +2422,14 @@ the session still holds the id, so a replay after `forget-user` writes it back, 
 `forget-user` must then be run again for that user. A line from before that holds the row as `row=` JSON the
 redaction rewrote, and cannot be recovered: replay counts it as could not be read.
 
+**Rows counted toward a grant not theirs.** `router usage foreign-grants` reads every shard's
+rows that name a grant, and prints, per grant, how many of them and what cost the grant counted
+(`limit_grant_uses`) although it is of neither their organization nor their app's, or is scoped
+to another app: a row imported with the grant ids it was sent with could be, before the owner
+check. Each was added to the grant's `used_micros`. It writes nothing; a deployment whose total
+is zero has nothing to correct. An app that drew its own grant while in no organization and has
+joined one since counts here too.
+
 **Forgetting an end user.** A user id is often an email, so an erasure request for one of a
 customer's users reaches the usage records. `router usage forget-user --app <app> --user <id>
 --actor <who>` replaces the id with `forgotten:` and 32 random hex characters (random, since a

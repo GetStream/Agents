@@ -48,6 +48,12 @@ const usageCommands = `usage: router usage <command>
                              it refused instead, once the producer is fixed. A row it never had
                              nor refused is never queued: one written before the router shipped,
                              or carried in by a data move. Writes the database
+  foreign-grants             count the rows of every shard counted toward a spend grant of
+                             neither their organization nor their app's, or scoped to another
+                             app (limit_grant_uses), as a row imported with the grant ids it was
+                             sent with could be before the owner check: per grant, its
+                             organization, how many rows and their cost in micros, then the
+                             total. Each was added to the grant's used_micros. Writes nothing
   forget-user --app id --user id --actor who [--dry-run] [--settle 2m] [--replacement id]
                              replace an app's end user id in the usage records with forgotten:
                              and 32 random hex characters, in order, after deleting their
@@ -191,6 +197,8 @@ func runUsage(args []string, settings config.Config, out io.Writer) error {
 		return runUsageReplay(ctx, args[1:], settings, out)
 	case "reship":
 		return runUsageReship(ctx, args[1:], settings, out)
+	case "foreign-grants":
+		return runUsageForeignGrants(ctx, settings, out)
 	case "forget-user":
 		return runUsageForgetUser(ctx, args[1:], settings, out)
 	case "storage":
@@ -409,6 +417,30 @@ func sinceTime(text string, now time.Time) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("usage reship: --since %q is neither an RFC 3339 time nor a positive duration", text)
 	}
 	return now.Add(-back), nil
+}
+
+// runUsageForeignGrants prints what rows counted toward a grant not theirs, per grant.
+func runUsageForeignGrants(ctx context.Context, settings config.Config, out io.Writer) error {
+	pgStore, err := openPriceStore(settings)
+	if err != nil {
+		return err
+	}
+	defer pgStore.Close()
+	foreign, err := pgStore.LimitGrantUses.Foreign(ctx)
+	if err != nil {
+		return err
+	}
+	var rows int
+	var micros int64
+	for _, grant := range foreign {
+		rows, micros = rows+grant.Rows, micros+grant.Micros
+		if _, err := fmt.Fprintf(out, "grant %d of organization %s: %d rows, %d micros\n",
+			grant.GrantID, grant.OrganizationID, grant.Rows, grant.Micros); err != nil {
+			return err
+		}
+	}
+	_, err = fmt.Fprintf(out, "%d rows counted toward %d grants not theirs, %d micros\n", rows, len(foreign), micros)
+	return err
 }
 
 // forgetSettle is how long forget-user waits to rewrite the usage service's events again: a
