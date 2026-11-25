@@ -252,15 +252,19 @@ func (s *ForwarderSuite) TestACurrentSecretThatDoesNotOpenIsLeftToAnotherRouterT
 		logs := &logLines{}
 		router := s.routerOn(s.sealer, target, logs, Options{Retries: []time.Duration{time.Minute}, Lease: time.Minute})
 		destination := s.rotated(target.URL, s.under(s.sealer), s.under(routerTwo), time.Now().Add(time.Hour))
+		other := s.rotated(target.URL, s.under(s.sealer), s.under(routerTwo), time.Now().Add(time.Hour))
 
 		for i := range 3 {
 			s.Require().NoError(s.send(router, destination, `{"n":`+strconv.Itoa(i)+`}`))
+			s.Require().NoError(s.send(router, other, `{"n":`+strconv.Itoa(i)+`}`))
 		}
 
 		const line = "cannot open an event destination's signing secret"
-		s.Require().Eventually(func() bool { return logs.about(destination, line) >= 1 }, 5*time.Second, 10*time.Millisecond)
-		s.Never(func() bool { return logs.about(destination, line) > 1 }, 500*time.Millisecond, 10*time.Millisecond,
-			"three forwards fail alike: one line says it")
+		s.Require().Eventually(func() bool {
+			return logs.about(destination, line) >= 1 && logs.about(other, line) >= 1
+		}, 5*time.Second, 10*time.Millisecond)
+		s.Never(func() bool { return logs.about(destination, line) > 1 || logs.about(other, line) > 1 }, 500*time.Millisecond, 10*time.Millisecond,
+			"three forwards fail alike: one line says it, for each destination")
 	})
 	s.Run("given up once it has waited out its retries", func() {
 		target, arrived := s.receiver()
