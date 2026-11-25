@@ -2167,6 +2167,31 @@ func (s *AppsSuite) TestAFailedLineLeavesTheRulesOfATrunkWhoseRowMoved() {
 	s.ElementsMatch([]string{line.E164, other}, s.deployment.TrunkNumbers(line.StreamTrunkID))
 }
 
+// The row moves while the number joins its trunk, which fails the line.
+func (s *AppsSuite) TestALineWhoseTrunksRowMovedMeanwhileLeavesItsOtherNumbersRules() {
+	_, squatter, trunk, line := s.squatted()
+	other := aNumber()
+	s.Require().NoError(s.addOnATrunk(trunk, squatter, other))
+	waiting, release := s.deployment.Hold("/sip/inbound_routing_rules")
+	failed := make(chan error, 1)
+	go func() {
+		_, err := trunk.service.Call(s.ctx, CallRequest{Owner: routing.Owner{CustomerID: squatter}, From: other, To: "+15550001111"})
+		failed <- err
+	}()
+	<-waiting
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE stream_trunks SET stream_app_pk = 777 WHERE id = ?", line.StreamTrunkID)
+	release()
+	s.Require().NoError(err)
+
+	s.Require().ErrorContains(<-failed, "another group's")
+
+	s.NotNil(s.deployment.Rule(line.StreamRouteID))
+	s.Contains(s.deployment.TrunkNumbers(line.StreamTrunkID), line.E164)
+	rules, err := NewStreamFromClient(s.deployment.Client).rulesOn(s.ctx, line.StreamTrunkID)
+	s.Require().NoError(err)
+	s.Equal(map[string]string{line.StreamRouteID: line.E164}, rules, "its own went")
+}
+
 // The rule a failed line made would not go at first.
 func (s *AppsSuite) TestAnUndoneTrunkGoesWithItsRule() {
 	s.sealed()
