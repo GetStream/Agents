@@ -129,6 +129,30 @@ func (s *ReplicateResumeSuite) cutOver() string {
 	return out.String()
 }
 
+// A cut-over that fails part way still prints what the batches before it did. 501 users take
+// two batches, and the last user's task is held, so the second waits past the lock timeout.
+func (s *ReplicateResumeSuite) TestACutOverThatFailsPartWayPrintsWhatItDid() {
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, `
+INSERT INTO scheduled_tasks (id, customer_id, config_id, user_id, caller_kind, title, instructions, start_local,
+	timezone, state, next_run_at, created_by, created_at, updated_at, move_paused)
+SELECT 'st-' || g, 'acme', 'config-1', 'user-' || lpad(g::text, 4, '0'), 'authenticated', 'Stretch',
+	'Remind them to stretch.', now(), 'UTC', 'paused', now() + interval '1 day', 'api', now(), now(), true
+FROM generate_series(1, 501) AS g`)
+	s.Require().NoError(err)
+	held, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = held.Rollback() }()
+	_, err = held.ExecContext(s.ctx, "SELECT 1 FROM scheduled_tasks WHERE id = 'st-501' FOR NO KEY UPDATE")
+	s.Require().NoError(err)
+
+	var out bytes.Buffer
+	err = resumeMove(s.ctx, s.store, "acme", &out)
+
+	s.Require().Error(err)
+	s.Contains(out.String(), "resumed 500 scheduled tasks\n")
+	s.Equal(store.ScheduledTaskPaused, s.state("st-501"))
+}
+
 func (s *ReplicateResumeSuite) state(id string) string {
 	task, err := s.store.ScheduledTasks.Get(s.ctx, "acme", id)
 	s.Require().NoError(err)

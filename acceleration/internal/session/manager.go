@@ -409,6 +409,7 @@ func (m *Manager) channelTeam(ctx context.Context, spec Spec) (string, error) {
 // session would hold a model session and a place in a call that nobody holds a handle to.
 func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure error) {
 	began := time.Now()
+	generated := spec.ID == ""
 	if err := spec.Normalize(); err != nil {
 		return nil, stack.Wrap(err)
 	}
@@ -447,8 +448,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	}
 	// The id is the row's primary key whoever owns it, so one somebody already used would
 	// write this session over theirs. A reopened one is the same session, its owner checked
-	// by whoever reopened it.
-	if m.options.Store != nil && spec.Reopened.IsZero() {
+	// by whoever reopened it. One generated just now is a UUIDv7 nobody has, and asking every
+	// shard about it would refuse the session whenever any one of them is down.
+	if m.options.Store != nil && spec.Reopened.IsZero() && !generated {
 		taken, err := m.options.Store.Sessions.Exists(ctx, spec.ID)
 		if err != nil {
 			return nil, stack.Wrap(err)
@@ -492,7 +494,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 
 	// The Stream app the session acts in is settled once, before anything is done there,
 	// and the whole session keeps it: its call, its transcript and the rows it writes.
-	stream, err := m.stream(ctx, spec)
+	stream, err := m.stream(ctx, spec, generated && spec.ownCall)
 	if err != nil {
 		return nil, err
 	}
@@ -526,15 +528,6 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	}
 
 	opened := false
-	// A new conversation is kept in Stream Chat by default, but a deployment without Chat
-	// credentials still holds it: what was said is worth keeping, not worth refusing the
-	// conversation for. Resuming or forking one needs the channel, so those still fail.
-	if spec.PersistConversation && spec.ConversationID == "" && spec.Recall == nil {
-		if _, err := m.Conversations(); err != nil {
-			m.logger.Warn("not keeping the conversation in Stream Chat", "error", err)
-			spec.PersistConversation = false
-		}
-	}
 	if cid, by, handed := m.handedOut(ctx, spec, stream); handed {
 		spec.ConversationID, spec.Dispatched, spec.HandedOutBy = cid, true, by
 		ctx = persistent.RouterOpensDispatched(ctx, cid)
@@ -571,6 +564,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		conv, previous, truncated, err = open(persistent.WithSession(reading, spec.ID), spec.StreamApp, spec.CustomerID, spec.AgentID, cid, spec.Caller.UserID, spec.UserID, spec.Custom, spec.ChannelTeam, memory.Scope{AppID: spec.Memory.AppID, UserID: spec.Memory.UserID, Extra: spec.Memory.Filter})
 		if errors.Is(err, streamapp.ErrReadOnly) {
 			return nil, ErrConversationReadOnly
+		}
+		if unkept := unkeptIn(err, m.options.Stream != nil && m.options.Stream.PerApp()); unkept != nil {
+			return nil, stack.Wrap(unkept)
 		}
 		if err != nil {
 			return nil, stack.Wrap(err)
@@ -626,6 +622,9 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		}
 		var truncated bool
 		previous, truncated, err = service.ContextForCaller(reading, spec.CustomerID, spec.AgentID, spec.ConversationID, spec.Caller.UserID, spec.UserID)
+		if unkept := unkeptIn(err, m.options.Stream != nil && m.options.Stream.PerApp()); unkept != nil {
+			return nil, stack.Wrap(unkept)
+		}
 		if err != nil {
 			return nil, stack.Wrap(err)
 		}
@@ -738,7 +737,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 	// clock line tells the day, and the scheduling tools read dates, in the zone its
 	// tasks will run in.
 	if user := zoneUser(spec); spec.Timezone == "" && user != "" && m.options.Store != nil {
-		if zone, err := m.options.Store.UserTimezone(ctx, spec.CustomerID, user); err == nil && zone != "" {
+		if zone, err := m.options.Store.Users.GetTimezone(ctx, spec.CustomerID, user); err == nil && zone != "" {
 			spec.Timezone, created.spec.Timezone = zone, zone
 		}
 	}
@@ -1052,9 +1051,11 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			m.records.Closed(spec.CustomerID, created.id, row.OpenedAt, time.Now().UTC(), created.kept())
 		})
 		if spec.Reopened.IsZero() {
-			m.records.Opened(row, toolRows(created))
+			m.records.Opened(row, toolRows(created), func() { m.idTaken(created) })
 		} else {
-			m.records.CarriedOn(row, toolRows(created))
+			// A carry-on skips the check that the id is free, so another customer's row written
+			// on another shard meanwhile refuses it too.
+			m.records.CarriedOn(row, toolRows(created), func() { m.idTaken(created) })
 		}
 		created.startRecording()
 	}
@@ -1076,7 +1077,8 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 			m.calls.Ended(spec.CustomerID, id, time.Now().UTC())
 			// The review runs on a model rather than in this closer, so it is started
 			// here and lands on the row whenever it comes back.
-			if !spec.NoReview {
+			// A session whose row the store refused (idTaken) has no call row to land on.
+			if !spec.NoReview && !created.idTaken.Load() {
 				m.reviews.Review(row(created), spec.Attribution, spec.Region, spec.reviewTarget(), spec.ReviewInstructions, created.conversation())
 			}
 		})
@@ -1097,6 +1099,13 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		m.mu.Unlock()
 		turnedAway = true
 		created.handedOver.Store(true)
+		fail()
+		return nil, stack.Wrap(ErrSessionExists)
+	}
+	// Its row was refused before the session was held, so idTaken found nothing to end.
+	if created.idTaken.Load() {
+		m.mu.Unlock()
+		turnedAway = true
 		fail()
 		return nil, stack.Wrap(ErrSessionExists)
 	}
@@ -1215,7 +1224,7 @@ func (m *Manager) supersede(spec Spec) {
 	}
 }
 
-// RetireWithin bounds how long a retiring session (Session.Retire) may take to write the
+// RetireWithin bounds how long a retiring session (Manager.Retire) may take to write the
 // replies it owes before it is closed all the same: as long as a written message's answer may
 // take (api.askTimeout).
 const RetireWithin = 2 * time.Minute
@@ -1727,6 +1736,26 @@ func (m *Manager) end(found *Session, reason EndReason) {
 	found.abandon()
 }
 
+// idTaken ends created, whose row the store refused because another customer's session has its
+// id: the check that an id is free (Create) runs before the row is written, so two routers
+// opening one id for two customers both pass it. One not held yet is turned away by Create.
+// It runs on the record writer, so the close, which may wait on the writer, runs beside it.
+func (m *Manager) idTaken(created *Session) {
+	created.idTaken.Store(true)
+	m.logger.Warn("ending a session whose id another customer's session has",
+		"session", created.id, "customer", created.Spec().CustomerID)
+	done, held := m.take(created)
+	if !held {
+		return
+	}
+	created.noteEnd(EndClosed)
+	go func() {
+		defer done()
+		m.release(created)
+		created.abandon()
+	}()
+}
+
 // hangUp ends found for its agent hanging up, or reason. It closes as Close does, so the
 // goodbye is not cut short, and in the background: the agent hangs up from inside its own
 // tool call, and closing the session waits for the agent.
@@ -1946,9 +1975,9 @@ func (m *Manager) FlushRecords(ctx context.Context) error {
 	return m.records.Flush(ctx)
 }
 
-// Delete stops a session if it is running and deletes it: its row, its turns, and what it
-// taught the memory store. Whoever asks has to have checked the session is the owner's, since
-// one that ended is no longer here to check against.
+// Delete stops a session if it is running and deletes it: its row, its turns, its scheduled
+// tasks, and what it taught the memory store. Whoever asks has to have checked the session is
+// the owner's, since one that ended is no longer here to check against.
 func (m *Manager) Delete(ctx context.Context, id string, owner Owner) error {
 	if _, err := m.Close(id, owner); err != nil {
 		return err
@@ -1968,6 +1997,11 @@ func (m *Manager) Delete(ctx context.Context, id string, owner Owner) error {
 	}
 	if m.options.Store == nil {
 		return nil
+	}
+	// A deleted conversation takes its tasks with it: there is nowhere left for a follow-up to
+	// land. They go before the row too, so a failure keeps the session to delete again.
+	if err := m.options.Store.ScheduledTasks.DeleteForSession(ctx, owner.CustomerID, id); err != nil {
+		return err
 	}
 	return m.options.Store.Sessions.Delete(ctx, owner.CustomerID, id)
 }
@@ -2163,10 +2197,13 @@ func (m *Manager) guardrail(ctx context.Context, spec Spec, stream streamapp.Ide
 	})
 }
 
-// stream is the Stream app a new session acts in. A deployment with no Stream app still
-// holds a text conversation, so having none is not an error here: what needs one fails
-// where it needs it.
-func (m *Manager) stream(ctx context.Context, spec Spec) (streamapp.Bound, error) {
+// stream is the Stream app a new session acts in. Having none is not an error here: an
+// incognito session needs none, and what does need one, such as keeping the conversation
+// (unkeptIn), fails where it needs it.
+//
+// newCall is a call named after an id generated for this session, which no line can have been
+// made for yet, so no shard is asked about its lines.
+func (m *Manager) stream(ctx context.Context, spec Spec, newCall bool) (streamapp.Bound, error) {
 	nowhere := streamapp.Bound{Identity: streamapp.Identity{CustomerID: spec.CustomerID}}
 	if m.options.Stream == nil {
 		return nowhere, nil
@@ -2181,7 +2218,7 @@ func (m *Manager) stream(ctx context.Context, spec Spec) (streamapp.Bound, error
 	}
 	// A call that already has lines, a number's or a placed call's, is in the app they were
 	// made in, and the agent has to join it there.
-	if m.options.Store != nil && spec.CallID != "" && !spec.Text {
+	if m.options.Store != nil && spec.CallID != "" && !spec.Text && !newCall {
 		pin, found, err := m.options.Store.CallResources.Pin(ctx, spec.CustomerID, spec.CallType, spec.CallID)
 		if err != nil {
 			return streamapp.Bound{}, err
@@ -2529,6 +2566,10 @@ func memoryFailed(ctx context.Context, err error) error {
 
 // newID is a handle for an agent or a turn. It is random rather than sequential because it
 // is the only thing standing between two customers who both guessed at an id.
+// NewAgentID is a fresh agent id, which nobody chose, for a session that must not be keyed under
+// an id its caller picked.
+func NewAgentID() string { return newID() }
+
 func newID() string {
 	raw := make([]byte, 16)
 	// rand.Read on crypto/rand never returns an error, which is why the result is not

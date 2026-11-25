@@ -54,6 +54,8 @@ type Store struct {
 	// shardNames names each of shards(), as Options.Shards does, for what is kept per shard
 	// in the shared database.
 	shardNames []string
+	// shardsDown is when each shard that did not answer was last logged (settledWithout).
+	shardsDown shardWarnings
 	// globalIsShard says the shared database is also some shard's own, so its calls are not
 	// strays to drop.
 	globalIsShard bool
@@ -63,10 +65,14 @@ type Store struct {
 	shapes tableShapes
 	// pins says how Stream app pins cross between deployments, once the router has said.
 	pins pinsHolder
-	// retries holds a slot for each deletion forgetLater is trying again. stop ends them
+	// retries holds a slot for each deletion forgetLater is trying again, and lost one for each
+	// lost commit it is waiting on, which it can do for longer; polls bounds how many of those
+	// ask Postgres at once. stop ends them
 	// when the store closes, and retrying is what Close waits on. retryMu guards closed, so no
 	// retry starts once Close is waiting.
 	retries  chan struct{}
+	lost     chan struct{}
+	polls    chan struct{}
 	closing  context.Context
 	stop     context.CancelFunc
 	retrying sync.WaitGroup
@@ -90,7 +96,8 @@ const writeTimeout = 10 * time.Second
 // keys is read once write has run, and names nothing when write found no row.
 //
 // A COMMIT whose answer was lost may land after the deletion, so its keys are dropped again
-// shortly after it (forgetLater).
+// on each of the next few attempts, which Close lets run, and once more when Postgres says the
+// transaction has ended, which Close does not wait for (forgetLater).
 func (s *Store) detachedWrite(ctx context.Context, write func(context.Context, bun.Tx) error, keys func() []string) error {
 	_, err := s.detachedWriteTold(ctx, write, keys)
 	return err
@@ -102,9 +109,18 @@ func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Contex
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.writeTimeout)
 	defer cancel()
 	var committing bool
+	var xid sql.NullInt64
 	err = s.global.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if err := write(ctx, tx); err != nil {
 			return err
+		}
+		// The transaction's id, for asking Postgres later whether a COMMIT whose answer was
+		// lost has landed. Without a cache there is nothing to drop again, and a write that
+		// changed nothing has no id, so nothing to wait for either.
+		if s.cache != nil {
+			if err := tx.NewSelect().ColumnExpr("pg_current_xact_id_if_assigned()").Scan(ctx, &xid); err != nil {
+				return err
+			}
 		}
 		committing = true
 		return nil
@@ -112,8 +128,8 @@ func (s *Store) detachedWriteTold(ctx context.Context, write func(context.Contex
 	names := keys()
 	told = s.forget(ctx, names...)
 	var answered pgdriver.Error
-	if err != nil && committing && !errors.As(err, &answered) && s.cache != nil && len(names) > 0 {
-		s.forgetLater(names, err)
+	if err != nil && committing && !errors.As(err, &answered) && xid.Valid && len(names) > 0 {
+		s.forgetLater(names, err, xid.Int64)
 	}
 	return told, err
 }
@@ -195,7 +211,7 @@ func connect(dsn string, conns int) (_ *bun.DB, err error) {
 			err = stack.Wrap(errors.New("store: the database DSN does not parse"))
 		}
 	}()
-	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn), sessionDefaults))
+	sqldb := sql.OpenDB(primaryOnly{pgdriver.NewConnector(pgdriver.WithDSN(dsn), sessionDefaults)})
 	// database/sql keeps two idle connections by default, so every burst of writes past two
 	// dials Postgres and shakes hands over TLS again, and under load those handshakes are
 	// what times out. The pool is kept instead, and bounded so that two pods, each running
@@ -223,11 +239,21 @@ func (s *Store) Server(ctx context.Context) (database, address string, err error
 	return database, server.String, nil
 }
 
-// Close releases the connection pools.
+// Close releases the connection pools, once the deletions forgetLater holds have run, or
+// forgetGrace has passed and the rest have stopped.
 func (s *Store) Close() error {
 	s.retryMu.Lock()
 	s.closed = true
 	s.retryMu.Unlock()
+	retried := make(chan struct{})
+	go func() {
+		s.retrying.Wait()
+		close(retried)
+	}()
+	select {
+	case <-retried:
+	case <-time.After(forgetGrace):
+	}
 	s.stop()
 	s.retrying.Wait()
 	s.closeRedis()
@@ -259,7 +285,7 @@ func (s *Store) CustomerActivity(
 		return nil, stack.Wrap(fmt.Errorf("store: unknown activity granularity %q", granularity))
 	}
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	unit := granularity.truncateUnit()
@@ -438,7 +464,7 @@ func carriedIn(id string) string {
 // and is one session while both are open.
 func (s *Store) CustomerConcurrencyPeak(ctx context.Context, customerID string, from, to time.Time) (ConcurrencyPeak, error) {
 	if customerID == "" {
-		return ConcurrencyPeak{}, stack.Wrap(errors.New("store: customer id is required"))
+		return ConcurrencyPeak{}, stack.Wrap(errCustomerRequired)
 	}
 
 	const spans = `
@@ -543,7 +569,7 @@ func (s *Store) peakAcrossShards(ctx context.Context, spans, customerID string, 
 // response when it comes back while the turn is open, and as a turn of its own after.
 func (s *Store) CustomerToolUsage(ctx context.Context, customerID, configID string, from, to time.Time) (ToolUsage, []ToolUsage, error) {
 	if customerID == "" {
-		return ToolUsage{}, nil, stack.Wrap(errors.New("store: customer id is required"))
+		return ToolUsage{}, nil, stack.Wrap(errCustomerRequired)
 	}
 
 	type usageRow struct {
@@ -878,7 +904,7 @@ GROUP BY x.session_id, x.turn_id`,
 // A configID keeps to the sessions of that agent config, and empty is every one.
 func (s *Store) CustomerTurns(ctx context.Context, customerID, configID string, from, to time.Time) (SessionTurns, error) {
 	if customerID == "" {
-		return SessionTurns{}, stack.Wrap(errors.New("store: customer id is required"))
+		return SessionTurns{}, stack.Wrap(errCustomerRequired)
 	}
 	type shardTurns struct {
 		SessionTurns
@@ -946,8 +972,10 @@ func lockUntilCommit(ctx context.Context, tx bun.IDB, key string, seed int64) er
 	return err
 }
 
-// databaseNow is the database's clock, which routers whose clocks disagree still share.
-func databaseNow(ctx context.Context, db bun.IDB) (time.Time, error) {
+// transactionStart is when db's transaction started, by the database's clock, which routers
+// whose clocks disagree still share. It is not when it is asked: every call in one transaction
+// gets the same answer, and outside a transaction it is when the statement started.
+func transactionStart(ctx context.Context, db bun.IDB) (time.Time, error) {
 	var now time.Time
 	err := db.QueryRowContext(ctx, "SELECT now()").Scan(&now)
 	return now, err

@@ -42,7 +42,7 @@ func ConnectorLabel(id string) string {
 }
 
 // definitionLockSeed is the second argument to hashtextextended for the lock a revision is
-// written under. Any value other than the 731 RecordAgentLog uses would do, so a customer's
+// written under. Any value other than the 731 AgentLogs.Insert uses would do, so a customer's
 // log writes never wait on its definitions; 833 is this table's issue, AI-833.
 const definitionLockSeed = 833
 
@@ -121,7 +121,7 @@ func (r *ConnectorDefinitions) Seed(ctx context.Context, fsys fs.FS) error {
 // revision is replaced: the store numbers revisions.
 func (r *ConnectorDefinitions) Revise(ctx context.Context, customerID string, manifest core.Manifest) (ConnectorDefinition, error) {
 	if customerID == BuiltinCustomer {
-		return ConnectorDefinition{}, stack.Wrap(errors.New("store: customer id is required"))
+		return ConnectorDefinition{}, stack.Wrap(errCustomerRequired)
 	}
 	probe := ConnectorDefinition{CustomerID: customerID, ID: manifest.ID, Revision: 1, Name: manifest.Name}
 	if err := probe.Validate(); err != nil {
@@ -168,7 +168,7 @@ type Definitions interface {
 	Latest(ctx context.Context, customerID, id string) (ConnectorDefinition, error)
 }
 
-// latestVisibleDefinition is LatestConnectorDefinition read on db.
+// latestVisibleDefinition is ConnectorDefinitions.Latest read on db.
 func latestVisibleDefinition(ctx context.Context, db bun.IDB, customerID, id string) (ConnectorDefinition, error) {
 	if customerID == "" || id == "" {
 		return ConnectorDefinition{}, stack.Wrap(errors.New("store: a customer and a connector id are required"))
@@ -210,7 +210,7 @@ const (
 // ConnectorDefinitionLimit is the page size a definition list uses for the limit asked for.
 // Select returns one row more than this.
 func ConnectorDefinitionLimit(asked int) int {
-	return clampLimit(asked, defaultConnectorDefinitionLimit, maxConnectorDefinitionLimit)
+	return ClampLimit(asked, defaultConnectorDefinitionLimit, maxConnectorDefinitionLimit)
 }
 
 // ConnectorDefinitionFilter narrows a definition list and says where its page starts.
@@ -236,7 +236,7 @@ type ConnectorDefinitionPosition struct {
 // to one more than ConnectorDefinitionLimit, so a caller can tell the page is not the last.
 func (r *ConnectorDefinitions) Select(ctx context.Context, customerID string, filter ConnectorDefinitionFilter) ([]ConnectorDefinition, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	// The newest revision first, then the text matched on it, so an older revision that
@@ -527,7 +527,7 @@ type ConnectorBindingUse struct {
 	Binding string `bun:"binding"`
 }
 
-// DeletedConnector is what DeleteConnectorDefinition found and removed.
+// DeletedConnector is what ConnectorDefinitions.Delete found and removed.
 type DeletedConnector struct {
 	// Uses is what named the definition when the delete looked, set on ErrConnectorDefinitionInUse too.
 	Uses ConnectorUses
@@ -596,7 +596,7 @@ func (r *ConnectorDefinitions) Delete(ctx context.Context, customerID, id string
 		for _, connection := range connections {
 			deleted.Uses.Connections = append(deleted.Uses.Connections, connection.ID)
 		}
-		// A row whose connectors is not an array binds nothing, as in ConnectorConnectionUses.
+		// A row whose connectors is not an array binds nothing, as in ConnectorConnections.Uses.
 		err = tx.NewSelect().
 			TableExpr("agent_configs AS ac").
 			Join("CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(ac.connectors) = 'array' THEN ac.connectors ELSE '[]'::jsonb END) AS binding").
@@ -623,8 +623,7 @@ func (r *ConnectorDefinitions) Delete(ctx context.Context, customerID, id string
 				ID: connection.ID, ConnectorID: id, OwnerType: connection.OwnerType, HadGrant: connection.HadGrant,
 			})
 		}
-		// The deliveries go with their destination (ON DELETE CASCADE,
-		// 20261007040000_connector_event_destinations.sql).
+		// The deliveries go with their destination (ON DELETE CASCADE).
 		for _, model := range []any{(*ConnectorOAuthClient)(nil), (*ConnectorConfigToken)(nil), (*EventDestination)(nil)} {
 			q := tx.NewDelete().Model(model).Where("customer_id = ? AND connector_id = ?", customerID, id)
 			if _, err := q.Exec(ctx); err != nil {
@@ -648,7 +647,7 @@ func (r *ConnectorDefinitions) Delete(ctx context.Context, customerID, id string
 
 // lockCustomDefinitions locks every revision of the customer's own definitions among ids FOR
 // KEY SHARE until tx ends, and returns the custom ids among them that have none. A writer of
-// a row naming a custom definition calls it before its write, so DeleteConnectorDefinition
+// a row naming a custom definition calls it before its write, so ConnectorDefinitions.Delete
 // and the write take turns. A built-in is never deleted, so it is neither locked nor reported.
 // FOR KEY SHARE, not FOR SHARE, as in lockBoundConnections: definitions are never updated,
 // and nothing but the delete needs to wait.

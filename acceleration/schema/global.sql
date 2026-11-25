@@ -81,6 +81,7 @@ TABLE agent_logs
     CREATE INDEX agent_logs_config_order ON public.agent_logs USING btree (customer_id, config_id, id DESC)
     CREATE INDEX agent_logs_customer_order ON public.agent_logs USING btree (customer_id, id DESC)
     CREATE INDEX agent_logs_error_order ON public.agent_logs USING btree (customer_id, severity, id DESC)
+    CREATE INDEX agent_logs_session_order ON public.agent_logs USING btree (customer_id, session_id, id DESC)
     CREATE UNIQUE INDEX agent_logs_source_idx ON public.agent_logs USING btree (customer_id, source_id) WHERE (source_id IS NOT NULL)
 
 TABLE api_keys
@@ -190,6 +191,7 @@ TABLE campaign_attempts
     CONSTRAINT campaign_attempts_campaign_id_fkey FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
     CONSTRAINT campaign_attempts_contact_id_fkey FOREIGN KEY (contact_id) REFERENCES campaign_contacts(id) ON DELETE CASCADE
     CONSTRAINT campaign_attempts_pkey PRIMARY KEY (id)
+    CREATE INDEX campaign_attempts_campaign_idx ON public.campaign_attempts USING btree (campaign_id)
     CREATE INDEX campaign_attempts_classify_idx ON public.campaign_attempts USING btree (classify_after) WHERE (classify_state = 'pending'::text)
     CREATE INDEX campaign_attempts_contact_idx ON public.campaign_attempts USING btree (contact_id, started_at)
 

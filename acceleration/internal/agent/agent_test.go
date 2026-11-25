@@ -6993,7 +6993,12 @@ func (s *AgentSuite) TestAnAnswerNoVoiceSaidIsOwedAgain() {
 
 		s.refusesVoice()
 
-		s.eventually(func() bool { return s.agent.harness.Pending() }, "the answer nobody heard is not owed again")
+		// Owed again, it is pending until the next chance to speak takes it into a turn of its
+		// own, told it was cut off. That chance can come in the instant it is owed, before the
+		// condition is first checked, so either one is the answer being owed.
+		s.eventually(func() bool {
+			return s.agent.harness.Pending() || s.toldTheModel("cut off before the caller heard it")
+		}, "the answer nobody heard is not owed again")
 	})
 }
 

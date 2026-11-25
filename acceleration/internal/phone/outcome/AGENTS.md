@@ -1,7 +1,7 @@
 # internal/phone/outcome
 
 How each phone call ended. The `Keeper` keeps one row per call the router placed
-(`phone_calls`), and `decide` (`outcome.go`) is the one place that turns the vendor's reports
+(`call_legs`), and `decide` (`outcome.go`) is the one place that turns the vendor's reports
 and the phone's join and leave into its stored outcome: `completed`, `busy`, `no_answer`,
 `failed`, `canceled` or `unknown`. The API and billing read those values: add to them, never
 change one.
@@ -43,7 +43,7 @@ Count once, whatever the order of events:
   phone may be ringing.
 - **Not counted**: a transfer's leg (an outbound leg with no row).
 - **Known gap**: a join that Stream delivers again after the call ended revives the leg
-  (`ConnectCallLeg`), and the stored outcome becomes `completed`. The call was already counted
+  (`CallLegs.Connect`), and the stored outcome becomes `completed`. The call was already counted
   under the outcome known at its first end (`no_answer`, or `unknown`), and it is not counted again.
 
 ## What a dropped call is

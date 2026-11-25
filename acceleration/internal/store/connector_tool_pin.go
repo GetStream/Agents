@@ -17,9 +17,9 @@ import (
 )
 
 // ConnectorToolPin is the schema digest one tool of one connection had when a session first
-// offered it, for a tool a session binding grants by name alone
-// (20261011150000_connector_tool_pins.sql). It holds for the grant the connection had then,
-// its ConnectedAt: a reconnect is a new trust event, and the next session pins again.
+// offered it, for a tool a session binding grants by name alone. It holds for the grant the
+// connection had then, its ConnectedAt: a reconnect is a new trust event, and the next session
+// pins again.
 type ConnectorToolPin struct {
 	bun.BaseModel `bun:"table:connector_tool_pins,alias:ctp"`
 
@@ -156,7 +156,7 @@ func (r *ConnectorToolPins) Reapprove(ctx context.Context, connection ConnectorC
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	// By name, so two approves of the same tools take the pins' locks in one order, as
-	// PinConnectorTools does.
+	// Pin does.
 	ordered := slices.SortedFunc(slices.Values(tools), func(a, b ApprovedTool) int { return strings.Compare(a.Name, b.Name) })
 	names, digests, previous := make([]string, len(ordered)), make([]string, len(ordered)), make([]string, len(ordered))
 	for i, tool := range ordered {

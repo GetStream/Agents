@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/uptrace/bun"
 )
@@ -540,6 +541,18 @@ func (s *StoreSuite) TestALateReopenAndItsCloseLeaveTheRunOpenedSinceOpen() {
 	s.Empty(found.Title)
 }
 
+func (s *StoreSuite) TestAWriteThatChangesNothingIsRefusedOnlyForAnotherCustomersID() {
+	late, again := s.base.Add(time.Hour), s.base.Add(2*time.Hour)
+	s.opened("one", "app", s.base, func(session *AgentSession) { session.OpenedAt = again })
+	write := func(customerID string) error {
+		return s.store.Sessions.Upsert(s.ctx, &AgentSession{ID: "one", CustomerID: customerID, AgentName: "docs",
+			ConfigID: "cfg-docs", UserID: "jlahey", CallerKind: "user", State: SessionRunning, CreatedAt: s.base, OpenedAt: late})
+	}
+
+	s.NoError(write("app"), "a late write of the app's own session is no refusal")
+	s.ErrorIs(write("somebody-else"), ErrIDTaken, "the same write under another customer is")
+}
+
 func (s *StoreSuite) TestDescribingASessionLongAfterItEnded() {
 	s.opened("one", "app", s.base, nil)
 	s.Require().NoError(s.store.Sessions.Close(s.ctx, "app", "one", s.base, s.base.Add(time.Hour), ""))
@@ -806,23 +819,23 @@ func (s *StoreSuite) TestDeletingSomebodyElsesSessionDeletesNothing() {
 
 func (s *StoreSuite) TestGettingAGuestTwiceIsOneGuest() {
 	guest := &User{ID: "guest-1", CustomerID: "app", Name: "Guest", CreatedAt: s.base}
-	s.Require().NoError(s.store.RecordGuest(s.ctx, guest))
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", Name: "Renamed"}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, guest))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", Name: "Renamed"}))
 
-	found, err := s.store.Guest(s.ctx, "app", "guest-1")
+	found, err := s.store.Users.GetGuest(s.ctx, "app", "guest-1")
 	s.Require().NoError(err)
 	s.Equal("Guest", found.Name, "coming back is the same person, not a new one")
 }
 
 func (s *StoreSuite) TestClaimingAGuestMovesTheirConversations() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
 	s.opened("theirs", "app", s.base, func(session *AgentSession) {
 		session.UserID = "guest-1"
 		session.CallerKind = "guest"
 	})
 	s.opened("somebody-elses", "app", s.base, func(session *AgentSession) { session.UserID = "randy" })
 
-	moved, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
+	moved, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
 	s.Require().NoError(err)
 	s.Equal(int64(1), moved)
 
@@ -835,39 +848,38 @@ func (s *StoreSuite) TestClaimingAGuestMovesTheirConversations() {
 	s.Require().NoError(err)
 	s.Len(mine, 1)
 
-	guest, err := s.store.Guest(s.ctx, "app", "guest-1")
+	guest, err := s.store.Users.GetGuest(s.ctx, "app", "guest-1")
 	s.Require().NoError(err)
 	s.Equal("jlahey", guest.ClaimedBy)
-	s.Require().NotNil(guest.ClaimedAt)
 }
 
 func (s *StoreSuite) TestAGuestIsClaimedOnce() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
-	_, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
 	s.Require().NoError(err)
 
 	// A second claim naming somebody else would move one person's conversations onto
 	// another's account.
-	_, err = s.store.ClaimGuest(s.ctx, "app", "guest-1", "randy")
+	_, err = s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "randy")
 	s.Require().ErrorIs(err, ErrGuestClaimed, "so a caller can answer a conflict, not a failure")
-	s.Contains(err.Error(), "already claimed by jlahey")
+	s.NotContains(err.Error(), "jlahey", "the error is logged, and names no end user")
 }
 
 func (s *StoreSuite) TestClaimingSomethingThatWasNeverAGuestFails() {
-	_, err := s.store.ClaimGuest(s.ctx, "app", "not-a-guest", "jlahey")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", "not-a-guest", "jlahey")
 	s.Require().Error(err)
 	s.Contains(err.Error(), "is not a guest of app")
 }
 
 func (s *StoreSuite) TestAGuestCannotBeClaimedByItself() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
-	_, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "guest-1")
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "guest-1")
 	s.Require().Error(err)
 }
 
 func (s *StoreSuite) TestAGuestOfAnotherAppIsNotClaimable() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
-	_, err := s.store.ClaimGuest(s.ctx, "somebody-else", "guest-1", "jlahey")
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "app", CreatedAt: s.base}))
+	_, err := s.store.Users.ClaimGuest(s.ctx, "somebody-else", "guest-1", "jlahey")
 	s.Require().Error(err)
 }
 
@@ -877,16 +889,16 @@ func (s *StoreSuite) TestARefreshSecretIsSpentOnce() {
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	rotated, err := s.store.Guests.RotateSecret(s.ctx, "app", "guest-1", GuestSecretHash(first), next)
+	rotated, err := s.store.Users.RotateGuestSecret(s.ctx, "app", "guest-1", GuestSecretHash(first), next)
 	s.Require().NoError(err)
 	s.Equal("guest-1", rotated.ID)
 	s.Equal("Alice", rotated.Name, "the guest comes back as they were")
 
 	_, other, err := NewGuestSecret()
 	s.Require().NoError(err)
-	_, err = s.store.Guests.RotateSecret(s.ctx, "app", "guest-1", GuestSecretHash(first), other)
+	_, err = s.store.Users.RotateGuestSecret(s.ctx, "app", "guest-1", GuestSecretHash(first), other)
 	s.Require().ErrorIs(err, ErrGuestSecretRefused)
-	held, err := s.store.Guest(s.ctx, "app", "guest-1")
+	held, err := s.store.Users.GetGuest(s.ctx, "app", "guest-1")
 	s.Require().NoError(err)
 	s.Equal(next, held.RefreshSecretHash, "a refused replay leaves the current secret in place")
 }
@@ -896,10 +908,10 @@ func (s *StoreSuite) TestAWrongRefreshSecretIsRefused() {
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	_, err = s.store.Guests.RotateSecret(s.ctx, "app", "guest-1", GuestSecretHash("not-it"), next)
+	_, err = s.store.Users.RotateGuestSecret(s.ctx, "app", "guest-1", GuestSecretHash("not-it"), next)
 
 	s.Require().ErrorIs(err, ErrGuestSecretRefused)
-	held, err := s.store.Guest(s.ctx, "app", "guest-1")
+	held, err := s.store.Users.GetGuest(s.ctx, "app", "guest-1")
 	s.Require().NoError(err)
 	s.Equal(hash, held.RefreshSecretHash)
 }
@@ -909,7 +921,7 @@ func (s *StoreSuite) TestAnotherAppsRefreshSecretIsRefused() {
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	_, err = s.store.Guests.RotateSecret(s.ctx, "somebody-else", "guest-1", GuestSecretHash(secret), next)
+	_, err = s.store.Users.RotateGuestSecret(s.ctx, "somebody-else", "guest-1", GuestSecretHash(secret), next)
 
 	s.Require().ErrorIs(err, ErrGuestSecretRefused)
 }
@@ -917,12 +929,12 @@ func (s *StoreSuite) TestAnotherAppsRefreshSecretIsRefused() {
 func (s *StoreSuite) TestAClaimedGuestsRefreshSecretIsRefused() {
 	// A guest who signed up has an account to sign in with now.
 	secret, _ := s.guestWithSecret("guest-1")
-	_, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
 	s.Require().NoError(err)
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	_, err = s.store.Guests.RotateSecret(s.ctx, "app", "guest-1", GuestSecretHash(secret), next)
+	_, err = s.store.Users.RotateGuestSecret(s.ctx, "app", "guest-1", GuestSecretHash(secret), next)
 
 	s.Require().ErrorIs(err, ErrGuestSecretRefused)
 }
@@ -932,23 +944,23 @@ func (s *StoreSuite) TestSettingAGuestsSecretReplacesTheOldOne() {
 	_, next, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	s.Require().NoError(s.store.Guests.SetSecret(s.ctx, "app", "guest-1", next))
+	s.Require().NoError(s.store.Users.SetGuestSecret(s.ctx, "app", "guest-1", next))
 
-	held, err := s.store.Guest(s.ctx, "app", "guest-1")
+	held, err := s.store.Users.GetGuest(s.ctx, "app", "guest-1")
 	s.Require().NoError(err)
 	s.Equal(next, held.RefreshSecretHash)
 	_, again, err := NewGuestSecret()
 	s.Require().NoError(err)
-	_, err = s.store.Guests.RotateSecret(s.ctx, "app", "guest-1", GuestSecretHash(old), again)
+	_, err = s.store.Users.RotateGuestSecret(s.ctx, "app", "guest-1", GuestSecretHash(old), again)
 	s.ErrorIs(err, ErrGuestSecretRefused, "the secret it replaced no longer works")
 }
 
 func (s *StoreSuite) TestAnAccountIsGivenNoGuestSecret() {
-	s.Require().NoError(s.store.RecordUser(s.ctx, &User{ID: "jlahey", CustomerID: "app", Kind: UserKindAuthenticated}))
+	s.Require().NoError(s.store.Users.Insert(s.ctx, &User{ID: "jlahey", CustomerID: "app", Kind: UserKindAuthenticated}))
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	err = s.store.Guests.SetSecret(s.ctx, "app", "jlahey", hash)
+	err = s.store.Users.SetGuestSecret(s.ctx, "app", "jlahey", hash)
 
 	s.Require().Error(err)
 	s.Contains(err.Error(), "is not a guest of app")
@@ -956,12 +968,12 @@ func (s *StoreSuite) TestAnAccountIsGivenNoGuestSecret() {
 
 func (s *StoreSuite) TestAClaimedGuestIsGivenNoGuestSecret() {
 	s.guestWithSecret("guest-1")
-	_, err := s.store.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "app", "guest-1", "jlahey")
 	s.Require().NoError(err)
 	_, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
 
-	s.Require().Error(s.store.Guests.SetSecret(s.ctx, "app", "guest-1", hash))
+	s.Require().Error(s.store.Users.SetGuestSecret(s.ctx, "app", "guest-1", hash))
 }
 
 // guestWithSecret records a guest of app called Alice holding a refresh secret, and returns
@@ -969,7 +981,7 @@ func (s *StoreSuite) TestAClaimedGuestIsGivenNoGuestSecret() {
 func (s *StoreSuite) guestWithSecret(id string) (string, []byte) {
 	secret, hash, err := NewGuestSecret()
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{
 		ID: id, CustomerID: "app", Name: "Alice", CreatedAt: s.base, RefreshSecretHash: hash,
 	}))
 	return secret, hash
@@ -978,37 +990,37 @@ func (s *StoreSuite) guestWithSecret(id string) (string, []byte) {
 func (s *StoreSuite) TestAnAccountIsNobodysToClaim() {
 	// Everybody is recorded now, so a user id being here no longer says anybody may be
 	// handed their conversations. Only a guest may.
-	s.Require().NoError(s.store.RecordUser(s.ctx, &User{
+	s.Require().NoError(s.store.Users.Insert(s.ctx, &User{
 		ID: "jlahey", CustomerID: "app", Kind: UserKindAuthenticated, CreatedAt: s.base,
 	}))
 
-	_, err := s.store.Guest(s.ctx, "app", "jlahey")
+	_, err := s.store.Users.GetGuest(s.ctx, "app", "jlahey")
 	s.Require().Error(err)
 	s.Contains(err.Error(), "is not a guest of app")
 
-	_, err = s.store.ClaimGuest(s.ctx, "app", "jlahey", "randy")
+	_, err = s.store.Users.ClaimGuest(s.ctx, "app", "jlahey", "randy")
 	s.Require().Error(err)
 }
 
 func (s *StoreSuite) TestTheSameUserIdUnderTwoAppsIsTwoPeople() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{
 		ID: "jlahey", CustomerID: "app", Name: "Guest", CreatedAt: s.base,
 	}))
-	s.Require().NoError(s.store.RecordUser(s.ctx, &User{
+	s.Require().NoError(s.store.Users.Insert(s.ctx, &User{
 		ID: "jlahey", CustomerID: "somebody-else", Kind: UserKindAuthenticated, CreatedAt: s.base,
 	}))
 
-	found, err := s.store.Guest(s.ctx, "app", "jlahey")
+	found, err := s.store.Users.GetGuest(s.ctx, "app", "jlahey")
 	s.Require().NoError(err)
 	s.Equal("Guest", found.Name)
 
-	_, err = s.store.Guest(s.ctx, "somebody-else", "jlahey")
+	_, err = s.store.Users.GetGuest(s.ctx, "somebody-else", "jlahey")
 	s.Require().Error(err, "the other app's user of that name is somebody else")
 }
 
 func (s *StoreSuite) TestAUserHasToSayWhichKindTheyAre() {
 	// Without it a row says somebody called, and nothing says whether anybody checked.
-	err := s.store.RecordUser(s.ctx, &User{ID: "jlahey", CustomerID: "app"})
+	err := s.store.Users.Insert(s.ctx, &User{ID: "jlahey", CustomerID: "app"})
 	s.Require().Error(err)
 }
 
@@ -1129,12 +1141,12 @@ func (s *StoreSuite) TestARedactedToolCallStillCountsInToolUsage() {
 }
 
 func (s *StoreSuite) TestClaimingAGuestMovesTheirScheduledTasks() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
 	s.task("theirs", func(task *ScheduledTask) { task.UserID = "guest-1" })
 	s.task("sams", nil)
 	s.task("theirs", func(task *ScheduledTask) { task.CustomerID, task.UserID = "globex", "guest-1" })
 
-	_, err := s.store.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
+	_, err := s.store.Users.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
 	s.Require().NoError(err)
 
 	for _, want := range []struct{ customer, task, user string }{
@@ -1151,18 +1163,18 @@ func (s *StoreSuite) TestClaimingAGuestMovesTheirScheduledTasks() {
 // A claim marked finished for anybody but the account that claimed the guest would have the
 // guest's own claim skip the steps it still owes, sent again.
 func (s *StoreSuite) TestAGuestClaimIsFinishedOnlyForTheAccountThatClaimedIt() {
-	s.Require().NoError(s.store.RecordGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
-	s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1"))
-	_, err := s.store.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
+	s.Require().NoError(s.store.Users.InsertGuest(s.ctx, &User{ID: "guest-1", CustomerID: "acme", Name: "Guest"}))
+	s.Require().NoError(s.store.Users.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1"))
+	_, err := s.store.Users.ClaimGuest(s.ctx, "acme", "guest-1", "account-1")
 	s.Require().NoError(err)
-	s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "mallory"))
-	guest, err := s.store.Guest(s.ctx, "acme", "guest-1")
+	s.Require().NoError(s.store.Users.FinishGuestClaim(s.ctx, "acme", "guest-1", "mallory"))
+	guest, err := s.store.Users.GetGuest(s.ctx, "acme", "guest-1")
 	s.Require().NoError(err)
 	s.Require().Nil(guest.ClaimFinishedAt, "finished before the claim, or by another account")
 
-	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1")) }))
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.Users.FinishGuestClaim(s.ctx, "acme", "guest-1", "account-1")) }))
 
-	guest, err = s.store.Guest(s.ctx, "acme", "guest-1")
+	guest, err = s.store.Users.GetGuest(s.ctx, "acme", "guest-1")
 	s.Require().NoError(err)
 	s.NotNil(guest.ClaimFinishedAt)
 }
@@ -1586,4 +1598,88 @@ func (s *StoreSuite) TestAnotherCustomersToolsForASessionIdAreNotKept() {
 			s.Equal(kept, tools)
 		})
 	}
+}
+
+func (s *StoreSuite) TestAnIdAnotherCustomersSessionHasIsNotWrittenOver() {
+	s.opened("one", "app", s.base, func(session *AgentSession) {
+		session.Title, session.State, session.ClosedAt = "theirs to keep", SessionClosed, &s.base
+	})
+	before, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+
+	err = s.store.Sessions.Upsert(s.ctx, &AgentSession{
+		ID: "one", CustomerID: "somebody-else", AgentName: "docs", ConfigID: "cfg-docs", UserID: "randy",
+		CallerKind: "user", State: SessionRunning, Title: "taken over", CreatedAt: s.base,
+	})
+	s.Require().ErrorIs(err, ErrIDTaken)
+
+	after, err := s.store.Sessions.Get(s.ctx, "app", "one")
+	s.Require().NoError(err)
+	s.Equal(before, after, "app's session is as it was, still ended")
+}
+
+func (s *StoreSuite) TestWhatWasSaidIsKeptWholeAndAToolResultIsCut() {
+	s.opened("one", "app", s.base, nil)
+	secret := strings.Repeat("q7", 12)
+	long := strings.Repeat("Stream ships chat, video and feeds. ", 400) + "my password: " + secret
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{
+		ID: "first", SessionID: "one", CustomerID: "app", Said: long, CreatedAt: s.base,
+	}))
+	items := []AgentResponseItem{}
+	for i, kind := range []string{ItemSaid, ItemThought, ItemAnswer, ItemToolResult, ItemError} {
+		items = append(items, AgentResponseItem{ResponseID: "first", Ordinal: i, SessionID: "one", Kind: kind, Text: long, At: s.base})
+	}
+	s.Require().NoError(s.store.ResponseItems.InsertMany(s.ctx, items))
+
+	response, err := s.store.Responses.Get(s.ctx, "app", "one", "first")
+	s.Require().NoError(err)
+	kept, err := s.store.ResponseItems.Select(s.ctx, "app", "one", ItemFilter{})
+	s.Require().NoError(err)
+	s.Require().Len(kept, 5)
+	for name, text := range map[string]string{"the question asked again": response.Said, "the question": kept[0].Text,
+		"the thought": kept[1].Text, "the answer": kept[2].Text} {
+		s.Equal(400, strings.Count(text, "Stream ships chat, video and feeds. "), "%s is kept whole", name)
+		s.Contains(text, "my [redacted]", "%s is redacted where the credential was", name)
+		s.NotContains(text, secret, "%s keeps no credential", name)
+	}
+	for name, text := range map[string]string{"a tool's output": kept[3].Text, "an error": kept[4].Text} {
+		s.True(strings.HasSuffix(text, truncatedMarker), "%s is cut as a log line is", name)
+		s.LessOrEqual(utf8.RuneCountInString(text), 2048+utf8.RuneCountInString(truncatedMarker), name)
+	}
+}
+
+func (s *StoreSuite) TestATurnPastTheCeilingIsCutWithTheMarker() {
+	s.opened("one", "app", s.base, nil)
+	// One byte ahead, so the ceiling falls inside a two-byte rune.
+	huge := "a" + strings.Repeat("é", maxTurnText)
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{
+		ID: "first", SessionID: "one", CustomerID: "app", Said: huge, CreatedAt: s.base,
+	}))
+	s.Require().NoError(s.store.ResponseItems.InsertMany(s.ctx, []AgentResponseItem{
+		{ResponseID: "first", SessionID: "one", Kind: ItemAnswer, Text: huge, At: s.base},
+	}))
+
+	response, err := s.store.Responses.Get(s.ctx, "app", "one", "first")
+	s.Require().NoError(err)
+	kept, err := s.store.ResponseItems.Select(s.ctx, "app", "one", ItemFilter{})
+	s.Require().NoError(err)
+	s.Require().Len(kept, 1)
+	for name, text := range map[string]string{"the question": response.Said, "the answer": kept[0].Text} {
+		s.LessOrEqual(len(text), maxTurnText+len(truncatedMarker), name)
+		// 256 KiB, the last rune boundary before it, then the marker.
+		s.Equal(256<<10-1+len(truncatedMarker), len(text), "%s is cut at 256 KiB", name)
+		s.True(strings.HasSuffix(text, truncatedMarker), name)
+		s.True(utf8.ValidString(text), "%s is cut between runes", name)
+	}
+}
+
+func (s *StoreSuite) TestATurnOfExactlyTheCeilingIsKeptWhole() {
+	s.opened("one", "app", s.base, nil)
+	exact := strings.Repeat("a", 256<<10)
+	s.Require().NoError(s.store.Responses.Insert(s.ctx, &AgentResponse{
+		ID: "first", SessionID: "one", CustomerID: "app", Said: exact, CreatedAt: s.base,
+	}))
+	response, err := s.store.Responses.Get(s.ctx, "app", "one", "first")
+	s.Require().NoError(err)
+	s.Equal(len(exact), len(response.Said), "a turn of exactly 256 KiB is not cut")
 }
