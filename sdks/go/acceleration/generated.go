@@ -6635,6 +6635,12 @@ type DataImport struct {
 	// Rows How many rows were written.
 	Rows int64 `json:"rows"`
 
+	// Skipped The rows left out rather than written, by table and primary key, as connector_definitions:{"id":"custom_crm","revision":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set.
+	Skipped *[]string `json:"skipped,omitempty"`
+
+	// SkippedMore How many more rows were left out than skipped names, which holds the first 100.
+	SkippedMore *int64 `json:"skipped_more,omitempty"`
+
 	// Tables How many of them went into each table.
 	Tables *map[string]int64 `json:"tables,omitempty"`
 }
@@ -11766,7 +11772,7 @@ type ListCallsParams struct {
 
 // GetCallEventsParams defines parameters for GetCallEvents.
 type GetCallEventsParams struct {
-	// Limit How many to return, oldest first.
+	// Limit How many to return, oldest first. Up to the 10000 a call keeps.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
@@ -12085,7 +12091,9 @@ type ListResponseSiblingsParamsOf string
 type ListSimulationRunsParams struct {
 	SimulationId *string                        `form:"simulation_id,omitempty" json:"simulation_id,omitempty"`
 	State        *ListSimulationRunsParamsState `form:"state,omitempty" json:"state,omitempty"`
-	Limit        *int                           `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Limit Up to 500. Omitted is 50.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // ListSimulationRunsParamsState defines parameters for ListSimulationRuns.
@@ -15837,6 +15845,13 @@ type ClientInterface interface {
 	//
 	// Corresponds with POST /v1/phone/hooks/telnyx/events (the `ReceiveTelnyxEvent` operationId).
 	ReceiveTelnyxEvent(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ReceiveTwilioCall Receive a Twilio call
+	//
+	// Where Twilio asks what to do with a call to one of this router's Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number's own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.
+	//
+	// Corresponds with POST /v1/phone/hooks/twilio (the `ReceiveTwilioCall` operationId).
+	ReceiveTwilioCall(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ReceiveTwilioEvent Receive a Twilio account event
 	//
@@ -21800,6 +21815,23 @@ func (c *Client) ReceiveTelnyxCall(ctx context.Context, reqEditors ...RequestEdi
 // Corresponds with POST /v1/phone/hooks/telnyx/events (the `ReceiveTelnyxEvent` operationId).
 func (c *Client) ReceiveTelnyxEvent(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewReceiveTelnyxEventRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// ReceiveTwilioCall Receive a Twilio call
+//
+// Where Twilio asks what to do with a call to one of this router's Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number's own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.
+//
+// Corresponds with POST /v1/phone/hooks/twilio (the `ReceiveTwilioCall` operationId).
+func (c *Client) ReceiveTwilioCall(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReceiveTwilioCallRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -32645,6 +32677,33 @@ func NewReceiveTelnyxEventRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewReceiveTwilioCallRequest constructs an http.Request for the ReceiveTwilioCall method
+func NewReceiveTwilioCallRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/phone/hooks/twilio")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewReceiveTwilioEventRequest constructs an http.Request for the ReceiveTwilioEvent method
 func NewReceiveTwilioEventRequest(server string) (*http.Request, error) {
 	var err error
@@ -39302,6 +39361,15 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /v1/phone/hooks/telnyx/events (the `ReceiveTelnyxEvent` operationId).
 	ReceiveTelnyxEventWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ReceiveTelnyxEventResponse, error)
+
+	// ReceiveTwilioCallWithResponse Receive a Twilio call
+	//
+	// Where Twilio asks what to do with a call to one of this router's Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number's own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with POST /v1/phone/hooks/twilio (the `ReceiveTwilioCall` operationId).
+	ReceiveTwilioCallWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ReceiveTwilioCallResponse, error)
 
 	// ReceiveTwilioEventWithResponse Receive a Twilio account event
 	//
@@ -60350,6 +60418,54 @@ func (r ReceiveTelnyxEventResponse) ContentType() string {
 	return ""
 }
 
+type ReceiveTwilioCallResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// XML200 the response for an HTTP 200 `application/xml` response
+	XML200 *string
+	// JSON500 the response for an HTTP 500 `application/json` response
+	JSON500 *InternalError
+}
+
+// GetXML200 returns the response for an HTTP 200 `application/xml` response
+func (r ReceiveTwilioCallResponse) GetXML200() *string {
+	return r.XML200
+}
+
+// GetJSON500 returns the response for an HTTP 500 `application/json` response
+func (r ReceiveTwilioCallResponse) GetJSON500() *InternalError {
+	return r.JSON500
+}
+
+// GetBody returns the raw response body bytes
+func (r ReceiveTwilioCallResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r ReceiveTwilioCallResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ReceiveTwilioCallResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ReceiveTwilioCallResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
 type ReceiveTwilioEventResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -72219,6 +72335,21 @@ func (c *ClientWithResponses) ReceiveTelnyxEventWithResponse(ctx context.Context
 		return nil, err
 	}
 	return ParseReceiveTelnyxEventResponse(rsp)
+}
+
+// ReceiveTwilioCallWithResponse Receive a Twilio call
+//
+// Where Twilio asks what to do with a call to one of this router's Twilio numbers. Unauthenticated because Twilio is not a customer: each call is checked against X-Twilio-Signature, made with the account's Auth Token over ROUTER_PUBLIC_URL and this path, and must name TWILIO_ACCOUNT_SID. The call then passes the checks a Telnyx call passes, and the answer dials that number's own trunk and no other, or rejects or hangs up the call. A deployment with no Twilio webhook token or no public URL answers 404, so the path never hands out trunk credentials unsigned.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with POST /v1/phone/hooks/twilio (the `ReceiveTwilioCall` operationId).
+func (c *ClientWithResponses) ReceiveTwilioCallWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ReceiveTwilioCallResponse, error) {
+	rsp, err := c.ReceiveTwilioCall(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReceiveTwilioCallResponse(rsp)
 }
 
 // ReceiveTwilioEventWithResponse Receive a Twilio account event
@@ -97148,6 +97279,51 @@ func ParseReceiveTelnyxEventResponse(rsp *http.Response) (*ReceiveTelnyxEventRes
 	switch {
 	case rsp.StatusCode == 204:
 		break // No content-type
+
+	case rsp.StatusCode == 400:
+		break // No content-type
+
+	case rsp.StatusCode == 401:
+		break // No content-type
+
+	case rsp.StatusCode == 404:
+		break // No content-type
+
+	case rsp.StatusCode == 413:
+		break // No content-type
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest InternalError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON500 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseReceiveTwilioCallResponse parses an HTTP response from a ReceiveTwilioCallWithResponse call
+func ParseReceiveTwilioCallResponse(rsp *http.Response) (*ReceiveTwilioCallResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ReceiveTwilioCallResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "xml") && rsp.StatusCode == 200:
+		var dest string
+		if err := xml.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.XML200 = &dest
 
 	case rsp.StatusCode == 400:
 		break // No content-type

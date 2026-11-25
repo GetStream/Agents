@@ -754,6 +754,78 @@ func (r *Sessions) ConversationPin(ctx context.Context, customerID, conversation
 	return newest[0].Pin.Int64, true, nil
 }
 
+// HeldConversation is a customer's conversation a session held.
+type HeldConversation struct {
+	CustomerID     string `bun:"customer_id"`
+	ConversationID string `bun:"conversation_id"`
+}
+
+// HeldConversations pages through the conversations this shard's sessions held, by customer and
+// then conversation, from after the one given: the zero value starts at the first. Only
+// customerID's when it is not empty. For a job that walks them all, which each shard does for
+// its own.
+func (r *Sessions) HeldConversations(ctx context.Context, customerID string, after HeldConversation, limit int) ([]HeldConversation, error) {
+	query := r.store.shard.NewSelect().Model((*AgentSession)(nil)).
+		Distinct().Column("customer_id", "conversation_id").
+		Where("conversation_id <> ''").
+		Where("(customer_id, conversation_id) > (?, ?)", after.CustomerID, after.ConversationID).
+		OrderExpr("customer_id, conversation_id").
+		Limit(limit)
+	if customerID != "" {
+		query = query.Where("customer_id = ?", customerID)
+	}
+	var held []HeldConversation
+	if err := query.Scan(ctx, &held); err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: held conversations: %w", err))
+	}
+	return held, nil
+}
+
+// CallerKinds are the kinds of caller whose sessions held a customer's conversation under a
+// user id, on every shard, each once.
+func (r *Sessions) CallerKinds(ctx context.Context, customerID, conversationID, userID string) ([]string, error) {
+	lists, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) ([]string, error) {
+		var kinds []string
+		err := db.NewSelect().Model((*AgentSession)(nil)).
+			Distinct().Column("caller_kind").
+			Where("customer_id = ?", customerID).
+			Where("conversation_id = ?", conversationID).
+			Where("user_id = ?", userID).
+			Scan(ctx, &kinds)
+		return kinds, err
+	})
+	if err != nil {
+		return nil, stack.Wrap(fmt.Errorf("store: caller kinds: %w", err))
+	}
+	var kinds []string
+	for _, list := range lists {
+		for _, kind := range list {
+			if !slices.Contains(kinds, kind) {
+				kinds = append(kinds, kind)
+			}
+		}
+	}
+	return kinds, nil
+}
+
+// HeldAsGuest reports whether a guest whose token said the role held a session under a customer's
+// user id, on any shard. Such a user's next token says the role though other sessions they held
+// may say none: before a refreshed guest token kept the role, a guest came back from a refresh as
+// a signed-in user.
+func (r *Sessions) HeldAsGuest(ctx context.Context, customerID, userID string) (bool, error) {
+	held, err := everyShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (bool, error) {
+		return db.NewSelect().Model((*AgentSession)(nil)).
+			Where("customer_id = ?", customerID).
+			Where("user_id = ?", userID).
+			Where("caller_kind = ?", UserKindGuest).
+			Exists(ctx)
+	})
+	if err != nil {
+		return false, stack.Wrap(fmt.Errorf("store: held as guest: %w", err))
+	}
+	return slices.Contains(held, true), nil
+}
+
 // Delete deletes one of a customer's sessions, and its turns and their items with it. A
 // session that is not there is not an error: a retried delete has nothing left to do.
 func (r *Sessions) Delete(ctx context.Context, customerID, id string) error {

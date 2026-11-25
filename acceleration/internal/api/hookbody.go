@@ -29,7 +29,7 @@ var errTooLarge = errors.New("api: that delivery is larger than any event Stream
 // isHook reports whether a path is one Stream, Telnyx or Twilio delivers events to. None is a
 // customer, so nothing a request to one of them says about who is calling is read.
 func isHook(path string) bool {
-	for _, hook := range []string{phone.CallHookPath, chat.MessageHookPath, telnyxCallHookPath, twilioEventsHookPath,
+	for _, hook := range []string{phone.CallHookPath, chat.MessageHookPath, telnyxCallHookPath, twilioCallHookPath,
 		chatInboundPath} {
 		if path == hook || strings.HasPrefix(path, hook+"/") {
 			return true

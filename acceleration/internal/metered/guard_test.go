@@ -112,6 +112,7 @@ var notVendors = map[string]string{
 	"internal/llm/openweights":         "what the hosts of open-weight models have in common",
 	"internal/decisionmodel/systemone": "the System One protocol every decision model vendor answers on",
 	"internal/tts/voices":              "the voice library and cloning service, a holder of its own",
+	"internal/tts/voiceid":             "the id format of each voice vendor, which its vendors and the voice API check a voice id against",
 	"internal/phone/sipbridge":         "the SIP bridge every phone vendor's calls go through",
 	"internal/phone/siptrunk":          "the customer's own SIP trunk, which is no vendor of Stream's",
 	"internal/phone/vendors":           "the phone vendors' registry",

@@ -155,10 +155,10 @@ the other commands that read them there.
 | `EXA_API_KEY`           | Exa credentials. Also what reads a URL into a knowledge base |
 | `PERPLEXITY_API_KEY`    | Perplexity credentials, for the ranked index and for Sonar |
 | `DAYTONA_API_KEY`       | Daytona credentials. Without it a session cannot ask for a sandbox |
-| `TWILIO_ACCOUNT_SID`    | Twilio credentials, for buying and operating numbers       |
+| `TWILIO_ACCOUNT_SID`    | Twilio credentials, for buying and operating numbers. A call to `/v1/phone/hooks/twilio` that names another account is hung up |
 | `TWILIO_AUTH_TOKEN`     | Twilio credentials. With `TWILIO_API_KEY_SID` set, that key's secret |
 | `TWILIO_API_KEY_SID`    | Optional Twilio API key (SK...). Requests are signed with it instead of the account SID |
-| `TWILIO_WEBHOOK_AUTH_TOKEN` | Auth Token of the Twilio account whose webhooks the router checks (`X-Twilio-Signature`). It only checks signatures: those of the Monitor alerts and usage-trigger callbacks sent to `/v1/phone/hooks/twilio/events`, signed over `ROUTER_PUBLIC_URL` and the path. Without it, or without `ROUTER_PUBLIC_URL`, that route answers 404. A token with whitespace in it stops the router at start |
+| `TWILIO_WEBHOOK_AUTH_TOKEN` | Auth Token of the Twilio account whose webhooks the router checks (`X-Twilio-Signature`). It only checks signatures: those of the Monitor alerts and usage-trigger callbacks sent to `/v1/phone/hooks/twilio/events`, and the calls sent to `/v1/phone/hooks/twilio`, each signed over `ROUTER_PUBLIC_URL` and the path. Without it, or without `ROUTER_PUBLIC_URL`, both routes answer 404. A call is answered once per `CallSid`, marked in Redis for a week: a copy of it is hung up, unless the first answer did not reach Twilio, and without Redis every call is hung up. A token with whitespace in it stops the router at start |
 | `TELNYX_API_KEY`        | Telnyx credentials                                         |
 | `TELNYX_CONNECTION_ID`  | The Telnyx TeXML application numbers and calls are on. Calls to the webhook from any other application are hung up |
 | `TELNYX_PUBLIC_KEY`     | Telnyx's public key (base64), to check the calls it sends to `/v1/phone/hooks/telnyx` and the account events it sends to `/v1/phone/hooks/telnyx/events`. Without it Telnyx numbers are not answered and the events route answers 404. Telnyx numbers also need a key encryption keyring (`ROUTER_DEV_KEK` locally, `ROUTER_AUTH_KEK_V<n>_WRAPPED` hosted): without one they cannot be attached |
@@ -392,7 +392,16 @@ opening the conversation and handing over the id is the ordinary shape of an int
 Anonymous is left out of that, since an anonymous name is a claim nobody checked and
 allowing it would make guessing whose a session was enough to read it.
 
-`internal/session` enforces all of this rather than the handlers, so `getSession`,
+A persistent conversation is matched the same way. Its channel records whose it is and which
+sort of caller that was (`support_owner_id`, `support_owner_kind`), and opening it or reading it
+back needs the user id to match and the kind to reach it as above; a backend names the user.
+Another member of a shared conversation has to be a verified user. A channel made before
+`support_owner_kind` keeps the access its owner had, until `router conversations
+backfill-owner-kinds --write` records the one verified kind its owner's sessions on it agree on,
+when it is the kind that owner's next token says (left alone otherwise). `internal/conversation`
+enforces this.
+
+`internal/session` enforces whose a session is rather than the handlers, so `getSession`,
 `stopSession`, `deleteSession`, the events socket, the call token and the session actions cannot each be
 wrong in their own way.
 
@@ -2959,6 +2968,16 @@ A row refused because another tenant here holds its key stops the move, and the 
 row by table and primary key, as `agent_configs:{"id":"config-1"}`. `router replicate` prints why.
 `POST /v1/data/import` answers 400 and says only that the row cannot be written here: pass the row
 to the operator of this deployment.
+
+A custom connector definition arrives only if the API would store it: it is held to the same id
+pattern, lengths, scope tokens and client rules, and a row that breaks one stops the move with a
+400 naming its id. Its endpoint is not resolved on the way in: a connection to it still dials only a public address.
+One rule is not a refusal: a definition with `oauth2_client_credentials`, which a custom connector
+could have before it lost that scheme, is left out and the move goes on, since no connection could
+use it. `POST /v1/data/import` names each one in `skipped`, as
+`connector_definitions:{"id":"custom_crm","revision":1}`, and `router replicate` logs it. `skipped` names the first 100, and `skipped_more` counts the rest. A row is named only if its id
+is a custom id and its revision a positive number; any other such row is refused as above. Recreate
+such a connector with another scheme where it arrives.
 
 Key rows, sealed secrets, OAuth access and refresh tokens, organizations and apps are not
 exported. A moved deployment mints its own keys and re-authorizes its plugin connections.

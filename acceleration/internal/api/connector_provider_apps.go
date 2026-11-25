@@ -241,7 +241,7 @@ func (s *Server) setConnectorProviderApp(ctx context.Context, request *providerA
 	}
 	public := strings.TrimRight(s.publicURL, "/")
 	if !providerAppsURL(public) {
-		return nil, notConfigured("provider apps cannot be created: ROUTER_PUBLIC_URL is not an https URL, and Slack sends consents and events only to one")
+		return nil, notConfigured("this deployment is not set up to create provider apps")
 	}
 	manifest, err := s.managedConnector(ctx, customerID, request.ID)
 	if err != nil {

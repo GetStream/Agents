@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -364,7 +365,8 @@ func (c ChannelRule) AnswerHandshake(query url.Values, verifyToken string) (stri
 		return "", false
 	}
 	challenge := query.Get("hub.challenge")
-	if query.Get("hub.mode") != hubSubscribe || query.Get("hub.verify_token") != verifyToken ||
+	if query.Get("hub.mode") != hubSubscribe ||
+		subtle.ConstantTimeCompare([]byte(query.Get("hub.verify_token")), []byte(verifyToken)) != 1 ||
 		challenge == "" || strings.Trim(challenge, "0123456789") != "" {
 		return "", false
 	}

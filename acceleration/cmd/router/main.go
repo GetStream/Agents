@@ -195,6 +195,7 @@ const usage = `usage: router [--config path] [command]
   keys revoke           stop one of an app's keys (--app, --key)
   replicate             copy another deployment's data here and follow its changes
   stream-apps           look after the Stream apps customers registered in app mode
+  conversations         look after the conversations kept in Stream Chat
   prices                read and check the price list (router prices for its commands)
   opt-outs normalize    rewrite opt-outs stored before E.164 was enforced into E.164
   usage replay          write the usage rows a log says were lost, once each (--from path)
@@ -280,6 +281,8 @@ func dispatchCommand(command string, args []string, settings config.Config, logg
 		return runReplicate(args, settings, logger)
 	case "stream-apps":
 		return runStreamApps(args, settings, logger)
+	case "conversations":
+		return runConversations(args, settings, logger)
 	case "prices":
 		return runPrices(args, settings, logger)
 	case "opt-outs":
@@ -1496,6 +1499,7 @@ func run(settings config.Config, logger *slog.Logger) error {
 		TelnyxPublicKey:       telnyxPublicKey,
 		ChatInboundKeys:       chatInboundKeys,
 		TwilioAuthToken:       settings.Twilio.WebhookAuthToken,
+		TwilioAccountSID:      settings.Twilio.AccountSID,
 		TelnyxConnectionID:    settings.Telnyx.ConnectionID,
 		Simulations:           simulations,
 		DLC:                   registrations,

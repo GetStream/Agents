@@ -247,6 +247,10 @@ func copyEverything(ctx context.Context, source *deployment, pgStore *store.Stor
 			if err != nil {
 				return "", 0, err
 			}
+			if key := store.SkippedRow(line.Table, line.Row); key != "" {
+				logger.Warn(skippedRowMessage, "row", key)
+				continue
+			}
 			rows++
 		case line.Cursor != nil:
 			cursor = line.Cursor
@@ -279,6 +283,9 @@ func copyEverything(ctx context.Context, source *deployment, pgStore *store.Stor
 	warnLeftOut(logger, customerID, leftOut)
 	return customerID, *cursor, nil
 }
+
+// skippedRowMessage is what a run logs for a row the import leaves out (store.SkippedRow).
+const skippedRowMessage = "left out a custom connector definition with oauth2_client_credentials, which no connection can use"
 
 // carryOn answers the cursor a run for a customer carries on from: the one the last run here
 // saved, or nil for a copy of the export, which it marks started. A copy of the export writes
@@ -352,6 +359,15 @@ func follow(ctx context.Context, source *deployment, pgStore *store.Store, reser
 			left, leftOut := errors.AsType[*store.NumbersLeftOutError](err)
 			if err != nil && !leftOut {
 				return err
+			}
+			for _, change := range page.Changes {
+				// A delete removes a row, so it leaves none out, whatever payload it carries.
+				if change.Op == store.ChangeDelete {
+					continue
+				}
+				if key := store.SkippedRow(change.Table, change.Payload); key != "" {
+					logger.Warn(skippedRowMessage, "row", key)
+				}
 			}
 			logger.Info("caught up on changes", "changes", len(page.Changes), "cursor", page.Cursor)
 			if leftOut {

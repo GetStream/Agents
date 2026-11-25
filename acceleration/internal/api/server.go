@@ -234,6 +234,9 @@ type Options struct {
 	// TwilioAuthToken checks that a webhook came from Twilio (TWILIO_WEBHOOK_AUTH_TOKEN).
 	// Without it no Twilio webhook is believed.
 	TwilioAuthToken string
+	// TwilioAccountSID is the Twilio account this router's Twilio numbers are under
+	// (TWILIO_ACCOUNT_SID). A call webhook naming any other is hung up.
+	TwilioAccountSID string
 	// TelnyxConnectionID is the TeXML application this router's Telnyx numbers are on
 	// (TELNYX_CONNECTION_ID). A call webhook for any other is hung up.
 	TelnyxConnectionID string
@@ -369,6 +372,8 @@ type Server struct {
 	chatInboundKeys    []ed25519.PublicKey
 	twilioAuthToken    string
 	twilioAlertSids    rueidis.Client // nil without Redis: every copy of an alert is counted
+	twilioCallSids     rueidis.Client // nil without Redis: every Twilio call is hung up
+	twilioAccountSID   string
 	telnyxConnectionID string
 	simulations        *simulation.Runner
 	knowledge          *metered.Knowledge
@@ -605,6 +610,7 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		telnyxPublicKey:    options.TelnyxPublicKey,
 		chatInboundKeys:    options.ChatInboundKeys,
 		twilioAuthToken:    options.TwilioAuthToken,
+		twilioAccountSID:   options.TwilioAccountSID,
 		telnyxConnectionID: options.TelnyxConnectionID,
 		simulations:        options.Simulations,
 		knowledge:          options.Knowledge,
@@ -677,12 +683,22 @@ func NewServer(options Options, with ...Option) (*Server, error) {
 		server.runSlots, server.runsPerApp = concurrency.New(options.Live.Redis(), nil), options.RunsPerApp
 		server.newGuests = core.NewLimiter(options.Live.Redis(), nil)
 		server.twilioAlertSids = options.Live.Redis()
+		server.twilioCallSids = options.Live.Redis()
 	}
 	server.imageHTTP = options.ImageHTTP
 	server.documents = options.Documents
 	if server.imageHTTP == nil {
 		// No proxy, which would dial on the client's behalf where the check cannot see.
-		server.imageHTTP = &http.Client{Transport: &http.Transport{Proxy: nil, DialContext: egress.DialPublic}}
+		// A host may take as long to begin its answer as the longest fetch may take in all. The
+		// TLS limit and the idle limits are http.DefaultTransport's.
+		server.imageHTTP = &http.Client{Transport: &http.Transport{
+			Proxy:                 nil,
+			DialContext:           egress.DialPublic,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: inlineDeadline,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+		}}
 	}
 	server.callbackHTTP = options.CallbackHTTP
 	if server.callbackHTTP == nil {
@@ -824,6 +840,7 @@ func (s *Server) Handler() http.Handler {
 	handle(mux, "POST "+phone.CallHookPath+"/{app}", "PhoneHook", s.receiveCallEvent)
 	handle(mux, "POST "+telnyxCallHookPath, "ReceiveTelnyxCall", s.receiveTelnyxCall)
 	handle(mux, "POST "+telnyxEventsHookPath, "ReceiveTelnyxEvent", s.receiveTelnyxEvent)
+	handle(mux, "POST "+twilioCallHookPath, "ReceiveTwilioCall", s.receiveTwilioCall)
 	handle(mux, "POST "+twilioEventsHookPath, "ReceiveTwilioEvent", s.receiveTwilioEvent)
 	handle(mux, "POST "+chat.MessageHookPath, "ChatHook", s.receiveMessageEvent)
 	handle(mux, "POST "+chat.MessageHookPath+"/{app}", "ChatHook", s.receiveMessageEvent)
@@ -1110,7 +1127,7 @@ func (s *Server) withRequestLog(routes *chi.Mux, next http.Handler) http.Handler
 		}
 		fields = append(fields, failure.closed.fields()...)
 		if failure.err != nil {
-			fields = append(fields, "error", failure.err.Error())
+			fields = append(fields, "error", core.LoggedError(failure.err))
 		}
 		if failure.trace != "" {
 			fields = append(fields, "stack", failure.trace)

@@ -280,23 +280,22 @@ func (s *Server) forwardedMessage(ctx context.Context, origin hookOrigin, event 
 	return true, false
 }
 
-// answeringNode is the node running the session that answers a message, by customer as
-// liveSessionOn picks one here: the hook's customer's, and in the deployment's app the customer's
-// the channel names or else the store does. While neither does, it is the only customer's writing
-// as the agent, and store.ErrAmbiguousHook when there are more. A claim does not say which app
-// its session is in, so a session in another app is counted among them, and the node a claim
-// names checks the app again (origin.owns).
+// answeringNode is the node running the session that answers a message, among the sessions in
+// the hook's app (origin.owns), by customer as liveSessionOn picks one here: the hook's
+// customer's, and in the deployment's app the customer's the channel names or else the store
+// does. While neither does, it is the only customer's writing as the agent, and
+// store.ErrAmbiguousHook when there are more.
 func (s *Server) answeringNode(ctx context.Context, origin hookOrigin, event messageEvent) (string, error) {
 	if !origin.deployment {
-		return s.directory.NodeByAgent(ctx, origin.customer, event.ChannelID)
+		return s.directory.NodeByAgent(ctx, origin.customer, origin.app, event.ChannelID)
+	}
+	nodes, err := s.directory.NodesByAgent(ctx, event.ChannelID, origin.owns)
+	if err != nil || len(nodes) == 0 {
+		return "", err
 	}
 	if owner, stamped := event.ChannelCustom[conversation.CustomerField]; stamped {
 		customer, _ := owner.(string)
-		return s.directory.NodeByAgent(ctx, customer, event.ChannelID)
-	}
-	nodes, err := s.directory.NodesByAgent(ctx, event.ChannelID)
-	if err != nil || len(nodes) == 0 {
-		return "", err
+		return nodes[customer], nil
 	}
 	owner, known, err := s.storedOwnerOf(ctx, origin, event)
 	if err != nil {
