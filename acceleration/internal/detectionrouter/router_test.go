@@ -147,6 +147,30 @@ func (s *DetectionRouterSuite) TestAnOverwriteForAProviderThatIsNotACandidateIsR
 	s.Empty(s.yolo.asked)
 }
 
+func (s *DetectionRouterSuite) TestARoboflowWorkflowOfTheCallersOwnIsRefusedWithoutACall() {
+	config, err := routing.DefaultConfig()
+	s.Require().NoError(err)
+	var asked []string
+	registry := NewRegistry()
+	for _, provider := range config[routing.Detection].Providers {
+		registry.Register(provider.Provider, func(spec routing.Spec) (detection.Provider, error) {
+			asked = append(asked, provider.Provider+"/"+spec.Model)
+			return &stubDetector{name: provider.Provider}, nil
+		})
+	}
+	router, err := New(Options{Config: config[routing.Detection], Registry: registry, Logger: slog.New(slog.DiscardHandler)})
+	s.Require().NoError(err)
+
+	_, err = router.Detect(s.ctx, Request{
+		CustomerID: "c1",
+		Target:     "roboflow/workflow",
+		Overwrites: map[string]json.RawMessage{"roboflow": json.RawMessage(`{"specification": {"version": "1.0"}}`)},
+	})
+
+	s.ErrorContains(err, "roboflow/workflow is retired; ask for roboflow/faces instead")
+	s.Empty(asked)
+}
+
 func (s *DetectionRouterSuite) TestATermNothingDeclaresIsRefusedWithoutACall() {
 	_, err := s.router().Detect(s.ctx, Request{CustomerID: "c1", Detection: detection.Request{Embeddings: true}})
 

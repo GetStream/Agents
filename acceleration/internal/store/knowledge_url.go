@@ -234,7 +234,7 @@ func (r *KnowledgeURLs) SelectDue(ctx context.Context, now time.Time, limit int)
 // Select returns the pages a customer subscribes to, newest first.
 func (r *KnowledgeURLs) Select(ctx context.Context, customerID string, filter KnowledgeURLFilter) ([]KnowledgeURL, error) {
 	if customerID == "" {
-		return nil, stack.Wrap(errors.New("store: customer id is required"))
+		return nil, stack.Wrap(errCustomerRequired)
 	}
 
 	var pages []KnowledgeURL

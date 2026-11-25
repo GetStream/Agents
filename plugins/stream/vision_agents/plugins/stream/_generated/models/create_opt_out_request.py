@@ -19,7 +19,7 @@ class CreateOptOutRequest:
     """
     Attributes:
         channel (OptOutChannel): The channel a recipient opted out of, or all of them.
-        recipient (str): The number, in E.164.
+        recipient (str): The number in E.164, or an iMessage handle's email address, for channel imessage or all.
         source (CreateOptOutRequestSource | Unset): Omitted is api.
     """
 

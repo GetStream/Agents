@@ -76,9 +76,8 @@ func (s *StoreSuite) TestAnInvocationKeepsItsProviderStatusAndErrorMessage() {
 	s.Equal("the server refused the request with 403 Forbidden", rows[1].ErrorMessage)
 }
 
-// baseInvocation is ConnectorInvocation as the router before
-// 20261031130000_connector_invocation_failures.sql has it (11fae4b1), without the provider's
-// status and the error message.
+// baseInvocation is ConnectorInvocation as the router that predates its provider_status and
+// error_message columns has it (11fae4b1), without them.
 type baseInvocation struct {
 	bun.BaseModel `bun:"table:connector_invocations,alias:ci"`
 

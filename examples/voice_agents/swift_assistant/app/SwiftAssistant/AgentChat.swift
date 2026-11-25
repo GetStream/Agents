@@ -227,7 +227,6 @@ final class AgentChat: AIConversationTransport {
             session = try await Assistant.agents.attach(sessionID: sessionID, tools: Assistant.tools)
         } else {
             var options = SessionOptions(agent: Assistant.agentName)
-            options.llm = Assistant.chatModel
             options.tools = Assistant.tools
             options.returnURL = Assistant.returnURL
             // Off leaves the UI instructions the backend chose out of this conversation.
