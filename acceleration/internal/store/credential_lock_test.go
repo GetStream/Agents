@@ -417,7 +417,7 @@ func (s *StoreSuite) assertTheWaitEnded(waiter *Store) {
 	s.Eventually(func() bool { return s.credentialLocks(false) == 0 }, 2*time.Second, 10*time.Millisecond,
 		"the server stops waiting for the lock on behalf of a caller that gave up")
 	s.Equal(1, s.credentialLocks(true), "the holder keeps the lock")
-	s.Eventually(func() bool { return waiter.GlobalDB().Stats().InUse == 0 }, 2*time.Second, 10*time.Millisecond,
+	s.Eventually(func() bool { return waiter.locks.Stats().InUse == 0 }, 2*time.Second, 10*time.Millisecond,
 		"the waiter's connection goes back")
 }
 
@@ -426,5 +426,312 @@ func (s *StoreSuite) assertTheWaitEnded(waiter *Store) {
 func (s *StoreSuite) assertNothingIsHeld(waiter *Store) {
 	s.Eventually(func() bool { return s.credentialLocks(true) == 0 && s.credentialLocks(false) == 0 },
 		2*time.Second, 10*time.Millisecond, "no credential lock is left behind")
-	s.Zero(waiter.GlobalDB().Stats().InUse)
+	s.Zero(waiter.locks.Stats().InUse)
+	s.Zero(waiter.lockSlots.callersOf("acme-app"), "the waiter gave its customer's lock slot back")
+}
+
+func (s *StoreSuite) TestCredentialLocksHeldAtOnceFillTheirOwnPoolAndLeaveTheServingOneFree() {
+	router := s.router()
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	var inside atomic.Int32
+	finished := make(chan error, maxConns)
+	// As many lockers as the serving pool has connections, each reading through the store
+	// inside its lock, as the resolver does: holding their locks on the serving pool, they
+	// would take all of it and wait for one more. Spread over 10 customers, 4 each, so no
+	// customer's cap (lockConnsPerCustomer) holds one back.
+	for i := range maxConns {
+		customerID := fmt.Sprintf("acme-app-%d", i%10)
+		connection := s.connection(customerID, nil)
+		go func() {
+			finished <- router.ConnectorConnections.WithLocked(s.ctx, customerID, connection.ID,
+				func(locked *ConnectorConnection, _ func() error) (bool, error) {
+					if _, err := router.ConnectorConnections.Get(s.ctx, customerID, locked.ID); err != nil {
+						return false, err
+					}
+					inside.Add(1)
+					<-release
+					return false, nil
+				})
+		}()
+	}
+	// The lock pool's size, written out so a change to it is a change to this test too.
+	const heldAtOnce = 16
+	s.Require().Eventually(func() bool {
+		return inside.Load() == heldAtOnce && router.locks.Stats().WaitCount == maxConns-heldAtOnce
+	}, 5*time.Second, 10*time.Millisecond, "16 locks are held and the lockers past them wait for a lock connection")
+	s.Equal(heldAtOnce, s.credentialLocks(true))
+
+	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+	defer cancel()
+	_, _, err := router.Server(ctx)
+	s.Require().NoError(err, "a query outside the locks gets a serving connection while every lock connection is held")
+
+	unblock()
+	for range maxConns {
+		s.Require().NoError(<-finished)
+	}
+	s.Equal(int32(maxConns), inside.Load(), "every locker past the pool waited its turn and ran")
+	s.Zero(router.locks.Stats().InUse)
+}
+
+func (s *StoreSuite) TestClosingTheStoreClosesItsLockPool() {
+	router, err := s.openRouter()
+	s.Require().NoError(err)
+	connection := s.connection("acme-app", nil)
+	s.Require().NoError(router.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
+		func(*ConnectorConnection, func() error) (bool, error) { return false, nil }))
+	s.Require().Equal(1, router.locks.Stats().OpenConnections, "the lock's connection stays open in the lock pool")
+
+	s.Require().NoError(router.Close())
+
+	s.Zero(router.locks.Stats().OpenConnections)
+}
+
+func (s *StoreSuite) TestAProviderAppLockIsHeldOnTheLockPool() {
+	router := s.router()
+	var locks, serving int
+	s.Require().NoError(router.ConnectorConfigTokens.WithProviderAppLock(s.ctx, "acme-app", "slack", func() error {
+		locks, serving = router.locks.Stats().InUse, router.GlobalDB().Stats().InUse
+		return nil
+	}))
+	s.Equal(1, locks, "the provider app lock keeps a lock pool connection")
+	s.Zero(serving, "and no serving one")
+}
+
+// callersOf is how many of the customer's locks hold a lock slot or wait for one.
+func (l *lockSlots) callersOf(customerID string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if slots := l.customers[customerID]; slots != nil {
+		return slots.callers
+	}
+	return 0
+}
+
+// customersLocking is how many customers have an entry in the lock slot map.
+func (l *lockSlots) customersLocking() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.customers)
+}
+
+// parked starts n locks of the customer's own connections on router, each stalled inside
+// until release is called, as a refresh stalls at a token endpoint the customer runs. inside
+// counts the ones that got in; release returns once every one has.
+func (s *StoreSuite) parked(router *Store, customerID string, n int) (inside *atomic.Int32, release func()) {
+	inside = new(atomic.Int32)
+	stalled := make(chan struct{})
+	finished := make(chan error, n)
+	for range n {
+		connection := s.connection(customerID, nil)
+		go func() {
+			finished <- router.ConnectorConnections.WithLocked(s.ctx, customerID, connection.ID,
+				func(*ConnectorConnection, func() error) (bool, error) {
+					inside.Add(1)
+					<-stalled
+					return false, nil
+				})
+		}()
+	}
+	return inside, sync.OnceFunc(func() {
+		close(stalled)
+		for range n {
+			s.Require().NoError(<-finished)
+		}
+	})
+}
+
+func (s *StoreSuite) TestOneCustomersStalledLocksLeaveTheLockPoolToOtherCustomers() {
+	router := s.router()
+	// As many of one customer's locks as the lock pool has connections, all stalled.
+	inside, release := s.parked(router, "evil-app", lockConns)
+	defer release()
+	// One customer's cap, written out so a change to it is a change to this test too.
+	const perCustomer = 4
+	s.Require().Eventually(func() bool {
+		return inside.Load() == perCustomer && router.lockSlots.callersOf("evil-app") == lockConns
+	}, 5*time.Second, 10*time.Millisecond, "4 of the customer's locks are held and the rest wait for a slot")
+	s.Equal(perCustomer, router.locks.Stats().InUse, "a lock waiting for its customer's slot holds no connection")
+
+	ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
+	defer cancel()
+	other := s.connection("other-app", nil)
+	ran := 0
+	s.Require().NoError(router.ConnectorConnections.WithLocked(ctx, "other-app", other.ID,
+		func(*ConnectorConnection, func() error) (bool, error) { ran++; return false, nil }))
+	s.Require().NoError(router.ConnectorConfigTokens.WithProviderAppLock(ctx, "other-app", "slack",
+		func() error { ran++; return nil }))
+	s.Equal(2, ran, "another customer's credential and provider app locks run")
+
+	short, stop := context.WithTimeout(s.ctx, 200*time.Millisecond)
+	defer stop()
+	err := router.ConnectorConfigTokens.WithProviderAppLock(short, "evil-app", "slack", func() error {
+		s.Fail("a provider app lock past its customer's cap waits for a slot")
+		return nil
+	})
+	s.ErrorIs(err, context.DeadlineExceeded, "a provider app lock counts against the same cap and gives up with its context")
+
+	release()
+	s.Equal(int32(lockConns), inside.Load(), "every one of the customer's locks ran in its turn")
+	s.Zero(router.lockSlots.callersOf("evil-app"))
+	s.Zero(router.locks.Stats().InUse)
+}
+
+func (s *StoreSuite) TestACustomersLockSlotIsGivenBackHoweverItsLockEnds() {
+	router := s.router()
+	connection := s.connection("acme-app", nil)
+
+	s.Panics(func() {
+		_ = router.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
+			func(*ConnectorConnection, func() error) (bool, error) { panic("callback") })
+	})
+	s.Zero(router.lockSlots.callersOf("acme-app"), "a callback that panics gives its slot back")
+
+	inside, release := s.parked(router, "acme-app", lockConnsPerCustomer)
+	s.Require().Eventually(func() bool { return inside.Load() == lockConnsPerCustomer }, 5*time.Second, 10*time.Millisecond)
+	ctx, cancel := context.WithTimeout(s.ctx, 100*time.Millisecond)
+	defer cancel()
+	err := router.ConnectorConnections.WithLocked(ctx, "acme-app", connection.ID,
+		func(*ConnectorConnection, func() error) (bool, error) { return false, nil })
+	s.ErrorIs(err, context.DeadlineExceeded)
+	release()
+	s.Zero(router.lockSlots.callersOf("acme-app"), "a lock that gave up waiting for a slot leaves none counted")
+	s.Zero(router.lockSlots.customersLocking(), "a customer whose locks all ended leaves no entry in the map")
+
+	closed, err := s.openRouter()
+	s.Require().NoError(err)
+	s.Require().NoError(closed.Close())
+	err = closed.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
+		func(*ConnectorConnection, func() error) (bool, error) { return false, nil })
+	s.ErrorContains(err, "credential lock connection")
+	s.Zero(closed.lockSlots.callersOf("acme-app"), "a lock that got no connection gives its slot back")
+}
+
+// panicsOnValue is a context whose Value panics once armed, as a driver or query hook that
+// reads a context value can: the seam for a panic inside the lock's own statements.
+type panicsOnValue struct {
+	context.Context
+	armed *atomic.Bool
+}
+
+func (c panicsOnValue) Value(key any) any {
+	if c.armed.Load() {
+		panic("context value")
+	}
+	return c.Context.Value(key)
+}
+
+func (s *StoreSuite) TestACustomersLockSlotIsGivenBackWhenTheLockStatementPanics() {
+	router := s.router()
+	connection := s.connection("acme-app", nil)
+	// One lock taken and given back first leaves an idle lock pool connection, so the panic
+	// comes in the lock statement, not in opening a connection.
+	s.Require().NoError(router.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
+		func(*ConnectorConnection, func() error) (bool, error) { return false, nil }))
+	armed := new(atomic.Bool)
+	armed.Store(true)
+
+	s.Panics(func() {
+		_ = router.ConnectorConnections.WithLocked(panicsOnValue{s.ctx, armed}, "acme-app", connection.ID,
+			func(*ConnectorConnection, func() error) (bool, error) {
+				s.Fail("a lock that panicked never runs the callback")
+				return false, nil
+			})
+	})
+	s.Zero(router.lockSlots.callersOf("acme-app"), "a panic while taking the lock gives the slot back")
+	s.Zero(router.lockSlots.customersLocking())
+	s.assertThePanickedConnectionIsGone(router)
+}
+
+func (s *StoreSuite) TestACustomersLockSlotIsGivenBackWhenTheUnlockStatementPanics() {
+	router := s.router()
+	connection := s.connection("acme-app", nil)
+	armed := new(atomic.Bool)
+
+	s.Panics(func() {
+		_ = router.ConnectorConnections.WithLocked(panicsOnValue{s.ctx, armed}, "acme-app", connection.ID,
+			func(*ConnectorConnection, func() error) (bool, error) {
+				armed.Store(true)
+				return false, nil
+			})
+	})
+	s.Zero(router.lockSlots.callersOf("acme-app"), "a panic while unlocking gives the slot back")
+	s.Zero(router.lockSlots.customersLocking())
+	s.assertThePanickedConnectionIsGone(router)
+}
+
+// panicsOnDeadline is a context whose Deadline panics once armed. pgdriver reads it
+// (Conn.deadline) inside database/sql's query, after the Conn's close lock is taken, so the
+// panic is the one discardOnPanic closes on a goroutine of its own.
+type panicsOnDeadline struct {
+	context.Context
+	armed *atomic.Bool
+}
+
+func (c panicsOnDeadline) Deadline() (time.Time, bool) {
+	if c.armed.Load() {
+		panic("context deadline")
+	}
+	return c.Context.Deadline()
+}
+
+func (s *StoreSuite) TestADriverPanicInTheLockStatementReachesTheCallerWhoseSlotIsGivenBack() {
+	router := s.router()
+	connection := s.connection("acme-app", nil)
+	// An idle lock pool connection first, so the panic comes in the lock statement.
+	s.Require().NoError(router.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
+		func(*ConnectorConnection, func() error) (bool, error) { return false, nil }))
+	armed := new(atomic.Bool)
+	armed.Store(true)
+	panicked := make(chan any, 1)
+	go func() {
+		defer func() { panicked <- recover() }()
+		_ = router.ConnectorConnections.WithLocked(panicsOnDeadline{s.ctx, armed}, "acme-app", connection.ID,
+			func(*ConnectorConnection, func() error) (bool, error) { return false, nil })
+	}()
+	select {
+	case p := <-panicked:
+		s.Equal("context deadline", p, "the driver's panic reaches the caller")
+	case <-time.After(5 * time.Second):
+		s.FailNow("a panic inside database/sql's query leaves the caller blocked closing its connection")
+	}
+	s.Zero(router.lockSlots.callersOf("acme-app"), "a panic inside the driver gives the slot back")
+}
+
+// assertThePanickedConnectionIsGone checks that the lock pool connection a lock or unlock
+// statement panicked on is closed, so no session is left holding the credential lock, which
+// would keep the connection locked for every router, and the lock pool has its connection back.
+func (s *StoreSuite) assertThePanickedConnectionIsGone(router *Store) {
+	s.Eventually(func() bool { return s.credentialLocks(true) == 0 }, 2*time.Second, 10*time.Millisecond,
+		"no session is left holding the credential lock")
+	s.Eventually(func() bool { return router.locks.Stats().OpenConnections == 0 }, 2*time.Second, 10*time.Millisecond,
+		"the connection is closed, not kept out of the pool or returned to it")
+}
+
+// deadlinePassedUnsaid is a context whose deadline has passed but which does not say so yet:
+// a context.WithDeadline whose timer has not run, as on a busy machine.
+type deadlinePassedUnsaid struct{ context.Context }
+
+func (deadlinePassedUnsaid) Deadline() (time.Time, bool) {
+	return time.Now().Add(-time.Millisecond), true
+}
+
+func (s *StoreSuite) TestALockCutByItsDeadlineBeforeTheContextSaysSoFailsWithTheDeadline() {
+	connection := s.connection("acme-app", nil)
+	locked := func(router *Store) error {
+		return router.ConnectorConnections.WithLocked(deadlinePassedUnsaid{s.ctx}, "acme-app", connection.ID,
+			func(*ConnectorConnection, func() error) (bool, error) {
+				s.Fail("a lock past its deadline never runs the callback")
+				return false, nil
+			})
+	}
+
+	warm := s.router()
+	s.Require().NoError(warm.ConnectorConnections.WithLocked(s.ctx, "acme-app", connection.ID,
+		func(*ConnectorConnection, func() error) (bool, error) { return false, nil }))
+	s.Require().Equal(1, warm.locks.Stats().Idle, "the next lock reuses this connection")
+	s.ErrorIs(locked(warm), context.DeadlineExceeded, "a pg_try_advisory_lock cut by the deadline")
+	s.assertNothingIsHeld(warm)
 }

@@ -5312,6 +5312,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("setup")]
         public ConnectorSetup? Setup { get; set; } = default!;
 
+        /// <summary>
+        /// The fingerprint of the file the CLI last synced onto this connector. Absent on a built-in, and on a connector that was never synced or was written since by anything that is not a sync.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
+        public string? SyncHash { get; set; } = default!;
+
         private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
 
         [System.Text.Json.Serialization.JsonExtensionData]
@@ -6688,7 +6694,7 @@ namespace GetStream.VisionAgents.Models
         public FloorControl? FloorControl { get; set; } = default!;
 
         /// <summary>
-        /// What the agent opens the call with, over what the config says.
+        /// What the agent opens the call with, over what the config says. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("greeting")]
         public Greeting? Greeting { get; set; } = default!;
@@ -6730,16 +6736,19 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<string>? Languages { get; set; } = default!;
 
         /// <summary>
-        /// A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured.
+        /// A provider/model or a capability shortcut. Omit it and the config decides, or llm-fast when there is no config. These carry no schema default on purpose: a generated client that filled one in would send it, and a caller naming a config would silently lose the model it configured. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("llm")]
         public string? Llm { get; set; } = default!;
 
+        /// <summary>
+        /// Server-side only: a device sending it is refused with a 403.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("max_tokens")]
         public int? MaxTokens { get; set; } = default!;
 
         /// <summary>
-        /// The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups.
+        /// The reply to a tool result, counted since the user last spoke, that is offered no more tools and made to answer from what it has. Zero is the default of 8; a negative number never withdraws them, for a written conversation that chains many lookups. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("max_tool_rounds")]
         public int? MaxToolRounds { get; set; } = default!;
@@ -6753,6 +6762,9 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("min_confidence")]
         public double? MinConfidence { get; set; } = default!;
 
+        /// <summary>
+        /// Server-side only: a device sending it is refused with a 403.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("model_overwrites")]
         public ModelOverwrites? ModelOverwrites { get; set; } = default!;
 
@@ -6762,6 +6774,9 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("navigating")]
         public bool? Navigating { get; set; } = default!;
 
+        /// <summary>
+        /// Server-side only: a device sending it is refused with a 403.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("phone")]
         public SessionPhone? Phone { get; set; } = default!;
 
@@ -6784,7 +6799,7 @@ namespace GetStream.VisionAgents.Models
         public string? ReturnUrl { get; set; } = default!;
 
         /// <summary>
-        /// Omit it and the config decides, or search-fast when there is no config.
+        /// Omit it and the config decides, or search-fast when there is no config. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("search")]
         public string? Search { get; set; } = default!;
@@ -6796,19 +6811,19 @@ namespace GetStream.VisionAgents.Models
         public bool? StartVoice { get; set; } = default!;
 
         /// <summary>
-        /// A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides.
+        /// A speech-to-speech target. Naming one makes the session native once voice is started: the model hears and speaks for itself, so no transcriber, conversation model or voice is opened. Omit it and the config decides. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("sts")]
         public string? Sts { get; set; } = default!;
 
         /// <summary>
-        /// Omit it and the config decides, or en-low-latency when there is no config.
+        /// Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("stt")]
         public string? Stt { get; set; } = default!;
 
         /// <summary>
-        /// Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins.
+        /// Cost labels, carried onto every request the session makes. Merged with the agent config's tags; where both name a key, this one wins. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("tags")]
         public System.Collections.Generic.Dictionary<string, string>? Tags { get; set; } = default!;
@@ -6841,7 +6856,7 @@ namespace GetStream.VisionAgents.Models
         public System.Collections.Generic.List<SessionTool>? Tools { get; set; } = default!;
 
         /// <summary>
-        /// Omit it and the config decides, or en-low-latency when there is no config.
+        /// Omit it and the config decides, or en-low-latency when there is no config. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("tts")]
         public string? Tts { get; set; } = default!;
@@ -6865,7 +6880,7 @@ namespace GetStream.VisionAgents.Models
         public SessionVideo? Video { get; set; } = default!;
 
         /// <summary>
-        /// The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI.
+        /// The voice to speak in: a provider's own voice id, or one of your voices by id or by the name you gave it. Prefix it with custom: to mean only the latter: without the prefix a name that is not one of yours is passed through to the provider's library, and with it a name that is not one of yours is refused. A native session (sts) takes the vendor's own voice name instead, such as marin at OpenAI. Server-side only: a device sending it is refused with a 403.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("voice")]
         public string? Voice { get; set; } = default!;
@@ -7049,6 +7064,12 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("scopes")]
         public System.Collections.Generic.List<string>? Scopes { get; set; } = default!;
+
+        /// <summary>
+        /// The fingerprint of the file this definition was synced from, which the connector then carries. Absent for a write that is no sync: the connector then carries none. Sending a definition the newest revision already says with another hash stores no new revision and records the hash on that one.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
+        public string? SyncHash { get; set; } = default!;
 
     }
 
@@ -7458,7 +7479,7 @@ namespace GetStream.VisionAgents.Models
         public double? MinConfidence { get; set; } = default!;
 
         /// <summary>
-        /// Settings for one provider that the options above have no word for, keyed by provider. roboflow takes workspace and workflow_id, or specification, for the roboflow/workflow model. An overwrite for a provider that is not a candidate is refused.
+        /// Settings for one provider that the options above have no word for, keyed by provider. No detection provider takes any today: the provider an overwrite names refuses it and the next candidate is asked without it. One naming a provider that is not a candidate is refused.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("overwrites")]
         public System.Collections.Generic.Dictionary<string, object>? Overwrites { get; set; } = default!;
@@ -7945,6 +7966,9 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("messages")]
         public bool? Messages { get; set; } = default!;
 
+        /// <summary>
+        /// Server-side only: a device sending it is refused with a 403.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("model_overwrites")]
         public ModelOverwrites? ModelOverwrites { get; set; } = default!;
 
@@ -10553,6 +10577,12 @@ namespace GetStream.VisionAgents.Models
     {
 
         /// <summary>
+        /// The organization has credit that is not trial credit now, after refunds and disputes, as the usage service holds it: the credit granted minus the trial credit is above zero. Spending the credit does not lower it. false for one with only trial credit, none, or no account. Read when the page is, not as of to. Absent, on every organization of the page, when this deployment has no usage service or it did not answer.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("funded")]
+        public bool? Funded { get; set; } = default!;
+
+        /// <summary>
         /// The furthest step from from to to, read from the rows that name the organization, of all its apps even when app_id is set. For apps that stayed in it, as getOrganizationActivity reads it from since.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("furthest_step")]
@@ -12865,6 +12895,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("stt")]
         public SttOptions? Stt { get; set; } = default!;
 
+        /// <summary>
+        /// The fingerprint of the file the CLI last synced onto this config. Absent if it was never synced, or was written since by anything that is not a sync.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
+        public string? SyncHash { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("tts")]
         public TtsOptions? Tts { get; set; } = default!;
 
@@ -12903,6 +12939,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("stt")]
         public SttOptions? Stt { get; set; } = default!;
+
+        /// <summary>
+        /// The fingerprint of the file this config was synced from, which the config then carries. Absent for a write that is no sync, which clears it. A replace with the hash the config carries and the same content writes nothing.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("sync_hash")]
+        public string? SyncHash { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("tts")]
         public TtsOptions? Tts { get; set; } = default!;

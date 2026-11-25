@@ -45,6 +45,12 @@ const (
 	maxLineLinkFailures = 20
 )
 
+// releaseTimeout bounds giving a counted code back: it runs detached from the message's context,
+// so a router shutting down after the code was counted does not leave it counted to the end of the
+// window, and a database that does not answer cannot hold the turn. The 2 s is that of the
+// store's credentialDetachedTimeout for a single write, unmeasured here.
+const releaseTimeout = 2 * time.Second
+
 // Options configures a Service. Store, Sessions and Secrets are required.
 type Options struct {
 	Store    *store.Store
@@ -554,23 +560,28 @@ func (s *Service) identify(ctx context.Context, config store.AgentConfig, accoun
 	}
 	if config.Channels.Lines.Identity == store.ChannelIdentityLink {
 		window := time.Now().UTC().Truncate(LinkValidFor)
-		onLine, fromSender, err := s.store.ChannelLinkFailures.Count(ctx, account.ID, message.From, window)
+		reserved, err := s.store.ChannelLinkFailures.Reserve(ctx, account.ID, message.From, window,
+			window.Add(-LinkValidFor), maxLinkFailures, maxLineLinkFailures)
 		if err != nil {
 			s.logger.Error("could not count the codes texted to a line", "channel", account.Kind, "error", err)
 			return store.ContactMapEntry{}, false
 		}
-		if fromSender >= maxLinkFailures || onLine >= maxLineLinkFailures {
+		if !reserved {
 			s.say(ctx, line, provider, message, Reply{Text: "Too many codes did not match. Try again in a few minutes."},
 				answering(account.CustomerID, ""))
 			return store.ContactMapEntry{}, false
 		}
 		link, err := s.store.ChannelLinks.Claim(ctx, account.CustomerID, config.ID, strings.TrimSpace(message.Text))
-		if err != nil {
-			if errors.Is(err, store.ErrUnknownChannelLink) {
-				if err := s.store.ChannelLinkFailures.Record(ctx, account.ID, message.From, window, window.Add(-LinkValidFor)); err != nil {
-					s.logger.Error("could not count a code texted to a line", "channel", account.Kind, "error", err)
-				}
+		// The code was counted before it was tried, so that codes texted at once are counted one
+		// after the other; only one that matched nothing stays counted.
+		if !errors.Is(err, store.ErrUnknownChannelLink) {
+			release, stop := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+			if err := s.store.ChannelLinkFailures.Release(release, account.ID, message.From, window); err != nil {
+				s.logger.Error("could not give back a code counted on a line", "channel", account.Kind, "error", err)
 			}
+			stop()
+		}
+		if err != nil {
 			s.say(ctx, line, provider, message, Reply{Text: "Send me the code from your account to " +
 				"get started. It ties this number to you, so I can answer about what is yours."},
 				answering(account.CustomerID, ""))

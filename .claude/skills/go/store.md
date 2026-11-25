@@ -29,7 +29,7 @@ Use these names, with the customer first after `ctx` for every tenant-scoped mod
 | `Delete(ctx, customerID, id)` | Removes one row; `ErrNoX` when absent. |
 
 A state change that is more than a column write gets a domain verb on the same repository:
-`Calls.Finish`, `CampaignContacts.Lease`, `Episodes.Close`. Batch versions take a slice
+`Calls.Finish`, `CampaignContacts.Claim`, `Episodes.CloseIdle`. Batch versions take a slice
 (`InsertMany`, `GetMany`) and run one statement, never a loop of single ones.
 
 ## Validation
@@ -93,10 +93,12 @@ A state change that is more than a column write gets a domain verb on the same r
 - Opening the database with `bun.WithDiscardUnknownColumns()` means a release that does not
   know a new column still reads the row. So add a column to the table that owns it, nullable
   or with a default; do not create a 1:1 side table to dodge a rollback.
+- Remove a column over two releases. First stop writing it and take it out of the model:
+  routers of the release before still name it in their SQL. Drop it in the next release.
 - A table of work routers claim (inbound messages, deliveries, jobs) is a `queue`
   (`queue.go`): `claim` leases due rows with `FOR UPDATE SKIP LOCKED` in one query,
   `nextDue` says when to look again, and every write after the claim goes through `heldBy`,
-  so a claim whose lease ran out cannot overwrite the next one. `image_jobs.go` is the
+  so a claim whose lease ran out cannot overwrite the next one. `image_job.go` is the
   example. Do not write the claim by hand.
 - Every serving connection runs with `statement_timeout` 8s, `lock_timeout` 3s,
   `idle_in_transaction_session_timeout` 30s and `timezone` UTC (`sessionDefaults` in
@@ -113,6 +115,8 @@ A state change that is more than a column write gets a domain verb on the same r
 - A lease is `lease_until` and `leased_by`. A queue row retries with `attempts` and
   `next_attempt_at`. A sealed secret column ends in `_sealed` with its key version in
   `<column>_kek_version` (`kek_version` when the table has one secret).
+- `created_at` and `updated_at` are records for people: a table keeps them even when no code
+  reads them.
 
 ## Adding a model
 

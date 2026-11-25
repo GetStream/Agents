@@ -40,9 +40,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     init {
         viewModelScope.launch {
             state.value = try {
-                // A model that streams its reasoning, which is what fills the reply's thinking
-                // panel. A call keeps the agent's own model, which answers sooner.
-                val options = SessionOptions(agent = Demo.AGENT_NAME, llm = "xai/grok-4.7", tools = Demo.tools)
+                val options = SessionOptions(agent = Demo.AGENT_NAME, tools = Demo.tools)
                 val session = Demo.agents.chat(options)
                 val transport = AgentTransport.open(getApplication(), session, viewModelScope)
                 State.Open(transport, AIConversationState(transport, viewModelScope, approver(session)))

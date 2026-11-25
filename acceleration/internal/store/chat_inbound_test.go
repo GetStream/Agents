@@ -83,7 +83,6 @@ func (s *StoreSuite) TestAClaimedChatInboundHasEverythingItWasQueuedWith() {
 	s.Equal(ChatInboundQueued, claimed.State)
 	s.Equal(1, claimed.Attempts, "a claim counts its attempt")
 	s.WithinDuration(time.Now().Add(chatLease), claimed.NextAttemptAt, 5*time.Second, "a claimed message is due at the end of the lease its claim gave")
-	s.WithinDuration(time.Now(), claimed.ReceivedAt, time.Minute)
 	s.Nil(claimed.FinishedAt)
 }
 

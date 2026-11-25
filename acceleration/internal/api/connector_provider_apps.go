@@ -441,7 +441,7 @@ func whyNotManaged(manifest core.Manifest) error {
 	if !slackapps.Serves(manifest) {
 		return invalidRequest(fmt.Sprintf("%s does not authorize at Slack, so the router creates no app for it", manifest.ID))
 	}
-	// The store refuses such a record too (store.PutConnectorOAuthClient); checked here so no
+	// The store refuses such a record too (store.ConnectorOAuthClients.Upsert); checked here so no
 	// app is created at Slack that could never be recorded.
 	if !slices.Contains(manifest.Client.Registration, core.ClientManaged) {
 		return invalidRequest(fmt.Sprintf("%s takes no app the router creates: its client.registration is %v, which does not list managed",
@@ -576,15 +576,46 @@ func (s *Server) configToken(ctx context.Context, customerID, connectorID, sent 
 	if err != nil {
 		return "", err
 	}
-	err = s.store.ConnectorConfigTokens.Upsert(detached, &store.ConnectorConfigToken{
+	attempts, err := s.saveConfigToken(detached, &store.ConnectorConfigToken{
 		CustomerID: customerID, ConnectorID: connectorID,
 		TokensSealed: sealed, KEKVersion: s.connectorSecrets.CurrentVersion(), ExpiresAt: rotated.ExpiresAt,
 	})
-
 	if err != nil {
+		s.logger.Error("could not save a rotated app configuration token; its customer must send a new config_refresh_token",
+			"customer", customerID, "connector", connectorID, "attempts", attempts, "error", err)
 		return "", err
 	}
 	return rotated.Token, nil
+}
+
+// configTokenSaveAttempts and configTokenSaveFirstPause bound how often a rotated configuration
+// token is saved: the first save and two more, 100 ms and then 200 ms after the one before, for
+// a dropped connection or a failover, the short failures a retry fixes. Slack has spent the
+// refresh token the router rotated, so the save is the only way the new pair is kept. Each save
+// is bounded by the store (Upsert's credentialDetachedTimeout, 2 s), so the whole is under
+// 6.3 s, inside the provider app lock the caller holds. A choice, not measured; a database
+// down for longer still loses the pair. The same numbers as the resolver's saveAttempts
+// (internal/connectors/resolver) and the 10DLC service's; theirs are unexported, and a shared
+// helper would need a package of its own, so only store.Unwritable is shared.
+const (
+	configTokenSaveAttempts   = 3
+	configTokenSaveFirstPause = 100 * time.Millisecond
+)
+
+// saveConfigToken saves a rotated configuration token and says how many saves it took. It
+// tries again while the failure is one a retry may fix: not a row the store or Postgres refused
+// (store.Unwritable). The save is an upsert, so one whose answer was lost and landed is safe to
+// repeat.
+func (s *Server) saveConfigToken(ctx context.Context, token *store.ConnectorConfigToken) (int, error) {
+	pause := configTokenSaveFirstPause
+	attempts, err := 1, s.store.ConnectorConfigTokens.Upsert(ctx, token)
+	for err != nil && !store.Unwritable(err) && attempts < configTokenSaveAttempts {
+		// ctx is detached from the caller, so nothing ends this wait early.
+		time.Sleep(pause)
+		pause *= 2
+		attempts, err = attempts+1, s.store.ConnectorConfigTokens.Upsert(ctx, token)
+	}
+	return attempts, err
 }
 
 // slackFailure is the answer to a Slack call that failed: its own code when Slack refused,

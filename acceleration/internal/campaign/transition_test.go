@@ -61,7 +61,7 @@ func (s *TransitionSuite) TestAFirstDialWhoseSessionNeverOpenedUsesTheAttemptWit
 }
 
 func (s *TransitionSuite) TestNobodyAnsweringTheDoubleDialSchedulesTheNextAttemptAfterItsDelay() {
-	settle, again := afterDial(s.sequence(true), s.hours, s.chicago, s.contact(1), 2, Dialed{Outcome: outcome.NoAnswer, CallID: "c2", VendorCallID: "v2"}, s.at(2, 10, 0), s.at(2, 10, 3))
+	settle, again := afterDial(s.sequence(true), s.hours, s.chicago, s.contact(1), 2, Dialed{Outcome: outcome.NoAnswer, CallID: "c2"}, s.at(2, 10, 0), s.at(2, 10, 3))
 	s.False(again)
 	s.Equal(store.Enrolled, settle.Stage)
 	s.Equal(2, settle.Attempt)
@@ -69,7 +69,6 @@ func (s *TransitionSuite) TestNobodyAnsweringTheDoubleDialSchedulesTheNextAttemp
 	s.Require().NotNil(settle.NextAttemptAt)
 	s.True(s.at(5, 10, 0).Equal(*settle.NextAttemptAt), settle.NextAttemptAt.String())
 	s.Equal("c2", settle.CallID)
-	s.Equal("v2", settle.VendorCallID)
 }
 
 func (s *TransitionSuite) TestWithoutDoubleDialTheFirstUnansweredDialSchedulesTheNextAttempt() {

@@ -243,7 +243,7 @@ func (s *Server) setConnectorOAuthClient(ctx context.Context, request *oauthClie
 		ProviderAppID: sent.ProviderAppID,
 	}
 	// The app the customer acts in now is the record's pin when this put creates it; a put
-	// that replaces the record keeps the pin it has (store.PutConnectorOAuthClient).
+	// that replaces the record keeps the pin it has (store.ConnectorOAuthClients.Upsert).
 	if s.stream != nil {
 		record.StreamAppPK, err = s.stream.Pin(ctx, customerID)
 		if err != nil {
@@ -267,7 +267,7 @@ func (s *Server) setConnectorOAuthClient(ctx context.Context, request *oauthClie
 		record.SigningKEKVersion = s.connectorSecrets.CurrentVersion()
 	}
 	created, err := s.store.ConnectorOAuthClients.Upsert(ctx, record)
-	// Deleted since it was read above (DeleteConnectorDefinition), so answered as one never made.
+	// Deleted since it was read above (store.ConnectorDefinitions.Delete), so answered as one never made.
 	if errors.Is(err, store.ErrNoConnectorDefinition) {
 		return nil, notFound("no such connector")
 	}

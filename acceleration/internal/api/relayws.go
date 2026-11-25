@@ -69,6 +69,9 @@ type remoteSocket struct {
 	// byCommand is set before closed when a close command this socket carried ended the
 	// session.
 	byCommand atomic.Bool
+	// detached is set before closed when the holder gave back the watcher standing for this
+	// socket while the session went on.
+	detached atomic.Bool
 }
 
 func (r *remoteSocket) close() { r.once.Do(func() { close(r.closed) }) }
@@ -230,6 +233,12 @@ func (s *Server) writeRelayedEvents(
 			return readEnd(stopped)
 
 		case <-socket.closed:
+			if socket.detached.Load() {
+				// The session goes on, so the caller is told its socket failed, which is its cue to
+				// reconnect, and not that the session ended.
+				closeBeforeReader(connection, websocket.CloseInternalServerErr, "the relay to the session ended", gone)
+				return socketEnd{cause: relayEnded, code: websocket.CloseInternalServerErr}
+			}
 			code, reason := ended()
 			// The holder says whether the caller's close command ended the session: one sent
 			// after the end did not, and the end may reach this node after it.
@@ -247,13 +256,13 @@ func (s *Server) writeRelayedEvents(
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.TextMessage, payload); err != nil {
 				s.logger.Debug("relayed session socket write failed", "error", err)
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 
 		case <-ping.C:
 			connection.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := connection.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return socketEnd{cause: clientGone}
+				return writeEnd(err, gone)
 			}
 			if err := state.bus.Publish(ctx, state.bus.Commands(), relay.Request{
 				Type: relay.Refresh, Node: state.bus.Node(), Session: id, Watcher: watcher,
@@ -401,7 +410,8 @@ func (s *Server) attachProxy(ctx context.Context, state *relayed, request relay.
 	}
 
 	go s.runRelayedCommands(ctx, found, proxy)
-	go s.publishSessionEvents(ctx, state, events, request.Watcher, request.Session, key, found.Halted, proxy.closing.Load)
+	running := func() bool { return found.State() != session.Ended }
+	go s.publishSessionEvents(ctx, state, events, request.Watcher, request.Session, key, found.Halted, proxy.closing.Load, running)
 }
 
 // publishSessionEvents puts one session's events on the bus for the socket watching it
@@ -411,7 +421,7 @@ func (s *Server) publishSessionEvents(
 	state *relayed,
 	events <-chan session.Event,
 	watcher, id, key string,
-	halted, byCommand func() bool,
+	halted, byCommand, running func() bool,
 ) {
 	// The events channel closing is either the session ending or the watcher being
 	// detached, and both end the watcher: dropping it here is what closes its command
@@ -449,6 +459,8 @@ func (s *Server) publishSessionEvents(
 		Watcher:   watcher,
 		Halted:    halted(),
 		ByCommand: byCommand(),
+		// A session sets Ended before it closes its watchers, so one still running was detached.
+		Detached: running(),
 	}); err != nil {
 		s.logger.Debug("could not relay the end of a session", "session", id, "error", err)
 	}
@@ -484,14 +496,19 @@ func (s *Server) expireProxies(ctx context.Context, state *relayed) {
 	for {
 		select {
 		case <-ticker.C:
-			for _, watcher := range state.expired() {
-				s.logger.Debug("dropping a relayed watcher whose node went quiet",
-					"watcher", watcher)
-				state.dropProxy(watcher)
-			}
+			s.dropExpired(state)
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+// dropExpired is one tick of expireProxies.
+func (s *Server) dropExpired(state *relayed) {
+	for _, watcher := range state.expired() {
+		s.logger.Debug("dropping a relayed watcher whose node went quiet",
+			"watcher", watcher)
+		state.dropProxy(watcher)
 	}
 }
 
@@ -529,6 +546,9 @@ func (r *relayed) deliver(payload []byte) {
 		}
 		if response.ByCommand {
 			socket.byCommand.Store(true)
+		}
+		if response.Detached {
+			socket.detached.Store(true)
 		}
 		socket.close()
 		return

@@ -437,7 +437,7 @@ func (r *Responses) Rewind(ctx context.Context, customerID, sessionID, kept stri
 	// read first rather than in each shard's update.
 	keptAt, err := whicheverShard(ctx, r.store, func(ctx context.Context, db bun.IDB) (AgentResponse, error) {
 		var response AgentResponse
-		err := db.NewSelect().Model(&response).Column("created_at", "id").Where("id = ?", kept).Scan(ctx)
+		err := db.NewSelect().Model(&response).Column("created_at", "id").Where("id = ?", kept).Where("customer_id = ?", customerID).Scan(ctx)
 		return response, err
 	})
 	if errors.Is(err, sql.ErrNoRows) {
@@ -593,18 +593,13 @@ func (r *Responses) BranchTail(ctx context.Context, customerID, sessionID, fromR
 	return path, nil
 }
 
-// MoveActivePath makes the path ending at leafResponseID the session's conversation. The
+// MoveActivePathUntil makes the path ending at leafResponseID the session's conversation. The
 // responses after the point where it leaves the current conversation are rewound at at, and
 // the ones on the new path after that point are brought back. An empty leafResponseID is a
 // conversation with nothing in it yet, as the first question asked again leaves it: every
-// response is rewound. Running it again changes nothing.
-func (r *Responses) MoveActivePath(ctx context.Context, customerID, sessionID, leafResponseID string, at time.Time) error {
-	return r.MoveActivePathUntil(ctx, customerID, sessionID, leafResponseID, at, time.Time{})
-}
-
-// MoveActivePathUntil is MoveActivePath taking off the conversation only responses created at
-// or before until, the zero time for every one: a switch finished after the person carried on
-// leaves the turns asked since it began where they are.
+// response is rewound. Running it again changes nothing. It takes off the conversation only
+// responses created at or before until, the zero time for every one: a switch finished after
+// the person carried on leaves the turns asked since it began where they are.
 func (r *Responses) MoveActivePathUntil(ctx context.Context, customerID, sessionID, leafResponseID string, at, until time.Time) error {
 	if customerID == "" || sessionID == "" {
 		return stack.Wrap(errors.New("store: a customer and a session id are required"))

@@ -18,6 +18,8 @@ final readonly class OrganizationProgress
         // Every step the organization's apps ever had a request answered in, whenever, not only from from to to, of a...
         /** @var list<ActivityStepDay> */
         public array $steps,
+        // The organization has credit that is not trial credit now, after refunds and disputes, as the usage service...
+        public ?bool $funded = null,
     ) {
     }
 
@@ -30,6 +32,7 @@ final readonly class OrganizationProgress
             furthestStep: Json::enum($data, 'furthest_step', ActivityStep::class),
             organizationId: Json::string($data, 'organization_id'),
             steps: array_map(ActivityStepDay::fromArray(...), Json::objects($data, 'steps')),
+            funded: array_key_exists('funded', $data) && $data['funded'] !== null ? Json::bool($data, 'funded') : null,
         );
     }
 
@@ -44,6 +47,9 @@ final readonly class OrganizationProgress
         $out['furthest_step'] = Json::enumValue($this->furthestStep);
         $out['organization_id'] = $this->organizationId;
         $out['steps'] = array_map(static fn (ActivityStepDay $each): array => $each->toArray(), $this->steps);
+        if ($this->funded !== null) {
+            $out['funded'] = $this->funded;
+        }
         return $out;
     }
 }

@@ -28,7 +28,7 @@ func (s *StoreSuite) record(customerID string, at time.Time, audioMs int64, late
 	if !success {
 		request.ErrorCode = "upstream_error"
 	}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
 }
 
 func (s *StoreSuite) TestRecordRequestDefaultsStartedAt() {
@@ -37,7 +37,7 @@ func (s *StoreSuite) TestRecordRequestDefaultsStartedAt() {
 		Provider: "deepgram", Model: "flux-general-en", Success: true,
 	}
 
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
 
 	s.False(request.StartedAt.IsZero(), "a request with no timestamp should be stamped now")
 	s.Positive(request.ID, "the row should come back with its generated id")
@@ -47,7 +47,7 @@ func (s *StoreSuite) TestModelRequestsCountEveryCustomerSinceTheWindowOpened() {
 	s.record("acme", s.base.Add(1*time.Minute), 1000, 100, true)
 	s.record("globex", s.base.Add(2*time.Minute), 1000, 100, false)
 	s.record("acme", s.base.Add(-time.Hour), 1000, 100, true)
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "llm", CustomerID: "acme", Provider: "openai", Model: "gpt-5.6-sol", StartedAt: s.base, Success: true,
 	}))
 
@@ -58,7 +58,7 @@ func (s *StoreSuite) TestModelRequestsCountEveryCustomerSinceTheWindowOpened() {
 
 func (s *StoreSuite) TestARequestItsCallerCancelledIsLoggedAsNoError() {
 	s.sessionCall(s.store, Call{ID: "call", SessionID: "session-cancel-log", CustomerID: "cancel-log", AgentID: "agent", StartedAt: s.base}, "cfg")
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{Modality: "llm", CustomerID: "cancel-log", AgentID: "agent", Provider: "openai", Model: "gpt",
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{Modality: "llm", CustomerID: "cancel-log", AgentID: "agent", Provider: "openai", Model: "gpt",
 		StartedAt: s.base.Add(time.Second), OutputTokens: 4, Success: false, ErrorCode: ErrorCancelled}))
 	logs, err := s.store.AgentLogs.Select(s.ctx, "cancel-log", AgentLogFilter{Limit: 10})
 	s.Require().NoError(err)
@@ -369,7 +369,7 @@ func (s *StoreSuite) TestTheIdentityAndShippingColumnsAreStored() {
 func (s *StoreSuite) TestMarkingARowAnotherSessionHoldsFailsWithinTheLockWait() {
 	request := &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "lock-" + uuid.NewString(),
 		Provider: "openai", Model: "gpt", StartedAt: time.Now().UTC(), Success: true, ToShip: true}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
 	// A router that went silent with the row locked.
 	tx, err := s.store.ShardDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
@@ -391,7 +391,7 @@ func (s *StoreSuite) TestMarkingARowAnotherSessionHoldsFailsWithinTheLockWait() 
 func (s *StoreSuite) shippable(organization string, at time.Time) uuid.UUID {
 	request := &Request{UsageID: uuid.Must(uuid.NewV7()), Modality: "llm", CustomerID: "acme", OrganizationID: organization,
 		Provider: "openai", Model: "gpt", StartedAt: at, Success: true, ToShip: true}
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, request))
+	s.Require().NoError(insertRequest(s.ctx, s.store, request))
 	return request.UsageID
 }
 
@@ -464,7 +464,7 @@ func (s *StoreSuite) spent(
 	costMicros int64,
 	tags map[string]string,
 ) {
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality:   modality,
 		CustomerID: customerID,
 		Provider:   "openai",
@@ -642,7 +642,7 @@ func (s *StoreSuite) TestRequestQueryBudgets() {
 
 	// The rows, the grants they used, their calls read, the log rows under the customers' lock, and
 	// the transactions around them: the same for one row as for a batch.
-	s.Equal(8, s.countQueries(func() { s.Require().NoError(s.store.Requests.Insert(s.ctx, &single)) }), "Insert")
+	s.Equal(8, s.countQueries(func() { s.Require().NoError(insertRequest(s.ctx, s.store, &single)) }), "InsertMany of one row")
 	s.Equal(8, s.countQueries(func() {
 		_, err := s.store.Requests.InsertMany(s.ctx, batch)
 		s.Require().NoError(err)
@@ -710,13 +710,13 @@ func (s *StoreSuite) TestRequestQueryBudgets() {
 func (s *StoreSuite) TestRenamingAUserWithMoreRequestsThanOneStatementTakesRenamesThemAll() {
 	s.inSmallBatches()
 	for i := range 3 {
-		s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+		s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 			Modality: "stt", CustomerID: "acme", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en",
 			StartedAt: s.base.Add(time.Duration(i) * time.Minute), Success: true,
 		}))
 	}
 
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "stt", CustomerID: "other-app", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true,
 	}))
 
@@ -740,7 +740,7 @@ func (s *StoreSuite) TestRenamingAUserWithMoreRequestsThanOneStatementTakesRenam
 
 func (s *StoreSuite) TestRenamingAUserToTheirOwnIdRewritesNothing() {
 	s.inSmallBatches()
-	s.Require().NoError(s.store.Requests.Insert(s.ctx, &Request{
+	s.Require().NoError(insertRequest(s.ctx, s.store, &Request{
 		Modality: "stt", CustomerID: "acme", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true,
 	}))
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)

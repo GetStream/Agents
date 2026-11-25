@@ -69,7 +69,7 @@ func (s *StoreSuite) TestATrunkWithANumberCannotBeDeletedUntilTheNumberIsRelease
 
 	s.ErrorIs(s.store.SIPTrunks.Delete(s.ctx, "acme", trunk.ID), ErrSIPTrunkInUse)
 
-	s.Require().NoError(s.store.PhoneNumbers.Release(s.ctx, "acme", "+15550000101", time.Time{}))
+	s.Require().NoError(giveBack(s.ctx, s.store, "acme", "+15550000101", time.Time{}))
 	s.Require().NoError(s.store.SIPTrunks.Delete(s.ctx, "acme", trunk.ID))
 	_, err := s.store.SIPTrunks.Get(s.ctx, "acme", trunk.ID)
 	s.ErrorIs(err, ErrNoSIPTrunk)

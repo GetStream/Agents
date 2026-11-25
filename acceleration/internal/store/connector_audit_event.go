@@ -22,7 +22,7 @@ const (
 	AuditProxyCall      = "proxy_call"
 	AuditTokenExport    = "token_export"
 	// AuditToolReapproved: the app's backend approved tools at the schema the provider lists
-	// now (ReapproveConnectorTools, 20261101130000_connector_audit_tool_reapproved.sql).
+	// now (ConnectorToolPins.Reapprove).
 	AuditToolReapproved = "tool_reapproved"
 )
 
@@ -48,8 +48,7 @@ const (
 )
 
 // ConnectorAuditEvent is one grant a connection got, renewed or lost, with the ids that tie it
-// to what caused it. It names no owner id and no account id, so it outlives a user delete
-// (20261007170000_connector_invocations_and_audit.sql).
+// to what caused it. It names no owner id and no account id, so it outlives a user delete.
 type ConnectorAuditEvent struct {
 	bun.BaseModel `bun:"table:connector_audit,alias:ca"`
 
@@ -133,7 +132,7 @@ type AuditPosition struct {
 // AuditLimit is the page size an audit list uses for the limit asked for.
 // Select returns one row more than this.
 func AuditLimit(asked int) int {
-	return clampLimit(asked, defaultAuditLimit, maxAuditLimit)
+	return ClampLimit(asked, defaultAuditLimit, maxAuditLimit)
 }
 
 // ConnectorAuditEvents are the connector audit log.

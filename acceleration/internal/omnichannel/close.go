@@ -176,11 +176,11 @@ func (c *Closer) Sweep(ctx context.Context) error {
 	// What a sweep summarizes, no key and no hook started.
 	ctx = routing.WithAttribution(ctx, routing.Attribution{APIKey: routing.JobOrigin("episode_summary")})
 	now := time.Now()
-	closed, err := c.store.Episodes.CloseIdle(ctx, now.Add(-c.idle), now, sweepBatch, now.Add(c.lease), c.holder)
+	closed, err := c.store.Episodes.CloseIdle(ctx, now.Add(-c.idle), now, sweepBatch, c.lease, c.holder)
 	if err != nil {
 		return err
 	}
-	left, err := c.store.Episodes.ClaimSummaries(ctx, now, sweepBatch, now.Add(c.lease), c.holder)
+	left, err := c.store.Episodes.ClaimSummaries(ctx, sweepBatch, c.lease, c.holder)
 	if err != nil {
 		return err
 	}
@@ -194,7 +194,7 @@ func (c *Closer) Sweep(ctx context.Context) error {
 // agent config without episode_cards is, changes nothing and reaches no Stream.
 func (c *Closer) EndCall(ctx context.Context, scope store.AppScope, callID string) error {
 	now := time.Now()
-	closed, err := c.store.Episodes.EndCall(ctx, scope, callID, now, now.Add(c.lease), c.holder)
+	closed, err := c.store.Episodes.EndCall(ctx, scope, callID, now, c.lease, c.holder)
 	if err != nil || len(closed) == 0 {
 		return err
 	}
@@ -331,7 +331,7 @@ func (c *Closer) ask(ctx context.Context, config store.AgentConfig, episode stor
 // authorOf is who an episode's card is updated as: its author, the agent user of the
 // omni-channel it was written in (Write). A message that is not a card as Write writes it has
 // no such author, as one that cannot be read has none: it is never updated as whoever wrote it. Not the omni-channel the person's row points at now:
-// an unlink gives the number's row a new one (store.UnlinkUserPhone), whose agent user is made
+// an unlink gives the number's row a new one (store.UserPhones.Unlink), whose agent user is made
 // only with its first card, and Stream refuses an update by a user it does not have («the user
 // omni-… does not exist», staging, AI-2771).
 func (c *Closer) authorOf(ctx context.Context, episode store.ClosedEpisode) (string, error) {
