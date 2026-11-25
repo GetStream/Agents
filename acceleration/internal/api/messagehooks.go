@@ -603,6 +603,9 @@ func (s *Server) liveSessionOn(ctx context.Context, origin hookOrigin, event mes
 	return found, running, nil
 }
 
+// directoryTimeout bounds asking which nodes write as an agent: the message waits for the answer.
+const directoryTimeout = time.Second
+
 // writesElsewhere reports whether the directory says a session admits takes, by its customer and
 // Stream app, writes as an agent on any node. A directory that cannot be read says none does, as
 // forwardedMessage answers here when it cannot find the node answering.
@@ -610,6 +613,8 @@ func (s *Server) writesElsewhere(ctx context.Context, agentID string, admits fun
 	if s.directory == nil {
 		return false
 	}
+	ctx, cancel := context.WithTimeout(ctx, directoryTimeout)
+	defer cancel()
 	nodes, err := s.directory.NodesByAgent(ctx, agentID, admits)
 	if err != nil {
 		s.logger.Warn("could not find out which nodes write as an agent", "agent", agentID, "error", err)

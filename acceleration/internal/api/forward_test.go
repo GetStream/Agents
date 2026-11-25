@@ -250,6 +250,45 @@ func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredHereWhenTh
 		settleFor, 10*time.Millisecond, "the session where the message landed was asked nothing")
 }
 
+// The same when Redis hangs rather than fails: the message is not held up by it.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredHereInTimeWhenTheDirectoryHangs() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	proxy, redis := newRedisProxy(s.T())
+	unread, _, _ := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler),
+		func(options *Options) { options.Directory = s.directoryOver(redis, "here") })
+	unread.Client().Timeout = 10 * time.Second
+	s.serverClient.on(unread).createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+	proxy.hung.Store(true)
+
+	started := time.Now()
+	s.Require().Equal(http.StatusOK, s.signedlyOn(unread, "/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Less(time.Since(started), 2*time.Second)
+	s.Require().Eventually(func() bool { return s.wasAsked(written) },
+		settleFor, 10*time.Millisecond, "the session where the message landed was asked nothing")
+}
+
+// A directory that is slow to answer is waited for: the other customer's session it names still
+// keeps the one here from answering.
+func (s *ForwardedSessionSuite) TestAMessageNamingNoCustomerIsAnsweredByNeitherThoughTheDirectoryIsSlow() {
+	channel, written := "chat-"+s.utils.uuid(), "is anybody there? "+s.utils.uuid()
+	proxy, redis := newRedisProxy(s.T())
+	slow, _, _ := s.otherNodeHolding(nil, s.sealer, slog.New(slog.DiscardHandler),
+		func(options *Options) { options.Directory = s.directoryOver(redis, "here") })
+	s.directoryOver(redis, "elsewhere").Hold(s.T().Context(), "another-customer", 0, s.utils.uuid(), channel, "")
+	s.serverClient.on(slow).createSession(CreateSessionRequest{
+		AgentId: &channel, Llm: pointerTo("vision/vision-model"), Incognito: pointerTo(true),
+	})
+	proxy.lag.Store(int64(300 * time.Millisecond))
+
+	s.Require().Equal(http.StatusOK, s.signedlyOn(slow, "/v1/chat/hooks/stream", writtenTo(channel, `{}`, written)))
+
+	s.Never(func() bool { return s.wasAsked(written) }, time.Second, 10*time.Millisecond,
+		"the session where the message landed answered before the directory did")
+}
+
 // A channel stamped with its customer is answered in the hook's app: that customer's session
 // writing as the agent in another app is not where the message goes, and with nothing of theirs
 // running in this app, their worker here is handed it.
@@ -366,8 +405,13 @@ func (s *RouterSuite) unreadableDirectory() *node.Directory {
 	redis, err := redisready.NewClient(rueidis.ClientOption{InitAddress: []string{s.redisAddr}, DisableCache: true})
 	s.Require().NoError(err)
 	redis.Close()
+	return s.directoryOver(redis, "unreadable")
+}
+
+// directoryOver is a node's directory over a Redis connection of the test's own, at address.
+func (s *RouterSuite) directoryOver(redis rueidis.Client, address string) *node.Directory {
 	directory, err := node.NewDirectory(node.DirectoryOptions{
-		Redis: redis, Address: "unreadable", Prefix: s.relayPrefix, Logger: slog.New(slog.DiscardHandler),
+		Redis: redis, Address: address, Prefix: s.relayPrefix, Logger: slog.New(slog.DiscardHandler),
 	})
 	s.Require().NoError(err)
 	s.T().Cleanup(directory.Close)
