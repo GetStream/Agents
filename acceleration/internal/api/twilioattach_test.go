@@ -77,7 +77,7 @@ func (s *TwilioHookSuite) TestANumberAttachedAtTwilioIsAnsweredAtTheVoiceURLTwil
 }
 
 // Without what the router needs to answer the call webhook, a Twilio number is not attached:
-// nothing is made at Stream and Twilio is asked nothing.
+// nothing is made at Stream, the app's call hook included, and Twilio is asked nothing.
 func (s *TwilioHookSuite) TestATwilioNumberIsNotAttachedWithoutWhatItsCallWebhookNeeds() {
 	ready := attacherSettings{token: s.twilioAuthToken, account: s.twilioAccountSID, publicURL: s.publicURL, sealed: true}
 	for name, test := range map[string]struct {
@@ -86,6 +86,7 @@ func (s *TwilioHookSuite) TestATwilioNumberIsNotAttachedWithoutWhatItsCallWebhoo
 	}{
 		"no webhook token": {settings: ready.without(func(a *attacherSettings) { a.token = "" }), refusal: "TWILIO_WEBHOOK_AUTH_TOKEN"},
 		"no public URL":    {settings: ready.without(func(a *attacherSettings) { a.publicURL = "" }), refusal: "ROUTER_PUBLIC_URL"},
+		"a plain http URL": {settings: ready.without(func(a *attacherSettings) { a.publicURL = "http://router.example.test" }), refusal: "https"},
 		"no account SID":   {settings: ready.without(func(a *attacherSettings) { a.account = "" }), refusal: "TWILIO_ACCOUNT_SID"},
 		"no keyring":       {settings: ready.without(func(a *attacherSettings) { a.sealed = false }), refusal: "stored trunk"},
 	} {
@@ -96,12 +97,14 @@ func (s *TwilioHookSuite) TestATwilioNumberIsNotAttachedWithoutWhatItsCallWebhoo
 			service := s.attacher(vendor, test.settings)
 			s.hold(e164, "twilio")
 			trunks := s.chat.Trunks()
+			s.chat.SetEventHooks(s.chat.Key)
 
 			_, err := service.Attach(context.Background(), phone.Attachment{CustomerID: s.customerID(), E164: e164})
 
 			s.ErrorContains(err, test.refusal)
 			s.Empty(vendor.asked(), "twilio was asked nothing")
 			s.Equal(trunks, s.chat.Trunks(), "no trunk was made at Stream")
+			s.Empty(s.chat.EventHooks(s.chat.Key), "the app's call hook was not written")
 			number, err := s.store.PhoneNumbers.GetByE164(context.Background(), s.customerID(), e164)
 			s.Require().NoError(err)
 			s.Nil(number.AttachedAt)

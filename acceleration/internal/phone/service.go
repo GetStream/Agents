@@ -995,6 +995,14 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 			held.Vendor, ErrNoSealer))
 	}
 	attachedHere := held.AttachedAt != nil && held.StreamTrunkID != "" && held.StreamAppPK == pin
+	// Refused before anything is made, the app's call hook included, as a number pointed at a
+	// webhook that refuses its calls would look fine and never answer. A number attached
+	// already is not pointed anywhere again, so it is not refused.
+	if hooked, ok := provider.(CallHooked); ok && !attachedHere {
+		if err := hooked.CallHookReady(s.publicURL); err != nil {
+			return Attached{}, err
+		}
+	}
 	if err := s.pointCallHook(ctx, stream, pin); err != nil {
 		if !attachedHere {
 			return Attached{}, err
@@ -1020,14 +1028,6 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 			return Attached{}, err
 		}
 		return attached, nil
-	}
-	// Refused before anything is made for the number, as a number pointed at a webhook that
-	// refuses its calls would look fine and never answer. A number attached already is not
-	// pointed anywhere again, so it is not refused.
-	if hooked, ok := provider.(CallHooked); ok {
-		if err := hooked.CallHookReady(s.publicURL); err != nil {
-			return Attached{}, err
-		}
 	}
 	if err := s.clearLinesFor(ctx, held, pin); err != nil {
 		return Attached{}, err
