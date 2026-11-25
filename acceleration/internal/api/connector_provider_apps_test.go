@@ -98,7 +98,7 @@ func (s *ConnectorProviderAppsSuite) TestOnlyTheAppsBackendMayCreateTheProviderA
 	})
 }
 
-func (s *ConnectorProviderAppsSuite) TestAPublicURLThatIsNotHTTPSIsRefusedNamingNoSetting() {
+func (s *ConnectorProviderAppsSuite) TestAPublicURLThatIsNotHTTPSIsRefusedInFixedWords() {
 	public := s.router.publicURL
 	s.T().Cleanup(func() { s.router.publicURL = public })
 	s.router.publicURL = "http://router.example"
@@ -106,9 +106,8 @@ func (s *ConnectorProviderAppsSuite) TestAPublicURLThatIsNotHTTPSIsRefusedNaming
 	status, failure := s.serverClient.failure(http.MethodPut, providerAppPath("slack_bot"), s.withToken("Acme"))
 
 	s.Equal(http.StatusBadRequest, status)
-	s.Contains(failure, "provider apps cannot be created")
-	s.NotContains(failure, "ROUTER_PUBLIC_URL", "only the operator sets it")
-	s.NotContains(failure, "public_url")
+	s.Equal("this deployment is not set up to create provider apps: "+cannotCorrect, failure,
+		"nothing of the public URL, which only the operator sets")
 }
 
 func (s *ConnectorProviderAppsSuite) TestOnlyTheAppsBackendMayDeleteTheProviderApp() {

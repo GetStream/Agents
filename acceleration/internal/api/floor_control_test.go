@@ -353,8 +353,8 @@ func (s *FloorControlWithoutChorusASRSuite) TestAFloorControlThatOptsInIsRefused
 		status, code, message := s.refusedWith(s.serverClient, write.method, write.path, write.body)
 		s.Equal(http.StatusBadRequest, status, "%s %s", write.method, write.path)
 		s.Equal(codeNotConfigured, code, "%s %s", write.method, write.path)
-		s.Equal(errNoChorusASR.Message, message)
-		s.NotContains(message, "ROUTER_CHORUS_ASR_URL", "only the operator sets it")
+		s.Equal("floor_control: this router does not take stream/chorus-asr: leave floor_control out, send {}, "+
+			"or name flow-controller", message, "what to change, and nothing of what the deployment has")
 	}
 	configs, err := s.store.AgentConfigs.Select(context.Background(), s.customerID())
 	s.Require().NoError(err)

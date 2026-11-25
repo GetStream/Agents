@@ -18,6 +18,10 @@ const errorDocs = "https://getstream.io/agents/docs/api/errors/#"
 // wrong is in the access log, under the request id.
 const somethingWentWrong = "something went wrong"
 
+// cannotCorrect ends the message of a refusal that only the operator can correct: the cause
+// names the deployment's settings, so it is in the log, under the request id.
+const cannotCorrect = "the caller cannot correct this: send the code and the X-Request-Id of this response to support"
+
 // ErrorType is the kind of a failure, and decides the status it is answered with.
 type ErrorType string
 

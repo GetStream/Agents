@@ -73,7 +73,7 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 		return nil, err
 	}
 	if err != nil {
-		s.logUnkept(customerID, err)
+		s.logNotConfigured(ctx, customerID, err)
 		// Everything that can go wrong here is the caller's spec, a provider that would not
 		// start, or a refusal about money, and each is worth reading rather than a 500 with
 		// the detail in a log the caller cannot see.
@@ -83,35 +83,40 @@ func (s *Server) createSession(ctx context.Context, request *createSessionReques
 	return &createSessionResponse{Body: sessionOf(ctx, created)}, nil
 }
 
-// logUnkept logs what Stream or the router said for a session refused because its Stream app is
-// missing or refuses its keys: Stream's own answer is the operator's to read, never the caller's.
-func (s *Server) logUnkept(customerID string, err error) {
+// logNotConfigured logs why a session was refused for a setting of this deployment, under the
+// request id the caller is told to send: the session's error, which names the setting, and
+// Stream's own answer for a Stream app that is missing or refuses its keys. The caller is
+// answered in fixed words (refusedRequest).
+func (s *Server) logNotConfigured(ctx context.Context, customerID string, err error) {
 	if found, ok := errors.AsType[*session.UnkeptError](err); ok {
-		s.logger.Warn("a session that is not incognito has no Stream app to be kept in",
-			"customer", customerID, "error", err, "cause", found.Cause)
+		s.logger.WarnContext(ctx, "a session that is not incognito has no Stream app to be kept in",
+			"customer", customerID, "request_id", RequestIDFrom(ctx), "error", err, "cause", found.Cause)
+		return
+	}
+	if errors.Is(err, session.ErrNotConfigured) {
+		s.logger.WarnContext(ctx, "a session lacks a setting of this deployment",
+			"customer", customerID, "request_id", RequestIDFrom(ctx), "error", err)
 	}
 }
 
-// errUnkeptNoKeys and errUnkeptKeysRejected are the messages a caller gets for
-// session.ErrNoStreamKeys and session.ErrStreamKeysRejected. They do not show a setting name:
-// only the operator sets the keys, and the session error that shows the names goes to the log
-// (logUnkept).
-var (
-	errUnkeptNoKeys = notConfigured("this deployment has no Stream app, and a session that is not incognito " +
-		"is kept in Stream Chat: open the session with incognito: true, or tell the operator to set the keys of a Stream app")
-	errUnkeptKeysRejected = notConfigured("Stream refused this deployment's Stream app keys, and a session that is " +
-		"not incognito is kept in Stream Chat: open the session with incognito: true, or tell the operator to set the correct keys")
-)
+// errUnkept is the answer for a session that is not incognito, on a deployment whose Stream app
+// is missing or refuses its keys. The keys are the operator's, so the caller is not told which
+// of the two it is: the log says (logNotConfigured).
+var errUnkept = notConfigured("a session that is not incognito cannot be opened on this deployment: " +
+	"open the session with incognito: true")
+
+// errSessionNotConfigured is the answer for session.ErrNotConfigured, whose text names a
+// setting of the deployment: the log has it (logNotConfigured).
+var errSessionNotConfigured = notConfigured("this deployment is not set up for this session: " + cannotCorrect)
 
 // unkeptAnswer is the answer for a session refused because the deployment's Stream app is
 // missing or refuses its keys: a setting of the deployment rather than anything in the
 // request, so not_configured, in words of our own. False for any other error.
 func unkeptAnswer(err error) (APIError, bool) {
-	switch {
-	case errors.Is(err, session.ErrNoStreamKeys):
-		return errUnkeptNoKeys, true
-	case errors.Is(err, session.ErrStreamKeysRejected):
-		return errUnkeptKeysRejected, true
+	for _, refusal := range []error{session.ErrNoStreamKeys, session.ErrStreamKeysRejected} {
+		if errors.Is(err, refusal) {
+			return errUnkept, true
+		}
 	}
 	return APIError{}, false
 }

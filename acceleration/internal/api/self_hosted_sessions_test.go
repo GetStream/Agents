@@ -15,10 +15,18 @@ import (
 // its own, so a session that is not incognito needs that app (AI-3566).
 type SelfHostedSessionsSuite struct {
 	RouterSuite
+	// logged is what the router logged, where the operator reads why a session was refused.
+	logged *lockedLog
 }
 
 func TestSelfHostedSessionsSuite(t *testing.T) {
 	runSuite(t, new(SelfHostedSessionsSuite))
+}
+
+func (s *SelfHostedSessionsSuite) SetupSuite() {
+	s.logged = &lockedLog{}
+	s.logs = s.logged
+	s.RouterSuite.SetupSuite()
 }
 
 func (s *SelfHostedSessionsSuite) SetupTest() {
@@ -33,7 +41,7 @@ func (s *SelfHostedSessionsSuite) errorOf(method, path string, body any) (int, E
 	return status, answered.Error, string(payload)
 }
 
-func (s *SelfHostedSessionsSuite) TestASessionOnKeysStreamRefusesNamesTheKeysAndIncognito() {
+func (s *SelfHostedSessionsSuite) TestASessionOnKeysStreamRefusesNamesOnlyIncognito() {
 	// It used to answer 400 «QueryUsers failed with error: "api_key not valid"», naming neither.
 	s.refuseTheKeys()
 
@@ -41,14 +49,35 @@ func (s *SelfHostedSessionsSuite) TestASessionOnKeysStreamRefusesNamesTheKeysAnd
 
 	s.Equal(http.StatusBadRequest, status)
 	s.Equal(codeNotConfigured, failure.Code)
-	s.Contains(failure.Message, "Stream refused this deployment's Stream app keys")
-	s.Contains(failure.Message, "incognito: true")
-	s.NotContains(body, "STREAM_API_KEY", "only the operator sets it")
-	s.NotContains(body, "stream.api_key")
+	s.Equal(errUnkept.Message, failure.Message, "the same words as for no Stream app: the keys are the operator's")
 	s.NotContains(body, "api_key not valid", "Stream's own words stay in the log")
 }
 
-func (s *SelfHostedSessionsSuite) TestAForkOnKeysStreamRefusesNamesTheKeysWithNothingOfStreams() {
+func (s *SelfHostedSessionsSuite) TestARefusalForTheKeysIsLoggedUnderItsRequestID() {
+	s.refuseTheKeys()
+
+	status, _ := s.serverClient.withRequestID("refused-keys").call(http.MethodPost, "/v1/agents/sessions", textSession(nil))
+
+	s.Equal(http.StatusBadRequest, status)
+	logged := lineWith(s.logged, "level=WARN", "request_id=refused-keys")
+	s.Contains(logged, "STREAM_API_KEY", "the operator reads which setting to correct")
+	s.Contains(logged, "api_key not valid", "and what Stream answered")
+}
+
+func (s *SelfHostedSessionsSuite) TestASessionTheDeploymentIsNotSetUpForIsAnsweredInFixedWords() {
+	// The suite routes no speech-to-speech model.
+	native := textSession(nil)
+	native.Sts = pointerTo("stub/stub-sts")
+
+	status, failure := s.serverClient.withRequestID("refused-sts").failure(http.MethodPost, "/v1/agents/sessions", native)
+
+	s.Equal(http.StatusBadRequest, status)
+	s.Equal(errSessionNotConfigured.Message, failure)
+	s.Contains(lineWith(s.logged, "level=WARN", "request_id=refused-sts"), "routes no speech-to-speech model",
+		"the operator reads what the deployment lacks under the request id")
+}
+
+func (s *SelfHostedSessionsSuite) TestAForkOnKeysStreamRefusesNamesOnlyIncognito() {
 	// A fork is refused through refusedRequest, which answered this refusal as a 500 saying
 	// only that something went wrong.
 	parent := s.serverClient.createSession(textSession(nil))
@@ -59,9 +88,7 @@ func (s *SelfHostedSessionsSuite) TestAForkOnKeysStreamRefusesNamesTheKeysWithNo
 
 	s.Equal(http.StatusBadRequest, status, body)
 	s.Equal("not_configured", failure.Code, "the same refusal as a create's")
-	s.Contains(failure.Message, "Stream refused this deployment's Stream app keys")
-	s.Contains(failure.Message, "incognito: true")
-	s.NotContains(body, "STREAM_API_KEY", "only the operator sets it")
+	s.Equal(errUnkept.Message, failure.Message)
 	s.NotContains(body, "api_key not valid", "Stream's own words stay in the log")
 }
 
@@ -75,7 +102,7 @@ func (s *SelfHostedSessionsSuite) refuseTheKeys() {
 	}
 }
 
-func (s *SelfHostedSessionsSuite) TestASessionOnADeploymentWithNoStreamAppNamesTheKeysAndIncognito() {
+func (s *SelfHostedSessionsSuite) TestASessionOnADeploymentWithNoStreamAppNamesOnlyIncognito() {
 	// It used to answer 400 «streamapp: no Stream app is configured for this customer».
 	s.setApps(s.customerID(), func(apps *suiteApps) { apps.keyless[s.customerID()] = true })
 	s.T().Cleanup(func() { s.setApps(s.customerID(), func(apps *suiteApps) { delete(apps.keyless, s.customerID()) }) })
@@ -84,10 +111,7 @@ func (s *SelfHostedSessionsSuite) TestASessionOnADeploymentWithNoStreamAppNamesT
 
 	s.Equal(http.StatusBadRequest, status)
 	s.Equal(codeNotConfigured, failure.Code)
-	s.Contains(failure.Message, "this deployment has no Stream app")
-	s.Contains(failure.Message, "incognito: true")
-	s.NotContains(body, "STREAM_API_KEY", "only the operator sets it")
-	s.NotContains(body, "stream.api_key")
+	s.Equal(errUnkept.Message, failure.Message)
 	s.NotContains(body, "streamapp:", "the internal error stays in the log")
 }
 

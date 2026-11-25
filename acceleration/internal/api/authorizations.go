@@ -372,8 +372,7 @@ func (c consents) begin(ctx context.Context, connection store.ConnectorConnectio
 	// otherwise be found out only after the user approved it.
 	public := strings.TrimRight(c.publicURL, "/")
 	if public == "" {
-		return Authorization{}, notConfigured("consents cannot be started: this deployment has no public URL, " +
-			"so the provider has nowhere to send the browser back to")
+		return Authorization{}, notConfigured("this deployment is not set up to start consents: " + cannotCorrect)
 	}
 	scheme, found := c.registry.Schemes[connection.AuthScheme]
 	if !found {
@@ -1003,7 +1002,7 @@ func (s *Server) beforeComplete(ctx context.Context, manifest core.ResolvedManif
 func (s *Server) serveConnectorClientMetadata(w http.ResponseWriter, _ *http.Request) {
 	clientID := ConnectorClientMetadataURL(s.publicURL)
 	if clientID == "" {
-		writeError(w, notFound("no client metadata document: this deployment has no https public URL"))
+		writeError(w, notFound("no client metadata document"))
 		return
 	}
 	document := oauth2code.ClientMetadataDocument(clientID,

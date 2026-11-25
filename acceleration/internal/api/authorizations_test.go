@@ -1841,9 +1841,8 @@ func (s *AuthorizationsWithoutAPublicURLSuite) TestAConsentIsRefusedWhenItStarts
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/connections/"+created.ID+"/authorizations", nil)
 
 	s.Equal(http.StatusBadRequest, status)
-	s.Contains(failure, "consents cannot be started")
-	s.NotContains(failure, "ROUTER_PUBLIC_URL", "only the operator sets it")
-	s.NotContains(failure, "public_url")
+	s.Equal("this deployment is not set up to start consents: "+cannotCorrect, failure,
+		"nothing of the public URL, which only the operator sets")
 	var attempts int
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),
 		"SELECT count(*) FROM connector_authorization_attempts WHERE connection_id = ?", created.ID).Scan(&attempts))
@@ -1861,6 +1860,5 @@ func (s *AuthorizationsWithoutAPublicURLSuite) TestThereIsNoClientMetadataDocume
 	status, failure := s.unauthenticatedClient.failure(http.MethodGet, ConnectorClientMetadataPath, nil)
 
 	s.Equal(http.StatusNotFound, status)
-	s.NotContains(failure, "ROUTER_PUBLIC_URL", "anyone may ask, and only the operator sets it")
-	s.NotContains(failure, "public_url")
+	s.Equal("no client metadata document", failure, "anyone may ask, and only the operator sets the public URL")
 }

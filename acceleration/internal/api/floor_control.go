@@ -31,9 +31,8 @@ func (*FloorControl) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma
 }
 
 // errNoChorusASR refuses stream/chorus-asr on a router with no chorus-asr server to ask.
-var errNoChorusASR = notConfigured("floor_control: stream/chorus-asr cannot control the floor on this router, which has " +
-	"no chorus-asr server; leave floor_control out, send {}, or name flow-controller: " +
-	"the flow controller rules every floor on this router")
+var errNoChorusASR = notConfigured("floor_control: this router does not take stream/chorus-asr: leave floor_control out, " +
+	"send {}, or name flow-controller")
 
 // errEndOfTurn refuses end_of_turn, which floor_control's max_wait_ms replaced.
 var errEndOfTurn = invalidRequest("end_of_turn is no longer read: send floor_control: " +
