@@ -137,6 +137,22 @@ func (s *AgentSuite) TestATranscriberRefusedMoneyIsAskedForOnceASecond() {
 	})
 }
 
+func (s *AgentSuite) TestATranscriberRefusedMoneyIsAskedForOnceASecondHoweverOftenAudioComes() {
+	s.hearsOn(func(gate *gatetest.Answers) {
+		gate.Refuse(policy.ErrNoCredits)
+		before := gate.Admitted()
+		for range 150 {
+			s.speak(stt.Participant{ID: "alice"})
+			synctest.Wait()
+			time.Sleep(20 * time.Millisecond)
+			synctest.Wait()
+		}
+
+		s.Equal(3, gate.Admitted()-before)
+		s.Len(s.hearingFailures(), 1)
+	})
+}
+
 func (s *AgentSuite) TestARunOfRefusalsIsOverOnceATranscriberIsGranted() {
 	s.hearsOn(func(gate *gatetest.Answers) {
 		s.talks(1)
@@ -420,6 +436,18 @@ func (s *AgentSuite) TestRefusalsMinutesApartAreNotARow() {
 		s.False(s.callEnded())
 		s.talks(1)
 		s.True(s.callEnded(), "a row of its own, 30 s long")
+	})
+}
+
+func (s *AgentSuite) TestRefusalsMoreThanTwoRenewalsApartAreNotARow() {
+	s.hearsOn(func(gate *gatetest.Answers) {
+		gate.Refuse(policy.ErrNoCredits)
+		s.talks(1)
+		time.Sleep(59*time.Second + 500*time.Millisecond)
+		s.talks(1)
+
+		s.Len(s.hearingFailures(), 2)
+		s.False(s.callEnded())
 	})
 }
 

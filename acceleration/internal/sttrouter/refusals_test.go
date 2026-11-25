@@ -30,6 +30,8 @@ var (
 	paidModel = routing.ProviderConfig{Provider: "stub", Model: "paid", Price: routing.Price{PerAudioHour: 1}}
 	// otherModel costs twice as much.
 	otherModel = routing.ProviderConfig{Provider: "stub", Model: "other", Price: routing.Price{PerAudioHour: 2}}
+	// cheapModel costs a millionth of a dollar a minute, the least a lease holds.
+	cheapModel = routing.ProviderConfig{Provider: "stub", Model: "cheap", Price: routing.Price{PerAudioHour: 0.00006}}
 	freeModel  = routing.ProviderConfig{Provider: "stub", Model: "free", Local: true}
 	// ownKeyModel is the paid model on the customer's own key.
 	ownKeyModel = routing.ProviderConfig{Provider: "stub", Model: "paid", BYOK: true}
@@ -47,7 +49,7 @@ func (s *RefusalsSuite) asked(model routing.ProviderConfig, first error, body fu
 		s.SetT(t)
 		defer s.SetT(outer)
 		discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-		prices, err := routing.Prices(routing.Config{routing.STT: {Providers: []routing.ProviderConfig{paidModel, otherModel, freeModel}}}, discard)
+		prices, err := routing.Prices(routing.Config{routing.STT: {Providers: []routing.ProviderConfig{paidModel, otherModel, cheapModel, freeModel}}}, discard)
 		s.Require().NoError(err)
 		gate := &gatetest.Answers{}
 		gate.Refuse(first)
@@ -55,6 +57,8 @@ func (s *RefusalsSuite) asked(model routing.ProviderConfig, first error, body fu
 		defer writer.Close(context.Background())
 		session := newSession(t.Context(), &quietSTT{emitter: stt.NewEmitter(64)}, model, routing.Owner{CustomerID: "acme"},
 			routing.NewRecorderOn(routing.STT, writer, prices, discard), nil, nil)
+		// A check that fails in body leaves no goroutine for the bubble to wait for.
+		defer session.Close() //nolint:errcheck // closed and checked below when body passes
 		body(gate, session)
 		s.NoError(session.Close())
 		synctest.Wait()
@@ -213,13 +217,15 @@ func (s *RefusalsSuite) TestAModelThatBillsNothingTakingOverForgetsTheRefusals()
 }
 
 func (s *RefusalsSuite) TestTheNextModelKeepsTheCount() {
-	s.asked(paidModel, nil, func(gate *gatetest.Answers, session *Session) {
-		s.renewals(gate, policy.ErrNoCredits)
-		s.takesOver(session, otherModel)
-		s.goesOn(session)
-		s.renewals(gate, policy.ErrNoCredits)
-		s.Require().ErrorIs(session.ProcessAudio(speech(20), stt.Participant{}), policy.ErrNoCredits)
-	})
+	for _, next := range []routing.ProviderConfig{otherModel, cheapModel} {
+		s.asked(paidModel, nil, func(gate *gatetest.Answers, session *Session) {
+			s.renewals(gate, policy.ErrNoCredits)
+			s.takesOver(session, next)
+			s.goesOn(session)
+			s.renewals(gate, policy.ErrNoCredits)
+			s.Require().ErrorIs(session.ProcessAudio(speech(20), stt.Participant{}), policy.ErrNoCredits)
+		})
+	}
 }
 
 func (s *RefusalsSuite) TestTheNextModelsMinuteIsHeldAtItsPrice() {
