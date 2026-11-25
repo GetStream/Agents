@@ -405,9 +405,9 @@ func (s *Server) writeKnowledge(
 		document := &documents[i].KnowledgeDocument
 		was, had := before[document.Source]
 		// What the base had, and what others wrote since.
-		key, stored := document.ObjectKey, max(was.Passages, document.Covered)
-		stale := ingest.IDs(document.Source, document.Passages, stored)
-		if stored > max(was.Passages, document.Passages) {
+		key := document.ObjectKey
+		stale := ingest.IDs(document.Source, document.Passages, document.Covered)
+		if document.Covered > max(was.Passages, document.Passages) {
 			// A post it shares the row with may have written some of them.
 			document.ObjectKey = store.NewPost()
 		}

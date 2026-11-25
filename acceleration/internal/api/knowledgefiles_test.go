@@ -851,6 +851,8 @@ func (s *KnowledgeFilesSuite) nothingLeft(source string) {
 func (s *KnowledgeFilesSuite) TestAPostDoneWhileItsBaseIsDeletedIsDeletedWithIt() {
 	s.Require().Equal(http.StatusOK, s.post("done.md", 2))
 	s.Require().Equal(http.StatusOK, s.post("other.md", 2))
+	s.Require().NoError(s.store.KnowledgeURLs.Insert(context.Background(), &store.KnowledgeURL{
+		CustomerID: s.customerID(), Namespace: s.namespace, URL: "https://acme.example/faq"}))
 	s.knowledge.onceAfterDrop(func() { s.Equal(http.StatusOK, s.post("done.md", 8)) })
 
 	s.Require().Equal(http.StatusNoContent, s.dropBase())
@@ -861,6 +863,7 @@ func (s *KnowledgeFilesSuite) TestAPostDoneWhileItsBaseIsDeletedIsDeletedWithIt(
 	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&removal).
 		Where("customer_id = ? AND resource_id = ?", s.customerID(), s.namespace).Scan(context.Background()))
 	s.Contains(removal.Changes, store.AuditChange{Field: "documents", Before: float64(2)})
+	s.Contains(removal.Changes, store.AuditChange{Field: "urls", Before: float64(1)})
 }
 
 func (s *KnowledgeFilesSuite) TestAFileReadWhileItsBaseIsDeletedIsDeletedWithIt() {
@@ -1278,6 +1281,17 @@ func (s *KnowledgeFilesSuite) TestAPostWhoseTailAReadsFailedDeleteTookIsWrittenA
 	s.indexedWith("tail.md", 8)
 }
 
+func (s *KnowledgeFilesSuite) TestAReadWhoseTailCouldNotBeDeletedIsTriedAgain() {
+	_, sent, _ := s.upload("tail.md", []byte(sections(8)), "")
+	s.Require().Equal(KnowledgeDocumentStateIndexed, s.settled(sent.Id).State)
+	s.knowledge.onceBeforeDelete(func() error { return errors.New("down") })
+	_, _, _ = s.upload("tail.md", []byte(sections(3)), "")
+
+	s.settled(sent.Id)
+	s.everyFileRead()
+	s.indexedWith("tail.md", 3)
+}
+
 // A read writes its passages 3 times before its file is read, and billed, again.
 func (s *KnowledgeFilesSuite) TestAFileIsReadAgainOnceItsPassagesWereMetThreeTimes() {
 	for met, reads := range map[int]int{2: 1, 3: 2} {
@@ -1460,12 +1474,20 @@ func (s *KnowledgeFilesSuite) TestAReadCancelledInItsWriteTakesItBackOnceItsDocu
 	defer func() { s.NoError(inspector.Close()) }()
 	s.Require().NoError(inspector.CancelProcessing(document.ObjectKey))
 	s.reached(s.knowledge.writeCancelled(), "the read was never cancelled")
+	deleting, release := make(chan struct{}), make(chan struct{})
+	s.knowledge.onceAfterDelete(func() {
+		s.knowledge.onceBeforeDelete(func() error { close(deleting); <-release; return nil })
+	})
 
 	s.Require().Equal(http.StatusNoContent, s.remove(sent.Id))
 	write()
 
+	// The queue lets go of a cancelled task while its read still takes back what it wrote.
 	s.everyFileRead()
-	s.Zero(s.passagesOf("cancelled.md"))
+	s.reached(deleting, "the read never took back what it wrote")
+	s.Equal(8, s.passagesOf("cancelled.md"))
+	close(release)
+	s.Eventually(func() bool { return s.passagesOf("cancelled.md") == 0 }, 30*time.Second, 10*time.Millisecond)
 	s.Empty(s.listed())
 }
 
