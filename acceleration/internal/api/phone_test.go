@@ -1719,7 +1719,9 @@ func (s *CallStatusSuite) TestADirectoryThatDoesNotAnswerHoldsUpNoSession() {
 	answering := s.router.directory
 	s.router.directory = directory
 	s.T().Cleanup(func() { s.router.directory = answering })
+	began = time.Now()
 	status, payload := s.callInto(s.utils.uuid())
+	s.Less(time.Since(began), 2900*time.Millisecond)
 	s.Equal(http.StatusServiceUnavailable, status, payload)
 	s.Contains(payload, "could not tell whose call")
 }

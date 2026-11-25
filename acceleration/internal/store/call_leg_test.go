@@ -802,6 +802,9 @@ func (s *StoreSuite) TestACallARunningSessionHoldsIsItsCustomers() {
 	failing = nil
 	s.ErrorIs(s.store.CallLegs.Claim(s.ctx, "mine", "agent", "call", on, func(context.Context) error { return errors.New("redis is down") }),
 		ErrCallUnchecked)
+	err := s.store.CallLegs.Claim(s.ctx, "mine", "agent", "call", on, func(context.Context) error { return ErrCallTaken })
+	s.ErrorIs(err, ErrCallTaken)
+	s.NotErrorIs(err, ErrCallUnchecked, "it could be told, and is another's")
 }
 
 // Whoever claims first is let in and the other refused, however long the first takes to keep
