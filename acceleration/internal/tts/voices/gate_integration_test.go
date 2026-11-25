@@ -39,6 +39,8 @@ type GateSuite struct {
 	asked map[string][]string
 	// entries are the prices the test's work is billed at.
 	entries []pricing.Entry
+	// models are the text-to-speech models the router routes to.
+	models []routing.ProviderConfig
 	// enforced says the suite's enforcer refuses, rather than runs in shadow or off.
 	enforced bool
 	bucket   *blob.Bucket
@@ -50,6 +52,16 @@ func TestGateSuite(t *testing.T) { suite.Run(t, new(GateSuite)) }
 
 func (s *GateSuite) SetupTest() {
 	s.entries, s.enforced = prices.Vendor().Entries, true
+	s.models = []routing.ProviderConfig{
+		{Provider: "another", Model: "drama-3",
+			DataPolicy: options.DataHandling{TrainsOnData: options.ClaimYes, Retention: options.RetentionUnspecified}},
+		{Provider: "elevenlabs", Model: "eleven_v4",
+			DataPolicy: options.DataHandling{TrainsOnData: options.ClaimYes, Retention: options.RetentionUnspecified}},
+		{Provider: "elevenlabs", Model: "eleven_flash_v2_5",
+			DataPolicy: options.DataHandling{TrainsOnData: options.ClaimYes, Retention: options.RetentionUnspecified}},
+		{Provider: "fish", Model: "drama-3",
+			DataPolicy: options.DataHandling{TrainsOnData: options.ClaimNo, Retention: options.RetentionNone}},
+	}
 	s.start()
 }
 
@@ -105,16 +117,7 @@ func (s *GateSuite) gatedBy(enforcer *policy.Enforcer) *Service {
 	s.Require().NoError(err)
 	service, err := NewService(Options{
 		Store: s.money.Store, Bucket: s.bucket, Cloners: cloners, Recorder: s.money.Recorder(routing.TTS, list), Gate: enforcer,
-		Models: []routing.ProviderConfig{
-			{Provider: "another", Model: "drama-3",
-				DataPolicy: options.DataHandling{TrainsOnData: options.ClaimYes, Retention: options.RetentionUnspecified}},
-			{Provider: "elevenlabs", Model: "eleven_v4",
-				DataPolicy: options.DataHandling{TrainsOnData: options.ClaimYes, Retention: options.RetentionUnspecified}},
-			{Provider: "elevenlabs", Model: "eleven_flash_v2_5",
-				DataPolicy: options.DataHandling{TrainsOnData: options.ClaimYes, Retention: options.RetentionUnspecified}},
-			{Provider: "fish", Model: "drama-3",
-				DataPolicy: options.DataHandling{TrainsOnData: options.ClaimNo, Retention: options.RetentionNone}},
-		},
+		Models: s.models,
 	})
 	s.Require().NoError(err)
 	return service
@@ -200,15 +203,47 @@ func (s *GateSuite) TestWithNoCreditAVoiceIsClonedForFreeAndNotHeard() {
 	s.Equal(before, s.asks())
 }
 
-func (s *GateSuite) TestACloneThatCostsMoneyNeedsCredit() {
+// pricedClone prices the vendor's clone at a dollar.
+func (s *GateSuite) pricedClone(vendor string) {
 	s.entries = slices.Clone(s.entries)
 	for i, entry := range s.entries {
-		if entry.Provider == "elevenlabs" && entry.Model == "voice_clone" {
+		if entry.Provider == vendor && entry.Model == "voice_clone" {
 			s.entries[i].Free = false
 			s.entries[i].Rates = map[pricing.Meter]pricing.Rate{pricing.Clones: {USD: 1, Per: 1}}
 		}
 	}
 	s.service = s.gatedBy(s.money.Enforcer)
+}
+
+func (s *GateSuite) TestWhenPayingWouldHaveClonedTheVoiceTheRefusalNamesMoney() {
+	s.pricedClone("elevenlabs")
+	s.own(0)
+	s.save(store.PolicyDocument{AllowedModels: &[]string{"elevenlabs/eleven_flash_v2_5"}})
+
+	s.ErrorIs(s.prepare(), policy.ErrNoCredits, "fish, refused after it by the policy, is not the reason")
+	s.Zero(s.asks())
+}
+
+func (s *GateSuite) TestWhenPayingWouldHaveClonedTheVoiceAtALaterVendorTheRefusalNamesMoney() {
+	s.pricedClone("fish")
+	s.own(0)
+	s.save(store.PolicyDocument{AllowedModels: &[]string{"fish/drama-3"}})
+
+	s.ErrorIs(s.prepare(), policy.ErrNoCredits, "elevenlabs, refused before it by the policy, is not the reason")
+	s.Zero(s.asks())
+}
+
+func (s *GateSuite) TestAVendorWithNoRoutedModelIsNamedInTheRefusal() {
+	s.models = slices.DeleteFunc(s.models, func(model routing.ProviderConfig) bool { return model.Provider == "fish" })
+	s.service = s.gatedBy(s.money.Enforcer)
+	s.Require().NoError(s.prepare("fish"), "with no policy it clones")
+	s.save(store.PolicyDocument{AllowedModels: &[]string{"elevenlabs/eleven_v4"}})
+
+	s.ErrorContains(s.prepare("fish"), "it allows none of fish/voice_clone")
+}
+
+func (s *GateSuite) TestACloneThatCostsMoneyNeedsCredit() {
+	s.pricedClone("elevenlabs")
 	s.own(0)
 
 	s.ErrorIs(s.prepare("elevenlabs"), policy.ErrNoCredits)
@@ -267,6 +302,7 @@ func (s *GateSuite) TestAVoiceIsClonedOnlyAtVendorsWhoseModelsAreAllowed() {
 	s.Empty(s.asked["elevenlabs"])
 	s.ErrorIs(s.prepare("fish", "elevenlabs"), routing.ErrModelNotAllowed)
 	s.Len(s.asked["fish"], 1, "a named vendor that is refused refuses them all")
+	s.NotContains(s.prepare("elevenlabs").Error(), "voice_clone", "a vendor with routed models is refused for those")
 	s.NoError(s.speak("fish"))
 }
 

@@ -1867,7 +1867,8 @@ func (s *RouterSuite) voiceService(gate routing.Gate) *voices.Service {
 	cloners := voices.NewRegistry()
 	cloners.Register("elevenlabs", cloner)
 
-	service, err := voices.NewService(voices.Options{Store: s.store, Bucket: bucket, Cloners: cloners, Recorder: s.metering, Gate: gate})
+	service, err := voices.NewService(voices.Options{Store: s.store, Bucket: bucket, Cloners: cloners, Recorder: s.metering, Gate: gate,
+		Models: s.ttsConfig.Providers})
 	s.Require().NoError(err)
 	return service
 }

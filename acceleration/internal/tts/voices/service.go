@@ -183,7 +183,10 @@ func (s *Service) Prepare(ctx context.Context, customerID, voiceID string, provi
 			if named {
 				return err
 			}
-			refused = err
+			// Money is named over a policy: paying would have served the customer here.
+			if refused == nil || errors.Is(err, admission.Spend) {
+				refused = err
+			}
 			continue
 		}
 		kept = append(kept, provider)
@@ -319,7 +322,7 @@ func (s *Service) affordable(admission routing.Admission, config routing.Provide
 
 // clonable refuses a provider the customer's recordings may not be sent to. A clone names no
 // model a policy can, so the provider may have it when the customer may be spoken to by any of
-// its models.
+// its models. One with no routed model is judged, and named in the refusal, as its clone.
 func (s *Service) clonable(admission routing.Admission, provider string) error {
 	var models []routing.ProviderConfig
 	for _, model := range s.models {
@@ -327,10 +330,14 @@ func (s *Service) clonable(admission routing.Admission, provider string) error {
 			models = append(models, model)
 		}
 	}
+	clone := routing.ProviderConfig{Provider: provider, Model: VoiceClone}
+	if len(models) == 0 {
+		models = append(models, clone)
+	}
 	if _, err := admission.Allowed(models); err != nil {
 		return err
 	}
-	return s.affordable(admission, routing.ProviderConfig{Provider: provider, Model: VoiceClone})
+	return s.affordable(admission, clone)
 }
 
 // model is the provider's model as it is routed, or nothing but its name when it is not.

@@ -249,7 +249,8 @@ func (a Admission) Labelled(tags Tags) Tags {
 
 // Allowed narrows models to the ones the admission lets the customer's work go to: those on its
 // Models, and of them those whose handling of data its DataPolicy permits. None left is the
-// refusal a routed request gets.
+// refusal a routed request gets. No models given is that refusal too, unless the admission holds
+// the customer to neither, which returns none and no error.
 func (a Admission) Allowed(models []ProviderConfig) ([]ProviderConfig, error) {
 	candidates := make([]Candidate, len(models))
 	for i, model := range models {
