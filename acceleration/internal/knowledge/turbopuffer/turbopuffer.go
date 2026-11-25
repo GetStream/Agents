@@ -62,6 +62,9 @@ const (
 // throughout: a GB is 10^9 bytes.
 const kilobyte = 1000
 
+// MinimumQueried is the fewest bytes turbopuffer bills a query for: 1.28 GB.
+const MinimumQueried = 1_280_000_000
+
 // listPage is how many namespaces one listing asks for, turbopuffer's most.
 const listPage = 1000
 
@@ -71,7 +74,7 @@ const listPage = 1000
 // meter it leaves out costs nothing.
 type Cost map[pricing.Meter]pricing.Rate
 
-// query is what a query cost under turbopuffer's formula: bytes queried, its 1.28 GB minimum
+// query is what a query cost under turbopuffer's formula: bytes queried, MinimumQueried
 // and large-namespace discounts already in the figure it reports, and bytes returned.
 func (c Cost) query(billing queryBilling) int64 {
 	return c[pricing.BytesQueried].Nanos(billing.BytesQueried) + c[pricing.BytesReturned].Nanos(billing.BytesReturned)
@@ -394,6 +397,9 @@ func (s *Store) Stored(ctx context.Context, namespace string) (knowledge.Billed,
 		CostNanos: s.cost.stored(metadata.ApproxLogicalBytes),
 	}, nil
 }
+
+// MinimumQueried is the fewest bytes a query is billed for.
+func (s *Store) MinimumQueried() int64 { return MinimumQueried }
 
 // Provider is the name this store is recorded under.
 func (s *Store) Provider() string { return "turbopuffer" }
