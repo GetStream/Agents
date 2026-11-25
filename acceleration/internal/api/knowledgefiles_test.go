@@ -1099,7 +1099,7 @@ func (s *KnowledgeFilesSuite) TestADeploymentThatTakesNoFilesIsRefusedInFixedWor
 	var answered ErrorResponse
 	s.Require().NoError(json.Unmarshal(refusal, &answered), string(refusal))
 	s.Equal(codeNotConfigured, answered.Error.Code)
-	s.Equal("this deployment is not set up to take files for knowledge: "+cannotCorrect, answered.Error.Message,
+	s.Equal("this deployment is not set up to take files for knowledge", answered.Error.Message,
 		"nothing of the components the deployment has")
 }
 

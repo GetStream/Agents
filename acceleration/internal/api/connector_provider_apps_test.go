@@ -106,7 +106,7 @@ func (s *ConnectorProviderAppsSuite) TestAPublicURLThatIsNotHTTPSIsRefusedInFixe
 	status, failure := s.serverClient.failure(http.MethodPut, providerAppPath("slack_bot"), s.withToken("Acme"))
 
 	s.Equal(http.StatusBadRequest, status)
-	s.Equal("this deployment is not set up to create provider apps: "+cannotCorrect, failure,
+	s.Equal("this deployment is not set up to create provider apps", failure,
 		"nothing of the public URL, which only the operator sets")
 }
 

@@ -29,7 +29,7 @@ const maxKnowledgeSource = 256
 // second, as an upload from a shop's connection can be.
 const fileReadTimeout = 10 * time.Minute
 
-var errNoKnowledgeFiles = notConfigured("this deployment is not set up to take files for knowledge: " + cannotCorrect)
+var errNoKnowledgeFiles = notConfigured("this deployment is not set up to take files for knowledge")
 
 // errFileTooLarge is a file past files.MaxBytes.
 var errFileTooLarge = errors.New("api: the file is larger than a knowledge upload takes")

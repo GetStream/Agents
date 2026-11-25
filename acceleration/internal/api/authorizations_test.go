@@ -1841,7 +1841,7 @@ func (s *AuthorizationsWithoutAPublicURLSuite) TestAConsentIsRefusedWhenItStarts
 	status, failure := s.serverClient.failure(http.MethodPost, "/v1/agents/connections/"+created.ID+"/authorizations", nil)
 
 	s.Equal(http.StatusBadRequest, status)
-	s.Equal("this deployment is not set up to start consents: "+cannotCorrect, failure,
+	s.Equal("this deployment is not set up to start consents", failure,
 		"nothing of the public URL, which only the operator sets")
 	var attempts int
 	s.Require().NoError(s.store.GlobalDB().QueryRowContext(context.Background(),

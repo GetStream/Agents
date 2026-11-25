@@ -372,7 +372,7 @@ func (c consents) begin(ctx context.Context, connection store.ConnectorConnectio
 	// otherwise be found out only after the user approved it.
 	public := strings.TrimRight(c.publicURL, "/")
 	if public == "" {
-		return Authorization{}, notConfigured("this deployment is not set up to start consents: " + cannotCorrect)
+		return Authorization{}, notConfigured("this deployment is not set up to start consents")
 	}
 	scheme, found := c.registry.Schemes[connection.AuthScheme]
 	if !found {

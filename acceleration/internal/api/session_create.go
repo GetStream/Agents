@@ -107,7 +107,7 @@ var errUnkept = notConfigured("a session that is not incognito cannot be opened 
 
 // errSessionNotConfigured is the answer for session.ErrNotConfigured, whose text names a
 // setting of the deployment: the log has it (logNotConfigured).
-var errSessionNotConfigured = notConfigured("this deployment is not set up for this session: " + cannotCorrect)
+var errSessionNotConfigured = notConfigured("this deployment is not set up for this session")
 
 // unkeptAnswer is the answer for a session refused because the deployment's Stream app is
 // missing or refuses its keys: a setting of the deployment rather than anything in the

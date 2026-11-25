@@ -241,7 +241,7 @@ func (s *Server) setConnectorProviderApp(ctx context.Context, request *providerA
 	}
 	public := strings.TrimRight(s.publicURL, "/")
 	if !providerAppsURL(public) {
-		return nil, notConfigured("this deployment is not set up to create provider apps: " + cannotCorrect)
+		return nil, notConfigured("this deployment is not set up to create provider apps")
 	}
 	manifest, err := s.managedConnector(ctx, customerID, request.ID)
 	if err != nil {
