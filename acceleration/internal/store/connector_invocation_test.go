@@ -216,7 +216,8 @@ func (s *ShardedStoreSuite) TestAnInvocationIsWrittenInThisShardAndNotTheSharedD
 	}
 }
 
-func (s *ShardedStoreSuite) TestInvocationsOfTheSharedDatabaseAndEveryShardAreListedOnceEachAndPaged() {
+// Defect: another shard's invocations are read here, or the shared database's twice or not at all.
+func (s *ShardedStoreSuite) TestInvocationsOfTheSharedDatabaseAndThisShardAreListedOnceEachAndPagedAndNoOtherShards() {
 	connection := s.connection("acme-app", nil)
 	legacy := s.legacyInvocation(connection, time.Second)
 	here := s.invocation(connection, 2*time.Second, "")
@@ -228,7 +229,7 @@ func (s *ShardedStoreSuite) TestInvocationsOfTheSharedDatabaseAndEveryShardAreLi
 
 	all, err := s.store.ConnectorInvocations.Select(s.ctx, "acme-app", InvocationFilter{ConnectionID: connection.ID})
 	s.Require().NoError(err)
-	s.Equal([]string{there.ID, here.ID, legacy.ID}, s.invocationIDs(all), "newest first, each once, whichever database holds it")
+	s.Equal([]string{here.ID, legacy.ID}, s.invocationIDs(all), "newest first, each once, from this shard and the shared database")
 
 	var paged []ConnectorInvocation
 	filter := InvocationFilter{ConnectionID: connection.ID, Limit: 1}

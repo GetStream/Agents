@@ -737,7 +737,7 @@ func (s *Service) recordBought(ctx context.Context, order store.PhoneNumberOrder
 		CustomerID: order.CustomerID, Tags: order.Tags, VendorID: vendorID, PurchasedAt: order.CreatedAt,
 	}
 	month := numberMonth(number, number.PurchasedAt).UsageID
-	billed, err := s.store.RecordedUsage(ctx, []uuid.UUID{month})
+	unbilled, err := s.store.UsageToBill(ctx, []uuid.UUID{month})
 	if err != nil {
 		return err
 	}
@@ -750,7 +750,7 @@ func (s *Service) recordBought(ctx context.Context, order store.PhoneNumberOrder
 	}
 	s.logger.Warn("recorded a number bought whose row was not written", "order", order.ID, "vendor", order.Vendor,
 		"vendor_id", vendorID, "customer", order.CustomerID)
-	if !billed[month] {
+	if unbilled[month] {
 		s.billMonth(number, routing.Owner{
 			CustomerID: number.CustomerID, Attribution: routing.Attribution{APIKey: OriginNumberRental}, Tags: number.Tags,
 		}, number.PurchasedAt)
@@ -997,6 +997,14 @@ func (s *Service) Attach(ctx context.Context, attachment Attachment) (Attached, 
 			held.Vendor, ErrNoSealer))
 	}
 	attachedHere := held.AttachedAt != nil && held.StreamTrunkID != "" && held.StreamAppPK == pin
+	// Refused before anything is made, the app's call hook included, as a number pointed at a
+	// webhook that refuses its calls would look fine and never answer. A number attached
+	// already is not pointed anywhere again, so it is not refused.
+	if hooked, ok := provider.(CallHooked); ok && !attachedHere {
+		if err := hooked.CallHookReady(s.publicURL); err != nil {
+			return Attached{}, err
+		}
+	}
 	if err := s.pointCallHook(ctx, stream, pin); err != nil {
 		if !attachedHere {
 			return Attached{}, err
@@ -1134,7 +1142,7 @@ func (s *Service) finishAttach(ctx context.Context, provider Provider, attachmen
 		ConfigID: held.ConfigID,
 	}
 
-	err := provider.ConfigureInbound(ctx, Inbound{E164: attachment.E164, Bridge: attached.Bridge})
+	err := provider.ConfigureInbound(ctx, Inbound{E164: attachment.E164, Bridge: attached.Bridge, PublicURL: s.publicURL})
 	if err != nil {
 		return stack.Wrap(err)
 	}
@@ -1739,7 +1747,7 @@ func (s *Service) park(
 				"public url to fetch it from, and none is configured", vendor)))
 	}
 
-	token := uuid.NewString()
+	token := s.store.MintToken()
 	bridge := &store.CallBridge{
 		Token:         token,
 		CustomerID:    customerID,
@@ -1888,7 +1896,8 @@ func (s *Service) callOfToken(ctx context.Context, token string) (outcome.Call, 
 	}
 	// The endpoint is public: a token not shaped like the ones made in Place never reaches the
 	// database.
-	if id, err := uuid.Parse(token); err != nil || id.String() != token {
+	_, random := store.SplitToken(token)
+	if id, err := uuid.Parse(random); err != nil || id.String() != random {
 		return outcome.Call{}, stack.Wrap(ErrUnknownStatus)
 	}
 	call, err := s.outcomes.ByToken(ctx, token)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/dlc"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/phone/outcome"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
@@ -612,6 +613,26 @@ func (s *Service) RunLegSweep(ctx context.Context, every time.Duration) {
 		case <-ticker.C:
 			if _, err := s.SweepLegs(ctx); err != nil {
 				s.logger.Error("could not sweep the call legs", "error", err)
+			}
+		}
+	}
+}
+
+// RunOpenLegsHeal writes this shard's count of each organization's calls up, which other shards
+// place calls against (store.OpenLegs), every interval until ctx ends.
+func (s *Service) RunOpenLegsHeal(ctx context.Context, every time.Duration) {
+	if s.store == nil {
+		return
+	}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.store.OpenLegs.Heal(ctx, s.now().Add(-dlc.RingWindow)); err != nil {
+				s.logger.Error("could not write this shard's count of calls up", "error", err)
 			}
 		}
 	}

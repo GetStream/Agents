@@ -130,24 +130,21 @@ type HeldCall struct {
 	ConfigID string `bun:"config_id,scanonly"`
 }
 
-// CallByAgentInApp is the newest call an agent ran, among the calls made in one app.
+// CallByAgentInApp is the newest call an agent ran in this shard, among the calls made in one
+// app.
 func (s *Store) CallByAgentInApp(ctx context.Context, scope AppScope, agentID string) (HeldCall, error) {
 	if agentID == "" {
 		return HeldCall{}, errors.New("store: an agent id is required")
 	}
-	lists, err := everyShard(ctx, s, func(ctx context.Context, db bun.IDB) ([]HeldCall, error) {
-		var calls []HeldCall
-		err := db.NewSelect().Model(&calls).
-			ColumnExpr("c.*").
-			ColumnExpr("COALESCE((SELECT s.config_id FROM agent_sessions AS s WHERE s.customer_id = c.customer_id AND s.id = c.session_id), '') AS config_id").
-			Where("c.agent_id = ?", agentID).
-			ApplyQueryBuilder(scope.where).Order("c.started_at DESC").Limit(20).Scan(ctx)
-		return calls, err
-	})
+	var calls []HeldCall
+	err := s.shard.NewSelect().Model(&calls).
+		ColumnExpr("c.*").
+		ColumnExpr("COALESCE((SELECT s.config_id FROM agent_sessions AS s WHERE s.customer_id = c.customer_id AND s.id = c.session_id), '') AS config_id").
+		Where("c.agent_id = ?", agentID).
+		ApplyQueryBuilder(scope.where).Order("c.started_at DESC").Limit(20).Scan(ctx)
 	if err != nil {
 		return HeldCall{}, fmt.Errorf("store: call by agent: %w", err)
 	}
-	calls := merged(lists, func(a, b HeldCall) int { return b.StartedAt.Compare(a.StartedAt) }, 20)
 	switch customers(calls, func(c HeldCall) string { return c.CustomerID }) {
 	case 0:
 		return HeldCall{}, unknownCall(agentID)

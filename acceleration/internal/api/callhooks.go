@@ -117,6 +117,11 @@ func (s *Server) receiveCallEvent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, invalidRequest("could not read that call event"))
 			return
 		}
+		// A call this router placed, or one already answered, is the shard's that holds its
+		// legs and lines.
+		if s.handedHome(w, r, origin, event, payload) {
+			return
+		}
 		if !s.dispatchArrivingCall(w, r, origin, event, payload) {
 			return
 		}
@@ -125,6 +130,9 @@ func (s *Server) receiveCallEvent(w http.ResponseWriter, r *http.Request) {
 		var event callEvent
 		if err := json.Unmarshal(payload, &event); err != nil {
 			writeError(w, invalidRequest("could not read that call event"))
+			return
+		}
+		if s.handedHome(w, r, origin, event, payload) {
 			return
 		}
 		// Asked before the release, which deletes what marks a placed call.
@@ -139,6 +147,9 @@ func (s *Server) receiveCallEvent(w http.ResponseWriter, r *http.Request) {
 		var event callEvent
 		if err := json.Unmarshal(payload, &event); err != nil {
 			writeError(w, invalidRequest("could not read that call event"))
+			return
+		}
+		if s.handedHome(w, r, origin, event, payload) {
 			return
 		}
 		if !s.phoneJoinedOrLeft(r, origin, eventType, event) {
@@ -177,10 +188,10 @@ func (s *Server) dispatchArrivingCall(w http.ResponseWriter, r *http.Request, or
 	// number's routing rule, which names the number too, so it would look like a call to dial.
 	placed, err := s.store.CallResources.Select(r.Context(), origin.scope(), callType, callID)
 	if err != nil {
-		// A shard that did not answer may have placed it, and dispatching it would put a second
-		// agent on it. While the caller may still be ringing, Stream is told to deliver it again,
-		// and nothing has been acted on yet. Past that, a delivery that lands once the shard is
-		// back would send a worker to a call its caller has left, so it is dropped as before.
+		// The router may have placed it, and dispatching it would put a second agent on it.
+		// While the caller may still be ringing, Stream is told to deliver it again, and nothing
+		// has been acted on yet. Past that, a delivery that lands once the shard is back would
+		// send a worker to a call its caller has left, so it is dropped as before.
 		if at := eventTime(event.CreatedAt); !at.IsZero() && time.Since(at) <= arrivingCallRetryFor {
 			s.logger.Warn("could not tell whether the router placed a call, asking for it again", "cid", event.CallCid, "error", err)
 			writeError(w, unavailable("could not tell whose call this is"))

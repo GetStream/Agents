@@ -222,6 +222,28 @@ func (s *ServerSuite) TestRollupThenStatsReportsTheCustomersUsage() {
 	s.InDelta(2.0/3.0, *bucket.Uptime, 0.001)
 }
 
+// Defect: a router of shards reads the stats from every shard, so one shard being down fails
+// every app's stats page; or it reads only its own shard's shipped buckets.
+func (s *ServerSuite) TestStatsOfShardsAreWhatEveryShardShippedWithAShardDown() {
+	s.recordTurn(s.base.Add(5*time.Minute), 3000, 100, true)
+	client, served := s.onAShardDown()
+	s.Require().NoError(served.ShipStats(context.Background(), s.base.Add(10*time.Minute)))
+	_, err := served.GlobalDB().ExecContext(context.Background(), `
+INSERT INTO shard_stats_hourly (shard, modality, customer_id, provider, model, bucket, audio_ms_total,
+    characters_total, input_tokens_total, cached_input_tokens_total, output_tokens_total, images_total,
+    cost_micros_total, request_count, error_count)
+VALUES ('there', 'stt', ?, 'stub', 'stub-model', ?, 2000, 0, 0, 0, 0, 0, 0, 1, 0)`, s.customerID(), s.base)
+	s.Require().NoError(err)
+
+	var buckets []StatsBucket
+	s.Require().Equal(http.StatusOK, client.do(http.MethodGet,
+		fmt.Sprintf("/v1/stt/stats?granularity=hourly&from=%s&to=%s", s.from(), s.to(time.Hour)), nil, &buckets))
+
+	s.Require().Len(buckets, 1)
+	s.EqualValues(5000, buckets[0].AudioMsTotal)
+	s.EqualValues(2, buckets[0].RequestCount)
+}
+
 func (s *ServerSuite) TestStatsAreReportedPerModality() {
 	s.recordTurn(s.base.Add(5*time.Minute), 3000, 100, true)
 	s.recordSynthesis(s.base.Add(6*time.Minute), 128, 6400)

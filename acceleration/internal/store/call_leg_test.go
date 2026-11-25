@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 )
 
@@ -325,7 +326,7 @@ func (s *StoreSuite) TestSelectPlacedReadsTheNewestPerCall() {
 	s.Require().NoError(err)
 
 	var legs []CallLeg
-	s.Equal(len(s.store.shards()), s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		legs, err = s.store.CallLegs.SelectPlaced(s.ctx, "app", []string{"call", "other", "unknown"})
 		s.Require().NoError(err)
 	}), "one query a shard, however many calls")
@@ -357,7 +358,7 @@ func (s *StoreSuite) TestAPlacedLegNeedsItsTokenAndPlacing() {
 	s.Empty(legs)
 }
 
-func (s *ShardedStoreSuite) TestALegAnotherShardPlacedIsChangedThere() {
+func (s *ShardedStoreSuite) TestALegAnotherShardPlacedIsNotChangedHere() {
 	placed := s.base
 	leg := CallLeg{Token: "there", CustomerID: "app", CallType: "default", CallID: "call", Vendor: "telnyx",
 		Direction: Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199", PlacedAt: &placed}
@@ -367,15 +368,69 @@ func (s *ShardedStoreSuite) TestALegAnotherShardPlacedIsChangedThere() {
 		leg.Outcome = "busy"
 		return true
 	})
-	s.Require().NoError(err)
+	s.Require().ErrorIs(err, ErrNoPlacedCall)
 
 	found, err := s.other.CallLegs.GetByToken(s.ctx, "there")
 	s.Require().NoError(err)
-	s.Equal("busy", found.Outcome)
+	s.Empty(found.Outcome)
+	_, err = s.store.CallLegs.GetByToken(s.ctx, "there")
+	s.ErrorIs(err, ErrNoPlacedCall)
+}
+
+func (s *ShardedStoreSuite) TestACallLivesInTheShardThatPlacedIt() {
+	placed := s.base
+	leg := CallLeg{Token: newID(), CustomerID: "app", CallType: "default", CallID: "call-" + newID(), Vendor: "telnyx",
+		Direction: Outbound, LocalNumber: "+15125550100", RemoteNumber: "+15125550199", PlacedAt: &placed}
+	s.Require().NoError(s.other.CallLegs.Place(s.ctx, &leg))
+
+	home, err := s.store.CallHomes.Elsewhere(s.ctx, AppScope{Unpinned: true}, "default", leg.CallID)
+	s.Require().NoError(err)
+	s.Equal("there", home)
+	home, err = s.other.CallHomes.Elsewhere(s.ctx, AppScope{Unpinned: true}, "default", leg.CallID)
+	s.Require().NoError(err)
+	s.Empty(home, "the shard that placed it is its home")
+	home, err = s.store.CallHomes.Elsewhere(s.ctx, AppScope{App: 9}, "default", leg.CallID)
+	s.Require().NoError(err)
+	s.Empty(home, "a call of that id in another app is another call")
+}
+
+func (s *ShardedStoreSuite) TestATokenNamesTheShardThatMintedIt() {
+	shard, id := SplitToken(s.other.MintToken())
+	s.Equal("there", shard)
+	s.NotContains(id, ".")
+	shard, id = SplitToken("1f0e8c52-6a4e-4b8e-9d55-0d7c3e0a2f61")
+	s.Empty(shard, "a token from before tokens named their shard")
+	s.Equal("1f0e8c52-6a4e-4b8e-9d55-0d7c3e0a2f61", id)
+}
+
+func (s *ShardedStoreSuite) TestABridgeAnotherShardParkedIsNotClaimedHere() {
+	token := s.other.MintToken()
+	s.Require().NoError(s.other.CallBridges.Insert(s.ctx, &CallBridge{Token: token, CustomerID: "acme", Vendor: "plivo",
+		TrunkURI: "sip:x@example.com", CallID: "call", ExpiresAt: time.Now().Add(time.Hour)}))
+
+	_, err := s.store.CallBridges.Claim(s.ctx, token)
+	s.Require().Error(err)
+	claimed, err := s.other.CallBridges.Claim(s.ctx, token)
+	s.Require().NoError(err)
+	s.Equal("sip:x@example.com", claimed.TrunkURI)
+}
+
+func (s *ShardedStoreSuite) TestUsageAnyShardCouldBillIsBilledByTheFirstToClaimIt() {
+	month := uuid.New()
+
+	there, err := s.other.UsageToBill(s.ctx, []uuid.UUID{month})
+	s.Require().NoError(err)
+	here, err := s.store.UsageToBill(s.ctx, []uuid.UUID{month})
+	s.Require().NoError(err)
+
+	s.True(there[month])
+	s.False(here[month], "billed twice, once in each shard")
+	again, err := s.other.UsageToBill(s.ctx, []uuid.UUID{month})
+	s.Require().NoError(err)
+	s.True(again[month], "a claim whose row was never written is billed again by the shard that holds it")
 }
 
 func (s *StoreSuite) TestCallLegQueryBudgets() {
-	shards := len(s.store.shards())
 	scope := AppScope{App: 7}
 	open := func(callID, remote string, direction string) CallLeg {
 		leg := CallLeg{CustomerID: "acme", OrganizationID: "org", StreamAppPK: 7, CallType: "default", CallID: callID,
@@ -385,43 +440,44 @@ func (s *StoreSuite) TestCallLegQueryBudgets() {
 		s.Require().True(opened)
 		return leg
 	}
-	// Opening looks for the phone's join kept before it, by its remote number, then, outbound,
-	// by the number it was placed from: one statement for each, in each shard, each its own transaction.
-	s.Equal(1+2*shards*3, s.countQueries(func() { open("call-1", "+15125550101", Outbound) }), "Open of an outbound leg")
-	s.Equal(1+shards*3, s.countQueries(func() { open("call-1", "+15125550102", Inbound) }), "Open of an inbound leg")
+	// Opening records the call's home, then looks for the phone's join kept before it, by its
+	// remote number, then, outbound, by the number it was placed from: one statement for each,
+	// each its own transaction.
+	s.Equal(1+s.homeWrites()+2*3, s.countQueries(func() { open("call-1", "+15125550101", Outbound) }), "Open of an outbound leg")
+	s.Equal(1+s.homeWrites()+3, s.countQueries(func() { open("call-1", "+15125550102", Inbound) }), "Open of an inbound leg")
 	open("call-1", "+15125550103", Outbound)
 
-	s.Equal(shards, s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		ringing, err := s.store.CallLegs.Ringing(s.ctx, scope, "default", "call-1")
 		s.Require().NoError(err)
 		s.True(ringing)
 	}), "Ringing")
-	s.Equal(shards+1, s.countQueries(func() {
+	s.Equal(2, s.countQueries(func() {
 		_, connection, err := s.store.CallLegs.Connect(s.ctx, scope, "default", "call-1", "session", "phone-1", "+15125550101", s.base, nil)
 		s.Require().NoError(err)
 		s.Equal(LegConnected, connection)
-	}), "Connect asks every shard whether the phone has a leg, then gives it the leg of its number")
-	s.Equal(shards, s.countQueries(func() {
+	}), "Connect asks whether the phone has a leg, then gives it the leg of its number")
+	s.Equal(1, s.countQueries(func() {
 		known, err := s.store.CallLegs.HasParticipant(s.ctx, scope, "default", "call-1", "phone-1")
 		s.Require().NoError(err)
 		s.True(known)
 	}), "HasParticipant")
-	s.Equal(shards, s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		total, inCall, err := s.store.CallLegs.CountOpen(s.ctx, "org", s.base.Add(-time.Minute), "default", "call-1")
 		s.Require().NoError(err)
 		s.Equal(3, total)
 		s.Equal(3, inCall)
 	}), "CountOpen")
-	s.Equal(shards, s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		ended, err := s.store.CallLegs.EndParticipant(s.ctx, scope, "default", "call-1", "phone-1", s.base.Add(time.Minute))
 		s.Require().NoError(err)
 		s.Len(ended, 1)
 	}), "EndParticipant")
-	s.Equal(shards, s.countQueries(func() {
+	s.Equal(1, s.countQueries(func() {
 		ended, err := s.store.CallLegs.EndCall(s.ctx, scope, "default", "call-1", s.base.Add(time.Minute))
 		s.Require().NoError(err)
 		s.Len(ended, 2)
-	}), "EndCall ends every open leg of the call in one statement a shard")
+	}), "EndCall ends every open leg of the call in one statement")
 	s.Equal(1, s.countQueries(func() {
 		ended, err := s.store.CallLegs.SelectEnded(s.ctx, s.base, s.base.Add(time.Hour), 10)
 		s.Require().NoError(err)
@@ -434,16 +490,16 @@ func (s *StoreSuite) TestCallLegQueryBudgets() {
 		s.Require().NoError(err)
 		open(fmt.Sprintf("rang-%d", i), "+15125550105", Outbound)
 	}
-	s.Equal(2, s.countQueries(func() {
+	s.Equal(s.homeWrites()+2, s.countQueries(func() {
 		swept, err := s.store.CallLegs.Sweep(s.ctx, s.base.Add(time.Hour), 30*time.Minute, 10)
 		s.Require().NoError(err)
 		s.Len(swept, 6)
-	}), "Sweep ends the long calls, then the ones that rang out")
+	}), "Sweep forgets the homes of old calls, ends the long calls, then the ones that rang out")
 
 	leg := s.placedLeg("token", func(leg *CallLeg) { leg.VendorCallID = "v-1" })
-	s.Equal(1, s.countQueries(func() { s.placedLeg("other", nil) }), "Place")
-	// The transaction, its lock, the count in each shard, the insert and the commit.
-	s.Equal(4+shards, s.countQueries(func() { s.Require().NoError(s.placeWithin(s.store, newID(), 1)) }), "PlaceWithin")
+	s.Equal(1+s.homeWrites(), s.countQueries(func() { s.placedLeg("other", nil) }), "Place")
+	// The transaction, its lock, the count, the insert and the commit, then the call's home.
+	s.Equal(5+s.homeWrites(), s.countQueries(func() { s.Require().NoError(s.placeWithin(s.store, newID(), 1)) }), "PlaceWithin")
 	s.Equal(1, s.countQueries(func() {
 		placed, err := s.store.CallLegs.Placed(s.ctx, leg.CustomerID, leg.Vendor, "v-1")
 		s.Require().NoError(err)
@@ -456,7 +512,7 @@ func (s *StoreSuite) TestCallLegQueryBudgets() {
 		})
 		s.Require().NoError(err)
 	}), "ChangeOutcome locks the leg in its shard, then writes it")
-	s.Equal(shards, s.countQueries(func() { s.Require().NoError(s.store.CallLegs.Unplace(s.ctx, "other")) }), "Unplace")
+	s.Equal(1, s.countQueries(func() { s.Require().NoError(s.store.CallLegs.Unplace(s.ctx, "other")) }), "Unplace")
 }
 
 func (s *StoreSuite) TestAPlacedLegNotDialedYetIsACallUp() {
@@ -519,12 +575,58 @@ func (s *StoreSuite) TestCallsPlacedAllAtOnceKeepToTheLimit() {
 }
 
 func (s *ShardedStoreSuite) TestALegAnotherShardPlacedCountsAgainstTheLimitHere() {
+	s.requireRedis()
 	organization := newID()
 	s.Require().NoError(s.placeWithin(s.other, organization, 2))
 	s.Require().NoError(s.placeWithin(s.store, organization, 2))
 
 	s.Require().ErrorIs(s.placeWithin(s.store, organization, 2), ErrCallsAtOnce)
 	s.Require().ErrorIs(s.placeWithin(s.other, organization, 2), ErrCallsAtOnce)
+	total, _, err := s.store.CallLegs.CountOpen(s.ctx, organization, s.base.Add(-time.Minute), "", "")
+	s.Require().NoError(err)
+	s.Equal(2, total, "the legs of both shards are up")
+}
+
+func (s *ShardedStoreSuite) TestTwoShardsPlacingAtOnceKeepToTheLimit() {
+	s.requireRedis()
+	organization := newID()
+	var placed atomic.Int64
+	var wg sync.WaitGroup
+	for _, router := range []*Store{s.store, s.other} {
+		for range 6 {
+			wg.Go(func() {
+				err := s.placeWithin(router, organization, 3)
+				if err == nil {
+					placed.Add(1)
+					return
+				}
+				s.ErrorIs(err, ErrCallsAtOnce)
+			})
+		}
+	}
+	wg.Wait()
+
+	s.EqualValues(3, placed.Load())
+}
+
+func (s *ShardedStoreSuite) TestALegAnotherShardEndedNoLongerCountsOnceItHeals() {
+	s.requireRedis()
+	organization := newID()
+	s.Require().NoError(s.placeWithin(s.other, organization, 1))
+	s.Require().ErrorIs(s.placeWithin(s.store, organization, 1), ErrCallsAtOnce)
+	_, err := s.other.ShardDB().NewDelete().Model((*CallLeg)(nil)).Where("organization_id = ?", organization).Exec(s.ctx)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.other.OpenLegs.Heal(s.ctx, s.base.Add(-time.Minute)))
+
+	s.NoError(s.placeWithin(s.store, organization, 1), "the other shard's ended leg still held the organization's call")
+}
+
+// requireRedis skips a test of what shards tell each other in Redis when the suite has none.
+func (s *StoreSuite) requireRedis() {
+	if s.store.cache == nil {
+		s.T().Skipf("%s not set", redisAddressVar)
+	}
 }
 
 func (s *StoreSuite) TestManyRoutersPlacingAtOnceKeepToTheLimit() {
@@ -558,7 +660,7 @@ func (s *StoreSuite) TestManyRoutersPlacingAtOnceKeepToTheLimit() {
 // holdPlacing holds, from a connection of its own, the lock each organization's calls are placed
 // under, until the release it returns is called.
 func (s *StoreSuite) holdPlacing(organizations ...string) (release func()) {
-	held, err := s.store.GlobalDB().BeginTx(s.ctx, nil)
+	held, err := s.store.ShardDB().BeginTx(s.ctx, nil)
 	s.Require().NoError(err)
 	for _, organization := range organizations {
 		s.Require().NoError(lockUntilCommit(s.ctx, held, organization, callsAtOnceLockSeed))
@@ -574,8 +676,8 @@ func (s *StoreSuite) holdPlacing(organizations ...string) (release func()) {
 	return release
 }
 
-// placingInUse is how many connections of router's shared pool are in use.
-func placingInUse(router *Store) int { return router.global.Stats().InUse }
+// placingInUse is how many connections of router's shard pool are in use.
+func placingInUse(router *Store) int { return router.shard.Stats().InUse }
 
 func (s *StoreSuite) TestAPlacementWaitsForItsOrganizationsLock() {
 	organization := newID()
@@ -637,7 +739,7 @@ func (s *StoreSuite) TestARouterHoldsAtMostItsPlacementsAtOnce() {
 	s.Require().Eventually(func() bool { return placingInUse(router) == placingAtOnce }, 2*time.Second, 10*time.Millisecond,
 		"as many placements as a router holds started, each waiting for its organization's lock")
 	s.Never(func() bool { return placingInUse(router) > placingAtOnce }, 300*time.Millisecond, 10*time.Millisecond,
-		"the shared pool keeps room for every other request")
+		"the shard pool keeps room for every other request")
 	release()
 	wg.Wait()
 }
@@ -692,7 +794,7 @@ func (s *StoreSuite) TestADialNamingNoOrganizationKeepsTheOneTheCallWasPlacedUnd
 
 // ownerOf is the customer the call is, read as Claim reads it.
 func (s *StoreSuite) ownerOf(scope AppScope, callID string) string {
-	owner, err := callOwner(s.ctx, s.store.shards(), scope, "agent", callID)
+	owner, err := s.store.CallLegs.owner(s.ctx, scope, "agent", callID)
 	s.Require().NoError(err)
 	return owner
 }
@@ -771,7 +873,7 @@ func (s *StoreSuite) TestACallIsTheCustomersWhoseLegWasDialledOnItFirst() {
 	s.Equal("first", s.ownerOf(AppScope{Unpinned: true}, "call"))
 	s.Equal("a", s.ownerOf(AppScope{Unpinned: true}, "tied"))
 	s.Empty(s.ownerOf(AppScope{Unpinned: true}, "another call"))
-	other, err := callOwner(s.ctx, s.store.shards(), AppScope{Unpinned: true}, "default", "call")
+	other, err := s.store.CallLegs.owner(s.ctx, AppScope{Unpinned: true}, "default", "call")
 	s.Require().NoError(err)
 	s.Empty(other, "a call of another type")
 }
@@ -884,26 +986,74 @@ func (s *ShardedStoreSuite) TestACallIsClaimedAcrossShards() {
 	s.True(errors.Is(errs[0], ErrCallTaken) != errors.Is(errs[1], ErrCallTaken), "%v", errs)
 }
 
-// Of legs two shards hold, the first dialled is the call's owner, and of two dialled at once the
-// first by id, whichever shard asks.
-func (s *ShardedStoreSuite) TestACallsOwnerIsTheSameOnEveryShard() {
-	open := func(store *Store, customer, call string, at time.Time) {
-		leg := CallLeg{CustomerID: customer, CallType: "agent", CallID: call, Vendor: "telnyx", VendorCallID: customer, Direction: Outbound,
-			LocalNumber: "+15125550150", RemoteNumber: "+15125550151", DialedAt: at}
-		_, err := store.CallLegs.Open(s.ctx, &leg)
+// claimsHere says a customer's session is on a call from a router of this shard, or how that is
+// refused.
+func (s *ShardedStoreSuite) claimsHere(customer, call string, scope AppScope) error {
+	return s.store.CallLegs.Claim(s.ctx, customer, "agent", call, NamedCall{Scope: scope}, func(context.Context) error { return nil })
+}
+
+// A call that lives in another shard is its customer's there: one who placed it, and one whose
+// caller arrived, in the app it is in, the deployment's own pinned to its id or to none.
+func (s *ShardedStoreSuite) TestACallThatLivesInAnotherShardIsItsCustomersThere() {
+	opened := func(call string, app int64) {
+		leg := CallLeg{CustomerID: "theirs", StreamAppPK: app, CallType: "agent", CallID: call, StreamSessionID: "session", Vendor: "telnyx",
+			Direction: Inbound, LocalNumber: "+15125550150", RemoteNumber: "+15125550151", DialedAt: s.base}
+		_, err := s.other.CallLegs.Open(s.ctx, &leg)
 		s.Require().NoError(err)
 	}
-	open(s.store, "a-later", "call", s.base.Add(time.Second))
-	open(s.other, "first", "call", s.base)
-	open(s.store, "b", "tied", s.base)
-	open(s.other, "a", "tied", s.base)
-	for _, store := range []*Store{s.store, s.other} {
-		for call, want := range map[string]string{"call": "first", "tied": "a"} {
-			owner, err := callOwner(s.ctx, store.shards(), AppScope{Unpinned: true}, "agent", call)
-			s.Require().NoError(err)
-			s.Equal(want, owner)
-		}
+	opened("arrived", 0)
+	opened("pinned", 1)
+	opened("own app", 7)
+	placed := time.Now()
+	s.Require().NoError(s.other.CallLegs.Place(s.ctx, &CallLeg{Token: newID(), CustomerID: "theirs", CallType: "agent", CallID: "placed",
+		Vendor: "telnyx", Direction: Outbound, LocalNumber: "+15125550150", RemoteNumber: "+15125550151", PlacedAt: &placed}))
+
+	for _, call := range []string{"arrived", "pinned", "placed"} {
+		s.ErrorIs(s.claimsHere("mine", call, AppOf(0, 1)), ErrCallTaken, call)
+		s.ErrorIs(s.claimsHere("mine", call, AppOf(1, 1)), ErrCallTaken, call)
+		s.NoError(s.claimsHere("theirs", call, AppOf(0, 1)), call)
+		s.NoError(s.claimsHere("mine", call, AppOf(7, 1)), call)
 	}
+	s.ErrorIs(s.claimsHere("mine", "own app", AppOf(7, 1)), ErrCallTaken)
+	s.NoError(s.claimsHere("mine", "own app", AppOf(0, 1)))
+	s.NoError(s.claimsHere("mine", "another call", AppOf(0, 1)))
+	s.NoError(s.store.CallLegs.Claim(s.ctx, "mine", "default", "arrived", NamedCall{Scope: AppOf(0, 1)}, func(context.Context) error { return nil }),
+		"a call of another type")
+}
+
+// A call's home in this shard says nothing its legs here do not: one nobody answered is anybody's.
+func (s *ShardedStoreSuite) TestACallNobodyAnsweredInThisShardIsAnybodys() {
+	s.onCall("theirs", "call", 0, s.base)
+	_, err := s.store.CallLegs.EndCall(s.ctx, AppScope{Unpinned: true}, "agent", "call", s.base.Add(time.Minute))
+	s.Require().NoError(err)
+
+	s.NoError(s.claimsHere("mine", "call", AppOf(0, 1)))
+}
+
+// A call in another shard is its customer's until its home is swept.
+func (s *ShardedStoreSuite) TestACallInAnotherShardIsItsCustomersUntilItsHomeIsSwept() {
+	leg := CallLeg{CustomerID: "theirs", CallType: "agent", CallID: "call", Vendor: "telnyx", VendorCallID: "v", Direction: Outbound,
+		LocalNumber: "+15125550150", RemoteNumber: "+15125550151", DialedAt: s.base}
+	_, err := s.other.CallLegs.Open(s.ctx, &leg)
+	s.Require().NoError(err)
+	_, err = s.other.CallLegs.Sweep(s.ctx, time.Now().Add(7*time.Hour), 4*time.Hour, 10)
+	s.Require().NoError(err)
+	s.ErrorIs(s.claimsHere("mine", "call", AppOf(0, 1)), ErrCallTaken)
+
+	_, err = s.other.CallLegs.Sweep(s.ctx, time.Now().Add(9*time.Hour), 4*time.Hour, 10)
+	s.Require().NoError(err)
+	s.NoError(s.claimsHere("mine", "call", AppOf(0, 1)))
+}
+
+// Legs of the customer's own here settle whose the call is without its homes.
+func (s *ShardedStoreSuite) TestACustomersOwnLegsHereAreEnoughToCallIntoThem() {
+	s.onCall("mine", "call", 0, s.base)
+	leg := CallLeg{CustomerID: "theirs", CallType: "agent", CallID: "call", Vendor: "telnyx", VendorCallID: "v", Direction: Outbound,
+		LocalNumber: "+15125550150", RemoteNumber: "+15125550151", DialedAt: s.base}
+	_, err := s.other.CallLegs.Open(s.ctx, &leg)
+	s.Require().NoError(err)
+
+	s.NoError(s.claimsHere("mine", "call", AppOf(0, 1)))
 }
 
 // A call is locked while it is claimed, in the deployment's app whether a claim knows its id or
