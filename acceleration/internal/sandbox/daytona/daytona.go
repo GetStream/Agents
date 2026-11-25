@@ -188,9 +188,11 @@ type Sandbox struct {
 	meter     Meter
 	slots     sandbox.Slots
 	logger    *slog.Logger
-	// admit and admitEvery are Options.Admit and Options.AdmitEvery.
+	// admit and admitEvery are Options.Admit and Options.AdmitEvery. refused is a refusal that
+	// came while work ran, which stops the sandbox once the work is done; held under the gate.
 	admit      func(ctx context.Context, running bool) error
 	admitEvery time.Duration
+	refused    error
 	// slot gives back the slot the sandbox holds while it runs, nil while it holds none. It is
 	// held under the gate.
 	slot func()
@@ -256,8 +258,15 @@ func New(o Options) (*Sandbox, error) {
 }
 func Configured() bool { return os.Getenv(apiKeyEnvVar) != "" }
 
-// done ends a piece of work in the sandbox, from which it idles, and lets the next one in.
-func (s *Sandbox) done() {
+// done ends a piece of work in the sandbox, from which it idles, and lets the next one in. A
+// refusal that came while the work ran stops the sandbox now, once the work has read what it
+// needed from it, such as a run's files. One whose session closed is deleted once the gate is
+// let go, which a stop would put off: a delete that then fails is tried again only once it idles.
+func (s *Sandbox) done(ctx context.Context) {
+	if s.refused != nil && !s.closed.Load() {
+		s.halt(ctx, s.refused)
+	}
+	s.refused = nil
 	s.used = time.Now()
 	s.arm()
 	<-s.gate
@@ -267,7 +276,7 @@ func (s *Sandbox) done() {
 func (s *Sandbox) Ready(ctx context.Context) (int, error) {
 	select {
 	case s.gate <- struct{}{}:
-		defer s.done()
+		defer s.done(ctx)
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
@@ -281,7 +290,7 @@ func (s *Sandbox) Run(ctx context.Context, code string, outputs []string) (sandb
 	}
 	select {
 	case s.gate <- struct{}{}:
-		defer s.done()
+		defer s.done(ctx)
 	case <-ctx.Done():
 		return sandbox.Result{}, ctx.Err()
 	}
@@ -401,7 +410,7 @@ func distinct(paths []string) []string {
 func (s *Sandbox) Write(ctx context.Context, name string, data []byte) error {
 	select {
 	case s.gate <- struct{}{}:
-		defer s.done()
+		defer s.done(ctx)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -443,9 +452,10 @@ func (s *Sandbox) use(ctx context.Context, call func(context.Context) error) err
 
 // watched is call made in the running sandbox with its owner admitted every admitEvery
 // meanwhile: the lifecycle timer waits for the gate, which a run holds for up to its timeout. A
-// refusal ends call, stops the sandbox and is what is returned, rather than the cut call's
-// error. The watch only asks Admit and cuts call; the stop is made once call has ended, under
-// the gate the caller holds.
+// refusal ends call and is what is returned, rather than the cut call's error, unless call had
+// finished already: its code ran, so its result stands. Either way the sandbox is stopped once
+// the work is done (done), under the gate the caller holds. The watch only asks Admit and cuts
+// call.
 func (s *Sandbox) watched(call func(context.Context) error) func(context.Context) error {
 	if s.admit == nil {
 		return call
@@ -474,15 +484,14 @@ func (s *Sandbox) watched(call func(context.Context) error) func(context.Context
 		err := call(ctx)
 		close(over)
 		<-done
-		if refusal != nil {
-			// One whose session closed is deleted once call lets the gate go, which a stop would
-			// put off: a delete that then fails is tried again only once it idles.
-			if !s.closed.Load() {
-				s.halt(ctx, refusal)
-			}
-			return refusal
+		if refusal == nil {
+			return err
 		}
-		return err
+		s.refused = refusal
+		if err == nil {
+			return nil
+		}
+		return refusal
 	}
 }
 
@@ -493,17 +502,25 @@ func (s *Sandbox) vanished(ctx context.Context, err error) bool {
 		return false
 	}
 	id := s.box.ID
-	read, end := context.WithTimeout(ctx, s.state)
-	defer end()
-	readErr := s.box.RefreshData(read)
-	deleted := errors.Is(readErr, sdkerrors.ErrNotFound) ||
-		readErr == nil && (s.box.State == "destroyed" || s.box.State == "destroying")
-	if !deleted {
+	if deleted, _ := s.deleted(ctx); !deleted {
 		return false
 	}
 	s.logger.Warn("a sandbox in use was deleted by someone else; making another", "sandbox", id, "error", err)
 	s.lost()
 	return true
+}
+
+// deleted reads the sandbox's state, and reports whether Daytona has deleted it: it does not
+// find it, or finds it destroyed. The error is the read's, when it failed for another reason.
+// The caller holds the gate.
+func (s *Sandbox) deleted(ctx context.Context) (bool, error) {
+	read, end := context.WithTimeout(ctx, s.state)
+	defer end()
+	err := s.box.RefreshData(read)
+	if errors.Is(err, sdkerrors.ErrNotFound) {
+		return true, nil
+	}
+	return err == nil && (s.box.State == "destroyed" || s.box.State == "destroying"), err
 }
 
 // started creates the sandbox the first time it is needed, starts it again once Daytona has
@@ -659,16 +676,30 @@ func (s *Sandbox) admitted(ctx context.Context) error {
 
 // halt stops a running sandbox its owner may not pay for, as Daytona stops one for idling: its
 // disk alone bills from now, and the next work Admit lets through starts it again. One Daytona
-// would not stop is stopped at the next admission. The caller holds the gate.
+// would not stop is stopped at the next admission, and one someone else deleted is forgotten,
+// its meter stopped. The caller holds the gate.
 func (s *Sandbox) halt(ctx context.Context, refusal error) {
-	stop, end := context.WithTimeout(context.WithoutCancel(ctx), s.check)
+	ctx = context.WithoutCancel(ctx)
+	stop, end := context.WithTimeout(ctx, s.check)
 	defer end()
+	id := s.box.ID
 	if err := s.box.Stop(stop); err != nil {
-		s.logger.Warn("could not stop a sandbox its owner may not pay for; it is stopped at its next admission",
-			"sandbox", s.box.ID, "refusal", refusal, "error", err)
-		return
+		// The stop's answer may be lost, or its wait for the stop run out, after Daytona stopped
+		// it; and a sandbox someone else deleted cannot be stopped. Its state says which.
+		deleted, readErr := s.deleted(ctx)
+		switch state := s.box.State; {
+		case deleted:
+			s.logger.Warn("a sandbox its owner may not pay for was deleted by someone else", "sandbox", id, "refusal", refusal)
+			s.lost()
+			return
+		case readErr == nil && (state == "stopping" || state == "stopped" || state == "archiving" || state == "archived"):
+		default:
+			s.logger.Warn("could not stop a sandbox its owner may not pay for; it is stopped at its next admission",
+				"sandbox", id, "refusal", refusal, "error", err)
+			return
+		}
 	}
-	s.logger.Info("stopped a sandbox its owner may not pay for", "sandbox", s.box.ID, "refusal", refusal)
+	s.logger.Info("stopped a sandbox its owner may not pay for", "sandbox", id, "refusal", refusal)
 	// As at an idle stop, the slot is given back before the stop is reported.
 	s.stoppedAt, s.confirmed = time.Now(), true
 	s.letGo()

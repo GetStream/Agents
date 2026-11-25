@@ -3,8 +3,10 @@
 package daytona
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -28,7 +30,9 @@ var unpaid = errors.New("the organization has no credit left")
 // set, until let is closed or its request gives up, as code that runs a while does. The
 // in-process Daytona answers one request at a time, so a run held there would hold the stop too.
 type stallingRuns struct {
-	stall   atomic.Bool
+	stall atomic.Bool
+	// in, when set, is the one sandbox whose runs are held.
+	in      string
 	entered chan struct{}
 	let     chan struct{}
 }
@@ -40,7 +44,8 @@ func newStallingRuns() *stallingRuns {
 }
 
 func (t *stallingRuns) RoundTrip(r *http.Request) (*http.Response, error) {
-	if t.stall.Load() && strings.HasSuffix(r.URL.Path, "/process/code-run") {
+	if t.stall.Load() && strings.HasSuffix(r.URL.Path, "/process/code-run") &&
+		(t.in == "" || strings.Contains(r.URL.Path, "/"+t.in+"/")) {
 		t.entered <- struct{}{}
 		select {
 		case <-t.let:
@@ -49,6 +54,81 @@ func (t *stallingRuns) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 	return http.DefaultTransport.RoundTrip(r)
+}
+
+// failingStops passes requests to the test's Daytona, but fails each stop while fail is set: when
+// lost is set, after Daytona stopped the sandbox, as an answer lost on its way back; otherwise
+// before Daytona hears of it, as a stop Daytona could not make.
+type failingStops struct {
+	fail, lost atomic.Bool
+}
+
+func (t *failingStops) RoundTrip(r *http.Request) (*http.Response, error) {
+	if !t.fail.Load() || r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/stop") {
+		return http.DefaultTransport.RoundTrip(r)
+	}
+	if t.lost.Load() {
+		answer, err := http.DefaultTransport.RoundTrip(r)
+		if err != nil {
+			return nil, err
+		}
+		_ = answer.Body.Close()
+	}
+	return nil, errors.New("connection reset by peer")
+}
+
+// finishingRuns passes requests to the test's Daytona, but holds the answer of each code run,
+// which Daytona ran, until the run's request is cut, as code that finished in the moment its
+// owner was refused. ran is told of each.
+type finishingRuns struct {
+	ran chan struct{}
+}
+
+func (t *finishingRuns) RoundTrip(r *http.Request) (*http.Response, error) {
+	answer, err := http.DefaultTransport.RoundTrip(r)
+	if err != nil || !strings.HasSuffix(r.URL.Path, "/process/code-run") {
+		return answer, err
+	}
+	body, err := io.ReadAll(answer.Body)
+	_ = answer.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	answer.Body = io.NopCloser(bytes.NewReader(body))
+	t.ran <- struct{}{}
+	<-r.Context().Done()
+	return answer, nil
+}
+
+// refusable is a sandbox on the test's Daytona, metered by the test and idling after an hour,
+// whose owner Admit refuses while refused is set, with its options changed.
+func (s *LifecycleSuite) refusable(refused *atomic.Bool, change func(*Options)) *Sandbox {
+	options := Options{APIKey: "key-1", APIURL: s.daytona.APIURL(), Lifecycle: sandbox.Lifecycle{IdleStop: time.Hour},
+		Meter: s.meter, Logger: slog.New(slog.NewTextHandler(s.logs, nil)),
+		Admit: func(context.Context, bool) error {
+			if refused.Load() {
+				return unpaid
+			}
+			return nil
+		}}
+	if change != nil {
+		change(&options)
+	}
+	box, err := New(options)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = box.Close() })
+	return box
+}
+
+// stops is how many times the sandbox was asked to stop.
+func (s *LifecycleSuite) stops(id string) int {
+	count := 0
+	for _, call := range s.daytona.Calls() {
+		if call == "POST /api/sandbox/"+id+"/stop" {
+			count++
+		}
+	}
+	return count
 }
 
 // running runs code in box on runs, which holds it, and is the run's error once it ends. The
@@ -229,7 +309,7 @@ func (s *LifecycleSuite) TestARunningSandboxIsAdmittedAgainEveryMinuteUnlessTold
 		require.NoError(t, err)
 		box.box = &sdk.Sandbox{ID: "sandbox-1"}
 		box.gate <- struct{}{}
-		box.done()
+		box.done(t.Context())
 
 		time.Sleep(time.Hour)
 		synctest.Wait()
@@ -238,4 +318,141 @@ func (s *LifecycleSuite) TestARunningSandboxIsAdmittedAgainEveryMinuteUnlessTold
 		defer mu.Unlock()
 		require.Equal(t, []time.Duration{time.Minute, 2 * time.Minute}, admitted)
 	})
+}
+
+func (s *LifecycleSuite) TestARefusedSandboxWhoseStopsAnswerWasLostIsBilledAsStoppedAndStartsAgain() {
+	stops := &failingStops{}
+	var refused atomic.Bool
+	box := s.refusable(&refused, func(o *Options) { o.HTTPClient = &http.Client{Transport: stops} })
+	s.run(box)
+	stops.fail.Store(true)
+	stops.lost.Store(true)
+	refused.Store(true)
+
+	_, err := box.Run(s.ctx, "print(2)", nil)
+
+	s.Require().ErrorIs(err, unpaid)
+	held, _ := s.daytona.Sandbox("sandbox-1")
+	s.Require().Equal(daytonatest.Stopped, held.State, "Daytona stopped it, though its answer never came")
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped"}, s.meter.all(), "billed as stopped, as it is")
+	refused.Store(false)
+	ran, err := box.Run(s.ctx, "print(3)", nil)
+	s.Require().NoError(err, "started again once its owner may pay")
+	s.Equal("ran\n", ran.Output)
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped", "started"}, s.meter.all())
+	s.Equal([]string{"sandbox-1: print(1)", "sandbox-1: print(3)"}, s.daytona.Ran())
+}
+
+func (s *LifecycleSuite) TestARefusedSandboxDaytonaWouldNotStopIsBilledAsRunningAndStoppedAtItsNextAdmission() {
+	stops := &failingStops{}
+	var refused atomic.Bool
+	box := s.refusable(&refused, func(o *Options) { o.HTTPClient = &http.Client{Transport: stops} })
+	s.run(box)
+	stops.fail.Store(true)
+	refused.Store(true)
+
+	_, err := box.Run(s.ctx, "print(2)", nil)
+
+	s.Require().ErrorIs(err, unpaid)
+	held, _ := s.daytona.Sandbox("sandbox-1")
+	s.Require().Equal(daytonatest.Started, held.State)
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container"}, s.meter.all(), "billed as running, as it still is")
+	stops.fail.Store(false)
+	_, err = box.Run(s.ctx, "print(3)", nil)
+	s.Require().ErrorIs(err, unpaid)
+	held, _ = s.daytona.Sandbox("sandbox-1")
+	s.Equal(daytonatest.Stopped, held.State, "stopped at its next admission")
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped"}, s.meter.all())
+}
+
+func (s *LifecycleSuite) TestARefusedSandboxSomeoneElseDeletedIsForgottenAndNotStoppedAgain() {
+	var refused atomic.Bool
+	box := s.refusable(&refused, nil)
+	s.run(box)
+	s.daytona.Gone("sandbox-1")
+	refused.Store(true)
+
+	_, err := box.Run(s.ctx, "print(2)", nil)
+
+	s.Require().ErrorIs(err, unpaid)
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "gone"}, s.meter.all(), "nothing bills once it is gone")
+	_, err = box.Run(s.ctx, "print(3)", nil)
+	s.Require().ErrorIs(err, unpaid)
+	s.Equal(1, s.stops("sandbox-1"), "a sandbox that is gone is not stopped again")
+	refused.Store(false)
+	s.run(box)
+	s.Equal([]string{"sandbox-1", "sandbox-2"}, s.daytona.Created(), "another is made once its owner may pay")
+}
+
+func (s *LifecycleSuite) TestARunMadeAgainInANewSandboxIsWatchedToo() {
+	runs := newStallingRuns()
+	runs.in = "sandbox-2"
+	var refused atomic.Bool
+	box := s.refusable(&refused, func(o *Options) {
+		o.HTTPClient, o.RunTimeout, o.AdmitEvery = &http.Client{Transport: runs}, 30*time.Minute, 50*time.Millisecond
+	})
+	s.run(box)
+	s.daytona.Gone("sandbox-1")
+	ran := s.running(box, runs)
+
+	refused.Store(true)
+
+	select {
+	case err := <-ran:
+		s.Require().ErrorIs(err, unpaid)
+	case <-time.After(5 * time.Second):
+		s.FailNow("the run in the sandbox made again went on after its owner was refused")
+	}
+	held, _ := s.daytona.Sandbox("sandbox-2")
+	s.Equal(daytonatest.Stopped, held.State)
+}
+
+func (s *LifecycleSuite) TestASandboxThatIdlesBeforeItsNextAdmissionIsStoppedForIdling() {
+	var refused atomic.Bool
+	box := s.refusable(&refused, func(o *Options) {
+		o.Lifecycle, o.AdmitEvery = sandbox.Lifecycle{IdleStop: 200 * time.Millisecond}, time.Hour
+	})
+
+	s.run(box)
+
+	s.told("created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped")
+}
+
+func (s *LifecycleSuite) TestARunThatFinishedAsItsOwnerWasRefusedKeepsItsResultAndStopsTheSandbox() {
+	runs := &finishingRuns{ran: make(chan struct{}, 1)}
+	var refused atomic.Bool
+	box := s.refusable(&refused, func(o *Options) {
+		o.HTTPClient, o.AdmitEvery = &http.Client{Transport: runs}, 20*time.Millisecond
+	})
+	s.daytona.Writes("/tmp/out.txt", []byte("written"))
+	type answer struct {
+		result sandbox.Result
+		err    error
+	}
+	ran := make(chan answer, 1)
+	go func() {
+		result, err := box.Run(s.ctx, "print(1)", []string{"/tmp/out.txt"})
+		ran <- answer{result, err}
+	}()
+	select {
+	case <-runs.ran:
+	case <-time.After(5 * time.Second):
+		s.FailNow("the code never ran")
+	}
+
+	refused.Store(true)
+
+	var got answer
+	select {
+	case got = <-ran:
+	case <-time.After(5 * time.Second):
+		s.FailNow("the run never ended")
+	}
+	s.Require().NoError(got.err, "the code ran, so the model is told what it did")
+	s.Equal("ran\n", got.result.Output)
+	s.Equal([]sandbox.File{{Name: "out.txt", MIME: "text/plain", Data: []byte("written")}}, got.result.Files,
+		"its files are read before the sandbox stops")
+	held, _ := s.daytona.Sandbox("sandbox-1")
+	s.Equal(daytonatest.Stopped, held.State, "stopped all the same")
+	s.Equal([]string{"created sandbox-1 1 vCPU 1 GiB 3 GiB container", "stopped"}, s.meter.all())
 }
