@@ -231,8 +231,9 @@ func (r *Users) emailLock(customerID, userID string) *sync.Mutex {
 	return &r.emailLocks[hash.Sum32()%emailStripes]
 }
 
-// Minted reports whether a user is a guest this router handed out (InsertGuest), through the
-// cache. A claimed guest still is one, and no row is none.
+// Minted reports whether a user is a guest this router handed out (InsertGuest), or one an import
+// brought as another deployment's, through the cache. That is the importing app's word, which only
+// keeps its own user from more. A claimed guest still is one, and an account or no row is none.
 //
 // The answer is held in Redis and in the copy each router tracks of it, or in an LRU of this
 // router's with no Redis, where nothing tells it of another router's write. One that could
@@ -247,7 +248,7 @@ func (r *Users) readMinted(ctx context.Context, customerID, userID string) (bool
 		Where("customer_id = ?", customerID).
 		Where("id = ?", userID).
 		Where("kind = ?", UserKindGuest).
-		Where("minted").
+		Where("minted OR minted_elsewhere").
 		Exists(ctx)
 	if err != nil {
 		return false, stack.Wrap(fmt.Errorf("store: minted guest: %w", err))

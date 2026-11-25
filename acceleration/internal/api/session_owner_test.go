@@ -446,6 +446,11 @@ func (s *SessionOwnershipSuite) TestAMintedGuestCarriesOnItsBackfilledConversati
 // A minted guest of no record of it reads as one whose app signed its token: its refresh says the
 // role, though its sessions say none. Its conversation is left as it is, and the token it is
 // refreshed to carries it on.
+func (s *SessionOwnershipSuite) TestAConversationOfAMintedGuestFromBeforeTheRecordIsLeftAloneInAnOwnApp() {
+	s.inAnAppOfItsOwn()
+	s.TestAConversationOfAMintedGuestFromBeforeTheRecordIsLeftAlone()
+}
+
 func (s *SessionOwnershipSuite) TestAConversationOfAMintedGuestFromBeforeTheRecordIsLeftAlone() {
 	minted := s.mintedGuest()
 	opened := s.withNoKindRecorded(s.ended(s.data.signedInAs(minted)), minted)
@@ -566,6 +571,12 @@ func (s *SessionOwnershipSuite) TestABackfillInTheDeploymentAppOfItsOwnCustomer(
 	command.SetPins(s.store.Sessions.ConversationPin)
 
 	_, err = command.BackfillOwnerKinds(s.T().Context(), s.store, s.authMode(), s.customerID(), true)
+	s.Require().NoError(err)
+	s.False(s.kindRecorded(opened))
+	refused := conversation.NewForChats(placedAs{conversation.StreamApps(s.stream), streamapp.ErrNoIdentity})
+	defer refused.Close()
+	refused.SetPins(s.store.Sessions.ConversationPin)
+	_, err = refused.BackfillOwnerKinds(s.T().Context(), s.store, s.authMode(), s.customerID(), true)
 	s.Require().NoError(err)
 	s.False(s.kindRecorded(opened))
 	s.False(s.kindRecorded(held))

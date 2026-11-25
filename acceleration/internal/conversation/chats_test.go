@@ -221,6 +221,21 @@ func (p *pinnedTo) ForApp(ctx context.Context, customer string, app int64) (*get
 	return p.Chats.ForApp(ctx, customer, app)
 }
 
+// placing is a source that says where a customer acts, and acts for nobody.
+type placing struct{ streamapp.Source }
+
+func (placing) Placed(context.Context, string) (int64, error) { return 77, nil }
+
+func (placing) For(context.Context, string) (streamapp.Identity, error) {
+	return streamapp.Identity{}, streamapp.ErrNoIdentity
+}
+
+func TestWhereACustomerActsIsReadWithoutActingForIt(t *testing.T) {
+	app, err := StreamApps(streamapp.NewClients(placing{}, streamapp.ClientsOptions{})).Placed(t.Context(), "acme")
+	require.NoError(t, err)
+	require.Equal(t, int64(77), app)
+}
+
 func ptr[T any](v T) *T { return &v }
 
 func TestAConversationInTheSharedAppIsOnlyReadOnceItCannotBeWrittenThere(t *testing.T) {
