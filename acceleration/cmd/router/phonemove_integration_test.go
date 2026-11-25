@@ -76,8 +76,7 @@ func (s *PhoneMoveSuite) SetupSuite() {
 func (s *PhoneMoveSuite) SetupTest() {
 	// The database is the suite's own, and a run lists every customer's numbers: none of an
 	// earlier test's may be left attached.
-	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE phone_numbers SET released_at = now() WHERE released_at IS NULL")
-	s.Require().NoError(err)
+	s.releaseAll()
 	// A token exported in the shell would let a test of a router without one pass.
 	s.T().Setenv("TWILIO_WEBHOOK_AUTH_TOKEN", "")
 	s.chat = chattest.NewServer(s.T())
@@ -206,11 +205,14 @@ func (s *PhoneMoveSuite) TestARouterThatCouldNotAnswerTheWebhookMovesNothing() {
 		"no keyring":       {settings: ready.with(func(m *moverSettings) { m.sealed = false }), refusal: "stored trunk"},
 	} {
 		s.Run(name, func() {
+			s.releaseAll()
+			kept := s.attachedWithNoStoredBridge()
 			number := s.attachedEarlier()
 
-			_, err := s.move(test.settings, "--apply")
+			out, err := s.move(test.settings, "--apply")
 
 			s.ErrorContains(err, test.refusal)
+			s.NotContains(out, kept, "refused before any number was read")
 			s.Empty(s.twilio.asked(), "twilio was asked nothing")
 			s.Equal(moveTestOldURL, s.twilio.voiceURL(number))
 		})
@@ -276,6 +278,89 @@ func (s *PhoneMoveSuite) TestAttachingANumberAttachedEarlierAgainMovesIt() {
 	s.Len(s.twilio.posted(), 1, "a number on the webhook is not written again")
 }
 
+// A run stops at the first number it could not move, naming it, and moves none after it: a
+// password the keyring does not open, a number Twilio does not hold, an update Twilio refused.
+func (s *PhoneMoveSuite) TestARunStopsAtTheFirstNumberItCouldNotMove() {
+	for name, test := range map[string]struct {
+		breakNumber func(number string) moverSettings
+		failure     string
+	}{
+		"a password the keyring does not open": {breakNumber: func(string) moverSettings {
+			return s.ready().with(func(m *moverSettings) { m.kek = "another key" })
+		}, failure: "open the trunk password"},
+		"a number twilio does not hold": {breakNumber: func(number string) moverSettings {
+			s.twilio.release(number)
+			return s.ready()
+		}, failure: "not one of this account's numbers"},
+		"an update twilio refused": {breakNumber: func(number string) moverSettings {
+			s.twilio.refuse(number)
+			return s.ready()
+		}, failure: "500"},
+	} {
+		s.Run(name, func() {
+			s.releaseAll()
+			broken, after := s.attachedEarlier(), s.attachedEarlier()
+			settings := test.breakNumber(broken)
+
+			_, err := s.move(settings, "--apply")
+
+			s.ErrorContains(err, test.failure)
+			s.ErrorContains(err, broken)
+			s.Equal(moveTestOldURL, s.twilio.voiceURL(after), "no number after it was moved")
+		})
+	}
+}
+
+// Attaching an attached number again with the router unable to answer the webhook neither asks
+// Twilio nor logs; a move that fails is logged, and the attach still answers.
+func (s *PhoneMoveSuite) TestAttachingAgainNeverFailsOverTheMove() {
+	number := s.attachedEarlier()
+	var logs bytes.Buffer
+	unready := s.ready().with(func(m *moverSettings) { m.token, m.logs = "", &logs })
+
+	_, err := s.service(unready).Attach(s.ctx, phone.Attachment{CustomerID: s.customer, E164: number})
+
+	s.Require().NoError(err)
+	s.Empty(s.twilio.asked())
+	s.Empty(logs.String())
+
+	s.twilio.refuse(number)
+	_, err = s.service(s.ready().with(func(m *moverSettings) { m.logs = &logs })).
+		Attach(s.ctx, phone.Attachment{CustomerID: s.customer, E164: number})
+
+	s.Require().NoError(err)
+	s.Contains(logs.String(), "could not point an attached number at the router's call webhook")
+	s.Equal(moveTestOldURL, s.twilio.voiceURL(number))
+}
+
+// The command is built from the router's config: without a keyring it refuses, and with one it
+// gets as far as the public URL, which this config lacks.
+func (s *PhoneMoveSuite) TestTheCommandRunsTheChecksOnTheRoutersConfig() {
+	settings := config.Defaults()
+	settings.Postgres.DSN = testenv.Database(os.Getenv("ROUTER_POSTGRES_DSN"), "phone_move")
+	settings.PublicURL = ""
+	s.T().Setenv("TWILIO_ACCOUNT_SID", "AC"+strings.Repeat("0", 32))
+	s.T().Setenv("TWILIO_AUTH_TOKEN", "api-secret")
+	s.T().Setenv("TWILIO_WEBHOOK_AUTH_TOKEN", s.token)
+	s.T().Setenv(devKEKEnvVar, "")
+
+	err := dispatchCommand("phone", []string{"move-twilio"}, settings, slog.New(slog.DiscardHandler))
+	s.ErrorContains(err, "stored trunk")
+
+	s.T().Setenv(devKEKEnvVar, moveTestKEK)
+	err = dispatchCommand("phone", []string{"move-twilio"}, settings, slog.New(slog.DiscardHandler))
+	s.ErrorContains(err, "ROUTER_PUBLIC_URL")
+
+	s.ErrorContains(dispatchCommand("phone", nil, settings, nil), "move-twilio")
+	s.ErrorContains(dispatchCommand("phone", []string{"move"}, settings, nil), `unknown phone command "move"`)
+}
+
+// releaseAll gives back every number an earlier test or subtest left held.
+func (s *PhoneMoveSuite) releaseAll() {
+	_, err := s.store.GlobalDB().ExecContext(s.ctx, "UPDATE phone_numbers SET released_at = now() WHERE released_at IS NULL")
+	s.Require().NoError(err)
+}
+
 // move runs router phone move-twilio with args on a service with settings.
 func (s *PhoneMoveSuite) move(settings moverSettings, args ...string) (string, error) {
 	var out bytes.Buffer
@@ -286,12 +371,17 @@ func (s *PhoneMoveSuite) move(settings moverSettings, args ...string) (string, e
 // moverSettings are what a deployment has for its Twilio numbers.
 type moverSettings struct {
 	token, account, publicURL string
-	// sealed is a deployment with a keyring.
+	// sealed is a deployment with a keyring, of kek.
 	sealed bool
+	kek    string
+	// logs, when set, is where the service logs.
+	logs *bytes.Buffer
 }
 
 func (s *PhoneMoveSuite) ready() moverSettings {
-	return moverSettings{token: s.token, account: "AC" + strings.Repeat("0", 32), publicURL: moveTestPublicURL, sealed: true}
+	return moverSettings{
+		token: s.token, account: "AC" + strings.Repeat("0", 32), publicURL: moveTestPublicURL, sealed: true, kek: moveTestKEK,
+	}
 }
 
 // with is the settings with change made to a copy.
@@ -318,12 +408,16 @@ func (s *PhoneMoveSuite) service(settings moverSettings) *phone.Service {
 	})
 	var sealer *auth.Sealer
 	if settings.sealed {
-		sealer, err = auth.NewSealer(moveTestKEK)
+		sealer, err = auth.NewSealer(settings.kek)
 		s.Require().NoError(err)
+	}
+	logger := slog.New(slog.DiscardHandler)
+	if settings.logs != nil {
+		logger = slog.New(slog.NewTextHandler(settings.logs, &slog.HandlerOptions{Level: slog.LevelError}))
 	}
 	service, err := phone.NewService(phone.ServiceOptions{
 		Registry: registry, Store: s.store, Stream: phone.NewStreamFromClient(s.chat.Client), Sealer: sealer,
-		PublicURL: settings.publicURL, Logger: slog.New(slog.DiscardHandler),
+		PublicURL: settings.publicURL, Logger: logger,
 	})
 	s.Require().NoError(err)
 	return service
@@ -383,6 +477,8 @@ type fakeTwilio struct {
 
 type fakeTwilioNumber struct {
 	sid, voiceURL, voiceMethod string
+	// refused answers its updates 500, and gone leaves it out of the list.
+	refused, gone bool
 }
 
 func newFakeTwilio(t *testing.T) *fakeTwilio {
@@ -401,7 +497,7 @@ func (f *fakeTwilio) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/IncomingPhoneNumbers.json"):
 		listed := []map[string]string{}
-		if number, ok := f.numbers[r.URL.Query().Get("PhoneNumber")]; ok {
+		if number, ok := f.numbers[r.URL.Query().Get("PhoneNumber")]; ok && !number.gone {
 			listed = append(listed, map[string]string{
 				"sid": number.sid, "phone_number": r.URL.Query().Get("PhoneNumber"),
 				"voice_url": number.voiceURL, "voice_method": number.voiceMethod,
@@ -412,6 +508,10 @@ func (f *fakeTwilio) serve(w http.ResponseWriter, r *http.Request) {
 		f.forms = append(f.forms, r.PostForm)
 		for _, number := range f.numbers {
 			if strings.HasSuffix(r.URL.Path, "/"+number.sid+".json") {
+				if number.refused {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
 				number.voiceURL, number.voiceMethod = r.PostForm.Get("VoiceUrl"), r.PostForm.Get("VoiceMethod")
 				_ = json.NewEncoder(w).Encode(map[string]string{"sid": number.sid})
 				return
@@ -435,6 +535,20 @@ func (f *fakeTwilio) point(e164, voiceURL, method string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.numbers[e164].voiceURL, f.numbers[e164].voiceMethod = voiceURL, method
+}
+
+// release makes the account no longer hold the number, keeping its voice URL to read.
+func (f *fakeTwilio) release(e164 string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.numbers[e164].gone = true
+}
+
+// refuse makes Twilio answer the number's updates 500.
+func (f *fakeTwilio) refuse(e164 string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.numbers[e164].refused = true
 }
 
 func (f *fakeTwilio) voiceURL(e164 string) string {
