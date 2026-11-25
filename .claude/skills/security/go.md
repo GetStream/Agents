@@ -45,10 +45,10 @@ Every operation not marked `x-client-accessible` answers a client-side caller 40
 
 - Enforced by the middleware reading the mark off the spec (`clientAccessibleExtension` in
   `server.go`), not by a list. Tested by
-  `TestEveryOperationTheSpecDoesNotOpenIsRefusedToAUsersDevice`.
-- The test must call with each client kind, not only one: an authenticated user, a guest,
-  an anonymous caller, and a server token presented with `Stream-Auth-Type: jwt` or no
-  header at all. If the suite walks the spec with one client only, that is a gap to report.
+  `TestEveryOperationTheSpecDoesNotOpenIsRefusedToEveryDevice`.
+- The test calls with each client kind (`devices` in `posture_test.go`): an authenticated
+  user, a guest, an anonymous caller, and a server token presented with
+  `Stream-Auth-Type: jwt`, `anonymous` or no header at all. A new client kind is added there.
 - `Stream-Auth-Type: server` with a user token, and a server token in a socket's query
   string, are both client-side. Tested by `TestAPIKey` and
   `TestAServerTokenInASocketsQueryStringIsNotABackend`.
@@ -73,9 +73,9 @@ token signed with that key's secret, or with neither and a 401.
   `exp`, `alg: none`, and an algorithm other than HS256 are all a 401, and the same 401 body
   (`assertRefusedAlike`), so a caller cannot learn which keys exist.
 - Tested in `internal/auth/auth_test.go` (`TestAPIKey`) for the authenticator and in
-  `PostureSuite` for the wire. `PostureSuite` checks the no-credential case on one path;
-  report as a gap any client-accessible operation, socket included, with no test that it
-  answers 401 without a credential. The fix is a spec-walking test like the 403 one.
+  `PostureSuite` for the wire. `PostureSuite` asks every
+  operation but the public ones, sockets included, with no credential, a key alone and a
+  token alone.
 - Sockets take `api_key` and `token` as query parameters. Check that the socket
   authenticates before upgrading and that a failed check never upgrades.
 - `noauth` and `proxy` trust headers. Check that nothing makes them the default and that a
