@@ -105,7 +105,9 @@ func (s *Server) createGuestUser(ctx context.Context, request *createGuestUserRe
 		}
 	}
 
-	if requested := strings.TrimSpace(value(body.Id)); requested != "" {
+	// A reserved id is never a guest's, so it is taken as naming none, and a new guest is
+	// minted, as for any id the caller cannot prove is theirs.
+	if requested := strings.TrimSpace(value(body.Id)); requested != "" && !strings.HasPrefix(requested, reservedUserIDPrefix) {
 		returning, err := s.returningGuest(ctx, customerID, bound, requested, body)
 		if err != nil || returning != nil {
 			return returning, err
