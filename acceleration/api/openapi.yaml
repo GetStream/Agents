@@ -4712,6 +4712,8 @@ components:
           description: At least one and at most 128, each name once.
           items:
             $ref: '#/components/schemas/CustomHTTPTool'
+          maxItems: 128
+          minItems: 1
           type: array
       required:
         - base_url
@@ -4722,6 +4724,7 @@ components:
       description: One value the model gives an http tool.
       properties:
         description:
+          maxLength: 1000
           type: string
         required:
           description: The model must give it. A parameter in the path must be required.
@@ -4747,6 +4750,7 @@ components:
       properties:
         description:
           description: What the tool does, which the model reads to know when to use it. Up to 1000 bytes.
+          maxLength: 1000
           type: string
         method:
           enum:
@@ -4766,14 +4770,17 @@ components:
             - CustomHTTPToolMethodDELETE
         name:
           description: 1 to 63 letters, digits, _ or -. The model is offered it after the binding's name and __.
+          pattern: ^[A-Za-z0-9_-]{1,63}$
           type: string
         parameters:
           additionalProperties:
             $ref: '#/components/schemas/CustomHTTPParameter'
           description: The values the model gives, by name, up to 64. A parameter not in the path goes into the query of a GET, HEAD or DELETE and into a JSON body otherwise. A name a client reads as a method override, such as _method or X-HTTP-Method-Override, is refused.
+          maxProperties: 64
           type: object
         path:
           description: Under base_url, starting with /, without a query or fragment. Each {name} in it is the parameter of that name, which must be required.
+          maxLength: 2048
           type: string
         read_only:
           description: The tool only reads. Only a GET or HEAD tool may say so.

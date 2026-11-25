@@ -951,7 +951,6 @@ func (s *ConnectorsSuite) TestAnHTTPConnectorTheManifestRefusesIsRefusedWithItsR
 		change func(sent, api map[string]any)
 		reason string
 	}{
-		"no tool": {func(_, api map[string]any) { api["tools"] = []any{} }, "an http custom connector needs at least one tool"},
 		"oauth2_code": {func(sent, _ map[string]any) {
 			sent["schemes"], sent["client"] = []string{"oauth2_code"}, map[string]any{"registration": []string{"dcr"}}
 		}, "oauth2_code is not available for an http custom connector"},
@@ -987,6 +986,27 @@ func (s *ConnectorsSuite) TestAnHTTPToolTheSchemaRefusesIsAValidationFailure() {
 		"no base_url":                     func(api, _, _ map[string]any) { delete(api, "base_url") },
 		"tools null":                      func(api, _, _ map[string]any) { api["tools"] = nil },
 		"a parameter with no type":        func(_, _, parameter map[string]any) { delete(parameter, "type") },
+		// AI-3676 R1.4: core's caps and tool name pattern, which the schema carries.
+		"no tool": func(api, _, _ map[string]any) { api["tools"] = []any{} },
+		"129 tools": func(api, tool, _ map[string]any) {
+			tools := make([]map[string]any, 129)
+			for i := range tools {
+				tools[i] = maps.Clone(tool)
+				tools[i]["name"] = fmt.Sprintf("tool_%d", i)
+			}
+			api["tools"] = tools
+		},
+		"a name of 64":                      func(_, tool, _ map[string]any) { tool["name"] = strings.Repeat("n", 64) },
+		"a name with a dot":                 func(_, tool, _ map[string]any) { tool["name"] = "get.forecast" },
+		"a description over 1000":           func(_, tool, _ map[string]any) { tool["description"] = strings.Repeat("d", 1001) },
+		"a path over 2048":                  func(_, tool, _ map[string]any) { tool["path"] = "/" + strings.Repeat("p", 2048) },
+		"a parameter description over 1000": func(_, _, parameter map[string]any) { parameter["description"] = strings.Repeat("d", 1001) },
+		"65 parameters": func(_, tool, _ map[string]any) {
+			parameters := tool["parameters"].(map[string]any)
+			for i := len(parameters); i < 65; i++ {
+				parameters[fmt.Sprintf("p%d", i)] = map[string]any{"type": "string"}
+			}
+		},
 	} {
 		id := s.customID()
 		sent := s.httpConnector(id)

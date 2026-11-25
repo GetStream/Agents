@@ -183,11 +183,15 @@ func (*CustomConnectorRequest) TransformSchema(_ huma.Registry, schema *huma.Sch
 }
 
 // CustomHTTPAPI is an http connector's API and its tools (core.CustomConnector's BaseURL and
-// Tools). The base URL has the endpoint's limit. The other rules are core.Manifest.Validate's
-// (checkHTTPSource in internal/connectors/core/http_tools.go), which answer naming the tool.
+// Tools). The schema carries the caps and the tool name pattern of core.Manifest.Validate
+// (maxHTTPTools, maxHTTPToolDescription, maxHTTPPath, maxHTTPParameters and httpToolName in
+// internal/connectors/core/http_tools.go), so a request breaking one fails validation. Huma
+// counts a length in characters and core in bytes, so core still refuses a description whose
+// characters fit and bytes do not. The other rules are core's alone (checkHTTPSource), which
+// answer naming the tool.
 type CustomHTTPAPI struct {
 	BaseURL string           `json:"base_url" maxLength:"2048" doc:"The API the tools call, each at its path under it: a public https URL without userinfo, query or fragment. An address on a private network, loopback or link-local is refused. Never shown once stored."`
-	Tools   []CustomHTTPTool `json:"tools" nullable:"false" doc:"At least one and at most 128, each name once."`
+	Tools   []CustomHTTPTool `json:"tools" nullable:"false" minItems:"1" maxItems:"128" doc:"At least one and at most 128, each name once."`
 }
 
 func (*CustomHTTPAPI) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {
@@ -199,11 +203,11 @@ func (*CustomHTTPAPI) TransformSchema(_ huma.Registry, schema *huma.Schema) *hum
 // CustomHTTPTool is one tool of an http connector (core.HTTPTool). Its methods and parameter
 // types are core's (httpMethods and httpParameterTypes in internal/connectors/core/http_tools.go).
 type CustomHTTPTool struct {
-	Name        string                         `json:"name" doc:"1 to 63 letters, digits, _ or -. The model is offered it after the binding's name and __."`
-	Description string                         `json:"description" doc:"What the tool does, which the model reads to know when to use it. Up to 1000 bytes."`
+	Name        string                         `json:"name" pattern:"^[A-Za-z0-9_-]{1,63}$" doc:"1 to 63 letters, digits, _ or -. The model is offered it after the binding's name and __."`
+	Description string                         `json:"description" maxLength:"1000" doc:"What the tool does, which the model reads to know when to use it. Up to 1000 bytes."`
 	Method      string                         `json:"method" enum:"GET,HEAD,POST,PUT,PATCH,DELETE"`
-	Path        string                         `json:"path" doc:"Under base_url, starting with /, without a query or fragment. Each {name} in it is the parameter of that name, which must be required."`
-	Parameters  map[string]CustomHTTPParameter `json:"parameters,omitempty" doc:"The values the model gives, by name, up to 64. A parameter not in the path goes into the query of a GET, HEAD or DELETE and into a JSON body otherwise. A name a client reads as a method override, such as _method or X-HTTP-Method-Override, is refused."`
+	Path        string                         `json:"path" maxLength:"2048" doc:"Under base_url, starting with /, without a query or fragment. Each {name} in it is the parameter of that name, which must be required."`
+	Parameters  map[string]CustomHTTPParameter `json:"parameters,omitempty" maxProperties:"64" doc:"The values the model gives, by name, up to 64. A parameter not in the path goes into the query of a GET, HEAD or DELETE and into a JSON body otherwise. A name a client reads as a method override, such as _method or X-HTTP-Method-Override, is refused."`
 	ReadOnly    bool                           `json:"read_only,omitempty" doc:"The tool only reads. Only a GET or HEAD tool may say so."`
 }
 
@@ -221,7 +225,7 @@ func (*CustomHTTPTool) TransformSchema(_ huma.Registry, schema *huma.Schema) *hu
 // CustomHTTPParameter is one value the model gives an http tool (core.HTTPParameter).
 type CustomHTTPParameter struct {
 	Type        string `json:"type" enum:"string,number,integer,boolean"`
-	Description string `json:"description,omitempty"`
+	Description string `json:"description,omitempty" maxLength:"1000"`
 	Required    bool   `json:"required,omitempty" doc:"The model must give it. A parameter in the path must be required."`
 }
 
