@@ -729,6 +729,19 @@ describe("loadFolder", () => {
     assert.deepEqual(folder.simulations?.map((each) => each.name), ["lunch"]);
   });
 
+  for (const linked of ["skills/old.md", "skills/report/old.txt", "knowledge/old.md", "simulations/old.yaml"]) {
+    it(`refuses ${linked} linked to nothing, saying so rather than skipping it or calling it a link out`, async () => {
+      const path = await agentDir({ "skills/report/SKILL.md": skill });
+      await link(path, linked, "gone");
+
+      await assert.rejects(() => loadFolder(path), (error: unknown) => {
+        assert.ok(error instanceof ConfigurationError);
+        assert.equal(error.message, `${join(path, linked)} is a link to nothing`);
+        return true;
+      });
+    });
+  }
+
   it("reads skills in name order", async () => {
     const path = await agentDir({
       "skills/recall.md": "---\ndescription: Remember\n---\nLook back.",
