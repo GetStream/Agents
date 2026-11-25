@@ -210,8 +210,8 @@ func (a *Agent) playedLocked(quiet bool) {
 	}
 }
 
-// cutLocked marks the questions a cascade said in a turn that was cut off. The caller holds the
-// lock.
+// cutLocked marks the questions a cascade said in a turn that was cut off: a native model's are
+// settled by repliedLocked. The caller holds the lock.
 func (a *Agent) cutLocked(turnID string) {
 	for _, waiting := range a.approvals {
 		if waiting.turn == turnID {
@@ -293,8 +293,9 @@ func (a *Agent) askLocked(turnID, question string) error {
 
 // confirm runs the call the caller answered, when they said yes in time to its question played
 // out, and returns what the model is told. A yes before they could answer runs nothing and
-// leaves the call waiting, or closes it when its question was cut off. The confirmation's own context is the call's: its timeout starts now.
-// The run gets its own "a tool call came back" line, under the call's name and id.
+// leaves the call waiting, or closes it when its question was cut off. The confirmation's own
+// context is the call's: its timeout starts now. The run gets its own "a tool call came back"
+// line, under the call's name and id.
 func (a *Agent) confirm(ctx context.Context, confirmation llm.ToolCall) ([]llm.ContentPart, bool, error) {
 	var answer struct {
 		ToolCallID string `json:"tool_call_id"`

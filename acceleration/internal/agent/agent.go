@@ -2501,7 +2501,8 @@ func (a *Agent) respondTurn(
 		a.mu.Unlock()
 		return stack.Wrap(errNotJoined)
 	}
-	// Counted before this turn's reply starts, which is not the question still playing.
+	// A spoken turn is counted before its reply starts, so that reply is not taken for a
+	// question still playing.
 	if !listened.typed {
 		a.heardLocked(drained)
 	}
