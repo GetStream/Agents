@@ -105,6 +105,7 @@ func (s *AgentSuite) TestAnApprovedCallIsLoggedUnderItsOwnName() {
 			})
 
 		s.Require().Len(lines, 3)
+		s.Equal([]int{1, 1, 1}, s.logs.keyCounts(toolBack, "app_id"), "the session logger's app is each line's only one")
 		asked, ran, confirmed := lines[0], lines[1], lines[2]
 		s.Equal("lookup_order", asked["tool"])
 		s.Equal("call-1", asked["tool_call"])
