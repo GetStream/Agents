@@ -58,8 +58,12 @@ const (
 // they have should be told to wait rather than open a hundred conversations, and a run of
 // ten variations is ten agents talking at once if nothing says otherwise.
 const (
-	runsAtOnce  = 4
-	casesAtOnce = 5
+	// runsPerCustomer is how many runs one customer has at once. runsAtOnce is above it because
+	// a run holds its place for up to runTimeout: at any lower number one customer could hold
+	// every place. Both are choices, not measurements.
+	runsPerCustomer = 4
+	runsAtOnce      = 8
+	casesAtOnce     = 5
 )
 
 // What Start refuses before a run is written.
@@ -67,6 +71,8 @@ var (
 	// ErrNoAudio is an audio simulation on a deployment with no speech models for the caller.
 	ErrNoAudio = errors.New(
 		"simulation: this deployment cannot give the caller a voice or ears, so it cannot run an audio simulation")
+	// ErrCustomerBusy is a run asked for while the customer has as many going as one may.
+	ErrCustomerBusy = errors.New("simulation: the customer has as many runs going as one may have at once")
 	// ErrBusy is a run asked for while as many as the runner holds at once are going.
 	ErrBusy = errors.New("simulation: as many runs as can go at once are already going, so this one would have to wait")
 	// ErrClosed is a run asked of a runner that is shut down.
@@ -101,7 +107,10 @@ type Runner struct {
 	mu sync.Mutex
 	// running is how a run is cancelled: the entry is the way to stop its conversations.
 	running map[string]context.CancelFunc
-	closed  bool
+	// places counts the runs each customer has, from before a run is written until its last
+	// conversation is over, a cancelled run's included.
+	places map[string]int
+	closed bool
 
 	working sync.WaitGroup
 	// stopKeeping ends keep, and kept is closed once it has.
@@ -135,6 +144,7 @@ func New(options Options) (*Runner, error) {
 		activity:    options.Activity,
 		logger:      options.Logger,
 		running:     map[string]context.CancelFunc{},
+		places:      map[string]int{},
 		stopKeeping: stop,
 		kept:        make(chan struct{}),
 	}
@@ -166,16 +176,15 @@ func (r *Runner) Start(ctx context.Context, customerID, id string) (store.Simula
 		return store.SimulationRun{}, err
 	}
 
-	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		return store.SimulationRun{}, stack.Wrap(ErrClosed)
+	if err := r.take(customerID); err != nil {
+		return store.SimulationRun{}, err
 	}
-	if len(r.running) >= runsAtOnce {
-		r.mu.Unlock()
-		return store.SimulationRun{}, stack.Wrap(ErrBusy)
-	}
-	r.mu.Unlock()
+	going := false
+	defer func() {
+		if !going {
+			r.leave(customerID)
+		}
+	}()
 
 	scenarios := r.scenarios(ctx, simulation, config)
 
@@ -205,15 +214,51 @@ func (r *Runner) Start(ctx context.Context, customerID, id string) (store.Simula
 	// a context that is cancelled the moment the caller is answered.
 	loop, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	r.running[run.ID] = cancel
+	// Under the lock, so that Close waits for it.
+	r.working.Add(1)
+	going = true
 	r.mu.Unlock()
 
-	r.working.Add(1)
 	go func() {
 		defer r.working.Done()
+		defer r.leave(customerID)
 		defer cancel()
 		r.run(loop, simulation, config, run, cases)
 	}()
 	return run, nil
+}
+
+// take holds a place for one more run of a customer, which leave gives back. The place is held
+// before the run is written, so runs asked for together are counted against each other.
+func (r *Runner) take(customerID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return stack.Wrap(ErrClosed)
+	}
+	if r.places[customerID] >= runsPerCustomer {
+		return stack.Wrap(ErrCustomerBusy)
+	}
+	held := 0
+	for _, runs := range r.places {
+		held += runs
+	}
+	if held >= runsAtOnce {
+		return stack.Wrap(ErrBusy)
+	}
+	r.places[customerID]++
+	return nil
+}
+
+func (r *Runner) leave(customerID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.places[customerID]--
+	if r.places[customerID] == 0 {
+		delete(r.places, customerID)
+	}
 }
 
 // Cancel stops a run. Unlike a paused campaign the conversations in flight are ended too:

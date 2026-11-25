@@ -2708,6 +2708,7 @@ export type paths = {
         /**
          * Have the conversations
          * @description Returns once the run is written rather than once it is over: the conversations happen after the answer, and the run says how far along they are. A simulation asking several ways has them all at once.
+         *     An app may have 4 runs going on a router, one being cancelled counted until its conversations end: a run past them is a 429 concurrency_limited. A router has 8 going for all its apps: a run past those is a 429 rate_limited. Both come with Retry-After.
          *     Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
          */
         readonly post: operations["runSimulation"];
@@ -18521,7 +18522,7 @@ export interface operations {
             readonly 402: components["responses"]["PaymentRequired"];
             readonly 403: components["responses"]["Forbidden"];
             readonly 404: components["responses"]["NotFound"];
-            /** @description Too Many Requests */
+            /** @description The app, or the router, has as many runs going as it may: retry after Retry-After */
             readonly 429: {
                 headers: {
                     readonly [name: string]: unknown;

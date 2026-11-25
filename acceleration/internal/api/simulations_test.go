@@ -5,7 +5,9 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"sync"
 	"testing"
+	"time"
 )
 
 // SimulationsSuite covers writing down a conversation to put an agent through, running it,
@@ -227,29 +229,109 @@ func (s *SimulationsSuite) TestARunTheDatabaseCannotStartIsAnsweredAsInternalWit
 	s.NotContains(string(body), "deadline")
 }
 
-func (s *SimulationsSuite) TestARunBeyondTheRunsTheRouterHasAtOnceIsAskedToWait() {
-	// The caller takes a minute over each thing it says, so every run is still going when the
-	// next one is asked for.
-	request := s.against(s.data.createAgentConfig())
-	request.CallerTarget = pointerTo("stuck/stuck-model")
-
-	status, payload := http.StatusAccepted, []byte(nil)
-	for range 10 {
-		created := s.createSimulation(request)
-		status, payload = s.serverClient.call(http.MethodPost, "/v1/agents/simulations/"+created.Id+"/run", nil)
-		if status != http.StatusAccepted {
-			break
-		}
-		var run SimulationRun
-		s.Require().NoError(json.Unmarshal(payload, &run))
-		s.T().Cleanup(func() {
-			s.serverClient.do(http.MethodPost, "/v1/agents/simulation-runs/"+run.Id+"/cancel", nil, nil)
+func (s *SimulationsSuite) TestAnAppHasFourRunsAtOnceWhenItAsksForManyTogether() {
+	ids := make([]string, 10)
+	for i := range ids {
+		ids[i] = s.stuckSimulation()
+	}
+	answers := make([]*http.Response, len(ids))
+	var asked sync.WaitGroup
+	for i, id := range ids {
+		asked.Go(func() {
+			answers[i] = s.serverClient.raw(http.MethodPost, "/v1/agents/simulations/"+id+"/run", nil)
 		})
 	}
+	asked.Wait()
 
-	s.Equal(http.StatusTooManyRequests, status, string(payload))
-	s.Contains(string(payload), `"type":"rate_limited"`)
-	s.NotContains(string(payload), "simulation:")
+	going := 0
+	for _, answer := range answers {
+		if answer.StatusCode == http.StatusAccepted {
+			var run SimulationRun
+			s.Require().NoError(json.NewDecoder(answer.Body).Decode(&run))
+			s.cancelled(run.Id)
+			going++
+			continue
+		}
+		s.Equal(http.StatusTooManyRequests, answer.StatusCode)
+		s.Equal("30", answer.Header.Get("Retry-After"))
+		var failed ErrorResponse
+		s.Require().NoError(json.NewDecoder(answer.Body).Decode(&failed))
+		s.Equal("concurrency_limited", failed.Error.Code)
+		s.NotContains(failed.Error.Message, "simulation:")
+	}
+	s.Equal(4, going)
+}
+
+func (s *SimulationsSuite) TestAnAppsRunsLeaveRoomForAnotherApps() {
+	for range 4 {
+		s.cancelled(s.run(s.stuckSimulation()).Id)
+	}
+
+	s.useApp(s.data.createApp())
+
+	s.cancelled(s.run(s.stuckSimulation()).Id)
+}
+
+func (s *SimulationsSuite) TestACancelledRunFreesItsPlaceOnceItsConversationsEnd() {
+	var last string
+	for range 4 {
+		last = s.run(s.stuckSimulation()).Id
+		s.cancelled(last)
+	}
+	next := s.stuckSimulation()
+	status, _ := s.serverClient.call(http.MethodPost, "/v1/agents/simulations/"+next+"/run", nil)
+	s.Require().Equal(http.StatusTooManyRequests, status)
+
+	s.Require().Equal(http.StatusOK, s.serverClient.do(
+		http.MethodPost, "/v1/agents/simulation-runs/"+last+"/cancel", nil, nil))
+
+	var run SimulationRun
+	s.Require().Eventually(func() bool {
+		return s.serverClient.do(http.MethodPost, "/v1/agents/simulations/"+next+"/run", nil, &run) == http.StatusAccepted
+	}, 30*time.Second, 100*time.Millisecond)
+	s.cancelled(run.Id)
+}
+
+func (s *SimulationsSuite) TestARunThatCouldNotBeWrittenHoldsNoPlace() {
+	ids := []string{s.stuckSimulation(), s.stuckSimulation(), s.stuckSimulation(), s.stuckSimulation()}
+	s.failQueries(`INSERT INTO "simulation_runs"`)
+	for _, id := range ids {
+		status, _ := s.serverClient.call(http.MethodPost, "/v1/agents/simulations/"+id+"/run", nil)
+		s.Require().Equal(http.StatusInternalServerError, status)
+	}
+	s.failing.value.Store(nil)
+
+	s.cancelled(s.run(ids[0]).Id)
+}
+
+func (s *SimulationsSuite) TestARunBeyondTheRunsTheRouterHasAtOnceIsAskedToWait() {
+	// Apps one after another, until the router has no place left for a new one.
+	going := 0
+	var answer *http.Response
+	for range 5 {
+		for range 4 {
+			answer = s.serverClient.raw(http.MethodPost, "/v1/agents/simulations/"+s.stuckSimulation()+"/run", nil)
+			if answer.StatusCode != http.StatusAccepted {
+				break
+			}
+			var run SimulationRun
+			s.Require().NoError(json.NewDecoder(answer.Body).Decode(&run))
+			s.cancelled(run.Id)
+			going++
+		}
+		if answer.StatusCode != http.StatusAccepted {
+			break
+		}
+		s.useApp(s.data.createApp())
+	}
+
+	s.Equal(8, going)
+	s.Equal(http.StatusTooManyRequests, answer.StatusCode)
+	s.Equal("30", answer.Header.Get("Retry-After"))
+	var failed ErrorResponse
+	s.Require().NoError(json.NewDecoder(answer.Body).Decode(&failed))
+	s.Equal("rate_limited", failed.Error.Code)
+	s.NotContains(failed.Error.Message, "simulation:")
 }
 
 func (s *SimulationsSuite) TestMoreVariationsThanARunTriesIsRefusedSayingHowMany() {
@@ -290,4 +372,25 @@ func (s *SimulationsSuite) run(id string) SimulationRun {
 	s.Require().Equal(http.StatusAccepted, s.serverClient.do(
 		http.MethodPost, "/v1/agents/simulations/"+id+"/run", nil, &started))
 	return started
+}
+
+// stuckSimulation is a simulation whose caller takes a minute over each thing it says, so a run
+// of it is still going when the next one is asked for.
+func (s *SimulationsSuite) stuckSimulation() string {
+	request := s.against(s.data.createAgentConfig())
+	request.CallerTarget = pointerTo("stuck/stuck-model")
+	return s.createSimulation(request).Id
+}
+
+// cancelled stops a run of the app in use when the test ends, and waits for it to be over.
+func (s *SimulationsSuite) cancelled(id string) {
+	client := s.serverClient
+	s.T().Cleanup(func() {
+		client.do(http.MethodPost, "/v1/agents/simulation-runs/"+id+"/cancel", nil, nil)
+		s.Require().Eventually(func() bool {
+			var run SimulationRun
+			client.do(http.MethodGet, "/v1/agents/simulation-runs/"+id, nil, &run)
+			return run.State != "" && run.State != "running"
+		}, 30*time.Second, 50*time.Millisecond)
+	})
 }
