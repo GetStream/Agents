@@ -142,8 +142,8 @@ internal static class UsageCategories
 /// </summary>
 internal sealed class Backend
 {
-    /// <summary>Stream's hosted router, which is where a client goes when nothing says otherwise.</summary>
-    public const string DefaultUrl = "https://accelerate-us-east4.gcp.stream-io-api.com";
+    /// <summary>Stream's hosted router in the nearest healthy region, which is where a client goes when nothing says otherwise.</summary>
+    public const string DefaultUrl = "https://accelerate.gcp.stream-io-api.com";
     public const string UrlEnv = "STREAM_ACCELERATION_URL";
     /// <summary>Holds this SDK to the hosted router in one region, such as <c>us-east4</c>.</summary>
     public const string RegionEnv = "STREAM_ACCELERATION_REGION";
@@ -400,9 +400,13 @@ internal sealed class Backend
         return $"https://accelerate-{name}.gcp.stream-io-api.com";
     }
 
-    // Whether url is the hosted router in some region, which is always behind the proxy.
+    // Whether url is the hosted router, nearest or in some region, which is always behind the proxy.
     private static bool Hosted(string url)
     {
+        if (url == DefaultUrl)
+        {
+            return true;
+        }
         const string prefix = "https://accelerate-", suffix = ".gcp.stream-io-api.com";
         return url.StartsWith(prefix, StringComparison.Ordinal)
             && url.EndsWith(suffix, StringComparison.Ordinal)
