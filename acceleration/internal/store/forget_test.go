@@ -308,20 +308,25 @@ func (s *StoreSuite) TestRenamingAUserLeavesARequestThatIsNoLongerTheirs() {
 	s.Empty(s.payloadsNaming("app", "jlahey"), "the change from when it was theirs is renamed")
 }
 
-// A change left names a request by its id alone, which may be another app's by then.
+// A change left names a request by its id alone, which may be another app's by then, and that
+// app's own changes of the same user id are not left to rename.
 func (s *StoreSuite) TestRenamingAUserLeavesAnotherAppsRequestOfTheIdAChangeNames() {
 	s.renaming()
 	theirs := &Request{Modality: "stt", CustomerID: "other-app", UserID: "jlahey", Provider: "deepgram", Model: "flux-general-en", StartedAt: s.base, Success: true}
 	s.Require().NoError(insertRequest(s.ctx, s.store, theirs))
 	_, err := s.store.global.ExecContext(s.ctx, `INSERT INTO data_changes (customer_id, table_name, op, key, payload)
-SELECT 'app', 'requests', 'insert', '{}', jsonb_build_object('id', id, 'user_id', 'jlahey') FROM requests WHERE usage_id = ?`, theirs.UsageID)
+SELECT app, 'requests', 'insert', '{}', jsonb_build_object('id', id, 'user_id', 'jlahey')
+FROM requests, unnest(ARRAY['other-app', 'app']) WITH ORDINALITY AS a (app, n) WHERE usage_id = ? ORDER BY n`, theirs.UsageID)
 	s.Require().NoError(err)
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
 
-	renamed, err := s.store.Requests.RenameUser(s.ctx, "app", "jlahey", "forgotten")
+	renamed, err := s.store.Requests.RenameUser(ctx, "app", "jlahey", "forgotten")
 
 	s.Require().NoError(err)
 	s.Zero(renamed)
 	s.Empty(s.payloadsNaming("app", "jlahey"))
+	s.Len(s.payloadsNaming("other-app", "jlahey"), 1)
 	left, err := s.store.Requests.CountByUser(s.ctx, "other-app", "jlahey")
 	s.Require().NoError(err)
 	s.EqualValues(1, left)
