@@ -1085,7 +1085,7 @@ func (s *RefusedAttemptsSuite) TestARefusedKeyAlertNamesTheProductAndModelInItsC
 	events := s.sentEvents(p.keyVars[0], func() { s.post(p.Pool) })
 
 	s.Require().Contains(events, item)
-	s.Equal([]string{"usage_key_refused:" + item}, events[item].Fingerprint, "the grouping is the item's, as before")
+	s.Equal([]string{"usage_key_refused:test:" + item}, events[item].Fingerprint, "the grouping is the item's, as before")
 	s.Equal(sentry.Context{"value": 1.0, "increase": 1.0, "owner": []string{"ours"}, "product": []string{"tts"},
 		"model": []string{"gemini-2.5-flash-preview-tts"}}, events[item].Contexts["usage_alert"])
 }

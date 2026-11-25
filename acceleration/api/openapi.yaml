@@ -687,6 +687,9 @@ components:
           description: Absent when calls are reviewed by Stream's default guide.
         role:
           $ref: '#/components/schemas/AgentRole'
+        routing_policy:
+          $ref: '#/components/schemas/RoutingPolicy'
+          description: Which regions the agent's work may be placed in, over the app's own routing_policy. Absent when the agent follows the app's.
         sandbox:
           $ref: '#/components/schemas/Sandbox'
         sandbox_options:
@@ -843,6 +846,9 @@ components:
           $ref: '#/components/schemas/AgentReview'
         role:
           $ref: '#/components/schemas/AgentRole'
+        routing_policy:
+          $ref: '#/components/schemas/RoutingPolicy'
+          description: Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's.
         sandbox:
           $ref: '#/components/schemas/Sandbox'
         sandbox_options:
@@ -997,6 +1003,9 @@ components:
           description: How a finished call under this agent is reviewed. Left out on an update, the stored instructions stay.
         role:
           $ref: '#/components/schemas/AgentRole'
+        routing_policy:
+          $ref: '#/components/schemas/RoutingPolicy'
+          description: Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's. Left out, a new agent follows the app's and an update keeps the stored policy.
         sandbox:
           $ref: '#/components/schemas/Sandbox'
         sandbox_options:
@@ -1461,10 +1470,14 @@ components:
     AppSettings:
       description: What the router does for the calling app. It never carries a secret.
       properties:
+        routing_policy:
+          $ref: '#/components/schemas/RoutingPolicy'
+          description: Which regions the app's work may be placed in, unless its agent config sets its own routing_policy. closest when the app never set one.
         stream:
           $ref: '#/components/schemas/StreamSettings'
       required:
         - stream
+        - routing_policy
       type: object
     ApprovedConnectionTool:
       properties:
@@ -8788,6 +8801,23 @@ components:
       required:
         - name
       type: object
+    RoutingPolicy:
+      description: 'Which regions work may be placed in. closest is the region nearest the person: where a request landed, the called number''s country, or the region that last served the user. us_east is the region holding the configs, for everything. us_only, eu_only and canada_only place the work (sessions, calls, runs, reminders, dials and dispatch workers) in that geography, and fail it (503 shard_unavailable) rather than place it anywhere else when none of its regions is up. Some data is still stored in the region holding the configs whatever the policy: configs, the global index of sessions, inbound message bodies, task instructions, knowledge and contacts. Empty is the app''s own on an agent config, and closest on the app.'
+      enum:
+        - ""
+        - closest
+        - us_east
+        - us_only
+        - eu_only
+        - canada_only
+      type: string
+      x-enum-varnames:
+        - RoutingPolicyUnset
+        - RoutingPolicyClosest
+        - RoutingPolicyUSEast
+        - RoutingPolicyUSOnly
+        - RoutingPolicyEUOnly
+        - RoutingPolicyCanadaOnly
     Run:
       properties:
         children:
@@ -11884,6 +11914,12 @@ components:
         - provider
         - model
         - region
+      type: object
+    UpdateAppSettings:
+      properties:
+        routing_policy:
+          $ref: '#/components/schemas/RoutingPolicy'
+          description: Which regions the app's work may be placed in, unless its agent config sets its own. Empty is closest.
       type: object
     UpdateScheduledTaskRequest:
       properties:
@@ -26562,7 +26598,7 @@ paths:
   /v1/settings/app:
     get:
       description: |-
-        Which Stream app the router writes the calling app's conversations and calls into, and whether that app holds the agent channel and call types. Stream is asked at most once a minute.
+        Which Stream app the router writes the calling app's conversations and calls into, and whether that app holds the agent channel and call types. Stream is asked at most once a minute. Also which regions the app's work may be placed in.
 
         Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
       operationId: getAppSettings
@@ -26593,6 +26629,49 @@ paths:
         "503":
           $ref: '#/components/responses/Unavailable'
       summary: What the router does for the calling app
+    patch:
+      description: |-
+        Writes only the fields sent, and answers with the app's settings as they now are. Work already placed stays where it is. After a switch to us_only, eu_only or canada_only, a dispatch worker already connected outside the geography is not reached by the app's sessions until it reconnects, when it is placed in the geography.
+
+        Server-side only: it needs a server-side token, so it cannot be reached from an end user's device.
+      operationId: updateAppSettings
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAppSettings'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppSettings'
+          description: The app's settings
+          headers:
+            X-Stream-Balance-Micros:
+              $ref: '#/components/headers/X-Stream-Balance-Micros'
+            X-Stream-Balance-Warning:
+              $ref: '#/components/headers/X-Stream-Balance-Warning'
+            X-Stream-Cost-Estimated:
+              $ref: '#/components/headers/X-Stream-Cost-Estimated'
+            X-Stream-Cost-Micros:
+              $ref: '#/components/headers/X-Stream-Cost-Micros'
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "402":
+          $ref: '#/components/responses/PaymentRequired'
+        "403":
+          $ref: '#/components/responses/Forbidden'
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "500":
+          $ref: '#/components/responses/InternalError'
+        "503":
+          $ref: '#/components/responses/Unavailable'
+      summary: Change the calling app's settings
   /v1/spend/limits:
     get:
       description: |-

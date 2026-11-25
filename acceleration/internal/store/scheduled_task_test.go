@@ -1754,3 +1754,113 @@ func (s *StoreSuite) TestWithNoShardRoutingEveryShardClaimsEveryTask() {
 
 	s.Equal([]string{"one"}, s.claimedIn(ShardClaim{Shard: "us-east4", Shards: []string{"us-east4", "europe-west4"}}, 16))
 }
+
+// placed is a deployment of three shards: us-east4, its home and the US's one, and
+// europe-west4 and europe-west1, Europe's in that order. It has none in Canada.
+var placed = shardmap.Map{Default: "us-east4", Countries: map[string]string{"DE": "europe-west4"},
+	Regions: map[string]string{"eu": "europe-west4"}, Home: "us-east4",
+	Residency: map[string][]string{"us": {"us-east4"}, "eu": {"europe-west4", "europe-west1"}}}
+
+// placedIn is a claim of shard in placed.
+func placedIn(shard string) ShardClaim {
+	return ShardClaim{Shard: shard, Routing: placed}
+}
+
+// appUnder stores the app customerID under policy.
+func (s *StoreSuite) appUnder(customerID string, policy shardmap.Policy) {
+	org := Organization{Name: "acme"}
+	s.Require().NoError(s.store.Organizations.Insert(s.ctx, &org))
+	s.Require().NoError(s.store.Apps.Insert(s.ctx, &App{ID: customerID, OrganizationID: org.ID, Name: "production"}))
+	s.Require().NoError(s.store.Apps.SetRoutingPolicy(s.ctx, customerID, policy))
+}
+
+// agentUnder stores customerID's config-1 under policy.
+func (s *StoreSuite) agentUnder(customerID string, policy shardmap.Policy) {
+	_, err := s.store.global.ExecContext(s.ctx,
+		"INSERT INTO agent_configs (id, customer_id, name, routing_policy) VALUES ('config-1', ?, 'placed', ?)",
+		customerID, string(policy))
+	s.Require().NoError(err)
+}
+
+func (s *StoreSuite) TestATaskOfAnEUOnlyAppIsClaimedInEuropeThoughItsUserWasServedInTheUS() {
+	s.appUnder("acme", shardmap.PolicyEUOnly)
+	s.dueTask("one", s.servedIn("us-east4"), time.Now().Add(-time.Minute))
+
+	s.Empty(s.claimedIn(placedIn("us-east4"), 16))
+	s.Empty(s.claimedIn(placedIn("europe-west1"), 16), "europe-west4 is the geography's first shard")
+	s.Equal([]string{"one"}, s.claimedIn(placedIn("europe-west4"), 16))
+}
+
+func (s *StoreSuite) TestATaskOfAnEUOnlyAppStaysInTheEuropeanShardThatServedItsUser() {
+	s.appUnder("acme", shardmap.PolicyEUOnly)
+	s.dueTask("one", s.servedIn("europe-west1"), time.Now().Add(-time.Minute))
+
+	s.Empty(s.claimedIn(placedIn("europe-west4"), 16))
+	s.Equal([]string{"one"}, s.claimedIn(placedIn("europe-west1"), 16))
+}
+
+func (s *StoreSuite) TestAnOverdueTaskOfAnEUOnlyAppIsNeverClaimedOutsideEurope() {
+	s.appUnder("acme", shardmap.PolicyEUOnly)
+	s.dueTask("one", s.servedIn("europe-west4"), time.Now().Add(-24*time.Hour))
+
+	s.Empty(s.claimedIn(placedIn("us-east4"), 16))
+}
+
+func (s *StoreSuite) TestATaskOfAnEUOnlyAppIsClaimedByAnotherEuropeanShardOnceOverdue() {
+	s.appUnder("acme", shardmap.PolicyEUOnly)
+	s.dueTask("one", s.servedIn("europe-west4"), time.Now().Add(-claimOverdue+time.Minute))
+	s.Require().Empty(s.claimedIn(placedIn("europe-west1"), 16), "not overdue yet")
+
+	_, err := s.store.global.NewUpdate().Model((*ScheduledTask)(nil)).
+		Set("next_run_at = ?", time.Now().Add(-claimOverdue-time.Minute)).
+		Where("id = ?", "one").Exec(s.ctx)
+	s.Require().NoError(err)
+
+	s.Equal([]string{"one"}, s.claimedIn(placedIn("europe-west1"), 16))
+}
+
+func (s *StoreSuite) TestATaskOfACanadaOnlyAppWaitsInADeploymentWithNoShardInCanada() {
+	s.appUnder("acme", shardmap.PolicyCanadaOnly)
+	s.dueTask("one", s.servedIn("us-east4"), time.Now().Add(-24*time.Hour))
+
+	for _, shard := range []string{"us-east4", "europe-west4", "europe-west1"} {
+		s.Empty(s.claimedIn(placedIn(shard), 16), shard)
+	}
+}
+
+func (s *StoreSuite) TestATaskOfAUSEastAppIsClaimedInTheHomeShardWhereverItsUserWasServed() {
+	s.appUnder("acme", shardmap.PolicyUSEast)
+	s.dueTask("one", s.servedIn("europe-west4"), time.Now().Add(-time.Minute))
+
+	s.Empty(s.claimedIn(placedIn("europe-west4"), 16))
+	s.Equal([]string{"one"}, s.claimedIn(placedIn("us-east4"), 16))
+}
+
+func (s *StoreSuite) TestAnOverdueTaskOfAUSEastAppIsClaimedByAnyShard() {
+	s.appUnder("acme", shardmap.PolicyUSEast)
+	s.dueTask("one", s.servedIn("europe-west4"), time.Now().Add(-claimOverdue-time.Minute))
+
+	s.Equal([]string{"one"}, s.claimedIn(placedIn("europe-west1"), 16))
+}
+
+func (s *StoreSuite) TestATasksAgentsPolicyWinsOverItsAppsAndAnAgentWithNoneTakesTheApps() {
+	s.appUnder("acme", shardmap.PolicyUSEast)
+	s.agentUnder("acme", shardmap.PolicyEUOnly)
+	s.dueTask("agents", s.servedIn("us-east4"), time.Now().Add(-time.Minute))
+	s.task("apps", func(task *ScheduledTask) {
+		due := time.Now().Add(-time.Minute)
+		task.UserID, task.ConfigID, task.NextRunAt = s.servedIn("europe-west4"), "config-2", &due
+	})
+
+	s.Equal([]string{"agents"}, s.claimedIn(placedIn("europe-west4"), 16))
+	s.Equal([]string{"apps"}, s.claimedIn(placedIn("us-east4"), 16))
+}
+
+func (s *StoreSuite) TestATaskOfAClosestAppIsClaimedWhereItsUserWasServed() {
+	s.appUnder("acme", shardmap.PolicyClosest)
+	s.dueTask("one", s.servedIn("europe-west1"), time.Now().Add(-time.Minute))
+
+	s.Empty(s.claimedIn(placedIn("us-east4"), 16))
+	s.Empty(s.claimedIn(placedIn("europe-west4"), 16))
+	s.Equal([]string{"one"}, s.claimedIn(placedIn("europe-west1"), 16))
+}
