@@ -5004,7 +5004,32 @@ func (s *ScheduledTasksSuite) TestRepeatingScheduleTaskAwaitsApprovalAndPersists
 	watching := s.watch(user, opened.Id)
 
 	requestID := s.sayCommand(user, opened.Id, "remind me to stretch every day")
-	step := s.awaitScheduleApproval(watching, "schedule_task")
+	var step map[string]any
+	sawWaiting := false
+	deadline := time.Now().Add(settleFor)
+	for (step == nil || !sawWaiting) && time.Now().Before(deadline) {
+		s.Require().NoError(watching.SetReadDeadline(deadline))
+		var frame map[string]any
+		s.Require().NoError(watching.ReadJSON(&frame))
+		if frame["type"] == "tool_ran" && frame["tool"] == "schedule_task" {
+			s.Require().Failf("tool ran without approval", "schedule_task answered %v before awaiting approval", frame["result"])
+		}
+		if frame["type"] == "tool_call.progress" && frame["tool"] == "schedule_task" && frame["status"] == "waiting" {
+			sawWaiting = true
+		}
+		if frame["type"] == "conversation_updated" && step == nil {
+			message, _ := frame["message"].(map[string]any)
+			parts, _ := message["parts"].([]any)
+			for _, part := range parts {
+				found, _ := part.(map[string]any)
+				if found["name"] == "schedule_task" && found["status"] == "awaiting_approval" {
+					step = found
+				}
+			}
+		}
+	}
+	s.Require().NotNil(step, "schedule_task never entered awaiting_approval")
+	s.True(sawWaiting, "watcher never received tool_call.progress waiting")
 
 	s.Equal(user.userID, step["target_user_id"])
 	s.Empty(s.tasksOf(user), "nothing is persisted before the user approves")
@@ -5012,7 +5037,21 @@ func (s *ScheduledTasksSuite) TestRepeatingScheduleTaskAwaitsApprovalAndPersists
 	s.Require().NoError(watching.WriteJSON(map[string]any{
 		"type": "tool_approval", "tool_call_id": step["id"], "request_id": requestID, "allowed": true,
 	}))
-	result := s.ranResult(watching)
+	var result string
+	sawInProgress := false
+	deadline = time.Now().Add(settleFor)
+	for (result == "" || !sawInProgress) && time.Now().Before(deadline) {
+		s.Require().NoError(watching.SetReadDeadline(deadline))
+		var frame map[string]any
+		s.Require().NoError(watching.ReadJSON(&frame))
+		if frame["type"] == "tool_call.progress" && frame["tool"] == "schedule_task" && frame["status"] == "in_progress" {
+			sawInProgress = true
+		}
+		if frame["type"] == "tool_ran" && frame["tool"] == "schedule_task" {
+			result, _ = frame["result"].(string)
+		}
+	}
+	s.True(sawInProgress, "watcher never received tool_call.progress in_progress after approval")
 	s.Contains(result, `"title":"Daily stretch"`)
 	tasks := s.tasksOf(user)
 	s.Require().Len(tasks, 1)

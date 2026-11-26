@@ -17,10 +17,17 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	persistent "github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/conversation/chattest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/llmrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/sttrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/testenv"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/ttsrouter"
 )
 
 // ScheduleApprovalSuite tests the code-enforced approval gate on repeating
@@ -381,6 +388,210 @@ func (s *ScheduleApprovalSuite) TestUpdateSkipNextWithInstructionsOnRepeatingTas
 	s.Equal("Remind them to stretch.", stored.Instructions)
 }
 
+func (s *ScheduleApprovalSuite) TestUpdatePauseAndSkipNextWithTitleOnRepeatingTaskHoldForApproval() {
+	for _, action := range []string{"pause", "skip_next"} {
+		s.Run(action, func() {
+			runner, sess, h, customer, configID := s.interactiveRunner()
+			task := s.insertTask(customer, configID, runner.user, "FREQ=DAILY", store.ScheduledTaskActive)
+
+			// A scheduled turn cannot rewrite the title either.
+			schedParts, err := runner.Run(agent.WithScheduledCall(s.ctx), llm.ToolCall{
+				ID:        "call-sched-title-" + action,
+				Name:      updateScheduledTool,
+				Arguments: `{"id":"` + task.ID + `","action":"` + action + `","title":"Rewritten"}`,
+			})
+			s.Require().NoError(err)
+			s.Contains(schedParts[0].Text, `"error":"scheduled_turn"`)
+			s.Empty(h.asked)
+
+			// An interactive turn must pause for approval; declining leaves the title unchanged.
+			callID := "call-title-" + action
+			done := make(chan []llm.ContentPart, 1)
+			go func() {
+				parts, err := runner.Run(s.ctx, llm.ToolCall{
+					ID:        callID,
+					Name:      updateScheduledTool,
+					Arguments: `{"id":"` + task.ID + `","action":"` + action + `","title":"New title"}`,
+				})
+				s.NoError(err)
+				done <- parts
+			}()
+
+			s.awaitAsked(h, callID)
+			s.Require().NoError(sess.AnswerConnectorApproval(callID, "cmd-1", false, "",
+				Owner{CustomerID: customer, UserID: runner.user, Kind: auth.KindAuthenticated}))
+
+			parts := <-done
+			s.Contains(parts[0].Text, `"status":"declined"`)
+			stored, err := s.store.ScheduledTasks.Get(s.ctx, customer, task.ID)
+			s.Require().NoError(err)
+			s.Equal("Stretch", stored.Title)
+		})
+	}
+}
+
+func (s *ScheduleApprovalSuite) TestAnswerConnectorApprovalFallsThroughFromConnectorsToScheduling() {
+	runner, _, h, customer, _ := s.interactiveRunner()
+	sess := &Session{
+		spec:       runner.spec,
+		connectors: &dispatcher{spec: runner.spec},
+		scheduling: runner,
+	}
+	callID := "call-fallthrough"
+	done := make(chan []llm.ContentPart, 1)
+	go func() {
+		parts, err := runner.Run(s.ctx, llm.ToolCall{
+			ID:        callID,
+			Name:      scheduleTaskTool,
+			Arguments: `{"title":"Daily stretch","instructions":"Stretch.","in":"PT2H","repeat":"FREQ=DAILY"}`,
+		})
+		s.NoError(err)
+		done <- parts
+	}()
+
+	s.awaitAsked(h, callID)
+	s.Require().NoError(sess.AnswerConnectorApproval(callID, "cmd-1", true, "",
+		Owner{CustomerID: customer, UserID: runner.user, Kind: auth.KindAuthenticated}))
+
+	parts := <-done
+	s.Require().Len(parts, 1)
+	s.Contains(parts[0].Text, `"title":"Daily stretch"`)
+	tasks, err := s.store.ScheduledTasks.Select(s.ctx, customer, store.ScheduledTaskFilter{Limit: 10})
+	s.Require().NoError(err)
+	s.Require().Len(tasks, 1)
+	s.Equal("FREQ=DAILY", tasks[0].RRule)
+}
+
+func (s *ScheduleApprovalSuite) newApprovalManager(approvalWait time.Duration) *Manager {
+	logger := slog.New(slog.DiscardHandler)
+	service := persistent.NewForChat(chattest.Client(s.T()))
+	s.T().Cleanup(service.Close)
+
+	transcription := sttrouter.NewRegistry()
+	transcription.Register("stub", func(routing.Spec) (stt.STT, error) { return &stubSTT{emitter: stt.NewEmitter(8)}, nil })
+	transcriber, err := sttrouter.New(sttrouter.Options{Config: stubConfig(), Registry: transcription, Logger: logger})
+	s.Require().NoError(err)
+	s.T().Cleanup(transcriber.Close)
+
+	reasoning := llmrouter.NewRegistry()
+	reasoning.Register("stub", func(routing.Spec) (llmrouter.Provider, error) { return &stubLLM{reply: "Hello."}, nil })
+	reasoner, err := llmrouter.New(llmrouter.Options{Config: stubConfig(), Registry: reasoning, Logger: logger})
+	s.Require().NoError(err)
+	s.T().Cleanup(reasoner.Close)
+
+	speech := ttsrouter.NewRegistry()
+	speech.Register("stub", func(routing.Spec) (tts.TTS, error) { return &stubTTS{emitter: tts.NewEmitter(8)}, nil })
+	speaker, err := ttsrouter.New(ttsrouter.Options{Config: stubConfig(), Registry: speech, Logger: logger})
+	s.Require().NoError(err)
+	s.T().Cleanup(speaker.Close)
+
+	mgr, err := NewManager(ManagerOptions{
+		LLM:           reasoner,
+		STT:           transcriber,
+		TTS:           speaker,
+		Store:         s.store,
+		Conversations: service,
+		Connectors:    Connectors{ApprovalWait: approvalWait},
+		Logger:        logger,
+		Edge: func(context.Context, Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
+			return nil, nil
+		},
+	})
+	s.Require().NoError(err)
+	return mgr
+}
+
+func (s *ScheduleApprovalSuite) TestPersistentPhoneSessionRefusesRepeatingScheduleImmediately() {
+	mgr := s.newApprovalManager(10 * time.Minute)
+	customer, user := "sched-phone-"+uuid.NewString(), "user-"+uuid.NewString()
+	config := store.AgentConfig{CustomerID: customer, Name: "agent-" + uuid.NewString()}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
+
+	created, err := mgr.Create(s.ctx, Spec{
+		CustomerID:          customer,
+		ConfigID:            config.ID,
+		Text:                true,
+		PersistConversation: true,
+		Timezone:            "UTC",
+		Caller:              routing.Caller{UserID: user},
+		CallerKind:          auth.KindAuthenticated,
+		LLMTarget:           "en-low-latency",
+		Scheduling:          store.AgentScheduling{Enabled: true},
+		Phone:               &PhoneSpec{To: "+15550100100"},
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = created.Close() })
+	s.Require().NotNil(created.scheduling)
+	s.Require().NotNil(created.persisted)
+
+	// Open an assistant message with the tool call recorded so conv.AwaitApproval would
+	// have held the call if Manager.Create had wired asksIn(conv) on a phone session.
+	callID := "call-phone-repeat"
+	_, err = created.persisted.BeginCommand("cmd-phone", "remind me daily", "")
+	s.Require().NoError(err)
+	created.persisted.Observe(agent.ToolStarted{ID: callID, Tool: scheduleTaskTool})
+
+	parts, err := created.scheduling.Run(s.ctx, llm.ToolCall{
+		ID:        callID,
+		Name:      scheduleTaskTool,
+		Arguments: `{"title":"Daily stretch","instructions":"Stretch.","in":"PT2H","repeat":"FREQ=DAILY"}`,
+	})
+	s.Require().NoError(err)
+	s.Require().Len(parts, 1)
+	var out map[string]string
+	s.Require().NoError(json.Unmarshal([]byte(parts[0].Text), &out))
+	s.Equal("unavailable", out["status"])
+	s.Contains(out["message"], "interactive approval")
+
+	tasks, err := s.store.ScheduledTasks.Select(s.ctx, customer, store.ScheduledTaskFilter{Limit: 10})
+	s.Require().NoError(err)
+	s.Empty(tasks)
+}
+
+func (s *ScheduleApprovalSuite) TestUnansweredRepeatingScheduleExpiresAfterApprovalWait() {
+	mgr := s.newApprovalManager(50 * time.Millisecond)
+	customer, user := "sched-wait-"+uuid.NewString(), "user-"+uuid.NewString()
+	config := store.AgentConfig{CustomerID: customer, Name: "agent-" + uuid.NewString()}
+	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
+
+	created, err := mgr.Create(s.ctx, Spec{
+		CustomerID:          customer,
+		ConfigID:            config.ID,
+		Text:                true,
+		PersistConversation: true,
+		Timezone:            "UTC",
+		Caller:              routing.Caller{UserID: user},
+		CallerKind:          auth.KindAuthenticated,
+		LLMTarget:           "en-low-latency",
+		Scheduling:          store.AgentScheduling{Enabled: true},
+	})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = created.Close() })
+	s.Require().NotNil(created.scheduling)
+	s.Require().NotNil(created.persisted)
+
+	callID := "call-timeout-repeat"
+	_, err = created.persisted.BeginCommand("cmd-wait", "remind me daily", "")
+	s.Require().NoError(err)
+	created.persisted.Observe(agent.ToolStarted{ID: callID, Tool: scheduleTaskTool})
+
+	parts, err := created.scheduling.Run(s.ctx, llm.ToolCall{
+		ID:        callID,
+		Name:      scheduleTaskTool,
+		Arguments: `{"title":"Daily stretch","instructions":"Stretch.","in":"PT2H","repeat":"FREQ=DAILY"}`,
+	})
+	s.Require().NoError(err)
+	s.Require().Len(parts, 1)
+	var out map[string]string
+	s.Require().NoError(json.Unmarshal([]byte(parts[0].Text), &out))
+	s.Equal("declined", out["status"])
+	s.Contains(out["message"], "in time")
+
+	tasks, err := s.store.ScheduledTasks.Select(s.ctx, customer, store.ScheduledTaskFilter{Limit: 10})
+	s.Require().NoError(err)
+	s.Empty(tasks)
+}
+
 func (s *ScheduleApprovalSuite) TestUpdatePauseAndSkipNextWithoutInstructionsNeedNoApproval() {
 	runner, _, h, customer, configID := s.interactiveRunner()
 	task := s.insertTask(customer, configID, runner.user, "FREQ=DAILY", store.ScheduledTaskActive)
@@ -460,3 +671,4 @@ func (s *ScheduleApprovalSuite) TestScheduledCallCannotRewriteRepeatingInstructi
 	s.Require().NoError(err)
 	s.Equal("Remind them to stretch.", stored.Instructions)
 }
+

@@ -796,7 +796,7 @@ func (m *Manager) Create(ctx context.Context, spec Spec) (_ *Session, failure er
 		tools = append(tools, offered...)
 		scheduling.next = runner
 		runner = scheduling
-		if conv != nil {
+		if conv != nil && spec.Phone == nil {
 			scheduling.approvals.asksIn(conv)
 		}
 		scheduling.approvals.changed = created.trackToolCall

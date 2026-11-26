@@ -203,8 +203,8 @@ func (r *scheduleRunner) approveRepeating(ctx context.Context, title string, cal
 
 // needsRepeatingApproval reports whether an update_scheduled_task call creates,
 // changes or re-arms a repeating schedule, or rewrites a repeating task's
-// instructions. One-shot tasks, downgrading a repeat to a one-shot, and pausing
-// or skipping without changing instructions need no approval.
+// title or instructions. One-shot tasks, downgrading a repeat to a one-shot,
+// and pausing or skipping without changing title or instructions need no approval.
 func needsRepeatingApproval(args updateArgs, isRepeating bool) bool {
 	if !isRepeating {
 		return false
@@ -213,7 +213,7 @@ func needsRepeatingApproval(args updateArgs, isRepeating bool) bool {
 	case "reschedule", "snooze", "resume":
 		return true
 	case "pause", "skip_next":
-		return args.Instructions != nil
+		return args.Instructions != nil || args.Title != nil
 	default:
 		return false
 	}
