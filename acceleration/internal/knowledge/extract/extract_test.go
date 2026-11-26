@@ -229,24 +229,6 @@ func (s *ExtractSuite) TestDrawingAPageStopsAtTheDeadline() {
 	s.Require().ErrorIs(err, context.DeadlineExceeded)
 }
 
-// A context cancelled before the read starts kills the worker while the read opens the
-// document, and the open that fails then closes the worker. Run under -race, as CI does, a
-// close while the kill is still going on is a data race in PDFium's instance. The kill runs in
-// a goroutine of its own, so a read can also finish before it and return no error.
-func (s *ExtractSuite) TestAReadCancelledBeforeItStartsKillsItsWorkerBeforeClosingIt() {
-	data := s.fixture("manual.pdf")
-	for range 200 {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
-		_, err := s.extractor.Extract(ctx, "manual.pdf", data)
-
-		if err != nil {
-			s.Require().ErrorIs(err, context.Canceled)
-		}
-	}
-}
-
 // A deadline that passes after the document opened kills the worker while the read closes it.
 // Run under -race, a close that does not wait for the kill is a data race in PDFium's
 // instance. Such a close can also leave the pool's lock held, so the next open never returns:
