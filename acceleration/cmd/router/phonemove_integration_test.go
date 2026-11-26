@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -157,6 +158,21 @@ func (s *PhoneMoveSuite) TestApplyMovesEachNumberOnceAndAgainMovesNone() {
 	s.Contains(again, "allowlist: 0 set, 0 to set, 2 already set\n")
 	s.Len(s.twilio.posted(), 2, "nothing more was written")
 	s.Equal(1, s.trunkUpdates(), "nothing more was written at Stream")
+}
+
+// A trunk that has Twilio's addresses in another order is left alone.
+func (s *PhoneMoveSuite) TestATrunkWithTheAddressesInAnotherOrderIsLeftAlone() {
+	number := s.attachedEarlier()
+	trunk := s.trunkOf(number)
+	reversed := slices.Clone(s.twilioRanges())
+	slices.Reverse(reversed)
+	s.Require().NoError(phone.NewStreamFromClient(s.chat.Client).UpdateTrunk(s.ctx, trunk,
+		phone.Trunk{Name: "made earlier", Numbers: s.chat.TrunkNumbers(trunk), AllowedIPs: reversed}))
+
+	out, err := s.move(s.ready(), "--apply")
+
+	s.Require().NoError(err)
+	s.Contains(out, number+"\tapp deployment\tmoved\tallowlist already set\n")
 }
 
 // A run reads past one page of the store, and reports each number once.

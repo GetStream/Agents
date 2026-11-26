@@ -238,6 +238,19 @@ func (s *AppsSuite) TestACallOnAPasswordVendorWithNoAddressesHasAPasswordAndNoAl
 	s.Empty(allowed)
 }
 
+// A shared trunk of a vendor that cannot send a password has its addresses and no password.
+func (s *AppsSuite) TestASharedTrunkOfAVendorThatCannotSendAPasswordHasNoPassword() {
+	vonage := s.vendorOnAnAllowlist()
+	s.sealed()
+
+	line, err := s.lineFor(s.customer, vonage.e164)
+
+	s.Require().NoError(err)
+	password, allowed := s.deployment.TrunkAuth(line.TrunkID)
+	s.Empty(password, "Stream would challenge a vendor that has no way to answer")
+	s.Equal(vonage.signalling, allowed)
+}
+
 // A shared Twilio trunk has Twilio's addresses and a password when it is made, and keeps both
 // when another number joins it.
 func (s *AppsSuite) TestASharedTwilioTrunkHasTwiliosAddressesAndAPassword() {
