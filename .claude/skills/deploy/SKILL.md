@@ -19,10 +19,11 @@ pointer and restarting. Not an image build, not a chart deploy.
 
 ## Release
 
-A release is one version, `vX.Y.Z`, tagged `accelerate-vX.Y.Z`, and a
-published version is immutable. Only the Deploy staging button cuts one (AI-3915): never build or upload a release by hand. Staging runs
-it first, then prod gets the same binaries, one shard after another. To check only that the
-cgo build of a branch pushed to origin (not the working tree) passes, run this in
+A release is one version, `vX.Y.Z`, tagged `accelerate-vX.Y.Z`, and a published
+version is immutable. Only the Deploy staging button cuts one (AI-3915): never
+build or upload a release by hand. Staging runs it first, then prod gets the
+same binaries, one shard after another. To check only that the cgo build of a
+branch pushed to origin (not the working tree) passes, run this in
 GetStream/agents-platform; it tags, uploads and deploys nothing:
 `GOWORK=off go run ./cmd/quickdeploy -build-only -ref <branch> -src <this checkout>`.
 
