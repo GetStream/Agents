@@ -347,6 +347,9 @@ type stubLLM struct {
 
 	// capabilities are what the model says it takes: text alone unless a test says more.
 	capabilities llm.Capabilities
+	// readingCapabilities, if set, is called each time they are read, so a test can act at that
+	// moment.
+	readingCapabilities func()
 
 	// panics, if set, is the value that Create panics with. It is like a bug in a model
 	// adapter.
@@ -540,9 +543,14 @@ func (s *stubLLM) Close() error {
 	return nil
 }
 
-func (s *stubLLM) Provider() string               { return "stub" }
-func (s *stubLLM) Model() string                  { return "stub-llm" }
-func (s *stubLLM) Capabilities() llm.Capabilities { return s.capabilities }
+func (s *stubLLM) Provider() string { return "stub" }
+func (s *stubLLM) Model() string    { return "stub-llm" }
+func (s *stubLLM) Capabilities() llm.Capabilities {
+	if s.readingCapabilities != nil {
+		s.readingCapabilities()
+	}
+	return s.capabilities
+}
 
 // sentBy is who each request was asked in the name of.
 func (s *stubLLM) sentBy() []routing.Caller {

@@ -2223,7 +2223,13 @@ func (a *Agent) perform(action Action) {
 
 	case ActSupersede:
 		a.dropSpeculation(action.TurnID)
-		if err := a.harness.CancelDecision(action.TurnID); err != nil {
+		a.mu.Lock()
+		current := a.harness
+		a.mu.Unlock()
+		if current == nil {
+			return
+		}
+		if err := current.CancelDecision(action.TurnID); err != nil {
 			a.fail(err, "flow")
 		}
 
