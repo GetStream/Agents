@@ -2297,10 +2297,6 @@ missed or failed), a campaign dial under `phone_sms`, and a simulation run under
 (refused when it errored). A signed MCP event counts under `hooks_in`, and a signed 10DLC report
 on an app's campaign under `phone_sms`.
 
-A GET of a route in one of those steps counts under `dashboard_reads`: it shows what was set up or
-held, and does not move `furthest_step`. A GET that opens a socket (`/v1/agents/socket`,
-`/v1/agents/sessions/{id}/events`, `/v1/dispatch`) counts under its own area.
-
 `furthest_step` is the furthest of `dashboard_reads`, `agent_setup`, `workers`, `conversations`,
 `voice_video` and `phone_sms` (`activity.Steps`), in that order, with a request answered rather than refused, or `steady_use` once conversations or model calls
 were answered on three UTC days, else `none`. Areas, `first_seen`, `last_seen` and
@@ -2311,6 +2307,12 @@ with empty lists. `shards` names the shards whose `requests` the meters sum, thi
 first. A deployment that leaves `shards` unset reads its own shard's `requests` alone
 and lists only that shard, named by a digest of its DSN, so its meters are not the organization's
 whole use; areas are kept in the database every shard shares and are complete (see Shards).
+
+A GET of a route in a step area, from any client, and a search of the sessions
+(`POST /v1/agents/sessions/query`) count under `dashboard_reads`: they show what was set up or
+held. They move `furthest_step` no further than `dashboard_reads`; the `client` of the item tells
+the dashboard's reads from the SDK's, the CLI's and the API's. A GET that opens a socket
+(`/v1/agents/socket`, `/v1/agents/sessions/{id}/events`, `/v1/dispatch`) counts under its own area.
 
 `sessions` reads `agent_sessions` on every shard in `shards`, from `since`: `opened` and
 `running` count the sessions the organization's apps opened, `ended` counts the others by end
