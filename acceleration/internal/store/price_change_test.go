@@ -312,6 +312,9 @@ func (s *StoreSuite) TestASyncThatWaitedForThePriceListTakesEffectWhenWritten() 
 	s.Require().NoError(err)
 	s.Equal(PriceChangeRelease, change.Kind)
 	s.False(change.EffectiveAt.Before(released), "effective %s, written after %s", change.EffectiveAt, released)
+	var stored PriceChange
+	s.Require().NoError(s.store.GlobalDB().NewSelect().Model(&stored).Where("name = ?", change.Name).Scan(s.ctx))
+	s.False(stored.CreatedAt.Before(released), "created %s, written after %s", stored.CreatedAt, released)
 }
 
 func (s *StoreSuite) TestASyncIsAudited() {
