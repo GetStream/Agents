@@ -404,6 +404,108 @@ func (s *CallHooksSuite) TestARefusalIsAnsweredWhileRedisHoldsItsMark() {
 		settleFor, 20*time.Millisecond, "ended at Stream, which the test's phone service has no credentials for")
 }
 
+// Defect (AI-2907): a refused call was ended at Stream on the request, so a slow Stream held
+// Stream's hook, and the caller, waiting.
+func (s *CallHooksSuite) TestARefusalIsAnsweredWhileStreamHoldsTheEnd() {
+	s.hold("default", s.callID)
+	s.suspended()
+	held := s.holdingEnd()
+
+	answered := make(chan int, 1)
+	go func() { answered <- s.arrive("default:" + s.callID) }()
+
+	select {
+	case status := <-answered:
+		s.Equal(http.StatusOK, status)
+	case <-time.After(settleFor):
+		s.Fail("the refusal waited on ending the call at Stream")
+	}
+	s.True(s.refused())
+	close(held.release)
+	s.Require().Eventually(func() bool { return strings.Contains(s.thisTest(), "could not end a refused arriving call") },
+		settleFor, 20*time.Millisecond, "the end was never tried")
+}
+
+// Defect (AI-2907): the end of a refused call used the request's context, which is cancelled
+// once the hook has answered, so the end failed whenever Stream took longer than the answer.
+func (s *CallHooksSuite) TestARefusedCallIsEndedAfterTheHookHasAnswered() {
+	s.hold("default", s.callID)
+	s.suspended()
+	held := s.holdingEnd()
+
+	s.Require().Equal(http.StatusOK, s.arrive("default:"+s.callID))
+	close(held.release)
+
+	select {
+	case err := <-held.endContext:
+		s.NoError(err, "the end ran under the request's context, cancelled by the answer")
+	case <-time.After(settleFor):
+		s.Fail("the end was never tried")
+	}
+	s.Require().Eventually(func() bool { return strings.Contains(s.thisTest(), "could not end a refused arriving call") },
+		settleFor, 20*time.Millisecond, "the end was not logged")
+}
+
+// suspended has the router refuse the suite's customer's calls.
+func (s *CallHooksSuite) suspended() {
+	s.Require().NoError(s.store.TelephonySuspensions.Upsert(context.Background(), &store.TelephonySuspension{
+		CustomerID: s.customerID(), Reason: "fraud", SuspendedBy: "ops@example.test",
+	}))
+}
+
+// heldEnd is the apps of a phone service whose Stream answers nothing until release is closed,
+// as a slow Stream does. endContext gets the context error the end saw when it was let go.
+type heldEnd struct {
+	release    chan struct{}
+	endContext chan error
+}
+
+func (h *heldEnd) For(context.Context, string) (*phone.Stream, int64, error) {
+	return nil, 0, phone.ErrNoStream
+}
+
+func (h *heldEnd) ForApp(ctx context.Context, _ string, _ int64) (*phone.Stream, error) {
+	select {
+	case <-h.release:
+	case <-ctx.Done():
+	}
+	h.endContext <- ctx.Err()
+	return nil, phone.ErrNoStream
+}
+
+func (h *heldEnd) ForAppRemoving(context.Context, string, int64) (*phone.Stream, error) {
+	return nil, phone.ErrNoStream
+}
+
+func (h *heldEnd) Placed(context.Context, string) (int64, error) { return 0, phone.ErrNoStream }
+
+// holdingEnd has the router's phone service end a call at a Stream that holds the end until
+// release is closed, which the test's cleanup does if it has not been, and then puts the service back.
+func (s *CallHooksSuite) holdingEnd() *heldEnd {
+	held := &heldEnd{release: make(chan struct{}), endContext: make(chan error, 1)}
+	config, err := phone.DefaultConfig()
+	s.Require().NoError(err)
+	service, err := phone.NewService(phone.ServiceOptions{
+		Registry: vendors.Registry(config),
+		Store:    s.store,
+		Gate:     s.gate,
+		Apps:     held,
+		Logger:   slog.New(slog.DiscardHandler),
+	})
+	s.Require().NoError(err)
+	kept := s.router.phone
+	s.router.phone = service
+	s.T().Cleanup(func() {
+		select {
+		case <-held.release:
+		default:
+			close(held.release)
+		}
+		s.router.phone = kept
+	})
+	return held
+}
+
 // heldRedis is a relay in front of the suite's Redis. It holds what a connection sends, from the
 // first command naming a key under its prefix on, until release is closed. store is a store whose
 // Redis is the relay.
