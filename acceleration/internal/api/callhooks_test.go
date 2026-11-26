@@ -356,10 +356,11 @@ func (s *CallHooksSuite) TestACallToANumberWithNoAgentOnARouterWithNoDispatchIsR
 	ttl, err := s.live.Redis().Do(ctx, s.live.Redis().B().Pttl().Key(keys[0]).Build()).AsInt64()
 	s.Require().NoError(err)
 	// phone.Refused keeps the mark until the leg sweep has ended the longest leg (legs.go
-	// refusedFor); it was written at most settleFor ago. A mark with no expiry reads -1.
+	// refusedFor). It was written since the test started, well under a minute ago, and a mark
+	// with no expiry reads -1.
 	keptFor := phone.MaxCallLength + phone.LegSweepEvery
 	s.LessOrEqual(time.Duration(ttl)*time.Millisecond, keptFor)
-	s.Greater(time.Duration(ttl)*time.Millisecond, keptFor-settleFor)
+	s.Greater(time.Duration(ttl)*time.Millisecond, keptFor-time.Minute)
 	s.Require().Equal(http.StatusOK, s.signedly("/v1/phone/hooks/stream", fmt.Sprintf(
 		`{"type":"call.session_ended","call_cid":"default:%s","session_id":"session-1","created_at":%q,`+
 			`"call":{"cid":"default:%s","id":"%s","type":"default","custom":{}}}`,
@@ -389,16 +390,20 @@ func (s *CallHooksSuite) TestARefusalIsAnsweredWhileRedisHoldsItsMark() {
 	answeredIn := time.Since(start)
 
 	s.Require().True(s.refused())
-	// A mark written before the answer would hold it for phone's outcomeTimeout (legs.go, 5 s).
+	// Writing the mark before answering would hold the answer for phone's outcomeTimeout
+	// (legs.go, 5 s); the hook answers in milliseconds when it does not wait.
 	s.Less(answeredIn, 2*time.Second, "the refusal waited on Redis")
 	s.False(marked(), "the mark reached Redis, so Redis held nothing")
 	close(held.release)
 	s.Eventually(marked, settleFor, 10*time.Millisecond, "the held mark never reached Redis")
+	// The end at Stream reads the router's phone service, which the test's cleanup puts back.
+	s.Eventually(func() bool { return strings.Contains(s.thisTest(), "could not end a refused arriving call") },
+		settleFor, 20*time.Millisecond, "ended at Stream, which the test's phone service has no credentials for")
 }
 
-// heldRedis is a Redis in front of the suite's that holds what a connection sends from the
-// first command naming a key under its prefix on, until release is closed, and store a store
-// on it.
+// heldRedis is a relay in front of the suite's Redis. It holds what a connection sends, from the
+// first command naming a key under its prefix on, until release is closed. store is a store whose
+// Redis is the relay.
 type heldRedis struct {
 	release chan struct{}
 	store   *store.Store
