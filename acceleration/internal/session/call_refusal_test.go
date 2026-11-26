@@ -82,6 +82,21 @@ func (s *SessionSuite) TestATranscriberFailingDuringATypedTurnOnACallLeavesItsRe
 	s.NoError(running.FollowUpFailure("task_call"))
 }
 
+// A provider failing a turn typed into a call, not for money, is not the reply's recorded
+// failure: only a refusal for money ends a typed reply from outside its turn.
+func (s *SessionSuite) TestAProviderFailingATypedTurnOnACallKeepsNoFailure() {
+	running := s.transcribedCall()
+	events, detach := running.Watch()
+	defer detach()
+	down := errors.New("the provider is down")
+	s.model.refuses = down
+
+	s.Require().NoError(running.FollowUp(s.ctx, "task_call", "Remind them to stretch", nil))
+
+	s.Require().True(sawError(events, down), "the provider's failure never reached the session")
+	s.NoError(running.FollowUpFailure("task_call"))
+}
+
 // A refusal for money once the turn typed into a call has answered is a later turn's: the
 // typed reply, still open while the call goes on, keeps no failure, so a scheduled call that
 // said its task is delivered.
