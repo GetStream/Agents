@@ -914,46 +914,49 @@ func (s *ExtractSuite) cellsNaming(cells int, cell, part, shared string) []byte 
 // enough to hold, and every one in it when it is not, so a string nested one level down moves the
 // strings after it to other indices in one way and not the other.
 func (s *ExtractSuite) TestASharedStringIsCountedAtTheIndexItIsReadAt() {
-	long := `<si><t>` + strings.Repeat("y", 2<<20) + `</t></si>`
+	const length = 2 << 20
+	long := `<si><t>` + strings.Repeat("y", length) + `</t></si>`
 	short := `<si><t>short</t></si>`
 	first := `<c t="s"><v>0</v></c>`
+	// excelize holds a shared strings part of up to 16 MiB in memory, so a longer string makes
+	// it read the part as it reads one too large to hold.
+	const nested = 17 << 20
 	for name, test := range map[string]struct {
 		data []byte
-		// budget is what the read may allocate. Counting a string allocates a few times its
-		// length, as the XML decoder grows its buffer, for each of the two ways it is read.
-		budget uint64
+		// row is the text of the row as it is built: the long string once in every cell.
+		row int
 	}{
 		"a part small enough to hold, the first string the root's child": {
-			data:   s.cellsNaming(128, first, "xl/sharedStrings.xml", `<x>`+short+`</x>`+long),
-			budget: maxWorkbookText,
+			data: s.cellsNaming(128, first, "xl/sharedStrings.xml", `<x>`+short+`</x>`+long),
+			row:  128 * length,
 		},
 		"a part too large to hold, the first string nested": {
-			data:   s.cellsNaming(32, first, "xl/sharedStrings.xml", `<x><si><t>`+strings.Repeat("y", 17<<20)+`</t></si></x>`+short),
-			budget: 2 * maxWorkbookText,
+			data: s.cellsNaming(128, first, "xl/sharedStrings.xml", `<x><si><t>`+strings.Repeat("y", nested)+`</t></si></x>`+short),
+			row:  128 * nested,
 		},
 		"a cell whose formula holds another index": {
-			data:   s.cellsNaming(128, `<c t="s"><v>0</v><f><v>1</v></f></c>`, "xl/sharedStrings.xml", long+short),
-			budget: maxWorkbookText,
+			data: s.cellsNaming(128, `<c t="s"><v>0</v><f><v>1</v></f></c>`, "xl/sharedStrings.xml", long+short),
+			row:  128 * length,
 		},
 		"an index between spaces": {
-			data:   s.cellsNaming(128, `<c t="s"><v> 1 </v></c>`, "xl/sharedStrings.xml", short+long),
-			budget: maxWorkbookText,
+			data: s.cellsNaming(128, `<c t="s"><v> 1 </v></c>`, "xl/sharedStrings.xml", short+long),
+			row:  128 * length,
 		},
 		"a part named in other letters": {
-			data:   s.cellsNaming(128, first, "XL/SharedStrings.xml", long),
-			budget: maxWorkbookText,
+			data: s.cellsNaming(128, first, "XL/SharedStrings.xml", long),
+			row:  128 * length,
 		},
 		"a part named with a backslash": {
-			data:   s.cellsNaming(128, first, `xl\sharedStrings.xml`, long),
-			budget: maxWorkbookText,
+			data: s.cellsNaming(128, first, `xl\sharedStrings.xml`, long),
+			row:  128 * length,
 		},
 		"a string of runs": {
-			data:   s.cellsNaming(maxSheetColumns, first, "xl/sharedStrings.xml", `<si><r><t>`+strings.Repeat("y", 1<<20)+`</t></r></si>`),
-			budget: maxWorkbookText,
+			data: s.cellsNaming(maxSheetColumns, first, "xl/sharedStrings.xml", `<si><r><t>`+strings.Repeat("y", 1<<20)+`</t></r></si>`),
+			row:  maxSheetColumns << 20,
 		},
 		"a cell of two values, the last naming the long string": {
-			data:   s.cellsNaming(128, `<c t="s"><v>1</v><v>0</v></c>`, "xl/sharedStrings.xml", long+short),
-			budget: maxWorkbookText,
+			data: s.cellsNaming(128, `<c t="s"><v>1</v><v>0</v></c>`, "xl/sharedStrings.xml", long+short),
+			row:  128 * length,
 		},
 	} {
 		var before, after runtime.MemStats
@@ -964,8 +967,10 @@ func (s *ExtractSuite) TestASharedStringIsCountedAtTheIndexItIsReadAt() {
 
 		s.requireReason(err, TooLarge)
 		s.Contains(err.Error(), "shared strings", "%s: refused before a row is built", name)
-		// The row is two to eight times the text budget.
-		s.Less(after.TotalAlloc-before.TotalAlloc, test.budget, name)
+		// Counting the long string allocates a few times its length for each of the two ways it
+		// is read, more under the race detector: at most a quarter of the row here. Building the
+		// row allocates more than the row. Half the row is between the two.
+		s.Less(after.TotalAlloc-before.TotalAlloc, uint64(test.row/2), name)
 	}
 }
 
@@ -1041,19 +1046,21 @@ func (s *ExtractSuite) escaped(text string) string {
 // The cells are counted as their formats write them before any row is built.
 func (s *ExtractSuite) TestACellIsCountedAsItsNumberFormatWritesIt() {
 	text := strings.Repeat("y", 32<<10)
+	// Stored, the cells are 8 MiB of text, within the budget; read, a gigabyte, eight times it.
+	const cells = 256
 	ats := strings.Repeat("@", 127)
 	// A fourth section is the text section, and its zero placeholders write the text as "@" does.
 	zeros := "0;0;0;" + strings.Repeat("0 ", 120)
 	shared := `<si><t>` + text + `</t></si>`
 	sharedCell := `<c t="s" s="1"><v>0</v></c>`
 	for name, data := range map[string][]byte{
-		"a shared string, written by 127 text placeholders":           s.formatted(ats, 1000, sharedCell, shared),
-		"an inline string, written by 127 text placeholders":          s.formatted(ats, 1000, `<c t="inlineStr" s="1"><is><t>`+text+`</t></is></c>`, ""),
-		"an inline string of runs, written by 127 text placeholders":  s.formatted(ats, 1000, `<c t="inlineStr" s="1"><is><r><t>`+text+`</t></r></is></c>`, ""),
-		"a value that is no number, written by 127 text placeholders": s.formatted(ats, 1000, `<c s="1"><v>`+text+`</v></c>`, ""),
-		"a shared string, written by 120 zero placeholders":           s.formatted(zeros, 1000, sharedCell, shared),
-		"a format whose code is replaced by its formatCode16":         s.formattedBy(`formatCode="@" x16r2:formatCode16="`+ats+`"`, "xl/styles.xml", 1000, sharedCell, shared),
-		"a styles part named with a backslash":                        s.formattedBy(`formatCode="`+ats+`"`, `xl\styles.xml`, 1000, sharedCell, shared),
+		"a shared string, written by 127 text placeholders":           s.formatted(ats, cells, sharedCell, shared),
+		"an inline string, written by 127 text placeholders":          s.formatted(ats, cells, `<c t="inlineStr" s="1"><is><t>`+text+`</t></is></c>`, ""),
+		"an inline string of runs, written by 127 text placeholders":  s.formatted(ats, cells, `<c t="inlineStr" s="1"><is><r><t>`+text+`</t></r></is></c>`, ""),
+		"a value that is no number, written by 127 text placeholders": s.formatted(ats, cells, `<c s="1"><v>`+text+`</v></c>`, ""),
+		"a shared string, written by 120 zero placeholders":           s.formatted(zeros, cells, sharedCell, shared),
+		"a format whose code is replaced by its formatCode16":         s.formattedBy(`formatCode="@" x16r2:formatCode16="`+ats+`"`, "xl/styles.xml", cells, sharedCell, shared),
+		"a styles part named with a backslash":                        s.formattedBy(`formatCode="`+ats+`"`, `xl\styles.xml`, cells, sharedCell, shared),
 	} {
 
 		var before, after runtime.MemStats
@@ -1064,7 +1071,7 @@ func (s *ExtractSuite) TestACellIsCountedAsItsNumberFormatWritesIt() {
 
 		s.requireReason(err, TooLarge)
 		s.Contains(err.Error(), "shared strings", "%s: refused before a row is built", name)
-		// Read, the row is gigabytes, many times the budget.
+		// Building the row allocates at least its gigabyte, four times this budget.
 		s.Less(after.TotalAlloc-before.TotalAlloc, uint64(2*maxWorkbookText), name)
 	}
 }
@@ -1167,7 +1174,10 @@ func (s *ExtractSuite) TestATableLongerThanTheTextBudgetIsRefused() {
 		header.WriteString(`<c r="` + cell + `" t="inlineStr"><is><t>h</t></is></c>`)
 	}
 	header.WriteString(`</row>`)
-	last := `<row r="100000"><c r="A100000" t="inlineStr"><is><t>x</t></is></c></row>`
+	// Each line of the table is its 1,024 cells of three bytes, a pipe and a line break. The
+	// table is four times the text budget.
+	rows := 4 * maxWorkbookText / (3*maxSheetColumns + 2)
+	last := `<row r="` + strconv.Itoa(rows) + `"><c r="A` + strconv.Itoa(rows) + `" t="inlineStr"><is><t>x</t></is></c></row>`
 
 	var before, after runtime.MemStats
 	runtime.GC()
@@ -1176,9 +1186,10 @@ func (s *ExtractSuite) TestATableLongerThanTheTextBudgetIsRefused() {
 	runtime.ReadMemStats(&after)
 
 	s.requireReason(err, TooLarge)
-	// Writing a table allocates several times its length, so the budget is a gigabyte, a few
-	// times the text budget. Writing the whole table allocates several gigabytes.
-	s.Less(after.TotalAlloc-before.TotalAlloc, uint64(1<<30))
+	// Writing a table allocates five to six times its length: refused at the text budget, about
+	// six times the budget; written whole, over twenty times it. Twelve times is about twice the
+	// first and half the second.
+	s.Less(after.TotalAlloc-before.TotalAlloc, uint64(12*maxWorkbookText))
 }
 
 // The deadline is checked between the rows of a table as it is written, not only as it is read.
