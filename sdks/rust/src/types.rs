@@ -13922,7 +13922,7 @@ pub struct ToolApprovalAnswer {
     ///The call's id, the id of its ai_tool_call step.
     pub tool_call_id: ::std::string::String,
 }
-///A person's answer to a call awaiting their approval, from a persistent text command. It changes only how the call is shown; the call still needs a tool_result. With allowed false and only tool_call_id it declines the sign-in a connector call waits for (awaiting_authorization) instead, and the router answers that call itself. For a connector call whose binding sets require_approval, the answer decides whether the router sends it, and names tool_call_id and request_id; turn_id may be left out.
+///A person's answer to a call awaiting their approval, from a persistent text command. It changes only how the call is shown; the call still needs a tool_result. With allowed false and only tool_call_id it declines the sign-in a connector call waits for (awaiting_authorization) instead, and the router answers that call itself. For a call the router holds for the person's approval, a connector call whose binding sets require_approval or a call of the agent's scheduling tools that would set a task going or change what it does, the answer decides whether the router runs it, and names tool_call_id and request_id; turn_id may be left out.
 #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug, PartialEq)]
 pub struct ToolApprovalCommand {
     pub allowed: bool,
@@ -13931,7 +13931,7 @@ pub struct ToolApprovalCommand {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub summary: ::std::option::Option<::std::string::String>,
     pub tool_call_id: ::std::string::String,
-    ///The turn of the call. Required, except for a connector call whose binding sets require_approval.
+    ///The turn of the call. Required, except for a call the router holds for approval: a connector call whose binding sets require_approval, or a scheduling tool's call.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub turn_id: ::std::option::Option<::std::string::String>,
     #[serde(rename = "type")]
