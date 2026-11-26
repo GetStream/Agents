@@ -4,6 +4,7 @@ package session
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -168,8 +169,8 @@ WHERE up.customer_id = h.customer_id AND up.stream_app_pk = h.stream_app_pk AND 
 // config turns them on, every session that reads her omni-channel reads what the number said
 // before the link: its SMS summarized, its SMS still in progress and its call. Her app chat,
 // her own device's text session and call, the number's next call and its SMS thread read none
-// of it. Each reads her chat card and the number's SMS after the link, whose card in progress
-// holds only its own episode's lines.
+// of it. Each reads the number's SMS after the link, whose card in progress holds only its own
+// episode's lines, and each but the number's call reads her chat card.
 func (s *EpisodeReadingSuite) TestCardsTurnedOnAfterALinkReadNoneOfTheNumbersEpisodesFromBeforeIt() {
 	config := store.AgentConfig{CustomerID: s.customerID, Name: "cards-" + uuid.NewString(), Mode: store.AgentModeText}
 	s.Require().NoError(s.store.AgentConfigs.Insert(s.ctx, &config))
@@ -198,26 +199,27 @@ func (s *EpisodeReadingSuite) TestCardsTurnedOnAfterALinkReadNoneOfTheNumbersEpi
 
 	next := s.chatChannel(user)
 	s.write(next, user, "what are my pets called?", nil)
-	s.readsOnlyAfterTheLink("her app chat", s.deploymentChat(next, user, true, "what are my pets called?"))
+	s.readsOnlyAfterTheLink("her app chat", true, s.deploymentChat(next, user, true, "what are my pets called?"))
 	_, params := s.deviceSession(signedIn(user), "", true, "and my pets? "+uuid.NewString())
-	s.readsOnlyAfterTheLink("her device's text session", params)
+	s.readsOnlyAfterTheLink("her device's text session", true, params)
 	_, params = s.deviceCall(signedIn(user), "my pets? "+uuid.NewString())
-	s.readsOnlyAfterTheLink("her device's call", params)
+	s.readsOnlyAfterTheLink("her device's call", true, params)
 	params, _ = s.voiceSession("sip-"+number, true, "pets? "+uuid.NewString())
-	s.readsOnlyAfterTheLink("the number's call", params)
-	s.readsOnlyAfterTheLink("the number's SMS thread", s.textSession(open, true, "pets please "+uuid.NewString()))
+	s.readsOnlyAfterTheLink("the number's call", false, params)
+	s.readsOnlyAfterTheLink("the number's SMS thread", true, s.textSession(open, true, "pets please "+uuid.NewString()))
 }
 
 // readsOnlyAfterTheLink checks a session of TestCardsTurnedOnAfterALinkReadNoneOfTheNumbersEpisodesFromBeforeIt
-// was handed the cards of the linked person from after the link alone.
-func (s *EpisodeReadingSuite) readsOnlyAfterTheLink(reader string, params llm.ResponseParams) {
+// was handed the cards of the linked person from after the link alone, her chat card only when
+// chat says so: a call is keyed by a Caller ID anybody can set.
+func (s *EpisodeReadingSuite) readsOnlyAfterTheLink(reader string, chat bool, params llm.ResponseParams) {
 	handed := s.handed(params)
 	told, err := json.Marshal(handed)
 	s.Require().NoError(err)
 	for _, before := range []string{"Saffron", "Kiwi", "Clover"} {
 		s.NotContains(string(told), before, reader)
 	}
-	s.Contains(string(told), "Said hello.", "%s reads her chat card", reader)
+	s.Equal(chat, strings.Contains(string(told), "Said hello."), "%s reads her chat card: %t", reader, chat)
 	var pepper []any
 	for _, card := range handed {
 		if card["source"] == store.EpisodeSMS {
