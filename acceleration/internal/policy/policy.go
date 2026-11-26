@@ -198,11 +198,11 @@ type Enforcer struct {
 
 	mu        sync.Mutex
 	decisions map[string]decision
-	// generation numbers each decision as it is made, so a background read that finishes after
-	// the decision was dropped or replaced does not put back what it read. forgotten counts the
-	// times Save dropped decisions, so a read under way when a policy was saved keeps nothing.
-	generation uint64
-	forgotten  uint64
+	// asked numbers each read of a decision as it is asked, so of two reads under way at once
+	// the one asked later is kept, whichever lands first. forgotten counts the times Save dropped
+	// decisions, so a read under way when a policy was saved keeps nothing.
+	asked     uint64
+	forgotten uint64
 	// warming is the apps whose decision is being read in the background on their behalf.
 	warming sync.Map
 	// members is which organization each app has already been recorded under by this
@@ -268,7 +268,8 @@ type decision struct {
 	read       time.Time
 	used       time.Time
 	refreshing bool
-	generation uint64
+	// asked is the number of the read it was made from (Enforcer.asked).
+	asked uint64
 }
 
 // New returns an Enforcer reading policies from the configuration store and money as the
@@ -482,7 +483,8 @@ func (e *Enforcer) record(ctx context.Context, appID, organizationID string) {
 	e.refresh(ctx, appID)
 }
 
-// warm starts reading an app's decision in the background when this process has none.
+// warm starts reading an app's decision in the background when this process has none. It
+// lands as a decision's read does (keep), over one made meanwhile from a read asked before it.
 func (e *Enforcer) warm(ctx context.Context, appID string) {
 	e.mu.Lock()
 	_, known := e.decisions[appID]
@@ -496,7 +498,7 @@ func (e *Enforcer) warm(ctx context.Context, appID string) {
 	go func() {
 		defer e.warming.Delete(appID)
 		e.mu.Lock()
-		forgotten := e.forgotten
+		asked, forgotten := e.ask(), e.forgotten
 		e.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), joinTimeout)
 		defer cancel()
@@ -508,10 +510,8 @@ func (e *Enforcer) warm(ctx context.Context, appID string) {
 		now := time.Now()
 		decided.read, decided.used = now, now
 		e.mu.Lock()
-		if _, raced := e.decisions[appID]; !raced && e.forgotten == forgotten {
-			e.generation++
-			decided.generation = e.generation
-			e.decisions[appID] = decided
+		if e.forgotten == forgotten {
+			e.keep(appID, decided, asked)
 		}
 		e.mu.Unlock()
 		e.money.want(decided.organization)
@@ -718,7 +718,7 @@ func (e *Enforcer) decide(ctx context.Context, customerID string) decision {
 		}
 		return cached
 	}
-	forgotten := e.forgotten
+	asked, forgotten := e.ask(), e.forgotten
 	e.mu.Unlock()
 
 	// The request waits on this read, so it is bounded on its own as the background ones are.
@@ -739,9 +739,7 @@ func (e *Enforcer) decide(ctx context.Context, customerID string) decision {
 	e.mu.Lock()
 	// A policy saved while this was read answers this request, and the next reads it again.
 	if e.forgotten == forgotten {
-		e.generation++
-		decided.generation = e.generation
-		e.decisions[customerID] = decided
+		e.keep(customerID, decided, asked)
 	}
 	e.mu.Unlock()
 	e.money.want(decided.organization)
@@ -749,10 +747,11 @@ func (e *Enforcer) decide(ctx context.Context, customerID string) decision {
 }
 
 // refresh reads a customer's decision again in the background and replaces the one in memory
-// with it. A read that fails keeps the decision there, and tries again after Fresh.
+// with it, unless that one was read since. A read that fails keeps the decision there, and
+// tries again after Fresh.
 func (e *Enforcer) refresh(ctx context.Context, customerID string) {
 	e.mu.Lock()
-	generation := e.decisions[customerID].generation
+	asked := e.ask()
 	e.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), joinTimeout)
 	defer cancel()
@@ -760,8 +759,8 @@ func (e *Enforcer) refresh(ctx context.Context, customerID string) {
 	now := time.Now()
 	e.mu.Lock()
 	current, ok := e.decisions[customerID]
-	if !ok || current.generation != generation {
-		// Dropped or replaced while it was read: what was read may be older than what is there.
+	if !ok || current.asked > asked {
+		// Dropped while it was read, or replaced by a read asked after this one.
 		e.mu.Unlock()
 		return
 	}
@@ -773,11 +772,25 @@ func (e *Enforcer) refresh(ctx context.Context, customerID string) {
 		return
 	}
 	decided.read, decided.used = now, current.used
-	e.generation++
-	decided.generation = e.generation
-	e.decisions[customerID] = decided
+	e.keep(customerID, decided, asked)
 	e.mu.Unlock()
 	e.money.want(decided.organization)
+}
+
+// ask numbers a read of a decision about to start, under e.mu.
+func (e *Enforcer) ask() uint64 {
+	e.asked++
+	return e.asked
+}
+
+// keep puts a decision made from the read numbered asked in memory, under e.mu. A read asked
+// before the one the decision there was made from is older, and changes nothing.
+func (e *Enforcer) keep(customerID string, decided decision, asked uint64) {
+	if current, ok := e.decisions[customerID]; ok && current.asked > asked {
+		return
+	}
+	decided.asked = asked
+	e.decisions[customerID] = decided
 }
 
 // policies reads the app's policy, the organization it is in and the organization's policy.
