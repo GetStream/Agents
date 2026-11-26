@@ -168,18 +168,19 @@ func conflictingDocument(source string, body SyncAgentRequest, stored []store.Kn
 	return "knowledge " + source + ", which this directory no longer has"
 }
 
-// conflictingKnowledgeURL is what to call a page the directory declares and would write its
-// own settings onto. A page the directory does not declare is left alone.
+// conflictingKnowledgeURL is what to call a page the directory would write its own settings
+// onto or take away. Pages declared are the whole set, so one not declared is unsubscribed;
+// a directory declaring none leaves every page alone.
 func conflictingKnowledgeURL(url string, body SyncAgentRequest) string {
-	if body.KnowledgeUrls == nil {
+	if body.KnowledgeUrls == nil || len(*body.KnowledgeUrls) == 0 {
 		return ""
 	}
 	for _, page := range *body.KnowledgeUrls {
-		if page.Url == url {
+		if strings.TrimSpace(page.Url) == url {
 			return "knowledge url " + url
 		}
 	}
-	return ""
+	return "knowledge url " + url + ", which this directory no longer has"
 }
 
 func skillNamed(declared []SkillRequest, name string) (SkillRequest, bool) {

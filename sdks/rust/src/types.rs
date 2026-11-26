@@ -13613,7 +13613,7 @@ pub struct SyncAgentRequest {
     pub keyterms: ::std::option::Option<::std::vec::Vec<::std::string::String>>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub knowledge: ::std::option::Option<::std::vec::Vec<KnowledgeDocument>>,
-    ///The pages the directory's knowledge/urls.yaml declares. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
+    ///The pages the directory's knowledge/urls.yaml declares, the whole of the pages its knowledge base is kept filled from: a page of that knowledge base not listed, including one subscribed to through the knowledge url API, is unsubscribed and its passages removed. Left out or empty, the pages stored stay as they are. They are subscribed to in the same knowledge base as the files, so one lookup covers both.
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub knowledge_urls: ::std::option::Option<::std::vec::Vec<KnowledgeUrlDeclaration>>,
     ///The connectors agent.yaml names that the client left out of connectors, because the app has no connection by the id or label they name. Stored as sent and served on the config, so the dashboard can say what the agent is missing. A non-empty list is refused without connectors: a sync that sends connectors replaces the stored ones with these, or with none when this is left out, and a sync that sends neither leaves them alone. At most 64, as connectors.
