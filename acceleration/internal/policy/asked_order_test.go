@@ -155,6 +155,26 @@ func (s *PolicySuite) TestARefreshAskedAfterAMoveIsKeptWithNoDecisionYet() {
 	s.Equal(moved, s.admit(enforcer, s.app).OrganizationID)
 }
 
+func (s *PolicySuite) TestARefreshWithNoDecisionYetKeepsWhatItReadAsUsedNow() {
+	enforcer := s.newEnforcer(s.store, nil)
+
+	enforcer.refresh(s.ctx, s.app)
+
+	s.Contains(enforcer.inUse(time.Now()), s.app, "not dropped as unused for Idle")
+}
+
+func (s *PolicySuite) TestARefreshThatFailsWithNoDecisionYetKeepsNothing() {
+	db, err := store.Open(os.Getenv("ROUTER_POSTGRES_DSN"))
+	s.Require().NoError(err)
+	s.Require().NoError(db.Close())
+	enforcer := s.newEnforcer(db, nil)
+
+	enforcer.refresh(s.ctx, s.app)
+
+	_, kept := enforcer.decided(s.app)
+	s.False(kept, "an empty decision would answer the next request")
+}
+
 func (s *PolicySuite) TestOfTwoRequestsReadingADecisionTheOneAskedLaterIsKept() {
 	enforcer, reads := s.ordered()
 	before := s.asked(reads, s.requested(enforcer))
