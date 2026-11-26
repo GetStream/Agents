@@ -6431,8 +6431,9 @@ func (s *AgentSuite) lostVoiceReplacedByInstance(lostBYOK, byok bool, provider, 
 }
 
 func (s *AgentSuite) TestAVoiceOnTheCustomersKeyReplacedByTheDeploymentsIsAFailoverOfTheLostOne() {
-	// The two instances of one model share its name, so a name alone would have counted the
-	// call as moved off nothing, and a customer whose own key failed would never be told.
+	// The two instances of one model share its name, so a name alone would count the call as
+	// moved off nothing. No TTS vendor takes a customer key today, so this pins the rule for the
+	// day one does: a customer whose own key failed is still counted as a failover.
 	s.Equal(map[string]float64{"tts session customer_key": 1}, s.lostVoiceReplacedBy(true, false))
 }
 
