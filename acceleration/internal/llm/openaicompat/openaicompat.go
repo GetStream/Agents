@@ -80,6 +80,11 @@ const maxEventBytes = 2 * maxAnswerBytes
 // near the limit too, and no real reply opens enough calls to notice it.
 const callBytes = 256
 
+// errorBytes is how much of an error's body is read. The SDK reads all of it to find the
+// message, which is a short JSON object, and withBody shows its first 2048 bytes; a body
+// longer than this is not a message anyone reads.
+const errorBytes = 16 << 10
+
 // rawBytes is how much of the stream the debug log line shows.
 const rawBytes = 64 << 10
 
@@ -400,8 +405,15 @@ func lengthRefused(err error) bool {
 func (l *LLM) sniff(refused *error) option.Middleware {
 	return func(request *http.Request, next option.MiddlewareNext) (*http.Response, error) {
 		response, err := next(request)
-		if err != nil || response.StatusCode/100 != 2 || response.Body == nil {
+		if err != nil || response.Body == nil {
 			return response, err
+		}
+		if response.StatusCode/100 != 2 {
+			response.Body = struct {
+				io.Reader
+				io.Closer
+			}{io.LimitReader(response.Body, errorBytes), response.Body}
+			return response, nil
 		}
 		response.Body = &eventLimit{body: http.MaxBytesReader(nil, response.Body, maxStreamBytes)}
 		contentType := response.Header.Get("Content-Type")

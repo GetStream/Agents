@@ -3,6 +3,7 @@ package openaicompat
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/openai/openai-go/v3"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 )
@@ -193,6 +196,44 @@ func (s *OpenAICompatSuite) TestABodyPastTheLimitIsCutShort() {
 			s.Equal(llm.ReasonMaxOutputTokens, response.IncompleteReason)
 			s.left(gone)
 			s.GreaterOrEqual(sent.Load(), int64(maxStreamBytes), "it is the body's limit that cut it")
+		})
+	}
+}
+
+func (s *OpenAICompatSuite) TestAnErrorWhoseBodyNeverEndsIsReadOnlyInPart() {
+	for _, status := range []int{http.StatusBadRequest, http.StatusInternalServerError} {
+		s.Run(http.StatusText(status), func() {
+			var sent atomic.Int64
+			gone := make(chan struct{}, 8)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer func() { gone <- struct{}{} }()
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, `{"error":{"message":"no","padding":"`)
+				for r.Context().Err() == nil {
+					n, err := io.WriteString(w, piece)
+					sent.Add(int64(n))
+					if err != nil {
+						return
+					}
+					w.(http.Flusher).Flush()
+				}
+			}))
+			s.T().Cleanup(server.Close)
+			provider, err := New(Options{Provider: "test", Model: "test-model", APIKey: "key", BaseURL: server.URL})
+			s.Require().NoError(err)
+			s.T().Cleanup(func() { provider.Close() })
+			ctx, cancel := context.WithTimeout(s.T().Context(), 10*time.Second)
+			defer cancel()
+
+			_, err = provider.Create(ctx, hello())
+
+			apiError, ok := errors.AsType[*openai.Error](err)
+			s.Require().True(ok, "the error is the endpoint's, with its status: %v", err)
+			s.Equal(status, apiError.StatusCode)
+			s.left(gone)
+			s.Less(sent.Load(), int64(16<<20), "only the start of the body is read")
 		})
 	}
 }
