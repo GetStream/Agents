@@ -208,6 +208,17 @@ func (s *DirectorySuite) TestAClaimOnAnAgentByItsCustomerAloneIsFoundNowhere() {
 	s.Empty(writing)
 }
 
+// A renewal says a claim on an agent in its session's app again, not in the deployment's.
+func (s *DirectorySuite) TestARenewedClaimOnAnAgentIsInItsSessionsApp() {
+	directory := s.directoryAt("node-a:1")
+	directory.Hold(s.ctx, "acme", 7, "s1", "support", "")
+	s.Require().NoError(s.client.Do(s.ctx, s.client.B().Del().Key(s.prefix+":writing-as-in:support").Build()).Error())
+
+	directory.renewAll(s.ctx)
+
+	s.Equal("node-a:1", s.writingAs(s.directoryAt("node-c:1"), "acme", 7, "support"))
+}
+
 // A router of the release before reads a claim on an agent by its customer alone.
 func (s *DirectorySuite) TestASessionWritingAsAnAgentIsFoundByItsCustomerAlone() {
 	s.directoryAt("node-a:1").Hold(s.ctx, "acme", 7, "s1", "support", "")
