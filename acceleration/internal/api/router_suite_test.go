@@ -2236,11 +2236,14 @@ func (s *RouterSuite) policies(logger *slog.Logger) *policy.Enforcer {
 // alone is no sign of it: an account the policies have not read yet admits everything
 // (policy.money.refusal), and the read under way may have been asked before the credit.
 func (s *RouterSuite) credited(micros int64) {
-	s.usage.Credit(s.T(), s.app.organization.ID, micros)
-	owner := routing.Owner{CustomerID: s.customerID()}
+	organization := s.app.organization.ID
+	s.usage.Credit(s.T(), organization, micros)
+	// As every request of the app joins it, naming no tier, so its account is read.
+	s.enforcer.Join(context.Background(), s.customerID(), organization, "")
+	owner := routing.Owner{CustomerID: s.customerID(), Attribution: routing.Attribution{OrganizationID: organization}}
 	s.Require().Eventually(func() bool {
 		// Asked before the admission, so the admission is answered from a read balance.
-		_, read := s.enforcer.Balance(s.customerID(), s.app.organization.ID)
+		_, read := s.enforcer.Balance(s.customerID(), organization)
 		admission, err := s.enforcer.Admit(context.Background(), owner)
 		return read && err == nil && admission.Spend == nil
 	}, 10*time.Second, 50*time.Millisecond, "the credit is read")
