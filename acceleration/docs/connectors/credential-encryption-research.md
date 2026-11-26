@@ -17,6 +17,10 @@ Decided on 2026-11-23.
 - Keep one KEK. Cloud KMS wraps it. The router unwraps it once, at start.
 - Do not salt the key with `app_id`.
 - Bind every sealed blob to its row with AAD. API key secrets: AI-3631. Channel and custom model secrets: AI-3632.
+- Ship each binding in three releases, so a rollback to the release before always opens every row:
+  1. Read both forms. Open with the row's AAD first, then without it, and count the opens without it. Write the old form.
+  2. When every environment runs step 1: write the bound form, and seal an old row again when it is read.
+  3. When every live row opens with its AAD: delete the fallback.
 - Alert on every Cloud KMS `Decrypt` of the router key outside a pod start: AI-3633.
 - KEK rotation stays in AI-3343.
 - Add per-tenant data keys only when a trigger fires: a customer asks for CMEK or BYOK, a SEC or SOC 2 review requires them, or a real alert fires.
@@ -47,7 +51,6 @@ Decided on 2026-11-23.
 | C10 | A KMS that does not answer fails startup, not a request: KMS is a start-time dependency only | `cmd/router/kms.go:38-41@2ef00b1c6` |
 | C11 | `ROUTER_DEV_KEK` is the one plain key, version 1, for laptops and CI, and it is refused beside a KMS setting | `cmd/router/main.go:150-152`, `:472-474@2ef00b1c6`; commit `c37de15ff` (#2068) |
 | C12 | On hosted routers only the router's service account holds Decrypter on the KMS key | Linear AI-1541 (staging, comment of 2026-10-23) and AI-3332 (prod, Done) |
-| C13 | Reading the router's `Decrypt` entry from the project's audit log was not possible at the staging switch | Linear AI-1541 comment of 2026-10-23: "I could not read the router's Decrypt entry from the project: unverified" |
 
 Prior discussion of the same risk:
 
@@ -55,7 +58,6 @@ Prior discussion of the same risk:
 - `acceleration/docs/connectors/architecture.md:573@2ef00b1c6`: more secret kinds under the same KEK make "a leak of the database plus the key" worse; "KMS is a credential store behind the interface when the time comes".
 - `architecture.md:429@2ef00b1c6`: the choice "sealed Postgres, KMS envelope, or a broker (Nango, Vercel Connect)" is deferred "After a month of Slack and Linear in staging, from data".
 - Linear AI-1541 and AI-1748 (Done): the KEK moved behind Cloud KMS. AI-3332 (Done): prod too, plain key refused. AI-3343 (Backlog): rotate to a new KEK version and rewrap every row.
-- Linear SEC-2462 (Backlog, Stream's main backend, not this router) picks the same shape: KEK in Cloud KMS, DEK stored only wrapped, unwrapped at start, plaintext only in process memory.
 - No Slack message or Linear issue on "app_id as salt" was found (Slack search `salt` and `"master key"` after 2026-10-01; Linear search `KEK`). The question has no recorded decision.
 
 ## (a) What the standards say
@@ -164,11 +166,11 @@ Each item names the evidence it follows from.
 
 | Item | Do | Why (evidence) | YAGNI: risk now, cost, simpler variant, trigger |
 | --- | --- | --- | --- |
-| KMS-wrapped KEK, keyring versions, lazy rewrap | **Keep** | Stops attacker 1 ([C8]); the same design Stream chose elsewhere (SEC-2462) | Nothing to add |
+| KMS-wrapped KEK, keyring versions, lazy rewrap | **Keep** | Stops attacker 1 ([C8]) | Nothing to add |
 | AAD with customer, connection, revision | **Keep** | Stops attacker 5 ([C4], [C5], [S3]) | Nothing to add |
 | `app_id` as HKDF salt or info | **Do not build** as a blast-radius measure | Changes no row of the threat table ([S1], [S2]); swap protection exists ([C4]) | Hygiene only ([V1], [S5]). Trigger: we rewrap every row anyway (C or D); then put app and purpose into `info` in the same change, at no extra rewrap |
-| Alert on Cloud KMS `Decrypt` of the router key | **Add** | Legit `Decrypt` happens only at pod start ([C9]); any other `Decrypt` is attacker 4 or a stolen wrapped key. Decrypt produces Data Access logs ([V3]); we could not read them at the switch ([C13]) | Risk now: real, the only signal for attacker 4. Cost: a log-based alert, no code. Simpler variant: a weekly manual audit-log check |
-| Rotate the KEK and rewrap every row (AI-3343) | **Do** (already planned) | A key that may have been copied before it was wrapped stays valid until rotated ([S6] §5.5: a compromised key "shall be revoked") | Gated as a data move (AI-3343) |
+| Alert on Cloud KMS `Decrypt` of the router key | **Add** (AI-3633) | Legit `Decrypt` happens only at pod start ([C9]); any other `Decrypt` is attacker 4 or a stolen wrapped key. Decrypt produces Data Access logs ([V3]) | Cost: a log-based alert, no code. Simpler variant: a weekly manual audit-log check |
+| Rotate the KEK and rewrap every row (AI-3343) | **Do** (already planned) | Once every row is rewrapped, the earlier key versions can be retired ([S6] §5.5: a compromised key "shall be revoked") | Gated as a data move (AI-3343) |
 | Record-id AAD at the [C7] call sites | **Fix in place** when touched | Same reason as [C4]; out of connector scope | Small |
 | Per-tenant DEK wrapped by Cloud KMS, `Decrypt` on cache miss (D) | **Defer** | The only option that changes rows 2–4 ([V1], [V5], [V9]) | Cost: request-path KMS dependency, per-operation billing, a rewrap. Trigger: a customer asks for tenant-level key isolation or crypto-shredding, a compliance review requires it, or attacker 2 becomes realistic (for example the KEK must reach a host we do not run) |
 | One KMS key per tenant (E) | **Defer** | Adds per-tenant IAM and tenant-named audit ([V4], [V3]) | Trigger: a customer-managed key (CMEK/BYOK) request |
@@ -178,7 +180,6 @@ Each item names the evidence it follows from.
 
 - How many seals each KEK version has made, against the 2^32 budget of [S5]: not measured.
 - The latency a Cloud KMS `Decrypt` adds on the voice tool path for option D: not measured.
-- Whether the router's start-time `Decrypt` shows in the Data Access audit log of the key's project ([C13]).
 - Vercel Connect's key hierarchy, KMS use and tenant isolation of stored refresh tokens: not in Vercel's docs (see Vercel Connect row).
 - Composio's per-organization key (a vendor blog post only, not in its docs), and AAD, derivation and per-tenant keys at Composio and Pipedream.
 - Supabase Vault key rotation, and the hash inside libsodium's `crypto_kdf_derive_from_key` (libsodium source not read).
@@ -231,5 +232,5 @@ Code and tickets (this repo at `2ef00b1c6`)
 - [C4], [C5] `acceleration/internal/connectors/credentialstores/pgsealed/pgsealed.go`
 - [C6], [C7] the call sites listed in the table
 - [C8]–[C11] `acceleration/cmd/router/kms.go`, `acceleration/cmd/router/main.go`, commits `fe655d0d6` (#1157), `93fe0d4da` (#1165), `c37de15ff` (#2068)
-- [C12], [C13] Linear AI-1541, AI-1748, AI-3332, AI-3343, SEC-2462
+- [C12] Linear AI-1541, AI-1748, AI-3332, AI-3343
 - Prior design notes: `acceleration/docs/connectors/architecture.md:429`, `:573`; `acceleration/docs/connectors/competitor-analysis.md:1726`
