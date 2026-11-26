@@ -387,11 +387,11 @@ func (l *Limiter) Reserve(ctx context.Context, customerID string, caller routing
 		return nil, Status{}, nil
 	}
 	buckets := bucketsFor(customerID, caller, held, now)
+	seen := make(map[string]struct{}, len(buckets)+2)
+	for _, b := range buckets {
+		seen[b.key] = struct{}{}
+	}
 	if held.Unread {
-		seen := make(map[string]struct{}, len(buckets))
-		for _, b := range buckets {
-			seen[b.key] = struct{}{}
-		}
 		customer := len(held.enforced(true)) > 0
 		if key := customerKey(customerID, named(caller), now); key != "" {
 			if _, ok := seen[key]; !ok {
@@ -403,12 +403,14 @@ func (l *Limiter) Reserve(ctx context.Context, customerID string, caller routing
 			l.logger.Warn("could not read a user's own quota, counting what they spent anyway",
 				"app_id", customerID)
 		}
-		if !caller.ServerSide {
-			for _, key := range deviceKeys(customerID, caller, now) {
-				if _, ok := seen[key]; !ok {
-					buckets = append(buckets, bucket{key: key})
-					seen[key] = struct{}{}
-				}
+	}
+	// A device caller is always counted in its user and address buckets (matching Debit), even
+	// when its active limit is customer-set, so address-only checks see the spend too.
+	if !caller.ServerSide {
+		for _, key := range deviceKeys(customerID, caller, now) {
+			if _, ok := seen[key]; !ok {
+				buckets = append(buckets, bucket{key: key})
+				seen[key] = struct{}{}
 			}
 		}
 	}

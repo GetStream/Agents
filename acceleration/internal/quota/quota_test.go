@@ -968,3 +968,19 @@ func (s *QuotaSuite) TestReserveFailsOpenWhenRedisDoesNotAnswer() {
 	s.Less(time.Since(started), time.Second)
 	hold.Release(s.ctx)
 }
+
+func (s *QuotaSuite) TestReserveUnderACustomerQuotaStillCountsDeviceAddressBuckets() {
+	// A verified device user held to a customer-set quota still counts into its device user and
+	// address buckets so an address-only check observes the spend, matching Debit.
+	limiter := s.limiterWith(Limits{}, s.appQuota(Limits{MessagesPerDay: 2}))
+	defer limiter.Close()
+
+	hold, _, err := limiter.Reserve(s.ctx, s.customer, s.caller, 0)
+	s.Require().NoError(err)
+	hold.Commit(s.ctx, 15)
+	s.written(limiter)
+
+	spent, err := limiter.spent(s.ctx, deviceKeys(s.customer, s.caller, time.Now())...)
+	s.Require().NoError(err)
+	s.Equal([]spend{{messages: 1, tokens: 15}, {messages: 1, tokens: 15}}, spent)
+}
