@@ -5838,6 +5838,44 @@ func (s *DataMoveSuite) TestAFollowerFollowedOnEmptiesWhatItRecordedOfAForgotten
 	s.Contains(s.recordedHere("initech", "users", "id", "grace"), "insert true", "a profile still here keeps what was recorded of it")
 }
 
+func (s *DataMoveSuite) TestAFollowerFollowedOnKeepsWhatItRecordedOfAnotherAppsProfileOfTheSameID() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "initech", time.Hour, time.Second))
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "other", time.Hour, time.Second))
+	s.Require().NoError(s.destination.Users.Insert(s.ctx, &User{CustomerID: "other", ID: "anya", Kind: UserKindAuthenticated, Name: "Other"}))
+	s.Require().NoError(s.source.Users.Insert(s.ctx, &User{CustomerID: "acme", ID: "anya", Kind: UserKindAuthenticated, Name: "Anya"}))
+	cursor := s.move("acme", "initech")
+	_, err := s.source.ForgetUserSettings(s.ctx, "acme", "anya", "forgotten", &AuditEntry{
+		CustomerID: "acme", ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+	})
+	s.Require().NoError(err)
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	s.Require().NoError(s.destination.ApplyChanges(s.ctx, "initech", changes))
+
+	s.Equal([]string{"delete false"}, slices.Compact(s.recordedHere("initech", "users", "id", "anya")))
+	s.Equal([]string{"insert true"}, s.recordedHere("other", "users", "id", "anya"))
+}
+
+func (s *DataMoveSuite) TestARefusedPageKeepsWhatTheFollowerRecordedOfTheRowsItDeletes() {
+	s.capture("acme")
+	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "initech", time.Hour, time.Second))
+	s.Require().NoError(s.source.Users.Insert(s.ctx, &User{CustomerID: "acme", ID: "anya", Kind: UserKindAuthenticated, Name: "Anya"}))
+	cursor := s.move("acme", "initech")
+	_, err := s.source.ForgetUserSettings(s.ctx, "acme", "anya", "forgotten", &AuditEntry{
+		CustomerID: "acme", ResourceType: AuditEndUser, ResourceID: "forgotten", Action: AuditUpdated, Source: AuditSourceCLI, ActorID: "ops",
+	})
+	s.Require().NoError(err)
+
+	changes, _, err := s.source.Changes(s.ctx, "acme", cursor, 100)
+	s.Require().NoError(err)
+	changes = append(changes, DataChange{Table: "no_such_table", Op: ChangeDelete, Key: json.RawMessage(`{}`)})
+	s.Require().ErrorIs(s.destination.ApplyChanges(s.ctx, "initech", changes), ErrInvalidImport)
+
+	s.Equal([]string{"insert true"}, s.recordedHere("initech", "users", "id", "anya"))
+}
+
 func (s *DataMoveSuite) TestAFollowerFollowedOnEmptiesWhatItRecordedOfADeletedLogsCopy() {
 	s.capture("acme")
 	s.Require().NoError(s.destination.StartDataCapture(s.ctx, "acme", time.Hour, time.Second))
