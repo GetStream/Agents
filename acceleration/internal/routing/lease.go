@@ -38,7 +38,8 @@ type Lease struct {
 	every      time.Duration
 	ttl        time.Duration
 	// settle records what the stream used since its last row, before each renewal but the
-	// first, so the renewal counts it. Nil records nothing.
+	// first while a minute of the model costs anything, so the renewal counts it. Nil records
+	// nothing.
 	settle func()
 
 	mu      sync.Mutex
@@ -69,8 +70,9 @@ func StartLeaseOf(recorder *Recorder, config ProviderConfig, owner Owner, kind, 
 }
 
 // StartLeaseEvery is StartLease renewing every every, for ttl each time, which calls settle
-// (when not nil) before each renewal but the first: a stream that records nothing until it ends
-// records there what it used so far, so the renewal is refused once that spent the money.
+// (when not nil) before each renewal but the first while a minute of the model costs anything:
+// a stream that records nothing until it ends records there what it used so far, so the
+// renewal is refused once that spent the money.
 func StartLeaseEvery(recorder *Recorder, config ProviderConfig, owner Owner, kind, id string, minute pricing.Quantities,
 	every, ttl time.Duration, settle func(),
 ) *Lease {
@@ -104,7 +106,7 @@ func (l *Lease) keep() {
 		case <-ticker.C:
 			// Before holding is taken: settle may wait on the stream's own lock, which is held
 			// while Move takes holding.
-			if l.settle != nil {
+			if l.settle != nil && l.bills() {
 				l.settle()
 			}
 			l.renew()
@@ -122,6 +124,20 @@ func (l *Lease) stat() Stat {
 		minute.Attribute(name, value)
 	}
 	return minute
+}
+
+// bills reports whether a minute of the model the lease is on now costs anything: a stream on a
+// free model or the customer's own key has nothing to settle before a renewal.
+func (l *Lease) bills() bool {
+	l.holding.Lock()
+	defer l.holding.Unlock()
+	return l.minuteCosts()
+}
+
+// minuteCosts reports whether a minute of the model the lease is on costs anything. holding is
+// held.
+func (l *Lease) minuteCosts() bool {
+	return l.recorder.QuoteStat(l.config, l.stat()).CostMicros > 0
 }
 
 func (l *Lease) renew() {
@@ -161,7 +177,7 @@ func (l *Lease) Move(config ProviderConfig) {
 	l.holding.Lock()
 	defer l.holding.Unlock()
 	l.config = config
-	if l.recorder.QuoteStat(config, l.stat()).CostMicros <= 0 {
+	if !l.minuteCosts() {
 		l.recorder.Release(l.id)
 		l.mu.Lock()
 		l.refused, l.refusal, l.refusals, l.refusedSince = nil, nil, 0, time.Time{}
