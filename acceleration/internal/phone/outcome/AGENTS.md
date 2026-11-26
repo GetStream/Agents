@@ -50,15 +50,14 @@ Count once, whatever the order of events:
   A dial never sent (the context ended first, or the row for its trunk could not be written)
   and a request that went away while the vendor was dialling are not counted: the phone may be
   ringing.
-- **Transfer**: a transfer's leg (an outbound leg with no row) is counted each time it ends, as
-  an inbound one is, under `transfer`: `completed` when the person it rang joined, else
+- **Transfer**: a transfer's leg (an outbound leg with no row) is counted when it first ends,
+  under `transfer`: `completed` when the person it rang joined, else
   `unknown` (no vendor is asked to report on it). It is never `dropped`: the agent hands the
   caller over, so its session closing leaves nobody alone on the line. A transfer whose dial
   fails is not counted.
 - **Known gap**: a join that Stream delivers again after the call ended revives the leg
   (`CallLegs.Connect`), and the stored outcome becomes `completed`. The call was already counted
   under the outcome known at its first end (`no_answer`, or `unknown`), and it is not counted again.
-  A transfer's leg revived so is counted again, as `completed`, beside its first `unknown`.
 
 ## What a dropped call is
 

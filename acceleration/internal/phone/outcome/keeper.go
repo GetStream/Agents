@@ -136,7 +136,8 @@ func (k *Keeper) Answered(ctx context.Context, key Key, at time.Time) error {
 // Ended is the call's leg ending at at. A leg with no row is nothing to keep, as in Answered.
 // A placed call is counted the first time its leg ends, and an inbound one each time, since the
 // store ends a leg once: failed when the router refused it, else completed or dropped. A
-// transfer's leg, an outbound leg with no row, is counted each time too, under transfer.
+// transfer's leg, an outbound leg with no row, is counted under transfer when it first ends,
+// not again when a late join revives it.
 func (k *Keeper) Ended(ctx context.Context, key Key, at time.Time, leg Leg) error {
 	before, call, err := k.decide(ctx, where(key), event{kind: endedEvent, at: at})
 	switch {
@@ -148,7 +149,7 @@ func (k *Keeper) Ended(ctx context.Context, key Key, at time.Time, leg Leg) erro
 		k.count(ctx, key, leg.Vendor, inbound, Completed, leg.AnsweredAt, at)
 	case err == nil && before.EndedAt == nil:
 		k.count(ctx, key, call.Vendor, outbound, call.Outcome, call.AnsweredAt, at)
-	case err != nil:
+	case err != nil && !leg.Revived:
 		k.countTransfer(leg, at)
 	}
 	return nil

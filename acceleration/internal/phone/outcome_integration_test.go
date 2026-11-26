@@ -791,6 +791,24 @@ func (s *OutcomeSuite) TestATransferLegNobodyAnsweredIsCountedUnknown() {
 	s.Equal(map[[2]string]float64{{"outbound", "no_answer"}: 1, {"transfer", "unknown"}: 1}, s.countedSince(before))
 }
 
+// TestATransferLegRevivedByALateJoinIsCountedOnce catches a transfer's leg counted twice: once
+// unknown at its first end, then again completed when the human's join, delivered again after
+// the call ended, revives it (CallLegs.Connect). Its first end is what it is counted under.
+func (s *OutcomeSuite) TestATransferLegRevivedByALateJoinIsCountedOnce() {
+	placed := s.place()
+	s.transfer(placed.CallID, "+15125550124")
+	before := s.callsCounted()
+	s.clock.advance(10 * time.Second)
+	joined := s.clock.now()
+	s.clock.advance(10 * time.Second)
+	s.ended(placed.CallType, placed.CallID)
+
+	s.Require().NoError(s.service.Connect(s.ctx, everyApp, placed.CallType, placed.CallID, "session-1", "human-1",
+		"+15125550124", joined))
+
+	s.Equal(map[[2]string]float64{{"outbound", "no_answer"}: 1, {"transfer", "unknown"}: 1}, s.countedSince(before))
+}
+
 func (s *OutcomeSuite) TestAnInboundCallHasNoRow() {
 	callID := "call-" + uuid.NewString()
 	s.arrived(callID)
