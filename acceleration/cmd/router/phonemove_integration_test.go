@@ -109,7 +109,7 @@ func (s *PhoneMoveSuite) TestADryRunSaysWhatItWouldMoveAndWritesNothing() {
 	s.Empty(s.twilio.posted(), "nothing was written at Twilio")
 	s.Equal(moveTestOldURL, s.twilio.voiceURL(first))
 	s.Contains(out, first+"\tapp deployment\twould move\twould set allowlist\n")
-	s.Contains(out, "allowlist: 0 set, 2 to set, 0 already set\n")
+	s.Contains(out, "allowlist, per number: 0 set, 2 to set, 0 already set\n")
 	s.Zero(s.trunkUpdates(), "nothing was written at Stream")
 	s.Empty(s.addresses(first))
 }
@@ -144,7 +144,7 @@ func (s *PhoneMoveSuite) TestApplyMovesEachNumberOnceAndAgainMovesNone() {
 	s.Equal(s.trunkOf(first), s.trunkOf(second))
 	s.Contains(out, first+"\tapp deployment\tmoved\tallowlist set\n")
 	s.Contains(out, second+"\tapp deployment\tmoved\tallowlist already set\n")
-	s.Contains(out, "allowlist: 1 set, 0 to set, 1 already set\n")
+	s.Contains(out, "allowlist, per number: 1 set, 0 to set, 1 already set\n")
 	s.Equal(1, s.trunkUpdates())
 	s.Equal(s.twilioRanges(), s.addresses(first))
 	password, _ := s.chat.TrunkAuth(s.trunkOf(first))
@@ -156,7 +156,7 @@ func (s *PhoneMoveSuite) TestApplyMovesEachNumberOnceAndAgainMovesNone() {
 	s.Require().NoError(err)
 	s.Contains(again, first+"\tapp deployment\talready moved\tallowlist already set\n")
 	s.Contains(again, "0 moved, 0 to move, 2 already moved, 1 with no stored bridge\n")
-	s.Contains(again, "allowlist: 0 set, 0 to set, 2 already set\n")
+	s.Contains(again, "allowlist, per number: 0 set, 0 to set, 2 already set\n")
 	s.Len(s.twilio.posted(), 2, "nothing more was written")
 	s.Equal(1, s.trunkUpdates(), "nothing more was written at Stream")
 }
@@ -242,7 +242,7 @@ func (s *PhoneMoveSuite) TestADryRunOverATrunkThatHasTheAddressesSaysTheyAreSet(
 
 	s.Require().NoError(err)
 	s.Contains(out, number+"\tapp deployment\twould move\tallowlist already set\n")
-	s.Contains(out, "allowlist: 0 set, 0 to set, 1 already set\n")
+	s.Contains(out, "allowlist, per number: 0 set, 0 to set, 1 already set\n")
 }
 
 // A trunk that has Twilio's addresses in another order is left alone.
@@ -299,7 +299,7 @@ func (s *PhoneMoveSuite) TestOneMovesOnlyThatNumber() {
 
 	s.Require().NoError(err)
 	s.Equal(second+"\tapp deployment\tmoved\tallowlist set\n"+
-		"1 moved, 0 to move, 0 already moved, 0 with no stored bridge\nallowlist: 1 set, 0 to set, 0 already set\n", out)
+		"1 moved, 0 to move, 0 already moved, 0 with no stored bridge\nallowlist, per number: 1 set, 0 to set, 0 already set\n", out)
 	s.Equal(moveTestOldURL, s.twilio.voiceURL(first))
 	s.Equal(moveTestHookURL, s.twilio.voiceURL(second))
 	s.Empty(s.addresses(first))
@@ -316,7 +316,7 @@ func (s *PhoneMoveSuite) TestAppMovesOnlyTheNumbersOfThatApp() {
 
 	s.Require().NoError(err)
 	s.Equal(theApps+"\tapp 4242\tmoved\tallowlist set\n1 moved, 0 to move, 0 already moved, 0 with no stored bridge\n"+
-		"allowlist: 1 set, 0 to set, 0 already set\n", out)
+		"allowlist, per number: 1 set, 0 to set, 0 already set\n", out)
 	s.Equal(moveTestOldURL, s.twilio.voiceURL(deployments))
 }
 

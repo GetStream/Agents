@@ -25,6 +25,8 @@ const phoneUsage = `usage: router phone <command> [flags]
                 is left alone, and so is one whose trunk credentials were not kept, which needs a
                 re-attach. Gives each number's Stream trunk exactly Twilio's signalling addresses
                 from the phone config, keeping its password; a trunk that has them is left alone.
+                The allowlist counts are per number: a trunk several numbers share is written
+                once, and its other numbers then find it already set.
                 Refuses before asking Twilio anything without TWILIO_WEBHOOK_AUTH_TOKEN, an https
                 ROUTER_PUBLIC_URL, the Twilio account or the keyring.
     --apply     point the numbers at the webhook and set their trunks' addresses
@@ -124,7 +126,7 @@ func moveTwilioNumbers(ctx context.Context, args []string, service *phone.Servic
 	})
 	fmt.Fprintf(out, "%d moved, %d to move, %d already moved, %d with no stored bridge\n",
 		counted[phone.Moved], counted[phone.WouldMove], counted[phone.AlreadyMoved], counted[phone.NoStoredBridge])
-	fmt.Fprintf(out, "allowlist: %d set, %d to set, %d already set\n",
+	fmt.Fprintf(out, "allowlist, per number: %d set, %d to set, %d already set\n",
 		allowed[phone.AllowlistSet], allowed[phone.WouldSetAllowlist], allowed[phone.AllowlistAlreadySet])
 	if !*apply {
 		fmt.Fprintln(out, "nothing was written at Twilio or Stream: --apply points the numbers at the webhook "+
