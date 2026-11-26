@@ -183,7 +183,7 @@ is kept working. What the router writes is what it renders:
   showing the call `awaiting_approval` and calls `session.decideShown` with its step and the
   reply's `support_runtime` (`command_id`, `turn_id`), or `session.decide` for a call only the
   session holds; on a call, by an `AIToolApprovalCard` over `session.approvals`. A call the
-  router holds itself (a connector's under `require_approval`, the scheduling tools of #2535) never
+  router holds itself (a connector's under `require_approval`, the agent's scheduling tools for a repeating task, #2533) never
   reaches `approvals`, so only `decideShown` answers it.
 - `AIConversationView` lays the channel out in turns, `ChatComposer` asks and stops, and
   `AIVoiceGlowView` / `AIVoiceWaveView` show the agent on a call.

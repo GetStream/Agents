@@ -313,9 +313,9 @@ final class AgentSession {
 
   /// Answers a call the conversation shows waiting for the person that this session's socket
   /// was never asked: one the router holds itself, such as a connector's call under
-  /// `require_approval` or one of the agent's scheduling tools, or an approval card shown from
-  /// the channel after the session was carried on or the app restarted. A call waiting in
-  /// [approvals] is answered as [decide] answers it.
+  /// `require_approval` or one of the agent's scheduling tools setting up a repeating task, or
+  /// an approval card shown from the channel after the session was carried on or the app
+  /// restarted. A call waiting in [approvals] is answered as [decide] answers it.
   ///
   /// The router settles a client call only with its result, so a declined one is told the
   /// person declined, and an allowed one of this session's tools runs here. One whose arguments
