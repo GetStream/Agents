@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 )
 
@@ -91,4 +92,32 @@ func TestWithTheSwitchOffAReservedActingForIdOrCallIdIsLetThrough(t *testing.T) 
 	})
 
 	require.False(t, refused)
+}
+
+// actingForPrincipal is a backend's credential acting for userID.
+func actingForPrincipal(app, userID string) auth.Principal {
+	return auth.Principal{AppID: app, UserID: userID, Kind: auth.KindServer, ServerSide: true}
+}
+
+func TestABackendActingForAReservedUserIdIsNotRecorded(t *testing.T) {
+	t.Cleanup(reservedIDsSwitch.EnableForApp("cha7323-on"))
+
+	for _, id := range []string{"!anon", "  !anon"} {
+		require.False(t, recordsActingFor(actingForPrincipal("cha7323-on", id)), id)
+	}
+}
+
+// Until its switch is on, writes for such an id still go through, and so does recording it:
+// an owner_email consent of that user reads the address recordEmail keeps.
+func TestWithTheSwitchOffABackendActingForAReservedUserIdIsRecordedAsBefore(t *testing.T) {
+	require.True(t, recordsActingFor(actingForPrincipal("cha7323-off", "!anon")))
+}
+
+func TestOrdinaryCallersAreRecorded(t *testing.T) {
+	t.Cleanup(reservedIDsSwitch.EnableForApp("cha7323-ordinary"))
+
+	require.True(t, recordsActingFor(actingForPrincipal("cha7323-ordinary", "alice")))
+	require.True(t, recordsActingFor(auth.Principal{
+		AppID: "cha7323-ordinary", UserID: "!anon", Kind: auth.KindAnonymous,
+	}), "only a backend's acting-for id is covered")
 }
