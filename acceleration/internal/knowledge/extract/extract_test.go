@@ -286,11 +286,14 @@ func (s *ExtractSuite) TestAWorkerKilledWhileAPageIsWalkedFailsTheRead() {
 }
 
 func (s *ExtractSuite) TestReadingEveryFormatStopsAtTheDeadline() {
-	hurried := New(Options{Timeout: time.Nanosecond})
-	defer hurried.Close()
+	extractor := New(Options{})
+	defer extractor.Close()
+	// The deadline has passed already: a timeout of a nanosecond is done only once its timer runs.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
 
 	for _, name := range []string{"handbook.docx", "handbook.odt", "handbook.rtf", "policies.doc", "menu.xlsx"} {
-		_, err := hurried.Extract(context.Background(), name, s.fixture(name))
+		_, err := extractor.Extract(ctx, name, s.fixture(name))
 
 		s.Require().ErrorIs(err, context.DeadlineExceeded, name)
 		_, ok := ReasonOf(err)
