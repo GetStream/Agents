@@ -219,6 +219,24 @@ type cellCount struct {
 	longest int
 	// repeat is the most times a number format writes a cell's text.
 	repeat int
+	// tokens is how many XML tokens have been read, of every part.
+	tokens int
+	// styles is whether the part being read is the one of the number formats.
+	styles bool
+}
+
+// tokensPerDeadlineCheck is how many XML tokens are read between two checks of the deadline, so a
+// part of elements that are no row, cell or string is not read to its end past it. A token is at
+// least a few bytes and costs more to read than a check, so this is a few tens of kilobytes of a
+// part between checks, at a cost too small to measure.
+const tokensPerDeadlineCheck = 4096
+
+// tick counts one token read, and is the deadline's error at every tokensPerDeadlineCheck tokens.
+func (c *cellCount) tick() error {
+	if c.tokens++; c.tokens%tokensPerDeadlineCheck != 0 {
+		return nil
+	}
+	return c.ctx.Err()
 }
 
 // overBudget is whether the workbook's cells are more text, as excelize reads them, than the text
@@ -239,35 +257,21 @@ func (c *cellCount) workbook(data []byte) error {
 	}
 	c.archive = archive
 	for _, file := range archive.File {
+		// excelize reads the number formats from this part only (styles.go, stylesReader).
+		c.styles = strings.ReplaceAll(file.Name, `\`, "/") == "xl/styles.xml"
 		if err := c.part(file, c.cells); err != nil {
 			return err
-		}
-		// excelize reads the number formats from this part only (styles.go, stylesReader).
-		if strings.ReplaceAll(file.Name, `\`, "/") == "xl/styles.xml" {
-			if err := c.part(file, c.formats); err != nil {
-				return err
-			}
 		}
 	}
 	return nil
 }
 
-// formats reads the number formats of the styles part, as excelize reads them (xlsxNumFmt): a
-// format's code, and the code that takes its place when there is one.
-func (c *cellCount) formats(decoder *xml.Decoder) error {
-	for {
-		token, err := decoder.Token()
-		if err != nil {
-			return nil
-		}
-		start, ok := token.(xml.StartElement)
-		if !ok || start.Name.Local != "numFmt" {
-			continue
-		}
-		for _, attr := range start.Attr {
-			if attr.Name.Local == "formatCode" || attr.Name.Local == "formatCode16" {
-				c.format(attr.Value)
-			}
+// numFmt reads a number format of the styles part, as excelize reads one (xlsxNumFmt): its code,
+// and the code that takes its place when there is one.
+func (c *cellCount) numFmt(start xml.StartElement) {
+	for _, attr := range start.Attr {
+		if attr.Name.Local == "formatCode" || attr.Name.Local == "formatCode16" {
+			c.format(attr.Value)
 		}
 	}
 }
@@ -308,9 +312,13 @@ func (c *cellCount) part(file *zip.File, read func(*xml.Decoder) error) error {
 	return read(decoder)
 }
 
-// cells counts the cells of a part, checking the deadline at each row, as the rows are read.
+// cells counts the cells of a part, and notes the number formats of the styles part, checking the
+// deadline at each row, as the rows are read, and every tokensPerDeadlineCheck tokens.
 func (c *cellCount) cells(decoder *xml.Decoder) error {
 	for {
+		if err := c.tick(); err != nil {
+			return err
+		}
 		token, err := decoder.Token()
 		if err != nil {
 			return nil
@@ -329,6 +337,8 @@ func (c *cellCount) cells(decoder *xml.Decoder) error {
 			}
 			c.text += shared
 			c.stored += stored
+		case c.styles && start.Name.Local == "numFmt":
+			c.numFmt(start)
 		}
 	}
 }
@@ -346,6 +356,9 @@ func (c *cellCount) cell(decoder *xml.Decoder, start xml.StartElement) (int, int
 	var value string
 	inline, hasInline := 0, false
 	for done := false; !done; {
+		if err := c.tick(); err != nil {
+			return 0, 0, err
+		}
 		token, err := decoder.Token()
 		if err != nil {
 			break
@@ -418,6 +431,9 @@ func (c *cellCount) readShared() error {
 func (c *cellCount) sharedStrings(decoder *xml.Decoder, everyOne bool) error {
 	depth, index := 0, 0
 	for {
+		if err := c.tick(); err != nil {
+			return err
+		}
 		token, err := decoder.Token()
 		if err != nil {
 			return nil

@@ -1289,6 +1289,27 @@ func (s *ExtractSuite) TestTheCellsAreCountedOnlyUntilTheDeadline() {
 	}
 }
 
+// The deadline is checked every few thousand XML tokens as the cells are counted, not only at a
+// row or a string: a part of many elements that are none of them is not read to its end past it.
+func (s *ExtractSuite) TestAPartOfOtherElementsIsCountedOnlyUntilTheDeadline() {
+	junk := strings.Repeat(`<a/>`, 100_000)
+	for name, data := range map[string][]byte{
+		"a part that is no sheet": s.rezip(s.workbook(1, 1), map[string][]byte{"xl/junk.xml": []byte(`<r>` + junk + `</r>`)}),
+		// Inside a formula, which the count of a part's cells skips whole, so the elements are
+		// read one by one only as the shared strings are read.
+		"the shared strings": s.rezip(s.workbook(1, 1), map[string][]byte{"xl/sharedStrings.xml": []byte(`<sst><si><t>s</t></si><c><f>` + junk + `</f></c></sst>`)}),
+		"a cell":             s.sheet(`<row r="1"><c r="A1" t="s"><v>0</v>` + junk + `</c></row>`),
+		"the styles":         s.rezip(s.workbook(1, 1), map[string][]byte{"xl/styles.xml": []byte(`<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` + junk + `</styleSheet>`)}),
+	} {
+		_, err := readXLSX(context.Background(), data)
+		s.Require().NoError(err, name)
+
+		_, err = readXLSX(&stopsAfter{Context: context.Background(), left: 10}, data)
+
+		s.Require().ErrorIs(err, context.DeadlineExceeded, name)
+	}
+}
+
 // sheet is a workbook whose only sheet is the given XML, rows of inline strings.
 func (s *ExtractSuite) sheet(sheetData string) []byte {
 	return s.rezip(s.workbook(1, 1), map[string][]byte{"xl/worksheets/sheet1.xml": []byte(
