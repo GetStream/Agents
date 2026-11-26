@@ -945,6 +945,63 @@ func (s *ExtractSuite) TestASharedStringIsCountedAtTheIndexItIsReadAt() {
 	}
 }
 
+// The text budget may be spent to the byte, and no further. Cells of spaces make no table, so the
+// cells alone spend it. Stored, the cells are counted before they are read, and a byte past the
+// budget is refused then; a number format that writes a string twice ("@@") makes them longer as
+// they are read, and they are counted again.
+func (s *ExtractSuite) TestTheTextBudgetMayBeSpentToTheByte() {
+	spaces := strings.Repeat(" ", 1<<20)
+	columns := maxWorkbookText / len(spaces)
+
+	stored := `<si><t>` + spaces + `</t></si><si><t> </t></si>`
+	read, err := s.extractor.Extract(context.Background(), "spaces.xlsx",
+		s.cellsNaming(columns, `<c t="s"><v>0</v></c>`, "xl/sharedStrings.xml", stored))
+	s.Require().NoError(err, "stored, the cells are the budget")
+	s.Empty(read.Pages[0].Text)
+
+	_, err = s.extractor.Extract(context.Background(), "spaces.xlsx",
+		s.cellsNaming(1, strings.Repeat(`<c t="s"><v>0</v></c>`, columns)+`<c t="s"><v>1</v></c>`, "xl/sharedStrings.xml", stored))
+	s.requireReason(err, TooLarge)
+	s.Contains(err.Error(), "shared strings", "stored, the cells are the budget and a byte, refused before they are read")
+
+	book := excelize.NewFile()
+	defer book.Close()
+	twice := "@@"
+	style, err := book.NewStyle(&excelize.Style{CustomNumFmt: &twice})
+	s.Require().NoError(err)
+	for column := 1; column <= columns/2; column++ {
+		cell, err := excelize.CoordinatesToCellName(column, 1)
+		s.Require().NoError(err)
+		s.Require().NoError(book.SetCellValue("Sheet1", cell, "twice"))
+		s.Require().NoError(book.SetCellStyle("Sheet1", cell, cell, style))
+	}
+	cell, err := excelize.CoordinatesToCellName(columns/2+1, 1)
+	s.Require().NoError(err)
+	s.Require().NoError(book.SetCellValue("Sheet1", cell, "once"))
+	var out bytes.Buffer
+	s.Require().NoError(book.Write(&out))
+	data := s.rezip(out.Bytes(), map[string][]byte{"xl/sharedStrings.xml": []byte(
+		`<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>` + spaces + `</t></si><si><t> </t></si></sst>`)})
+
+	_, err = s.extractor.Extract(context.Background(), "twice.xlsx", data)
+
+	// Stored, the cells are half the budget and a byte; read, the budget and a byte.
+	s.requireReason(err, TooLarge)
+}
+
+// A table may be as long as its limit and no longer, its last row counted as well as the others.
+func (s *ExtractSuite) TestATableMayBeAsLongAsItsLimit() {
+	rows := [][]string{{"h"}, {"a"}, {"b"}}
+	whole := table(rows)
+
+	text, err := tableWithin(context.Background(), rows, len(whole))
+	s.Require().NoError(err)
+	s.Equal(whole, text)
+
+	_, err = tableWithin(context.Background(), rows, len(whole)-1)
+	s.Require().ErrorIs(err, errTableTooLong)
+}
+
 // The text budget is of the whole workbook: two sheets that each take less than half of it are
 // read, and a third is refused.
 func (s *ExtractSuite) TestTheTextBudgetIsOfTheWholeWorkbook() {
