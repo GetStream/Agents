@@ -1256,6 +1256,18 @@ func (s *DLCBillingSuite) TestARegisteredBrandAndCampaignAreBilledOnce() {
 		read()
 		return len(fees[dlc.ModelCampaignMonth]) == dlc.UpfrontMonths
 	}, settleFor, 50*time.Millisecond, "the campaign's first months were not billed")
+	now := time.Now().UTC()
+	registeredMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	var upfront []uuid.UUID
+	for k := range dlc.UpfrontMonths {
+		month := registeredMonth.AddDate(0, k, 0)
+		upfront = append(upfront, routing.UsageID("dlc_campaign", "telnyx", *reviewed.VendorCampaignId, month.Format("2006-01")))
+	}
+	var billedUpfront []uuid.UUID
+	for _, month := range fees[dlc.ModelCampaignMonth] {
+		billedUpfront = append(billedUpfront, month.UsageID)
+	}
+	s.ElementsMatch(upfront, billedUpfront, "the registered month and the next two, each under its own usage id")
 
 	s.registrar10DLC.Poll(context.Background())
 	billed, err := s.registrar10DLC.BillCampaigns(context.Background(), time.Now().AddDate(0, -2, 0))
