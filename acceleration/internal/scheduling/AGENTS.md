@@ -295,8 +295,8 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   the next one would run on uncounted. A tool call the agent asks for in it carries
   `agent.WithScheduledCall` (set in `Agent.prepareTool` from `toolScheduled`), and
   `schedule_task`, the `reschedule`, `snooze` and `resume` of `update_scheduled_task`, and an
-  update carrying `instructions` answer it `scheduled_turn` before anybody is asked; list,
-  pause, skip and cancel still run. The user's next turn is theirs.
+  update carrying `instructions` or `title` answer it `scheduled_turn` before anybody is asked;
+  list, pause, skip and cancel still run. The user's next turn is theirs.
   `TestScheduleApprovalSuite/TestAScheduledTurnIsRefusedWithoutAQuestion` (`internal/session`),
   `TestScheduledTasksSuite/TestATasksTurnCannotScheduleATask`,
   `TestScheduledTasksSuite/TestATasksTurnCannotScheduleATaskInALaterRound`,
@@ -309,7 +309,8 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestAgentSuite/TestAToolAskedInTheCallersOwnNativeReplyIsNotTheTasksCall` (`internal/agent`).
 - **The user allows what the agent sets going (AI-3990).** The model does what any text it
   reads says, a web page or a tool's result among them, so `schedule_task`, the `reschedule`,
-  `snooze` and `resume` of `update_scheduled_task`, and an update carrying `instructions` wait
+  `snooze` and `resume` of `update_scheduled_task`, and an update carrying `instructions` or
+  `title` (every run's prompt carries the title, `scheduledPrompt`) wait
   on their step in the conversation until the session's user allows them
   (`scheduleRunner.approve`), as a connector call under `require_approval` does (`approvals`,
   `internal/session/connector_approval.go`). The app answers with the session socket's
@@ -318,8 +319,7 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   in words and next run first, then its title and instructions (`shownTask`), since a step
   shows only the start of what does not fit it. A call is checked before the user is asked,
   then run again from their answer, so its times count from then and it changes the task as it
-  then stands. A pause or a skip, with a new title or without, and list and cancel ask
-  nothing. Where nobody can be asked (an SMS, WhatsApp or iMessage thread, a spoken turn on a
+  then stands. A pause or a skip that changes neither, and list and cancel, ask nothing. Where nobody can be asked (an SMS, WhatsApp or iMessage thread, a spoken turn on a
   voice call, which has no reply in the conversation to ask in), a call that leaves its task
   running once goes on unasked, as it runs at most once, and one that leaves it repeating
   answers `needs_approval`.

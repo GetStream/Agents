@@ -498,7 +498,12 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 		return refusal(scheduling.CodeInvalidSchedule, "action must be reschedule, snooze, skip_next, pause or resume"), nil
 	}
 	if question := updateQuestion(args); question != "" && !agent.Approved(ctx) {
-		view := shownTask(schedule, task.NextRunAt, task.Title, task.Instructions, now)
+		// Shown as the change leaves it: a snooze moves a one-shot's one time.
+		shown := schedule
+		if changed, err := scheduling.FromStored(task); err == nil {
+			shown = changed
+		}
+		view := shownTask(shown, task.NextRunAt, task.Title, task.Instructions, now)
 		asked, parts, err := r.approve(ctx, call, question, view, task.RRule != "")
 		if parts != nil || err != nil {
 			return parts, err
@@ -539,8 +544,9 @@ func (r *scheduleRunner) update(ctx context.Context, call llm.ToolCall) ([]llm.C
 }
 
 // updateQuestion is what the user is asked before an update is saved: one that sets a run
-// going, as armedByTask counts them, or changes what the task does. "" for a pause or a skip,
-// with or without a new title, which ask nothing.
+// going, as armedByTask counts them, or changes what the task does, its instructions or its
+// title, which every run's prompt carries too (api.scheduledPrompt). "" for a pause or a skip
+// that leaves both as they are, which asks nothing.
 func updateQuestion(args updateArgs) string {
 	switch args.Action {
 	case "reschedule":
@@ -550,7 +556,7 @@ func updateQuestion(args updateArgs) string {
 	case "resume":
 		return "Allow the agent to resume this task?"
 	}
-	if args.Instructions != nil {
+	if args.Instructions != nil || args.Title != nil {
 		return "Allow the agent to change what this task does?"
 	}
 	return ""
