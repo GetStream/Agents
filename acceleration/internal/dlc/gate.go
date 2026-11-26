@@ -272,13 +272,16 @@ func (g *Gate) Dialed(ctx context.Context, customerID, organizationID, to string
 	g.countChannel(ctx, customerID, organizationID, Voice, to, 0)
 }
 
-// Talked counts how long a leg of an app's call in organizationID lasted: its seconds against
-// the sandbox while it holds the app, and for an outbound leg its minutes, rounded up, against
-// the organization's voice limit a day. Calls people make to the app's numbers are not what
-// that limit holds back, so they never use it up.
+// Talked counts how long a leg of an app's call in organizationID lasted. An outbound leg's
+// seconds count against the sandbox while it holds the app, and its minutes, rounded up,
+// against the organization's voice limit a day. Calls people make to the app's numbers are
+// billed and are not what either limit holds back, so they never use one up.
 func (g *Gate) Talked(ctx context.Context, customerID, organizationID string, outbound bool, lasted time.Duration) {
+	if !outbound {
+		return
+	}
 	g.count(ctx, customerID, secondsField, int64(lasted.Seconds()))
-	if minutes := int64(math.Ceil(lasted.Minutes())); outbound && minutes > 0 {
+	if minutes := int64(math.Ceil(lasted.Minutes())); minutes > 0 {
 		g.countChannel(ctx, customerID, organizationID, Voice, "", minutes)
 	}
 }
@@ -312,8 +315,9 @@ func (g *Gate) SetRecipients(ctx context.Context, customerID string, recipients 
 	return g.store.SandboxRecipients.Replace(ctx, customerID, recipients)
 }
 
-// Sandboxed reports whether the sandbox holds an app now, which is what gives its texts and
-// minutes away. A nil Gate holds nobody, and neither does one that could not tell.
+// Sandboxed reports whether the sandbox holds an app now, which is what gives the texts it
+// sends and the minutes of the calls it places away. A nil Gate holds nobody, and neither does
+// one that could not tell.
 func (g *Gate) Sandboxed(ctx context.Context, customerID string) (bool, error) {
 	if g == nil || g.store == nil {
 		return false, nil

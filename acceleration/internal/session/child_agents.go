@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sensitive"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/harness"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
@@ -130,10 +131,24 @@ func (r *childRunner) Run(ctx context.Context, call llm.ToolCall) ([]llm.Content
 	case len(config.Agents) > 0:
 		return nil, fmt.Errorf("the agent %q behind %s calls agents of its own", child.Config, call.Name)
 	}
+	if message, ok, err := r.sensitiveComplaint(ctx, config); err != nil {
+		return nil, err
+	} else if !ok {
+		// The complaint names bindings, connectors and tools of server-side configs: the log
+		// has it, and the model, whose words the end user reads, gets a sentence that names none.
+		r.manager.logger.Warn("a delegation was refused: the agent and its children break the sensitive connector rule",
+			"config", r.spec.ConfigID, "tool", call.Name, "complaint", message)
+		return nil, fmt.Errorf("%s was not run: the agents it works with together read private data and can send data out", call.Name)
+	}
 
 	spec := FromConfig(config)
 	spec.CustomerID = r.spec.CustomerID
 	spec.Caller, spec.CallerKind = r.spec.Caller, r.spec.CallerKind
+	// What the parent's conversation is, as the router opened it, goes on to the child: a child of a
+	// thread everyone writes in is as shared as the thread (Spec.Shared), so it attaches no one
+	// person's connection. Dispatched and HandedOutBy only mark the child as the same hand-out as its
+	// parent; nothing reads them for a child today.
+	spec.Thread, spec.Dispatched, spec.HandedOutBy = r.spec.Thread, r.spec.Dispatched, r.spec.HandedOutBy
 	spec.MaxToolRounds = child.MaxToolRounds
 	// The parent's cost labels go on the child's requests too, so its spend is counted
 	// where the parent's is.
@@ -158,6 +173,33 @@ func (r *childRunner) Run(ctx context.Context, call llm.ToolCall) ([]llm.Content
 		return nil, fmt.Errorf("%s gave no answer", call.Name)
 	}
 	return llm.TextParts(run.FinalText), nil
+}
+
+// sensitiveComplaint is sensitive.GraphComplaint over the parent as it runs, called and every
+// other child the parent offers as the store holds it now: a stored graph may break the rule,
+// having been saved before the rule held across agents or changed since, as a child can be.
+func (r *childRunner) sensitiveComplaint(ctx context.Context, called store.AgentConfig) (string, bool, error) {
+	configs := []store.AgentConfig{{
+		Name: r.spec.AgentName, Connectors: r.spec.ConnectorBindings,
+		Sandbox: store.AgentSandbox{Provider: r.spec.Sandbox, Options: r.spec.SandboxOptions},
+	}, called}
+	read := map[string]bool{called.Name: true}
+	for _, child := range r.spec.Agents {
+		if _, offered := r.children[child.Tool]; !offered || read[child.Config] {
+			continue
+		}
+		read[child.Config] = true
+		config, err := r.manager.options.Store.AgentConfigs.GetByName(ctx, r.spec.CustomerID, child.Config)
+		// A child deleted since runs nothing, as its own call says.
+		if errors.Is(err, store.ErrNoAgentConfig) {
+			continue
+		}
+		if err != nil {
+			return "", false, err
+		}
+		configs = append(configs, config)
+	}
+	return sensitive.GraphComplaint(ctx, r.manager.options.Store.ConnectorDefinitions, r.spec.CustomerID, configs)
 }
 
 // childEnded is a child given up on before it answered.

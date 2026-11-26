@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/keypool/keypooltest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/stt"
 )
@@ -385,17 +386,17 @@ func (s *GeminiSocketSuite) startRefused(code int, reason string) (float64, erro
 	}))
 	defer server.Close()
 
-	before := keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key")
+	before := keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/invalid_key"]
 	provider, err := New(Options{
 		URL:              "ws://" + strings.TrimPrefix(server.URL, "http://"),
 		APIKey:           "AIza-" + rand.Text(),
 		HandshakeTimeout: 5 * time.Second,
 	})
 	s.Require().NoError(err)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "stt", "gemini-live"), 5*time.Second)
 	defer cancel()
 	err = provider.Start(ctx)
-	return keypooltest.Refused(s.T(), apiKeyEnvVar, "invalid_key") - before, err
+	return keypooltest.Series(s.T(), "router_keypool_refused_attempts_total", apiKeyEnvVar)["/customer/stt/invalid_key"] - before, err
 }
 
 func (s *GeminiSocketSuite) TestAKeyRefusedByACloseAfterSetupIsCountedAsInvalid() {

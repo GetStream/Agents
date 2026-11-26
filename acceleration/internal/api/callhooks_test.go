@@ -4,7 +4,6 @@ package api
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
@@ -15,7 +14,6 @@ import (
 	"maps"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -209,12 +207,12 @@ func (s *CallHooksSuite) TestTheAccessLineOfASignedCallNamesTheNumbersCustomer()
 	forged, _ := s.deliver(phone.CallHookPath, s.arriving("default:"+s.callID), sign(s.arriving("default:"+s.callID), "not the secret"))
 	s.Require().Equal(http.StatusUnauthorized, forged)
 	s.Require().Eventually(func() bool { return served(" status=401 ") }, settleFor, 10*time.Millisecond)
-	s.True(served(" status=401 ", ` customer="" `))
+	s.False(served(" status=401 ", "app_id="), "a call nobody signed names no app")
 
 	s.Require().Equal(http.StatusOK, s.arrive("default:"+s.callID))
 	s.Require().Eventually(func() bool { return served(" status=200 ") }, settleFor, 10*time.Millisecond)
 	// No worker takes it, so it is refused in a 200, with the code it is counted under.
-	s.True(served(" status=200 ", " customer="+s.customerID()+" ", " error_code=unavailable "))
+	s.True(served(" status=200 ", " app_id="+s.customerID()+" ", " error_code=unavailable "))
 }
 
 // thisTest is what the current test logged, so a line another test logged for a number
@@ -496,75 +494,6 @@ func (s *CallHooksSuite) TestAnArrivingCallToANumberIsStillDispatched() {
 	case <-time.After(settleFor):
 		s.Fail("the call never reached the worker")
 	}
-}
-
-// A peer shard that is down may have placed the call, so the delivery is answered for Stream
-// to make again, and nothing was acted on: delivered again once every shard answers, it is
-// dispatched.
-func (s *CallHooksSuite) TestAnArrivingCallAShardThatIsDownMayHavePlacedIsDeliveredAgain() {
-	s.hold("default", s.callID)
-	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
-	defer release()
-	other := s.nodeWithAShardDown()
-
-	body := s.ringingNumberAt("default", time.Now().UTC())
-	s.Equal(http.StatusServiceUnavailable, s.signedlyTo(other, "/v1/phone/hooks/stream", body))
-	s.nothingReaches(worker.Calls(), "a call a shard that is down may have placed was dispatched")
-
-	s.Require().Equal(http.StatusOK, s.signedly("/v1/phone/hooks/stream", body))
-	select {
-	case call := <-worker.Calls():
-		s.Equal(s.callID, call.CallID)
-	case <-time.After(settleFor):
-		s.Fail("the call delivered again never reached the worker")
-	}
-}
-
-// Past arrivingCallRetryFor, a delivery that lands once the shard is back would send a worker to
-// a call its caller has left, so it is answered and dropped.
-func (s *CallHooksSuite) TestAnOldArrivingCallAShardThatIsDownMayHavePlacedIsDropped() {
-	s.hold("default", s.callID)
-	worker, release := s.dispatch.Register(s.customerID(), dispatch.Registration{Capacity: 1})
-	defer release()
-	other := s.nodeWithAShardDown()
-
-	body := s.ringingNumberAt("default", time.Now().UTC().Add(-2*arrivingCallRetryFor))
-	s.Equal(http.StatusOK, s.signedlyTo(other, "/v1/phone/hooks/stream", body))
-	s.nothingReaches(worker.Calls(), "a call long past ringing was dispatched")
-	s.Eventually(func() bool { return strings.Contains(s.thisTest(), "dropped an arriving call") }, settleFor, 10*time.Millisecond)
-}
-
-// nodeWithAShardDown is another node on the suite's databases whose peer shard is down: nothing
-// answers on port 1.
-func (s *CallHooksSuite) nodeWithAShardDown() *httptest.Server {
-	options := s.storeOptions
-	options.Shards = map[string]string{
-		"here": cmp.Or(options.ShardDSN, options.DSN), "gone": "postgres://postgres:postgres@127.0.0.1:1/gone?sslmode=disable",
-	}
-	served, err := store.OpenShards(options)
-	s.Require().NoError(err)
-	s.T().Cleanup(func() { s.NoError(served.Close()) })
-	logger := slog.New(NewLogHandler(slog.NewTextHandler(s.logs, &slog.HandlerOptions{Level: slog.LevelDebug, ReplaceAttr: store.RedactLogAttr})))
-	other, _, _ := s.otherNodeServingFrom(served, nil, s.sealer, logger)
-	return other
-}
-
-// signedlyTo is signedly to another node.
-func (s *CallHooksSuite) signedlyTo(other *httptest.Server, path, body string) int {
-	request, err := http.NewRequest(http.MethodPost, other.URL+path, bytes.NewReader([]byte(body)))
-	s.Require().NoError(err)
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set(signatureHeader, sign(body, suiteStreamSecret))
-	response, err := other.Client().Do(request)
-	s.Require().NoError(err)
-	s.Require().NoError(response.Body.Close())
-	return response.StatusCode
-}
-
-// ringingNumberAt is ringingNumber made by Stream at at.
-func (s *CallHooksSuite) ringingNumberAt(callType string, at time.Time) string {
-	return strings.Replace(arrivingCallAt(callType+":"+s.callID, at),
-		`"custom": {"line": "support"}`, fmt.Sprintf(`"custom": {"line": "support", "phone_number": %q}`, s.e164), 1)
 }
 
 func (s *CallHooksSuite) TestAnArrivingCallToANumberWithAnAgentIsAnsweredByIt() {

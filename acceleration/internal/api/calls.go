@@ -988,6 +988,7 @@ func callOf(call store.Call) Call {
 		EndedAt:   call.EndedAt,
 	}
 	rendered.SessionId = optional(call.SessionID)
+	rendered.Region = optional(call.Region)
 	rendered.CampaignId = optional(call.CampaignID)
 	rendered.ContactId = optional(call.ContactID)
 	rendered.FromNumber = optional(call.FromNumber)
@@ -1227,7 +1228,7 @@ func (s *Server) registerCalls(api huma.API) {
 		// Declared rather than read off the input, so the default is documented without
 		// being filled in: the handler tells a parameter left out from one sent.
 		Parameters: []*huma.Param{
-			{Name: "limit", In: "query", Description: "How many to return, oldest first.", Schema: &huma.Schema{Type: huma.TypeInteger, Default: 1000}},
+			{Name: "limit", In: "query", Description: "How many to return, oldest first. Up to the 10000 a call keeps.", Schema: &huma.Schema{Type: huma.TypeInteger, Minimum: bound(1), Maximum: bound(10_000), Default: 1000}},
 		},
 		Responses: map[string]*huma.Response{
 			"200": {Description: "The judgements, oldest first"},
@@ -1314,7 +1315,7 @@ type getCallTimelineResponse struct {
 
 type getCallEventsRequest struct {
 	Id    string             `path:"id" doc:"The resource, as returned when it was created."`
-	Limit optionalParam[int] `query:"limit" doc:"How many to return, oldest first."`
+	Limit optionalParam[int] `query:"limit" doc:"How many to return, oldest first. Up to the 10000 a call keeps." minimum:"1" maximum:"10000"`
 }
 
 type getCallEventsResponse struct {

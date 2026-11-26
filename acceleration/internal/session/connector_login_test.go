@@ -236,6 +236,22 @@ func (s *ConnectorLoginSuite) TestALoginWithNoneChosenOpensOnAnAccountConnectedO
 	s.Empty(s.shown, "no button shown")
 }
 
+func (s *ConnectorLoginSuite) TestALoginWhoseEndpointIsRefusedLogsWhy() {
+	manager := s.managerWith(fixtureRequestTimeout)
+	var logged bytes.Buffer
+	manager.logger = slog.New(slog.NewTextHandler(&logged, nil))
+	d, _, _, err := s.attachWithConsentsOn(manager, s.persisted(s.spec(s.config(s.chosen("crm", "whoami")), "alice", nil)))
+	s.Require().NoError(err)
+	d.logins.consents = func(context.Context, ConsentRequest) (Consent, error) {
+		return Consent{}, &core.EndpointError{Endpoint: "https://crm.example/token", Err: errors.New("the test's reason")}
+	}
+
+	said, _ := s.call(d, "crm__call_tool", `{"tool":"whoami"}`)
+
+	s.NotContains(said, "the test's reason")
+	s.Contains(logged.String(), "that resolves: the test's reason")
+}
+
 // TestALoginWithNoneChosenStillAsksWhenTheCallerHasTwoAccounts: with two connected, which one
 // the session uses is the person's to say, so the login asks rather than picks.
 func (s *ConnectorLoginSuite) TestALoginWithNoneChosenStillAsksWhenTheCallerHasTwoAccounts() {

@@ -74,6 +74,7 @@ import kotlinx.serialization.encoding.Encoder
  * @param modelOverwrites 
  * @param pinnedAt When the session was pinned. Absent for one that is not pinned.
  * @param projectId 
+ * @param region The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards.
  * @param reviewNotes Why the review scored the conversation as it did. Read by a backend only.
  * @param reviewScore How well the agent handled the conversation, from 1 to 5, written a few seconds after it ended. Read by a backend only.
  * @param sts The provider and model holding a native conversation, once routing has picked one.
@@ -188,6 +189,10 @@ internal data class Session (
 
     @SerialName(value = "project_id")
     val projectId: kotlin.String? = null,
+
+    /* The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards. */
+    @SerialName(value = "region")
+    val region: kotlin.String? = null,
 
     /* Why the review scored the conversation as it did. Read by a backend only. */
     @SerialName(value = "review_notes")

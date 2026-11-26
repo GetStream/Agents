@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/llm"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/memory"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/policy"
@@ -697,10 +698,11 @@ func TestPersonalConversationBindsMembershipMessagesAndHistoryToCaller(t *testin
 }
 
 func TestSharedMembersResumeContextWithTheirOwnCommandsAndLoseAccessOnRemoval(t *testing.T) {
+	ctx := WithCallerKind(t.Context(), auth.KindAuthenticated)
 	db, client := newChat(t)
 	s := NewForChat(client)
 	t.Cleanup(s.Close)
-	alice, _, _, err := s.OpenForCaller(t.Context(), "customer", "agent", "", "alice")
+	alice, _, _, err := s.OpenForCaller(ctx, "customer", "agent", "", "alice")
 	require.NoError(t, err)
 	cid := alice.CID()
 	aliceReceipt, err := alice.BeginCommand("alice-command", "Remember TEAM_CANVAS_42", "")
@@ -714,35 +716,35 @@ func TestSharedMembersResumeContextWithTheirOwnCommandsAndLoseAccessOnRemoval(t 
 	channel["members"] = append(channel["members"].([]any), map[string]any{"user_id": "bob"})
 	db.mu.Unlock()
 	// Membership alone must never expose a private or legacy conversation.
-	_, err = s.HistoryForCaller(t.Context(), "customer", "agent", cid, "", "bob")
+	_, err = s.HistoryForCaller(ctx, "customer", "agent", cid, "", "bob")
 	require.ErrorContains(t, err, "another user")
 	db.mu.Lock()
 	channel["custom"].(map[string]any)["support_access"] = "members"
 	db.messages[aliceReceipt.UserMessageID]["user"] = map[string]any{"id": "alice", "name": "Alice"}
 	db.mu.Unlock()
-	page, err := s.HistoryForCaller(t.Context(), "customer", "agent", cid, "", "bob")
+	page, err := s.HistoryForCaller(ctx, "customer", "agent", cid, "", "bob")
 	require.NoError(t, err)
 	require.Len(t, page.Messages, 2)
 	for _, caller := range []string{"outsider", ""} {
-		_, err := s.HistoryForCaller(t.Context(), "customer", "agent", cid, "", caller)
+		_, err := s.HistoryForCaller(ctx, "customer", "agent", cid, "", caller)
 		require.Error(t, err)
 	}
-	_, _, _, err = s.OpenForCaller(t.Context(), "customer", "agent", cid, "bob")
+	_, _, _, err = s.OpenForCaller(ctx, "customer", "agent", cid, "bob")
 	require.ErrorContains(t, err, "already open", "a second session cannot steal an active conversation")
 	alice.Release()
-	bob, previous, _, err := s.OpenForCaller(t.Context(), "customer", "agent", cid, "bob")
+	bob, previous, _, err := s.OpenForCaller(ctx, "customer", "agent", cid, "bob")
 	require.NoError(t, err)
 	require.Len(t, previous, 3)
 	require.Contains(t, previous[1].Content, "TEAM_CANVAS_42")
 	require.Contains(t, previous[1].Content, `"user_id":"alice","display_name":"Alice"`)
-	require.NoError(t, bob.CheckCaller(t.Context(), "bob"))
+	require.NoError(t, bob.CheckCaller(ctx, "bob"))
 	_, err = bob.BeginCommand("alice-command", "Remember TEAM_CANVAS_42", "")
 	require.ErrorIs(t, err, ErrCommandNotFound)
 	_, err = bob.Command("alice-command")
 	require.ErrorIs(t, err, ErrCommandNotFound)
 	_, err = bob.CancelCommand("alice-command")
 	require.ErrorIs(t, err, ErrCommandNotFound)
-	_, err = s.CommandForCaller(t.Context(), "customer", "agent", cid, "bob", "alice-command")
+	_, err = s.CommandForCaller(ctx, "customer", "agent", cid, "bob", "alice-command")
 	require.ErrorIs(t, err, ErrCommandNotFound)
 	bobReceipt, err := bob.BeginCommand("bob-command", "What is the codeword?", "")
 	require.NoError(t, err)
@@ -754,7 +756,7 @@ func TestSharedMembersResumeContextWithTheirOwnCommandsAndLoseAccessOnRemoval(t 
 
 	restarted := NewForChat(client)
 	defer restarted.Close()
-	bob, previous, _, err = restarted.OpenForCaller(t.Context(), "customer", "agent", cid, "bob")
+	bob, previous, _, err = restarted.OpenForCaller(ctx, "customer", "agent", cid, "bob")
 	require.NoError(t, err)
 	require.Len(t, previous, 5)
 	duplicate, err := bob.BeginCommand("bob-command", "What is the codeword?", "")
@@ -763,7 +765,7 @@ func TestSharedMembersResumeContextWithTheirOwnCommandsAndLoseAccessOnRemoval(t 
 	require.Equal(t, bobReceipt.UserMessageID, duplicate.UserMessageID)
 	_, err = bob.BeginCommand("alice-command", "Remember TEAM_CANVAS_42", "")
 	require.ErrorIs(t, err, ErrCommandNotFound)
-	reconciled, err := restarted.CommandForCaller(t.Context(), "customer", "agent", cid, "alice", "alice-command")
+	reconciled, err := restarted.CommandForCaller(ctx, "customer", "agent", cid, "alice", "alice-command")
 	require.NoError(t, err)
 	require.Equal(t, aliceReceipt.UserMessageID, reconciled.UserMessageID)
 	db.mu.Lock()
@@ -773,15 +775,15 @@ func TestSharedMembersResumeContextWithTheirOwnCommandsAndLoseAccessOnRemoval(t 
 	require.Equal(t, "alice", channel["custom"].(map[string]any)["support_owner_id"])
 	channel["members"] = []any{map[string]any{"user_id": "alice"}, map[string]any{"user_id": "agent"}}
 	db.mu.Unlock()
-	require.ErrorIs(t, bob.CheckCaller(t.Context(), "bob"), ErrCommandNotFound)
-	_, err = restarted.HistoryForCaller(t.Context(), "customer", "agent", cid, "", "bob")
+	require.ErrorIs(t, bob.CheckCaller(ctx, "bob"), ErrCommandNotFound)
+	_, err = restarted.HistoryForCaller(ctx, "customer", "agent", cid, "", "bob")
 	require.Error(t, err)
-	_, err = restarted.CommandForCaller(t.Context(), "customer", "agent", cid, "bob", "bob-command")
+	_, err = restarted.CommandForCaller(ctx, "customer", "agent", cid, "bob", "bob-command")
 	require.ErrorIs(t, err, ErrCommandNotFound)
 	bob.Release()
-	_, _, _, err = restarted.OpenForCaller(t.Context(), "customer", "agent", cid, "bob")
+	_, _, _, err = restarted.OpenForCaller(ctx, "customer", "agent", cid, "bob")
 	require.Error(t, err)
-	_, _, _, err = restarted.OpenForCaller(t.Context(), "other-customer", "agent", cid, "alice")
+	_, _, _, err = restarted.OpenForCaller(ctx, "other-customer", "agent", cid, "alice")
 	require.Error(t, err)
 }
 
@@ -817,14 +819,14 @@ func TestMalformedSharedMetadataDoesNotRelaxOwnership(t *testing.T) {
 		err := ownedBy(map[string]any{
 			"support_customer_id": "customer", "support_agent_id": "agent",
 			"support_owner_id": "alice", "support_access": mode,
-		}, "customer", "agent", "bob")
+		}, "customer", "agent", "bob", auth.KindAuthenticated)
 		require.Error(t, err)
 	}
 	for _, owner := range []any{nil, "", true} {
 		err := ownedBy(map[string]any{
 			"support_customer_id": "customer", "support_agent_id": "agent",
 			"support_owner_id": owner, "support_access": "members",
-		}, "customer", "agent", "bob")
+		}, "customer", "agent", "bob", auth.KindAuthenticated)
 		require.Error(t, err)
 	}
 }

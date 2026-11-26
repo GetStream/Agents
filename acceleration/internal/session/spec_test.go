@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/suite"
 
 	"github.com/GetStream/Vision-Agents/acceleration/internal/agent"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/audiofloor"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/auth"
 	persistent "github.com/GetStream/Vision-Agents/acceleration/internal/conversation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/routing"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox"
@@ -428,18 +430,58 @@ func (s *SpecSuite) TestHistoryAndAConversationThatKeepsItsOwnAreRefusedTogether
 	s.ErrorContains(spec.Normalize(), "conversation_id", "even though incognito drops the id")
 }
 
-func (s *SpecSuite) TestAProjectIsAlsoACostLabel() {
+func (s *SpecSuite) TestABackendsProjectIsAlsoACostLabel() {
 	spec := s.spec(nil)
-	spec.Project = "Health"
+	spec.NameProject(new("Health"), auth.KindServer)
 
 	s.Require().NoError(spec.Normalize())
 
 	s.Equal("Health", spec.Tags["project"], "billing should not need the caller to say it twice")
 }
 
+func (s *SpecSuite) TestADevicesProjectIsNoCostLabel() {
+	for _, kind := range []auth.Kind{auth.KindAuthenticated, auth.KindGuest, auth.KindAnonymous} {
+		spec := s.spec(nil)
+		spec.NameProject(new("Health"), kind)
+
+		s.Require().NoError(spec.Normalize())
+
+		s.Equal("Health", spec.Project)
+		s.NotContains(spec.Tags, "project", kind)
+	}
+}
+
+func (s *SpecSuite) TestAProjectIsAsShortAsATag() {
+	long := strings.Repeat("h", 300)
+	device, backend, tagged, reopened := s.spec(nil), s.spec(nil), s.spec(nil), s.spec(nil)
+	device.NameProject(&long, auth.KindAuthenticated)
+	backend.NameProject(&long, auth.KindServer)
+	tagged.NameProject(&long, auth.KindAuthenticated)
+	tagged.Tags = routing.Tags{"project": "spelled-out"}
+	reopened.Project, reopened.Reopened = long, time.Now()
+	reopened.CallID, reopened.Text, reopened.PersistConversation, reopened.ConversationID = "", true, true, "agent:c-1"
+
+	s.ErrorIs(device.Normalize(), routing.ErrRequest)
+	s.ErrorIs(backend.Normalize(), routing.ErrRequest)
+	s.ErrorIs(tagged.Normalize(), routing.ErrRequest)
+	s.NoError(reopened.Normalize(), "its row is there already")
+}
+
+func (s *SpecSuite) TestAProjectNamedOverAMergedTagLeavesTheOthers() {
+	spec := s.spec(nil)
+	spec.Tags = routing.Tags{"environment": "dev"}
+	spec.NameProject(new("Health"), auth.KindServer)
+	s.Require().NoError(spec.Normalize())
+
+	spec.NameProject(new("Billing"), auth.KindServer)
+	s.Require().NoError(spec.Normalize())
+
+	s.Equal(routing.Tags{"environment": "dev", "project": "Billing"}, spec.Tags)
+}
+
 func (s *SpecSuite) TestAnExplicitProjectTagWins() {
 	spec := s.spec(nil)
-	spec.Project = "Health"
+	spec.NameProject(new("Health"), auth.KindServer)
 	spec.Tags = routing.Tags{"project": "spelled-out"}
 
 	s.Require().NoError(spec.Normalize())

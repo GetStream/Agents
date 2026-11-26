@@ -479,16 +479,11 @@ func (s *Server) answerPhoneCall(w http.ResponseWriter, r *http.Request) {
 
 	plan, err := s.phone.Answer(r.Context(), token)
 	// Answer notes the call's app once its token resolves.
-	logger := s.logger.With("customer", activity.NotedCustomer(r.Context()))
+	logger := s.logger.With("app_id", activity.NotedCustomer(r.Context()))
 	if err != nil {
 		// The vendor is about to bridge a live call to nowhere, so this is worth a log
 		// line even though there is nobody to return the detail to.
 		logger.Error("could not answer a placed call", "error", err)
-		// The vendor fetches again on a 5xx, by when the shard holding the bridge may answer.
-		if errors.Is(err, store.ErrShardUnanswered) {
-			writeError(w, unavailable("could not read the call's plan, try again"))
-			return
-		}
 		writeError(w, notFound("that call is not waiting to be answered"))
 		return
 	}
@@ -670,6 +665,10 @@ var (
 	errPhoneNoStream      = notConfigured("phone lines are not available: this deployment has no Stream app to make them in")
 	errPhoneNotConfigured = notConfigured("This deployment is not set up for this phone operation. Try another vendor, or contact support.")
 	errCallHookUnpointed  = unavailable("this app's Stream call hook could not be pointed at this router, so its calls would not reach an agent: try again")
+	// errNumberHeldElsewhere names neither the app nor the trunk that holds the number: which
+	// app holds one is not the caller's to learn.
+	errNumberHeldElsewhere = APIError{Type: ErrorTypeConflict, Code: codePhoneNumberHeldElsewhere,
+		Message: "Another app holds this number, so it cannot be added to or called from your SIP trunk."}
 	errNumberNotAttached  = conflict("The number is not attached: attach the number first.")
 	errNumberOnItsOwnCall = conflict("Every caller of this number joins one call: attach the number again so each caller gets a session of their own.")
 	errTelephonySuspended = APIError{Type: ErrorTypePermission, Code: codeTelephonySuspended,
@@ -733,6 +732,9 @@ func phoneFailure(logger *slog.Logger, err error) error {
 	if errors.Is(err, phone.ErrSIPTrunksDisabled) {
 		return notConfigured(phone.ErrSIPTrunksDisabled.Error())
 	}
+	if errors.Is(err, store.ErrNumberHeldElsewhere) {
+		return errNumberHeldElsewhere
+	}
 	if errors.Is(err, phone.ErrNotConfigured) {
 		// The settings it lacks name the deployment's environment: the operator's to read.
 		logger.Warn("a phone operation lacks a setting of this deployment", "error", store.SafeLogText(err.Error()))
@@ -783,6 +785,8 @@ func sipTrunkFailure(err error) error {
 		return notConfigured(err.Error())
 	case errors.Is(err, store.ErrNoSIPTrunk):
 		return notFound(err.Error())
+	case errors.Is(err, store.ErrNumberHeldElsewhere):
+		return errNumberHeldElsewhere
 	case errors.Is(err, store.ErrSIPTrunkInUse), errors.Is(err, store.ErrNumberHeld):
 		return conflict(err.Error())
 	case errors.Is(err, phone.ErrInvalidSIPTrunk):
@@ -1214,7 +1218,7 @@ func (s *Server) registerPhone(api huma.API) {
 		Responses: map[string]*huma.Response{
 			"202": {Description: "The vendor is dialling the human"},
 		},
-		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound},
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict},
 	}, s.transferPhoneCall)
 	huma.Register(api, huma.Operation{
 		OperationID: "pressPhoneDigits",
@@ -1285,7 +1289,9 @@ func (s *Server) registerPhone(api huma.API) {
 		Summary:     "Add a number that is on this SIP trunk",
 		Description: "Nothing is bought. The number is recorded with vendor sip_trunk, and calls from it " +
 			"are dialled through this trunk. Whether the number is really the customer's is for the " +
-			"trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}.",
+			"trunk's carrier to decide when it is called from. Release it with DELETE /v1/phone/numbers/{e164}. " +
+			"A number another app holds, bought or on a trunk of its own, in the Stream app this app's lines are made in " +
+			"is refused with 409 `phone_number_held_elsewhere`, as is a call or transfer from it once another app there has bought it.",
 		DefaultStatus: http.StatusCreated,
 		Responses:     map[string]*huma.Response{"201": {Description: "The number is on the trunk"}},
 		Errors:        sipTrunkErrors,

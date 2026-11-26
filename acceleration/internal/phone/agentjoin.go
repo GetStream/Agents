@@ -45,7 +45,7 @@ func (s *Service) awaitAgent(ctx context.Context, leg store.CallLeg) {
 // that joins between the read and the end is ended with the call. One read cannot prevent
 // this, and the time between the two is one Stream request.
 func (s *Service) checkAgent(ctx context.Context, leg store.CallLeg) {
-	attributes := []any{"session_id", leg.CallID, "customer", leg.CustomerID, "from", leg.LocalNumber,
+	attributes := []any{"session_id", leg.CallID, "app_id", leg.CustomerID, "from", leg.LocalNumber,
 		"to", leg.RemoteNumber, "vendor", leg.Vendor, "vendor_call_id", leg.VendorCallID, "waited", s.agentJoinTimeout}
 	reading, cancel := context.WithTimeout(ctx, agentCheckTimeout)
 	defer cancel()

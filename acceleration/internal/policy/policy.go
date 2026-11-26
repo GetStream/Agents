@@ -317,6 +317,20 @@ func (e *Enforcer) Close() {
 // it has no decision for has its policies read now, through the store's cache, and its money left to
 // the loops, which admit until they land.
 func (e *Enforcer) Admit(ctx context.Context, owner routing.Owner) (routing.Admission, error) {
+	return e.admit(ctx, owner, false)
+}
+
+// AdmitRunning is Admit for work already running, such as a sandbox, which a refusal stops: its
+// Spend counts what was spent, not what is set aside, so no reservation refuses it, its own
+// lease included. A suspended organization, a balance spent as a warning reads it, and a spend
+// hard limit or a customer's limit whose ledger is reached still do, and what could not be
+// checked is answered as Admit answers it.
+func (e *Enforcer) AdmitRunning(ctx context.Context, owner routing.Owner) (routing.Admission, error) {
+	return e.admit(ctx, owner, true)
+}
+
+// admit is Admit, or with spent AdmitRunning.
+func (e *Enforcer) admit(ctx context.Context, owner routing.Owner, spent bool) (routing.Admission, error) {
 	customerID := owner.CustomerID
 	if e == nil || customerID == "" {
 		return routing.Admission{}, nil
@@ -324,7 +338,7 @@ func (e *Enforcer) Admit(ctx context.Context, owner routing.Owner) (routing.Admi
 	ctx, span := tracer.Start(ctx, "policy.admit")
 	defer span.End()
 	decided := e.decide(ctx, customerID)
-	refusal, spend, grants := e.spendable(ctx, owner, decided)
+	refusal, spend, grants := e.spendable(ctx, owner, decided, spent)
 	limits, tier := e.money.inForce(decided.organization)
 	return routing.Admission{
 		DataPolicy: decided.floor, Models: decided.models, Tags: decided.tags, OrganizationID: decided.organization,
@@ -384,7 +398,7 @@ func (e *Enforcer) Quota(ctx context.Context, customerID, userID string, default
 	if err != nil {
 		if e.userQuotaLogs.Due(customerID, time.Minute) {
 			e.logger.Error("could not read a user's own quota, holding them to their app's",
-				"customer", customerID, "error", err)
+				"app_id", customerID, "error", err)
 		}
 		held.Unread = true
 		return held
@@ -716,7 +730,7 @@ func (e *Enforcer) decide(ctx context.Context, customerID string) decision {
 		// afford; its money is read apart. Nothing is kept, so the next request reads again,
 		// and a read in the background keeps the decision when it lands.
 		e.logger.Error("could not read a customer's policies, allowing the request",
-			"customer", customerID, "error", err)
+			"app_id", customerID, "error", err)
 		decided.unread = err
 		e.warm(ctx, customerID)
 		return decided
@@ -755,7 +769,7 @@ func (e *Enforcer) refresh(ctx context.Context, customerID string) {
 		current.read, current.refreshing = now, false
 		e.decisions[customerID] = current
 		e.mu.Unlock()
-		e.money.failedRead("could not read a customer's policies again, answering with the last ones read", err, "customer", customerID)
+		e.money.failedRead("could not read a customer's policies again, answering with the last ones read", err, "app_id", customerID)
 		return
 	}
 	decided.read, decided.used = now, current.used

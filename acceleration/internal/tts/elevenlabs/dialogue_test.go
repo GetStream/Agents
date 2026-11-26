@@ -43,7 +43,7 @@ func (s *DialogueSuite) connect(fake *fakeElevenLabs, options Options) (*Dialogu
 	}
 	provider := s.newDialogue(options)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(keypool.WithCaller(context.Background(), "tts", "eleven"), 5*time.Second)
 	s.T().Cleanup(cancel)
 	s.Require().NoError(provider.Start(ctx))
 
@@ -392,7 +392,7 @@ func (s *DialogueSuite) TestAKeyWithNoQuotaLeftIsRestedForTheSessionsAfter() {
 	defer fake.close()
 	provider, conn := s.connect(fake, Options{APIKey: spent + "," + spare, VoiceID: "v1"})
 	defer provider.Close()
-	before := refusals(s.T(), "quota_exceeded")
+	before := callerRefusals(s.T(), "quota_exceeded")
 
 	payload, err := json.Marshal(map[string]any{
 		"message": "This request exceeds your API key quota.", "error": "quota_exceeded", "code": 1008,
@@ -407,7 +407,7 @@ func (s *DialogueSuite) TestAKeyWithNoQuotaLeftIsRestedForTheSessionsAfter() {
 	pool := keypool.FromEnv(spent + "," + spare)
 	s.Equal([]string{spare, spare}, []string{pool.Next(), pool.Next()},
 		"the sessions after are opened on the key that has quota")
-	s.Equal(before+1, refusals(s.T(), "quota_exceeded"), "the refusal is counted")
+	s.Equal(before+1, callerRefusals(s.T(), "quota_exceeded"), "the refusal is counted")
 }
 
 // refusedBy is how many invalid keys were counted while the server sent these frames on a
@@ -417,7 +417,7 @@ func (s *DialogueSuite) refusedBy(frames ...string) float64 {
 	defer fake.close()
 	provider, conn := s.connect(fake, Options{APIKey: "sk_" + rand.Text(), VoiceID: "v1"})
 	defer provider.Close()
-	before := refusals(s.T(), "invalid_key")
+	before := callerRefusals(s.T(), "invalid_key")
 
 	for _, frame := range frames {
 		s.Require().NoError(conn.WriteMessage(websocket.TextMessage, []byte(frame)))
@@ -429,7 +429,7 @@ func (s *DialogueSuite) refusedBy(frames ...string) float64 {
 		}
 		return failures == len(frames)
 	})
-	return refusals(s.T(), "invalid_key") - before
+	return callerRefusals(s.T(), "invalid_key") - before
 }
 
 func (s *DialogueSuite) TestAnInvalidKeyFrameIsCountedOncePerConnection() {

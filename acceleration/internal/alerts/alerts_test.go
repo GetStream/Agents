@@ -35,7 +35,16 @@ func TestAlertsSuite(t *testing.T) {
 
 func (s *AlertsSuite) SetupTest() {
 	s.events = nil
+	// The Sentry client takes the environment from SENTRY_ENVIRONMENT when its options name none.
+	s.T().Setenv("SENTRY_ENVIRONMENT", "")
+	s.hub = s.hubIn("")
+	s.logs = &bytes.Buffer{}
+}
+
+// hubIn is a hub whose client reports events as environment, and keeps them as s.hub's do.
+func (s *AlertsSuite) hubIn(environment string) *sentry.Hub {
 	client, err := sentry.NewClient(sentry.ClientOptions{
+		Environment: environment,
 		BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 			s.mu.Lock()
 			defer s.mu.Unlock()
@@ -44,8 +53,7 @@ func (s *AlertsSuite) SetupTest() {
 		},
 	})
 	s.Require().NoError(err)
-	s.hub = sentry.NewHub(client, sentry.NewScope())
-	s.logs = &bytes.Buffer{}
+	return sentry.NewHub(client, sentry.NewScope())
 }
 
 func (s *AlertsSuite) sent() []*sentry.Event {
@@ -78,7 +86,7 @@ func (s *AlertsSuite) TestAConditionIsSentAtMostOncePerInterval() {
 	events := s.sent()
 	s.Require().Len(events, 1)
 	s.Equal(sentry.LevelFatal, events[0].Level)
-	s.Equal([]string{"usage_alert:lost"}, events[0].Fingerprint)
+	s.Equal([]string{"usage_alert:development:lost"}, events[0].Fingerprint)
 	s.Equal(map[string]string{"usage_alert": "lost", "source": "usage/test", "shard": "here"}, events[0].Tags)
 	s.Equal(sentry.Context{"rows": 3}, events[0].Contexts["usage_alert"])
 }
@@ -90,6 +98,107 @@ func (s *AlertsSuite) TestAConditionHeldPastTheLimitIsSentAgain() {
 
 	s.Len(s.sent(), 3)
 	s.Equal(sentry.LevelError, s.sent()[0].Level)
+}
+
+func (s *AlertsSuite) TestAConditionWithItsOwnRepeatIsSentAgainOnlyAfterIt() {
+	start := time.Now()
+	now := start
+	loop := New(Options{
+		Hub: s.hub, Logger: slog.New(slog.NewTextHandler(s.logs, nil)), Every: 15 * time.Second, Limit: time.Minute,
+		Now: func() time.Time { return now },
+	}, Condition{Name: "unowned", Level: Warn, Repeat: 24 * time.Hour,
+		Check: func(time.Time) (bool, map[string]any) { return true, nil }})
+
+	s.ticks(loop, &now, start, 0)
+	s.Require().Len(s.sent(), 1, "the first event goes out as soon as the condition holds")
+	s.ticks(loop, &now, start, time.Minute, 2*time.Minute, time.Hour, 24*time.Hour-time.Second)
+	s.Len(s.sent(), 1, "the loop's one-minute limit does not apply to it")
+	s.ticks(loop, &now, start, 24*time.Hour)
+	s.Len(s.sent(), 2)
+}
+
+func (s *AlertsSuite) TestAnItemOfAConditionWithItsOwnRepeatIsSentAgainOnlyAfterIt() {
+	start := time.Now()
+	now := start
+	loop := New(Options{
+		Hub: s.hub, Logger: slog.New(slog.NewTextHandler(s.logs, nil)), Every: 15 * time.Second, Limit: time.Minute,
+		Now: func() time.Time { return now },
+	}, Condition{Name: "unowned", Level: Warn, Repeat: 24 * time.Hour,
+		Items: func(time.Time) map[string]map[string]any { return map[string]map[string]any{"a": nil} }})
+
+	s.ticks(loop, &now, start, 0, time.Minute, 2*time.Minute, 24*time.Hour-time.Second)
+	s.Len(s.sent(), 1)
+	s.ticks(loop, &now, start, 24*time.Hour)
+	s.Len(s.sent(), 2)
+}
+
+func (s *AlertsSuite) TestANewSpellOfAConditionWithItsOwnRepeatIsSentAtOnce() {
+	start := time.Now()
+	now := start
+	holds := func(now time.Time) bool { at := now.Sub(start); return at < 2*time.Hour || at >= 3*time.Hour }
+	loop := New(Options{
+		Hub: s.hub, Logger: slog.New(slog.NewTextHandler(s.logs, nil)), Every: 15 * time.Second, Limit: time.Minute,
+		Now: func() time.Time { return now },
+	}, Condition{Name: "unowned", Level: Warn, Repeat: 24 * time.Hour,
+		Check: func(now time.Time) (bool, map[string]any) { return holds(now), nil }})
+
+	s.ticks(loop, &now, start, 0, time.Hour, 2*time.Hour, 3*time.Hour, 4*time.Hour)
+
+	s.Len(s.sent(), 2, "the condition stopped holding at 2 h, so 3 h starts a new spell")
+}
+
+func (s *AlertsSuite) TestAnItemThatComesBackIsSentAtOnce() {
+	start := time.Now()
+	now := start
+	loop := New(Options{
+		Hub: s.hub, Logger: slog.New(slog.NewTextHandler(s.logs, nil)), Every: 15 * time.Second, Limit: time.Minute,
+		Now: func() time.Time { return now },
+	}, Condition{Name: "unowned", Level: Warn, Repeat: 24 * time.Hour,
+		Items: func(now time.Time) map[string]map[string]any {
+			if at := now.Sub(start); at >= time.Hour && at < 2*time.Hour {
+				return map[string]map[string]any{"b": nil}
+			}
+			return map[string]map[string]any{"a": nil, "b": nil}
+		}})
+
+	s.ticks(loop, &now, start, 0, time.Hour, 2*time.Hour, 3*time.Hour)
+
+	events := s.sent()
+	s.Require().Len(events, 3, "a went away at 1 h and came back at 2 h; b never went away")
+	s.Equal("a", events[2].Tags["item"])
+}
+
+func (s *AlertsSuite) TestAConditionWithoutARepeatKeepsTheLimitAcrossSpells() {
+	start := time.Now()
+	now := start
+	loop := New(Options{
+		Hub: s.hub, Logger: slog.New(slog.NewTextHandler(s.logs, nil)), Every: 15 * time.Second, Limit: time.Minute,
+		Now: func() time.Time { return now },
+	}, Condition{Name: "rejected", Level: Page,
+		Check: func(now time.Time) (bool, map[string]any) { return now.Sub(start) != 15*time.Second, nil }})
+
+	s.ticks(loop, &now, start, 0, 15*time.Second, 30*time.Second)
+
+	s.Len(s.sent(), 1, "a condition with no Repeat is held back for the Limit even after it stopped holding")
+}
+
+func (s *AlertsSuite) TestAnItemOfAConditionWithoutARepeatKeepsTheLimitAcrossSpells() {
+	start := time.Now()
+	now := start
+	loop := New(Options{
+		Hub: s.hub, Logger: slog.New(slog.NewTextHandler(s.logs, nil)), Every: 15 * time.Second, Limit: time.Minute,
+		Now: func() time.Time { return now },
+	}, Condition{Name: "rejected", Level: Page,
+		Items: func(now time.Time) map[string]map[string]any {
+			if now.Sub(start) == 15*time.Second {
+				return map[string]map[string]any{}
+			}
+			return map[string]map[string]any{"a": nil}
+		}})
+
+	s.ticks(loop, &now, start, 0, 15*time.Second, 30*time.Second)
+
+	s.Len(s.sent(), 1, "an item with no Repeat is held back for the Limit even after it went away")
 }
 
 func (s *AlertsSuite) TestWithNoDSNAnAlertIsLogged() {
@@ -282,12 +391,62 @@ func (s *AlertsSuite) TestEachItemOfAConditionIsAnAlertOfItsOwn() {
 
 	events := s.sent()
 	s.Require().Len(events, 2)
-	s.Equal([]string{"usage_missing:llm/a"}, events[0].Fingerprint)
-	s.Equal([]string{"usage_missing:llm/b"}, events[1].Fingerprint)
+	s.Equal([]string{"usage_missing:development:llm/a"}, events[0].Fingerprint)
+	s.Equal([]string{"usage_missing:development:llm/b"}, events[1].Fingerprint)
 	s.Equal("llm/a", events[0].Tags["item"])
 	s.Equal("missing", events[0].Tags["usage_alert"])
 	s.Equal(sentry.LevelError, events[0].Level, "a warning does not page")
 	s.Contains(s.logs.String(), "item=llm/a")
+}
+
+// The fingerprint of an alert, and of each item of one, carries the environment the client
+// reports, so staging and prod are two Sentry issues; the same environment is the same issue.
+func (s *AlertsSuite) TestTheFingerprintCarriesTheEnvironment() {
+	conditions := []Condition{
+		{Name: "lost", Level: Page, Check: func(time.Time) (bool, map[string]any) { return true, nil }},
+		{Name: "missing", Level: Warn, Items: func(time.Time) map[string]map[string]any {
+			return map[string]map[string]any{"a": nil}
+		}},
+	}
+	fingerprints := func(environment string) []string {
+		s.events = nil
+		loop := New(Options{Hub: s.hubIn(environment), Logger: slog.New(slog.NewTextHandler(s.logs, nil)),
+			Every: time.Hour, Limit: time.Hour}, conditions...)
+		s.run(loop, 50*time.Millisecond)
+		var got []string
+		for _, event := range s.sent() {
+			got = append(got, event.Fingerprint...)
+		}
+		return got
+	}
+
+	staging := fingerprints("staging")
+	s.Equal([]string{"usage_alert:staging:lost", "usage_missing:staging:a"}, staging)
+	s.Equal([]string{"usage_alert:prod:lost", "usage_missing:prod:a"}, fingerprints("prod"))
+	s.Equal(staging, fingerprints("staging"), "one environment keeps one issue per alert")
+}
+
+func (s *AlertsSuite) TestAClientWithNoEnvironmentIsDevelopment() {
+	s.Equal("development", environment(s.hub))
+	s.Equal("development", environment(sentry.NewHub(nil, sentry.NewScope())), "a hub with no client")
+	s.Equal("staging", environment(s.hubIn("staging")))
+}
+
+// A job has no loop: Send and SendItem go to the current hub, whose client's environment is
+// the one in the fingerprint.
+func (s *AlertsSuite) TestAJobsAlertCarriesTheEnvironmentToo() {
+	hub := sentry.CurrentHub()
+	previous := hub.Client()
+	hub.BindClient(s.hubIn("staging").Client())
+	s.T().Cleanup(func() { hub.BindClient(previous) })
+
+	Send("missed", Warn, nil)
+	SendItem("missed", "2026-01-02", Warn, nil)
+
+	events := s.sent()
+	s.Require().Len(events, 2)
+	s.Equal([]string{"usage_alert:staging:missed"}, events[0].Fingerprint)
+	s.Equal([]string{"usage_missed:staging:2026-01-02"}, events[1].Fingerprint)
 }
 
 func (s *AlertsSuite) TestAnItemIsSentAtMostOncePerLimitAndThenAgain() {
@@ -316,6 +475,27 @@ func (s *AlertsSuite) TestAnItemConditionCountsOnlyTheSeriesItIsAbout() {
 	s.Equal([]string{"b"}, slices.Collect(maps.Keys(check(time.Now()))))
 }
 
+// Each detail label lists the values of the item's series that rose since it last held, sorted;
+// an empty value is not listed, and a label with none is left out.
+func (s *AlertsSuite) TestAnItemNamesTheDetailOfTheSeriesThatRose() {
+	refused := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_detailed_total"}, []string{"item", "product", "model"})
+	check := IncreasedPer(refused, time.Hour, []string{"item"}, nil, "product", "model")
+	start := time.Now()
+	refused.WithLabelValues("a", "tts", "voice-2").Inc()
+	refused.WithLabelValues("a", "llm", "").Inc()
+	refused.WithLabelValues("a", "tts", "voice-1").Inc()
+	refused.WithLabelValues("b", "", "").Inc()
+
+	s.Equal(map[string]map[string]any{
+		"a": {"value": 3.0, "increase": 3.0, "product": []string{"llm", "tts"}, "model": []string{"voice-1", "voice-2"}},
+		"b": {"value": 1.0, "increase": 1.0},
+	}, check(start))
+
+	refused.WithLabelValues("a", "tts", "voice-2").Inc()
+	s.Equal(map[string]map[string]any{"a": {"value": 4.0, "increase": 1.0, "product": []string{"tts"}, "model": []string{"voice-2"}}},
+		check(start.Add(2*time.Hour)), "only the series that rose since a last held")
+}
+
 func (s *AlertsSuite) TestAnItemIsDescribedInTheMessageAndNowhereElse() {
 	missing := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "test_described_total"}, []string{"model"})
 	missing.WithLabelValues("a").Inc()
@@ -330,7 +510,7 @@ func (s *AlertsSuite) TestAnItemIsDescribedInTheMessageAndNowhereElse() {
 	s.Require().Len(events, 2)
 	s.Equal("usage alert: missing a: gone for good", events[0].Message)
 	s.Equal("usage alert: missing b", events[1].Message, "an item with no description keeps its message")
-	s.Equal([]string{"usage_missing:a"}, events[0].Fingerprint)
+	s.Equal([]string{"usage_missing:development:a"}, events[0].Fingerprint)
 	s.Equal(map[string]string{"usage_alert": "missing", "source": "usage/test", "shard": "here", "item": "a"}, events[0].Tags)
 	s.Equal(map[string]string{"usage_alert": "missing", "source": "usage/test", "shard": "here", "item": "b"}, events[1].Tags)
 }
@@ -345,7 +525,7 @@ func (s *AlertsSuite) TestASummaryFollowsTheNameInTheMessageAndNowhereElse() {
 	s.Require().Len(events, 1)
 	s.Equal("usage alert: lost: rows were dropped", events[0].Message)
 	s.Equal(sentry.LevelError, events[0].Level, "a summary keeps the level")
-	s.Equal([]string{"usage_alert:lost"}, events[0].Fingerprint, "the alert keeps its Sentry issue")
+	s.Equal([]string{"usage_alert:development:lost"}, events[0].Fingerprint, "the alert keeps its Sentry issue")
 	s.Equal(map[string]string{"usage_alert": "lost", "source": "usage/test", "shard": "here"}, events[0].Tags)
 }
 
@@ -395,11 +575,11 @@ func (s *AlertsSuite) TestTheEventsSentAndTheirLimitAreAsTheyWere() {
 		sent = append(sent, event.Fingerprint...)
 	}
 	s.Equal([]string{
-		"usage_alert:lost", "usage_missing:a", // 0 s
-		"usage_missing:b",                     // 15 s
-		"usage_alert:lost", "usage_missing:a", // 60 s
-		"usage_missing:b",                     // 75 s
-		"usage_alert:lost", "usage_missing:a", // 120 s
+		"usage_alert:development:lost", "usage_missing:development:a", // 0 s
+		"usage_missing:development:b",                                 // 15 s
+		"usage_alert:development:lost", "usage_missing:development:a", // 60 s
+		"usage_missing:development:b",                                 // 75 s
+		"usage_alert:development:lost", "usage_missing:development:a", // 120 s
 	}, sent)
 }
 

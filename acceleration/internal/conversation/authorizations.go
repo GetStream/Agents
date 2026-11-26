@@ -94,6 +94,15 @@ func (c *Conversation) FollowUpReply(id string) (state, text string, known bool)
 	return record.State, record.Reply, known
 }
 
+// FollowUpFailure is the error the reply to the follow-up under id failed on, as the
+// agent.Error that ended it carried. It is nil for a reply that has not failed, and for one that
+// failed before the conversation was opened again (commandsIn).
+func (c *Conversation) FollowUpFailure(id string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.data.Commands[id].Failure
+}
+
 // FollowUpFinished is the reply to the follow-up under id as OnFinishedReply tells it, with
 // its files, for a follow-up delivered again to send rather than run twice. One the
 // conversation does not hold has no message id, text or files.

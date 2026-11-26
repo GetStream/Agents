@@ -943,6 +943,12 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("id")]
         public string Id { get; set; } = default!;
 
+        /// <summary>
+        /// Who the agent is in Stream Chat in a session that names nobody. Absent when the config sets none.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("identity")]
+        public AgentIdentity? Identity { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("image")]
         public string? Image { get; set; } = default!;
 
@@ -993,6 +999,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("role")]
         public string? Role { get; set; } = default!;
+
+        /// <summary>
+        /// Which regions the agent's work may be placed in, over the app's own routing_policy. Absent when the agent follows the app's.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("sandbox")]
         public string? Sandbox { get; set; } = default!;
@@ -1130,6 +1142,12 @@ namespace GetStream.VisionAgents.Models
         public string? Harness { get; set; } = default!;
 
         /// <summary>
+        /// Replaces the identity whole. An empty object removes it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("identity")]
+        public AgentIdentity? Identity { get; set; } = default!;
+
+        /// <summary>
         /// An empty string removes it, and the agent stops being offered generate_image.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("image")]
@@ -1197,6 +1215,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("role")]
         public string? Role { get; set; } = default!;
+
+        /// <summary>
+        /// Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("sandbox")]
         public string? Sandbox { get; set; } = default!;
@@ -1328,6 +1352,12 @@ namespace GetStream.VisionAgents.Models
         public string? Harness { get; set; } = default!;
 
         /// <summary>
+        /// Who the agent is in Stream Chat in a session that names nobody: the agent id a new conversation is kept under, and the user the agent joins a call and writes as, with that user's name. A session that names this config uses each one set, from an end user's device or the app's backend alike, unless its request names its own agent_id, user_id or user_name: one at its default counts as naming none. An incognito session keeps no conversation, so it gets an agent id of its own. A session carrying on a conversation_id keeps the agent id that conversation was kept under, and a fork gets an agent id of its own; a session resumed or forked takes user_id and user_name. Each visitor's conversation stays theirs when every session shares one agent id. Left out or null on an update, the stored identity stays; an empty object removes it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("identity")]
+        public AgentIdentity? Identity { get; set; } = default!;
+
+        /// <summary>
         /// What the agent draws pictures with, as a provider/model or a capability shortcut such as image-fast. Naming one offers a text agent with a Chat channel the generate_image tool, whose pictures are drawn after the turn and posted into the conversation when ready, billed like POST /v1/image/generations. Empty offers no such tool: unlike search there is no default.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("image")]
@@ -1410,6 +1440,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("role")]
         public string? Role { get; set; } = default!;
+
+        /// <summary>
+        /// Which regions the agent's work may be placed in, over the app's own routing_policy. Empty follows the app's. Left out, a new agent follows the app's and an update keeps the stored policy.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("sandbox")]
         public string? Sandbox { get; set; } = default!;
@@ -1647,6 +1683,33 @@ namespace GetStream.VisionAgents.Models
             get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
             set { _additionalProperties = value; }
         }
+
+    }
+
+    /// <summary>
+    /// Who an agent config's agent is in Stream Chat, set by the app's backend. An unknown field is refused rather than ignored.
+    /// </summary>
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class AgentIdentity
+    {
+
+        /// <summary>
+        /// The agent id a new conversation is kept under, as a session's agent_id. A text conversation's replies are written as the Chat user of this id, which the router makes with user_name when the app has none. It may not start with !.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("agent_id")]
+        public string? AgentId { get; set; } = default!;
+
+        /// <summary>
+        /// The Stream user the agent joins a call and writes Chat messages as, as a session's user_id. Up to 128 letters, digits, _, . and -, not starting with !.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("user_id")]
+        public string? UserId { get; set; } = default!;
+
+        /// <summary>
+        /// That user's display name, as a session's user_name, and the name the router gives the agent_id's Chat user when it makes it.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("user_name")]
+        public string? UserName { get; set; } = default!;
 
     }
 
@@ -2132,6 +2195,12 @@ namespace GetStream.VisionAgents.Models
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class AppSettings
     {
+
+        /// <summary>
+        /// Which regions the app's work may be placed in, unless its agent config sets its own routing_policy. closest when the app never set one.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string RoutingPolicy { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("stream")]
         public StreamSettings Stream { get; set; } = new StreamSettings();
@@ -2993,6 +3062,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("mode")]
         public string? Mode { get; set; } = default!;
+
+        /// <summary>
+        /// The shard the call is kept in. Set on a listed call of a deployment with shards.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("region")]
+        public string? Region { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("review_notes")]
         public string? ReviewNotes { get; set; } = default!;
@@ -6781,7 +6856,7 @@ namespace GetStream.VisionAgents.Models
         public SessionPhone? Phone { get; set; } = default!;
 
         /// <summary>
-        /// What the conversation belongs to. Also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice. A tag spelled out in tags wins.
+        /// What the conversation belongs to. Sent server-side it is also recorded as the "project" cost tag, so spend breaks down by project without the caller labelling it twice; a tag spelled out in tags, or the agent config's, wins. A device's groups the session and is no cost tag.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("project_id")]
         public string? ProjectId { get; set; } = default!;
@@ -7031,6 +7106,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("category")]
         public string? Category { get; set; } = default!;
+
+        /// <summary>
+        /// Refuse the create, with unsynced_changes (409), when the newest revision of the id carries no sync_hash, because no sync wrote it, and says something else than this definition: a sync would write over an edit made outside it, in the dashboard, say. The same definition is not refused. Omitted, the create stores the next revision, as a sync that means to write over the edit wants.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("check_changes")]
+        public bool? CheckChanges { get; set; } = default!;
 
         [System.Text.Json.Serialization.JsonPropertyName("client")]
         public ConnectorClient? Client { get; set; } = default!;
@@ -7336,6 +7417,18 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("rows")]
         public long Rows { get; set; } = default!;
+
+        /// <summary>
+        /// The rows left out rather than written, by table and primary key, as connector_definitions:{"id":"custom_crm","revision":1}. Such a row is a custom connector definition with oauth2_client_credentials, which no connection can use: the scheme needs a token endpoint a custom connector cannot set.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("skipped")]
+        public System.Collections.Generic.List<string>? Skipped { get; set; } = default!;
+
+        /// <summary>
+        /// How many more rows were left out than skipped names, which holds the first 100.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("skipped_more")]
+        public long? SkippedMore { get; set; } = default!;
 
         /// <summary>
         /// How many of them went into each table.
@@ -7972,6 +8065,9 @@ namespace GetStream.VisionAgents.Models
         [System.Text.Json.Serialization.JsonPropertyName("model_overwrites")]
         public ModelOverwrites? ModelOverwrites { get; set; } = default!;
 
+        /// <summary>
+        /// What the fork belongs to. Omitted, the parent's is kept. Sent server-side it is also the "project" cost tag, as on createSession; a device's groups the fork, whose cost tag stays the project a backend named for its parent. A tag spelled out in a running parent's tags, or the agent config's, wins.
+        /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("project_id")]
         public string? ProjectId { get; set; } = default!;
 
@@ -8533,7 +8629,7 @@ namespace GetStream.VisionAgents.Models
         public System.DateTimeOffset CreatedAt { get; set; } = default!;
 
         /// <summary>
-        /// Why the uploaded file could not be read, or why the passages of posted text could not all be written, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
+        /// Why the uploaded file could not be read, why the passages of posted text could not all be written, or that the document's removal did not finish, written for whoever sent it. Set while a read that failed is tried again, and once it has failed for good.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("error")]
         public string? Error { get; set; } = default!;
@@ -8551,7 +8647,7 @@ namespace GetStream.VisionAgents.Models
         public int Pages { get; set; } = default!;
 
         /// <summary>
-        /// How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote.
+        /// How many passages it was last cut into. A file uploaded again keeps its old passages, which are still looked up, until the new file has been read. A document that is pending or failed can also count the passages of the version before, so that deleting it removes every passage either version wrote. An indexed one whose file was still being read when newer text or a newer file replaced it can count more than it was cut into, for the same reason, until it is written again.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("passages")]
         public int Passages { get; set; } = default!;
@@ -10544,7 +10640,7 @@ namespace GetStream.VisionAgents.Models
         public ActivitySessions Sessions { get; set; } = new ActivitySessions();
 
         /// <summary>
-        /// The names of the shards whose requests the meters sum, this one's first. A deployment that sets no postgres.shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
+        /// The names of the shards whose requests the meters sum, this one's first. A deployment that sets no shards lists only its own shard, named by a digest, and its meters cover that shard alone. Areas are read from the database every shard shares and cover all of them.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("shards")]
         public System.Collections.Generic.List<string>? Shards { get; set; } = default!;
@@ -12188,7 +12284,7 @@ namespace GetStream.VisionAgents.Models
     }
 
     /// <summary>
-    /// What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user &lt;id&gt;, every user of app &lt;id&gt;, every user of organization &lt;id&gt;), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
+    /// What one end user may spend in a UTC day. Each number is the first set of the user's own (/v1/policies/users/{user_id}), the app's, the organization's and the router's default. A quota set here counts everything recorded with the user: what their devices ask for and what the app's backend asks for in their name. (An app's quota counted devices only before; the router's default still does.) A quota set here is counted per user only, never by the address a device calls from, which many users can share; the router's default counts a device by its address as well, an IPv6 address by its /64. A turn is counted on the day of the user who sent it. A request over the limit is a 429 rate_limited with Retry-After, whose message names the quota (user &lt;id&gt;, every user of app &lt;id&gt;, every user of organization &lt;id&gt;), and a counted request carries X-Quota-Limit, X-Quota-Remaining and X-Quota-Reset.
     /// </summary>
     [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
     public partial class Quota
@@ -12922,6 +13018,12 @@ namespace GetStream.VisionAgents.Models
     public partial class RouterConfigRequest
     {
 
+        /// <summary>
+        /// Refuse a replace, with unsynced_changes (409), when the config carries no sync_hash, because no sync wrote it, and says something else than this body: a sync would write over an edit made outside it, in the dashboard, say. The same content is not refused. A create has nothing stored to write over. Omitted, the replace writes over whatever is there, as a sync that means to write over the edit wants.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("check_changes")]
+        public bool? CheckChanges { get; set; } = default!;
+
         [System.Text.Json.Serialization.JsonPropertyName("llm")]
         public LlmOptions? Llm { get; set; } = default!;
 
@@ -13316,7 +13418,7 @@ namespace GetStream.VisionAgents.Models
         public string DeliveredTo { get; set; } = default!;
 
         /// <summary>
-        /// Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
+        /// Why it failed, as a short code, when it did: delivery_failed, timed_out, schedule_unreadable, user_on_call, channel_unreachable, no_reply, reply_failed, no_phone_number, no_agent_number, not_answered, already_called (a call was placed for the occurrence on an earlier attempt, so the user is not rung again; that call may have carried the task out, so the run does not count toward the five failures in a row), outside_window (a WhatsApp thread task whose person last wrote over 24 hours ago, with no template to send), thread_gone (a thread task's thread no longer exists or is not its user's), connection_removed (a thread task's line was removed), tier_limit_reached (the organization's tier limits refuse the call or the text: tried again for a limit of the day or of calls at once, not for a country), not_in_team (in an app that keeps each team's agents to its own users, the user who made the task is no longer in its agent's team, so the agent is not run; not tried again), or, refused for money, account_suspended, insufficient_credits, system_limit_reached, spend_limit_reached or user_limit_reached, none of which is tried again, or spend_check_unavailable (the router could not check what the organization has spent, so the run is tried again); on a missed run, task_paused (a run's time came while its task was paused). The full error is in the router's logs. Null otherwise.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("error")]
         public string? Error { get; set; } = default!;
@@ -13753,6 +13855,12 @@ namespace GetStream.VisionAgents.Models
 
         [System.Text.Json.Serialization.JsonPropertyName("project_id")]
         public string? ProjectId { get; set; } = default!;
+
+        /// <summary>
+        /// The shard the session is kept in, which answers for its logs. Set on a listed session of a deployment with shards.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("region")]
+        public string? Region { get; set; } = default!;
 
         /// <summary>
         /// Why the review scored the conversation as it did. Read by a backend only.
@@ -15060,7 +15168,7 @@ namespace GetStream.VisionAgents.Models
         public string Instructions { get; set; } = default!;
 
         /// <summary>
-        /// How the config names it, which is unique among that config's own skills.
+        /// How the config names it, which is unique among that config's own skills. At most 255 characters, none of them / or \ or a control character, and not starting with . or -, since it names the skill's folder in the sandbox.
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("name")]
         public string Name { get; set; } = default!;
@@ -17474,6 +17582,27 @@ namespace GetStream.VisionAgents.Models
         /// </summary>
         [System.Text.Json.Serialization.JsonPropertyName("withdrawn")]
         public bool? Withdrawn { get; set; } = default!;
+
+        private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
+
+        [System.Text.Json.Serialization.JsonExtensionData]
+        public System.Collections.Generic.IDictionary<string, object> AdditionalProperties
+        {
+            get { return _additionalProperties ?? (_additionalProperties = new System.Collections.Generic.Dictionary<string, object>()); }
+            set { _additionalProperties = value; }
+        }
+
+    }
+
+    [System.CodeDom.Compiler.GeneratedCode("NJsonSchema", "14.7.1.0 (NJsonSchema v11.6.1.0 (Newtonsoft.Json v13.0.0.0))")]
+    public partial class UpdateAppSettings
+    {
+
+        /// <summary>
+        /// Which regions the app's work may be placed in, unless its agent config sets its own. Empty is closest.
+        /// </summary>
+        [System.Text.Json.Serialization.JsonPropertyName("routing_policy")]
+        public string? RoutingPolicy { get; set; } = default!;
 
         private System.Collections.Generic.IDictionary<string, object>? _additionalProperties;
 

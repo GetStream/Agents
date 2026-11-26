@@ -93,6 +93,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/sandbox/daytona/daytonatest"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/searchrouter"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/session"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/shardmap"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/simulation"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/streamapp"
@@ -104,6 +105,7 @@ import (
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/tts/voices"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/ttsrouter"
+	"github.com/GetStream/Vision-Agents/acceleration/internal/twiliosig"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/usage/usagetest"
 	"github.com/GetStream/Vision-Agents/acceleration/prices"
@@ -208,10 +210,15 @@ const suiteManageKey = "suite-manage-key"
 type RouterSuite struct {
 	suite.Suite
 
-	store   *store.Store
-	configs *store.Store
-	live    *live.Client
-	sealer  *auth.Sealer
+	store *store.Store
+	// otherStore is the store of otherNode, on the same databases, named for its shard.
+	otherStore *store.Store
+	// otherShardApart keeps otherStore's shard rows in a database of their own, as a shard in
+	// another region keeps them, for a suite to set before it starts.
+	otherShardApart bool
+	configs         *store.Store
+	live            *live.Client
+	sealer          *auth.Sealer
 	// storeOptions are what the suite's store was opened with, for a node on the same databases.
 	storeOptions store.Options
 	// activity is the activity record every node of the suite counts in.
@@ -299,6 +306,11 @@ type RouterSuite struct {
 	// about shards to set before it starts the harness. Nodes in two shards have a relay
 	// each. Empty is one deployment of one shard.
 	shard, otherShard string
+	// shardRouting is where every node of the suite sends a hook's work, by shard.
+	shardRouting shardmap.Map
+	// shards are the shards every node of the suite knows (Options.Shards), for a suite to set
+	// before it starts the harness.
+	shards []string
 
 	// unauthenticatedClient sends no credentials. The rest hold the app's key:
 	// anonymousClient goes by a name nothing proves, guestClient and client are signed-in
@@ -320,7 +332,10 @@ type RouterSuite struct {
 	knowledge *knowledgeBase
 	// knowledgeBucket is where an uploaded knowledge file waits to be read.
 	knowledgeBucket *blob.Bucket
-	memories        *keptMemories
+	// knowledgeRedis and knowledgeQueue are where uploaded files wait to be read.
+	knowledgeRedis asynq.RedisClientOpt
+	knowledgeQueue string
+	memories       *keptMemories
 	// voice keeps what every stub voice was told to say. Each socket is given a stub voice
 	// and transcriber of its own, so one a test left open cannot read what the next test
 	// sends; newestVoice and newestEars are the last the router started, read through
@@ -428,6 +443,9 @@ type RouterSuite struct {
 	// twilioAuthToken, set by a suite about Twilio's webhooks before it starts the harness, is
 	// the Auth Token Twilio's requests are checked against. Empty leaves it unconfigured.
 	twilioAuthToken string
+	// twilioAccountSID is the Twilio account the router's Twilio numbers are under, for the
+	// same suite to set. Empty is a router with none, which answers no Twilio call.
+	twilioAccountSID string
 	// chatInboundKeys, set by a suite about Stream Chat's delivery endpoint before it starts
 	// the harness, are what its deliveries are checked against, on every node. Nil leaves it
 	// unconfigured.
@@ -603,6 +621,7 @@ func (s *RouterSuite) SetupSuite() {
 	if shardDSN := os.Getenv("ROUTER_POSTGRES_SHARD_DSN"); shardDSN != "" {
 		options.ShardDSN = testDatabase(s.T(), shardDSN)
 	}
+	options.Shard = s.shard
 	s.storeOptions = options
 	pgStore, err := store.OpenShards(options)
 	s.Require().NoError(err)
@@ -610,11 +629,24 @@ func (s *RouterSuite) SetupSuite() {
 	s.Require().NoError(migrate(ctx, pgStore, options.DSN))
 	s.store = pgStore
 	s.failing = &failingQueries{}
-	pgStore.GlobalDB().AddQueryHook(s.failing)
-	if pgStore.Sharded() {
-		pgStore.ShardDB().AddQueryHook(s.failing)
-	}
+	s.failing.hook(pgStore)
 	s.T().Cleanup(func() { s.Require().NoError(pgStore.Close()) })
+	s.otherStore = pgStore
+	if s.otherShard != s.shard {
+		otherOptions := options
+		otherOptions.Shard = s.otherShard
+		if s.otherShardApart {
+			otherOptions.ShardDSN = testenv.Database(options.DSN, "othershard")
+		}
+		s.otherStore, err = store.OpenShards(otherOptions)
+		s.Require().NoError(err)
+		// The other node's reads fail as the suite's own do.
+		s.failing.hook(s.otherStore)
+		s.T().Cleanup(func() { s.Require().NoError(s.otherStore.Close()) })
+		if s.otherShardApart {
+			s.Require().NoError(migrate(ctx, s.otherStore, otherOptions.ShardDSN))
+		}
+	}
 	// Registered before everything that records, so it runs once all of it has closed and
 	// written what it held.
 	s.T().Cleanup(s.assertEveryRowNamesAKey)
@@ -667,6 +699,8 @@ func (s *RouterSuite) SetupSuite() {
 		s.stream = streamapp.NewClients(stored, streamapp.ClientsOptions{})
 	}
 	s.store.SetStreamPins(store.StreamPins{Deployment: s.apps.deployment.App, For: s.stream.Pin, Knowable: s.stream.DeploymentAppKnowable})
+	// As openStore (cmd/router) sets it.
+	s.store.SetConfigRule(ImportRule())
 	s.configs = pgStore
 	s.relayPrefix = uuid.NewString()
 
@@ -783,6 +817,8 @@ func (s *RouterSuite) SetupSuite() {
 		AuthMode:  s.authMode(),
 		// App mode is served only behind a gateway that declares kinds.
 		ProxyDeclaresKind: s.appMode,
+		ShardRouting:      s.shardRouting,
+		Shards:            s.shards,
 		Phone:             s.telephony(logger),
 		Simulations:       s.simulations(sessions, streams, logger),
 		Channels:          s.inbound,
@@ -796,7 +832,7 @@ func (s *RouterSuite) SetupSuite() {
 		KnowledgeLimits:   s.knowledgeLimits,
 		KnowledgeURLs:     s.pages(redisAddr),
 		KnowledgeFiles:    s.knowledgeFiles(redisAddr, knowledgeBase, streams.OCR),
-		Voices:            s.voiceService(),
+		Voices:            s.voiceService(policies),
 		VoiceLibrary:      s.library,
 		Dispatch:          s.dispatch,
 		Policies:          policies,
@@ -812,6 +848,7 @@ func (s *RouterSuite) SetupSuite() {
 		HookSecret:         suiteStreamSecret,
 		TelnyxPublicKey:    s.telnyxPublicKey,
 		TwilioAuthToken:    s.twilioAuthToken,
+		TwilioAccountSID:   s.twilioAccountSID,
 		ChatInboundKeys:    s.chatInboundKeys,
 		TelnyxConnectionID: s.telnyxConnectionID,
 		AudioFloor:         s.audioFloor,
@@ -1048,6 +1085,14 @@ func (f *failingQueries) BeforeQuery(ctx context.Context, event *bun.QueryEvent)
 }
 
 func (*failingQueries) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+// hook makes the queries of each of pgStore's databases fail as f says.
+func (f *failingQueries) hook(pgStore *store.Store) {
+	pgStore.GlobalDB().AddQueryHook(f)
+	if pgStore.Sharded() {
+		pgStore.ShardDB().AddQueryHook(f)
+	}
+}
 
 // channelBridgeOptions are the options channelBridge builds the bridge with, for a test to
 // build another router's bridge.
@@ -1717,6 +1762,8 @@ func (s *RouterSuite) forgetPhoneVendors() {
 			s.Require().NoError(os.Unsetenv(name))
 		}
 	}
+	// The Twilio provider reads it too, to point numbers at the call webhook.
+	s.Require().NoError(os.Unsetenv(twiliosig.AuthTokenEnvVar))
 }
 
 // telephony serves the phone paths against the real vendor registry with no credentials
@@ -1829,10 +1876,12 @@ func (s *RouterSuite) knowledgeFiles(redisAddr string, base *metered.Knowledge, 
 	s.knowledgeBucket = bucket
 
 	n := redisDB.Add(1)
+	s.knowledgeRedis = asynq.RedisClientOpt{Addr: redisAddr, DB: int(n)%15 + 1}
+	s.knowledgeQueue = fmt.Sprintf("knowledge-files-%d", n)
 	service, err := files.New(files.Options{
 		Store:         s.store,
-		Redis:         asynq.RedisClientOpt{Addr: redisAddr, DB: int(n)%15 + 1},
-		Queue:         fmt.Sprintf("knowledge-files-%d", n),
+		Redis:         s.knowledgeRedis,
+		Queue:         s.knowledgeQueue,
 		Bucket:        bucket,
 		Extractor:     extract.New(extract.Options{}),
 		Knowledge:     base,
@@ -1848,7 +1897,7 @@ func (s *RouterSuite) knowledgeFiles(redisAddr string, base *metered.Knowledge, 
 
 // voiceService keeps the voices a customer brought with them in a directory of its own,
 // and clones them at a provider answering in process.
-func (s *RouterSuite) voiceService() *voices.Service {
+func (s *RouterSuite) voiceService(gate routing.Gate) *voices.Service {
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/v1/text-to-speech/") {
 			_, _ = w.Write([]byte("spoken"))
@@ -1867,7 +1916,8 @@ func (s *RouterSuite) voiceService() *voices.Service {
 	cloners := voices.NewRegistry()
 	cloners.Register("elevenlabs", cloner)
 
-	service, err := voices.NewService(voices.Options{Store: s.store, Bucket: bucket, Cloners: cloners, Recorder: s.metering})
+	service, err := voices.NewService(voices.Options{Store: s.store, Bucket: bucket, Cloners: cloners, Recorder: s.metering, Gate: gate,
+		Models: s.ttsConfig.Providers})
 	s.Require().NoError(err)
 	return service
 }
@@ -1915,11 +1965,11 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 		Memory:        metered.NewMemory(&keptMemories{}, s.metering),
 		Conversations: s.conversations,
 		Stream:        s.stream,
-		Store:         s.store,
+		Store:         s.otherStore,
 		Live:          s.live,
 		Directory:     directory,
 		Logger:        logger,
-		Writer:        s.routerWriter(s.store, s.live, nil, logger),
+		Writer:        s.routerWriter(s.otherStore, s.live, nil, logger),
 		Edge: func(context.Context, session.Spec, streamapp.Bound, *slog.Logger) (agent.Edge, error) {
 			return &silentEdge{inbound: make(chan agent.InboundAudio, 4)}, nil
 		},
@@ -1936,9 +1986,11 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 		Streams:           s.streams,
 		Sessions:          sessions,
 		Directory:         directory,
+		ShardRouting:      s.shardRouting,
+		Shards:            s.shards,
 		Dispatch:          workers,
 		Workers:           everyWorker,
-		Store:             s.store,
+		Store:             s.otherStore,
 		Activity:          s.activity,
 		Live:              s.live,
 		Auth:              s.authenticator(),
@@ -1972,6 +2024,24 @@ func (s *RouterSuite) otherNodeHolding(workers *dispatch.Pool, keyring *auth.Sea
 // store; nil is a node with no store. Its sessions keep the suite's.
 func (s *RouterSuite) otherNodeServingFrom(served *store.Store, workers *dispatch.Pool, keyring *auth.Sealer, logger *slog.Logger) (*httptest.Server, *Server, *session.Manager) {
 	return s.otherNodeHolding(workers, keyring, logger, func(o *Options) { o.Store = served })
+}
+
+// onAShardDown is the app's client on a node of the suite's databases, shard "here", whose
+// other shard, "there", has no node up; and the store that node reads.
+func (s *RouterSuite) onAShardDown() (*testClient, *store.Store) {
+	shared := testDatabase(s.T(), os.Getenv("ROUTER_POSTGRES_DSN"))
+	if s.database != "" {
+		shared = testenv.Database(shared, s.database)
+	}
+	own := shared
+	if shardDSN := os.Getenv("ROUTER_POSTGRES_SHARD_DSN"); shardDSN != "" {
+		own = testDatabase(s.T(), shardDSN)
+	}
+	served, err := store.OpenShards(store.Options{DSN: shared, ShardDSN: own, Shard: "here", Shards: []string{"here", "there"}})
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.NoError(served.Close()) })
+	other, _, _ := s.otherNodeServingFrom(served, nil, s.sealer, slog.New(slog.DiscardHandler))
+	return s.serverClient.on(other), served
 }
 
 // deploymentWorkers is one node's view of the dispatch workers across the deployment.
@@ -2334,7 +2404,7 @@ func (c *testClient) raw(method, path string, body any) *http.Response {
 		require.NoError(err)
 		payload = bytes.NewReader(encoded)
 	}
-	request, err := http.NewRequest(method, c.suite.server.URL+path, payload)
+	request, err := http.NewRequest(method, c.base()+path, payload)
 	require.NoError(err)
 	request.Header = c.header.Clone()
 	request.Header.Set("Content-Type", "application/json")
@@ -2414,6 +2484,11 @@ func (c *testClient) refusal(path string) (int, string) {
 
 // dial opens a socket with the client's credentials, the way watch describes.
 func (c *testClient) dial(path string) (*websocket.Conn, *http.Response, error) {
+	return c.dialWith(websocket.DefaultDialer, path)
+}
+
+// dialWith is dial through dialer.
+func (c *testClient) dialWith(dialer *websocket.Dialer, path string) (*websocket.Conn, *http.Response, error) {
 	address := "ws" + strings.TrimPrefix(c.base(), "http") + path
 	query := url.Values{}
 	if key := c.header.Get(auth.APIKeyHeader); key != "" {
@@ -2431,7 +2506,37 @@ func (c *testClient) dial(path string) (*websocket.Conn, *http.Response, error) 
 		}
 	}
 
-	return websocket.DefaultDialer.Dial(address, c.header.Clone())
+	return dialer.Dial(address, c.header.Clone())
+}
+
+// handshaking starts opening the socket at path and returns what gives it up: its connection is
+// closed before the router answers, as a client that stops waiting does.
+func (c *testClient) handshaking(path string) (giveUp func()) {
+	connected := make(chan net.Conn, 1)
+	dialer := &websocket.Dialer{NetDialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		connection, err := (&net.Dialer{}).DialContext(ctx, network, address)
+		if err == nil {
+			connected <- connection
+		}
+		return connection, err
+	}}
+	answered := make(chan struct{})
+	go func() {
+		defer close(answered)
+		if connection, _, err := c.dialWith(dialer, path); err == nil {
+			_ = connection.Close()
+		}
+	}()
+	var connection net.Conn
+	select {
+	case connection = <-connected:
+	case <-answered:
+		c.suite.Require().FailNow("the socket " + path + " never connected")
+	}
+	return func() {
+		_ = connection.Close()
+		<-answered
+	}
 }
 
 // opens a socket the handshake must accept.

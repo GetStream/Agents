@@ -7,8 +7,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 )
 
@@ -44,7 +42,7 @@ func (k *Keeper) Placed(ctx context.Context, call Call) (string, error) {
 func (k *Keeper) PlacedWithin(ctx context.Context, call Call, organization string, atOnce *store.CallsAtOnce) (string, error) {
 	placed := k.now()
 	row := store.CallLeg{
-		Token:        uuid.NewString(),
+		Token:        k.store.MintToken(),
 		CustomerID:   call.CustomerID,
 		StreamAppPK:  call.StreamAppPK,
 		CallType:     call.CallType,
@@ -215,7 +213,7 @@ func (k *Keeper) count(ctx context.Context, key Key, vendor, direction string, o
 			label = dropped
 		case err != nil && !errors.Is(err, store.ErrNoSession):
 			k.logger.Warn("could not tell whether a phone call was dropped; it is counted as it is stored",
-				"customer", key.CustomerID, "call", key.CallType+":"+key.CallID, "outcome", label, "error", err)
+				"app_id", key.CustomerID, "call", key.CallType+":"+key.CallID, "outcome", label, "error", err)
 		}
 	}
 	callOutcomes.WithLabelValues(vendor, direction, label).Inc()

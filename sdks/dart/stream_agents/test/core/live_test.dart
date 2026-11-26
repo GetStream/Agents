@@ -264,10 +264,7 @@ void main() {
       });
 
       test('looking something up answers with sources', () async {
-        final found = await agents.router().search(
-          'What is the capital of France?',
-          const SearchOptions(results: 2),
-        );
+        final found = await agents.router().search('What is the capital of France?');
 
         expect(found.provider, isNotEmpty);
         expect(found.results, isNotEmpty);

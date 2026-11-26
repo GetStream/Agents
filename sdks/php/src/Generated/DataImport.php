@@ -18,6 +18,11 @@ final readonly class DataImport
         // How many of them went into each table.
         /** @var array<string, mixed>|null */
         public ?array $tables = null,
+        // The rows left out rather than written, by table and primary key, as connector_definitions:{"id":"custom_crm...
+        /** @var list<string>|null */
+        public ?array $skipped = null,
+        // How many more rows were left out than skipped names, which holds the first 100.
+        public ?int $skippedMore = null,
     ) {
     }
 
@@ -30,6 +35,8 @@ final readonly class DataImport
             rows: Json::int($data, 'rows'),
             cursor: array_key_exists('cursor', $data) && $data['cursor'] !== null ? Json::int($data, 'cursor') : null,
             tables: array_key_exists('tables', $data) && $data['tables'] !== null ? Json::object($data, 'tables') : null,
+            skipped: array_key_exists('skipped', $data) && $data['skipped'] !== null ? Json::strings($data, 'skipped') : null,
+            skippedMore: array_key_exists('skipped_more', $data) && $data['skipped_more'] !== null ? Json::int($data, 'skipped_more') : null,
         );
     }
 
@@ -47,6 +54,12 @@ final readonly class DataImport
         }
         if ($this->tables !== null) {
             $out['tables'] = Json::objectValue($this->tables);
+        }
+        if ($this->skipped !== null) {
+            $out['skipped'] = $this->skipped;
+        }
+        if ($this->skippedMore !== null) {
+            $out['skipped_more'] = $this->skippedMore;
         }
         return $out;
     }

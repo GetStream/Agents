@@ -669,7 +669,7 @@ func (m *money) readServiceBatch(ctx context.Context, reads []*spendRead) {
 }
 
 // sumShards sums each subject's billable spend in each interval it has a limit in from the
-// request rows of every shard, sumReads at a time.
+// request rows of this shard, sumReads at a time.
 func (m *money) sumShards(ctx context.Context, db *store.Store, reads []*spendRead) {
 	now := m.settings.Now()
 	var mu sync.Mutex

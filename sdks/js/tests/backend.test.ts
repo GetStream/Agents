@@ -202,7 +202,22 @@ describe("Backend", () => {
     const backend = new Backend({ apiKey: "vak_live_x", token: "token-for-jim" });
 
     assert.equal(backend.url, DEFAULT_URL);
+    assert.equal(backend.url, "https://accelerate.gcp.stream-io-api.com");
     assert.equal(backend.authenticate, true);
+  });
+
+  it("authenticates the nearest hosted router even when a customer id is set", () => {
+    for (const url of [undefined, `${DEFAULT_URL}/`]) {
+      const backend = new Backend({
+        ...(url ? { url } : {}),
+        customerId: "acme",
+        apiKey: "vak_live_x",
+        apiSecret: "secret",
+      });
+
+      assert.equal(backend.url, DEFAULT_URL);
+      assert.equal(backend.authenticate, true);
+    }
   });
 
   it("leaves the proxy off for a router it was pointed at", () => {

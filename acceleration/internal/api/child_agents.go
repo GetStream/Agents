@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 
+	"github.com/GetStream/Vision-Agents/acceleration/internal/connectors/sensitive"
 	"github.com/GetStream/Vision-Agents/acceleration/internal/store"
 	"github.com/danielgtaylor/huma/v2"
 )
@@ -64,7 +65,9 @@ func renderedChildAgents(stored []store.ChildAgent) *[]ChildAgent {
 // child is another of the app's text agents with no agents of its own. That is held from both
 // sides, so an agent another one calls can neither gain agents nor stop being a text agent.
 // existing is the config before this save, nil for a new one. A list the save leaves as it was
-// is not asked about again, as llmFallbacksComplaint leaves a list.
+// is not asked about again, as llmFallbacksComplaint leaves a list. Every save, whatever it
+// changes, is also held to the sensitive-connector rule over each set of agents the config is
+// part of (sensitiveGraphComplaint).
 func (s *Server) childAgentsComplaint(ctx context.Context, customerID string, config *store.AgentConfig, existing *store.AgentConfig) (string, bool, error) {
 	var was []store.ChildAgent
 	wasText := false
@@ -100,27 +103,64 @@ func (s *Server) childAgentsComplaint(ctx context.Context, customerID string, co
 			config.Agents[i].Config = found.Name
 		}
 	}
-	renamed := existing != nil && existing.Name != config.Name
-	// Only a save that could break a parent reads the app's other configs.
-	if len(config.Agents) == 0 && !renamed && !(wasText && config.Mode != store.AgentModeText) {
-		return "", true, nil
+	if existing != nil && existing.Name != config.Name {
+		if parent, err := s.parentOf(ctx, customerID, existing.Name, config.ID); err != nil {
+			return "", false, err
+		} else if parent != "" {
+			return fmt.Sprintf("%q hands work to this agent by its name, so it keeps it: take it out of %q's agents first", parent, parent), false, nil
+		}
 	}
-	name := config.Name
-	if renamed {
-		name = existing.Name
-	}
-	parent, err := s.parentOf(ctx, customerID, name, config.ID)
-	switch {
-	case err != nil:
+	// Every save reads the configs that call it by the name it is about to have: it runs as
+	// their child, beside their other children.
+	parents, err := s.store.AgentConfigs.Calling(ctx, customerID, config.Name, config.ID)
+	if err != nil {
 		return "", false, err
-	case parent == "":
-		return "", true, nil
-	case renamed:
-		return fmt.Sprintf("%q hands work to this agent by its name, so it keeps it: take it out of %q's agents first", parent, parent), false, nil
-	case len(config.Agents) > 0:
-		return fmt.Sprintf("%q hands work to this agent, so it cannot have agents of its own: agents are one level deep", parent), false, nil
 	}
-	return fmt.Sprintf("%q hands work to this agent, so it stays a text agent", parent), false, nil
+	if len(parents) > 0 {
+		parent := parents[0].Name
+		switch {
+		case len(config.Agents) > 0:
+			return fmt.Sprintf("%q hands work to this agent, so it cannot have agents of its own: agents are one level deep", parent), false, nil
+		case wasText && config.Mode != store.AgentModeText:
+			return fmt.Sprintf("%q hands work to this agent, so it stays a text agent", parent), false, nil
+		}
+	}
+	return s.sensitiveGraphComplaint(ctx, customerID, *config, parents)
+}
+
+// sensitiveGraphComplaint is sensitive.GraphComplaint over each set of agents the config is
+// about to be part of: itself with its children, and each of parents with all of its children.
+// The config is weighed as it is about to be stored, each other one as stored, so a save that
+// leaves the agents as they were still refuses a set that breaks the rule.
+func (s *Server) sensitiveGraphComplaint(ctx context.Context, customerID string, config store.AgentConfig, parents []store.AgentConfig) (string, bool, error) {
+	if len(config.Agents) > 0 {
+		parents = append([]store.AgentConfig{config}, parents...)
+	}
+	for _, parent := range parents {
+		configs := []store.AgentConfig{parent}
+		for _, child := range parent.Agents {
+			if child.Config == config.Name {
+				configs = append(configs, config)
+				continue
+			}
+			found, err := s.store.AgentConfigs.GetByName(ctx, customerID, child.Config)
+			// A child deleted since runs nothing (childRunner.Run).
+			if errors.Is(err, store.ErrNoAgentConfig) {
+				continue
+			}
+			if err != nil {
+				return "", false, err
+			}
+			configs = append(configs, found)
+		}
+		if message, ok, err := sensitive.GraphComplaint(ctx, s.store.ConnectorDefinitions, customerID, configs); err != nil || !ok {
+			if !ok {
+				message += ". The other agents in these are weighed as stored: if you mean to change them too, change them first and save this one after"
+			}
+			return message, ok, err
+		}
+	}
+	return "", true, nil
 }
 
 // childConfig is the app's config named, by name or else by id, that the caller may see.
@@ -144,13 +184,17 @@ func (s *Server) childConfig(ctx context.Context, customerID, named string) (sto
 			return store.AgentConfig{}, false, err
 		}
 	}
-	return found, !teams.refuses(found), nil
+	return found, !teams.refuses(ctx, found), nil
 }
 
 // parentOf is the name of a config of the app, other than self, that hands work to the
 // config called name, and empty when none does.
 func (s *Server) parentOf(ctx context.Context, customerID, name, self string) (string, error) {
-	return s.store.AgentConfigs.NameCalling(ctx, customerID, name, self)
+	parents, err := s.store.AgentConfigs.Calling(ctx, customerID, name, self)
+	if err != nil || len(parents) == 0 {
+		return "", err
+	}
+	return parents[0].Name, nil
 }
 
 func (*ChildAgent) TransformSchema(_ huma.Registry, schema *huma.Schema) *huma.Schema {

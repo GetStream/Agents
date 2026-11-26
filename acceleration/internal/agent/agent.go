@@ -162,6 +162,10 @@ type Options struct {
 	// Telephony is what the agent may do to the call itself. Without it the agent can
 	// only talk, which is what a call that is not on a phone network can do.
 	Telephony Telephony
+	// CallersTool reports whether the tool called name is one an end user's device declared
+	// and runs itself. Its result is the caller's own word, so it gives no number to transfer
+	// to. Nil means no tool is.
+	CallersTool func(name string) bool
 	// Destinations, when set, are the only places a transfer may go, asked for by name:
 	// a number the model supplies is never dialled.
 	Destinations []Destination
@@ -341,6 +345,9 @@ type Agent struct {
 	// approvalQuestions are what a cascade owes the caller as written, in place of a reply
 	// to the calls that asked them.
 	approvalQuestions []string
+	// callerTurns counts the turns a caller spoke (approval.go), so a yes runs a call only once
+	// one came after its question played.
+	callerTurns int
 	// approvedRuns is the confirmation each approved call runs under, by the call's own id.
 	approvedRuns map[string]approvedRun
 	// toolsRunning names each tool still running, by call, so a caller left waiting can
@@ -765,7 +772,7 @@ func New(options Options) (*Agent, error) {
 		}
 	}
 
-	logger := options.Logger.With("customer", options.CustomerID, "session", options.SessionID, "call", options.CallID)
+	logger := options.Logger.With("app_id", options.CustomerID, "session", options.SessionID, "call", options.CallID)
 	owner := routing.Owner{
 		CustomerID:  options.CustomerID,
 		Attribution: options.Attribution,
@@ -2492,10 +2499,16 @@ func (a *Agent) respondTurn(
 	scheduled bool,
 	speculated string,
 ) error {
+	drained := !a.waitingForPlayout()
 	a.mu.Lock()
 	if a.harness == nil {
 		a.mu.Unlock()
 		return stack.Wrap(errNotJoined)
+	}
+	// A spoken turn, or one the caller typed, is counted before its reply starts, so that reply
+	// is not taken for a question still playing.
+	if !listened.typed || callerTyped(sender, scheduled) {
+		a.heardLocked(drained)
 	}
 	said := participant
 	switch {
@@ -3157,7 +3170,12 @@ func (a *Agent) startReply(
 		}
 	}
 
-	a.pump(turn.ID, stream)
+	a.pump(turn.ID, stream, func() (*llm.Stream, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return current.Respond(ctx, turn)
+	})
 }
 
 // screening is a guardrail check running beside the model.
@@ -3359,23 +3377,90 @@ func (a *Agent) finishGenerate(turnID string) {
 }
 
 // pump drains one reply into the channel the speaking goroutine reads.
-func (a *Agent) pump(turnID string, stream *llm.Stream) {
+//
+// again, when set, asks for the same reply once more. It is used once, for a provider failure
+// that may pass (llm.Transient) and that ended the reply before any of its text, thinking or
+// calls was sent on: the caller has seen nothing of it, so asking again cannot repeat
+// anything. A reply that failed part way through is reported as it failed.
+func (a *Agent) pump(turnID string, stream *llm.Stream, again func() (*llm.Stream, error)) {
+	a.mu.Lock()
+	replies := a.replies
+	a.mu.Unlock()
+	for {
+		held := a.forward(stream, replies, again != nil)
+		if len(held) == 0 {
+			break
+		}
+		failed := held[0].(llm.ResponseFailed)
+		settled, _ := held[len(held)-1].(llm.ResponseCompleted)
+		a.mu.Lock()
+		closed := a.closed
+		a.mu.Unlock()
+		if settled.Response.Status != llm.StatusFailed || closed || a.abandonedTurn(turnID) {
+			sendAll(replies, held)
+			break
+		}
+		a.logger.Info("asking again after the provider failed before the reply began",
+			"turn", turnID, "provider", failed.Provider, "model", failed.Model, "error", failed.Err)
+		next, err := again()
+		again = nil
+		if err != nil {
+			failed.Err = errors.Join(failed.Err, err)
+			held[0] = failed
+			sendAll(replies, held)
+			break
+		}
+		a.mu.Lock()
+		a.streams[turnID] = next
+		_, abandoned := a.abandoned[turnID]
+		closed = a.closed
+		a.mu.Unlock()
+		if abandoned || closed {
+			next.Close()
+		}
+		stream = next
+	}
+
+	a.mu.Lock()
+	delete(a.streams, turnID)
+	a.mu.Unlock()
+}
+
+// forward drains stream into replies. With hold set, a failure that may pass arriving before
+// anything but the response's opening was sent on is not forwarded: it and the rest of the
+// stream are returned instead, the failure first.
+func (a *Agent) forward(stream *llm.Stream, replies chan<- llm.Event, hold bool) []llm.Event {
 	defer stream.Close()
 
 	if a.options.UnifiedReplies {
 		_, from, to := harness.ParseUnified(stream.Lead(harness.UnifiedLead))
 		stream.Cut(from, to)
 	}
-	a.mu.Lock()
-	replies := a.replies
-	a.mu.Unlock()
+	var held []llm.Event
 	for stream.Next() {
-		replies <- stream.Current()
+		event := stream.Current()
+		if failed, ok := event.(llm.ResponseFailed); ok && hold && llm.Transient(failed.Err) &&
+			!errors.Is(failed.Err, policy.ErrPromptInjection) {
+			held = append(held, event)
+			continue
+		}
+		if len(held) > 0 {
+			held = append(held, event)
+			continue
+		}
+		if _, opening := event.(llm.ResponseCreated); !opening {
+			hold = false
+		}
+		replies <- event
 	}
+	return held
+}
 
-	a.mu.Lock()
-	delete(a.streams, turnID)
-	a.mu.Unlock()
+// sendAll puts events into replies in order.
+func sendAll(replies chan<- llm.Event, events []llm.Event) {
+	for _, event := range events {
+		replies <- event
+	}
 }
 
 // consumeLLM turns the model's deltas into sentences and sends them to be spoken.

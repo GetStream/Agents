@@ -122,6 +122,10 @@ const (
 	invalidKeyStatus    = "invalid_key"
 )
 
+// spendLimitStatus is the label of a 429 that says the account is past its spend cap, which
+// is no rate limit: the key stays refused until the cap is raised or resets.
+const spendLimitStatus = "spend_limit"
+
 // outOfFundsStatus is the label of a refusal in a frame for the lack of money, the one the
 // same refusal gets at the handshake as an HTTP 402.
 var outOfFundsStatus = strconv.Itoa(http.StatusPaymentRequired)
@@ -293,20 +297,25 @@ func (r *ring) from(source string) {
 	r.source = source
 }
 
-// countRefused counts a refused attempt under the pool's key variable, never its key, and under
-// whose key it is: the router's own when Env read the keys from a variable, else a customer's.
-func (r *ring) countRefused(status string) {
+// countRefused counts a refused attempt under the pool's key variable, never its key, under
+// whose key it is: the router's own when Env read the keys from a variable, else a customer's,
+// and under the product and model ctx was made for (WithCaller). A customer's model is counted
+// under no name: the customer names their own models, so the names are no fixed set.
+func (r *ring) countRefused(ctx context.Context, status string) {
 	r.mu.Lock()
 	keyVar, source := r.keyVar, r.source
 	r.mu.Unlock()
 	if keyVar == "" {
 		keyVar = unnamedKeyVar
 	}
+	asked, _ := ctx.Value(callerKey{}).(caller)
 	owner := customerOwner
 	if source != "" {
 		owner = ourOwner
+	} else {
+		asked.model = ""
 	}
-	refusedAttempts.WithLabelValues(keyVar, status, owner).Inc()
+	refusedAttempts.WithLabelValues(keyVar, status, owner, asked.product, asked.model).Inc()
 }
 
 func (r *ring) resting(key string) bool {
@@ -337,24 +346,26 @@ func (p *Pool) Cooldown(key string, d time.Duration) {
 
 // QuotaExceeded rests key for as long as a pool can, after a websocket frame said its quota
 // is spent, and counts it as refused under the status "quota_exceeded": the frame has no
-// HTTP status.
-func (p *Pool) QuotaExceeded(key string) {
-	p.countRefused(quotaExceededStatus)
+// HTTP status. ctx is the socket's, which names its caller (WithCaller).
+func (p *Pool) QuotaExceeded(ctx context.Context, key string) {
+	p.countRefused(ctx, quotaExceededStatus)
 	p.Cooldown(key, MaxCooldown)
 }
 
 // InvalidKey counts as refused, under the status "invalid_key", a key a provider accepted at
 // the websocket handshake and refused in a frame or close after it. Like a 401 at the
-// handshake it leaves the key in turn: a key to replace, not one to wait out.
-func (p *Pool) InvalidKey() {
-	p.countRefused(invalidKeyStatus)
+// handshake it leaves the key in turn: a key to replace, not one to wait out. ctx is the
+// socket's, as for QuotaExceeded.
+func (p *Pool) InvalidKey(ctx context.Context) {
+	p.countRefused(ctx, invalidKeyStatus)
 }
 
 // OutOfFunds counts as refused, under the status "402", a key a provider accepted at the
 // websocket handshake and then refused in a frame for want of funds: the status the handshake
-// gives the same refusal. Like a 402 there it leaves the key in turn.
-func (p *Pool) OutOfFunds() {
-	p.countRefused(outOfFundsStatus)
+// gives the same refusal. Like a 402 there it leaves the key in turn. ctx is the socket's, as
+// for QuotaExceeded.
+func (p *Pool) OutOfFunds(ctx context.Context) {
+	p.countRefused(ctx, outOfFundsStatus)
 }
 
 // CooldownFromResponse rests key for as long as the response's Retry-After asks, or for
@@ -480,7 +491,7 @@ func (p *Pool) sendTimes(ctx context.Context, attempts int, send func(key string
 		p.observe(key, response)
 		rest, refused := p.refused(response)
 		if refused || rejectsKey(response) {
-			p.countRefused(strconv.Itoa(response.StatusCode))
+			p.countRefused(ctx, refusalStatus(response))
 		}
 		if !refused {
 			return response, nil
@@ -629,7 +640,7 @@ func (p *Pool) Dial(
 		}
 		rest, refused := p.refused(response)
 		if refused || rejectsKey(response) {
-			p.countRefused(strconv.Itoa(response.StatusCode))
+			p.countRefused(ctx, refusalStatus(response))
 		}
 		if !refused {
 			return conn, response, key, err

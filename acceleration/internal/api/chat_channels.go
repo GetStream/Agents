@@ -161,6 +161,13 @@ func (s *Server) answerChatChannel(ctx context.Context, origin hookOrigin, event
 	if !found || !answersTo(config, event) || strings.TrimSpace(event.Message.Text) == "" && len(event.photos()) == 0 {
 		return true
 	}
+	place, _, refused := s.placed(ctx, config.CustomerID, config.ID, s.userShard(ctx, config.CustomerID, config.Region, event.Message.User.ID))
+	if refused {
+		return false
+	}
+	if elsewhere, taken, _ := s.handedToShard(ctx, origin.handOver, place, shardWorkMessage); elsewhere {
+		return taken
+	}
 	if answer, settled := s.answerOnce(ctx, origin, event); !answer {
 		return settled
 	}

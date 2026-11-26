@@ -29,6 +29,8 @@ debug it: `.claude/skills/scheduled-tasks/SKILL.md`. Paths are under `accelerati
                  v
         internal/api/scheduled_delivery.go DeliverScheduledTask
                  |   quiet hours? -> Postponed
+                 |   a task for its end user (theirs, or the agent's off a thread),
+                 |     they out of its config's team? -> not_in_team, final
                  |   channel_thread? -> internal/api/scheduled_thread_delivery.go deliverOnThread
                  |   session live here | on a peer (POST /internal/scheduled-tasks/deliver)
                  |   | ended: reopen from its row | none yet: open one
@@ -81,6 +83,15 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestSchedulerSuite/TestTwoWorkersDeliverAnOccurrenceOnce`,
   `TestStoreSuite/TestClaimingGivesEachDueTaskToOneWorker`,
   `TestStoreSuite/TestAClaimInsertsOneRunPerOccurrence`.
+- **A task is claimed in its user's shard.** With `shard_routing` set, a worker claims a task
+  only when its agent's region's shard, or else its user's `users.shard`, is its own or no shard
+  of the deployment (`store.ShardClaim`, `Scheduler.SetShard`); a task claimable for more than
+  `claimOverdue` (5 min, from `GREATEST(next_run_at, lease_until)`) is any shard's.
+  `TestSchedulerSuite/TestAWorkerLeavesTheTasksOfAnotherShardToIt`,
+  `TestStoreSuite/TestATaskOfAUserServedInEuropeIsClaimedThereAndNotInTheUS`,
+  `TestStoreSuite/TestATaskOfAnAgentKeptInTheEUIsClaimedInEuropeWhereverItsUserWasServed`,
+  `TestStoreSuite/TestATaskLeftUnclaimedInItsShardPastTheOverdueTimeIsClaimedByAnother`,
+  `TestStoreSuite/TestATaskWhoseHoldEndedJustNowIsLeftToItsShardHoweverLongAgoItWasDue`.
 - **Every write after a claim goes through its `leased_by`.** A finish, renewal or hold under a
   claim a pause, edit or delete took changes nothing on the task.
   `TestStoreSuite/TestAFinishUnderAStolenClaimDoesNotAdvanceTheTask`,
@@ -222,8 +233,11 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   more under `st_<run>_r1`, in the conversation, a text channel or a thread. In the conversation
   an `_r1` that failed as well fails the attempt under that reason, tried again
   (`followUpInConversation`), so the run fails under it once its retries are spent and is never
-  `delivered`. Any other failed reply is read back as it was. A worker that takes the run over
-  rebuilds it from the row, which keeps no reason between attempts, so it reruns nothing.
+  `delivered`. Any other failed reply is read back as it was. Before each retry wait the worker records that
+  reason on the running run (`ScheduledTaskRuns.SetAttemptReason`, under its claim, and only while
+  no call is placed for the run, whose reason is how that call ended), so a worker that takes the
+  run over reads it from the row and reruns the turn as well; a pause or an edit that settles the
+  run `missed` drops it.
   A call's turn keeps `st_<run>_call`. A channel carries the
   agent's reply only, never settled work's own words (`spokenOf`, AI-1559), so the first
   attempt and a read-back send the same words.
@@ -237,6 +251,17 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
   `TestTelnyxUnpaidSuite/TestAConversationTurnRefusedWhileMoneyCannotBeCheckedRunsAgainOnItsRetry`,
   `TestTelnyxUnpaidSuite/TestAConversationTurnRefusedAgainOnItsRerunFailsTheRun`,
   `TestTelnyxUnpaidSuite/TestAConversationTurnRefusedOnAnotherRouterRunsAgainThereOnItsRetry`,
+  `TestTelnyxUnpaidSuite/TestAConversationTurnRefusedWhileMoneyCannotBeCheckedRunsAgainForTheWorkerTakingItOver`,
+  `TestTelnyxUnpaidSuite/TestAConversationTurnRefusedOnAnotherRouterRunsAgainThereForTheWorkerTakingItOver`,
+  `TestTelnyxUnpaidSuite/TestATextTurnFailedNotForMoneyIsNotRunAgainByTheWorkerTakingItOver`,
+  `TestSchedulerSuite/TestAWorkerTakingARunOverReadsTheReasonItsLastAttemptFailedUnder`,
+  `TestSchedulerSuite/TestAWorkerTakingARunOverAfterItsCallReadsHowTheCallEnded`,
+  `TestSchedulerSuite/TestAWorkerClosedAsItsAttemptFailsStillRecordsTheReason`,
+  `TestStoreSuite/TestAnAttemptsReasonIsReadByTheWorkerTakingTheRunOver`,
+  `TestStoreSuite/TestAnAttemptsReasonLeavesTheReasonAPlacedCallEndedUnder`,
+  `TestStoreSuite/TestAFinishedRunTakesNoAttemptsReason`,
+  `TestStoreSuite/TestAPausedRunBetweenAttemptsIsMissedWithoutTheAttemptsReason`,
+  `TestStoreSuite/TestADeletedConfigsRunBetweenAttemptsIsMissedWithoutTheAttemptsReason`,
   `TestTelnyxUnpaidSuite/TestATextTurnRefusedWhileMoneyCannotBeCheckedRunsAgainOnItsRetry`,
   `TestTelnyxUnpaidSuite/TestATextTurnFailedNotForMoneyIsNotRunAgainOnItsRetry`,
   `TestTelnyxUnpaidSuite/TestAThreadRetryAfterARefusalForMoneyRunsTheTurnAgain`,
@@ -347,6 +372,33 @@ Each rule names the test that fails when it breaks. Suites: `SchedulerSuite`
 - **A caller's own tool with a scheduling name keeps the name.**
   `TestScheduledTasksSuite/TestACallersOwnScheduleTaskKeepsTheName`.
 - **Another user's task is a 404.** `TestScheduledTasksSuite/TestTheOwnerReachesATaskItsBackendMadeAndAnotherUserDoesNot`.
+- **A task is its config's team's (AgentTeams).** In an app that keeps each team's configs to its
+  own users, a device is answered a task on a config of a team its user is not in now as one that
+  does not exist, by every operation but pause and delete, which only stop it and so stay theirs;
+  the list leaves those out in its query (`ScheduledTaskFilter.Configs`), and one on a deleted
+  config. A backend is not checked. A task for its end user runs only while they are in the team:
+  one they made (`caller_kind` not `server`), and one the agent made talking with them
+  (`created_by` `agent`, stored with the kind of whoever opened that chat, their backend
+  included). One who left it fails the occurrence `not_in_team`, final, before any session is found
+  or opened, on every path (live here, on a peer, reopened, opened). A task the backend made through
+  the API is not checked, nor one the agent made on a thread, which the Router's own session
+  answers. Teams Stream could not read fail the attempt, retried. A router holds a user's teams for
+  30 s (`teamsFor`), so a removal is seen within that. Held teams that refuse ask Stream again
+  first, at most once a second per user (`teamsRecheck`); while Stream cannot be asked, they stand.
+  `TestScheduledTasksSuite/TestATaskOfATeamTheUserLeftIsAnsweredAsATaskThatDoesNotExist`,
+  `TestScheduledTasksSuite/TestAUserWhoLeftATasksTeamStillPausesAndDeletesIt`,
+  `TestScheduledTasksSuite/TestAUserStillInATasksTeamReachesItByEveryOperation`,
+  `TestScheduledTasksSuite/TestABackendReachesATaskOfATeamItsUserLeftWithoutAskingStream`,
+  `TestScheduledTasksSuite/TestTheListLeavesOutTasksOfAnotherTeamAndStillFillsEachPage`,
+  `TestScheduledTasksSuite/TestATaskOfATeamIsReachedByNoUserWhileTheirTeamsCannotBeRead`,
+  `TestScheduledTasksSuite/TestATaskOfAUserWhoLeftItsAgentsTeamFailsWithoutRunningTheAgent`,
+  `TestScheduledTasksSuite/TestATaskOfAUserWhoLeftItsAgentsTeamIsNotFollowedUpInTheirRunningChat`,
+  `TestScheduledTasksSuite/TestATaskOfAUserWhoLeftItsAgentsTeamIsNotHandedToTheNodeHoldingTheirChat`,
+  `TestScheduledTasksSuite/TestATaskTheAgentMadeInAChatTheBackendOpenedFailsOnceItsUserLeftTheTeam`,
+  `TestScheduledTasksSuite/TestATaskTheAgentMadeOnAThreadIsNotCheckedAgainstItsPersonsTeams`,
+  `TestScheduledTasksSuite/TestATaskOfAUserStillInItsAgentsTeamIsDelivered`,
+  `TestScheduledTasksSuite/TestATaskItsBackendMadeForAUserOutsideTheTeamIsDelivered`,
+  `TestScheduledTasksSuite/TestAnOccurrenceWhoseTeamsCannotBeReadFailsAndTheTaskGoesOn`.
 - **A scheduled turn is never on the user's day.** `TestScheduledTasksSuite/TestADueTaskIsNotCountedOnItsUsersDay`.
 - **A call in progress is waited out**, and a session on another node is handed over.
   `TestScheduledTasksSuite/TestATaskThatComesDueOnACallWaitsForTheCallToEnd`,

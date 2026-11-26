@@ -295,7 +295,7 @@ func (s *TelnyxChannelSuite) TestAKeywordIsAnsweredOnceWhenItsRowIsTakenAgain() 
 	s.took(1)
 	channel := s.threadChannel(person)
 	s.Require().Eventually(func() bool {
-		return strings.Contains(s.logged.String(), `msg="could not record an inbound message's attempt" connector=telnyx customer=`+s.customerID()+" channel="+channel)
+		return strings.Contains(s.logged.String(), `msg="could not record an inbound message's attempt" connector=telnyx app_id=`+s.customerID()+" channel="+channel)
 	}, settleFor, 10*time.Millisecond, "the attempt was recorded")
 	drop()
 

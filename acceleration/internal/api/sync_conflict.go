@@ -24,6 +24,16 @@ func unsyncedChangesError(lost []string) APIError {
 	}
 }
 
+// errChangedOutsideSync is unsyncedChangesError for a router config or a custom connector, which
+// keep no record of their changes: a checked sync found the stored one written by no sync, such
+// as a dashboard edit, and saying something else than the file. The code is the same, so a
+// client handles the refusal of every sync it checks in one place.
+var errChangedOutsideSync = APIError{
+	Type: ErrorTypeConflict, Code: codeUnsyncedChanges,
+	Message: "this would write over a change made since the last sync, outside it: read what is stored, " +
+		"then sync again without check_changes to write over it",
+}
+
 // driftedSinceSync reports whether a sync whose hash matches the stored one has anything
 // left to do: somebody changed the agent since that sync, so the directory and the stored
 // agent no longer agree however unchanged the directory is.
